@@ -1,0 +1,151 @@
+# GVDB Ambient Occlusion
+
+Also called: GVDB AO, computeAmbientOcclusion
+
+## Overview
+GVDB Ambient Occlusion is a device function that estimates ambient occlusion at a surface point by sampling a volumetric Signed Distance Field (SDF) or density volume along a hemisphere of directions [S1, unofficial]. It differs from standard SDF-based AO by supporting two distinct sampling modes—point sampling and ray casting—allowing for a trade-off between computational cost and occlusion accuracy [S1, unofficial]. It builds on [Ambient Occlusion via SDF/Geometry](2527-ambient-occlusion-via-sdf-geometry.md) by integrating directly with the GVDB volume data structures.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Surface position $\mathbf{p}$, surface normal $\mathbf{n}$, volume data structure, sampling parameters ($N$, $R$, $B$, mode).
+*   **Output:** A scalar float value $AO \in [0, 1]$, where 1 is fully lit and 0 is fully occluded.
+
+**Data Structures:**
+The method assumes access to a volume query interface capable of returning a scalar value (density or SDF) at a given 3D coordinate. The specific internal layout of the GVDB volume is abstracted by the query function.
+
+**Parameters:**
+*   $N$ (`aoSamples`): Number of hemisphere samples. Maximum value is 512 [S1, unofficial].
+*   $R$ (`aoRadius`): World-space radius for AO sampling, controlling the falloff distance [S1, unofficial].
+*   $B$ (`aoBias`): Backtrack distance in world space to mitigate acne artifacts. Typical value: $10^{-3}$ [S1, unofficial].
+*   `mode` (`AMBIENT_OCCLUSION_MODE`): Integer switch. 0 for point sampling, 1 for ray sampling [S1, unofficial].
+
+**Algorithm Steps:**
+1.  If $N = 0$, return 1.0 [S1, unofficial].
+2.  Generate a random rotation vector $\mathbf{r}$ (precomputed or generated per sample) [S1, unofficial].
+3.  Compute the tangent $\mathbf{t}$ and bitangent $\mathbf{b}$ vectors from $\mathbf{r}$ and $\mathbf{n}$ to form a local basis [S1, unofficial]:
+    $$ \mathbf{t} = \frac{\mathbf{r} - (\mathbf{r} \cdot \mathbf{n})\mathbf{n}}{\|\mathbf{r} - (\mathbf{r} \cdot \mathbf{n})\mathbf{n}\|} $$
+    $$ \mathbf{b} = \mathbf{n} \times \mathbf{t} $$
+4.  Backtrack the position to avoid self-intersection artifacts:
+    $$ \mathbf{p}_{start} = \mathbf{p} + \mathbf{n} \cdot B $$
+    [S1, unofficial]
+5.  Initialize occlusion sum $S = 0$ [S1, unofficial].
+6.  For each sample $i$ from 1 to $N$:
+    a. Generate a direction $\mathbf{v}_i$ in the upper hemisphere relative to the local basis $(\mathbf{t}, \mathbf{b}, \mathbf{n})$ [S1, unofficial].
+    b. Transform $\mathbf{v}_i$ to world space using the basis vectors [S1, unofficial].
+    c. **If mode is 0 (Point Sampling):**
+        i. Query the volume at $\mathbf{q} = \mathbf{p}_{start} + R \cdot \mathbf{v}_i$ [S1, unofficial].
+        ii. Let $v$ be the returned value. If $v \le \text{bias}$ (where bias is a threshold indicating surface presence, often implicit in the volume type or set to a small epsilon), add 1.0 to $S$ [S1, unofficial].
+    d. **If mode is 1 (Ray Sampling):**
+        i. Cast a ray from $\mathbf{p}_{start}$ in direction $\mathbf{v}_i$ up to length $R$ [S1, unofficial].
+        ii. If a hit is found at distance $d$, compute the weight:
+        $$ w = \text{smoothstep}(1, 0, \frac{R}{d}) $$
+        [S1, unofficial]
+        iii. Add $w$ to $S$.
+7.  Compute final AO:
+    $$ AO = \frac{S}{N} $$
+    [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_ambient_occlusion(p, n, volume, ao_samples, ao_radius, ao_bias, mode):
+    if ao_samples == 0:
+        return 1.0
+    
+    # Generate a random vector for tangent space rotation
+    # In a real implementation, this might be a precomputed hash or uniform random
+    noise = generate_random_vector()
+    
+    # Compute tangent and bitangent
+    # G: Ensure noise is not parallel to normal to avoid division by zero
+    proj = noise - dot(noise, n) * n
+    if length(proj) < 1e-6:
+        proj = cross(noise, float3(1, 0, 0))
+    tangent = normalize(proj)
+    bitangent = cross(n, tangent)
+    
+    # Backtrack position to avoid acne
+    p_start = p + n * ao_bias
+    
+    occlusion_sum = 0.0
+    
+    for i in range(ao_samples):
+        # Generate hemisphere sample direction in local space
+        # G: Standard hemisphere sampling logic (e.g., cosine-weighted or uniform)
+        v_local = sample_hemisphere(i)
+        
+        # Transform to world space
+        v_world = tangent * v_local.x + bitangent * v_local.y + n * v_local.z
+        
+        if mode == 0:
+            # Point sampling mode
+            query_pos = p_start + v_world * ao_radius
+            value = volume.query(query_pos)
+            # G: The source notes "if value <= bias", implying a threshold check.
+            # In SDF contexts, this usually means checking if the point is inside the surface.
+            # Assuming 'bias' here refers to a threshold indicating surface presence,
+            # or potentially the ao_bias if the volume stores SDF.
+            # Based on note: "if value <= bias, add 1.0".
+            if value <= ao_bias: 
+                occlusion_sum += 1.0
+        elif mode == 1:
+            # Ray sampling mode
+            hit_dist = volume.cast_ray(p_start, v_world, ao_radius)
+            if hit_dist is not None:
+                # Formula: smoothstep(1, 0, ao_radius / dist)
+                # smoothstep(edge0, edge1, x) clamps x to [0,1] and applies Hermite interpolation
+                ratio = ao_radius / hit_dist
+                # Clamp ratio to [0, 1] for smoothstep logic if necessary, 
+                # though smoothstep handles out-of-bounds.
+                # If ratio > 1, smoothstep(1,0,ratio) -> 0 (fully occluded? No, wait.)
+                # Let's check the formula: w = smoothstep(1, 0, R/d).
+                # If d < R, R/d > 1. smoothstep(1,0, >1) = 0.
+                # If d > R, R/d < 1. smoothstep(1,0, <1) = 1.
+                # This seems inverted for standard AO where closer = more occlusion.
+                # However, the source explicitly states: "smoothstep(1, 0, ao_radius / dist)".
+                # And "if hit found... add to occlusion".
+                # Let's re-read carefully: "compute distance, apply smoothstep(1, 0, aoRadius / dist) to get value, add to occlusion."
+                # Standard smoothstep(e0, e1, x):
+                # x < e0 -> 0
+                # x > e1 -> 1
+                # e0 < x < e1 -> 3t^2 - 2t^3 where t = (x-e0)/(e1-e0)
+                # Here e0=1, e1=0.
+                # If R/d > 1 (d < R), x > 1 -> returns 1.
+                # If R/d < 0 (impossible for positive dist), x < 0 -> returns 0.
+                # If 0 < R/d < 1 (d > R), 0 < x < 1 -> returns 0 to 1.
+                # So closer objects (d < R) contribute 1.0. Distant objects (d > R) contribute < 1.0.
+                # This matches the logic: closer occluders block more light.
+                ratio = ao_radius / hit_dist
+                weight = smoothstep(1.0, 0.0, ratio)
+                occlusion_sum += weight
+    
+    return occlusion_sum / ao_samples
+
+def smoothstep(edge0, edge1, x):
+    t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
+    return t * t * (3.0 - 2.0 * t)
+```
+
+## Subtopics
+
+### Point Sampling Mode
+Queries the volume at a single point offset by `aoRadius`. Faster but less accurate for thin geometry or complex occlusion. Choose when performance is critical and geometry is thick.
+
+### Ray Sampling Mode
+Casts a ray and integrates occlusion based on distance. More accurate for thin surfaces and complex self-occlusion. Choose when visual quality is prioritized.
+
+## Operating characteristics
+*   **Time Complexity**: $O(N)$ per surface point, where $N$ is `aoSamples`. Ray casting mode has higher constant overhead due to ray-volume intersection tests.
+*   **Memory Complexity**: $O(1)$ auxiliary memory per sample, relying on the volume's internal structure.
+*   **Performance**: The method is designed for GPU execution ("device function"). Max samples are capped at 512 [S1, unofficial].
+*   **Strengths**: Integrates directly with GVDB volumes; supports both fast point queries and accurate ray casting; handles tangent-space rotation for normal-aligned AO.
+*   **Limitations**: Acne artifacts require careful tuning of `aoBias`; point sampling mode may miss thin occluders; ray casting is computationally expensive.
+*   **When to use**: Real-time or interactive volume visualization where local illumination effects are needed without full path tracing.
+*   **When not to use**: Offline rendering requiring high-fidelity global illumination; scenes with extremely thin geometry where point sampling fails.
+
+## Background
+GVDB Ambient Occlusion is part of the GVDB (GPU Volume Database) ecosystem, developed by NVIDIA. It is implemented as a device function within the GVDB library to provide efficient local illumination for volumetric data. The method leverages the structured nature of GPU volumes to perform fast sampling and ray casting.
+
+## Sources
+[S1] Learning adaptive sampling and reconstruction for Volume Visualization, https://github.com/shamanDevel/AdaptiveSampling, fetched 2026-10-27 (unofficial)

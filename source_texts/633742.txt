@@ -1,0 +1,228 @@
+Good evening! I hate to keep asking questions, but I've been banging my head against the wall on this one... Is there a provision to generate the tiles in parallel? Basically looking for a way for the map to request all of the tiles at o...
+
+Parallel Tile Generation · Issue #35 · Outdooractive/route-me · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Parallel Tile Generation #35
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Parallel Tile Generation#35
+Copy link
+Description
+mtoon
+opened on Mar 1, 2012
+Issue body actions
+Good evening! I hate to keep asking questions, but I've been banging my head against the wall on this one... Is there a provision to generate the tiles in parallel? Basically looking for a way for the map to request all of the tiles at once and use some kind of background processing mechanism to generate the tiles and then notify the mapview that they are ready and have the mapview draw the tiles...
+Thoughts?
+Thank you!
+Activity
+Next
+incanus commented on Mar 1, 2012
+incanus
+on Mar 1, 2012
+More actions
+I don't think there is, given the way CATiledLayer works. It requests multiple tiles supposedly in the most efficient way, on background threads, automatically taking advantage of multiple cores. And the tile compositing down in the web tile sources is also GCD-aware and can request images to stack into one tile on multiple threads as well.
+zhm commented on Mar 1, 2012
+zhm
+on Mar 1, 2012
+More actions
+It is possible to do this with CATiledLayer, but it requires usage of private methods of the CATiledLayer class. The built-in MapKit MKMapView uses a sub-classed UIScrollView+CATiledLayer combination (called MKScrollView+MKTiledLayer).
+I posted more info about this a while back on the devforums: https://devforums.apple.com/message/523140
+I have filed a radar about this last year requesting to expose the private methods of CATiledLayer that are required to implement truly asynchronous tile fetching like MKMapView can do (CATiledLayer drawRect, while being called on multiple threads, is synchronous with respect to the actual drawing, and any network I/O must block drawRect). MKOverlayView also has the usage pattern that's needed to implement efficient network fetching of tiles, and it's also internally backed by CATiledLayer private methods.
+mtoon commented on Mar 1, 2012
+mtoon
+on Mar 1, 2012
+Author
+More actions
+@incanus Thanks for that.. I ran across that late last night after seeing some odd behavior. I still don't understand why I can't retain the graphics context and then draw on it at a later time.
+@zhm Thanks for the head's up. Being a long time windows developer, I still don't fully understand why Apple keeps so much private in the APIs. I'll close this up, but if anyone comes across how to save the context and pass it into a block that will ultimately draw on it later it would be greatly appreciated! Thanks!
+mtoon
+closed this as completedon Mar 1, 2012
+zhm commented on Mar 1, 2012
+zhm
+on Mar 1, 2012
+More actions
+@mtoon I think the problem is that in order to retain the graphics context, CATiledLayer would have have know about that, since it takes the context passed to drawRect and immediately draws it on the screen after drawRect returns. The context only lives within the call to drawRect. The solution is to only have drawRect called when you have the data ready to draw, which is done with the canDrawRect/setNeedsDisplayInRect pattern. If anyone finds a solution to this, I'd love to hear about it!
+mtoon commented on Mar 1, 2012
+mtoon
+on Mar 1, 2012
+Author
+More actions
+FYI.. Good response here on the forums for my question.. https://devforums.apple.com/message/626588
+mtoon commented on Mar 1, 2012
+mtoon
+on Mar 1, 2012
+Author
+More actions
+Oops, just realized your post was almost exactly the same answer... Hoepfully my follow up in the forums about how to increase the performance of drawrect for CATiledLayer is answered. Thanks!
+mtoon commented on Mar 2, 2012
+mtoon
+on Mar 2, 2012
+Author
+More actions
+"As for the CATiledLayer, yes it will generate an extra thread on devices with 2 cores." So, it looks like CATiledLayer is already optimized for multiple threads. So, now I just need to optimize my rendering routines! Oh well, so much for the easy route!
+Just a note here... I am SHOCKED (all caps in a good way!) at how memory efficient this implementation of route-me is. I had used the original one and spent a LOT of time optimizing it and my own code and I still was plagued with constant memory warnings. Roughly a direct port over to this new library (same functionality, just had to accommodate for the structural differences) and I haven't had a single memory warning even on one of our test iPad 1s... So, thank you for all of your hard work!
+incanus commented on Mar 5, 2012
+incanus
+on Mar 5, 2012
+More actions
+@zhm, good info. I hadn't gotten that deep into it, as my CATiledLayer travails have been limited to screenshotting lately (see #27). I wonder if you could track panning/zooming in the scroll view, start proactively fetching tiles based on that, caching, and then in drawRect:, making use of any previously-cached stuff to do the drawing faster?
+That is, completely rewriting CATiledLayer yourself. Sigh.
+mtoon commented on Mar 6, 2012
+mtoon
+on Mar 6, 2012
+Author
+More actions
+Something I used to do in the previous RM library (because it was passing back an object rather than a UIImage, so it was easier) was to return the base tile (so that something the user could reference came back immediately) and then spawn off a background block to render the actual composite tile and then update the tile on screen once that was done. So.. not to keep this going forever, but do you guys have any ideas about how that might be possible with the CATiledLayer method? Could it be as easy as a notification with an attached CGRect for invalidating and redrawing with the newly cached tile? Or would that not work?
+incanus commented on Mar 6, 2012
+incanus
+on Mar 6, 2012
+More actions
+Thinking about this, I think it would work. You track the passed CGRect, as you say, which you actively map to an RMTile. You return dummy content immediately since you don't hit cache. Once you know you have that RMTile in cache, you call setNeedsDisplayInRect: passing that CGRect and cache is pulled to refresh the content.
+incanus commented on Mar 6, 2012
+incanus
+on Mar 6, 2012
+More actions
+It all comes down to your drawRect: routine having the smarts to map cache to RMTile and branch depending on cache state, which is pretty simple.
+incanus commented on Mar 6, 2012
+incanus
+on Mar 6, 2012
+More actions
+It seems to me that there could be some neat potential here with composited tiles. If you have one of the (say) three composited layers handy for a tile, you pass that back in drawRect:, but as more come in, you re-render the tile in question, compositing each as you get it.
+mtoon commented on Mar 6, 2012
+mtoon
+on Mar 6, 2012
+Author
+More actions
+Yup, that's exactly how my previous implementation worked.... We use the mapbox mbtiles for the base layer and then have lots of other possible layers that can be composited on top of those, so I basically pulled the correct tile out of the base layer and spawned off a block (with a reference to the tile) and returned the base layer (very fast) and then when the block finished it called the updateTileWithData method which would replace the tile with the final version. However, that worked well because the RMMapView held a reference to all pending RMTileImages and would call cancelLoading if they went out of scope which I checked each layer and broke out of the composting loop if needed. I don't see that in this implementation in the same style, so it might such down a lot of CPU processing tiles that quickly go out of focus as the user scrolls around fast. However, I'm new at this library so maybe that does exist.
+zhm commented on Mar 6, 2012
+zhm
+on Mar 6, 2012
+More actions
+That might work... it's definitely worth a shot. It depends on how smart CATiledLayer is with setNeedsDisplayInRect. I know there is a private method on CATiledLayer called setNeedsDisplayInRect:levelOfDetail which allows you to invalidate a single level of detail, rather than the rect at all levels of detail (zoom scales). It's possible that it's smart enough to determine the level of detail based on the CATiledLayer parameters and the given rect, since tiles are well-known and not arbitrary. If it's not smart, it could invalidate any tile containing that rectangle, which would include a lot of other tiles at at lower zoom levels (i.e. invalidating a tile at zoom 4 could invalidate tiles at 3, 2, and 1 even though they they've already been drawn). The additional level of detail parameter seems critical to make it work like MKMapView because it's the only way to tell it exactly which tile needs to be drawn.
+7 remaining items
+Load more
+incanus commented on Jun 4, 2012
+incanus
+on Jun 4, 2012
+More actions
+I'm back looking into these issues. I am seeing bottlenecking for network-based tiles, and I think it's based on the underlying Core Foundation URL loading not being able to simultaneously request tiles from the same hostname. With multicore CATiledLayer rendering, we are effectively blocking on single tile requests at once.
+@afarnham, have you run into this in your implementation? Even with a queue to move network ops outside of the rendering routine, it seems like you'd have to have a single serial queue for these ops.
+My current areas of investigation are:
+Trying to configure the URL loading system to behave differently.
+Making use of the fact that many mapping APIs (including MapBox's) provide 2+ server subdomain aliases (in our case, a through d) so that browsers can more efficiently multitask network ops.
+/cc @russellquinn
+afarnham commented on Jun 4, 2012
+afarnham
+on Jun 4, 2012
+More actions
+@incanus I had not encountered this issue, but had not really looked for it before. I'll keep an eye out once I am back to working on this project (another week or two I think).
+incanus commented on Jun 4, 2012
+incanus
+on Jun 4, 2012
+More actions
+@zhm, doing the background fetching method and then calling setNeedsDisplayInRect: works more speedily, but as you say, it clears all levels of detail and thus shows the background image through while reloading the tile, instead of other zoom levels.
+incanus commented on Jun 5, 2012
+incanus
+on Jun 5, 2012
+More actions
+In doing some poking around with the Maps.app, I have noticed that the client does HTTP POST requests to the server, roughly on the order of 1/5th the number of requests as this library does. Then, it gets back larger responses of concatenated PNG images in a single file, which presumably it then splits and renders to the tiled layer.
+However, it seems that being able to access [CATiledLayer setNeedsDisplayInRect:levelOfDetail:] would still be needed to bring in all the tile images independently without a whole-map redundant refresh.
+afarnham commented on Jun 5, 2012
+afarnham
+on Jun 5, 2012
+More actions
+@zhm You can keep the background from appearing while loading tiles by borrowing a caching trick from the original, non-catiledlayer route me. The idea is to keep tiles from previous zoom levels of the current map area in a cache that your drawrect function can access. So when a tile is needed, but not yet downloaded you can instead find a cached tile from a previous zoom level that covers the area and slice it up into an image that fits the requested tile perfectly. It will be blurry tile you get the actual tile you need, but users are used to that as it happens in Maps.app too.
+In my implementation I fetch the tiles for the 2 previous zoom levels that cover my current map area and put them in "on screen" memory cache that my catiledlayer drawrect function can access.
+trasch commented on Jul 6, 2012
+trasch
+on Jul 6, 2012
+More actions
+I think this feature could be feasible now, with the new feature of adding multiple tile sources to the map view.
+Create a tile source that returns tiles immediately from the cache or spawns a background operation to create the tile. In the latter case, return nil or a dummy tile to display on the map during the background operation. The new missingTilesDepth feature might be useful here.
+When the tile (or better: all requested tiles) are ready (and in the cache!), force the RMMapTiledLayerView to reload its contents. Since the layer knows its zoom level it will only reload the visible tiles that should be in the cache now. And since the layer handles only one tile source, the impact on the system will be small.
+Any ideas? This would be mainly a feature of the tile source, but I think some enhacements in route-me might be necessary to support such tile sources.
+trasch
+added a commit that references this issue on Jul 6, 2012
+o Added reloadTileSource: and reloadTileSourceAtIndex: (issue #35)
+cddb768
+mtoon commented on Jul 8, 2012
+mtoon
+on Jul 8, 2012
+Author
+More actions
+It would be great to have a way to notify the map of updated tiles and have just that tile re-rendered. I think the older Routeme used to actually have a class representing the tile and that tile could be passed back to the map for updating. An example of this would be both this base and then updated content load as well as dynamically updating tiles (for things like WX overlays, etc).
+It would be nice not to reload the whole view simply because it seems to take a little time to do that.
+trasch commented on Jul 9, 2012
+trasch
+on Jul 9, 2012
+More actions
+@mtoon I don't see any feasible possibility to only reload specific tiles since CATiledLayer doesn't (officially) allow this, so this is currently the best solution I can offer...
+mtoon commented on Jul 9, 2012
+mtoon
+on Jul 9, 2012
+Author
+More actions
+No worries, thanks for the info!
+afarnham commented on Jul 10, 2012
+afarnham
+on Jul 10, 2012
+More actions
+Calling [CATiledLayer setNeedsDisplayInRect:] with a CGRect that represents the pixel locations of the tile you want to invalidate will cause it to redraw just that tile on the screen. It should not cause a whole screen redraw. The main side effect is that it will affect the cache of tiles at other zoom levels that intersect that rect. One other possible side effect is that if your redraw pushes over some memory limit on the CATiledLayer it can cause a full screen draw, but I have found that is pretty rare on iPad 2 and 3.
+incanus commented on Jul 16, 2012
+incanus
+on Jul 16, 2012
+More actions
+Guys, I've been focusing on this in a somewhat-sloppy-but-works-for-testing branch of our SDK called develop-bench. Feel free to check it out. I've also been working on a testbed app that uses this branch and makes it easy to really hammer the testing. It's called MapBox Bench.
+I've been working on two async methods thus far. More details in the app's README.
+Prefetch radius, which sees a tile request, kicks off async requests for surrounding tiles that go straight to cache, then continues on with the usual blocking fetch/draw of the tile requested.
+Combination of -[RMMapView missingTilesDepth] use with -[CATiledLayer setNeedsDisplay] to always async request tiles that go straight to cache, then request the tiled layer to redraw using them.
+I'm not entirely happy with either method yet, but they are my most recent thinking on this and it's something I want to keep focusing on, so I thought it was good to get them out there.
+incanus
+added a commit that references this issue on Aug 13, 2012
+refs Outdooractive/route-me#35: apply some async research to performance
+a90ff6c
+incanus commented on Aug 14, 2012
+incanus
+on Aug 14, 2012
+More actions
+We are seeing pretty good performance with the above-referenced commit. I'm curious what others think. Here is the rationale/method:
+When a tile request comes in, instead of making a direct tile source query, the cache is consulted directly.
+If the tile exists in cache, it is passed to drawInRect: as is standard.
+If the tile is not in cache, GCD is used to make a call to the tile source using the regular method, but asynchronously.
+Upon completion of that (possibly relatively lengthy) fetch, a main/UI queue call to [self.layer setNeedsDisplay] is made in order to possibly refresh the tile on screen.
+This effectively does what @zhm mentioned above and requests redraws. However, combined with missingTilesDepth = 1 or greater, it has the effect of not "poking holes" in the tiled layer and allowing the background to show through. Without the setting, you see full-view refreshes each time an async tile fetch completes and setNeedsDisplay is called.
+Any thoughts? I'm liking this so far.
+trasch commented on Aug 14, 2012
+trasch
+on Aug 14, 2012
+More actions
+I don't have much time at the moment to test it in depth, but it looks quite good so far. I will try to get some spare time next week.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,1975 @@
+# DualContouringCSharp
+A Dual Contouring Example using C# and Unity3D
+
+The unity package can be imported into unity and run. The code portion of this has everything set up, but you need to manually add the game manager script into the scene you're using. 
+
+Also, please do not use this code as the "Ideal way to code in C#"!!! It is by no means optimized for managed code. This is nothing but a direct port of NGildea's Dual Contouring Impl from his blog.
+
+### CSharpCode/GameManager.cs
+```
+﻿using UnityEngine;
+using System.Collections;
+using Code.Utils;
+using Code;
+using System.Collections.Generic;
+
+public class GameManager : MonoBehaviour
+{
+    const int MAX_THRESHOLDS = 5;
+	static float[] THRESHOLDS = new float[MAX_THRESHOLDS] { -1.0f, 0.1f, 1.0f, 10.0f, 50.0f };
+	static int thresholdIndex = -1;
+
+	OctreeNode root = null;
+
+	// octreeSize must be a power of two!
+	const int octreeSize = 64;
+
+    void Awake()
+    {
+    }
+
+	void Start ()
+    {
+        PlayerInput.Start();
+
+		thresholdIndex = (thresholdIndex + 1) % MAX_THRESHOLDS;
+        List<MeshVertex> vertices = new List<MeshVertex>();
+		List<int> indices = new List<int>();
+
+
+        root = Octree.BuildOctree(new Vector3(-octreeSize / 2, -octreeSize / 2, -octreeSize / 2), octreeSize, THRESHOLDS[thresholdIndex]);
+
+        if (root == null)
+            Debug.Log("root is null");
+
+        Octree.GenerateMeshFromOctree(root, vertices, indices);
+	}
+	
+	// Update is called once per frame
+	void Update ()
+    {
+        PlayerInput.Update();
+	}
+
+    void OnApplicationQuit()
+    {
+        Octree.DestroyOctree(root);
+    }
+
+    void OnGUI ()
+    {
+        //You need a killer computer to be able to use this!! (or drop the octree size some.. )
+        //Octree.DrawOctree(root, 0);
+    }
+
+
+}
+```
+
+### CSharpCode/DualContouring/Givens.cs
+```
+﻿/*
+ * This is free and unencumbered software released into the public domain.
+ *
+ * Anyone is free to copy, modify, publish, use, compile, sell, or
+ * distribute this software, either in source code form or as a compiled
+ * binary, for any purpose, commercial or non-commercial, and by any
+ * means.
+ *
+ * In jurisdictions that recognize copyright laws, the author or authors
+ * of this software dedicate any and all copyright interest in the
+ * software to the public domain. We make this dedication for the benefit
+ * of the public at large and to the detriment of our heirs and
+ * successors. We intend this dedication to be an overt act of
+ * relinquishment in perpetuity of all present and future rights to this
+ * software under copyright law.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * For more information, please refer to <http://unlicense.org/>
+ */
+
+public static class Givens
+{
+    public static void rot01_post(Mat3 m, float c, float s)
+    {
+        float m00 = m.m00, m01 = m.m01, m10 = m.m10, m11 = m.m11, m20 = m.m20, m21 = m.m21;
+        m.set(c * m00 - s * m01, s * m00 + c * m01, m.m02, c * m10 - s * m11,
+              s * m10 + c * m11, m.m12, c * m20 - s * m21, s * m20 + c * m21, m.m22);
+    }
+
+    public static void rot02_post(Mat3 m, float c, float s)
+    {
+        float m00 = m.m00, m02 = m.m02, m10 = m.m10, m12 = m.m12, m20 = m.m20, m22 = m.m22;
+        m.set(c * m00 - s * m02, m.m01, s * m00 + c * m02, c * m10 - s * m12, m.m11,
+              s * m10 + c * m12, c * m20 - s * m22, m.m21, s * m20 + c * m22);
+    }
+
+    public static void rot12_post(Mat3 m, float c, float s)
+    {
+        float m01 = m.m01, m02 = m.m02, m11 = m.m11, m12 = m.m12, m21 = m.m21, m22 = m.m22;
+        m.set(m.m00, c * m01 - s * m02, s * m01 + c * m02, m.m10, c * m11 - s * m12,
+              s * m11 + c * m12, m.m20, c * m21 - s * m22, s * m21 + c * m22);
+    }
+}
+```
+
+### CSharpCode/DualContouring/Mat3.cs
+```
+﻿public class Mat3
+    {
+        public float m00, m01, m02, m10, m11, m12, m20, m21, m22;
+        public Mat3()
+        { }
+        public Mat3(float m00, float m01, float m02, float m10, float m11, float m12, float m20, float m21, float m22) { }
+        public void clear() { }
+        public void set(float m00, float m01, float m02, float m10, float m11, float m12, float m20, float m21, float m22) { }
+        public void set(Mat3 rhs) { }
+        public void setSymmetric(float a00, float a01, float a02, float a11, float a12, float a22) { }
+        public void setSymmetric(SMat3 rhs) { }
+
+        private Mat3(Mat3 rhs) { }
+
+    }
+```
+
+### CSharpCode/DualContouring/MatUtils.cs
+```
+﻿using UnityEngine;
+
+public static class MatUtils
+{
+    public static float fnorm(Mat3 a) 
+    { 
+        return Mathf.Sqrt((a.m00 * a.m00) + (a.m01 * a.m01) + (a.m02 * a.m02)
+                    + (a.m10 * a.m10) + (a.m11 * a.m11) + (a.m12 * a.m12)
+                    + (a.m20 * a.m20) + (a.m21 * a.m21) + (a.m22 * a.m22));
+    }
+
+    public static float fnorm(SMat3 a)
+    {
+        return Mathf.Sqrt((a.m00 * a.m00) + (a.m01 * a.m01) + (a.m02 * a.m02)
+                    + (a.m01 * a.m01) + (a.m11 * a.m11) + (a.m12 * a.m12)
+                    + (a.m02 * a.m02) + (a.m12 * a.m12) + (a.m22 * a.m22)); 
+    }
+
+    public static float off(Mat3 a)
+    { 
+        return Mathf.Sqrt((a.m01 * a.m01) + (a.m02 * a.m02) + (a.m10 * a.m10) + (a.m12 * a.m12) + (a.m20 * a.m20) + (a.m21 * a.m21));
+    }
+
+    public static float off(SMat3 a) 
+    { 
+        return Mathf.Sqrt(2 * ((a.m01 * a.m01) + (a.m02 * a.m02) + (a.m12 * a.m12))); 
+    }
+
+    public static void mmul(out Mat3 Out, Mat3 a, Mat3 b)
+    { 
+        Out = new Mat3();
+        Out.set(a.m00 * b.m00 + a.m01 * b.m10 + a.m02 * b.m20,
+                a.m00 * b.m01 + a.m01 * b.m11 + a.m02 * b.m21,
+                a.m00 * b.m02 + a.m01 * b.m12 + a.m02 * b.m22,
+                a.m10 * b.m00 + a.m11 * b.m10 + a.m12 * b.m20,
+                a.m10 * b.m01 + a.m11 * b.m11 + a.m12 * b.m21,
+                a.m10 * b.m02 + a.m11 * b.m12 + a.m12 * b.m22,
+                a.m20 * b.m00 + a.m21 * b.m10 + a.m22 * b.m20,
+                a.m20 * b.m01 + a.m21 * b.m11 + a.m22 * b.m21,
+                a.m20 * b.m02 + a.m21 * b.m12 + a.m22 * b.m22);
+    }
+
+    public static void mmul_ata(out SMat3 Out, Mat3 a)
+    { 
+        Out = new SMat3();
+
+        Out.setSymmetric(a.m00 * a.m00 + a.m10 * a.m10 + a.m20 * a.m20,
+                         a.m00 * a.m01 + a.m10 * a.m11 + a.m20 * a.m21,
+                         a.m00 * a.m02 + a.m10 * a.m12 + a.m20 * a.m22,
+                         a.m01 * a.m01 + a.m11 * a.m11 + a.m21 * a.m21,
+                         a.m01 * a.m02 + a.m11 * a.m12 + a.m21 * a.m22,
+                         a.m02 * a.m02 + a.m12 * a.m12 + a.m22 * a.m22);
+    }
+
+    public static void transpose(out Mat3 Out, Mat3 a) 
+    {
+        Out = new Mat3();
+
+        Out.set(a.m00, a.m10, a.m20, a.m01, a.m11, a.m21, a.m02, a.m12, a.m22);
+    }
+
+    public static void vmul(out Vector3 Out, Mat3 a, Vector3 v)
+    { 
+        Out = new Vector3(
+            (a.m00 * v.x) + (a.m01 * v.y) + (a.m02 * v.z),
+            (a.m10 * v.x) + (a.m11 * v.y) + (a.m12 * v.z),
+            (a.m20 * v.x) + (a.m21 * v.y) + (a.m22 * v.z));
+    }
+
+    public static void vmul_symmetric(out Vector3 Out, SMat3 a, Vector3 v) 
+    { 
+        Out = new Vector3(
+            (a.m00 * v.x) + (a.m01 * v.y) + (a.m02 * v.z),
+            (a.m01 * v.x) + (a.m11 * v.y) + (a.m12 * v.z),
+            (a.m02 * v.x) + (a.m12 * v.y) + (a.m22 * v.z));
+    }
+}
+```
+
+### CSharpCode/DualContouring/Octree.cs
+```
+﻿/*
+
+Implementations of Octree member functions.
+
+Copyright (C) 2011  Tao Ju
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public License
+(LGPL) as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+
+using Code.Utils;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class Octree
+{
+    private static Color[] drawColors = new Color[]
+    {
+        Color.white,
+        Color.yellow,
+        Color.grey,
+        Color.green,
+        Color.blue, 
+        Color.black,
+        Color.red,
+        Color.cyan,
+    };
+
+    public static int MATERIAL_AIR = 0;
+    public static int MATERIAL_SOLID = 1;
+
+    public static float QEF_ERROR = 1e-6f;
+    public static int QEF_SWEEPS = 4;
+
+    #region Readonly Variables
+    public static readonly Vector3[] CHILD_MIN_OFFSETS =
+{
+	// needs to match the vertMap from Dual Contouring impl
+	new Vector3( 0, 0, 0 ),
+	new Vector3( 0, 0, 1 ),
+	new Vector3( 0, 1, 0 ),
+	new Vector3( 0, 1, 1 ),
+	new Vector3( 1, 0, 0 ),
+	new Vector3( 1, 0, 1 ),
+	new Vector3( 1, 1, 0 ),
+	new Vector3( 1, 1, 1 ),
+};
+
+    // data from the original DC impl, drives the contouring process
+
+    public static readonly int[][] edgevmap = new int[12][] 
+{
+	new int[2]{2,4},new int[2]{1,5},new int[2]{2,6},new int[2]{3,7},	// x-axis 
+	new int[2]{0,2},new int[2]{1,3},new int[2]{4,6},new int[2]{5,7},	// y-axis
+	new int[2]{0,1},new int[2]{2,3},new int[2]{4,5},new int[2]{6,7}		// z-axis
+};
+
+    public static readonly int[] edgemask = { 5, 3, 6 };
+
+    public static readonly int[][] vertMap = new int[8][]  
+{
+	new int[3]{0,0,0},
+	new int[3]{0,0,1},
+	new int[3]{0,1,0},
+	new int[3]{0,1,1},
+	new int[3]{1,0,0},
+	new int[3]{1,0,1},
+	new int[3]{1,1,0},
+	new int[3]{1,1,1}
+};
+
+    public static readonly int[][] faceMap = new int[6][]
+{
+    new int[4]{4, 8, 5, 9}, 
+    new int[4]{6, 10, 7, 11},
+    new int[4]{0, 8, 1, 10},
+    new int[4]{2, 9, 3, 11},
+    new int[4]{0, 4, 2, 6},
+    new int[4]{1, 5, 3, 7}
+};
+
+    public static readonly int[][] cellProcFaceMask = new int[12][]
+{
+    new int[3]{0,4,0},
+    new int[3]{1,5,0},
+    new int[3]{2,6,0},
+    new int[3]{3,7,0},
+    new int[3]{0,2,1},
+    new int[3]{4,6,1},
+    new int[3]{1,3,1},
+    new int[3]{5,7,1},
+    new int[3]{0,1,2},
+    new int[3]{2,3,2},
+    new int[3]{4,5,2},
+    new int[3]{6,7,2}
+};
+
+    public static readonly int[][] cellProcEdgeMask = new int[6][] 
+{
+    new int[5]{0,1,2,3,0},
+    new int[5]{4,5,6,7,0},
+    new int[5]{0,4,1,5,1},
+    new int[5]{2,6,3,7,1},
+    new int[5]{0,2,4,6,2},
+    new int[5]{1,3,5,7,2}
+};
+
+    public static readonly int[][][] faceProcFaceMask = new int[3][][] 
+{
+	new int[4][]{ new int[3]{4,0,0}, new int[3]{5,1,0}, new int[3]{6,2,0}, new int[3]{7,3,0} },
+	new int[4][]{ new int[3]{2,0,1}, new int[3]{6,4,1}, new int[3]{3,1,1}, new int[3]{7,5,1} },
+	new int[4][]{ new int[3]{1,0,2}, new int[3]{3,2,2}, new int[3]{5,4,2}, new int[3]{7,6,2} }
+};
+
+    public static readonly int[][][] faceProcEdgeMask = new int[3][][]
+{
+	new int[4][]{new int[6]{1,4,0,5,1,1},new int[6]{1,6,2,7,3,1},new int[6]{0,4,6,0,2,2},new int[6]{0,5,7,1,3,2}},
+	new int[4][]{new int[6]{0,2,3,0,1,0},new int[6]{0,6,7,4,5,0},new int[6]{1,2,0,6,4,2},new int[6]{1,3,1,7,5,2}},
+	new int[4][]{new int[6]{1,1,0,3,2,0},new int[6]{1,5,4,7,6,0},new int[6]{0,1,5,0,4,1},new int[6]{0,3,7,2,6,1}}
+};
+
+    public static readonly int[][][] edgeProcEdgeMask = new int[3][][]
+{
+	new int[2][]{new int[5]{3,2,1,0,0},new int[5]{7,6,5,4,0}},
+	new int[2][]{new int[5]{5,1,4,0,1},new int[5]{7,3,6,2,1}},
+	new int[2][]{new int[5]{6,4,2,0,2},new int[5]{7,5,3,1,2}},
+};
+
+    public static readonly int[][] processEdgeMask = new int[3][]
+{
+    new int[4]{3,2,1,0},new int[4]{7,5,6,4},new int[4]{11,10,9,8}
+};
+    #endregion
+
+
+    public static OctreeNode SimplifyOctree(OctreeNode node, float threshold)
+    {
+        if (node == null)
+        {
+            return null;
+        }
+
+        if (node.Type != OctreeNodeType.Node_Internal)
+        {
+            // can't simplify!
+            return node;
+        }
+
+        QefSolver qef = new QefSolver();
+        int[] signs = new int[8] { -1, -1, -1, -1, -1, -1, -1, -1 };
+        int midsign = -1;
+        int edgeCount = 0;
+        bool isCollapsible = true;
+
+        for (int i = 0; i < 8; i++)
+        {
+            node.children[i] = SimplifyOctree(node.children[i], threshold);
+
+            if (node.children[i] != null)
+            {
+                OctreeNode child = node.children[i];
+
+                if (child.Type == OctreeNodeType.Node_Internal)
+                {
+                    isCollapsible = false;
+                }
+                else
+                {
+                    qef.add(child.drawInfo.qef);
+
+                    midsign = (child.drawInfo.corners >> (7 - i)) & 1;
+                    signs[i] = (child.drawInfo.corners >> i) & 1;
+
+                    edgeCount++;
+                }
+            }
+        }
+
+        if (!isCollapsible)
+        {
+            // at least one child is an internal node, can't collapse
+            return node;
+        }
+
+        Vector3 qefPosition = Vector3.zero;
+        qef.solve(qefPosition, QEF_ERROR, QEF_SWEEPS, QEF_ERROR);
+        float error = qef.getError();
+
+        // convert to glm vec3 for ease of use
+        Vector3 position = new Vector3(qefPosition.x, qefPosition.y, qefPosition.z);
+
+        // at this point the masspoint will actually be a sum, so divide to make it the average
+        if (error > threshold)
+        {
+            // this collapse breaches the threshold
+            return node;
+        }
+
+        if (position.x < node.min.x || position.x > (node.min.x + node.size) ||
+            position.y < node.min.y || position.y > (node.min.y + node.size) ||
+            position.z < node.min.z || position.z > (node.min.z + node.size))
+        {
+            position = qef.getMassPoint();
+        }
+
+        // change the node from an internal node to a 'psuedo leaf' node
+        OctreeDrawInfo drawInfo = new OctreeDrawInfo();
+        drawInfo.corners = 0;
+        drawInfo.index = -1;
+
+        for (int i = 0; i < 8; i++)
+        {
+            if (signs[i] == -1)
+            {
+                // Undetermined, use centre sign instead
+                drawInfo.corners |= (midsign << i);
+            }
+            else
+            {
+                drawInfo.corners |= (signs[i] << i);
+            }
+        }
+
+        drawInfo.averageNormal = Vector3.zero;
+        for (int i = 0; i < 8; i++)
+        {
+            if (node.children[i] != null)
+            {
+                OctreeNode child = node.children[i];
+                if (child.Type == OctreeNodeType.Node_Psuedo ||
+                    child.Type == OctreeNodeType.Node_Leaf)
+                {
+                    drawInfo.averageNormal += child.drawInfo.averageNormal;
+                }
+            }
+        }
+
+        drawInfo.averageNormal = drawInfo.averageNormal.normalized;
+        drawInfo.position = position;
+        drawInfo.qef = qef.getData();
+
+        for (int i = 0; i < 8; i++)
+        {
+            DestroyOctree(node.children[i]);
+            node.children[i] = null;
+        }
+
+        node.Type = OctreeNodeType.Node_Psuedo;
+        node.drawInfo = drawInfo;
+
+        return node;
+    }
+
+    public static void GenerateVertexIndices(OctreeNode node, List<MeshVertex> vertexBuffer)
+    {
+        if (node == null)
+        {
+            return;
+        }
+
+        if (node.Type != OctreeNodeType.Node_Leaf)
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                GenerateVertexIndices(node.children[i], vertexBuffer);
+            }
+        }
+
+        if (node.Type != OctreeNodeType.Node_Internal)
+        {
+            node.drawInfo.index = vertexBuffer.Count;
+
+            vertexBuffer.Add(new MeshVertex(node.drawInfo.position, node.drawInfo.averageNormal));
+        }
+    }
+
+    public static void ContourProcessEdge(OctreeNode[] node, int dir, List<int> indexBuffer)
+    {
+        int minSize = 1000000;		// arbitrary big number
+        int minIndex = 0;
+        int[] indices = new int[4] { -1, -1, -1, -1 };
+        bool flip = false;
+        bool[] signChange = new bool[4] { false, false, false, false };
+
+        for (int i = 0; i < 4; i++)
+        {
+            int edge = processEdgeMask[dir][i];
+            int c1 = edgevmap[edge][0];
+            int c2 = edgevmap[edge][1];
+
+            int m1 = (node[i].drawInfo.corners >> c1) & 1;
+            int m2 = (node[i].drawInfo.corners >> c2) & 1;
+
+            if (node[i].size < minSize)
+            {
+                minSize = node[i].size;
+                minIndex = i;
+                flip = m1 != MATERIAL_AIR;
+            }
+
+            indices[i] = node[i].drawInfo.index;
+
+            signChange[i] =
+                (m1 == MATERIAL_AIR && m2 != MATERIAL_AIR) ||
+                (m1 != MATERIAL_AIR && m2 == MATERIAL_AIR);
+        }
+
+        if (signChange[minIndex])
+        {
+            if (!flip)
+            {
+                indexBuffer.Add(indices[0]);
+                indexBuffer.Add(indices[1]);
+                indexBuffer.Add(indices[3]);
+
+                indexBuffer.Add(indices[0]);
+                indexBuffer.Add(indices[3]);
+                indexBuffer.Add(indices[2]);
+            }
+            else
+            {
+                indexBuffer.Add(indices[0]);
+                indexBuffer.Add(indices[3]);
+                indexBuffer.Add(indices[1]);
+
+                indexBuffer.Add(indices[0]);
+                indexBuffer.Add(indices[2]);
+                indexBuffer.Add(indices[3]);
+            }
+
+        }
+    }
+
+    public static void ContourEdgeProc(OctreeNode[] node, int dir, List<int> indexBuffer)
+    {
+        if (node[0] == null || node[1] == null || node[2] == null || node[3] == null)
+        {
+            return;
+        }
+
+        if (node[0].Type != OctreeNodeType.Node_Internal &&
+            node[1].Type != OctreeNodeType.Node_Internal &&
+            node[2].Type != OctreeNodeType.Node_Internal &&
+            node[3].Type != OctreeNodeType.Node_Internal)
+        {
+            ContourProcessEdge(node, dir, indexBuffer);
+        }
+        else
+        {
+            for (int i = 0; i < 2; i++)
+            {
+                OctreeNode[] edgeNodes = new OctreeNode[4];
+                int[] c = new int[4]
+			{
+				edgeProcEdgeMask[dir][i][0],
+				edgeProcEdgeMask[dir][i][1],
+				edgeProcEdgeMask[dir][i][2],
+				edgeProcEdgeMask[dir][i][3],
+			};
+
+                for (int j = 0; j < 4; j++)
+                {
+                    if (node[j].Type == OctreeNodeType.Node_Leaf || node[j].Type == OctreeNodeType.Node_Psuedo)
+                    {
+                        edgeNodes[j] = node[j];
+                    }
+                    else
+                    {
+                        edgeNodes[j] = node[j].children[c[j]];
+                    }
+                }
+
+                ContourEdgeProc(edgeNodes, edgeProcEdgeMask[dir][i][4], indexBuffer);
+            }
+        }
+    }
+
+    public static void ContourFaceProc(OctreeNode[] node, int dir, List<int> indexBuffer)
+    {
+        if (node[0] == null || node[1] == null)
+        {
+            return;
+        }
+
+        if (node[0].Type == OctreeNodeType.Node_Internal ||
+            node[1].Type == OctreeNodeType.Node_Internal)
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                OctreeNode[] faceNodes = new OctreeNode[2];
+                int[] c = new int[2] 
+			{
+				faceProcFaceMask[dir][i][0], 
+				faceProcFaceMask[dir][i][1], 
+			};
+
+                for (int j = 0; j < 2; j++)
+                {
+                    if (node[j].Type != OctreeNodeType.Node_Internal)
+                    {
+                        faceNodes[j] = node[j];
+                    }
+                    else
+                    {
+                        faceNodes[j] = node[j].children[c[j]];
+                    }
+                }
+
+                ContourFaceProc(faceNodes, faceProcFaceMask[dir][i][2], indexBuffer);
+            }
+
+            int[][] orders = new int[2][] 
+		{
+			new int[4]{ 0, 0, 1, 1 },
+			new int[4]{ 0, 1, 0, 1 },
+		};
+
+            for (int i = 0; i < 4; i++)
+            {
+                OctreeNode[] edgeNodes = new OctreeNode[4];
+                int[] c = new int[4]
+			{
+				faceProcEdgeMask[dir][i][1],
+				faceProcEdgeMask[dir][i][2],
+				faceProcEdgeMask[dir][i][3],
+				faceProcEdgeMask[dir][i][4],
+			};
+
+                int[] order = orders[faceProcEdgeMask[dir][i][0]];
+                for (int j = 0; j < 4; j++)
+                {
+                    if (node[order[j]].Type == OctreeNodeType.Node_Leaf ||
+                        node[order[j]].Type == OctreeNodeType.Node_Psuedo)
+                    {
+                        edgeNodes[j] = node[order[j]];
+                    }
+                    else
+                    {
+                        edgeNodes[j] = node[order[j]].children[c[j]];
+                    }
+                }
+
+                ContourEdgeProc(edgeNodes, faceProcEdgeMask[dir][i][5], indexBuffer);
+            }
+        }
+    }
+
+    public static void ContourCellProc(OctreeNode node, List<int> indexBuffer)
+    {
+        if (node == null)
+        {
+            return;
+        }
+
+        if (node.Type == OctreeNodeType.Node_Internal)
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                ContourCellProc(node.children[i], indexBuffer);
+            }
+
+            for (int i = 0; i < 12; i++)
+            {
+                OctreeNode[] faceNodes = new OctreeNode[2];
+                int[] c = { cellProcFaceMask[i][0], cellProcFaceMask[i][1] };
+
+                faceNodes[0] = node.children[c[0]];
+                faceNodes[1] = node.children[c[1]];
+
+                ContourFaceProc(faceNodes, cellProcFaceMask[i][2], indexBuffer);
+            }
+
+            for (int i = 0; i < 6; i++)
+            {
+                OctreeNode[] edgeNodes = new OctreeNode[4];
+                int[] c = new int[4]
+			{
+				cellProcEdgeMask[i][0],
+				cellProcEdgeMask[i][1],
+				cellProcEdgeMask[i][2],
+				cellProcEdgeMask[i][3],
+			};
+
+                for (int j = 0; j < 4; j++)
+                {
+                    edgeNodes[j] = node.children[c[j]];
+                }
+
+                ContourEdgeProc(edgeNodes, cellProcEdgeMask[i][4], indexBuffer);
+            }
+        }
+    }
+
+    public static Vector3 ApproximateZeroCrossingPosition(Vector3 p0, Vector3 p1)
+    {
+        // approximate the zero crossing by finding the min value along the edge
+        float minValue = 100000f;
+        float t = 0f;
+        float currentT = 0f;
+        const int steps = 8;
+        const float increment = 1f / (float)steps;
+        while (currentT <= 1.0f)
+        {
+            Vector3 p = p0 + ((p1 - p0) * currentT);
+            float density = Mathf.Abs(glm.Density_Func(p));
+            if (density < minValue)
+            {
+                minValue = density;
+                t = currentT;
+            }
+
+            currentT += increment;
+        }
+
+        return p0 + ((p1 - p0) * t);
+    }
+
+    public static Vector3 CalculateSurfaceNormal(Vector3 p)
+    {
+        float H = 0.001f;
+        float dx = glm.Density_Func(p + new Vector3(H, 0.0f, 0.0f)) - glm.Density_Func(p - new Vector3(H, 0.0f, 0.0f));
+        float dy = glm.Density_Func(p + new Vector3(0.0f, H, 0.0f)) - glm.Density_Func(p - new Vector3(0.0f, H, 0.0f));
+        float dz = glm.Density_Func(p + new Vector3(0.0f, 0.0f, H)) - glm.Density_Func(p - new Vector3(0.0f, 0.0f, H));
+
+        return new Vector3(dx, dy, dz).normalized;
+    }
+
+    public static OctreeNode ConstructLeaf(OctreeNode leaf)
+    {
+        if (leaf == null || leaf.size != 1)
+        {
+            return null;
+        }
+
+        int corners = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            Vector3 cornerPos = leaf.min + CHILD_MIN_OFFSETS[i];
+            float density = glm.Density_Func(cornerPos);
+            int material = density < 0.0f ? MATERIAL_SOLID : MATERIAL_AIR;
+            corners |= (material << i);
+        }
+
+        if (corners == 0 || corners == 255)
+        {
+            // voxel is full inside or outside the volume
+            //delete leaf
+            //setting as null isn't required by the GC in C#... but its in the original, so why not!
+            leaf = null;
+            return null;
+        }
+
+        // otherwise the voxel contains the surface, so find the edge intersections
+        const int MAX_CROSSINGS = 6;
+        int edgeCount = 0;
+        Vector3 averageNormal = Vector3.zero;
+        QefSolver qef = new QefSolver();
+
+        for (int i = 0; i < 12 && edgeCount < MAX_CROSSINGS; i++)
+        {
+            int c1 = edgevmap[i][0];
+            int c2 = edgevmap[i][1];
+
+            int m1 = (corners >> c1) & 1;
+            int m2 = (corners >> c2) & 1;
+
+            if ((m1 == MATERIAL_AIR && m2 == MATERIAL_AIR) || (m1 == MATERIAL_SOLID && m2 == MATERIAL_SOLID))
+            {
+                // no zero crossing on this edge
+                continue;
+            }
+
+            Vector3 p1 = leaf.min + CHILD_MIN_OFFSETS[c1];
+            Vector3 p2 = leaf.min + CHILD_MIN_OFFSETS[c2];
+            Vector3 p = ApproximateZeroCrossingPosition(p1, p2);
+            Vector3 n = CalculateSurfaceNormal(p);
+            qef.add(p.x, p.y, p.z, n.x, n.y, n.z);
+
+            averageNormal += n;
+
+            edgeCount++;
+        }
+
+        Vector3 qefPosition = Vector3.zero;
+        qef.solve(qefPosition, QEF_ERROR, QEF_SWEEPS, QEF_ERROR);
+
+        OctreeDrawInfo drawInfo = new OctreeDrawInfo();
+        drawInfo.corners = 0;
+        drawInfo.index = -1;
+        drawInfo.position = new Vector3(qefPosition.x, qefPosition.y, qefPosition.z);
+        drawInfo.qef = qef.getData();
+
+        Vector3 min = leaf.min;
+        Vector3 max = new Vector3(leaf.min.x + leaf.size, leaf.min.y + leaf.size, leaf.min.z + leaf.size);
+        if (drawInfo.position.x < min.x || drawInfo.position.x > max.x ||
+            drawInfo.position.y < min.y || drawInfo.position.y > max.y ||
+            drawInfo.position.z < min.z || drawInfo.position.z > max.z)
+        {
+            drawInfo.position = qef.getMassPoint();
+        }
+
+        drawInfo.averageNormal = Vector3.Normalize(averageNormal / (float)edgeCount);
+        drawInfo.corners = corners;
+
+        leaf.Type = OctreeNodeType.Node_Leaf;
+        leaf.drawInfo = drawInfo;
+
+        return leaf;
+    }
+
+    public static OctreeNode ConstructOctreeNodes(OctreeNode node)
+    {
+        if (node == null)
+        {
+            return null;
+        }
+
+        if (node.size == 1)
+        {
+            return ConstructLeaf(node);
+        }
+
+        int childSize = node.size / 2;
+        bool hasChildren = false;
+
+        for (int i = 0; i < 8; i++)
+        {
+            OctreeNode child = new OctreeNode();
+            child.size = childSize;
+            child.min = node.min + (CHILD_MIN_OFFSETS[i] * childSize);
+            child.Type = OctreeNodeType.Node_Internal;
+
+            node.children[i] = ConstructOctreeNodes(child);
+            hasChildren |= (node.children[i] != null);
+        }
+
+        if (!hasChildren)
+        {
+            //delete leaf
+            //setting as null isn't required by the GC in C#... but its in the original, so why not!
+            node = null;
+            return null;
+        }
+
+        return node;
+    }
+
+    public static OctreeNode BuildOctree(Vector3 min, int size, float threshold)
+    {
+        Debug.Log(string.Format("Building Octree at {0}, with size of {1} and threshold of {2}", min, size, threshold));
+
+        OctreeNode root = new OctreeNode();
+        root.min = min;
+        root.size = size;
+        root.Type = OctreeNodeType.Node_Internal;
+
+        root = ConstructOctreeNodes(root);
+        root = SimplifyOctree(root, threshold);
+
+        return root;
+    }
+
+    public static void GenerateMeshFromOctree(OctreeNode node, List<MeshVertex> vertexBuffer, List<int> indexBuffer)
+    {
+        if (node == null)
+        {
+            return;
+        }
+
+        vertexBuffer = new List<MeshVertex>();
+        indexBuffer = new List<int>();
+
+        GenerateVertexIndices(node, vertexBuffer);
+        ContourCellProc(node, indexBuffer);
+
+        GameObject go = new GameObject("Mesh");
+        Mesh mesh;
+        MeshFilter filter;
+        MeshRenderer meshRenderer;
+
+        meshRenderer = go.AddComponent<MeshRenderer>();
+        filter = go.AddComponent<MeshFilter>();
+
+        meshRenderer.sharedMaterial = Resources.Load("Default") as Material;
+
+        Vector3[] vertArray = new Vector3[vertexBuffer.Count];
+        Vector2[] uvs = new Vector2[vertexBuffer.Count];
+        for (int i = 0; i < vertexBuffer.Count; i++)
+        {
+            vertArray[i] = vertexBuffer[i].xyz;
+            uvs[i] = new Vector2(vertexBuffer[i].xyz.x, vertexBuffer[i].xyz.z);
+        }
+
+        Vector3[] normsArray = new Vector3[vertexBuffer.Count];
+        for (int i = 0; i < vertexBuffer.Count; i++)
+        {
+            normsArray[i] = vertexBuffer[i].normal;
+        }
+
+        mesh = filter.mesh;
+        mesh.vertices = vertArray;
+        mesh.uv = uvs;
+        mesh.triangles = indexBuffer.ToArray();
+        mesh.normals = normsArray;
+        mesh.RecalculateBounds();
+
+        for (int i = 0; i < 8; i++)
+        {
+            Debug.Log("vert: " + vertArray[i]);
+        }
+
+        for (int i = 0; i < 8; i++)
+        {
+            Debug.Log("index: " + indexBuffer[i]);
+        }
+
+    }
+
+    public static void DrawOctree(OctreeNode rootNode, int colorIndex)
+    {
+        if (rootNode != null && rootNode.children.Length > 0)
+        {
+            for (int i = 0; i < rootNode.children.Length; i++)
+            {
+                DrawOctree(rootNode.children[i], colorIndex + 1);
+            }
+
+            DrawOctreeNode(rootNode, drawColors[colorIndex]);
+        }
+    }
+
+    public static void DrawOctreeNode(OctreeNode node, Color color)
+    {
+        DrawCubeInLines.DrawCube(node.min, node.size, color);
+    }
+
+    public static void DestroyOctree(OctreeNode node)
+    {
+        if (node == null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < 8; i++)
+        {
+            DestroyOctree(node.children[i]);
+        }
+
+        node = null;
+    }
+
+}
+```
+
+### CSharpCode/DualContouring/OctreeDrawInfo.cs
+```
+﻿using UnityEngine;
+public struct OctreeDrawInfo 
+{
+    public int index;
+    public int corners;
+    public Vector3 position;
+    public Vector3 averageNormal;
+	public QefData	qef;
+}
+```
+
+### CSharpCode/DualContouring/OctreeNode.cs
+```
+﻿using UnityEngine;
+
+
+public class OctreeNode
+{
+    public OctreeNodeType Type;
+    public Vector3 min;
+    public int size;
+    public OctreeNode[] children;
+    public OctreeDrawInfo drawInfo;
+
+	public OctreeNode()
+	{
+        Type = OctreeNodeType.Node_None;
+        min = Vector3.zero;
+        size = 0;
+        drawInfo = new OctreeDrawInfo();
+
+        children = new OctreeNode[8];
+        for (int i = 0; i < 8; i++)
+        {
+            children[i] = null;
+        }
+	}
+
+    public OctreeNode(OctreeNodeType _type)
+    {
+        Type = _type;
+        min = Vector3.zero;
+        size = 0;
+        drawInfo = new OctreeDrawInfo();
+
+        children = new OctreeNode[8];
+        for (int i = 0; i < 8; i++)
+        {
+            children[i] = null;
+        }
+    }
+}
+```
+
+### CSharpCode/DualContouring/OctreeNodeType.cs
+```
+﻿public enum OctreeNodeType
+{
+    Node_None,
+    Node_Internal,
+    Node_Psuedo,
+    Node_Leaf
+}
+```
+
+### CSharpCode/DualContouring/QefData.cs
+```
+﻿/*
+ * This is free and unencumbered software released into the public domain.
+ *
+ * Anyone is free to copy, modify, publish, use, compile, sell, or
+ * distribute this software, either in source code form or as a compiled
+ * binary, for any purpose, commercial or non-commercial, and by any
+ * means.
+ *
+ * In jurisdictions that recognize copyright laws, the author or authors
+ * of this software dedicate any and all copyright interest in the
+ * software to the public domain. We make this dedication for the benefit
+ * of the public at large and to the detriment of our heirs and
+ * successors. We intend this dedication to be an overt act of
+ * relinquishment in perpetuity of all present and future rights to this
+ * software under copyright law.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * For more information, please refer to <http://unlicense.org/>
+ */
+
+    public class QefData
+    {
+        public float ata_00, ata_01, ata_02, ata_11, ata_12, ata_22;
+        public float atb_x, atb_y, atb_z;
+        public float btb;
+        public float massPoint_x, massPoint_y, massPoint_z;
+        public int numPoints;
+
+        public QefData()
+        {
+            clear();
+        }
+
+        public QefData(QefData rhs)
+        {
+            set(rhs);
+        }
+
+        public QefData(float ata_00, float ata_01,float ata_02, float ata_11, float ata_12,float ata_22, float atb_x, float atb_y,
+                float atb_z, float btb, float massPoint_x, float massPoint_y, float massPoint_z, int numPoints)
+        {
+            
+            set(ata_00, ata_01, ata_02, ata_11, ata_12, ata_22, atb_x, atb_y, atb_z, btb, massPoint_x, massPoint_y, massPoint_z, numPoints);
+        }
+
+        public void add(QefData rhs)
+        {
+            ata_00 += rhs.ata_00;
+            ata_01 += rhs.ata_01;
+            ata_02 += rhs.ata_02;
+            ata_11 += rhs.ata_11;
+            ata_12 += rhs.ata_12;
+            ata_22 += rhs.ata_22;
+            atb_x += rhs.atb_x;
+            atb_y += rhs.atb_y;
+            atb_z += rhs.atb_z;
+            btb += rhs.btb;
+            massPoint_x += rhs.massPoint_x;
+            massPoint_y += rhs.massPoint_y;
+            massPoint_z += rhs.massPoint_z;
+            numPoints += rhs.numPoints;
+        }
+
+        public void clear()
+        {
+            set(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        }
+
+        public void set(float ata_00, float ata_01, float ata_02, float ata_11, float ata_12, float ata_22, float atb_x, float atb_y,
+                 float atb_z, float btb, float massPoint_x, float massPoint_y, float massPoint_z, int numPoints) 
+        {
+            this.ata_00 = ata_00;
+            this.ata_01 = ata_01;
+            this.ata_02 = ata_02;
+            this.ata_11 = ata_11;
+            this.ata_12 = ata_12;
+            this.ata_22 = ata_22;
+            this.atb_x = atb_x;
+            this.atb_y = atb_y;
+            this.atb_z = atb_z;
+            this.btb = btb;
+            this.massPoint_x = massPoint_x;
+            this.massPoint_y = massPoint_y;
+            this.massPoint_z = massPoint_z;
+            this.numPoints = numPoints;
+        }
+
+        public void set(QefData rhs)
+        {
+            set(rhs.ata_00, rhs.ata_01, rhs.ata_02, rhs.ata_11, rhs.ata_12,
+                  rhs.ata_22, rhs.atb_x, rhs.atb_y, rhs.atb_z, rhs.btb,
+                  rhs.massPoint_x, rhs.massPoint_y, rhs.massPoint_z,
+                  rhs.numPoints);
+        }
+    }
+```
+
+### CSharpCode/DualContouring/QefSolver.cs
+```
+﻿/*
+ * This is free and unencumbered software released into the public domain.
+ *
+ * Anyone is free to copy, modify, publish, use, compile, sell, or
+ * distribute this software, either in source code form or as a compiled
+ * binary, for any purpose, commercial or non-commercial, and by any
+ * means.
+ *
+ * In jurisdictions that recognize copyright laws, the author or authors
+ * of this software dedicate any and all copyright interest in the
+ * software to the public domain. We make this dedication for the benefit
+ * of the public at large and to the detriment of our heirs and
+ * successors. We intend this dedication to be an overt act of
+ * relinquishment in perpetuity of all present and future rights to this
+ * software under copyright law.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * For more information, please refer to <http://unlicense.org/>
+ */
+
+using System;
+using UnityEngine;
+
+public class QefSolver
+{
+    private QefData data;
+    private SMat3 ata;
+    private Vector3 atb, massPoint, x;
+    private bool hasSolution;
+
+    public QefSolver()
+    {
+        data = new QefData();
+        ata = new SMat3();
+        atb = Vector3.zero;
+        massPoint = Vector3.zero;
+        x = Vector3.zero;
+        hasSolution = false;
+    }
+
+    private QefSolver(QefSolver rhs)
+    { }
+
+    public Vector3 getMassPoint()
+    {
+        return massPoint;
+    }
+
+    public void add(float px, float py, float pz, float nx, float ny, float nz)
+    {
+        hasSolution = false;
+    
+        Vector3 tmpv = new Vector3(nx, ny, nz).normalized;
+        nx = tmpv.x;
+        ny = tmpv.y;
+        nz = tmpv.z;
+   
+        data.ata_00 += nx * nx;
+        data.ata_01 += nx * ny;
+        data.ata_02 += nx * nz;
+        data.ata_11 += ny * ny;
+        data.ata_12 += ny * nz;
+        data.ata_22 += nz * nz;
+        float dot = nx * px + ny * py + nz * pz;
+        data.atb_x += dot * nx;
+        data.atb_y += dot * ny;
+        data.atb_z += dot * nz;
+        data.btb += dot * dot;
+        data.massPoint_x += px;
+        data.massPoint_y += py;
+        data.massPoint_z += pz;
+        ++data.numPoints;
+    }
+
+    public void add(Vector3 p, Vector3 n)
+    {
+        add(p.x, p.y, p.z, n.x, n.y, n.z);
+    }
+
+    public void add(QefData rhs)
+    {
+        hasSolution = false;
+        data.add(rhs);
+    }
+
+    public QefData getData()
+    {
+        return data;
+    }
+
+    public float getError()
+        {
+            if (!hasSolution)
+            {
+                throw new ArgumentException("Qef Solver does not have a solution!");
+            }
+
+            return getError(x);
+        }
+
+    public float getError(Vector3 pos)
+        { 
+            if (!hasSolution)
+            {
+                setAta();
+                setAtb();
+            }
+
+        Vector3 atax;
+        MatUtils.vmul_symmetric(out atax, ata, pos);
+        return Vector3.Dot(pos, atax) - 2 * Vector3.Dot(pos, atb) + data.btb;
+        }
+
+    public void reset()
+    {
+        hasSolution = false;
+        data.clear();
+    }
+
+    public float solve(Vector3 outx, float svd_tol, int svd_sweeps, float pinv_tol)
+    {
+        if (data.numPoints == 0)
+        {
+            throw new ArgumentException("...");
+        }
+
+        massPoint.Set(data.massPoint_x, data.massPoint_y, data.massPoint_z);
+        massPoint *= (1.0f / data.numPoints);
+        setAta();
+        setAtb();
+        Vector3 tmpv;
+        MatUtils.vmul_symmetric(out tmpv, ata, massPoint);
+        atb = atb - tmpv;
+        x = Vector3.zero;
+        float result = SVD.solveSymmetric(ata, atb, x, svd_tol, svd_sweeps, pinv_tol);
+        x += massPoint * 1;
+        setAtb();
+        outx = x;
+        hasSolution = true;
+        return result;
+    }
+
+    private void setAta()
+    {
+        ata.setSymmetric(data.ata_00, data.ata_01, data.ata_02, data.ata_11, data.ata_12, data.ata_22);
+    }
+
+    private void setAtb()
+    {
+        atb.Set(data.atb_x, data.atb_y, data.atb_z);
+    }
+
+
+    
+}
+```
+
+### CSharpCode/DualContouring/SMat3.cs
+```
+﻿public class SMat3
+    {
+        public float m00, m01, m02, m11, m12, m22;
+
+        public SMat3()
+        { 
+            clear();
+        }
+
+        public SMat3(float m00, float m01, float m02, float m11, float m12, float m22)
+        { 
+            this.setSymmetric(m00, m01, m02, m11, m12, m22);
+        }
+
+        public void clear() 
+        {
+            this.setSymmetric(0, 0, 0, 0, 0, 0); 
+        }
+
+        public void setSymmetric(float a00, float a01, float a02, float a11, float a12, float a22)
+        {
+            this.m00 = a00;
+            this.m01 = a01;
+            this.m02 = a02;
+            this.m11 = a11;
+            this.m12 = a12;
+            this.m22 = a22;
+        }
+
+        public void setSymmetric(SMat3 rhs)
+        {
+            this.setSymmetric(rhs.m00, rhs.m01, rhs.m02, rhs.m11, rhs.m12, rhs.m22);
+        }
+
+        private SMat3(SMat3 rhs) 
+        { 
+            this.setSymmetric(rhs);
+        }
+    }
+```
+
+### CSharpCode/DualContouring/SVD.cs
+```
+﻿/*
+ * This is free and unencumbered software released into the public domain.
+ *
+ * Anyone is free to copy, modify, publish, use, compile, sell, or
+ * distribute this software, either in source code form or as a compiled
+ * binary, for any purpose, commercial or non-commercial, and by any
+ * means.
+ *
+ * In jurisdictions that recognize copyright laws, the author or authors
+ * of this software dedicate any and all copyright interest in the
+ * software to the public domain. We make this dedication for the benefit
+ * of the public at large and to the detriment of our heirs and
+ * successors. We intend this dedication to be an overt act of
+ * relinquishment in perpetuity of all present and future rights to this
+ * software under copyright law.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * For more information, please refer to <http://unlicense.org/>
+ */
+
+using UnityEngine;
+
+public static class SVD
+{
+    public static void rotate01(SMat3 vtav, Mat3 v)
+    {
+        if (vtav.m01 == 0)
+        {
+            return;
+        }
+
+        float c = 0, s = 0;
+        Schur2.rot01(vtav, c, s);
+        Givens.rot01_post(v, c, s);
+    }
+
+    public static void rotate02(SMat3 vtav, Mat3 v)
+    {
+        if (vtav.m02 == 0)
+        {
+            return;
+        }
+
+        float c = 0, s = 0;
+        Schur2.rot02(vtav, c, s);
+        Givens.rot02_post(v, c, s);
+    }
+
+    public static void rotate12(SMat3 vtav, Mat3 v)
+    {
+        if (vtav.m12 == 0)
+        {
+            return;
+        }
+
+        float c = 0, s = 0;
+        Schur2.rot12(vtav, c, s);
+        Givens.rot12_post(v, c, s);
+    }
+
+    public static void getSymmetricSvd(SMat3 a, SMat3 vtav, Mat3 v, float tol, int max_sweeps)
+    {
+        vtav.setSymmetric(a);
+        v.set(1, 0, 0, 0, 1, 0, 0, 0, 1);
+        float delta = tol * MatUtils.fnorm(vtav);
+
+        for (int i = 0; i < max_sweeps && MatUtils.off(vtav) > delta; ++i)
+        {
+            rotate01(vtav, v);
+            rotate02(vtav, v);
+            rotate12(vtav, v);
+        }
+    }
+
+    public static float calcError(Mat3 A, Vector3 x, Vector3 b)
+    {
+        Vector3 vtmp;
+        MatUtils.vmul(out vtmp, A, x);
+        vtmp = b - vtmp;
+        return Vector3.Dot(vtmp, vtmp);
+    }
+
+    public static float calcError(SMat3 origA, Vector3 x, Vector3 b)
+    {
+        Mat3 A = new Mat3();
+        Vector3 vtmp;
+        A.setSymmetric(origA);
+        MatUtils.vmul(out vtmp, A, x);
+        vtmp = b - vtmp;
+        return Vector3.Dot(vtmp, vtmp);
+    }
+
+    public static float pinv(float x, float tol)
+    {
+        return (Mathf.Abs(x) < tol || Mathf.Abs(1 / x) < tol) ? 0 : (1 / x);
+    }
+
+    public static void pseudoinverse(out Mat3 Out, SMat3 d, Mat3 v, float tol)
+    {
+        float d0 = pinv(d.m00, tol), d1 = pinv(d.m11, tol), d2 = pinv(d.m22, tol);
+
+        Out = new Mat3();
+        Out.set(v.m00 * d0 * v.m00 + v.m01 * d1 * v.m01 + v.m02 * d2 * v.m02,
+                v.m00 * d0 * v.m10 + v.m01 * d1 * v.m11 + v.m02 * d2 * v.m12,
+                v.m00 * d0 * v.m20 + v.m01 * d1 * v.m21 + v.m02 * d2 * v.m22,
+                v.m10 * d0 * v.m00 + v.m11 * d1 * v.m01 + v.m12 * d2 * v.m02,
+                v.m10 * d0 * v.m10 + v.m11 * d1 * v.m11 + v.m12 * d2 * v.m12,
+                v.m10 * d0 * v.m20 + v.m11 * d1 * v.m21 + v.m12 * d2 * v.m22,
+                v.m20 * d0 * v.m00 + v.m21 * d1 * v.m01 + v.m22 * d2 * v.m02,
+                v.m20 * d0 * v.m10 + v.m21 * d1 * v.m11 + v.m22 * d2 * v.m12,
+                v.m20 * d0 * v.m20 + v.m21 * d1 * v.m21 + v.m22 * d2 * v.m22);
+    }
+
+    public static float solveSymmetric(SMat3 A, Vector3 b, Vector3 x, float svd_tol, int svd_sweeps, float pinv_tol)
+    {
+        Mat3 pinv;
+        Mat3 V = new Mat3();
+        SMat3 VTAV = new SMat3();
+        getSymmetricSvd(A, VTAV, V, svd_tol, svd_sweeps);
+        pseudoinverse(out pinv, VTAV, V, pinv_tol);
+        MatUtils.vmul(out x, pinv, b);
+        return calcError(A, x, b);
+    }
+
+    public static void calcSymmetricGivensCoefficients(float a_pp, float a_pq, float a_qq, float c, float s)
+    {
+        if (a_pq == 0)
+        {
+            c = 1;
+            s = 0;
+            return;
+        }
+
+        float tau = (a_qq - a_pp) / (2 * a_pq);
+        float stt = Mathf.Sqrt(1.0f + tau * tau);
+        float tan = 1.0f / ((tau >= 0) ? (tau + stt) : (tau - stt));
+        c = 1.0f / Mathf.Sqrt(1.0f + tan * tan);
+        s = tan * c;
+    }
+
+    public static float solveLeastSquares(Mat3 a, Vector3 b, Vector3 x, float svd_tol, int svd_sweeps, float pinv_tol)
+    {
+        Mat3 at;
+        SMat3 ata;
+        Vector3 atb;
+        MatUtils.transpose(out at, a);
+        MatUtils.mmul_ata(out ata, a);
+        MatUtils.vmul(out atb, at, b);
+        return solveSymmetric(ata, atb, x, svd_tol, svd_sweeps, pinv_tol);
+    }
+
+}
+```
+
+### CSharpCode/DualContouring/Schur2.cs
+```
+﻿/*
+ * This is free and unencumbered software released into the public domain.
+ *
+ * Anyone is free to copy, modify, publish, use, compile, sell, or
+ * distribute this software, either in source code form or as a compiled
+ * binary, for any purpose, commercial or non-commercial, and by any
+ * means.
+ *
+ * In jurisdictions that recognize copyright laws, the author or authors
+ * of this software dedicate any and all copyright interest in the
+ * software to the public domain. We make this dedication for the benefit
+ * of the public at large and to the detriment of our heirs and
+ * successors. We intend this dedication to be an overt act of
+ * relinquishment in perpetuity of all present and future rights to this
+ * software under copyright law.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * For more information, please refer to <http://unlicense.org/>
+ */
+
+public static class Schur2
+{
+    public static void rot01(SMat3 m, float c, float s)
+    {
+        SVD.calcSymmetricGivensCoefficients(m.m00, m.m01, m.m11, c, s);
+        float cc = c * c;
+        float ss = s * s;
+        float mix = 2 * c * s * m.m01;
+        m.setSymmetric(cc * m.m00 - mix + ss * m.m11, 0, c * m.m02 - s * m.m12,
+                       ss * m.m00 + mix + cc * m.m11, s * m.m02 + c * m.m12, m.m22);
+    }
+
+    public static void rot02(SMat3 m, float c, float s)
+    {
+        SVD.calcSymmetricGivensCoefficients(m.m00, m.m02, m.m22, c, s);
+        float cc = c * c;
+        float ss = s * s;
+        float mix = 2 * c * s * m.m02;
+        m.setSymmetric(cc * m.m00 - mix + ss * m.m22, c * m.m01 - s * m.m12, 0,
+                       m.m11, s * m.m01 + c * m.m12, ss * m.m00 + mix + cc * m.m22);
+    }
+
+    public static void rot12(SMat3 m, float c, float s)
+    {
+        SVD.calcSymmetricGivensCoefficients(m.m11, m.m12, m.m22, c, s);
+        float cc = c * c;
+        float ss = s * s;
+        float mix = 2 * c * s * m.m12;
+        m.setSymmetric(m.m00, c * m.m01 - s * m.m02, s * m.m01 + c * m.m02,
+                       cc * m.m11 - mix + ss * m.m22, 0, ss * m.m11 + mix + cc * m.m22);
+    }
+}
+```
+
+### CSharpCode/DualContouring/density.cs
+```
+using Code.Noise;
+using UnityEngine;
+
+public static class glm
+{
+    public static float Sphere(Vector3 worldPosition, Vector3 origin, float radius)
+    {
+        return Vector3.Magnitude(worldPosition - origin) - radius;
+    }
+
+    public static float Cuboid(Vector3 worldPosition, Vector3 origin, Vector3 halfDimensions)
+    {
+        Vector3 local_pos = worldPosition - origin;
+        Vector3 pos = local_pos;
+
+        Vector3 d = new Vector3(Mathf.Abs(pos.x), Mathf.Abs(pos.y), Mathf.Abs(pos.z)) - halfDimensions;
+        float m = Mathf.Max(d.x, Mathf.Max(d.y, d.z));
+        return Mathf.Min(m, Vector3.Magnitude(d.magnitude > 0 ? d : Vector3.zero));
+    }
+
+    public static float FractalNoise(int octaves, float frequency, float lacunarity, float persistence, Vector2 position)
+    {
+        float SCALE = 1.0f / 128.0f;
+        Vector2 p = position * SCALE;
+        float noise = 0.0f;
+
+        float amplitude = 1.0f;
+        p *= frequency;
+
+        for (int i = 0; i < octaves; i++)
+        {
+            noise += Noise.Perlin(p.x, p.y) * amplitude;
+            p *= lacunarity;
+            amplitude *= persistence;
+        }
+
+        // move into [0, 1] range
+        return 0.5f + (0.5f * noise);
+    }
+
+
+    public static float Density_Func(Vector3 worldPosition)
+    {
+        float MAX_HEIGHT = 20.0f;
+        float noise = FractalNoise(4, 0.5343f, 2.2324f, 0.68324f, new Vector2(worldPosition.x, worldPosition.z));
+        float terrain = worldPosition.y - (MAX_HEIGHT * noise);
+
+        float cube = Cuboid(worldPosition, new Vector3(-4.0f, 10.0f, -4.0f), new Vector3(12.0f, 12.0f, 12.0f));
+        float sphere = Sphere(worldPosition, new Vector3(15.0f, 2.5f, 1.0f), 16.0f);
+
+        return Mathf.Max(-cube, Mathf.Min(sphere, terrain));
+    }
+}
+```
+
+### CSharpCode/DualContouring/mesh.cs
+```
+using System.Collections.Generic;
+using UnityEngine;
+
+public struct MeshVertex
+{
+	public Vector3 xyz, normal;
+
+	public MeshVertex(Vector3 _xyz, Vector3 _normal)
+    {
+		xyz = _xyz;
+		normal = _normal;
+	}
+}
+
+public class DCMesh
+{
+    public List<int> vertexArrayObj_, vertexBuffer_, indexBuffer_;
+    public int numIndices_;
+
+    public DCMesh()
+    {
+        vertexArrayObj_ = new List<int>();
+        vertexBuffer_ = new List<int>();
+        indexBuffer_ = new List<int>();
+        numIndices_ = 0;
+
+    }
+
+    public void initialise()
+    {
+
+    }
+    public void uploadData(List<MeshVertex> vertices, List<int> indices)
+    {
+
+    }
+
+
+    public void destroy()
+    {
+
+    }
+
+}
+```
+
+### CSharpCode/Utils/Config.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+
+namespace Code.Utils
+{
+    public static class Config
+    {
+        public static int ChunkSize = 8;
+    }
+}
+```
+
+### CSharpCode/Utils/DrawCubeInLines.cs
+```
+﻿using UnityEngine;
+
+namespace Code.Utils
+{
+    public static class DrawCubeInLines
+    {
+        public static void DrawCube(Vector3 pos, int size, Color color)
+        {
+            DrawGLLine(new Vector3(pos.x, pos.y, pos.z), new Vector3(pos.x + size, pos.y, pos.z), color);
+            DrawGLLine(new Vector3(pos.x + size, pos.y, pos.z), new Vector3(pos.x + size, pos.y + size, pos.z), color);
+            DrawGLLine(new Vector3(pos.x + size, pos.y + size, pos.z), new Vector3(pos.x, pos.y + size, pos.z), color);
+            DrawGLLine(new Vector3(pos.x, pos.y + size, pos.z), new Vector3(pos.x, pos.y, pos.z), color);
+
+            DrawGLLine(new Vector3(pos.x, pos.y, pos.z + size), new Vector3(pos.x + size, pos.y, pos.z + size), color);
+            DrawGLLine(new Vector3(pos.x + size, pos.y, pos.z + size), new Vector3(pos.x + size, pos.y + size, pos.z + size), color);
+            DrawGLLine(new Vector3(pos.x + size, pos.y + size, pos.z + size), new Vector3(pos.x, pos.y + size, pos.z + size), color);
+            DrawGLLine(new Vector3(pos.x, pos.y + size, pos.z + size), new Vector3(pos.x, pos.y, pos.z + size), color);
+
+            DrawGLLine(new Vector3(pos.x, pos.y, pos.z), new Vector3(pos.x, pos.y, pos.z + size), color);
+            DrawGLLine(new Vector3(pos.x + size, pos.y, pos.z), new Vector3(pos.x + size, pos.y, pos.z + size), color);
+            DrawGLLine(new Vector3(pos.x + size, pos.y + size, pos.z), new Vector3(pos.x + size, pos.y + size, pos.z + size), color);
+            DrawGLLine(new Vector3(pos.x, pos.y + size, pos.z), new Vector3(pos.x, pos.y + size, pos.z + size), color);
+        }
+
+        public static void DrawTri(Vector3 pos1, Vector3 pos2, Vector3 pos3, Color color)
+        {
+            DrawGLLine(pos1, pos2, color);
+            DrawGLLine(pos2, pos3, color);
+            DrawGLLine(pos3, pos1, color);
+        }
+
+        public static void DrawGLLine(Vector3 P1, Vector3 P2, Color lineColor)
+        {
+            GL.PushMatrix();
+            GL.Begin(GL.LINES);
+            GL.Color(lineColor);
+            GL.Vertex(P1);
+            GL.Vertex(P2);
+            GL.End();
+            GL.PopMatrix();
+        }
+    }
+
+
+}
+```
+
+### CSharpCode/Utils/PlayerInput.cs
+```
+﻿using UnityEngine;
+
+namespace Code.Utils
+{
+    public static class PlayerInput
+    {
+        static Vector3 movementVector;
+
+        enum RotationAxes { MouseXAndY = 0, MouseX = 1, MouseY = 2 }
+        static RotationAxes axes = RotationAxes.MouseXAndY;
+        static float sensitivityX = 5F;
+        static float sensitivityY = 5F;
+
+        static float minimumY = -60F;
+        static float maximumY = 60F;
+
+        static float rotationY = 0F;
+
+        static Transform transform;
+
+        public static void Start()
+        {
+            transform = Camera.main.transform;
+        }
+
+        public static void Update()
+        {
+            movementVector = Vector3.zero;
+
+            if (Input.GetKey(KeyCode.W))
+                movementVector += Camera.main.transform.forward * 7;
+
+            if (Input.GetKey(KeyCode.S))
+                movementVector -= Camera.main.transform.forward * 7;
+
+            if (Input.GetKey(KeyCode.A))
+                movementVector -= Camera.main.transform.right * 7;
+
+            if (Input.GetKey(KeyCode.D))
+                movementVector += Camera.main.transform.right * 7;
+
+            if (Input.GetKey(KeyCode.Space))
+                movementVector += Camera.main.transform.up * 7;
+
+            if (Input.GetKey(KeyCode.LeftShift))
+                movementVector -= Camera.main.transform.up * 7;
+
+            Camera.main.transform.position = Camera.main.transform.position + movementVector * Time.deltaTime;
+
+            CheckMouseInput();
+        }
+
+        private static void CheckMouseInput()
+        {
+            if (axes == RotationAxes.MouseXAndY)
+            {
+                float rotationX = transform.localEulerAngles.y + Input.GetAxis("Mouse X") * sensitivityX;
+
+                rotationY += Input.GetAxis("Mouse Y") * sensitivityY;
+                rotationY = Mathf.Clamp(rotationY, minimumY, maximumY);
+
+                transform.localEulerAngles = new Vector3(-rotationY, rotationX, 0);
+            }
+            else if (axes == RotationAxes.MouseX)
+            {
+                transform.Rotate(0, Input.GetAxis("Mouse X") * sensitivityX, 0);
+            }
+            else
+            {
+                rotationY += Input.GetAxis("Mouse Y") * sensitivityY;
+                rotationY = Mathf.Clamp(rotationY, minimumY, maximumY);
+
+                transform.localEulerAngles = new Vector3(-rotationY, transform.localEulerAngles.y, 0);
+            }
+        }
+    }
+}
+```
+
+### CSharpCode/Utils/Noise/PerlinNoise.cs
+```
+﻿using UnityEngine;
+
+namespace Code.Noise
+{
+    public partial class Noise
+    {
+        #region static readonlys
+        private static readonly Vector3[] Grad3 = {
+        new Vector3(1,1,0), new Vector3(-1,1,0), new Vector3(1,-1,0), new Vector3(-1,-1,0),
+        new Vector3(1,0,1), new Vector3(-1,0,1), new Vector3(1,0,-1), new Vector3(-1,0,-1),
+        new Vector3(0,1,1), new Vector3(0,-1,1), new Vector3(0,1,-1), new Vector3(0,-1,-1)
+    };
+
+        private static readonly int[] P = {151,160,137,91,90,15,
+                                             131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,8,99,37,240,21,10,23,
+                                             190, 6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,57,177,33,
+                                             88,237,149,56,87,174,20,125,136,171,168, 68,175,74,165,71,134,139,48,27,166,
+                                             77,146,158,231,83,111,229,122,60,211,133,230,220,105,92,41,55,46,245,40,244,
+                                             102,143,54, 65,25,63,161, 1,216,80,73,209,76,132,187,208, 89,18,169,200,196,
+                                             135,130,116,188,159,86,164,100,109,198,173,186, 3,64,52,217,226,250,124,123,
+                                             5,202,38,147,118,126,255,82,85,212,207,206,59,227,47,16,58,17,182,189,28,42,
+                                             223,183,170,213,119,248,152, 2,44,154,163, 70,221,153,101,155,167, 43,172,9,
+                                             129,22,39,253, 19,98,108,110,79,113,224,232,178,185, 112,104,218,246,97,228,
+                                             251,34,242,193,238,210,144,12,191,179,162,241, 81,51,145,235,249,14,239,107,
+                                             49,192,214, 31,181,199,106,157,184, 84,204,176,115,121,50,45,127, 4,150,254,
+                                             138,236,205,93,222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180};
+
+
+        private static readonly int[] Perm = new int[512];
+        #endregion
+
+        public static float Perlin(float x, float y)
+        {
+            var i = x > 0 ? (int)x : (int)x - 1;
+            var j = y > 0 ? (int)y : (int)y - 1;
+
+            x = x - i;
+            y = y - j;
+
+            i = i & 255;
+            j = j & 255;
+
+            var gll = Perm[i + Perm[j]] % 12;
+            var glh = Perm[i + Perm[j + 1]] % 12;
+            var ghl = Perm[i + 1 + Perm[j]] % 12;
+            var ghh = Perm[i + 1 + Perm[j + 1]] % 12;
+
+            var nll = Vector2.Dot(Grad3[gll], new Vector2(x, y));
+            var nlh = Vector2.Dot(Grad3[glh], new Vector2(x, y - 1));
+            var nhl = Vector2.Dot(Grad3[ghl], new Vector2(x - 1, y));
+            var nhh = Vector2.Dot(Grad3[ghh], new Vector2(x - 1, y - 1));
+
+            var u = (float)(x * x * x * (x * (x * 6 - 15) + 10));
+            var v = (float)(y * y * y * (y * (y * 6 - 15) + 10));
+
+            //var nyl = Mathf.Lerp(nll, nhl, u);
+            var nyl = (1-u)*nll + u*nhl;
+            //var nyh = Mathf.Lerp(nlh, nhh, u);
+            var nyh = (1-u)*nlh + u*nhh;
+
+            //var nxy = Mathf.Lerp(nyl, nyh, v);
+            var nxy = (1-v)*nyl + v*nyh;
+
+            return nxy;
+
+            
+        }
+
+        public static float Perlin(float x, float y, float z)
+        {
+            var X = x > 0 ? (int)x : (int)x - 1;
+            var Y = y > 0 ? (int)y : (int)y - 1;
+            var Z = z > 0 ? (int)z : (int)z - 1;
+
+            x = x - X;
+            y = y - Y;
+            z = z - Z;
+
+            X = X & 255;
+            Y = Y & 255;
+            Z = Z & 255;
+
+            var gi000 = Perm[X + Perm[Y + Perm[Z]]] % 12;
+            var gi001 = Perm[X + Perm[Y + Perm[Z + 1]]] % 12;
+            var gi010 = Perm[X + Perm[Y + 1 + Perm[Z]]] % 12;
+            var gi011 = Perm[X + Perm[Y + 1 + Perm[Z + 1]]] % 12;
+            var gi100 = Perm[X + 1 + Perm[Y + Perm[Z]]] % 12;
+            var gi101 = Perm[X + 1 + Perm[Y + Perm[Z + 1]]] % 12;
+            var gi110 = Perm[X + 1 + Perm[Y + 1 + Perm[Z]]] % 12;
+            var gi111 = Perm[X + 1 + Perm[Y + 1 + Perm[Z + 1]]] % 12;
+
+
+            //TODO: inline the dot products to speed up perlin noise
+            var n000 = Vector2.Dot(Grad3[gi000], new Vector3( x, y, z));
+            var n100 = Vector2.Dot(Grad3[gi100], new Vector3(x - 1, y, z));
+            var n010 = Vector2.Dot(Grad3[gi010], new Vector3(x, y - 1, z));
+            var n110 = Vector2.Dot(Grad3[gi110], new Vector3(x - 1, y - 1, z));
+            var n001 = Vector2.Dot(Grad3[gi001], new Vector3( x, y, z - 1));
+            var n101 = Vector2.Dot(Grad3[gi101], new Vector3(x - 1, y, z - 1));
+            var n011 = Vector2.Dot(Grad3[gi011], new Vector3(x, y - 1, z - 1));
+            var n111 = Vector2.Dot(Grad3[gi111], new Vector3(x - 1, y - 1, z - 1));
+
+            var u = (float)(x * x * x * (x * (x * 6 - 15) + 10));
+            var v = (float)(y * y * y * (y * (y * 6 - 15) + 10));
+            var w = (float)(z * z * z * (z * (z * 6 - 15) + 10));
+
+            //TODO: inline lerps to speed up perlin noise
+            var nx00 = Mathf.Lerp(n000, n100, u);
+            var nx01 = Mathf.Lerp(n001, n101, u);
+            var nx10 = Mathf.Lerp(n010, n110, u);
+            var nx11 = Mathf.Lerp(n011, n111, u);
+
+            var nxy0 = Mathf.Lerp(nx00, nx10, v);
+            var nxy1 = Mathf.Lerp(nx01, nx11, v);
+
+
+            var nxyz = Mathf.Lerp(nxy0, nxy1, w);
+
+            return nxyz;
+
+
+        }
+    }
+}
+```

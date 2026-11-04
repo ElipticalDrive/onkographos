@@ -1,0 +1,5672 @@
+# Volumetric Path Tracing with Participating Media
+
+## Overview
+
+This project explores **volumetric path tracing** as a physically based rendering technique for simulating participating media such as fog, smoke, and clouds. Unlike classical path tracing, which assumes a vacuum medium, this implementation models light transport *inside volumes*, enabling accurate simulation of scattering phenomena.
+
+The project was developed in an academic context to study how volumetric path tracing compares to ray marching approaches in terms of realism, complexity, and performance.
+
+## Motivation
+
+Participating media introduce additional realism to rendered scenes but significantly increase complexity. Modeling how light scatters within a volume requires extending traditional surface-based path tracing to support random walks inside the medium. This project investigates that extension and its implications.
+
+## Key Concepts
+
+* Participating media (fog, smoke, clouds)
+* Volumetric path tracing
+* Multiple scattering
+* Physically based light transport
+* Variance vs. realism trade-offs
+
+## Methodology
+
+The renderer extends classical path tracing by allowing rays to:
+
+* Enter volumetric regions
+* Sample scattering events within the medium
+* Continue random walks after each scattering interaction
+
+This approach naturally supports **multiple scattering**, leading to more physically accurate volumetric effects compared to single-scattering or ray marching techniques.
+
+## Comparison with Ray Marching
+
+| Aspect              | Ray Marching | Volumetric Path Tracing |
+| ------------------- | ------------ | ----------------------- |
+| Accuracy            | Approximate  | Physically based        |
+| Multiple Scattering | Limited      | Fully supported         |
+| Variance            | Low          | Higher                  |
+| Performance         | Faster       | More expensive          |
+
+
+
+## References
+
+[1] Physically Based Rendering: From Theory to Implementation
+
+---
+
+Feel free to explore the code and the results ( https://drive.google.com/drive/folders/1R71_UK8Q61WIc06NvWc8uHgEusKIBMql?usp=drive_link) .
+
+### main.cpp
+```
+#include <iostream>
+#include <algorithm>
+
+#include "core/film.h"
+#include "core/matrix4x4.h"
+#include "core/ray.h"
+#include "core/utils.h"
+#include "core/scene.h"
+
+
+#include "shapes/sphere.h"
+#include "shapes/infiniteplan.h"
+
+#include "cameras/ortographic.h"
+#include "cameras/perspective.h"
+
+#include "shaders/intersectionshader.h"
+#include "shaders/depthshader.h"
+#include "shaders/normalshader.h"
+#include "shaders/whittedshader.h"
+#include "shaders/hemisphericalshader.h"
+#include "shaders/areaintegrator.h"
+#include "shaders/pathtracer.h"
+#include "shaders/nee.h"
+#include "shaders/NEEAdvanced.h"
+#include "shaders/homogenousvolumetricpathshader.h"
+#include "shaders/heterogeneousvolumetric.h"
+#include "shaders/coloredvolumetricpathshader.h"
+
+
+#include "materials/phong.h"
+#include "materials/emissive.h"
+#include "materials/mirror.h"
+#include "materials/transmissive.h"
+
+#include <chrono>
+
+using namespace std::chrono;
+
+typedef std::chrono::duration<double, std::milli> durationMs;
+
+
+void buildSceneCornellBox(Camera*& cam, Film*& film,
+    Scene myScene)
+{
+    /* **************************** */
+/* Declare and place the camera */
+/* **************************** */
+    Matrix4x4 cameraToWorld = Matrix4x4::translate(Vector3D(0, 0, -3));
+    double fovDegrees = 60;
+    double fovRadians = Utils::degreesToRadians(fovDegrees);
+    cam = new PerspectiveCamera(cameraToWorld, fovRadians, *film);
+
+    /* ********* */
+    /* Materials */
+    /* ********* */
+    Material* redDiffuse = new Phong(Vector3D(0.7, 0.2, 0.3), Vector3D(0, 0, 0), 100);
+    Material* greenDiffuse = new Phong(Vector3D(0.2, 0.7, 0.3), Vector3D(0, 0, 0), 100);
+    Material* greyDiffuse = new Phong(Vector3D(0.8, 0.8, 0.8), Vector3D(0, 0, 0), 100);
+    Material* blueGlossy_20 = new Phong(Vector3D(0.2, 0.3, 0.8), Vector3D(0.2, 0.2, 0.2), 20);
+    Material* blueGlossy_80 = new Phong(Vector3D(0.2, 0.3, 0.8), Vector3D(0.2, 0.2, 0.2), 80);
+    Material* cyandiffuse = new Phong(Vector3D(0.2, 0.8, 0.8), Vector3D(0, 0, 0), 100);
+    Material* emissive = new Emissive(Vector3D(25, 25, 25), Vector3D(0.5));
+
+    Material* mirror = new Mirror();
+    Material* transmissive = new Transmissive(0.7);
+
+    /* ******* */
+    /* Objects */
+    /* ******* */
+    double offset = 3.0;
+    Matrix4x4 idTransform;
+    // Construct the Cornell Box
+    Shape* leftPlan = new InfinitePlan(Vector3D(-offset - 1, 0, 0), Vector3D(1, 0, 0), redDiffuse);
+    Shape* rightPlan = new InfinitePlan(Vector3D(offset + 1, 0, 0), Vector3D(-1, 0, 0), greenDiffuse);
+    Shape* topPlan = new InfinitePlan(Vector3D(0, offset, 0), Vector3D(0, -1, 0), greyDiffuse);
+    Shape* bottomPlan = new InfinitePlan(Vector3D(0, -offset, 0), Vector3D(0, 1, 0), greyDiffuse);
+    Shape* backPlan = new InfinitePlan(Vector3D(0, 0, 3 * offset), Vector3D(0, 0, -1), greyDiffuse);
+    Shape* square_emissive = new Square(Vector3D(-1.0, 3.0, 3.0), Vector3D(2.0, 0.0, 0.0), Vector3D(0.0, 0.0, 2.0), Vector3D(0.0, -1.0, 0.0), emissive);
+ 
+
+    myScene.AddObject(leftPlan);
+    myScene.AddObject(rightPlan);
+    myScene.AddObject(topPlan);
+    myScene.AddObject(bottomPlan);
+    myScene.AddObject(backPlan);
+    myScene.AddObject(square_emissive);
+
+
+
+    // Place the Spheres inside the Cornell Box
+    double radius = 1;
+    Matrix4x4 sphereTransform1;
+    sphereTransform1 = Matrix4x4::translate(Vector3D(1.5, -offset + radius, 6));
+    Shape* s1 = new Sphere(radius, sphereTransform1, blueGlossy_20);
+
+    Matrix4x4 sphereTransform2;
+    sphereTransform2 = Matrix4x4::translate(Vector3D(-1.5, -offset + 3 * radius, 4));
+    Shape* s2 = new Sphere(radius, sphereTransform2, blueGlossy_20);
+
+    Shape* square = new Square(Vector3D(offset + 0.999, -offset - 0.2, 3.0), Vector3D(0.0, 4.0, 0.0), Vector3D(0.0, 0.0, 2.0), Vector3D(-1.0, 0.0, 0.0), cyandiffuse);
+
+    myScene.AddObject(s1);
+    myScene.AddObject(s2);
+    myScene.AddObject(square);
+}
+
+
+void buildSceneSphere(Camera*& cam, Film*& film,
+    Scene myScene)
+{
+    /* **************************** */
+      /* Declare and place the camera */
+      /* **************************** */
+      // By default, this gives an ID transform
+      //  which means that the camera is located at (0, 0, 0)
+      //  and looking at the "+z" direction
+    Matrix4x4 cameraToWorld;
+    double fovDegrees = 60;
+    double fovRadians = Utils::degreesToRadians(fovDegrees);
+    cam = new PerspectiveCamera(cameraToWorld, fovRadians, *film);
+
+
+    /* ************************** */
+    /* DEFINE YOUR MATERIALS HERE */
+    /* ************************** */
+    Material* green_100 = new Phong(Vector3D(0.2, 0.7, 0.3), Vector3D(0.2, 0.6, 0.2), 50);
+
+    // Define and place a sphere
+    Matrix4x4 sphereTransform1;
+    sphereTransform1 = sphereTransform1.translate(Vector3D(-1.25, 0.5, 4.0));
+    Shape* s1 = new Sphere(1.0, sphereTransform1, green_100);
+
+    // Define and place a sphere
+    Matrix4x4 sphereTransform2;
+    sphereTransform2 = sphereTransform2.translate(Vector3D(1.25, 0.0, 6));
+    Shape* s2 = new Sphere(1.25, sphereTransform2, green_100);
+
+    // Define and place a sphere
+    Matrix4x4 sphereTransform3;
+    sphereTransform3 = sphereTransform3.translate(Vector3D(1.0, -0.75, 3.5));
+    Shape* s3 = new Sphere(0.25, sphereTransform3, green_100);
+
+    // Store the objects in the object list
+    myScene.AddObject(s1);
+    myScene.AddObject(s2);
+    myScene.AddObject(s3);
+   
+}
+
+void raytrace(Camera* &cam, Shader* &shader, Film* &film,
+              std::vector<Shape*>* &objectsList, std::vector<LightSource*>* &lightSourceList)
+{
+    
+    double my_PI = 0.0;
+    double n_estimations = 0.0;
+    unsigned int sizeBar = 40;
+
+    size_t resX = film->getWidth();
+    size_t resY = film->getHeight();
+
+    // Main raytracing loop
+    // Out-most loop invariant: we have rendered lin lines
+    for(size_t lin=0; lin<resY; lin++)
+    {
+        // Show progression 
+        double progress = (double)lin / double(resY);
+        Utils::printProgress(progress);
+
+        // Inner loop invariant: we have rendered col columns
+        for(size_t col=0; col<resX; col++)
+        {
+            // Compute the pixel position in NDC
+            double x = (double)(col + 0.5) / resX;
+            double y = (double)(lin + 0.5) / resY;
+            // Generate the camera ray
+            Ray cameraRay = cam->generateRay(x, y);
+            Vector3D pixelColor = Vector3D(0.0);
+
+            // Compute ray color according to the used shader
+            pixelColor += shader->computeColor(cameraRay, *objectsList, *lightSourceList);
+
+            // Store the pixel color
+            film->setPixelValue(col, lin, pixelColor);
+        }
+    }
+
+
+}
+
+
+
+int main()
+{
+    std::string separator     = "\n----------------------------------------------\n";
+    std::string separatorStar = "\n**********************************************\n";
+    std::cout << separator << "RT-ACG - Ray Tracer for \"Advanced Computer Graphics\"" << separator << std::endl;
+
+    // Create an empty film
+    Film *film;
+    film = new Film(720, 512);
+
+
+    // Declare the shader
+    Vector3D bgColor(0.0, 0.0, 0.0); // Background color (for rays which do not intersect anything)
+    Vector3D intersectionColor(1,0,0);
+    
+    
+    Shader* homogenous = new Homogenous(intersectionColor, bgColor);
+    Shader* heterogeneous = new Heterogeneous(intersectionColor, bgColor);
+    Shader* colored = new Colored(intersectionColor, bgColor);
+    
+
+  
+
+    // Build the scene---------------------------------------------------------
+    // 
+    // Declare pointers to all the variables which describe the scene
+    Camera* cam;
+    Scene myScene;
+    //Create Scene Geometry and Illumiantion
+    //buildSceneSphere(cam, film, myScene); //Task 2,3,4;
+    buildSceneCornellBox(cam, film, myScene); //Task 5
+
+    //---------------------------------------------------------------------------
+
+    
+    auto start = high_resolution_clock::now();
+    
+    // Colored volumetric shadows with homogenous media
+    // raytrace(cam, colored, film, myScene.objectsList, myScene.LightSourceList);
+
+    // Homogeneous media
+    // raytrace(cam, homogenous, film, myScene.objectsList, myScene.LightSourceList);
+
+    // Heterogenous media
+    raytrace(cam, heterogeneous, film, myScene.objectsList, myScene.LightSourceList);
+    
+    auto stop = high_resolution_clock::now();
+
+    
+
+    // Save the final result to file
+    std::cout << "\n\nSaving the result to file output.bmp\n" << std::endl;
+    film->save();
+    film->saveEXR();
+
+    float durationS = (durationMs(stop - start) / 1000.0).count() ;
+    std::cout <<  "FINAL_TIME(s): " << durationS << std::endl;
+
+
+    std::cout << "\n\n" << std::endl;
+    return 0;
+}
+```
+
+### cameras/camera.cpp
+```
+#include "camera.h"
+
+Camera::Camera(const Matrix4x4 &cameraToWorld_, const Film &film_)
+    : cameraToWorld(cameraToWorld_), film(film_)
+{
+    aspect = (double) (film.getWidth()) / (double) (film.getHeight());
+}
+```
+
+### cameras/camera.h
+```
+#ifndef CAMERA_H
+#define CAMERA_H
+
+#include "../core/film.h"
+#include "../core/matrix4x4.h"
+
+class Camera
+{
+public:
+    Camera() = delete;
+    Camera(const Matrix4x4 &cameraToWorld_, const Film &film_);
+
+    // Given image plane coordinates (u, v) = [0,1]x[0,1] in normalized
+    // device coordinates (NDC), returns a ray in WORLD COORDINATES which passes
+    // through (u, v)
+    virtual Ray generateRay(const double u, const double v) const = 0;
+    virtual Vector3D ndcToCameraSpace(const double u, const double v) const = 0;
+
+    /* ******************* */
+    /* General Camera data */
+    /* ******************* */
+
+    // The cameraToWorld transformation "places"
+    //  the camera in the world
+    Matrix4x4 cameraToWorld;
+    // Film to store and handle the actual image
+    const Film &film;
+    // Aspect (based on the film size)
+    double aspect;
+};
+
+#endif // CAMERA_H
+```
+
+### cameras/ortographic.cpp
+```
+#include "ortographic.h"
+
+OrtographicCamera::OrtographicCamera(const Matrix4x4 &cameraToWorld_,
+                  //const double nearClip_, const double farClip_,
+                  const Film &film_ )
+    //: Camera(cameraToWorld_, nearClip_, farClip_, film_)
+    : Camera(cameraToWorld_, film_)
+{
+    // Build the necessary transforms
+//    Vector3D delta(-1.0, -1.0, 0);
+
+//    ndcToCamera =  Matrix4x4::scale(Vector3D(aspect, 1.0, 1.0)) *
+//                   Matrix4x4::translate(delta) *
+//                   Matrix4x4::scale(Vector3D(2.0, 2.0, 1.0)) *
+//                   Matrix4x4::scale(Vector3D(1.0, 1.0, farClip - nearClip));
+}
+
+Vector3D OrtographicCamera::ndcToCameraSpace(const double u, const double v) const
+{
+    // Compute the x-coordinate in camera space (taking into account the aspect ratio)
+    double x = ((u * 2) - 1) * aspect;
+    // Compute the x-coordinate in camera space
+    double y = ((v * 2) - 1);
+
+    // Return the position in camera space
+    return Vector3D(x, y, 0);
+}
+
+// Input in Image plane
+Ray OrtographicCamera::generateRay(const double u, const double v) const
+{
+    // Convert the sample to camera coordinates
+    //Vector3D rOrig = ndcToCamera.transformPoint(sample);
+    Vector3D rOrig = ndcToCameraSpace(u, v);
+
+    Vector3D rDir(0, 0, 1);
+
+    // Construct the ray
+    size_t rayDepth = 0;
+    Ray r(rOrig, rDir, rayDepth);
+
+    // Convert the ray to world coordinates
+    r = cameraToWorld.transformRay(r);
+
+    // Make sure the ray is normalized
+    r.d = r.d.normalized();
+
+    return r;
+}
+```
+
+### cameras/ortographic.h
+```
+#ifndef ORTOGRAPHICCAMERA_H
+#define ORTOGRAPHICCAMERA_H
+
+#include "camera.h"
+
+
+// Ortographic Camera Interface
+class OrtographicCamera : public Camera
+{
+public:
+
+    OrtographicCamera() = delete;
+
+    OrtographicCamera(const Matrix4x4 &cameraToWorld_,
+                      const Film &film_ );
+
+    // Member functions
+    virtual Ray generateRay(const double u, const double v) const;
+    virtual Vector3D ndcToCameraSpace(const double u, const double v) const;
+};
+
+#endif // ORTOGRAPHICCAMERA_H
+```
+
+### cameras/perspective.cpp
+```
+#include "perspective.h"
+
+PerspectiveCamera::PerspectiveCamera(const Matrix4x4 &cameraToWorld_, const double fov_,
+                const Film &film_ )
+    : Camera(cameraToWorld_, film_),
+      fov(fov_)
+{ }
+
+Vector3D PerspectiveCamera::ndcToCameraSpace(const double u, const double v) const
+{
+    // In the following code, we assume a focal distance fd = 1
+    double topLeftX, topLeftY;
+    // Compute the image height (equal to width before taking into
+    //  account the aspect ratio)
+    double size = 2.0 * std::tan(fov/2);
+
+    // Compute the coordinates of the upper left corner at the image
+    //  plane in camera coordinate (bedore taking into accoung the
+    //  aspect ratio)
+    topLeftX = -size * 0.5;
+    topLeftY =  size * 0.5;
+    return Vector3D( (topLeftX + u*size) * aspect,
+                     (topLeftY - v*size),
+                      1);
+}
+
+Ray PerspectiveCamera::generateRay(const double u, const double v) const
+{
+    // Convert the sample to camera coordinates
+    Vector3D rOrig(0, 0, 0);
+
+    Vector3D imagePlanePoint = ndcToCameraSpace(u, v);
+
+    Vector3D rDir = imagePlanePoint - rOrig;
+    rDir = rDir.normalized();
+
+    // Construct the ray
+    size_t rayDepth = 0;
+    Ray r(rOrig, rDir, rayDepth);
+
+    // Convert the ray to world coordinates
+    r = cameraToWorld.transformRay(r);
+
+    // Make sure the ray is normalized
+    r.d = r.d.normalized();
+
+    return r;
+}
+```
+
+### cameras/perspective.h
+```
+#ifndef PERSPECTIVE_H
+#define PERSPECTIVE_H
+
+#include "camera.h"
+
+class PerspectiveCamera : public Camera
+{
+public:
+    PerspectiveCamera() = delete;
+
+    PerspectiveCamera(const Matrix4x4 &cameraToWorld_, const double fov,
+                const Film &film_ );
+
+    // Member functions
+    virtual Ray generateRay(const double u, const double v) const;
+    virtual Vector3D ndcToCameraSpace(const double u, const double v) const;
+
+    /* Perspective Camera Data */
+    double fov; // Radians
+};
+
+#endif // PERSPECTIVE_H
+```
+
+### core/bitmap.cpp
+```
+#include "bitmap.h"
+
+#include <iostream>
+#include <fstream>
+#include <stdint.h>
+#include <algorithm>
+#include <string>
+
+BitMap::BitMap()
+{
+
+}
+
+int BitMap::read(Vector3D** &dataOut, size_t &widthOut, size_t &heightOut, std::string &fileName)
+{
+    std::ifstream inputFile;
+    inputFile.open(fileName.c_str(), std::ios::binary | std::ios::in);
+
+    if(inputFile.is_open())
+    {
+        std::cout << "Reading BMP file \"" << fileName << "\"" << std::endl;
+
+        // start off with four pointers
+        unsigned char *dataBuffer[2] = {nullptr, nullptr};     // Header buffers
+        unsigned char *pixels = nullptr;                       // Pixels
+        bmp24_file_header* bmpFileHeader = nullptr;            // Header
+        bmp24_info_header* bmpInfoHeader   = nullptr;          // Info
+
+        // Allocate byte memory that will hold the two headers
+        dataBuffer[0] = new unsigned char[14];
+        dataBuffer[1] = new unsigned char[40];
+
+        // Get the values with the data buffers
+        inputFile.read((char*)dataBuffer[0], 14);
+        inputFile.read((char*)dataBuffer[1], 40);
+
+        // Construct the values from the buffers
+        bmpFileHeader = (bmp24_file_header*) dataBuffer[0];
+        bmpInfoHeader   = (bmp24_info_header*) dataBuffer[1];
+
+        // Check if the file is an actual BMP file
+        if(bmpFileHeader->magic1 != (unsigned char)0x4D42)
+        {
+            std::cout << "File \"" << fileName << "\" isn't a bitmap file\n";
+            return 2;
+        }
+
+        // Allocate pixel memory
+        pixels = new unsigned char[bmpInfoHeader->size_image];
+
+        // Go to where image data starts, then read in image data
+        std::cout << "Jumping " << 54 << " bits on the file" << std::endl;
+        inputFile.seekg(54);
+        std::cout << "Reading " << bmpInfoHeader->size_image << " bytes of pixels" << std::endl;
+        inputFile.read((char *)pixels, bmpInfoHeader->size_image);
+
+        // Allocate memory for the image matrix
+        heightOut = (size_t)bmpInfoHeader->height;
+        widthOut  = (size_t)bmpInfoHeader->width;
+        dataOut = new Vector3D*[heightOut];
+        for( size_t i=0; i<heightOut; i++)
+        {
+            dataOut[i] = new Vector3D[widthOut];
+        }
+
+        //int channels = bmpFileHeader->size;
+        int extra_bytes = (4 - (bmpInfoHeader->width * 3) % 4) % 4;
+        //void* padd = (void*)malloc(extra_bytes);
+
+        // Store the result in the input Buffer
+        for( size_t i=0; i<heightOut; i++)
+        {
+            for(size_t j=0; j<widthOut; j++)
+            {
+                Vector3D pixelValue;
+                //if(bmpFileHeader->size == 3)
+                //{
+                    size_t index = i*(widthOut*3+extra_bytes) + j*3;
+                    int r, g, b;
+
+                    //b = (int)pixels[index];
+                    b = (int)pixels[index];
+                    g = (int)pixels[index+1];
+                    r = (int)pixels[index+2];
+
+                    pixelValue = Vector3D(r, g, b)/255.0;
+                //}
+                //else
+                //{
+                //    size_t index = i*(widthOut+extra_bytes) + j;
+                //    pixelValue = Vector3D((int)pixels[index])/255.0;
+                //}
+                dataOut[heightOut-1-i][j] = pixelValue;
+            }
+        }
+
+        // Delete the two buffers.
+        delete[] dataBuffer[0];
+        delete[] dataBuffer[1];
+        delete[] pixels;
+
+        // return success
+        return 0;
+    }
+    else
+    {
+        // Problem opening file
+        std::cout << "Problem at BitMap::read() : Could not open file \""
+                  << fileName << "\"" << std::endl;
+
+        return 1;
+    }
+}
+
+int BitMap::save(Vector3D** &data, const size_t &width, const size_t &height)
+{
+    // Create file header
+    bmp24_file_header fileHeader;
+
+    // Create info header
+    bmp24_info_header infoHeader(width, height);
+
+    std::ofstream outputFile;
+    outputFile.open("./output.bmp", std::ios::binary | std::ios::out);
+
+    if(outputFile.is_open())
+    {
+        // Write the file header
+        outputFile.write(fileHeader.toCharBlock(), 14);
+
+        // Write the info header
+        outputFile.write(infoHeader.toCharBlock(), 40);
+
+        int extra_bytes = (4 - (infoHeader.width * 3) % 4) % 4;
+        void* padd = (void*)malloc(extra_bytes);
+
+        // Store the image in the BMP format (bottom-up, i.e.,
+        //  first row stores is the lowermost one)
+        for(size_t row = height; row > 0; row--)
+        {
+            for(size_t col = 0; col < width; col++)
+            {
+                // Get the pixel value
+                Vector3D p = data[row-1][col];
+                uint8_t red   = (uint8_t)(std::min((double)p.x, 1.0) * 255);
+                uint8_t green = (uint8_t)(std::min((double)p.y, 1.0) * 255);
+                uint8_t blue  = (uint8_t)(std::min((double)p.z, 1.0) * 255);
+
+                // Write the pixel value
+                outputFile.write(reinterpret_cast<const char *>(&blue),  1); // blue
+                outputFile.write(reinterpret_cast<const char *>(&green), 1); // green
+                outputFile.write(reinterpret_cast<const char *>(&red),   1); // red
+
+            }
+            // Padd the rest of the row;
+            outputFile.write(reinterpret_cast<const char *>(padd), extra_bytes);
+        }
+
+        outputFile.close();
+        return 0;
+    }
+    else
+    {
+        // Problem opening file
+        std::cout << "Problem at BitMap::save() : Could not open file \""
+                  << "example.bmp" << "\"" << std::endl;
+        return 1;
+    }
+}
+```
+
+### core/bitmap.h
+```
+#ifndef BITMAP_H
+#define BITMAP_H
+
+#include "vector3d.h"
+//#include <iostream>
+
+/**
+ * @brief The bmp24_file_header struct
+ */
+struct bmp24_file_header
+{
+    char      magic1;    // 'B'
+    char      magic2;    // 'M'
+    long      size;      // 0
+    short int reserved1; // 0
+    short int reserved2; // 0
+    long      offbits;   // 14 + 40
+                         // (info header size) + (fileheader size)
+
+    /**
+     * @brief bmp24_file_header
+     */
+    bmp24_file_header() : magic1('B'), magic2('M'), size(0),
+                          reserved1(0), reserved2(0), offbits(54)
+    { }
+
+    /**
+     * @brief toCharBlock
+     * @return
+     */
+    char *toCharBlock()
+    {
+        // Allocate 14 bytes of memory
+        char* block = (char*)malloc(14);
+        block[0]  = magic1;
+        block[1]  = magic2;
+        memcpy((void*)&block[2],  &size, sizeof(size));
+        memcpy((void*)&block[6],  &reserved1, sizeof(reserved1));
+        memcpy((void*)&block[8],  &reserved2, sizeof(reserved2));
+        memcpy((void*)&block[10], &offbits, sizeof(offbits));
+        //long test = block[10];
+        //std::cout << "Writing offbits value " << offbits << ": " << test << std::endl;
+
+        return block;
+    }
+};
+
+/**
+ * @brief The bmp24_info_header struct
+ */
+struct bmp24_info_header
+{
+    long	  size;             // 40 (size of the info header block in bytes)
+    long	  width;            // img.width
+    long	  height;           // img.height
+    short int planes;           // 1
+    short int bit_count;        // 24
+    long	  compression;      // 0
+    long      size_image;       // (img.width * 3 + extra_bytes) * img.height
+    long	  x_pels_per_meter; // 2952
+    long	  y_pels_per_meter; // 2952
+    long	  clr_used;         // 0
+    long	  clr_important;    // 0
+
+    /**
+     * @brief bmp24_info_header
+     * @param width_
+     * @param height_
+     */
+    bmp24_info_header(size_t width_, size_t height_) : size(40), planes(1), bit_count(24),
+                                   compression(0), x_pels_per_meter(2952),
+                                   y_pels_per_meter(2952), clr_used(0),
+                                   clr_important(0)
+    {
+        width  = (long) width_;
+        height = (long) height_;
+
+        int extra_bytes = (4 - (width * 3) % 4) % 4;
+        size_image = (width * 3 + extra_bytes) * height;
+    }
+
+    char *toCharBlock()
+    {
+        char *block = (char *)malloc(40);
+
+        memcpy((void*)&block[0],  &size,   sizeof(long));
+        memcpy((void*)&block[4],  &width,  sizeof(long));
+        memcpy((void*)&block[8],  &height, sizeof(long));
+        memcpy((void*)&block[12], &planes, sizeof(short int));
+        memcpy((void*)&block[14], &bit_count,   sizeof(short int));
+        memcpy((void*)&block[16], &compression, sizeof(long));
+        memcpy((void*)&block[20], &size_image,  sizeof(long));
+        memcpy((void*)&block[24], &x_pels_per_meter, sizeof(long));
+        memcpy((void*)&block[28], &y_pels_per_meter, sizeof(long));
+        memcpy((void*)&block[32], &clr_used,         sizeof(long));
+        memcpy((void*)&block[36], &clr_important,    sizeof(long));
+
+        return block;
+    }
+};
+
+
+class BitMap
+{
+public:
+    BitMap();
+
+    static int save(Vector3D** &data, const size_t &width, const size_t &height);
+    static int read(Vector3D** &dataOut, size_t &width, size_t &height, std::string &fileName);
+};
+
+#endif // BITMAP_H
+```
+
+### core/eqsolver.cpp
+```
+#include <cmath>
+#include <iostream>
+
+#include "eqsolver.h"
+
+EqSolver::EqSolver()
+{
+
+}
+
+// Compute the root of a linear equation of type: c1*x + c0 = 0
+// (useful for solving intersections of rays with planes, i.e., polygons)
+bool EqSolver::rootLinEq(double c1, double c0, rootValues &res)
+{
+    if (c1 == 0) {
+        /* [VERIFY]
+         *  case c1 == 0 && c0 == 0
+         */
+        res.nValues = 0; // No Roots
+        return false;
+    } else
+    {
+        // Single solution (Polynomial of degree 1)
+        res.nValues   = 1;
+        /* [VERIFY]
+         *  case c0 >> c1 -> overflow + div by 0
+         */
+        res.values[0] = -c0/c1;
+        return true;
+    }
+}
+
+// Compute the roots of a quadratic equation of type: c2*x^2 + c1*x + c0 = 0
+// (useful for solving intersections of rays with spheres)
+bool EqSolver::rootQuadEq(double c2, double c1, double c0, rootValues &res)
+{
+    if(c2 == 0)
+    {
+        // This is a linear equation!
+        return rootLinEq(c1, c0, res);
+    } else
+    {
+        // Compute the discriminant "d"
+        double d = c1*c1 - 4*c2*c0;
+
+        // Get the roots based on the discriminant
+        if(d < 0)
+        {
+            // There are no real roots (only complex!)
+            res.nValues = 0;
+            return false;
+        } else if (d > 0)
+        {
+            // There are two real roots...
+            res.nValues = 2;
+            // ... with values:
+            res.values[0] = ( -c1 + std::sqrt(d) ) / (2*c2);
+            res.values[1] = ( -c1 - std::sqrt(d) ) / (2*c2);
+            if(res.values[0] > res.values[1])
+            {
+                double aux = res.values[0];
+                res.values[0] = res.values[1];
+                res.values[1] = aux;
+            }
+
+        } else
+        {
+            // There is a single real root
+            res.nValues = 1;
+            // ... with value:
+            res.values[0] = -c1 / (2*c2);
+            res.values[1] = -c1 / (2*c2);
+        }
+        return true;
+    }
+}
+
+void EqSolver::testerRootLinearEq(double c1, double c0) {
+
+    std::cout << std::endl << "Computing the roots of:" << std::endl;
+    std::cout << c1 << "*x + " << c0 << " = 0" << std::endl;
+
+    rootValues roots;
+    rootLinEq(c1, c0, roots);
+
+    if(roots.nValues > 0u)
+    {
+        std::cout << "Result: x = " << roots.values[0] << std::endl;
+    } else
+    {
+        std::cout << "Result: none or infininte solutions!" << std::endl;
+    }
+
+}
+
+
+void EqSolver::testerRootQuadEq(double c2, double c1, double c0) {
+
+    std::cout << std::endl << "Computing the roots of:" << std::endl;
+    std::cout << c2 << "*x^2 + " << c1 << "*x + " << c0 << " = 0" << std::endl;
+
+    rootValues roots;
+    rootQuadEq(c2, c1, c0, roots);
+
+    if(roots.nValues == 0u)
+    {
+        std::cout << "Result: no real roots" << std::endl;
+    } else if(roots.nValues == 1u)
+    {
+        std::cout << "Result: single real root with value x = " << roots.values[0] << std::endl;
+    } else
+    {
+        std::cout << "Result: two real roots with value x1 = " << roots.values[0] << " and x2 = " << roots.values[1] << std::endl;
+    }
+}
+```
+
+### core/eqsolver.h
+```
+#ifndef EQSOLVER_H
+#define EQSOLVER_H
+
+// Auxiliar structure for storing the roots of polynomials up
+// to a degree 2
+struct rootValues
+{
+    unsigned int nValues;
+    double values[2];
+};
+
+
+class EqSolver
+{
+public:
+    EqSolver();
+
+    bool rootLinEq(double c1, double c0, rootValues &res);
+    bool rootQuadEq(double c2, double c1, double c0, rootValues &res);
+
+    void testerRootLinearEq(double c1, double c0);
+    void testerRootQuadEq(double c2, double c1, double c0);
+};
+
+#endif // EQSOLVER_H
+```
+
+### core/film.cpp
+```
+#include "film.h"
+
+#define TINYEXR_IMPLEMENTATION
+#include "tinyexr.h"
+
+#include <iostream>
+#include <vector>
+
+/**
+ * @brief Film::Film
+ */
+
+Film::Film(size_t width_, size_t height_)
+{
+    // Initialize the width and height of the image
+    width  = width_;
+    height = height_;
+
+    // Allocate memory for the image matrix
+    data = new Vector3D*[height];
+    for( size_t i=0; i<height; i++)
+    {
+        data[i] = new Vector3D[width];
+    }
+
+    // Set all values to zero
+    clearData();
+}
+
+Film::~Film()
+{
+    // Resease the dynamically-allocated memory for the image data
+    for( size_t i=0; i<height; i++)
+    {
+        delete [] data[i];
+    }
+    delete [] data;
+}
+
+size_t Film::getWidth() const
+{
+    return width;
+}
+
+size_t Film::getHeight() const
+{
+    return height;
+}
+
+Vector3D Film::getPixelValue(size_t w, size_t h) const
+{
+    return data[h][w];
+}
+
+void Film::setPixelValue(size_t w, size_t h, Vector3D &value)
+{
+    data[h][w] = value;
+}
+
+void Film::clearData()
+{
+    Vector3D zero;
+
+    for(size_t h=0; h<height; h++)
+    {
+        for(size_t w=0; w<width; w++)
+        {
+            setPixelValue(w, h, zero);
+        }
+    }
+}
+
+int Film::save()
+{
+    return BitMap::save(data, width, height);
+}
+
+
+int Film::saveEXR()
+{
+    const char* fname = "output.exr";
+
+    unsigned int N_COMPONENTS = 3;
+
+    ImageBufferEXR buffer;
+    buffer.data = data;
+    buffer.width = width;
+    buffer.height = height;
+
+    const std::string filename(fname);
+
+    float* myImage = (float*)malloc(sizeof(float) * width* height* N_COMPONENTS);    
+  
+    for (size_t i = 0; i < static_cast<size_t>(width); i++) {
+        for (size_t j = 0; j < static_cast<size_t>(height); j++) {
+            int idx = j * width + i;
+            myImage[idx * 3 + 0] = data[height - j - 1][i].x;
+            myImage[idx * 3 + 1] = data[height - j - 1][i].y;
+            myImage[idx * 3 + 2] = data[height - j - 1][i].z;
+        }
+    }
+
+    const char* err = "";
+    int32_t ret = SaveEXR(
+        myImage,
+        buffer.width,
+        buffer.height,
+        N_COMPONENTS, // num components
+        0, // save_as_fp32
+        filename.c_str(),
+        &err);
+
+    free(myImage);
+
+    bool saved_correctly = (err != NULL) && (err[0] == '\0');
+    if (saved_correctly) {
+        printf("EXR Stored Correctly :) \n"); 
+        return 1;
+    }
+    else {
+        std::cout <<"Error storing EXR file :( --> " << err;
+        return 0;
+    }
+
+    
+
+}
+```
+
+### core/film.h
+```
+#ifndef FILM_H
+#define FILM_H
+
+#include "vector3d.h"
+#include "bitmap.h"
+
+#include <iostream>
+
+
+enum BufferImageFormat
+{
+    UNSIGNED_BYTE4,
+    FLOAT4,
+    FLOAT3
+};
+
+struct ImageBufferEXR
+{
+    void* data = nullptr;
+    unsigned int      width = 0;
+    unsigned int      height = 0;
+    BufferImageFormat pixel_format;
+    // The memory backed by data isn't always owned by ImageBuffer (e.g. in the case of
+    // loadImage), so you can't always free the memory in a destructor. Additionally you
+    // can't simply delete the memory in the client either, because on some systems the
+    // heap isn't shared between the sutil library and the client. In this case you should
+    // call destroy to free the memory.
+    void destroy();
+};
+
+/**
+ * @brief The Film class
+ */
+class Film
+{
+public:
+    // Constructor(s)
+    Film(size_t width_, size_t height_);
+    Film() = delete;
+
+    // Destructor
+    ~Film();
+
+    // Getters
+    size_t getWidth() const;
+    size_t getHeight() const;
+    Vector3D getPixelValue(size_t w, size_t h) const;
+
+    // Setters
+    void setPixelValue(size_t w, size_t h, Vector3D &value);
+
+    // Other functions
+    int save();
+    int saveEXR();
+    void clearData();
+
+private:
+    // Image size
+    size_t width;
+    size_t height;
+
+    // Pointer to image data
+    Vector3D **data;
+};
+
+#endif // FILM_H
+```
+
+### core/hemisphericalsampler.cpp
+```
+#include "hemisphericalsampler.h"
+#include "matrix4x4.h"
+
+#include <random>
+#define _USE_MATH_DEFINES
+#include <math.h>
+#include <stdlib.h>
+
+
+
+
+
+HemisphericalSampler::HemisphericalSampler()
+{ }
+
+Vector3D HemisphericalSampler::getSample(const Vector3D &normal) const
+{
+    // Get two i.i.d. random numbers between 0-1
+    double psi1 = (double)std::rand() / RAND_MAX;
+    double psi2 = (double)std::rand() / RAND_MAX;
+
+    // Generate the direction in spherical coordinates (arround (0, 1, 0))
+    double theta = std::acos(psi1);
+    double phi   = psi2 * 2 * M_PI;
+
+    // Convert to a 3D vector
+    Vector3D randomDir( cos(phi) * sin(theta),
+                        psi1,
+                        sin(phi) * sin(theta));
+
+
+    // Construct the local frame (n = yy local)
+    Vector3D yL = normal.normalized();
+    Vector3D xL = cross(yL, Vector3D(0.0, 1.0, 0.0));
+    // Treat the unfortunate case in which xxLocal = 0
+    if( std::abs(xL.x) < 0.001 &&
+        std::abs(xL.y) < 0.001 &&
+        std::abs(xL.z) < 0.001 )
+    {
+        xL = cross(yL, Vector3D(1.0, 0.0, 0.0));
+    }
+
+    xL = xL.normalized();
+    Vector3D zL = cross(xL, yL).normalized();
+
+    // Compute the rotation matrix between (0, 1, 0) and the provided normal
+    Matrix4x4 R(xL.x, yL.x, zL.x, 0.0,
+                xL.y, yL.y, zL.y, 0.0,
+                xL.z, yL.z, zL.z, 0.0,
+                0.0,    0.0,    0.0,    1.0);
+
+    // Rotate the random direction
+    randomDir = R.transformVector(randomDir);
+
+    //Center the hemisphere on the provided normal
+    return randomDir.normalized();
+}
+```
+
+### core/hemisphericalsampler.h
+```
+#ifndef HEMISPHERICALSAMPLER_H
+#define HEMISPHERICALSAMPLER_H
+
+#include "../core/vector3d.h"
+
+using namespace std;
+
+
+class HemisphericalSampler
+{
+public:
+    HemisphericalSampler();
+    Vector3D getSample(const Vector3D &normal) const;
+    //Vector3D getSample_OMP(const Vector3D &normal, const double rand_numbers[], int idx, int n_spp) const;
+};
+
+#endif // HEMISPHERICALSAMPLER_H
+```
+
+### core/intersection.cpp
+```
+#include "intersection.h"
+
+Intersection::Intersection()
+{
+
+}
+```
+
+### core/intersection.h
+```
+#ifndef INTERSECTION_H
+#define INTERSECTION_H
+
+#include "vector3d.h"
+
+class Shape;
+
+// Class used to store information regarding the
+// intersection point.
+// Based on PBRT (Chapter 2)
+class Intersection
+{
+public:
+    Intersection();
+
+    //  Position of the 3D point (i.e., the intersection point in world coordinates)
+    Vector3D itsPoint;
+
+    // The surface normal at the intersection point (also in world coordinates)
+    Vector3D normal;
+
+    // Pointer to the shape that the intersection point lies on
+    const Shape *shape;
+};
+
+#endif // INTERSECTION_H
+```
+
+### core/matrix4x4.cpp
+```
+#include "matrix4x4.h"
+
+Matrix4x4::Matrix4x4()
+{
+    for(size_t lin=0; lin<4; lin++)
+    {
+        for(size_t col=0; col<4; col++ )
+        {
+            if(lin == col)
+            {
+                data[lin][col] = 1;
+            } else
+            {
+                data[lin][col] = 0;
+            }
+        }
+    }
+}
+
+Matrix4x4::Matrix4x4(double data_[4][4])
+{
+    for(size_t lin=0; lin<4; lin++)
+    {
+        for(size_t col=0; col<4; col++ )
+        {
+            data[lin][col] = data_[lin][col];
+        }
+    }
+}
+
+Matrix4x4::Matrix4x4( double a00, double a01, double a02, double a03,
+           double a10, double a11, double a12, double a13,
+           double a20, double a21, double a22, double a23,
+           double a30, double a31, double a32, double a33)
+{
+    data[0][0] = a00; data[0][1] = a01; data[0][2] = a02; data[0][3] = a03;
+    data[1][0] = a10; data[1][1] = a11; data[1][2] = a12; data[1][3] = a13;
+    data[2][0] = a20; data[2][1] = a21; data[2][2] = a22; data[2][3] = a23;
+    data[3][0] = a30; data[3][1] = a31; data[3][2] = a32; data[3][3] = a33;
+}
+
+Matrix4x4 Matrix4x4::operator+(const Matrix4x4 &m) const
+{
+    Matrix4x4 sum;
+
+    for(size_t lin=0; lin<4; lin++)
+    {
+        for(size_t col=0; col<4; col++)
+        {
+            sum.data[lin][col] = data[lin][col] + m.data[lin][col];
+        }
+    }
+
+    return sum;
+}
+
+Matrix4x4 Matrix4x4::operator-(const Matrix4x4 &m) const
+{
+    Matrix4x4 sum;
+
+    for(size_t lin=0; lin<4; lin++)
+    {
+        for(size_t col=0; col<4; col++)
+        {
+            sum.data[lin][col] = data[lin][col] - m.data[lin][col];
+        }
+    }
+
+    return sum;
+}
+
+// Product between two matrices 4x4
+// res(lin, col) = inner product of this.data(lin,:)
+//                  with m.data(:,col)
+// Given the current matrix m1 and a second matrix m2, returns a matrix
+// res which, applied to an object (e.g., a point p) is equal to m1(m2(p))
+Matrix4x4 Matrix4x4::operator*(const Matrix4x4 &m) const
+{
+    Matrix4x4 res;
+
+    for(size_t lin=0; lin<4; lin++)
+    {
+        for(size_t col=0; col<4; col++)
+        {
+            res.data[lin][col] = data[lin][0] * m.data[0][col] +
+                                 data[lin][1] * m.data[1][col] +
+                                 data[lin][2] * m.data[2][col] +
+                                 data[lin][3] * m.data[3][col];
+        }
+    }
+    return res;
+}
+
+Matrix4x4 Matrix4x4::operator*(const double a) const
+{
+    Matrix4x4 res;
+
+    for(size_t lin=0; lin<4; lin++)
+    {
+        for(size_t col=0; col<4; col++)
+        {
+            res.data[lin][col] = data[lin][col]*a;
+        }
+    }
+    return res;
+}
+
+// CHANGE THE TEXT BELOW
+// This operator assumes that Vector3D are implicitly represented
+// through homogeneous coordinates [vx, vy, vz, 0]
+Vector3D Matrix4x4::transformVector(const Vector3D &v) const
+{
+    double xTransformed, yTransformed, zTransformed;
+
+    xTransformed = data[0][0] * v.x +
+                   data[0][1] * v.y +
+                   data[0][2] * v.z;
+
+    yTransformed = data[1][0] * v.x +
+                   data[1][1] * v.y +
+                   data[1][2] * v.z;
+
+    zTransformed = data[2][0] * v.x +
+                   data[2][1] * v.y +
+                   data[2][2] * v.z;
+
+    return Vector3D(xTransformed, yTransformed, zTransformed);
+}
+
+// This operator assumes that Point3D are implicitly represented
+// through homogeneous coordinates [px, py, pz, 1]
+Vector3D Matrix4x4::transformPoint(const Vector3D &p) const
+{
+    double xTransformed, yTransformed,
+           zTransformed, wTransformed;
+
+    xTransformed = data[0][0] * p.x + data[0][1] * p.y +
+                   data[0][2] * p.z + data[0][3];
+
+    yTransformed = data[1][0] * p.x + data[1][1] * p.y +
+                   data[1][2] * p.z + data[1][3];
+
+    zTransformed = data[2][0] * p.x + data[2][1] * p.y +
+                   data[2][2] * p.z + data[2][3];
+
+    wTransformed = data[3][0] * p.x + data[3][1] * p.y +
+                   data[3][2] * p.z + data[3][3];
+
+    if (wTransformed == 1.0)
+    {
+        return Vector3D(xTransformed, yTransformed, zTransformed);
+    } else
+    {
+        if (wTransformed == 0.0)
+            std::cout << "Problem! wTransformed = 0 in Matrix4x4::operator*(const Point3D &p)" << std::endl;
+        return Vector3D(xTransformed, yTransformed, zTransformed) / wTransformed;
+    }
+}
+
+Ray Matrix4x4::transformRay(const Ray &r) const
+{
+    Ray transformedRay = r;
+    Vector3D transformedOrigin = transformPoint(r.o);
+    Vector3D transformedDir    = transformVector(r.d);
+
+    transformedRay.o = transformedOrigin;
+    transformedRay.d = transformedDir;
+
+    return transformedRay;
+}
+
+//Normal Matrix4x4::operator*(const Normal &n) const
+//{
+//    double xTransformed, yTransformed, zTransformed;
+
+//    xTransformed = data[0][0] * n.x +
+//                   data[0][1] * n.y +
+//                   data[0][2] * n.z;
+
+//    yTransformed = data[1][0] * n.x +
+//                   data[1][1] * n.y +
+//                   data[1][2] * n.z;
+
+//    zTransformed = data[2][0] * n.x +
+//                   data[2][1] * n.y +
+//                   data[2][2] * n.z;
+
+//    return Normal(xTransformed, yTransformed, zTransformed);
+//}
+
+std::string Matrix4x4::toString() const
+{
+    std::stringstream s;
+
+    auto oldPrecision = s.precision(3);
+    for(size_t lin=0; lin<4; lin++)
+    {
+        for(size_t col=0; col<4; col++)
+        {
+            s << data[lin][col] << "\t";
+        }
+        s << std::endl;
+    }
+    s.precision(oldPrecision);
+    return s.str();
+}
+
+// Compute the inverse of a square matrix using the Gauss-Jordan algorithm
+// To find the inverse of matrix A, using Gauss-Jordan elimination, we must
+// find a sequence of elementary row operations that reduces A to the identity
+// and then perform the same operations on In to obtain A-1.
+// The "Elementary Row Operations" are simple things like adding rows, multiplying and swapping
+// Strongly inspired in the pbrt and mitsuba's implementations of the method
+//  Check http://matrix.reshish.com/inverCalculation.php
+//   for a visual example
+bool Matrix4x4::inverse(Matrix4x4 &target) const
+{
+    int indxc[4], indxr[4];
+    int ipiv[4] = { 0, 0, 0, 0 };
+    //double minv[4][4];
+    memcpy(target.data, data, 4*4*sizeof(double));
+    for (int i = 0; i < 4; i++) {
+        int irow = -1, icol = -1;
+        double big = 0.;
+        // Choose pivot
+        for (int j = 0; j < 4; j++) {
+            if (ipiv[j] != 1) {
+                for (int k = 0; k < 4; k++) {
+                    if (ipiv[k] == 0) {
+                        if (std::abs(target.data[j][k]) >= big) {
+                            big = std::abs(target.data[j][k]);
+                            irow = j;
+                            icol = k;
+                        }
+                    }
+                    else if (ipiv[k] > 1) {
+                        std::cout << "Error: Singular matrix in MatrixInvert" << std::endl;
+                        return false;
+                    }
+                }
+            }
+        }
+        ++ipiv[icol];
+        // Swap rows _irow_ and _icol_ for pivot
+        if (irow != icol) {
+            for (int k = 0; k < 4; ++k)
+                std::swap(target.data[irow][k], target.data[icol][k]);
+        }
+        indxr[i] = irow;
+        indxc[i] = icol;
+        if (target.data[icol][icol] == 0.) {
+            std::cout << "Error: Singular matrix in MatrixInvert" << std::endl;
+            return false;
+        }
+
+        // Set $m[icol][icol]$ to one by scaling row _icol_ appropriately
+        double pivinv = 1.0 / target.data[icol][icol];
+        target.data[icol][icol] = 1.0;
+        for (int j = 0; j < 4; j++)
+            target.data[icol][j] *= pivinv;
+
+        // Subtract this row from others to zero out their columns
+        for (int j = 0; j < 4; j++) {
+            if (j != icol) {
+                double save = target.data[j][icol];
+                target.data[j][icol] = 0;
+                for (int k = 0; k < 4; k++)
+                    target.data[j][k] -= target.data[icol][k]*save;
+            }
+        }
+    }
+    // Swap columns to reflect permutation
+    for (int j = 3; j >= 0; j--) {
+        if (indxr[j] != indxc[j]) {
+            for (int k = 0; k < 4; k++)
+                std::swap(target.data[k][indxr[j]], target.data[k][indxc[j]]);
+        }
+    }
+    return true;
+}
+
+
+void Matrix4x4::setToZeros()
+{
+    for(size_t lin=0; lin<4; lin++)
+    {
+        for(size_t col=0; col<4; col++ )
+        {
+            data[lin][col] = 0;
+        }
+    }
+}
+
+void Matrix4x4::transpose(Matrix4x4 &target) const
+{
+    for(size_t lin=0; lin<4; lin++)
+    {
+        for(size_t col=0; col<4; col++)
+        {
+            target.data[lin][col] = data[col][lin];
+        }
+    }
+}
+
+// static method implementation
+Matrix4x4 Matrix4x4::translate(const Vector3D &delta)
+{
+    Matrix4x4 m(1, 0, 0, delta.x,
+                0, 1, 0, delta.y,
+                0, 0, 1, delta.z,
+                0, 0, 0, 1);
+
+    return m;
+}
+
+// static method implementation
+Matrix4x4 Matrix4x4::scale(const Vector3D &scalingVector)
+{
+    Matrix4x4 m(scalingVector.x, 0, 0, 0,
+                0, scalingVector.y, 0, 0,
+                0, 0, scalingVector.z, 0,
+                0, 0, 0, 1);
+    return m;
+}
+
+// static method implementation
+Matrix4x4 Matrix4x4::rotate(const double angleInRad, const Vector3D &axis)
+{
+    Vector3D a = axis.normalized();
+    double s = std::sin(angleInRad);
+    double c = std::cos(angleInRad);
+    double m[4][4];
+    m[0][0] = a.x * a.x + (1.0 - a.x * a.x) * c;
+    m[0][1] = a.x * a.y * (1.0 - c) - a.z * s;
+    m[0][2] = a.x * a.z * (1.0 - c) + a.y * s;
+    m[0][3] = 0;
+    m[1][0] = a.x * a.y * (1.0 - c) + a.z * s;
+    m[1][1] = a.y * a.y + (1.0 - a.y * a.y) * c;
+    m[1][2] = a.y * a.z * (1.0 - c) - a.x * s;
+    m[1][3] = 0;
+    m[2][0] = a.x * a.z * (1.0 - c) - a.y * s;
+    m[2][1] = a.y * a.z * (1.0 - c) + a.x * s;
+    m[2][2] = a.z * a.z + (1.0 - a.z * a.z) * c;
+    m[2][3] = 0;
+    m[3][0] = 0;
+    m[3][1] = 0;
+    m[3][2] = 0;
+    m[3][3] = 1;
+    Matrix4x4 mat(m);
+
+    return mat;
+}
+
+ostream& operator<<(ostream &out, const Matrix4x4 &m)
+{
+
+    out << m.toString();
+    return out;
+}
+```
+
+### core/matrix4x4.h
+```
+#ifndef MATRIX_H
+#define MATRIX_H
+
+#include <iostream>
+#include <string>
+#include <sstream>
+
+#include "vector3d.h"
+#include "ray.h"
+
+using std::ostream;
+using std::string;
+
+// Matrix stored in row-major form
+struct Matrix4x4
+{
+    // Constructors
+    Matrix4x4();
+    Matrix4x4(double data_[4][4]);
+    Matrix4x4( double a00, double a01, double a02, double a03,
+               double a10, double a11, double a12, double a13,
+               double a20, double a21, double a22, double a23,
+               double a30, double a31, double a32, double a33);
+
+    //Matrix4x4(Matrix4x4);
+
+    // Member operators overload
+    Matrix4x4 operator+(const Matrix4x4 &m) const;
+    Matrix4x4 operator-(const Matrix4x4 &m) const;
+    Matrix4x4 operator*(const Matrix4x4 &m) const;
+    Matrix4x4 operator*(const double     a) const;
+    /*Matrix4x4& operator+=(const Matrix4x4 &m);
+    Matrix4x4& operator-=(const Matrix4x4 &m);
+    Matrix4x4& operator*=(const Matrix4x4 &m);*/
+
+    // Member functions (Transformations)
+    Vector3D transformVector(const Vector3D &v) const;
+    Vector3D transformPoint(const Vector3D &p) const;
+    Ray      transformRay(const Ray &r) const;
+
+    //Vector3D  multiplyNormal(const Vector3D  &n) const;
+    std::string toString() const;
+    bool inverse(Matrix4x4 &target) const;
+    void setToZeros();
+    void transpose(Matrix4x4 &target) const;
+    // determinant ?
+
+    // Static methods
+    static Matrix4x4 translate(const Vector3D &delta);
+    static Matrix4x4 scale(const Vector3D &scalingVector);
+    static Matrix4x4 rotate(const double angleInRad, const Vector3D &axis);
+
+
+    // Structure data
+    double data[4][4];
+};
+
+// Stream insertion operator
+ostream& operator<<(ostream &out, const Matrix4x4& m);
+
+#endif // MATRIX_H
+```
+
+### core/ray.cpp
+```
+#include "ray.h"
+
+Ray::Ray() : minT(0.001), maxT(INFINITY), depth(0)
+{}
+
+Ray::Ray(const Vector3D &ori, const Vector3D &dir, size_t dep, double start,
+         double end)
+         : o(ori), d(dir), minT(start), maxT(end), depth(dep)
+{}
+
+std::string Ray::toString() const
+{
+    std::ostringstream out;
+    out << "origin: " << o << std::endl;
+    out << "direction: " << d << std::endl;
+    out << "minT = " << minT << ", maxT = " << maxT << std::endl;
+    return out.str();
+}
+
+std::ostream &operator<<(std::ostream &out, const Ray &r)
+{
+    out << r.toString();
+    return out;
+}
+```
+
+### core/ray.h
+```
+#ifndef RAY_H
+#define RAY_H
+
+#include <string>
+#include <sstream>
+
+#include "vector3d.h"
+
+#define Epsilon (double)1e-4
+
+// Note: the "mutable" keyword allows to change a class instance
+// poperty even if the instance is declared as "const"
+
+enum RayType { DIFFUSE, SPECULAR, TRANSMISSIVE };
+
+class Ray
+{
+public:
+
+
+    // Constructors
+    Ray();
+    Ray(const Vector3D &ori, const Vector3D &dir,
+        size_t dep = 0, double start = Epsilon,
+        double end = INFINITY);
+    // Member functions
+    std::string toString() const;
+
+    // Ray public data
+    Vector3D o;          // Ray origin
+    Vector3D d;          // Ray direction
+    mutable double minT; //
+    mutable double maxT; //
+    size_t depth;        // Ray depth (or number of bounces)
+
+    //FILL(..) Extra data for Path Tracing
+    RayType type;
+
+};
+
+std::ostream &operator<<(std::ostream &out, const Ray &r);
+
+#endif // RAY_H
+```
+
+### core/scene.cpp
+```
+#include "scene.h"
+#include "../lightsources/arealightsource.h"
+
+Scene::Scene()
+{
+	objectsList = new std::vector<Shape*>;
+	LightSourceList = new std::vector<LightSource*>;
+
+}
+
+void Scene::AddObject(Shape* new_object)
+{
+	objectsList->push_back(new_object);
+	if (new_object->getMaterial().isEmissive())
+		LightSourceList->push_back(new AreaLightSource(dynamic_cast<Square*>(new_object)));
+
+}	
+
+void Scene::AddPointLight(PointLightSource* new_pointLight)
+{
+	LightSourceList->push_back(new_pointLight);
+}
+```
+
+### core/scene.h
+```
+#ifndef SCENE_H
+#define SCENE_H
+
+#include "vector3d.h"
+#include <stdlib.h> /* srand, rand */
+#include <vector>
+#include "../lightsources/pointlightsource.h"
+#include "../shapes/shape.h"
+
+
+// Class used to store information regarding the
+// intersection point.
+// Based on PBRT (Chapter 2)
+class Scene
+{
+public:
+    Scene();
+
+    void AddObject(Shape* new_object);
+    
+    void AddPointLight(PointLightSource* new_pointLight);
+                                 
+    // Declare pointers to all the variables which describe the scene
+    std::vector<Shape*>* objectsList;
+    std::vector<LightSource*>* LightSourceList;
+};
+
+#endif
+```
+
+### core/utils.cpp
+```
+﻿#include "utils.h"
+
+Utils::Utils()
+{ }
+
+double Utils::degreesToRadians(double degrees)
+{
+    return degrees * M_PI / 180.0;
+}
+
+
+
+bool Utils::hasIntersection(const Ray& cameraRay, const std::vector<Shape*>& objectsList) //or Shadow Ray
+{
+
+    // For each object on the scene...
+    for(size_t objIndex = 0; objIndex < objectsList.size(); objIndex ++)
+    {
+          // Get the current object
+          const Shape *obj = objectsList.at(objIndex);
+          if (obj->rayIntersectP(cameraRay))
+              return true;
+    }   
+
+    return false;
+}
+
+
+
+bool Utils::getClosestIntersection(const Ray& cameraRay, const std::vector<Shape*>& objectsList, Intersection& its) //or Closest Hit Ray
+{
+    //std::cout << "Need to implement the function Utils::getClosestIntersection() in the file utils.cpp" << std::endl;
+
+    bool hasIntersection = false;
+
+    for (size_t objIndex = 0; objIndex < objectsList.size(); objIndex++)
+    {
+        // Get the current object
+        const Shape* obj = objectsList.at(objIndex);
+        if (obj->rayIntersect(cameraRay, its))
+            hasIntersection =  true;
+    }
+    return hasIntersection;
+}
+
+double interpolate(double val, double y0, double x0, double y1, double x1 )
+{
+    return (val-x0)*(y1-y0)/(x1-x0) + y0;
+}
+
+double getRed(double value)
+{
+    if (value > 0.5)
+        return interpolate( value, 0.0, 0.5, 1.0, 1.0 );
+    else
+        return 0.0;
+}
+
+double getGreen(double value)
+{
+    if (value < 0.25)
+        return 0.0;
+    else if (value < 0.5)
+        return interpolate(value, 0.0, 0.25, 1, 0.5);
+    else if (value < 0.75)
+        return interpolate(value, 1, 0.5, 0, 0.75);
+    else
+        return 0;
+}
+
+double getBlue(double value)
+{
+    if (value < 0.5)
+        return interpolate(value, 1.0, 0.0, 0.0, 0.5);
+    else
+        return 0;
+}
+
+
+Vector3D Utils::scalarToRGB(double scalar)
+{
+    return Vector3D( getRed(scalar),
+                getGreen(scalar),
+                getBlue(scalar) );
+}
+
+Vector3D Utils::computeReflectionDirection(const Vector3D &Direction, const Vector3D &normal)
+{
+    // Compute the perfect reflection direction FILL(...) [OPTIONAL]
+    return 2.0 * dot(normal, Direction) * normal - Direction;
+}
+
+Vector3D Utils::computeRefractionDirection(const Vector3D& wi_in, const Vector3D& n_in, double eta)
+{
+    Vector3D n = n_in.normalized();          // make a modifiable copy
+    Vector3D wi = wi_in.normalized();
+
+    double cos_i = dot(-wi, n);
+    bool entering = cos_i > 0.0;
+
+    if (!entering) {
+        // inside → outside: flip normal and invert ratio
+        n = -n;
+        eta = 1.0 / eta;
+        cos_i = dot(-wi, n);
+    }
+
+    double k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
+    if (k < 0.0) {
+        // total internal reflection
+        return Utils::computeReflectionDirection(wi, n);
+    }
+    else {
+        // refraction direction
+        return eta * wi + (eta * cos_i - sqrt(k)) * n;
+    }
+}
+```
+
+### core/utils.h
+```
+#ifndef UTILS_H
+#define UTILS_H
+
+#define _USE_MATH_DEFINES
+
+#include <cmath>
+#include <vector>
+
+#include "ray.h"
+#include "../shapes/shape.h"
+
+
+#define PBSTR "||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||"
+#define PBWIDTH 60
+
+class Utils
+{
+public:
+    Utils();
+
+    static bool getClosestIntersection(const Ray &cameraRay, const std::vector<Shape*> &objectsList, Intersection &its);
+    static bool hasIntersection(const Ray &ray, const std::vector<Shape*> &objectsList);
+    static Vector3D scalarToRGB(double scalar);
+    static double degreesToRadians(double degrees);
+
+
+
+    static Vector3D computeReflectionDirection(const Vector3D &Direction, const Vector3D &normal);
+    static Vector3D computeRefractionDirection(const Vector3D& wi, const Vector3D& n, double eta);
+
+
+
+    static void printProgress(double percentage) {
+        int val = (int)(percentage * 100);
+        int lpad = (int)(percentage * PBWIDTH);
+        int rpad = PBWIDTH - lpad;
+        printf("\r%3d%% [%.*s%*s]", val, lpad, PBSTR, rpad, "");
+        fflush(stdout);
+    };
+
+};
+
+#endif // UTILS_H
+```
+
+### core/vector3d.cpp
+```
+#include "vector3d.h"
+
+Vector3D::Vector3D() : x(0), y(0), z(0)
+{
+}
+
+Vector3D::Vector3D(double a) : x(a), y(a), z(a)
+{
+}
+
+Vector3D::Vector3D(double x_, double y_, double z_) : x(x_), y(y_), z(z_)
+{
+}
+
+Vector3D::Vector3D(const Vector3D &v_) : x(v_.x), y(v_.y), z(v_.z)
+{
+}
+
+// Sum two vectors and return the result as a new object
+Vector3D Vector3D::operator+(const Vector3D &v) const
+{
+    return Vector3D(x + v.x, y + v.y, z + v.z);
+}
+
+// Subtract two vectors and return the result as a new object
+Vector3D Vector3D::operator-(const Vector3D &v) const
+{
+    return Vector3D(x - v.x, y - v.y, z - v.z);
+}
+
+// Return the negative of the vector as a new object
+Vector3D Vector3D::operator-() const
+{
+    return Vector3D(-x, -y, -z);
+}
+
+// Multiply a vector by a scalar and return the result as a new object
+Vector3D Vector3D::operator*(const double a) const
+{
+    return Vector3D(x*a, y*a, z*a);
+}
+
+
+Vector3D Vector3D::operator*(const Vector3D a) const
+{
+    return Vector3D(x * a.x, y * a.y, z * a.z);
+}
+
+Vector3D Vector3D::operator/(const Vector3D a) const
+{
+    return Vector3D(x / a.x, y / a.y, z / a.z);
+}
+
+// Divide a vector by a scalar and return the result as a new object
+Vector3D Vector3D::operator/(const double a) const
+{
+    return Vector3D(x/a, y/a, z/a);
+}
+
+// Add a vector to the current one
+Vector3D& Vector3D::operator+=(const Vector3D &v)
+{
+    x += v.x;
+    y += v.y;
+    z += v.z;
+
+    return *this;
+}
+
+// Subtract a vector to the current one
+Vector3D& Vector3D::operator-=(const Vector3D &v)
+{
+    x -= v.x;
+    y -= v.y;
+    z -= v.z;
+
+    return *this;
+}
+
+// Multiply the current vector by a scalar
+Vector3D& Vector3D::operator*=(const double a)
+{
+    x *= a;
+    y *= a;
+    z *= a;
+
+    return *this;
+}
+
+// Divide the current vector by a scalar
+Vector3D& Vector3D::operator/=(const double a)
+{
+    x /= a;
+    y /= a;
+    z /= a;
+
+    return *this;
+}
+
+// Squared length of the current vector
+double Vector3D::lengthSq() const
+{
+    return x*x + y*y + z*z;
+}
+
+// Length of the current vector
+double Vector3D::length() const
+{
+    //[T] : check line 572 of vector.h in mitsuba
+    return std::sqrt(lengthSq());
+}
+// Length of the current vector
+Vector3D Vector3D::v_abs() const
+{
+    //[T] : check line 572 of vector.h in mitsuba
+    return Vector3D(abs(x), abs(y), abs(z));
+}
+
+// Returns the normalized version of the current vector
+Vector3D Vector3D::normalized() const
+{
+    return (*this)/length();
+}
+
+// Stream insertion operator
+std::ostream& operator<<(std::ostream& out, const Vector3D &v)
+{
+    out << "[" << v.x << ", " << v.y << ", " << v.z << "]";
+    return out;
+}
+```
+
+### core/vector3d.h
+```
+#ifndef VECTOR3D_H
+#define VECTOR3D_H
+
+#include <ostream>
+
+struct Vector3D
+{
+    // Constructors
+    Vector3D();
+    Vector3D(double a);
+    Vector3D(double x_, double y_, double z_);
+    Vector3D(const Vector3D &v_);
+
+    // Member operators overload
+    Vector3D operator+(const Vector3D &v) const;
+    Vector3D operator-(const Vector3D &v) const;
+    Vector3D operator*(const double a) const;
+    Vector3D operator*(const Vector3D a) const;
+    Vector3D operator/(const Vector3D a) const;
+
+    Vector3D operator/(const double a) const;
+
+	friend Vector3D operator*(const double s, const Vector3D& v) {
+		return Vector3D(v.x*s,v.y*s ,v.z*s); };
+
+    Vector3D operator-() const;
+
+    Vector3D& operator+=(const Vector3D &v);
+    Vector3D& operator-=(const Vector3D &v);
+    Vector3D& operator*=(const double a);
+    Vector3D& operator/=(const double a);
+
+    // Member functions
+    double length()      const;
+    Vector3D v_abs()      const;
+    double lengthSq()    const;
+    Vector3D normalized() const;
+
+
+
+    // Structure data
+    float x, y, z;
+};
+
+// Stream insertion operator (since it takes the user-defined type at the right,
+//  i.e., "Vector3D", it must be implemented as non-member
+std::ostream& operator<<(std::ostream& out, const Vector3D &v);
+
+// Dot product between two vectors
+inline double dot(const Vector3D &v1, const Vector3D &v2)
+{
+    return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
+}
+
+// Returns the cross product between two vectors
+inline Vector3D cross(const Vector3D &v1, const Vector3D &v2)
+{
+    return Vector3D( v1.y * v2.z - v1.z * v2.y,
+                     v1.z * v2.x - v1.x * v2.z,
+                     v1.x * v2.y - v1.y * v2.x );
+}
+#endif // VECTOR3D_H
+```
+
+### lightsources/arealightsource.cpp
+```
+#include "arealightsource.h"
+
+AreaLightSource::AreaLightSource(Square* areaLightsource_) :
+    myAreaLightsource(areaLightsource_)
+{ }
+
+
+
+Vector3D AreaLightSource::getIntensity() const
+{
+    return myAreaLightsource->getMaterial().getEmissiveRadiance();
+}
+
+Vector3D AreaLightSource::sampleLightPosition() const
+{
+    // Get two random numbers between 0-1
+    double u = (double)std::rand() / RAND_MAX;
+    double v = (double)std::rand() / RAND_MAX;
+
+    // Map u,v from [0,1] to [-0.5,0.5] to center around the square's position
+    u = u - 0.5;
+    v = v - 0.5;
+
+    // Calculate the sampled point on the square
+    Vector3D sampledPoint = myAreaLightsource->corner + (u * myAreaLightsource->v1) + (v * myAreaLightsource->v2);
+
+    return sampledPoint;
+}
+```
+
+### lightsources/arealightsource.h
+```
+#ifndef AREALIGHTSOURCE_H
+#define AREALIGHTSOURCE_H
+
+#include "../shapes/square.h"
+#include "lightsource.h"
+
+
+class AreaLightSource : public LightSource
+{
+public:
+    AreaLightSource() = delete;
+    
+    AreaLightSource(Square* areaLightsource);
+
+
+    Vector3D getIntensity() const;        
+    Vector3D sampleLightPosition() const ;
+
+    double getArea() const {
+        Vector3D square_dim = myAreaLightsource->v1 + myAreaLightsource->v2;
+        if (square_dim.x <= Epsilon) {
+            return square_dim.y * square_dim.z;
+        }
+        if (square_dim.y <= Epsilon) {
+            return square_dim.x * square_dim.z;
+        }
+        if (square_dim.z <= Epsilon) {
+            return square_dim.x * square_dim.y;
+        }
+    }
+
+    Vector3D getNormal() const {
+        return myAreaLightsource->normal;
+    };
+
+private:
+    Square* myAreaLightsource;
+};
+
+#endif
+```
+
+### lightsources/lightsource.h
+```
+#ifndef LIGHTSOURCE_H
+#define LIGHTSOURCE_H
+
+
+// To start, let this be the interface of a point light source
+// Then, make this an abstract class from which we can derive:
+//   - omnidirectional uniform point light sources
+//   - area light sources
+
+class LightSource
+{
+public:
+    LightSource() {}; 
+
+
+    virtual Vector3D getIntensity() const = 0;
+    virtual Vector3D sampleLightPosition() const = 0;
+
+    virtual double getArea() const = 0;
+    virtual Vector3D getNormal() const = 0;
+
+
+};
+
+#endif
+```
+
+### lightsources/pointlightsource.h
+```
+#ifndef POINTLIGHTSOURCE_H
+#define POINTLIGHTSOURCE_H
+
+#include "../core/vector3d.h"
+#include "lightsource.h"
+
+
+class PointLightSource : public LightSource
+{
+public:
+    PointLightSource() = delete;
+    PointLightSource(Vector3D pos_, Vector3D intensity_) :
+        pos(pos_), intensity(intensity_)
+    { }
+
+
+
+    Vector3D getIntensity() const { return intensity; };
+    Vector3D sampleLightPosition() const { return pos; };
+
+    ////A point light emits light uniformly in all directions
+    //Its Area is zero and have no Normal
+    double getArea() const { return 0.0; };              
+    Vector3D getNormal() const { return Vector3D(0.0); };
+
+private:
+    Vector3D pos;
+    Vector3D intensity; // (unity: watts/sr)
+};
+
+#endif // POINTLIGHTSOURCE_H
+```
+
+### materials/emissive.cpp
+```
+#include "emissive.h"
+
+#include <iostream>
+
+Emissive::Emissive()
+{ }
+
+Emissive::Emissive(Vector3D Ke_, Vector3D rho_d_):
+Ke(Ke_), rho_d(rho_d_){}
+
+Vector3D Emissive::getReflectance(const Vector3D& n, const Vector3D& wo,
+    const Vector3D& wi) const {
+    return  rho_d/3.1416;
+};
+
+double Emissive::getIndexOfRefraction() const
+{
+    std::cout << "Warning! Calling \"Material::getIndexOfRefraction()\" for a non-transmissive material"
+              << std::endl;
+
+    return -1;
+}
+
+
+Vector3D Emissive::getEmissiveRadiance() const
+{
+    return Ke;
+}
+
+
+Vector3D Emissive::getDiffuseReflectance() const
+{
+    return rho_d;
+}
+```
+
+### materials/emissive.h
+```
+#ifndef EMISSIVEMATERIAL
+#define EMISSIVEMATERIAL
+
+#include "material.h"
+
+class Emissive : public Material
+{
+public:
+    Emissive();
+    Emissive(Vector3D Ke_, Vector3D rho_d_);
+
+    Vector3D getReflectance(const Vector3D& n, const Vector3D& wo,
+        const Vector3D& wi) const ;
+
+    bool hasSpecular() const { return false; }
+    bool hasTransmission() const { return false; }
+    bool hasDiffuseOrGlossy() const { return true; }
+    bool isEmissive() const { return true; }
+
+    double getIndexOfRefraction() const;
+    Vector3D getEmissiveRadiance() const;
+    Vector3D getDiffuseReflectance() const;
+
+private:
+    Vector3D Ke;    Vector3D rho_d;
+};
+
+
+#endif // MATERIAL
+```
+
+### materials/material.cpp
+```
+#include "material.h"
+
+#include <iostream>
+
+Material::Material()
+{ }
+
+double Material::getIndexOfRefraction() const
+{
+    std::cout << "Warning! Calling \"Material::getIndexOfRefraction()\" for a non-transmissive material"
+              << std::endl;
+
+    return -1;
+}
+
+
+Vector3D Material::getEmissiveRadiance() const
+{
+    std::cout << "Warning! Calling \"Material::getEmissiveRadiance()\" for a non-Emissive material"
+        << std::endl;
+
+    return -1;
+}
+
+
+Vector3D Material::getDiffuseReflectance() const
+{
+    std::cout << "Warning! Calling \"Material::getDiffuseReflectance()\" for a non-Diffuse material"
+        << std::endl;
+
+    return -1;
+}
+```
+
+### materials/material.h
+```
+#ifndef MATERIAL
+#define MATERIAL
+
+#include "../core/vector3d.h"
+
+class Material
+{
+public:
+    Material();
+
+    virtual Vector3D getReflectance(const Vector3D &n, const Vector3D &wo,
+                                    const Vector3D &wi) const = 0; //Return Phong BRDF of Phong Materials and Emissive Diffuse
+
+    virtual double getIndexOfRefraction() const; // Return Refraction ratio of Transmissive Materials
+    virtual Vector3D getEmissiveRadiance() const; //Return Emissive Radiance of Emissive Materials
+    virtual Vector3D getDiffuseReflectance() const; //Return Difusse Coefficient of Phong Materials
+
+    //Functions to check the material of the object
+    virtual bool hasSpecular() const = 0;
+    virtual bool hasTransmission() const = 0;
+    virtual bool hasDiffuseOrGlossy() const = 0;
+    virtual bool isEmissive() const = 0;
+
+
+    
+};
+
+
+#endif // MATERIAL
+```
+
+### materials/mirror.cpp
+```
+#include "mirror.h"
+
+#include <iostream>
+
+Mirror::Mirror()
+{ }
+
+
+Vector3D Mirror::getReflectance(const Vector3D& n, const Vector3D& wo,
+    const Vector3D& wi) const {
+    return  rho_d / 3.1416;
+};
+
+double Mirror::getIndexOfRefraction() const
+{
+    std::cout << "Warning! Calling \"Material::getIndexOfRefraction()\" for a non-transmissive material"
+        << std::endl;
+
+    return -1;
+}
+
+Vector3D Mirror::getEmissiveRadiance() const
+{
+    return Ke;
+}
+
+Vector3D Mirror::getDiffuseReflectance() const
+{
+    return rho_d;
+}
+```
+
+### materials/mirror.h
+```
+#ifndef MIRRORMATERIAL
+#define MIRRORMATERIAL
+
+#include "material.h"
+
+class Mirror : public Material
+{
+public:
+    Mirror();
+
+    Vector3D getReflectance(const Vector3D& n, const Vector3D& wo,
+        const Vector3D& wi) const;
+
+    bool hasSpecular() const { return true; }
+    bool hasTransmission() const { return false; }
+    bool hasDiffuseOrGlossy() const { return false; }
+    bool isEmissive() const { return false; }
+
+    double getIndexOfRefraction() const;
+    Vector3D getEmissiveRadiance() const;
+    Vector3D getDiffuseReflectance() const;
+
+private:
+    Vector3D Ke;    
+    Vector3D rho_d;
+};
+
+
+#endif // MATERIAL
+```
+
+### materials/phong.cpp
+```
+#include "phong.h"
+
+#include <iostream>
+#define M_PI 3.1416
+
+Phong::Phong()
+{ }
+
+Phong::Phong(Vector3D Kd_, Vector3D Ks_, float alpha_):
+rho_d(Kd_), Ks(Ks_), alpha(alpha_){}
+
+
+Vector3D Phong::getReflectance(const Vector3D& n, const Vector3D& wo,
+    const Vector3D& wi) const {
+
+    //We calculate the ideal reflection direction
+    Vector3D wr = 2.0 * dot(n, wi) * n - wi;
+
+    //First term of the reflectance
+    Vector3D diffuse = (rho_d / M_PI); //A1
+
+    //Second term of the reflectance
+    double scale_factor = ((alpha + 2) / (2 * M_PI));
+    Vector3D ref = scale_factor * (Ks * pow(dot(wo, wr), alpha));
+
+    return Vector3D (diffuse + ref);
+
+};
+
+double Phong::getIndexOfRefraction() const
+{
+    std::cout << "Warning! Calling \"Material::getIndexOfRefraction()\" for a non-transmissive material"
+              << std::endl;
+
+    return -1;
+}
+
+
+Vector3D Phong::getEmissiveRadiance() const
+{
+    return Vector3D(0.0);
+}
+
+
+Vector3D Phong::getDiffuseReflectance() const
+{
+    return rho_d;
+}
+```
+
+### materials/phong.h
+```
+#ifndef PHONGMATERIAL
+#define PHONGMATERIAL
+
+#include "material.h"
+
+class Phong : public Material
+{
+public:
+    Phong();
+    Phong(Vector3D Kd_, Vector3D Ks_,  float    alpha_);
+
+    Vector3D getReflectance(const Vector3D& n, const Vector3D& wo,
+        const Vector3D& wi)const ;
+
+    bool hasSpecular() const { return false; }
+    bool hasTransmission() const { return false; }
+    bool hasDiffuseOrGlossy() const { return true; }
+    bool isEmissive() const { return false; }
+
+    double getIndexOfRefraction() const;
+    Vector3D getEmissiveRadiance() const;
+    Vector3D getDiffuseReflectance() const;
+
+
+private:
+    Vector3D rho_d;
+    Vector3D Ks;
+    float    alpha;
+    
+
+};
+#endif // MATERIAL
+```
+
+### materials/transmissive.cpp
+```
+#include "transmissive.h"
+#include <iostream>
+
+Transmissive::Transmissive(const double r)
+{ }
+
+Vector3D Transmissive::getReflectance(const Vector3D& n, const Vector3D& wo,
+    const Vector3D& wi) const {
+    return  rho_d / 3.1416;
+};
+
+double Transmissive::getIndexOfRefraction() const
+{
+    std::cout << "Warning! Calling \"Material::getIndexOfRefraction()\" for a non-transmissive material"
+        << std::endl;
+
+    return r;
+}
+
+Vector3D Transmissive::getEmissiveRadiance() const
+{
+    return Ke;
+}
+
+Vector3D Transmissive::getDiffuseReflectance() const
+{
+    return rho_d;
+}
+```
+
+### materials/transmissive.h
+```
+#ifndef TRANSMISSIVEMATERIAL
+#define TRANSMISSIVEMATERIAL
+
+#include "material.h"
+
+class Transmissive : public Material
+{
+public:
+    Transmissive(const double r);
+
+    Vector3D getReflectance(const Vector3D& n, const Vector3D& wo,
+        const Vector3D& wi) const;
+
+    bool hasSpecular() const { return false; }
+    bool hasTransmission() const { return true; }
+    bool hasDiffuseOrGlossy() const { return false; }
+    bool isEmissive() const { return false; }
+
+    double getIndexOfRefraction() const;
+    Vector3D getEmissiveRadiance() const;
+    Vector3D getDiffuseReflectance() const;
+
+private:
+    double r;
+    Vector3D Ke;    
+    Vector3D rho_d;   
+};
+
+
+#endif // MATERIAL
+```
+
+### shaders/NEEAdvanced.cpp
+```
+﻿#include "NEEAdvanced.h"
+#include "../materials/phong.h"
+#include "../lightsources/pointlightsource.h"
+#include "../lightsources/arealightsource.h"
+#include "../core/hemisphericalsampler.h"
+#include "../core/utils.h"
+#include "../core/scene.h"
+#include <math.h>
+
+#define M_PI 3.1416
+
+NEEAdvanced::NEEAdvanced()
+    : Color(Vector3D(1, 0, 0))
+{
+}
+
+NEEAdvanced::NEEAdvanced(Vector3D Color_, Vector3D bgColor_)
+    : NEE(Color_, bgColor_)
+{
+}
+
+Vector3D NEEAdvanced::computeRadiance(
+    const Ray& r,
+    const std::vector<Shape*>& objList,
+    const std::vector<LightSource*>& lsList,
+    const Intersection& its,
+    const int maxDepth) const
+{
+    // Termination check
+    if (r.depth >= maxDepth)
+        return Vector3D(0.0);
+
+    Vector3D Le(0.0), Lr(0.0);
+
+    // We handle emissive surfaces
+    // Firstly, primary or specular/transmissive rays can see lights
+    if (its.shape->getMaterial().isEmissive()) {
+        if (r.depth == 0 || r.type == SPECULAR || r.type == TRANSMISSIVE) {
+            Le = its.shape->getMaterial().getEmissiveRadiance();
+        }
+    }
+
+    // Outgoing direction towards the camera
+    Vector3D w_o = -r.d.normalized();
+
+    // Reflected/indirect contribution
+    Lr = reflectedRadiance(objList, lsList, its, w_o, r.depth, maxDepth);
+
+    return Le + Lr;
+}
+
+
+Vector3D NEEAdvanced::reflectedRadiance(
+    const std::vector<Shape*>& objList,
+    const std::vector<LightSource*>& lsList,
+    const Intersection& x,
+    const Vector3D& w_o,
+    int depth,
+    const int maxDepth) const
+{
+    Vector3D Ldir(0.0);
+
+    if (x.shape->getMaterial().hasDiffuseOrGlossy()) {
+        Ldir = directRadiance(objList, lsList, x, w_o);
+    }
+
+    Vector3D Lind = indirectRadiance(objList, lsList, x, w_o, depth, maxDepth);
+    return Ldir + Lind;
+}
+
+
+Vector3D NEEAdvanced::directRadiance(
+    const std::vector<Shape*>& objList,
+    const std::vector<LightSource*>& lsList,
+    const Intersection& x,
+    const Vector3D& w_o) const
+{
+    Vector3D direct = Vector3D(0.0);
+    Vector3D n = x.normal.normalized();
+    if (dot(n, w_o) < 0.0) n = -n;
+    int numLightSamples = 4; // Number of samples per light
+
+    for (int lightId = 0; lightId < lsList.size(); lightId++) {
+        double lightArea = lsList.at(lightId)->getArea();
+
+        for (int sample = 0; sample < numLightSamples; sample++) {
+            Vector3D p = lsList.at(lightId)->sampleLightPosition();
+            double pdf = 1.0 / lightArea;
+
+            Vector3D wi = (p - x.itsPoint).normalized();
+            double distance = (p - x.itsPoint).length();
+            double dSquared = distance * distance;
+
+            // Shadow test
+            Ray shadowRay(x.itsPoint, wi);
+            shadowRay.maxT = distance - 1e-3;
+            bool is_in_shadow = Utils::hasIntersection(shadowRay, objList);
+
+            if (!is_in_shadow) {
+                Vector3D radiance = lsList.at(lightId)->getIntensity();
+
+                // BRDF direction (n, wi, wo)
+                Vector3D fr = x.shape->getMaterial().getReflectance(n, wi, w_o);
+
+                Vector3D lightNormal = lsList.at(lightId)->getNormal().normalized();
+                double cosThetaX = dot(n, wi);
+                double cosThetaY = dot(lightNormal, -wi);
+                double G = (cosThetaX * cosThetaY) / dSquared;
+
+                // Divide by number of samples
+                direct += (radiance * fr * G) / (pdf * numLightSamples);
+            }
+        }
+    }
+    return direct;
+}
+
+
+Vector3D NEEAdvanced::indirectRadiance(
+    const std::vector<Shape*>& objList,
+    const std::vector<LightSource*>& lsList,
+    const Intersection& x,
+    const Vector3D& w_o,
+    int depth,
+    const int maxDepth) const
+{
+    if (depth >= maxDepth)
+        return Vector3D(0.0);
+
+    Vector3D n = x.normal.normalized();
+    if (dot(n, w_o) < 0.0) n = -n;
+
+    // We handle perfect mirror
+    if (x.shape->getMaterial().hasSpecular()) {
+        Vector3D wi = Utils::computeReflectionDirection(w_o, n);
+        Ray reflectedRay(x.itsPoint - n * 1e-5, wi, depth + 1, SPECULAR);
+        reflectedRay.minT = 1e-3;
+
+        Intersection newIts;
+        if (Utils::getClosestIntersection(reflectedRay, objList, newIts)) {
+            Vector3D Li = computeRadiance(reflectedRay, objList, lsList, newIts, maxDepth);
+            return Li; // Mirror perfectly reflects one direction
+        }
+        return Vector3D(0.0);
+    }
+
+    // We handle transmissive (refraction)
+    if (x.shape->getMaterial().hasTransmission()) {
+        double coeficcient = 0.75;
+        if (dot(n, w_o) < 0.0) coeficcient = 1/0.75;
+
+        Vector3D wi = Utils::computeRefractionDirection(-w_o, n, coeficcient); // η = n1/n2
+        Ray refractedRay(x.itsPoint - n * 1e-3, wi, depth + 1, TRANSMISSIVE);
+
+        Intersection newIts;
+        if (Utils::getClosestIntersection(refractedRay, objList, newIts)) {
+            Vector3D Li = computeRadiance(refractedRay, objList, lsList, newIts, maxDepth);
+            return Li;
+        }
+        return Vector3D(0.0);
+    }
+
+    // We handle diffuse or glossy
+    if (x.shape->getMaterial().hasDiffuseOrGlossy()) {
+        Vector3D Lind(0.0);
+        int numSamples = 4;
+        HemisphericalSampler hS;
+        for (int i = 0; i < numSamples; ++i) {
+            Vector3D wi = hS.getSample(n);
+            double pdf = 1.0 / (2.0 * M_PI);
+            double cosTheta = std::max(0.0, dot(n, wi));
+
+            Vector3D origin = x.itsPoint + n * 1e-3;
+            Ray newRay(origin, wi, depth + 1, DIFFUSE);
+
+            Intersection newIts;
+            if (Utils::getClosestIntersection(newRay, objList, newIts)) {
+                Vector3D Li = reflectedRadiance(objList, lsList, newIts, -wi, depth + 1, maxDepth);
+                Vector3D brdf = x.shape->getMaterial().getReflectance(n, wi, w_o);
+                Lind += (Li * brdf * cosTheta) / (pdf * numSamples);
+            }
+        }
+
+        return Lind;
+    }
+    return Vector3D(0.0);
+}
+
+Vector3D NEEAdvanced::computeColor(
+    const Ray& r,
+    const std::vector<Shape*>& objList,
+    const std::vector<LightSource*>& lsList) const
+{
+    Intersection its;
+    if (!Utils::getClosestIntersection(r, objList, its))
+        return bgColor;
+
+    return computeRadiance(r, objList, lsList, its, 3);
+}
+```
+
+### shaders/NEEAdvanced.h
+```
+#ifndef NEEADVANCED_H
+#define NEEADVANCED_H
+
+#include "shader.h"
+#include "nee.h"
+#include "../core/scene.h"
+#include "../core/hemisphericalsampler.h"
+
+class NEEAdvanced : public NEE
+{
+public:
+    NEEAdvanced();
+    NEEAdvanced(Vector3D Color_, Vector3D bgColor_);
+
+    Vector3D computeColor(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const;
+    virtual Vector3D computeRadiance(
+        const Ray& r,
+        const std::vector<Shape*>& objList,
+        const std::vector<LightSource*>& lsList,
+        const Intersection& its,
+        const int maxDepth) const;
+
+    virtual Vector3D reflectedRadiance(
+        const std::vector<Shape*>& objList,
+        const std::vector<LightSource*>& lsList,
+        const Intersection& x,
+        const Vector3D& w_o,
+        int depth,
+        const int maxDepth) const;
+
+    virtual Vector3D directRadiance(
+        const std::vector<Shape*>& objList,
+        const std::vector<LightSource*>& lsList,
+        const Intersection& x,
+        const Vector3D& w_o) const;
+
+    virtual Vector3D indirectRadiance(
+        const std::vector<Shape*>& objList,
+        const std::vector<LightSource*>& lsList,
+        const Intersection& x,
+        const Vector3D& w_o,
+        int depth,
+        const int maxDepth) const;
+
+    Vector3D bgColor;
+private:
+    Vector3D Color;
+};
+
+#endif // NEEADVANCED_H
+```
+
+### shaders/areaintegrator.cpp
+```
+﻿#include "areaintegrator.h"
+#include "hemisphericalshader.h"
+#include "../materials/phong.h"
+#include "../lightsources/pointlightsource.h"
+#include "../core/hemisphericalsampler.h"
+#include "../core/utils.h"
+
+#define M_PI 3.1416
+
+AreaIntegrator::AreaIntegrator():
+    Color(Vector3D(1, 0, 0))
+{
+}
+
+AreaIntegrator::AreaIntegrator(Vector3D Color_, Vector3D bgColor_):
+    Shader(bgColor_), Color(Color_)
+{
+}
+
+Vector3D AreaIntegrator::computeColor(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const {
+    Intersection its;
+    Vector3D Color = Vector3D(0, 0, 0);
+
+    if (!Utils::getClosestIntersection(r, objList, its)) {
+        return bgColor;
+    }
+
+    // Handle emissive materials FIRST
+    if (its.shape->getMaterial().isEmissive()) {
+        return its.shape->getMaterial().getEmissiveRadiance();
+    }
+
+    Vector3D wo = -r.d; // Viewing direction (from surface to camera)
+    Vector3D n = its.normal.normalized();
+
+    if (its.shape->getMaterial().hasDiffuseOrGlossy()) {
+        Vector3D direct = Vector3D(0.0);
+        Vector3D ambient = Vector3D(0.25);
+        Vector3D diffuse_coefficient = its.shape->getMaterial().getDiffuseReflectance();
+        int numSamples = 256;
+
+        for (int lightId = 0; lightId < lsList.size(); lightId++) {
+            double lightArea = lsList.at(lightId)->getArea();
+
+            for (int j = 0; j < numSamples; j++) {
+                Vector3D p = lsList.at(lightId)->sampleLightPosition();
+                double pdf = 1.0 / lightArea;
+
+                Vector3D wi = (p - its.itsPoint).normalized();
+                double distance = (p - its.itsPoint).length();
+                double dSquared = distance * distance;
+
+                Ray testRay(its.itsPoint, wi);
+                testRay.maxT = distance - 1e-4;
+                bool is_in_shadow = Utils::hasIntersection(testRay, objList);
+
+                if (!is_in_shadow) {
+                    Vector3D radiance = lsList.at(lightId)->getIntensity();
+
+                    Vector3D fr = its.shape->getMaterial().getReflectance(n, -wi, wo);
+
+                    Vector3D ny = lsList.at(lightId)->getNormal().normalized();
+                    double g = (dot(n, wi) * dot(-wi, ny)) / dSquared;
+
+                    direct += (radiance * fr * g) / (pdf * numSamples);
+                }
+            }
+        }
+        Color = direct + (ambient * diffuse_coefficient);
+    }
+    // We use recursive ray tracing for perfect reflection (specular materials)
+    else if (its.shape->getMaterial().hasSpecular()) {
+        // We calculate the ideal reflection direction
+        Vector3D in_light_direction = -(r.d).normalized();   // Incident light direction (ωi)
+        Vector3D normal = its.normal.normalized(); // The normal (n)
+
+        double scale_factor = 2.0 * dot(normal, in_light_direction);
+        Vector3D reflection = scale_factor * normal;
+        Vector3D ideal_reflection = reflection - in_light_direction; // Final computation of the ideal reflection direction (wr)
+
+        // We build the reflection ray from the intersection point to the ideal reflection direction
+        Ray reflection_ray(its.itsPoint, ideal_reflection, r.depth + 1);
+        // Recursive Ray Tracing
+        Color = computeColor(reflection_ray, objList, lsList);
+    }
+    // We use recursive ray tracing for refraction
+    else if (its.shape->getMaterial().hasTransmission()) {
+        //We compute the transmissive refaction wt following the formula:
+
+        Vector3D normal = its.normal.normalized(); // The normal (n)
+        Vector3D view_direction = -(r.d).normalized(); // viewing direction (wo)
+        double refraction_ratio = 0.75;
+
+        // If the ray is inside the object (we are going from medium µ2 to µ1) we need to flip the normal and invert the refraction ratio
+        if (dot(view_direction, normal) < 0) {
+            refraction_ratio = 1.0 / refraction_ratio;
+            normal = -normal;
+        }
+
+        // Cosine of angle between incident ray and surface normal
+        double cos_angle = dot(view_direction, normal);
+
+        // Discriminant of the equation
+        double discriminant = 1.0 - refraction_ratio * refraction_ratio * (1.0 - (cos_angle * cos_angle));
+
+        Vector3D transmissive_refraction;
+
+        if (discriminant >= 0) {
+
+            double refract_term = sqrt(discriminant);
+            Vector3D first_term = (refraction_ratio * view_direction);
+            Vector3D second_term = refraction_ratio * cos_angle - refract_term;
+
+            transmissive_refraction = -first_term + normal * second_term;
+        }
+        else {
+            // Happens total internal reflection so the ray cannot exit the material
+            // We compute specular reflection instead
+            double scale_factor = 2.0 * dot(normal, view_direction);
+            Vector3D reflection = scale_factor * normal;
+            Vector3D transmissive_refraction = reflection - view_direction;
+        }
+
+
+        Ray refracted_ray(its.itsPoint, transmissive_refraction, r.depth + 1);
+
+        // Recursively trace the refracted ray to get its color contribution
+        Color += computeColor(refracted_ray, objList, lsList);
+    }
+
+    return Color;
+}
+```
+
+### shaders/areaintegrator.h
+```
+#ifndef AREAINTEGRATOR_H
+#define AREAINTEGRATOR_H
+
+#include "shader.h"
+
+
+class AreaIntegrator : public Shader
+{
+public:
+    AreaIntegrator();
+    AreaIntegrator(Vector3D Color_, Vector3D bgColor_);
+
+    Vector3D computeColor(const Ray& r,
+        const std::vector<Shape*>& objList,
+        const std::vector<LightSource*>& lsList) const;
+
+    Vector3D bgColor;
+private:
+    Vector3D Color;
+};
+
+#endif AREAINTEGRATOR_H
+```
+
+### shaders/coloredvolumetricpathshader.cpp
+```
+#include "coloredvolumetricpathshader.h"
+#include "../core/utils.h"
+#include "../core/hemisphericalsampler.h"
+#include <random>
+
+#define _USE_MATH_DEFINES
+#include "math.h"
+
+Colored::Colored() :
+    hitColor(Vector3D(1, 0, 0))
+{
+}
+
+Colored::Colored(Vector3D hitColor_, Vector3D bgColor_) :
+    Shader(bgColor_), hitColor(hitColor_)
+{
+}
+
+// Helper function for uniform random sampling
+double randomUniform() {
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    static std::uniform_real_distribution<> dis(0.0, 1.0);
+    return dis(gen);
+}
+
+// Sample distance in participating media using exponential distribution
+double sampleDistance(double sigma_t) {
+    double xi = randomUniform();
+    return -log(1.0 - xi) / sigma_t;
+}
+
+// Compute colored transmittance through the medium
+Vector3D computeTransmittance(double distance, const Vector3D& extinction) {
+    return Vector3D(exp(-extinction.x * distance), exp(-extinction.y * distance), exp(-extinction.z * distance));
+}
+
+// Compute inscattering contribution along a ray segment with colored medium
+Vector3D Colored::computeInscattering(const Ray& r, double t_max, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, int depth) const {
+
+    // Color-dependent absorption and scattering (creates colored shadows)
+    // Red shadows: absorb cyan/blue, let red pass through shadows
+    Vector3D mu_a(0.003, 0.025, 0.030);  // Absorption (R, G, B) - absorb cyan/blue heavily
+    Vector3D mu_s(0.15, 0.03, 0.02);     // Scattering (R, G, B) - scatter red heavily in light areas
+    Vector3D mu_t = mu_a + mu_s;         // Total extinction per channel
+
+    // Use average extinction for distance sampling
+    double mu_t_avg = (mu_t.x + mu_t.y + mu_t.z) / 3.0;
+
+    Vector3D L_inscatter(0.0);
+
+    double t_sample = sampleDistance(mu_t_avg);
+
+    if (t_sample < t_max) {                                                 // If scattering event happens before intersection
+        Vector3D scatter_pos = r.o + r.d * t_sample;                        // Scattering event position
+        Vector3D T_to_scatter = computeTransmittance(t_sample, mu_t);       // Transmittance
+
+        Vector3D L_direct_scatter(0.0);
+        for (auto light : lsList) {                                         // Iterate for every light source
+            Vector3D light_pos = light->sampleLightPosition();              // Light position
+            Vector3D light_dir = (light_pos - scatter_pos).normalized();    // Light direction
+            double light_dist = (light_pos - scatter_pos).length();         // Light distance  
+
+            Ray shadow_ray(scatter_pos, light_dir);
+            shadow_ray.maxT = light_dist - Epsilon;                         // Cast shadow ray
+
+            if (!Utils::hasIntersection(shadow_ray, objList)) {             // If not occluded, compute contribution --> NEE
+                Vector3D light_n = light->getNormal();
+                double light_area = light->getArea();
+                Vector3D T_to_light = computeTransmittance(light_dist, mu_t);
+                double phase = 1.0 / (4.0 * M_PI);
+                double geometric = abs(dot(-light_dir, light_n)) / ((light_pos - scatter_pos).lengthSq());
+                Vector3D emitted = light->getIntensity() * 2.0;             // Boost light intensity to make volumetric effects more visible
+
+                // Component-wise multiplication for colored transmission
+                L_direct_scatter += emitted * T_to_light * phase * geometric * light_area;  // Accumulate contribution
+            }
+        }
+
+        // Color-dependent albedo
+        Vector3D albedo = mu_s / mu_t;
+        L_inscatter = L_direct_scatter * albedo * T_to_scatter;                     // Direct scattering contribution
+
+        // Multiple scattering
+        if (depth < 5) {
+            HemisphericalSampler hs;
+            Vector3D random_dir = hs.getSample(Vector3D(0, 1, 0)).normalized();
+            Ray scatter_ray(scatter_pos, random_dir, depth + 1);                    // Cast new ray from scattering point
+            scatter_ray.maxT = 1000.0;
+
+            Intersection scatter_its;
+            if (Utils::getClosestIntersection(scatter_ray, objList, scatter_its)) {
+                double dist_to_surface = (scatter_its.itsPoint - scatter_pos).length();
+                Vector3D L_indirect = computeInscattering(scatter_ray, dist_to_surface, objList, lsList, depth + 1);        // Recursibe inscattering
+                L_inscatter += L_indirect * albedo * T_to_scatter * (1.0 / (4.0 * M_PI));
+            }
+        }
+    }
+
+    return L_inscatter;
+}
+
+Vector3D Colored::computeRadiance(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, const int MaxDepth) const {
+    Intersection its;
+    Vector3D Lo(0.0, 0.0, 0.0);
+
+    // Colored extinction coefficients - red shadows
+    Vector3D mu_a(0.003, 0.025, 0.030);
+    Vector3D mu_s(0.15, 0.03, 0.02);
+    Vector3D mu_t = mu_a + mu_s;
+
+    if (Utils::getClosestIntersection(r, objList, its)) {
+        double distance = (its.itsPoint - r.o).length();
+        Vector3D T = computeTransmittance(distance, mu_t);                                      // Transmittance through heterogeneous media
+
+        Vector3D L_inscatter = computeInscattering(r, distance, objList, lsList, r.depth);      // In-scattering contribution
+        Lo += L_inscatter;
+        Lo += its.shape->getMaterial().getEmissiveRadiance() * T;                               // Surface emision attenuated
+
+        // Surface reflection
+        if (r.depth < MaxDepth) {
+            Vector3D wo = -r.d.normalized();
+            Vector3D n = its.normal.normalized();
+            Vector3D L_reflected = ReflectedRadiance(its, wo, r.depth, objList, lsList);
+            Lo += L_reflected * T;
+        }
+        return Lo;
+    }
+
+    // Background with colored fog
+    double tau_avg = (mu_t.x + mu_t.y + mu_t.z) / 3.0;
+    double exp_r = exp(-mu_t.x);
+    double exp_g = exp(-mu_t.y);
+    double exp_b = exp(-mu_t.z);
+    Vector3D T_light = Vector3D(exp_r > 0.3 ? exp_r : 0.3, exp_g > 0.3 ? exp_g : 0.3, exp_b > 0.3 ? exp_b : 0.3);
+    Vector3D ambient = bgColor * 0.2;
+    return ambient + bgColor * T_light;
+}
+
+Vector3D Colored::ReflectedRadiance(const Intersection& its, const Vector3D& wo, const size_t depth, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const {
+    Vector3D L_dir = DirectRadiance(its, wo, objList, lsList);
+    Vector3D L_ind = IndirectRadiance(its, wo, depth, objList, lsList);
+
+    return L_dir + L_ind;
+}
+
+Vector3D Colored::DirectRadiance(const Intersection& its, const Vector3D& wo, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const {
+    Vector3D L_direct = Vector3D(0.0);
+
+    // Colored extinction
+    Vector3D mu_a(0.005, 0.015, 0.025);
+    Vector3D mu_s(0.08, 0.04, 0.02);
+    Vector3D mu_t = mu_a + mu_s;
+
+    for (int light_idx = 0; light_idx < lsList.size(); light_idx++) {
+        double light_area = lsList[light_idx]->getArea();
+        Vector3D y = lsList[light_idx]->sampleLightPosition();
+
+        Vector3D n = its.normal.normalized();
+        Vector3D wi = (y - its.itsPoint).normalized();
+
+        double p_y = 1.0 / light_area;
+
+        Vector3D reflectance = its.shape->getMaterial().getReflectance(n, wo, wi);
+
+        Ray ray_wi(its.itsPoint + n * Epsilon, wi);
+        ray_wi.maxT = (y - its.itsPoint).length() - Epsilon;
+
+        size_t V;
+
+        if (Utils::hasIntersection(ray_wi, objList)) {
+            V = 0;
+        }
+        else {
+            V = 1;
+        }
+
+        Vector3D light_n = lsList[light_idx]->getNormal();
+
+        double geometric_term = (dot(n, wi) * abs(dot(-wi, light_n))) / (y - its.itsPoint).lengthSq();
+        Vector3D emited_light = lsList[light_idx]->getIntensity();
+
+        // Colored volumetric transmittance
+        double dist = (y - its.itsPoint).length();
+        Vector3D T_light = computeTransmittance(dist, mu_t);
+
+        // Ensure positive dot product
+        double cos_term = std::max(0.0, dot(n, wi));
+
+        L_direct += (emited_light * reflectance * T_light * cos_term * abs(dot(-wi, light_n)) * V) / ((y - its.itsPoint).lengthSq() * p_y);
+    }
+    return L_direct;
+}
+
+Vector3D Colored::IndirectRadiance(const Intersection& its, const Vector3D& wo, const size_t depth, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, const size_t maxDepth) const {
+    HemisphericalSampler hs;
+    Vector3D L_indirect = Vector3D(0.0);
+
+    // Cosine-weighted hemisphere sampling
+    double r1 = randomUniform();
+    double r2 = randomUniform();
+
+    double phi = 2.0 * M_PI * r1;
+    double cosTheta = sqrt(1.0 - r2);
+    double sinTheta = sqrt(r2);
+
+    // Local coordinate system
+    Vector3D n = its.normal.normalized();
+    Vector3D tangent, bitangent;
+    if (fabs(n.x) > fabs(n.y)) {
+        tangent = Vector3D(-n.z, 0, n.x).normalized();
+    }
+    else {
+        tangent = Vector3D(0, n.z, -n.y).normalized();
+    }
+    bitangent = cross(n, tangent);
+
+    // Transform to world space
+    Vector3D wi = (tangent * cos(phi) * sinTheta + bitangent * sin(phi) * sinTheta + n * cosTheta).normalized();
+
+    double p_wi = cosTheta / M_PI;
+
+    Ray new_r(its.itsPoint + n * Epsilon, wi, depth + 1);
+    new_r.maxT = 1000.0;
+
+    // Recursive path tracing
+    if (depth < maxDepth) {
+        Intersection y;
+        if (Utils::getClosestIntersection(new_r, objList, y)) {
+            Vector3D reflectance = its.shape->getMaterial().getReflectance(n, wo, wi);
+            double cos_term = std::max(0.0, dot(n, wi));
+
+            Vector3D incoming_radiance = computeRadiance(new_r, objList, lsList, maxDepth);
+
+            L_indirect += incoming_radiance * reflectance * cos_term / p_wi;
+        }
+    }
+
+    return L_indirect;
+}
+
+Vector3D Colored::computeColor(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const {
+    size_t N = 100;
+    Vector3D vector_total(0.0, 0.0, 0.0);
+
+    for (size_t idx = 0; idx < N; idx++)
+        vector_total += computeRadiance(r, objList, lsList, 5);
+
+    return vector_total / N;
+}
+```
+
+### shaders/coloredvolumetricpathshader.h
+```
+#ifndef COLOREDVOLUMETRICPATHSHADER_H
+#define COLOREDVOLUMETRICPATHSHADER_H
+
+#include "shader.h"
+
+class Colored : public Shader
+{
+public:
+    Colored();
+    Colored(Vector3D hitColor, Vector3D bgColor_);
+
+    Vector3D DirectRadiance(const Intersection& its, const Vector3D& wo, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const;
+    Vector3D IndirectRadiance(const Intersection& its, const Vector3D& wo, const size_t depth, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, const size_t maxDepth = 3) const;
+    Vector3D ReflectedRadiance(const Intersection& its, const Vector3D& wo, const size_t depth, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const;
+    Vector3D computeInscattering(const Ray& r, double t_max,
+        const std::vector<Shape*>& objList,
+        const std::vector<LightSource*>& lsList,
+        int depth) const;
+
+    Vector3D computeRadiance(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, const int MaxDepth = 3) const;
+
+    Vector3D computeColor(const Ray &r,
+                             const std::vector<Shape*> &objList,
+                             const std::vector<LightSource*> &lsList) const;
+
+    Vector3D hitColor;
+};
+
+#endif //Colored
+```
+
+### shaders/depthshader.cpp
+```
+#include "depthshader.h"
+
+#include "../core/utils.h"
+
+DepthShader::DepthShader() :
+    color(Vector3D(1, 0, 0))
+{ }
+
+DepthShader::DepthShader(Vector3D hitColor_, double maxDist_, Vector3D bgColor_) :
+    Shader(bgColor_), maxDist(maxDist_), color(hitColor_)
+{ }
+
+Vector3D DepthShader::computeColor(const Ray &r, const std::vector<Shape*> &objList, const std::vector<LightSource*> &lsList) const
+{
+    Intersection its;
+
+    if (Utils::getClosestIntersection(r, objList, its)) {
+        Vector3D origin = r.o;
+        Vector3D dest = its.itsPoint;
+
+        float dist = (origin - dest).length();
+        float dist_n = dist / maxDist;
+
+        return Vector3D(0, 1 - dist_n, 0);
+    }
+
+
+    return bgColor;
+}
+```
+
+### shaders/depthshader.h
+```
+#ifndef DEPTHSHADER_H
+#define DEPTHSHADER_H
+
+#include "shader.h"
+
+
+class DepthShader : public Shader
+{
+public:
+    DepthShader();
+    DepthShader(Vector3D color_, double maxDist_, Vector3D bgColor_);
+
+    Vector3D computeColor(const Ray &r,
+                             const std::vector<Shape*> &objList,
+                             const std::vector<LightSource*> &lsList) const;
+
+private:
+    double maxDist;
+    Vector3D color;
+};
+
+#endif // DEPTHSHADER_H
+```
+
+### shaders/hemisphericalshader.cpp
+```
+﻿#include "shader.h"
+#include "hemisphericalshader.h"
+#include "../materials/phong.h"
+#include "../lightsources/pointlightsource.h"
+#include "../core/hemisphericalsampler.h"
+#include "../core/utils.h"
+
+#define M_PI 3.1416
+
+HemisphericalShader::HemisphericalShader() :
+    Color(Vector3D(1, 0, 0))
+{
+}
+
+HemisphericalShader::HemisphericalShader(Vector3D Color_, Vector3D bgColor_) :
+    Shader(bgColor_), Color(Color_)
+{
+}
+
+Vector3D HemisphericalShader::computeColor(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const {
+    Intersection its;
+    Vector3D Color = Vector3D(0, 0, 0);
+
+    if (!Utils::getClosestIntersection(r, objList, its)) {
+        return bgColor;
+    }
+
+    // Handle emissive materials - they emit light themselves
+    if (its.shape->getMaterial().isEmissive()) {
+        Color = its.shape->getMaterial().getEmissiveRadiance();
+    }
+
+    Vector3D wo = -r.d; // Viewing direction (from surface to camera)
+    Vector3D n = its.normal.normalized();
+
+    // We use hemispherical sampling for diffuse/glossy materials
+    if (its.shape->getMaterial().hasDiffuseOrGlossy()) {
+        Vector3D ambient = Vector3D(0.25);
+        Vector3D diffuse_coefficient = its.shape->getMaterial().getDiffuseReflectance();
+        int numSamples = 512;
+
+        Color += ambient * diffuse_coefficient;
+
+        for (int j = 0; j < numSamples; j++) {
+            // Sample uniform hemisphere around normal
+            Vector3D wi = HemisphericalSampler().getSample(n);
+            double pdf = 1.0 / (2.0 * M_PI); // Uniform hemisphere PDF
+
+            // Test visibility in direction wi
+            Ray testRay(its.itsPoint, wi);
+            Intersection lightIts;
+
+            Vector3D Li_dir = Vector3D(0, 0, 0);
+            if (Utils::getClosestIntersection(testRay, objList, lightIts) && lightIts.shape->getMaterial().isEmissive()) {
+                Li_dir = lightIts.shape->getMaterial().getEmissiveRadiance();
+            }
+
+            // BRDF evaluation
+            Vector3D fr = its.shape->getMaterial().getReflectance(n, wo, wi);
+
+            // Cosine term
+            double cosTerm = std::max(0.0, dot(n, wi));
+
+            // Monte Carlo estimatation
+            Color += (Li_dir * fr * cosTerm) / (pdf * numSamples);
+        }
+
+    }
+    // We use recursive ray tracing for perfect reflection (specular materials)
+    else if (its.shape->getMaterial().hasSpecular()) {
+        // We calculate the ideal reflection direction
+        Vector3D in_light_direction = -(r.d).normalized();   // Incident light direction (ωi)
+        Vector3D normal = its.normal.normalized(); // The normal (n)
+
+        double scale_factor = 2.0 * dot(normal, in_light_direction);
+        Vector3D reflection = scale_factor * normal;
+        Vector3D ideal_reflection = reflection - in_light_direction; // Final computation of the ideal reflection direction (wr)
+
+        // We build the reflection ray from the intersection point to the ideal reflection direction
+        Ray reflection_ray(its.itsPoint, ideal_reflection, r.depth + 1);
+        // Recursive Ray Tracing
+        Color = computeColor(reflection_ray, objList, lsList);
+    }
+    // We use recursive ray tracing for refraction
+    else if (its.shape->getMaterial().hasTransmission()) {
+        //We compute the transmissive refaction wt following the formula:
+
+        Vector3D normal = its.normal.normalized(); // The normal (n)
+        Vector3D view_direction = -(r.d).normalized(); // viewing direction (wo)
+        double refraction_ratio = 0.75;
+
+        // If the ray is inside the object (we are going from medium µ2 to µ1) we need to flip the normal and invert the refraction ratio
+        if (dot(view_direction, normal) < 0) {
+            refraction_ratio = 1.0 / refraction_ratio;
+            normal = -normal;
+        }
+
+        // Cosine of angle between incident ray and surface normal
+        double cos_angle = dot(view_direction, normal);
+
+        // Discriminant of the equation
+        double discriminant = 1.0 - refraction_ratio * refraction_ratio * (1.0 - (cos_angle * cos_angle));
+
+        Vector3D transmissive_refraction;
+
+        if (discriminant >= 0) {
+
+            double refract_term = sqrt(discriminant);
+            Vector3D first_term = (refraction_ratio * view_direction);
+            Vector3D second_term = refraction_ratio * cos_angle - refract_term;
+
+            transmissive_refraction = -first_term + normal * second_term;
+        }
+        else {
+            // Happens total internal reflection so the ray cannot exit the material
+            // We compute specular reflection instead
+            double scale_factor = 2.0 * dot(normal, view_direction);
+            Vector3D reflection = scale_factor * normal;
+            Vector3D transmissive_refraction = reflection - view_direction;
+        }
+
+
+        Ray refracted_ray(its.itsPoint, transmissive_refraction, r.depth + 1);
+
+        // Recursively trace the refracted ray to get its color contribution
+        Color = computeColor(refracted_ray, objList, lsList);
+    }
+        return Color;
+}
+```
+
+### shaders/hemisphericalshader.h
+```
+#ifndef HEMISPHERICALSHADER_H
+#define HEMISPHERICALSHADER_H
+
+#include "shader.h"
+
+
+class HemisphericalShader : public Shader
+{
+public:
+    HemisphericalShader();
+    HemisphericalShader(Vector3D Color_, Vector3D bgColor_);
+
+    Vector3D computeColor(const Ray& r,
+        const std::vector<Shape*>& objList,
+        const std::vector<LightSource*>& lsList) const;
+
+    Vector3D bgColor;
+private:
+    Vector3D Color;
+};
+
+#endif HEMISPHERICALSHADER_H
+```
+
+### shaders/heterogeneousvolumetric.cpp
+```
+﻿#include "heterogeneousvolumetric.h"
+#include "../core/utils.h"
+#include "../core/hemisphericalsampler.h"
+#include <random>
+
+#define _USE_MATH_DEFINES
+#include "math.h"
+
+Heterogeneous::Heterogeneous() :
+    hitColor(Vector3D(1, 0, 0))
+{
+}
+
+Heterogeneous::Heterogeneous(Vector3D hitColor_, Vector3D bgColor_) :
+    Shader(bgColor_), hitColor(hitColor_)
+{
+}
+
+// Helper function for uniform random sampling
+static double randomUniform() {
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    static std::uniform_real_distribution<> dis(0.0, 1.0);
+    return dis(gen);
+}
+
+// ==================== NOISE FUNCTIONS ====================
+
+// Permutation function for noise
+double permute(double x) {
+    return fmod(((x * 34.0) + 1.0) * x, 289.0);
+}
+
+// Vector3D permutation
+Vector3D permute(const Vector3D& x) {
+    return Vector3D(
+        fmod(((x.x * 34.0) + 1.0) * x.x, 289.0),
+        fmod(((x.y * 34.0) + 1.0) * x.y, 289.0),
+        fmod(((x.z * 34.0) + 1.0) * x.z, 289.0)
+    );
+}
+
+// Taylor inverse square root approximation
+double taylorInvSqrt(double r) {
+    return 1.79284291400159 - 0.85373472095314 * r;
+}
+
+// 3D Simplex Noise (Adapted from GLSL implementation)
+double snoise(const Vector3D& v) {
+    const double C1 = 1.0 / 6.0;
+    const double C2 = 1.0 / 3.0;
+
+    // First corner
+    double s = (v.x + v.y + v.z) * C2;
+    Vector3D i = Vector3D(floor(v.x + s), floor(v.y + s), floor(v.z + s));
+
+    double t = (i.x + i.y + i.z) * C1;
+    Vector3D x0 = v - (i - Vector3D(t, t, t));
+
+    // Other corners
+    Vector3D g = Vector3D(
+        x0.x >= x0.y ? 1.0 : 0.0,
+        x0.y >= x0.z ? 1.0 : 0.0,
+        x0.z >= x0.x ? 1.0 : 0.0
+    );
+    Vector3D l = Vector3D(1.0, 1.0, 1.0) - g;
+
+    Vector3D i1 = Vector3D(
+        std::min(g.x, l.z),
+        std::min(g.y, l.x),
+        std::min(g.z, l.y)
+    );
+    Vector3D i2 = Vector3D(
+        std::max(g.x, l.z),
+        std::max(g.y, l.x),
+        std::max(g.z, l.y)
+    );
+
+    Vector3D x1 = x0 - i1 + Vector3D(C1, C1, C1);
+    Vector3D x2 = x0 - i2 + Vector3D(2.0 * C1, 2.0 * C1, 2.0 * C1);
+    Vector3D x3 = x0 - Vector3D(1.0, 1.0, 1.0) + Vector3D(3.0 * C1, 3.0 * C1, 3.0 * C1);
+
+    // Permutations
+    i = Vector3D(fmod(i.x, 289.0), fmod(i.y, 289.0), fmod(i.z, 289.0));
+
+    double p0 = permute(permute(permute(i.z) + i.y) + i.x);
+    double p1 = permute(permute(permute(i.z + i1.z) + i.y + i1.y) + i.x + i1.x);
+    double p2 = permute(permute(permute(i.z + i2.z) + i.y + i2.y) + i.x + i2.x);
+    double p3 = permute(permute(permute(i.z + 1.0) + i.y + 1.0) + i.x + 1.0);
+
+    // Simplified gradient calculation
+    double n_ = 1.0 / 7.0;
+    double j0 = p0 - 49.0 * floor(p0 * n_ * n_);
+    double j1 = p1 - 49.0 * floor(p1 * n_ * n_);
+    double j2 = p2 - 49.0 * floor(p2 * n_ * n_);
+    double j3 = p3 - 49.0 * floor(p3 * n_ * n_);
+
+    // Create gradients
+    auto makeGradient = [n_](double j) -> Vector3D {
+        double x_ = floor(j * n_);
+        double y_ = floor(j - 7.0 * x_);
+        double x = x_ * n_ + n_;
+        double y = y_ * n_ + n_;
+        double h = 1.0 - abs(x) - abs(y);
+        double sx = x >= 0 ? 1.0 : -1.0;
+        double sy = y >= 0 ? 1.0 : -1.0;
+        if (h < 0.0) {
+            x = x - sx * h;
+            y = y - sy * h;
+        }
+        return Vector3D(x, y, h);
+        };
+
+    Vector3D grad0 = makeGradient(j0);
+    Vector3D grad1 = makeGradient(j1);
+    Vector3D grad2 = makeGradient(j2);
+    Vector3D grad3 = makeGradient(j3);
+
+    // Normalize
+    double norm0 = taylorInvSqrt(dot(grad0, grad0));
+    double norm1 = taylorInvSqrt(dot(grad1, grad1));
+    double norm2 = taylorInvSqrt(dot(grad2, grad2));
+    double norm3 = taylorInvSqrt(dot(grad3, grad3));
+
+    grad0 = grad0 * norm0;
+    grad1 = grad1 * norm1;
+    grad2 = grad2 * norm2;
+    grad3 = grad3 * norm3;
+
+    // Mix contributions
+    double m0 = std::max(0.6 - dot(x0, x0), 0.0);
+    double m1 = std::max(0.6 - dot(x1, x1), 0.0);
+    double m2 = std::max(0.6 - dot(x2, x2), 0.0);
+    double m3 = std::max(0.6 - dot(x3, x3), 0.0);
+
+    m0 *= m0; m0 *= m0;
+    m1 *= m1; m1 *= m1;
+    m2 *= m2; m2 *= m2;
+    m3 *= m3; m3 *= m3;
+
+    return 42.0 * (m0 * dot(grad0, x0) + m1 * dot(grad1, x1) +
+        m2 * dot(grad2, x2) + m3 * dot(grad3, x3));
+}
+
+// Fractional Brownian Motion
+double fbm(const Vector3D& p, double scale = 1.0, int octaves = 3) {
+    double value = 0.0;
+    double amplitude = 0.5;
+    Vector3D position = p / scale;
+    Vector3D shift = Vector3D(100.0, 100.0, 100.0);
+
+    for (int i = 0; i < octaves; i++) {
+        value += amplitude * snoise(position);
+        position = position * 2.0 + shift;
+        amplitude *= 0.5;
+    }
+
+    return fabs(value);
+}
+
+// Get density at a point in space using FBM
+double getDensity(const Vector3D& pos, double base_density = 0.8) {
+    // Single FBM call with 2 octaves for good balance of detail and speed
+    double noise = fbm(pos, 3.0, 2);
+
+    // Remap from [-1, 1] to [0, 1]
+    noise = noise * 0.5 + 0.5;
+
+    // Apply power function to create patchier distribution
+    // Values close to 0 become very sparse, values close to 1 stay dense
+    double density = pow(noise, 2.5);
+
+    // Add threshold to create clear empty regions
+    if (density < 0.15) {
+        density = 0.0;
+    }
+
+    // Scale by base density
+    density *= base_density;
+
+    return std::max(0.0, std::min(1.0, density));
+}
+
+// ==================== VOLUMETRIC RENDERING ====================
+
+// Compute transmittance between two points through heterogeneous media
+double computeTransmittance(const Vector3D& p1, const Vector3D& p2, double mu_s, double mu_a) {
+    Vector3D dir = (p2 - p1);
+    double dist = dir.length();
+    dir = dir.normalized();
+
+    const int STEPS = 16;  // Reduced from 50 for performance
+    const double step_size = dist / STEPS;
+
+    double tau = 0.0;
+    for (int i = 0; i < STEPS; i++) {
+        Vector3D pos = p1 + dir * (i * step_size);
+        double density = getDensity(pos);
+        tau += (mu_a + mu_s) * density * step_size;
+    }
+
+    return exp(-tau);
+}
+
+// ------------------ Delta (Woodcock) Tracking ------------------
+double sampleDistanceDeltaTracking(const Ray& r, double t_max, double& transmittance, Vector3D& sample_pos, double mu_s, double mu_a)
+{
+    const double sigma_t_max = (mu_s + mu_a);
+
+    double t = 0.0;
+
+    while (true)
+    {
+        // 1. Sample exponential distance
+        double xi = randomUniform();
+        t += -log(1.0 - xi) / sigma_t_max;
+
+        // If we step outside the volume, no collision
+        if (t >= t_max)
+        {
+            sample_pos = r.o + r.d * t_max;
+            return t_max;   // "no real collision inside"
+        }
+
+        // 2. Compute real extinction at sampled position
+        Vector3D pos = r.o + r.d * t;
+        double density = getDensity(pos);                    // in [0,1]
+        double sigma_t_local = (mu_s + mu_a) * density;      // local sigma_t(x)
+
+        // 3. Acceptance / rejection
+        if (randomUniform() < (sigma_t_local / sigma_t_max))
+        {
+            sample_pos = pos;   // real event
+            return t;           // return distance to collision
+        }
+
+        // else: null-collision --> keep looping
+    }
+}
+
+// Compute inscattering contribution along a ray segment
+Vector3D Heterogeneous::computeInscattering(const Ray& r, double t_max, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, int depth) const {
+
+    double mu_a = 0.05;  // Absorption - reduced for brighter patches
+    double mu_s = 0.1;   // Scattering - increased for more visible fog patches
+
+    Vector3D L_inscatter(0.0);
+
+    Vector3D scatter_pos;
+    double T_to_scatter;
+    double t_sample = sampleDistanceDeltaTracking(r, t_max, T_to_scatter, scatter_pos, mu_s, mu_a);     // Delta tracking sampling --> distance to next event
+
+    if (t_sample < t_max) {                                 // if a scattering event occurs before intersection hit
+        double local_density = getDensity(scatter_pos);     // Get density at scattering point (since it's heterogeneous media)
+        double local_mu_a = mu_a * local_density;           // Local absorption coefficient
+        double local_mu_s = mu_s * local_density;           // Local scattering coefficient
+        double local_mu_t = (mu_a + mu_s) * local_density;  // Local extinction coefficient
+
+        if (local_mu_t > 0.0001) {                          
+            // Direct lighting from light sources
+            Vector3D L_direct_scatter(0.0);
+
+            double pScatter = local_mu_s / local_mu_t;      // Local single scattering albedo
+            double xi = randomUniform();
+
+            if (xi > pScatter) {    // ABSORPTION -> ray dies, contributes no radiance
+
+                return Vector3D(0.0);
+
+            }
+            else {      // SCATTERING EVENT -> continue in-scattering
+                for (auto light : lsList) {
+                    Vector3D light_pos = light->sampleLightPosition();              // Sample light position
+                    Vector3D light_dir = (light_pos - scatter_pos).normalized();    // Direction to light
+                    double light_dist = (light_pos - scatter_pos).length();         // Distance to light
+
+                    Ray shadow_ray(scatter_pos, light_dir);
+                    shadow_ray.maxT = light_dist - Epsilon;                         // Shadow ray to light
+
+                    if (!Utils::hasIntersection(shadow_ray, objList)) {             // If not occluded, compute contribution
+                        Vector3D light_n = light->getNormal();
+                        double light_area = light->getArea();
+
+                        // Transmittance through heterogeneous media
+                        double T_to_light = computeTransmittance(scatter_pos, light_pos, local_mu_s, local_mu_a);
+
+                        // Isotropic phase function
+                        double phase = 1.0 / (4.0 * M_PI);
+                        double geometric = abs(dot(-light_dir, light_n)) / ((light_pos - scatter_pos).lengthSq());
+                        Vector3D emitted = light->getIntensity() * 3.0;             // Boost light intensity to make volumetric effects more visible
+
+                        L_direct_scatter += emitted * phase * geometric * T_to_light * light_area;  // Accumulate contribution
+                    }
+                }
+            }
+
+            double albedo = local_mu_s / local_mu_t;                            // Local single scattering albedo
+            L_inscatter = L_direct_scatter * albedo * T_to_scatter;             // Direct inscattering contribution
+
+            // Multiple scattering
+            if (depth < 5) {
+                HemisphericalSampler hs;
+                Vector3D random_dir = hs.getSample(Vector3D(0, 1, 0)).normalized();
+                Ray scatter_ray(scatter_pos, random_dir, depth + 1);            // Cast new ray from scattering point
+                scatter_ray.maxT = 1000.0;
+
+                Intersection scatter_its;
+                if (Utils::getClosestIntersection(scatter_ray, objList, scatter_its)) {
+                    double dist_to_surface = (scatter_its.itsPoint - scatter_pos).length();
+                    Vector3D L_indirect = computeInscattering(scatter_ray, dist_to_surface,     // Recursive inscattering
+                        objList, lsList, depth + 1);
+                    L_inscatter += L_indirect * albedo * T_to_scatter * (1.0 / (4.0 * M_PI));
+                }
+            }
+        }
+    }
+
+    return L_inscatter;
+}
+
+Vector3D Heterogeneous::computeRadiance(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, const int MaxDepth) const {
+    Intersection its;
+    Vector3D Lo(0.0, 0.0, 0.0);
+
+    double mu_a = 0.05;
+    double mu_s = 0.1;
+
+    if (Utils::getClosestIntersection(r, objList, its)) {
+        double distance = (its.itsPoint - r.o).length();
+
+        // Compute transmittance through heterogeneous media
+        double T = computeTransmittance(r.o, its.itsPoint, mu_s, mu_a);
+
+        // In-scattering contribution
+        Vector3D L_inscatter = computeInscattering(r, distance, objList, lsList, r.depth);
+        Lo += L_inscatter;
+
+        // Surface emission
+        Lo += its.shape->getMaterial().getEmissiveRadiance() * T;
+
+        // Surface reflection
+        if (r.depth < MaxDepth) {
+            Vector3D wo = -r.d.normalized();
+            Vector3D n = its.normal.normalized();
+            Vector3D L_reflected = ReflectedRadiance(its, wo, r.depth, objList, lsList);
+            Lo += L_reflected * T;
+        }
+        return Lo;
+    }
+
+    // Background with atmospheric scattering
+    double avg_density = 0.3;
+    double tau = (mu_a + mu_s) * avg_density * 10.0;
+    double T_light = std::max(0.2, exp(-tau));
+    Vector3D ambient = bgColor * 0.15;
+    return ambient + bgColor * T_light;
+}
+
+Vector3D Heterogeneous::ReflectedRadiance(const Intersection& its, const Vector3D& wo, const size_t depth, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const {
+    Vector3D L_dir = DirectRadiance(its, wo, objList, lsList);
+    Vector3D L_ind = IndirectRadiance(its, wo, depth, objList, lsList);
+
+    return L_dir + L_ind;
+}
+
+Vector3D Heterogeneous::DirectRadiance(const Intersection& its, const Vector3D& wo, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const {
+    Vector3D L_direct = Vector3D(0.0);
+
+    double mu_a = 0.05;
+    double mu_s = 0.1;
+
+    for (int light_idx = 0; light_idx < lsList.size(); light_idx++) {
+        double light_area = lsList[light_idx]->getArea();
+        Vector3D y = lsList[light_idx]->sampleLightPosition();
+
+        Vector3D n = its.normal.normalized();
+        Vector3D wi = (y - its.itsPoint).normalized();
+
+        double p_y = 1.0 / light_area;
+
+        Vector3D reflectance = its.shape->getMaterial().getReflectance(n, wo, wi);
+
+        Ray ray_wi(its.itsPoint + n * Epsilon, wi);
+        ray_wi.maxT = (y - its.itsPoint).length() - Epsilon;
+
+        size_t V;
+
+        if (Utils::hasIntersection(ray_wi, objList)) {
+            V = 0;
+        }
+        else {
+            V = 1;
+        }
+
+        Vector3D light_n = lsList[light_idx]->getNormal();
+
+        double geometric_term = (dot(n, wi) * abs(dot(-wi, light_n))) / (y - its.itsPoint).lengthSq();
+        Vector3D emited_light = lsList[light_idx]->getIntensity();
+
+        // Heterogeneous volumetric transmittance
+        double T_light = computeTransmittance(its.itsPoint, y, mu_s, mu_a);
+
+        double cos_term = std::max(0.0, dot(n, wi));
+
+        L_direct += (emited_light * reflectance * cos_term * abs(dot(-wi, light_n)) * V * T_light) / ((y - its.itsPoint).lengthSq() * p_y);
+    }
+    return L_direct;
+}
+
+Vector3D Heterogeneous::IndirectRadiance(const Intersection& its, const Vector3D& wo, const size_t depth, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, const size_t maxDepth) const {
+    HemisphericalSampler hs;
+    Vector3D L_indirect = Vector3D(0.0);
+
+    // Cosine-weighted hemisphere sampling
+    double r1 = randomUniform();
+    double r2 = randomUniform();
+
+    double phi = 2.0 * M_PI * r1;
+    double cosTheta = sqrt(1.0 - r2);
+    double sinTheta = sqrt(r2);
+
+    // Build local coordinate system
+    Vector3D n = its.normal.normalized();
+    Vector3D tangent, bitangent;
+    if (fabs(n.x) > fabs(n.y)) {
+        tangent = Vector3D(-n.z, 0, n.x).normalized();
+    }
+    else {
+        tangent = Vector3D(0, n.z, -n.y).normalized();
+    }
+    bitangent = cross(n, tangent);
+
+    // Transform to world space
+    Vector3D wi = (tangent * cos(phi) * sinTheta +
+        bitangent * sin(phi) * sinTheta +
+        n * cosTheta).normalized();
+
+    double p_wi = cosTheta / M_PI;
+
+    Ray new_r(its.itsPoint + n * Epsilon, wi, depth + 1);
+    new_r.maxT = 1000.0;
+
+    if (depth < maxDepth) {
+        Intersection y;
+        if (Utils::getClosestIntersection(new_r, objList, y)) {
+            Vector3D reflectance = its.shape->getMaterial().getReflectance(n, wo, wi);
+            double cos_term = std::max(0.0, dot(n, wi));
+
+            Vector3D incoming_radiance = computeRadiance(new_r, objList, lsList, maxDepth);
+
+            L_indirect += incoming_radiance * reflectance * cos_term / p_wi;
+        }
+    }
+
+    return L_indirect;
+}
+
+Vector3D Heterogeneous::computeColor(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const {
+    size_t N = 128;
+    Vector3D vector_total(0.0, 0.0, 0.0);
+
+    for (size_t idx = 0; idx < N; idx++)
+        vector_total += computeRadiance(r, objList, lsList, 5);
+
+    return vector_total / N;
+}
+```
+
+### shaders/heterogeneousvolumetric.h
+```
+#ifndef HETEROGENEOUSVOLUMETRIC_H
+#define HETEROGENEOUSVOLUMETRIC_H
+
+#include "shader.h"
+
+class Heterogeneous : public Shader
+{
+public:
+    Heterogeneous();
+    Heterogeneous(Vector3D hitColor, Vector3D bgColor_);
+
+    Vector3D DirectRadiance(const Intersection& its, const Vector3D& wo, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const;
+    Vector3D IndirectRadiance(const Intersection& its, const Vector3D& wo, const size_t depth, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, const size_t maxDepth = 3) const;
+    Vector3D ReflectedRadiance(const Intersection& its, const Vector3D& wo, const size_t depth, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const;
+    Vector3D computeInscattering(const Ray& r, double t_max, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, int depth) const;
+
+    Vector3D computeRadiance(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, const int MaxDepth = 3) const;
+
+    Vector3D computeColor(const Ray &r, const std::vector<Shape*> &objList, const std::vector<LightSource*> &lsList) const;
+
+    Vector3D hitColor;
+};
+
+#endif //HETEROGENEOUS
+```
+
+### shaders/homogenousvolumetricpathshader.cpp
+```
+#include "homogenousvolumetricpathshader.h"
+#include "../core/utils.h"
+#include "../core/hemisphericalsampler.h"
+#include <random>
+
+#define _USE_MATH_DEFINES
+#include "math.h"
+
+Homogenous::Homogenous():
+    hitColor(Vector3D(1, 0, 0))
+{
+}
+
+Homogenous::Homogenous(Vector3D hitColor_, Vector3D bgColor_) :
+    Shader(bgColor_), hitColor(hitColor_)
+{
+}
+
+// Helper function for uniform random sampling
+double randomUniform() {
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    static std::uniform_real_distribution<> dis(0.0, 1.0);
+    return dis(gen);
+}
+
+// Sample distance in participating media using exponential distribution
+double sampleDistance(double sigma_t) {
+    double xi = randomUniform();
+    return -log(1.0 - xi) / sigma_t;
+}
+
+// Compute inscattering contribution along a ray segment
+Vector3D Homogenous::computeInscattering(const Ray& r, double t_max, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, int depth) const {
+
+    // Absorption and scattering coefficients
+    double mu_a = 0.05;
+    double mu_s = 0.1;
+    double mu_t = mu_a + mu_s;  // 0.05 - 0.5     // 0.1 - 1.0
+
+    Vector3D L_inscatter(0.0);
+
+    double t_sample = sampleDistance(mu_t);
+
+    if (t_sample < t_max) {     // if a scattering event occurs before surface hit
+        Vector3D scatter_pos = r.o + r.d * t_sample;
+        double T_to_scatter = exp(-mu_t * t_sample);
+
+        Vector3D L_direct_scatter(0.0);
+        // -------------------------------------------------------------------------------
+        double pScatter = mu_s / mu_t;
+        double xi = randomUniform();
+    
+        if (xi > pScatter) {    // ABSORPTION -> ray dies, contributes no radiance
+
+            return Vector3D(0.0);
+
+        }
+        else {                  // SCATTERING EVENT -> continue in-scattering
+            for (auto light : lsList) {
+                Vector3D light_pos = light->sampleLightPosition();              // Sample light position
+                Vector3D light_dir = (light_pos - scatter_pos).normalized();    // Direction to light
+                double light_dist = (light_pos - scatter_pos).length();         // Distance to light
+
+                Ray shadow_ray(scatter_pos, light_dir);
+                shadow_ray.maxT = light_dist - Epsilon;                         // Shadow ray to light
+
+                if (!Utils::hasIntersection(shadow_ray, objList)) {             // If not occluded, compute contribution
+                    Vector3D light_n = light->getNormal();
+                    double light_area = light->getArea();
+                    double T_to_light = exp(-mu_t * light_dist);                // Transmittance to light
+                    double phase = 1.0 / (4.0 * M_PI);                          // Isotropic phase function
+                    double geometric = abs(dot(-light_dir, light_n)) / ((light_pos - scatter_pos).lengthSq());
+                    Vector3D emitted = light->getIntensity() * 2.0;             // Boost light intensity to make volumetric effects more visible 
+                    L_direct_scatter += emitted * phase * geometric * T_to_light * light_area;  // Accumulate contribution
+                }
+            }
+        }
+        // -------------------------------------------------------------------------------
+        double albedo = mu_s / mu_t;                                            // Single scattering albedo
+        L_inscatter = L_direct_scatter * albedo * T_to_scatter;                 // Direct inscattering contribution
+
+        // Multiple scattering
+        if (depth < 10) {
+            HemisphericalSampler hs;
+            Vector3D random_dir = hs.getSample(Vector3D(0, 1, 0)).normalized();
+            Ray scatter_ray(scatter_pos, random_dir, depth + 1);                // Cast new ray from scattering point
+            scatter_ray.maxT = 1000.0;
+
+            Intersection scatter_its;
+            if (Utils::getClosestIntersection(scatter_ray, objList, scatter_its)) {
+                double dist_to_surface = (scatter_its.itsPoint - scatter_pos).length();
+                Vector3D L_indirect = computeInscattering(scatter_ray, dist_to_surface, objList, lsList, depth + 1);    // Recursive inscattering 
+                L_inscatter += L_indirect * albedo * T_to_scatter * (1.0 / (4.0 * M_PI));
+            }
+        }
+    }
+
+    return L_inscatter;
+
+}
+
+Vector3D Homogenous::computeRadiance(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, const int MaxDepth) const {
+    Intersection its;
+    Vector3D Lo(0.0, 0.0, 0.0);
+
+    // Absorption and scattering coefficients
+    double mu_a = 0.05;
+    double mu_s = 0.1;
+    double mu_t = mu_a + mu_s;
+
+    if (Utils::getClosestIntersection(r, objList, its)) {
+        double distance = (its.itsPoint - r.o).length();
+        double T = exp(-mu_t * distance);                                                       // Transmittance from ray origin to intersection
+
+        Vector3D L_inscatter = computeInscattering(r, distance, objList, lsList, r.depth);      // In-scattering contribution along the ray
+        Lo += L_inscatter;
+        Lo += its.shape->getMaterial().getEmissiveRadiance() * T;                               // Emissive contribution attenuated by transmittance
+
+        if (r.depth < MaxDepth) {                                                               // Indirect and direct lighting --> recursive path tracing
+            Vector3D wo = -r.d.normalized();
+            Vector3D n = its.normal.normalized();
+            Vector3D L_reflected = ReflectedRadiance(its, wo, r.depth, objList, lsList);
+            Lo += L_reflected * T;
+        }
+        return Lo;
+    }
+
+    // If no intersection, return background color with volumetric attenuation
+    double tau = mu_t * r.maxT;
+    double T_light = std::max(0.3, exp(-tau));  // Increased base light  
+    Vector3D ambient = bgColor * 0.2;           // Increased ambient  
+    return ambient + bgColor * T_light;
+
+}
+
+Vector3D Homogenous::ReflectedRadiance(const Intersection& its, const Vector3D& wo, const size_t depth, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const {
+    Vector3D L_dir = DirectRadiance(its, wo, objList, lsList);
+    Vector3D L_ind = IndirectRadiance(its, wo, depth, objList, lsList);
+
+    return L_dir + L_ind;
+}
+
+Vector3D Homogenous::DirectRadiance(const Intersection& its, const Vector3D& wo, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const {
+    Vector3D L_direct = Vector3D(0.0);
+
+    // Absorption and scattering coefficients
+    double mu_a = 0.05;
+    double mu_s = 0.1;
+    double mu_t = mu_a + mu_s;
+
+    for (int light_idx = 0; light_idx < lsList.size(); light_idx++) {
+        double light_area = lsList[light_idx]->getArea();
+        Vector3D y = lsList[light_idx]->sampleLightPosition();
+
+        Vector3D n = its.normal.normalized();
+        Vector3D wi = (y - its.itsPoint).normalized();
+
+        double p_y = 1.0 / light_area;
+
+        Vector3D reflectance = its.shape->getMaterial().getReflectance(n, wo, wi);
+
+        Ray ray_wi(its.itsPoint + n * Epsilon, wi);
+        ray_wi.maxT = (y - its.itsPoint).length() - Epsilon;
+
+        size_t V;
+
+        if (Utils::hasIntersection(ray_wi, objList)) {
+            V = 0;
+        }
+        else {
+            V = 1;
+        }
+
+        Vector3D light_n = lsList[light_idx]->getNormal();
+
+        double geometric_term = (dot(n, wi) * abs(dot(-wi, light_n))) / (y - its.itsPoint).lengthSq();
+        Vector3D emited_light = lsList[light_idx]->getIntensity();
+
+        // Volumetric transmittance
+        double dist = (y - its.itsPoint).length();
+        double tau = mu_t * dist;
+        double T_light = exp(-tau);
+
+        // Ensure dot product is positive for proper lighting
+        double cos_term = std::max(0.0, dot(n, wi));
+
+        L_direct += (emited_light * reflectance * cos_term * abs(dot(-wi, light_n)) * V * T_light) / ((y - its.itsPoint).lengthSq() * p_y);
+    }
+    return L_direct;
+}
+
+Vector3D Homogenous::IndirectRadiance(const Intersection& its, const Vector3D& wo, const size_t depth, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, const size_t maxDepth) const {
+    HemisphericalSampler hs;
+    Vector3D L_indirect = Vector3D(0.0);
+
+    // Cosine-weighted hemisphere sampling for better convergence
+    double r1 = randomUniform();
+    double r2 = randomUniform();
+
+    double phi = 2.0 * M_PI * r1;
+    double cosTheta = sqrt(1.0 - r2);
+    double sinTheta = sqrt(r2);
+
+    // Build local coordinate system
+    Vector3D n = its.normal.normalized();
+    Vector3D tangent, bitangent;
+    if (fabs(n.x) > fabs(n.y)) {
+        tangent = Vector3D(-n.z, 0, n.x).normalized();
+    }
+    else {
+        tangent = Vector3D(0, n.z, -n.y).normalized();
+    }
+    bitangent = cross(n, tangent);
+
+    // Transform to world space
+    Vector3D wi = (tangent * cos(phi) * sinTheta +
+        bitangent * sin(phi) * sinTheta +
+        n * cosTheta).normalized();
+
+    double p_wi = cosTheta / M_PI;  // Cosine-weighted PDF
+
+    Ray new_r(its.itsPoint + n * Epsilon, wi, depth + 1);
+    new_r.maxT = 1000.0;
+
+    if (depth < maxDepth) {
+        Intersection y;
+        if (Utils::getClosestIntersection(new_r, objList, y)) {
+            Vector3D reflectance = its.shape->getMaterial().getReflectance(n, wo, wi);
+            double cos_term = std::max(0.0, dot(n, wi));
+
+            // Recursively compute radiance
+            Vector3D incoming_radiance = computeRadiance(new_r, objList, lsList, maxDepth);
+            
+            L_indirect += incoming_radiance * reflectance * cos_term / p_wi ;
+
+        }
+    }
+
+    return L_indirect;
+}
+
+Vector3D Homogenous::computeColor(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const {
+    size_t N = 512;
+    Vector3D vector_total(0.0, 0.0, 0.0);
+
+    for (size_t idx = 0; idx < N; idx++)
+        vector_total += computeRadiance(r, objList, lsList, 5);
+
+    return vector_total / N;
+
+}
+```
+
+### shaders/homogenousvolumetricpathshader.h
+```
+#ifndef HOMOGENOUSVOLUMETRICPATHSHADER_H
+#define HOMOGENOUSVOLUMETRICPATHSHADER_H
+
+#include "shader.h"
+
+class Homogenous : public Shader
+{
+public:
+    Homogenous();
+    Homogenous(Vector3D hitColor, Vector3D bgColor_);
+
+    Vector3D DirectRadiance(const Intersection& its, const Vector3D& wo, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const;
+    Vector3D IndirectRadiance(const Intersection& its, const Vector3D& wo, const size_t depth, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, const size_t maxDepth = 3) const;
+    Vector3D ReflectedRadiance(const Intersection& its, const Vector3D& wo, const size_t depth, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const;
+    Vector3D computeInscattering(const Ray& r, double t_max, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, int depth) const;
+    Vector3D computeRadiance(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList, const int MaxDepth = 3) const;
+    Vector3D computeColor(const Ray &r, const std::vector<Shape*> &objList, const std::vector<LightSource*> &lsList) const;
+
+    Vector3D hitColor;
+};
+
+#endif //Homogenous
+```
+
+### shaders/intersectionshader.cpp
+```
+#include "intersectionshader.h"
+#include "../core/utils.h"
+
+IntersectionShader::IntersectionShader() :
+    hitColor(Vector3D(1, 0, 0))
+{ }
+
+IntersectionShader::IntersectionShader(Vector3D hitColor_, Vector3D bgColor_) :
+    Shader(bgColor_), hitColor(hitColor_)
+{ }
+
+Vector3D IntersectionShader::computeColor(const Ray &r, const std::vector<Shape*> &objList, const std::vector<LightSource*> &lsList) const
+{
+    Intersection its;
+    if (Utils::getClosestIntersection(r, objList, its)) 
+    {
+        if (its.shape->getMaterial().isEmissive()) 
+        {
+            //return Vector3D(1.0, 0.0, 0.0);
+            return its.shape->getMaterial().getEmissiveRadiance();
+        }
+        else 
+        {
+            return its.shape->getMaterial().getDiffuseReflectance();
+        }
+    }
+
+    return bgColor;
+}
+```
+
+### shaders/intersectionshader.h
+```
+#ifndef INTERSECTIONSHADER_H
+#define INTERSECTIONSHADER_H
+
+#include "shader.h"
+
+class IntersectionShader : public Shader
+{
+public:
+    IntersectionShader();
+    IntersectionShader(Vector3D hitColor, Vector3D bgColor_);
+
+    virtual Vector3D computeColor(const Ray &r,
+                             const std::vector<Shape*> &objList,
+                             const std::vector<LightSource*> &lsList) const;
+
+    Vector3D hitColor;
+};
+
+#endif // INTERSECTIONSHADER_H
+```
+
+### shaders/nee.cpp
+```
+﻿#include "nee.h"
+#include "../materials/phong.h"
+#include "../lightsources/pointlightsource.h"
+#include "../lightsources/arealightsource.h"
+#include "../core/hemisphericalsampler.h"
+#include "../core/utils.h"
+#include "../core/scene.h"
+#include <math.h>
+
+#define M_PI 3.1416
+
+NEE::NEE() :
+    Color(Vector3D(1, 0, 0))
+{
+}
+
+NEE::NEE(Vector3D Color_, Vector3D bgColor_) :
+    Shader(bgColor_), Color(Color_)
+{
+}
+
+Vector3D NEE::computeRadiance(
+    const Ray& r,
+    const std::vector<Shape*>& objList,
+    const std::vector<LightSource*>& lsList,
+    const Intersection& its,
+    const int maxDepth) const
+{
+    // Termination check
+    if (r.depth >= maxDepth)
+        return Vector3D(0.0);
+
+    Vector3D Le(0.0), Lr(0.0);
+
+    // Emitted radiance only if emissive surface
+    if (its.shape->getMaterial().isEmissive()) {
+        Le = its.shape->getMaterial().getEmissiveRadiance();
+    }
+
+    // Outgoing direction towards the camera
+    Vector3D w_o = -r.d.normalized();
+
+    // Reflected contribution
+    Lr = reflectedRadiance(objList, lsList, its, w_o, r.depth, maxDepth);
+
+    return Le + Lr;
+}
+
+Vector3D NEE::reflectedRadiance(
+    const std::vector<Shape*>& objList,
+    const std::vector<LightSource*>& lsList,
+    const Intersection& x,
+    const Vector3D& w_o,
+    int depth,
+    const int maxDepth) const
+{
+    Vector3D Ldir = directRadiance(objList, lsList, x, w_o);
+    Vector3D Lind = indirectRadiance(objList, lsList, x, w_o, depth, maxDepth);
+    return Ldir + Lind;
+}
+
+
+Vector3D NEE::directRadiance(
+    const std::vector<Shape*>& objList,
+    const std::vector<LightSource*>& lsList,
+    const Intersection& x,
+    const Vector3D& w_o) const
+{
+    Vector3D direct = Vector3D(0.0);
+    Vector3D n = x.normal.normalized();
+    int numLightSamples = 4; // Number of samples per light
+
+    for (int lightId = 0; lightId < lsList.size(); lightId++) {
+        double lightArea = lsList.at(lightId)->getArea();
+
+        for (int sample = 0; sample < numLightSamples; sample++) {
+            Vector3D p = lsList.at(lightId)->sampleLightPosition();
+            double pdf = 1.0 / lightArea;
+
+            Vector3D wi = (p - x.itsPoint).normalized();
+            double distance = (p - x.itsPoint).length();
+            double dSquared = distance * distance;
+
+            // Shadow test
+            Ray shadowRay(x.itsPoint, wi);
+            shadowRay.maxT = distance - 1e-4;
+            bool is_in_shadow = Utils::hasIntersection(shadowRay, objList);
+
+            if (!is_in_shadow) {
+                Vector3D radiance = lsList.at(lightId)->getIntensity();
+
+                // BRDF direction (n, wi, wo)
+                Vector3D fr = x.shape->getMaterial().getReflectance(n, wi, w_o);
+
+                Vector3D ny = lsList.at(lightId)->getNormal().normalized();
+                double g = (dot(n, wi) * dot(-wi, ny)) / dSquared;
+
+                // Divide by number of samples
+                direct += (radiance * fr * g) / (pdf * numLightSamples);
+            }
+        }
+    }
+    return direct;
+}
+
+
+
+Vector3D NEE::indirectRadiance(
+    const std::vector<Shape*>& objList,
+    const std::vector<LightSource*>& lsList,
+    const Intersection& x,
+    const Vector3D& w_o,
+    int depth,
+    const int maxDepth) const
+{
+    if (depth >= maxDepth)
+        return Vector3D(0.0);
+
+    Vector3D Lind(0.0);
+    int numSamples = 4; // hemisphere samples
+
+    Vector3D n = x.normal.normalized();
+    HemisphericalSampler hS;
+
+    for (int i = 0; i < numSamples; ++i) {
+        // Sample random direction ωi over hemisphere
+        Vector3D wi = hS.getSample(n);
+        double pdf = 1.0 / (2.0 * M_PI); // uniform hemisphere PDF
+        double cosTheta = std::max(0.0, dot(n, wi));
+
+        // Create new ray
+        Vector3D origin = x.itsPoint + n * 1e-4;
+        Ray newRay(origin, wi, depth + 1);
+
+        Intersection newIts;
+        if (Utils::getClosestIntersection(newRay, objList, newIts)) {
+            // Recursive reflected radiance at next bounce
+            Vector3D Li = reflectedRadiance(objList, lsList, newIts, -wi, depth + 1, maxDepth);
+            Vector3D brdf = x.shape->getMaterial().getReflectance(n, wi, w_o);
+
+            // Lind = Li * BRDF * cosθ / pdf
+            Lind += (Li * brdf * cosTheta) / (pdf * numSamples);
+        }
+    }
+
+    return Lind;
+}
+
+Vector3D NEE::computeColor(
+    const Ray& r,
+    const std::vector<Shape*>& objList,
+    const std::vector<LightSource*>& lsList) const
+{
+    Intersection its;
+    if (!Utils::getClosestIntersection(r, objList, its))
+        return bgColor;
+
+    return computeRadiance(r, objList, lsList, its, 3);
+}
+```
+
+### shaders/nee.h
+```
+#ifndef NEE_H
+#define NEE_H
+
+#include "shader.h"
+#include "../core/scene.h"
+#include "../core/hemisphericalsampler.h"
+
+class NEE : public Shader
+{
+public:
+    NEE();
+    NEE(Vector3D Color_, Vector3D bgColor_);
+
+    Vector3D computeColor(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const;
+    virtual Vector3D computeRadiance(
+        const Ray& r,
+        const std::vector<Shape*>& objList,
+        const std::vector<LightSource*>& lsList,
+        const Intersection& its,
+        const int maxDepth) const;
+    
+    virtual Vector3D reflectedRadiance(
+        const std::vector<Shape*>& objList,
+        const std::vector<LightSource*>& lsList,
+        const Intersection& x,
+        const Vector3D& w_o,
+        int depth,
+        const int maxDepth) const;
+    
+    virtual Vector3D directRadiance(
+        const std::vector<Shape*>& objList,
+        const std::vector<LightSource*>& lsList,
+        const Intersection& x,
+        const Vector3D& w_o) const;
+    
+    virtual Vector3D indirectRadiance(
+        const std::vector<Shape*>& objList,
+        const std::vector<LightSource*>& lsList,
+        const Intersection& x,
+        const Vector3D& w_o,
+        int depth,
+        const int maxDepth) const;
+
+    Vector3D bgColor;
+private:
+    Vector3D Color;
+};
+
+#endif // NEE_H
+```
+
+### shaders/normalshader.cpp
+```
+#include "normalshader.h"
+
+#include "../core/utils.h"
+
+NormalShader::NormalShader() :
+    color(Vector3D(1, 0, 0))
+{ }
+
+NormalShader::NormalShader(Vector3D hitColor_, Vector3D bgColor_) :
+    Shader(bgColor_), color(hitColor_)
+{ }
+
+Vector3D NormalShader::computeColor(const Ray &r, const std::vector<Shape*> &objList, const std::vector<LightSource*> &lsList) const
+{
+    Intersection its;
+
+    if (Utils::getClosestIntersection(r, objList, its)) {
+
+        return (its.normal + Vector3D(1, 1, 1)) * 0.5;
+    }
+
+    return bgColor;
+}
+```
+
+### shaders/normalshader.h
+```
+#ifndef NORMALSHADER_H
+#define NORMALSHADER_H
+
+#include "shader.h"
+
+
+class NormalShader : public Shader
+{
+public:
+    NormalShader();
+    NormalShader(Vector3D color_, Vector3D bgColor_);
+
+    Vector3D computeColor(const Ray &r,
+                             const std::vector<Shape*> &objList,
+                             const std::vector<LightSource*> &lsList) const;
+
+private:
+    double maxDist;
+    Vector3D color;
+};
+
+#endif // NORMALSHADER_H
+```
+
+### shaders/pathtracer.cpp
+```
+﻿#include "pathtracer.h"
+#include "../materials/phong.h"
+#include "../lightsources/pointlightsource.h"
+#include "../core/hemisphericalsampler.h"
+#include "../core/utils.h"
+#include "../core/scene.h"
+#include <math.h>
+
+#define M_PI 3.1416
+
+PathTracer::PathTracer() :
+    Color(Vector3D(1, 0, 0))
+{
+}
+
+PathTracer::PathTracer(Vector3D Color_, Vector3D bgColor_) :
+    Shader(bgColor_), Color(Color_)
+{
+}
+Vector3D PathTracer::computeRadiance(
+    const Ray& r,
+    const std::vector<Shape*>& objList,
+    const std::vector<LightSource*>& lsList,
+    const int maxDepth) const
+{
+    // Terminate recursion
+    if (r.depth > maxDepth)
+        return Vector3D(0.0);
+
+    // If there is no intersection we return black
+    Intersection x;
+    if (!Utils::getClosestIntersection(r, objList, x))
+        return Vector3D(0.0);
+
+    Vector3D Lo = x.shape->getMaterial().getEmissiveRadiance();
+
+    // We sample a random direction over the hemisphere
+    HemisphericalSampler sampler;
+    Vector3D wi, brdf;
+    double pdf;
+
+    wi = sampler.getSample(x.normal);
+    pdf = 1.0 / (2.0 * M_PI); // Uniform hemisphere PDF
+
+    if (r.depth < maxDepth)
+    {
+        Ray newRay(x.itsPoint, wi, r.depth + 1);
+
+        // Evaluate BRDF and cosine term
+        brdf = x.shape->getMaterial().getReflectance(x.normal, wi, -r.d);
+        double cosTheta = std::max(0.0, dot(x.normal, wi));
+
+        // Recursive radiance estimate
+        Vector3D Li = computeRadiance(newRay, objList, lsList, maxDepth);
+
+        // Monte Carlo estimation of the reflected radiance
+        Lo += (Li * brdf * cosTheta) / pdf;
+    }
+
+    return Lo;
+}
+
+
+Vector3D PathTracer::computeColor(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const {
+    Intersection its;
+    Scene scene;
+    Vector3D Color = Vector3D(0, 0, 0);
+
+    if (!Utils::getClosestIntersection(r, objList, its)) {
+        return bgColor;
+    }
+
+    // Handle emissive materials FIRST
+    if (its.shape->getMaterial().isEmissive()) {
+        return its.shape->getMaterial().getEmissiveRadiance();
+    }
+
+    Vector3D wo = -r.d; // Viewing direction (from surface to camera)
+    Vector3D n = its.normal.normalized();
+
+    if (its.shape->getMaterial().hasDiffuseOrGlossy()) {
+        Vector3D indirect = Vector3D(0.0);
+        Vector3D ambient = Vector3D(0.25);
+        Vector3D diffuse_coefficient = its.shape->getMaterial().getDiffuseReflectance();
+        int numSamples = 256;
+
+        HemisphericalSampler hS;
+
+        for (int i = 0; i < numSamples; i++)
+        {
+            Vector3D wi = hS.getSample(n);
+            Ray indirect_ray(its.itsPoint, wi);
+            Intersection indirect_its;
+
+            if (Utils::getClosestIntersection(indirect_ray, objList, indirect_its))
+            {
+
+                Vector3D indRadiance = computeRadiance(indirect_ray, objList, lsList, r.depth + 1);
+                Vector3D total = indRadiance;
+                Vector3D reflectance = its.shape->getMaterial().getReflectance(n, wo, wi);
+                double pdf = 1 / (2 * M_PI);
+                indirect += (total * reflectance * dot(n, wi)) / pdf;
+            }
+        }
+
+        Color = (indirect) / (double)numSamples;
+    }
+    // We use recursive ray tracing for perfect reflection (specular materials)
+    else if (its.shape->getMaterial().hasSpecular()) {
+        // We calculate the ideal reflection direction
+        Vector3D in_light_direction = -(r.d).normalized();   // Incident light direction (ωi)
+        Vector3D normal = its.normal.normalized(); // The normal (n)
+
+        double scale_factor = 2.0 * dot(normal, in_light_direction);
+        Vector3D reflection = scale_factor * normal;
+        Vector3D ideal_reflection = reflection - in_light_direction; // Final computation of the ideal reflection direction (wr)
+
+        // We build the reflection ray from the intersection point to the ideal reflection direction
+        Ray reflection_ray(its.itsPoint, ideal_reflection, r.depth + 1);
+        // Recursive Ray Tracing
+        Color = computeColor(reflection_ray, objList, lsList);
+    }
+    // We use recursive ray tracing for refraction
+    else if (its.shape->getMaterial().hasTransmission()) {
+        //We compute the transmissive refaction wt following the formula:
+
+        Vector3D normal = its.normal.normalized(); // The normal (n)
+        Vector3D view_direction = -(r.d).normalized(); // viewing direction (wo)
+        double refraction_ratio = 0.75;
+
+        // If the ray is inside the object (we are going from medium µ2 to µ1) we need to flip the normal and invert the refraction ratio
+        if (dot(view_direction, normal) < 0) {
+            refraction_ratio = 1.0 / refraction_ratio;
+            normal = -normal;
+        }
+
+        // Cosine of angle between incident ray and surface normal
+        double cos_angle = dot(view_direction, normal);
+
+        // Discriminant of the equation
+        double discriminant = 1.0 - refraction_ratio * refraction_ratio * (1.0 - (cos_angle * cos_angle));
+
+        Vector3D transmissive_refraction;
+
+        if (discriminant >= 0) {
+
+            double refract_term = sqrt(discriminant);
+            Vector3D first_term = (refraction_ratio * view_direction);
+            Vector3D second_term = refraction_ratio * cos_angle - refract_term;
+
+            transmissive_refraction = -first_term + normal * second_term;
+        }
+        else {
+            // Happens total internal reflection so the ray cannot exit the material
+            // We compute specular reflection instead
+            double scale_factor = 2.0 * dot(normal, view_direction);
+            Vector3D reflection = scale_factor * normal;
+            Vector3D transmissive_refraction = reflection - view_direction;
+        }
+
+
+        Ray refracted_ray(its.itsPoint, transmissive_refraction, r.depth + 1);
+
+        // Recursively trace the refracted ray to get its color contribution
+        Color += computeColor(refracted_ray, objList, lsList);
+    }
+
+    return Color;
+}
+```
+
+### shaders/pathtracer.h
+```
+#ifndef PATHTRACER_H
+#define PATHTRACER_H
+
+#include "shader.h"
+#include "../core/scene.h"
+#include "../core/hemisphericalsampler.h"
+
+class PathTracer : public Shader
+{
+public:
+    PathTracer();
+    PathTracer(Vector3D Color_, Vector3D bgColor_);
+
+    Vector3D computeColor(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const;
+    virtual Vector3D computeRadiance(const Ray& r,
+        const std::vector<Shape*>& objList,
+        const std::vector<LightSource*>& lsList,
+        const int maxDepth) const;
+
+    Vector3D bgColor;
+private:
+    Vector3D Color;
+};
+
+#endif // PATHTRACER_H
+```
+
+### shaders/shader.cpp
+```
+#include "shader.h"
+
+Shader::Shader() : bgColor(Vector3D(0.0))
+{ }
+
+Shader::Shader(Vector3D bgColor_) : bgColor(bgColor_)
+{ }
+```
+
+### shaders/shader.h
+```
+#ifndef SHADER_H
+#define SHADER_H
+
+#include <vector>
+
+#include "../core/ray.h"
+#include "../lightsources/pointlightsource.h"
+#include "../lightsources/arealightsource.h"
+#include "../shapes/shape.h"
+
+class Shader
+{
+public:
+    Shader();
+    Shader(Vector3D bgColor_);
+
+    virtual Vector3D computeColor(const Ray &r,
+                             const std::vector<Shape*> &objList,
+                             const std::vector<LightSource*> &lsList) const = 0;
+
+    Vector3D bgColor;
+};
+
+#endif // SHADER_H
+```
+
+### shaders/whittedshader.cpp
+```
+﻿#include "shader.h"
+#include "whittedshader.h"
+#include "../materials/phong.h"
+#include "../lightsources/pointlightsource.h"
+#include "../core/utils.h"
+
+WhittedShader::WhittedShader():
+    WgColor(Vector3D(1, 0, 0))
+{ }
+
+WhittedShader::WhittedShader(Vector3D wgColor_, Vector3D bgColor_):
+    Shader(bgColor_),WgColor(wgColor_)
+{ }
+
+Vector3D WhittedShader::computeColor(const Ray& r, const std::vector<Shape*>& objList, const std::vector<LightSource*>& lsList) const
+{
+
+    Intersection its;
+    
+    if (Utils::getClosestIntersection(r, objList, its)) {
+
+        Vector3D Color = Vector3D(0, 0, 0);
+
+        //5.2
+        if (its.shape->getMaterial().hasDiffuseOrGlossy()) {
+            const Vector3D ambient_constant = Vector3D(0.25, 0.25, 0.25); 
+            Vector3D diffuse_coefficient = its.shape->getMaterial().getDiffuseReflectance();
+
+            //We initialize the luminance with the ambient constant and the diffuse coefficient
+            Color += ambient_constant * diffuse_coefficient;
+
+            //For the summation part of the equation
+            for (const auto& lightSource : lsList) {
+
+                // We calculate the reflectance, to do so, we need:
+                Vector3D normal = its.normal.normalized(); // The normal (n)
+                Vector3D view_direction = -r.d; // The viewing direction (wo)
+                Vector3D in_light_direction = (lightSource->sampleLightPosition() - its.itsPoint).normalized(); //the incident light direction
+
+                Vector3D reflectance = its.shape->getMaterial().getReflectance(normal, view_direction, in_light_direction);
+
+                // To calculate the visibility term Vi(x):
+                // We construct a shadow ray
+                Ray shadow_ray(its.itsPoint, in_light_direction);
+                shadow_ray.maxT = (shadow_ray.o - lightSource->sampleLightPosition()).length();
+
+                // If the shadow ray hits another object before reaching the light, the point is in a shadow.
+                bool is_in_shadow = Utils::hasIntersection(shadow_ray, objList);
+
+                int visibility_factor;
+                if (is_in_shadow) {
+                    visibility_factor = 0;
+                }
+                else {
+                    visibility_factor = 1;
+                }
+
+                // We compute the final term:
+                Color += lightSource->getIntensity() * reflectance * dot(normal, in_light_direction) * visibility_factor;
+            }
+        }
+
+        // 5.3
+        else if (its.shape->getMaterial().hasSpecular()) {
+            // We calculate the ideal reflection direction
+            Vector3D in_light_direction = -(r.d).normalized();   // Incident light direction (ωi)
+            Vector3D normal = its.normal.normalized(); // The normal (n
+
+            double scale_factor = 2.0 * dot(normal, in_light_direction);
+            Vector3D reflection = scale_factor * normal;
+            Vector3D ideal_reflection = reflection - in_light_direction; // Final computation of the ideal reflection direction (wr)
+
+            // We build the reflection ray from the intersection point to the ideal reflection direction
+            Ray reflection_ray(its.itsPoint, ideal_reflection, r.depth);
+            // Recursive Ray Tracing
+            Color = computeColor(reflection_ray, objList, lsList);
+            
+        }
+
+        // 5.4
+        else if (its.shape->getMaterial().hasTransmission()) {
+            
+            //We compute the transmissive refaction wt following the formula:
+            
+            Vector3D normal = its.normal.normalized(); // The normal (n)
+            Vector3D view_direction = - (r.d).normalized(); // viewing direction (wo)
+            double refraction_ratio = 0.75;
+
+            // If the ray is inside the object (we are going from medium µ2 to µ1) we need to flip the normal and invert the refraction ratio
+            if (dot(view_direction, normal) < 0) {
+                refraction_ratio = 1.0 / refraction_ratio;
+                normal = -normal;
+            }
+
+            // Cosine of angle between incident ray and surface normal
+            double cos_angle = dot(view_direction, normal);
+
+            // Discriminant of the equation
+            double discriminant = 1.0 - refraction_ratio * refraction_ratio * (1.0 - (cos_angle * cos_angle));
+
+            Vector3D transmissive_refraction;
+
+            if (discriminant >= 0) {
+                
+                double refract_term = sqrt(discriminant);
+                Vector3D first_term = (refraction_ratio * view_direction);
+                Vector3D second_term = refraction_ratio * cos_angle - refract_term ;
+                
+                transmissive_refraction = -first_term + normal * second_term;
+            }
+            else {
+                // Happens total internal reflection so the ray cannot exit the material
+                // We compute specular reflection instead
+                double scale_factor = 2.0 * dot(normal, view_direction);
+                Vector3D reflection = scale_factor * normal;
+                Vector3D transmissive_refraction = reflection - view_direction;
+            }
+
+       
+            Ray refracted_ray(its.itsPoint, transmissive_refraction, r.depth );
+
+            // Recursively trace the refracted ray to get its color contribution
+            Color += computeColor(refracted_ray, objList, lsList);
+        }
+
+        return Color;
+    } 
+    
+    
+    else {
+        return bgColor;
+    }
+}
+```
+
+### shaders/whittedshader.h
+```
+#ifndef WHITTEDSHADER_H
+#define WHITTEDSHADER_H
+
+#include "shader.h"
+
+//to define the class WhittedShader
+class WhittedShader : public Shader
+{
+public:
+    WhittedShader();
+    WhittedShader(Vector3D wgColor_, Vector3D bgColor_);
+
+    Vector3D computeColor(const Ray& r,
+        const std::vector<Shape*>& objList,
+        const std::vector<LightSource*>& lsList) const;
+
+    Vector3D WgColor;
+private:
+    Vector3D color;
+};
+
+
+#endif // WhittedShader_H
+```
+
+### shapes/infiniteplan.cpp
+```
+#include "infiniteplan.h"
+
+InfinitePlan::InfinitePlan(const Vector3D &p0_, const Vector3D &normal_,
+         Material *mat_) :
+    Shape(Matrix4x4(), mat_),
+    p0World(p0_), nWorld(normal_.normalized())
+{ }
+
+Vector3D InfinitePlan::getNormalWorld() const
+{
+    return nWorld;
+}
+
+bool InfinitePlan::rayIntersect(const Ray &rayWorld, Intersection &its) const
+{
+    // Compute the denominator of the tHit formula
+    double denominator = dot(rayWorld.d, nWorld);
+
+    // Test for parallel ray/plane
+    if(std::abs(denominator) < Epsilon)
+        return false;
+
+    // Effectivelly compute the intersection distance
+    double tHit = dot((p0World - rayWorld.o), nWorld) / denominator;
+
+    // Is tHit outside the bounds of the ray segment we want to test intersecion?
+    if (tHit < rayWorld.minT || tHit > rayWorld.maxT)
+        return false;
+
+    // Compute ray/plane the intersection point
+    Vector3D p = rayWorld.o + (rayWorld.d * tHit);
+
+    // Fill the intersection details
+    its.itsPoint = p;
+    its.normal   = nWorld;
+    its.shape    = this;
+
+    // Update the ray maxT
+    rayWorld.maxT = tHit;
+
+    return true;
+}
+
+bool InfinitePlan::rayIntersectP(const Ray &rayWorld) const
+{
+    // Compute the denominator of the tHit formula
+    double denominator = dot(rayWorld.d, nWorld);
+
+    // If the denominator is very close to zero, then the ray and the
+    // plane are almost parallel
+    if(std::abs(denominator) < Epsilon)
+        return false;
+
+    // Effectivelly compute the intersection point
+    double tHit = dot((p0World - rayWorld.o), nWorld) / denominator;
+
+    // Is tHit outside the bounds of the ray segment we want to test intersecion?
+    if (tHit < rayWorld.minT || tHit > rayWorld.maxT)
+        return false;
+
+    // Arriving here, we know that the ray segment intersects the plan
+    return true;
+}
+
+
+std::string InfinitePlan::toString() const
+{
+    std::stringstream s;
+    s << "\tInfinitePlan attributes: \n";
+
+    s << "\t p0 (world coordinates): " << p0World << "\n";
+    s << "\t normal (world coordinates): " << nWorld << "\n" << std::endl;
+
+    return s.str();
+}
+
+std::ostream &operator<<(std::ostream &out, const InfinitePlan &t)
+{
+    out << t.toString();
+    return out;
+}
+```
+
+### shapes/infiniteplan.h
+```
+#ifndef INFINITEPLAN_H
+#define INFINITEPLAN_H
+
+#include "shape.h"
+
+class InfinitePlan : public Shape
+{
+public:
+    InfinitePlan() = delete;
+    InfinitePlan(const Vector3D &p0_, const Vector3D &normal_,
+                 Material *mat_);
+
+    // Get the normal at a surface point in world coordinates
+    Vector3D getNormalWorld() const;
+
+    // Ray/plan intersection methods
+    bool rayIntersect(const Ray &ray, Intersection &its) const;
+    bool rayIntersectP(const Ray &rayWorld) const;
+
+
+    // Convert triangle to String
+    std::string toString() const;
+
+private:
+    // A point belonging to the plan, and the normal at the plan
+    /* All values are in world coordinates */
+    Vector3D p0World;
+    Vector3D nWorld;
+};
+
+std::ostream &operator<<(std::ostream &out, const InfinitePlan &t);
+
+#endif // INFINITEPLAN_H
+```
+
+### shapes/shape.cpp
+```
+#include "shape.h"
+
+Shape::Shape(const Matrix4x4 &t_, Material *material_)
+{
+    objectToWorld = t_;
+    objectToWorld.inverse(worldToObject);
+    material = material_;
+}
+
+const Material& Shape::getMaterial() const
+{
+    return *material;
+}
+```
+
+### shapes/shape.h
+```
+#ifndef SHAPE_H
+#define SHAPE_H
+
+#include "../core/matrix4x4.h"
+#include "../core/vector3d.h"
+#include "../core/ray.h"
+#include "../materials/material.h"
+#include "../core/intersection.h"
+
+class Shape
+{
+public:
+    Shape() = delete;
+    Shape(const Matrix4x4 &t_, Material *material_);
+
+    // Pure virtual function makes this class Abstract class.
+
+    // Ray/shape intersection methods
+    virtual bool rayIntersect(const Ray &ray, Intersection &its) const =0 ;
+    virtual bool rayIntersectP(const Ray &ray) const = 0;
+
+    // Return the material associated with the shape
+    const Material& getMaterial() const;
+
+protected:
+    Matrix4x4 objectToWorld;
+    Matrix4x4 worldToObject;
+    Material *material;
+    //float area;
+};
+
+#endif // SHAPE_H
+```
+
+### shapes/sphere.cpp
+```
+#include "sphere.h"
+
+Sphere::Sphere(const double radius_, const Matrix4x4 &t_, Material *material_)
+    : Shape(t_, material_), radius(radius_)
+{ }
+
+// Return the normal in world coordinates
+// Pre condition: the point passed as argument to this function is in
+// world coordinates and belongs to the sphere
+Vector3D Sphere::getNormalWorld(const Vector3D &pt_world) const
+{
+    // Transform the point to local coordinates
+    //Point3D pt_local = worldToObject.applyTransform(pt_world);
+    Vector3D pt_local = worldToObject.transformPoint(pt_world);
+
+    // CHECK IF THE POINT EFFECTIVELLY BELONGS TO THE SPHERE?
+    // TODO?
+
+    // Normal in local coordinates
+    //Normal n(pt_local.x, pt_local.y, pt_local.z);
+    Vector3D n(pt_local.x, pt_local.y, pt_local.z);
+
+    // Transform the normal to world coordinates
+    //Normal nWorld = objectToWorld.applyTransform(n);
+    // Multiply the normal by the transpose of the inverse
+    Matrix4x4 inverseTransposed;
+    worldToObject.transpose(inverseTransposed);
+    Vector3D nWorld = inverseTransposed.transformVector(n);
+
+    // Check whether applying the transform to a normalized
+    // normal allways yields a normalized normal
+    return(nWorld.normalized());
+}
+
+// Chapter 3 PBRT, page 117
+bool Sphere::rayIntersect(const Ray &ray, Intersection &its) const
+{
+    // Pass the ray to local coordinates
+    //Ray r = worldToObject.applyTransform(ray);
+    Ray r = worldToObject.transformRay(ray);
+
+    // The ray-sphere intersection equation can be expressed in the
+    // form A*t^2 + B*t + C = 0, where:
+    double A = r.d.x*r.d.x + r.d.y*r.d.y + r.d.z*r.d.z;
+    double B = 2*(r.o.x*r.d.x + r.o.y*r.d.y + r.o.z*r.d.z);
+    double C = r.o.x*r.o.x + r.o.y*r.o.y +
+               r.o.z*r.o.z - radius*radius;
+
+    // Now we need to solve this quadratic equation for t
+    EqSolver solver;
+    rootValues roots;
+    bool hasRoots = solver.rootQuadEq(A, B, C, roots);
+
+    if(!hasRoots)
+    {
+        return false;
+    }
+
+    // Test whether both root values (i.e., the intersection points)
+    // are greater or smaller than r.maxT and r.minT, respectivelly
+    if (roots.values[0] > r.maxT || roots.values[1] < r.minT)
+        return false;
+
+    // If they are not, then there are three possibilities:
+    // 1 - t0 > minT and t1 > maxT, in which case t0 is the hit point we want to retain
+    // 2 - t0 < minT and t1 < maxT, in which case t1 is the hit point we want to retain
+    // 3 - Both roots are out of the ray segment (t0 < minT and t1 > maxT)
+
+    // We initialize the tHit for case 1
+    double tHit = roots.values[0];
+    // We check where we could possibly be in case 2 or 3
+    if (roots.values[0] < ray.minT) {
+        // If so, then we set tHit to t1 (hoping we are in case 2!)
+        tHit = roots.values[1];
+        // If we are in case 3, then return false (meaning there is no intersection detected
+        if (tHit > ray.maxT)
+            return false;
+    }
+
+    // If we arrive here it is because there is an intersection
+    // with the tested ray segment!
+
+    // Update the maxT in the ray so as to terminate earlier subsequent
+    // intersection tests with other shapes
+    ray.maxT = tHit;
+
+    // Compute Intersection Point (in local coordinates)
+    Vector3D itsPoint = r.o + r.d*tHit;
+
+    // Transform to world coordinates
+    its.itsPoint = objectToWorld.transformPoint(itsPoint);
+
+    // Compute the normal at the intersection point (in world coordinates)
+    its.normal   = getNormalWorld(its.itsPoint);
+
+    // Store the shape the intersection point lies in
+    its.shape = this;
+
+    return true;
+}
+
+// Chapter 3 PBRT, page 117
+bool Sphere::rayIntersectP(const Ray &ray) const
+{
+    // Pass the ray to local coordinates
+    Ray r = worldToObject.transformRay(ray);
+
+    // The ray-sphere intersection equation can be expressed in the
+    // form A*t^2 + B*t + C = 0, where:
+    double A = r.d.x*r.d.x + r.d.y*r.d.y + r.d.z*r.d.z;
+    double B = 2*(r.o.x*r.d.x + r.o.y*r.d.y + r.o.z*r.d.z);
+    double C = r.o.x*r.o.x + r.o.y*r.o.y +
+               r.o.z*r.o.z - radius*radius;
+
+    // Now we need to solve this quadratic equation for t
+    EqSolver solver;
+    rootValues roots;
+    bool hasRoots = solver.rootQuadEq(A, B, C, roots);
+
+    if(!hasRoots)
+    {
+        return false;
+    }
+
+    // Test whether both root values (i.e., the intersection points)
+    // are greater or smaller than r.maxT and r.minT, respectivelly
+    if (roots.values[0] > r.maxT || roots.values[1] < r.minT)
+        return false;
+
+    // If they are not, then there are three possibilities:
+    // 1 - t0 > minT and t1 > maxT, in which case t0 is the hit point we want to retain
+    // 2 - t0 < minT and t1 < maxT, in which case t1 is the hit point we want to retain
+    // 3 - Both roots are out of the ray segment (t0 < minT and t1 > maxT)
+
+    // We initialize the tHit for case 1
+    double tHit = roots.values[0];
+    // We check where we could possibly be in case 2 or 3
+    if (roots.values[0] < ray.minT) {
+        // If so, then we set tHit to t1 (hoping we are in case 2!)
+        tHit = roots.values[1];
+        // If we are in case 3, then return false (meaning there is no intersection detected
+        if (tHit > ray.maxT)
+            return false;
+    }
+
+    // If we arrive here it is because there is an intersection
+    // with the tested ray segment!
+
+    // Update the maxT in the ray so as to terminate earlier subsequent
+    // intersection tests with other shapes
+    ray.maxT = tHit;
+
+    return true;
+}
+
+std::string Sphere::toString() const
+{
+    std::stringstream s;
+    s << "[ " << std::endl
+      << " Center (World) = " << objectToWorld.transformPoint(Vector3D(0,0,0)) << ", Radius = " << radius << std::endl
+      << "]" << std::endl;
+
+    return s.str();
+}
+
+std::ostream& operator<<(std::ostream &out, const Sphere &s)
+{
+    out << s.toString();
+    return out;
+}
+```
+
+### shapes/sphere.h
+```
+#ifndef SPHERE_H
+#define SPHERE_H
+
+#include <iostream>
+#include <string>
+
+#include "shape.h"
+#include "../core/eqsolver.h"
+
+class Sphere : public Shape
+{
+public:
+    Sphere() = delete;
+    Sphere(const double radius_, const Matrix4x4 &t, Material *material_);
+
+    Vector3D getNormalWorld(const Vector3D &pt_world) const;
+
+    bool rayIntersect(const Ray &ray, Intersection &its) const;
+    bool rayIntersectP(const Ray &ray) const;
+    std::string toString() const;
+
+private:
+    // The center of the sphere in local coordinates is assumed
+    // to be (0, 0, 0). To pass to world coordinates just apply the
+    // objectToWorld transformation contained in the mother class
+    double radius;
+};
+
+std::ostream& operator<<(std::ostream &out, const Sphere &s);
+
+#endif // SPHERE_H
+```
+
+### shapes/square.cpp
+```
+#include "square.h"
+
+
+Square::Square(const Vector3D pos_, const Vector3D& v1_, const Vector3D& v2_, const Vector3D& normal_, Material *material_)
+    : Shape(Matrix4x4(), material_), corner(pos_), v1(v1_), v2(v2_), normal(normal_)
+{ 
+    Vector3D n = cross(v1_,v2);
+    w = n / dot(n, n);
+}
+
+// Return the normal in world coordinates
+
+Vector3D Square::getNormalWorld(const Vector3D &pt_world) const
+{    
+    return normal;
+}
+
+// Chapter 3 PBRT, page 117
+bool Square::rayIntersect(const Ray &ray, Intersection &its) const
+{
+    //return false;  
+     // Compute the denominator of the tHit formula
+    double denominator = dot(ray.d, normal);
+
+    // Test for parallel ray/plane
+    if (std::abs(denominator) < Epsilon)
+        return false;
+
+    // Effectivelly compute the intersection distance
+    double tHit = dot((corner - ray.o), normal) / denominator;
+
+    // Is tHit outside the bounds of the ray segment we want to test intersecion?
+    if (tHit < ray.minT || tHit > ray.maxT)
+        return false;
+
+    // Compute ray/plane the intersection point
+    Vector3D p = ray.o + (ray.d * tHit);  
+
+    
+    //Check if the point is inside the square
+    Vector3D planar_hitpt_vector = p - corner;
+
+    double alpha = dot(w, cross(planar_hitpt_vector, v2));
+    double beta = dot(w, cross(v1, planar_hitpt_vector));
+
+    if ( !(alpha >0.0 && alpha <1.0) || !(beta > 0.0 && beta < 1.0))
+        return false;
+
+    // Update intersection info
+    its.itsPoint = p;
+    its.normal = normal;
+    its.shape = this;
+
+    // Update the ray maxT
+    ray.maxT = tHit;
+
+    return true;
+}
+
+// Chapter 3 PBRT, page 117
+bool Square::rayIntersectP(const Ray &ray) const
+{
+    //return false;  
+ // Compute the denominator of the tHit formula
+    double denominator = dot(ray.d, normal);
+
+    // Test for parallel ray/plane
+    if (std::abs(denominator) < Epsilon)
+        return false;
+
+    // Effectivelly compute the intersection distance
+    double tHit = dot((corner - ray.o), normal) / denominator;
+
+    // Is tHit outside the bounds of the ray segment we want to test intersecion?
+    if (tHit < ray.minT || tHit > ray.maxT)
+        return false;
+
+    // Compute ray/plane the intersection point
+    Vector3D p = ray.o + (ray.d * tHit);
+
+    //Check if the point is insde the square
+    Vector3D planar_hitpt_vector = p - corner;
+    double alpha = dot(w, cross(planar_hitpt_vector, v2));
+    double beta = dot(w, cross(v1, planar_hitpt_vector));
+
+    if (!(alpha > 0.0 && alpha < 1.0) || !(beta > 0.0 && beta < 1.0))
+        return false;
+
+    // Update the ray maxT
+    ray.maxT = tHit;
+
+
+
+
+    return true;
+}
+
+std::string Square::toString() const
+{
+    std::stringstream s;
+    s << "[ " << std::endl
+      << " Center (World) = " << objectToWorld.transformPoint(Vector3D(0,0,0)) << ", Radius = " << corner.x << std::endl
+      << "]" << std::endl;
+
+    return s.str();
+}
+
+std::ostream& operator<<(std::ostream &out, const Square&s)
+{
+    out << s.toString();
+    return out;
+}
+```
+
+### shapes/square.h
+```
+#ifndef SQUARE_H
+#define SQUARE_H
+
+#include <iostream>
+#include <string>
+
+#include "shape.h"
+#include "../core/eqsolver.h"
+
+class Square : public Shape
+{
+public:
+    Square() = delete;
+    Square(const Vector3D pos_, const Vector3D & v1_, const Vector3D& v2_, const Vector3D& normal_,Material *material_);
+
+    Vector3D getNormalWorld(const Vector3D &pt_world) const;
+
+    bool rayIntersect(const Ray &ray, Intersection &its) const;
+    bool rayIntersectP(const Ray &ray) const;
+    std::string toString() const;
+
+
+    Vector3D normal;
+    Vector3D corner;
+    Vector3D v1;
+    Vector3D v2;
+
+    Vector3D    w;//constant for a given quadrilateral
+
+};
+
+std::ostream& operator<<(std::ostream &out, const Square &s);
+
+#endif // SPHERE_H
+```

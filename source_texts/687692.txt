@@ -1,0 +1,1377 @@
+Adaptive Tiling for Least-Squares Phase Unwrapping
+Runtime and Accuracy
+Antoine Moevus
+Max Mignotte
+Department of Computer Science and Operations Research
+Université de Montréal
+Technical Report
+arXiv:2609.28541v2 [eess.IV] 26 Sep 2026
+September 2026
+Abstract
+Phase unwrapping estimates the missing multiples of 2π in measured phase images. For large
+images, tiling limits the size of local reconstruction problems and enables parallel processing.
+Adaptive tiling could further reduce the number of local problems and boundaries by retaining
+large tiles where little refinement is needed. We investigate whether this reduction makes
+reconstruction faster. We compare complete reconstruction time and accuracy for a regular grid,
+quadtree, and kd-tree partitions. We also evaluate nine criteria for deciding where quadtree tiles
+should be subdivided, including residue count, fringe density, and measures of phase variation, at
+different tile sizes and budgets. In single-threaded experiments on a heterogeneous image dataset,
+optimized adaptive partitions use fewer tiles but remain slower than the optimized grid, and some
+reconstructions lose substantial accuracy. Stage measurements explain why: constructing the
+partition and solving larger retained tiles outweigh the savings at tile boundaries. The criterion
+comparison also shows that more refinement does not consistently improve accuracy. These
+results motivate evaluating adaptive partitions by the complete time needed to reach a chosen
+reconstruction accuracy, including whether limited refinement can provide a faster approximate
+result.
+Keywords: Phase unwrapping, adaptive tiling, quadtree, kd-tree, domain decomposition, leastsquares reconstruction, Poisson equation, discrete cosine transform, image processing, remote sensing,
+runtime analysis, computational complexity.
+1 Motivation and scope
+Phase unwrapping estimates the missing multiples of 2π in a measured angle image. For large images,
+tiling reduces the size of individual reconstruction problems. Tiles can be processed sequentially
+to limit memory use, or in parallel before their solutions are assembled [1]. The choice of partition
+must therefore account for both local reconstruction and boundary reconciliation.
+Several phase-unwrapping methods already separate local reconstruction from the assembly of
+neighboring regions. Strand et al. [2] unwrap small square blocks under the assumption that the true
+phase range within each block is below 2π, then align them by least-squares fitting of integer-cycle
+offsets. Antonopoulos et al. [3] combine polynomial fits within tiles with reliability-guided merging
+for digital holography. The tiled extension of SNAPHU unwraps tiles independently, subdivides
+them into reliable regions, and estimates region offsets through a second network optimization [1].
+Here we study tiled least-squares reconstruction. Least-squares methods fit a phase field to
+differences between neighboring observations [4, 5]; Moevus and Mignotte [6] use local Poisson solves
+in a fixed-grid formulation. A regular grid uses a fixed tile size, whereas an adaptive partition retains
+larger tiles where refinement appears unnecessary. Adaptive regions also have precedents: Baldi [7]
+1
+subdivides using phase jumps and joins regions through interface-error minimization, while Yu et al.
+[8] construct regions from residue clusters.
+Figure 1 illustrates the attraction of adaptivity: many small tiles can be replaced by a few large
+regions. Whether this saves time depends on the cost of identifying and reconstructing those regions,
+as well as the boundaries removed.
+Our question is whether adaptive allocation improves complete reconstruction time or reference
+agreement when the local solver and joining rule are fixed. We first compare a regular grid with
+four-way and binary partitions using residue-driven refinement. We then examine how alternative
+criteria and restricted tile budgets affect allocation and error. This separates the runtime value of
+the tested adaptive pipeline from the broader question of where refinement should be concentrated.
+Wrapped phase
+Signed residues
+Grid: 1024 tiles
+Adaptive: 268 tiles
+Wrapped phase
+Signed residues
+Grid: 1024 tiles
+Adaptive: 514 tiles
+Wrapped phase
+Signed residues
+Grid: 1024 tiles
+Adaptive: 4 tiles
+A: Synthetic InSAR
+Ground truth
+-185.7
+Phase (rad)
+24.1
+B: Tree-derived phase
+Ground truth
+0.0
+Phase (rad)
+11.6
+C: Vortex
+Ground truth
+-2.7
+Phase (rad)
+11.4
+Figure 1: Regular and adaptive partitions on three 256 × 256 phase fields: A, a generated interferometric
+synthetic aperture radar (InSAR) field; B, a field derived from tree-photograph intensities; C, a generated
+vortex field. Columns show the known generating phase (ground truth, GT), wrapped phase, signed cell
+residues (red: +1, blue: −1, white: zero), a grid of 8 × 8-pixel tiles, and a residue-driven quadtree. Each GT
+panel has its own color scale in radians; wrapped panels share the cyclic scale [−π, π]. White lines mark tile
+boundaries. The quadtree has minimum side s = 8 pixels and stopping budget B = 512 leaves. It retains 268,
+514, and four tiles in A–C, versus 1024 grid tiles in each case. A four-way split adds three leaves, allowing the
+budget to be exceeded by two. These unquantized examples illustrate allocation, not reconstruction accuracy
+or runtime.
+2
+2 Reconstruction with a common solver
+Figure 2 separates partition construction, local reconstruction, and boundary reconciliation. A spatial
+tree determines tile boundaries. A different tree, introduced in Sec. 2.3, connects the reconstructed
+tiles to propagate their offsets. Keeping these roles separate allows the grid, quadtree, and kd-tree
+to use the same local solver and joining rule.
+Wrapped phase
+1. Partition
+2. Solve each tile
+3. Join the tiles
+Median + MAD per boundary
+Residues → spatial tree
+Wrapped Laplacian
+Quadtree or binary cuts
+DCT → divide → inverse DCT
+Propagate reliable offsets
+Grid: fixed rectangles
+BRiDCT; FFTW fallback
+Assemble the phase image
+Full reconstruction call: partition + local solves + joining + assembly + cleanup
+Figure 2: Common pipeline for grid, quadtree, and kd-tree reconstruction. The partition sets the tile
+boundaries; local Poisson solves use the BRiDCT discrete cosine transform (DCT), with FFTW for unsupported
+shapes. Seam discrepancies are summarized by their median and median absolute deviation (MAD). A
+separate reliability tree connects the reconstructed tiles and determines their relative phase offsets. The
+complete-call timer includes preparation, all reconstruction stages, and temporary-buffer cleanup. Transform
+plans are reused in the main timing comparison; first-call latency is evaluated separately.
+2.1 Residues and subdivision
+Let ψ denote the wrapped observation and W reduce an angle to (−π, π]. A cell consists of four
+neighboring pixels arranged in a square. Compute the principal differences W(ψq − ψp ) along its
+four edges and sum them with signs following a consistent orientation around the cell. A nonzero
+sum, measured in multiples of 2π, is a residue: the four observed differences cannot all belong to
+one consistent phase field. For the main runtime comparison, the tile score is the sum of absolute
+residue charges over cells wholly inside it, excluding cells crossed by its boundary. Alternative scores
+are examined in Sec. 4.
+The quadtree starts with the image rectangle. A split bisects both sides and replaces one terminal
+tile, or leaf, with four children (Fig. 3). Both sides must be at least 2s, where s is the minimum
+permitted tile side. With a tile budget, the largest-scoring eligible leaf is split first. Refinement stops
+when the budget is reached or no eligible positive-score leaf remains. The final runtime comparison
+removes the budget restriction: every eligible tile containing a residue is split. In that setting,
+depth-first traversal produces the same leaves without maintaining their priority in a queue.
+With a consistent oriented-edge convention, a residue-free rectangle admits an exact fit to its
+observed differences in exact arithmetic: zero circulation around every cell makes the integral between
+two pixels independent of the path. This is a local consistency statement, not a guarantee of the true
+phase. For example, slopes of 3π/2 and −π/2 per pixel give the same wrapped observations and no
+residues. Recovering the physical phase requires additional sampling assumptions [9]. Inconsistencies
+can also lie across tile boundaries and therefore escape each tile’s internal test.
+3
+(a) Start: one leaf
+(b) Split: four leaves
+C=4
+(c) Refine: seven leaves
+1
+1
+1
+1
+C=2
+C=2
+C=6
+C=0
+Bisect both sides
+C=0
+Select largest eligible score
+C=0
+C=0
+Budget reached: L = B = 7
+Example: 32 × 32 pixels; minimum side s = 8. Zero-score tiles remain intact.
+Figure 3: Priority-based quadtree refinement on a 32 × 32 image, with minimum tile side s = 8 pixels
+and stopping budget B = 7 leaves. C is an illustrative nonnegative tile score, and L is the leaf count. (a)
+The root covers the image. (b) Bisecting both sides creates four 16 × 16 children; the orange outline selects
+the highest-scoring eligible child. (c) Splitting that child creates four 8 × 8 tiles and brings the total to
+seven leaves. Refinement stops at the budget even though another tile remains eligible with positive score.
+Zero-score tiles are retained.
+2.2 Binary alternatives to the quadtree
+A kd-tree splits a rectangle into two children with one horizontal or vertical cut. It can refine one
+direction without refining the other, which may suit elongated structures. The cut is eligible only if
+both children retain at least s pixels along the divided axis. We test KD midpoint, which bisects the
+longest eligible side, and KD dyadic, which places the cut at the largest power of two no greater
+than half that side, clamped to respect the minimum size. The latter favors dimensions supported
+by fast transforms without guaranteeing that every resulting tile has power-of-two dimensions.
+Both kd-trees use the same residue stopping test as the quadtree, so their comparison measures
+the effect of cut geometry and the resulting tile shapes. We also examine a residue-balanced rule,
+which places the cut near the median of the residue distribution instead of dividing side lengths. Its
+measured cost and accuracy are reported with the other geometric comparisons in Sec. 3.3.
+2.3 Local reconstruction and boundary reconciliation
+Let gT collect the observed principal differences inside tile T , and let DT compute neighboring
+differences of a candidate phase u. The local least-squares problem is
+uT ∈ arg min ∥DT u − gT ∥22 .
+u
+(1)
+When the observed differences are inconsistent, this fit finds a compromise between them; a small
+fitting residual does not by itself guarantee agreement with the reference phase. The normal equations
+form a discrete Poisson system with no connections outside the tile. A discrete cosine transform
+(DCT) diagonalizes this system: transform the right-hand side, divide by the nonzero eigenvalues,
+and apply the inverse transform [4]. The constant coefficient is set to zero because local differences
+do not determine an additive offset.
+The complete-runtime comparison in Sec. 3 uses BRiDCT [10], our high-performance singleprecision DCT implementation, for both the grid and adaptive partitions. Based on the Shao–Johnson
+factorization [11], it supports square and rectangular tiles with power-of-two side lengths from 8 to
+1024 pixels. This range is particularly useful for quadtree reconstruction, where repeated bisection
+4
+produces tiles of widely varying sizes. Other shapes use cosine transforms from the FFTW library.
+Transform plans, which store reusable setup information, and working buffers are cached by shape.
+After each local solve, phase values are rounded to multiples of δ = 2π/256 radians, using
+nearest-value rounding with ties to even. The remaining additive offsets must then be reconciled
+across shared boundaries. We follow the fixed-grid boundary-difference construction of Moevus and
+Mignotte [6], and account for unequal seam lengths in the median/MAD reliability rule below.
+Let ua , ub be the local solutions on neighboring tiles, with unknown additive offsets oa , ob . A seam
+is their shared boundary. For adjacent pixel pairs (pk , qk ) crossing it from tile a to tile b, form
+dk = ua (pk ) + W(ψ(qk ) − ψ(pk )) − ub (qk ).
+(2)
+Its median mab = mediank dk estimates ob − oa . The median absolute deviation (MAD), Dab =
+mediank |dk − mab |, measures disagreement along the seam rather than the size of its offset. With
+seam length nab (the number of pixel pairs), define
+wab =
+nab
+,
+(1.4826Dab + η)2
+(3)
+where η = δ is one phase-quantization step and keeps the weight finite when the seam discrepancies
+agree exactly. The factor 1.4826 expresses MAD on a Gaussian standard-deviation scale. The
+seam-length factor is heuristic: correlated boundary samples do not justify treating this weight as
+calibrated uncertainty.
+Reliability-tree joining treats tiles as graph vertices and shared boundaries as graph edges. A
+maximum-weight spanning tree connects every tile without cycles while maximizing the sum of
+selected reliability weights. Median offsets are propagated from a fixed root along this tree. This
+joining tree is distinct from the spatial subdivision tree: it determines relative phase offsets, not tile
+boundaries.
+2.4 Partition and reconstruction algorithms
+Algorithms 1 and 2 separate the decisions that are varied from the operations held fixed. The
+score-map builder A selects where refinement is useful, while the split rule G determines its geometry.
+Section 4 defines the candidate scores; Sec. 2.2 defines the binary alternatives.
+Algorithm 1 uses a summed-area table to obtain each rectangular score from four cumulative
+entries. It splits the highest-scoring eligible tile while retaining zero-score and ineligible leaves.
+Checking the budget before a split permits an overshoot of two leaves for quadtrees, but none for
+binary trees. With no budget limit, depth-first traversal gives the same leaves without a priority
+queue.
+Algorithm 2 accepts either this adaptive partition or a regular grid. It solves the local problems,
+estimates seam offsets, and connects the tiles in decreasing order of reliability without creating cycles.
+A fixed root supplies the additive reference; assembly, minimum subtraction, and rounding complete
+the output. Ground truth is used only for subsequent accuracy evaluation.
+5
+Algorithm 1. Priority-based adaptive partition
+Input: Wrapped phase ψ; nonnegative cell-score builder A; split rule G; minimum side s (pixels); stopping
+budget B ≥ 1 (integer or ∞).
+Output: Rectangular leaf partition L covering the image.
+1: Compute A(ψ) and its summed-area table
+2: Define C(T ) as the sum of scores over cells inside tile T
+3: Initialize L with the image rectangle and queue it if eligible with positive score
+4: while |L| < B and an eligible positive-score leaf exists do
+5:
+Select the eligible leaf T with largest C(T )
+6:
+Replace T in L with its children under G
+7:
+Compute child scores and update the priority queue
+8: end while
+9: return leaves in fixed order
+Eligibility enforces the minimum side. Ties use insertion order; children cover their parent without overlap.
+Zero-score and ineligible tiles remain leaves. Set B = ∞ for unrestricted refinement; a finite budget can be
+exceeded by at most two leaves for a quadtree, and is not exceeded by binary splits.
+Algorithm 2. Local reconstruction and tile reconciliation
+Input: Wrapped phase ψ; rectangular tiling L; fixed quantization convention.
+Output: Reconstructed phase ϕb with a common additive reference.
+1: for each tile T ∈ L do
+2:
+Solve (1) by DCT and apply local quantization
+3: end for
+4: Find neighboring tiles and their shared boundary samples
+5: Compute seam medians mab and weights wab by (2)–(3)
+6: Select a maximum-weight spanning tree of neighboring tiles
+7: Fix one root offset to zero; propagate ob − oa = mab along the tree
+b T = uT + oT
+8: Assemble ϕ|
+b
+9: Shift the output minimum to zero, quantize, and return ϕ
+Tiles cover the image without overlap. The single-tile case has offset zero and no seams. No reference phase
+enters the reconstruction.
+3 Complete reconstruction time and accuracy
+The complete-pipeline comparison holds local reconstruction and reconciliation fixed, and gives the
+grid every applicable implementation improvement. It therefore tests whether adaptive subdivision
+itself saves time.
+3.1 Inputs, controls, and measurements
+The dataset contains 208 entries from six image families (Table 1). Ten inputs covering smooth
+fields, dense texture, and non-square dimensions guide implementation choices, while the other 198
+evaluate the selected configurations. Because the dataset includes correlated cases and had already
+been used in exploratory work, this larger comparison evaluates fixed configurations rather than
+providing an independent test of generalization.
+The exploratory subset comprises five photograph-derived inputs (trees, a portrait, noisy baboon,
+Lena, and a Barbara crop), two generated surfaces (Zernike and peaks), one synthetic InSAR
+field, one experimental holographic input, and one MRI simulation. Their dimensions range from
+6
+126 × 134 to 1024 × 1024 pixels. The complete dataset also includes narrow rectangular test fields
+and non-power-of-two dimensions, so the comparison exercises both the BRiDCT and fallback paths.
+Table 1: Composition of the 208-entry dataset. Counts denote test inputs, not independent acquisitions.
+Ten entries guide implementation choices; the other 198 provide the main comparison. Reference phases
+comprise 158 known generating fields, 30 terrain-model references, and 20 algorithmic references. Agreement
+with the last category does not establish agreement with independent ground truth.
+Family
+Entries
+Photographs
+45
+InSAR
+69
+Synthetic surfaces
+Published tests
+Holography
+18
+4
+40
+MRI simulations
+32
+Source and reference
+Image intensities mapped to known phase fields, including USC-SIPI
+images.
+19 generated fields; 50 InSAR-DLPU entries, including 30 with terrainmodel references [12].
+Analytic or generated fields with known phase.
+Ghiglia–Pritt images and supplied reference arrays [5].
+20 synthetic and 20 experimental entries; the latter use supplied algorithmic
+wrap-count references [13].
+Magnetic resonance imaging (MRI) simulations from the quantitative
+susceptibility mapping (QSM) challenge, with known phase and brain
+masks [14].
+The reconstruction timings use one thread on an Apple M3 Max. For these experiments, observations are encoded in 256 intensity levels per cycle, and local and assembled solutions are quantized to
+the same phase step. Non-square inputs are padded with zero intensity to a square of side max(H, W )
+for every method, where H and W are the original height and width. The whole padded domain is
+reconstructed; output is cropped before evaluation, and MRI accuracy uses the supplied brain mask.
+These choices are shared controls, but they limit direct extrapolation to floating-point observations
+or reconstruction only within a mask.
+The timer surrounds the complete C++ reconstruction call, including partition construction,
+local solves, seam processing, output assembly, and temporary-buffer destruction. Input loading,
+encoding, process startup, and accuracy evaluation are excluded. Transform plans are prepared
+during an untimed warm-up. Seven randomly ordered repetitions are recorded for every image and
+configuration at minimum sides s = 8 and s = 16, without an adaptive leaf-budget limit. Grids use
+nominal side s, with partial tiles at image edges. First-call latency is evaluated separately.
+For each image and method we take the median repeated time, then form the adaptive/grid ratio.
+Table 2 reports the median of those paired ratios and the ratio of summed case times, which gives
+greater weight to expensive images. A time ratio of 1.25 therefore means 25% slower reconstruction.
+Accuracy is evaluated on the original image, or the supplied MRI mask. We subtract the mean
+reconstruction-minus-reference difference over those pixels to remove one common additive offset
+before computing the fraction of evaluated pixels with absolute error below π, denoted Sπ , and the
+root-mean-square error (RMSE). Mean paired changes in these measures show whether a difference
+in speed is accompanied by a difference in reference agreement. For example, a success change of −1
+percentage point means a smaller fraction of pixels within tolerance.
+3.2 Implementation optimizations and the grid control
+We reduce the cost of constructing the tree, processing its interfaces, and solving its tiles. Tree
+construction is specific to the adaptive methods; improvements to local solves and reconciliation are
+also given to the grid.
+7
+For unrestricted residue refinement, depth-first traversal replaces the priority queue because
+processing order no longer affects the final leaves. Residue computation and cumulative summation
+are combined in one pass, avoiding a separate residue-map pass. Since the input is encoded on 256
+levels, residue evaluation uses integer phase differences. A lookup table handles differences of exactly
+half a cycle consistently with the reference wrapping convention.
+For reconciliation, we collect each shared boundary as a contiguous interface. Finding its median
+and MAD requires selecting central values rather than sorting every sample. A disjoint-set structure
+tracks the relative offsets of tile groups as they are joined, avoiding a separate propagation traversal.
+Finally, FFTW replaces the slow direct-transform fallback on shapes unsupported by BRiDCT.
+To measure the benefit of these changes, we compare with a quadtree implementation that uses a
+priority queue, ordered-map seam collection, and direct rectangular fallbacks. Both implementations
+already use BRiDCT on supported shapes. The changes reduce median paired runtime by about
+51% at s = 8 and 42% at s = 16. The comparison with the grid below therefore evaluates adaptivity
+after these avoidable costs have been reduced.
+Two further shortcuts also fail to reduce paired runtime on the ten exploratory inputs. Direct
+integration with an explicit consistency check is about 1–4% slower than DCT solves, while searching
+each tile only until its first residue is found is about 3–4% slower than building the fused residue
+table. The retained pipeline therefore keeps DCT solves and the full table.
+3.3 Measured outcome
+The optimized grid remains faster (Table 2). Quadtree reconstruction takes 24% longer in median
+paired time at s = 8, and 53% longer at s = 16. Both kd-tree variants also remain slower than the
+grid. Across the 198 entries, no tested adaptive configuration has a lower per-image median time
+than the optimized grid at either minimum size. Figure 4 shows the spread across inputs and the
+contribution of each stage.
+Table 2: Complete reconstruction time and reference agreement on 198 entries. s is the minimum adaptive
+tile side in pixels; the grid uses nominal s × s tiles. For each entry, t and tG are the median times over seven
+repeats
+P P for the adaptive method and its grid control. The median of t/tG describes a typical entry, while
+t/ tG compares aggregate time across entries. Ratios above one mean slower reconstruction. ∆Sπ and
+∆RMSE are mean paired changes, adaptive minus grid, in percentage points (pp) and radians. Sπ is the
+fraction of pixels with absolute error below π after removing a common mean phase offset. Thus positive
+∆Sπ and negative ∆RMSE indicate better reference agreement. All methods share BRiDCT, FFTW fallback,
+and reconciliation.
+s (px)
+Partition
+8
+8
+8
+Quadtree
+KD midpoint
+KD dyadic
+16
+16
+16
+Quadtree
+KD midpoint
+KD dyadic
+Median t/tG
+P
+t/
+P
+tG
+∆Sπ (pp)
+∆RMSE (rad)
+1.244
+1.228
+1.229
+1.371
+1.381
+1.294
+-0.20
+-0.04
+-0.06
++0.105
++0.133
++0.145
+1.532
+1.578
+1.570
+1.777
+1.796
+1.644
+-1.02
+-0.99
+-1.01
++0.184
++0.213
++0.225
+The two runtime summaries reveal different effects of binary subdivision. At s = 8, both binary
+variants are close to the quadtree in median runtime; at s = 16, neither improves that statistic.
+Dyadic cuts reduce summed time relative to midpoint cuts more than they change the median ratio,
+suggesting that their benefit is concentrated among expensive inputs. This advantage over midpoint
+cuts remains insufficient to beat the grid. Binary subdivision also has a construction cost: for the
+8
+(a) Paired runtime ratios
+Quadtree, s=8
+KD midpoint, s=8
+KD dyadic, s=8
+Quadtree, s=16
+KD midpoint, s=16
+KD dyadic, s=16
+(b) Where the time is spent
+1.24
+Grid 8 × 8
+1.23
+1.23
+Quadtree, s=8
+1.53
+Grid 16 × 16
+1.58
+1.57
+Quadtree, s=16
+1.0
+1.5
+2.0
+2.5
+Time / grid time at matching s
+0
+20
+40
+60
+80
+100
+Share of summed reconstruction time (%)
+Partition
+Local solves
+Boundary statistics
+Joining
+Output assembly
+Remainder
+Figure 4: Complete reconstruction time relative to the grid and its stage breakdown. (a) Each adaptive
+method uses minimum tile side s and is paired with a grid of nominal side s on the same input. Per-entry
+times are medians over seven repeats. Dots show the median ratio across 198 entries; whiskers show the
+10th–90th percentiles across entries, not confidence intervals. The dashed line at one marks equal time. (b)
+Stage times are summed across entries using their per-entry medians and divided by the summed median
+complete-call times. Partitioning includes residue computation and tree construction; local solves include data
+preparation, the Poisson right-hand side, and transforms. Boundary statistics compute seam medians and
+MAD; joining propagates offsets. The remainder includes cleanup, uninstrumented overhead, and differences
+caused by summarizing each stage separately.
+same number of leaves L, it requires L − 1 splits, compared with (L − 1)/3 for a full quadtree.
+Greater directional freedom therefore comes with additional node-processing work.
+Balancing residues across a cut does not improve this result. On the ten exploratory inputs, the
+residue-balanced rule takes about 1.53 and 1.85 times the midpoint kd-tree runtime at s = 8 and
+s = 16, respectively, in median paired time with otherwise matched reconstruction. It also reduces
+mean success at both sizes. The broader comparison therefore retains the simpler midpoint and
+dyadic rules.
+The additional runtime is not accompanied by a consistent improvement in reference agreement.
+Mean success changes are modest, but averages hide severe failures: two related shear-field test
+images fall from Sπ = 100% with the grid to Sπ = 0% with each adaptive method. Thus, after
+removing the common phase offset, none of their adaptive pixels lies within π of the reference. Mean
+RMSE increases for all three adaptive configurations. The shear failures also occur with the quadtree
+before the construction optimizations, so they are not introduced by the faster construction routine.
+These observations do not prove that every adaptive reconstruction is worse; they rule out a claim
+that the tested allocation preserves accuracy across the dataset.
+3.4 Why fewer tiles do not save time
+Partition construction accounts for about 24–25% of summed quadtree time, and local reconstruction
+for 47–54% (Fig. 4). A regular grid avoids image-dependent partitioning. Adaptive tiling reduces
+the number of interfaces, but every pixel still contributes to a local solve, and retaining larger tiles
+can increase the work per pixel. For a fast transform on nt pixels, the work scales as O(nt log nt ).
+9
+Combining small tiles increases the transform size while leaving the total number of pixels unchanged,
+so fewer local problems need not mean less transform work.
+The complexity follows the same separation of work. Let N denote the processed pixel count, L
+the number of leaves, P the number of pixel pairs crossing tile boundaries, and E the number of
+adjacent tile pairs. Residue preprocessing costs O(N ), after which the unrestricted traversal creates
+O(L) nodes and
+P sorts leaves into a deterministic order in O(L log L). The transform work over
+all tiles is O( t nt log nt ). Replacing a direct separable transform on an h × w tile, whose cost is
+O(hw(h + w)), by a fast DCT avoids an additional penalty on unsupported rectangular shapes.
+Fewer tiles mainly help the boundary stages: seam processing is linear in P on average for
+the selection routine used, and reliability sorting costs O(E log E). Pixel preparation and output
+assembly still require O(N ) work, while storage is O(N + E + L) apart from cached transform plans.
+Thus reducing interfaces leaves both the initial residue pass and the work over all pixels in place.
+This distribution of work limits what further DCT acceleration can achieve on its own. The
+local-solve stage includes input extraction and right-hand-side construction as well as the transforms
+themselves. A faster DCT changes only part of that stage, and the same improvement is available to
+the grid. A useful optimization must therefore be judged by the complete paired runtime, rather
+than a kernel speedup in isolation.
+For a single reconstruction, initialization adds a cost absent from the warm timings. On the
+ten exploratory inputs, median first-call/warm-call ratios are about 2.2–2.9. Quadtree and dyadic
+kd-tree remain slower than the grid in paired first-call time; process startup, loading, and encoding
+are excluded.
+4 Subdivision criteria and reconstruction accuracy
+The runtime comparison fixes residue count as the subdivision criterion. We now compare nine
+criteria at two minimum tile sizes and two leaf budgets on all 208 entries. This separate study
+measures allocation and reference error under numerical conditions held fixed across criteria. It does
+not impose an error tolerance or rank the criteria by complete runtime.
+4.1 Stopping rules and priority scores
+A criterion assigns a nonnegative score to each cell, and a tile sums scores over its interior cells. The
+resulting score serves two purposes: zero stops refinement, while positive values determine priority
+when a leaf budget limits subdivision. Consequently, a sparse score can leave large zero-score regions
+untouched, whereas a score that is positive everywhere continues refining even where the local fit is
+already consistent.
+With fixed split locations and no budget limit, the stopping test determines the leaves; positive
+priorities affect only processing order. A restricted budget makes those priorities matter, as Fig. 5
+illustrates. Criteria A–C use residues, D–F describe phase variation, G–H test phase jumps, and I
+ignores image content. Their neighborhoods and thresholds are fixed across entries, without a claim
+that these settings are optimal.
+A. Residue count. The score counts absolute residue charge, directing refinement toward differences
+that cannot be fitted consistently. This is the criterion used in the main timing comparison.
+B. Local net charge. The score is the magnitude of the signed residue sum over an 8 × 8 cell
+neighborhood, with zeros outside the image. Opposite charges can cancel, so zero net charge does
+not imply absence of residues.
+10
+C. Paired cut length. This criterion pairs nearby opposite residues greedily within a Manhattan
+distance of 16 cells, prioritizing short connections, and connects unmatched residues to the nearest
+border. Each path contributes one to every cell it visits; overlapping paths accumulate. These paths
+guide tile allocation only; they do not delete edges from the local least-squares problem.
+D. Fringe density. The score counts cell edges whose principal difference has magnitude above
+3π/4, emphasizing rapid phase variation. A steep, consistently sampled ramp can score highly
+without any residue.
+E. Gradient variance. This criterion sums the horizontal and vertical principal-difference variances
+in 5 × 5 windows, with reflection at image boundaries, and averages the edge scores onto cells. It
+responds to texture, curvature, and noise rather than inconsistency alone.
+F. Laplacian magnitude. The score averages the absolute divergence of principal differences over
+a cell’s four corners, using replicated values at image boundaries. Because smooth curvature also
+produces a nonzero score, this criterion may subdivide regions whose observed differences are already
+consistent.
+G. Near-π edge. The score is one if any edge has principal-difference magnitude greater than
+π − 10−6 radians, and zero otherwise. This narrow test can miss inconsistencies with less extreme
+edge differences.
+H. Raw phase jump. This criterion marks neighboring wrapped values whose difference exceeds π
+before rewrapping. It uses Baldi’s subdivision test [7], without reproducing his complete method.
+Smooth phase crossing a wrap boundary can activate it.
+I. Uniform score (control). Every cell receives the same positive score. The tile score is its
+number of interior cells, so subdivision is driven by tile size and the budget, independently of image
+content.
+4.2 Criterion and budget evaluation
+For each entry, we cross the nine criteria with minimum sides s ∈ {8, 16} pixels and the full and half
+budgets defined in Table 3. This gives 7488 reconstructions.
+For this allocation and accuracy study, every criterion uses the same double-precision DCT solver,
+local and final quantization, and median/MAD reliability-tree reconciliation. Scores and local
+right-hand sides use the original, unquantized observations without square padding. All nine criteria
+are compared under these same conditions. Their error differences describe the effect of allocation
+within this study and should not be combined numerically with the encoded-input BRiDCT results
+of Sec. 3.
+The two error measures in Table 3 need not improve together: more pixels can fall below the π
+threshold while the largest errors increase. Nor do equal budgets imply equal tile counts, because a
+sparse criterion may stop before using its budget.
+The absolute control values show that changing the budget can affect the two error measures
+differently. At s = 16, halving the budget lowers mean success but also lowers mean RMSE. A
+reduction in one error statistic therefore does not establish that accuracy is preserved.
+Dense scores often spend more tiles without improving reconstruction. At s = 8 and budget B1 ,
+residue count produces a median of 302.5 tiles, compared with 1024 for gradient variance, Laplacian
+magnitude, and the uniform control. Their mean success is about 1.50–1.53 percentage points
+lower, and mean RMSE is about 0.36 radians higher. Conversely, stopping almost everywhere is not
+sufficient: the near-π criterion has a median of one tile but loses 5.50 percentage points of success.
+Tile reduction must therefore be assessed together with error.
+11
+(b) Local net charge
+L = 514
+(c) Paired cut length
+L = 514
+(d) Fringe density
+L = 514
+(e) Gradient variance
+L = 514
+(f) Laplacian magnitude
+L = 514
+0
+(g) Near-pi edge
+L = 496
+(h) Raw phase jump
+L = 514
+Wrapped phase (rad)
+(a) Residue count
+L = 514
+(i) Uniform score (control)
+L = 514
+Figure 5: Effect of the subdivision criterion on a fixed observation. All panels show the same unquantized
+256 × 256 tree-photograph phase field as row B of Fig. 1, with white quadtree boundaries over the wrapped
+phase. Panels (a)–(i) use criteria A–I from Sec. 4; L is the resulting number of tiles. Minimum side s = 8
+pixels and stopping budget B = 512 leaves are identical throughout. A four-way split can exceed this budget
+by two leaves. The shared cyclic color scale gives phase in radians. These partitions illustrate how scores
+allocate a limited tile budget; they are not the unrestricted partitions used in the main runtime comparison.
+Residue count is not the most accurate criterion in every setting. At s = 8 and budget B1/2 ,
+fringe density improves mean success by 0.37 percentage points and reduces mean RMSE by 0.23
+radians, while its median tile count rises from 302.5 to 514. At s = 16 with the same budget fraction,
+fringe density also improves both error measures, although both median counts are 130. Local net
+charge and gradient variance sometimes improve success while increasing RMSE. These findings
+support residue count as an interpretable baseline that often uses fewer tiles, rather than a universal
+accuracy optimum.
+12
+Table 3: Criterion comparison on 208 entries at minimum side s pixels. For original dimensions H × W ,
+the full budget is B1 = max(1, ⌊H/s⌋⌊W/s⌋) and the half budget is B1/2 = max(1, ⌊B1 /2⌋). For a 256 × 256
+image at s = 8, these targets are 1024 and 512 tiles; a split may exceed the target by two. L is the median
+tile count. ∆Sπ (percentage points, pp) and ∆RMSE (radians, rad) are mean paired changes relative to
+residue count at the same s and budget. Positive ∆Sπ and negative ∆RMSE improve agreement. The zero
+control rows do not imply equal accuracy between budgets: absolute control means are given below. Budgets
+limit tiles, not error, and this table does not compare runtimes.
+Full budget B1
+Half budget B1/2
+L
+∆Sπ (pp)
+∆RMSE (rad)
+L
+∆Sπ (pp)
+∆RMSE (rad)
+302.5
+419.5
+362.5
+748
+1024
+1024
+1
+841
+1024
++0.00
+-0.25
+-0.42
++0.07
+-1.50
+-1.53
+-5.50
+-0.72
+-1.53
++0.000
++0.266
++0.026
++0.021
++0.356
++0.356
++0.216
++0.163
++0.356
+302.5
+419.5
+362.5
+514
+514
+514
+1
+514
+514
++0.00
++0.50
+-0.18
++0.37
++0.48
+-0.38
+-4.79
++0.07
+-0.21
++0.000
++0.236
++0.070
+-0.226
++0.288
++0.350
++0.179
++0.187
++0.267
++0.00
++0.00
+-0.17
++0.09
+-0.11
+-0.11
+-2.59
++0.16
+-0.11
++0.000
++0.249
++0.013
+-0.021
++0.240
++0.240
+-0.088
++0.118
++0.240
+130
+130
+130
+130
+130
+130
+1
+130
+130
++0.00
++0.06
+-1.22
++0.42
++0.63
+-0.33
+-2.33
+-0.17
+-0.86
++0.000
++0.251
++0.167
+-0.063
++0.230
++0.256
++0.039
++0.192
++0.258
+Criterion
+Minimum side s = 8 pixels
+A. Residue count
+B. Local net charge
+C. Paired cut length
+D. Fringe density
+E. Gradient variance
+F. Laplacian magnitude
+G. Near-π edge
+H. Raw phase jump
+I. Uniform control
+Minimum side s = 16 pixels
+A. Residue count
+B. Local net charge
+C. Paired cut length
+D. Fringe density
+E. Gradient variance
+F. Laplacian magnitude
+G. Near-π edge
+H. Raw phase jump
+I. Uniform control
+139
+160
+146.5
+247
+256
+256
+1
+245.5
+256
+Absolute residue-count control. Values are mean Sπ (%) / mean RMSE (rad), in the order B1 , B1/2 . s = 8: 84.628 /
+4.336, 84.062 / 4.374. s = 16: 82.824 / 4.619, 82.275 / 4.500.
+4.3 Relaxed stopping and runtime
+The criterion comparison shows how allocation affects error, but does not establish whether coarser
+partitions save time. We therefore test relaxed residue stopping on the ten exploratory inputs,
+measuring whether allowing a few residues inside a tile reduces reconstruction time without losing
+reference agreement. The density rules stop a tile when its residue count per interior cell is at
+most 0.001 or 0.01. A second rule stops when the count is below 0.25(h + w) for tile dimensions
+h, w, provided the larger side is at most 4s. Each is paired with zero-residue stopping at s = 8
+and s = 16, with five repeated timings per input. Both arms use the same joining rule and permit
+direct integration in place of a DCT solve only after checking consistency against every internal edge.
+These timings exclude temporary-buffer destruction and are interpreted only within this comparison.
+These tests do not yield a consistent time–accuracy improvement. Across the two minimum sizes,
+the density rules take 1.6–12.4% longer in median paired time and reduce mean success by 0.78–5.93
+percentage points. The perimeter-based cutoff is about 0.9% faster at s = 8 and 2.3% slower at
+s = 16, while mean RMSE increases at both sizes. Allowing additional local inconsistency therefore
+13
+does not by itself produce a useful speedup in these tests. A broader study should instead measure
+the fastest reconstruction available at each acceptable error level.
+5 Discussion and conclusions
+The optimized grid remains faster than the tested quadtree and kd-tree configurations, even after
+substantial reductions in adaptive reconstruction time. Stage measurements explain the result:
+residue preprocessing and larger local solves outweigh the savings at tile boundaries. The criterion
+study shows why refinement must also be assessed through accuracy: allocating more tiles does not
+consistently improve reference agreement, and gains depend on the score and budget. The value of
+an adaptive partition therefore depends on both its complete runtime and the reconstruction error it
+produces.
+The runtime conclusion concerns single-threaded, encoded-input reconstruction on one machine,
+with unrestricted residue refinement. Related dataset entries and different reference types limit
+generalization to independent physical acquisitions. Padding, quantization, and reconciliation are also
+part of the evaluated pipeline. The comparison therefore establishes a result for these configurations
+with their common BRiDCT solver and FFTW fallback, rather than a universal ranking of adaptive
+methods.
+These results leave open whether limited refinement can provide a faster approximate reconstruction
+when a larger error is acceptable. A targeted study would vary the criterion, tile budget, and minimum
+tile size for the adaptive methods, and the tile size for the grid. For each setting, it would measure
+complete reconstruction time and error against the reference phase. At each allowed error level, the
+comparison would identify the fastest setting that meets that tolerance. This would show whether
+the quadtree or kd-tree offers an advantage for an approximate first result, and how that advantage
+changes as the required accuracy increases.
+The kd-tree comparison could also be extended with synthetic images whose difficult regions have
+controlled shapes. For example, residues could be concentrated in a compact patch or a narrow band,
+while image size, noise level, and residue count are held fixed. Comparing quadtree and kd-tree
+reconstruction times at similar reference error would then test whether binary cuts help specifically
+with elongated structures. This would isolate a geometric effect that the mixed-dataset comparison
+does not resolve, while retaining the shared solver and joining rule.
+Further engineering could reduce repeated gradient preparation or group tiles of equal shape to
+improve data reuse. Transform plans and buffers are already cached; additional gains from these
+proposals remain to be demonstrated. The report’s practical conclusion is to retain the grid as
+the runtime baseline and require any adaptive improvement to survive a complete reconstruction
+comparison. Fewer tiles are a useful geometric property; they become a computational advantage
+only when the work they remove exceeds the work required to construct and process them.
+Data and code availability
+Public source collections are identified in Table 1. The photograph-derived inputs include images
+attributed to the USC-SIPI collection.1 The assembled derived arrays, case lists, preprocessing
+scripts, experiment code, and outputs are retained by the authors and are not currently publicly
+available. Some locally prepared inputs lack a complete generation recipe, so citations to the source
+collections do not reproduce the exact benchmark.
+1
+USC-SIPI Image Database: https://sipi.usc.edu/database/.
+14
+Supplementary material
+The supplementary material contains the detailed input inventory, additional mathematical and
+implementation details, the underlying criterion score maps, a separate baseline DCT-library
+comparison, and expanded results for the exploratory variants and first-call measurements.
+References
+[1] C. W. Chen and H. A. Zebker, “Phase unwrapping for large SAR interferograms: Statistical segmentation and
+generalized network models,” IEEE Transactions on Geoscience and Remote Sensing, vol. 40, no. 8, pp. 1709–1719,
+2002.
+[2] J. Strand, T. Taxt, and A. Jain, “Two-dimensional phase unwrapping using a block least-squares method,” IEEE
+Transactions on Image Processing, vol. 8, no. 3, pp. 375–386, 1999.
+[3] G. C. Antonopoulos, B. Steltner, A. Heisterkamp, T. Ripken, and H. Meyer, “Tile-based two-dimensional phase
+unwrapping for digital holography using a modular framework,” PLOS ONE, vol. 10, no. 11, p. e0143186, 2015.
+[4] D. C. Ghiglia and L. A. Romero, “Robust two-dimensional weighted and unweighted phase unwrapping that uses
+fast transforms and iterative methods,” Journal of the Optical Society of America A, vol. 11, no. 1, pp. 107–117,
+1994.
+[5] D. C. Ghiglia and M. D. Pritt, Two-Dimensional Phase Unwrapping: Theory, Algorithms, and Software. WileyInterscience, 1998.
+[6] A. Moevus and M. Mignotte, “Translation-invariant tile-based phase unwrapping with residual-weighted
+multipath averaging,” 2026, arXiv:2609.13409. [Online]. Available: https://arxiv.org/abs/2609.13409
+[7] A. Baldi, “Two-dimensional phase unwrapping by quad-tree decomposition,” Applied Optics, vol. 40, no. 8, pp.
+1187–1194, 2001.
+[8] H. Yu, Z. Li, and Z. Bao, “Residues cluster-based segmentation and outlier-detection method for large-scale phase
+unwrapping,” IEEE Transactions on Image Processing, vol. 20, no. 10, pp. 2865–2875, 2011.
+[9] K. Itoh, “Analysis of the phase unwrapping algorithm,” Applied Optics, vol. 21, no. 14, p. 2470, 1982.
+[10] A. Moevus and M. Mignotte, “BRiDCT: Fast two-dimensional DCTs using SIMD: SIMD organization,
+register blocking, and numerical verification,” arXiv preprint arXiv:2609.28519, 2026. [Online]. Available:
+https://arxiv.org/abs/2609.28519
+[11] X. Shao and S. G. Johnson, “Type-II/III DCT/DST algorithms with reduced number of arithmetic operations,”
+Signal Processing, vol. 88, no. 6, pp. 1553–1564, 2008.
+[12] L. Zhou and H. Yu, “InSAR-DLPU: A benchmark dataset for deep learning-based SAR interferometry phase
+unwrapping,” IEEE Geoscience and Remote Sensing Magazine, vol. 12, no. 2, pp. 118–124, 2024.
+[13] M. Gontarz, V. Dutta, M. Kujawińska, and W. Krauze, “Phase unwrapping using deep learning in holographic
+tomography,” Optics Express, vol. 31, no. 12, pp. 18 964–18 992, 2023.
+[14] J. P. Marques, J. Meineke, C. Milovic, B. Bilgic, K.-S. Chan, R. Hedouin, W. van der Zwaag, C. Langkammer, and
+F. Schweser, “QSM reconstruction challenge 2.0: A realistic in silico head phantom for MRI data simulation and
+evaluation of susceptibility mapping procedures,” Magnetic Resonance in Medicine, vol. 86, no. 1, pp. 526–542,
+2021.
+[15] T. Ooura, “General purpose fft (fast fourier/cosine/sine transform) package,” Software package, 2001. [Online].
+Available: https://www.kurims.kyoto-u.ac.jp/~ooura/fft.html
+15
+Adaptive Tiling for Least-Squares Phase Unwrapping
+Runtime and Accuracy — Supplementary Material
+Antoine Moevus
+Université de Montréal
+Max Mignotte
+September 2026
+This supplement provides the detailed input descriptions, additional method analysis, score maps,
+and supporting measurements for the accompanying technical report. The primary result is the
+complete-reconstruction comparison using BRiDCT in the main report’s Table 2. The baseline
+DCT-library comparison here evaluates a different implementation and is reported separately.
+S1 Data and measurement details
+The 208-entry dataset contains 158 entries with a known generating reference, 30 real radarinterferometry entries with terrain-model references, and 20 experimental holographic entries with
+algorithmic references (Table S1). Agreement with an algorithmic reference is not independent physical ground truth. MRI inputs use cropped quantitative susceptibility mapping (QSM) simulations
+[14] and their supplied brain masks; other inputs use the full image.
+For the reconstruction-time experiments, the input is first encoded in 256 intensity levels per cycle.
+Non-square arrays are placed at the top left of a square of side max(H, W ) and padded with zero
+intensity. Reconstruction covers this whole square, including padding and pixels outside evaluation
+masks. Output is cropped back to the original dimensions before evaluation. The dimensions in
+Tables S1 and S2 describe the original arrays, not the padded working domain.
+For a valid-pixel set M , let ep = ϕbp − ϕp and subtract itsPmean ē to remove the arbitrary
+constant phase offset. The success fraction is Sπ = |M |−1 p∈M 1{|ep − ē| < π}; RMSE is
+P
+[|M |−1 p∈M (ep − ē)2 ]1/2 . Success measures the fraction within tolerance, whereas RMSE is
+sensitive to large errors. The main report’s Table 2 reports mean paired changes in success in
+percentage points and RMSE in radians. Its median runtime statistic summarizes paired ratios; its
+summed-time statistic is explicitly a ratio of summed case times.
+S2 Method specification
+S2.1 Local fitting and residues
+Let ϕ be a phase field and ψ = W(ϕ) its wrapped observation, where W reduces angles to (−π, π].
+An oriented edge e = (p, q) joins two neighboring pixels. On tile T , collect the observed principal
+differences ge = W(ψq − ψp ) into gT . The operator DT computes the corresponding differences of a
+candidate phase, so (DT u)e = uq − up . The local problem is
+uT ∈ arg min ∥DT u − gT ∥22 .
+u
+(S1)
+Its normal equations, DTT DT u = DTT gT , form a discrete Poisson system with the natural boundary
+conditions of the local fit. No edge outside the tile is included. The DCT diagonalizes this system
+[4]. Its zero-frequency coefficient is fixed to zero because neighboring differences do not determine
+an additive constant. Local solutions are rounded to a phase step δ = 2π/256 radians, with ties to
+even. After offset assembly, the output minimum is subtracted and the values are rounded to the
+S1
+Table S1: Dataset families, original image dimensions, and reference-phase construction. Dimensions are
+height × width in pixels before square padding; ranges cover the selected entries, not the entire source
+collections. Known generating references include both analytic fields and phases derived from photograph
+intensities. Terrain-model and algorithmic references are identified separately in the last column.
+Family
+Entries
+Dimensions
+Source and reference phase
+Photographderived
+45
+Grayscale test images, including USC-SIPI images,
+scaled into phase fields; the generating field is the
+reference. Clean and noisy variants are included.
+InSAR
+69
+256 × 256,
+512 × 512,
+1024 × 1024;
+250 × 288
+256 × 256
+Synthetic
+surfaces
+18
+Published test
+images
+4
+Holography
+40
+MRI
+simulations
+32
+256 × 256,
+257 × 257;
+458 × 152
+257 × 257;
+458 × 157;
+458 × 152
+256 × 256
+92–167 rows;
+101–155 columns
+19 locally generated interferograms with known phase;
+20 simulated and 30 real TanDEM-X entries from
+InSAR-DLPU [12]. The real-data references derive
+from a digital elevation model.
+Analytic and generated phase fields, with the
+generating field retained as the reference.
+Ghiglia–Pritt test images [5], using their supplied
+reference arrays.
+20 synthetic fields with known phase and 20
+experimental inputs from Gontarz et al. [13].
+Experimental references are reconstructed from the
+supplied quality-guided phase-unwrapping (QGPU)
+wrap counts.
+Cropped slices from four QSM challenge
+simulation/noise combinations [14], two echo times per
+view. Reference phase is 2πf TE from the supplied
+frequency f and echo time TE.
+same step. Input encoding is used in the timing comparison, whereas the criterion study retains the
+original floating-point observations.
+P
+For a four-pixel cell c, let rc = (2π)−1 e∈∂c ϵce ge , with signs following the oriented cell boundary.
+The residue criterion is
+X
+Cr (T ) =
+|rc |,
+(S2)
+c⊂T
+using only cells wholly inside the tile. In exact arithmetic on a hole-free rectangle, Cr (T ) = 0
+exactly when these differences admit a consistent potential: zero circulation on all cells makes path
+integration independent of the path. The unrounded least-squares residual is then zero, and the
+solution is unique up to a constant.
+This concerns observed differences, not the true phase. Slopes 3π/2 and −π/2 per pixel have
+identical wrapped observations and zero residues. Recovering the physical phase needs additional
+sampling assumptions [9]. Cells crossed by tile boundaries are also absent from the local count,
+leaving inconsistencies for reconciliation.
+S2.2 Budget conventions
+The reconstruction and median/MAD reconciliation are defined in the main report, Sec. 2.3 and
+Algorithms 1–2. In the criterion comparison, the size-based budget is B1 = max(1, ⌊H/s⌋⌊W/s⌋);
+S2
+Table S2: Ten inputs used for implementation choices and first-call measurements. Dimensions are original
+height × width in pixels, before padding. F1–F10 identify entries within this report. The last column states
+their origin and the image property relevant to these tests. Source-collection citations identify provenance;
+the exact derived benchmark arrays are not publicly available.
+ID
+Input
+Size
+Origin and role in the comparison
+F1
+Tree photograph
+256 × 256
+F2
+Portrait
+1024 × 1024
+F3
+Zernike field
+256 × 256
+F4
+Peaks field
+256 × 256
+F5
+Noisy baboon
+512 × 512
+F6
+Lena
+512 × 512
+F7
+Barbara crop
+250 × 288
+F8
+Synthetic InSAR
+256 × 256
+F9
+Holographic image
+256 × 256
+F10
+MRI simulation
+126 × 134
+Source recorded as USC-SIPI; intensity-derived
+phase with fine texture.
+Source recorded as USC-SIPI; larger intensityderived phase image.
+Locally generated polynomial phase field; curved
+fringes.
+Locally generated smooth test surface; no residues
+in the input.
+Locally prepared noisy photograph-derived field;
+dense subdivision.
+Photograph-derived field retained in the local collection; intermediate subdivision.
+Locally cropped photograph-derived field; nonsquare leaves.
+Locally generated interferometric field; known generating phase.
+Gontarz et al. [13], test sample 00189; algorithmic
+reference.
+QSM challenge [14], Sim1Snr1, axial slice 81, echo
+3; cropped reference mask.
+the restricted budget is B1/2 = max(1, ⌊B1 /2⌋). A regular grid includes partial edge tiles and has
+⌈H/s⌉⌈W/s⌉ tiles. On non-dyadic images, bisection need not reproduce that grid.
+S2.3 Complexity of the measured implementation
+Let N be the processed pixel count, including padding, and L the final tile count. Residue evaluation
+and a summed-area table cost O(N ) and give constant-time tile-score queries. Priority refinement
+costs O(L log L) in queue operations. The final unrestricted traversal instead creates O(L) nodes,
+then sorts leaves into a deterministic order in O(L log L); it removes queue overhead without changing
+this overall bound. Fixed-neighborhood residue, fringe, variance, and divergence maps are linear in
+N , whereas paired-path criteria also require residue searches and path construction.
+P
+Fast-transform work on nt pixels scales as O(nt log nt ), yielding O( t nt log nt ) local work. A direct
+separable fallback on an ht × wt rectangle costs O(ht wt (ht + wt )); replacing it can dominate aggregate
+speedups on unusual shapes. Input extraction, right-hand-side construction, pixel ownership, and
+output assembly additionally require linear pixel work regardless of tile count.
+Let P count pixel pairs across tile boundaries, E adjacent tile pairs, and pe the length of seam e.
+The final collector walks contiguous interfaces in O(P ) and computes median/MAD by selection,
+with average linear work in pe for the implementation used. Interfaces are first sorted by their tile
+identifiers to fix tie order, then stably sorted by decreasing reliability. These two sorts cost O(E log E).
+Weighted union–find propagates offsets while joining groups in O(Eα(L)) amortized work, where α
+is the inverse Ackermann function. The spatial and reconciliation storage is O(N + E + L), excluding
+S3
+reusable transform plans. An ordered map over boundary samples would instead add O(P log(E + 1))
+grouping work.
+For the same leaf count L, a binary tree performs L − 1 splits, compared with (L − 1)/3 for a
+full quadtree. The tested residue-balanced cut uses binary searches of summed-area queries, adding
+O(log ℓv ) work at split v along an axis of length ℓv . The rejected early-exit search caps inspected
+cells at a fixed multiple of N before building a prefix table, bounding repeated scanning but adding
+work before fallback. These bounds describe costs; the stage measurements determine their practical
+balance.
+S2.4 Exact candidate score definitions
+Tile scores sum cell scores ac over cells wholly inside the tile. These definitions instantiate the
+criteria in the main report, Sec. 4. Table 3 in the main report compares their allocation and accuracy.
+The complete-runtime comparison retains residue count (A), whose additional stopping variants are
+defined in Sec. S4. Positive global rescaling changes neither priority order nor the zero test.
+A. Residue count. ac = |rc |.
+B. Local net charge. Absolute signed-residue sum in an 8 × 8 cell neighborhood, zero-padded
+outside the image.
+C. Paired cut length. Greedily pair opposite residues within Manhattan radius 16, using up to
+eight candidates per direction and six rounds, shortest pairs first. Connect unmatched residues to
+the nearest border. Each rasterized segment adds one to visited cells; overlaps accumulate.
+D. Fringe density. Count cell edges with |W(ψq − ψp )| > 3π/4.
+E. Gradient variance. Sum horizontal and vertical principal-difference variances in reflected 5 × 5
+windows; average edge-grid variances onto adjacent cells.
+F. Laplacian magnitude. Take the divergence of principal differences with replicated image
+boundaries, then average its absolute value over the cell’s four corners.
+G. Near-π edge. Set one if any cell edge has |W(ψq − ψp )| > π − 10−6 , zero otherwise.
+H. Raw phase jump. Set one if any cell edge has |ψq − ψp | > π before rewrapping, zero otherwise.
+I. Uniform score (control). ac = 1, giving C(T ) = (hT − 1)(wT − 1) for an hT × wT tile.
+Equal-priority ties use fixed ordering.
+Figure S1 shows the scores underlying the main report’s partition comparison (Fig. 5). Positive
+rescaling leaves the partition rule unchanged, so each map is displayed with its own normalization.
+This visualization makes the difference between sparse and nearly everywhere-positive criteria visible
+without claiming a runtime or accuracy ranking.
+S3 Baseline DCT-library comparison
+A separate kernel benchmark compares a baseline Shao–Johnson implementation [11], before the
+BRiDCT optimizations, with FFTW 3.3.11 using measured plans, native Apple Accelerate, and
+float adaptations of Ooura’s general and specialized routines [15]. Tests used an Apple M3 Max, one
+thread, single precision, and power-of-two square sides 8–256, the supported range of the square
+implementation tested here. We timed a normalized forward/inverse DCT pair and a Poisson spectral
+solve, which additionally divides by the Laplacian eigenvalues. Timing includes data rearrangement
+but excludes setup, allocation, and right-hand-side construction. Nine randomly ordered batches
+cycle through 16 inputs. All 225 numerical checks pass against double-precision references, with
+relative error below 4 × 10−7 on nonconstant cases.
+S4
+(a) Residue count
+3.3% nonzero cells
+(b) Local net charge
+24.5% nonzero cells
+(c) Paired cut length
+7.0% nonzero cells
+(d) Fringe density
+10.6% nonzero cells
+(e) Gradient variance
+100.0% nonzero cells
+(f) Laplacian magnitude
+100.0% nonzero cells
+0.8
+0.6
+0.4
+(g) Near-pi edge
+0.4% nonzero cells
+(h) Raw phase jump
+28.1% nonzero cells
+(i) Uniform score (control)
+100.0% nonzero cells
+Partition inset (not score)
+0.2
+c/max(c) (each map separately)
+1.0
+0.0
+Figure S1: Cell-score maps underlying the p
+tree-image partitions in the main report’s Fig. 5. Panels (a)–(i)
+correspond to criteria A–I. Color represents ac /amax , where ac is the cell score and amax is the maximum
+within that panel; a zero map would be displayed as zero. Independent normalization reveals each map’s
+spatial support but prevents comparison of absolute scores between criteria. Panel labels report the proportion
+or count of nonzero cells. The uniform control is one everywhere; its inset shows the resulting partition, not a
+second score map.
+The library comparison in Table S3 uses FFTW’s measured planning mode, which times candidate
+algorithms during setup.1 Plans and working buffers are reused during timing. In this comparison, the
+Accelerate and Ooura routines are applied along rows and columns, including the data rearrangement
+needed for the two-dimensional transform. These routines are comparators in the library benchmark;
+the final reconstruction experiments use BRiDCT with the FFTW fallback.
+The baseline Shao–Johnson implementation is fastest at sides 8–64 for both tasks (Table S3).
+This size range is relevant to the partitions: more than 99% of pooled quadtree leaves on the ten
+inputs in Table S2 have both sides at most 64 pixels, at either minimum size. At 16 × 16, its
+spectral solve takes 0.189 µs versus 0.489 µs for specialized Ooura. At sides 128 and 256, it ranks
+second to Accelerate and takes about 1.5–1.6 times as long. These measurements support the choice
+1
+FFTW planner flags: https://www.fftw.org/fftw3_doc/Planner-Flags.html.
+S5
+of Shao–Johnson’s factorization for small tiles, but do not measure BRiDCT’s performance. The
+complete-reconstruction results in the main report, Sec. 3, include the BRiDCT optimizations and
+the common FFTW fallback.
+Table S3: Poisson spectral-solve time in µs per square tile on an Apple M3 Max, using one thread and single
+precision. Each value is the median of nine randomly ordered timing batches cycling through 16 inputs. The
+operation comprises a forward DCT, division by nonzero Poisson eigenvalues, and an inverse DCT, including
+normalization and data rearrangement; setup, allocation, and right-hand-side construction are excluded. SJ
+baseline is the Shao–Johnson implementation preceding BRiDCT, not a BRiDCT measurement. Bold marks
+the fastest tested implementation at each size. Dashes indicate sizes unsupported by the tested interface, not
+by the entire algorithm family. Smaller values are faster; these kernel timings are not complete reconstruction
+times.
+Side (px)
+SJ baseline
+FFTW
+Accelerate
+Ooura general
+Ooura specialized
+8
+16
+32
+64
+128
+256
+0.048
+0.189
+0.882
+6.141
+67.924
+296.262
+0.131
+1.189
+4.374
+17.668
+94.720
+468.333
+—
+0.956
+3.350
+11.417
+44.160
+186.678
+0.530
+1.712
+6.451
+25.823
+104.776
+473.060
+0.101
+0.489
+—
+—
+—
+—
+S4 Additional implementation tests
+The ten inputs in Table S2 are used to compare bounded alternatives before the 198-entry evaluation.
+These exploratory tests select configurations; they do not rank criteria B–I. Comparisons are made
+within each timing session, since sessions were run separately on a shared machine. The primary
+reconstruction table uses a timer around the entire call, including temporary-buffer destruction.
+Early exploratory component timings excluded that cleanup and are not pooled with the primary
+measurements.
+Table S4 reports paired changes relative to a control that omits the tested modification. Each
+row compares the same ten inputs within one session. The three stopping-rule controls retain direct
+integration, the integration control uses DCT solves, the residue-balanced control uses midpoint
+binary cuts, and the early-exit controls use a full fused residue table. All other choices are held fixed
+within each pair.
+Relaxed residue stopping. A density rule stops a tile when residue count divided by the number
+of interior cells is at most 0.001 or 0.01. A low-charge rule stops when the count is below 0.25(h + w)
+on a tile whose largest side is at most 4s. These rules can retain inconsistent tiles, unlike zero-residue
+stopping. They were compared using the same integration-enabled local solver. Neither consistently
+improved both measured time and reference agreement at s = 8 and s = 16, so neither was retained
+for the main comparison.
+Verified direct integration. A candidate solution is formed by integrating observed differences,
+then checked against every internal edge. The DCT can be skipped only when those differences agree
+with the integrated field. The check itself costs work, and the change in arithmetic and quantization
+can affect the output. The grid is given the same integration option. The tested version did not
+consistently reduce measured reconstruction time, so the selected pipeline keeps the DCT solve on
+every tile.
+S6
+Table S4: Paired effects of implementation variants on ten inputs at minimum side s pixels. Time ratios
+compare each variant with the control specified below, using per-input median timings; the table reports the
+median ratio across inputs. Values above one are slower. ∆Sπ and ∆RMSE are mean paired changes, variant
+minus control, in percentage points (pp) and radians. Sπ is the fraction of pixels with absolute reference
+error below π after mean-offset removal. Positive ∆Sπ and negative ∆RMSE indicate improvement. N is the
+processed pixel count. Rows from different timing sessions do not establish a ranking between variants.
+Variant
+Time ratio
+s = 8 s = 16
+∆Sπ (pp)
+s = 8 s = 16
+∆RMSE (rad)
+s = 8 s = 16
+Density 0.001
+Density 0.01
+Low-charge cutoff
+Verified integration
+Residue-balanced kd-tree
+Early exit, cap N
+Early exit, cap 2N
+Early exit, cap 4N
+1.027
+1.061
+0.991
+1.039
+1.525
+1.038
+1.041
+1.038
+-5.93
+-1.52
+-1.44
+-0.04
+-0.70
+0.00
+0.00
+0.00
++0.240
++0.556
++0.873
++0.002
++0.420
+0.000
+0.000
+0.000
+1.016
+1.124
+1.023
+1.012
+1.847
+1.033
+1.029
+1.028
+-0.78
+-1.30
++0.46
+0.00
+-3.07
+0.00
+0.00
+0.00
++0.090
++0.016
++0.106
+0.000
+-0.190
+0.000
+0.000
+0.000
+Controls. Density and low-charge rules: residue-count quadtree with direct integration. Verified integration: quadtree
+with DCT solves. Residue-balanced cuts: midpoint kd-tree. Early exit: quadtree with a full fused residue table.
+Timing. Density, low-charge, and binary-cut tests use five repeats; integration uses seven; early exit uses nine. The
+first five rows exclude temporary-buffer destruction; the last three include it. Rounded zero metric changes do not
+imply identical output arrays; exact identity was verified separately for early exit.
+Early-exit residue search. For unrestricted residue refinement, only existence of a nonzero
+residue is needed. A scan can stop as soon as one is found, but repeated parent/child scans revisit
+cells. We tested limits of N , 2N , and 4N inspected cells before reverting to a summed-area table,
+where N is the processed pixel count. Tested partitions and outputs were preserved, but the extra
+scans were slower overall. The main implementation computes the fused residue table once.
+Residue-balanced binary cuts. A summed-area table supports binary searches for a cut near
+half the residue count along an eligible axis. The cut is clamped to preserve the minimum child size.
+Compared with the midpoint control used in this test, the search adds work and may produce less
+favorable transform shapes. The exploratory results did not establish a consistent benefit, so the
+main comparison uses the two geometric rules.
+S5 Implementation and numerical checks
+The complete reconstruction experiments use a frozen BRiDCT [10] version dated 20 September 2026
+for the grid and both tree geometries. Every method receives the same encoded and padded arrays.
+BRiDCT uses single precision; phase preparation and boundary statistics use double precision.
+FFTW 3.3.11 uses FFTW_ESTIMATE plans for unsupported shapes, distinct from the measured plans
+in the transform microbenchmark. Forward and inverse scaling is matched, and the constant Poisson
+coefficient is zero. Transform implementations are frozen for each timing session.
+To separate intended algorithm changes from numerical side effects, we check partitions and
+reconstructed outputs as well as timing. The main timing comparison on 198 entries contains
+198 × 5 × 2 × 7 = 13,860 timed calls: a grid, the quadtree before the optimizations defined in
+the main report (Sec. 3.2), and three optimized adaptive configurations at two minimum sizes.
+Warm-ups and correctness checks are additional. For each image, numerical checks compare the
+residue maps, partitions, and outputs before and after the optimizations intended to preserve them.
+S7
+These construction and assembly checks cover fused residue preprocessing, interface collection, offset
+propagation, and the early-exit search. Across this set, 2772 comparisons verify identical partitions
+and outputs for the tested combinations. These checks do not imply identity after replacing a
+transform fallback: final rounding differs from the reference quadtree on 15 entries at s = 8 and
+eight at s = 16, although success fractions remain unchanged and the largest absolute RMSE change
+is below 5.1 × 10−4 radians. Reconstruction metrics are therefore checked explicitly rather than
+inferred from bitwise equality.
+The 256-level encoding requires a consistent convention for half-cycle edge differences. A focused
+diagnostic on 256 constructed cells found no disagreement between the retained residue zero/nonzero
+test and the integer local-gradient circulation for those patterns. This is a finite endpoint check, not
+a proof for arbitrary observations.
+S6 First-call latency
+The main report measures repeated reconstruction with initialized transform plans and reusable
+buffers. Table S5 measures the first reconstruction in a fresh process, which additionally includes
+initialization and memory/cache effects within the reconstruction call. Process startup, input loading,
+and encoding remain outside the timer.
+This first-call study uses 10 × 3 × 2 × 3 = 180 fresh processes, crossing inputs, methods, minimum
+sizes, and process repetitions. Each performs one first call and seven warm calls; all 1260 warm
+outputs equal their process’s first-call output. First-call times are summarized across three processes
+per image/configuration. Warm times use the median within each process, then across processes.
+Paired grid ratios are formed only after these within-case summaries. No timing sessions are pooled.
+Table S5: First-call overhead and adaptive/grid comparison on the ten exploratory inputs. s is the minimum
+adaptive side, or nominal grid side, in pixels. Each entry/configuration uses three fresh processes, each with
+one first call and seven warm calls. First-call time is the median over the three processes; warm time is the
+median of their seven-call medians. Columns report medians of the resulting per-entry ratios. First/warm
+compares the same method before and after initialization; first/grid compares its first call with the grid’s
+first call at the same s. Ratios above one mean longer reconstruction. Process startup, input loading, and
+encoding are excluded.
+s (px)
+Partition
+8
+8
+8
+16
+16
+16
+Grid
+Quadtree
+KD dyadic
+Grid
+Quadtree
+KD dyadic
+First/warm
+First/grid
+2.245
+2.151
+2.244
+2.938
+2.391
+2.459
+1.000
+1.219
+1.244
+1.000
+1.378
+1.373
+Availability and interpretation
+Public sources identify the underlying collections but do not reproduce every derived array. Some
+photograph metadata lack an exact public filename, and some generated fields lack a complete
+retained recipe. The benchmark arrays, implementations, and outputs are not currently publicly
+available. These restrictions limit independent reproduction of the numerical results. The descriptions
+above specify the evaluated operations, inputs, and controls, but a public release is still needed for
+independent replication.
+S8

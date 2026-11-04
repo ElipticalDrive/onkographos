@@ -1,0 +1,325 @@
+The current implementation of the irregular grid can look quite terrible, depending on the provided data. This has been discussed in the PR #33 It was implemented as a point cloud with all points having the exact same size regardless of ...
+
+Irregular Grid - Experiments and thoughts · Issue #42 · d70-t/gridlook · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Irregular Grid - Experiments and thoughts #42
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Irregular Grid - Experiments and thoughts#42
+Copy link
+Labels
+help wantedExtra attention is neededExtra attention is needed
+Description
+Karinon
+opened on Jun 27, 2025
+Issue body actions
+The current implementation of the irregular grid can look quite terrible, depending on the provided data. This has been discussed in the PR #33
+It was implemented as a point cloud with all points having the exact same size regardless of their position on the globe and a very simplistic approach to change their size while zooming the camera. This has to be done manually. In order to do so properly, several things need to be taken into account:
+Camera-Distance: The closer the camera, the bigger the points
+Size-Attenuation: Since the globe is a globe, the points at the edge of the viewpoint have to appear smaller than the ones in the center
+density: In datasets with lower resolution or irregular grids with changing point numbers across the globe, areas with fewer points may have larger points than areas with higher density. The package Delaunator looks promising to calculate the density for each single point in an acceptable period of time, however has the weakness that it creates a seam, at the edge of the longitudes (usually where 0 and 360 meet), as it is not built for our usecase.
+This could like here for the vertex shader (keep in mind, that the math here is completely bonkers and made by ChatGPT, this is just an example how to apply the density onto the globe):
+```
+attribute float data_value;
+attribute float localDensity;
+uniform float baseSize;
+varying float vDensity;
+varying float v_value;
+
+void main() {
+    v_value = data_value;
+    vDensity = localDensity;
+
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+
+    // Compensate for perspective scaling
+    float size = baseSize / (vDensity * 5.0 + 1.0);
+    size = size * (10.0 / -mvPosition.z); // Adjust constant (300.0) for your scene scaling
+
+    gl_PointSize = size;
+}
+```
+And for the GlobeIrregular-Code, this could be something like this here
+```
+function haversineDistance(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const R = 6371; // Earth's radius in km
+  const toRad = Math.PI / 180;
+
+  const dLat = (lat2 - lat1) * toRad;
+  const dLon = (lon2 - lon1) * toRad;
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLon / 2) ** 2;
+
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function estimateLocalDensityLatLon(latLons: [number, number][]): Float32Array {
+  const N = latLons.length;
+
+  const delaunay = Delaunator.from(latLons);
+  const { triangles } = delaunay;
+  // Prepare adjacency lists
+  const adjacency: number[][] = Array.from({ length: N }, () => []);
+  const densities = new Float32Array(N);
+
+  for (let i = 0; i < triangles.length; i += 3) {
+    const a = triangles[i];
+    const b = triangles[i + 1];
+    const c = triangles[i + 2];
+
+    // Add undirected edges
+    adjacency[a].push(b, c);
+    adjacency[b].push(a, c);
+    adjacency[c].push(a, b);
+  }
+
+  // Remove duplicates from adjacency lists
+  for (let i = 0; i < N; i++) {
+    adjacency[i] = Array.from(new Set(adjacency[i]));
+  }
+
+  // Estimate local density based on average neighbor distance
+  for (let i = 0; i < N; i++) {
+    const [lat1, lon1] = latLons[i];
+    const neighbors = adjacency[i];
+
+    if (neighbors.length === 0) {
+      densities[i] = 0; // Isolated point
+      continue;
+    }
+
+    let sumDistances = 0;
+
+    for (const j of neighbors) {
+      const [lat2, lon2] = latLons[j];
+      sumDistances += haversineDistance(lat1, lon1, lat2, lon2);
+    }
+
+    const avgDistance = sumDistances / neighbors.length;
+
+    // Density can be inversely proportional to distance
+    densities[i] = 1 / avgDistance;
+  }
+
+  let min = Infinity;
+  let max = -Infinity;
+
+  for (let i = 0; i < densities.length; i++) {
+    if (densities[i] < min) min = densities[i];
+    if (densities[i] > max) max = densities[i];
+  }
+
+  // Normalize densities to [0, 1]
+  for (let i = 0; i < densities.length; i++) {
+    densities[i] = (densities[i] - min) / (max - min);
+  }
+
+  return densities;
+}
+
+...
+
+// in getGrid
+  const points2D: [number, number][] = [];
+  for (let i = 0; i < N; i++) {
+    points2D.push([longitudes[i], latitudes[i]]);
+  }
+  const densities = estimateLocalDensityLatLon(points2D);
+
+  points!.geometry.setAttribute(
+    "position",
+    new THREE.BufferAttribute(positions, 3)
+  );
+
+  points!.geometry.setAttribute(
+    "localDensity",
+    new THREE.BufferAttribute(densities, 1)
+  );
+```
+Another thing is the question if we want to apply a fade-out to the points, to come closer to gaussian splatting, this can be implemented quite easily in the fragmentShader via
+```
+    float falloff = exp(-r2 * 2.0); // Adjust the 4.0 as needed (sharpness)
+    gl_FragColor = vec4(color, falloff);
+```
+or something like this. A working example is available in the aforementioned PR in the txt-files. The used Material should enable some kind of blending as well, like blending: THREE.AdditiveBlending.
+Activity
+Karinon commented on Jul 22, 2025
+Karinon
+on Jul 22, 2025
+CollaboratorAuthor
+More actions
+I pushed the code for the falloff aswell as the delaunator in order to determine the distance between points into its own branch:
+https://github.com/d70-t/gridlook/tree/irregular_delaunator
+It is not meant for production as there are tons of unused code in it and the delaunator is causing a seam
+d70-t commented on Jul 22, 2025
+d70-t
+on Jul 22, 2025
+Owner
+More actions
+Unfortunately, the CI build of the site failed with:
+```
+15:24:12.307 | > vue-tsc -b && vite build
+-- | --
+15:24:12.307 |  
+15:24:15.272 | src/components/GlobeIrregular.vue(10,24): error TS7016: Could not find a declaration file for module 'delaunator'. '/opt/buildhome/repo/node_modules/delaunator/index.js' implicitly has an 'any' type.
+15:24:15.273 | Try `npm i --save-dev @types/delaunator` if it exists or add a new declaration (.d.ts) file containing `declare module 'delaunator';`
+15:24:15.273 | src/components/GlobeIrregular.vue(35,6): error TS6196: 'Point3D' is declared but never used.
+15:24:15.274 | src/components/GlobeIrregular.vue(56,7): error TS6133: 'estimatedSpacing' is declared but its value is never read.
+15:24:15.274 | src/components/GlobeIrregular.vue(66,3): error TS2339: Property 'getRenderer' does not exist on type '{ getScene: () => Scene \| undefined; getCamera: () => PerspectiveCamera \| undefined; getResizeObserver: () => ResizeObserver \| undefined; ... 6 more ...; registerUpdateLOD: (func: () => void) => void; }'.
+15:24:15.274 | src/components/GlobeIrregular.vue(66,3): error TS6133: 'getRenderer' is declared but its value is never read.
+15:24:15.274 | src/components/GlobeIrregular.vue(201,10): error TS6133: 'xyzToLonLat' is declared but its value is never read.
+15:24:15.275 | src/components/GlobeIrregular.vue(577,10): error TS6133: 'estimateAverageSpacing' is declared but its value is never read.
+15:24:15.302 | Failed: Error while executing user command. Exited with error code: 1
+15:24:15.312 | Failed: build command exited with code: 1
+15:24:16.335 | Failed: error occurred while running build command
+```
+Apart from that: I like this progress very much! But I'm wondering again, if this is (exactly) the right strategy. I think using e.g. a triangulation is a good way to determine the relevant size for each data point. But relying on the sphere being a sphere can be dangerous, as many people already requested they want to see different projections than only the sphere (and although not finished, #34 aims at supporting those). As the approach already creates a delaunay triangulation, and the data is already provided on the vertices of the generated triangulation, my impression would be, the easiest approach would be to use just plain vertex coloring. WebGl would already take care of color interpolation. And because the data values are defined on the vertices, not the cells, it's much simpler than coloring the native ICON grid (where we had to create individual triangles instead of a mesh and replicate each cell color on all three vertices of the triangles). On top of that, this method wouldn't rely on a particular shape of the earth and thus would be compatible with other projections.
+Karinon commented on Jul 22, 2025
+Karinon
+on Jul 22, 2025
+CollaboratorAuthor
+More actions
+I was aware of the build-issues, I just ignored them because it is just a proof of concept, but now I have fixed them (mostly by commenting code out).
+d70-t commented on Jul 22, 2025
+d70-t
+on Jul 22, 2025
+Owner
+More actions
+Thanks! As the build now succeeds, there's a preview deployment for the branch: https://irregular-delaunator.gridlook.pages.dev/#https://eerie.cloud.dkrz.de/datasets/ifs-amip-tco1279.hist.v20240901.atmos.gr025.2D_monthly/zarr apart from the seam (which I find looks a bit amazing), it also seems that the size of the dots scale well for quite a while, but at very high zom levels, it seems that the dots stop getting bigger.
+Karinon commented on Jul 28, 2025
+Karinon
+on Jul 28, 2025
+Last edited by Karinon
+CollaboratorAuthor
+More actions
+I tried out a few more things and found quickhull3d and also tried triangulation with delaunator. Quickhull3d does everything for you but is really slow to render it. Once rendered, the performance depends on the data. The last dataset you posted feels quite fast (I would say faster than the implementation I have in the irregular-delaunator-branch), but rendering it took nearly 3 minutes. Here are three screenshots to give you an idea how it looks like for this data. The third one shows the south pole. Not sure what's going on there but apparently there are some issues with it:
+My own custom implementation didn't work at all with this example, but worked with others. I also tried stereographic projection which reduced the seam and created only a relatively small hole close to Galapagos. I have tried it with this dataset here which only contains ocean data:
+https://storage.googleapis.com/cmip6/CMIP6/CMIP/AWI/AWI-CM-1-1-MR/historical/r1i1p1f1/Omon/tos/gn/v20181218/
+Since the implementation has no knowledge of globes it will search for the nearest neighbor at the other side of the coastline of a continent and create dents as seen in the following screenshot. Mind also the hole close to galapagos. It would make sense to create a button to toggle land-sea-masks.
+The quickhull3d is SIGNIFICANTLY slower to render the stuff (almost 5 minutes). My own implementation takes 15 seconds.
+Datasets with really many points will eventually render but take a significant amount of time to render and are barely usable afterwards
+Here is the code of the getGrid-Function which can be used as a drop-in replacement for the implementation in the irregular-delaunator-branch
+```
+import { QuickHull } from "quickhull3d";
+
+...
+
+async function getGrid(grid: zarr.Group<zarr.Readable>, data: Float64Array) {
+  console.time("getGrid");
+  const latArr = (
+    await zarr.open(grid.resolve("lat"), { kind: "array" }).then(zarr.get)
+  ).data as Float64Array;
+  const lonArr = (
+    await zarr.open(grid.resolve("lon"), { kind: "array" }).then(zarr.get)
+  ).data as Float64Array;
+  const N = latArr.length;
+  if (lonArr.length !== N || data.length !== N)
+    throw new Error("Mismatched dimensions");
+
+  // 1. Map to 3D points
+  let pts3D: [number, number, number][] = [];
+  for (let i = 0; i < N; i++) {
+    pts3D.push(latLonToCartesianVec3(latArr[i], lonArr[i]));
+  }
+
+  // 2. Build convex hull -> list of triangle faces
+  console.time("quickhull");
+  const hull = new QuickHull(pts3D);
+  console.timeEnd("quickhull");
+  console.time("build");
+  hull.build();
+  console.timeEnd("build");
+
+  console.time("build2");
+  const faces: number[][] = hull.collectFaces(false);
+  console.log("derp", faces);
+  console.timeEnd("build2");
+
+  const positions = new Float32Array(N * 3);
+  const dataValues = new Float32Array(N);
+  pts3D.forEach(([x, y, z], i) => {
+    positions.set([x, y, z], i * 3);
+    dataValues[i] = data[i];
+  });
+
+  console.log("positions", positions);
+
+  // 3. Flatten triangle indices
+  const indexArray = new Uint32Array(faces.length * 3);
+  faces.forEach((tri, i) => {
+    indexArray.set(tri, i * 3);
+  });
+
+  // 4. Create BufferGeometry
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("data_value", new THREE.BufferAttribute(dataValues, 1));
+  geometry.setIndex(new THREE.BufferAttribute(indexArray, 1));
+  geometry.computeVertexNormals();
+
+  mesh!.geometry = geometry;
+  updateColormap();
+  redraw();
+  console.timeEnd("getGrid");
+}
+```
+d70-t commented on Jul 28, 2025
+d70-t
+on Jul 28, 2025
+Last edited by d70-t
+Owner
+More actions
+The renderings look nice!
+In terms of performance, I fear that at some point, we'll have to admit that fully irregular grids are just slower...
+I think it will be hard to get a decent performance if we want to have high-res and not want to use textures. And I don't see a good way of implementing irregular grids using textures.
+I wouldn't be too unhappy with this though. One initial goal has been to show that it's possible to analyse data quickly if it is stored in a decent format. If we now (re-) discover that analysing data in a less optimal format is less performant, that's fine.
+Apart from that, I'm actually amazed how well the plotting works despite the underlying formats.
+For the bad interpolation: I guess we'd have to introduce some limit on the maximum edge-length we are allowing.
+Karinon
+added
+help wantedExtra attention is neededExtra attention is needed
+on May 7, 2026
+Karinon commented on Jun 2, 2026
+Karinon
+on Jun 2, 2026
+CollaboratorAuthor
+More actions
+Delaunay Triangulation is implemented as an alternative rendering method for irregular grids (and all the grid type which can be rendered as irregular). For now I am not going to make it the default as it still has some caveats:
+Glitches in flat projections
+Fills triangles where no data is supposed to be (like the screenshot above)
+Furthermore, there is also irregular stationary data which looks horrible with delaunay. It also does not look great with simple dots, but at least you understand what's going on there.
+Regarding the point-cloud approach: The heuristics which determines the size of the points could be improved as well, as they are usually too small or too big. And there are also some funky issues, especially with azimuthal projections (see #135)
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+help wantedExtra attention is neededExtra attention is needed
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

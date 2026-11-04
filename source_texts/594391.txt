@@ -1,0 +1,106 @@
+Red Alert 2: Yuri's Revenge rebuilt in Rust / 用 Rust 重写的《红警2：尤里的复仇》 - Rasterize UseBuffer voxels through the depth-tested leaves by hrusten · Pull Request #2355 · YuriPlanet/vera20k
+
+Rasterize UseBuffer voxels through the depth-tested leaves by hrusten · Pull Request #2355 · YuriPlanet/vera20k · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+hrusten
+commented
+Oct 20, 2026
+Copy link
+Copy Markdown
+Collaborator
+Ports gamemd's depth-buffered voxel raster for UseBuffer=yes types. In retail that is the SHAD Nighthawk, the SCHP Siege Chopper and its deployed SCHD, and HIND.
+Native
+The key. TechnoTypeClass::ReadINI (0x0071576F..0x0071578D) reads UseBuffer with ReadBool (0x005295F0) from the ART INI (0x00887180), under the type's own ID (this+0x24), not its Image= section. The default is the current byte; the constructor 0x00710AF0 writes false (+0xDAC).
+The flag. TechnoClass's uncached voxel draw (0x00706ED0, reached from 0x00706640, which both Foot 0x004DAF10 and Building 0x0043DA80 call) sets 0xB43180 from GetTechnoType()+0xDAC at 0x00706F12, and clears it at 0x0070724F. Body, turret and barrel are separate calls, so each draws with the flag.
+The section order. Under the flag, 0x00754510 rasterizes its exchange-sorted section list from the last entry down (0x007545F3..0x0075461E).
+The leaf. 0x00756590 also computes the Z words: the origin word at P+0x1C, and the per-axis steps at P+0x22/+0x28/+0x2E, the latter only under the flag (0x007567B0). It then dispatches table 0x00846840 entries 6/7: 0x00757980 forward and 0x00757BF0 backward.
+What the leaves do.
+X, Y and Z are separate 16-bit 8.8 words with no carry between them.
+A voxel draws only when its Z word's high byte is strictly greater than the byte depth map at 0xB1D5E0.
+A drawn voxel stores that byte and its lit colour at its pixel and at the next one.
+Skips advance X/Y through a product table (0xB45590) and Z through a 16-bit IMUL.
+Shadows (0x00707280 -> 0x00756860) ignore the flag.
+What changes
+ArtEntry::use_buffer / ArtRegistry::use_buffer: the exact-ID ART read, with ReadBool.
+VxlRenderParams::use_buffer: UnitModel sets it from its type for render and render_pose, i.e. body, turret and barrel, including building voxel guns. Bullets and voxel anims keep it false; they draw outside 0x00706ED0.
+vxl_native:
+prepare_geometry computes the Z words under the flag.
+Geometry::raster_order reverses the sorted list.
+paint_section runs a Cursor::Split position and the depth test, against a per-draw 64 KiB depth map.
+The ordinary path is unchanged: Cursor::Packed keeps the existing packed arithmetic.
+Player-visible effect: a Nighthawk's or Siege Chopper's nearest voxel now wins each pixel, so rotor blades and hull occlude each other by depth instead of by section order. Each voxel is two pixels wide, as in the original, which thickens thin parts slightly.
+Evidence levels
+Native behavior established by instruction reads of 0x00756590, both leaves, 0x007545F3, the leaf table, the constructor and the ReadINI read.
+Parity demonstrated for the raster core on a synthetic corpus. tools/voxel_oracle/raster.py gained use_buffer=True, which sets 0xB43180 after the Init_Game slice zeroes it. It then runs the original 0x00753E00/0x007540F0/0x00754510 and both leaves under Unicorn.
+raster_fixtures.json adds the four existing synthetic models at four facings (16 cases). They reach both leaves, depth ties, depth rejections and zero-colour erases (the generator asserts each).
+render::vxl_raster::native::tests::native_sections_match_all_geometry_and_visibility_bytes compares, per case:
+the dispatched leaf and every integer parameter, including the Z words;
+the complete 256x256 colour buffer;
+the complete 256x256 depth map;
+all store counts.
+The four existing models' goldens are byte-identical after regeneration.
+The corpus covers synthetic models only, not retail assets.
+Rust regression tested:
+rules::art_data::tests::use_buffer_reads_the_type_id_section (ID not Image, ReadBool's on default);
+retail_use_buffer_types_are_the_four_helicopters (the retail artmd set is exactly HIND, SCHD, SCHP, SHAD).
+Mutation runs: a non-strict depth test, an unreversed section order and a one-pixel store each fail the native comparison.
+Residuals
+Native clears its depth map only over the previous draw's rect (0x00753EC5), so depth written outside it can survive into a later draw. Here each draw starts clear.
+The shadow draw sets 0xB43180 twice and never clears it. After a UseBuffer shadow cache miss, the next uncached voxel draw of any type can rasterize depth-tested until a UseBuffer body clears the flag. Here the flag follows the drawn type only.
+A store at depth address 0xFFFF writes one byte past both buffers; it is dropped.
+A skip of size_z or more would read a product-table entry that call did not write. That requires an all-empty column stored without a -1 offset.
+Not gameplay: no sim state, no RNG, no update-order change. No critic, per review.md for rendering changes.
+Validation
+cargo test -p vera20k --lib -- render:: app::presentation::: 789 passed, none failed. -p vera20k-core --lib -- rules::: 830 passed, none failed. Both on retail INIs with VERA20K_REQUIRE_RETAIL_INI=1. The ignored retail_vehicles_load_their_native_voxel_models passes.
+python -m tools.run_tests: 885 tests OK. python -m tools.voxel_oracle.raster_fixtures --check: native outputs match.
+Production capture: the Siege Chopper recipe in tools/map_observation.md, on a map whose SHA-256 matches the recorded fixture, run at steps 190 (airborne SCHP) and 400 (deployed SCHD).
+Builds: fast c40-before (main bede50aae) and c40-after2 (this branch with that main merged).
+Simulation transcripts and fingerprints match exactly. The only differences are atlas UV origins, from changed sprite sizes, and the frame pixels: 1095 pixels around the SCHP at 190, and 897 around the SCHD at 400.
+At 190 the rotor blades now draw over the fuselage, where main hid them under the hull. At 400 the deployed body's thin parts thicken by the two-pixel store.
+These are VERA before/after images, not a native capture comparison.
+Part of the TechnoClass class-parity audit.
+hrusten
+added 2 commits
+October 20, 2026 22:37
+Rasterize UseBuffer voxels through the depth-tested leaves
+…
+3ff69e8
+```
+TechnoTypeClass::ReadINI reads UseBuffer= from the ART INI under the type
+ID (0x0071576F). 706ED0 sets 0xB43180 from it for body, turret and barrel;
+754510 then rasterizes the sorted sections in reverse (0x007545F3) and
+756590 dispatches 757980/757BF0: separate 8.8 X/Y/Z words, a strict byte
+depth test, two-pixel stores.
+
+Native raster oracle gains use_buffer; raster_fixtures adds the four
+synthetic models at four facings with the flag set, compared in full
+(colour buffer, depth map, leaf parameters, store counts).
+```
+Merge remote-tracking branch 'origin/main' into feature/usebuffer-voxels
+4fb4f75
+hrusten
+merged commit 2049364
+into
+main
+Oct 20, 2026
+hrusten
+deleted the
+feature/usebuffer-voxels
+branch
+October 20, 2026 20:46
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

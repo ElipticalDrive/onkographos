@@ -1,0 +1,515 @@
+From Mono to Stereo: Accelerating Binocular
+Gaussian Splatting via Reprojection and
+Selective Patching
+Hongfei Zhu1,2 and Ling Zhou2⋆
+arXiv:2609.30741v1 [cs.CV] 25 Sep 2026
+1
+Shanghai Jiao Tong University, Shanghai, China
+vit_oo@sjtu.edu.cn
+2
+Alpha Labs, Goertek, Shanghai, China
+ling.zhou@goertek.com
+Abstract. Binocular rendering requires two nearby views of the same
+scene and therefore repeats substantial visibility and shading work. We
+present a 2D Gaussian Splatting (2DGS) pipeline that fully renders a
+dominant-eye RGB image and an alpha-weighted depth proxy, reprojects
+that image to the affiliated eye, and repairs uncovered pixels. Small interior gaps are interpolated, whereas larger disoccluded regions are identified as regions of interest (ROIs) and selectively re-rendered. The depth
+proxy reuses the alpha-blending weights computed during dominant-eye
+rasterization, avoiding a separate depth-rendering pass. An adaptive ROI
+generator localizes the required updates using reprojected image boundaries and optional connected center-hole detection. On DTU, Tanks and
+Temples, and MipNeRF-360, the method reduces the measured time of a
+sequential two-pass binocular reference by 15.5% to 28.8% and peak GPU
+memory by 6% to 11%. The corresponding affiliated-eye quality degradation is at most 1.3 dB PSNR, 0.02 SSIM, and 0.02 LPIPS, representing
+a measurable trade-off that requires application-specific perceptual validation. These results establish a practical efficiency–quality trade-off for
+controlled static-scene stereo rendering and motivate future evaluation
+under continuous motion and on physical VR hardware.
+Keywords: Virtual Reality · Gaussian Splatting · Binocular Rendering · Rasterization Acceleration
+1
+Introduction
+Virtual reality (VR) systems render two horizontally displaced views so that the
+visual system can recover binocular depth cues [6]. The two views overlap substantially, but straightforward stereo pipelines rasterize each eye independently
+and repeat much of the same work [7, 15]. This repeated cost is important for
+high-resolution head-mounted displays, mobile rendering, and interactive telepresence, where both latency and memory budgets are constrained.
+⋆
+Corresponding author.
+2
+H. Zhu and L. Zhou
+Image reprojection can reuse samples across time or viewpoints, but disocclusions expose content that is absent from the source image. Temporal antialiasing
+systems address a related problem through history validation and reconstruction [17]; stereo methods instead transfer samples between the two eye views
+within the same frame [18, 15, 2]. For Gaussian Splatting, the depth required by
+this transfer can be accumulated during rasterization, while missing regions can
+be re-rendered directly from the scene representation.
+We therefore study a hybrid binocular pipeline for static 2DGS scenes. The
+dominant eye is fully rendered with RGB and an alpha-weighted depth proxy,
+and its image is reprojected to the affiliated eye using the known relative pose.
+The resulting holes are divided into small gaps and larger disoccluded ROIs;
+interpolation handles the former, and selective 2DGS rasterization handles the
+latter. Our contributions are:
+– A reprojection-and-patch pipeline that avoids a complete second-eye rasterization by combining depth-guided warping, hole categorization, interpolation, and selective ROI rendering.
+– A joint RGB-depth rendering component that reuses the alpha-blending
+weights already computed by the 2DGS rasterizer, avoiding a separate depthrendering pass.
+– Evaluation on three real-world multi-view benchmarks under a controlled
+static-scene protocol, with per-scene timing and memory analysis.
+Fig. 1. Overview of the binocular rendering pipeline. The dominant eye is fully rasterized to obtain an RGB image and depth proxy, which are reprojected to the affiliated
+eye. Small gaps are interpolated, while larger regions of interest (ROIs) are selectively
+re-rendered.
+From Mono to Stereo
+2
+Related Work
+2.1
+Temporal and Stereo Reprojection
+3
+Reprojection reuses previously shaded samples by transforming them with depth,
+camera motion, or both. Asynchronous reprojection warps an earlier frame to
+compensate for updated head pose [4]. Temporal antialiasing (TAA) and temporal upsampling extend this principle by accumulating samples over time and
+rejecting invalid history; the survey by Yang et al. [17] summarizes reconstruction, history validation, and the characteristic failure modes around disocclusions
+and motion. These temporal techniques motivate our treatment of invalid samples, but our main transfer is spatial: it reuses the dominant-eye image for the
+affiliated eye within the same binocular frame.
+Stereo reprojection has previously been combined with temporal supersampling [18] and with adaptive ray tracing [15]. Wissmann et al. forward-warp one
+eye and trace rays only where reprojection fails, which is conceptually close to
+our selective repair strategy; our pipeline instead operates on an explicit 2DGS
+scene and repairs selected regions through Gaussian rasterization. YORO [2]
+synthesizes a second mobile-VR view using reprojection and filter-based completion without re-rendering newly visible content. Our qualitative comparison in
+Fig. 7 illustrates why this reprojection-only design can distort near-scene disocclusions. Because YORO uses a Unity rasterization pipeline rather than a 2DGS
+renderer, we treat it as a qualitative reference rather than report implementationdependent timing comparisons.
+2.2
+Gaussian Splatting Efficiency and View Consistency
+3D Gaussian Splatting (3DGS) introduced a visibility-aware tile rasterizer for
+real-time novel-view synthesis [10]. Subsequent work reduces representation and
+rendering cost by pruning Gaussians and compressing their attributes. Compact
+3DGS uses learnable masks and quantized attributes [12], while EAGLES combines quantized embeddings with coarse-to-fine optimization and pruning [3].
+These methods reduce the cost of rendering each view and are complementary
+to our reuse of samples across a stereo pair.
+View consistency is also relevant to reprojection. StopThePop improves perray ordering and evaluates artifacts that become visible during viewpoint motion [13]. Our method does not modify the underlying 2DGS ordering; instead,
+it relies on the depth proxy produced by the rasterizer and explicitly re-renders
+disoccluded ROIs. This distinction also exposes a limitation: view-dependent appearance and temporal popping inherited from the source view are not corrected
+by image warping alone.
+2.3
+Dynamic Gaussian Scenes
+Dynamic Gaussian representations model time-varying geometry and appearance, for example through learned deformations in 4D Gaussian Splatting [16].
+4
+H. Zhu and L. Zhou
+The present work assumes a fixed 2DGS scene and evaluates isolated stereo pairs.
+Supporting moving objects would require a time-dependent Gaussian representation, current per-frame depth, and temporal validation of reprojected samples.
+Continuous head motion in an otherwise static scene also requires temporal evaluation because ROI boundaries and interpolation decisions may change between
+frames.
+3
+Method
+3.1
+Pipeline Overview
+As illustrated in Fig. 1, our method replaces the conventional independent binocular rendering pipeline with a more efficient hybrid approach that exploits the
+geometric correlation between the two eye views. The overall pipeline consists
+of four main stages.
+Stage 1: Joint RGB-Depth Rendering of the Dominant Eye. The pipeline begins by performing a full rasterization of the dominant eye, e.g., the left eye,
+from the 2D Gaussian Splatting scene. During front-to-back compositing, splat
+i contributes with the standard alpha-blending weight wi = αi Ti . We reuse
+P this
+weight in the same CUDA kernel to accumulate the depth proxy D = i di wi
+alongside RGB, avoiding a separate depth pass. This alpha-weighted depth supports the subsequent reprojection, although it may differ from physical surface
+depth in multi-layer, semi-transparent, or strongly view-dependent regions.
+Stage 2: Depth-Guided Reprojection. Using the rendered depth map and the
+known relative pose between the two eyes, we reproject the dominant-eye image
+to synthesize an initial view for the affiliated eye, e.g., the right eye. Each pixel
+in the dominant eye is unprojected into 3D world coordinates using its depth
+value and the source camera parameters, and then projected onto the affiliatedeye image plane. This step produces a largely complete image for the second
+eye at minimal computational cost, since it involves only per-pixel geometric
+transformations rather than full Gaussian rasterization.
+Stage 3: Hole Categorization. The reprojected image inevitably contains uncovered pixels, referred to as holes, arising from disocclusions and field-of-view
+differences between the two viewpoints. We classify these holes into two types:
+gaps, which are small, scattered interior pixels caused by depth discontinuities
+and parallax-induced disocclusions; and ROIs, which comprise peripheral areas
+visible only in the affiliated eye, large connected gap clusters caused by substantial parallax, and a conservative buffer around these regions.
+Stage 4: Hybrid Hole Patching. The two types of holes are patched using different strategies tailored to their characteristics. Gaps, which are typically small
+and surrounded by valid reprojected pixels, are efficiently filled through adaptive interpolation. ROIs, including peripheral areas with genuinely new scene
+From Mono to Stereo
+5
+Table 1. Quantitative comparison of geometry reconstruction quality.
+Method
+3DGS [10]
+SuGaR [5]
+2DGS [8]
+DTU (CD) T&T (F1)
+1.96
+1.33
+0.80
+0.09
+0.19
+0.32
+content and large connected center-hole clusters, are resolved by an adaptive
+ROI generator that identifies bounded regions for targeted rasterization.
+3.2
+Why 2D Gaussian Splatting
+Our pipeline supports any Gaussian Splatting variant that outputs per-pixel
+depth, but accurate geometry is crucial because depth errors cause warping
+artifacts and additional holes. Table 1 compares three representative backbones.
+The volumetric ellipsoids of 3DGS [10] provide relatively coarse surfaces, while
+SuGaR [5] improves geometry through surface alignment. 2D Gaussian Splatting
+(2DGS) [8] instead uses oriented planar disks on tangent planes, yielding the best
+DTU and Tanks and Temples geometry scores among the compared methods.
+We therefore adopt 2DGS for its accurate, view-consistent geometry.
+3.3
+2D Gaussian Modeling
+A 2D Gaussian primitive has center pk ∈ R3 , tangent vectors {tu , tv }, and inplane scales s = (su , sv ). Its rotation quaternion gives R = [tu , tv , tw ], where
+tw = tu × tv is the normal.
+The geometry of the 2D Gaussian in world space is described by a homogeneous transformation matrix:
+
+
+su tu sv tv 0 pk
+H=
+.
+(1)
+0
+0 0 1
+For local coordinate u = (u, v), P(u, v) = H[u, v, 0, 1]T and
+ 2
+
+u + v2
+G(u) = exp −
+.
+2
+(2)
+For perspective-accurate splatting, 2DGS transforms each pixel ray’s two
+homogeneous planes into the primitive frame and computes their intersection on
+the disk.
+3.4
+Reprojection
+Reprojection establishes dense correspondence between stereo views by lifting
+image pixels into 3D and reprojecting them into another view under known
+6
+H. Zhu and L. Zhou
+camera geometry. We adopt a unified pinhole camera model with projection and
+unprojection operators.
+Let X = [X, Y, Z]T ∈ R3 denote a 3D point expressed in the camera coordinate system. The perspective projection operator π(·) is defined as
+
+
+X/Z
+π(X) = K  Y /Z  ,
+(3)
+1
+where K ∈ R3×3 is the camera intrinsic matrix, and Z denotes the depth of the
+point along the camera optical axis. Given a source pixel usrc with depth d, its
+3D position in the world coordinate system is obtained via unprojection:
+Pworld = Rsrc π −1 (usrc , d) + tsrc ,
+(4)
+where usrc ∈ R3 is a homogeneous image coordinate, π −1 (·) denotes the unprojection operator, and Rsrc ∈ SO(3) and tsrc ∈ R3 represent the rotation matrix
+and translation vector of the source camera pose in the world coordinate system.
+The point is then transformed into the destination camera frame and projected
+onto the target image plane:
+
+T
+udst = πdst Rdst
+(Pworld − tdst ) ,
+(5)
+where Rdst ∈ SO(3) and tdst ∈ R3 denote the rotation and translation of the
+destination camera, and πdst (·) uses the destination camera intrinsics.
+3.5
+Adaptive ROI Generator
+Reprojection produces two types of holes. Gaps are small, scattered interior holes
+caused by depth variation and parallax, and are filled by interpolation. ROIs
+comprise peripheral regions visible only to the affiliated eye and large connected
+disocclusions near foreground boundaries; together with a small safety margin,
+they are repaired by targeted rendering. To limit affiliated-eye rasterization, our
+adaptive ROI generator restricts this rendering to the required regions, as summarized in Fig. 2. As illustrated in Fig. 2a, far objects generally produce fewer
+and smaller holes, whereas near objects produce larger interior disocclusions because of greater parallax. The edge-ROI step is therefore always applied, while
+the optional center-ROI step is enabled by the user before rendering for scenes
+expected to contain close foreground geometry and wide interior disocclusions.
+Step 1: Edge ROI Generation. As illustrated in Fig. 2b, our ROI generator
+dynamically identifies the border regions corresponding to edge holes that require
+re-rendering. Let Ωbound denote the boundary of the source image domain. We
+uniformly sample N pixels along each image edge. For each sampled boundary
+pixel usrc , we reproject it at two depth hypotheses {dmin , dmax } using Eqs. (3)–
+(5). Let P denote the set of all such valid projected points in the affiliated eye,
+where each point p ∈ P implies a coordinate pair (x, y).
+From Mono to Stereo
+7
+(a) Configured ROI paths for far
+and near objects.
+(b) Adaptive edge-ROI
+generation.
+Fig. 2. ROI generation. (a) Step 1 generates edge ROIs and fills remaining small holes
+by interpolation; for scenes expected to contain close foreground geometry, the user
+can enable Step 2 to repair connected center-hole regions. (b) Boundary reprojection
+and tile alignment determine the border regions that require re-rendering.
+We then compute the axis-aligned bounding box by finding the coordinate
+extrema over the set P:
+xmin = min x,
+xmax = max x,
+ymin = min y,
+ymax = max y.
+(x,y)∈P
+(x,y)∈P
+(x,y)∈P
+(6)
+(x,y)∈P
+Based on the projected boundary samples, we estimate the uncovered border
+regions in the affiliated eye. Let (umin , umax , vmin , vmax ) denote the resulting
+valid projection bounds. Given the image width W and height H, we compute
+the border widths along four sides by expanding the valid projection range with
+a fixed edge margin m. Specifically, the left and right border widths are defined
+as:
+(
+clamp(⌈umin ⌉ + m, 0, W/2), umin > 0,
+lef tw =
+(7)
+0,
+otherwise,
+(
+clamp((W − 1) − ⌊umax ⌋ + m, 0, W/2), umax < W − 1,
+rightw =
+(8)
+0,
+otherwise.
+The top and bottom border heights are computed analogously from vmin and
+vmax . Here, clamp(x, a, b) = min(max(x, a), b) limits the ROI size to at most
+half of the image extent.
+After obtaining the coarse projection bounds through boundary reprojection,
+we align the bounds to the rasterizer’s native 16×16-pixel tile boundaries, whose
+size is determined by the original gaussian rasterizer and is therefore not tuned
+8
+H. Zhu and L. Zhou
+as a method-specific parameter. Here a margin of m = 32 pixels was selected
+empirically during system development as a conservative buffer against small inaccuracies introduced by projection, discretization, and temporal variation, and
+was subsequently kept fixed across all evaluated scenes and datasets. The margin
+controls a coverage–efficiency trade-off: reducing it may produce smaller ROIs
+and lower rendering cost, but increases the risk of excluding relevant boundary
+pixels; increasing it improves tolerance to projection errors but causes additional
+pixels to be rendered and therefore reduces the performance benefit.
+Step 2: Center ROI Generation. When the user enables center-ROI rendering,
+we perform an additional center ROI generation step after edge ROI rendering.
+We first identify center hole pixels in the reprojected image, i.e., interior pixels
+that remain unfilled after reprojection and interpolation. Connected component
+analysis is then applied to group adjacent center hole pixels into clusters. For
+each resulting cluster, we compute an axis-aligned bounding box encompassing
+the cluster. The bounding box is expanded by the same margin m and aligned
+to the tile grid, producing a center ROI. These center ROIs are rendered via
+the same targeted ROI rendering pipeline used for edge ROIs, ensuring highquality hole repair through 2DGS re-rasterization. The choice to enable Step 2
+is made before the rendering run; it is not triggered by an area threshold or by an
+automatic near/far classifier. This user-configured choice and the fixed margin
+are heuristic design settings rather than learned or optimized parameters, and
+their sensitivity is not evaluated in the current experiments.
+4
+Experiment
+The whole pipeline is run on a desktop equipped with an NVIDIA RTX 4090D
+GPU.
+4.1
+Datasets
+We evaluate our method on three widely used multi-view datasets: DTU [9],
+a controlled indoor benchmark from which we select 15 scans (24, 37, 40, 55,
+63, 65, 69, 83, 97, 105, 106, 110, 114, 118, and 122); Tanks and Temples [11],
+containing eight large-scale indoor and outdoor scenes; and MipNeRF-360 [1],
+containing eight high-resolution unbounded scenes with complex geometry and
+wide baselines. We use an approximate 2:1 training–test split for every scene,
+yielding 33 training and 16 test images per DTU scan, while the exact counts
+for the other datasets vary with scene size.
+4.2
+Stereo Pair Construction and Evaluation Targets
+Each test sample consists of a dominant eye and an affiliated eye. The pose of
+the affiliated eye is first generated by COLMAP. The pose of the dominant eye is
+From Mono to Stereo
+9
+generated with a small viewpoint difference from the affiliated eye while preserving the same orientation, thereby simulating binocular parallax. The affiliated
+eye image is compared against the ground truth for evaluating PSNR, SSIM,
+and LPIPS. Although no captured reference image exists for the dominant eye,
+none is needed for the comparison: both rendering strategies use the same full
+2DGS rendering at the dominant eye and differ only in how they generate the
+affiliated eye image. Consequently, all image-quality metrics are computed at the
+affiliated eye against the captured image.
+4.3
+Experimental Pipeline
+For each scene, COLMAP [14] recovers camera intrinsics and extrinsics, and
+a 2DGS model is trained for 30,000 iterations on the training images. After
+training, the model is fixed for all rendering and evaluation.
+With the stereo pairs prepared, we compare two sequential rendering strategies for producing the binocular frames. Both strategies begin with exactly the
+same complete dominant-eye rendering, which produces the dominant-eye RGB
+image and depth proxy. The full-rendering reference then performs a second complete rasterization at the affiliated eye pose, whereas our method replaces this
+second full-image pass with reprojection, interpolation, and selective ROI rasterization. The reported time for each strategy is the accumulated cost of these
+sequential stages for the complete stereo pair; neither strategy uses batched
+multiview rendering or concurrent CUDA streams. Comparisons with batched
+or concurrent execution are outside the scope of the reported measurements. In
+our method, the shared dominant-eye depth proxy is used, together with the
+known relative pose, to reproject the dominant-eye image into the viewpoint of
+the affiliated eye pose. The reprojected result contains holes from disocclusions
+and field-of-view differences; gaps are filled by interpolation, while ROI regions
+are resolved through targeted ROI rendering.
+Finally, visual quality is evaluated only on the affiliated eye pose. Specifically,
+both the full-rendering baseline at the affiliated eye pose and our generated
+affiliated eye image are compared against the captured affiliated eye ground-truth
+image. Rendering time and GPU memory are measured for the complete stereo
+pair: the identical dominant-eye pass followed by a complete affiliated eye pass
+for the reference, and the identical dominant-eye pass followed by reprojection
+and patching for our method. All speedup statements below are therefore relative
+to this sequential two-pass reference.
+4.4
+Visual Comparison
+Figure 3 compares the affiliated eye views on DTU: captured ground truth,
+full-rendered baseline, and the result of our method. Additional comparisons on
+Tanks and Temples and MipNeRF-360 are provided in Figs. 5 and 6, respectively,
+in Appendix A. Zoomed-in insets highlight local details. The examples show that
+most scene content is preserved, while local differences remain near disocclusions
+and fine structures.
+10
+H. Zhu and L. Zhou
+Fig. 3. Visual comparison on the DTU dataset.
+4.5
+Quantitative Evaluation
+Table 2 shows a consistent quality–efficiency trade-off relative to sequential twopass rendering: affiliated-eye PSNR decreases by 0.82–1.20 dB, while stereo-pair
+rendering time and GPU memory decrease by 15.5–28.8% and 6–11%, respectively. We report the quality change without interpreting it as perceptually negligible because no headset-based perceptual threshold was evaluated.
+Figure 4 summarizes the efficiency analysis across datasets. Specifically, Fig. 4a
+shows that denser scenes generally yield greater speedup and absolute memory
+savings, with Spearman ρ = 0.79 and 0.60, respectively (both p < 0.001). These
+correlations are descriptive rather than causal because Gaussian count is not
+isolated from resolution, dataset, geometry, or ROI coverage.
+Figure 4b identifies dominant-eye rendering as the main bottleneck (about
+71–75% of total time), followed by ROI rendering (about 15–17%); the remaining
+stages together account for less than 14%.
+4.6
+Discussion
+As reported in Table 2, the method trades affiliated-eye image quality for lower
+rendering time and memory use relative to the sequential two-pass reference.
+From Mono to Stereo
+11
+Table 2. Per-dataset average quality and efficiency metrics. Quality metrics are computed on the affiliated eye pose; time and GPU memory are measured for the complete
+stereo pair.
+Dataset
+Method PSNR (dB) SSIM LPIPS Time (ms) GPU (MB)
+DTU [9]
+DTU [9]
+Baseline
+Ours
+28.83
+28.01
+0.8738 0.3730
+0.8677 0.3790
+17.81
+15.05
+744
+661
+Tanks & Temples [11] Baseline
+Tanks & Temples [11] Ours
+20.99
+20.00
+0.7383 0.4145
+0.7219 0.4266
+35.67
+25.40
+1792
+1681
+MipNeRF-360 [1]
+MipNeRF-360 [1]
+26.14
+24.94
+0.7895 0.3437
+0.7717 0.3627
+43.10
+30.96
+2463
+2310
+Baseline
+Ours
+(b) Per-dataset time breakdown.
+(a) Per-scene scaling trends.
+Fig. 4. Efficiency analysis across the evaluated datasets. (a) Per-scene analysis on DTU,
+Tanks and Temples, and MipNeRF-360; both speedup and GPU memory reduction increase with scene complexity. (b) Per-dataset time breakdown of the proposed pipeline.
+Figure 4a further shows that both speedup and GPU memory savings grow with
+the per-scene Gaussian count, with Spearman ρ = 0.79 and 0.60, respectively,
+and both p < 0.001. This association is consistent with the cost of full rasterization increasing with primitive count while much of the reprojection overhead is
+image based. However, Gaussian count, image resolution, scene geometry, and
+12
+H. Zhu and L. Zhou
+ROI coverage vary together in the current benchmarks, so the analysis does not
+establish a causal scaling law. The time breakdown in Fig. 4b also confirms that
+the total cost is dominated by rendering the dominant eye.
+Several limitations remain. Our pipeline assumes accurate per-pixel depth;
+errors directly cause reprojection holes and misaligned pixels, especially in sparse
+or large-scale outdoor scenes. Because the method reuses dominant-eye pixels,
+view-dependent appearance such as specular highlights or reflections may also
+be inherited from the dominant-eye viewpoint. In addition, our evaluation uses
+controlled stereo pairs derived from COLMAP poses on an RTX 4090D desktop. We have not evaluated perceptual comfort, binocular rivalry, or latency
+on a physical VR headset. The timing results compare two sequential pipelines
+with an identical first-eye pass and do not establish an advantage over batched
+multiview or concurrent stereo rendering.
+The method targets static scenes. Moving objects would require a timedependent scene representation, a current depth estimate, and validity tests that
+prevent stale dominant-eye samples from being transferred to the affiliated eye.
+Even with static geometry, continuous camera motion may cause ROI boundaries and interpolation decisions to change between frames; temporal stability
+therefore requires sequence-level evaluation and may require additional history
+constraints. Our current experiments evaluate independent stereo pairs and do
+not measure this behavior.
+5
+Conclusion
+We presented a binocular rendering acceleration framework for static 2D Gaussian Splatting scenes. The method replaces redundant full rendering of the second
+eye with depth-guided reprojection and targeted hole filling, using interpolation
+for gaps and ROI rendering for larger missing regions.
+Experiments on DTU, Tanks and Temples, and MipNeRF-360 show reductions of up to 28.8% in rendering time and 6% to 11% in peak GPU memory
+relative to a sequential two-pass reference, with affiliated-eye changes within
+1.3 dB PSNR, 0.02 SSIM, and 0.02 LPIPS. These results establish the tradeoff for controlled static-scene pairs, but do not establish physically calibrated
+headset performance or temporal perceptual quality. Future work will evaluate
+normalized stereo baselines, multiview and concurrent rendering references, parameter sensitivity, continuous head motion, physical VR hardware, and dynamic
+Gaussian scenes.
+Acknowledgments. The authors thank Goertek for providing the hardware resources
+and experimental facilities that supported this work. OpenAI Codex and Anthropic
+Claude were used solely for grammar editing and language polishing. All research
+content, technical contributions, and scientific writing are entirely the authors’ own
+work.
+Disclosure of Interests. The authors have no competing interests to declare that
+are relevant to the content of this article.
+From Mono to Stereo
+13
+References
+1. Barron, J.T., Mildenhall, B., Verbin, D., Srinivasan, P.P., Hedman, P.: Mip-NeRF
+360: Unbounded anti-aliased neural radiance fields (2022)
+2. Chen, X., Fang, X., Zhang, S., Zhang, X., He, L., Li, Z.: YORO: You only render once: Enhancing energy and computation efficiency of mobile virtual reality.
+In: Proc. ACM International Conference on Mobile Systems, Applications, and
+Services (MobiSys). ACM (2025). https://doi.org/10.1145/3711875.3729133
+3. Girish, S., Gupta, K., Shrivastava, A.: EAGLES: Efficient accelerated 3D Gaussians
+with lightweight encodings. In: Proc. European Conference on Computer Vision
+(ECCV). Springer (2024)
+4. Google Developers: Asynchronous reprojection. Google VR Developer Guide (2018)
+5. Guedon, A., Lepetit, V.: SuGaR: Surface-aligned Gaussian Splatting for efficient
+3D mesh reconstruction and high-quality mesh rendering. In: Proc. IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), pp. 5354–5363.
+IEEE (2024). https://doi.org/10.1109/CVPR52733.2024.00512
+6. Howard, I.P.: Perceiving in Depth: Volume 1 Basic Mechanisms. Oxford University
+Press (2012). https://doi.org/10.1093/acprof:oso/9780199764143.001.0001
+7. Hu, X., Wu, X., Ma, M., Xu, X., Gu, Y., Wang, G., Xu, Y., Meng, X., Wang,
+L.: Efficient VR rendering: Survey on foveated, stereo, cloud, and low-power rendering techniques. Virtual Reality & Intelligent Hardware 7(5), 421–452 (2025).
+https://doi.org/10.1016/j.vrih.2025.08.003
+8. Huang, B., Yu, Z., Chen, A., Geiger, A., Gao, S.: 2D Gaussian Splatting for geometrically accurate radiance fields. In: ACM SIGGRAPH 2024 Conference Proceedings. ACM (2024). https://doi.org/10.1145/3641519.3657428
+9. Jensen, R., Dahl, A., Vogiatzis, G., Tola, E., Aanas, H.: Large scale multi-view
+stereopsis evaluation. In: 2014 IEEE Conference on Computer Vision and Pattern
+Recognition, pp. 406–413 (2014). https://doi.org/10.1109/CVPR.2014.59
+10. Kerbl, B., Kopanas, G., Leimkuehler, T., Drettakis, G.: 3D Gaussian Splatting for
+real-time radiance field rendering. ACM Transactions on Graphics 42(4) (2023).
+https://doi.org/10.1145/3592433
+11. Knapitsch, A., Park, J., Zhou, Q.Y., Koltun, V.: Tanks and temples: Benchmarking large-scale scene reconstruction. ACM Transactions on Graphics 36(4) (2017).
+https://doi.org/10.1145/3072959.3073599
+12. Lee, J.C., Rho, D., Sun, X., Ko, J.H., Park, E.: Compact 3D Gaussian representation for radiance field. In: Proc. IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pp. 21719–21728 (2024)
+13. Radl, L., Steiner, M., Parger, M., Weinrauch, A., Kerbl, B., Steinberger,
+M.: StopThePop: Sorted Gaussian Splatting for view-consistent real-time
+rendering. ACM Transactions on Graphics 43(4), Article 64, 1–17 (2024).
+https://doi.org/10.1145/3658187
+14. Schoenberger, J.L., Frahm, J.M.: Structure-from-motion revisited. In: 2016 IEEE
+Conference on Computer Vision and Pattern Recognition (CVPR), pp. 4104–4113
+(2016). https://doi.org/10.1109/CVPR.2016.445
+15. Wißmann, N., Mišiak, M., Fuhrmann, A., Latoschik, M.E.: Accelerated stereo rendering with hybrid reprojection-based rasterization and adaptive ray-tracing. In:
+2020 IEEE Conference on Virtual Reality and 3D User Interfaces (VR), pp. 828–
+835 (2020). https://doi.org/10.1109/VR46266.2020.00107
+16. Wu, G., Yi, T., Fang, J., Xie, L., Zhang, X., Wei, W., Liu, W., Tian, Q., Wang, X.:
+4D Gaussian Splatting for real-time dynamic scene rendering. In: Proc. IEEE/CVF
+14
+H. Zhu and L. Zhou
+Conference on Computer Vision and Pattern Recognition (CVPR), pp. 20310–
+20320 (2024)
+17. Yang, L., Liu, S., Salvi, M.: A survey of temporal antialiasing techniques. Computer
+Graphics Forum 39(2), 607–621 (2020). https://doi.org/10.1111/cgf.14018
+18. Yang, S., Zhuge, J., Ji, J., Zhu, Q., Jin, X.: Accelerating stereo rendering via image reprojection and spatio-temporal supersampling. IEEE Transactions on Visualization and Computer Graphics 31(5), 2643–2652 (2025).
+https://doi.org/10.1109/TVCG.2025.3549557
+A
+Supplementary Visual Comparison
+Fig. 5. Visual comparison on the Tanks and Temples dataset.
+From Mono to Stereo
+15
+Fig. 6. Visual comparison on the MipNeRF-360 dataset.
+Fig. 7. Qualitative comparison with YORO. (a) Near objects, where reprojection-only
+completion produces visible distortion. (b) Far objects, where the distortion is less
+visible.

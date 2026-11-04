@@ -1,0 +1,196 @@
+# Permutation Proof for Projection and Warp
+
+Also called: Permutation of Projection and Warp
+
+## Overview
+A mathematical proof demonstrating that the projection matrix $P$ and warp matrix $W$ in the perspective shear-warp algorithm can be permuted, allowing the viewing transformation to be computed as $W \cdot P \cdot S$ instead of the standard $P \cdot W \cdot S$ [S1, unofficial]. This property is a basic premise for the perspective projection shear-warp algorithm, enabling specific optimization paths in the compositing step [S1, unofficial]. It sets the method apart from general matrix factorizations by proving that the specific structure of the shear-warp decomposition allows the projection to precede the warp without altering the final image coordinates, provided the warp matrix satisfies specific zero-element constraints.
+
+## How it works
+The method verifies the commutativity of the projection and warp operations within the viewing matrix decomposition. It relies on the specific algebraic structure of the shear matrix $S$ and the geometric constraint that the eye position in world space maps to the camera center in view space.
+
+### Inputs and Outputs
+- **Inputs**:
+  - Eye position in object space $e_o = (e_o^x, e_o^y, e_o^z, e_o^w)^T$ [S1, unofficial].
+  - Overall viewing matrix $M_{ov}$ (mapping object space to view space) [S1, unofficial].
+  - Standard projection matrix $P$ [S1, unofficial].
+  - General warp matrix $W$ [S1, unofficial].
+  - Shear matrix $S$ derived from $e_o$ [S1, unofficial].
+- **Outputs**:
+  - Verification that $w_{02} = 0$ and $w_{12} = 0$ in the warp matrix $W$ when derived from $M_{ov}$ and $e_o$ [S1, unofficial].
+  - Proof that $P \cdot W \cdot S = W' \cdot P \cdot S$ (where $W'$ is the permuted warp) [S1, unofficial].
+
+### Data Structures
+The method operates on $4 \times 4$ homogeneous transformation matrices.
+- **Projection Matrix $P$**:
+  $$
+  P = \begin{pmatrix}
+  1 & 0 & 0 & 0 \\
+  0 & 1 & 0 & 0 \\
+  0 & 0 & 0 & 0 \\
+  0 & 0 & 0 & 1
+  \end{pmatrix}
+  $$
+  [S1, unofficial]
+- **Shear Matrix $S$**:
+  $$
+  S = \begin{pmatrix}
+  1 & 0 & e_{x,z} & 0 \\
+  0 & 1 & e_{y,z} & 0 \\
+  0 & 0 & 1 & 0 \\
+  0 & 0 & e_{w,z} & 1
+  \end{pmatrix}
+  $$
+  [S1, unofficial]
+  Where:
+  $$
+  e_{x,z} = -\frac{e_o^x}{e_o^z}, \quad e_{y,z} = -\frac{e_o^y}{e_o^z}, \quad e_{w,z} = -\frac{e_o^w}{e_o^z}
+  $$
+  [S1, unofficial]
+- **Warp Matrix $W$**:
+  $$
+  W = \begin{pmatrix}
+  w_{00} & w_{01} & w_{02} & w_{03} \\
+  w_{10} & w_{11} & w_{12} & w_{13} \\
+  w_{20} & w_{21} & w_{22} & w_{23} \\
+  w_{30} & w_{31} & w_{32} & w_{33}
+  \end{pmatrix}
+  $$
+  [S1, unofficial]
+
+### Steps
+1.  **Compute Eye Position**: Determine the object space eye position $e_o$ from the world-to-object transformation $M_{wo}$ and the standard camera direction vector $(0, 0, -1, 0)^T$ [S1, unofficial]:
+    $$
+    e_o = M_{wo} \cdot \begin{pmatrix} 0 \\ 0 \\ -1 \\ 0 \end{pmatrix}
+    $$
+    [S1, unofficial]
+2.  **Define Matrices**: Construct $P$, $S$, and the general $W$ as defined in the Data Structures section [S1, unofficial].
+3.  **Formulate Viewing Matrix**: The standard viewing matrix is defined as $M_{ov} = P \cdot W \cdot S$ [S1, unofficial].
+4.  **Calculate Performed Product**: Compute the product $V = P \cdot W \cdot S$. The elements in the third column of the resulting matrix $V$ (specifically indices $(0,2)$ and $(1,2)$) are derived as [S1, unofficial]:
+    $$
+    V_{02} = w_{00} \cdot e_{x,z} + w_{01} \cdot e_{y,z} + w_{03} \cdot e_{w,z}
+    $$
+    $$
+    V_{12} = w_{10} \cdot e_{x,z} + w_{11} \cdot e_{y,z} + w_{13} \cdot e_{w,z}
+    $$
+    [S1, unofficial]
+5.  **Calculate Standard Product**: Compute the standard viewing matrix $M_{ov}$. The elements in the third column are [S1, unofficial]:
+    $$
+    M_{ov}^{02} = w_{00} \cdot e_{x,z} + w_{01} \cdot e_{y,z} + w_{02} + w_{03} \cdot e_{w,z}
+    $$
+    $$
+    M_{ov}^{12} = w_{10} \cdot e_{x,z} + w_{11} \cdot e_{y,z} + w_{12} + w_{13} \cdot e_{w,z}
+    $$
+    [S1, unofficial]
+6.  **Verify Equality Condition**: For the permutation to hold ($P \cdot W \cdot S = W' \cdot P \cdot S$), the results must be identical. Comparing $V_{02}$ with $M_{ov}^{02}$ and $V_{12}$ with $M_{ov}^{12}$, the difference lies solely in the terms $w_{02}$ and $w_{12}$ [S1, unofficial]. Thus, the condition for correctness is [S1, unofficial]:
+    $$
+    w_{02} = 0 \quad \text{and} \quad w_{12} = 0
+    $$
+    [S1, unofficial]
+7.  **Derive $w_{02}$ and $w_{12}$ from $M_{ov}$**: Express $w_{02}$ and $w_{12}$ in terms of the overall viewing matrix $M_{ov}$ and eye position $e_o$ [S1, unofficial]:
+    $$
+    w_{02} = M_{ov}^{00} \cdot e_{x,z} + M_{ov}^{01} \cdot e_{y,z} + M_{ov}^{02} + M_{ov}^{03} \cdot e_{w,z}
+    $$
+    $$
+    w_{12} = M_{ov}^{10} \cdot e_{x,z} + M_{ov}^{11} \cdot e_{y,z} + M_{ov}^{12} + M_{ov}^{13} \cdot e_{w,z}
+    $$
+    [S1, unofficial]
+8.  **Proof of Zero Constraint**: Multiply the expressions for $w_{02}$ and $w_{12}$ by $e_o^z$ [S1, unofficial]:
+    $$
+    w_{02} \cdot e_o^z = M_{ov}^{00} \cdot e_o^x + M_{ov}^{01} \cdot e_o^y + M_{ov}^{02} \cdot e_o^z + M_{ov}^{03} \cdot e_o^w
+    $$
+    $$
+    w_{12} \cdot e_o^z = M_{ov}^{10} \cdot e_o^x + M_{ov}^{11} \cdot e_o^y + M_{ov}^{12} \cdot e_o^z + M_{ov}^{13} \cdot e_o^w
+    $$
+    [S1, unofficial]
+    The right-hand side of these equations represents the x and y components of the eye position transformed by the viewing matrix $M_{ov}$. Since $e_o$ is the eye position in object space, $M_{ov} \cdot e_o$ yields the eye position in view space. By definition, the camera center in view space is $(0, 0, 0, 1)^T$ (or effectively zero in the x and y coordinates for the direction vector derivation) [S1, unofficial]. Specifically, the relation $M_{ow} \cdot (0, 0, -1, 0)^T = e_o$ implies that the transformed eye position has zero x and y components relative to the camera center [S1, unofficial]. Therefore:
+    $$
+    M_{ov}^{00} \cdot e_o^x + M_{ov}^{01} \cdot e_o^y + M_{ov}^{02} \cdot e_o^z + M_{ov}^{03} \cdot e_o^w = 0
+    $$
+    $$
+    M_{ov}^{10} \cdot e_o^x + M_{ov}^{11} \cdot e_o^y + M_{ov}^{12} \cdot e_o^z + M_{ov}^{13} \cdot e_o^w = 0
+    $$
+    [S1, unofficial]
+    Consequently, $w_{02} \cdot e_o^z = 0$ and $w_{12} \cdot e_o^z = 0$. Assuming $e_o^z \neq 0$ (the eye is not in the plane of the slice being sheared), it follows that $w_{02} = 0$ and $w_{12} = 0$ [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def verify_permutation_proof(M_ov, e_o):
+    """
+    Verifies that w02 and w12 are zero for the warp matrix derived from M_ov and e_o.
+    
+    Args:
+        M_ov (4x4 matrix): Overall viewing matrix (object to view space).
+        e_o (4-vector): Eye position in object space.
+        
+    Returns:
+        bool: True if w02 and w12 are zero (within floating point tolerance).
+    """
+    # Extract components of eye position
+    ex, ey, ez, ew = e_o[0], e_o[1], e_o[2], e_o[3]
+    
+    # Check for degenerate case where eye is in the shear plane
+    if ez == 0:
+        return False # Or handle as undefined/edge case
+        
+    # Calculate shear parameters
+    ex_z = -ex / ez
+    ey_z = -ey / ez
+    ew_z = -ew / ez
+    
+    # Extract relevant elements from M_ov
+    # M_ov is 4x4, indexed [row][col]
+    m00, m01, m02, m03 = M_ov[0][0], M_ov[0][1], M_ov[0][2], M_ov[0][3]
+    m10, m11, m12, m13 = M_ov[1][0], M_ov[1][1], M_ov[1][2], M_ov[1][3]
+    
+    # Calculate w02 and w12 using the derived formulas
+    # w02 = M_ov^00 * ex_z + M_ov^01 * ey_z + M_ov^02 + M_ov^03 * ew_z
+    w02 = m00 * ex_z + m01 * ey_z + m02 + m03 * ew_z
+    
+    # w12 = M_ov^10 * ex_z + M_ov^11 * ey_z + M_ov^12 + M_ov^13 * ew_z
+    w12 = m10 * ex_z + m11 * ey_z + m12 + m13 * ew_z
+    
+    # Verify if they are zero
+    tolerance = 1e-9
+    return abs(w02) < tolerance and abs(w12) < tolerance
+
+def compute_eye_position(M_wo):
+    """
+    Computes object space eye position from world-to-object matrix.
+    
+    Args:
+        M_wo (4x4 matrix): World-to-object transformation matrix.
+        
+    Returns:
+        4-vector: Eye position e_o.
+    """
+    # Standard camera direction vector (0, 0, -1, 0)
+    cam_dir = [0, 0, -1, 0]
+    
+    # Matrix-vector multiplication
+    # e_o = M_wo * cam_dir
+    ex = M_wo[0][0]*cam_dir[0] + M_wo[0][1]*cam_dir[1] + M_wo[0][2]*cam_dir[2] + M_wo[0][3]*cam_dir[3]
+    ey = M_wo[1][0]*cam_dir[0] + M_wo[1][1]*cam_dir[1] + M_wo[1][2]*cam_dir[2] + M_wo[1][3]*cam_dir[3]
+    ez = M_wo[2][0]*cam_dir[0] + M_wo[2][1]*cam_dir[1] + M_wo[2][2]*cam_dir[2] + M_wo[2][3]*cam_dir[3]
+    ew = M_wo[3][0]*cam_dir[0] + M_wo[3][1]*cam_dir[1] + M_wo[3][2]*cam_dir[2] + M_wo[3][3]*cam_dir[3]
+    
+    return [ex, ey, ez, ew]
+```
+
+### Edge Cases and Pitfalls
+- **$e_o^z = 0$**: If the eye position's z-component in object space is zero, the shear parameters $e_{x,z}, e_{y,z}, e_{w,z}$ are undefined (division by zero). This corresponds to the eye lying in the plane of the slice being sheared, which is a degenerate viewing configuration for the shear-warp algorithm [S1, unofficial].
+- **Floating Point Precision**: The proof relies on exact zero values. In implementation, floating point errors may result in $w_{02}$ and $w_{12}$ being very small but non-zero. A tolerance check is required [G].
+- **Matrix Definition Consistency**: The proof assumes a specific definition of $M_{ov}$ and the coordinate systems. If the viewing matrix is defined differently (e.g., row-major vs column-major multiplication order), the indices and formulas must be adjusted accordingly [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: The proof itself is a static mathematical verification with $O(1)$ complexity. It does not add runtime overhead to the rendering algorithm but validates a structural property that allows for optimization.
+- **Memory Complexity**: $O(1)$ as it only requires storing a few matrix elements and scalars for verification.
+- **Strengths**: Validates that the projection can be applied before the warp, potentially simplifying the compositing loop or allowing for different memory access patterns in the voxel data traversal [S1, unofficial].
+- **Limitations**: The proof is specific to the shear-warp decomposition and does not apply to general perspective transformations. It relies on the specific structure of the shear matrix $S$ and the definition of the eye position [S1, unofficial].
+
+## Background
+The perspective shear-warp algorithm was introduced to accelerate volume rendering by decomposing the viewing transformation into a shear, a projection, and a warp, thereby substituting trilinear interpolation with bilinear interpolation [S1, unofficial]. The permutation of the projection and warp matrices was a basic premise of the algorithm but lacked a formal proof until the work described in [S1, unofficial]. This proof establishes the mathematical foundation for the algorithm's correctness under the specified constraints. The method is used in virtual environments and medical imaging applications where real-time volume rendering is required [S1, unofficial].
+
+## Sources
+[S1] The Perspective Shear-Warp Algorithm in a Virtual Environment., https://www.researchgate.net/publication/220943822_The_Perspective_Shear-Warp_Algorithm_in_a_Virtual_Environment, fetched 2026-10-29 (unofficial)

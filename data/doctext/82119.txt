@@ -1,0 +1,435 @@
+# CS677 Assignment 2
+
+This zip file contains the asg2.py, hostfile, opacity_TF.txt, color_TF.txt, Report.pdf and image files from different runs.
+
+The main Python program uses mpi4py, numba, scipy, numpy and PIL libraries to execute the program in a parallel environment, handle the dataset values better and image rendering. It also uses sys and gc libraries to take command line arguments and collect garbage.
+
+## Exceptions to the assignment questions - 
+ 
+1. The command to execute include following parameter ```--mca btl_tcp_if_include eno1``` this code specify the interface on which mpi should connect to other systems
+2. The hostfile is in format of IP addresses instead of hostnames as the systems were unable to process hostnames.
+
+## Steps for program execution
+  1. Run command
+     ```
+     bash script.sh
+     ```
+     > This script is for installing openmpi, python, pip, numpy, numba and mpi4py (You can ignore these commands on preinstalled systems)
+  2. Make sure opacity_TF.txt and color_TF.txt are in same folder in which volume_rendering.py is present.
+  3. Execute the command in format given in assignment in terminal
+     ```
+     mpirun --mca btl_tcp_if_include eno1 -hostfile hostfile -np 8 python3 asg2.py Isabel_2000x2000x400_float32.raw 2 2 2 0.5 opacity_TF.txt color_TF.txt
+     ```
+  4. The resulting image will be stored with the name "px_py_pz.png"
+
+### asg2.py
+```
+from mpi4py import MPI
+import numpy as np
+from PIL import Image
+import gc
+import sys
+from numba import jit
+from numba import float32
+
+
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+comm.Barrier()
+
+start_time = MPI.Wtime()
+
+@jit(nopython=True)
+def rayCasting(data, i, ii, iii):
+
+    colorMesh = np.zeros((i, ii, iii), dtype=np.float32)
+    opacityMesh = np.zeros((i, ii), dtype=np.float32)
+
+    xL = i
+    yL = ii
+
+    xi = 0
+    yi = 0
+    zd = 0
+
+    numberOfRays = 0
+    raysTerminatedEarly = 0
+    steps = 0
+    numberOfRays = xL * yL
+    numberOfRays2 = 0
+    while xi < xL:
+        yi = 0
+        while yi < yL:
+            zd = 0
+            tData = data[xi][yi]
+            numberOfRays2 += 1
+            cm = colorMesh[xi][yi]
+            m = opacityMesh[xi][yi]
+            while zd < zL - 1:
+                steps += 1
+                zv = lerp(tData[int(zd)], tData[int(zd) + 1], zd)
+                tOpac = nearestn(opacityData[1], zv)
+                opacity = oplerp(opacityData, tOpac, zv)
+                o = m + ((1 - m) * opacity)
+                tColor = nearestn(colorData[1], zv)
+                cr, cg, cb = colerp(colorData, tColor, zv)
+                cm[0] += (1 - m) * cr * opacity
+                cm[1] += (1 - m) * cg * opacity
+                cm[2] += (1 - m) * cb * opacity
+                zd += step_size
+                if o > 0.98:
+                    raysTerminatedEarly += 1
+                    break
+                m = o
+
+            opacityMesh[xi][yi] = o
+            colorMesh[xi][yi][0] = cm[0]
+            colorMesh[xi][yi][1] = cm[1]
+            colorMesh[xi][yi][2] = cm[2]
+            yi += 1
+
+        xi += 1
+    colorMesh = colorMesh * 256
+
+    colorMesh = np.swapaxes(colorMesh, 0, 2)
+    colorMesh = np.swapaxes(colorMesh, 1, 2)
+
+    return colorMesh, opacityMesh
+
+
+@jit(nopython=True)
+def nearestn(array, value):
+    left, right = 0, len(array) - 1
+    result_index = -1
+
+    while left <= right:
+        mid = left + (right - left) // 2
+
+        if array[mid] < value:
+            result_index = mid
+            left = mid + 1
+        else:
+            right = mid - 1
+    return result_index
+
+
+@jit(nopython=True)
+def lerp(A: float32, B: float32, a: float32) -> float32:
+    al = a - int(a)
+    return al * B + (1 - al) * A
+
+
+@jit(nopython=True)
+def oplerp(arr, nn, P):
+    A = arr[1][nn]
+    B = arr[1][nn + 1]
+    V1 = arr[2][nn]
+    V2 = arr[2][nn + 1]
+    a = P - A
+    b = B - P
+    al = a / (a + b)
+    return (1 - al) * V1 + al * V2
+
+
+@jit(nopython=True)
+def colerp(arr, nn, P):
+    a = P - arr[1][nn]
+    b = arr[1][nn + 1] - P
+    al = a / (a + b)
+
+    rc1 = arr[2][nn]
+    rc2 = arr[2][nn + 1]
+    rc = (1 - al) * rc1 + al * rc2
+
+    gc1 = arr[3][nn]
+    gc2 = arr[3][nn + 1]
+    gc = (1 - al) * gc1 + al * gc2
+
+    bc1 = arr[4][nn]
+    bc2 = arr[4][nn + 1]
+    bc = (1 - al) * bc1 + al * bc2
+
+    return rc, gc, bc
+
+
+dataset, px, py, pz, step_size, opacity_TF_filename, color_TF_filename = sys.argv[1:]
+step_size = float(step_size)
+px = int(px)
+py = int(py)
+pz = int(pz)
+
+
+if size < 4:
+    dimensions = 1
+
+if rank == 0:
+
+    opacityData = [[n for n in range(4)], [], []]
+    with open(opacity_TF_filename, "r+") as f:
+        temparr = f.readlines()
+        i = 0
+        while i < len(temparr):
+            opacityData[1].append(np.float32(temparr[i].strip(",\n")))
+            i += 1
+            opacityData[2].append(np.float32(temparr[i].strip(",\n")))
+            i += 1
+    opacityData = np.array(opacityData)
+
+    print("Opacity file loaded")
+
+    colorData = [[n for n in range(55)], [], [], [], []]
+    with open(color_TF_filename, "r+") as f:
+        temparr = f.readlines()
+        i = 0
+        while i < len(temparr):
+            colorData[1].append(np.float32(temparr[i].strip(",\n")))
+            i += 1
+            colorData[2].append(np.float32(temparr[i].strip(",\n")))
+            i += 1
+            colorData[3].append(np.float32(temparr[i].strip(",\n")))
+            i += 1
+            colorData[4].append(np.float32(temparr[i].strip(",\n")))
+            i += 1
+    colorData = np.array(colorData)
+
+    print("Color file loaded")
+
+    with open(dataset, "rb") as f:
+        data = np.fromfile(f, dtype=np.float32)
+        if dataset == "Isabel_1000x1000x200_float32.raw":
+            data = data.reshape((200, 1000, 1000))
+        else:
+            data = data.reshape((400, 2000, 2000))
+
+    print("Data file loaded in rank 0")
+
+    z_Total, y_Total, x_Total = data.shape
+
+    total_size = px * py * pz
+
+    x_segment_size = int(x_Total / px)
+    y_segment_size = int(y_Total / py)
+    z_segment_size = int(z_Total / pz)
+
+    x_index = 0
+    y_index = 0
+    z_index = 0
+
+    count = 0
+
+    p0_data = 0
+
+    for k in range(pz):
+        y_index = 0
+        for j in range(py):
+            x_index = 0
+            for i in range(px):
+                if count == 0:
+                    p0_data = data[0:z_segment_size, 0:y_segment_size, 0:x_segment_size]
+                else:
+
+                    z_next = z_index + z_segment_size
+                    y_next = y_index + y_segment_size
+                    x_next = x_index + x_segment_size
+                    if k == pz - 1:
+                        z_next = z_Total
+                    if j == py - 1:
+                        y_next = y_Total
+                    if i == px - 1:
+                        x_next = x_Total
+
+                    comm.send(
+                        [
+                            data[z_index:z_next, y_index:y_next, x_index:x_next],
+                            opacityData,
+                            colorData,
+                            px,
+                            py,
+                            pz,
+                        ],
+                        dest=count,
+                    )
+                count += 1
+                x_index += x_segment_size
+            y_index += y_segment_size
+        z_index += z_segment_size
+    del data
+    data = p0_data
+    del p0_data
+    gc.collect()
+
+
+else:
+    data, opacityData, colorData, px, py, pz = comm.recv(source=0)
+
+
+end_time = MPI.Wtime()
+
+elapsed_time = end_time - start_time
+
+if rank != 0:
+    print(
+        f"Time taken by {rank} to recieve the data is {elapsed_time:.6f} seconds",
+        flush=True,
+    )
+
+all_times = comm.gather(elapsed_time, root=0)
+
+if rank == 0:
+    max_time = max(all_times)
+    print(
+        f"Maximum distribution time taken by any process: {max_time:.6f} seconds",
+        flush=True,
+    )
+
+
+comm.Barrier()
+
+start_time = MPI.Wtime()
+
+
+data = np.swapaxes(data, 0, 2)  # x,y,z
+
+
+a = list(data.shape)
+zL = a.pop(2)
+a.append(3)
+
+
+colorMesh, opacityMesh = rayCasting(data, a[0], a[1], a[2])
+
+
+del data
+
+gc.collect()
+
+end_time = MPI.Wtime()
+
+elapsed_time_ray_casting = end_time - start_time
+
+print(
+    f"Process {rank} took {elapsed_time_ray_casting:.6f} seconds to complete ray casting"
+)
+
+
+all_times_elapsed_time_ray_casting = comm.gather(elapsed_time_ray_casting, root=0)
+
+if rank == 0:
+    max_time = max(all_times_elapsed_time_ray_casting)
+    print(
+        f"Maximum ray casting time taken by any process: {max_time:.6f} seconds",
+        flush=True,
+    )
+
+
+comm.Barrier()
+
+start_time = MPI.Wtime()
+
+t = px * py
+
+if rank >= t:
+    surfaceProcess = rank % t
+
+    comm.send([colorMesh, opacityMesh], dest=surfaceProcess)
+
+if rank < t:
+    ColorMeshes = []
+    OpacityMeshes = []
+    for c in range(1, pz):
+        destPrc = (c * t) + rank
+        tempcm, tempom = comm.recv(source=destPrc)
+
+        ColorMeshes.append(tempcm)
+        OpacityMeshes.append(tempom)
+
+
+end_time = MPI.Wtime()
+
+
+elapsed_time_communication = end_time - start_time
+
+print(
+    f"Process {rank} took {elapsed_time_communication:.6f} seconds to complete communication"
+)
+all_times_elapsed_time_communication = comm.gather(elapsed_time_communication, root=0)
+
+if rank == 0:
+    max_time = max(all_times_elapsed_time_communication)
+    print(
+        f"Maximum communication time taken by any process: {max_time:.6f} seconds",
+        flush=True,
+    )
+
+comm.Barrier()
+
+
+if rank >= t:
+    print(f"Process {rank} took {elapsed_time_communication+elapsed_time_ray_casting:.6f} seconds in Total")
+    exit()
+
+
+
+start_time = MPI.Wtime()
+
+for i in range(len(ColorMeshes)):
+    tempOp = 1 - opacityMesh
+    tempOp[tempOp < 0] = 0
+    colorMesh += tempOp * ColorMeshes[i] * OpacityMeshes[i]
+    opacityMesh += tempOp * OpacityMeshes[i]
+
+
+
+colorMesh = np.swapaxes(colorMesh, 0, 1)
+colorMesh = np.swapaxes(colorMesh, 2, 1)
+
+
+end_time = MPI.Wtime()
+
+elapsed_time_compositing = end_time - start_time
+
+print(f"Process {rank} took {elapsed_time_compositing:.6f} seconds to complete composition")
+
+
+
+if rank != 0:
+    comm.send(colorMesh, dest=0)
+
+all_colorMesh = [colorMesh]
+
+if rank == 0:
+
+    for i in range(1, t):
+        all_colorMesh.append(comm.recv(source=i))
+
+    structure = [px] * py
+
+    count = 0
+    totalimage = []
+    for i in structure:
+        a = []
+        for j in range(i):
+            a.append(all_colorMesh.pop(0))
+        tempimage = np.concatenate(a, axis=0)
+        totalimage.append(tempimage)
+        tempimage = tempimage.astype("uint8")
+        count += 1
+
+    final_image = np.concatenate(totalimage, axis=1)
+    final_image = final_image.astype("uint8")
+    image = Image.fromarray(final_image, "RGB")
+    image = image.transpose(method=Image.FLIP_TOP_BOTTOM)
+    image = image.transpose(Image.ROTATE_90)
+    s = f"{px}_{py}_{pz}.png"
+    image.save(s)
+
+    print(f"Final image saved as {s}", flush=True)
+    
+print(f"Process {rank} took {elapsed_time_communication+elapsed_time_ray_casting+elapsed_time_compositing:.6f} seconds in Total")
+
+MPI.Finalize()
+
+exit()
+```

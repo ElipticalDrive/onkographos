@@ -1,0 +1,543 @@
+Sampling Volume Scattering
+15.2 Sampling Volume Scattering
+Before proceeding to algorithms that model the effect of light scattering
+in participating media, we’ll first define some building-block
+functionality for sampling from distributions related to participating
+media and for computing the beam transmittance for
+spatially varying media.
+The Medium interface defines a Sample() method, which takes a
+world space ray
+left-parenthesis normal p Subscript Baseline comma omega Subscript Baseline right-parenthesis
+and possibly samples a medium scattering
+interaction along it. The input ray will generally have been intersected
+against the scene geometry; thus, implementations of this method shouldn’t ever
+sample a medium interaction at a point on the ray beyond its
+t Subscript normal m normal a normal x
+value. Without loss of generality, the following discussion assumes that there
+is always a surface at some distance
+t Subscript normal m normal a normal x Baseline less-than normal infinity
+.
+<<Medium Interface>>+=
+virtual Spectrum Sample(const Ray &ray, Sampler &sampler,
+MemoryArena &arena, MediumInteraction *mi) const = 0;
+The objective of this method is to sample the integral form of the equation
+of transfer, Equation (15.2), which consists of a surface and a
+medium-related term:
+upper L Subscript normal i Superscript Baseline left-parenthesis normal p Subscript Baseline comma omega Subscript Baseline right-parenthesis equals upper T Subscript r Baseline left-parenthesis normal p 0 right-arrow normal p Subscript Baseline right-parenthesis upper L Subscript normal o Superscript Baseline left-parenthesis normal p 0 comma minus omega Subscript Baseline right-parenthesis plus integral Subscript 0 Superscript t Subscript normal m normal a normal x Baseline Baseline upper T Subscript r Baseline left-parenthesis normal p Subscript Baseline plus t omega Subscript Baseline right-arrow normal p Subscript Baseline right-parenthesis upper L Subscript normal s Superscript Baseline left-parenthesis normal p Subscript Baseline plus t omega Subscript Baseline comma minus omega Subscript Baseline right-parenthesis normal d t comma
+where
+normal p 0 equals normal p Subscript Baseline plus t Subscript normal m normal a normal x Baseline omega Subscript
+is the point on the surface. We
+will neglect the effect of medium emission and assume directionally constant
+medium properties, in which case the source term is given by
+upper L Subscript normal s Superscript Baseline left-parenthesis normal p Subscript Baseline comma omega Subscript Baseline right-parenthesis equals sigma Subscript normal s Baseline left-parenthesis normal p Subscript Baseline right-parenthesis integral Underscript script upper S squared Endscripts p left-parenthesis normal p Subscript Baseline comma omega prime Subscript Baseline comma omega Subscript Baseline right-parenthesis upper L Subscript normal i Superscript Baseline left-parenthesis normal p Subscript Baseline comma omega prime Subscript Baseline right-parenthesis normal d omega Subscript Baseline Superscript prime Baseline period
+(15.6)
+Two cases can occur: if Sample() doesn’t sample an
+interaction on the given ray interval
+left-bracket 0 comma t Subscript normal m normal a normal x Baseline right-bracket
+, then
+the surface-related term
+upper T Subscript r Baseline left-parenthesis normal p 0 right-arrow normal p Subscript Baseline right-parenthesis upper L Subscript normal o Superscript Baseline left-parenthesis normal p 0 comma minus omega Subscript Baseline right-parenthesis
+should be estimated. If
+it does sample an interaction, the
+second integral term is to be estimated, and the provided MediumInteraction
+should be initialized accordingly.
+Suppose that
+p Subscript t Baseline left-parenthesis t right-parenthesis
+denotes the probability per unit distance of generating
+an interaction at position
+normal p Subscript Baseline plus t omega Subscript
+. Due to the possibility of not
+sampling a medium interaction,
+this function generally doesn’t integrate to 1, and we define
+p Subscript normal s normal u normal r normal f
+as the associated discrete probability of sampling the surface term:
+p Subscript normal s normal u normal r normal f Baseline equals 1 minus integral Subscript 0 Superscript t Subscript normal m normal a normal x Baseline Baseline p Subscript t Baseline left-parenthesis t right-parenthesis normal d t
+With these definitions, we can now specify the semantics of Sample(), which
+differs from previously encountered techniques for scattering functions
+like BSDF::Sample_f() in that it does not provide the caller with
+separate information about the function value and PDF at the
+sampled position. This information is not generally needed, and some medium
+models (specifically, the heterogeneous medium) admit more efficient sampling
+schemes when it is possible to compute ratios of these quantities
+instead.
+When the surface term is selected, the method should return a weight equal to
+beta Subscript normal s normal u normal r normal f Baseline equals StartFraction upper T Subscript r Baseline left-parenthesis normal p Subscript Baseline right-arrow normal p Subscript Baseline plus t omega Subscript Baseline right-parenthesis Over p Subscript normal s normal u normal r normal f Baseline EndFraction comma
+(15.7)
+which corresponds to sampling the first summand. Note that the value of the
+outgoing radiance
+upper L Subscript normal o Superscript Baseline left-parenthesis normal p 0 comma minus omega Subscript Baseline right-parenthesis
+is not included in
+beta Subscript normal s normal u normal r normal f
+; it is the responsibility of the caller to account for
+this term. In the medium case, the method returns
+beta Subscript normal m normal e normal d Baseline equals StartFraction sigma Subscript normal s Baseline left-parenthesis normal p Subscript Baseline plus t omega Subscript Baseline right-parenthesis upper T Subscript r Baseline left-parenthesis normal p Subscript Baseline right-arrow normal p Subscript Baseline plus t omega Subscript Baseline right-parenthesis Over p Subscript t Baseline left-parenthesis t right-parenthesis EndFraction comma
+(15.8)
+which corresponds to sampling all medium-related terms except for the integral
+over in-scattered light in Equation (15.6),
+which must be handled separately.
+The scattering coefficient and transmittance allow for spectral variation,
+hence this method returns a Spectrum-valued weighting factor to
+update the path throughput weight
+beta
+up to the surface or
+medium scattering event.
+As is generally the case for Monte Carlo integration, estimators like
+beta Subscript normal s normal u normal r normal f
+and
+beta Subscript normal m normal e normal d
+admit a variety of sampling
+techniques that all produce the desired distribution. The implementation of
+the heterogeneous medium will make use of this fact to provide an
+implementation that is considerably more efficient than the canonical
+sampling approach based on the inversion method.
+So that calling code can easily determine whether the provided
+MediumInteraction was initialized by Sample(),
+MediumInteraction provides an IsValid() method that takes
+advantage of the fact that any time a medium scattering event has been
+sampled, the phase function pointer will be set.
+<<MediumInteraction Public Methods>>+=
+bool IsValid() const { return phase != nullptr; }
+15.2.1 Homogeneous Medium
+The HomogeneousMedium implementation of this method is fairly
+straightforward; the only complexities come from needing to handle
+attenuation coefficients that vary by wavelength.
+<<HomogeneousMedium Method Definitions>>+=
+Spectrum HomogeneousMedium::Sample(const Ray &ray, Sampler &sampler,
+MemoryArena &arena, MediumInteraction *mi) const {
+<<Sample a channel and distance along the ray>>
+int channel = std::min((int)(sampler.Get1D() * Spectrum::nSamples),
+Spectrum::nSamples - 1);
+Float dist = -std::log(1 - sampler.Get1D()) / sigma_t[channel];
+Float t = std::min(dist * ray.d.Length(), ray.tMax);
+bool sampledMedium = t < ray.tMax;
+if (sampledMedium)
+*mi = MediumInteraction(ray(t), -ray.d, ray.time, this,
+ARENA_ALLOC(arena, HenyeyGreenstein)(g));
+<<Compute the transmittance and sampling density>>
+Spectrum Tr = Exp(-sigma_t * std::min(t, MaxFloat) * ray.d.Length());
+<<Return weighting factor for scattering from homogeneous medium>>
+Spectrum density = sampledMedium ? (sigma_t * Tr) : Tr;
+Float pdf = 0;
+for (int i = 0; i < Spectrum::nSamples; ++i)
+pdf += density[i];
+pdf *= 1 / (Float)Spectrum::nSamples;
+return sampledMedium ? (Tr * sigma_s / pdf) : (Tr / pdf);
+}
+In Section 13.3.1 we derived the sampling method for
+an exponential distribution defined over
+left-bracket 0 comma normal infinity right-parenthesis
+. For
+f left-parenthesis t right-parenthesis equals normal e Superscript minus sigma Super Subscript normal t Superscript t
+, it is
+t equals minus StartFraction ln left-parenthesis 1 minus xi Subscript Baseline right-parenthesis Over sigma Subscript normal t Baseline EndFraction comma
+(15.9)
+with PDF
+p Subscript t Baseline left-parenthesis t right-parenthesis equals sigma Subscript normal t Baseline normal e Superscript minus sigma Super Subscript normal t Superscript t Baseline period
+(15.10)
+However, the attenuation coefficient
+sigma Subscript normal t
+in general varies by
+wavelength. It is not desirable to sample multiple points in the medium, so
+a uniform sample is first used to select a spectral channel
+i
+; the
+corresponding scalar
+sigma Subscript normal t Superscript i
+value is
+then used to sample a distance along the distribution
+ModifyingAbove p With caret Subscript t Superscript i Baseline left-parenthesis t right-parenthesis equals sigma Subscript normal t Superscript i Baseline normal e Superscript minus sigma Super Subscript normal t Super Superscript i Superscript t Baseline comma
+using the technique from Equation (15.9). The
+resulting sampling density is the average of the individual strategies
+p Subscript t Superscript i
+:
+ModifyingAbove p With caret Subscript t Baseline left-parenthesis t right-parenthesis equals StartFraction 1 Over n EndFraction sigma-summation Underscript i equals 1 Overscript n Endscripts sigma Subscript normal t Superscript i Baseline normal e Superscript minus sigma Super Subscript normal t Super Superscript i Superscript t Baseline period
+(15.11)
+The (discrete) probability of sampling a surface interaction at
+t equals t Subscript normal m normal a normal x
+is the complement of generating a medium scattering event
+between
+t equals 0
+and
+t equals t Subscript normal m normal a normal x
+. This works out to a probability equal to
+the average transmittance over all
+n
+spectral channels:
+p Subscript normal s normal u normal r normal f Baseline equals 1 minus integral Subscript 0 Superscript t Subscript normal m normal a normal x Baseline Baseline ModifyingAbove p With caret Subscript t Baseline left-parenthesis t right-parenthesis normal d t equals StartFraction 1 Over n EndFraction sigma-summation Underscript i equals 1 Overscript n Endscripts normal e Superscript minus sigma Super Subscript normal t Super Superscript i Superscript t Super Subscript normal m normal a normal x Superscript Baseline period
+(15.12)
+The implementation draws a sample according to Equation (15.11);
+if the sampled distance is before the ray–primitive intersection (if any),
+then a medium scattering event is recorded by initializing the
+MediumInteraction. Otherwise, the sampled point in the medium is
+ignored, and corresponding surface interaction should be used as the next
+path vertex by the integrator. This sampling
+approach is naturally efficient: the probability of generating a medium
+interaction instead of the surface interaction is exactly equal to 1
+minus the beam transmittance for the selected wavelength. Thus, given
+optically thin media (or a short ray extent), the surface interaction is
+more often used, and for thick media (or longer rays), a
+medium interaction is more likely to be sampled.
+<<Sample a channel and distance along the ray>>=
+int channel = std::min((int)(sampler.Get1D() * Spectrum::nSamples),
+Spectrum::nSamples - 1);
+Float dist = -std::log(1 - sampler.Get1D()) / sigma_t[channel];
+Float t = std::min(dist * ray.d.Length(), ray.tMax);
+bool sampledMedium = t < ray.tMax;
+if (sampledMedium)
+*mi = MediumInteraction(ray(t), -ray.d, ray.time, this,
+ARENA_ALLOC(arena, HenyeyGreenstein)(g));
+In either case, the beam transmittance Tr is easily computed using
+Beer’s law, Equation (11.3), just as in the
+HomogeneousMedium::Tr() method.
+<<Compute the transmittance and sampling density>>=
+Spectrum Tr = Exp(-sigma_t * std::min(t, MaxFloat) * ray.d.Length());
+Finally, the method computes the sample density using
+Equations (15.11)
+or (15.12) and returns the resulting sampling weight
+beta Subscript normal s normal u normal r normal f
+or
+beta Subscript normal m normal e normal d
+, depending on the value of
+sampledMedium.
+<<Return weighting factor for scattering from homogeneous medium>>=
+Spectrum density = sampledMedium ? (sigma_t * Tr) : Tr;
+Float pdf = 0;
+for (int i = 0; i < Spectrum::nSamples; ++i)
+pdf += density[i];
+pdf *= 1 / (Float)Spectrum::nSamples;
+return sampledMedium ? (Tr * sigma_s / pdf) : (Tr / pdf);
+15.2.2 Heterogeneous Medium
+In the case of the GridDensityMedium, extra effort is necessary to
+deal with the medium’s heterogeneous nature. When the spatial variation can be
+decomposed into uniform regions (e.g., piecewise constant voxels), a technique
+known as regular tracking applies standard homogeneous medium techniques
+to the voxels individually; a disadvantage of this approach is that it becomes
+costly when there are many voxels. Since the GridDensityMedium
+relies on linear interpolation, this approach cannot be used.
+Other techniques build on a straightforward generalization of the homogeneous
+sampling PDF from Equation (15.10) with a spatially
+varying attenuation coefficient:
+p Subscript t Baseline left-parenthesis t right-parenthesis equals sigma Subscript normal t Baseline left-parenthesis t right-parenthesis normal e Superscript minus integral Subscript 0 Superscript t Baseline sigma Super Subscript normal t Superscript left-parenthesis t Super Superscript prime Superscript right-parenthesis normal d t Super Superscript prime Superscript Baseline comma
+(15.13)
+where
+sigma Subscript normal t Baseline left-parenthesis t right-parenthesis equals sigma Subscript normal t Baseline left-parenthesis normal p Subscript Baseline plus t omega Subscript Baseline right-parenthesis
+evaluates the attenuation at distance
+t
+along the ray. The most commonly used method for importance sampling
+Equation (15.13), is known as ray marching. This method inverts an
+approximate cumulative distribution by partitioning the range
+left-bracket 0 comma t Subscript normal m normal a normal x Baseline right-bracket
+into a number of subintervals, numerically approximating
+the integral in each interval, and finally inverting this discrete
+representation. Unfortunately discretizing the problem in this way introduces
+systemic statistical bias, which means that an Integrator using ray
+marching generally won’t converge to the right result (even when an
+infinite number of samples per pixel is used). Furthermore,
+this bias can manifest itself in the
+form of distracting visual artifacts.
+For this reason, we prefer an alternative unbiased approach proposed by
+Woodcock et al. (1965) that was originally developed to simulate volumetric
+scattering of neutrons in atomic reactors. This technique is known as
+delta tracking and is easiest to realize when the attenuation
+coefficient
+sigma Subscript normal t
+is monochromatic. Our implementation includes an
+assertion test (not shown here) to verify that this is indeed the case. Note
+that the scattering and absorption coefficients are still permitted to vary
+with respect to wavelength—however, their sum
+sigma Subscript normal t Baseline equals sigma Subscript normal s Baseline plus sigma Subscript normal a
+must
+be uniform.
+Figure 15.3 compares regular tracking, ray marching, and
+delta tracking. Delta tracking can be interpreted as filling the medium with
+additional (virtual) particles until its attenuation coefficient is
+constant everywhere. Sampling the resulting homogeneous medium is then easily
+accomplished using the basic exponential scheme from
+Equation (15.9). However, whenever an
+interaction with a particle occurs, it is still necessary to determine if it
+involved a “real” or a “virtual” particle (in which case the
+interaction is disregarded). The elegant insight of Woodcock et al. was that
+this decision can be made randomly based on the local fraction of “real”
+particles, which leads to a distribution of samples matching
+Equation (15.13).
+Figure 15.3: Ray Marching and Delta Tracking in a Medium with Density that Varies Along the
+Horizontal Axis.
+(top) Regular tracking partitions the medium into a number of homogeneous
+sub-regions and relies on standard techniques for dealing with the individual
+homogeneous regions.
+(middle) Ray marching partitions the ray into a number of discrete segments
+and approximates the transmittance through each one.
+(bottom) Delta tracking effectively considers a medium that is “filled” with additional
+virtual particles (red) until it reaches a uniform density.
+Image courtesy of Novák et al. (2014).
+The following fragment is part of the
+GridDensityMedium::GridDensityMedium() constructor; its purpose is to
+precompute the inverse of the maximum density scale factor over the entire
+medium, which will be a useful quantity in the delta tracking implementation
+discussed next.
+<<Precompute values for Monte Carlo sampling of GridDensityMedium>>=
+sigma_t = (sigma_a + sigma_s)[0];
+Float maxDensity = 0;
+for (int i = 0; i < nx * ny * nz; ++i)
+maxDensity = std::max(maxDensity, density[i]);
+invMaxDensity = 1 / maxDensity;
+<<GridDensityMedium Private Data>>+=
+Float sigma_t;
+Float invMaxDensity;
+The Sample() method begins by transforming the ray into the medium
+coordinate system and normalizing the ray direction; ray.tMax is scaled
+appropriately to account for the normalization.
+<<GridDensityMedium Method Definitions>>+=
+Spectrum GridDensityMedium::Sample(const Ray &rWorld, Sampler &sampler,
+MemoryArena &arena, MediumInteraction *mi) const {
+Ray ray = WorldToMedium(Ray(rWorld.o, Normalize(rWorld.d),
+rWorld.tMax * rWorld.d.Length()));
+<<Compute
+left-bracket t Subscript normal m normal i normal n Baseline comma t Subscript normal m normal a normal x Baseline right-bracket
+interval of ray’s overlap with medium bounds>>
+const Bounds3f b(Point3f(0, 0, 0), Point3f(1, 1, 1));
+Float tMin, tMax;
+if (!b.IntersectP(ray, &tMin, &tMax))
+return Spectrum(1.f);
+<<Run delta-tracking iterations to sample a medium interaction>>
+Float t = tMin;
+while (true) {
+t -= std::log(1 - sampler.Get1D()) * invMaxDensity / sigma_t;
+if (t >= tMax)
+break;
+if (Density(ray(t)) * invMaxDensity > sampler.Get1D()) {
+<<Populate mi with medium interaction information and return>>
+PhaseFunction *phase = ARENA_ALLOC(arena, HenyeyGreenstein)(g);
+*mi = MediumInteraction(rWorld(t), -rWorld.d, rWorld.time, this, phase);
+return sigma_s / sigma_t;
+}
+}
+return Spectrum(1.f);
+}
+Next, the implementation computes
+the parametric range of the ray’s overlap with the medium’s
+bounds, which are the unit cube
+left-bracket 0 comma 1 right-bracket cubed
+. This step is technically not
+required for correct operation but is generally a good idea: reducing the
+length of the considered ray segment translates into a correspondingly
+smaller number of delta tracking iterations.
+<<Compute
+left-bracket t Subscript normal m normal i normal n Baseline comma t Subscript normal m normal a normal x Baseline right-bracket
+interval of ray’s overlap with medium bounds>>=
+const Bounds3f b(Point3f(0, 0, 0), Point3f(1, 1, 1));
+Float tMin, tMax;
+if (!b.IntersectP(ray, &tMin, &tMax))
+return Spectrum(1.f);
+Assuming that the maximum extinction value throughout the medium is given by
+sigma Subscript normal t comma normal m normal a normal x
+, each delta-tracking iteration
+i
+performs a
+standard exponential step through the uniform medium:
+t Subscript i Baseline equals t Subscript i minus 1 Baseline minus StartFraction ln left-parenthesis 1 minus xi Subscript 2 i Baseline right-parenthesis Over sigma Subscript normal t comma normal m normal a normal x Baseline EndFraction comma
+where
+t 0 equals t Subscript normal m normal i normal n
+. These steps are repeated until one of two stopping criteria is
+satisfied: first, if
+t Subscript i Baseline greater-than t Subscript normal m normal a normal x
+then we have left the medium without an
+interaction and Medium::Sample() hasn’t sampled a scattering event.
+Alternatively, the loop may be terminated
+at each iteration
+i
+with probability
+sigma Subscript normal t Baseline left-parenthesis t Subscript i Baseline right-parenthesis slash sigma Subscript normal t comma normal m normal a normal x
+, the local fraction of “real” particles.
+This random decision consumes
+xi Subscript 2 i plus 1
+, the
+second of two uniform samples per iteration
+i
+.
+<<Run delta-tracking iterations to sample a medium interaction>>=
+Float t = tMin;
+while (true) {
+t -= std::log(1 - sampler.Get1D()) * invMaxDensity / sigma_t;
+if (t >= tMax)
+break;
+if (Density(ray(t)) * invMaxDensity > sampler.Get1D()) {
+<<Populate mi with medium interaction information and return>>
+PhaseFunction *phase = ARENA_ALLOC(arena, HenyeyGreenstein)(g);
+*mi = MediumInteraction(rWorld(t), -rWorld.d, rWorld.time, this, phase);
+return sigma_s / sigma_t;
+}
+}
+return Spectrum(1.f);
+The probability of not sampling a medium interaction is equal to the
+transmittance of the ray segment
+left-bracket t Subscript normal m normal i normal n Baseline comma t Subscript normal m normal a normal x Baseline right-bracket
+; hence
+1.0 is returned for the sampling weight
+beta Subscript normal s normal u normal r normal f
+according to Equation (15.7). The medium interaction case
+resembles the fragment <<Sample a channel and distance along the
+ray>>.
+<<Populate mi with medium interaction information and return>>=
+PhaseFunction *phase = ARENA_ALLOC(arena, HenyeyGreenstein)(g);
+*mi = MediumInteraction(rWorld(t), -rWorld.d, rWorld.time, this, phase);
+return sigma_s / sigma_t;
+Finally, we must also provide an implementation of the Tr() method to
+compute the transmittance along a ray segment. Consider the pseudocode of the
+following simplistic implementation that performs a call to Sample() and
+returns 1.0 if the ray passed through the segment
+left-bracket 0 comma t Subscript normal m normal a normal x Baseline right-bracket
+and
+0.0 when a medium interaction occurred along the way. This effectively
+turns the transmittance function into a binary random variable.
+Float Tr(ray, sampler) {
+if (Sample(ray, sampler, ...) fails)
+return 1.0;
+else
+return 0.0;
+}
+Since the probability of passing through the medium is equal to the
+transmittance, this random variable has the correct mean and could be used in the
+context of unbiased Monte Carlo integration. Calling Tr() many times and
+averaging the result would produce an increasingly accurate estimate of the
+transmittance, though this will generally be too costly to do in practice.
+On the other hand, using the naive binary implementation leads to a high
+amount of variance.
+Novák et al. (2014) observed that this binary-valued function can be
+interpreted as an instance of Russian roulette. However, instead of randomly
+terminating the algorithm with a value of zero in each iteration, we could also
+remove the Russian roulette logic and simply multiply the transmittance by the
+probability of continuation. The resulting estimator has the same mean with a
+considerably lower variance.
+We will use this approach in the
+implementation of GridDensityMedium::Tr().
+<<GridDensityMedium Method Definitions>>+=
+Spectrum GridDensityMedium::Tr(const Ray &rWorld,
+Sampler &sampler) const {
+Ray ray = WorldToMedium(Ray(rWorld.o, Normalize(rWorld.d),
+rWorld.tMax * rWorld.d.Length()));
+<<Compute
+left-bracket t Subscript normal m normal i normal n Baseline comma t Subscript normal m normal a normal x Baseline right-bracket
+interval of ray’s overlap with medium bounds>>
+const Bounds3f b(Point3f(0, 0, 0), Point3f(1, 1, 1));
+Float tMin, tMax;
+if (!b.IntersectP(ray, &tMin, &tMax))
+return Spectrum(1.f);
+<<Perform ratio tracking to estimate the transmittance value>>
+Float Tr = 1, t = tMin;
+while (true) {
+t -= std::log(1 - sampler.Get1D()) * invMaxDensity / sigma_t;
+if (t >= tMax)
+break;
+Float density = Density(ray(t));
+Tr *= 1 - std::max((Float)0, density * invMaxDensity);
+}
+return Spectrum(Tr);
+}
+The beginning of the Tr() method matches Sample(). The loop body
+is also identical except for the last line, which multiplies a running product
+by the ratio of real particles to hypothetical particles.
+(Novák referred to this scheme as ratio tracking).
+<<Perform ratio tracking to estimate the transmittance value>>=
+Float Tr = 1, t = tMin;
+while (true) {
+t -= std::log(1 - sampler.Get1D()) * invMaxDensity / sigma_t;
+if (t >= tMax)
+break;
+Float density = Density(ray(t));
+Tr *= 1 - std::max((Float)0, density * invMaxDensity);
+}
+return Spectrum(Tr);
+15.2.3 Sampling Phase Functions
+It is also useful to be able to draw samples from the distribution described by
+phase functions—applications include applying multiple importance
+sampling to computing direct lighting in participating media as well as for
+sampling scattered directions for indirect lighting samples in
+participating media. For these applications, PhaseFunction
+implementations must implement the Sample_p() method, which samples
+an incident direction
+omega Subscript normal i
+given the outgoing direction
+omega Subscript normal o
+and
+a sample value in
+left-bracket 0 comma 1 right-parenthesis squared
+.
+Note that, unlike the BxDF sampling methods, Sample_p()
+doesn’t return both the phase function’s value and its PDF. Rather, pbrt assumes that phase functions are sampled with PDFs that perfectly match
+their distributions. In conjunction with the requirement that phase
+functions themselves be normalized
+(Equation (11.4)), a single return value
+encodes both values. When the value of the PDF alone is needed, a call to
+PhaseFunction::p() suffices.
+<<PhaseFunction Interface>>+=
+virtual Float Sample_p(const Vector3f &wo, Vector3f *wi,
+const Point2f &u) const = 0;
+The PDF for the Henyey–Greenstein phase function is separable into
+theta
+and
+phi
+components, with
+p left-parenthesis phi right-parenthesis equals 1 slash left-parenthesis 2 pi right-parenthesis
+as usual. The main
+task is to sample
+cosine theta
+.
+<<HenyeyGreenstein Method Definitions>>+=
+Float HenyeyGreenstein::Sample_p(const Vector3f &wo, Vector3f *wi,
+const Point2f &u) const {
+<<Compute
+cosine theta
+for Henyey–Greenstein sample>>
+Float cosTheta;
+if (std::abs(g) < 1e-3)
+cosTheta = 1 - 2 * u[0];
+else {
+Float sqrTerm = (1 - g * g) /
+(1 - g + 2 * g * u[0]);
+cosTheta = (1 + g * g - sqrTerm * sqrTerm) / (2 * g);
+}
+<<Compute direction wi for Henyey–Greenstein sample>>
+Float sinTheta = std::sqrt(std::max((Float)0,
+1 - cosTheta * cosTheta));
+Float phi = 2 * Pi * u[1];
+Vector3f v1, v2;
+CoordinateSystem(wo, &v1, &v2);
+*wi = SphericalDirection(sinTheta, cosTheta, phi, v1, v2, wo);
+return PhaseHG(cosTheta, g);
+}
+For Henyey–Greenstein with pbrt’s convention for the orientation of
+direction vectors, the distribution for
+theta
+is
+cosine theta equals minus StartFraction 1 Over 2 g EndFraction left-parenthesis 1 plus g squared minus left-parenthesis StartFraction 1 minus g squared Over 1 plus g minus 2 g xi Subscript Baseline EndFraction right-parenthesis squared right-parenthesis
+if
+g not-equals 0
+; otherwise,
+cosine theta equals 1 minus 2 xi Subscript
+gives a uniform
+sampling over the sphere of directions.
+<<Compute
+cosine theta
+for Henyey–Greenstein sample>>=
+Float cosTheta;
+if (std::abs(g) < 1e-3)
+cosTheta = 1 - 2 * u[0];
+else {
+Float sqrTerm = (1 - g * g) /
+(1 - g + 2 * g * u[0]);
+cosTheta = (1 + g * g - sqrTerm * sqrTerm) / (2 * g);
+}
+Given
+left-parenthesis cosine theta comma phi right-parenthesis
+, what should now be a familiar
+approach converts them to the direction
+omega Subscript normal i
+.
+<<Compute direction wi for Henyey–Greenstein sample>>=
+Float sinTheta = std::sqrt(std::max((Float)0,
+1 - cosTheta * cosTheta));
+Float phi = 2 * Pi * u[1];
+Vector3f v1, v2;
+CoordinateSystem(wo, &v1, &v2);
+*wi = SphericalDirection(sinTheta, cosTheta, phi, v1, v2, wo);

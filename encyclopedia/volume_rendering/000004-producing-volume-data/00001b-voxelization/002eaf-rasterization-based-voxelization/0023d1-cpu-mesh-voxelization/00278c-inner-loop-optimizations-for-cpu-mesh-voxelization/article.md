@@ -1,0 +1,101 @@
+# Inner Loop Optimizations for CPU Mesh Voxelization
+
+Also called: Inner loop optimizations for voxelization, MeshProcessor::voxelize optimizations, Pre-allocated hit_xs and rolling index voxelization
+
+## Overview
+This method applies structural and algorithmic optimizations to the core inner loop of `MeshProcessor::voxelize` to reduce constant overhead when processing millions of grid cells [S1, unofficial]. It distinguishes itself from sibling methods by focusing on cache-friendly memory allocation, loop-invariant hoisting, and replacing binary searches with rolling indices to achieve amortized $O(1)$ lookups, rather than changing the fundamental rasterization or scattering approach [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Triangle mesh data, voxel grid dimensions, `narrow_band` flag (boolean).
+- Output: Voxel grid with signed distance field (SDF) values or occupancy flags.
+
+**Data Structures:**
+- `hit_xs`: A dynamic array (vector) storing X-coordinates of triangle intersections along a scanline. Pre-allocated with capacity 8.
+- `hit_idx`: An integer index tracking the current position in `hit_xs`.
+
+**Numbered Steps:**
+1. **Pre-allocate Intersection Array:** Initialize `hit_xs` with `Vec::with_capacity(8)` before processing scanlines to avoid dynamic reallocations [S1, unofficial].
+2. **Hoist Loop-Invariant Calculations:** Move `base_x` calculations and `phase_sphere` offset computations outside the innermost X-axis loops to eliminate redundant floating-point operations [S1, unofficial].
+3. **Replace Binary Search with Rolling Index:** Instead of using `partition_point` (binary search) to find the start of the interior region in `hit_xs`, maintain a rolling index `hit_idx` that advances monotonically as X increases. This leverages the fact that X strictly ascends, reducing lookup from $O(\log M)$ to amortized $O(1)$ [S1, unofficial].
+4. **Bypass BVH Queries for Exterior Voxels:** When `narrow_band` is `None`, skip the expensive `distance_to_local_point` BVH query for voxels classified as exterior. Assign a dummy SDF value of `1.0` to these voxels, as they are ultimately discarded by the `sdf <= 0.0` check [S1, unofficial].
+5. **Compute SDF for Interior Voxels:** For voxels classified as interior or when `narrow_band` is active, perform the standard BVH distance query to compute the accurate SDF [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxelize_inner_loop_optimized(triangles, grid_bounds, narrow_band=False):
+    # Pre-allocate hit_xs with capacity 8
+    hit_xs = []
+    hit_xs.reserve(8)
+    
+    for y in range(grid_bounds.min_y, grid_bounds.max_y):
+        for z in range(grid_bounds.min_z, grid_bounds.max_z):
+            # Hoist base_x and phase_sphere calculations outside inner loop
+            base_x = calculate_base_x(y, z)
+            phase_sphere_offset = calculate_phase_sphere_offset(y, z)
+            
+            # Clear and re-use hit_xs for this scanline
+            hit_xs.clear()
+            
+            # Collect intersections for current scanline
+            for triangle in triangles:
+                if triangle.intersects_scanline(y, z):
+                    hit_x = triangle.get_intersection_x(y, z)
+                    hit_xs.append(hit_x)
+            
+            # Sort intersections if not already sorted
+            hit_xs.sort()
+            
+            # Rolling index for interior detection
+            hit_idx = 0
+            is_inside = False
+            
+            for x in range(grid_bounds.min_x, grid_bounds.max_x):
+                # Advance hit_idx while hit_xs[hit_idx] <= x
+                while hit_idx < len(hit_xs) and hit_xs[hit_idx] <= x:
+                    hit_idx += 1
+                
+                # Toggle inside state based on parity of hit_idx
+                if hit_idx % 2 == 1:
+                    is_inside = True
+                else:
+                    is_inside = False
+                
+                # Bypass BVH for exterior voxels if narrow_band is disabled
+                if not is_inside and not narrow_band:
+                    distance = 1.0
+                else:
+                    # Compute actual distance via BVH
+                    distance = distance_to_local_point(x, y, z)
+                
+                # Store voxel data
+                if distance <= 0.0:
+                    set_voxel_sdf(x, y, z, distance)
+                else:
+                    set_voxel_sdf(x, y, z, distance) # Or mark as empty
+```
+
+**Parameters:**
+- `hit_xs_capacity`: 8 (typical for small meshes, but pre-allocation avoids reallocation overhead) [S1, unofficial].
+- `narrow_band`: Boolean flag. If `False`, exterior voxels get dummy distance `1.0` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Erosion:** When `narrow_band` is `None`, assigning `distance = 1.0` to exterior voxels changes boundary behavior for voxels exactly on the surface that are parity-classified as outside (common on the +X exit face where `hit_x == x`). Previously, these points had `distance_to_local_point(...) == 0` and were retained (`sdf == 0`). Now, they become `sdf = 1.0` and are dropped, potentially asymmetrically eroding the solid by a boundary layer on grid-aligned meshes [S1, unofficial].
+- **Small Mesh Regression:** On very small meshes (e.g., 10x10x10 cubes), the algorithmic wins may be overshadowed by constant branching overhead, resulting in a ~3-4% micro-regression [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Replaces $O(N \log M)$ binary search per scanline with $O(M)$ rolling index updates, where $N$ is the number of voxels and $M$ is the number of intersections [S1, unofficial].
+- **Memory Complexity:** Pre-allocates `hit_xs` with fixed capacity 8, reducing heap fragmentation [S1, unofficial].
+- **Measured Performance:** Theoretical asymptotic improvements for large-scale high-resolution voxel grids. Small benchmarks (10x10x10) show ~3-4% regression due to constant overhead [S1, unofficial].
+- **Strengths:** Reduces redundant arithmetic, avoids dynamic allocations, and short-circuits expensive BVH queries for discarded exterior voxels [S1, unofficial].
+- **Limitations:** Potential boundary erosion on grid-aligned meshes when `narrow_band` is disabled; minor regression on very small meshes [S1, unofficial].
+- **When to Use:** Large-scale production mesh workloads where voxel grid resolution is high and `narrow_band` is not required [S1, unofficial].
+- **When Not to Use:** Small meshes where constant overhead dominates, or when precise boundary retention is critical without `narrow_band` [S1, unofficial].
+
+## Background
+This method was implemented by lhemerly in May 2026 as part of the `voxelizer-rs` project, specifically in PR #121 [S1, unofficial]. It addresses bottlenecks in the `MeshProcessor::voxelize` function, including dynamic vector allocation, redundant invariant math, binary searches over intersection arrays, and unneeded BVH distance queries for discarded exterior voxels [S1, unofficial]. The optimizations are designed for CPU-based voxelization, building on the foundational approach of [CPU Mesh Voxelization](3137-cpu-mesh-voxelization.md).
+
+## Sources
+[S1] ⚡ Bolt: [performance improvement] Inner loop optimizations for voxelization, https://github.com/lhemerly/voxelizer-rs/pull/121, fetched 2026-10-28 (unofficial)

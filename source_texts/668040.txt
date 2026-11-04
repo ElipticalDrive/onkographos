@@ -1,0 +1,2290 @@
+Community-driven advanced graphics modifications for AE, SE and VR. - fix(VR): depth culling during upscaling and with Terrain Blending by ParticleTroned · Pull Request #1858 · community-shaders/skyrim-community-shaders
+
+fix(VR): depth culling during upscaling and with Terrain Blending by ParticleTroned · Pull Request #1858 · community-shaders/skyrim-community-shaders · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ParticleTroned
+commented
+Feb 12, 2026
+•
+edited by coderabbitai
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Summary:
+Provides depth culling in VR during upscaling
+Enables Terrain Blending working together with Depth Culling & Upcaling without shadow and mesh popping issues
+Note, not compatible in VR with Screen Space Shadows (tested only with SSS 1.2.1), which is inactivated in VR anyways
+relevant fixes are VR-gated and should not apply to flatrim
+Depth culling:
+Removes forced disable paths tied to upscaling.
+Adds conservative depth upscaling (2x2/3x3 min-depth) for VR.
+Improves VR-safe dynamic-resolution clamping and depth-kernel selection.
+Terrain Blending:
+Keeps TB depth SRV switching mode-aware when VR depth culling is active.
+Adds safer TB cleanup/restoration paths for depth SRVs.
+For VR-only Depth Offset of 1.25 (which is absolutely sufficient with room to spare - take it or leave it...)
+Integration:
+Adds scoped, pass-specific depth SRV overrides for VR OBB occlusion and utility shadowmask draws: when TerrainBlending is loaded+enabled and VR depth-buffer culling is ON:
+matching OBB draws (OBBOcclusionTesting) temporarily swap PS depth slot 17.
+matching shadowmask utility draws (RenderShadowmask* descriptors) swap PS depth slot 2, using blended TB depth (fallback kMAIN_COPY) and restoring the previous SRVs immediately after each draw (Draw, DrawIndexed, DrawInstanced, DrawIndexedInstanced).
+This fixes TB/depth-culling mismatches without applying a global depth override.
+Summary by CodeRabbit
+New Features
+Wide-kernel and gather-mode options for VR upscaling (new Wide Kernel Mode UI)
+Engine hook system for terrain blending with lifecycle hooks and access to blended depth
+New API exposing frame-generation timing
+Bug Fixes
+VR-aware depth clamping and more consistent depth sourcing across passes
+Safer depth-buffer culling with null-checked VR UI controls
+Refactor
+Reorganized upscaling pipeline with stronger validation, hysteresis and early-exit guards
+fix(vr-tb): enable VR depth culling during upscaling and ensure Terra…
+…
+c273bf7
+```
+…in Blending compatibility
+```
+coderabbitai
+Bot
+commented
+Feb 12, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Note
+Reviews paused
+It looks like this branch is under active development. To avoid overwhelming you with review comments due to an influx of new commits, CodeRabbit has automatically paused this review. You can configure this behavior by changing the reviews.auto_review.auto_pause_after_reviewed_commits setting.
+Use the following commands to manage reviews:
+@coderabbitai resume to resume automatic reviews.
+@coderabbitai review to trigger a single review.
+Use the checkboxes below for quick actions:
+▶️ Resume reviews
+🔍 Trigger review
+📝 Walkthrough
+Walkthrough
+Centralizes scene depth SRV sourcing, adds VR-aware per-eye dynamic-resolution clamping, introduces conservative/wide-kernel depth sampling and two JitterCB flags, refactors UpscaleDepth with validation/hysteresis and VR flows, removes FeatureConstraints-based VR depth-culling, and adds TerrainBlending engine-hook overrides.
+Changes
+Cohort / File(s)
+Summary
+Upscaling shaders & CB layout
+features/Upscaling/Shaders/Upscaling/DepthRefractionUpscalePS.hlsl, features/Upscaling/Shaders/Upscaling/UnderwaterMaskUpscalePS.hlsl
+Add conservative depth-sampling helpers (2x2/3x3/gather) and Min4; add useWideKernel/useGatherWideKernel to JitterCB; use DR-aware clamping and VR per‑eye depth selection.
+FrameBuffer DR clamping
+package/Shaders/Common/FrameBuffer.hlsli
+Replace public 2D DR helper with ClampDynamicResolutionAdjustedScreenPosition(screenPositionDR, screenPosition, stereo) plus a 2D wrapper; implement VR per‑eye clamping and add docs/comments.
+Upscaling feature & runtime
+src/Features/Upscaling.cpp, src/Features/Upscaling.h
+Remove GetActiveConstraints, add useGatherWideKernel setting and depthUpscaleUseWideKernel flag, add GetFrameGenerationFrameTime(), and substantially rewrite UpscaleDepth with resource validation, early exits, wide‑kernel hysteresis, conditional copies, VR-specific flows, and updated shader/resource binding.
+Depth SRV centralization
+src/Features/ScreenSpaceShadows.cpp, src/Features/ScreenSpaceGI.cpp
+Replace direct renderer depth-stencil accesses with Util::GetCurrentSceneDepthSRV() and update shader resource binding sites.
+VR depth-culling & settings
+src/Features/VR.cpp, src/Features/VR.h, src/Features/VR/SettingsUI.cpp
+Remove FeatureConstraints usage; change UpdateDepthBufferCulling() to a parameterless centralized implementation; default interior culling true; convert constrained UI to direct checkboxes and add null guards.
+TerrainBlending engine hooks
+src/Features/TerrainBlending.cpp, src/Features/TerrainBlending.h
+Add engine-hook override subsystem: state/gating predicates, lifecycle hooks (OnBeginTechnique, OnShadowmaskPhaseEnd, OnUtilitySetupGeometry, OnShaderPropertySetupGeometry, OnSetDirtyStates), SRV override apply/restore, and GetBlendedDepthSRV().
+Frame annotations & VR thunks
+src/FrameAnnotations.cpp, include/FrameAnnotations.h
+Add VR perf-event wrapper thunks (downscale/downscale-test/upscale), wire new depth-related vfuncs/thunks, guard Main_RenderShadowmasks detour, minimal header newline change.
+Minor / formatting & trivial
+src/Hooks.cpp, include/FrameAnnotations.h
+EOF/newline and small formatting fixes.
+Sequence Diagram(s)
+```
+sequenceDiagram
+  participant Upscaling as Upscaling (CPU)
+  participant FB as FrameBuffer (DR helper)
+  participant DepthSRV as Depth SRV (GPU)
+  participant PS as DepthRefractionUpscalePS (GPU PS)
+  participant VR as VR/runtime
+
+  Upscaling->>DepthSRV: Util::GetCurrentSceneDepthSRV()
+  Upscaling->>FB: GetDynamicResolutionAdjustedScreenPosition(screenPos, stereo)
+  FB->>VR: Apply per‑eye bounds (if stereo)
+  FB-->>Upscaling: Clamped DR UV
+  Upscaling->>PS: Bind Depth SRV and JitterCB (useWideKernel/useGatherWideKernel)
+  PS->>DepthSRV: SampleDepthClamped -> choose SampleMinDepth2x2 / SampleMinDepth3x3Legacy / SampleMinDepthWideGather
+  PS-->>Upscaling: Output upscaled depth
+```
+Loading
+Estimated code review effort
+🎯 5 (Critical) | ⏱️ ~120 minutes
+Possibly related PRs
+doodlum/skyrim-community-shaders#1925: Centralizes depth SRV sourcing and refactors callers to use Util::GetCurrentSceneDepthSRV() — directly overlaps depth SRV changes.
+doodlum/skyrim-community-shaders#1443: Overlaps HLSL changes to DepthRefractionUpscalePS and FrameBuffer DR helpers (JitterCB and DR clamping).
+doodlum/skyrim-community-shaders#1804: Related Upscaling API/constraint changes and VR upscaling logic touched/removed here.
+Suggested reviewers
+alandtse
+doodlum
+Poem
+🐰 I hop through pixels, per‑eye and bright,
+Clamping corners, sampling depths just right,
+Wide kernels hum while upscalers leap,
+Terrain hooks listen as the depth runs deep,
+A twitch of whiskers — the frame falls asleep.
+🚥 Pre-merge checks | ✅ 2 | ❌ 1
+❌ Failed checks (1 warning)
+Check name
+Status
+Explanation
+Resolution
+Docstring Coverage
+⚠️ Warning
+Docstring coverage is 5.95% which is insufficient. The required threshold is 80.00%.
+Write docstrings for the functions missing them to satisfy the coverage threshold.
+✅ Passed checks (2 passed)
+Check name
+Status
+Explanation
+Description Check
+✅ Passed
+Check skipped - CodeRabbit’s high-level summary is enabled.
+Title check
+✅ Passed
+The title accurately reflects the main changes: VR depth culling improvements during upscaling and Terrain Blending integration.
+✏️ Tip: You can configure your own custom pre-merge checks in the settings.
+✨ Finishing Touches
+🧪 Generate unit tests (beta)
+Create PR with unit tests
+Post copyable unit tests in a comment
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands and usage tips.
+github-actions
+Bot
+commented
+Feb 12, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+No actionable suggestions for changed features.
+coderabbitai
+Bot
+reviewed
+Feb 12, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+🤖 Fix all issues with AI agents
+```
+In `@src/Features/TerrainBlending.cpp`:
+- Around line 362-374: The enabled-exit branch after checking settings.Enabled
+only restores mainDepth.depthSRV but not zPrepassCopy.depthSRV, leaving
+zPrepassCopy pointing to stale blended data; update that branch to also set
+zPrepassCopy.depthSRV = prepassSRVBackup (using the same
+renderer->GetDepthStencilData().depthStencils[...] references and
+depthSRVBackup/prepassSRVBackup variables) before the final return so both
+targets are restored consistently.
+```
+🧹 Nitpick comments (4)
+src/Globals.cpp (3)
+464-508: Performance: every draw call incurs hook overhead on all game editions
+All four draw-call detours instantiate two scoped-override objects per call. On non-VR (SE/AE), ShouldOverrideObbDepth and ShouldOverrideShadowmaskDepth exit immediately at the isVR check (lines 281, 322), so the cost is two virtual-dispatch entries + two boolean branches per draw call. This is likely negligible, but worth confirming with a profiling pass since draw-call counts can be very high.
+If you ever want to eliminate that overhead for flat-screen users, you could skip hooking indices 12/13/20/21 in InstallD3DHooks when !REL::Module::IsVR().
+🔧 Optional: conditionally install draw hooks only for VR
+```
+ void InstallD3DHooks(ID3D11DeviceContext* a_context)
+ {
+-	stl::detour_vfunc<12, ID3D11DeviceContext_DrawIndexed>(a_context);
+-	stl::detour_vfunc<13, ID3D11DeviceContext_Draw>(a_context);
++	if (REL::Module::IsVR()) {
++		stl::detour_vfunc<12, ID3D11DeviceContext_DrawIndexed>(a_context);
++		stl::detour_vfunc<13, ID3D11DeviceContext_Draw>(a_context);
++	}
+ 	stl::detour_vfunc<14, ID3D11DeviceContext_Map>(a_context);
+ 	stl::detour_vfunc<15, ID3D11DeviceContext_Unmap>(a_context);
+-	stl::detour_vfunc<20, ID3D11DeviceContext_DrawIndexedInstanced>(a_context);
+-	stl::detour_vfunc<21, ID3D11DeviceContext_DrawInstanced>(a_context);
++	if (REL::Module::IsVR()) {
++		stl::detour_vfunc<20, ID3D11DeviceContext_DrawIndexedInstanced>(a_context);
++		stl::detour_vfunc<21, ID3D11DeviceContext_DrawInstanced>(a_context);
++	}
+ }
+```
+As per coding guidelines, ensure changes work across SE/AE/VR variants using runtime detection.
+339-461: Consider extracting a shared base to reduce near-identical scoped-override classes
+ScopedObbDepthOverride and ScopedShadowmaskDepthOverride share ~95% of their logic — the only differences are the PS slot number (17 vs 2), the SRV fallback order, and the "should override" predicate. A single parameterized ScopedDepthSrvOverride class could eliminate the duplication.
+♻️ Sketch of a unified scoped override
+```
+class ScopedDepthSrvOverride
+{
+public:
+    ScopedDepthSrvOverride(ID3D11DeviceContext* ctx, UINT slot,
+        bool (*shouldOverride)(),
+        ID3D11ShaderResourceView* (*pickSrv)())
+        : context(ctx), slot(slot)
+    {
+        if (!shouldOverride()) return;
+        auto* overrideSrv = pickSrv();
+        if (!overrideSrv) return;
+        context->PSGetShaderResources(slot, 1, &previousSrv);
+        if (previousSrv == overrideSrv) {
+            if (previousSrv) { previousSrv->Release(); previousSrv = nullptr; }
+            return;
+        }
+        context->PSSetShaderResources(slot, 1, &overrideSrv);
+        active = true;
+    }
+    ~ScopedDepthSrvOverride()
+    {
+        if (active) context->PSSetShaderResources(slot, 1, &previousSrv);
+        if (previousSrv) previousSrv->Release();
+    }
+    ScopedDepthSrvOverride(const ScopedDepthSrvOverride&) = delete;
+    ScopedDepthSrvOverride& operator=(const ScopedDepthSrvOverride&) = delete;
+private:
+    ID3D11DeviceContext* context = nullptr;
+    UINT slot = 0;
+    ID3D11ShaderResourceView* previousSrv = nullptr;
+    bool active = false;
+};
+```
+268-277: String comparison on every draw call for shader identification
+IsObbOcclusionShaderActive performs std::strcmp against a string literal on every draw call (when VR + TB + depth culling are all active). Since fxpFilename is a const char*, this comparison cost is small per invocation, but it runs on the hot path. If there's a numeric shader ID or enum available for OBBOcclusionTesting, that would be a faster check.
+src/Features/VR.cpp (1)
+145-155: Prefer globals::game::tes over RE::TES::GetSingleton() for consistency
+globals::game::tes is already cached during ReInit() (line 167 of this file's corresponding Globals.cpp). Using it here would be consistent with the rest of the codebase and avoid the repeated singleton lookup on every prepass frame.
+♻️ Use cached global
+```
+ void VR::EarlyPrepass()
+ {
+ 	// Apply culling setting each prepass based on current interior/exterior state.
+-	const auto* tes = RE::TES::GetSingleton();
++	const auto* tes = globals::game::tes;
+ 	if (!tes) {
+ 		return;
+ 	}
+```
+Based on learnings: "Access core systems through src/Globals.h which provides global access to feature registry, state management, shader cache, and DirectX device/context."
+Comment thread
+src/Features/TerrainBlending.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+doodlum
+requested changes
+Feb 12, 2026
+View reviewed changes
+doodlum
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+still a tiny bias (why?). this is like, a 30th of a terrain piece.
+also hooks don't always work
+Comment thread
+src/Globals.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+github-actions
+Bot
+commented
+Feb 12, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+✅ A pre-release build is available for this PR:
+Download
+alandtse
+reviewed
+Feb 12, 2026
+View reviewed changes
+alandtse
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Please review all comments including mine. AI comments can be ignored if they're wrong but resolve the issue. No need to actually respond to the AI.
+Consider DRY principles so reduce maintenance burden.
+Comment thread
+src/Deferred.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+features/Upscaling/Shaders/Upscaling/DepthRefractionUpscalePS.hlsl
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+package/Shaders/Common/FrameBuffer.hlsli
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/Features/TerrainBlending.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/Features/TerrainBlending.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/Features/VR.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/Features/VR.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/Globals.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/Globals.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/Globals.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ParticleTroned
+added 11 commits
+February 13, 2026 23:14
+PR(doodlum): draw functions are not globally hookable (Globals.cpp)
+66b8e29
+PR(Alandtse): No reason to disable the enabled check (Deferred.cpp).
+fc9d868
+PR(Alandtse): unchanged behavior in flat and minimize code churn
+3f843b9
+PR(Alandtse): Add a doxygen (DepthRefractionUpscalePS.hlsl)
+13f450f
+PR(Alandtse): Why isn't this using your new function: ShouldUseBlende…
+…
+d79b530
+```
+…dDepthSRV (TerrainBlendning.cpp)
+```
+PR(Alandtse): simplify into a return boolean evaluation (TerrainBlend…
+…
+5a0d192
+```
+…ing).
+```
+PR(Alandtse):Is this not in globals? Should it be (VR.cpp)
+5278fd8
+PR(Alandtse): Verify this constraint (SSS.cpp, Tb.cpp)
+fd2b6b7
+PR(Alandtse): Epsilon constant - use FLT_EPSILON as in Skysync (Upsca…
+…
+dac413e
+```
+…ling.cpp)
+```
+PR(Alandtse): DRY VR/TB/depth-culling gate (Globals.cpp)
+0e9b73a
+PR(doodlum): Depth Offset = 2.5, TB UI cleanup
+c22cfea
+ParticleTroned
+force-pushed
+the
+pr/depth-culling-terrain-blending
+branch
+from
+8581e30 to
+c22cfea
+Compare
+February 14, 2026 00:50
+coderabbitai
+Bot
+reviewed
+Feb 14, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+🧹 Nitpick comments (3)
+src/Globals.cpp (1)
+3-4: Remove unused <cstring> include from Globals.cpp.
+The <cstring> header is not used directly in this file—none of its functions (memcpy, memset, strlen, strcmp, etc.) are called. If this was added to support other files in the PR, the include should go in those files instead.
+src/Features/TerrainBlending.cpp (1)
+134-138: IsEngineHookPathActive always returns true — is this intentional?
+The function accepts a TerrainBlending& parameter (cast to void), ignores it, and returns true unconditionally. If it's meant to be a future toggle point, a comment explaining the intent would help. If the OverridePath setting from the header is intended to drive this, it should be wired up.
+package/Shaders/Common/FrameBuffer.hlsli (1)
+112-115: Rename parameter for consistency and clarity in the float3 overload.
+The parameter is named screenPositionDR (implying it's already in dynamic-resolution space), but it's passed to the 2D overload which applies the DR transformation. While this overload is currently unused in the codebase, the misleading naming could cause future misuse. Rename to screenPosition to match the float2 overload and prevent double-application of the DR transform.
+Suggested change
+```
+-	float3 GetDynamicResolutionAdjustedScreenPosition(float3 screenPositionDR, uint stereo = 1)
++	float3 GetDynamicResolutionAdjustedScreenPosition(float3 screenPosition, uint stereo = 1)
+ 	{
+-		return float3(GetDynamicResolutionAdjustedScreenPosition(screenPositionDR.xy, stereo), screenPositionDR.z);
++		return float3(GetDynamicResolutionAdjustedScreenPosition(screenPosition.xy, stereo), screenPosition.z);
+ 	}
+```
+Comment thread
+src/Features/TerrainBlending.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ParticleTroned
+commented
+Feb 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+doodlum: Increased DepthOffset in Utility.hlsl to 2.5. (c22cfea)
+PR(coderabbitai): define variant-specific RVAs using REL::Relocate pa…
+…
+1118228
+```
+…ttern.
+```
+ParticleTroned
+force-pushed
+the
+pr/depth-culling-terrain-blending
+branch
+from
+d128e22 to
+1118228
+Compare
+February 14, 2026 01:53
+PR(coderabbitai): wire TB engine-hook override path and remove unused…
+…
+430d32a
+```
+… <cstring> include
+```
+ParticleTroned
+force-pushed
+the
+pr/depth-culling-terrain-blending
+branch
+from
+7edb48e to
+430d32a
+Compare
+February 14, 2026 02:04
+coderabbitai
+Bot
+reviewed
+Feb 14, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+🤖 Fix all issues with AI agents
+```
+In `@src/Features/TerrainBlending.cpp`:
+- Around line 128-136: Global fallback flags (slot2BroadFallbackActive,
+slot2RejectTotal, slot2BlockedCallerRvas, hookActiveLogged,
+fallbackActivatedLogged, fallbackTriggerRva) are never cleared so once the
+auto-broad fallback latches it stays active for the process lifetime; fix by
+adding a single reset routine (e.g., ResetSlot2FallbackState) that sets
+slot2BroadFallbackActive=false, slot2RejectTotal=0, clears
+slot2BlockedCallerRvas, and resets
+hookActiveLogged/fallbackActivatedLogged/fallbackTriggerRva to their initial
+values, and call that reset from appropriate lifecycle boundaries such as a
+per-frame update (TerrainBlending::UpdateFrame or similar), on cell/scene change
+handler (TerrainBlending::OnCellChange), and when toggling TB on/off so
+transient conditions don't permanently latch the fallback; keep the
+kEnableAutoBroadSlot2Fallback and kSlot2AutoFallbackRejectThreshold constants
+unchanged.
+```
+🧹 Nitpick comments (3)
+src/Features/TerrainBlending.cpp (3)
+23-57: Significant diagnostic infrastructure with no runtime output.
+TbHookDiagnostics and the associated LogTbHookStateTransition/MaybeLogTbHookSummary are wired throughout the rendering path but produce no output (empty bodies, (void) casts). The counters accumulate indefinitely but are never read. If this is scaffolding for future dev-mode telemetry, consider gating the counter increments behind IsDeveloperMode() to avoid unnecessary work on the hot path, or remove until needed.
+241-277: COM reference leak when canRewrite is false.
+PSGetShaderResources increments the reference count on currentSrv. When !result.alreadyBound && !canRewrite, execution falls through to the if (currentSrv) currentSrv->Release() cleanup — which is correct. However, if a future code path introduces an early return between the PSGetShaderResources call (line 259) and the Release (line 273), the ref will leak. Consider using a COM smart pointer or RAII guard for currentSrv to make this robust.
+That said, the current code as written does release correctly in all existing paths.
+417-503: OnBeginTechnique — repeated gate-check pattern used across 4 methods.
+The 5-condition gate (gateSatisfied && inShadowmaskPhase && isUtility && isWhitelistedDescriptor) and the subsequent OBB + shadowmask slot override logic is nearly identical in OnBeginTechnique, OnUtilitySetupGeometry, OnSetDirtyStates, and partially in OnShaderPropertySetupGeometry. Consider extracting a shared helper to reduce duplication and ensure future changes stay in sync.
+♻️ Sketch of a shared helper
+```
+// In the anonymous namespace:
+struct OverrideContext {
+    RE::BSShader* shader;
+    uint32_t descriptor;
+    uint32_t callerRva;
+    bool applyObb;
+};
+
+bool TryApplyEngineOverrides(const TerrainBlending& tb, const OverrideContext& ctx) {
+    if (!IsEngineHookFeatureGateSatisfied(tb))
+        return false;
+    if (!FrameAnnotations::IsInRenderShadowmasksPhase())
+        return false;
+    if (!ctx.shader || ctx.shader->shaderType.get() != RE::BSShader::Type::Utility)
+        return false;
+    if (!IsShadowmaskDepthDescriptorWhitelisted(ctx.descriptor))
+        return false;
+    
+    auto* context = globals::d3d::context;
+    if (!context) return false;
+    
+    if (ctx.applyObb) {
+        ApplyPixelShaderSlotOverride(context, 17u, ResolveEngineOverrideSrv(false), /*...*/);
+    }
+    ApplyPixelShaderSlotOverride(context, 2u, ResolveEngineOverrideSrv(true), /*...*/);
+    return true;
+}
+```
+Comment thread
+src/Features/TerrainBlending.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+PR(coderabbitai): reset slot2 fallback state after toogle on/off and …
+…
+2155e5e
+```
+…DRY engine-hook pass gating
+```
+ParticleTroned
+force-pushed
+the
+pr/depth-culling-terrain-blending
+branch
+from
+ecaa689 to
+2155e5e
+Compare
+February 14, 2026 03:05
+style: 🎨 apply pre-commit.ci formatting
+…
+fd35fb2
+```
+Automated formatting by clang-format, prettier, and other hooks.
+See https://pre-commit.ci for details.
+```
+alandtse
+reviewed
+Feb 14, 2026
+View reviewed changes
+Comment thread
+package/Shaders/Utility.hlsl
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ParticleTroned
+and others
+added 4 commits
+February 28, 2026 11:37
+PR(Alandtse): Annotation of Overrides and slot2 rewrite fallback now …
+…
+e165d9a
+```
+…collapses on allowlisted hit
+```
+fix(build): use const for REL::Relocate RVAs and include State.h in V…
+…
+4dbed5e
+```
+…R SettingsUI
+```
+PR(Doodlum): DepthUpscaling optimsations -refractor and harden Upscal…
+…
+93cff99
+```
+…eDepth path
+```
+style: 🎨 apply pre-commit.ci formatting
+…
+1c1029e
+```
+Automated formatting by clang-format, prettier, and other hooks.
+See https://pre-commit.ci for details.
+```
+coderabbitai
+Bot
+reviewed
+Feb 28, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🧹 Nitpick comments (3)
+src/Features/VR.cpp (1)
+226-246: Consider removing tautological write-mismatch check.
+The check on lines 243-245 will never trigger under normal circumstances since *gDepthBufferCulling is assigned desired on line 238 immediately before the comparison. This could only fail if another thread modified the value concurrently, which would indicate a serious synchronization issue.
+If the intent is to catch external interference, consider documenting that explicitly; otherwise, this check adds noise without practical benefit.
+🔧 Suggested simplification
+```
+ 	const bool previous = *gDepthBufferCulling;
+ 	*gDepthBufferCulling = desired;
+ 
+ 	if (previous != desired) {
+ 		logger::info("VR depth buffer culling set to {}", desired);
+ 	}
+-	if (*gDepthBufferCulling != desired) {
+-		logger::warn("VR depth buffer culling write mismatch (desired {}, actual {})", desired, *gDepthBufferCulling);
+-	}
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against the current code and only fix it if needed.
+
+In `@src/Features/VR.cpp` around lines 226 - 246, The final "write-mismatch" check
+in VR::UpdateDepthBufferCulling is tautological because *gDepthBufferCulling is
+set to desired just above, so remove the if (*gDepthBufferCulling != desired) {
+logger::warn(...) } block (and its message) to avoid noisy/unused checks; if the
+intent was to detect concurrent modification instead, replace the raw write with
+an atomic compare-exchange or guard with a mutex and document the concurrency
+intent before logging.
+```
+src/FrameAnnotations.cpp (1)
+1-1: PR metadata suggestion: tighten conventional title and add issue keyword.
+Suggested title: fix(vr): restore depth culling with terrain blending
+If this resolves a tracked bug, add Fixes #<issue-id> in the PR description.
+As per coding guidelines: “When reviewing PRs, please provide suggestions for Conventional Commit Titles… [and] Issue References…”
+🤖 Prompt for AI Agents
+```
+Verify each finding against the current code and only fix it if needed.
+
+In `@src/FrameAnnotations.cpp` at line 1, Update the PR metadata to follow
+Conventional Commits: set the PR title to "fix(vr): restore depth culling with
+terrain blending" and, if this change closes a tracked bug, add "Fixes
+#<issue-id>" to the PR description; ensure the commit message(s) associated with
+FrameAnnotations.cpp changes use the same conventional title format and
+reference the issue ID where applicable.
+```
+src/Features/TerrainBlending.cpp (1)
+948-961: Consider using ToModuleRva helper consistently.
+Lines 950 and 958 compute the RVA inline (static_cast<uint32_t>(reinterpret_cast<std::uintptr_t>(_ReturnAddress()) - REL::Module::get().base())), while lines 927 and 934 use the ToModuleRva helper. Using the helper consistently would improve maintainability.
+♻️ Suggested refactor
+```
+ bool TerrainBlending::Hooks::BSShader_BeginTechnique::thunk(RE::BSShader* shader, uint32_t vertexDescriptor, uint32_t pixelDescriptor, bool skipPixelShader)
+ {
+-	const auto callerRva = static_cast<uint32_t>(reinterpret_cast<std::uintptr_t>(_ReturnAddress()) - REL::Module::get().base());
++	const auto callerRva = ToModuleRva(_ReturnAddress());
+ 	bool result = func(shader, vertexDescriptor, pixelDescriptor, skipPixelShader);
+ 	globals::features::terrainBlending.OnBeginTechnique(shader, pixelDescriptor, callerRva);
+ 	return result;
+ }
+
+ void TerrainBlending::Hooks::BSGraphics_SetDirtyStates::thunk(bool isCompute)
+ {
+-	const auto callerRva = static_cast<uint32_t>(reinterpret_cast<std::uintptr_t>(_ReturnAddress()) - REL::Module::get().base());
++	const auto callerRva = ToModuleRva(_ReturnAddress());
+ 	func(isCompute);
+ 	globals::features::terrainBlending.OnSetDirtyStates(isCompute, callerRva);
+ }
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against the current code and only fix it if needed.
+
+In `@src/Features/TerrainBlending.cpp` around lines 948 - 961, Replace the inline
+RVA calculations in TerrainBlending::Hooks::BSShader_BeginTechnique::thunk and
+TerrainBlending::Hooks::BSGraphics_SetDirtyStates::thunk with the existing
+ToModuleRva helper to match other hooks; specifically, call
+ToModuleRva(_ReturnAddress()) (or the equivalent helper signature used
+elsewhere) to compute callerRva and pass that to
+globals::features::terrainBlending.OnBeginTechnique and OnSetDirtyStates,
+removing the duplicated static_cast/reinterpret_cast arithmetic for consistency
+and maintainability.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against the current code and only fix it if needed.
+
+Nitpick comments:
+In `@src/Features/TerrainBlending.cpp`:
+- Around line 948-961: Replace the inline RVA calculations in
+TerrainBlending::Hooks::BSShader_BeginTechnique::thunk and
+TerrainBlending::Hooks::BSGraphics_SetDirtyStates::thunk with the existing
+ToModuleRva helper to match other hooks; specifically, call
+ToModuleRva(_ReturnAddress()) (or the equivalent helper signature used
+elsewhere) to compute callerRva and pass that to
+globals::features::terrainBlending.OnBeginTechnique and OnSetDirtyStates,
+removing the duplicated static_cast/reinterpret_cast arithmetic for consistency
+and maintainability.
+
+In `@src/Features/VR.cpp`:
+- Around line 226-246: The final "write-mismatch" check in
+VR::UpdateDepthBufferCulling is tautological because *gDepthBufferCulling is set
+to desired just above, so remove the if (*gDepthBufferCulling != desired) {
+logger::warn(...) } block (and its message) to avoid noisy/unused checks; if the
+intent was to detect concurrent modification instead, replace the raw write with
+an atomic compare-exchange or guard with a mutex and document the concurrency
+intent before logging.
+
+In `@src/FrameAnnotations.cpp`:
+- Line 1: Update the PR metadata to follow Conventional Commits: set the PR
+title to "fix(vr): restore depth culling with terrain blending" and, if this
+change closes a tracked bug, add "Fixes #<issue-id>" to the PR description;
+ensure the commit message(s) associated with FrameAnnotations.cpp changes use
+the same conventional title format and reference the issue ID where applicable.
+```
+ℹ️ Review info
+Configuration used: Path: .coderabbit.yaml
+Review profile: CHILL
+Plan: Pro
+📥 Commits
+Reviewing files that changed from the base of the PR and between fd35fb2 and 1c1029e.
+📒 Files selected for processing (14)
+features/Upscaling/Shaders/Upscaling/DepthRefractionUpscalePS.hlsl
+features/Upscaling/Shaders/Upscaling/UnderwaterMaskUpscalePS.hlsl
+include/FrameAnnotations.h
+src/Features/ScreenSpaceGI.cpp
+src/Features/ScreenSpaceShadows.cpp
+src/Features/TerrainBlending.cpp
+src/Features/TerrainBlending.h
+src/Features/Upscaling.cpp
+src/Features/Upscaling.h
+src/Features/VR.cpp
+src/Features/VR.h
+src/Features/VR/SettingsUI.cpp
+src/FrameAnnotations.cpp
+src/Hooks.cpp
+✅ Files skipped from review due to trivial changes (2)
+src/Hooks.cpp
+include/FrameAnnotations.h
+🚧 Files skipped from review as they are similar to previous changes (3)
+src/Features/ScreenSpaceShadows.cpp
+src/Features/VR.h
+src/Features/Upscaling.h
+ParticleTroned
+requested review from
+alandtse and
+doodlum
+February 28, 2026 14:36
+ParticleTroned
+commented
+Feb 28, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Commit [4dbed5e] was needed for building after changes above:
+--> TerrainBlending.cpp: it changes caller RVA constants from constexpr to const because REL::Relocate(...) is not constexpr
+--> VR/SettingsUI.cpp: it adds #include "State.h" and guards developer-mode access with globals::state &&
+PR(CodeRabbit): Remove redundant culling write check and unify caller…
+…
+ef6e219
+```
+… RVA via ToModuleRva
+```
+ParticleTroned
+commented
+Feb 28, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+🧹 Nitpick comments (3) CodeRabbit (see above)
+Comments 1 and 3 make sense and are addressed here: [ef6e219]
+coderabbitai
+Bot
+reviewed
+Feb 28, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 3
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against the current code and only fix it if needed.
+
+Inline comments:
+In `@src/Features/TerrainBlending.cpp`:
+- Around line 507-510: Before returning when the D3D context is null, call
+ReleaseEngineHookTechniqueOverride() to release any active overrides and SRV
+refs; specifically, in the block that reads "auto* context =
+globals::d3d::context; if (!context) { return; }" invoke
+ReleaseEngineHookTechniqueOverride() (it already handles null context)
+immediately prior to the early return so cleanup/bookkeeping runs even when the
+context is missing.
+- Around line 94-102: ResetCallerFallbackState currently doesn't reset the
+per-gate diagnostic flag so hookActiveLogged persists across cycles; update
+ResetCallerFallbackState(CallerFallbackState& a_state) to also set
+a_state.hookActiveLogged = false so the diagnostics controlled by
+hookActiveLogged are emitted once per gate-on cycle as intended (refer to
+CallerFallbackState::hookActiveLogged and ResetCallerFallbackState).
+- Around line 940-946: The current thunk in
+TerrainBlending::Hooks::Main_RenderShadowmasks increments
+renderShadowmasksPhaseDepth then always calls OnShadowmaskPhaseEnd() on return,
+which tears down overrides during nested phases; change the teardown to run only
+when the depth transitions to zero by using the result of fetch_sub to detect
+the outermost exit (e.g., call renderShadowmasksPhaseDepth.fetch_sub(1,
+std::memory_order_relaxed) and if it returns 1 then call
+globals::features::terrainBlending.OnShadowmaskPhaseEnd()), leaving the
+increment (fetch_add) and func(a1) call as-is.
+```
+ℹ️ Review info
+Configuration used: Path: .coderabbit.yaml
+Review profile: CHILL
+Plan: Pro
+📥 Commits
+Reviewing files that changed from the base of the PR and between 1c1029e and ef6e219.
+📒 Files selected for processing (2)
+src/Features/TerrainBlending.cpp
+src/Features/VR.cpp
+Comment thread
+src/Features/TerrainBlending.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/Features/TerrainBlending.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/Features/TerrainBlending.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+PR(CodeRabbit): Hardened TB hook cleanup, nested shadowmask teardown,…
+…
+35a7dc4
+```
+… and clarified debug logging scope.
+```
+coderabbitai
+Bot
+reviewed
+Feb 28, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+♻️ Duplicate comments (1)
+src/Features/TerrainBlending.cpp (1)
+94-102: ⚠️ Potential issue | 🟡 Minor
+hookActiveLogged is not reset, limiting per-cycle diagnostic logging.
+The comment at line 45 indicates diagnostics should log "one hook snapshot per gate-on cycle," but ResetCallerFallbackState() does not clear hookActiveLogged. This means the diagnostic log at lines 318-330 only fires once per process lifetime rather than once per TB/depth-culling activation cycle.
+This was flagged in a prior review but appears unaddressed.
+🔧 Proposed fix
+```
+ void ResetCallerFallbackState(CallerFallbackState& a_state)
+ {
+ 	a_state.broadFallbackActive = false;
+ 	a_state.sawAllowlistedHit = false;
+ 	a_state.rejectTotal = 0;
+ 	a_state.blockedCallerRvas.clear();
++	a_state.hookActiveLogged = false;
+ 	a_state.fallbackActivatedLogged = false;
+ 	a_state.fallbackTriggerRva = 0;
+ }
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against the current code and only fix it if needed.
+
+In `@src/Features/TerrainBlending.cpp` around lines 94 - 102,
+ResetCallerFallbackState currently does not clear the hookActiveLogged flag, so
+per-cycle diagnostics only log once per process; update
+ResetCallerFallbackState(CallerFallbackState& a_state) to set
+a_state.hookActiveLogged = false so the diagnostic snapshot (the
+hookActiveLogged-controlled logging path) can fire once per TB/depth-culling
+activation cycle; locate ResetCallerFallbackState and add clearing of
+hookActiveLogged alongside the other resets.
+```
+🧹 Nitpick comments (1)
+src/Features/TerrainBlending.cpp (1)
+414-426: Consider caching the forced DepthStencilState across frames.
+CreateDepthStencilState is called each time the override is first applied within a shadowmask phase. While D3D11 state creation is lightweight, in VR at high refresh rates this could result in dozens of state creations per second. Since the forced state always has the same modification (DepthFunc = ALWAYS) applied to whichever base state is active, consider caching the created states in a map keyed by the original state's description hash.
+🤖 Prompt for AI Agents
+```
+Verify each finding against the current code and only fix it if needed.
+
+In `@src/Features/TerrainBlending.cpp` around lines 414 - 426, The code is
+creating a new forced DepthStencilState every time instead of reusing one;
+modify the logic around CreateDepthStencilState/depthStencilDesc to cache forced
+states keyed by the base state's description hash (or a copy of
+D3D11_DEPTH_STENCIL_DESC) so repeated calls return an existing
+ID3D11DepthStencilState* instead of creating a new one. Update the code paths
+that set engineHookTechniqueState.forcedDepthStencilState and
+engineHookTechniqueState.depthStateForced to use the cached object (e.g., look
+up by hashed depthStencilDesc, create/store on miss, and reuse on hit), and add
+proper lifetime management to release all cached ID3D11DepthStencilState* on
+shutdown to avoid leaks; reference CreateDepthStencilState, depthStencilDesc,
+forcedDepthStencilState, and engineHookTechniqueState when making these changes.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against the current code and only fix it if needed.
+
+Duplicate comments:
+In `@src/Features/TerrainBlending.cpp`:
+- Around line 94-102: ResetCallerFallbackState currently does not clear the
+hookActiveLogged flag, so per-cycle diagnostics only log once per process;
+update ResetCallerFallbackState(CallerFallbackState& a_state) to set
+a_state.hookActiveLogged = false so the diagnostic snapshot (the
+hookActiveLogged-controlled logging path) can fire once per TB/depth-culling
+activation cycle; locate ResetCallerFallbackState and add clearing of
+hookActiveLogged alongside the other resets.
+
+---
+
+Nitpick comments:
+In `@src/Features/TerrainBlending.cpp`:
+- Around line 414-426: The code is creating a new forced DepthStencilState every
+time instead of reusing one; modify the logic around
+CreateDepthStencilState/depthStencilDesc to cache forced states keyed by the
+base state's description hash (or a copy of D3D11_DEPTH_STENCIL_DESC) so
+repeated calls return an existing ID3D11DepthStencilState* instead of creating a
+new one. Update the code paths that set
+engineHookTechniqueState.forcedDepthStencilState and
+engineHookTechniqueState.depthStateForced to use the cached object (e.g., look
+up by hashed depthStencilDesc, create/store on miss, and reuse on hit), and add
+proper lifetime management to release all cached ID3D11DepthStencilState* on
+shutdown to avoid leaks; reference CreateDepthStencilState, depthStencilDesc,
+forcedDepthStencilState, and engineHookTechniqueState when making these changes.
+```
+ℹ️ Review info
+Configuration used: Path: .coderabbit.yaml
+Review profile: CHILL
+Plan: Pro
+📥 Commits
+Reviewing files that changed from the base of the PR and between ef6e219 and 35a7dc4.
+📒 Files selected for processing (1)
+src/Features/TerrainBlending.cpp
+alandtse
+approved these changes
+Feb 28, 2026
+View reviewed changes
+coderabbitai
+Bot
+reviewed
+Mar 1, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🧹 Nitpick comments (1)
+src/Features/Upscaling.cpp (1)
+1741-1744: Clarify the purpose of the second VR depth copy.
+The second copy at line 1743 is intentional, not redundant. The flow shows: initial copy → stencil clear → shader reads depthCopy SRV → shader writes to depth DSV → copy depth back to depthCopy (VR only). This synchronizes the newly-written depth back to depthCopy for VR-specific purposes. However, the comment "Depth copy is also used on VR" obscures the actual intent. Consider explaining why VR requires this synchronization (e.g., per-eye buffer handling, subsequent frame preparation) to make the pattern clear to future maintainers.
+🤖 Prompt for AI Agents
+```
+Verify each finding against the current code and only fix it if needed.
+
+In `@src/Features/Upscaling.cpp` around lines 1741 - 1744, Update the comment
+above the VR-only copyIfNonAliased(depthCopy.texture, depth.texture) call to
+explain that this second copy intentionally synchronizes the depth buffer
+written by the shader back into depthCopy for VR-specific use (e.g., per-eye
+buffer handling or preparing depthCopy for subsequent frame/stereo read paths),
+so maintainers understand it’s required after the shader writes to the DSV;
+reference the copyIfNonAliased call and the depthCopy.texture/depth.texture pair
+when clarifying the rationale.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against the current code and only fix it if needed.
+
+Nitpick comments:
+In `@src/Features/Upscaling.cpp`:
+- Around line 1741-1744: Update the comment above the VR-only
+copyIfNonAliased(depthCopy.texture, depth.texture) call to explain that this
+second copy intentionally synchronizes the depth buffer written by the shader
+back into depthCopy for VR-specific use (e.g., per-eye buffer handling or
+preparing depthCopy for subsequent frame/stereo read paths), so maintainers
+understand it’s required after the shader writes to the DSV; reference the
+copyIfNonAliased call and the depthCopy.texture/depth.texture pair when
+clarifying the rationale.
+```
+ℹ️ Review info
+Configuration used: Path: .coderabbit.yaml
+Review profile: CHILL
+Plan: Pro
+📥 Commits
+Reviewing files that changed from the base of the PR and between 35a7dc4 and a797cee.
+📒 Files selected for processing (3)
+features/Upscaling/Shaders/Upscaling/DepthRefractionUpscalePS.hlsl
+src/Features/Upscaling.cpp
+src/Features/Upscaling.h
+ParticleTroned
+added 3 commits
+March 1, 2026 15:28
+PR(fixTB): use R32 depth for shadowmask slot2 override
+0877334
+PR(doodlum): Optimization,use gathered also for 3x3 kernel
+c65c29f
+PR(doodlum): Toggable wide kernel GatheRed vs 3x3: Debug only
+47e68b2
+ParticleTroned
+force-pushed
+the
+pr/depth-culling-terrain-blending
+branch
+from
+a797cee to
+47e68b2
+Compare
+March 1, 2026 15:30
+style: 🎨 apply pre-commit.ci formatting
+…
+1f5aa83
+```
+Automated formatting by clang-format, prettier, and other hooks.
+See https://pre-commit.ci for details.
+```
+coderabbitai
+Bot
+reviewed
+Mar 1, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🧹 Nitpick comments (1)
+src/Features/Upscaling.cpp (1)
+1766-1769: Clean up all bound SRVs after the underwater mask pass.
+The cleanup unbinds 3 SRVs, but the underwater mask pass only binds 1 SRV at slot 0 (line 1756-1757). While unbinding extra slots is harmless, consider matching the cleanup to what was actually bound in each pass for clarity.
+🤖 Prompt for AI Agents
+```
+Verify each finding against the current code and only fix it if needed.
+
+In `@src/Features/Upscaling.cpp` around lines 1766 - 1769, Cleanup currently
+unbinds 3 SRVs even though the underwater mask pass only binds a single SRV at
+slot 0; change the unbind to only clear the one bound slot by replacing
+nullPSResources[3] with a single-element array (e.g., ID3D11ShaderResourceView*
+nullPSResources[1] = { nullptr }) and call context->PSSetShaderResources(0, 1,
+nullPSResources) so the number of slots unbound matches what was bound in the
+underwater mask pass.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against the current code and only fix it if needed.
+
+Nitpick comments:
+In `@src/Features/Upscaling.cpp`:
+- Around line 1766-1769: Cleanup currently unbinds 3 SRVs even though the
+underwater mask pass only binds a single SRV at slot 0; change the unbind to
+only clear the one bound slot by replacing nullPSResources[3] with a
+single-element array (e.g., ID3D11ShaderResourceView* nullPSResources[1] = {
+nullptr }) and call context->PSSetShaderResources(0, 1, nullPSResources) so the
+number of slots unbound matches what was bound in the underwater mask pass.
+```
+ℹ️ Review info
+Configuration used: Path: .coderabbit.yaml
+Review profile: CHILL
+Plan: Pro
+📥 Commits
+Reviewing files that changed from the base of the PR and between a797cee and 1f5aa83.
+📒 Files selected for processing (4)
+features/Upscaling/Shaders/Upscaling/DepthRefractionUpscalePS.hlsl
+src/Features/TerrainBlending.cpp
+src/Features/Upscaling.cpp
+src/Features/Upscaling.h
+🚧 Files skipped from review as they are similar to previous changes (2)
+features/Upscaling/Shaders/Upscaling/DepthRefractionUpscalePS.hlsl
+src/Features/Upscaling.h
+ParticleTroned
+commented
+Mar 1, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+RE: commit [0877334]
+Testing some more, testers and I noticed antialiasing on shadow borders upon HMD movement. These were dependent on eihter TB or Depthculling being activated. Using R32 depth for TB shadowmask slot2 overrides (instead of the 16-bit path) across all hook re-apply points eliminated these square like shimmer/aliasing upon head movement. I inserted this commit before the last two regarding GatheRed as I do not think those should be included when merging.
+doodlum
+approved these changes
+Mar 2, 2026
+View reviewed changes
+doodlum
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+good work
+Hide details
+View details
+alandtse
+merged commit 4671f5d
+into
+community-shaders:dev
+Mar 2, 2026
+16 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ParticleTroned
+mentioned this pull request
+Mar 18, 2026
+feat(upscaling): integrate Streamline Reflex controls
+#1958
+Merged
+davo0411
+added a commit
+to davo0411/skyrim-community-shaders
+that referenced
+this pull request
+Mar 28, 2026
+dev update (#33)
+…
+498f05a
+```
+* fix(weather overrides): ensure json format for features (community-shaders#1748)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* perf(terrain blending): tweak defaults (community-shaders#1771)
+
+* fix(lighting): vanilla envcolor mult the correct value (community-shaders#1775)
+
+* fix(water): remove final colour saturate (community-shaders#1778)
+
+* fix(unified-water): LOD water cache mismatch (community-shaders#1779)
+
+* fix(weather editor): override desync with weather transitions (community-shaders#1782)
+
+* fix(weather editor): no-override weather file deletion (community-shaders#1777)
+
+* fix(weather editor): apply weather settings post-load (community-shaders#1776)
+
+* fix(weather editor): handling of weathers without overrides (community-shaders#1773)
+
+* feat(UI): feature headings (community-shaders#1786)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(VR): add wand pointing (community-shaders#1790)
+
+* chore(UI): theme consistency (community-shaders#1787)
+
+* fix(upscaling): warn about max nvidia resolution (community-shaders#1795)
+
+Co-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>
+
+* chore(linear lighting): UI settings changes (community-shaders#1785)
+
+Co-authored-by: Jiaye <l936249247@hotmail.com>
+
+* fix(grass-lighting) better basic grass brightness default (community-shaders#1780)
+
+* chore(UI): remove settings and about tabs (community-shaders#1794)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* fix(terrain shadows): fix compiler warnings (community-shaders#1798)
+
+* fix: fix flickering particles (community-shaders#1791)
+
+* fix(terrain blending): disable vr support (community-shaders#1799)
+
+* refactor(upscaling): standardize behavior and tune settings (community-shaders#1783)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(UI): add auto-hide featurelist option (community-shaders#1793)
+
+* fix: match grass brightness of vanilla (community-shaders#1801)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* refactor(perfoverlay): remove color from "Other" and "Total" (community-shaders#1806)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* fix(unified water): fix for mesh water jitter (community-shaders#1809)
+
+* fix: clear shader cache on plugin version change (community-shaders#1739)
+
+* feat(filewatcher): add hlsli tracking (community-shaders#1796)
+
+* feat(linear lighting): add ambient multiplier (community-shaders#1805)
+
+* fix(unified-water): underwater fog flicker (community-shaders#1807)
+
+* fix(UI): conflicting esc key on welcome hotkey dialogue (community-shaders#1811)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* chore(UI): add subtext font to tooltips (community-shaders#1810)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* build: bump streamline to 2.10.3 (community-shaders#1813)
+
+* build: resolve shader warnings (community-shaders#1818)
+
+* feat(ui): add combo hotkey support (community-shaders#1808)
+
+* feat: add feature constraints (community-shaders#1804)
+
+* build: update version to 1.4.8 (community-shaders#1802)
+
+* fix(VR): apply per eye upscaling (community-shaders#1819)
+
+- Split upscaling across each eye for correctness and to avoid DLSS failing over 8k x 8k limit
+- Changes HMD mask color to black to hide artifacts with fast movement
+
+* build: bump common lib to 4.2.0 (community-shaders#1821)
+
+Co-authored-by: doodlum <15017472+doodlum@users.noreply.github.com>
+
+* fix(grass collision): catch trashed actor pointers (community-shaders#1765)
+
+* fix(weather editor): desynced override transitions (community-shaders#1820)
+
+* fix(upscaling): fix preset and allocation handling (community-shaders#1824)
+
+Co-authored-by: coderabbitai[bot] <136622811+coderabbitai[bot]@users.noreply.github.com>
+
+* build: remove linear lighting from core whilst in development (community-shaders#1826)
+
+* chore: bump version to 1.4.9 (community-shaders#1827)
+
+* fix: add back LLF core file and remove LL core file (community-shaders#1828)
+
+* fix: dont save shader debug toggles (community-shaders#1831)
+
+* fix: remove IBL from core, unfinished (community-shaders#1830)
+
+* chore: update version to 1.4.10 (community-shaders#1832)
+
+* chore(dynamic cubemaps): lessen normalisation darkening (community-shaders#1833)
+
+* chore(llf): remove LightsVisualisationMode settings loading (community-shaders#1834)
+
+* revert: "fix: dont save shader debug toggles (community-shaders#1831)"
+
+This reverts commit f55f195.
+
+* revert: "chore(llf): remove LightsVisualisationMode settings loading (community-shaders#1834)"
+
+This reverts commit b3db5a7.
+
+* fix: default enabledClasses true
+
+* build: bump version
+
+* feat(upscaling): custom DLSS preset (community-shaders#1837)
+
+* fix(weather editor): sync UI for full transition (community-shaders#1822)
+
+* fix(linearlighting): return correct buffer when ll feature off (community-shaders#1838)
+
+* fix(PBR): skip IrradianceToLinear on specular in vanilla (community-shaders#1839)
+
+* feat(weather editor): adjust slider ranges (community-shaders#1847)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* feat(weather editor): replace volumetric Lighting RGB sliders with color picker (community-shaders#1846)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* fix(grass collision): collision radius math  (community-shaders#1849)
+
+* chore: move new feature information into docs (community-shaders#1848)
+
+Co-authored-by: doodlum <15017472+doodlum@users.noreply.github.com>
+
+* fix(ui): background blur with upscaling (community-shaders#1815)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* refactor: move some features to core (community-shaders#1852)
+
+* fix: fix blown out water specular (community-shaders#1853)
+
+* feat(weather editor): toggle hotkey (community-shaders#1856)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(color picker): add an original color reference to all color pickers (community-shaders#1857)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* perf(emat): alternate tweaks (community-shaders#1850)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(weather-editor): merge weather picker and editor (community-shaders#1845)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* chore(llf): remove LLF settings loading (community-shaders#1859)
+
+* feat: exponential height fog (community-shaders#1708)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(weather editor): block editor access in loading screens (community-shaders#1871)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* feat(weather editor): improve weather picker UI and functionality (community-shaders#1863)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(weather editor): repurpose unsaved changes tracking (community-shaders#1860)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* fix: sync grass lighting defaults to match ENB (community-shaders#1844)
+
+* fix: stop shader compilation on game exit (community-shaders#1867)
+
+closes community-shaders#1130
+
+* fix(weather editor): prevent inputs when editor is open (community-shaders#1872)
+
+* fix(weather editor): add ctd guards (community-shaders#1864)
+
+* feat(weather editor): remove WorldSpace widget and associated code (community-shaders#1878)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* feat(vr): add OpenComposite menu support (community-shaders#1880)
+
+* revert: "feat(vr): add OpenComposite VR menu" (community-shaders#1881)
+
+* revert: "fix: stop shader compilation on game exit" (community-shaders#1882)
+
+* feat(vr): add OpenComposite menu support (community-shaders#1883)
+
+* feat(weather editor): add time controls (community-shaders#1877)
+
+* feat: add shadowmap rasterizer override (community-shaders#1690)
+
+* fix(weather editor): clear feature overrides with revert (community-shaders#1884)
+
+* feat(UI): Interior Only (community-shaders#1854)
+
+* fix(VR): fix Shadowmap Cascade Rasterizer (community-shaders#1888)
+
+* fix(unified water): distance calculation for raindrops & LOD fade (community-shaders#1890)
+
+* refactor: clarify core feature version mismatch text (community-shaders#1886)
+
+* fix: stop shader compilation on game exit (community-shaders#1885)
+
+* build: exclude hlsl tests from packaging (community-shaders#1894)
+
+* chore: disable feature constraints in dev mode (community-shaders#1893)
+
+* fix(vr): improve stereo UV handling (community-shaders#1899)
+
+* fix(weather editor): move esc key to native input system (community-shaders#1897)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* fix: move ResolveMonoUVForEye outside VR guard (community-shaders#1906)
+
+* fix(grass collision): validate actor  (community-shaders#1905)
+
+Co-authored-by: doodlum <15017472+doodlum@users.noreply.github.com>
+
+* fix(terrain shadows): height map regression (community-shaders#1911)
+
+* fix: util vertical fov math (community-shaders#1904)
+
+Co-authored-by: doodlum <15017472+doodlum@users.noreply.github.com>
+
+* test: add float4 overload test (community-shaders#1902)
+
+* refactor: move all features to globals::game::calendar (community-shaders#1909)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: coderabbitai[bot] <136622811+coderabbitai[bot]@users.noreply.github.com>
+
+* fix(UI): resolution based font (community-shaders#1907)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(weather editor): make objects window be independently scrollable (community-shaders#1908)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(UI): consolidate searchbar to util and add to weather editor (community-shaders#1898)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(weather editor): add filled star for favourites. (community-shaders#1913)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* feat(weather editor): add delete json button to objects window (community-shaders#1914)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* fix(VR): resolution-based font (community-shaders#1923)
+
+* refactor: use depthbuffer helper (community-shaders#1925)
+
+* refactor: move TurboColormap into Color.hlsli (community-shaders#1924)
+
+* fix(weather editor): expand clickable area of feature override (community-shaders#1921)
+
+* feat(weather editor): enable snapping to viewport (community-shaders#1917)
+
+* feat(weather editor): highlight enabled cloud layers (community-shaders#1916)
+
+* fix(VR): SSGI discrepancies (community-shaders#1926)
+
+* feat: volumetric shadows (community-shaders#1874)
+
+* ci: enhance feature version audit (community-shaders#1927)
+
+* feat(weather editor): add filter options for objects window (community-shaders#1922)
+
+* feat(weather editor): sticky headers and scrollable content (community-shaders#1930)
+
+* fix(UI): ImGui scaling for borderless mode (community-shaders#1929)
+
+* ci: don't fail on feature audits (community-shaders#1934)
+
+* fix(pbr): use scrap heap allocation (community-shaders#1928)
+
+* chore(UI): add subsurface scattering to Interior Only (community-shaders#1932)
+
+* fix(weather editor): align highlights, fix tooltip (community-shaders#1918)
+
+* fix(ssgi): guard VR only compilation (community-shaders#1938)
+
+* build: update template to avoid extra directory (community-shaders#1812)
+
+* style: fix hlsl formatting (community-shaders#1939)
+
+* fix(UI): improve theme management UI flow (community-shaders#1933)
+
+closes community-shaders#1919
+
+* build(deps): update pre-commit hooks (community-shaders#1768)
+
+* feat(UI): delete theme button (community-shaders#1940)
+
+* feat(UI): open log file button (community-shaders#1942)
+
+* fix(hair): marschner volumetric shadow tint (community-shaders#1944)
+
+* fix(VR): screen space shadows desync (community-shaders#1946)
+
+closes community-shaders#1840
+
+* fix(VR): depth culling during upscaling/Terrain Blending (community-shaders#1858)
+
+* feat(VR): add edge detection for stereo blending (community-shaders#1948)
+
+* refactor: allocate trampoline once (community-shaders#1951)
+
+* fix(UI): PBR MATO color scale RGB settings corrected (community-shaders#1957)
+
+* fix(weather editor): guard against loadorder changes (community-shaders#1953)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+Co-authored-by: davo0411 <davidkehoe0411@outlook.com>
+
+* fix(UI): feature description text wrapping (community-shaders#1960)
+
+* fix(VR): exponential height fog stereo mismatch (community-shaders#1961)
+
+* chore: pbr consistency changes (community-shaders#1841)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+Co-authored-by: coderabbitai[bot] <136622811+coderabbitai[bot]@users.noreply.github.com>
+Co-authored-by: jiayev <l936249247@hotmail.com>
+
+* fix(skylighting): remove PBR lighting scale (community-shaders#1963)
+
+* fix(skysync): effect mesh blackout during shadow caster transitions (community-shaders#1965)
+
+* ci: fix wiki deletion with buffer update (community-shaders#1967)
+
+* feat(weather-editor): option to hide viewport (community-shaders#1970)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* test(shader): fallback to warp on invalidarg (community-shaders#1956)
+
+Co-authored-by: LukeFrankio <loren@example.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat: triplanar projected materials (community-shaders#1950)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* fix(ao): better ao calculations (community-shaders#1968)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* fix(pbr): fix improper kD terms (community-shaders#1971)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* perf(emat): tweak fade and shadow intensity (community-shaders#1892)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(ibl): revamp ibl and dalc sh (community-shaders#1947)
+
+* build: bump commonlib to 4.7.1 (community-shaders#1977)
+
+* fix: upscaling monitor detection fixes (community-shaders#1978)
+
+* fix(weather editor): prevent overrides resetting settings (community-shaders#1980)
+
+* fix(VR): bad llf offset (community-shaders#1984)
+
+* perf: cache frequent ui checks (community-shaders#1985)
+
+* fix: preserve vanilla water TAA when no upscaler is active (community-shaders#1986)
+
+Co-authored-by: jturnley <jturnley@users.noreply.github.com>
+
+* fix(UI): first-time dialog fade affects all overlays (community-shaders#1976)
+
+* fix(skysync): remove sunlight fade and volumetric lighting overrides (community-shaders#1966)
+
+* refactor(HLSL): standardize epsilon constants (community-shaders#1992)
+
+closes community-shaders#1227
+
+* feat(UI): require Shift to dock windows (community-shaders#1989)
+
+* fix(UI): input spam after alt-tab (community-shaders#1993)
+
+* fix(sky sync): early return for invalid cells (community-shaders#1991)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: jiayev <l936249247@hotmail.com>
+
+* fix(sky sync): remove undeclared variable (community-shaders#1994)
+
+* refactor(pbr): clear up semantics (community-shaders#1995)
+
+* fix(UI): scale layout values for high-DPI (community-shaders#1987)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* fix(water): hdr water taa blend (community-shaders#1988)
+
+* refactor(color): clarify gamma conversion functions (community-shaders#1996)
+
+* feat(ISL-editor): add light counters and fix filtering (community-shaders#1997)
+
+* fix(UI): DPI-aware window layouts (community-shaders#2000)
+
+* fix(weather-editor): save color palette window (community-shaders#2001)
+
+* refactor: centralize feature category names (community-shaders#2007)
+
+closes community-shaders#1265
+
+Co-authored-by: Matt Van Horn <455140+mvanhorn@users.noreply.github.com>
+Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>
+
+* chore: bump versions (community-shaders#2010)
+
+* fix(water): sample history mask from current mask (community-shaders#2011)
+
+* chore(wetness-effects): set default MaxPuddleWetness to 1.5 (community-shaders#1981)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* feat(weather-editor): add free camera and play mode (community-shaders#2008)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* build: bump versions and reduce false positives (community-shaders#2013)
+
+* fix(VR): LLF cluster building and culling (community-shaders#2012)
+
+* build: update to VS 2026 (community-shaders#1990)
+
+* ci: fix preset in vs2022 mode (community-shaders#2015)
+
+* ci: remove v2022 from shader jobs (community-shaders#2016)
+
+* feat(upscaling): integrate Streamline Reflex controls (community-shaders#1958)
+
+* fix(unified-water): BSWaterShaderProperty.plane (community-shaders#1998)
+
+---------
+
+Co-authored-by: Skrubby Skrub In A Shrub <87662196+SkrubbySkrubInAShrub@users.noreply.github.com>
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: doodlum <15017472+doodlum@users.noreply.github.com>
+Co-authored-by: jiayev <l936249247@hotmail.com>
+Co-authored-by: Dlizzio <77717521+Dlizzio@users.noreply.github.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+Co-authored-by: Alan Tse <alandtse@users.noreply.github.com>
+Co-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>
+Co-authored-by: Bruce <44987693+brucenguyen@users.noreply.github.com>
+Co-authored-by: Copilot <198982749+Copilot@users.noreply.github.com>
+Co-authored-by: Dawntic <197450198+Dawntic@users.noreply.github.com>
+Co-authored-by: coderabbitai[bot] <136622811+coderabbitai[bot]@users.noreply.github.com>
+Co-authored-by: Alan Tse <alandtse@gmail.com>
+Co-authored-by: Vanni Giachin <vanni.giachin@qlik.com>
+Co-authored-by: zxcvbn <66063766+zndxcvbn@users.noreply.github.com>
+Co-authored-by: ParticleTroned <248299730+ParticleTroned@users.noreply.github.com>
+Co-authored-by: soda <130315225+soda3000@users.noreply.github.com>
+Co-authored-by: YtzyFvra <59631290+YtzyFvra@users.noreply.github.com>
+Co-authored-by: LukeFrankio <lorenzogrutzmann@gmail.com>
+Co-authored-by: LukeFrankio <loren@example.com>
+Co-authored-by: jturnley <32892261+jturnley@users.noreply.github.com>
+Co-authored-by: jturnley <jturnley@users.noreply.github.com>
+Co-authored-by: Igor Alan Albuquerque de Sousa <50077829+IgorAlanAlbuquerque@users.noreply.github.com>
+Co-authored-by: Matt Van Horn <mvanhorn@users.noreply.github.com>
+Co-authored-by: Matt Van Horn <455140+mvanhorn@users.noreply.github.com>
+Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>
+```
+davo0411
+added a commit
+to davo0411/skyrim-community-shaders
+that referenced
+this pull request
+Mar 29, 2026
+update (#34)
+…
+39b8663
+```
+* fix(weather overrides): ensure json format for features (community-shaders#1748)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* perf(terrain blending): tweak defaults (community-shaders#1771)
+
+* fix(lighting): vanilla envcolor mult the correct value (community-shaders#1775)
+
+* fix(water): remove final colour saturate (community-shaders#1778)
+
+* fix(unified-water): LOD water cache mismatch (community-shaders#1779)
+
+* fix(weather editor): override desync with weather transitions (community-shaders#1782)
+
+* fix(weather editor): no-override weather file deletion (community-shaders#1777)
+
+* fix(weather editor): apply weather settings post-load (community-shaders#1776)
+
+* fix(weather editor): handling of weathers without overrides (community-shaders#1773)
+
+* feat(UI): feature headings (community-shaders#1786)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(VR): add wand pointing (community-shaders#1790)
+
+* chore(UI): theme consistency (community-shaders#1787)
+
+* fix(upscaling): warn about max nvidia resolution (community-shaders#1795)
+
+Co-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>
+
+* chore(linear lighting): UI settings changes (community-shaders#1785)
+
+Co-authored-by: Jiaye <l936249247@hotmail.com>
+
+* fix(grass-lighting) better basic grass brightness default (community-shaders#1780)
+
+* chore(UI): remove settings and about tabs (community-shaders#1794)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* fix(terrain shadows): fix compiler warnings (community-shaders#1798)
+
+* fix: fix flickering particles (community-shaders#1791)
+
+* fix(terrain blending): disable vr support (community-shaders#1799)
+
+* refactor(upscaling): standardize behavior and tune settings (community-shaders#1783)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(UI): add auto-hide featurelist option (community-shaders#1793)
+
+* fix: match grass brightness of vanilla (community-shaders#1801)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* refactor(perfoverlay): remove color from "Other" and "Total" (community-shaders#1806)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* fix(unified water): fix for mesh water jitter (community-shaders#1809)
+
+* fix: clear shader cache on plugin version change (community-shaders#1739)
+
+* feat(filewatcher): add hlsli tracking (community-shaders#1796)
+
+* feat(linear lighting): add ambient multiplier (community-shaders#1805)
+
+* fix(unified-water): underwater fog flicker (community-shaders#1807)
+
+* fix(UI): conflicting esc key on welcome hotkey dialogue (community-shaders#1811)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* chore(UI): add subtext font to tooltips (community-shaders#1810)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* build: bump streamline to 2.10.3 (community-shaders#1813)
+
+* build: resolve shader warnings (community-shaders#1818)
+
+* feat(ui): add combo hotkey support (community-shaders#1808)
+
+* feat: add feature constraints (community-shaders#1804)
+
+* build: update version to 1.4.8 (community-shaders#1802)
+
+* fix(VR): apply per eye upscaling (community-shaders#1819)
+
+- Split upscaling across each eye for correctness and to avoid DLSS failing over 8k x 8k limit
+- Changes HMD mask color to black to hide artifacts with fast movement
+
+* build: bump common lib to 4.2.0 (community-shaders#1821)
+
+Co-authored-by: doodlum <15017472+doodlum@users.noreply.github.com>
+
+* fix(grass collision): catch trashed actor pointers (community-shaders#1765)
+
+* fix(weather editor): desynced override transitions (community-shaders#1820)
+
+* fix(upscaling): fix preset and allocation handling (community-shaders#1824)
+
+Co-authored-by: coderabbitai[bot] <136622811+coderabbitai[bot]@users.noreply.github.com>
+
+* build: remove linear lighting from core whilst in development (community-shaders#1826)
+
+* chore: bump version to 1.4.9 (community-shaders#1827)
+
+* fix: add back LLF core file and remove LL core file (community-shaders#1828)
+
+* fix: dont save shader debug toggles (community-shaders#1831)
+
+* fix: remove IBL from core, unfinished (community-shaders#1830)
+
+* chore: update version to 1.4.10 (community-shaders#1832)
+
+* chore(dynamic cubemaps): lessen normalisation darkening (community-shaders#1833)
+
+* chore(llf): remove LightsVisualisationMode settings loading (community-shaders#1834)
+
+* revert: "fix: dont save shader debug toggles (community-shaders#1831)"
+
+This reverts commit f55f195.
+
+* revert: "chore(llf): remove LightsVisualisationMode settings loading (community-shaders#1834)"
+
+This reverts commit b3db5a7.
+
+* fix: default enabledClasses true
+
+* build: bump version
+
+* feat(upscaling): custom DLSS preset (community-shaders#1837)
+
+* fix(weather editor): sync UI for full transition (community-shaders#1822)
+
+* fix(linearlighting): return correct buffer when ll feature off (community-shaders#1838)
+
+* fix(PBR): skip IrradianceToLinear on specular in vanilla (community-shaders#1839)
+
+* feat(weather editor): adjust slider ranges (community-shaders#1847)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* feat(weather editor): replace volumetric Lighting RGB sliders with color picker (community-shaders#1846)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* fix(grass collision): collision radius math  (community-shaders#1849)
+
+* chore: move new feature information into docs (community-shaders#1848)
+
+Co-authored-by: doodlum <15017472+doodlum@users.noreply.github.com>
+
+* fix(ui): background blur with upscaling (community-shaders#1815)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* refactor: move some features to core (community-shaders#1852)
+
+* fix: fix blown out water specular (community-shaders#1853)
+
+* feat(weather editor): toggle hotkey (community-shaders#1856)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(color picker): add an original color reference to all color pickers (community-shaders#1857)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* perf(emat): alternate tweaks (community-shaders#1850)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(weather-editor): merge weather picker and editor (community-shaders#1845)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* chore(llf): remove LLF settings loading (community-shaders#1859)
+
+* feat: exponential height fog (community-shaders#1708)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(weather editor): block editor access in loading screens (community-shaders#1871)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* feat(weather editor): improve weather picker UI and functionality (community-shaders#1863)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(weather editor): repurpose unsaved changes tracking (community-shaders#1860)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* fix: sync grass lighting defaults to match ENB (community-shaders#1844)
+
+* fix: stop shader compilation on game exit (community-shaders#1867)
+
+closes community-shaders#1130
+
+* fix(weather editor): prevent inputs when editor is open (community-shaders#1872)
+
+* fix(weather editor): add ctd guards (community-shaders#1864)
+
+* feat(weather editor): remove WorldSpace widget and associated code (community-shaders#1878)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* feat(vr): add OpenComposite menu support (community-shaders#1880)
+
+* revert: "feat(vr): add OpenComposite VR menu" (community-shaders#1881)
+
+* revert: "fix: stop shader compilation on game exit" (community-shaders#1882)
+
+* feat(vr): add OpenComposite menu support (community-shaders#1883)
+
+* feat(weather editor): add time controls (community-shaders#1877)
+
+* feat: add shadowmap rasterizer override (community-shaders#1690)
+
+* fix(weather editor): clear feature overrides with revert (community-shaders#1884)
+
+* feat(UI): Interior Only (community-shaders#1854)
+
+* fix(VR): fix Shadowmap Cascade Rasterizer (community-shaders#1888)
+
+* fix(unified water): distance calculation for raindrops & LOD fade (community-shaders#1890)
+
+* refactor: clarify core feature version mismatch text (community-shaders#1886)
+
+* fix: stop shader compilation on game exit (community-shaders#1885)
+
+* build: exclude hlsl tests from packaging (community-shaders#1894)
+
+* chore: disable feature constraints in dev mode (community-shaders#1893)
+
+* fix(vr): improve stereo UV handling (community-shaders#1899)
+
+* fix(weather editor): move esc key to native input system (community-shaders#1897)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* fix: move ResolveMonoUVForEye outside VR guard (community-shaders#1906)
+
+* fix(grass collision): validate actor  (community-shaders#1905)
+
+Co-authored-by: doodlum <15017472+doodlum@users.noreply.github.com>
+
+* fix(terrain shadows): height map regression (community-shaders#1911)
+
+* fix: util vertical fov math (community-shaders#1904)
+
+Co-authored-by: doodlum <15017472+doodlum@users.noreply.github.com>
+
+* test: add float4 overload test (community-shaders#1902)
+
+* refactor: move all features to globals::game::calendar (community-shaders#1909)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: coderabbitai[bot] <136622811+coderabbitai[bot]@users.noreply.github.com>
+
+* fix(UI): resolution based font (community-shaders#1907)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(weather editor): make objects window be independently scrollable (community-shaders#1908)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(UI): consolidate searchbar to util and add to weather editor (community-shaders#1898)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(weather editor): add filled star for favourites. (community-shaders#1913)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* feat(weather editor): add delete json button to objects window (community-shaders#1914)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* fix(VR): resolution-based font (community-shaders#1923)
+
+* refactor: use depthbuffer helper (community-shaders#1925)
+
+* refactor: move TurboColormap into Color.hlsli (community-shaders#1924)
+
+* fix(weather editor): expand clickable area of feature override (community-shaders#1921)
+
+* feat(weather editor): enable snapping to viewport (community-shaders#1917)
+
+* feat(weather editor): highlight enabled cloud layers (community-shaders#1916)
+
+* fix(VR): SSGI discrepancies (community-shaders#1926)
+
+* feat: volumetric shadows (community-shaders#1874)
+
+* ci: enhance feature version audit (community-shaders#1927)
+
+* feat(weather editor): add filter options for objects window (community-shaders#1922)
+
+* feat(weather editor): sticky headers and scrollable content (community-shaders#1930)
+
+* fix(UI): ImGui scaling for borderless mode (community-shaders#1929)
+
+* ci: don't fail on feature audits (community-shaders#1934)
+
+* fix(pbr): use scrap heap allocation (community-shaders#1928)
+
+* chore(UI): add subsurface scattering to Interior Only (community-shaders#1932)
+
+* fix(weather editor): align highlights, fix tooltip (community-shaders#1918)
+
+* fix(ssgi): guard VR only compilation (community-shaders#1938)
+
+* build: update template to avoid extra directory (community-shaders#1812)
+
+* style: fix hlsl formatting (community-shaders#1939)
+
+* fix(UI): improve theme management UI flow (community-shaders#1933)
+
+closes community-shaders#1919
+
+* build(deps): update pre-commit hooks (community-shaders#1768)
+
+* feat(UI): delete theme button (community-shaders#1940)
+
+* feat(UI): open log file button (community-shaders#1942)
+
+* fix(hair): marschner volumetric shadow tint (community-shaders#1944)
+
+* fix(VR): screen space shadows desync (community-shaders#1946)
+
+closes community-shaders#1840
+
+* fix(VR): depth culling during upscaling/Terrain Blending (community-shaders#1858)
+
+* feat(VR): add edge detection for stereo blending (community-shaders#1948)
+
+* refactor: allocate trampoline once (community-shaders#1951)
+
+* fix(UI): PBR MATO color scale RGB settings corrected (community-shaders#1957)
+
+* fix(weather editor): guard against loadorder changes (community-shaders#1953)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+Co-authored-by: davo0411 <davidkehoe0411@outlook.com>
+
+* fix(UI): feature description text wrapping (community-shaders#1960)
+
+* fix(VR): exponential height fog stereo mismatch (community-shaders#1961)
+
+* chore: pbr consistency changes (community-shaders#1841)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+Co-authored-by: coderabbitai[bot] <136622811+coderabbitai[bot]@users.noreply.github.com>
+Co-authored-by: jiayev <l936249247@hotmail.com>
+
+* fix(skylighting): remove PBR lighting scale (community-shaders#1963)
+
+* fix(skysync): effect mesh blackout during shadow caster transitions (community-shaders#1965)
+
+* ci: fix wiki deletion with buffer update (community-shaders#1967)
+
+* feat(weather-editor): option to hide viewport (community-shaders#1970)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* test(shader): fallback to warp on invalidarg (community-shaders#1956)
+
+Co-authored-by: LukeFrankio <loren@example.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat: triplanar projected materials (community-shaders#1950)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* fix(ao): better ao calculations (community-shaders#1968)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* fix(pbr): fix improper kD terms (community-shaders#1971)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* perf(emat): tweak fade and shadow intensity (community-shaders#1892)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* feat(ibl): revamp ibl and dalc sh (community-shaders#1947)
+
+* build: bump commonlib to 4.7.1 (community-shaders#1977)
+
+* fix: upscaling monitor detection fixes (community-shaders#1978)
+
+* fix(weather editor): prevent overrides resetting settings (community-shaders#1980)
+
+* fix(VR): bad llf offset (community-shaders#1984)
+
+* perf: cache frequent ui checks (community-shaders#1985)
+
+* fix: preserve vanilla water TAA when no upscaler is active (community-shaders#1986)
+
+Co-authored-by: jturnley <jturnley@users.noreply.github.com>
+
+* fix(UI): first-time dialog fade affects all overlays (community-shaders#1976)
+
+* fix(skysync): remove sunlight fade and volumetric lighting overrides (community-shaders#1966)
+
+* refactor(HLSL): standardize epsilon constants (community-shaders#1992)
+
+closes community-shaders#1227
+
+* feat(UI): require Shift to dock windows (community-shaders#1989)
+
+* fix(UI): input spam after alt-tab (community-shaders#1993)
+
+* fix(sky sync): early return for invalid cells (community-shaders#1991)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: jiayev <l936249247@hotmail.com>
+
+* fix(sky sync): remove undeclared variable (community-shaders#1994)
+
+* refactor(pbr): clear up semantics (community-shaders#1995)
+
+* fix(UI): scale layout values for high-DPI (community-shaders#1987)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* fix(water): hdr water taa blend (community-shaders#1988)
+
+* refactor(color): clarify gamma conversion functions (community-shaders#1996)
+
+* feat(ISL-editor): add light counters and fix filtering (community-shaders#1997)
+
+* fix(UI): DPI-aware window layouts (community-shaders#2000)
+
+* fix(weather-editor): save color palette window (community-shaders#2001)
+
+* refactor: centralize feature category names (community-shaders#2007)
+
+closes community-shaders#1265
+
+Co-authored-by: Matt Van Horn <455140+mvanhorn@users.noreply.github.com>
+Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>
+
+* chore: bump versions (community-shaders#2010)
+
+* fix(water): sample history mask from current mask (community-shaders#2011)
+
+* chore(wetness-effects): set default MaxPuddleWetness to 1.5 (community-shaders#1981)
+
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+
+* feat(weather-editor): add free camera and play mode (community-shaders#2008)
+
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+
+* build: bump versions and reduce false positives (community-shaders#2013)
+
+* fix(VR): LLF cluster building and culling (community-shaders#2012)
+
+* build: update to VS 2026 (community-shaders#1990)
+
+* ci: fix preset in vs2022 mode (community-shaders#2015)
+
+* ci: remove v2022 from shader jobs (community-shaders#2016)
+
+* feat(upscaling): integrate Streamline Reflex controls (community-shaders#1958)
+
+* fix(unified-water): BSWaterShaderProperty.plane (community-shaders#1998)
+
+---------
+
+Co-authored-by: Skrubby Skrub In A Shrub <87662196+SkrubbySkrubInAShrub@users.noreply.github.com>
+Co-authored-by: SkrubbySkrubInAShrub <skrubbyskrubinashrub@gmail.com>
+Co-authored-by: doodlum <15017472+doodlum@users.noreply.github.com>
+Co-authored-by: jiayev <l936249247@hotmail.com>
+Co-authored-by: Dlizzio <77717521+Dlizzio@users.noreply.github.com>
+Co-authored-by: pre-commit-ci[bot] <66853113+pre-commit-ci[bot]@users.noreply.github.com>
+Co-authored-by: Alan Tse <alandtse@users.noreply.github.com>
+Co-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>
+Co-authored-by: Bruce <44987693+brucenguyen@users.noreply.github.com>
+Co-authored-by: Copilot <198982749+Copilot@users.noreply.github.com>
+Co-authored-by: Dawntic <197450198+Dawntic@users.noreply.github.com>
+Co-authored-by: coderabbitai[bot] <136622811+coderabbitai[bot]@users.noreply.github.com>
+Co-authored-by: Alan Tse <alandtse@gmail.com>
+Co-authored-by: Vanni Giachin <vanni.giachin@qlik.com>
+Co-authored-by: zxcvbn <66063766+zndxcvbn@users.noreply.github.com>
+Co-authored-by: ParticleTroned <248299730+ParticleTroned@users.noreply.github.com>
+Co-authored-by: soda <130315225+soda3000@users.noreply.github.com>
+Co-authored-by: YtzyFvra <59631290+YtzyFvra@users.noreply.github.com>
+Co-authored-by: LukeFrankio <lorenzogrutzmann@gmail.com>
+Co-authored-by: LukeFrankio <loren@example.com>
+Co-authored-by: jturnley <32892261+jturnley@users.noreply.github.com>
+Co-authored-by: jturnley <jturnley@users.noreply.github.com>
+Co-authored-by: Igor Alan Albuquerque de Sousa <50077829+IgorAlanAlbuquerque@users.noreply.github.com>
+Co-authored-by: Matt Van Horn <mvanhorn@users.noreply.github.com>
+Co-authored-by: Matt Van Horn <455140+mvanhorn@users.noreply.github.com>
+Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>
+```
+ParticleTroned
+added a commit
+to ParticleTroned/skyrim-community-shaders
+that referenced
+this pull request
+Apr 9, 2026
+revert(tb): roll back PR community-shaders#1858 Terrain Blending changes
+1d5ea23
+doodlum
+mentioned this pull request
+Jun 11, 2026
+revert(terrain-blending): revert VR-era code to original
+#2499
+Merged
+4 tasks
+doodlum
+pushed a commit
+to doodlum/skyrim-community-shaders
+that referenced
+this pull request
+Aug 26, 2026
+fix(VR): depth culling during upscaling/Terrain Blending (community-s…
+…
+a26de2c
+```
+…haders#1858)
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

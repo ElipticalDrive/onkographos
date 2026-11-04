@@ -1,0 +1,198 @@
+# Volumetric Primitive PRB Integrator
+
+Also called: Volumetric Primitives Path Tracing, VolumetricPrimitivesPRBIntegrator
+
+## Overview
+The Volumetric Primitive PRB Integrator is a path tracing method for rendering scattering and emissive media represented by mixtures of kernel-based volumetric primitives (e.g., Gaussians, Epanechnikov) rather than voxel grids or point clouds [S1, unofficial]. It modifies standard volumetric path tracing by replacing medium interaction routines with primitive-specific transmittance evaluation, free-flight distance sampling, and albedo evaluation [S1, unofficial]. It distinguishes itself from its sibling, the Volumetric Primitive Tomography Integrator, by supporting scattering and emissive media via multiple importance sampling with PDF balancing, whereas the tomography integrator integrates density with no scattering [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scene containing a list of volumetric primitives (each defined by a kernel type, center, scale, orientation, extinction coefficient $\sigma_t$, and albedo), a camera ray, and a sampler.
+*   **Output:** The radiance contribution along the ray.
+
+**Data Structures:**
+*   **Primitive Attributes:** Each primitive stores kernel parameters (e.g., mean, covariance for Gaussians), $\sigma_t$, and albedo.
+*   **Interaction Stack:** A stack for primitive IDs with size `max_overlaps` (default 32) to store overlapping primitives during traversal [S1, unofficial].
+*   **State:** Ray, active mask, depth, previous event PDF, throughput $\beta$ [S1, unofficial].
+
+**Parameters:**
+*   `kernel_type`: String, 'gaussian' or 'epanechnikov' [S1, unofficial].
+*   `solver_type`: String, 'bisection', 'newton', or 'disabled' [S1, unofficial].
+*   `max_overlaps`: Integer, default 32 [S1, unofficial].
+*   `max_depth_primitive`: Integer, default 256 [S1, unofficial].
+*   `rr_depth_primitive`: Integer, default 256 [S1, unofficial].
+*   `solver_max_iterations`: Integer, default 4 [S1, unofficial].
+
+**Steps:**
+
+1.  **Initialization:** Initialize integrator state: set ray to primal copy, active mask, depth=0, previous event PDF=1.0, throughput $\beta=1.0$. Allocate stack for primitive IDs with size `max_overlaps` [S1, unofficial].
+2.  **Primitive Tracing Loop:** While active: Call `primitive_tracing` with scene, sampler, ray, primitives, depth, and callback `self.sample_segment`. This function samples a medium interaction distance `sampled_t` and retrieves overlapping primitives [S1, unofficial].
+3.  **Throughput Update:** Update throughput $\beta *= \text{weight}$. Deactivate paths where $\beta$ is zero: `active &= dr.any(β != 0.0)` [S1, unofficial].
+4.  **Interaction Construction:** Construct `MediumInteraction mei`: set $w_i = -\text{ray}.d$, $sh\_frame$ from $w_i$, $t = \text{sampled\_t}$, $p = \text{ray}(\text{sampled\_t})$ [S1, unofficial].
+5.  **Classification:** Classify interaction:
+    *   `active_surface = active & ~mei.is_valid() & si.is_valid()`
+    *   `active_medium = active & mei.is_valid()`
+    *   `escaped_medium = active & ~mei.is_valid() & ~si.is_valid()` [S1, unofficial].
+6.  **Depth Management:** Increment depth for surface and medium interactions. Clamp `active_medium` and `active_surface` by `max_depth` [S1, unofficial].
+7.  **Derivative Evaluation (Gradient Mode):** If not primal (gradient mode), evaluate transmittance derivatives: create `ray2` from origin to interaction point (or previous surface), call `eval_transmittance(scene, sampler, ray2, primitives, L, δL, mode, active2)` [S1, unofficial].
+8.  **Albedo Evaluation:** Evaluate albedo at `mei.p` for active medium interactions: `albedo = self.eval_albedo(scene, mei.p, primitives, L, δL, mode, active_medium)`. Update throughput: $\beta[\text{active\_medium}] *= \text{albedo}$ [S1, unofficial].
+9.  **BSDF Sampling:** Sample emitter direction using BSDF at `si` (or `mei` if `active_medium`). Continue path [S1, unofficial].
+10. **Albedo Derivative Propagation:**
+    *   Iterate over active primitives, gather ellipsoid and attributes ($\sigma_t$, albedo).
+    *   Compute pdf: $\text{pdf} = \text{kernel.pdf}(p, \text{ellipsoid}) * \sigma_t$ [S1, unofficial].
+    *   Compute derivative of accum_albedo term: $d\_albedo\_pdf = \text{replace\_grad}(1.0, \text{albedo} * \text{pdf})$, $\text{contrib} += d\_albedo\_pdf * \text{detach}(\text{safe\_rcp}(\text{accum\_pdf}) * L\_albedo)$ [S1, unofficial].
+    *   Compute derivative of accum_pdf term: $d\_pdf = \text{replace\_grad}(1.0, \text{pdf})$, $\text{contrib} += -d\_pdf * \text{detach}(\text{accum\_albedo} * \text{safe\_rcp}(\text{accum\_pdf} * \text{accum\_pdf}) * L\_albedo)$ [S1, unofficial].
+    *   Compute derivative of pdf term that cancels out: $\text{contrib} += d\_pdf * \text{detach}(L * \text{safe\_rcp}(\text{accum\_pdf}))$ [S1, unofficial].
+    *   Apply active mask to contrib and propagate gradients: if `grad_enabled`, use `dr.backward_from(δL * contrib)` for Backward mode or `δL += dr.forward_to(contrib)` for Forward mode [S1, unofficial].
+    *   Compute final albedo: $\text{albedo} = \text{accum\_albedo} * \text{safe\_rcp}(\text{accum\_pdf})$ [S1, unofficial].
+11. **Segment Transmittance Sampling:**
+    *   Iterate primitives, gather ellipsoid.
+    *   Compute density: $\text{density} = \text{kernel.density\_integral}(\text{ray}, \text{ellipsoid}, \text{seg\_t0}, \text{seg\_t1})$.
+    *   Update optical depth: $\text{seg\_tau} += \text{density} * \sigma_t$.
+    *   Compute segment transmittance: $\text{seg\_tr} = \exp(-\text{seg\_tau})$ [S1, unofficial].
+12. **Segment Sampling Condition:** Test segment sampling condition: $\chi_i = \beta * \text{seg\_tr}$, $\text{success} = \text{active} \& (\chi_i < \text{sample}) \& \sim\text{primitives.is\_empty()}$ [S1, unofficial].
+13. **Interaction Distance Sampling:**
+    *   If `solver_type == 'disabled'`, $t_s = (\text{seg\_t0} + \text{seg\_t1}) / 2.0$ [S1, unofficial].
+    *   Else call `primitives_sample_interaction_segment` [S1, unofficial].
+14. **Solver Loop (`primitives_sample_interaction_segment`):**
+    *   Fetch primitive attributes into stacks: ellipsoids and sigmats, iterating over active primitives [S1, unofficial].
+    *   Inside solver loop, compute cdf and pdf:
+        *   Iterate primitives, $\text{density} = \text{kernel.density\_integral}(\text{ray}, \text{ellipsoid}, \text{seg\_t0}, t_s)$.
+        *   $\text{tau} += \text{density} * \text{sigmat}$.
+        *   $\text{cdf} += \text{density} * \text{sigmat}$.
+        *   If Newton, $\text{pdf} += \text{kernel.pdf}(\text{ray}(t_s), \text{ellipsoid}) * \text{sigmat}$ [S1, unofficial].
+    *   Update $t_s$:
+        *   If Newton: $\text{step} = (\exp(-\chi) - \exp(-\text{cdf})) / \text{pdf}$, $t_s -= \text{step}$ [S1, unofficial].
+        *   If Bisection: $\text{step} = (\text{seg\_t1} - \text{seg\_t0}) / 2^{it+2}$, $t_s += \text{step}$ if $\text{tau} < \chi$ else $t_s -= \text{step}$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sample_segment(self, scene, sampler, ray, primitives, depth, active, max_depth_primitive, rr_depth_primitive):
+    """
+    Samples a medium interaction distance and retrieves overlapping primitives.
+    """
+    # Initialize state
+    t_s = ray.t_min
+    seg_t0 = ray.t_min
+    seg_t1 = ray.t_max
+    
+    # Fetch primitive attributes
+    ellipsoids = []
+    sigmats = []
+    for prim in primitives:
+        if prim.is_valid():
+            ellipsoids.append(prim.ellipsoid)
+            sigmats.append(prim.sigma_t)
+            
+    # Compute segment transmittance for sampling condition
+    seg_tau = 0.0
+    for ellipsoid, sigmat in zip(ellipsoids, sigmats):
+        density = kernel.density_integral(ray, ellipsoid, seg_t0, seg_t1)
+        seg_tau += density * sigmat
+    seg_tr = exp(-seg_tau)
+    
+    # Test sampling condition
+    chi_i = self.throughput * seg_tr
+    sample = sampler.next_1d()
+    success = active & (chi_i < sample) & (~primitives.is_empty())
+    
+    if not dr.any(success):
+        return 0.0, [] # No interaction
+        
+    # Sample interaction distance
+    if self.solver_type == 'disabled':
+        t_s = (seg_t0 + seg_t1) / 2.0
+    else:
+        # Newton or Bisection solver
+        t_s = seg_t0
+        for it in range(self.solver_max_iterations):
+            tau = 0.0
+            cdf = 0.0
+            pdf = 0.0
+            
+            for ellipsoid, sigmat in zip(ellipsoids, sigmats):
+                density = kernel.density_integral(ray, ellipsoid, seg_t0, t_s)
+                tau += density * sigmat
+                cdf += density * sigmat
+                
+                if self.solver_type == 'newton':
+                    pdf += kernel.pdf(ray(t_s), ellipsoid) * sigmat
+            
+            chi = self.throughput * exp(-tau)
+            
+            if self.solver_type == 'newton':
+                step = (exp(-chi) - exp(-cdf)) / pdf
+                t_s -= step
+            elif self.solver_type == 'bisection':
+                step = (seg_t1 - seg_t0) / (2 ** (it + 2))
+                if tau < chi:
+                    t_s += step
+                else:
+                    t_s -= step
+            
+            # Clip t_s to segment to avoid NaNs
+            t_s = max(seg_t0, min(seg_t1, t_s))
+            
+            # Check convergence or divergence
+            if it == self.solver_max_iterations - 1:
+                if not converged:
+                    t_s = 0.5 * (seg_t0 + seg_t1)
+                    
+    return t_s, ellipsoids
+
+def eval_albedo(self, scene, p, primitives, L, dL, mode, active_medium):
+    """
+    Evaluates albedo at point p for active medium interactions.
+    """
+    accum_albedo = 0.0
+    accum_pdf = 0.0
+    
+    for prim in primitives:
+        if prim.is_valid():
+            ellipsoid = prim.ellipsoid
+            sigmat = prim.sigma_t
+            albedo_val = prim.albedo
+            
+            pdf = kernel.pdf(p, ellipsoid) * sigmat
+            accum_albedo += albedo_val * pdf
+            accum_pdf += pdf
+            
+            # Derivative computation for gradient mode
+            if mode == 'backward':
+                d_albedo_pdf = dr.replace_grad(1.0, albedo_val * pdf)
+                dL += d_albedo_pdf * dr.detach(dr.safe_rcp(accum_pdf) * L)
+                
+                d_pdf = dr.replace_grad(1.0, pdf)
+                dL += -d_pdf * dr.detach(accum_albedo * dr.safe_rcp(accum_pdf * accum_pdf) * L)
+                
+                dL += d_pdf * dr.detach(L * dr.safe_rcp(accum_pdf))
+                
+    final_albedo = accum_albedo * dr.safe_rcp(accum_pdf)
+    return final_albedo
+```
+
+## Subtopics
+
+### Volumetric Primitive Tomography Integrator
+Integrates density of overlapping volumetric primitives along the ray with no scattering. Use when rendering absorbing media only. [Link](2542-volumetric-primitive-tomography-integrator.md)
+
+### Volumetric Primitive Radiance Field Integrator
+The parent method providing the general framework for volumetric primitive rendering. Use as the base for implementing specific integrators like PRB or Tomography. [Link](2536-volumetric-primitive-radiance-field-integrator.md)
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of overlapping primitives per ray and the solver iterations. Each primitive evaluation involves kernel density integral and PDF calculation.
+*   **Memory Complexity:** Linear in the number of primitives for storage. The stack size is bounded by `max_overlaps` (default 32) [S1, unofficial].
+*   **Performance:** The Newton solver converges faster than Bisection by using derivative information (PDF), while Bisection uses fixed step halving [S1, unofficial].
+*   **Strengths:** Supports scattering and emissive media, differentiable rendering via Dr.Jit, efficient representation using kernel primitives.
+*   **Limitations:** Requires an environment emitter; multiple emitters trigger a warning. Divergence in the solver can lead to NaNs if not clipped [S1, unofficial].
+*   **When to use:** When rendering scattering media represented by volumetric primitives (e.g., 3D Gaussians) with differentiable requirements.
+*   **When not to use:** When only absorbing media is needed (use Tomography Integrator) or when no environment emitter is available [S1, unofficial].
+
+## Background
+The Volumetric Primitive PRB Integrator is part of the `volumetric_primitives` project by Meta Platforms, Inc. and affiliates, licensed under the MIT license [S1, unofficial]. It is designed to render assets generated by optimization pipelines that convert volume grids or 3D Gaussian Splatting datasets into volumetric primitives [S1, unofficial]. The method leverages Dr.Jit for automatic differentiation, enabling gradient-based optimization of primitive parameters [S1, unofficial].
+
+## Sources
+[S1] facebookresearch/volumetric_primitives, https://github.com/facebookresearch/volumetric_primitives, fetched 2026-10-26 (unofficial)

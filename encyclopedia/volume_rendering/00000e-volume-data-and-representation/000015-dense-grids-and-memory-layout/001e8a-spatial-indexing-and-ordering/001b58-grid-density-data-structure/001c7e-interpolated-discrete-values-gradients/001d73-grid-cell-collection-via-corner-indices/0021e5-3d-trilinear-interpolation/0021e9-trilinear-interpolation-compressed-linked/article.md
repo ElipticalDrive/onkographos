@@ -3,20 +3,20 @@
 Also called: JAX Trilinear Interpolation (Vmapped)
 
 ## Overview
-This method performs trilinear interpolation on a compressed sparse grid using a links array to map voxel indices to compressed value indices, handling boundary checks via masking or a zero-value hack [S1]. It builds on [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) by adding a link lookup step that translates grid coordinates to compressed indices while retaining the regular 8-corner neighborhood structure.
+This method performs trilinear interpolation on a compressed sparse grid using a links array to map voxel indices to compressed value indices, handling boundary checks via masking or a zero-value hack [S1, unofficial]. It builds on [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) by adding a link lookup step that translates grid coordinates to compressed indices while retaining the regular 8-corner neighborhood structure.
 
 ## How it works
 **Inputs:**
-- `xyz`: Array of sample coordinates, shape `(N, 3)`, in the same coordinate system as the grid [S1].
-- `links`: 3D integer array, shape `(Dx, Dy, Dz)`, mapping each voxel corner to an index in the compressed value array [S1]. Invalid links are represented by negative integers [S1].
-- `values_compressed`: Array of values, shape `(M, C)`, where `M` is the number of valid compressed entries and `C` is the channel dimension [S1].
+- `xyz`: Array of sample coordinates, shape `(N, 3)`, in the same coordinate system as the grid [S1, unofficial].
+- `links`: 3D integer array, shape `(Dx, Dy, Dz)`, mapping each voxel corner to an index in the compressed value array [S1, unofficial]. Invalid links are represented by negative integers [S1, unofficial].
+- `values_compressed`: Array of values, shape `(M, C)`, where `M` is the number of valid compressed entries and `C` is the channel dimension [S1, unofficial].
 
 **Outputs:**
-- `result`: Interpolated values at the sample points, shape `(N, C)` [S1].
+- `result`: Interpolated values at the sample points, shape `(N, C)` [S1, unofficial].
 
 **Data Structures:**
-- `links`: A 3D integer array where `links[x, y, z]` returns the index `k` such that `values_compressed[k]` holds the value for the voxel corner at `(x, y, z)` [S1]. If the corner is invalid, `links[x, y, z] < 0` [S1].
-- `values_compressed`: A 2D array where each row corresponds to a valid voxel corner's data [S1]. Index 0 is often reserved as a zero-value placeholder for boundary handling in the zero-value hack variant [S1].
+- `links`: A 3D integer array where `links[x, y, z]` returns the index `k` such that `values_compressed[k]` holds the value for the voxel corner at `(x, y, z)` [S1, unofficial]. If the corner is invalid, `links[x, y, z] < 0` [S1, unofficial].
+- `values_compressed`: A 2D array where each row corresponds to a valid voxel corner's data [S1, unofficial]. Index 0 is often reserved as a zero-value placeholder for boundary handling in the zero-value hack variant [S1, unofficial].
 
 **Steps:**
 
@@ -24,37 +24,37 @@ This method performs trilinear interpolation on a compressed sparse grid using a
    Compute the floor and fractional parts of the input coordinates.
    $$ x_0, y_0, z_0 = \lfloor xyz \rfloor $$
    $$ xd, yd, zd = xyz - (x_0, y_0, z_0) $$
-   Where $x_0, y_0, z_0$ are integer indices for the voxel containing the sample point, and $xd, yd, zd \in [0, 1)$ are the relative positions within that voxel [S1].
+   Where $x_0, y_0, z_0$ are integer indices for the voxel containing the sample point, and $xd, yd, zd \in [0, 1)$ are the relative positions within that voxel [S1, unofficial].
 
 2. **Corner Link Lookup:**
    Retrieve the compressed indices for all 8 corners of the voxel defined by $(x_0, y_0, z_0)$.
    $$ l_{ijk} = \text{links}[x_0+i, y_0+j, z_0+k] \quad \text{for } i,j,k \in \{0,1\} $$
-   This yields 8 indices: $l_{000}, l_{100}, l_{010}, l_{110}, l_{001}, l_{101}, l_{011}, l_{111}$ [S1].
+   This yields 8 indices: $l_{000}, l_{100}, l_{010}, l_{110}, l_{001}, l_{101}, l_{011}, l_{111}$ [S1, unofficial].
 
 3. **Validity Masking:**
-   Create boolean masks for each link indicating validity (index $\ge 0$) [S1].
+   Create boolean masks for each link indicating validity (index $\ge 0$) [S1, unofficial].
    $$ m_{ijk} = (l_{ijk} \ge 0) $$
-   For strict mode, compute the intersection of all 8 masks to identify sample points where all 8 corners are valid [S1].
+   For strict mode, compute the intersection of all 8 masks to identify sample points where all 8 corners are valid [S1, unofficial].
    $$ m_{valid} = m_{000} \land m_{100} \land m_{010} \land m_{110} \land m_{001} \land m_{101} \land m_{011} \land m_{111} $$
-   For the zero-value hack variant, compute the union of all 8 masks to identify points touching the boundary [S1].
+   For the zero-value hack variant, compute the union of all 8 masks to identify points touching the boundary [S1, unofficial].
 
 4. **Boundary Handling (Zero-Value Hack):**
-   If using the zero-value hack, replace invalid links (negative indices) within the boundary mask with index 0 before gathering [S1].
+   If using the zero-value hack, replace invalid links (negative indices) within the boundary mask with index 0 before gathering [S1, unofficial].
    $$ l_{ijk}[m_{boundary} \land \lnot m_{ijk}] = 0 $$
 
 5. **Value Gathering:**
-   Gather the values from `values_compressed` using the corresponding links [S1].
+   Gather the values from `values_compressed` using the corresponding links [S1, unofficial].
    $$ v_{ijk} = \text{values\_compressed}[l_{ijk}] $$
 
 6. **Weight Computation and Interpolation:**
-   Compute the trilinear weights based on the fractional coordinates [S1].
+   Compute the trilinear weights based on the fractional coordinates [S1, unofficial].
    $$ \text{tmpX} = 1 - xd, \quad \text{tmpY} = 1 - yd, \quad \text{tmpZ} = 1 - zd $$
    $$ a_{000} = \text{tmpX} \cdot \text{tmpY}, \quad a_{100} = xd \cdot \text{tmpY}, \quad a_{010} = \text{tmpX} \cdot yd, \quad a_{110} = xd \cdot yd $$
    $$ \text{weights} = [a_{000}, a_{010}, a_{100}, a_{110}] $$
-   Gather coefficients and compute the result [S1].
+   Gather coefficients and compute the result [S1, unofficial].
    $$ \text{coeff} = [v_{000}, v_{001}, v_{010}, v_{011}, v_{100}, v_{101}, v_{110}, v_{111}] $$
    $$ \text{result} = \sum \text{weights} \cdot \text{coeff}[[0, 2, 4, 6], :] \cdot \text{tmpZ} + \sum \text{weights} \cdot \text{coeff}[[1, 3, 5, 7], :] \cdot zd $$
-   For points where $m_{valid}$ is false in strict mode, the result is zero [S1].
+   For points where $m_{valid}$ is false in strict mode, the result is zero [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -140,20 +140,20 @@ def trilinear_compressed_linked(xyz, links, values_compressed, use_zero_hack=Fal
 ```
 
 **Subtopics:**
-- **Trilinear Interpolation (Compressed/Linked Zero):** A variant where invalid links are replaced with index 0 (assumed to hold a zero value) within a boundary union mask rather than masked out [S1].
-- **JAX Trilinear Interpolation (Vmapped):** An implementation strategy using `jax.vmap` for batched processing and `jax.jit` for compilation to accelerate the linked interpolation [S1].
+- **Trilinear Interpolation (Compressed/Linked Zero):** A variant where invalid links are replaced with index 0 (assumed to hold a zero value) within a boundary union mask rather than masked out [S1, unofficial].
+- **JAX Trilinear Interpolation (Vmapped):** An implementation strategy using `jax.vmap` for batched processing and `jax.jit` for compilation to accelerate the linked interpolation [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N$ is the number of sample points, with a higher constant factor than dense trilinear due to link lookup and masking operations [S1].
-- **Memory Complexity:** $O(D_x D_y D_z)$ for the `links` array, plus $O(M)$ for `values_compressed` [S1].
-- **Measured Performance:** Vectorized masking and gathering operations run in parallel; performance is limited by memory bandwidth when accessing `values_compressed` if links are highly scattered [S1].
-- **Strengths:** Efficient for sparse data where the bounding box is not excessively large; maintains the smoothness of trilinear interpolation [S1].
-- **Limitations:** The `links` array consumes memory proportional to the bounding box volume, not the number of occupied voxels; boundary handling requires careful masking or zero-padding [S1].
-- **When to use:** When the volume is sparse but the bounding box is manageable, and smooth interpolation is required [S1].
+- **Time Complexity:** $O(N)$ where $N$ is the number of sample points, with a higher constant factor than dense trilinear due to link lookup and masking operations [S1, unofficial].
+- **Memory Complexity:** $O(D_x D_y D_z)$ for the `links` array, plus $O(M)$ for `values_compressed` [S1, unofficial].
+- **Measured Performance:** Vectorized masking and gathering operations run in parallel; performance is limited by memory bandwidth when accessing `values_compressed` if links are highly scattered [S1, unofficial].
+- **Strengths:** Efficient for sparse data where the bounding box is not excessively large; maintains the smoothness of trilinear interpolation [S1, unofficial].
+- **Limitations:** The `links` array consumes memory proportional to the bounding box volume, not the number of occupied voxels; boundary handling requires careful masking or zero-padding [S1, unofficial].
+- **When to use:** When the volume is sparse but the bounding box is manageable, and smooth interpolation is required [S1, unofficial].
 - **When not to use:** When the bounding box is very large relative to the number of occupied voxels [G].
 
 ## Background
-This method originates from implementations of volumetric rendering in JAX, specifically for optimizing sparse grid access in neural rendering pipelines [S1]. It leverages the compressed data structure to reduce memory footprint for values while using a link array to maintain spatial locality for interpolation [S1].
+This method originates from implementations of volumetric rendering in JAX, specifically for optimizing sparse grid access in neural rendering pipelines [S1, unofficial]. It leverages the compressed data structure to reduce memory footprint for values while using a link array to maintain spatial locality for interpolation [S1, unofficial].
 
 ## Sources
-[S1] szat/Jax-Volumetric-Renderer, https://github.com/szat/Jax-Volumetric-Renderer, fetched 2026-10-27 [S1, unofficial]
+[S1] szat/Jax-Volumetric-Renderer, https://github.com/szat/Jax-Volumetric-Renderer, fetched 2026-10-27 (unofficial)

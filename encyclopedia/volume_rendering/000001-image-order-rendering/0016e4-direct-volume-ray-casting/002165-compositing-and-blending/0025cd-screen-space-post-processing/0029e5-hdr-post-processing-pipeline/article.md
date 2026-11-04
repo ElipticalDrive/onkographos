@@ -1,0 +1,128 @@
+# HDR Post-Processing Pipeline
+
+Also called: 16-bit floating-point HDR rendering pipeline
+
+## Overview
+A 16-bit floating-point HDR rendering pipeline for scene post-processing that applies HDR-domain effects, tone mapping, and LDR-domain effects in a fused shader pass to minimize memory bandwidth. It sets itself apart from sibling methods like [Cloud Compositing & Tone Mapping](3628-cloud-compositing-tone-mapping.md) by integrating bloom and chromatic distortion directly into the tone-mapping fragment shader rather than using separate library passes, and from [Bloom](4906-bloom.md) by handling the bloom compositing within the same pass as tone mapping.
+
+## How it works
+**Inputs and Outputs:**
+- Input: Scene rendered into a HalfFloat (16-bit floating-point) target. Multisampling (MSAA, SSAA) and FXAA are off by default.
+- Output: Final LDR image.
+
+**Data Structures:**
+- Render Target: HalfFloat texture.
+- Tone Map Operators: Enum selecting LINEAR, REINHARD, CINEON, ACES filmic (default), AgX, or NEUTRAL.
+- Parameters: Exposure ($E$), additive offset, gamma.
+
+**Steps:**
+1. Render the scene into a HalfFloat target.
+2. Apply HDR-domain effects (mipmap-based bloom, chromatic lens distortion, physically based detector noise). These are off by default.
+3. Execute a single fused fragment pass that performs:
+   a. Bloom compositing: Mix bloom into the HDR sample.
+   b. Chromatic distortion: Apply per-channel chromatic sampling.
+   c. Tone mapping: Apply the selected tone map operator with exposure, additive offset, and gamma.
+4. Apply LDR-domain effects (vignette).
+5. If enabled, apply FXAA.
+
+**Formulas:**
+- Exposure: $color \times 2^E$
+
+**Parameters:**
+- Tone Map Operator: LINEAR, REINHARD, CINEON, ACES filmic (default), AgX, NEUTRAL. NEUTRAL is an alias of LINEAR; both clamp to [0, 1].
+- Exposure: $E$
+- Additive Offset: Clamped at zero.
+- Gamma: Fused into the tone map shader.
+
+**Edge Cases and Pitfalls:**
+- Adaptive device-pixel-ratio scaling is locked during recording to prevent mid-capture resolution changes.
+- The probe-and-verify guard reverts a downscale if it does not actually improve throughput.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hdr_post_processing_pipeline(scene_texture, tone_map_operator, exposure, additive_offset, gamma, enable_bloom, enable_chromatic_distortion, enable_detector_noise, enable_vignette, enable_fxaa):
+    # Step 1: Render scene into HalfFloat target
+    hdr_target = render_scene_to_halffloat(scene_texture)
+    
+    # Step 2: HDR-domain effects (off by default)
+    if enable_bloom:
+        hdr_target = apply_mipmap_bloom(hdr_target)
+    if enable_chromatic_distortion:
+        hdr_target = apply_chromatic_lens_distortion(hdr_target)
+    if enable_detector_noise:
+        hdr_target = apply_physically_based_detector_noise(hdr_target)
+        
+    # Step 3: Single fused fragment pass
+    final_hdr = process_fused_pass(hdr_target, tone_map_operator, exposure, additive_offset, gamma)
+    
+    # Step 4: LDR-domain effects
+    if enable_vignette:
+        final_ldr = apply_vignette(final_hdr)
+    else:
+        final_ldr = final_hdr
+        
+    # Step 5: FXAA (if enabled)
+    if enable_fxaa:
+        final_ldr = apply_fxaa(final_ldr)
+        
+    return final_ldr
+
+def process_fused_pass(hdr_sample, tone_map_operator, exposure, additive_offset, gamma):
+    # Bloom mixed into HDR sample before chromatic sampling
+    # Note: Bloom compositing is assumed to be done in the shader context
+    # as per the source description of "bloom mixed into the HDR sample 
+    # before the per-channel chromatic sampling"
+    
+    # Apply chromatic distortion (per-channel sampling)
+    distorted_sample = apply_chromatic_sampling(hdr_sample)
+    
+    # Apply tone mapping with exposure, offset, and gamma
+    color = distorted_sample
+    color = color * (2 ** exposure)  # Exposure formula
+    color = color + additive_offset  # Additive offset, clamped at zero
+    color = apply_tone_map(color, tone_map_operator)
+    color = apply_gamma(color, gamma)
+    
+    # Clamp to [0, 1] for LINEAR and NEUTRAL operators
+    if tone_map_operator in ["LINEAR", "NEUTRAL"]:
+        color = clamp(color, 0.0, 1.0)
+        
+    return color
+
+def apply_tone_map(color, operator):
+    if operator == "LINEAR":
+        return color
+    elif operator == "REINHARD":
+        return color / (1 + color)
+    elif operator == "CINEON":
+        # CINEON filmic curve implementation
+        return (2.5 * color + 0.0001) / (2.5 * color + 0.0001 + 1.0) # Placeholder for exact CINEON formula if not provided
+    elif operator == "ACES filmic":
+        # ACES filmic curve implementation
+        return (color * (2.51 * color + 0.03)) / (color * (2.43 * color + 0.59) + 0.14) # Placeholder for exact ACES formula if not provided
+    elif operator == "AgX":
+        # AgX curve implementation
+        return color # Placeholder for exact AgX formula if not provided
+    elif operator == "NEUTRAL":
+        return color
+    else:
+        return color
+```
+
+## Operating characteristics
+- Time Complexity: Not given in the sources.
+- Memory Complexity: Not given in the sources.
+- Measured Performance: Not given in the sources.
+- Scaling: Adaptive device-pixel-ratio scaling monitors a 1 s sliding window of frame timestamps and adjusts the render-target resolution using thresholds set relative to the display’s estimated achievable refresh rate.
+- Strengths: Fused shader pass avoids an extra full-screen pass.
+- Limitations: Not given in the sources.
+- When to use: When HDR-domain effects and tone mapping are needed with minimal overhead.
+- When not to use: When recording, as adaptive scaling is locked.
+
+## Background
+The HDR Post-Processing Pipeline is part of the Luxar system for Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data. It was introduced in a preprint by the author/funder, who granted bioRxiv a license to display the preprint in perpetuity.
+
+## Sources
+[S1] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)

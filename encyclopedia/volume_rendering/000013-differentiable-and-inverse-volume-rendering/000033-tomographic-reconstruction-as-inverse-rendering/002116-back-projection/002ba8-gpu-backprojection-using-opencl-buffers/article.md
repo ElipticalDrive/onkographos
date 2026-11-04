@@ -1,0 +1,116 @@
+# GPU Backprojection using OpenCL Buffers
+
+Also called: Full GPU Path (Ramp Filter + Backprojection), GPU-Buffer Backprojection
+
+## Overview
+A GPU-accelerated tomographic reconstruction pipeline that performs filtered backprojection (FBK) by storing projection data in OpenCL global memory buffers rather than image objects [S1, unofficial]. It distinguishes itself from [GPU Backprojection using OpenCL Image Textures](5111-gpu-backprojection-using-opencl-image-textures.md) by avoiding texture sampling hardware, and from [GPU Backprojection with Global Memory Buffer](4991-gpu-backprojection-with-global-memory-buffer.md) by explicitly including the ramp filtering step in the GPU path (or CPU pre-filtering followed by GPU backprojection) [S1, unofficial]. It solves the problem of reconstructing a 3D volume from 2D projections by mapping projection weights to volume expansion coefficients, building on [Back-projection](2450-back-projection.md).
+
+## How it works
+**Inputs:**
+- `projections`: `std::vector<float>` of size $P \times W \times H$ (column-major layout: `psrc[u * H + v]` for each projection $p$).
+- `P`: Number of projections.
+- `W`, `H`: Detector width and height in pixels.
+- `NX`, `NY`: Volume dimensions ($NX \times NX \times NY$ voxels).
+- `voxelSize`: Voxel size in mm.
+- `pixelSize`: Pixel size in mm.
+- `sdd`: Source-to-detector distance in mm.
+- `sod`: Source-to-object distance in mm.
+
+**Outputs:**
+- `std::vector<float>` representing the reconstructed volume of size $NX \times NX \times NY$.
+
+**Data Structures:**
+- **Volume Buffer:** `cl_mem` with `CL_MEM_READ_WRITE`, size `sizeof(float) * volumeSize` where `volumeSize = NX * NX * NY`.
+- **Projection Buffer:** `cl_mem` with `CL_MEM_READ_WRITE`, size `sizeof(float) * projSize` where `projSize = W * H` (per projection, reused or copied per iteration).
+
+**Steps:**
+1. **Pre-filtering:** Apply FDK pre-filter (ramp filter) on CPU to raw projections [S1, unofficial].
+2. **Volume Initialization:** Fill volume buffer with zeros using `clEnqueueFillBuffer` [S1, unofficial].
+3. **Loop over projections:** For each projection $p$ from $0$ to $P-1$:
+   a. Calculate angle: $\theta = 2.0f \times \pi \times p / P$ [S1, unofficial].
+   b. **Data Transposition:** Convert projection data from column-major (`psrc[u * H + v]`) to row-major (`rowMajor[v * W + u]`) for memory coalescing in the kernel [S1, unofficial].
+   c. **Kernel Execution:** Enqueue NDRange kernel with global size equal to `volumeSize` ($NX \times NX \times NY$) [S1, unofficial]. The kernel computes backprojection weights based on geometry and accumulates into the volume buffer.
+4. **Final Scaling:** After reading the volume buffer back to host, multiply every voxel by `scale = M_PI / P` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reconstruct_gpu_buffer(projections, P, W, H, NX, NY, voxelSize, pixelSize, sdd, sod):
+    """
+    Reconstructs volume using GPU backprojection with OpenCL buffers.
+    Assumes OpenCL context, command queue, and kernel 'backproject_kernel' are initialized.
+    """
+    volume_size = NX * NX * NY
+    proj_size = W * H
+    
+    # 1. Pre-filtering (CPU)
+    # Apply FDK ramp filter to projections in-place or to a new buffer
+    filtered_projections = apply_fdk_filter(projections, W, H, voxelSize, sdd, sod)
+    
+    # 2. Volume Initialization
+    volume_buffer = clCreateBuffer(context, CL_MEM_READ_WRITE, volume_size * sizeof(float), None, None)
+    clEnqueueFillBuffer(queue, volume_buffer, 0, 0, volume_size * sizeof(float), 0, None, None)
+    
+    # 3. Loop over projections
+    for p in range(P):
+        # Calculate angle
+        angle = 2.0 * math.pi * p / P
+        
+        # Data Transposition: Column-major to Row-major
+        # Input: filtered_projections[p * proj_size + u * H + v]
+        # Output: row_major_proj[v * W + u]
+        row_major_proj = transpose_column_to_row(filtered_projections, p, W, H)
+        
+        # Create projection buffer for this iteration
+        proj_buffer = clCreateBuffer(context, CL_MEM_READ_WRITE, proj_size * sizeof(float), None, None)
+        clEnqueueWriteBuffer(queue, proj_buffer, CL_TRUE, 0, proj_size * sizeof(float), row_major_proj, 0, None, None)
+        
+        # Set kernel arguments
+        # kernel.setArg(0, volume_buffer)
+        # kernel.setArg(1, proj_buffer)
+        # kernel.setArg(2, W, H, NX, NY, voxelSize, pixelSize, sdd, sod, angle)
+        
+        # Kernel Execution
+        global_size = [NX, NX, NY]
+        clEnqueueNDRangeKernel(queue, kernel, 3, None, global_size, None, 0, None, None)
+        clFinish(queue) # Synchronize for correctness in this simple pipeline
+        
+        clReleaseMemObject(proj_buffer)
+    
+    # 4. Final Scaling
+    result = np.empty(volume_size, dtype=np.float32)
+    clEnqueueReadBuffer(queue, volume_buffer, CL_TRUE, 0, volume_size * sizeof(float), result, 0, None, None)
+    
+    scale = math.pi / P
+    result *= scale
+    
+    clReleaseMemObject(volume_buffer)
+    return result
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Expected MSE < 1e-4 against CPU reference [S1, unofficial].
+- **Boundaries:** Ensure `clEnqueueFillBuffer` is used correctly to zero-initialize the volume [S1, unofficial].
+- **Memory:** Large volumes may exceed global memory limits; not given in the sources.
+
+## Subtopics
+
+### [GPU Backprojection using Local-Memory Tiling](5112-gpu-backprojection-using-local-memory-tiling.md)
+A GPU-accelerated tomographic reconstruction variant that optimizes memory access patterns by tiling the Z-axis reconstruction loop using OpenCL local memory. It reduces global memory bandwidth pressure by reusing projection data across threads within a work-group, distinguishing it from the parent [GPU Backprojection using OpenCL Buffers](5110-gpu-backprojection-using-opencl-buffers.md) which relies solely on global memory buffers for projection storage.
+
+## Operating characteristics
+- **Time Complexity:** $O(P \times NX \times NX \times NY)$, where $P$ is the number of projections and $NX, NY$ are volume dimensions.
+- **Memory Complexity:** $O(NX^2 \times NY + W \times H)$ for volume and projection buffers.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Linear with number of projections and volume size.
+- **Strengths:** Full GPU path for backprojection, avoids texture unit overhead.
+- **Limitations:** Relies on global memory for projection data, which may cause bandwidth bottlenecks compared to local-memory tiling variants.
+- **When to use:** When texture units are unavailable or when a simple buffer-based approach is preferred over image objects.
+- **When not:** When memory bandwidth is a critical bottleneck and local memory tiling is feasible.
+
+## Background
+Originated from the `ct-reconstruction-gpu` project by hardik0001 [S1, unofficial]. It is part of a suite of GPU reconstruction methods including CPU reference, image texture-based, and local-memory tiling variants [S1, unofficial].
+
+## Sources
+[S1] hardik0001/ct-reconstruction-gpu, https://github.com/hardik0001/ct-reconstruction-gpu, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,2579 @@
+Volume Rendering using Raycasting
+
+Made with **C++**, **OpenGL**, **Cinder**, **GLM** and **dear imgui**.
+
+Loads 8 and 16 bit raw volumetric data. And displays this volume on screen using raycasting. Some features include ray jitter with random noise and voxel's solidity check to reduce banding / artifacts, fast computation of gradients, gradients smoothing with 3x3x3 average filter and histogram extraction using compute shaders.
+
+*Requirements:*
+
+**OpenGL 4.3+**
+
+![alt tag](screenshots/1.png)
+
+![alt tag](screenshots/2.png)
+
+![alt tag](screenshots/3.png)
+
+### VolumeRendering/CubicSpline.cpp
+```
+#include "CubicSpline.h"
+using namespace glm;
+
+CubicSpline::CubicSpline(vec3 a, vec3 b, vec3 c, vec3 d)
+{
+    this->a = a;
+    this->b = b;
+    this->c = c;
+    this->d = d;
+}
+
+vec3 CubicSpline::getPointOnSpline(float s) const
+{
+    return (((d * s) + c) * s + b) * s + a;
+}
+
+std::vector<CubicSpline> CubicSpline::CalculateCubicSpline(std::vector<vec3> points)
+{
+    auto n = points.size() - 1;
+    auto& v = points;
+    std::vector<vec3> gamma(n + 1);
+    std::vector<vec3> delta(n + 1);
+    std::vector<vec3> D(n + 1);
+
+    int i;
+    /* We need to solve the equation
+    * taken from: http://mathworld.wolfram.com/CubicSpline.html
+    [2 1       ] [D[0]]   [3(v[1] - v[0])  ]
+    |1 4 1     | |D[1]|   |3(v[2] - v[0])  |
+    |  1 4 1   | | .  | = |      .         |
+    |    ..... | | .  |   |      .         |
+    |     1 4 1| | .  |   |3(v[n] - v[n-2])|
+    [       1 2] [D[n]]   [3(v[n] - v[n-1])]
+
+    by converting the matrix to upper triangular.
+    The D[i] are the derivatives at the control points.
+    */
+
+    //this builds the coefficients of the left matrix
+    gamma[0] = vec3(0);
+    gamma[0].x = 1.0f / 2.0f;
+    gamma[0].y = 1.0f / 2.0f;
+    gamma[0].z = 1.0f / 2.0f;
+
+    for (i = 1; i < n; i++)
+    {
+        gamma[i] = vec3(1) / ((4.0f * vec3(1)) - gamma[i - 1]);
+    }
+
+    gamma[n] = vec3(1) / ((2.0f * vec3(1)) - gamma[n - 1]);
+
+    delta[0] = 3.0f * (v[1] - v[0]) * gamma[0];
+
+    for (i = 1; i < n; i++)
+    {
+        delta[i] = (3.0f * (v[i + 1] - v[i - 1]) - delta[i - 1]) * gamma[i];
+    }
+
+    delta[n] = (3.0f * (v[n] - v[n - 1]) - delta[n - 1]) * gamma[n];
+
+    D[n] = delta[n];
+
+    for (i = n - 1; i >= 0; i--)
+    {
+        D[i] = delta[i] - gamma[i] * D[i + 1];
+    }
+
+    // now compute the coefficients of the cubics 
+    std::vector<CubicSpline> C(n);
+
+    for (i = 0; i < n; i++)
+    {
+        C[i] = CubicSpline(v[i], D[i], 3.0f * (v[i + 1] - v[i]) - 2.0f * D[i] - D[i + 1], 2.0f * (v[i] - v[i + 1]) + D[i] + D[i + 1]);
+    }
+
+    return C;
+}
+```
+
+### VolumeRendering/CubicSpline.h
+```
+#pragma once
+#include "cinder/CinderGlm.h"
+#include <vector>
+
+class CubicSpline
+{
+    public:
+        CubicSpline() = default;
+        CubicSpline(glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d);
+        //evaluate the point using a cubic equation
+        glm::vec3 getPointOnSpline(float s) const;
+        static std::vector<CubicSpline> CalculateCubicSpline(std::vector<glm::vec3> points);
+    private:
+        glm::vec3 a;
+        glm::vec3 b;
+        glm::vec3 c;
+        glm::vec3 d;
+};
+```
+
+### VolumeRendering/Light.h
+```
+#pragma once
+#include "cinder/CinderMath.h"
+
+struct Light
+{
+    glm::vec3 direction{ 0.0f, 0.0f, 1.0f };
+    glm::vec3 diffuse{ 1.0f, 1.0f, 1.0f };
+    glm::vec3 ambient{ 0.1f, 0.1f, 0.1f };
+};
+```
+
+### VolumeRendering/Postprocess.cpp
+```
+#include "PostProcess.h"
+#include <cinder/app/AppBase.h>
+#include <cinder/Log.h>
+#include "RenderingParams.h"
+using namespace ci;
+using namespace glm;
+using namespace app;
+
+void PostProcess::displayTexture(const gl::Texture2dRef colorTex) const
+{
+    const gl::ScopedViewport scopedViewport(ivec2(0), toPixels(getWindowSize()));
+    const gl::ScopedMatrices scopedMatrices;
+    const gl::ScopedTextureBind scopedTextureBind(colorTex ? colorTex : temporalTexture, 0);
+
+    // no depth write or read for quad display
+    gl::disableDepthRead();
+    gl::disableDepthWrite();
+    gl::clear();
+
+    // translate to center and scale to fit whole screen
+    gl::translate(getWindowCenter());
+    gl::scale(getWindowSize());
+
+    // draw quad with mapped texture
+    textureRect->draw();
+}
+
+void PostProcess::toneMapping(const gl::Texture2dRef& hdrBuffer) const
+{
+    const gl::ScopedFramebuffer scopedFramebuffer(temporalFbo);
+    const gl::ScopedViewport scopedViewport(ivec2(0), temporalFbo->getSize());
+    const gl::ScopedMatrices scopedMatrices;
+    const gl::ScopedTextureBind scopedTextureBind(hdrBuffer, 0);
+
+    // custom uniforms
+    auto& prog = toneMappingRect->getGlslProg();
+    prog->uniform("gamma", RenderingParams::GetGamma());
+    prog->uniform("exposure", RenderingParams::GetExposure());
+
+    // no depth write or read for quad display
+    gl::disableDepthRead();
+    gl::disableDepthWrite();
+    gl::clear();
+
+    // translate to center and scale to fit whole screen
+    gl::translate(getWindowCenter());
+    gl::scale(getWindowSize());
+
+    // draw quad with mapped texture
+    toneMappingRect->draw();
+}
+
+void PostProcess::fxAA(const gl::Texture2dRef& texture) const
+{
+    const gl::ScopedViewport scopedViewport(ivec2(0), toPixels(getWindowSize()));
+    const gl::ScopedMatrices scopedMatrices;
+    const gl::ScopedTextureBind scopedTextureBind(texture ? texture : temporalTexture, 0);
+
+    // custom uniforms
+    auto& prog = fxaaRect->getGlslProg();
+    prog->uniform("pixelSize", vec2(1.0f) / vec2(toPixels(getWindowSize())));
+
+    // no depth write or read for quad display
+    gl::disableDepthRead();
+    gl::disableDepthWrite();
+    gl::clear();
+
+    // translate to center and scale to fit whole screen
+    gl::translate(getWindowCenter());
+    gl::scale(getWindowSize());
+
+    // draw quad with mapped texture
+    fxaaRect->draw();
+}
+
+const gl::Texture2dRef &PostProcess::getTemporalColorTexture() const
+{
+    return temporalTexture;
+}
+
+void PostProcess::resizeFbos()
+{
+    // temporal accumulated texture
+    gl::Texture2d::Format colorAccFormat = gl::Texture2d::Format().internalFormat(GL_RGB8)
+                                                                  .magFilter(GL_NEAREST)
+                                                                  .minFilter(GL_NEAREST)
+                                                                  .wrap(GL_REPEAT);
+    const ivec2 winSize = getWindowSize();
+    const int32_t h = winSize.y;
+    const int32_t w = winSize.x;
+
+    try
+    {
+        // create temporal texture
+        temporalTexture = gl::Texture2d::create(w, h, colorAccFormat);
+        // deferred rendering mode gbuffer
+        gl::Fbo::Format colorFormat;
+        colorFormat.attachment(GL_COLOR_ATTACHMENT0, temporalTexture);
+        colorFormat.depthBuffer();
+        temporalFbo = gl::Fbo::create(w, h, colorFormat);
+    }
+    catch (const Exception& e)
+    {
+        CI_LOG_EXCEPTION("Fbo/Renderbuffer create", e);
+    }
+}
+
+PostProcess::PostProcess()
+{
+    // create fbos
+    resizeFbos();
+    // post process programs 
+    auto toneMappingProg = gl::GlslProg::create(gl::GlslProg::Format()
+        .vertex(loadFile("shaders/fs_quad.vert"))
+        .fragment(loadFile("shaders/tonemapping.frag")));
+    auto fxaaProg = gl::GlslProg::create(gl::GlslProg::Format()
+        .vertex(loadFile("shaders/fs_quad.vert"))
+        .fragment(loadFile("shaders/fxaa.frag")));
+    // create fs quad for single texture display
+    const gl::GlslProgRef stockTexture = gl::context()->getStockShader(gl::ShaderDef().texture(GL_TEXTURE_2D));
+    const gl::VboMeshRef rect = gl::VboMesh::create(geom::Rect());
+    textureRect = gl::Batch::create(rect, stockTexture);
+    toneMappingRect = gl::Batch::create(rect, toneMappingProg);
+    fxaaRect = gl::Batch::create(rect, fxaaProg);
+}
+
+PostProcess::~PostProcess() {}
+```
+
+### VolumeRendering/Postprocess.h
+```
+#pragma once
+#include "cinder/gl/gl.h"
+
+class PostProcess
+{
+public:
+    /**
+     * \brief Displays the given texture on a full screen quad. If colorTex is 
+     * null then it displays the color output of the last post-process effect
+     * \param colorTex The texture to display
+     */
+    void displayTexture(const ci::gl::Texture2dRef colorTex = nullptr) const;
+    /**
+     * \brief Reinhard tonemapping and gamma correction
+     * \param hdrBuffer An unclampled (floating point) color buffer
+     */
+    void toneMapping(const cinder::gl::Texture2dRef& hdrBuffer) const;
+    /**
+     * \brief The temporal color texture contains the output color result of
+     * the last post-process effect executed
+     * \return The temporal color texture
+     */
+    const ci::gl::Texture2dRef &getTemporalColorTexture() const;
+    /**
+     * \brief Fast approximate anti-aliasing post effect
+     * \param texture The color buffer texture
+     */
+    void fxAA(const cinder::gl::Texture2dRef &texture = nullptr) const;
+    /**
+     * \brief Resizes the created framebuffers to the actual window's size
+     */
+    void resizeFbos();
+    PostProcess();
+    ~PostProcess();
+private:
+    // fs screen effects
+    ci::gl::BatchRef textureRect;
+    ci::gl::BatchRef toneMappingRect;
+    ci::gl::BatchRef fxaaRect;
+
+    // temporal texture
+    ci::gl::Texture2dRef temporalTexture;
+    ci::gl::FboRef temporalFbo;
+};
+```
+
+### VolumeRendering/RaycastVolume.cpp
+```
+#include "RaycastVolume.h"
+#include <cinder/app/AppBase.h>
+#include <cinder/Log.h>
+#include "TransferFunction.h"
+#include "RenderingParams.h"
+using namespace ci;
+using namespace glm;
+
+RaycastVolume::RaycastVolume() : aspectRatios(1), scaleFactor(vec3(1)), stepScale(1), enableDiffuseShading(true)
+{
+    // positions shader
+    positionsShader = gl::GlslProg::create(gl::GlslProg::Format()
+        .vertex(loadFile("shaders/positions.vert"))
+        .fragment(loadFile("shaders/positions.frag")));
+    // raycast shader
+    raycastShaderRendertargets = gl::GlslProg::create(gl::GlslProg::Format()
+        .vertex(loadFile("shaders/raycast.vert"))
+        .fragment(loadFile("shaders/raycast_rendertargets.frag")));
+    raycastShaderDirect = gl::GlslProg::create(gl::GlslProg::Format()
+        .vertex(loadFile("shaders/raycast.vert"))
+        .fragment(loadFile("shaders/raycast.frag")));
+    // histogram calculation 
+    histogramCompute = gl::GlslProg::create(gl::GlslProg::Format()
+        .compute(loadFile("shaders/histogram.comp")));
+    // gradient computation
+    gradientsCompute = gl::GlslProg::create(gl::GlslProg::Format()
+        .compute(loadFile("shaders/gradients.comp")));
+    smoothGradientsCompute = gl::GlslProg::create(gl::GlslProg::Format()
+        .compute(loadFile("shaders/smooth_gradients.comp")));
+    // noise texture to reduce volume banding artifacts
+    noiseTexture = gl::Texture2d::create(loadImage("images/noise.png"), gl::Texture2d::Format()
+                                         .wrapS(GL_REPEAT)
+                                         .wrapT(GL_REPEAT)
+                                         .magFilter(GL_NEAREST)
+                                         .minFilter(GL_NEAREST));
+    // create clockwise bbox for volume rendering
+    createCubeVbo();
+    // create frame buffer object
+    resizeFbos();
+}
+
+RaycastVolume::~RaycastVolume() {}
+
+vec3 RaycastVolume::centerPoint() const
+{
+    return vec3(0.5) * scaleFactor;
+}
+
+const float &RaycastVolume::getStepScale() const
+{
+    return stepScale;
+}
+
+void RaycastVolume::setStepScale(const float& value)
+{
+    stepScale = max(value, 0.1f);
+}
+
+const vec3 &RaycastVolume::getAspectRatios() const
+{
+    return aspectRatios;
+}
+
+void RaycastVolume::setAspectratios(const vec3& value)
+{
+    aspectRatios = max(value, vec3(0));
+    // volume scale
+    scaleFactor = vec3(1) / ((vec3(1) * maxSize) / (dimensions * aspectRatios));
+}
+
+void RaycastVolume::createCubeVbo()
+{
+    cubeMesh = TriMesh::create(geom::Cube());
+
+    // move cube to 0 - 1 coordinates
+    for (auto& pos : cubeMesh->getBufferPositions()) { pos += .5; }
+
+    cubeVao = gl::Vao::create();
+    // bind vertex buffer object
+    gl::ScopedVao scopedVao(cubeVao);
+    {
+        cubeVerticesBuffer = gl::Vbo::create(GL_ARRAY_BUFFER, sizeof(vec3) * cubeMesh->getNumVertices(),
+                                                            cubeMesh->getPositions<3>(), GL_STATIC_DRAW);
+        {
+            gl::ScopedBuffer scopedBuffer(cubeVerticesBuffer);
+            gl::vertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, static_cast<const GLvoid*>(nullptr));
+            gl::enableVertexAttribArray(0);
+        }
+        cubeIndicesBuffer = gl::Vbo::create<uint32_t>(GL_ELEMENT_ARRAY_BUFFER, cubeMesh->getIndices(), GL_STATIC_DRAW);
+        {
+            gl::ScopedBuffer scopedBuffer(cubeIndicesBuffer);
+        }
+    }
+}
+
+void RaycastVolume::readVolumeFromFile8(const std::string filepath)
+{
+    // open file and read
+    std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+
+    // error opening given filepath
+    if (!file.good()) return;
+
+    // determine volume size
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    // reserve space for data
+    std::vector<uint8_t> buffer(size);
+
+    if (file.read(reinterpret_cast<char*>(buffer.data()), size))
+    {
+        // create 3D texture
+        auto format = gl::Texture3d::Format().magFilter(GL_LINEAR)
+                                             .minFilter(GL_LINEAR)
+                                             .wrapS(GL_CLAMP_TO_BORDER)
+                                             .wrapR(GL_CLAMP_TO_BORDER)
+                                             .wrapT(GL_CLAMP_TO_BORDER);
+        format.setDataType(GL_UNSIGNED_BYTE);
+        format.setInternalFormat(GL_RED);
+        format.setSwizzleMask(GL_RED, GL_RED, GL_RED, GL_RED);
+        volumeTexture = gl::Texture3d::create(buffer.data(), GL_RED,
+                                              dimensions.x, dimensions.y, dimensions.z, format);
+        // finally has drawable data
+        isDrawable = true;
+    }
+
+    file.close();
+}
+
+void RaycastVolume::readVolumeFromFile16(const std::string filepath)
+{
+    // open file and read
+    std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+
+    // error opening given filepath
+    if (!file.good()) return;
+
+    // determine volume size
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    // reserve space for data
+    std::vector<uint16_t> buffer(size);
+
+    if (file.read(reinterpret_cast<char*>(buffer.data()), size))
+    {
+        // create 3D texture
+        auto format = gl::Texture3d::Format().magFilter(GL_LINEAR)
+                                             .minFilter(GL_LINEAR)
+                                             .wrapS(GL_CLAMP_TO_BORDER)
+                                             .wrapR(GL_CLAMP_TO_BORDER)
+                                             .wrapT(GL_CLAMP_TO_BORDER);
+        format.setDataType(GL_UNSIGNED_SHORT);
+        format.setInternalFormat(GL_RED);
+        format.setSwizzleMask(GL_RED, GL_RED, GL_RED, GL_RED);
+        volumeTexture = gl::Texture3d::create(buffer.data(), GL_RED,
+                                              dimensions.x, dimensions.y, dimensions.z, format);
+        // finally has drawable data
+        isDrawable = true;
+    }
+
+    file.close();
+}
+
+void RaycastVolume::loadFromFile(const vec3& dimensions, const vec3& ratios, const std::string filepath,
+                                 bool is16Bits)
+{
+    // compute step size and number of iterations for the given volume dimensions
+    this->dimensions = dimensions;
+    maxSize = max(dimensions.x, max(dimensions.y, dimensions.z));
+    stepSize = vec3(1.0f / (dimensions.x * (maxSize / dimensions.x)),
+                    1.0f / (dimensions.y * (maxSize / dimensions.y)),
+                    1.0f / (dimensions.z * (maxSize / dimensions.z)));
+    setAspectratios(ratios);
+    // create volume texture
+    is16Bits ? readVolumeFromFile16(filepath) : readVolumeFromFile8(filepath);
+    // histogram compute
+    extractHistogram();
+    // gradients
+    generateGradients();
+}
+
+void RaycastVolume::drawCubeFaces() const
+{
+    gl::enableDepth(true);
+    // draw front face
+    {
+        gl::ScopedFramebuffer scopedFramebuffer(frontFbo);
+        gl::ScopedViewport scopedViewport(ivec2(0), frontFbo->getSize());
+        gl::ScopedFaceCulling faceCulling(true, GL_BACK);
+        // draw front face cube positions to render target 
+        gl::clear();
+        positionsShader->bind();
+        positionsShader->uniform("scaleFactor", scaleFactor);
+        positionsShader->uniform("renderingFront", true);
+        gl::setDefaultShaderVars();
+        gl::drawElements(gl::toGl(cubeMesh->getPrimitive()), cubeMesh->getNumIndices(),
+                         GL_UNSIGNED_INT, static_cast<GLuint *>(nullptr));
+    }
+    // draw back face
+    {
+        gl::ScopedFramebuffer scopedFramebuffer(backFbo);
+        gl::ScopedViewport scopedViewport(ivec2(0), backFbo->getSize());
+        gl::ScopedFaceCulling faceCulling(true, GL_FRONT);
+        // draw back face cube positions to render target
+        gl::clear();
+        gl::drawElements(gl::toGl(cubeMesh->getPrimitive()), cubeMesh->getNumIndices(),
+                         GL_UNSIGNED_INT, static_cast<GLuint *>(nullptr));
+    }
+}
+
+void RaycastVolume::drawVolume(const Camera& camera, bool toRendertargets)
+{
+    if (!isDrawable) return;
+
+    // volume raycast
+    {
+        gl::ScopedMatrices scopedMatrices;
+        gl::ScopedVao scopedCubeVao(cubeVao);
+        gl::ScopedBuffer scopedCubeIndicesBuffer(cubeIndicesBuffer);
+
+        // set model matrix for model
+        gl::setMatrices(camera);
+        gl::rotate(modelRotation);
+        gl::translate(modelPosition);
+
+        // draw cube positions
+        drawCubeFaces();
+
+        // ray cast cube
+        auto program = toRendertargets ? raycastShaderRendertargets : raycastShaderDirect;
+        gl::ScopedGlslProg scopedProg(program);
+        gl::ScopedBlend blend(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        gl::enableDepth(true);
+
+        // bind  textures
+        gl::ScopedTextureBind frontTex(frontTexture, 0);
+        gl::ScopedTextureBind backTex(backTexture, 1);
+        gl::ScopedTextureBind volumeTex(volumeTexture, 2);
+        gl::ScopedTextureBind gradientTex(gradientTexture, 3);
+        gl::ScopedTextureBind trasferTex(transferFunction->getColorMappingTexture(), 4);
+        gl::ScopedTextureBind noiseTex(noiseTexture, 5);
+
+        // raycast parameters
+        program->uniform("threshold", transferFunction->getThreshold());
+        program->uniform("scaleFactor", scaleFactor);
+        program->uniform("stepSize", stepSize * stepScale);
+        program->uniform("stepScale", stepScale);
+        program->uniform("iterations", static_cast<int>(maxSize * (1.0f / stepScale) * 2.0f));
+
+        // lighting
+        program->uniform("diffuseShading", enableDiffuseShading);
+        program->uniform("light.direction", light.direction);
+        program->uniform("light.ambient", light.ambient);
+        program->uniform("light.diffuse", light.diffuse);
+        gl::setDefaultShaderVars();
+        
+        if(toRendertargets)
+        {
+            const gl::ScopedFramebuffer scopedFramebuffer(volumeRBuffer);
+            {
+                const static GLenum buffers[] = {
+                    GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
+                };
+                gl::drawBuffers(2, buffers);
+            }
+            const gl::ScopedViewport scopedViewport(ivec2(0), volumeRBuffer->getSize());
+            gl::clear();
+            // draw cube
+            gl::drawElements(gl::toGl(cubeMesh->getPrimitive()), cubeMesh->getNumIndices(),
+                GL_UNSIGNED_INT, static_cast<GLuint *>(nullptr));
+        }
+        else
+        {
+            const gl::ScopedViewport scopedViewport(ivec2(0), app::toPixels(app::getWindowSize()));
+            program->uniform("gamma", RenderingParams::GetGamma());
+            program->uniform("exposure", RenderingParams::GetExposure());
+            gl::clear();
+            // draw cube
+            gl::drawElements(gl::toGl(cubeMesh->getPrimitive()), cubeMesh->getNumIndices(),
+                GL_UNSIGNED_INT, static_cast<GLuint *>(nullptr));
+        }
+    }
+}
+
+void RaycastVolume::resizeFbos()
+{
+    gl::Texture2d::Format dataFormat = gl::Texture2d::Format().internalFormat(GL_RGB16F)
+                                                              .magFilter(GL_NEAREST)
+                                                              .minFilter(GL_NEAREST)
+                                                              .wrap(GL_REPEAT)
+                                                              .dataType(GL_FLOAT);
+    const ivec2 winSize = app::getWindowSize();
+    const int32_t h = winSize.y;
+    const int32_t w = winSize.x;
+
+    try
+    {
+        // cube positions rendering
+        gl::Fbo::Format frontFormat, backFormat;
+        frontTexture = gl::Texture2d::create(w, h, dataFormat);
+        backTexture = gl::Texture2d::create(w, h, dataFormat);
+        volumeColor = gl::Texture2d::create(w, h, dataFormat);
+        volumeNormal = gl::Texture2d::create(w, h, dataFormat);
+
+        // front fbo
+        frontFormat.attachment(GL_COLOR_ATTACHMENT0, frontTexture);
+        frontFormat.depthBuffer();
+        frontFbo = gl::Fbo::create(w, h, frontFormat);
+
+        // back fbo
+        backFormat.attachment(GL_COLOR_ATTACHMENT0, backTexture);
+        backFormat.depthBuffer();
+        backFbo = gl::Fbo::create(w, h, backFormat);
+
+        // deferred rendering mode gbuffer
+        gl::Fbo::Format gBufferFormat;
+        gBufferFormat.attachment(GL_COLOR_ATTACHMENT0, volumeColor);
+        gBufferFormat.attachment(GL_COLOR_ATTACHMENT1, volumeNormal);
+        gBufferFormat.depthTexture();
+        volumeRBuffer = gl::Fbo::create(w, h, gBufferFormat);
+    }
+    catch (const Exception& e)
+    {
+        CI_LOG_EXCEPTION("Fbo/Renderbuffer create", e);
+    }
+}
+
+void RaycastVolume::extractHistogram()
+{
+    std::array<uint32_t, 256> histogramData = {0};
+    // create shader storage buffer
+    histogramSsbo = gl::Ssbo::create(256 * sizeof(uint32_t), histogramData.data(), GL_DYNAMIC_COPY);
+    histogramSsbo->bindBase(1);
+
+    // compute histogram
+    {
+        // bind histogram compute shader
+        histogramCompute->bind();
+        // volume texture
+        glBindImageTexture(0, volumeTexture->getId(), 0, true, 0, GL_READ_ONLY, GL_R8UI);
+        bindBufferBase(histogramSsbo->getTarget(), 1, histogramSsbo);
+        // compute histogram
+        gl::dispatchCompute(1, 1, 1);
+        // block to ensure completion
+        gl::memoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    }
+
+    // extract histogram values
+    uint32_t* ssboValues = reinterpret_cast<uint32_t*>(histogramSsbo->map(GL_WRITE_ONLY));
+    memcpy(histogramData.data(), ssboValues, 256 * sizeof(uint32_t));
+    histogramSsbo->unmap();
+    // convert to normalized floating values
+    auto maxValue = max_element(histogramData.begin(), histogramData.end());
+
+    // normalize and insert values
+    for (int i = 0; i < 256; i++)
+    {
+        histogram[i] = static_cast<float>(histogramData[i]) / *maxValue;
+    }
+}
+
+void RaycastVolume::generateGradients()
+{
+    auto format = gl::Texture3d::Format().magFilter(GL_LINEAR)
+                                         .minFilter(GL_LINEAR)
+                                         .wrapS(GL_CLAMP_TO_BORDER)
+                                         .wrapR(GL_CLAMP_TO_BORDER)
+                                         .wrapT(GL_CLAMP_TO_BORDER)
+                                         .internalFormat(GL_RG16F);
+    format.setDataType(GL_FLOAT);
+    gradientTexture = gl::Texture3d::create(dimensions.x, dimensions.y, dimensions.z, format);
+
+    // compute gradients
+    {
+        gradientsCompute->bind();
+        // pass textures
+        glBindImageTexture(0, volumeTexture->getId(), 0, true, 0, GL_READ_ONLY, GL_R8UI);
+        glBindImageTexture(1, gradientTexture->getId(), 0, true, 0, GL_WRITE_ONLY, GL_RG16F);
+        // compute gradients
+        gl::dispatchCompute(ceil(dimensions.x / 8), ceil(dimensions.y / 8), ceil(dimensions.z / 8));
+    }
+    // smooth gradients
+    {
+        smoothGradientsCompute->bind();
+        // pass textures
+        glBindImageTexture(0, gradientTexture->getId(), 0, true, 0, GL_READ_WRITE, GL_RG16F);
+        // compute gradients
+        gl::dispatchCompute(ceil(dimensions.x / 8), ceil(dimensions.y / 8), ceil(dimensions.z / 8));
+    }
+}
+
+const std::array<float, 256> &RaycastVolume::getHistogram() const
+{
+    return histogram;
+}
+
+void RaycastVolume::setTransferFunction(const std::shared_ptr<TransferFunction>& transferFunction)
+{
+    this->transferFunction = transferFunction;
+}
+
+void RaycastVolume::diffuseShading(bool enable)
+{
+    this->enableDiffuseShading = enable;
+}
+
+void RaycastVolume::setLight(vec3 direction, vec3 ambient, vec3 diffuse)
+{
+    light.direction = direction;
+    light.ambient = ambient;
+    light.diffuse = diffuse;
+}
+
+const Light &RaycastVolume::getLight() const { return light; }
+
+const quat &RaycastVolume::getRotation() const { return modelRotation; }
+
+void RaycastVolume::setRotation(const quat& rotation) { modelRotation = rotation; }
+
+const vec3 &RaycastVolume::getPosition() const { return modelPosition; }
+
+void RaycastVolume::setPosition(const vec3& position) { modelPosition = position; }
+
+const gl::Texture2dRef& RaycastVolume::getColorTexture() const
+{
+    return volumeColor;
+}
+
+const gl::Texture2dRef& RaycastVolume::getNormalTexture() const
+{
+    return volumeNormal;
+}
+
+const gl::Texture2dRef& RaycastVolume::getDepthTexture() const
+{
+    return volumeRBuffer->getDepthTexture();
+}
+```
+
+### VolumeRendering/RaycastVolume.h
+```
+#pragma once
+#include "cinder/gl/gl.h"
+#include "Light.h"
+
+class TransferFunction;
+
+class RaycastVolume
+{
+public:
+    void loadFromFile(const glm::vec3& dimensions, const glm::vec3& ratios, const std::string filepath, bool is16Bits = false);
+    void drawVolume(const cinder::Camera& camera, bool toRendertargets);
+    void resizeFbos();
+    explicit RaycastVolume();
+    ~RaycastVolume();
+
+    // getters and setters
+    glm::vec3 centerPoint() const;
+    const float &getStepScale() const;
+    void setStepScale(const float& value);
+    const glm::vec3 &getAspectRatios() const;
+    void setAspectratios(const glm::vec3& value);
+    const std::array<float, 256> &getHistogram() const;
+    void setTransferFunction(const std::shared_ptr<TransferFunction>& transferFunction);
+    void diffuseShading(bool enable);
+    void setLight(glm::vec3 direction, glm::vec3 ambient, glm::vec3 diffuse);
+    const Light &getLight() const;
+    const glm::quat &getRotation() const;
+    void setRotation(const glm::quat& rotation);
+    const glm::vec3 &getPosition() const;
+    void setPosition(const glm::vec3& position);
+
+    // render targets
+    const ci::gl::Texture2dRef &getColorTexture() const;
+    const cinder::gl::Texture2dRef &getNormalTexture() const;
+    const cinder::gl::Texture2dRef &getDepthTexture() const;
+private:
+    // histogram data
+    std::array<float, 256> histogram;
+
+    // cube for positions
+    ci::TriMeshRef cubeMesh;
+    ci::gl::VboRef cubeVerticesBuffer;
+    ci::gl::VboRef cubeIndicesBuffer;
+    ci::gl::VaoRef cubeVao;
+
+    // volume texture
+    ci::gl::Texture3dRef gradientTexture;
+    ci::gl::Texture3dRef volumeTexture;
+
+    // fbos
+    ci::gl::FboRef frontFbo;
+    ci::gl::FboRef backFbo;
+    ci::gl::FboRef volumeRBuffer;
+
+    // draw positions shader
+    ci::gl::GlslProgRef positionsShader;
+
+    // volume raycast
+    cinder::gl::GlslProgRef raycastShaderRendertargets;
+    cinder::gl::GlslProgRef raycastShaderDirect;
+    std::shared_ptr<TransferFunction> transferFunction;
+
+    // lighting
+    Light light;
+
+    // compute shaders
+    ci::gl::SsboRef histogramSsbo;
+    ci::gl::GlslProgRef histogramCompute;
+    ci::gl::GlslProgRef gradientsCompute;
+    ci::gl::GlslProgRef smoothGradientsCompute;
+
+    // render targets
+    ci::gl::Texture2dRef frontTexture;
+    ci::gl::Texture2dRef backTexture;
+    ci::gl::Texture2dRef volumeNormal;
+    ci::gl::Texture2dRef volumeColor;
+
+    // raycast parameters
+    ci::gl::Texture2dRef noiseTexture;
+    glm::vec3 dimensions;
+    glm::vec3 stepSize;
+    glm::vec3 aspectRatios;
+    glm::vec3 scaleFactor;
+    float stepScale;
+    float maxSize;
+    bool enableDiffuseShading;
+
+    // model
+    bool isDrawable;
+    glm::quat modelRotation;
+    glm::vec3 modelPosition;
+
+    void drawCubeFaces() const;
+    void createCubeVbo();
+    void readVolumeFromFile8(const std::string filepath);
+    void readVolumeFromFile16(const std::string filepath);
+
+    void extractHistogram();
+    void generateGradients();
+};
+```
+
+### VolumeRendering/RenderingParams.cpp
+```
+#include "RenderingParams.h"
+#include <cinder/CinderGlm.h>
+using namespace glm;
+
+float RenderingParams::gammaValue = 2.2f;
+float RenderingParams::exposureValue = 1.0f;
+bool RenderingParams::fxaa = true;
+
+float RenderingParams::GetExposure() 
+{
+    return exposureValue;
+}
+
+void RenderingParams::SetExposure(const float exposure)
+{
+    exposureValue = min(max(epsilon<float>(), exposure), 8.0f);
+}
+
+float RenderingParams::GetGamma()
+{
+    return gammaValue;
+}
+
+void RenderingParams::SetGamma(const float gamma)
+{
+    gammaValue = min(max(epsilon<float>(), gamma), 10.0f);
+}
+
+void RenderingParams::FXAAEnabled(const bool enabled)
+{
+    fxaa = enabled;
+}
+
+bool RenderingParams::FXAAEnabled()
+{
+    return fxaa;
+}
+```
+
+### VolumeRendering/RenderingParams.h
+```
+#pragma once
+class RenderingParams
+{
+public:
+    static float GetExposure();
+    static void SetExposure(const float exposure);
+    static float GetGamma();
+    static void SetGamma(const float gamma);
+    static void FXAAEnabled(const bool enabled);
+    static bool FXAAEnabled();
+private:
+    static float gammaValue;
+    static float exposureValue;
+    static bool fxaa;
+};
+```
+
+### VolumeRendering/TransferFunction.cpp
+```
+#include "TransferFunction.h"
+#include "RaycastVolume.h"
+#include "CinderImGui.h"
+using namespace glm;
+using namespace cinder;
+
+TransferFunction::TransferFunction() : threshold(vec2(0, 255))
+{
+    colorPoints.push_back(TransferFunctionColorPoint(vec3(1), 0));
+    colorPoints.push_back(TransferFunctionColorPoint(vec3(1), 255));
+
+    alphaPoints.push_back(TransferFunctionAlphaPoint(1.0, 0));
+    alphaPoints.push_back(TransferFunctionAlphaPoint(1.0, 255));
+}
+
+TransferFunction::~TransferFunction() {}
+
+void TransferFunction::addColorPoint(const vec3& color, const int isoValue)
+{
+    // inserted point is off limits
+    if (isoValue <= 0 || isoValue >= colorPoints.back().getIsoValue() || colorPoints.size() > 255)
+    {
+        return;
+    }
+
+    auto ctrlP = TransferFunctionColorPoint(color, isoValue);
+    // sorted insert
+    colorPoints.insert(upper_bound(colorPoints.begin(), colorPoints.end(), ctrlP), ctrlP);
+    updateFunction();
+}
+
+void TransferFunction::addAlphaPoint(const float alpha, const int isoValue)
+{
+    // inserted point is off limits
+    if (isoValue <= 0 || isoValue >= alphaPoints.back().getIsoValue() || colorPoints.size() > 255)
+    {
+        return;
+    }
+
+    auto ctrlP = TransferFunctionAlphaPoint(alpha, isoValue);
+    // sorted insert
+    alphaPoints.insert(upper_bound(alphaPoints.begin(), alphaPoints.end(), ctrlP), ctrlP);
+    updateFunction();
+}
+
+void TransferFunction::removeColorPoint(const int index)
+{
+    // off limits
+    if (index <= 0 || index >= colorPoints.size())
+    {
+        return;
+    }
+
+    colorPoints.erase(colorPoints.begin() + index);
+    updateFunction();
+}
+
+void TransferFunction::removeAlphaPoint(const int index)
+{
+    // off limits
+    if (index <= 0 || index >= alphaPoints.size())
+    {
+        return;
+    }
+
+    alphaPoints.erase(alphaPoints.begin() + index);
+    updateFunction();
+}
+
+void TransferFunction::setAlpha(const int index, const float alpha)
+{
+    // off limits
+    if (index < 0 || index >= alphaPoints.size())
+    {
+        return;
+    }
+
+    alphaPoints[index].setAlpha(clamp(alpha, 0.0f, 1.0f));
+    updateFunction();
+}
+
+void TransferFunction::setThreshold(int minIso, int maxIso)
+{
+    minIso = clamp(minIso, 0, maxIso - 1);
+    maxIso = clamp(maxIso, minIso + 1, 255);
+
+    threshold.x = minIso;
+    threshold.y = maxIso;
+}
+
+const ivec2& TransferFunction::getThreshold() const
+{
+    return threshold;
+}
+
+vec4 TransferFunction::getColor(const float t)
+{
+    float alpha = 0;
+    vec3 color = vec3(0);
+    int i = 0;
+    int isoValue = t * 255;
+
+    for (auto it = alphaPoints.cbegin(); it != --alphaPoints.cend() && i < alphaSpline.size();)
+    {
+        int currentIso = it->getIsoValue();
+        int nextIso = (++it)->getIsoValue();
+
+        // find cubic index
+        if (isoValue >= currentIso && isoValue <= nextIso)
+        {
+            auto& currentCubic = alphaSpline[i];
+            float evalAt = static_cast<float>(isoValue - currentIso) / (nextIso - currentIso);
+            alpha = currentCubic.getPointOnSpline(evalAt).r;
+            break;
+        }
+
+        i++;
+    }
+
+    i = 0;
+
+    for (auto it = colorPoints.cbegin(); it != --colorPoints.cend() && i < colorSpline.size();)
+    {
+        int currentIso = it->getIsoValue();
+        int nextIso = (++it)->getIsoValue();
+
+        // find cubic index
+        if (isoValue >= currentIso && isoValue <= nextIso)
+        {
+            auto& currentCubic = colorSpline[i];
+            float evalAt = static_cast<float>(isoValue - currentIso) / (nextIso - currentIso);
+            color = currentCubic.getPointOnSpline(evalAt);
+            break;
+        }
+
+        i++;
+    }
+
+    return vec4(color.r, color.g, color.b, alpha);
+}
+
+vec4 TransferFunction::getColor(const int isoValue)
+{
+    if (isoValue < 0 || isoValue > 255) return vec4(-1);
+
+    return indexedTransferFunction[isoValue];
+}
+
+void TransferFunction::updateFunction()
+{
+    std::vector<vec3> alphaCtrPoints(alphaPoints.size());
+    std::vector<vec3> colorCtrPoints(colorPoints.size());
+
+    for (int i = 0; i < alphaCtrPoints.size(); i++)
+    {
+        alphaCtrPoints[i] = vec3(alphaPoints[i].getAlpha());
+    }
+
+    for (int i = 0; i < colorCtrPoints.size(); i++)
+    {
+        colorCtrPoints[i] = colorPoints[i].getColor();
+    }
+
+    alphaSpline = move(CubicSpline::CalculateCubicSpline(alphaCtrPoints));
+    colorSpline = move(CubicSpline::CalculateCubicSpline(colorCtrPoints));
+
+    // update fast access transfer function
+    for (int i = 0; i < indexedTransferFunction.size(); i++)
+    {
+        indexedTransferFunction[i] = getColor(static_cast<float>(i) / 255);
+    }
+
+    // update texture needs to be update on next query
+    updateColorTexture = true;
+}
+
+const std::vector<TransferFunctionColorPoint> &TransferFunction::getColorPoints() const
+{
+    return colorPoints;
+}
+
+const std::vector<TransferFunctionAlphaPoint> &TransferFunction::getAlphaPoints() const
+{
+    return alphaPoints;
+}
+
+const std::array<vec4, 256> &TransferFunction::getIndexedTransferFunction() const
+{
+    return indexedTransferFunction;
+}
+
+const gl::Texture1dRef& TransferFunction::getColorMappingTexture()
+{
+    // update texture
+    if (!colorMappingTexture)
+    {
+        updateFunction();
+        auto format = gl::Texture1d::Format().minFilter(GL_LINEAR)
+            .magFilter(GL_LINEAR)
+            .wrapS(GL_CLAMP_TO_EDGE)
+            .internalFormat(GL_RGBA);
+        format.setDataType(GL_FLOAT);
+        colorMappingTexture = gl::Texture1d::create(getIndexedTransferFunction().data(), GL_RGBA, 256, format);
+    }
+    else if (updateColorTexture)
+    {
+        colorMappingTexture->update(getIndexedTransferFunction().data(), GL_RGBA, GL_FLOAT, 0, 256, 0);
+        updateColorTexture = true;
+    }
+
+    return colorMappingTexture;
+}
+
+void TransferFunction::setColor(const int index, const vec3& color)
+{
+    // off limits
+    if (index < 0 || index >= colorPoints.size())
+    {
+        return;
+    }
+
+    colorPoints[index].setColor(clamp(color, vec3(0), vec3(1)));
+    updateFunction();
+}
+
+void TransferFunction::setAlphaPointIsoValue(const int index, const int isoValue)
+{
+    // off limits
+    if (index <= 0 || index >= alphaPoints.size())
+    {
+        return;
+    }
+
+    // off limits iso val
+    if (isoValue <= 0 || isoValue >= 255)
+    {
+        return;
+    }
+
+    alphaPoints[index].setIsoValue(isoValue);
+
+    // function points may need sorting after modiying sorting token, isoValue
+    bool needSorting = !is_sorted(alphaPoints.begin(), alphaPoints.end());
+
+    if (needSorting) { sort(alphaPoints.begin(), alphaPoints.end()); }
+
+    updateFunction();
+}
+
+void TransferFunction::setColorPointIsoValue(const int index, const int isoValue)
+{
+    // off limits
+    if (index <= 0 || index >= colorPoints.size())
+    {
+        return;
+    }
+
+    // off limits iso val
+    if (isoValue <= 0 || isoValue >= 255)
+    {
+        return;
+    }
+
+    colorPoints[index].setIsoValue(isoValue);
+
+    // function points may need sorting after modiying sorting token, isoValue
+    bool needSorting = !is_sorted(colorPoints.begin(), colorPoints.end());
+
+    if (needSorting) { sort(colorPoints.begin(), colorPoints.end()); }
+
+    updateFunction();
+}
+```
+
+### VolumeRendering/TransferFunction.h
+```
+#pragma once
+#include "TransferFunctionPoint.h"
+#include "CubicSpline.h"
+class RaycastVolume;
+
+class TransferFunction
+{
+public:
+    TransferFunction();
+    virtual ~TransferFunction();
+    glm::vec4 getColor(const float t /* t=[0..1] */);
+    glm::vec4 getColor(const int isoValue /* isoValue=[0..255] */);
+    virtual void updateFunction();
+    void addColorPoint(const glm::vec3& color, const int isoValue);
+    void addAlphaPoint(const float alpha, const int isoValue);
+    void removeColorPoint(const int index);
+    void removeAlphaPoint(const int index);
+    void setAlpha(const int index, const float alpha);
+    void setColor(const int index, const glm::vec3 &color);
+    void setAlphaPointIsoValue(const int index, const int isoValue);
+    void setColorPointIsoValue(const int index, const int isoValue);
+    void setThreshold(int minIso, int maxIso);
+    const glm::ivec2 &getThreshold() const;
+    const std::vector<TransferFunctionColorPoint> &getColorPoints() const;
+    const std::vector<TransferFunctionAlphaPoint> &getAlphaPoints() const;
+    const std::array<glm::vec4, 256> &getIndexedTransferFunction() const;
+    const cinder::gl::Texture1dRef &getColorMappingTexture();
+private:
+    glm::ivec2 threshold;
+    std::vector<TransferFunctionColorPoint> colorPoints;
+    std::vector<TransferFunctionAlphaPoint> alphaPoints;
+    std::vector<CubicSpline> alphaSpline;
+    std::vector<CubicSpline> colorSpline;
+    std::array<glm::vec4, 256> indexedTransferFunction;
+    bool updateColorTexture;
+
+    cinder::gl::Texture1dRef colorMappingTexture;
+};
+```
+
+### VolumeRendering/TransferFunctionPoint.cpp
+```
+#include "TransferFunctionPoint.h"
+
+TransferFunctionPoint::TransferFunctionPoint(const int isoValue)
+{
+    this->isoValue = isoValue;
+}
+
+const int &TransferFunctionPoint::getIsoValue() const
+{
+    return isoValue;
+}
+
+void TransferFunctionPoint::setIsoValue(const int value)
+{
+    this->isoValue = value;
+}
+
+TransferFunctionPoint::~TransferFunctionPoint() {}
+
+bool TransferFunctionPoint::operator<(const TransferFunctionPoint& rhs) const
+{
+    return this->isoValue < rhs.getIsoValue();
+}
+
+bool TransferFunctionPoint::operator==(const TransferFunctionPoint& rhs) const
+{
+    return this->isoValue == rhs.getIsoValue();
+}
+
+const glm::vec3 &TransferFunctionColorPoint::getColor() const
+{
+    return color;
+}
+
+void TransferFunctionColorPoint::setColor(const glm::vec3& value)
+{
+    this->color = value;
+}
+
+TransferFunctionColorPoint::TransferFunctionColorPoint(const glm::vec3& color, const int iso) : TransferFunctionPoint(iso)
+{
+    this->color = color;
+}
+
+bool TransferFunctionColorPoint::operator<(const TransferFunctionColorPoint& rhs) const
+{
+    return TransferFunctionPoint::operator<(rhs) ? true : TransferFunctionPoint::operator==(rhs) && length2(this->color) < length2(rhs.color);
+}
+
+bool TransferFunctionColorPoint::operator==(const TransferFunctionColorPoint& rhs) const
+{
+    return TransferFunctionPoint::operator==(rhs) && length2(this->color) == length2(rhs.color);
+}
+
+const float &TransferFunctionAlphaPoint::getAlpha() const
+{
+    return alpha;
+}
+
+void TransferFunctionAlphaPoint::setAlpha(const float value)
+{
+    this->alpha = value;
+}
+
+TransferFunctionAlphaPoint::TransferFunctionAlphaPoint(const float alpha, const int iso) : TransferFunctionPoint(iso)
+{
+    this->alpha = alpha;
+}
+
+bool TransferFunctionAlphaPoint::operator<(const TransferFunctionAlphaPoint& rhs) const
+{
+    return TransferFunctionPoint::operator<(rhs) ? true : TransferFunctionPoint::operator==(rhs) && this->alpha < rhs.alpha;
+}
+
+bool TransferFunctionAlphaPoint::operator==(const TransferFunctionAlphaPoint& rhs) const
+{
+    return TransferFunctionPoint::operator==(rhs) && this->alpha == rhs.alpha;
+}
+```
+
+### VolumeRendering/TransferFunctionPoint.h
+```
+#pragma once
+#include "cinder/gl/gl.h"
+
+class TransferFunctionPoint
+{
+protected:
+    TransferFunctionPoint() = default;
+    explicit TransferFunctionPoint(const int isoValue);
+    int isoValue;
+public:
+    const int &getIsoValue() const;
+    void setIsoValue(const int value);
+    ~TransferFunctionPoint();
+
+    bool operator<(const TransferFunctionPoint& rhs) const;
+    bool operator==(const TransferFunctionPoint& rhs) const;
+};
+
+class TransferFunctionColorPoint : public TransferFunctionPoint
+{
+public:
+    const glm::vec3 &getColor() const;
+    void setColor(const glm::vec3& value);
+    TransferFunctionColorPoint() = default;
+    TransferFunctionColorPoint(const glm::vec3& color, const int iso);
+    bool operator<(const TransferFunctionColorPoint& rhs) const;
+    bool operator==(const TransferFunctionColorPoint& rhs) const;
+private:
+    glm::vec3 color;
+};
+
+class TransferFunctionAlphaPoint : public TransferFunctionPoint
+{
+public:
+    const float &getAlpha() const;
+    void setAlpha(const float value);
+    TransferFunctionAlphaPoint() = default;
+    TransferFunctionAlphaPoint(const float alpha, const int iso);
+    bool operator<(const TransferFunctionAlphaPoint& rhs) const;
+    bool operator==(const TransferFunctionAlphaPoint& rhs) const;;
+private:
+    float alpha;
+};
+```
+
+### VolumeRendering/TransferFunctionUi.cpp
+```
+#include "TransferFunctionUi.h"
+#include "RaycastVolume.h"
+#include "CinderImGui.h"
+using namespace glm;
+using namespace ci;
+
+void TransferFunctionUi::drawThresholdControl()
+{
+    // draw threshold indicator
+    const ImVec2 p = ui::GetCursorScreenPos();
+    ImDrawList* drawList = ui::GetWindowDrawList();
+    auto width = ui::GetContentRegionAvailWidth();
+    ImU32 gray = ImColor(0.5f, 0.5f, 0.5f, 0.5f);
+    float x = p.x;
+    float y = p.y - 35.0f - 4.0f;
+    float steps = width / 255;
+    ImGuiStyle& style = ui::GetStyle();
+    auto threshold = getThreshold();
+
+    if (threshold.x > 0)
+    {
+        drawList->AddRectFilled(ImVec2(x, y - 120), ImVec2(x + threshold.x * steps, y), gray, style.FrameRounding);
+    }
+
+    if (threshold.y < 255)
+    {
+        drawList->AddRectFilled(ImVec2(x + threshold.y * steps, y - 120), ImVec2(x + 255 * steps, y), gray, style.FrameRounding);
+    }
+
+    // draw threshold controls
+    ui::BeginGroup();
+    ui::PushItemWidth(-2.0f);
+
+    if (ui::SliderInt2("##Threshold", value_ptr(threshold), 0, 255))
+    {
+        setThreshold(threshold.x, threshold.y);
+        updateFunction();
+    }
+
+    ui::PopItemWidth();
+    ui::EndGroup();
+}
+
+void TransferFunctionUi::drawUi(bool& open, const RaycastVolume& volume)
+{
+    if (open)
+    {
+        ui::Begin("Transfer Function", &open, ImGuiWindowFlags_AlwaysAutoResize);
+        drawHistogram(volume);
+        drawControlPointsUi();
+        drawThresholdControl();
+        drawControlPointCreationUi();
+        ui::End();
+    }
+}
+
+TransferFunctionUi::TransferFunctionUi() {}
+
+TransferFunctionUi::~TransferFunctionUi() {}
+
+void TransferFunctionUi::drawHistogram(const RaycastVolume& volume) const
+{
+    ui::BeginGroup();
+    auto& histogram = volume.getHistogram();
+    ui::PlotHistogram("##histogram", histogram.data(), histogram.size(), 0, nullptr, 0.0f, 1.0f, ImVec2(520, 120));
+    ui::EndGroup();
+}
+
+void TransferFunctionUi::drawControlPointsUi()
+{
+    const ImVec2 p = ui::GetCursorScreenPos();
+    ImDrawList* drawList = ui::GetWindowDrawList();
+    int width = ui::GetContentRegionAvailWidth() - 4.0f;
+    ImU32 white = ImColor(1.0f, 1.0f, 1.0f, 1.0f);
+    ImU32 black = ImColor(0.0f, 0.0f, 0.0f, 1.0f);
+    float sz = 20.0f;
+    float x = p.x + 4.0f;
+    float y = p.y + 4.0f;
+    float step = static_cast<float>(width) / 256;
+    auto& colorPoints = getColorPoints();
+    auto& alphaPoints = getAlphaPoints();
+
+    for (int i = 0; i < 256; i++)
+    {
+        const auto& color = getColor(i);
+        ImU32 col32 = ImColor(color);
+        // draw color transfer function
+        drawList->AddLine(ImVec2(x, y), ImVec2(x, y + sz), col32, 2.0f * step);
+        x += step;
+    }
+
+    for (auto& colorP : colorPoints)
+    {
+        const auto& color = colorP.getColor();
+        ImU32 col32 = ImColor(color.r, color.g, color.b, 1.0f);
+        ImU32 invCol32 = ImColor(1.0f - color.r, 1.0f - color.g, 1.0f - color.b, 1.0f);
+        drawList->AddCircleFilled(ImVec2(p.x + step * colorP.getIsoValue() + 4.0f, y + sz), 5, col32, 24);
+        drawList->AddCircle(ImVec2(p.x + step * colorP.getIsoValue() + 4.0f, y + sz), 5, invCol32, 24);
+    }
+
+    for (int i = 0; i < 255; i++)
+    {
+        auto aBegin = clamp(1.0f - getColor(i).a, 0.0f, 1.0f);
+        auto aEnd = clamp(1.0f - getColor(i + 1).a, 0.0f, 1.0f);
+        drawList->AddLine(ImVec2(p.x + step * i + 4.0f, y - 124.0f + aBegin * 120),
+            ImVec2(p.x + step * (i + 1) + 4.0f, y - 124.0f + aEnd * 120), white, 2);
+    }
+
+    for (auto& alphaP : alphaPoints)
+    {
+        const auto& alpha = 1.0f - alphaP.getAlpha();
+        ImU32 opacity = ImColor(1.0f - vec4(alpha));
+        drawList->AddCircleFilled(ImVec2(p.x + step * alphaP.getIsoValue() + 4.0f, y - 124.0f + alpha * 120), 5, opacity, 24);
+        drawList->AddCircle(ImVec2(p.x + step * alphaP.getIsoValue() + 4.0f, y - 124.0f + alpha * 120), 5, black, 24);
+    }
+
+    ui::Dummy(ImVec2(width, sz + 15.0f));
+}
+
+void TransferFunctionUi::drawControlPointList(int pointType)
+{
+    bool deleteCtrlPoint = false;
+
+    auto isoValueControl = [&](const TransferFunctionPoint& p, const int index)
+    {
+        int pIso = p.getIsoValue();
+        ui::SameLine();
+        ui::PushItemWidth(-30);
+
+        if (p.getIsoValue() != 0 && p.getIsoValue() != 255)
+        {
+            if (ui::SliderInt("##isoValA", &pIso, 1, 254))
+            {
+                pIso = min(max(pIso, 1), 254);
+                pointType == 0 ? setAlphaPointIsoValue(index, pIso)
+                    : setColorPointIsoValue(index, pIso);
+            }
+        }
+        else if (p.getIsoValue() == 0 || p.getIsoValue() == 255)
+        {
+            ui::PushStyleColor(ImGuiCol_Button, ImVec4(vec4(0.5f)));
+            ui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(vec4(0.5f)));
+            ui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(vec4(0.5f)));
+            ui::Button(std::to_string(p.getIsoValue()).c_str(), ImVec2(ui::GetContentRegionAvailWidth() - 30, 0));
+            ui::PopStyleColor(3);
+        }
+
+        ui::PopItemWidth();
+
+        if (p.getIsoValue() != 0 && p.getIsoValue() != 255)
+        {
+            ui::SameLine();
+
+            if (ui::Button("X", ImVec2(ui::GetContentRegionAvailWidth(), 0)))
+            {
+                deleteCtrlPoint = true;
+            }
+        }
+    };
+
+    // draw control point list
+    if (pointType == 0 ? ui::TreeNode("Alpha Points") : ui::TreeNode("Color Points"))
+    {
+        ui::BeginGroup();
+        ui::BeginChild(ui::GetID((void*)(intptr_t)pointType), ImVec2(ui::GetContentRegionAvailWidth(), 120), true);
+
+        if (pointType == 0)
+        {
+            for (auto i = 0; i < getAlphaPoints().size(); i++)
+            {
+                auto& alphaP = getAlphaPoints()[i];
+                auto pAlpha = alphaP.getAlpha();
+
+                ui::PushID(&alphaP);
+                ui::PushItemWidth(ui::GetContentRegionAvailWidth() * 0.5f);
+
+                if (ui::DragFloat("##alpha", &pAlpha, 0.01f, 0.0f, 1.0f))
+                {
+                    setAlpha(i, pAlpha);
+                }
+
+                ui::PopItemWidth();
+                isoValueControl(alphaP, i);
+
+                if (deleteCtrlPoint)
+                {
+                    removeAlphaPoint(i--);
+                    deleteCtrlPoint = false;
+                    updateFunction();
+                }
+
+                ui::PopID();
+            }
+        }
+        else if (pointType == 1)
+        {
+            for (auto i = 0; i < getColorPoints().size(); i++)
+            {
+                auto& colorP = getColorPoints()[i];
+                auto pColor = colorP.getColor();
+
+                ui::PushID(&colorP);
+                ui::PushItemWidth(ui::GetContentRegionAvailWidth() * 0.5f);
+
+                if (ui::ColorEdit3("##color", value_ptr(pColor)))
+                {
+                    setColor(i, pColor);
+                }
+
+                ui::PopItemWidth();
+                isoValueControl(colorP, i);
+
+                if (deleteCtrlPoint)
+                {
+                    removeColorPoint(i--);
+                    deleteCtrlPoint = false;
+                    updateFunction();
+                }
+
+                ui::PopID();
+            }
+        }
+
+        ui::EndChild();
+        ui::EndGroup();
+        ui::TreePop();
+    }
+}
+
+void TransferFunctionUi::drawControlPointCreationUi()
+{
+    // creation bar
+    static int pointType = 0;
+    static int isoValue = 127;
+    static float alpha;
+    static vec3 color;
+    ui::BeginGroup();
+    ui::Separator();
+    ui::RadioButton("Alpha Point", &pointType, 0);
+    ui::SameLine();
+    ui::RadioButton("Color Point", &pointType, 1);
+    // iso value bar
+    ui::SliderInt("Iso Value", &isoValue, 1, 254);
+
+    // alpha point
+    if (pointType == 0)
+    {
+        ui::DragFloat("Alpha", &alpha, 0.01f, 0.0f, 1.0f);
+    }
+    else // color point
+    {
+        ui::ColorEdit3("Color", value_ptr(color));
+    }
+
+    ui::EndGroup();
+    ImVec2 size = ImGui::GetItemRectSize();
+    ui::SameLine();
+
+    if (ui::Button("Add Point", ImVec2(ui::GetContentRegionAvailWidth(), size.y)))
+    {
+        pointType == 0 ? addAlphaPoint(alpha, isoValue) : addColorPoint(color, isoValue);
+    }
+
+    drawControlPointList(pointType);
+}
+```
+
+### VolumeRendering/TransferFunctionUi.h
+```
+#pragma once
+#include "TransferFunction.h"
+class RaycastVolume;
+
+class TransferFunctionUi : public TransferFunction
+{
+public:
+    void drawUi(bool& open, const RaycastVolume& volume);
+    TransferFunctionUi();
+    ~TransferFunctionUi();
+private:
+    void drawHistogram(const RaycastVolume& volume) const;
+    void drawThresholdControl();
+    void drawControlPointsUi();
+    void drawControlPointList(int pointType);
+    void drawControlPointCreationUi();
+};
+```
+
+### VolumeRendering/VolumeRenderingApp.cpp
+```
+#include "cinder/app/App.h"
+#include "cinder/app/RendererGl.h"
+#include "cinder/gl/gl.h"
+
+#include "CinderImGui.h"
+#include "RaycastVolume.h"
+#include "PostProcess.h"
+#include "VolumeRenderingAppUi.h"
+#include "RenderingParams.h"
+
+using namespace ci;
+using namespace app;
+
+class VolumeRenderingApp : public App
+{
+public:
+    static void prepareSettings(Settings* settings);
+    void setup() override;
+    void update() override;
+    void draw() override;
+    void resize() override;
+    void mouseWheel(MouseEvent event) override;
+    void mouseDrag(MouseEvent event) override;
+    void mouseDown(MouseEvent event) override;
+private:
+    vec2 dragStart;
+    RaycastVolume volume;
+    PostProcess postProcess;
+    CameraPersp camera;
+    CameraPersp initialCamera;
+    float dragPivotDistance{0.0f};
+};
+
+void VolumeRenderingApp::prepareSettings(Settings* settings)
+{
+    settings->setWindowSize(1280, 720);
+}
+
+void VolumeRenderingApp::setup()
+{
+    auto options = ImGui::Options();
+    options.font("fonts/DroidSans.ttf", 16);
+    ui::initialize(options);
+    // set camera initial setup
+    camera.lookAt(vec3(0, 0, -4), vec3(0), vec3(0, 1, 0));
+}
+
+void VolumeRenderingApp::update()
+{
+    VolumeRenderingAppUi::DrawUi(volume);
+}
+
+void VolumeRenderingApp::draw()
+{
+    gl::clear();
+    // volume raycasting
+    {
+        volume.setPosition(-volume.centerPoint());
+        volume.drawVolume(camera, VolumeRenderingAppUi::PostProcessingEnabled());
+    }
+    // post-process
+    if (VolumeRenderingAppUi::PostProcessingEnabled())
+    {
+        postProcess.toneMapping(volume.getColorTexture());
+
+        // anti aliasing
+        if(RenderingParams::FXAAEnabled())
+        {
+            postProcess.fxAA();
+        }
+        else
+        {
+            postProcess.displayTexture();
+        }
+    }
+}
+
+void VolumeRenderingApp::resize()
+{
+    camera.setAspectRatio(getWindowAspectRatio());
+    // update frame buffers
+    volume.resizeFbos();
+    postProcess.resizeFbos();
+}
+
+void VolumeRenderingApp::mouseWheel(MouseEvent event)
+{
+    float increment = event.getWheelIncrement();
+    float multiplier = powf(1.2f, increment);
+    // move camera
+    vec3 translate = camera.getViewDirection() * (camera.getPivotDistance() * (1.0f - multiplier));
+    camera.setEyePoint(camera.getEyePoint() + translate);
+    camera.setPivotDistance(camera.getPivotDistance() * multiplier);
+}
+
+void VolumeRenderingApp::mouseDrag(MouseEvent event)
+{
+    if (event.isLeftDown())
+    {
+        vec2 dragCurrent = event.getPos();
+        float deltaX = (dragCurrent.x - dragStart.x) / -100.0f;
+        float deltaY = (dragCurrent.y - dragStart.y) / 100.0f;
+        vec3 viewDirection = normalize(initialCamera.getViewDirection());
+        bool invertMotion = (initialCamera.getOrientation() * initialCamera.getWorldUp()).y < 0.0f;
+
+        vec3 rightDirection = normalize(cross(initialCamera.getWorldUp(), viewDirection));
+
+        if (invertMotion)
+        {
+            deltaX = -deltaX;
+            deltaY = -deltaY;
+        }
+
+        console() << deltaX << ", " << deltaY << std::endl;
+
+        vec3 rotated = angleAxis(deltaY, rightDirection) * (-initialCamera.getViewDirection() * dragPivotDistance);
+        rotated = angleAxis(deltaX, initialCamera.getWorldUp()) * rotated;
+
+        camera.setEyePoint(initialCamera.getEyePoint() + initialCamera.getViewDirection() * dragPivotDistance + rotated);
+        camera.setOrientation(angleAxis(deltaX, initialCamera.getWorldUp()) * angleAxis(deltaY, rightDirection) * initialCamera.getOrientation());
+    }
+}
+
+void VolumeRenderingApp::mouseDown(MouseEvent event)
+{
+    if (event.isLeftDown())
+    {
+        dragStart = event.getPos();
+        initialCamera = camera;
+        dragPivotDistance = camera.getPivotDistance();
+    }
+}
+
+CINDER_APP (VolumeRenderingApp, RendererGl, &VolumeRenderingApp::prepareSettings)
+```
+
+### VolumeRendering/VolumeRenderingAppUi.cpp
+```
+#include "VolumeRenderingAppUi.h"
+#include "RaycastVolume.h"
+#include "CinderImGui.h"
+#include "TransferFunctionUi.h"
+#include "RenderingParams.h"
+using namespace glm;
+
+bool VolumeRenderingAppUi::enablePostProcessing = true;
+bool VolumeRenderingAppUi::loadNewVolume = false;
+bool VolumeRenderingAppUi::showVolumeOptions = false;
+bool VolumeRenderingAppUi::showRendering = false;
+bool VolumeRenderingAppUi::showTransferFunction = false;
+bool VolumeRenderingAppUi::showRotationControls = false;
+bool VolumeRenderingAppUi::showLightingSetup = false;
+std::string VolumeRenderingAppUi::path;
+
+bool VolumeRenderingAppUi::PostProcessingEnabled()
+{
+    return enablePostProcessing;
+}
+
+void VolumeRenderingAppUi::DrawUi(RaycastVolume& volume)
+{
+    // menu bar
+    DrawMainMenuBar(volume);
+    // rotation controls
+    DrawRotationControls(volume);
+    // model lighting setup
+    DrawLightingSetup(volume);
+    // volume controls
+    DrawRenderingOptions(volume);
+
+    // open modal dialog for volume parameters
+    if (loadNewVolume)
+    {
+        ui::OpenPopup("Volume Parameters");
+        bool isClosed = VolumeLoadPopup(volume);
+        loadNewVolume = !isClosed;
+        showVolumeOptions = isClosed;
+    }
+
+    // initialize transfer function ui
+    static std::shared_ptr<TransferFunctionUi> transferFunctionUi = nullptr;
+
+    if(!transferFunctionUi)
+    {
+        transferFunctionUi = std::make_shared<TransferFunctionUi>();
+        volume.setTransferFunction(transferFunctionUi);
+    }
+    else
+    {
+        transferFunctionUi->drawUi(showTransferFunction, volume);
+    }
+}
+
+void VolumeRenderingAppUi::DrawRenderingOptions(RaycastVolume& volume)
+{
+    if (showRendering)
+    {
+        ui::Begin("Rendering", &showRendering, ImGuiWindowFlags_AlwaysAutoResize);
+        static float stepScale = volume.getStepScale();
+        static vec3 aspectRatios = volume.getAspectRatios();
+        static int renderingPath = 0;
+        static float exposure = RenderingParams::GetExposure();
+        static float gamma = RenderingParams::GetGamma();
+        stepScale = volume.getStepScale();
+        aspectRatios = volume.getAspectRatios();
+
+        if (ui::SliderFloat("Step Scale", &stepScale, 0.1, 8))
+        {
+            volume.setStepScale(stepScale);
+        }
+
+        if (ui::InputFloat3("Aspect", value_ptr(aspectRatios)))
+        {
+            volume.setAspectratios(aspectRatios);
+        }
+
+        if(ui::SliderFloat("Gamma", &gamma, 0.01f, 10.0f))
+        {
+            RenderingParams::SetGamma(gamma);
+        }
+
+        if (ui::SliderFloat("Exposure", &exposure, 0.01f, 8.0f))
+        {
+            RenderingParams::SetExposure(exposure);
+        }
+
+        ui::Checkbox("Enable Post-processing", &enablePostProcessing);
+
+        if(enablePostProcessing)
+        {
+            static bool fxaa = RenderingParams::FXAAEnabled();
+
+            if (ui::Checkbox("FXAA", &fxaa))
+            {
+                RenderingParams::FXAAEnabled(fxaa);
+            }
+        }
+
+        ui::End();
+    }
+}
+
+void VolumeRenderingAppUi::DrawLightingSetup(RaycastVolume& volume)
+{
+    if (showLightingSetup)
+    {
+        static Light light = volume.getLight();
+        static float lightIntensity = 1.0f;
+        static vec3 rotation;
+        static bool doShading = true;
+        bool changed = false;
+        ui::Begin("Lighting", &showLightingSetup, ImGuiWindowFlags_AlwaysAutoResize);
+
+        if (ui::Checkbox("Enable Diffuse Shading", &doShading))
+        {
+            volume.diffuseShading(doShading);
+        }
+
+        changed |= ui::SliderFloat3("Rotation", value_ptr(rotation), -180, 180);
+        changed |= ui::DragFloat3("Ambient", value_ptr(light.ambient), 0.01, 0, 1);
+        changed |= ui::DragFloat3("Diffuse", value_ptr(light.diffuse), 0.01, 0, 1);
+        changed |= ui::DragFloat("Intensity", &lightIntensity, 0.1, 0, 32);
+
+        if (changed)
+        {
+            vec3 rads = radians(rotation);
+            light.direction = vec3(0, 0, 1) * mat3(eulerAngleXYZ(rads.x, rads.y, rads.z));
+            volume.setLight(light.direction, light.ambient, light.diffuse * lightIntensity);
+        }
+
+        ui::End();
+    }
+}
+
+void VolumeRenderingAppUi::DrawRotationControls(RaycastVolume& volume)
+{
+    if (showRotationControls)
+    {
+        static vec3 angles = vec3(0);
+        bool changed = false;
+        ui::Begin("Rotate", &showRotationControls, ImGuiWindowFlags_AlwaysAutoResize);
+        changed |= ui::SliderAngle("X", &angles.x);
+        changed |= ui::SliderAngle("Y", &angles.y);
+        changed |= ui::SliderAngle("Z", &angles.z);
+
+        if (changed)
+        {
+            volume.setRotation(toQuat(eulerAngleXYZ(angles.x, angles.y, angles.z)));
+        }
+
+        ui::End();
+    }
+}
+
+bool VolumeRenderingAppUi::VolumeLoadPopup(RaycastVolume& volume)
+{
+    bool isClosed = false;
+
+    if (ui::BeginPopupModal("Volume Parameters", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        static ivec3 slices = ivec3(1);
+        static vec3 ratios = vec3(1);
+        static int bits = 0;
+        // volume dimensions
+        ui::InputInt3("Slices", value_ptr(slices));
+        // volume aspectRatios
+        ui::InputFloat3("Aspect", value_ptr(ratios));
+        // node bit size
+        ui::RadioButton("8 bits", &bits, 0);
+        ui::SameLine();
+        ui::Dummy(ImVec2(ui::GetContentRegionAvailWidth() / 3, 0));
+        ui::SameLine();
+        ui::RadioButton("16 bits", &bits, 1);
+        // slices has to be positive
+        slices = max(slices, ivec3(1));
+
+        if (ui::Button("Load", ImVec2(ui::GetContentRegionAvailWidth(), 0)))
+        {
+            volume.loadFromFile(slices, ratios, path, bits == 1);
+            ui::CloseCurrentPopup();
+            isClosed = true;
+        }
+
+        ui::EndPopup();
+    }
+
+    return isClosed;
+}
+
+void VolumeRenderingAppUi::DrawMainMenuBar(RaycastVolume& volume)
+{
+    // menu bar on top
+    {
+        ui::ScopedMainMenuBar menuBar;
+
+        if (ui::BeginMenu("File"))
+        {
+            if (ui::MenuItem("Open"))
+            {
+                auto fspath = cinder::app::getOpenFilePath(path, { "raw" });
+
+                if (!fspath.empty())
+                {
+                    path = fspath.string();
+                    loadNewVolume = true;
+                }
+            }
+            ui::EndMenu();
+        }
+
+        if (ui::BeginMenu("Volume", showVolumeOptions))
+        {
+            ui::MenuItem("Rotate", nullptr, &showRotationControls);
+            ui::MenuItem("Rendering", nullptr, &showRendering);
+            ui::MenuItem("Lighting", nullptr, &showLightingSetup);
+            ui::MenuItem("Transfer Function", nullptr, &showTransferFunction);
+
+            ui::EndMenu();
+        }
+    }
+}
+```
+
+### VolumeRendering/VolumeRenderingAppUi.h
+```
+#pragma once
+#include <string>
+class RaycastVolume;
+
+class VolumeRenderingAppUi
+{
+public:
+    static bool PostProcessingEnabled();
+    static void DrawUi(RaycastVolume &volume);
+private:
+    static bool VolumeLoadPopup(RaycastVolume &volume);
+    static void DrawRenderingOptions(RaycastVolume &volume);
+    static void DrawLightingSetup(RaycastVolume &volume);
+    static void DrawRotationControls(RaycastVolume &volume);
+    static void DrawMainMenuBar(RaycastVolume &volume);
+
+    static bool enablePostProcessing;
+    static bool loadNewVolume;
+    static bool showVolumeOptions;
+    static bool showRendering;
+    static bool showTransferFunction;
+    static bool showRotationControls;
+    static bool showLightingSetup;
+    static std::string path;
+};
+```
+
+### VolumeRendering/shaders/fs_quad.vert
+```
+#version 420
+uniform mat4 ciModelViewProjection;
+
+in vec4 ciPosition;
+in vec2 ciTexCoord0;
+
+out vec2 uvs;
+
+void main()
+{
+    // fs quad uv coords
+    uvs = ciTexCoord0;
+    // final drawing pos
+    gl_Position = ciModelViewProjection * ciPosition;
+}
+```
+
+### VolumeRendering/shaders/fxaa.frag
+```
+#version 420
+layout(binding=0) uniform sampler2D colorBuffer;
+
+uniform vec2 pixelSize;
+
+in vec2     uvs;
+out vec4 	oColor;
+
+void main( void )
+{
+	float fxaaSpanMax	= 8.0;
+	float fxaaReduceMul	= 1.0 / fxaaSpanMax;
+	float fxaaReduceMin	= 1.0 / 128.0;
+
+	vec3 rgbUL	= texture( colorBuffer, uvs + vec2( -1.0, -1.0 ) * pixelSize ).xyz;
+	vec3 rgbUR	= texture( colorBuffer, uvs + vec2(  1.0, -1.0 ) * pixelSize ).xyz;
+	vec3 rgbBL	= texture( colorBuffer, uvs + vec2( -1.0,  1.0 ) * pixelSize ).xyz;
+	vec3 rgbBR	= texture( colorBuffer, uvs + vec2(  1.0,  1.0 ) * pixelSize ).xyz;
+	vec3 rgbM	= texture( colorBuffer, uvs ).xyz;
+
+	vec3 luma		= vec3( 0.299, 0.587, 0.114 );
+	float lumaUL	= dot( rgbUL, luma );
+	float lumaUR	= dot( rgbUR, luma );
+	float lumaBL	= dot( rgbBL, luma );
+	float lumaBR	= dot( rgbBR, luma );
+	float lumaM		= dot( rgbM,  luma );
+	
+	float lumaMin = min( lumaM, min( min( lumaUL, lumaUR ), min( lumaBL, lumaBR ) ) );
+	float lumaMax = max( lumaM, max( max( lumaUL, lumaUR ), max( lumaBL, lumaBR ) ) );
+	
+	vec2 dir = vec2( -( ( lumaUL + lumaUR ) - ( lumaBL + lumaBR ) ), ( lumaUL + lumaBL ) - ( lumaUR + lumaBR ) );
+	
+	float dirReduce	= max( ( lumaUL + lumaUR + lumaBL + lumaBR ) * ( 0.25 * fxaaReduceMul ), fxaaReduceMin );
+	float rcpDirMin	= 1.0 / ( min ( abs( dir.x ), abs( dir.y ) ) + dirReduce );
+	
+	dir = min( vec2(  fxaaSpanMax,  fxaaSpanMax ),
+		  max( vec2( -fxaaSpanMax, -fxaaSpanMax ),
+		  dir * rcpDirMin ) ) * pixelSize;
+
+	vec3 color0 = 0.5 * (
+		texture( colorBuffer, uvs + dir * ( 1.0 / 3.0 - 0.5 ) ).rgb +
+		texture( colorBuffer, uvs + dir * ( 2.0 / 3.0 - 0.5 ) ).rgb );
+	vec3 color1 = color0 * 0.5 + 0.25 * (
+		texture( colorBuffer, uvs + dir * -0.5 ).rgb +
+		texture( colorBuffer, uvs + dir *  0.5 ).rgb );
+	
+	float lumaB = dot( color1, luma );
+
+	vec4 color	= vec4( color1, 1.0 );
+
+	if ( lumaB < lumaMin || lumaB > lumaMax ) 
+    {
+		color.rgb = color0;
+	}
+
+	oColor = color;
+}
+```
+
+### VolumeRendering/shaders/gradients.comp
+```
+#version 430
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(binding=0, r8ui) uniform readonly uimage3D volume;
+layout(binding=1, rg16f) uniform writeonly image3D gradients;
+
+// Spheremap Transform for normal encoding. Used in Cry Engine 3, presented by 
+// Martin Mittring in "A bit more Deferred", p. 13
+// http://www.crytek.com/sites/default/files/A_bit_more_deferred_-_CryEngine3.ppt
+vec4 encode (vec3 n)
+{
+    return vec4(normalize(n.xy) * sqrt(n.z * 0.5 + 0.5), 0, 0);
+}
+
+void main()
+{
+    ivec3 pos = ivec3(gl_GlobalInvocationID);
+    vec3 s1 = vec3(0); 
+    vec3 s2 = s1;
+
+    s1.x = imageLoad(volume, ivec3(pos.x - 1, pos.y, pos.z)).r;
+    s2.x = imageLoad(volume, ivec3(pos.x + 1, pos.y, pos.z)).r;
+
+    s1.y = imageLoad(volume, ivec3(pos.x, pos.y - 1, pos.z)).r;
+    s2.y = imageLoad(volume, ivec3(pos.x, pos.y + 1, pos.z)).r;
+
+    s1.z = imageLoad(volume, ivec3(pos.x, pos.y, pos.z - 1)).r;
+    s2.z = imageLoad(volume, ivec3(pos.x, pos.y, pos.z + 1)).r;
+
+    imageStore(gradients, pos, encode(normalize(s2 - s1)));
+}
+```
+
+### VolumeRendering/shaders/histogram.comp
+```
+#version 430 compatibility
+#extension GL_ARB_shader_image_load_store : require
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding=0, r8ui) uniform readonly uimage3D volume;
+layout(std430, binding=1) coherent buffer Histogram
+{
+    uint histogramData[256];
+};
+
+shared uint sharedHistogram[256];
+
+void main()
+{
+    // initialize shared variable and set global to zeroes
+    sharedHistogram[gl_LocalInvocationID.x] = 0;
+
+    // synchronize
+    barrier();
+    memoryBarrierShared();
+
+    // calculate sharedHistogram values
+    uvec3 volumeSize = imageSize(volume);
+    uint totalSize = volumeSize.x * volumeSize.y * volumeSize.z;
+    uint workLoadPerThread = uint(ceil(totalSize / 256));
+    uint begin = gl_LocalInvocationID.x * workLoadPerThread;
+    uint end = min(begin + workLoadPerThread, totalSize);
+
+    for(uint i = begin; i < end; i++)
+    {
+        ivec3 uvs;
+        uvs.x = int(i % volumeSize.x);
+		uvs.y = int(((i - uvs.x) / volumeSize.x) % volumeSize.y);
+		uvs.z = int((i - uvs.x) / (volumeSize.y * volumeSize.x));
+
+        uint value = imageLoad(volume, uvs).r;
+        atomicAdd(sharedHistogram[value], 1);
+    }
+
+    // synchronize
+    barrier();
+    memoryBarrierShared();
+
+    // save to global sharedHistogram
+    atomicAdd(histogramData[gl_LocalInvocationID.x], sharedHistogram[gl_LocalInvocationID.x]);
+}
+```
+
+### VolumeRendering/shaders/positions.frag
+```
+#version 330
+in vec3 modelPosition;
+
+layout (location=0) out vec3 positions;
+
+void main(void)
+{
+    positions = modelPosition;
+}
+```
+
+### VolumeRendering/shaders/positions.vert
+```
+#version 330
+uniform mat4 ciModelViewProjection;
+uniform vec3 scaleFactor;
+
+layout(location = 0) in vec3 position;
+
+out vec3 modelPosition;
+
+void main(void)
+{
+    gl_Position = ciModelViewProjection * vec4(position * scaleFactor, 1);
+    modelPosition = position;
+}
+```
+
+### VolumeRendering/shaders/raycast.frag
+```
+#version 420
+struct Light 
+{
+    vec3 direction;
+    vec3 ambient;
+    vec3 diffuse;
+};
+
+layout(binding=0) uniform sampler2D cubeFront;
+layout(binding=1) uniform sampler2D cubeBack;
+layout(binding=2) uniform sampler3D volume;
+layout(binding=3) uniform sampler3D gradients;
+layout(binding=4) uniform sampler1D transferFunction;
+layout(binding=5) uniform sampler2D bakedNoise;
+
+uniform mat3 ciModelMatrixInverseTranspose;
+uniform Light light;
+
+uniform ivec2 threshold;
+uniform vec3 stepSize;
+uniform int iterations;
+uniform bool diffuseShading;
+uniform float stepScale;
+uniform float gamma;
+uniform float exposure;
+
+in vec4 position;
+
+layout (location=0) out vec4 oColor;
+
+// Spheremap Transform for normal encoding. Used in Cry Engine 3, presented by 
+// Martin Mittring in "A bit more Deferred", p. 13
+// http://www.crytek.com/sites/default/files/A_bit_more_deferred_-_CryEngine3.ppt
+vec3 decode (vec2 enc)
+{
+    vec3 n;
+    n.z = dot(enc, enc) * 2.0 - 1.0;
+    n.xy = normalize(enc.xy) * sqrt(1.0 - n.z * n.z);
+    return n;
+}
+
+void main(void)
+{
+    vec2 texC = position.xy / position.w;
+    texC.x = 0.5 * texC.x + 0.5;
+    texC.y = 0.5 * texC.y - 0.5;
+
+    vec3 front = texture(cubeFront, texC).xyz;
+    vec3 back = texture(cubeBack, texC).xyz;
+    
+    vec3 dir = normalize(back - front);
+    vec4 pos = vec4(front, 0);
+
+    vec4 dst = vec4(0, 0, 0, 0);
+    vec4 src = vec4(0, 0, 0, 0);
+
+    vec4 value = vec4(0);
+
+    vec3 step = dir * stepSize;
+    
+    // jitter ray starting position to reduce artifacts
+    pos.xyz += step * texture(bakedNoise, gl_FragCoord.xy / 256).x;
+
+    for(int i = 0; i < iterations; i++)
+    {
+        pos.w = 0;
+        value.a = texture(volume, pos.xyz).x;
+        int isoValue = int(255.0f * value.a);
+
+        if(isoValue >= threshold.x && isoValue <= threshold.y)
+        {
+            // assigned color from transfer function for this density
+            src = texture(transferFunction, value.a);
+
+            // oppacity correction
+            src.a = 1 - pow((1 - src.a), stepScale / 0.5);
+
+            if(diffuseShading)
+            {
+                // gradient value
+                value.xyz = decode(texture(gradients, pos.xyz).xy);
+                // diffuse shading + fake ambient light
+                vec3 normal = normalize(ciModelMatrixInverseTranspose * value.xyz);
+                vec3 lightDir = normalize(-light.direction);
+                float lambert = max(dot(normal, lightDir), 0.0);
+                src.rgb = light.diffuse * lambert * src.rgb + light.ambient * src.rgb;
+            }
+
+            // front to back blending
+            src.rgb *= src.a;
+            dst = (1.0 - dst.a) * src + dst;
+
+            // optimization: break from loop on high enough alpha value
+            if(dst.a >= 0.95) 
+                break;
+        }
+
+        pos.xyz += step;
+
+        // out of bounds
+        if (pos.x > 1.0 || pos.y > 1.0 || pos.z > 1.0) 
+            break;
+    }
+
+    // Exposure tone mapping
+    vec3 mapped =  vec3(1.0) - exp(-dst.rgb * exposure);
+    // Gamma correction 
+    mapped = pow(mapped, vec3(1.0 / gamma));
+
+    oColor = vec4(mapped, 1.0);
+}
+```
+
+### VolumeRendering/shaders/raycast.vert
+```
+#version 420
+uniform mat4 ciModelViewProjection;
+uniform vec3 scaleFactor;
+layout(location = 0) in vec3 v_position;
+out vec4 position;
+
+void main(void)
+{
+    gl_Position = ciModelViewProjection * vec4(v_position * scaleFactor, 1);
+    position = gl_Position;
+}
+```
+
+### VolumeRendering/shaders/raycast_rendertargets.frag
+```
+#version 420
+struct Light 
+{
+    vec3 direction;
+    vec3 ambient;
+    vec3 diffuse;
+};
+
+layout(binding=0) uniform sampler2D cubeFront;
+layout(binding=1) uniform sampler2D cubeBack;
+layout(binding=2) uniform sampler3D volume;
+layout(binding=3) uniform sampler3D gradients;
+layout(binding=4) uniform sampler1D transferFunction;
+layout(binding=5) uniform sampler2D bakedNoise;
+
+uniform mat3 ciModelMatrixInverseTranspose;
+uniform Light light;
+
+uniform ivec2 threshold;
+uniform vec3 stepSize;
+uniform int iterations;
+uniform bool diffuseShading;
+uniform float stepScale;
+
+in vec4 position;
+
+layout (location=0) out vec4 oColor;
+layout (location=1) out vec3 oNormal;
+
+// Spheremap Transform for normal encoding. Used in Cry Engine 3, presented by 
+// Martin Mittring in "A bit more Deferred", p. 13
+// http://www.crytek.com/sites/default/files/A_bit_more_deferred_-_CryEngine3.ppt
+vec3 decode (vec2 enc)
+{
+    vec3 n;
+    n.z = dot(enc, enc) * 2.0 - 1.0;
+    n.xy = normalize(enc.xy) * sqrt(1.0 - n.z * n.z);
+    return n;
+}
+
+void main(void)
+{
+    vec2 texC = position.xy / position.w;
+    texC.x = 0.5 * texC.x + 0.5;
+    texC.y = 0.5 * texC.y - 0.5;
+
+    vec3 front = texture(cubeFront, texC).xyz;
+    vec3 back = texture(cubeBack, texC).xyz;
+    
+    vec3 dir = normalize(back - front);
+    vec4 pos = vec4(front, 0);
+
+    vec4 dst = vec4(0, 0, 0, 0);
+    vec4 src = vec4(0, 0, 0, 0);
+
+    vec4 value = vec4(0);
+
+    vec3 step = dir * stepSize;
+    
+    // jitter ray starting position to reduce artifacts
+    pos.xyz += step * texture(bakedNoise, gl_FragCoord.xy / 256).x;
+
+    for(int i = 0; i < iterations; i++)
+    {
+        pos.w = 0;
+        value.a = texture(volume, pos.xyz).x;
+        int isoValue = int(255.0f * value.a);
+
+        if(isoValue >= threshold.x && isoValue <= threshold.y)
+        {
+            // assigned color from transfer function for this density
+            src = texture(transferFunction, value.a);
+
+            // oppacity correction
+            src.a = 1 - pow((1 - src.a), stepScale / 0.5);
+
+            if(diffuseShading)
+            {
+                // gradient value
+                value.xyz = decode(texture(gradients, pos.xyz).xy);
+                // diffuse shading + fake ambient light
+                vec3 normal = normalize(ciModelMatrixInverseTranspose * value.xyz);
+                vec3 lightDir = normalize(-light.direction);
+                float lambert = max(dot(normal, lightDir), 0.0);
+                src.rgb = light.diffuse * lambert * src.rgb + light.ambient * src.rgb;
+            }
+
+            // front to back blending
+            src.rgb *= src.a;
+            dst = (1.0 - dst.a) * src + dst;
+
+            // optimization: break from loop on high enough alpha value
+            if(dst.a >= 0.95) 
+                break;
+        }
+
+        pos.xyz += step;
+
+        // out of bounds
+        if (pos.x > 1.0 || pos.y > 1.0 || pos.z > 1.0) 
+            break;
+    }
+
+    oColor = vec4(dst.rgb, 1.0);
+    oNormal = value.xyz;
+    gl_FragDepth = pos.z;
+}
+```
+
+### VolumeRendering/shaders/smooth_gradients.comp
+```
+#version 430
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(binding=1, rg16f) uniform volatile image3D gradients;
+
+// Spheremap Transform for normal encoding. Used in Cry Engine 3, presented by 
+// Martin Mittring in "A bit more Deferred", p. 13
+// http://www.crytek.com/sites/default/files/A_bit_more_deferred_-_CryEngine3.ppt
+vec4 encode (vec3 n)
+{
+    return vec4(normalize(n.xy) * sqrt(n.z * 0.5 + 0.5), 0, 0);
+}
+
+// Spheremap Transform for normal encoding. Used in Cry Engine 3, presented by 
+// Martin Mittring in "A bit more Deferred", p. 13
+// http://www.crytek.com/sites/default/files/A_bit_more_deferred_-_CryEngine3.ppt
+vec3 decode (vec2 enc)
+{
+    vec3 n;
+    n.z = dot(enc, enc) * 2.0 - 1.0;
+    n.xy = normalize(enc.xy) * sqrt(1.0 - n.z * n.z);
+    return n;
+}
+
+void main()
+{
+    ivec3 pos = ivec3(gl_GlobalInvocationID);
+    uvec3 volumeSize = imageSize(gradients);
+    vec3 average = vec3(0);
+    int sampleCount = 0;
+
+    // average neighbor values
+    for (int k = pos.z - 3; k <= pos.z + 3; k++)
+    {
+        for (int j = pos.y - 3; j <= pos.y + 3; j++)
+        {
+            for (int i = pos.x - 3; i <= pos.x + 3; i++)
+            {
+                // in bounds
+                if((i >= 0 && i < volumeSize.x) && 
+                   (j >= 0 && j < volumeSize.y) && 
+                   (k >= 0 && k < volumeSize.z))
+                {
+                    average += decode(imageLoad(gradients, ivec3(i, j, k)).rg);
+                    sampleCount++;
+                }
+            }
+        }
+    }
+
+    average /= float(sampleCount);
+
+    // synchronize
+    barrier();
+    memoryBarrierShared();
+
+    // save smoothed gradient
+    imageStore(gradients, pos, encode(normalize(average)));
+}
+```
+
+### VolumeRendering/shaders/tonemapping.frag
+```
+#version 420
+layout(binding=0) uniform sampler2D hdrBuffer;
+
+uniform float gamma;
+uniform float exposure;
+
+in vec2 uvs;
+out vec4 fragmentColor;
+
+vec3 ACESFilm( vec3 x )
+{
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
+}
+
+void main()
+{
+    vec3 hdrColor = texture(hdrBuffer, uvs).rgb;
+  
+    // Exposure tone mapping
+    vec3 mapped = ACESFilm(hdrColor * exposure);
+    // Gamma correction 
+    mapped = pow(mapped, vec3(1.0 / gamma));
+  
+    fragmentColor = vec4(mapped, 1.0);
+}
+```

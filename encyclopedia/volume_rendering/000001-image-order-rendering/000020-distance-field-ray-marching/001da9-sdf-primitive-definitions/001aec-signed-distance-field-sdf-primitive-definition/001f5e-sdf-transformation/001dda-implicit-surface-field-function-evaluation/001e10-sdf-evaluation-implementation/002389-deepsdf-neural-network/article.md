@@ -1,0 +1,133 @@
+# DeepSDF Neural Network
+Also called: DeepSDF, DeepSDF Network Architecture
+
+## Overview
+DeepSDF is a neural network architecture that takes a latent code and 3D coordinates as input and outputs the signed distance value (SDF) for that point [S1, unofficial]. It uses a multi-layer perceptron that predicts signed distance values by concatenating a shape-specific latent code with 3D coordinates, using skip connections and a Tanh output activation [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A latent code vector $z \in \mathbb{R}^{d_z}$ representing a specific shape instance, and a 3D coordinate $p \in \mathbb{R}^3$ [S1, unofficial].
+- Output: A scalar signed distance value $s \in \mathbb{R}$ representing the distance from $p$ to the implicit surface, with sign indicating inside/outside [S1, unofficial].
+
+**Data Structures:**
+- **Latent Code ($z$):** A vector of dimension $d_z$ [S1, unofficial]. Sources vary on default dimension: 16 [S1, unofficial] or 512 [S2, unofficial].
+- **Coordinates ($p$):** A 3D point [S1, unofficial].
+- **Network Weights:** Parameters of the Multi-Layer Perceptron (MLP) [S2, unofficial].
+
+**Network Architecture:**
+The network is an MLP that concatenates the latent code and coordinates [S1, unofficial]. Two distinct architectural variants are cited:
+1. **Variant A (Simple):** Input dimension $d_z + 3$ [S1, unofficial]. Layer 1: Linear($d_z + 3$, 256) with ReLU activation [S1, unofficial]. Layer 2: Linear(256, 1) with Tanh activation [S1, unofficial].
+2. **Variant B (Deep with Skip Connections):** Input dimension $d_z + 3$ [S2, unofficial]. Hidden dimension $d_h$: Default 1024 [S2, unofficial]. Number of hidden layers $L$: Default 8 [S2, unofficial]. Skip connections: Applied at layer indices $S = [3, 7]$ [S2, unofficial]. Activation: ReLU for hidden layers, Tanh for output [S2, unofficial]. Dropout: 0.2 applied after each hidden layer except the last [S2, unofficial].
+
+**Numbered Steps:**
+1. **Input Preparation:** Reshape the batch of coordinates to shape $(-1, 3)$ and the latent codes to $(-1, d_z)$ [S2, unofficial]. Concatenate them along the feature dimension to form the input tensor $x_{in} = [z; p]$ with shape $(-1, d_z + 3)$ [S2, unofficial]. Expand the latent code to match the batch size for each forward pass [S1, unofficial].
+2. **Forward Pass (Variant B):** Let $h_0 = x_{in}$ [S2, unofficial]. For layer $i$ from 0 to $L-1$:
+   - If $i \in S$: Concatenate the current hidden state $h_i$ with the original input $x_{in}$ to form $x_{current} = [h_i; x_{in}]$ [S2, unofficial].
+   - Else: The input to the linear layer is $h_i$ [S2, unofficial].
+   - Apply Linear transformation: $h_{temp} = x_{current} W_i + b_i$ [S2, unofficial].
+   - If $i < L-1$: Apply Dropout with rate 0.2, then ReLU activation: $h_{i+1} = \text{ReLU}(\text{Dropout}(h_{temp}))$ [S2, unofficial].
+3. **Output:** Apply Linear($d_h$, 1) followed by Tanh activation to produce the output $s = \tanh(h_L W_{out} + b_{out})$ [S2, unofficial]. Reshape output to $(-1, 1)$ [S2, unofficial].
+
+**Formulas:**
+- Input concatenation: $x_{in} = \text{concat}(z, p)$ [S2, unofficial].
+- Hidden layer computation (with skip connection at index $k$):
+  $$h_{i+1} = \text{ReLU}(\text{Dropout}(W_i \cdot \text{concat}(h_i, x_{in}) + b_i)) \quad \text{if } i \in S \text{ [S2, unofficial]}$$
+  $$h_{i+1} = \text{ReLU}(\text{Dropout}(W_i \cdot h_i + b_i)) \quad \text{if } i \notin S \text{ [S2, unofficial]}$$
+- Output: $s = \tanh(W_{out} \cdot h_L + b_{out})$ [S2, unofficial].
+
+**Parameters:**
+- $d_z$: Latent dimension. Default 16 [S1, unofficial] or 512 [S2, unofficial].
+- $d_h$: Hidden dimension. Default 1024 [S2, unofficial].
+- $L$: Number of hidden layers. Default 8 [S2, unofficial].
+- $S$: Skip layer indices. Default [3, 7] [S2, unofficial].
+- $\alpha$: Dropout rate. Default 0.2 [S2, unofficial].
+- $\eta$: Learning rate. Default 0.001 [S1, unofficial].
+- $B$: Batch size. Default 128 [S1, unofficial].
+- $E$: Number of epochs. Default 10 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The Tanh output activation bounds the SDF value to $[-1, 1]$ [S2, unofficial].
+- **Boundary Conditions:** Training samples are often generated uniformly in a bounding box (e.g., $[-1.5, 1.5]^3$) [S1, unofficial].
+- **Latent Code Expansion:** The latent code must be expanded to match the batch size for each forward pass if the same shape is processed for multiple points [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def deepsdf_forward(latent_code, points, layers, skip_layers, dropout_rate=0.2):
+    # latent_code: list of floats, length d_z
+    # points: list of lists, shape (B, 3)
+    # layers: list of dicts with 'W' (list of lists) and 'b' (list of floats)
+    # skip_layers: set of layer indices
+    B = len(points)
+    d_z = len(latent_code)
+    
+    # Expand latent code to match batch size
+    latent_batch = [latent_code for _ in range(B)]
+    
+    # Concatenate latent code and points along feature dimension
+    x_in = [latent_batch[b] + points[b] for b in range(B)]
+    
+    h = x_in
+    for i, layer in enumerate(layers):
+        W = layer['W']
+        b = layer['b']
+        
+        if i in skip_layers:
+            # Concatenate current hidden state with original input
+            h = [h[b_idx] + x_in[b_idx] for b_idx in range(B)]
+            
+        # Linear transformation: h = h @ W + b
+        h = [linear_transform(h[b_idx], W, b) for b_idx in range(B)]
+        
+        # Apply dropout and ReLU for hidden layers
+        if i < len(layers) - 1:
+            h = [dropout_apply(h[b_idx], dropout_rate) for b_idx in range(B)]
+            h = [relu(h[b_idx]) for b_idx in range(B)]
+            
+    # Output layer: Linear -> Tanh
+    output = [linear_transform(h[b_idx], layers[-1]['W'], layers[-1]['b']) for b_idx in range(B)]
+    output = [tanh(output[b_idx]) for b_idx in range(B)]
+    return output
+
+def linear_transform(x, W, b):
+    return [sum(x[j] * W[j][k] for j in range(len(x))) + b[k] for k in range(len(b))]
+
+def dropout_apply(x, rate):
+    return [v if random.random() > rate else 0.0 for v in x]
+
+def relu(x):
+    return [max(0.0, v) for v in x]
+
+def tanh(x):
+    return [(math.exp(2*x) - 1) / (math.exp(2*x) + 1)]
+```
+
+## Subtopics
+
+### [Vox2SDF](4047-vox2sdf.md)
+Vox2SDF is a neural network pipeline that converts a discrete 3D voxel grid into a continuous Signed Distance Field (SDF) representation. It solves implicit surface reconstruction from discrete inputs by encoding the voxel structure into a latent vector and decoding it via a position-conditional MLP to predict SDF values at arbitrary 3D points. Unlike [DeepSDF Neural Network](3051-deepsdf-neural-network.md), which relies on a global latent code independent of input geometry, Vox2SDF derives its latent code directly from the input voxel grid using a 3D CNN encoder.
+
+### DeepSDF Training with Image Latents
+**Definition:** Jointly trains a ResNet-18 encoder and DeepSDF to learn an implicit surface per image from a training set [S3].
+**Steps:** Encode rendering of each shape into a latent vector using ResNet-18 [S3]. Concatenate latent vector with a query point for which SDF is learned by DeepSDF [S3]. Sample 400,000 query points close to the surface [S3].
+**Parameters:** Optimizer: ADAM [S3]. Epochs: 2,000 per category [S3].
+
+## Operating characteristics
+- **Time Complexity:** Inference is $O(L \cdot d_h)$ per point, where $L$ is the number of hidden layers and $d_h$ is the hidden dimension [G]. Training time depends on the number of epochs and batch size [G].
+- **Memory Complexity:** $O(d_z + L \cdot d_h^2)$ for storing weights and latent codes [G].
+- **Strengths:** Compact representation via latent code; continuous surface representation; ability to generalize across shapes [G].
+- **Limitations:** Requires training for each shape category; inference speed may be slower than analytic primitives; output bounded by Tanh activation [G].
+- **When to use:** When a compact, continuous representation of a shape category is needed, and training data is available [G].
+- **When not to use:** For real-time applications with strict latency constraints where analytic primitives suffice, or when no training data is available [G].
+
+## Background
+The architecture has been implemented in various forms, with variations in network depth, skip connections, and latent dimensionality [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] Kulakov-Nikita/RayMarchingAI, https://github.com/Kulakov-Nikita/RayMarchingAI, fetched 2026-10-26 (unofficial)
+[S2] TurtleJayWang/VC-SDFGen, https://github.com/TurtleJayWang/VC-SDFGen, fetched 2026-10-28 (unofficial)
+[S3] Self-Supervised Dual Contouring, https://doi.org/10.1109/cvpr52733.2024.00448, fetched 2026-10-26

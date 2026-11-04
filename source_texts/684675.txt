@@ -1,0 +1,351 @@
+Slang Render Hardware Interface. Contribute to shader-slang/slang-rhi development by creating an account on GitHub.
+
+Add Metal bindless DescriptorHandle support by nv-slang-bot[bot] · Pull Request #802 · shader-slang/slang-rhi · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+nv-slang-bot
+Bot
+commented
+Jul 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Status: Implemented; peer-reviewed APPROVE_WITH_NITS (0 bugs), review nits addressed. Builds clean (shared lib + test-bindless.cpp); Metal path is macOS-CI-only.
+Link: this PR; Fixes DescriptorHandle support on Metal devices slang#10842.
+Verdict: Metal bindless DescriptorHandle for buffers / texture views / samplers / acceleration structures via raw native ids (Approach A1); combined texture+sampler stays SLANG_E_NOT_AVAILABLE (Combined texture+sampler DescriptorHandle bindless support on Metal slang#11540).
+Next-action: maintainer review + merge (operator-gated on our side; CODEOWNERS assigns). macOS CI exercises the runtime path.
+Blocker: none — the Metal path cannot be run on the Linux/no-Metal author env, so runtime verification is the repo's macOS CI.
+Summary
+Implements getDescriptorHandle on the Metal backend so bindless DescriptorHandles work for buffers, texture views, samplers, and acceleration structures. Before this change every Metal resource inherited the base SLANG_E_NOT_AVAILABLE, so bindless was unavailable on Metal even though the compiler/emit side already supports it.
+Fixes shader-slang/slang#10842.
+Motivation
+On Metal, a bindless resource is referenced in an argument buffer by its raw native id — MTL::Buffer::gpuAddress() for buffers and MTL::ResourceID (from gpuResourceID()) for texture views / samplers / acceleration structures. The existing argument-buffer path in src/metal/metal-shader-object.cpp already writes exactly those values (buffer getDeviceAddress() + range.offset at :562, texture gpuResourceID() at :523, sampler at :546, acceleration structure at :588). A DescriptorHandle::value is a single uint64_t, and each of those native ids is a single 64-bit value, so the handle can carry the native id verbatim.
+Proposed solution (Approach A1)
+The handle's value is the raw native id/address — MTL::ResourceID is struct { uint64_t _impl; }, so ._impl is the 64-bit id; buffers use gpuAddress() + resolvedRange.offset. This is precisely what the arg-buffer consumer reads, so the host and device agree by construction. A static_assert(sizeof(MTL::ResourceID) == sizeof(uint64_t)) guards this equivalence so a future metal-cpp bump that widened ResourceID fails the build instead of silently dropping data.
+No descriptor heap or slot allocator. The handle is derived directly from the resource's native id, so no descriptor slot is allocated or reclaimed; resource lifetime remains the application's responsibility, and this change does not alter the backend's existing residency mechanisms. This makes the Metal BindlessDescriptorSet much thinner than the Vulkan/D3D12 ones (which allocate heap slots) — it holds no per-set state.
+Feature::Bindless is advertised inside the existing ArgumentBufferTier2 block. The backend already hard-fails device init below Tier 2 (src/metal/metal-device.cpp:93-101), and the pre-existing ParameterBlock arg-buffer path already calls gpuResourceID()/gpuAddress() unconditionally under that same gate — so bindless adds no new availability requirement.
+Combined texture+sampler is intentionally not supported and keeps returning SLANG_E_NOT_AVAILABLE: a combined handle would need two 64-bit gpuResourceIDs (128 bits), which cannot fit in a single 64-bit DescriptorHandle::value. Tracked as won't-do in shader-slang/slang#11540.
+Change summary
+File
+Change
+src/metal/metal-bindless-descriptor-set.{h,cpp}
+New. Raw-id extraction for buffer / texture / sampler / acceleration structure; no heap, no per-set state. static_assert on sizeof(MTL::ResourceID). Class doc records the residency-set dependency, no-cache behavior, and the combined-handle omission.
+src/metal/metal-device.{h,cpp}
+m_bindlessDescriptorSet member; advertise Feature::Bindless under the Tier 2 gate; create the set at the end of initialize(); release it in the destructor.
+src/metal/metal-base.h
+Forward-declare BindlessDescriptorSet.
+src/metal/metal-buffer.{h,cpp}, metal-texture.{h,cpp} (TextureViewImpl), metal-sampler.{h,cpp} (SamplerImpl), metal-acceleration-structure.{h,cpp}
+getDescriptorHandle overrides that gate on m_bindlessDescriptorSet then delegate id extraction.
+CMakeLists.txt
+Register the new source file.
+tests/test-bindless.cpp
+Enable Metal on the bindless-buffers and bindless-textures cases (the latter also exercises separate sampler handles). bindless-combined-texture-samplers stays D3D12 | Vulkan | CUDA.
+docs/api.md
+Mark Metal getDescriptorHandle as supported for IBuffer / ITextureView / ISampler / IAccelerationStructure (combined tex+sampler stays unsupported).
+The Metal overrides do not cache the handle (unlike Vulkan, which caches and frees on destruction): the value is a pure function of the resource's stable native id, so there is no allocated slot to reclaim and nothing to cache.
+The Metal BindlessDescriptorSet keeps the vk/d3d12-shaped alloc*Handle surface for cross-backend consistency and to serve as the "bindless is enabled" gate that the resource overrides check — not because heap allocation is expected later; the raw-id model deliberately holds no per-set state (the vk/d3d12 m_device/m_desc members drive heap sizing and are absent here).
+The acceleration-structure override is implemented for scope + vk/d3d12 parity but ships without a dedicated test: there is currently no bindless-acceleration-structure test for any backend (vk and d3d12 both ship allocAccelerationStructureHandle untested). The Metal test masks added here cover all existing applicable bindless tests (buffers/textures/samplers); a first-ever bindless-AS test — for all backends — is left as a separate follow-up.
+Residency note
+Metal has two residency modes, and this affects only the non-default fallback:
+Residency-set path (default, GPUFamilyApple6+): every created resource is added to a device-wide residency set, so a resource referenced by a bindless handle is resident purely by existing. Bindless works with no extra wiring — matching D3D12/Vulkan, which also have no per-handle residency.
+Per-encoder useResource fallback (SLANG_RHI_METAL_NO_RESIDENCY_SET, or no residency-set support): residency is driven by the argument-buffer binding path, which a bindless handle bypasses. Bindless-only textures are therefore not made resident in this mode (buffers are covered via pointer-field resolution, AS via the use-all-AS path, samplers are not MTL::Resources). Per Approach A1 the maintainer waived per-handle residency bookkeeping (resource lifetime/residency is the application's responsibility); this dependency is documented in the class doc comment rather than worked around.
+Risk
+No public header (include/slang-rhi.h) change — no ABI/source-compatibility impact.
+Additive: non-Metal backends and the combined-sampler path are untouched.
+GPU/macOS-only path. It cannot be exercised on a Linux/no-Metal CI runner (the Metal backend does not compile on non-Apple platforms). Verified locally that the shared library and tests/test-bindless.cpp still build; the Metal translation units and runtime behavior are covered by this repo's macOS CI (the macos-latest, aarch64 matrix entries in ci.yml, which run slang-rhi-tests -check-devices).
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+Add Metal bindless DescriptorHandle support
+…
+3a4001d
+```
+Implement getDescriptorHandle on the Metal backend for buffers, texture
+views, samplers, and acceleration structures. A Metal bindless handle
+carries the resource's raw native id directly (MTL::Buffer::gpuAddress()
+for buffers, MTL::ResourceID from gpuResourceID() for views/samplers/
+acceleration structures) — the same value the argument-buffer path already
+consumes — so there is no descriptor heap, slot allocation, or per-handle
+residency tracking. Feature::Bindless is advertised alongside the existing
+ArgumentBufferTier2 gating.
+
+Combined texture+sampler handles remain unsupported (SLANG_E_NOT_AVAILABLE):
+they need two 64-bit gpuResourceIDs, which do not fit a single 64-bit
+DescriptorHandle value.
+
+Fixes shader-slang/slang#10842.
+```
+nv-slang-bot
+Bot
+added
+the
+pr: non-breaking
+label
+Jul 24, 2026
+nv-slang-bot
+Bot
+mentioned this pull request
+Jul 24, 2026
+DescriptorHandle support on Metal devices
+shader-slang/slang#10842
+Open
+jhelferty-nv
+marked this pull request as ready for review
+July 25, 2026 04:15
+jhelferty-nv
+requested a review
+from a team
+as a code owner
+July 25, 2026 04:15
+jhelferty-nv
+requested review from
+bmillsNV
+and removed request for
+a team
+July 25, 2026 04:15
+jhelferty-nv
+commented
+Jul 27, 2026
+Copy link
+Copy Markdown
+Contributor
+@nv-slang-bot Can you update the documentation to reflect the changes? I think at least docs/api.md needs an update.
+Metal bindless: guard ResourceID size, drop dead members, update api.md
+…
+993c968
+```
+Add static_assert(sizeof(MTL::ResourceID)==sizeof(uint64_t)) so a metal-cpp
+bump that widened ResourceID can't silently break the gpuResourceID()._impl /
+consumer-memcpy byte-equivalence. Remove the unused m_device/m_desc members
+(the raw-id model holds no per-set state). Document the residency-set
+dependency, no-cache behavior, and the intentionally-unsupported combined
+texture+sampler case. Flip Metal getDescriptorHandle to yes in docs/api.md for
+buffer/texture-view/sampler/acceleration-structure.
+```
+nv-slang-bot
+Bot
+commented
+Jul 27, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Done — docs/api.md now marks Metal getDescriptorHandle as supported for IBuffer, ITextureView, ISampler, and IAccelerationStructure. Combined texture+sampler (getCombinedTextureSamplerDescriptorHandle) is intentionally left unsupported — it would need two 64-bit gpuResourceIDs (128 bits), which don't fit a single 64-bit DescriptorHandle::value (shader-slang/slang#11540).
+Same push (993c968) also folds in the peer-review nits:
+static_assert(sizeof(MTL::ResourceID) == sizeof(uint64_t)) in metal-bindless-descriptor-set.cpp so a future metal-cpp bump that widened ResourceID fails the build rather than silently breaking the gpuResourceID()._impl / consumer-memcpy byte-equivalence.
+Removed the unused m_device/m_desc members (they seed heap sizing in the vk/d3d12 sets; the raw-id model holds no per-set state).
+Documented the fallback-mode residency dependency (bindless-only textures rely on the residency-set path; per Approach A1 residency is the app's responsibility), the no-cache behavior, and the combined-handle omission in the class doc comment.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+jhelferty-nv
+reviewed
+Jul 27, 2026
+View reviewed changes
+jhelferty-nv
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This looks fine to me, but adding @skallweitNV to look it over first.
+jhelferty-nv
+requested a review
+from skallweitNV
+July 27, 2026 23:20
+jhelferty-nv
+self-assigned this
+Jul 27, 2026
+Merge branch 'main' into fix/issue-10842
+4144455
+skallweitNV
+commented
+Aug 3, 2026
+Copy link
+Copy Markdown
+Collaborator
+@jhelferty-nv looks good to me on the surface. However, Metal is currently untested by CI because of an unrelated issue:
+```
+Metal: not supported (failed to get shader entry point code)
+Slang diagnostics: metal 32023.883: test(1): error :  'required_threads_per_threadgroup' attribute requires Metal language standard metal4.0 or higher
+[[required_threads_per_threadgroup(1, 1, 1)]]
+  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1 error generated.
+```
+We should first fix this. Then AFAICT our CI machine may not support testing this new path entirely, so we should at least run this on some HW that supports it before merging.
+skallweitNV
+requested changes
+Aug 3, 2026
+View reviewed changes
+skallweitNV
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Needs testing
+nv-slang-bot
+Bot
+commented
+Aug 3, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Agreed on both counts — and thanks, the log you pasted actually pins down two separate things. I dug into the CI run for this PR's head (993c968, run 30804222761) to confirm:
+1. The Metal skip is a pre-existing capability-detection bug, independent of this PR — and it's already tracked.
+It's shader-slang/slang#12096 (open, assigned to @jkwak-work): "Metal 4 capability inferred from OS version fails MSL compile on macos-26 CI images (toolchain lacks metal4.0)". Same mechanism, same compiler build (metal 32023.883).
+The chain, verified in the current sources:
+macos-latest now resolves to macos-26-arm64 (the job log's Image: macos-26-arm64).
+src/metal/metal-device.cpp derives the capability from the OS version — if (osVersion.majorVersion >= 26) addCapability(Capability::metallib_4_0); (main:266; untouched by this PR).
+Slang's emit gate is getTargetCaps().implies(CapabilityAtom::metallib_4_0) (slang-emit-metal.cpp, emitRequiredThreadsPerThreadgroup), so it emits [[required_threads_per_threadgroup(...)]].
+But the image's Metal toolchain is Xcode-16-era and rejects the 4.0-only attribute → failed to get shader entry point code → the whole Metal device is reported unsupported, so every Metal test is skipped (not just the bindless ones).
+Per #12096 the fix belongs on the slang-rhi side — derive metallib_4_0 from the Metal toolchain/language version actually available at runtime rather than from the OS version (the OS and toolchain disagree on these images). That is a one-file change in metal-device.cpp, but it's orthogonal to bindless and would silently change capability reporting for every Metal user, so I'd rather not smuggle it into this PR. Happy to open it as a separate small PR (linked to #12096) if you'd like me to take it — just say the word.
+2. Your instinct that the CI machine may not exercise this path is correct — and the log confirms it, in a way that matters for review.
+The same job prints:
+```
+Debug callback output: [Info] [Driver] GPUFamilyApple6 not supported; using per-encoder useResource fallback
+```
+So this runner is on the !m_hasResidencySet fallback residency path, not the residency-set path. That's exactly the gap called out in this PR's description under Residency note: in fallback mode residency is driven by the argument-buffer binding path, which a bindless handle bypasses — buffers are still covered (pointer-field resolution) and acceleration structures are covered (use-all-AS), and samplers aren't MTL::Resources, but bindless-only textures are not made resident. On residency-set hardware (GPUFamilyApple6+) the question doesn't arise.
+So even once #12096 is fixed, this runner is the least favourable machine for validating bindless-textures: it's the one configuration where a bindless-only texture could page-fault. Real Apple-Silicon HW with GPUFamilyApple6+ would exercise the intended path.
+Concretely, I'd suggest gating merge on: (a) #12096 fixed so Metal isn't skipped, then (b) a run of bindless-buffers / bindless-textures on GPUFamilyApple6+ hardware. I don't have Metal hardware — everything I could verify here is static (the handle value is byte-identical to what the existing argument-buffer path already writes for the same resources, and the new Metal TU compiles clean on the macOS CI job), so I can't self-certify the runtime path. Holding this PR until someone can run it on capable HW is the right call.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+Merge branch 'main' into fix/issue-10842
+c09d12c
+skallweitNV
+commented
+Aug 3, 2026
+Copy link
+Copy Markdown
+Collaborator
+@jhelferty-nv I have fixed Metal testing for CI in #807 an now tests are failing. This PR probably needs more work.
+nv-slang-bot
+Bot
+commented
+Aug 3, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Root-caused — and it turns out my earlier framing of the residency risk was the wrong lens entirely. Thanks for merging #807: with metallib_4_0 disabled the Metal device now reports Metal: supported (with bindless among its features) and my bindless cases executed for the first time. Exactly two fail — bindless-buffers.metal and bindless-textures.metal (1041 test cases | 1039 passed | 2 failed, 77 failed assertions).
+Neither failure is a residency problem, and the interesting part is that Metal's DescriptorHandle ABI is not the one this test assumes.
+What the shader actually receives
+Compiling the failing test with the exact Slang the build fetches (build/_deps/slang-src/bin/slangc, 2026.12.2):
+```
+slangc tests/test-bindless-buffers.slang -target metal -entry computeMain -stage compute -o out.metal
+```
+```
+[[kernel]] void computeMain(
+    float device*                             result_1             [[buffer(4)]],
+    texture_buffer<float, access::read>       buffer_1             [[texture(0)]],
+    float device*                             structuredBuffer_1   [[buffer(0)]],
+    uint32_t device*                          byteAddressBuffer_1  [[buffer(1)]],
+    texture_buffer<float, access::read_write>  rwBuffer_1           [[texture(1)]],
+    float device*                             rwStructuredBuffer_1 [[buffer(2)]],
+    uint32_t device*                          rwByteAddressBuffer_1[[buffer(3)]])
+```
+Every uniform ....Handle becomes an ordinary directly-bound parameter with its own [[buffer(n)]]/[[texture(n)]] slot. There is no uniform/argument-buffer parameter carrying handle values, so the 64-bit values the test writes via setDescriptorHandle are never read. result works because it is bound with setBinding; the six handles are never bound to anything, which explains the zeros the CI run observed.
+Importantly, that direct binding is intentional upstream, not a codegen bug — I initially assumed the opposite and was wrong. slang-emit-metal.cpp:149-153 deliberately unwraps DescriptorHandle<T> to T's layout before assigning slots, and tests/metal/entry-point-descriptor-handle-buffer.slang is a regression test (for #11066) whose CHECK lines require .Handle params to receive [[buffer(n)]]. So on Metal a top-level .Handle parameter is currently a normal bound resource, and setDescriptorHandle is simply not the way to feed it. Please read my earlier "residency waiver" comment with that correction in mind.
+Why residency is not the cause
+The runner is Apple Paravirtual device, argument-buffer-tier-2 without Apple6, i.e. exactly the !m_hasResidencySet per-encoder useResource path — so the suspicion was reasonable.
+But the shader never dereferences a handle value at all, so residency of a handle target isn't yet reachable as a question. The zero reads are fully explained by the missing bindings.
+I won't lean on "there was no residency warning" as proof: resolvePointerFieldResidency (src/metal/metal-shader-object.cpp:716-752) only inspects reflected ordinary-data pointer fields, and these directly-bound resource params never traverse that path, so its silence here is expected either way.
+To be explicit: this run does not clear the residency question at all — bindless isn't being exercised, so nothing about residency was tested either way. And to correct another thing I had backwards earlier: this paravirtual runner (no Apple6) is already the !m_hasResidencySet fallback machine, since the residency set requires supportsFamily(GPUFamilyApple6) (metal-device.cpp:124-132). So what's needed to close the fallback question is a genuine argument-buffer handle test on this runner; separate Apple6+ hardware is what would validate the residency-set path.
+A real bug this surfaced in my own patch
+Splitting the six cases by the slot they land in is instructive:
+Slang declaration
+emitted MSL
+correct 64-bit value
+StructuredBuffer<float>, ByteAddressBuffer (+ RW)
+float device* / uint32_t device* → [[buffer(n)]]
+gpuAddress() ✅
+Buffer<float>, RWBuffer<float> (typed)
+texture_buffer<float,…> → [[texture(n)]]
+a texture gpuResourceID ❌
+My allocBufferHandle returns getDeviceAddress() + offset for all buffer kinds and explicitly discards format (metal-bindless-descriptor-set.cpp:31-33). For typed Buffer<float>/RWBuffer<float> that is the wrong class of value — those want a texture-buffer resource ID. My "format is irrelevant here" comment is therefore wrong, and the reviewer's byte-for-byte equivalence check didn't catch it because the pre-existing bound path has the same shape: metal-shader-object.cpp:562-563 also writes getDeviceAddress() + offset for TypedBuffer/MutableTypedBuffer. Matching that path is not validation.
+Worth flagging separately: slang-rhi never creates a Metal texture-buffer object anywhere (no newTextureBuffer/textureBufferWithDescriptor in src/metal/), so typed Buffer<T>/RWBuffer<T> look like a pre-existing gap in the Metal backend, bindless aside. I'd rather not fix that here uninvited — it's your call whether it's in scope for #10842 or a separate issue.
+Where that leaves the PR
+I'm withdrawing the "just mask the tests" suggestion I was about to make — the PR advertises Feature::Bindless and marks four getDescriptorHandle APIs supported in docs/api.md, so deleting the only end-to-end coverage while keeping those claims would be hiding the problem rather than resolving it.
+What I think is actually needed, and I'd like your direction before I spend the cycles:
+Re-express the tests through the ABI Metal really supports — a ParameterBlock/argument buffer. A probe shows those handles do land as argument-buffer struct members (Params_default_0 constant* params [[buffer(0)]]), which is the representation this PR's raw ids are meant for. That would tell us which handle classes genuinely work end-to-end.
+Fix the typed-buffer encoding (or explicitly reject typed buffers from getDescriptorHandle on Metal until the backend can create texture-buffer views).
+Resolve the feature-advertisement question: Feature::Bindless is currently advertised from argument-buffer-tier-2 alone (metal-device.cpp:252). On the !m_hasResidencySet fallback, buffer handles may still be covered — resolvePointerFieldResidency walks reflected pointer fields and resolves raw addresses through m_addressToBuffer — but texture/sampler handles are the demonstrably uncovered class, since they aren't pointer fields and have no equivalent reverse lookup. If that's a genuine restriction, the feature gate should encode it rather than leaving it to a comment.
+Happy to take any or all of those. I'd suggest (1) first, since it decides how much of (2)/(3) is real. If you'd prefer to hold #802 until Metal bindless has a settled story, that's a legitimate outcome too — the host plumbing here is a prerequisite either way.
+Caveat on all of the above: I have no Metal hardware. Everything is either read from the CI job log or reproduced with the fetched slangc 2026.12.2 on Linux (source emit + reflection only) — I can't self-certify runtime behavior.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+jkwak-work
+mentioned this pull request
+Aug 6, 2026
+Metal 4 capability inferred from OS version fails MSL compile on macos-26 CI images (toolchain lacks metal4.0)
+shader-slang/slang#12096
+Open
+skallweitNV
+marked this pull request as draft
+August 10, 2026 07:43
+Merge branch 'main' into fix/issue-10842
+…
+86c347d
+```
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+coderabbitai
+Bot
+commented
+Sep 27, 2026
+Copy link
+Copy Markdown
+Important
+Review skipped
+Bot user detected.
+To trigger a single review, invoke the @coderabbitai review command.
+⚙️ Run configuration
+Configuration used: Repository: shader-slang/slang-rhi/.coderabbit.yaml
+Review profile: ASSERTIVE
+Plan: Advanced
+Run ID: 41f6c029-1144-46bb-adbf-ca2faeaf1523
+You can disable this status message by setting the reviews.review_status to false in the CodeRabbit configuration file.
+Use the checkbox below for a quick retry:
+🔍 Trigger review
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands.
+skallweitNV
+mentioned this pull request
+Oct 24, 2026
+Metal: top-level DescriptorHandle parameters use resource bindings instead of ordinary-data layout
+shader-slang/slang#13900
+Open
+skallweitNV
+commented
+Oct 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+Closing this. Slang first needs to address shader-slang/slang#13900. Once that's fixed I have a branch implementing bindless handles for Metal on current top-of-tree.
+skallweitNV
+closed this
+Oct 27, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+pr: non-breaking
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

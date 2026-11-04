@@ -1,0 +1,151 @@
+A Monte Carlo path tracer written from scratch in C++. Global illumination, GGX materials, a SAH BVH, and a guided denoiser. - Trace rays on the RT cores by DanKane2029 · Pull Request #24 · DanKane2029/Steradian
+
+Trace rays on the RT cores by DanKane2029 · Pull Request #24 · DanKane2029/Steradian · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+DanKane2029
+commented
+Aug 2, 2026
+Copy link
+Copy Markdown
+Owner
+First half of Stage 3. An OptiX pipeline builds an acceleration structure from the same flat arrays the CPU renderer uses and traces against it, so ray/box and ray/triangle work lands on the fixed-function hardware. Nothing shades yet — that is the second half.
+Traversal is where the CPU renderer spends its time (the dragon: 658 box visits per ray against 87.5 triangle tests), and box traversal is exactly what RT cores do. So it is the part worth getting right first, and worth verifying on its own before any shading is layered on top.
+Shape of it
+OptiX in its simplest useful form: one raygen program, one miss program, one hit group per primitive kind, and hit groups that report a distance, a pair of barycentrics and an index — nothing else. The shader binding table records carry no data at all; everything the programs read comes from the launch parameters. That avoids nearly all of the machinery that makes OptiX look forbidding.
+Triangles use OptiX's built-in intersection, so the hardware does the work.
+Spheres are custom primitives with an intersection program mirroring Geometry::intersectSphere — including its refusal to reject on tca < 0, since a ray originating inside a sphere still has a valid forward hit. Using OptiX's built-in sphere would mean a second implementation of something this project already has, and the two would agree right up until one was changed. A structure cannot mix primitive kinds, hence two of them under one instance array.
+Device code is compiled at runtime by NVRTC, so its source has to travel with the binary. It is embedded at build time rather than read from disk, so a built renderer doesn't depend on the checkout it came from. Only the OptiX headers come from the filesystem via an include path, since they're a fetched dependency already.
+Is it correct?
+Checked the same way the CPU hierarchy was — against a reference already trusted. device_traversal fires identical rays at both backends. Seven scenes, 200,000 rays each, from three primitives up to the dragon's 202,522 triangles:
+hit/miss disagreements
+0
+wrong primitive reported
+0
+worst distance difference
+1.3e-4 relative
+Exact agreement is neither expected nor asked for: OptiX uses its own watertight triangle algorithm on different hardware, and a ray grazing a shared edge may legitimately go to either triangle. A systematic disagreement would be a defect — so I checked the test has teeth by deleting the offset that maps sphere indices into the shared numbering. That makes 6.7% of hits report the wrong primitive, 130× the threshold.
+Speed, stated carefully
+Traversal alone, against a single CPU thread:
+Scene
+GPU
+CPU (1 thread)
+cornell_box
+174 M rays/s
+9.2 M rays/s
+dragon
+240 M rays/s
+7.2 M rays/s
+The number worth noticing isn't the ratio. It's that the GPU is faster on the dragon than on the Cornell box while the CPU is slower — the RT cores absorbing exactly the traversal breadth the CPU cannot. What this is worth to a finished image is the next stage's question, and it will be answered by rendering one rather than by scaling these.
+Two smaller things
+The primitive records move from Geometry.h into Primitives.h. The container needs std::vector and is host-only for that reason; the records themselves have to exist on a device.
+setup-gpu-deps.sh now takes the whole of cudart's include directory rather than a hand-picked pair of headers. OptiX 9.1's device headers include cuda_fp16.h, which drags in its own companions, and naming the closure by hand is always one header short of working. 4.1 MB either way.
+Verification
+All thirteen scenes still render byte-for-byte identical images on the CPU.
+22 tests pass without GPU support, 30 with it.
+.cu files are now covered by scripts/format.sh and by CI — device code is the one part no compiler in the workflow parses, so nothing else would notice it drifting.
+Release, Debug, viewer, headless and GPU builds all clean.
+Next
+The ported path loop: Integrator::radiance as a raygen program, a dedicated occlusion trace for shadow rays, device buffers for materials and lights, and --device cpu|gpu. Its gate is the furnace test passing on the GPU and deterministic GPU output before any speedup is claimed.
+Trace rays on the RT cores
+…
+b2df66f
+```
+First half of Stage 3. An OptiX pipeline now builds an acceleration
+structure from the same flat arrays the CPU renderer uses and traces
+against it, so ray/box and ray/triangle work lands on the fixed function
+hardware. Nothing shades yet; that is the second half.
+
+Traversal is where the CPU renderer spends its time -- the dragon costs
+658 bounding box visits per ray against 87.5 triangle tests -- and box
+traversal is exactly what the RT cores do, so this is the part worth
+getting right first.
+
+OptiX is used in its simplest useful shape: one raygen program, one miss
+program, one hit group per kind of primitive, and hit groups that report
+a distance, a pair of barycentrics and an index and nothing else. The
+shader binding table records carry no data at all; everything the
+programs read comes from the launch parameters. That avoids nearly all
+of the machinery that makes OptiX look forbidding.
+
+Triangles use OptiX's built-in intersection so the hardware can do the
+work. Spheres are custom primitives with an intersection program that
+mirrors Geometry::intersectSphere, including its refusal to reject on
+tca < 0, since a ray originating inside a sphere still has a valid
+forward hit. Using OptiX's built-in sphere instead would mean a second
+implementation of something this project already has, and the two would
+agree until one was changed. A structure cannot mix primitive kinds, so
+there are two of them under a single instance array.
+
+Device code is compiled at run time by NVRTC, which means the source has
+to travel with the binary. It is embedded at build time rather than read
+from disk, so a built renderer does not depend on the checkout it came
+from. Only the OptiX headers come from the filesystem, through an
+include path, since they are a fetched dependency already.
+
+device_traversal checks the result against the CPU hierarchy, which is
+itself already checked against brute force. Across seven scenes at
+200,000 rays each, from three primitives up to the dragon's 202,522
+triangles: zero hit/miss disagreements, zero wrong primitives, and a
+worst distance difference of 1.3e-4 relative. Exact agreement is neither
+expected nor asked for -- OptiX intersects triangles with its own
+watertight algorithm on different hardware -- but a systematic
+disagreement would be a defect, and deleting the offset that maps sphere
+indices into the shared numbering makes 6.7% of hits report the wrong
+primitive, 130 times the threshold, which is how the test was checked
+for teeth.
+
+Traversal alone, against one CPU thread: 174 M rays/s against 9.2 on the
+Cornell box, 240 M against 7.2 on the dragon. The number worth noticing
+is not the ratio but that the GPU is faster on the dragon than on the
+Cornell box while the CPU is slower, which is the RT cores absorbing
+exactly the traversal breadth that the CPU cannot. What that is worth to
+a finished image is the next stage's question and will be answered by
+rendering one.
+
+Two smaller things. The primitive records move out of Geometry.h into
+Primitives.h: the container needs std::vector and is host-only for that
+reason, but the records themselves have to exist on a device. And
+setup-gpu-deps.sh now takes the whole of cudart's include directory
+rather than a hand-picked pair of headers, because OptiX 9.1's device
+headers include cuda_fp16.h, which drags in its own companions, and
+naming the closure by hand is always one header short of working.
+
+All thirteen scenes still render byte-for-byte identical images on the
+CPU. 22 tests pass without GPU support, 30 with it. .cu files are now
+covered by the formatter and by CI, since device code is the one part no
+compiler in the workflow parses.
+```
+DanKane2029
+marked this pull request as ready for review
+August 2, 2026 10:49
+Hide details
+View details
+DanKane2029
+merged commit d7e392c
+into
+main
+Aug 2, 2026
+5 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+DanKane2029
+deleted the
+feat/optix-backend
+branch
+August 4, 2026 07:06
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,128 @@
+# SnugBox
+
+
+## Overview
+SnugBox is a precise algorithm for computing Gaussian-to-tile bounding box intersections in 3D Gaussian Splatting, replacing the overly conservative tile assignment of standard 3D-GS to reduce the number of pixels processed per Gaussian [S1]. It computes an axis-aligned bounding box (AABB) around each Gaussian using its elliptical extent in image space, allowing for tighter identification of intersected tiles compared to the standard method which inscribes a circle within a square [S1].
+
+## How it works
+**Inputs:**
+*   3D Gaussian parameters: mean $\mu_i$, scale $s_i$, rotation $r_i$, opacity $\sigma_i$ [S1].
+*   Camera parameters: viewing transform $W$, perspective projection Jacobian $J$ [S1].
+*   Image resolution and tile size [G].
+
+**Outputs:**
+*   Tile indices $[x_{min}, x_{max}] \times [y_{min}, y_{max}]$ representing the tight AABB intersecting the Gaussian's elliptical extent [S1].
+
+**Data Structures:**
+*   $\Sigma_{i_{3D}}$: 3x3 3D covariance matrix [S1].
+*   $\Sigma_{i_{2D}}$: 2x2 2D projected covariance matrix [S1].
+*   $\Sigma_{i_{2D}}^{-1}$: Inverse of the 2D covariance matrix, represented as $\begin{pmatrix} a & b \\ b & c \end{pmatrix}$ [S1].
+*   $t$: Threshold value derived from opacity [S1].
+
+**Steps:**
+
+1.  **Project Covariance:** Compute the 3D covariance $\Sigma_{i_{3D}} = R_i S_i S_i^T R_i^T$, where $S_i$ and $R_i$ are diagonal scale and rotation matrices derived from $s_i$ and $r_i$ [S1]. Project to 2D via $\hat{\Sigma}_{i_{3D}} = J W \Sigma_{i_{3D}} W^T J^T$, where $J$ is the Jacobian of the first-order approximation of the perspective projection and $W$ is the viewing transform [S1]. Drop the last row and column of $\hat{\Sigma}_{i_{3D}}$ to obtain $\Sigma_{i_{2D}}$ [S1].
+2.  **Compute Inverse and Threshold:** Compute the inverse of the 2D covariance matrix $\Sigma_{i_{2D}}^{-1} = \begin{pmatrix} a & b \\ b & c \end{pmatrix}$ [S1]. Compute the threshold $t = 2 \log(255 \sigma_i)$ [S1].
+3.  **Compute Extrema:** The pixel extent satisfies the ellipse equation $t = ax_d^2 + 2bx_dy_d + cy_d^2$, where $x_d = p_x - \mu_x$ and $y_d = p_y - \mu_y$ are coordinates relative to the 2D mean $\mu_{i_{2D}}$ [S1]. Rearrange to solve for $y_d$: $y_d = \frac{-bx_d \pm \sqrt{(b^2 - ac)x_d^2 + tc}}{c}$ [S1]. Find the $x_d$ values ($x_{d_{args}}$) where $\partial y_d / \partial x_d = 0$: $x_{d_{args}} = \pm \sqrt{\frac{-b^2 t}{(b^2 - ac)a}}$ [S1]. Calculate $y_{min}$ and $y_{max}$ by substituting $x_{d_{args}}$ into the rearranged equation and adding $\mu_y$ [S1]. Calculate $x_{min}$ and $x_{max}$ by swapping $y_d$ and $x_d$ and constants $a$ and $c$ in the equations, solving for $y_{d_{args}}$, and adding $\mu_x$ [S1].
+4.  **Map to Tiles:** Convert bounding box edges to tile indices by dividing by tile size, rounding, and clipping to the image boundary [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_snugbox(mu_2d, a, b, c, t, tile_size, img_w, img_h):
+    """
+    Computes the tight AABB tile indices for a Gaussian using SnugBox.
+    
+    Args:
+        mu_2d: (2,) array, 2D mean [x, y]
+        a, b, c: float, elements of inverse 2D covariance [[a, b], [b, c]]
+        t: float, threshold 2 * log(255 * opacity)
+        tile_size: int, pixels per tile
+        img_w, img_h: int, image dimensions
+        
+    Returns:
+        (x_min, x_max, y_min, y_max): Tile indices
+    """
+    # 1. Compute x_d extrema locations
+    denom_y_ext = (b**2 - a*c) * a
+    if denom_y_ext == 0:
+        return (0, 0, 0, 0) # [G] Guard against division by zero
+    
+    radicand_x = (-b**2 * t) / denom_y_ext
+    if radicand_x < 0: radicand_x = 0
+    x_d_args = math.sqrt(radicand_x)
+    
+    # Evaluate y_d at both + and - x_d_args to find global min/max
+    y_candidates = []
+    for x_d in [x_d_args, -x_d_args]:
+        rad = (b**2 - a*c) * (x_d**2) + t*c
+        if rad < 0: rad = 0
+        sq = math.sqrt(rad)
+        y1 = (-b * x_d + sq) / c
+        y2 = (-b * x_d - sq) / c
+        y_candidates.extend([y1, y2])
+        
+    y_min_px = mu_2d[1] + min(y_candidates)
+    y_max_px = mu_2d[1] + max(y_candidates)
+    
+    # 2. Compute y_d extrema locations (swapped a/c)
+    denom_x_ext = (b**2 - c*a) * c
+    if denom_x_ext == 0:
+        return (0, 0, 0, 0) # [G] Guard against division by zero
+        
+    radicand_y = (-b**2 * t) / denom_x_ext
+    if radicand_y < 0: radicand_y = 0
+    y_d_args = math.sqrt(radicand_y)
+    
+    # Evaluate x_d at both + and - y_d_args
+    x_candidates = []
+    for y_d in [y_d_args, -y_d_args]:
+        rad = (b**2 - c*a) * (y_d**2) + t*a
+        if rad < 0: rad = 0
+        sq = math.sqrt(rad)
+        x1 = (-b * y_d + sq) / a
+        x2 = (-b * y_d - sq) / a
+        x_candidates.extend([x1, x2])
+        
+    x_min_px = mu_2d[0] + min(x_candidates)
+    x_max_px = mu_2d[0] + max(x_candidates)
+    
+    # 3. Map to Tiles
+    x_min_tile = int(math.floor(x_min_px / tile_size))
+    x_max_tile = int(math.ceil(x_max_px / tile_size))
+    y_min_tile = int(math.floor(y_min_px / tile_size))
+    y_max_tile = int(math.ceil(y_max_px / tile_size))
+    
+    # Clip to image boundary
+    max_x_tile = img_w // tile_size
+    max_y_tile = img_h // tile_size
+    
+    x_min_tile = max(0, min(x_min_tile, max_x_tile))
+    x_max_tile = max(0, min(x_max_tile, max_x_tile))
+    y_min_tile = max(0, min(y_min_tile, max_y_tile))
+    y_max_tile = max(0, min(y_max_tile, max_y_tile))
+    
+    return (x_min_tile, x_max_tile, y_min_tile, y_max_tile)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Singular Covariance:** If the determinant of $\Sigma_{i_{2D}}$ is zero (degenerate Gaussian), the inverse is undefined. A guard should handle this, potentially returning a minimal bounding box or skipping the Gaussian [G].
+*   **Numerical Stability:** The term under the square root in the extrema calculation and the coordinate solving must be non-negative. Numerical errors may cause slight negative values; these should be clamped to zero [G].
+*   **Division by Zero:** The denominators in the extrema formulas involve $a$ and $c$. If these are zero, the formula breaks. This corresponds to axis-aligned ellipses with infinite extent in one direction, which is physically unlikely for a valid Gaussian but possible in degenerate cases [G].
+
+## Operating characteristics
+*   **Time Complexity:** Constant number of operations per Gaussian [S1]. It is called twice in the rendering pipeline: once during preprocessing to count Gaussians per tile, and once in `duplicateWithKeys` to populate the Gaussian-to-tile arrays [S1].
+*   **Memory Complexity:** No additional significant memory overhead beyond the computed bounding box indices [S1].
+*   **Performance:** Produces an average overall inference speed-up of 1.82× on Mip-NeRF 360, Tanks & Temples, and Deep Blending datasets compared to baseline 3D-GS [S1].
+*   **Strengths:** Significantly tighter bounding boxes than the standard 3D-GS method, reducing the number of tiles processed per Gaussian [S1].
+*   **Limitations:** More complex than the standard square-inscribing-circle method, though the overhead is small [S1].
+
+## Background
+SnugBox was introduced in the "Speedy-Splat" paper (2025) as a plug-and-play optimization for 3D Gaussian Splatting [S1]. It addresses the overly conservative tile assignment of the original 3D-GS algorithm, which assigns a Gaussian to any tile intersecting a square inscribing a circle [S1]. SnugBox replaces this with a tight AABB derived from the Gaussian's elliptical extent [S1].
+
+## Sources
+[S1] Speedy-Splat: Fast 3D Gaussian Splatting with Sparse Pixels and Sparse Primitives, https://doi.org/10.1109/cvpr52734.2025.02006, fetched 2026-10-26

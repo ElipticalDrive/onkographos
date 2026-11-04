@@ -1,0 +1,648 @@
+OpenVDB - Sparse volume data structure and tools. Contribute to AcademySoftwareFoundation/openvdb development by creating an account on GitHub.
+
+NanoVDB: parallel checksum, cooperative GridStats, coalesced IndexToGrid optimizations by swahtz · Pull Request #2250 · AcademySoftwareFoundation/openvdb · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+swahtz
+commented
+Jul 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Update: #2249 has merged and master has been merged into this branch (clean merge, no conflicts; all goldens re-validated), so the diff now shows only this PR's changes.
+Summary
+This PR replaces the serial anti-patterns (byte-serial dependence chains, <<<1,1>>> tails, thread-per-node loops, uncoalesced thread↔address maps) in three independent NanoVDB CUDA maintenance operators with parallel associative reductions and coalesced mappings. Byte-exact where ordering permits, benchmarked A/B on an RTX PRO 6000 (sm_120; 3 rounds, 30 iters / 10 warmup) against the #2249 base.
+Four commits across three independent operators — the checksum lands in two commits (a parallel rewrite plus a host-precomputed combine), GridStats and IndexToGrid one each; each touches a single independent file.
+Parallel CRC32 GridChecksum (GridChecksum.cuh)
+Replaces the serial anti-patterns in blockedCRC32:
+Slicing-by-4 per-block CRC: the 256-entry base LUT is staged into shared memory and three derived slice tables built in place. Therefore, the result of this optimization is that the dependent CRC chain advances 4 bytes/step with 4 shared-memory lookups instead of 1 byte per L2 lookup.
+GF(2) crc32_combine fold replacing the single-thread CRC of the whole block-CRC array (megabytes for multi-GB grids): parallel per-chunk CRCs + a zlib-construction combine (zlib's crc32_combine). This associative combine is the key optimization which makes the whole block CRC parallelizable.
+Host-precomputed combine operators: the two GF(2) shift operators were originally rebuilt by binary exponentiation on a single device thread every call — a fixed ~480 µs that profiling showed dominated small/medium-grid checksums (as large as the entire streaming pass). They depend only on the chunk length, so they are now built on the host in microseconds and uploaded, and the device combine is reduced to an O(chunkCount) fold. This commit alone adds +40.7% (dragon) / +15.3% (emu) / +9.8% (crawler) / +1.9% (wdas_cloud) — a fixed cost, so it helps smaller grids most.
+Checksum values are bit-identical (all transforms are value-preserving); crc32TailOld path untouched.
+A/B (median of 3 rounds vs the #2249 base):
+dataset
+baseline
+this PR
+saved
+speedup
+dragon
+7.66 ms
+0.70 ms
+6.96 ms
+10.9×
+emu
+34.74 ms
+2.35 ms
+32.39 ms
+14.8×
+crawler
+57.76 ms
+3.56 ms
+54.20 ms
+16.2×
+wdas_cloud
+147.19 ms
+8.48 ms
+138.71 ms
+17.4×
+Cooperative GridStats (GridStats.cuh)
+GridStats builds an accumulation of statistics over the tree aggregating stats bottom-up. Before this optimization PR, each level of the tree (leaf, lower inner, upper inner, root) was run as one thread per node with that thread doing the reduction serially. This PR recasts this work as a parallel-reduction… we assign a group of threads to each node and reduce cooperatively in shared memory.
+processLeaf: one warp per leaf (lanes stride the 512 slots with 32 lanes/16 voxels-per-lane with a 5-step tree merge).
+processInternal: one 128-thread block per internal node with a shared-memory tree reduction (the old thread-per-node loop gave each thread up to 32,768 serial child visits). Now 128 threads each doing 256 child visits then a 7-step merge.
+min/max are order-independent → stats_minmax is bit-identical. stats_all (avg/stddev) uses a Welford-correct parallel merge but is not bit-identical (float reduction order) — it stays a bench-only measurement, never a byte-exact claim.
+A/B — stats_minmax (byte-exact; median of 3 rounds):
+dataset
+baseline
+this PR
+saved
+speedup
+dragon
+2.52 ms
+0.32 ms
+2.20 ms
+7.9×
+emu
+4.36 ms
+0.76 ms
+3.60 ms
+5.7×
+crawler
+5.58 ms
+1.09 ms
+4.48 ms
+5.1×
+wdas_cloud
+19.00 ms
+3.13 ms
+15.87 ms
+6.1×
+A/B — stats_all (bench-only, not bit-identical):
+dataset
+baseline
+this PR
+saved
+speedup
+dragon
+4.39 ms
+1.23 ms
+3.16 ms
+3.6×
+emu
+8.68 ms
+4.20 ms
+4.48 ms
+2.1×
+crawler
+11.63 ms
+8.12 ms
+3.51 ms
+1.4×
+wdas_cloud
+30.84 ms
+20.04 ms
+10.80 ms
+1.5×
+Coalesced IndexToGrid remap (IndexToGrid.cuh)
+Consecutive threads process consecutive table entries / leaf values (the old mapping gave each thread a strided run across the warp), and the 4 KB upper-node value/child masks are copied cooperatively instead of member-wise by thread 0. Preserves the scoped zero-init from #2249, so output is bit-identical.
+A/B (byte-exact; median of 3 rounds) — on top of the #2249 fixes:
+dataset
+baseline
+this PR
+saved
+speedup
+dragon
+1.28 ms
+0.99 ms
+0.29 ms
+1.3×
+emu
+3.93 ms
+3.06 ms
+0.86 ms
+1.3×
+crawler
+5.87 ms
+4.85 ms
+1.02 ms
+1.2×
+wdas_cloud
+14.55 ms
+12.42 ms
+2.14 ms
+1.2×
+Validation
+Bottom line (real time): on wdas_cloud the three byte-exact maintenance ops together drop from ~180.7 ms → ~24.0 ms (checksum + stats_minmax + indextogrid), ~157 ms saved per invocation; on dragon, ~11.5 ms → ~2.0 ms.
+Byte-exact for checksum, stats_minmax, indextogrid across dragon/emu/crawler/wdas_cloud.
+16 A/B wins, 0 regressions (19 ops compared); transient + retained memory unchanged; floodfill and the rest NEUTRAL.
+compute-sanitizer: memcheck clean; initcheck identical to the base build (pre-existing host-side readback reports, none in the new kernels).
+Notes
+Profiling after the combine fix shows the checksum is now bound by the per-block streaming kernel at ~31% of peak DRAM (compute is essentially free). That kernel is limited by the checksum's definition-mandated 4 KB block layout (an uncoalesced, one-block-per-thread access pattern), not by bandwidth, so the remaining headroom would require a cooperative-staging rewrite with an uncertain payoff — deliberately out of scope here.
+🤖 Generated with Claude Code, revised by a human
+swahtz
+requested a review
+from kmuseth
+as a code owner
+July 14, 2026 05:25
+swahtz
+changed the title
+NanoVDB CUDA: Tranche 2 — parallel checksum, cooperative GridStats, coalesced IndexToGrid
+NanoVDB: parallel checksum, cooperative GridStats, coalesced IndexToGrid
+Jul 14, 2026
+swahtz
+added
+the
+nanovdb
+label
+Jul 14, 2026
+swahtz
+changed the title
+NanoVDB: parallel checksum, cooperative GridStats, coalesced IndexToGrid
+NanoVDB CUDA: parallel checksum, cooperative GridStats, coalesced IndexToGrid
+Jul 14, 2026
+swahtz
+requested a review
+from Copilot
+July 14, 2026 05:35
+Copilot started reviewing on behalf of
+swahtz
+July 14, 2026 05:35
+View session
+Copilot
+AI
+reviewed
+Jul 14, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR modernizes several NanoVDB CUDA “maintenance” operators by removing serial GPU work patterns and improving stream-correctness and determinism, while adding/expanding CUDA regression tests to lock in behavior (notably byte-determinism and non-default stream safety).
+Changes:
+Parallelizes GridChecksum and GridStats CUDA kernels (associative reductions / cooperative processing) to remove long serial dependence chains.
+Improves determinism and hygiene by zero-initializing otherwise-unwritten regions (and tightening grid-name copying to avoid host over-reads).
+Fixes stream propagation/synchronization issues in CUDA tools and adds regression tests for non-blocking-stream correctness and deterministic output.
+Reviewed changes
+Copilot reviewed 10 out of 10 changed files in this pull request and generated 2 comments.
+Show a summary per file
+File
+Description
+nanovdb/nanovdb/unittest/TestNanoVDB.cu
+Adds CUDA regression tests for non-blocking stream correctness, grid-name round-trip, deterministic output, and DeviceBuffer stream-ordered lifetime.
+nanovdb/nanovdb/tools/cuda/SignedFloodFill.cuh
+Ensures root processing orders correctly with a caller-provided stream and launches device work on that stream.
+nanovdb/nanovdb/tools/cuda/PointsToGrid.cuh
+Adds buffer-wide zero-init for determinism, removes redundant background fill kernels, and fixes grid-name copying to avoid over-read/truncation issues.
+nanovdb/nanovdb/tools/cuda/MeshToGrid.cuh
+Fixes grid-name copying by zeroing the name field and copying only the actual string length.
+nanovdb/nanovdb/tools/cuda/IndexToGrid.cuh
+Improves coalescing/cooperation for node/table/value writes and adds targeted deterministic initialization for otherwise-unwritten bytes.
+nanovdb/nanovdb/tools/cuda/GridStats.cuh
+Reworks stats computation to be warp/block cooperative (warp-per-leaf, block-per-internal-node) and reduces serial traversal.
+nanovdb/nanovdb/tools/cuda/GridChecksum.cuh
+Introduces slicing-by-4 per-block CRC and a GF(2) combine fold to avoid serial CRC passes; fixes host copy sizes for head/tail CRC.
+nanovdb/nanovdb/tools/cuda/DistributedPointsToGrid.cuh
+Fixes grid-name copy to avoid host over-read by zeroing and bounded copy.
+nanovdb/nanovdb/tools/cuda/DilateGrid.cuh
+Ensures NN_FACE_EDGE_VERTEX dilation launch uses the caller’s stream.
+nanovdb/nanovdb/cuda/DeviceBuffer.h
+Tracks per-device allocation streams so frees are ordered on the owning stream (stream-safe lifetime).
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+nanovdb/nanovdb/tools/cuda/IndexToGrid.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+nanovdb/nanovdb/unittest/TestNanoVDB.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+force-pushed
+the
+tranche-2-maintenance-monoids
+branch
+from
+90ef727 to
+f7220d6
+Compare
+July 14, 2026 22:22
+swahtz
+requested a review
+from Copilot
+July 14, 2026 22:24
+swahtz
+changed the title
+NanoVDB CUDA: parallel checksum, cooperative GridStats, coalesced IndexToGrid
+NanoVDB: parallel checksum, cooperative GridStats, coalesced IndexToGrid
+Jul 14, 2026
+Copilot started reviewing on behalf of
+swahtz
+July 14, 2026 22:25
+View session
+Copilot
+AI
+reviewed
+Jul 14, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 10 out of 10 changed files in this pull request and generated 4 comments.
+Comment thread
+nanovdb/nanovdb/tools/cuda/IndexToGrid.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+nanovdb/nanovdb/tools/cuda/GridStats.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+nanovdb/nanovdb/tools/cuda/GridStats.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+nanovdb/nanovdb/cuda/DeviceBuffer.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+force-pushed
+the
+tranche-2-maintenance-monoids
+branch
+from
+f7220d6 to
+9f85d9f
+Compare
+July 14, 2026 22:57
+swahtz
+requested a review
+from Copilot
+July 14, 2026 23:11
+Copilot started reviewing on behalf of
+swahtz
+July 14, 2026 23:12
+View session
+Copilot
+AI
+reviewed
+Jul 14, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 10 out of 10 changed files in this pull request and generated 4 comments.
+Comment thread
+nanovdb/nanovdb/tools/cuda/PointsToGrid.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+nanovdb/nanovdb/tools/cuda/MeshToGrid.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+nanovdb/nanovdb/cuda/DeviceBuffer.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+nanovdb/nanovdb/cuda/DeviceBuffer.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+and others
+added 4 commits
+July 15, 2026 00:02
+NanoVDB CUDA: parallel bit-identical GridChecksum (slicing-by-4 + GF(…
+…
+9e6d47c
+```
+…2) combine)
+
+Port of Agent A's exp/14. Replaces the two serial anti-patterns in blockedCRC32
+with parallel equivalents:
+- Per-block CRC via slicing-by-4: the 256-entry base LUT is staged into shared
+  memory and three derived slice tables are built in place, so the dependent CRC
+  chain advances four bytes per step with four shared-memory lookups instead of
+  one byte per L2 lookup. (Not __constant__: divergent indices serialize there.)
+- The final fold (a single thread CRCing the whole block-CRC array - megabytes
+  for multi-GB grids) becomes parallel per-chunk CRCs plus a GF(2) crc32_combine
+  (zlib construction: one shift operator per fixed chunk length, applied per
+  fold). Small inputs keep the single-thread path.
+
+Checksum VALUES are bit-identical (slicing-by-4 and the GF(2) combine are both
+value-preserving); all checksum_full goldens pass on dragon/emu/crawler/
+wdas_cloud. The pre-v32.6.0 crc32TailOld path is untouched.
+
+A/B vs the Tranche-1 base (RTX PRO 6000, 3 rounds): dragon +84.7%, emu +92.0%,
+crawler +93.2%, wdas_cloud +94.1% (~6.5x / 12.5x / 15x / 17x); transient memory
+unchanged.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+NanoVDB CUDA: cooperative GridStats reductions (warp-per-leaf, block-…
+…
+44d5e65
+```
+…per-node)
+
+Port of Agent A's exp/13. Replaces the thread-per-node serial reductions:
+- processLeaf: one warp per leaf - lanes stride the 512 voxel slots (mask-gated)
+  and merge partial statistics through shared memory; lane 0 keeps the bbox
+  update and the final store.
+- processInternal: one 128-thread block per internal node striding the
+  4,096/32,768-entry child table with a shared-memory tree reduction of Stats +
+  bbox. The former kernel gave each thread up to 32,768 serial child visits and
+  ran an entire lower level of a 181M-voxel grid on ~9 warps of a 188-SM GPU.
+
+min/max are order-independent, so stats_minmax output is bit-identical - all
+stats_minmax goldens pass on dragon/emu/crawler/wdas_cloud. avg/stddev
+(stats_all) use a Welford-correct parallel merge but are NOT bit-identical to
+the serial result (floating-point reduction order differs); stats_all stays a
+bench-only measurement, never a byte-exact claim.
+
+A/B vs the Tranche-1 base (RTX PRO 6000, 3 rounds):
+  stats_minmax  dragon +87.3%  emu +82.5%  crawler +80.3%  wdas +83.5%  (5-8x)
+  stats_all     dragon +71.9%  emu +51.7%  crawler +29.8%  wdas +35.1%
+transient memory unchanged.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+NanoVDB CUDA: coalesced IndexToGrid node/leaf remap
+…
+5fcaa5a
+```
+Port of Agent A's exp/20. Consecutive threads now process consecutive table
+entries and leaf values - the former mapping gave each thread a consecutive RUN
+(a 32-entry stride across the warp for internal nodes, 8 for leaves) on every
+iteration. The 4 KB upper-node value/child masks are copied cooperatively across
+the block instead of member-wise by thread 0 while the rest idled.
+
+Combines with the Tranche-1 scoped zero-init already on this file: the leaf
+kernel's stats/padding-gap zeroing is preserved inside the thread-0 block, and
+the coalesced value loop still writes every mValues[i], so output stays
+bit-identical - all indextogrid goldens pass on dragon/emu/crawler/wdas_cloud.
+
+A/B vs the Tranche-1 base (RTX PRO 6000, 3 rounds): dragon +23%, emu +21%,
+crawler +18%, wdas_cloud +14%; transient memory unchanged. The remap gain is on
+top of Tranche 1's scoped init, so absolute indextogrid is now faster than both
+master and A's exp/20.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+NanoVDB CUDA: GridStats review fixes - guard leaf launch + unique per…
+…
+72a4bfe
+```
+…-node stats slot
+
+Addresses PR review on the cooperative GridStats:
+- processLeaf is now launched only when nodeCount[0] > 0, matching the guards on
+  the internal-node launches (a leaf-less grid would otherwise be a <<<0,...>>>
+  launch).
+- The average path now gives each node its own d_stats slot instead of reusing
+  one of its children's. A fully-tiled internal node (active value tiles, no
+  children) never claimed a child slot, so the old code wrote d_stats[-1] (out
+  of bounds) and propagated an invalid slot to its parent. d_stats is now sized
+  for all nodes (leaves, then lower, then upper) and each node writes slot
+  leafCount + levelOffset + nodeID; the sSlot/atomicMax machinery is removed.
+
+stats_minmax is unaffected (it never touches d_stats) and stays byte-exact;
+stats_all output is unchanged for grids without childless internal nodes and
+correct for those that have them. compute-sanitizer memcheck clean.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+force-pushed
+the
+tranche-2-maintenance-monoids
+branch
+from
+9f85d9f to
+72a4bfe
+Compare
+July 15, 2026 01:10
+kmuseth
+approved these changes
+Jul 16, 2026
+View reviewed changes
+kmuseth
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Impressive optimizations, though it's hard to follow the details of the tricks, but they appear to be primarily related to better use of shared memory and asynchronous processing with streams. The use of raw intrinsics produces cryptic-looking code, so please add comments. The same is true for some of the more intricate algorithmic optimization tricks. Happy to see lots of performance and unit tests.
+Comment thread
+nanovdb/nanovdb/tools/cuda/GridStats.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+nanovdb/nanovdb/tools/cuda/GridStats.cuh
+*reinterpret_cast<uint32_t*>(&d_leaf.mMinimum) = tid;
+} else {
+stats.setStats(d_leaf);
+const auto &mask = d_leaf.valueMask();
+kmuseth
+Jul 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+it looks like a cool optimization but I'd like to understand the underlying principle. Just a comment
+swahtz
+Jul 19, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Sure, I've added some more colour to what is happening in this optimization to the PR summary and put some more explanation in the comments to what is going on at each stage. Instead of a thread processing a whole leaf node's stats, we map a 32-thread warp to each leaf node. This cooperative reduction lets us increase occupancy and coalesce memory reads done by the warp (instead of each thread in a warp reading stats from different nodes). The core inspiration was chapter 10 from the Programming Massively Parallel Processors book.
+kmuseth
+requested changes
+Jul 16, 2026
+View reviewed changes
+kmuseth
+left a comment
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Oh, one mandatory change: please update the pendingchanges/nanovdb.txt file to reflect these improvements.
+swahtz
+changed the title
+NanoVDB: parallel checksum, cooperative GridStats, coalesced IndexToGrid
+NanoVDB: parallel checksum, cooperative GridStats, coalesced IndexToGrid optimizations
+Jul 16, 2026
+NanoVDB CUDA: precompute GridChecksum combine operators on the host
+…
+2e30d61
+```
+crc32CombineKernel rebuilt its two GF(2) shift operators by binary
+exponentiation on a single device thread every call - a fixed ~480 us that
+dominated the checksum for small and medium grids (profiling showed it as large
+as the entire tail-streaming pass). The operators depend only on the chunk
+length, so they are now built on the host in microseconds and uploaded, and the
+device kernel is reduced to the O(chunkCount) fold.
+
+Bit-identical: all checksum goldens pass on dragon/emu/crawler/wdas_cloud.
+
+A/B vs the parallel-checksum base (RTX PRO 6000, 3 rounds):
+  dragon +40.7% (1.69x)  emu +15.3%  crawler +9.8%  wdas_cloud +1.9%
+The gain shrinks with grid size because it removes a fixed cost; transient
+memory unchanged.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+swahtz
+requested review from
+Idclip,
+apradhana,
+danrbailey,
+jmlait and
+richhones
+as code owners
+July 19, 2026 01:57
+swahtz
+added 5 commits
+July 19, 2026 03:53
+Improve comments for processInternal/Leaf
+…
+06ad21b
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Comment cleanup and swap some constants for semantically defined values
+…
+ad25134
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Update pendingchanges
+…
+65c9d48
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Merge branch 'master' into tranche-2-maintenance-monoids
+b0b99d6
+Merge remote-tracking branch 'upstream/master' into tranche-2-mainten…
+…
+b082b5e
+```
+…ance-monoids
+```
+swahtz
+enabled auto-merge
+August 8, 2026 03:04
+kmuseth
+approved these changes
+Aug 11, 2026
+View reviewed changes
+kmuseth
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+thanks for the changes
+Hide details
+View details
+swahtz
+merged commit bb597a2
+into
+AcademySoftwareFoundation:master
+Aug 11, 2026
+15 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+harrism
+mentioned this pull request
+Aug 11, 2026
+NanoVDB: GridStats.cuh emits nvcc #20054-D warnings (dynamic init of __shared__ StatsT/CoordBBox arrays)
+#2279
+Closed
+JaeHyunLee94
+pushed a commit
+to sifakis/openvdb
+that referenced
+this pull request
+Sep 27, 2026
+Merge pull request AcademySoftwareFoundation#2250 from swahtz/tranche…
+…
+8876d2b
+```
+…-2-maintenance-monoids
+
+NanoVDB: parallel checksum, cooperative GridStats, coalesced IndexToGrid optimizations
+(cherry picked from commit bb597a2)
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+nanovdb
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

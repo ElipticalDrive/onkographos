@@ -1,0 +1,180 @@
+# Volume Loading and Preprocessing
+
+Also called: CT Volume Loading
+
+## Overview
+This method handles the ingestion of volumetric data from various medical imaging formats (such as DICOM) and raw binary files, performing essential normalization, coordinate system alignment, and memory layout preparation for downstream rendering. It distinguishes itself from sibling methods by focusing on the complete pipeline from file I/O to GPU-ready tensor preparation, including specific affine matrix transformations for medical coordinate systems (RAS to IJK) and intensity scaling for Hounsfield Units (HU). Unlike [Raw Volume Data Reader](2259-raw-volume-data-reader.md) which assumes a fixed binary layout, or [DICOM Volume Loading and Coordinate Reconstruction](2574-dicom-volume-loading-and-coordinate-reconstruction.md) which focuses on geometry extraction for projection data, this method prepares the final 3D volume tensor for direct rendering.
+
+## How it works
+### Inputs and Outputs
+- **Inputs**: Source files (DICOM series, raw binary slices, or SciData files), configuration parameters (spacing, intensity ranges, thresholds).
+- **Outputs**: A normalized, contiguous volume tensor (typically floating-point or unsigned 8-bit integer) aligned to a specific coordinate system, ready for GPU upload.
+
+### Data Structures
+1.  **Volume Tensor**: A 3D array of voxels. In MONAI-based workflows, this is a PyTorch tensor with shape `(1, C, D, H, W)` after batch expansion [S1, unofficial]. In brick-based workflows, data is stored in a `BrickGrid` structure indexed by `(x, y, z)` brick coordinates [S2, unofficial].
+2.  **Affine Matrix**: A 4x4 matrix representing the transformation from voxel indices (IJK) to world coordinates (RAS) [S1, unofficial].
+3.  **Slice List**: An array of slice objects containing intensity metadata and file paths, sorted by spatial position [S4, unofficial].
+
+### Steps
+
+#### 1. File Discovery and Metadata Extraction
+- **DICOM**: Scan the directory for files with extension `*.IMA` (or standard DICOM extensions) [S4, unofficial]. For each file, extract metadata including `LargestImagePixelValue`, `SmallestImagePixelValue`, and the IJK-to-RAS affine matrix [S1, S4, unofficial].
+- **Raw/SciData**: Parse the file header to determine resolution and location bounds [S2, unofficial].
+
+#### 2. Intensity Normalization and Filtering
+Apply one or more pre-processing methods to convert raw values to a standard range (typically `[0, 1]` or `[0, 255]`) [S3, unofficial]:
+- **Scale**: Divide each value $v$ by a user-defined constant $C$:
+  $$ v' = \frac{v}{C} $$
+- **ScaleToMax**: Divide each value by the approximate maximum value $M$ of the channel, determined automatically from the lowest resolution representation:
+  $$ v' = \frac{v}{M} $$
+- **LogTransform**: Apply the common logarithm:
+  $$ v' = \log_{10}(v) $$
+- **Thresholding**: Apply user-defined thresholds $min$ and $max$ (in range $[0, 1]$). Values outside $[min \times 255, max \times 255]$ are set to zero [S3, unofficial]. This removes noise or irrelevant background values.
+
+#### 3. Coordinate System Alignment
+- Extract the IJK-to-RAS affine matrix $A_{ijk \to ras}$ from the volume metadata [S1, unofficial].
+- Compute the inverse matrix $A_{ras \to ijk} = A_{ijk \to ras}^{-1}$ for use in rendering shaders [S1, unofficial].
+- For CT data, apply Hounsfield Unit (HU) calibration if raw values are not already in HU [S1, unofficial].
+
+#### 4. Resampling and Spacing Adjustment
+- If the source voxel spacing differs from the target spacing, resample the volume.
+- **Spacing Parameter**: Define target voxel spacing in mm, e.g., `[2.5, 2.5, 3.0]` [S1, unofficial].
+- Use interpolation (e.g., linear or nearest neighbor) to map source voxels to the target grid.
+
+#### 5. Intensity Clipping and Scaling
+- Clip intensity values to a specified range, e.g., $[-3024, 3024]$ for HU [S1, unofficial].
+- Scale the clipped values to the target range, e.g., $[0, 1]$:
+  $$ v_{final} = \frac{v_{clipped} - v_{min}}{v_{max} - v_{min}} $$
+- Ensure the data type is suitable for the renderer (e.g., float32 for MONAI, uint8 for brick-based systems) [S1, S3, unofficial].
+
+#### 6. Memory Layout and GPU Upload
+- **Batch Expansion**: Add a batch dimension if required by the rendering framework:
+  $$ V_{batch} = V.unsqueeze(0) $$
+- **Device Transfer**: Move the volume tensor to the GPU (CUDA) [S1, unofficial].
+- **Brick Loading (Alternative)**: For out-of-core rendering, load data into a `BrickGrid`. Iterate over the Y-axis from $0$ to $\lfloor vol\_res.y() \rfloor$, computing offsets and loading each slice via `loadVolSlice` [S2, unofficial]. Check index bounds before setting brick data [S2, unofficial]. If a brick contains only zero values after pre-processing, transmit a special `EMPTY` value to optimize transfer [S3, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def load_and_preprocess_volume(file_paths, config):
+    """
+    Load volume data, normalize intensity, align coordinates, and prepare for GPU.
+    
+    Args:
+        file_paths: List of file paths (DICOM or raw).
+        config: Configuration object with attributes:
+            - spacing: Target voxel spacing [x, y, z] in mm.
+            - intensity_min: Lower bound for clipping.
+            - intensity_max: Upper bound for clipping.
+            - scale_method: 'scale', 'scaleToMax', or 'logTransform'.
+            - threshold_min: Lower threshold [0, 1].
+            - threshold_max: Upper threshold [0, 1].
+    """
+    # Step 1: Load raw data and metadata
+    raw_volumes = []
+    affine_matrices = []
+    
+    for path in file_paths:
+        if path.endswith('.IMA') or is_dicom(path):
+            # Extract metadata and pixel data
+            slice_data = load_dicom_slice(path)
+            raw_volumes.append(slice_data.pixel_array)
+            affine_matrices.append(slice_data.affine_matrix)
+        else:
+            # Load raw binary/SciData
+            slice_data = load_raw_slice(path)
+            raw_volumes.append(slice_data.values)
+            affine_matrices.append(slice_data.affine)
+            
+    # Stack into 3D volume (assuming Z is the slice dimension)
+    volume = np.stack(raw_volumes, axis=0)
+    
+    # Step 2: Intensity Pre-processing
+    if config.scale_method == 'scale':
+        volume = volume / config.scale_constant
+    elif config.scale_method == 'scaleToMax':
+        max_val = np.max(volume) # Or from lowest resolution representation
+        volume = volume / max_val
+    elif config.scale_method == 'logTransform':
+        volume = np.log10(volume + 1e-6) # Add epsilon to avoid log(0)
+        
+    # Step 3: Thresholding
+    min_thresh = config.threshold_min * 255
+    max_thresh = config.threshold_max * 255
+    volume = np.clip(volume, min_thresh, max_thresh)
+    volume[volume < min_thresh] = 0
+    volume[volume > max_thresh] = 0
+    
+    # Step 4: Coordinate Alignment
+    # Use the first slice's affine matrix as the reference
+    affine_ijk_to_ras = affine_matrices[0]
+    affine_ras_to_ijk = np.linalg.inv(affine_ijk_to_ras)
+    
+    # Step 5: Resampling (if spacing differs)
+    # Note: Actual resampling requires interpolation kernel implementation
+    # Here we assume a placeholder for resampling logic
+    if config.spacing is not None:
+        volume = resample_volume(volume, current_spacing, config.spacing)
+        
+    # Step 6: Final Scaling to [0, 1]
+    v_min = config.intensity_min
+    v_max = config.intensity_max
+    volume = np.clip(volume, v_min, v_max)
+    volume = (volume - v_min) / (v_max - v_min)
+    
+    # Step 7: Prepare for GPU
+    # Convert to tensor and add batch dimension
+    import torch
+    tensor_volume = torch.from_numpy(volume).float()
+    tensor_volume = tensor_volume.unsqueeze(0) # Add batch dim
+    
+    # Move to CUDA
+    tensor_volume = tensor_volume.cuda()
+    
+    return tensor_volume, affine_ras_to_ijk
+```
+
+### Parameters
+- **Spacing**: Target voxel spacing in mm, e.g., `[2.5, 2.5, 3.0]` [S1, unofficial].
+- **ScaleIntensityRange**: Clipping and scaling range, e.g., `[-3024, 3024]` to `[0, 1]` [S1, unofficial].
+- **Thresholds**: User-defined `min` and `max` in `[0, 1]` for filtering [S3, unofficial].
+- **iso_min, iso_max**: Thresholds for CT data loading in brick-based systems, defaulting to `0` and `USHRT_MAX` [S2, unofficial].
+- **m_density_mult**: Multiplier applied to density values in `BrickDensityRegion` [S2, unofficial].
+
+### Edge Cases and Pitfalls
+- **Precision**: Converting high-precision data (e.g., 16-bit) to 8-bit can lose detail. Use `ScaleToMax` based on the lowest resolution representation to preserve dynamic range [S3, unofficial].
+- **Boundaries**: Index bounds checking is critical in brick-based loading. The `set()` method must verify that `i, j, k` are within `m_brickData` dimensions [S2, unofficial].
+- **Empty Bricks**: Detect bricks containing only zero values after pre-processing and transmit an `EMPTY` flag instead of data to save bandwidth [S3, unofficial].
+- **Coordinate Systems**: Incorrect affine matrix inversion leads to misaligned rendering. Ensure `ras2ijk` is correctly computed from the source metadata [S1, unofficial].
+
+## Subtopics
+
+### [DICOM CT Projection Loading and Geometry Extraction](2661-dicom-ct-projection-loading-and-geometry-extraction.md)
+This method loads raw CT projection data from a directory of DICOM files, extracts scanner geometry parameters, applies Hounsfield Unit (HU) calibration, and constructs a ConeBeamGeometry object suitable for tomographic reconstruction. It specifically addresses the challenge of interpreting non-standard or vendor-specific DICOM metadata (such as angle definitions and flying focal spot offsets) to correctly map 2D detector coordinates to 3D ray paths. It differs from standard CT loading by explicitly handling cylindrical-to-rectangular coordinate conversion for the ray transform and correcting for pixel-center vs. pixel-corner detector geometry.
+
+### Brick Density Volume Loading
+This variant loads volume data into a `BrickGrid` structure for out-of-core rendering. It iterates over the Y-axis, loading slices via `loadVolSlice` and handling both CT and Ocean Data formats [S2, unofficial]. For CT data, it uses `iso_min` and `iso_max` thresholds (defaulting to `0` and `USHRT_MAX`) [S2, unofficial]. For Ocean Data, it parses SciData files, normalizes locations and O2 concentration to `[0, 1]` based on min/max values, and applies a density multiplier `m_density_mult` [S2, unofficial]. It includes strict index bounds checking to prevent out-of-bounds access [S2, unofficial].
+
+### Brick Loading Pre-processing
+This method applies pre-processing steps in a dedicated brick-loading thread to convert volume data to unsigned 8-bit integers [S3, unofficial]. It supports three scaling methods: `scale` (divide by constant), `scaleToMax` (divide by auto-detected max from lowest resolution), and `logTransform` (common logarithm) [S3, unofficial]. User-defined thresholds `[min, max]` in `[0, 1]` are applied to filter noise, setting out-of-range values to zero [S3, unofficial]. Bricks containing only zero values are replaced with a special `EMPTY` value to optimize GPU transfer [S3, unofficial].
+
+### DICOM Slice Processing
+This method loads DICOM slices from a directory, determines intensity range, and sorts slices [S4, unofficial]. It scans for `*.IMA` files, initializes min/max intensity to `99999` and `-1` respectively, and iterates through slices to update global min/max based on `LargestImagePixelValue` and `SmallestImagePixelValue` [S4, unofficial]. The slices are then sorted to ensure correct spatial ordering [S4, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Linear with respect to the number of voxels for loading and normalization $O(N)$. Resampling adds complexity based on the interpolation kernel.
+- **Memory Complexity**: Linear with respect to the volume size $O(N)$. Brick-based loading reduces peak memory usage by loading only active bricks.
+- **Performance**: GPU upload time depends on PCIe bandwidth and volume size. Pre-processing on the CPU (brick-loading thread) overlaps with GPU rendering [S3, unofficial].
+- **Strengths**: Handles various medical formats, ensures coordinate correctness, and optimizes transfer with empty brick detection.
+- **Limitations**: Requires careful handling of affine matrices. Resampling can be computationally expensive for large volumes.
+
+## Background
+This method is part of the `VolumeLoader` framework, which supports various medical imaging formats. It builds on techniques from MONAI for medical image processing [S1, unofficial] and brick-based rendering systems for out-of-core visualization [S2, S3, unofficial]. The approach to affine matrix transformation is standard in medical imaging (e.g., NIfTI, DICOM) [S1, unofficial]. The brick-based pre-processing and empty brick optimization are derived from scalable web-based volume rendering systems [S3, unofficial].
+
+## Sources
+[S1] pcarnah/flashdrr, https://github.com/pcarnah/flashdrr, fetched 2026-10-26 (unofficial)
+[S2] cgibson/Mr-Voxel, https://github.com/cgibson/Mr-Voxel, fetched 2026-10-27 (unofficial)
+[S3] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)
+[S4] Torbenhjl/Marching-Tetrahedra-on-CT-headscan, https://github.com/Torbenhjl/Marching-Tetrahedra-on-CT-headscan, fetched 2026-10-27 (unofficial)

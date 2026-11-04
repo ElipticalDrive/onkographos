@@ -1,0 +1,141 @@
+# Coordinate System Conversion for Gaussian Splats
+
+Also called: RUB to RDF conversion, convertCoordinates
+
+## Overview
+This method transforms Gaussian splat attributes (position, rotation, spherical harmonics) between different coordinate systems, such as converting from the Right-handed Up-Back (RUB) format used internally to the Right-handed Down-Forward (RDF) format used in PLY files [S1, unofficial]. It sets apart from sibling loaders by handling the specific axis flips and rotations required for quaternion and spherical harmonic consistency, ensuring that the rendered output remains invariant under coordinate system changes [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A `GaussianCloud` struct containing arrays of positions, rotations, scales, alphas, colors, and spherical harmonics (SH), along with metadata (`numPoints`, `shDegree`).
+- Output: The same `GaussianCloud` struct with attributes transformed to the target coordinate system.
+
+**Data Structures:**
+The `GaussianCloud` struct layout is as follows [S1, unofficial]:
+- `numPoints`: `int32_t`
+- `shDegree`: `int32_t`
+- `antialiased`: `bool`
+- `positions`: `std::vector<float>` (size $3 \times \text{numPoints}$)
+- `scales`: `std::vector<float>` (size $3 \times \text{numPoints}$)
+- `rotations`: `std::vector<float>` (size $4 \times \text{numPoints}$, stored as quaternions $x, y, z, w$)
+- `alphas`: `std::vector<float>` (size $\text{numPoints}$)
+- `colors`: `std::vector<float>` (size $3 \times \text{numPoints}$)
+- `sh`: `std::vector<float>` (size $3 \times \text{numCoeffsPerPoint} \times \text{numPoints}$)
+- `extensions`: `std::vector<SpzExtensionBasePtr>`
+
+The `CoordinateConverter` struct `c` is computed via `coordinateConverter(from, to, shDegree)` and contains:
+- `flipP`: Array of 3 floats (axis multipliers for position).
+- `flipQ`: Array of 3 floats (axis multipliers for quaternion $x, y, z$).
+- `flipSh`: Array of floats (multipliers for SH coefficients).
+- `rotFlipPFunc`: Optional function pointer for custom position transformation.
+- `rotFlipQFunc`: Optional function pointer for custom rotation transformation.
+- `rotFlipShFuncs`: Array of optional function pointers for SH transformation.
+
+**Steps:**
+1. If `numPoints` is 0, return immediately [S1, unofficial].
+2. Compute `c = coordinateConverter(from, to, shDegree)` [S1, unofficial].
+3. Transform positions:
+   - If `c.rotFlipPFunc` exists, call it for each point's 3 floats [S1, unofficial].
+   - Otherwise, for each point $i$, update $p_x \leftarrow p_x \cdot c.\text{flipP}[0]$, $p_y \leftarrow p_y \cdot c.\text{flipP}[1]$, $p_z \leftarrow p_z \cdot c.\text{flipP}[2]$ [S1, unofficial].
+4. Transform rotations (quaternions):
+   - If `c.rotFlipQFunc` exists, call it for each point's 4 floats [S1, unofficial].
+   - Otherwise, for each point $i$, update $q_x \leftarrow q_x \cdot c.\text{flipQ}[0]$, $q_y \leftarrow q_y \cdot c.\text{flipQ}[1]$, $q_z \leftarrow q_z \cdot c.\text{flipQ}[2]$. The $w$ component remains untouched [S1, unofficial].
+5. Transform Spherical Harmonics (SH):
+   - Calculate `numCoeffsPerPoint` as `sh.size() / 3 / numPoints` [S1, unofficial].
+   - If `c.rotFlipShFuncs[0]` exists (cross-family transformation), iterate through bands and channels, applying `rotFlipShFuncs` to temporary buffers [S1, unofficial].
+   - Otherwise (within-family), for each point and each coefficient index $j$, update $sh_j \leftarrow sh_j \cdot c.\text{flipSh}[j]$ [S1, unofficial].
+
+**Parameters:**
+- `shDegree`: Determines the number of SH coefficients per point.
+  - Degree 0: 0 coefficients.
+  - Degree 1: 9 coefficients.
+  - Degree 2: 24 coefficients.
+  - Degree 3: 45 coefficients.
+  - Degree 4: 72 coefficients [S1, unofficial].
+- The SH array is organized with the color channel as the inner axis and the coefficient index as the outer axis [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Precision issues may arise when flipping signs of quaternions if not handled correctly, though the method leaves $w$ untouched to preserve orientation [S1, unofficial].
+- The volume of a Gaussian is calculated as $V = \frac{4}{3} \pi \exp(s_x + s_y + s_z)$, where $s_x, s_y, s_z$ are log-scales. This formula is invariant under coordinate system changes as it depends only on scale magnitudes [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def convert_coordinates(cloud, from_sys, to_sys):
+    if cloud.numPoints == 0:
+        return
+
+    c = coordinate_converter(from_sys, to_sys, cloud.shDegree)
+
+    # Transform positions
+    if c.rot_flip_p_func is not None:
+        for i in range(cloud.numPoints):
+            c.rot_flip_p_func(cloud.positions, i)
+    else:
+        for i in range(cloud.numPoints):
+            base = i * 3
+            cloud.positions[base] *= c.flip_p[0]
+            cloud.positions[base + 1] *= c.flip_p[1]
+            cloud.positions[base + 2] *= c.flip_p[2]
+
+    # Transform rotations
+    if c.rot_flip_q_func is not None:
+        for i in range(cloud.numPoints):
+            c.rot_flip_q_func(cloud.rotations, i)
+    else:
+        for i in range(cloud.numPoints):
+            base = i * 4
+            cloud.rotations[base] *= c.flip_q[0]
+            cloud.rotations[base + 1] *= c.flip_q[1]
+            cloud.rotations[base + 2] *= c.flip_q[2]
+            # cloud.rotations[base + 3] (w) remains unchanged
+
+    # Transform Spherical Harmonics
+    num_coeffs_per_point = len(cloud.sh) // 3 // cloud.numPoints
+    if c.rot_flip_sh_funcs[0] is not None:
+        # Cross-family transformation using function pointers
+        for i in range(cloud.numPoints):
+            for band in range(cloud.shDegree + 1):
+                for channel in range(3):
+                    # Apply specific rotation function for this band/channel
+                    # Implementation detail: uses temporary buffers as per source
+                    pass 
+    else:
+        # Within-family transformation using simple multiplication
+        for i in range(cloud.numPoints):
+            for j in range(num_coeffs_per_point):
+                # Index calculation: channel is inner, coefficient is outer
+                # Assuming layout: [coeff_0_ch0, coeff_0_ch1, coeff_0_ch2, coeff_1_ch0, ...]
+                # Or as per source: "color channel is the inner axis, coefficient is the outer axis"
+                # This implies index = (j * 3 + channel) + i * (num_coeffs_per_point * 3)
+                # However, standard SH storage is often [ch0, ch1, ch2] per coeff.
+                # Let's assume the source implies: sh[point_idx][coeff_idx][channel]
+                # Flattened: sh[point_idx * num_coeffs * 3 + coeff_idx * 3 + channel]
+                base = i * num_coeffs_per_point * 3
+                for channel in range(3):
+                    idx = base + j * 3 + channel
+                    cloud.sh[idx] *= c.flip_sh[j]
+```
+
+## Subtopics
+
+### Gaussian Splat PLY Loader
+Loads raw Gaussian data from PLY files. Use when importing data. Link: [Gaussian Splat PLY Loader](3254-gaussian-splat-ply-loader.md).
+
+### Gaussian Property Loading
+Parses properties and applies inverse transformations. Use when loading and preparing data for conversion. Link: [Gaussian Property Loading](2221-gaussian-property-loading.md).
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot C)$, where $N$ is the number of points and $C$ is the number of SH coefficients per point. The transformation is linear and applied element-wise.
+- **Memory Complexity**: $O(1)$ auxiliary space if in-place transformation is used, or $O(N \cdot C)$ if temporary buffers are allocated for cross-family SH transformations.
+- **Strengths**: Simple and efficient for within-family conversions. Handles the complex quaternion and SH rotations required for coordinate invariance.
+- **Limitations**: Cross-family SH transformations may require more complex logic and temporary storage.
+- **When to use**: When switching between coordinate systems (e.g., RUB to RDF) for rendering or export.
+- **When not to use**: When the coordinate system is already consistent with the target system.
+
+## Background
+The method originates from the SPZ (Splatting Package for Z) project by Niantic Labs and Adobe, which provides tools for handling 3D Gaussian Splatting data [S1, unofficial]. It addresses the need for interoperability between different coordinate system conventions used in various 3D graphics pipelines and file formats.
+
+## Sources
+[S1] nianticlabs/spz, https://github.com/nianticlabs/spz, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,107 @@
+# Dynamic Sparse Voxel Octree with Morton Codes
+
+Also called: rapid-svo
+
+## Overview
+A single-header C++ implementation of a dynamic sparse voxel octree using integer coordinates and Morton codes, designed for micro-optimized CPU-based voxel physics simulations in chunked procedural game worlds [S1, unofficial]. It distinguishes itself by providing bulk allocation and deallocation operations alongside point queries, optimized for high-throughput voxel manipulation rather than just static storage [S1, unofficial]. It builds on [Octree Insertion with Growth](2387-octree-insertion-with-growth.md) by providing the concrete data structures and Morton code integration required for efficient spatial indexing [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+The method takes voxel positions (integer coordinates) and metadata as input [S1, unofficial]. It outputs a tree structure supporting `alloc_bulk` (batch insertion), `get` (point query returning a pointer or `nullptr`), and `dealloc` (removal) [S1, unofficial].
+
+**Data Structures:**
+The tree is templated on three parameters: `<MortonType, VoxelFormat, DetailsInfo>` [S1, unofficial].
+*   `DetailsInfo` (`rapid_svo::details_info`): A struct containing `_discard_overflow` (bool) and `_limit_max_bounds` (array of 3 integers) [S1, unofficial].
+*   `MortonType`: Determines the bit-width of the Morton code (e.g., 16-bit, 32-bit) [S1, unofficial].
+*   `VoxelFormat`: A template parameter for the tree [S1, unofficial].
+
+**Morton Code Generation:**
+Voxel positions are encoded into Morton codes using lookup tables provided by the `libmorton` dependency [S1, unofficial]. The encoding is performed via `encode_position` on a position array [S1, unofficial].
+
+**Parameters:**
+*   `_limit_max_bounds`: Typical benchmark values include `{16,16,16}`, `{32,32,32}`, `{64,64,64}`, `{128,128,128}`, `{256,256,256}`, `{512,512,512}`, `{1024,1024,1024}` [S1, unofficial].
+*   `_discard_overflow`: When `true`, voxels outside `_limit_max_bounds` are not inserted [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialization**: Create a `rapid_svo::tree` instance with specified `MortonType`, `VoxelFormat`, and `DetailsInfo` [S1, unofficial].
+2.  **Bulk Allocation**: Prepare a contiguous array of voxel data [S1, unofficial]. Call `tree.alloc_bulk(voxels.data(), count)` to insert the batch [S1, unofficial].
+3.  **Point Query**: To retrieve a voxel, call `tree.get(position)` [S1, unofficial]. This returns a pointer to the voxel if found, or `nullptr` if not [S1, unofficial].
+4.  **Deallocation**: To remove a voxel, call `tree.dealloc(position)` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class DynamicSparseVoxelOctree:
+    def __init__(self, morton_bits, voxel_format, discard_overflow, max_bounds):
+        # Initialize the SVO with Morton bit-width, voxel format, overflow flag, and bounds [S1, unofficial]
+        self.morton_bits = morton_bits
+        self.voxel_format = voxel_format
+        self.discard_overflow = discard_overflow
+        self.max_bounds = max_bounds
+        self.data = {}  # Internal storage initialization [G]
+
+    def alloc_bulk(self, voxel_array, count):
+        # Insert a batch of voxels into the tree [S1, unofficial]
+        # Sources do not provide the internal bulk insertion algorithm [G]
+        for i in range(count):
+            pos = voxel_array[i]
+            if self.discard_overflow and self._is_out_of_bounds(pos):
+                continue
+            # Encode position to Morton code and insert into tree [S1, unofficial]
+            # Sources do not provide the internal Morton encoding or tree traversal logic [G]
+            self.data[pos] = voxel_array[i]
+
+    def get(self, position):
+        # Query a voxel by position [S1, unofficial]
+        # Returns a reference to the voxel, or None if not found [S1, unofficial]
+        return self.data.get(position, None)
+
+    def dealloc(self, position):
+        # Remove a voxel by position [S1, unofficial]
+        if position in self.data:
+            del self.data[position]
+
+    def _is_out_of_bounds(self, pos):
+        # Check if position exceeds max_bounds [S1, unofficial]
+        return any(p > b for p, b in zip(pos, self.max_bounds))
+```
+
+**Edge Cases and Pitfalls:**
+*   **Overflow**: If `_discard_overflow` is true, voxels outside `_limit_max_bounds` are silently discarded [S1, unofficial].
+*   **Precision**: The choice of `MortonType` (16-bit vs 32-bit) limits the maximum spatial extent and affects performance [S1, unofficial].
+*   **Compiler Optimization**: Performance varies significantly between compilers (e.g., Clang vs MSVC) [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources. The implementation is described as "micro-optimized" for CPU performance [S1, unofficial].
+
+**Measured Performance:**
+Benchmarks conducted on AMD Ryzen 7 1800X, 32GB DDR4, Windows 10 [S1, unofficial]:
+*   **Clang 19.1.6, 16b Morton, 16^3 grid**:
+    *   Alloc: 58.28M vox/s
+    *   Get: 176.50M vox/s
+    *   Dealloc: 116.97M vox/s
+*   **Clang 19.1.6, 32b Morton, 128^3 grid**:
+    *   Alloc: 29.91M vox/s
+    *   Get: 89.40M vox/s
+    *   Dealloc: 51.23M vox/s
+*   **MSVC 1937 (VS 17.7), 16b Morton, 16^3 grid**:
+    *   Alloc: 22.73M vox/s
+    *   Get: 42.57M vox/s
+    *   Dealloc: 84.40M vox/s
+
+Clang 19.1.6 yields considerably faster results than MSVC 1937, though the exact optimizations responsible are undetermined [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths**: High throughput for bulk operations and point queries; suitable for dynamic voxel physics in procedural worlds [S1, unofficial].
+*   **Limitations**: Performance is sensitive to compiler choice; limited to CPU-based execution [S1, unofficial].
+
+**When to Use:**
+Use for CPU-based voxel physics simulations requiring fast dynamic insertion, removal, and querying of voxels in chunked procedural worlds [S1, unofficial].
+
+## Background
+Originated as a single-header C++ implementation by Severi Suominen, prototyped for lightning-fast voxel physics simulations on CPU in chunked procedural game worlds [S1, unofficial]. It relies on `libmorton` for fast Morton code generation and `glm` for math types [S1, unofficial].
+
+## Sources
+[S1] SeveriSuominen/rapid-svo, https://github.com/SeveriSuominen/rapid-svo, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,290 @@
+# Zerobit Encoding Scheme
+
+Also called: Enhanced Encoding Scheme
+
+## Overview
+The Zerobit Encoding Scheme is a value compression method for volume rendering data that improves compression ratio and random access speed by exploiting spatial coherence in wavelet coefficients [S1, unofficial]. It modifies the cell tag table to indicate whether the coefficient vector $c_0$ is zero, reducing storage waste for zero-valued coefficients [S1, unofficial]. It sets itself apart from its siblings by using a variable-length significance map driven by "zerobits" (flags indicating if all 7 detail coefficients of a node are zero) rather than fixed-size maps or purely predictive differential coding [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 16x16x16 unit block of wavelet coefficients, previously decomposed into a set of 4x4x4 subblocks called "cells" [S1, unofficial].
+*   **Output:** A compressed bitstream containing cell tags, cell information (zerobits and significance maps), and byte streams for coefficients [S1, unofficial].
+
+**Data Structures:**
+1.  **Cell Tag Table:** One byte per cell.
+    *   Bit 0 (Left-most): Zerobit for the Level 0 node.
+    *   Bit 1: Adjacent to Bit 0. For CT data, this is the bytetag of $c_0$. For RGB data, this indicates if $c_0$ is $(0,0,0)$ [S1, unofficial].
+    *   Bits 2-7: Unused or reserved in the description [S1, unofficial].
+2.  **Cell Information:** Stored in one-byte blocks following the tag table.
+    *   First Byte: Contains 9 zerobits. Bit 0 is the Level 0 zerobit (redundant with Cell Tag Table Bit 0, but stored for local access efficiency). Bits 1-8 are the zerobits for the 8 Level 1 nodes [S1, unofficial].
+    *   Subsequent Bytes: Significance maps. The number of bytes equals the count of zerobits with value 1 in the first byte (up to 8 bytes for Level 1 nodes, plus potentially 1 for Level 0 if not redundant, but the text implies the significance map bytes follow the zerobit byte) [S1, unofficial]. *Correction based on text:* "The number of bytes in the significance map equals the number of zerobits with value 1 (up to 9 bytes)." The first byte of Cell Information holds the 9 zerobits. The following bytes are the significance maps [S1, unofficial].
+3.  **Significance Map:** One byte per node where the zerobit is 1.
+    *   Contains 7 bit-flags for the 7 detail coefficients ($d_0, \dots, d_6$) of that node.
+    *   Left-most bit (Bit 7): Two-byte flag. 0 indicates existence of at least one coefficient in that node stored in a two-byte stream; 1 indicates all are one-byte [S1, unofficial].
+4.  **Bytetag:** A single byte per cell.
+    *   Tracks which specific detail coefficients (among those with significance flag 1) are stored in the two-byte stream. Bit $i$ is 1 if the $i$-th detail coefficient (in enumeration order) is two-byte [S1, unofficial].
+5.  **Byte Streams:** Two streams per cell.
+    *   One-byte stream: Stores coefficients fitting in 1 byte (CT) or 3 bytes (RGB components).
+    *   Two-byte stream: Stores coefficients requiring 2 bytes (CT) or 3 bytes (RGB components) if the two-byte flag is set.
+    *   Each stream maintains an offset value in the cell information to locate coefficients [S1, unofficial].
+
+**Numbered Steps (Encoding):**
+1.  Enumerate cells front-to-back, top-to-bottom, left-to-right.
+2.  Tag cells with 0 if all coefficients are zero. Tag cells with positive integers (increasing order) if they contain non-zero coefficients [S1, unofficial].
+3.  For each non-null cell, determine the zerobit for each of the 9 nodes in the octree. A zerobit is 0 if all 7 detail coefficients of that node are zero; otherwise, it is 1 [S1, unofficial].
+4.  Store the 9 zerobits in the first byte of the Cell Information [S1, unofficial].
+5.  For each node with zerobit 1, create a significance map byte. Set the 7 bits corresponding to the 7 detail coefficients. If any coefficient in that node is stored in a two-byte stream, set the left-most bit of this byte to 0 [S1, unofficial].
+6.  Store the significance map bytes immediately after the zerobit byte. The total number of significance map bytes equals the number of zerobits equal to 1 [S1, unofficial].
+7.  Determine the bytetag. For each coefficient with significance flag 1, if it requires two bytes, set the corresponding bit in the bytetag to 1 [S1, unofficial].
+8.  Store coefficient $c_0$.
+    *   **CT Data:** Always stored in the one-byte stream, even if zero. The bytetag bit for $c_0$ (Bit 1 of Cell Tag Table) indicates if it is zero [S1, unofficial].
+    *   **RGB Data:** $c_0$ is a 3-component vector $(r,g,b)$. Stored in a three-byte stream. The bit adjacent to the left-most bit in the Cell Tag Table indicates if $c_0$ is $(0,0,0)$ [S1, unofficial].
+9.  Store detail coefficients. Coefficients with significance flag 1 are stored in the appropriate byte stream (one-byte or two-byte) based on the two-byte flag and bytetag [S1, unofficial].
+
+**Decoding Algorithm:**
+To decode a coefficient with index $(i, j, k)$ in a 16x16x16 unit block:
+1.  Find the cell $C$ containing $(i, j, k)$.
+2.  Check Cell Tag Table for $C$. If tag is 0, return 0 [Case 1] [S1, unofficial].
+3.  Compute local index $(i', j', k')$ within cell $C$.
+4.  Check the zerobit for $(i', j', k')$ in the Cell Information. If 0, return 0 [Case 2] [S1, unofficial].
+5.  Check the bit-flag in the significance map for $(i', j', k')$. If 0, return 0 [Case 3] [S1, unofficial].
+6.  If 1, the coefficient is non-zero. Calculate the address in the byte stream:
+    *   Determine the displacement: the number of preceding non-zero coefficients (with flag 1) in the enumeration order.
+    *   Use a precomputed indexing table $T(*)$ with 256 entries to count set bits in significance map bytes quickly [S1, unofficial].
+    *   Address = Offset of the appropriate stream + Displacement [S1, unofficial].
+    *   Return the value from the stream [Case 4] [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def decode_coefficient(unit_block, i, j, k):
+    """
+    Decodes a wavelet coefficient from a Zerobit encoded unit block.
+    unit_block: dict containing 'cell_tags', 'cell_info', 'streams'
+    i, j, k: global coordinates in the 16x16x16 block
+    """
+    # 1. Find the cell C
+    # 16x16x16 block is composed of 4x4x4 cells of size 4x4x4
+    cell_x = i // 4
+    cell_y = j // 4
+    cell_z = k // 4
+    cell_idx = cell_z * 16 + cell_y * 4 + cell_x
+    
+    # 2. Check Cell Tag
+    cell_tag = unit_block['cell_tags'][cell_idx]
+    if cell_tag == 0:
+        return 0  # Case 1
+    
+    # 3. Get Cell Information
+    # Cell info starts after cell tags. Assuming contiguous storage for simplicity in this model.
+    # In reality, offsets are stored. Here we assume 'cell_info' is a list of bytes per cell.
+    cell_info = unit_block['cell_info'][cell_idx]
+    
+    # First byte is 9 zerobits
+    zerobits_byte = cell_info[0]
+    
+    # Local coordinates in cell
+    local_i = i % 4
+    local_j = j % 4
+    local_k = k % 4
+    
+    # Map (local_i, local_j, local_k) to node index and coefficient index
+    # The octree structure:
+    # Level 0: Root (c0)
+    # Level 1: 8 children (c1..c8), each having 7 detail coeffs? 
+    # Text says: "c0 at root... d0i (i=1..7) on level 0... c1j (j=1..8) are averages for 2x2x2 subblocks"
+    # "9 nodes in octree structure"
+    # Level 0 node has 7 details. Level 1 nodes (8 of them) have 7 details each?
+    # Wait, "9 nodes" implies Level 0 (1) + Level 1 (8).
+    # But decoding checks zerobit for (i', j', k').
+    # The text says: "If the zerobit for (i', j', k') is 0... If the bit-flag in significance map for (i', j', k') is 0..."
+    # This implies (i', j', k') maps to a specific coefficient or node.
+    # Given "9 nodes", and "7 detail coefficients" per node.
+    # c0 is special.
+    
+    # Let's assume the zerobits array has 9 entries.
+    # Zerobits[0] is Level 0. Zerobits[1..8] are Level 1 nodes.
+    
+    # Determine which node (i', j', k') refers to.
+    # In a 4x4x4 cell, the 8 subblocks are 2x2x2.
+    # The index (i', j', k') likely maps to the 8 Level 1 nodes if it's not c0.
+    # Or does it map to a specific coefficient?
+    # "Compute the index (i', j', k') in C."
+    # "If the zerobit for (i', j', k') is 0"
+    # If (i', j', k') is (0,0,0), it might be c0?
+    # But c0 is handled separately in encoding.
+    # The text says "coefficient vector c0 always has index (0,0,0)".
+    
+    if local_i == 0 and local_j == 0 and local_k == 0:
+        # This is c0
+        # Check bytetag/zero flag in cell tag
+        # Bit 1 of cell_tag
+        is_zero_c0 = (cell_tag >> 1) & 1
+        if is_zero_c0:
+            return 0
+        # Retrieve from stream
+        # c0 is always in one-byte stream for CT, or 3-byte for RGB
+        # Offset for c0 is stored in cell info?
+        # "each cell has a burden to keep the two offset values"
+        # Assuming offsets are in cell_info[1] and cell_info[2]
+        offset_one_byte = unit_block['cell_info_offsets'][cell_idx][0]
+        # c0 is the first element in the one-byte stream?
+        # "c0 ... stored in the one-byte stream"
+        # Displacement for c0 is 0?
+        # "displacement is the number of non-zero coefficients ... that precede it"
+        # c0 is processed first.
+        val = unit_block['streams']['one_byte'][offset_one_byte]
+        return val
+
+    # For other coefficients, they belong to one of the 8 Level 1 nodes.
+    # Map (local_i, local_j, local_k) to Level 1 node index (1-8) and detail index (0-6)
+    # A 4x4x4 cell is 8 subblocks of 2x2x2.
+    # The 8 subblocks correspond to the 8 Level 1 nodes.
+    # Node index N = 4*local_k + 2*local_j + local_i ? No, that's 0-7.
+    # Let's use 1-8.
+    node_idx = 4 * local_k + 2 * local_j + local_i + 1
+    
+    # Check zerobit for this node
+    # Zerobits are in cell_info[0]. Bit 0 is Level 0. Bits 1-8 are Level 1.
+    # Bit 1 corresponds to Node 1? Or Node 8?
+    # "left-most bit ... zerobit of node on level 0"
+    # "allocate one byte ... for the other eight zerobits"
+    # Assuming Bit 1 is Node 1, Bit 8 is Node 8.
+    zerobit = (zerobits_byte >> node_idx) & 1
+    
+    if zerobit == 0:
+        return 0  # Case 2
+    
+    # Case 3: Check significance map
+    # Significance maps follow the zerobit byte.
+    # We need to find the significance map byte for this node.
+    # The significance maps are stored in order of nodes with zerobit 1.
+    # This requires parsing the zerobits to find the offset of the specific node's sig map.
+    
+    # Find the position of the significance map for this node
+    sig_map_offset = 1 # Start after zerobit byte
+    for n in range(1, 9):
+        zb = (zerobits_byte >> n) & 1
+        if n == node_idx:
+            break
+        if zb == 1:
+            sig_map_offset += 1
+            
+    sig_map_byte = cell_info[sig_map_offset]
+    
+    # Determine the detail coefficient index within the node
+    # Each 2x2x2 subblock has 7 detail coefficients?
+    # The text says "7 detail coefficients of the corresponding node".
+    # How are they indexed?
+    # Usually wavelet details are d0..d6.
+    # We need a mapping from (local_i, local_j, local_k) to detail index d.
+    # This is implementation-specific [G]. Assuming a standard ordering.
+    # Let's assume the detail index is derived from the local position within the 2x2x2 block.
+    # However, the text doesn't specify the exact mapping of (i,j,k) to d0..d6.
+    # It just says "bit-flag in significance map for (i', j', k')".
+    # This implies (i', j', k') maps directly to a bit in the sig map.
+    # Since there are 7 details, and 8 positions in 2x2x2, one position is likely c1j (the average).
+    # The 7 details correspond to the other 7 positions.
+    # Let's assume the detail index `d` is calculated based on the local coordinates excluding the "average" position.
+    # This is a gap [G]. We will assume a helper function `get_detail_index(local_i, local_j, local_k)` exists.
+    
+    detail_idx = get_detail_index(local_i, local_j, local_k)
+    
+    # Check the bit in sig_map_byte
+    # "Each byte contains 7 bit-flags for the 7 detail coefficients"
+    # Assuming bits 0-6 correspond to d0-d6.
+    flag = (sig_map_byte >> detail_idx) & 1
+    
+    if flag == 0:
+        return 0  # Case 3
+        
+    # Case 4: Retrieve value
+    # Calculate displacement
+    # "displacement is the number of non-zero coefficients with flag 1 that precede it"
+    # This requires counting set bits in all preceding significance maps and the current one up to detail_idx.
+    
+    # Count set bits in preceding sig maps
+    count = 0
+    for n in range(1, node_idx):
+        zb = (zerobits_byte >> n) & 1
+        if zb == 1:
+            # Find sig map for node n
+            # Re-calculate offset or use a precomputed list
+            # For simplicity, assume we have a list of sig map bytes
+            pass 
+            
+    # This part is complex to implement without the exact enumeration order.
+    # The text says: "Use a precomputed indexing table T(*) ... to quickly count the number of set bits"
+    
+    # Determine stream (one-byte or two-byte)
+    # Check two-byte flag in sig_map_byte
+    two_byte_flag = (sig_map_byte >> 7) & 1 # Left-most bit
+    
+    if two_byte_flag == 0:
+        # Check bytetag
+        bytetag = cell_info[sig_map_offset + 1] # Bytetag follows sig maps? Or is it separate?
+        # "preserve a bytetag ... to represent which coefficients ... are stored in two-byte stream"
+        # Assuming bytetag is stored after sig maps in cell info.
+        is_two_byte = (bytetag >> detail_idx) & 1
+        if is_two_byte:
+            stream = 'two_byte'
+        else:
+            stream = 'one_byte'
+    else:
+        stream = 'two_byte'
+        
+    # Calculate address
+    # Offset for stream
+    offset = unit_block['stream_offsets'][cell_idx][stream]
+    
+    # Displacement calculation using T(*)
+    # T(byte) returns popcount
+    # This requires iterating through all preceding coefficients in the enumeration order.
+    # Enumeration order: front-to-back, top-to-bottom, left-to-right for cells.
+    # Within cell: ?
+    # "displacement is the number of non-zero coefficients ... that precede it in the enumeration"
+    
+    displacement = calculate_displacement(unit_block, cell_idx, node_idx, detail_idx, zerobits_byte, cell_info)
+    
+    address = offset + displacement
+    
+    if stream == 'one_byte':
+        return unit_block['streams']['one_byte'][address]
+    else:
+        return unit_block['streams']['two_byte'][address]
+
+def get_detail_index(i, j, k):
+    # Placeholder for mapping 2x2x2 local coords to 7 detail indices [G]
+    # Standard wavelet detail ordering varies.
+    return 0
+
+def calculate_displacement(unit_block, cell_idx, node_idx, detail_idx, zerobits_byte, cell_info):
+    # Placeholder for counting preceding set bits [G]
+    return 0
+```
+
+**Parameters:**
+*   **Indexing Table T(*):** A precomputed table with 256 entries. Given a one-byte word, it returns the number of bit 1s in the byte [S1, unofficial].
+*   **Zerobit Ratio:**
+    *   CT Data (3.0% desired ratio): Level 0 zerobit ratio 0.230, Level 1 zerobit ratio 0.949 [S1, unofficial].
+    *   RGB Data (1.0% desired ratio): Level 0 zerobit ratio 0.754, Level 1 zerobit ratio 0.993 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **CT Data $c_0$:** Stored in the one-byte stream even if zero, causing unnecessary storage overhead [S1, unofficial].
+*   **RGB Data:** $c_0$ range [0,255] requires 3-byte streams (unsigned char). Detail vectors range [-128,127] require 3-byte streams (signed char) [S1, unofficial].
+*   **Precision:** The scheme relies on wavelet coefficients being thresholded to zero beforehand [S1, unofficial].
+
+## Operating characteristics
+*   **Compression Ratio:** Improves over previous schemes using fixed 8-byte significance maps by using variable-length maps (average < 8 bytes for non-null cells) [S1, unofficial].
+*   **Random Access Speed:** Supports fast random access by allowing early termination (Cases 1-3) during decoding without reading the full byte stream [S1, unofficial].
+*   **Memory:** Requires storage for Cell Tag Table (1 byte/cell), Cell Information (variable), and Byte Streams [S1, unofficial].
+*   **Strengths:** High compression ratio, fast random access, no image quality loss [S1, unofficial].
+*   **Limitations:** Complexity in decoding due to variable-length maps and bytetag handling [S1, unofficial].
+
+## Background
+The Zerobit Encoding Scheme (also called Enhanced Encoding Scheme) was proposed to improve upon previous wavelet-based volume compression methods [S1, unofficial]. It leverages the spatial coherence of wavelet coefficients, where null coefficients often form thick clusters [S1, unofficial]. It is particularly effective for interactive visualization systems [S1, unofficial].
+
+## Sources
+[S1] Compression Scheme, https://www.nlm.nih.gov/research/visible/vhpconf98/AUTHORS/PARK/SECTION3.HTM, fetched 2026-10-28 (unofficial)

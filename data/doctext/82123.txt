@@ -1,0 +1,506 @@
+# MPI Volume Rendering Project
+
+This project implements **parallel volume rendering** using MPI for large 3D scalar datasets (e.g., Hurricane Isabel). 
+It is divided into two parts, covering progressively advanced implementations of MPI-based ray casting and compositing.
+
+---
+
+## 📌 Part 1: MPI Volume Rendering (1D/2D Decomposition)
+
+### Prerequisites
+- MPI (MPICH or OpenMPI)
+- Python 3.x
+- Python packages:
+  - mpi4py
+  - numpy
+  - pillow
+  - scipy
+
+### Installation
+```bash
+# Install MPI (choose one)
+sudo apt update
+sudo apt install -y openmpi-bin libopenmpi-dev   # OpenMPI
+sudo apt install -y mpich                       # MPICH
+
+# Install Python 3 and pip
+sudo apt install -y python3 python3-pip
+
+# Install required Python packages
+pip3 install mpi4py numpy pillow scipy
+
+# Or simply run the provided script
+chmod +x script.sh
+./script.sh
+```
+
+### Running the Code
+```bash
+mpirun -np <num_processes> python3 volume_rendering.py <volume_file> <partition_method> <step_interval> <x_min> <x_max> <y_min> <y_max>
+```
+
+**Arguments:**
+- `<num_processes>`: Number of MPI processes  
+- `<volume_file>`: Path to `.raw` volume dataset (e.g., Isabel_1000x1000x200_float32.raw)  
+- `<partition_method>`: Partitioning method (1 = 1D, 2 = 2D)  
+- `<step_interval>`: Step size interval for ray casting (e.g., 0.5)  
+- `<x_min>, <x_max>`: Bounds for x-axis (e.g., 0–999)  
+- `<y_min>, <y_max>`: Bounds for y-axis (e.g., 0–999)  
+
+---
+
+## 📌 Part 2: MPI Volume Rendering (3D Decomposition & Transfer Functions)
+
+### Prerequisites
+- MPI (MPICH or OpenMPI)
+- Python 3.x
+- Python packages:
+  - mpi4py
+  - numpy
+  - matplotlib
+
+### Installation
+```bash
+# Same installation steps as Part 1, with matplotlib instead of pillow/scipy
+pip3 install mpi4py numpy matplotlib
+```
+
+### Running the Code
+```bash
+# Example: 8 processes
+mpirun -np 8 python3 volume_rendering_3D.py Isabel_1000x1000x200_float32.raw 2 2 2 0.5 opacity_TF.txt color_TF.txt
+
+# Example: 16 processes
+mpirun -np 16 python3 volume_rendering_3D.py Isabel_1000x1000x200_float32.raw 2 2 4 0.5 opacity_TF.txt color_TF.txt
+
+# Example: 32 processes
+mpirun -np 32 python3 volume_rendering_3D.py Isabel_1000x1000x200_float32.raw 2 2 8 0.5 opacity_TF.txt color_TF.txt
+```
+
+### Running on Large Dataset
+```bash
+mpirun -np 8  python3 volume_rendering_3D.py Isabel_2000x2000x400_float32.raw 2 2 2 0.5 opacity_TF.txt color_TF.txt
+mpirun -np 16 python3 volume_rendering_3D.py Isabel_2000x2000x400_float32.raw 2 2 4 0.5 opacity_TF.txt color_TF.txt
+mpirun -np 32 python3 volume_rendering_3D.py Isabel_2000x2000x400_float32.raw 2 2 8 0.5 opacity_TF.txt color_TF.txt
+```
+
+### Running on Multiple Nodes
+```bash
+mpirun --mca btl_tcp_if_include eno1 --hostfile hostfile -np 8  python3 volume_rendering_3D.py Isabel_1000x1000x200_float32.raw 2 2 2 0.5 opacity_TF.txt color_TF.txt
+mpirun --mca btl_tcp_if_include eno1 --hostfile hostfile -np 16 python3 volume_rendering_3D.py Isabel_1000x1000x200_float32.raw 2 2 4 0.5 opacity_TF.txt color_TF.txt
+mpirun --mca btl_tcp_if_include eno1 --hostfile hostfile -np 32 python3 volume_rendering_3D.py Isabel_1000x1000x200_float32.raw 2 2 8 0.5 opacity_TF.txt color_TF.txt
+```
+
+**Notes:**
+- Add `--oversubscribe` if processes exceed available cores.  
+- If multi-node commands fail, adjust `--hostfile` syntax.  
+- Contact for support: `deepaksoni24@iitk.ac.in`  
+
+**Arguments:**
+- `<num_processes>`: Number of MPI processes  
+- `<volume_file>`: Path to `.raw` dataset (e.g., Isabel_1000x1000x200_float32.raw)  
+- `<x_divs>, <y_divs>, <z_divs>`: Number of domain divisions along x, y, z axes  
+- `<step_interval>`: Step size interval for ray casting (e.g., 0.5)  
+- `<opacity_tf_file>`: Path to opacity transfer function file  
+- `<color_tf_file>`: Path to color transfer function file  
+
+---
+
+## ⚙️ Technology Stack
+Python, MPI (MPICH/OpenMPI), mpi4py, NumPy, Pillow, SciPy, Matplotlib  
+
+---
+
+### Part_1/volume_rendering.py
+```
+from mpi4py import MPI
+import numpy as np
+from PIL import Image
+import time
+from scipy.interpolate import interp1d
+import sys
+
+#dividing the volume for each processes
+def divide_volume(volume_data, num_processes, partition_method, x_min, x_max, y_min, y_max):
+    partitions = []
+
+    volume_data = volume_data[y_min:y_max, x_min:x_max, :]  
+
+    if partition_method == 1:
+        num_rows = volume_data.shape[0]
+        rows_per_process = num_rows // num_processes
+        extra_rows = num_rows % num_processes
+        start_row = 0
+        
+        for i in range(num_processes):
+            end_row = start_row + rows_per_process + (1 if i < extra_rows else 0)
+            partitions.append(volume_data[start_row:end_row, :, :])
+            start_row = end_row
+
+    elif partition_method == 2:
+        x_divisions, y_divisions = calculate_splits(num_processes)
+        total_blocks = x_divisions * y_divisions
+        block_size_x = volume_data.shape[0] / x_divisions
+        block_size_y = volume_data.shape[1] / y_divisions
+
+        for block_index in range(total_blocks):
+            x_block_index = block_index // y_divisions
+            y_block_index = block_index % y_divisions
+
+            x_start = int(x_block_index * block_size_x)
+            x_end = int((x_block_index + 1) * block_size_x)
+            y_start = int(y_block_index * block_size_y)
+            y_end = int((y_block_index + 1) * block_size_y)
+
+            x_end = min(x_end, volume_data.shape[0])
+            y_end = min(y_end, volume_data.shape[1])
+
+            partitions.append(volume_data[x_start:x_end, y_start:y_end, :])
+
+            if len(partitions) >= num_processes:
+                break
+
+    return partitions
+
+#Calculating splits for 3d partitioning
+def calculate_splits(num_processes):
+    x_divisions = 1
+    y_divisions = num_processes
+
+    for i in range(1, int(np.sqrt(num_processes)) + 1):
+        if num_processes % i == 0:
+            temp_x = i
+            temp_y = num_processes // i
+
+            if temp_x < temp_y:
+                temp_x, temp_y = temp_y, temp_x
+
+            if abs(temp_x - temp_y) < abs(x_divisions - y_divisions):
+                x_divisions, y_divisions = temp_x, temp_y
+
+    return x_divisions, y_divisions
+
+def main():
+    #MPI Initialization
+    communicator = MPI.COMM_WORLD
+    process_rank = communicator.Get_rank()
+    num_processes = communicator.Get_size()
+
+    #Taking Arguments
+    volume_file = sys.argv[1]
+    partition_method = int(sys.argv[2])
+    step_interval = float(sys.argv[3])
+    x_min = int(sys.argv[4])
+    x_max = int(sys.argv[5])
+    y_min = int(sys.argv[6])
+    y_max = int(sys.argv[7])
+
+    if process_rank == 0:
+        load_start_time = time.time()
+        volume_data = np.fromfile(volume_file, dtype=np.float32).reshape((1000, 1000, 200), order='f')
+        volume_partitions = divide_volume(volume_data, num_processes, partition_method, x_min, x_max, y_min, y_max)
+        load_time_elapsed = time.time() - load_start_time
+        communicator.scatter(volume_partitions, root=0)
+        volume_chunk = volume_partitions[0]
+    else:
+        volume_chunk = communicator.scatter(None, root=0)
+
+    #Taking opacity transfer function and color transfer function and calculating interpolators
+    if process_rank == 0:
+        with open('color_tf.txt', 'r') as file:
+            color_values = list(map(float, file.read().strip().split(',')))
+        scalar_values_color = color_values[0::4]
+        color_components = np.array([color_values[i::4] for i in range(1, 4)]).T
+
+        with open('opacity_tf.txt', 'r') as file:
+            opacity_values = list(map(float, file.read().strip().split(',')))
+        scalar_values_opacity = opacity_values[::2]
+        opacity_components = opacity_values[1::2]
+
+        color_r_interp = interp1d(scalar_values_color, color_components[:, 0], kind='linear', bounds_error=False, fill_value=(color_components[0, 0], color_components[-1, 0]))
+        color_g_interp = interp1d(scalar_values_color, color_components[:, 1], kind='linear', bounds_error=False, fill_value=(color_components[0, 1], color_components[-1, 1]))
+        color_b_interp = interp1d(scalar_values_color, color_components[:, 2], kind='linear', bounds_error=False, fill_value=(color_components[0, 2], color_components[-1, 2]))
+        opacity_interp = interp1d(scalar_values_opacity, opacity_components, kind='linear', bounds_error=False, fill_value=(opacity_components[0], opacity_components[-1]))
+        interpolators = (color_r_interp, color_g_interp, color_b_interp, opacity_interp)
+    else:
+        interpolators = None
+
+    interpolators = communicator.bcast(interpolators, root=0)
+    color_r_interp, color_g_interp, color_b_interp, opacity_interp = interpolators
+
+    render_start_time = time.time()
+    img_height, img_width, depth = volume_chunk.shape
+    output_image = np.zeros((img_height, img_width, 3))
+
+    total_rays_cast = 0
+    early_terminated_rays = 0
+
+    #Applying Volume Rendering 
+    for y_coord in range(img_height):
+        for x_coord in range(img_width):
+            total_rays_cast += 1
+            current_opacity = 0.0
+            pixel_color = np.zeros(3)
+            depth_coord = 0
+
+            while depth_coord < depth:
+                voxel_value = volume_chunk[y_coord, x_coord, int(depth_coord)]
+                sampled_color = np.array([color_r_interp(voxel_value), color_g_interp(voxel_value), color_b_interp(voxel_value)])
+                sampled_opacity = opacity_interp(voxel_value)
+
+                pixel_color += sampled_color * sampled_opacity * (1 - current_opacity)
+                current_opacity += sampled_opacity * (1 - current_opacity)
+
+                if current_opacity >= 0.95: 
+                    early_terminated_rays += 1  
+                    break
+
+                depth_coord += step_interval
+
+            output_image[y_coord, x_coord, :] = pixel_color
+            # print(f"Color for {y_coord},{x_coord},{depth_coord}: {pixel_color}")
+
+    render_time_elapsed = time.time() - render_start_time
+
+    #Gathering Images from each process and Combine then to make final image
+    gathered_images = communicator.gather(output_image, root=0)
+    gathered_render_times = communicator.gather(render_time_elapsed, root=0)
+    gathered_early_terminated_rays = communicator.gather(early_terminated_rays, root=0)
+    gathered_total_rays_cast = communicator.gather(total_rays_cast, root=0)
+
+    if process_rank == 0:
+        total_rays = sum(gathered_total_rays_cast)
+        total_early_terminated = sum(gathered_early_terminated_rays)
+        early_termination_fraction = total_early_terminated / total_rays
+
+        print(f"Total rendering time: {max(gathered_render_times):.2f} seconds")
+        print(f"Fraction of rays early terminated: {early_termination_fraction:.2%}")
+
+        x_divisions, y_divisions = calculate_splits(num_processes)
+        if partition_method == 1:
+            final_image = np.vstack(gathered_images)
+        else:
+            rows = [np.hstack(gathered_images[row_idx * y_divisions:(row_idx + 1) * y_divisions]) for row_idx in range(x_divisions)]
+            final_image = np.vstack(rows)
+
+        final_image = (final_image * 255).astype(np.uint8)
+        Image.fromarray(final_image).save('Rendered_Image.png')
+
+if __name__ == '__main__':
+    main()
+```
+
+### Part_2/volume_rendering_3D.py
+```
+import numpy as np
+import sys
+import matplotlib.pyplot as plt
+from mpi4py import MPI
+
+def main():
+    comm = MPI.COMM_WORLD  # Initialize MPI communicator
+    n_procs = comm.Get_size()  # Number of processes
+    rank = comm.Get_rank()  # Rank of the current process
+
+    start_time_total = MPI.Wtime()  # Record total start time
+
+    send_duration = 0.0  # Duration for sending data
+    recv_duration = 0.0  # Duration for receiving data
+    gather_duration = 0.0  # Duration for gathering data
+
+    # Input parameters from command-line arguments
+    dataset_filename = sys.argv[1]  # Path to the dataset file
+    x_divs, y_divs, z_divs = map(int, sys.argv[2:5])  # Number of divisions in x, y, and z dimensions
+    step = float(sys.argv[5])  # Step size for ray casting
+    opacity_tf_file = sys.argv[6]  # Path to opacity transfer function file
+    color_tf_file = sys.argv[7]  # Path to color transfer function file
+
+    # Predefined dataset dimensions for validation
+    dataset_dimensions = {
+        "1000x1000x200": (1000, 1000, 200),
+        "2000x2000x400": (2000, 2000, 400)
+    }
+
+    # Determine dataset dimensions based on filename
+    try:
+        data_dims = next(dims for key, dims in dataset_dimensions.items() if key in dataset_filename)
+    except StopIteration:
+        raise ValueError("Unknown dataset dimensions in filename.")
+
+    if rank == 0:
+        # Load the dataset and split it into subdomains across the processes
+        load_start = MPI.Wtime()
+        data_volume = np.fromfile(dataset_filename, dtype=np.float32).reshape(data_dims, order='F')
+
+        # Split data into subdomains based on x, y, z divisions
+        x_splits = np.array_split(data_volume, x_divs, axis=0)
+        data_parts = [np.array_split(part, y_divs, axis=1) for part in x_splits]
+
+        # Calculate subdomain shape for each rank
+        x_step = data_dims[0] // x_divs
+        y_step = data_dims[1] // y_divs
+        z_step = data_dims[2] // z_divs
+
+        # Start non-blocking sends to distribute subdomains to other processes
+        send_requests = []
+        for ix in range(x_divs):
+            for iy in range(y_divs):
+                for iz in range(z_divs):
+                    target_rank = ix * y_divs * z_divs + iy * z_divs + iz
+                    sub_vol = data_parts[ix][iy][:, :, iz::z_divs]
+                    sub_vol = np.ascontiguousarray(sub_vol)  # Ensure contiguity of data
+                    if target_rank == 0:
+                        local_volume = sub_vol
+                    else:
+                        req = comm.Isend(sub_vol, dest=target_rank, tag=target_rank)
+                        send_requests.append(req)
+        MPI.Request.Waitall(send_requests)  # Wait for all non-blocking sends to complete
+        send_duration = MPI.Wtime() - load_start
+        print(f"Data loading and distribution took {send_duration:.4f} seconds")
+    else:
+        # Receive data for each process with matching buffer shape
+        x_step = data_dims[0] // x_divs
+        y_step = data_dims[1] // y_divs
+        z_step = data_dims[2] // z_divs
+        recv_start = MPI.Wtime()
+        local_volume = np.empty((x_step, y_step, z_step), dtype=np.float32)
+        comm.Recv(local_volume, source=0, tag=rank)  # Receive the subdomain data
+        recv_duration = MPI.Wtime() - recv_start
+
+    # Function to load transfer functions (opacity or color)
+    def load_tf(filepath, is_color=True):
+        with open(filepath, 'r') as file:
+            values = [float(val) for line in file for val in line.strip().replace(',', '').split()]
+        # Parse opacity or color transfer function based on is_color flag
+        return [(values[i], tuple(values[i + 1:i + 4])) for i in range(0, len(values), 4)] if is_color else [(values[i], values[i + 1]) for i in range(0, len(values), 2)]
+
+    # Load opacity and color transfer functions
+    opacity_tf = load_tf(opacity_tf_file, is_color=False)
+    color_tf = load_tf(color_tf_file, is_color=True)
+
+    # Ray casting procedure for each subdomain to generate the image section
+    ray_start = MPI.Wtime()
+    h, w, d = local_volume.shape
+    image_section = np.zeros((h, w, 3))  # Initialize the image section for this subdomain
+
+    # Create a meshgrid of pixel indices for the 2D subdomain
+    x_idx, y_idx = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+
+    # Reshape indices to iterate over all pixels in the subdomain at once
+    x_idx = x_idx.flatten()
+    y_idx = y_idx.flatten()
+
+    # Iterate over each pixel in the subdomain using flattened indices
+    for idx in range(len(x_idx)):
+        x, y = x_idx[idx], y_idx[idx]
+    
+        color_accum = np.zeros(3)  # Accumulated color for the pixel
+        opacity_accum = 0  # Accumulated opacity
+        depth_pos = 0.0  # Initial depth position for ray casting
+
+        # Vectorize the depth loop by handling depth positions in a range
+        while depth_pos < d:
+            d_start = int(depth_pos)
+            d_end = min(d_start + 1, d - 1)
+            interp_factor = depth_pos - d_start
+            voxel_val = (1 - interp_factor) * local_volume[x, y, d_start] + interp_factor * local_volume[x, y, d_end]
+
+            # Vectorized Color Interpolation based on the transfer function
+            color = np.zeros(3)
+            for i in range(len(color_tf) - 1):
+                v0, c0 = color_tf[i]
+                v1, c1 = color_tf[i + 1]
+                if v0 <= voxel_val <= v1:
+                    interp_factor = (voxel_val - v0) / (v1 - v0)
+                    color = np.array([c0[j] + interp_factor * (c1[j] - c0[j]) for j in range(3)])
+                    break
+
+            # Vectorized Opacity Interpolation based on the transfer function
+            opacity = 0
+            for i in range(len(opacity_tf) - 1):
+                v0, o0 = opacity_tf[i]
+                v1, o1 = opacity_tf[i + 1]
+                if v0 <= voxel_val <= v1:
+                    if v1 != v0:
+                        opacity = o0 + ((o1 - o0) * (voxel_val - v0) / (v1 - v0))
+                    else:
+                        opacity = o0
+                    break
+
+            # Update accumulated color and opacity
+            color_accum += (1 - opacity_accum) * color * opacity
+            opacity_accum += (1 - opacity_accum) * opacity
+
+            # Early exit if opacity reaches a threshold (for optimization)
+            if opacity_accum >= 0.98:
+                break
+
+            depth_pos += step
+
+        # Store the accumulated color in the image section for this pixel
+        image_section[x, y, :] = color_accum  # Store the color for the current pixel
+
+    # Calculate the ray casting time
+    ray_duration = MPI.Wtime() - ray_start  # Total time for ray casting
+
+    # Gather image sections from all processes to the root process
+    gather_start = MPI.Wtime()
+    gathered_sections = comm.gather(image_section, root=0)
+    gather_duration = MPI.Wtime() - gather_start
+
+    if rank == 0:
+        print("Assembling the final image...")
+
+        # Get the shape of one section
+        section_h, section_w, _ = gathered_sections[0].shape
+
+        # Create an empty array to hold the final image
+        final_image = np.zeros((section_h * x_divs, section_w * y_divs, 3))
+
+        # Generate meshgrid of indices for ix and iy (to place sections in the final image)
+        ix_vals, iy_vals = np.meshgrid(np.arange(x_divs), np.arange(y_divs), indexing='ij')
+        ix_vals = ix_vals.flatten()
+        iy_vals = iy_vals.flatten()
+
+        # Loop over ix and iy using a single loop
+        for idx in range(len(ix_vals)):
+            ix, iy = ix_vals[idx], iy_vals[idx]
+
+            final_color = np.zeros((section_h, section_w, 3))
+            final_opacity = np.zeros((section_h, section_w))
+
+            # Loop over iz (depth slices) and accumulate the image sections
+            for iz in range(z_divs):
+                gather_idx = ix * y_divs * z_divs + iy * z_divs + iz
+                sub_img = gathered_sections[gather_idx]
+
+                alpha = 1 - final_opacity
+                final_color += sub_img * alpha[:, :, None]
+                final_opacity += alpha
+
+            # Place the final color for this block into the appropriate region of the full image
+            final_image[ix * section_h:(ix + 1) * section_h, iy * section_w:(iy + 1) * section_w, :] = final_color
+
+        # Optionally save or display the image after assembling
+        output_file = f"{x_divs}_{y_divs}_{z_divs}.png"
+        plt.imsave(output_file, final_image)
+        print(f"Final image saved : {output_file}")
+
+    # Communication statistics across all processes
+    max_ray_duration = comm.reduce(ray_duration, op=MPI.MAX, root=0)
+    max_send_duration = comm.reduce(send_duration, op=MPI.MAX, root=0)
+    max_recv_duration = comm.reduce(recv_duration, op=MPI.MAX, root=0)
+    max_gather_duration = comm.reduce(gather_duration, op=MPI.MAX, root=0)
+
+    if rank == 0:
+        # Only root process prints the summary of timings
+        print(f"Data loading and distribution took {send_duration:.4f} seconds")
+        print(f"Final image saved : 2_2_2.png")
+        print(f"Computation Time (Max Ray casting time) (in seconds) : {max_ray_duration:.4f} seconds")
+        print(f"Total communication time (in seconds) : {max_send_duration + max_recv_duration + max_gather_duration:.4f} seconds")
+        total_duration = max_ray_duration + max_send_duration + max_recv_duration + max_gather_duration
+        print(f"Total execution time (in seconds) : {total_duration:.4f} seconds")
+
+if __name__ == "__main__":
+    main()
+```

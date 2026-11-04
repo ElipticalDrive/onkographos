@@ -1,0 +1,225 @@
+# Triangle-AABB Intersection (Separating Axis Theorem)
+
+Also called: AABB-Triangle Overlap Test, SAT Triangle-AABB Intersection, Separating Axis Theorem Triangle-Box Intersection, TriBoxOverlapCUDA, Triangle-AABB Overlap Test, Triangle-AABB SAT
+
+## Overview
+
+This method determines whether a triangle overlaps with an Axis-Aligned Bounding Box (AABB) using the Separating Axis Theorem (SAT) [S1, S3, S4, unofficial][S6]. It is primarily used for frustum culling, spatial partitioning, and voxelization pruning in rendering pipelines [S3, S5, unofficial]. Unlike ray-primitive intersection methods that compute precise hit points, this test returns a binary overlap result [S6]. It is distinct from [Ray-box intersection](776-ray-box-intersection.md) because it handles a planar polygon rather than a line, and from [General Ray-Triangle Intersection (Plücker Coordinates)](909-general-ray-triangle-intersection-pl-cker-coordinates.md) because it tests a volume (box) against a surface (triangle) rather than a ray against a surface.
+
+## How it works
+
+**Inputs:**
+- Triangle vertices: $v_0, v_1, v_2$ (3D vectors).
+- AABB defined by center $c$ and half-extents $e = (e_x, e_y, e_z)$ [S1, unofficial][S6].
+
+**Outputs:**
+- Boolean: `true` if the triangle and AABB overlap, `false` otherwise.
+
+**Data Structures:**
+- No persistent data structures required. Temporary variables for edge vectors, normals, and projection intervals are used.
+
+**Steps:**
+
+1. **Translate Triangle:** Translate the triangle vertices so the AABB center is at the origin.
+   $$v_i' = v_i - c \quad \text{for } i \in \{0, 1, 2\}$$
+   [S1, S3, S4, unofficial][S6]
+
+2. **Compute Edge Vectors:** Calculate the three edges of the triangle.
+   $$e_0 = v_1' - v_0$$
+   $$e_1 = v_2' - v_1$$
+   $$e_2 = v_0' - v_2$$
+   [S1, S3, S4, S5, unofficial][S6]
+
+3. **Test 9 Cross-Product Axes:** For each edge $e_i$, test the 3 axes perpendicular to $e_i$ and the coordinate axes (X, Y, Z). These axes are the cross products of the edge and the unit vectors $\hat{x}, \hat{y}, \hat{z}$.
+   The potential separating axes are:
+   - $a_{0} = e_0 \times \hat{x}, e_0 \times \hat{y}, e_0 \times \hat{z}$
+   - $a_{1} = e_1 \times \hat{x}, e_1 \times \hat{y}, e_1 \times \hat{z}$
+   - $a_{2} = e_2 \times \hat{x}, e_2 \times \hat{y}, e_2 \times \hat{z}$
+   [S1, S3, S4, unofficial][S6]
+
+   For each axis $a$, perform the projection test:
+   a. Compute the projection radius $r$ of the AABB centered at the origin:
+      $$r = e_x |a_x| + e_y |a_y| + e_z |a_z|$$
+      [S3, unofficial][S6]
+   b. Project the triangle vertices onto $a$:
+      $$p_i = v_i' \cdot a \quad \text{for } i \in \{0, 1, 2\}$$
+      [S6]
+   c. Find the min and max of the triangle projections:
+      $$min_P = \min(p_0, p_1, p_2)$$
+      $$max_P = \max(p_0, p_1, p_2)$$
+      [S6]
+   d. Check for separation. If $min_P > r$ or $max_P < -r$, the shapes do not overlap. Return `false`.
+      [S1, unofficial][S6]
+
+   *Optimization Note:* The cross products can be computed explicitly or via macro-generated tests that avoid full vector allocation. For example, for edge $e_0$, the axes are $(0, -e_{0z}, e_{0y})$, $(e_{0z}, 0, -e_{0x})$, and $(-e_{0y}, e_{0x}, 0)$ [S3, unofficial][S6].
+
+4. **Test 3 Box Face Normals (Coordinate Axes):** Test separation along the X, Y, and Z axes. Since the box is centered at the origin, this is equivalent to checking if the triangle's bounding box overlaps the AABB extents.
+   For each axis $q \in \{X, Y, Z\}$:
+   a. Find min and max of the triangle vertices along $q$:
+      $$min_Q = \min(v_0[q], v_1[q], v_2[q])$$
+      $$max_Q = \max(v_0[q], v_1[q], v_2[q])$$
+      [S1, S4, unofficial][S6]
+   b. Check for separation. If $min_Q > e_q$ or $max_Q < -e_q$, return `false`.
+      [S1, S4, unofficial][S6]
+
+5. **Test Triangle Plane Normal:** Test if the box intersects the plane of the triangle.
+   a. Compute the triangle normal:
+      $$n = e_0 \times e_1$$
+      [S1, S4, S5, unofficial]
+   b. Compute the distance $d$ from the origin to the plane. The plane equation is $n \cdot x + d = 0$. Since the plane passes through $v_0'$:
+      $$d = -(n \cdot v_0')$$
+      [S2, unofficial][S6]
+   c. Compute the projection radius $r$ of the AABB onto the normal $n$:
+      $$r = e_x |n_x| + e_y |n_y| + e_z |n_z|$$
+      [S3, unofficial][S6]
+   d. Check for separation. If $d > r$ or $d < -r$, the box is entirely on one side of the plane. Return `false`.
+      [S3, unofficial][S6]
+      *Note:* Some implementations normalize $n$ before this step, but the unnormalized form with the radius calculation as defined above is consistent with the sources [S3, unofficial][S6]. If $n$ is normalized, $r$ must be scaled accordingly or the formula adjusted. The sources [S3, unofficial][S6] use the unnormalized normal in the radius formula $r = e \cdot |n|$.
+
+6. **Return Result:** If no separating axis is found, return `true`.
+   [S2, S4, unofficial][S6]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def triangle_aabb_overlap(v0, v1, v2, box_center, box_halfsize):
+    # Step 1: Translate triangle vertices relative to box center
+    v0_t = v0 - box_center
+    v1_t = v1 - box_center
+    v2_t = v2 - box_center
+
+    # Step 2: Compute triangle edges
+    e0 = v1_t - v0_t
+    e1 = v2_t - v1_t
+    e2 = v0_t - v2_t
+
+    # Helper function for projection test
+    def test_axis(axis):
+        # Step 3a: Compute AABB projection radius
+        r = (box_halfsize.x * abs(axis.x) +
+             box_halfsize.y * abs(axis.y) +
+             box_halfsize.z * abs(axis.z))
+        
+        # Step 3b: Project triangle vertices
+        p0 = dot(v0_t, axis)
+        p1 = dot(v1_t, axis)
+        p2 = dot(v2_t, axis)
+        
+        # Step 3c: Find min/max
+        min_p = min(p0, p1, p2)
+        max_p = max(p0, p1, p2)
+        
+        # Step 3d: Check separation
+        if min_p > r or max_p < -r:
+            return False
+        return True
+
+    # Step 3: Test 9 cross-product axes
+    # Edge 0 cross X, Y, Z
+    if not test_axis(vec3(0, -e0.z, e0.y)): return False
+    if not test_axis(vec3(e0.z, 0, -e0.x)): return False
+    if not test_axis(vec3(-e0.y, e0.x, 0)): return False
+
+    # Edge 1 cross X, Y, Z
+    if not test_axis(vec3(0, -e1.z, e1.y)): return False
+    if not test_axis(vec3(e1.z, 0, -e1.x)): return False
+    if not test_axis(vec3(-e1.y, e1.x, 0)): return False
+
+    # Edge 2 cross X, Y, Z
+    if not test_axis(vec3(0, -e2.z, e2.y)): return False
+    if not test_axis(vec3(e2.z, 0, -e2.x)): return False
+    if not test_axis(vec3(-e2.y, e2.x, 0)): return False
+
+    # Step 4: Test 3 Box Face Normals (X, Y, Z axes)
+    # X-axis
+    min_x = min(v0_t.x, v1_t.x, v2_t.x)
+    max_x = max(v0_t.x, v1_t.x, v2_t.x)
+    if min_x > box_halfsize.x or max_x < -box_halfsize.x: return False
+
+    # Y-axis
+    min_y = min(v0_t.y, v1_t.y, v2_t.y)
+    max_y = max(v0_t.y, v1_t.y, v2_t.y)
+    if min_y > box_halfsize.y or max_y < -box_halfsize.y: return False
+
+    # Z-axis
+    min_z = min(v0_t.z, v1_t.z, v2_t.z)
+    max_z = max(v0_t.z, v1_t.z, v2_t.z)
+    if min_z > box_halfsize.z or max_z < -box_halfsize.z: return False
+
+    # Step 5: Test Triangle Plane Normal
+    normal = cross(e0, e1)
+    d = -dot(normal, v0_t)
+    
+    # Radius of AABB projected onto normal
+    r = (box_halfsize.x * abs(normal.x) +
+         box_halfsize.y * abs(normal.y) +
+         box_halfsize.z * abs(normal.z))
+    
+    if d > r or d < -r: return False
+
+    # Step 6: No separating axis found
+    return True
+```
+
+**Parameters:**
+- None. The method is deterministic based on input geometry.
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Triangle:** If the triangle is degenerate (area zero), the normal $n$ will be zero. The plane test may fail or produce incorrect results. Guard against this by checking if $|n|$ is near zero [G].
+- **Precision:** Floating-point precision errors can cause false negatives in boundary cases (touching edges/vertices). Using epsilon comparisons or robust geometric predicates may be necessary for critical applications [G].
+- **Order of Tests:** The order of tests can affect performance. Testing the 9 cross-product axes first is often faster because they are more likely to separate non-overlapping triangles early [S1, unofficial].
+
+## Subtopics
+
+### [Triangle / Box Overlap Test (Conservative 26/6-separating)](3528-triangle-box-overlap-test-conservative-26-6-separating.md)
+An overlap test to determine if an axis-aligned box overlaps a triangle. For fully conservative 26-separating rasterization, it checks if the triangle plane intersects the box and checks 2D projections along all three axes. For thin 6-separating case, it checks projection along the dominant axis of the triangle normal. [3528-triangle-box-overlap-test-conservative-26-6-separating.md]
+
+## Operating characteristics
+
+**Time Complexity:**
+- The test performs a fixed number of operations: 9 cross-product tests, 3 coordinate axis tests, and 1 plane test. Each test involves a constant number of arithmetic operations. Thus, the time complexity is $O(1)$.
+- [S1, unofficial][S6]
+
+**Memory Complexity:**
+- $O(1)$ auxiliary space.
+
+**Measured Performance:**
+- The method is highly optimized for GPU execution, as seen in CUDA implementations [S1, unofficial]. The use of macros and avoiding vector allocations contributes to its speed.
+- [S1, unofficial]
+
+**Strengths:**
+- Exact and robust (within floating-point limits).
+- No false positives.
+- Fast due to fixed number of tests.
+- Suitable for GPU parallelization.
+- [S1, S5, unofficial][S6]
+
+**Limitations:**
+- Does not provide intersection points or depth information.
+- Sensitive to degenerate triangles.
+- [G]
+
+**When to Use:**
+- Frustum culling.
+- Spatial partitioning (voxelization).
+- Collision detection where only overlap status is needed.
+- [S3, S5, unofficial]
+
+**When Not to Use:**
+- When precise intersection points are required (use [Ray-primitive intersection](769-ray-primitive-intersection.md) variants).
+- When performance is critical and approximate culling is acceptable (use [AABB Face Normal Test](#aabb-face-normal-test) if applicable, though SAT is generally preferred for accuracy).
+
+## Background
+
+The Separating Axis Theorem based triangle-AABB intersection test was originally released by Tomas Akenine-Möller on 2001-03-05, with optimizations on 2001-06-18. It acknowledges contributions from Pierre Terdiman and David Hunt. [S3, unofficial] The method is widely used in computer graphics for culling and voxelization. [S3, S5, unofficial]
+
+## Sources
+
+[S1] idealab-isu/GPView, https://github.com/idealab-isu/GPView, fetched 2026-10-26 (unofficial)
+[S2] mesh voxelizer library, https://github.com/karimnaaji/voxelizer, fetched 2026-10-26 (unofficial)
+[S3] bottledspace/volumetric-spot-noise, https://github.com/bottledspace/volumetric-spot-noise, fetched 2026-10-27 (unofficial)
+[S4] itsyouyi/Voxelizer, https://github.com/itsyouyi/Voxelizer, fetched 2026-10-27 (unofficial)
+[S5] Joji0/3D-Object-Surface-Voxelizer, https://github.com/Joji0/3D-Object-Surface-Voxelizer, fetched 2026-10-27 (unofficial)
+[S6] Real-Time GPU-Based Voxelizer - GitHub Pages, https://freder.github.io/UnityGraphicsProgrammingBook1/html-translated/vol2/Chapter%201%20_%20Real-Time%20GPU-Based%20Voxelizer.html, fetched 2026-10-27

@@ -1,0 +1,165 @@
+# Voxel Grid Indexing
+Also called: Voxel Grid Coordinate Mapping, Voxel Grids, Voxel Indexing, VoxelGridDesc
+
+## Overview
+Voxel Grid Indexing maps 3D voxel coordinates $(i, j, k)$ to a linear 1D memory index and vice versa, enabling direct access to dense volume data stored in contiguous arrays [S1, S4, S7, unofficial]. It solves the problem of spatial locality in discrete 3D space by providing a deterministic, arithmetic mapping between logical grid positions and physical memory offsets [S7, unofficial]. Unlike hierarchical structures like [Morton Code Encoding/Decoding](1700-morton-code-encoding-decoding.md) or sparse structures like [Spatial Hashing](5002-spatial-hashing.md), this method assumes a fully dense grid, resulting in $O(1)$ access time but $O(N^3)$ storage complexity [S7, unofficial]. It differs from [Grid Density Data Structure](998-grid-density-data-structure.md) by focusing on the coordinate-to-index arithmetic rather than density-based culling or sparsification [S1, S4, unofficial].
+
+## How it works
+**Inputs:**
+- 3D voxel coordinates $(i, j, k)$ or a linear index $idx$.
+- Grid dimensions: $size_x, size_y, size_z$ (number of voxels along each axis) [S2, S4, unofficial].
+- Optional padding: $pad$ (e.g., 1) to handle boundary checks or neighbor lookups [S1, S3, unofficial].
+
+**Outputs:**
+- Linear 1D index $idx$ (integer) or 3D coordinates $(i, j, k)$.
+
+**Data Structures:**
+- **1D Array:** A contiguous block of memory (e.g., `TArray<BlockType>`, `float[]`, `int[]`) of size $size_x \times size_y \times size_z$ (or padded dimensions) [S1, S8, unofficial].
+- **Layout:** Row-major order is standard, where the fastest-changing index is $x$ (or $i$), followed by $y$ (or $j$), then $z$ (or $k$) [S1, S5, S8, unofficial]. Some implementations use $z$ as the fastest axis depending on the API (e.g., OpenGL textures) [S8, unofficial].
+
+**Formulas:**
+1. **Forward Mapping (3D to 1D):**
+   The linear index $idx$ for coordinates $(i, j, k)$ is computed as:
+   $$ idx = i \cdot (size_y \cdot size_z) + j \cdot size_z + k $$
+   If padding is applied (e.g., a 1-voxel border), the dimensions become $size'_x = size_x + 2 \cdot pad$, etc., and the formula uses padded dimensions [S1, S3, S4, unofficial].
+   Example with padding $p=1$ [S3, unofficial]:
+   $$ idx = (i + 1) \cdot kPaddedArea + (j + 1) \cdot kPaddedSize + (k + 1) $$
+   where $kPaddedArea = (size_x + 2) \cdot (size_y + 2)$ and $kPaddedSize = size_y + 2$.
+
+2. **Inverse Mapping (1D to 3D):**
+   Given $idx$ and dimensions $size_x, size_y, size_z$:
+   $$ i = \lfloor idx / (size_y \cdot size_z) \rfloor $$
+   $$ j = \lfloor (idx \pmod{size_y \cdot size_z}) / size_z \rfloor $$
+   $$ k = idx \pmod{size_z} $$
+   If padding was used, the resulting indices must be adjusted by subtracting the padding offset [S1, S5, unofficial].
+
+**Steps:**
+1. **Initialize Grid:** Allocate a 1D array of size $size_x \times size_y \times size_z$ [S1, S8, unofficial].
+2. **Compute Dimensions:** Determine $size_x, size_y, size_z$ based on the world bounds and voxel resolution [S2, S5, unofficial].
+3. **Map Coordinates:** For a given voxel $(i, j, k)$, compute $idx$ using the forward formula [S1, S4, unofficial].
+4. **Access Data:** Use $idx$ to read/write the value in the 1D array [S1, unofficial].
+5. **Inverse Lookup:** To find neighbors or convert back, use the inverse formula [S1, S5, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_to_index(i, j, k, size_x, size_y, size_z):
+    """
+    Convert 3D voxel coordinates to a 1D linear index.
+    Assumes row-major order: x fastest, then y, then z.
+    """
+    # Validate bounds
+    if not (0 <= i < size_x and 0 <= j < size_y and 0 <= k < size_z):
+        raise ValueError("Coordinates out of bounds")
+    
+    # Compute linear index
+    index = i * (size_y * size_z) + j * size_z + k
+    return index
+
+def index_to_voxel(index, size_x, size_y, size_z):
+    """
+    Convert a 1D linear index to 3D voxel coordinates.
+    """
+    # Validate bounds
+    if not (0 <= index < size_x * size_y * size_z):
+        raise ValueError("Index out of bounds")
+    
+    # Compute coordinates
+    i = index // (size_y * size_z)
+    remainder = index % (size_y * size_z)
+    j = remainder // size_z
+    k = remainder % size_z
+    
+    return (i, j, k)
+
+def voxel_to_index_padded(i, j, k, size_x, size_y, size_z, pad=1):
+    """
+    Convert 3D voxel coordinates to a 1D linear index with padding.
+    Padding adds a border of 'pad' voxels around the grid.
+    """
+    padded_size_x = size_x + 2 * pad
+    padded_size_y = size_y + 2 * pad
+    padded_size_z = size_z + 2 * pad
+    
+    # Adjust coordinates to include padding offset
+    adj_i = i + pad
+    adj_j = j + pad
+    adj_k = k + pad
+    
+    index = adj_i * (padded_size_y * padded_size_z) + adj_j * padded_size_z + adj_k
+    return index
+```
+
+**Parameters:**
+- `size_x, size_y, size_z`: Grid dimensions in voxels [S2, unofficial].
+- `pad`: Padding size for boundary handling (e.g., 1) [S1, S3, unofficial].
+- `voxel_size_m`: Physical size of a voxel in meters, used for world-to-grid conversion [S5, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Checks:** Without padding, neighbor lookups at grid boundaries may access invalid memory or wrap around [S1, unofficial]. Padding prevents this but increases memory usage [S1, unofficial].
+- **Precision:** Integer arithmetic is exact, but world-to-grid conversion involves floating-point division and flooring, which can cause off-by-one errors if not clamped [S5, S6, unofficial].
+- **Memory Layout:** Row-major vs. column-major order must be consistent between CPU and GPU access [S1, S8, unofficial].
+
+## Subtopics
+
+### [Coordinate Space Conversion](1785-coordinate-space-conversion.md)
+Voxel space uses integer indices for direct access, while local/world spaces use floating-point coordinates. The center of voxel [0,0,0] is at floating-point coordinate [0.5, 0.5, 0.5] [1785-coordinate-space-conversion.md].
+
+### [Voxel Grid Initialization](2168-voxel-grid-initialization.md)
+Voxel Grid Initialization returns a new grid where any voxel (active or inactive) whose stored value equals a specific `value` is made active, effectively expanding the active set. It differs from sibling methods like [Coordinate Space Conversion](1785-coordinate-space-conversion.md) by focusing on data population and memory allocation rather than coordinate transformation, and from [Spatial Hashing](5002-spatial-hashing.md) by operating on a dense grid structure before potential sparsification [G].
+
+### [World to UVW Normalization](2229-world-to-uvw-normalization.md)
+World to UVW Normalization maps arbitrary 3D world coordinates into the normalized $[0, 1]$ range of a voxel grid, enabling consistent indexing and texture sampling regardless of the scene's physical scale or origin. It differs from [Coordinate Space Conversion](1785-coordinate-space-conversion.md) by explicitly handling discrete voxel grid boundaries and dimensionality, and from [Texture Coordinate Conversion](3581-texture-coordinate-conversion.md) by operating at the grid indexing level rather than applying shader-specific offsets like Y-flips or centering adjustments [G].
+
+### [Bitstream Voxel Position Encoding](2371-bitstream-voxel-position-encoding.md)
+Bitstream Voxel Position Encoding is a method to encode the 3D position of a voxel into a linear bitstream for tree traversal, where each child index is determined by 3 bits. It solves the problem of mapping spatial coordinates to a hierarchical structure (such as an Octree) by creating a deterministic bit sequence that guides navigation from the root to the leaf node representing the voxel. It differs from its siblings [Coordinate Space Conversion](1785-coordinate-space-conversion.md) and [World to UVW Normalization](2229-world-to-uvw-normalization.md) by operating directly on integer bit patterns rather than floating-point values, and from [Spatial Hashing](5002-spatial-hashing.md) by preserving the hierarchical spatial locality required for tree-based culling and compression.
+
+### [3D Texture Representation (CPU/GPU Indexing)](2393-3d-texture-representation-cpu-gpu-indexing.md)
+3D Texture Representation stores voxel data in a dense 3D texture (or equivalent linear array) with dimensions matching the voxel grid, providing the simplest storage mechanism for volume rendering. Unlike tree-based structures like octrees, it fully leverages hardware acceleration for 3D textures, including caching and filtering, offering high runtime performance but low memory efficiency due to its inability to address sparse memory.
+
+### [Uniform Grid Adjacent Cell Indexing](2992-uniform-grid-adjacent-cell-indexing.md)
+Uniform Grid Adjacent Cell Indexing computes the linear memory indices of the four cells sharing a specific grid edge in a uniform voxel grid. It solves the problem of efficiently locating neighboring cells for operations such as multi-material interface definition or gradient estimation without traversing a graph structure. It differs from its parent, [Voxel Grid Indexing](1719-voxel-grid-indexing.md), which provides general coordinate-to-index mapping, by specifically resolving the topology of edge-adjacent neighbors using pointer arithmetic based on edge orientation. It differs from [Multi-Material Cell Map Indexing & Access](4886-multi-material-cell-map-indexing-access.md) by computing raw linear indices rather than material-specific pointers.
+
+### [Multi-Material Cell Map Indexing & Access](4886-multi-material-cell-map-indexing-access.md)
+[4886-multi-material-cell-map-indexing-access.md]
+
+### [Spatial Hashing](5002-spatial-hashing.md)
+A Lua library for mapping 3D world positions to hierarchical spatial hashes (strings) and vice versa, supporting conversion to Region3 and parent/child space traversal [5002-spatial-hashing.md].
+
+#### Voxel World Map Data Layout
+The world geometry is represented as a discrete 3D grid of integers. A value of 0 denotes empty space; non-zero values denote solid voxels or texture indices [S8, unofficial]. Dimensions are `MAP_WIDTH` and `MAP_HEIGHT` [S8, unofficial]. Indexing uses row-major order along the Z axis, then Y: `y * MAP_WIDTH * MAP_HEIGHT + z * MAP_WIDTH + x` [S8, unofficial].
+
+#### Data Collection from Indices
+Extracts data from a tensor given a list of indices, handling both 2D and 3D data tensors [S9, unofficial]. Reshape data to 2D (flatten first two dimensions) if it is 3D, or keep as 2D if it is 2D [S9, unofficial]. Calculate point_index by combining index and count_index to flatten the indexing [S9, unofficial].
+
+#### Grid Embedding
+A learnable 4D tensor lookup table that stores shape-specific latent codes indexed by model ID, structured as a dense grid [S10, unofficial]. Forward pass: Given indices tensor of shape (n_models,), gather embeddings via self.embeddings[indices]. Reshape to (n_models, grid_size+1, grid_size+1, grid_size+1, -1) to preserve the 4D grid structure across the batch dimension [S10, unofficial]. Tensor shape: (n, grid_size+1, grid_size+1, grid_size+1, latent_dim). Stored as nn.Parameter for gradient tracking [S10, unofficial].
+
+#### Coarse Geometry Searching
+A two-stage optimization process where the first stage efficiently finds the coarse 3D areas of interest (geometry) using a low-resolution voxel grid with view-invariant color, reducing queried points for the fine stage [S11]. Prior 1 (Initialization): Initialize all grid values in V^(density)(c) to 0. Set bias b using Eq. 9. This ensures all sampled points are visible to cameras at the beginning (Ti ~ 1) [S11]. Prior 2 (Learning Rate): For each grid point j, count the number of training views n_j to which it is visible. Scale its base learning rate by n_j / n_max, where n_max is the maximum view count over all grid points [S11]. Formula: $b = \log( (1 - \alpha^{init}(c))^{-1/s^{(c)}} - 1 )$, where $\alpha^{init}(c)$ is a hyperparameter [S11]. Parameter: $M^{(c)}$: Hyperparameter for the expected total number of voxels in the coarse stage [S11]. Layout: Coarse density voxel grid $V^{(density)(c)}$ in $\mathbb{R}^{1 \times N_x^{(c)} \times N_y^{(c)} \times N_z^{(c)}}$. Coarse color voxel grid $V^{(rgb)(c)}$ in $\mathbb{R}^{3 \times N_x^{(c)} \times N_y^{(c)} \times N_z^{(c)}}$ [S11].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for forward and inverse mapping [S1, S4, unofficial].
+- **Memory Complexity:** $O(N^3)$ for a grid of size $N \times N \times N$ [S7, unofficial].
+- **Performance:** High runtime performance due to direct memory access and hardware caching (e.g., 3D texture units) [S1, S5, unofficial]. However, memory usage is high for large grids, making it unsuitable for sparse scenes [S1, S7, unofficial].
+- **Strengths:** Simple implementation, fast access, compatible with hardware acceleration [S1, S5, unofficial].
+- **Limitations:** Inefficient for sparse data, high memory consumption, no natural symmetry exploitation compared to neural methods [S7, unofficial].
+- **When to Use:** Dense volumes, small to medium grids, hardware-accelerated rendering [S1, S5, unofficial].
+- **When Not to Use:** Sparse scenes, very large grids, memory-constrained environments [S7, unofficial].
+
+## Background
+Voxel grids are a fundamental representation in computer graphics and volume rendering, dating back to the early days of 3D graphics [S7, unofficial]. They are used in various applications, including medical imaging, terrain generation, and neural radiance fields (NeRF) [S11]. The method is often contrasted with implicit representations like NeRF, which exploit natural symmetries and reduce storage requirements [S7, unofficial]. Recent advancements, such as Direct Voxel Grid Optimization, have improved the efficiency of voxel-based rendering by optimizing the grid directly for radiance field reconstruction [S11].
+
+## Sources
+[S1] Manolo94/UE5MinecraftClone, https://github.com/Manolo94/UE5MinecraftClone, fetched 2026-10-26 (unofficial)
+[S2] topskychen/voxelizer, https://github.com/topskychen/voxelizer, fetched 2026-10-27 (unofficial)
+[S3] dmadevice/streaming-binary-greedy-meshing, https://github.com/dmadevice/streaming-binary-greedy-meshing, fetched 2026-10-27 (unofficial)
+[S4] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)
+[S5] wlim33/vox-ocean, https://github.com/wlim33/vox-ocean, fetched 2026-10-27 (unofficial)
+[S6] https://github.com/google-research/google-research/blob/master/tf3d/utils/voxel_utils.py#L305, https://github.com/google-research/google-research/blob/master/tf3d/utils/voxel_utils.py, fetched 2026-10-27 (unofficial)
+[S7] A Visual Exploration of Neural Radiance Fields, https://djrhails.github.io/post--radiance-fields/, fetched 2026-10-29 (unofficial)
+[S8] DJayalath/RayTracingEngine, https://github.com/DJayalath/RayTracingEngine, fetched 2026-10-24 (unofficial)
+[S9] B1ueber2y/DIST-Renderer, https://github.com/B1ueber2y/DIST-Renderer, fetched 2026-10-26 (unofficial)
+[S10] TurtleJayWang/VC-SDFGen, https://github.com/TurtleJayWang/VC-SDFGen, fetched 2026-10-28 (unofficial)
+[S11] Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00538, fetched 2026-10-26

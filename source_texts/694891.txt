@@ -1,0 +1,173 @@
+A custom ray-tracing engine for blender that allows the plug in of custom materials and custom ray tracing methods for astrophysically based ray tracing. - feat(pkg206): luminance-weighted hero-wavelength importance sampling (D65 CDF) by HendrikGC02 · Pull Request #627 · HendrikGC02/Astroray
+
+feat(pkg206): luminance-weighted hero-wavelength importance sampling (D65 CDF) by HendrikGC02 · Pull Request #627 · HendrikGC02/Astroray · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+HendrikGC02
+commented
+Aug 19, 2026
+Copy link
+Copy Markdown
+Owner
+pkg206 — Luminance-weighted hero-wavelength importance sampling (D65 CDF)
+Replaces the uniform hero-wavelength draw on the primary camera path with a
+luminance-weighted importance sampler: the hero λ is drawn from a logistic
+(sigmoid) CDF fitted to the (y_bar + 0.25)·D65 distribution, so sampling effort
+concentrates where the eye sees. CPU + GPU byte-mirrored in the same PR. The
+per-sample pdf is a genuine density in 1/nm, so the MC estimator stays
+unbiased — only chromatic variance drops.
+Algorithm sourcing (CLAUDE.md §6)
+Wilkie et al. 2014, "Hero Wavelength Spectral Sampling", CGF 33(4) — hero-λ + stratified-companion structure.
+PBRT-v4 SampledWavelengths::SampleVisibleWavelengths (Apache-2.0) — CDF-space stratification (the unbiased construction; see correction below).
+Blender Cycles sample_wavelength() + cie_d65_luminance_fit.py (Apache-2.0) — the D65-luminance sigmoid CDF and the +0.25 "bit of all wavelengths" blend.
+Observer-mismatch decision: Cycles fits CIE-1931 2°; Astroray carries CIE-1964 10°. Re-fit against Astroray's own baked tables (scripts/data/fit_hero_luminance_cdf.py) in nm units — no foreign constants reused.
+Research note: .astroray_plan/docs/pkg206-hero-luminance-fit.md.
+Fitted constants (CIE-1964 10°, nm, [360,830], blend +0.25):
+a=0.0221679280 /nm, x0=552.040271 nm, y0=0.0139650380, N=0.9839309253;
+∫pdf dλ = 0.999999.
+Correctness catch (unbiasedness)
+The spec's naive reading (wavelength-space companion offset hero+i·step and
+pdf_i = p(λ_i)) is biased — a fixed-wavelength-offset companion has marginal
+density p(hero) shifted, not p(λ_i). Measured: prism red channel converged to
+ratio 0.73 vs uniform before the fix. Fixed by stratifying in CDF space
+(λ_i = F⁻¹(frac(u+i/k))), which makes each lane's marginal exactly p(λ_i) and
+reduces byte-exactly to sampleUniform under a uniform F.
+Measured numbers (RTX 5070 Ti, .pyd mtime 2026-08-20 04:25, sm_120)
+Unbiasedness (sampler): importance 150.60±0.11 vs uniform 151.23±0.48 vs analytic 150.31.
+Unbiasedness (render, 384spp prism): converged mean-ratio imp/uni = 1.002 / 1.002 / 1.000 (R/G/B).
+Variance reduction (sampler, photopic band): var ratio 0.144.
+Convergence win (render, 16spp prism): luminance-weighted MSE ratio 0.749 (25% less perceptual noise); raw per-channel: R 0.0092 vs 0.0228, G 0.0046 vs 0.0064, B 0.0566 vs 0.0417 (blue panel sits in the luminance tail — reported, not gated).
+Register HARD gate unchanged: every stageShadeBucketedKernel variant REG:254 / CONSTANT[0]:1700 (includes the spec's 3352-STACK variant). Sampler lives in stage_init, not the shade path. RNG draw count unchanged (one Uniform()).
+CPU↔GPU parity: pkg64 + pkg55 reference-production/oracle parity green.
+Acceptance checklist
+cite-algorithm invoked; research note + inline citations (CPU + GPU).
+Convergence win measured (luminance-weighted MSE 0.749, seed-pinned, linear EXR).
+Unbiasedness preserved (furnace-equivalent mean-ratio band, high-spp prism 1.00x).
+CPU↔GPU parity; sampler constants + pdf formula byte-identical (both snippets in stage_init.cu / spectrum.cpp).
+Shade-kernel register gate unchanged (254/…/1700); RNG draw-count unchanged.
+Re-baselined suites pass; no xfail gated this feature.
+Authorized surface
+Spec §Specification named: src/spectrum.cpp, include/astroray/spectrum.h,
+src/cpu/wavefront/path_kernel.cpp, src/cpu/wavefront/reference_pt_production.cpp,
+src/gpu/wavefront/stage_init.cu. Additions (justified):
+plugins/integrators/spectral_path_tracer.cpp — the spec's anchor list omitted the production integrator (ASTRORAY_REGISTER_INTEGRATOR("path_tracer", …)) that the acceptance prism scene actually renders through; without routing it, the convergence win is unmeasurable. Guarded to the default full band + an internal hero_importance param (not a UI knob) so the A/B gate can render the uniform baseline.
+module/blender_module.cpp — sample_importance binding for the sampler-level tests.
+scripts/data/fit_hero_luminance_cdf.py, .astroray_plan/docs/pkg206-hero-luminance-fit.md — cite-algorithm deliverables.
+tests/test_pkg206_*.py, pytest.ini — new gates + slow marker.
+Build (last 5 lines, commit 4b7b73d — source unchanged since)
+```
+[pkg183] running host-only ABI canary (no GPU)...
+[pkg183] canary caps: {'cpu': True, 'spectral': True, 'gpu': True, 'gpu_spectral': True, 'gpu_approximate': False, 'closure_graph': True, 'closure_count': 1, 'gpu_type': 'closure_graph', 'notes': 'spectral closure-graph GPU lowering'}
+========================================
+Build succeeded
+========================================
+```
+🤖 Generated with Claude Code
+HendrikGC02
+and others
+added 4 commits
+August 20, 2026 04:12
+feat(pkg206): luminance-weighted hero-wavelength importance sampling …
+…
+639a2b7
+```
+…(D65 CDF)
+
+CPU+GPU byte-mirrored hero-wavelength importance sampler on the primary camera
+path. Draws the hero from a logistic CDF fitted to (y_bar+0.25)*D65 against
+Astroray's CIE-1964 10deg observer (re-fit, not Cycles' 1931-2deg constants),
+per-sample pdf = the sigmoid-derivative density (1/nm) so the MC estimator stays
+unbiased. Wilkie 2014 hero-lambda + Cycles D65 sigmoid CDF (Apache-2.0).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+fix(pkg206): CDF-space stratification for unbiased companion pdfs
+…
+4b7b73d
+```
+The wavelength-space companion offset + pdf=p(lambda_i) reading is biased under
+a non-uniform proposal (companion marginal is p(hero) shifted). Stratify in CDF
+space per lane (PBRT-v4 SampleVisibleWavelengths) so each lane marginal is
+p(lambda_i). Prism red-channel converged ratio 0.73 -> ~1.0.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+test(pkg206): luminance-weighted convergence gate + lint fixes
+…
+9a1dc31
+```
+Primary render gate uses luminance-weighted (perceptual) MSE ratio 0.749 on the
+BK7 prism; raw per-channel reported for transparency. Register 'slow' marker.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+docs(pkg206): flip spec status to done (PR #627)
+ec80285
+HendrikGC02
+commented
+Aug 19, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+HOLD — do not merge. CI regression indicates sampler bias (owner review recommended).
+CI build-and-test fails on tests/test_pkg67_flat_regression.py::test_flat_baseline_ssim: SSIM = −0.109 (requires ≥ 0.999) — the flat Lambertian baseline render is nearly anti-correlated with the stored reference.
+Diagnosis (team-lead): a correct luminance-weighted hero-λ importance-sampling change must leave the converged image identical — it reduces per-sample variance but never shifts the estimator mean. An SSIM this far from 1.0 means the converged mean moved, i.e. the sampler is biased (the pdf/weight cancellation is wrong, or the CDF inversion is off). The implementer's own unbiasedness test passed locally but the render-level flat-regression suite caught the real bias — consistent with the "PR-named tests insufficient / verify unbiasedness at the render level" lesson.
+Likely locus: the CDF-space stratification for companion-wavelength pdfs (commit 4b7b73d) — verify the estimator divides by the actual sampling pdf (the D65-luminance CDF density), not a uniform pdf, and that the hero-λ weight still integrates to 1. This is the owner-priority package, so I'm leaving it for a careful pass rather than an autonomous auto-fix at morning wrap-up.
+Worktree preserved at Astroray-pkg206 (branch pkg206, head ec80285) for diagnosis.
+HendrikGC02
+commented
+Aug 20, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Closing: CI-red (test_pkg67_flat_regression::test_flat_baseline_ssim) with a genuine bias — architect triage (2026-08-21) identified companion wavelengths left at pdf=1/span. pkg206 re-dispatched fresh with the triage appended to its spec. See .astroray_plan/packages/pkg206-luminance-weighted-hero-wavelength-sampling.md.
+HendrikGC02
+closed this
+Aug 20, 2026
+HendrikGC02
+added a commit
+that referenced
+this pull request
+Aug 20, 2026
+docs(specs): file pkg213 (light intensity slider) + pkg214 (sodium-va…
+…
+325a2b8
+```
+…por emission fix); triage pkg206
+
+- pkg213: expose light.data.energy in the Astroray light panel (intensity is
+  already wired to the engine at __init__.py:4632, just not surfaced)
+- pkg214: sodium_vapor D-line aliases to a single 5nm bin -> emits black;
+  broaden atomic lines to an energy-conserving Gaussian in the profile builder
+- pkg206: architect triage — CI failure is a realization change + genuine bias
+  (companion wavelengths left at pdf=1/span); close PR #627, re-dispatch fresh
+```
+HendrikGC02
+mentioned this pull request
+Aug 21, 2026
+docs: planning doc refresh — pkg203/204/205/213 done, pkg214 HW FAIL, pkg206 unheld
+#631
+Merged
+2 tasks done
+HendrikGC02
+deleted the
+pkg206
+branch
+October 3, 2026 09:43
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

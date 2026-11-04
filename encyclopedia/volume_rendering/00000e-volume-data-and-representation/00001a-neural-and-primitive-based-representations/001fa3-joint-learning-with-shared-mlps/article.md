@@ -1,0 +1,209 @@
+# Joint Learning with Shared MLPs
+
+Also called: Context Model Architecture, Joint training, Shared decoder training
+
+## Overview
+Joint Learning with Shared MLPs is a training strategy for neural and primitive-based volume representations that simultaneously optimizes multiple related scenes using a single, lightweight shared decoder (typically a shallow MLP) [S1, unofficial]. It solves the problem of redundant computation and memory usage when training individual neural fields or Gaussian splatting models for each scene independently [S1, unofficial]. By exploiting inter-scene correlations through shared parameters, it significantly reduces training time, model size, and the number of required anchors/points compared to separate optimization, while maintaining reconstruction quality [S1, unofficial]. It is distinct from single-scene methods like [NeuS](6060-neus.md) or [MLP Neural Fields](3854-mlp-neural-fields.md) by explicitly coupling the optimization of multiple datasets into a single forward/backward pass through a shared context model [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   A set of $N$ related volume visualization (VolVis) scenes.
+    *   For each scene, a point cloud representing the geometric initialization (subsampled to at most 10,000 points) [S1, unofficial].
+    *   Anchor positions $\mathbf{x}_a$ for each scene [S1, unofficial].
+*   **Outputs:**
+    *   A single shared context model (decoder) [S1, unofficial].
+    *   Probability distribution values for anchor attributes (e.g., position, scaling, rotation, color) for all scenes jointly [S1, unofficial].
+    *   Compressed representations of the scenes using fewer anchors than separate training [S1, unofficial].
+
+### Data Structures
+
+**1. Scene Grouping Structure**
+Scenes are grouped into clusters based on geometric similarity.
+*   **Metric:** Pairwise Chamfer distance between point clouds of scenes.
+*   **Clustering Method:** Hierarchical clustering [S1, unofficial].
+*   **Input Data:** Point clouds subsampled to $\le 10,000$ points per scene to reduce computational cost [S1, unofficial].
+
+**2. Context Model (Shared MLP)**
+*   **Architecture:** Based on BiRF [S1, unofficial].
+*   **Components:**
+    *   Multiple binary hash grids. Parameter values in grids are either $+1$ or $-1$ [S1, unofficial].
+    *   A shallow Multi-Layer Perceptron (MLP) [S1, unofficial].
+*   **Input to MLP:** Aggregated hash features retrieved using anchor position $\mathbf{x}_a$ [S1, unofficial].
+*   **Output of MLP:** Values modeling the probability distribution for anchor attributes [S1, unofficial].
+
+**3. Anchor Attributes**
+*   Continuous attributes (e.g., scaling factors $l_s, l_r$) are quantized to discrete values for entropy coding [S1, unofficial].
+*   Quantization is implemented by injecting noise during training to enable backpropagation [S1, unofficial].
+*   Scaling factors are defined after sigmoid activation [S1, unofficial].
+
+### Numbered Steps
+
+1.  **Preprocessing (Clustering):**
+    *   For each of the $N$ scenes, subsample the initialization point cloud to at most 10,000 points [S1, unofficial].
+    *   Compute the pairwise Chamfer distance between all scene point clouds [S1, unofficial].
+    *   Apply hierarchical clustering to group scenes. The number of groups is controlled by a clustering threshold $\tau$ (Chamfer distance) [S1, unofficial].
+    *   *Note:* Clustering overhead is negligible (e.g., 0.49s for 41 scenes) [S1, unofficial].
+
+2.  **Joint Training:**
+    *   Initialize a single shared context model (hash grids + shallow MLP) [S1, unofficial].
+    *   For each batch of training images from all scenes in the current group:
+        *   Retrieve hash features for anchor positions $\mathbf{x}_a$ from the shared hash grids [S1, unofficial].
+        *   Pass aggregated features through the shared shallow MLP [S1, unofficial].
+        *   Output probability distributions for anchor attributes [S1, unofficial].
+        *   Compute loss (reconstruction + entropy coding regularization) and backpropagate to update the shared model parameters [S1, unofficial].
+
+3.  **Inference/Decoding:**
+    *   Use the trained shared context model to decode anchor attributes for any scene in the trained groups [S1, unofficial].
+    *   Render using the decoded neural editable Gaussians [S1, unofficial].
+
+### Formulas
+
+*   **Chamfer Distance:** Not explicitly defined in sources, but used as the metric for clustering scenes [S1, unofficial].
+*   **Clustering Threshold:** A scalar value $\tau$ controlling the maximum allowable Chamfer distance for scenes to be grouped together [S1, unofficial].
+*   **Scaling Factors:** Defined after sigmoid activation, scaled by 100 for visualization in analysis [S1, unofficial].
+
+### Parameters
+
+*   **Clustering Threshold ($\tau$):** Controls scene grouping.
+    *   Tested values: 0, 0.005, 0.01, 0.02, 0.04 [S1, unofficial].
+    *   Larger $\tau$ groups more scenes, reducing the number of jointly trained groups [S1, unofficial].
+*   **Subsampling Limit:** Maximum 10,000 points for clustering initialization [S1, unofficial].
+
+### Edge Cases and Pitfalls
+
+*   **Out of Memory (OOM):** Setting the clustering threshold too high (e.g., 0.04) groups too many scenes (e.g., >20) together. This causes OOM errors during training because anchor/optimizer parameters and training images cannot fit in GPU memory [S1, unofficial]. Peak memory occurs during joint training; inference memory is low (<2 GB) [S1, unofficial].
+*   **Quality Degradation:** Joint learning across fundamentally unrelated datasets (e.g., beetle and argon bubble) degrades quality because the shared MLP lacks the capacity to encode different volume structures simultaneously [S1, unofficial]. Scene grouping based on Chamfer distance is essential [S1, unofficial].
+*   **Precision:** Continuous attributes must be quantized for entropy coding; noise injection is used to maintain differentiability [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_chamfer_distance(points_a, points_b):
+    """
+    Computes pairwise Chamfer distance between two point clouds.
+    points_a: (N, 3) array
+    points_b: (M, 3) array
+    Returns: scalar distance
+    """
+    # Implementation detail: Not given in sources.
+    # Standard Chamfer distance is sum of min distances from A to B and B to A.
+    pass
+
+def hierarchical_cluster_scenes(scene_point_clouds, threshold):
+    """
+    Groups scenes based on pairwise Chamfer distances.
+    scene_point_clouds: list of arrays, each subsampled to <= 10,000 points.
+    threshold: float, max Chamfer distance for grouping.
+    Returns: list of lists, where each inner list contains indices of scenes in a group.
+    """
+    n_scenes = len(scene_point_clouds)
+    # Compute pairwise distances
+    distances = np.zeros((n_scenes, n_scenes))
+    for i in range(n_scenes):
+        for j in range(i + 1, n_scenes):
+            dist = compute_chamfer_distance(scene_point_clouds[i], scene_point_clouds[j])
+            distances[i, j] = dist
+            distances[j, i] = dist
+    
+    # Hierarchical clustering logic (e.g., agglomerative) based on threshold
+    # Implementation detail: Not given in sources.
+    # Use a standard clustering library or algorithm with the distance matrix and threshold.
+    pass
+
+def shared_context_model_forward(anchor_positions, hash_grids, mlp):
+    """
+    Forward pass of the shared context model.
+    anchor_positions: (B, 3) array of anchor positions x_a.
+    hash_grids: list of hash grids with values +1 or -1.
+    mlp: shallow MLP model.
+    Returns: probability distribution values for anchor attributes.
+    """
+    # Retrieve hash features
+    features = []
+    for pos in anchor_positions:
+        # Hash feature retrieval logic
+        # Implementation detail: Not given in sources.
+        # Typically involves hashing the position and aggregating values from multiple grids.
+        pass
+    
+    # Aggregate features
+    aggregated_features = aggregate_hash_features(features)
+    
+    # Decode with MLP
+    output = mlp(aggregated_features)
+    return output
+
+def joint_training_loop(scenes, threshold, num_epochs):
+    """
+    Main joint training loop.
+    scenes: list of scene objects containing point clouds and training images.
+    threshold: clustering threshold.
+    num_epochs: number of training epochs.
+    """
+    # Step 1: Preprocessing
+    subsampled_clouds = []
+    for scene in scenes:
+        # Subsample to at most 10,000 points
+        cloud = scene.point_cloud[np.random.choice(len(scene.point_cloud), min(10000, len(scene.point_cloud)), replace=False)]
+        subsampled_clouds.append(cloud)
+    
+    groups = hierarchical_cluster_scenes(subsampled_clouds, threshold)
+    
+    # Initialize shared model
+    hash_grids = initialize_hash_grids() # Values +1 or -1
+    mlp = initialize_shallow_mlp()
+    
+    # Step 2: Training
+    for epoch in range(num_epochs):
+        for group in groups:
+            # Collect batches from all scenes in the group
+            batches = collect_batches(scenes, group)
+            
+            for batch in batches:
+                # Forward pass
+                anchor_positions = batch.anchor_positions
+                probs = shared_context_model_forward(anchor_positions, hash_grids, mlp)
+                
+                # Compute loss (reconstruction + entropy)
+                # Quantization noise injection for backpropagation
+                # Implementation detail: Not given in sources.
+                loss = compute_loss(probs, batch.targets)
+                
+                # Backward pass
+                update_shared_model(hash_grids, mlp, loss)
+
+```
+
+## Subtopics
+
+### Context Model Architecture
+The specific neural network (BiRF-based) used as the shared decoder. It uses binary hash grids and a shallow MLP to map anchor positions to probability distributions. It is chosen for its lightweight nature and ability to exploit inter-scene correlations [S1, unofficial].
+
+### Neural Entropy Coding
+A technique used in conjunction with joint learning to compress the quantized anchor attributes. It uses the shared context model to provide probability estimates for entropy coding, preserving important scene information at lower bitrates [S1, unofficial].
+
+## Operating characteristics
+
+*   **Time Complexity:** Training time is significantly reduced compared to separate optimization. For 41 scenes, training time dropped from 156.9 min to 72.0 min (54% reduction) [S1, unofficial]. The reduction scales with the number of scenes (35% to 54% reduction) [S1, unofficial]. Clustering overhead is negligible (<0.02% of total training time) [S1, unofficial].
+*   **Memory Complexity:** Peak memory usage occurs during joint training and can lead to OOM errors if too many scenes are grouped together (e.g., >20 scenes with threshold 0.04) [S1, unofficial]. Inference memory is low (<2 GB) [S1, unofficial]. Model size is reduced by 44% to 60% (e.g., 45.75 MB to 15.99 MB for 41 scenes) [S1, unofficial].
+*   **Performance:** Reconstruction quality (PSNR, LPIPS) remains nearly unchanged compared to separate optimization for geometrically similar scenes [S1, unofficial]. Quality degrades if unrelated scenes are forced into the same group [S1, unofficial].
+*   **Strengths:** Reduces training time, model size, and anchor count. Exploits inter-scene redundancy. Fast clustering overhead.
+*   **Limitations:** Requires scenes to be geometrically similar (grouped by Chamfer distance). Risk of OOM if grouping is too aggressive. Not suitable for fundamentally unrelated datasets.
+*   **When to Use:** When training multiple related volume visualization scenes and computational resources (time/memory) are constrained.
+*   **When Not to Use:** When scenes are geometrically dissimilar or unrelated, as shared MLPs cannot encode diverse structures effectively [S1, unofficial].
+
+## Background
+
+*   **Origin:** The method is part of the ECoNGS (Efficient Compressive Neural Gaussian Splats for Volume Visualization) framework [S1, unofficial].
+*   **History:** Developed to address the redundancy in training neural Gaussian splatting models for volume visualization. It builds on the BiRF context model architecture [S1, unofficial].
+*   **Usage:** Applied to multivariate volume visualization datasets (e.g., combustion, vortex, ionization) to compress and efficiently render multiple scenes [S1, unofficial].
+
+## Sources
+
+[S1] ECoNGS: Efficient Compressive Neural Gaussian Splats for Volume Visualization, https://doi.org/10.48550/arxiv.2607.18466, fetched 2026-10-26 (unofficial)

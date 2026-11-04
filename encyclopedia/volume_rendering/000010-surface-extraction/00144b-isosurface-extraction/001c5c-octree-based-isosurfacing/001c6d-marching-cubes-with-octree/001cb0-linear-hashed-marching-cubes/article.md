@@ -1,140 +1,123 @@
 # Linear Hashed Marching Cubes
 
-Also called: Pointerless Octree Duals (loose implementation)
 
 ## Overview
-Linear Hashed Marching Cubes is a surface extraction method that generates meshes from implicit volumes by applying the Marching Cubes algorithm over a linear hashed octree structure [S1, unofficial]. It serves as a high-performance alternative to standard grid-based Marching Cubes, aiming to reduce memory overhead and traversal time by using a pointerless, hash-based octree representation [S1, unofficial]. It builds on [Marching Cubes with Octree](1259-marching-cubes-with-octree.md) but replaces the standard octree traversal with a linear hashed variant for faster performance [S1, unofficial].
+Linear Hashed Marching Cubes extracts triangle meshes from implicit scalar fields by applying the Marching Cubes algorithm over a linear hashed octree [S1, unofficial]. It replaces the standard grid-based traversal with a pointerless octree structure to reduce memory overhead and improve performance [S1, unofficial]. It builds on [Marching Cubes with Octree](1259-marching-cubes-with-octree.md) but uses a linear hash table for node storage instead of a primal grid [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- An implicit scalar field function $f(x, y, z)$ that returns the signed distance or density value at any point in 3D space.
-- An isovalue threshold $T$ used to classify vertices as inside or outside the surface.
-- `max_depth`: The maximum depth of the internal octree, defining the resolution limit. The tree spans a cubic grid of size $2^{\text{max\_depth}}$ in each dimension [S1, unofficial].
+- An implicit scalar field function $f(x, y, z)$ returning signed distance or density [G].
+- An isovalue threshold $T$ for classification [G].
+- `max_depth`: The maximum depth of the internal octree, defining the resolution limit [S1, unofficial]. The tree spans the equivalent of a cubic grid of size $2^{\text{max\_depth}}$ in either direction [S1, unofficial].
 
 **Outputs:**
-- A triangle mesh consisting of vertices and indices representing the isosurface.
+- A triangle mesh consisting of vertices and indices representing the isosurface [S1, unofficial].
 
 **Data Structures:**
-- **ImplicitOctree**: A pointerless octree structure that stores voxel data. Unlike traditional octrees, it uses a linear hash table for node storage, eliminating pointer overhead [S1, unofficial].
-- **MortonKey**: A 64-bit integer representing the position of a voxel in the 3D grid using Morton (Z-order) curve encoding. This key is used to index into the linear hash table and to identify vertices in the mesh builder [S1, unofficial].
-- **MeshTopologyBuilder**: A temporary structure that accumulates vertex positions and face indices during traversal. It uses `MortonKey` identifiers to track vertex uniqueness and ensure proper mesh connectivity [S1, unofficial].
+- **ImplicitOctree**: A traversal structure that replaces `PrimalGrid`, storing voxel data in a linear hash table [S1, unofficial].
+- **MortonKey**: A 64-bit integer representing the position of a voxel in the 3D grid using Morton (Z-order) curve encoding, used for indexing instead of `GridKey` [S1, unofficial].
+- **MeshTopologyBuilder**: A temporary structure that accumulates vertex positions and face indices during traversal, using `MortonKey` identifiers to track vertex uniqueness and ensure proper mesh connectivity [S1, unofficial].
 
 **Algorithm Steps:**
-1. **Initialization**: Create an `ImplicitOctree` instance with the specified `max_depth`. Initialize a `MeshTopologyBuilder` to store the resulting mesh data [S1, unofficial].
-2. **Traversal**: Traverse the `ImplicitOctree`. For each visited cube (voxel) in the octree, retrieve its `MortonKey`, the 8 corner coordinates, and the scalar values at those corners [S1, unofficial].
-3. **Classification**: Compute the sign of the scalar value at each of the 8 corners relative to the isovalue $T$. If $f(\text{corner}) < T$, the corner is classified as "inside" (0); otherwise, it is "outside" (1). This produces an 8-bit cube index (0–255) [S1, unofficial].
-4. **Edge Intersection**: Based on the cube index, determine which of the 12 edges of the cube are intersected by the isosurface. For each intersected edge, calculate the exact intersection point using linear interpolation between the corner values [S1, unofficial].
-   - Let $v_1$ and $v_2$ be the scalar values at the two endpoints of an edge, and $p_1$ and $p_2$ be their 3D positions. The intersection point $p_{int}$ is:
-     $$ p_{int} = p_1 + \frac{T - v_1}{v_2 - v_1} (p_2 - p_1) $$
-   - If $v_1 = v_2$, the edge is parallel to the isosurface; handle as a degenerate case (e.g., skip or use a small epsilon) [G].
-5. **Mesh Construction**: Iterate through the triangles defined by the cube index (from the standard Marching Cubes lookup table). For each triangle with vertices $a, b, c$:
-   - Assign a unique `MortonKey` to each vertex based on its position in the grid.
-   - Add the vertex positions to the `MeshTopologyBuilder`.
-   - Add the face (triangle) to the builder, referencing the vertex indices [S1, unofficial].
-6. **Finalization**: After all cubes have been traversed, build the final mesh from the `MeshTopologyBuilder`. Extract the vertex positions and index buffer to produce the final triangle mesh [S1, unofficial].
+1. **Initialization**: Create an `ImplicitOctree` instance with the specified `max_depth` and initialize a `MeshTopologyBuilder` [S1, unofficial].
+2. **Traversal**: Traverse the `ImplicitOctree` [S1, unofficial]. For each visited cube, retrieve its `MortonKey`, the 8 corner coordinates, and the scalar values at those corners [S1, unofficial].
+3. **Classification**: Compute the cube index (0–255) by setting bit $i$ if $f(\text{corner}_i) < T$ [S1, unofficial].
+4. **Edge Intersection**: Find the 12 edge crossing vertices for the cube using the cube index, corners, and values [S1, unofficial].
+5. **Mesh Construction**: March the cube by iterating through the triangles defined by the cube index [S1, unofficial]. For each triangle $(a, b, c)$, add vertices to the mesh builder with `MortonKey` identifiers and the calculated vertex positions, then add the face [S1, unofficial].
+6. **Finalization**: After all cubes have been traversed, build the final mesh from the `MeshTopologyBuilder` and extract indices to the extractor [S1, unofficial].
+
+**Formulas:**
+The intersection point $p_{int}$ on an edge is calculated via linear interpolation:
+$$ p_{int} = p_1 + \frac{T - v_1}{v_2 - v_1} (p_2 - p_1) $$
+where $v_1, v_2$ are the scalar values at the edge endpoints and $p_1, p_2$ are their 3D positions [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def linear_hashed_marching_cubes(iso_func, isovalue, max_depth):
-    # Initialize structures
     octree = ImplicitOctree(max_depth=max_depth)
-    mesh_builder = MeshTopologyBuilder()
+    builder = MeshTopologyBuilder()
     
-    # Traverse the octree
     for cube in octree.traverse():
-        # Get cube data
         key = cube.morton_key
-        corners = cube.corners  # List of 8 (x, y, z) positions
+        corners = cube.corners
         values = [iso_func(c) for c in corners]
         
-        # Classify corners
         cube_index = 0
         for i in range(8):
             if values[i] < isovalue:
                 cube_index |= (1 << i)
+                
+        intersections = find_edge_intersections(corners, values, isovalue, cube_index)
         
-        # Find edge intersections
-        edge_intersections = find_edge_intersections(corners, values, isovalue, cube_index)
-        
-        # Generate triangles based on cube_index
-        triangles = get_triangles_for_cube(cube_index)
-        
-        for tri in triangles:
-            # tri is a list of 3 edge indices
-            verts = []
-            for edge_idx in tri:
-                # Get the vertex position for this edge intersection
-                # The MortonKey for the vertex is derived from its grid position
-                pos = edge_intersections[edge_idx]
-                verts.append(pos)
+        for tri in MC_TRIANGLES[cube_index]:
+            verts = [intersections[e] for e in tri]
+            builder.add_triangle(verts)
             
-            # Add to mesh builder
-            mesh_builder.add_triangle(verts)
-    
-    # Build final mesh
-    mesh = mesh_builder.build()
-    return mesh
+    return builder.build()
 
 def find_edge_intersections(corners, values, isovalue, cube_index):
-    intersections = {}
-    # Define the 12 edges of a cube as pairs of corner indices
-    edges = [
-        (0, 1), (1, 2), (2, 3), (3, 0),  # Bottom face
-        (4, 5), (5, 6), (6, 7), (7, 4),  # Top face
-        (0, 4), (1, 5), (2, 6), (3, 7)   # Vertical edges
-    ]
-    
-    for edge_idx, (i, j) in enumerate(edges):
-        # Check if this edge is intersected
-        if (cube_index & (1 << i)) != (cube_index & (1 << j)):
-            v1 = values[i]
-            v2 = values[j]
-            p1 = corners[i]
-            p2 = corners[j]
-            
-            # Linear interpolation
-            if abs(v2 - v1) < 1e-9:
-                # Degenerate case: edge is parallel to isosurface
-                # Use midpoint as approximation [G]
-                t = 0.5
-            else:
-                t = (isovalue - v1) / (v2 - v1)
-            
-            p_int = p1 + t * (p2 - p1)
-            intersections[edge_idx] = p_int
-            
-    return intersections
+    # Standard MC edge connectivity: 12 edges connecting 8 corners
+    edges = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
+    pts = {}
+    for idx, (i, j) in enumerate(edges):
+        # Edge crosses isosurface if corner signs differ
+        if (values[i] < isovalue) != (values[j] < isovalue):
+            v1, v2 = values[i], values[j]
+            p1, p2 = corners[i], corners[j]
+            t = 0.5 if abs(v2 - v1) < 1e-9 else (isovalue - v1) / (v2 - v1)
+            pts[idx] = p1 + t * (p2 - p1)
+    return pts
+
+def morton_encode(x, y, z):
+    # Standard Z-order curve encoding [G]
+    x = (x | (x << 16)) & 0x0000FFFF0000FFFF
+    x = (x | (x << 8)) & 0x00FF00FF00FF00FF
+    x = (x | (x << 4)) & 0x0F0F0F0F0F0F0F0F
+    x = (x | (x << 2)) & 0x3333333333333333
+    x = (x | (x << 1)) & 0x5555555555555555
+    y = (y | (y << 16)) & 0x0000FFFF0000FFFF
+    y = (y | (y << 8)) & 0x00FF00FF00FF00FF
+    y = (y | (y << 4)) & 0x0F0F0F0F0F0F0F0F
+    y = (y | (y << 2)) & 0x3333333333333333
+    y = (y | (y << 1)) & 0x5555555555555555
+    z = (z | (z << 16)) & 0x0000FFFF0000FFFF
+    z = (z | (z << 8)) & 0x00FF00FF00FF00FF
+    z = (z | (z << 4)) & 0x0F0F0F0F0F0F0F0F
+    z = (z | (z << 2)) & 0x3333333333333333
+    z = (z | (z << 1)) & 0x5555555555555555
+    return x | (y << 1) | (z << 2)
+
+class ImplicitOctree:
+    def __init__(self, max_depth):
+        self.max_depth = max_depth
+    def traverse(self):
+        # Yields cube objects with .morton_key, .corners, and .values [S1, unofficial]
+        pass
+
+class MeshTopologyBuilder:
+    def __init__(self):
+        self.vertices = {}
+        self.indices = []
+    def add_triangle(self, verts):
+        for v in verts:
+            key = morton_encode(round(v[0]), round(v[1]), round(v[2]))
+            if key not in self.vertices:
+                self.vertices[key] = v
+            self.indices.append(self.vertices[key])
+    def build(self):
+        return list(self.vertices.values()), self.indices
+
+# Standard 256-entry MC triangle table [G]
+MC_TRIANGLES = [...]
 ```
 
-**Parameters:**
-- `max_depth`: Controls the maximum resolution. The grid size is $2^{\text{max\_depth}} \times 2^{\text{max\_depth}} \times 2^{\text{max\_depth}}$ [S1, unofficial]. Typical values depend on the desired detail and memory constraints.
-
-**Edge Cases and Pitfalls:**
-- **Degenerate Edges**: If the scalar values at both ends of an edge are equal, the interpolation factor is undefined. A small epsilon or midpoint approximation should be used [G].
-- **Hash Collisions**: The linear hashed octree must handle hash collisions efficiently. The implementation should use a robust hashing strategy (e.g., double hashing or chaining) to ensure correct traversal [G].
-- **Boundary Conditions**: The octree traversal must correctly handle the boundaries of the defined volume. Vertices on the boundary should be handled consistently to avoid gaps or artifacts [G].
-
-## Subtopics
-
-### [Adaptive Resolution Isosurface Rendering with Two-Pass Discontinuity Handling](1340-adaptive-resolution-isosurface-rendering-with-two-pass-disco.md)
-Focuses on adaptive resolution and handling discontinuities in two passes. Choose when high-quality adaptive rendering is needed.
-
-### [DMC Octree Contour Extraction](3661-dmc-octree-contour-extraction.md)
-Uses Dual Marching Cubes on an octree for smoother surfaces. Choose when smoother surfaces are required and performance is less critical.
-
 ## Operating characteristics
-- **Time Complexity**: Depends on the number of visited octree nodes. Linear hashed octrees can offer faster traversal than pointer-based octrees due to better cache locality [S1, unofficial].
-- **Memory Complexity**: Significantly reduced compared to pointer-based octrees due to the lack of pointer overhead. The linear hash table stores only necessary nodes [S1, unofficial].
-- **Performance**: Reported to be faster than standard Marching Cubes [S1, unofficial].
-- **Strengths**: High performance, reduced memory usage, suitability for large volumes.
-- **Limitations**: Potential for hash collisions, complexity in implementation compared to standard grid-based methods.
-- **When to Use**: Large volumes where memory and performance are critical.
-- **When Not to Use**: Small volumes where the overhead of octree construction is not justified, or when simpler implementations are preferred.
+Faster than standard marching cubes [S1, unofficial]. Time and memory complexity: Not given in the sources. Scaling: Not given in the sources. Strengths and limitations: Not given in the sources. When to use: Not given in the sources.
 
 ## Background
-The method is described as a "loose implementation" of the paper "Fast Generation of Pointerless Octree Duals" [S1, unofficial]. It was developed to improve the performance of isosurface extraction by leveraging the efficiency of linear hashed octrees [S1, unofficial]. The source is an unofficial GitHub repository [S1, unofficial].
+Origin: Loose implementation of "Fast Generation of Pointerless Octree Duals" [S1, unofficial]. History: Not given in the sources. Usage: Not given in the sources.
 
 ## Sources
 [S1] https://github.com/swiftcoder/isosurface, https://github.com/swiftcoder/isosurface, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,2493 @@
+# Voxel Cone Tracing
+
+An implementation of voxel cone tracing based on "Interactive Indirect Illumination Using Voxel Cone Tracing" by Cyril Crassin et al (https://research.nvidia.com/sites/default/files/publications/GIVoxels-pg2011-authors.pdf).
+
+![alt text](https://github.com/GreatBlambo/voxel_cone_tracing/blob/master/tckr9Pn.png)
+
+Requires OpenGL 4.5, CMake 3.2
+
+After cloning, do:
+```
+git submodule update --init --recursive
+```
+To pull each submodule.
+
+To build:
+``` 
+mkdir build
+cd build && cmake ..
+make
+cd ..
+build/Voxel_Cone_Tracing
+```
+
+### shader/mipmap.comp
+```
+#version 450 core
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+uniform layout (binding = 0) sampler3D src_tex3D[6];
+uniform layout (binding = 0, RGBA8) image3D dest_tex3D[6];
+
+uniform int resolution;
+uniform int mip;
+
+const ivec3 voxel_offsets[] = ivec3[8]
+(
+  ivec3(1, 1, 1),
+  ivec3(1, 1, 0),
+  ivec3(1, 0, 1),
+  ivec3(1, 0, 0),
+  ivec3(0, 1, 1),
+  ivec3(0, 1, 0),
+  ivec3(0, 0, 1),
+  ivec3(0, 0, 0)
+);
+
+/**
+dir:
+  0 = -x
+  1 = x
+  2 = -y 
+  3 = y 
+  4 = -z
+  5 = z 
+  */
+
+vec4[8] fetch_texels(int dir, ivec3 block_pos)
+{
+  vec4 values[8];
+  for (int i = 0; i < 8; i++)
+    values[i] = texelFetch(src_tex3D[dir], block_pos + voxel_offsets[i], mip);
+  return values;
+}
+
+vec4 alpha_blend(vec4 v0, vec4 v1)
+{
+  return v0 + ((1 - v0.a) * v1);
+}
+
+void main()
+{
+  if (gl_GlobalInvocationID.x >= resolution ||
+      gl_GlobalInvocationID.y >= resolution ||
+      gl_GlobalInvocationID.z >= resolution)
+    return;
+
+  ivec3 write_pos = ivec3(gl_GlobalInvocationID);
+  ivec3 block_pos = write_pos * 2;
+
+  vec4 values[8];
+
+  // Anisotropically filter voxels
+  // -x dir
+  values = fetch_texels(0, block_pos);
+  imageStore(dest_tex3D[0], write_pos, (alpha_blend(values[0], values[4]) + 
+                                        alpha_blend(values[1], values[5]) +
+                                        alpha_blend(values[2], values[6]) +
+                                        alpha_blend(values[3], values[7])) / 4);
+
+  // x dir
+  values = fetch_texels(1, block_pos);
+  imageStore(dest_tex3D[1], write_pos, (alpha_blend(values[4], values[0]) + 
+                                        alpha_blend(values[5], values[1]) +
+                                        alpha_blend(values[6], values[2]) +
+                                        alpha_blend(values[7], values[3])) / 4);
+
+  // -y dir
+  values = fetch_texels(2, block_pos);
+  imageStore(dest_tex3D[2], write_pos, (alpha_blend(values[0], values[2]) + 
+                                        alpha_blend(values[1], values[3]) +
+                                        alpha_blend(values[5], values[7]) +
+                                        alpha_blend(values[4], values[6])) / 4);
+
+  // y dir
+  values = fetch_texels(3, block_pos);
+  imageStore(dest_tex3D[3], write_pos, (alpha_blend(values[2], values[0]) + 
+                                        alpha_blend(values[3], values[1]) +
+                                        alpha_blend(values[7], values[5]) +
+                                        alpha_blend(values[6], values[4])) / 4);
+
+  // -z dir
+  values = fetch_texels(4, block_pos);
+  imageStore(dest_tex3D[4], write_pos, (alpha_blend(values[0], values[1]) + 
+                                        alpha_blend(values[2], values[3]) +
+                                        alpha_blend(values[4], values[5]) +
+                                        alpha_blend(values[6], values[7])) / 4);
+
+  // z dir
+  values = fetch_texels(5, block_pos);
+  imageStore(dest_tex3D[5], write_pos, (alpha_blend(values[1], values[0]) + 
+                                        alpha_blend(values[3], values[2]) +
+                                        alpha_blend(values[5], values[4]) +
+                                        alpha_blend(values[7], values[6])) / 4);
+
+}
+```
+
+### shader/passthrough.frag
+```
+#version 450 core
+
+out vec4 final_color;
+
+in VS_OUT 
+{
+  vec4 position;
+  vec3 normal;
+  vec2 uv;
+} fs_in;
+
+layout (std140, binding = 1) uniform material
+{
+  vec3 ambient;
+  vec3 diffuse;
+  vec3 specular;
+  vec3 transmittance;
+  vec3 emission;
+
+  float shininess;
+  float ior;
+  float dissolve;
+
+  float roughness;
+  float metallic;
+  float sheen;
+  float clearcoat_thickness;
+  float clearcoat_roughness;
+  float anisotropy;
+  float anisotropy_rotation;
+};
+
+uniform float cube_size;
+void main()
+{
+  final_color = vec4(diffuse, 1.0);
+}
+```
+
+### shader/passthrough.vert
+```
+#version 450 core
+
+layout (location = 0) in vec3 position;
+layout (location = 1) in vec3 normal;
+layout (location = 2) in vec2 uv;
+
+layout (binding = 0) uniform camera
+{
+  mat4 projection;
+  mat4 view;
+};
+
+out VS_OUT
+{
+  vec4 position;
+  vec3 normal;
+  vec2 uv;
+} vs_out;
+
+uniform mat4 model;
+
+void main()
+{
+  gl_Position = projection * view * model * vec4(position, 1.0);
+  vs_out.position = vec4(position, 1.0);
+  vs_out.normal = normal;
+  vs_out.uv = uv;
+}
+```
+
+### shader/voxel_cone_tracing.frag
+```
+#version 450 core
+
+layout (std140, binding = 1) uniform material
+{
+  vec3 ambient;
+  vec3 diffuse;
+  vec3 specular;
+  vec3 transmittance;
+  vec3 emission;
+
+  float shininess;
+  float ior;
+  float dissolve;
+
+  int illum;
+
+  float roughness;
+  float metallic;
+  float sheen;
+  float clearcoat_thickness;
+  float clearcoat_roughness;
+  float anisotropy;
+  float anisotropy_rotation;
+};
+
+in VS_OUT
+{
+  vec4 world_position;
+  vec3 normal;
+  vec2 uv;
+} vs_out;
+
+out vec4 final_color;
+
+layout (binding = 2) uniform sampler3D tex3D[6];
+
+uniform float cube_size;
+
+uniform int cube_res;
+
+uniform vec3 camera_position;
+
+float voxel_size = 1.0f / cube_res;
+
+struct point_light
+{
+  vec3 position;
+  vec3 color;
+  float intensity;
+};
+
+#define MAX_POINT_LIGHTS 10
+uniform point_light point_lights[MAX_POINT_LIGHTS];
+uniform int point_light_count;
+
+vec3 scale_and_bias(const vec3 p)
+{
+  return 0.5f * p + vec3(0.5f);
+}
+
+bool within_cube(const vec3 p, float error)
+{
+  return abs(p.x) < 1 + error && abs(p.y) < 1 + error && abs(p.z) < 1 + error;
+}
+
+float attenuate(float k, float l, float q, float d)
+{
+  return 1.0f / (k + l * d + q * d * d);
+}
+
+uvec3 face_indices(vec3 dir)
+{
+  uvec3 ret;
+  ret.x = (dir.x < 0.0) ? 0 : 1;
+  ret.y = (dir.y < 0.0) ? 2 : 3;
+  ret.z = (dir.z < 0.0) ? 4 : 5;
+  return ret;
+}
+
+vec4 sample_voxel(vec3 pos, vec3 dir, uvec3 indices, float lod)
+{
+  dir = abs(dir);
+  return dir.x * textureLod(tex3D[indices.x], pos, lod) +
+         dir.y * textureLod(tex3D[indices.y], pos, lod) +
+         dir.z * textureLod(tex3D[indices.z], pos, lod);
+}
+
+vec4 trace_cone(vec3 origin, vec3 dir, float aperture, float max_dist)
+{
+  dir = normalize(dir);
+
+  uvec3 indices = face_indices(dir);
+
+  vec4 sample_color = vec4(0.0);
+  float dist = 3 * voxel_size;
+  float diam = dist * aperture;
+  vec3 sample_position = dir * dist + origin;
+
+  // Step until alpha > 1 or out of bounds
+  while (sample_color.a < 1.0 && dist < max_dist)
+  {
+    // Choose mip level based on the diameter of the cone
+    float mip = max(log2(diam * cube_res), 0);
+
+    vec4 mip_sample = sample_voxel(sample_position, dir, indices, mip);
+
+    // Blend mip sample with current sample color
+    sample_color += (1 - sample_color.a) * mip_sample;
+    
+    float step_size = max(diam / 2, voxel_size);
+
+    dist += step_size;
+
+    diam = dist * aperture;
+    sample_position = dir * dist + origin;
+  }
+
+  return sample_color;
+}
+
+float trace_shadow(vec3 origin, vec3 dir, float aperture, float target_dist)
+{
+  return trace_cone(origin, dir, aperture, target_dist).a;
+}
+
+vec3 tangent(vec3 n)
+{
+  vec3 t1 = cross(n, vec3(0, 0, 1));
+  vec3 t2 = cross(n, vec3(0, 1, 0));
+  if (length(t1) > length(t2))
+    return normalize(t1);
+  else
+    return normalize(t2);
+}
+
+#define TAN_22_5 0.55785173935
+// sqrt(3)
+#define MAX_DISTANCE 1.73205080757
+
+vec3 trace_diffuse(vec3 origin, vec3 normal)
+{
+  const float angle_mix = 0.5f;
+  const float aperture = TAN_22_5;
+  vec4 result_diffuse = vec4(0.0); 
+  
+  const vec3 o1 = normalize(tangent(normal));
+  const vec3 o2 = normalize(cross(o1, normal));
+
+  const vec3 c1 = 0.5f * (o1 + o2);
+  const vec3 c2 = 0.5f * (o1 - o2);
+
+  // Normal direction
+  result_diffuse += trace_cone(origin, normal, aperture, MAX_DISTANCE);
+
+  // 4 side cones
+  result_diffuse += trace_cone(origin, mix(normal, o1, angle_mix), aperture, MAX_DISTANCE);
+  result_diffuse += trace_cone(origin, mix(normal, -o1, angle_mix), aperture, MAX_DISTANCE);
+  result_diffuse += trace_cone(origin, mix(normal, o2, angle_mix), aperture, MAX_DISTANCE);
+  result_diffuse += trace_cone(origin, mix(normal, -o2, angle_mix), aperture, MAX_DISTANCE);
+
+  // 4 corners
+  result_diffuse += trace_cone(origin, mix(normal, c1, angle_mix), aperture, MAX_DISTANCE);
+  result_diffuse += trace_cone(origin, mix(normal, -c1, angle_mix), aperture, MAX_DISTANCE);
+  result_diffuse += trace_cone(origin, mix(normal, c2, angle_mix), aperture, MAX_DISTANCE);
+  result_diffuse += trace_cone(origin, mix(normal, -c2, angle_mix), aperture, MAX_DISTANCE);
+
+  return result_diffuse.xyz / 9.0f;
+}
+
+uniform bool enable_diffuse;
+uniform bool enable_specular;
+uniform bool enable_shadow;
+uniform bool enable_direct;
+
+vec3 direct_light(vec3 pos, vec3 view_dir)
+{
+  vec3 result = vec3(0.0f);
+
+  for (uint i = 0; i < min(point_light_count, MAX_POINT_LIGHTS); i++)
+  {
+    point_light light = point_lights[i];
+
+    vec3 light_pos = scale_and_bias(light.position / cube_size);
+    vec3 light_dir = light_pos - pos;
+    float d = length(light_dir);
+    light_dir = normalize(light_dir);
+    float cos_surf = max(dot(vs_out.normal, light_dir), 0.0f);
+    vec3 light_color = attenuate(1, 0, 1, d) * cos_surf * light.color * light.intensity;
+
+    // Shadow
+    float shadow_level = 1.0;
+    if (enable_shadow)
+      shadow_level = max(0, 1 - trace_shadow(pos, light_dir, 0.1, d));
+
+    // Blinn-Phong
+    float lambertian = max(dot(light_dir, vs_out.normal), 0);
+
+    // Refraction
+    float refract_angle = 0.0;
+    if (dissolve <= 0.1)
+    {
+      vec3 refraction = refract(view_dir, vs_out.normal, 1.0 / ior);
+      refract_angle = max((1 - dissolve) * dot(refraction, light_dir), 0);
+    }
+
+    float specular_coeff = 0;
+
+    vec3 half_vec = normalize(light_dir + view_dir);
+    float specular_angle = max(dot(half_vec, vs_out.normal), 0);
+    specular_angle = max(specular_angle, refract_angle);
+
+    specular_coeff = pow(specular_angle, shininess);
+
+    result += (shadow_level + 0.04) * (lambertian * diffuse + specular_coeff * specular) * light_color;
+  }
+
+  return result + clamp(emission, 0, 1);
+}
+
+float spec_to_roughness = sqrt(2.0f / (shininess + 2.0f));
+
+#define PI 3.14159265f
+#define HALF_PI 1.57079f
+#define MIN_SPECULAR_APERTURE 0.0174533f
+#define MAX_SPECULAR_APERTURE PI
+
+float specular_aperture = clamp(tan(HALF_PI * (spec_to_roughness)), MIN_SPECULAR_APERTURE, MAX_SPECULAR_APERTURE);
+
+vec3 trace_specular(vec3 pos, vec3 normal, vec3 view_dir)
+{
+  vec3 specular_dir = normalize(reflect(-view_dir, normal));
+
+  // Clamp to 1 grad and pi, exponent is angle of cone in radians
+  return trace_cone(pos, specular_dir, specular_aperture, MAX_DISTANCE).xyz;
+}
+
+vec3 trace_refraction(vec3 pos, vec3 normal, vec3 view_dir)
+{
+  const vec3 refraction = refract(view_dir, normal, 1.0 / ior);
+  return transmittance * trace_cone(pos, refraction, specular_aperture, MAX_DISTANCE).xyz;
+}
+
+uniform int view_voxel_dir;
+uniform float view_voxel_lod;
+
+void main()
+{
+  vec3 pos = scale_and_bias(vs_out.world_position.xyz / cube_size);
+
+  if (!within_cube(pos, 0))
+    return;
+
+  if (view_voxel_dir < 7)
+  {
+    final_color = textureLod(tex3D[view_voxel_dir], pos, view_voxel_lod);
+    return;
+  }
+
+  vec3 view_dir = normalize(vs_out.world_position.xyz - camera_position);
+
+  vec3 final_diffuse = vec3(0.0);
+  vec3 final_direct = vec3(0.0);
+  vec3 final_specular = vec3(0.0);
+
+  if (enable_diffuse)
+    final_diffuse = diffuse * trace_diffuse(pos, vs_out.normal);
+  if (enable_direct)
+    final_direct = direct_light(pos, view_dir);
+  if (enable_specular)
+    final_specular = specular * trace_specular(pos, vs_out.normal, view_dir);
+
+  final_color = vec4(final_specular + final_diffuse + final_direct, 1);
+  if ((illum == 4 || illum == 6 || illum == 7 || illum == 9) && enable_specular)
+    final_color = vec4(mix(trace_refraction(pos, vs_out.normal, view_dir), final_color.rgb, dissolve), 1);
+}
+```
+
+### shader/voxel_cone_tracing.vert
+```
+#version 450 core
+
+layout (location = 0) in vec3 position;
+layout (location = 1) in vec3 normal;
+layout (location = 2) in vec2 uv;
+
+layout (binding = 0) uniform camera
+{
+  mat4 projection;
+  mat4 view;
+};
+
+out VS_OUT 
+{
+  vec4 world_position;
+  vec3 normal;
+  vec2 uv;
+} vs_out;
+
+uniform mat4 model;
+
+void main()
+{
+  vs_out.world_position = model * vec4(position, 1.0);
+  gl_Position = projection * view * vs_out.world_position;
+  vs_out.normal = normalize(mat3(transpose(inverse(model))) * normal);
+  vs_out.uv = uv;
+}
+```
+
+### shader/voxelize.frag
+```
+#version 450 core
+
+in GS_OUT 
+{
+  vec4 world_position;
+  vec3 normal;
+  vec2 uv;
+} gs_out;
+
+layout (std140, binding = 1) uniform material
+{
+  vec3 ambient;
+  vec3 diffuse;
+  vec3 specular;
+  vec3 transmittance;
+  vec3 emission;
+
+  float shininess;
+  float ior;
+  float dissolve;
+
+  int illum;
+
+  float roughness;
+  float metallic;
+  float sheen;
+  float clearcoat_thickness;
+  float clearcoat_roughness;
+  float anisotropy;
+  float anisotropy_rotation;
+};
+
+struct point_light
+{
+  vec3 position;
+  vec3 color;
+  float intensity;
+};
+
+#define MAX_POINT_LIGHTS 10
+uniform point_light point_lights[MAX_POINT_LIGHTS];
+uniform int point_light_count;
+
+uniform layout (binding = 2, r32ui) uimage3D tex3D[6];
+
+vec3 scale_and_bias(const vec3 p)
+{
+  return 0.5f * p + vec3(0.5f);
+}
+
+bool within_cube(const vec3 p, float error)
+{
+  return abs(p.x) < 1 + error && abs(p.y) < 1 + error && abs(p.z) < 1 + error;
+}
+
+float attenuate(float k, float l, float q, float d)
+{
+  return 1.0f / (k + l * d + q * d * d);
+}
+
+uniform float cube_size;
+
+// Note: below functions relating to storing an atomic running average are courtesy of the OpenGL
+// Insights chapter on hardware accelerated voxelization
+
+uint convVec4ToRGBA8(vec4 val) {
+  return (uint(val.w) & 0x000000FF) << 24U
+    | (uint(val.z) & 0x000000FF) << 16U
+    | (uint(val.y) & 0x000000FF) << 8U
+    | (uint(val.x) & 0x000000FF);
+}
+
+vec4 convRGBA8ToVec4(uint val) {
+  return vec4(float((val & 0x000000FF)),
+      float((val & 0x0000FF00) >> 8U),
+      float((val & 0x00FF0000) >> 16U),
+      float((val & 0xFF000000) >> 24U));
+}
+
+uint encUnsignedNibble(uint m, uint n) {
+  return (m & 0xFEFEFEFE)
+    | (n & 0x00000001)
+    | (n & 0x00000002) << 7U
+    | (n & 0x00000004) << 14U
+    | (n & 0x00000008) << 21U;
+}
+
+uint decUnsignedNibble(uint m) {
+  return (m & 0x00000001)
+    | (m & 0x00000100) >> 7U
+    | (m & 0x00010000) >> 14U
+    | (m & 0x01000000) >> 21U;
+}
+
+void imageAtomicRGBA8Avg(layout (r32ui) uimage3D img, ivec3 coords, vec4 val)
+{
+  // LSBs are used for the sample counter of the moving average.
+
+  val *= 255.0;
+  uint newVal = encUnsignedNibble(convVec4ToRGBA8(val), 1);
+  uint prevStoredVal = 0;
+  uint currStoredVal;
+
+  int counter = 0;
+  // Loop as long as destination value gets changed by other threads
+  while ((currStoredVal = imageAtomicCompSwap(img, coords, prevStoredVal, newVal))
+      != prevStoredVal && counter < 16) {
+
+    vec4 rval = convRGBA8ToVec4(currStoredVal & 0xFEFEFEFE);
+    uint n = decUnsignedNibble(currStoredVal);
+    rval = rval * n + val;
+    rval /= ++n;
+    rval = round(rval / 2) * 2;
+    newVal = encUnsignedNibble(convVec4ToRGBA8(rval), n);
+
+    prevStoredVal = currStoredVal;
+
+    counter++;
+  }
+}
+
+void main()
+{
+  vec3 pos = gs_out.world_position.xyz;
+  vec3 color = vec3(0.0f);
+
+  // Calculate lighting
+  int num_lights = min(point_light_count, MAX_POINT_LIGHTS);
+  for (int i = 0; i < num_lights; i++)
+  {
+    const vec3 light_pos = point_lights[i].position / cube_size;
+    const vec3 dir = normalize(light_pos - gs_out.world_position.xyz);
+    const float d = distance(light_pos, gs_out.world_position.xyz);
+    const float a = attenuate(1, 0, 1, d);
+
+    float cos_surf = max(dot(normalize(gs_out.normal), dir), 0.0f);
+
+    color += cos_surf * a * point_lights[i].color * point_lights[i].intensity;
+  }
+
+  // Multiply intensity with diffuse/specular
+  vec3 emissivity_term = emission;
+  color = (diffuse * color) + emissivity_term;
+
+  vec3 final_trans = vec3(1.0, 1.0, 1.0);
+  float alpha = 1.0;
+  if (illum == 4 || illum == 6 || illum == 7 || illum == 9)
+  {
+    final_trans = transmittance;
+    alpha = dissolve;
+  }
+
+  vec4 final_color = clamp(vec4(final_trans * color, alpha), 0, 1);
+
+  // Output to 3D texture
+  ivec3 dim = imageSize(tex3D[0]);
+  ivec3 voxel_pos = ivec3(dim * scale_and_bias(pos));
+
+  for (int i = 0; i < 6; i++)
+    imageAtomicRGBA8Avg(tex3D[i], voxel_pos, final_color);
+}
+```
+
+### shader/voxelize.geom
+```
+#version 450 core
+
+layout (triangles) in;
+layout (triangle_strip, max_vertices = 3) out;
+
+in VS_OUT
+{
+  vec4 world_position;
+  vec3 normal;
+  vec2 uv;
+} vs_out[];
+
+out GS_OUT
+{
+  vec4 world_position;
+  vec3 normal;
+  vec2 uv;
+} gs_out;
+
+vec3 scale_and_bias(const vec3 p)
+{
+  return 0.5f * p + vec3(0.5f);
+}
+
+void main()
+{
+  // Get triangle normal
+  const vec3 p1 = vs_out[1].world_position.xyz - vs_out[0].world_position.xyz;
+  const vec3 p2 = vs_out[2].world_position.xyz - vs_out[0].world_position.xyz;
+  const vec3 p = abs(cross(p1, p2));
+
+  // For each vertex emit a projected vertex based on the axis with the
+  // largest projection
+  for (uint i = 0; i < 3; i++)
+  {
+    gs_out.world_position = vs_out[i].world_position;
+    gs_out.normal = vs_out[i].normal;
+    gs_out.uv = vs_out[i].uv;
+
+    if (p.z > p.x && p.z > p.y)
+    {
+      gl_Position = vec4(gs_out.world_position.x, gs_out.world_position.y, 0, 1);
+    }
+    else if (p.x > p.y && p.x > p.z)
+    {
+      gl_Position = vec4(gs_out.world_position.y, gs_out.world_position.z, 0, 1);
+    }
+    else
+    {
+      gl_Position = vec4(gs_out.world_position.x, gs_out.world_position.z, 0, 1);
+    }
+    EmitVertex();
+  }
+  EndPrimitive();
+}
+```
+
+### shader/voxelize.vert
+```
+#version 450 core
+
+layout (location = 0) in vec3 position;
+layout (location = 1) in vec3 normal;
+layout (location = 2) in vec2 uv;
+
+layout (binding = 0) uniform camera
+{
+  mat4 projection;
+  mat4 view;
+};
+
+uniform mat4 model;
+
+out VS_OUT
+{
+  vec4 world_position;
+  vec3 normal;
+  vec2 uv;
+} vs_out;
+
+uniform float cube_size;
+
+void main()
+{
+  vs_out.world_position = (model * vec4(position, 1.0)) / cube_size;
+  gl_Position = projection * view * vs_out.world_position;
+  vs_out.normal = normalize(mat3(transpose(inverse(model))) * normal);
+  vs_out.uv = uv;
+}
+```
+
+### src/camera.h
+```
+#pragma once
+
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/rotate_vector.hpp>
+
+struct Camera
+{
+  public:
+    Camera(glm::vec3 initial_pos, float pitch, float yaw)
+      : m_up(0, 1, 0)
+      , m_pos(initial_pos)
+      , m_pitch(pitch)
+      , m_yaw(yaw)
+    {
+      calc_front();
+    };
+
+    void set_perspective(float lens_angle, float aspect_ratio, float near, float far)
+    {
+      m_projection = glm::perspective(lens_angle, aspect_ratio, near, far);
+    } 
+
+    void calc_front()
+    {
+      if (m_pitch > 89)
+        m_pitch = 89;
+      if (m_pitch < -89)
+        m_pitch = 89;
+      
+      m_front.x = cos(glm::radians(m_pitch)) * cos(glm::radians(m_yaw));
+      m_front.y = sin(glm::radians(m_pitch));
+      m_front.z = cos(glm::radians(m_pitch)) * sin(glm::radians(m_yaw));
+
+      m_front = glm::normalize(m_front);
+    }
+
+    void add_rot(float pitch, float yaw)
+    {
+      m_pitch += pitch;
+      m_yaw += yaw;
+    }
+
+    void move(float x, float y, float z)
+    {
+      m_pos += glm::vec3(x * glm::normalize(glm::cross(m_front, m_up)));
+      m_pos.y += y;
+      m_pos += z * m_front;
+    }
+
+    glm::mat4& get_lookat()
+    {
+      calc_front();      
+      m_view = glm::lookAt(m_pos, m_pos + m_front, m_up);
+      return m_view;
+    }
+
+    glm::mat4& get_projection()
+    {
+      return m_projection;
+    }
+
+    glm::vec3 m_pos;
+    glm::vec3 m_front;
+    glm::vec3 m_up;
+
+    float m_pitch;
+    float m_yaw;
+
+    glm::mat4 m_projection;
+    glm::mat4 m_view;
+};
+```
+
+### src/device.cpp
+```
+#include "device.h"
+```
+
+### src/device.h
+```
+#pragma once
+
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+
+#include <vector>
+
+#define MAX_BOUND_TEXTURES 32
+#define MAX_BOUND_UBOS 32
+
+typedef size_t pipeline_id_t;
+typedef size_t vertex_buffer_t;
+
+typedef struct
+{
+  GLuint vao;
+  GLuint shader_program;
+
+  GLuint textures[MAX_BOUND_TEXTURES];
+  size_t num_textures;
+
+  GLuint ubos[MAX_BOUND_UBOS];
+  size_t num_ubos;
+} pipeline_state_t;
+
+typedef struct
+{
+
+    
+} attrib_description_t;
+
+class Device
+{
+  public:
+    
+  private:
+    std::vector<pipeline_state_t> m_pipeline_states;
+};
+```
+
+### src/main.cpp
+```
+// TODO: Camera class
+
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+
+#include <gl_utils/gl_helpers.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include "renderer.h"
+
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/rotate_vector.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+#include <imgui/imgui.h>
+#include <imgui_impl_glfw_gl3.h>
+
+static void error_callback(int error, const char *description)
+{
+  fprintf(stderr, "%s", description);
+}
+
+#define WIDTH 800 
+#define HEIGHT 600 
+
+#include <glm/gtx/string_cast.hpp>
+
+#define CONTROL_WIDTH 400
+
+namespace ImGui
+{
+  static auto vector_getter = [](void* vec, int idx, const char** out_text)
+  {
+    auto& vector = *static_cast<std::vector<std::string>*>(vec);
+    if (idx < 0 || idx >= static_cast<int>(vector.size())) { return false; }
+    *out_text = vector.at(idx).c_str();
+    return true;
+  };
+
+  bool ListBox(const char* label, int* currIndex, std::vector<std::string>& values, int height_in_items)
+  {
+    if (values.empty()) { return false; }
+    return ListBox(label, currIndex, vector_getter,
+        static_cast<void*>(&values), values.size(), height_in_items);
+  }
+}
+
+int main()
+{
+  GLFWwindow* window;
+  if (!glfwInit())
+    exit(EXIT_FAILURE);
+
+  glfwSetErrorCallback(error_callback);
+
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
+  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+  glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+  glfwWindowHint(GLFW_RESIZABLE, GL_FALSE);
+  glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GL_TRUE);
+
+  window = glfwCreateWindow(WIDTH + CONTROL_WIDTH, HEIGHT, "", NULL, NULL);
+  if (!window)
+  {
+    glfwTerminate();
+    exit(EXIT_FAILURE);
+  }
+
+  glfwMakeContextCurrent(window);
+  gladLoadGLLoader((GLADloadproc) glfwGetProcAddress);
+
+  glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+
+  ImGui_ImplGlfwGL3_Init(window, true);
+
+  Renderer renderer(WIDTH, HEIGHT);
+
+  // Create scene
+  model_id_t box = renderer.load_model("assets/CornellBox-Glossy.obj");
+
+  model_id_t dynamic_object = renderer.load_model("assets/suzanne.obj");
+  material_data_t dynamic_object_material;
+  dynamic_object_material.ambient = glm::vec4(1.0);
+  dynamic_object_material.diffuse = glm::vec4(0.0);
+  dynamic_object_material.specular = glm::vec4(1.0);
+  dynamic_object_material.transmittance = glm::vec4(1.0);
+  dynamic_object_material.emission = glm::vec3(0.0, 0.0, .25); 
+  dynamic_object_material.shininess = 1000;
+  dynamic_object_material.ior = 5;
+  dynamic_object_material.dissolve = 0.1;
+  dynamic_object_material.illum = 4;
+
+  material_id_t dynamic_object_material_id = renderer.add_material(dynamic_object_material);
+  renderer.set_model_material(dynamic_object_material_id, dynamic_object);
+  glm::vec3 dynamic_object_position = glm::vec3(0, 1.1, -0.5);
+  float dynamic_object_scale = 0.3;
+  float dynamic_object_rot = 0;
+
+  renderer.set_grid_size(3);
+
+  Camera camera(glm::vec3(0, .9, 3), 0, -90);
+  camera.set_perspective(45.0f, (float) WIDTH / (float) HEIGHT, 0.1f, 100.0f);
+  renderer.set_camera_transform(camera.get_lookat(), camera.get_projection());
+
+  std::vector<std::string> light_names;
+  std::vector<point_light_t> lights;
+  int current_light_index = 0;
+
+  point_light_t ceiling_light;
+  ceiling_light.position = glm::vec3(0, 1.4, 0);
+  ceiling_light.color = glm::vec3(1.0f);
+  ceiling_light.intensity = 1.0;
+
+  light_names.push_back("Ceiling light");
+  lights.push_back(ceiling_light);
+
+  static float init_move_speed = 0.005;
+  static float init_rot_speed = 0.005;
+  static float init_camera_rot_amount = 0.01;
+
+  double mouse_x, mouse_y;
+  glfwGetCursorPos(window, &mouse_x, &mouse_y);
+
+  double last_time = glfwGetTime();
+
+  bool control_object = false;
+  bool control_light = false;
+  bool control_camera = false;
+
+  bool enable_diffuse = true;
+  bool enable_specular = true;
+  bool enable_shadows = true;
+  bool enable_direct = true;
+
+  while (!glfwWindowShouldClose(window))
+  {
+    double time = glfwGetTime();
+    double dt = (time - last_time) * 1000.0f;
+    last_time = time;
+
+    float move_speed = dt * init_move_speed;
+    float turn_speed = dt * init_rot_speed;
+    float camera_rot_amount = dt * init_camera_rot_amount;
+
+    // Input
+    glfwPollEvents();
+    ImGui_ImplGlfwGL3_NewFrame();
+
+    // Menu
+
+    point_light_t& current_light = lights[current_light_index];
+
+    {
+      ImGui::SetNextWindowSizeConstraints(ImVec2(CONTROL_WIDTH, HEIGHT), ImVec2(CONTROL_WIDTH, HEIGHT));
+      ImGui::SetNextWindowPos(ImVec2(WIDTH, 0));
+      ImGui::Begin("CONTROL");
+
+      ImGui::Text("Dynamic object parameters");
+      ImGui::SliderFloat3("Diffuse", glm::value_ptr(dynamic_object_material.diffuse), 0.0, 1.0);
+      ImGui::SliderFloat3("Specular", glm::value_ptr(dynamic_object_material.specular), 0.0, 1.0);
+      ImGui::SliderFloat3("Transmittance", glm::value_ptr(dynamic_object_material.transmittance), 0.0, 1.0);
+      ImGui::SliderFloat3("Emission", glm::value_ptr(dynamic_object_material.emission), 0.0, 1.0);
+      ImGui::SliderFloat("Shininess", &dynamic_object_material.shininess, 1, 1000);
+      ImGui::SliderFloat("Index of Refraction", &dynamic_object_material.ior, 1, 5);
+      ImGui::SliderFloat("Opacity", &dynamic_object_material.dissolve, 0, 1);
+
+      bool transparency = dynamic_object_material.illum == 4;
+      ImGui::Checkbox("Refraction", &transparency);
+      if (transparency)
+        dynamic_object_material.illum = 4;
+      else
+        dynamic_object_material.illum = 5;
+
+      ImGui::Separator();
+
+      ImGui::Text("Light parameters");
+      ImGui::ListBox("Lights", &current_light_index, light_names, 3);
+      ImGui::Text("Current light: %s", light_names[current_light_index].c_str());
+      ImGui::SliderFloat3("Light color", glm::value_ptr(current_light.color), 0.0, 1.0);
+      ImGui::SliderFloat("Light intensity", &current_light.intensity, 0.0, 1.0);
+
+      ImGui::Text("Create light");
+      static char light_name[256];
+      bool light_name_filled = ImGui::InputText("Light name", light_name, 256);
+      if (ImGui::Button("New light"))
+      {
+        light_names.push_back(light_name);
+
+        point_light_t new_light;
+        new_light.color = glm::vec3(1.0, 1.0, 1.0);
+        new_light.position = glm::vec3(0, 1.45, 0);
+        new_light.intensity = 0;
+
+        lights.push_back(new_light);
+      }
+
+      ImGui::SameLine();
+
+      if (ImGui::Button("Delete light"))
+      {
+        lights.erase(lights.begin() + current_light_index);
+        light_names.erase(light_names.begin() + current_light_index);
+      }
+
+      ImGui::Separator();
+
+      static const char* control_options[] =
+      {
+        "object",
+        "light",
+        "camera",
+        "none"
+      };
+
+      static int current_control = 3;
+      
+      ImGui::Text("Transform control: %s. Press ESC to stop control", control_options[current_control]);
+      ImGui::Text("Shift for down, Space for up");
+
+      if (ImGui::Button("Dynamic object (WASD move, QE rotate)"))
+      {
+        control_object = true;
+        control_light = false;
+        control_camera = false;
+        current_control = 0;
+      }
+
+      if (ImGui::Button("Current light (WASD move)"))
+      {
+        control_object = false;
+        control_light = true;
+        control_camera = false;
+        current_control = 1;
+      }
+
+      if (ImGui::Button("Camera (WASD move, mouse look)"))
+      {
+        control_object = false;
+        control_light = false;
+        control_camera = true;
+        current_control = 2;
+      }
+
+      if (ImGui::Button("None") || ImGui::IsKeyDown(ImGui::GetKeyIndex(ImGuiKey_Escape)))
+      {
+        control_object = false;
+        control_light = false;
+        control_camera = false;
+        current_control = 3;
+      }
+
+      ImGui::Separator();
+
+      ImGui::Text("Rendering stages");
+      ImGui::Checkbox("Enable indirect diffuse", &enable_diffuse);
+      ImGui::Checkbox("Enable indirect specular", &enable_specular);
+      ImGui::Checkbox("Enable soft shadows", &enable_shadows);
+      ImGui::Checkbox("Enable direct", &enable_direct);
+
+      ImGui::Separator();
+
+      ImGui::Text("View filtered voxel map");
+
+      static bool view_voxels = false;
+      ImGui::Checkbox("Enable", &view_voxels);
+
+      static float lod = 0;
+      static int dir = 0;
+
+      if (view_voxels)
+      {
+        ImGui::SliderFloat("LOD", &lod, 0, 7);
+        ImGui::Text("View direction: "); ImGui::SameLine();
+        if (ImGui::Button("x"))
+          dir = 1;
+        ImGui::SameLine(); 
+        if (ImGui::Button("-x"))
+          dir = 0;
+        ImGui::SameLine(); 
+        if (ImGui::Button("y"))
+          dir = 3;
+        ImGui::SameLine(); 
+        if (ImGui::Button("-y"))
+          dir = 2;
+        ImGui::SameLine(); 
+        if (ImGui::Button("z"))
+          dir = 5;
+        ImGui::SameLine(); 
+        if (ImGui::Button("-z"))
+          dir = 4;
+        renderer.set_voxel_view_dir(dir, lod);
+      }
+      else
+        renderer.set_voxel_view_dir(7, lod);
+
+
+      ImGui::End();
+    }
+
+    renderer.upload_material_data(dynamic_object_material, dynamic_object_material_id);
+    renderer.set_rendering_phases(enable_direct, enable_diffuse, enable_specular, enable_shadows);
+
+    double new_mouse_x, new_mouse_y;
+    glfwGetCursorPos(window, &new_mouse_x, &new_mouse_y);
+
+    float dx = 0, dy = 0, dz = 0;
+    float dtheta = 0;
+
+    int state = glfwGetKey(window, GLFW_KEY_D);
+    if (state == GLFW_PRESS)
+      dx = move_speed;
+
+    state = glfwGetKey(window, GLFW_KEY_A);
+    if (state == GLFW_PRESS)
+      dx = -move_speed;
+
+    state = glfwGetKey(window, GLFW_KEY_S);
+    if (state == GLFW_PRESS)
+      dz = -move_speed;
+
+    state = glfwGetKey(window, GLFW_KEY_W);
+    if (state == GLFW_PRESS)
+      dz = move_speed;
+
+    state = glfwGetKey(window, GLFW_KEY_Q);
+    if (state == GLFW_PRESS)
+      dtheta = turn_speed;
+
+    state = glfwGetKey(window, GLFW_KEY_E);
+    if (state == GLFW_PRESS)
+      dtheta = -turn_speed;
+
+    state = glfwGetKey(window, GLFW_KEY_SPACE);
+    if (state == GLFW_PRESS)
+      dy = move_speed;
+
+    state = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT);
+    if (state == GLFW_PRESS)
+      dy = -move_speed;
+
+    if (control_camera)
+    {
+      camera.move(dx, dy, dz);
+      camera.add_rot(-camera_rot_amount * (new_mouse_y - mouse_y), camera_rot_amount * (new_mouse_x - mouse_x));
+      renderer.set_camera_transform(camera.get_lookat(), camera.get_projection());
+    }
+    else if (control_object)
+    {
+      dynamic_object_position += glm::vec3(0.2 * dx, 0.2 * dy, 0.2 * -dz);
+      dynamic_object_rot += dtheta;
+    }
+    else if (control_light)
+    {
+      point_light_t& current_light = lights[current_light_index];
+      current_light.position += glm::vec3(0.2 * dx, 0.2 * dy, 0.2 * -dz);
+    }
+
+    mouse_x = new_mouse_x;
+    mouse_y = new_mouse_y;
+
+    // Renderer
+
+    glm::mat4 dynamic_object_matrix;
+    dynamic_object_matrix = glm::translate(dynamic_object_matrix, dynamic_object_position);
+    dynamic_object_matrix = glm::rotate(dynamic_object_matrix, dynamic_object_rot, glm::vec3(0, 1, 0));
+    dynamic_object_matrix = glm::scale(dynamic_object_matrix, glm::vec3(dynamic_object_scale, dynamic_object_scale, dynamic_object_scale));
+    glm::mat4 dynamic_object_rotate;
+    renderer.set_model_transform(dynamic_object, dynamic_object_matrix);
+
+    glm::mat4 box_matrix;
+    renderer.set_model_transform(box, box_matrix);
+    renderer.queue_model(box);
+    renderer.queue_model(dynamic_object);
+
+    for (auto& light : lights)
+      renderer.queue_point_light(light);
+
+    renderer.render();
+
+    ImGui::Render();
+    glfwSwapBuffers(window);
+  }
+
+  ImGui_ImplGlfwGL3_Shutdown();
+
+  return 0;
+}
+```
+
+### src/renderer.cpp
+```
+// TODO: Split into pass class
+// TODO: Finish shader implementation
+// TODO: Write your own damn object loader
+// TODO: Support textures
+// TODO: Materials should not just bind 2D textures
+// TODO: Calculate normals if not provided
+
+#include <tinyobjloader/tiny_obj_loader.h>
+#include <unordered_map>
+
+#include "renderer.h"
+#include <glm/gtc/type_ptr.hpp>
+#include <glm/glm.hpp>
+
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/gtx/hash.hpp>
+#include <glm/gtc/matrix_access.hpp> 
+
+#include <gl_utils/gl_helpers.h>
+
+#include "texture_3d.h"
+
+#pragma pack(push, 1)
+struct vert_data_t
+{
+  glm::vec3 pos;
+  glm::vec3 norm;
+  glm::vec2 tex;
+
+  bool operator==(const vert_data_t& other) const
+  {
+    return pos == other.pos && norm == other.norm && tex == other.tex;
+  }
+};
+#pragma pack(pop)
+
+namespace std
+{
+  template<> struct hash<vert_data_t>
+  {
+    size_t operator()(vert_data_t const& vertex) const
+    {
+      return ((hash<glm::vec3>()(vertex.pos) ^
+              (hash<glm::vec3>()(vertex.norm) << 1)) >> 1) ^ 
+              (hash<glm::vec2>()(vertex.tex) << 1);
+    }
+  };
+}
+void create_material(const tinyobj::material_t& material, material_t* result)
+{
+  material_data_t mat_data;
+
+  for (int i = 0; i < 3; i++)
+  {
+    mat_data.ambient[i] = material.ambient[i];
+    mat_data.diffuse[i] = material.diffuse[i];
+    mat_data.specular[i] = material.specular[i];
+    mat_data.transmittance[i] = material.transmittance[i];
+    mat_data.emission[i] = material.emission[i];
+  }
+  
+  mat_data.shininess = material.shininess;
+  mat_data.ior = material.ior;
+  mat_data.dissolve = material.dissolve;
+  mat_data.illum = material.illum;
+  mat_data.roughness = material.roughness;
+  mat_data.metallic = material.metallic;
+  mat_data.sheen = material.sheen;
+  mat_data.clearcoat_thickness = material.clearcoat_thickness;
+  mat_data.clearcoat_roughness = material.clearcoat_roughness;
+  mat_data.anisotropy = material.anisotropy;
+  mat_data.anisotropy_rotation = material.anisotropy_rotation;
+
+  glGenBuffers(1, &result->ubo);
+  glBindBuffer(GL_UNIFORM_BUFFER, result->ubo);
+  glBufferData(GL_UNIFORM_BUFFER, sizeof(material_data_t), &mat_data, GL_STATIC_DRAW);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+  //temp
+  result->num_textures = 0;
+}
+
+#define DEFAULT_MATERIAL_INDEX 0
+
+static void fill_default_mat_data(material_data_t& mat)
+{
+  mat.ambient[0] = 1;
+  mat.ambient[1] = 0;
+  mat.ambient[2] = 1;
+  mat.diffuse[0] = 1;
+  mat.diffuse[1] = 0;
+  mat.diffuse[2] = 1;
+
+  mat.shininess = 1;
+  mat.ior = 1;
+  mat.dissolve = 1;
+  mat.illum = 0;
+}
+
+Renderer::Renderer(int width, int height)
+  : m_viewport_width(width)
+  , m_viewport_height(height)
+  , m_enable_shadows(true)
+  , m_enable_direct(true)
+  , m_enable_indirect_diffuse(true)
+  , m_enable_indirect_specular(true)
+  , m_view_voxel_dir(0)
+  , m_view_voxel_lod(0)
+{
+  // Setup camera ubo
+  glGenBuffers(1, &m_camera_ubo);
+  glBindBuffer(GL_UNIFORM_BUFFER, m_camera_ubo);
+  glBufferData(GL_UNIFORM_BUFFER, sizeof(camera_data_t), &m_camera, GL_DYNAMIC_DRAW);
+
+  // Push default material
+  material_data_t default_material_data;
+
+  fill_default_mat_data(default_material_data);
+
+  material_t default_material;
+  default_material.num_textures = 0;
+
+  glGenBuffers(1, &default_material.ubo);
+  glBindBuffer(GL_UNIFORM_BUFFER, default_material.ubo);
+  glBufferData(GL_UNIFORM_BUFFER, sizeof(material_t), &default_material, GL_STATIC_DRAW);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+  m_materials.push_back(default_material);
+
+  // Load shaders
+  m_draw_shader = load_shader("shader/voxel_cone_tracing.vert",
+                              "shader/voxel_cone_tracing.frag");
+
+  m_voxelize_shader = load_shader("shader/voxelize.vert",
+                                  "shader/voxelize.frag",
+                                  "shader/voxelize.geom");
+
+  GLuint mipmap_shader = load_shader_source("shader/mipmap.comp", GL_COMPUTE_SHADER);
+  m_mipmap_shader = link_shader_program(&mipmap_shader, 1);
+  detach_shaders(m_mipmap_shader, &mipmap_shader, 1);
+  destroy_shader(mipmap_shader);
+
+  for (int i = 0; i < 6; i++)
+    m_voxel_maps[i] = 0;
+
+  set_grid_resolution(128);
+}
+
+Renderer::~Renderer()
+{
+  for (const auto& material : m_materials)
+    glDeleteBuffers(1, &material.ubo);
+  for (const auto& model : m_models)
+  {
+    glDeleteVertexArrays(1, &model.vao);
+    glDeleteBuffers(1, &model.vbo);
+    glDeleteBuffers(1, &model.ebo);
+  }
+  for (const auto& shader : m_shaders)
+    destroy_program(shader.program);
+  glDeleteBuffers(1, &m_camera_ubo);
+  destroy_program(m_mipmap_shader);
+
+  glDeleteTextures(6, m_voxel_maps);
+}
+
+void Renderer::set_camera_transform(glm::mat4& lookat, glm::mat4& projection)
+{
+  m_camera.view = lookat;
+  m_camera.projection = projection;
+}
+
+glm::vec3 Renderer::get_model_dimensions(model_id_t model)
+{
+  return m_models[model].dimensions;
+}
+
+void Renderer::set_grid_resolution(unsigned int res)
+{
+  m_resolution = res;
+
+  for (int i = 0; i < 6; i++)
+  {
+    if (m_voxel_maps[i])
+      destroy_tex_3d(m_voxel_maps[i]);
+    m_voxel_maps[i] = create_tex_3d(res, res, res, 7);
+  }
+}
+
+void Renderer::set_grid_size(float size)
+{
+  m_cube_size = size;
+}
+
+void Renderer::set_rendering_phases(bool direct, bool diffuse, bool specular, bool shadow)
+{
+  m_enable_shadows = shadow;
+  m_enable_direct = direct;
+  m_enable_indirect_diffuse = diffuse;
+  m_enable_indirect_specular = specular;
+}
+
+void Renderer::set_voxel_view_dir(int dir, float lod)
+{
+  m_view_voxel_dir = dir;
+  m_view_voxel_lod = lod;
+}
+
+void Renderer::queue_model(model_id_t model_id)
+{
+  if (model_id >= m_models.size())
+    return;
+
+  model_t model = m_models[model_id];
+
+  // Push model 
+  m_draw_queue.push_back(model);
+}
+
+void Renderer::queue_point_light(point_light_t& point_light)
+{
+  m_point_lights.push_back(point_light);
+}
+
+void Renderer::set_model_transform(model_id_t model_id, glm::mat4 model_matrix)
+{
+  m_models[model_id].model_matrix = model_matrix;
+}
+
+material_t& Renderer::get_material(material_id_t material_id)
+{
+  return m_materials[material_id];
+}
+
+void Renderer::bind_material(material_t& material, int location)
+{
+  glBindBufferBase(GL_UNIFORM_BUFFER, location, material.ubo);
+}
+
+void Renderer::draw_models(const shader_t& shader)
+{
+  for (auto& model : m_draw_queue)
+  {
+    glUniformMatrix4fv(shader.model_location, 1, false, glm::value_ptr(model.model_matrix));
+
+    glBindVertexArray(model.vao);
+
+    for (size_t i = 0; i < model.draw_obj_range.size; i++)
+    {
+      draw_obj_t& draw_obj = m_draw_objs[model.draw_obj_range.start + i];
+      // Bind ubos for materials
+      bind_material(m_materials[draw_obj.material_id], shader.material_location);
+
+      glDrawElements(draw_obj.draw_type, draw_obj.range.size, GL_UNSIGNED_INT, (const void*) (sizeof(unsigned) * draw_obj.range.start));
+    }
+  }
+}
+
+void Renderer::upload_lights(const shader_t& shader)
+{
+  for (size_t i = 0; i < m_point_lights.size(); i++)
+  {
+    int position_location = glGetUniformLocation(shader.program, ("point_lights[" + std::to_string(i) + "].position").c_str());
+    int color_location = glGetUniformLocation(shader.program, ("point_lights[" + std::to_string(i) + "].color").c_str());
+    int intensity_location = glGetUniformLocation(shader.program, ("point_lights[" + std::to_string(i) + "].intensity").c_str());
+
+    glUniform3fv(position_location, 1, glm::value_ptr(m_point_lights[i].position));
+    glUniform3fv(color_location, 1, glm::value_ptr(m_point_lights[i].color));
+    glUniform1f(intensity_location, m_point_lights[i].intensity);
+  }
+
+  glUniform1i(glGetUniformLocation(shader.program, "point_light_count"), m_point_lights.size());
+}
+
+void Renderer::upload_camera(const shader_t& shader)
+{
+  glBindBufferBase(GL_UNIFORM_BUFFER, shader.camera_location, m_camera_ubo);
+
+  glm::vec3 camera_position = glm::column(m_camera.view, 3);
+  glUniform3fv(glGetUniformLocation(shader.program, "camera_position"), 1, glm::value_ptr(camera_position));
+}
+
+void Renderer::filter()
+{
+  glUseProgram(m_mipmap_shader);
+
+  // Bind 3d texture
+  for (int i = 0; i < 6; i++)
+    activate_tex_3d(m_mipmap_shader, m_voxel_maps[i], i);
+  glActiveTexture(GL_TEXTURE0);
+
+  size_t current_dim = m_resolution;
+  int mip = 0;
+
+  int resolution_location = glGetUniformLocation(m_mipmap_shader, "resolution");
+  int mip_location = glGetUniformLocation(m_mipmap_shader, "mip");
+
+  while (current_dim >= 1)
+  {
+    glUniform1i(resolution_location, current_dim);
+    glUniform1i(mip_location, mip);
+
+    for (int i = 0; i < 6; i++)
+      glBindImageTexture(i, m_voxel_maps[i], mip + 1, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA8);
+
+    unsigned work_groups = static_cast<unsigned>(glm::ceil(current_dim / 8.0f));
+    glDispatchCompute(work_groups, work_groups, work_groups);
+
+    glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+    mip++;
+    current_dim /= 2;
+  }
+}
+
+void Renderer::voxelize()
+{
+  static GLfloat black[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+  // Clear texture
+  for (int i = 0; i < 6; i++)
+    clear_tex_3d(m_voxel_maps[i], black);
+
+  // Render scene
+  shader_t& shader = m_shaders[m_voxelize_shader];
+  glUseProgram(shader.program);
+  glUniform1f(shader.cube_size_location, m_cube_size); 
+
+  // Bind 3d texture
+  int offset = 2;
+  for (int i = 0; i < 6; i++)
+    glBindImageTexture(i + offset, m_voxel_maps[i], 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_R32UI);
+
+  upload_camera(shader);
+
+  // Upload lights
+  upload_lights(shader);
+
+  // Set render settings
+  int viewport_res = m_resolution * 2;
+  glViewport(0, 0, viewport_res, viewport_res);
+  glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+  glDisable(GL_CULL_FACE);
+  glDisable(GL_DEPTH_TEST);
+  //glEnable(GL_BLEND);
+  //glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+
+  draw_models(shader);
+
+  // Mipmap
+  filter();
+
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+}
+
+void Renderer::visualize()
+{
+  // Set settings
+  glViewport(0, 0, m_viewport_width, m_viewport_height);
+
+  glEnable(GL_DEPTH_TEST);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+  shader_t& shader = m_shaders[m_draw_shader];
+  glUseProgram(shader.program);
+  glUniform1f(shader.cube_size_location, m_cube_size); 
+  glUniform1i(shader.cube_res_location, m_resolution);
+
+  glUniform1i(glGetUniformLocation(shader.program, "enable_diffuse"), m_enable_indirect_diffuse);
+  glUniform1i(glGetUniformLocation(shader.program, "enable_specular"), m_enable_indirect_specular);
+  glUniform1i(glGetUniformLocation(shader.program, "enable_shadow"), m_enable_shadows);
+  glUniform1i(glGetUniformLocation(shader.program, "enable_direct"), m_enable_direct);
+
+  glUniform1i(glGetUniformLocation(shader.program, "view_voxel_dir"), m_view_voxel_dir);
+  glUniform1f(glGetUniformLocation(shader.program, "view_voxel_lod"), m_view_voxel_lod);
+
+  // Bind 3d texture
+  int offset = 2;
+  for (int i = 0; i < 6; i++)
+    activate_tex_3d(shader.program, m_voxel_maps[i], i + offset);
+
+  upload_camera(shader);
+  upload_lights(shader);
+
+  glEnable(GL_DEPTH_TEST);
+  //glEnable(GL_CULL_FACE);
+  //glCullFace(GL_BACK);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  draw_models(shader);
+}
+
+void Renderer::render()
+{
+  glBindBuffer(GL_UNIFORM_BUFFER, m_camera_ubo);
+  glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(camera_data_t), &m_camera);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+  glClearColor(0.15, 0.25, 0.25, 1.0);
+
+  voxelize();
+  visualize();
+
+  m_draw_queue.clear();
+  m_point_lights.clear();
+}
+
+model_id_t Renderer::load_model(const char* filename)
+{
+  tinyobj::attrib_t attrib;
+  std::vector<tinyobj::shape_t> shapes;
+  std::vector<tinyobj::material_t> materials;
+  std::string err;
+
+  std::string filename_obj = filename;
+  std::string basepath = filename_obj.substr(0, filename_obj.find_last_of("\\/") + 1);
+
+  if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &err, filename, basepath.c_str(), true))
+  {
+    fprintf(stderr, "Error loading file %s\n", filename);
+    return INVALID_ID;
+  }
+
+  // Store materials
+  size_t material_base_index = m_materials.size(); 
+  for (const auto& material : materials)
+  {
+    material_t new_mat = {0};
+    create_material(material, &new_mat);
+    m_materials.push_back(new_mat);
+  }
+
+  std::vector<vert_data_t> vertices;
+  std::vector<unsigned> indices;
+  std::unordered_map<vert_data_t, unsigned> unique_verts = {};
+
+  GLuint vao;
+  GLuint vbo;
+  GLuint ebo;
+
+  glGenVertexArrays(1, &vao);
+  glGenBuffers(1, &vbo);
+  glGenBuffers(1, &ebo);
+
+  draw_obj_t new_draw_obj;
+  new_draw_obj.draw_type = GL_TRIANGLES;
+  new_draw_obj.material_id = 0;
+  new_draw_obj.range.start = 0;
+  new_draw_obj.range.size = 0;
+
+  model_t new_model;
+  new_model.vao = vao;
+  new_model.vbo = vbo;
+  new_model.ebo = ebo;
+  new_model.draw_obj_range.start = m_draw_objs.size();
+  new_model.draw_obj_range.size = 0; 
+
+  glm::vec3 min(FLT_MAX);
+  glm::vec3 max(0);
+
+  for (const auto& shape : shapes)
+  { 
+    int indices_base = indices.size();
+
+    for (const auto& index : shape.mesh.indices)
+    {
+      vert_data_t vertex = {};
+
+      vertex.pos = 
+      {
+        attrib.vertices[3 * index.vertex_index + 0],
+        attrib.vertices[3 * index.vertex_index + 1],
+        attrib.vertices[3 * index.vertex_index + 2]
+      };
+
+      if (vertex.pos.x > max.x)
+        max.x = vertex.pos.x;
+      if (vertex.pos.x < min.x)
+        min.x = vertex.pos.x;
+      if (vertex.pos.y > max.y) 
+        max.y = vertex.pos.y;
+      if (vertex.pos.y < min.y)
+        min.y = vertex.pos.y;
+      if (vertex.pos.z > max.z)
+        max.z = vertex.pos.z;
+      if (vertex.pos.z < min.y)
+        min.z = vertex.pos.z; 
+
+      if (index.normal_index >= 0)
+      {
+        vertex.norm = 
+        {
+          attrib.normals[3 * index.normal_index + 0],
+          attrib.normals[3 * index.normal_index + 1],
+          attrib.normals[3 * index.normal_index + 2]
+        };
+      }
+
+      if (index.texcoord_index >= 0)
+      {
+        vertex.tex = 
+        {
+          attrib.texcoords[2 * index.texcoord_index + 0],
+          attrib.texcoords[2 * index.texcoord_index + 1]
+        };
+      }
+
+      if (unique_verts.count(vertex) == 0)
+      {
+        unique_verts[vertex] = vertices.size();
+        vertices.push_back(vertex);
+      }
+
+      vertices.push_back(vertex);
+      indices.push_back(unique_verts[vertex]);
+    }
+
+    new_model.dimensions = max - min;
+
+    int current_material_id = shape.mesh.material_ids.at(0);
+    size_t start = indices_base;
+    size_t size = 0;
+
+    for (size_t i = 0; i < shape.mesh.material_ids.size(); i++)
+    {
+      int material_id = shape.mesh.material_ids.at(i);
+
+      if (material_id == -1)
+        material_id = DEFAULT_MATERIAL_INDEX;
+
+      if (current_material_id != material_id)
+      {
+        // push new draw object
+        new_model.draw_obj_range.size++;
+
+        new_draw_obj.range.start = start;
+        new_draw_obj.range.size = size;
+        new_draw_obj.material_id = material_base_index + current_material_id;
+
+        m_draw_objs.push_back(new_draw_obj);
+
+        // Initialize start + size for new object
+        start += size;
+        size = 0;
+        current_material_id = material_id;
+      }
+      size += shape.mesh.num_face_vertices.at(i); 
+    }
+
+    // Add the last object
+
+    new_model.draw_obj_range.size++;
+
+    new_draw_obj.range.start = start;
+    new_draw_obj.range.size = size;
+    new_draw_obj.material_id = material_base_index + current_material_id;
+    m_draw_objs.push_back(new_draw_obj);
+  }
+
+  // Upload everything to the device
+
+  glBindVertexArray(new_model.vao);
+  glBindBuffer(GL_ARRAY_BUFFER, new_model.vbo);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(vert_data_t) * vertices.size(), &vertices[0], GL_STATIC_DRAW);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, new_model.ebo);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(unsigned) * indices.size(), &indices[0], GL_STATIC_DRAW);
+
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0,
+      3,
+      GL_FLOAT,
+      false,
+      sizeof(vert_data_t),
+      NULL);
+
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(1,
+      3,
+      GL_FLOAT,
+      false,
+      sizeof(vert_data_t),
+      (const void*) offsetof(vert_data_t, norm));
+
+  glEnableVertexAttribArray(2);
+  glVertexAttribPointer(2,
+      2,
+      GL_FLOAT,
+      false,
+      sizeof(vert_data_t),
+      (const void*) offsetof(vert_data_t, tex));
+
+  glBindVertexArray(0);
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+  glDisableVertexAttribArray(0);
+  glDisableVertexAttribArray(1);
+  glDisableVertexAttribArray(2);
+
+  // Finally, add the model to the vector of models
+  m_models.push_back(new_model);
+
+  return m_models.size() - 1;
+}
+
+shader_id_t Renderer::load_shader(const char* vertex_shader_name,
+    const char* fragment_shader_name,
+    const char* geometry_shader_name)
+{
+  GLuint vert_shader = load_shader_source(vertex_shader_name, GL_VERTEX_SHADER);
+  GLuint frag_shader = load_shader_source(fragment_shader_name, GL_FRAGMENT_SHADER);
+  GLuint geom_shader = load_shader_source(geometry_shader_name, GL_GEOMETRY_SHADER);
+
+  GLuint shaders[3] = { vert_shader, frag_shader, geom_shader };
+
+  int num_shaders = 3;
+
+  if (!geometry_shader_name)
+    num_shaders = 2;
+
+  shader_t new_shader;
+  new_shader.program = link_shader_program(shaders, num_shaders);
+  new_shader.material_location = glGetUniformBlockIndex(new_shader.program, "material");
+  new_shader.camera_location = glGetUniformBlockIndex(new_shader.program, "camera");
+  new_shader.texture_3D_location = glGetUniformLocation(new_shader.program, "tex3D");
+
+  new_shader.cube_size_location = glGetUniformLocation(new_shader.program, "cube_size");
+  new_shader.cube_res_location = glGetUniformLocation(new_shader.program, "cube_res");
+  new_shader.model_location = glGetUniformLocation(new_shader.program, "model");
+
+  m_shaders.push_back(new_shader);  
+
+  detach_shaders(new_shader.program, shaders, 2);
+
+  destroy_shader(vert_shader);
+  destroy_shader(frag_shader);
+
+  if (geometry_shader_name)
+    destroy_shader(geom_shader); 
+
+  return m_shaders.size() - 1;
+}
+
+void Renderer::upload_material_data(material_data_t& material_data, material_id_t material_id)
+{
+  material_t& material = m_materials[material_id];
+ 
+  glGenBuffers(1, &material.ubo);
+  glBindBuffer(GL_UNIFORM_BUFFER, material.ubo);
+  glBufferData(GL_UNIFORM_BUFFER, sizeof(material_data_t), &material_data, GL_DYNAMIC_DRAW);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+}
+
+material_id_t Renderer::add_material(material_data_t& material_data)
+{
+  material_t result;
+  result.num_textures = 0;
+
+  glGenBuffers(1, &result.ubo);
+  glBindBuffer(GL_UNIFORM_BUFFER, result.ubo);
+  glBufferData(GL_UNIFORM_BUFFER, sizeof(material_data_t), &material_data, GL_DYNAMIC_DRAW);
+  glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+  m_materials.push_back(result);
+  return m_materials.size() - 1;
+}
+
+void Renderer::set_model_material(material_id_t material_id, model_id_t model_id)
+{
+  model_t& model = m_models[model_id];
+  material_t& material = m_materials[material_id];
+
+  for (int i = 0; i < model.draw_obj_range.size; i++)
+  {
+    draw_obj_t& draw_obj = m_draw_objs[i + model.draw_obj_range.start];
+    draw_obj.material_id = material_id;
+  }
+}
+```
+
+### src/renderer.h
+```
+// TODO: Eliminate std
+// TODO: Make backend agnostic
+// TODO: Buckets accept commands rather than draw_objs
+// TODO: Handles should actually do something; currently they're just indices
+// TODO: Move shader loading to the device
+
+#pragma once
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+
+#include <vector>
+
+#include "shared.h"
+#include "camera.h"
+
+#include <glm/glm.hpp>
+
+#define MAX_TEXTURE_BINDINGS 32
+
+typedef GLuint shader_program_t;
+
+#define INVALID_ID (~0)
+typedef size_t model_id_t;
+typedef size_t shader_id_t;
+typedef size_t material_id_t;
+
+// Uniforms are copied to a host-memory buffer which is then uploaded as a
+// whole to the GPU on submit time.
+// Then on each individual draw call, it binds a range in the ubo
+typedef struct
+{
+  size_t start;
+  size_t size;  
+} buffer_range_t;
+
+// Maps to a uniform buffer and a max MAX_TEXTURE_BINDINGS # of textures
+typedef struct
+{
+  GLuint ubo;
+  GLuint textures[MAX_TEXTURE_BINDINGS];
+  size_t num_textures;
+} material_t;
+
+// Shader object that contains some binding info 
+typedef struct
+{
+  shader_program_t program;
+  int material_location;
+  int camera_location;
+  int texture_3D_location;
+  int cube_size_location;
+  int cube_res_location;
+  int model_location;
+} shader_t;
+
+// Maps to a vbo, a vao, an ebo, a range each for uniforms and indices/vertices
+typedef struct
+{
+  buffer_range_t range;
+  
+  GLenum draw_type;
+  
+  material_id_t material_id;
+} draw_obj_t;
+
+// Group of draw_objs that share buffer resources
+typedef struct
+{
+  GLuint vao;
+  GLuint vbo;
+  GLuint ebo;
+
+  buffer_range_t draw_obj_range;
+
+  shader_id_t shader_id;
+
+  glm::vec3 dimensions;
+  glm::mat4 model_matrix;
+} model_t;
+
+typedef struct
+{
+  glm::mat4 projection;
+  glm::mat4 view;
+} camera_data_t;
+
+typedef struct
+{
+  glm::vec3 position;
+  glm::vec3 color;
+  float intensity;
+} point_light_t;
+
+#pragma pack(push, 1)
+typedef struct 
+{
+  glm::vec4 ambient;
+  glm::vec4 diffuse;
+  glm::vec4 specular;
+  glm::vec4 transmittance;
+  glm::vec3 emission;
+
+  float shininess;
+  float ior;       // index of refraction
+  float dissolve;  // 1 == opaque; 0 == fully transparent
+
+  int illum;
+
+  // PBR extension
+  float roughness;            // [0, 1] default 0
+  float metallic;             // [0, 1] default 0
+  float sheen;                // [0, 1] default 0
+  float clearcoat_thickness;  // [0, 1] default 0
+  float clearcoat_roughness;  // [0, 1] default 0
+  float anisotropy;           // aniso. [0, 1] default 0
+  float anisotropy_rotation;  // anisor. [0, 1] default 0
+
+  float pad[2];
+} material_data_t;
+#pragma pack(pop)
+
+struct Renderer
+{
+  Renderer(int width, int height);
+
+  ~Renderer(); 
+
+  // Resource 
+
+  model_id_t load_model(const char* filename);
+  shader_id_t load_shader(const char* vertex_shader_name,
+                          const char* fragment_shader_name,
+                          const char* geometry_shader_name = NULL);
+
+  material_id_t add_material(material_data_t& material_data);
+  void upload_material_data(material_data_t& material_data, material_id_t material_id);
+  void set_model_material(material_id_t material_id, model_id_t model_id);
+
+  glm::vec3 get_model_dimensions(model_id_t model);
+  void set_grid_resolution(unsigned int res);
+  void set_grid_size(float size);
+  
+  void set_camera_transform(glm::mat4& lookat, glm::mat4& projection);
+  void set_model_transform(model_id_t model_id, glm::mat4 model_matrix);
+
+  material_t& get_material(material_id_t material_id);
+
+  // Render
+
+  void set_rendering_phases(bool direct, bool diffuse, bool specular, bool shadow);
+  void set_voxel_view_dir(int dir, float lod);
+
+  void queue_model(model_id_t model_id);
+  void queue_point_light(point_light_t& point_light);
+  void render();
+
+private:
+  void draw_models(const shader_t& shader);
+  void filter();
+  void upload_lights(const shader_t& shader);
+  void upload_camera(const shader_t& shader);
+  void voxelize();
+  void visualize();
+  void bind_material(material_t& material, int location);
+
+  // Lifetime
+
+  std::vector<material_t> m_materials;
+  std::vector<model_t> m_models;
+  std::vector<draw_obj_t> m_draw_objs;
+  std::vector<shader_t> m_shaders;
+
+  GLuint m_camera_ubo;
+  camera_data_t m_camera;
+
+  float m_cube_size;
+  GLuint m_voxel_grid_tex;
+  size_t m_resolution;
+
+  GLuint m_voxel_maps[6];
+
+  int m_viewport_width, m_viewport_height;
+
+  bool m_enable_shadows, m_enable_direct, m_enable_indirect_diffuse, m_enable_indirect_specular;
+  int m_view_voxel_dir;
+  float m_view_voxel_lod;
+
+  // Per frame
+
+  std::vector<model_t> m_draw_queue;
+  std::vector<point_light_t> m_point_lights;
+
+  GLuint m_mipmap_shader;
+  shader_id_t m_voxelize_shader;
+  shader_id_t m_draw_shader;
+};
+```
+
+### src/shared.h
+```
+#pragma once
+#include <stdint.h>
+
+typedef struct
+{
+  uint8_t* ptr;
+  size_t used;
+  size_t size;
+} buffer_t;
+```
+
+### src/texture_3d.cpp
+```
+#include "texture_3d.h"
+
+GLuint create_tex_3d(int width, int height, int depth, int levels)
+{
+  // Setup 3d texture
+  GLuint tex;
+  glGenTextures(1, &tex);
+  glBindTexture(GL_TEXTURE_3D, tex);
+
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+
+  glTexStorage3D(GL_TEXTURE_3D, levels, GL_RGBA8, width, height, depth);
+
+  glTexImage3D(GL_TEXTURE_3D, 0, GL_R32UI, width, height, depth, 0, GL_RGBA, GL_FLOAT, NULL);
+
+  glGenerateMipmap(GL_TEXTURE_3D);
+  glBindTexture(GL_TEXTURE_3D, 0);
+
+  return tex;
+}
+
+void destroy_tex_3d(GLuint tex)
+{
+  glDeleteTextures(1, &tex);
+}
+
+void activate_tex_3d(GLuint program, GLuint tex, GLuint unit)
+{
+  // Bind 3d texture
+  glActiveTexture(GL_TEXTURE0 + unit);
+  glBindTexture(GL_TEXTURE_3D, tex);
+}
+
+void clear_tex_3d(GLuint tex, GLfloat clear_color[4])
+{
+  glBindTexture(GL_TEXTURE_3D, tex);
+  glClearTexImage(tex, 0, GL_RGBA, GL_FLOAT, clear_color);
+  glBindTexture(GL_TEXTURE_3D, 0);
+}
+
+void mip_tex_3d(GLuint tex)
+{
+  glBindTexture(GL_TEXTURE_3D, tex);
+  glGenerateMipmap(GL_TEXTURE_3D);  
+  glBindTexture(GL_TEXTURE_3D, 0);
+}
+```
+
+### src/texture_3d.h
+```
+#pragma once
+
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+
+GLuint create_tex_3d(int width, int height, int depth, int levels);
+void destroy_tex_3d(GLuint tex);
+void activate_tex_3d(GLuint program, GLuint tex, GLuint unit);
+void clear_tex_3d(GLuint tex, GLfloat clear_color[4]);
+void mip_tex_3d(GLuint tex);
+```
+
+### lib/gl_utils/src/gl_helpers.c
+```
+#include <gl_utils/gl_helpers.h>
+#include <string.h>
+
+// Vertex Specs
+void create_vert_attrib(vert_attrib_t* attrib,
+                        const char* name,
+                        int location,
+                        int size,
+                        GLenum type,
+                        bool normalize,
+                        size_t stride,
+                        size_t offset)
+{
+  if (strlen(name) > 256)
+    return;
+  strcpy(attrib->name, name);
+  attrib->location = location;
+  attrib->size = size;
+  attrib->type = type;
+  attrib->normalize = normalize;
+  attrib->stride = stride;
+  attrib->offset = offset;
+}
+
+void set_vertex_spec(vert_attrib_t* attribs, size_t num_attribs)
+{
+  for (int i = 0; i < num_attribs; i++)
+  {
+    vert_attrib_t* attrib = attribs + i;
+    
+    glEnableVertexAttribArray(attrib->location);
+    glVertexAttribPointer(attrib->location, attrib->size, attrib->type,
+                          attrib->normalize, attrib->stride, (void*) attrib->offset);
+ 
+  }
+}
+
+GLuint create_buffer(const void* data, size_t data_size, GLenum usage, GLenum access_type)
+{
+  GLuint buf;
+  glGenBuffers(1, &buf);
+  glBindBuffer(usage, buf);
+  glBufferData(usage, data_size, data, access_type);
+  glBindBuffer(usage, 0);
+
+  return buf;
+}
+
+void delete_buffer(GLuint buf)
+{
+  glDeleteBuffers(1, &buf);
+}
+
+// Shaders
+
+#define ERROR_BUFF_SIZE 512
+
+GLuint compile_shader(const char* source, size_t size, GLenum shader_type)
+{
+  GLuint result = glCreateShader(shader_type);
+  glShaderSource(result, 1, (const GLchar**) &source, (int*) &size);
+  glCompileShader(result);
+
+  int is_compiled;
+  glGetShaderiv(result, GL_COMPILE_STATUS, (int*) &is_compiled);
+
+  if (!(is_compiled == GL_TRUE))
+  {
+    fprintf(stderr, "Compile issue:");
+    char error_buff[ERROR_BUFF_SIZE];
+    int max_length = 0;
+    glGetShaderiv(result, GL_INFO_LOG_LENGTH, &max_length);
+    glGetShaderInfoLog(result, max_length, &max_length, error_buff);
+
+    error_buff[max_length] = 0;
+    fprintf(stderr, "%s\n", error_buff);
+    
+    glDeleteShader(result);
+    result = 0;
+  }
+  return result;
+}
+
+GLuint load_shader_source(const char* pathname, GLenum shader_type)
+{
+  if (!pathname)
+    return 0;
+
+  GLuint result;
+  FILE* file = NULL;
+  size_t file_size;
+  char* shader_string_buffer;
+
+  file = fopen(pathname, "r+");
+  if (!file)
+  {
+    fprintf(stderr, "Unable to load file %s.\n", pathname);
+    return 0;
+  }
+  fseek(file, 0L, SEEK_END);
+  file_size = ftell(file);
+  rewind(file);
+
+  shader_string_buffer = (char*) malloc(file_size + 1);
+  if (fread(shader_string_buffer, 1, file_size, file) != file_size)
+  {
+    fprintf(stderr, "Read error when reading %s.\n", pathname);
+    return 0;
+  }
+  shader_string_buffer[file_size] = 0;
+
+  result = compile_shader(shader_string_buffer, file_size, shader_type);
+
+  free(shader_string_buffer);
+  fclose(file);
+  return result;
+}
+
+void destroy_shader(GLuint shader)
+{
+  if (!shader)
+    return;
+
+  glDeleteShader(shader);
+}
+
+GLuint link_shader_program(GLuint* shaders, size_t num_shaders)
+{
+  if (!shaders)
+    return 0;
+
+  GLuint program = glCreateProgram();
+  for (size_t i = 0; i < num_shaders; i++)
+  {
+    if (!shaders[i])
+      continue;
+    glAttachShader(program, shaders[i]);
+  }
+
+  glLinkProgram(program);
+
+  int is_linked;
+  glGetProgramiv(program, GL_LINK_STATUS, &is_linked);
+
+  if (!is_linked)
+  {
+    fprintf(stderr, "Linking error\n");
+
+    char error_buff[ERROR_BUFF_SIZE];
+    int max_length = 0;
+    glGetProgramiv(program, GL_INFO_LOG_LENGTH, &max_length);
+    glGetProgramInfoLog(program, max_length, &max_length, error_buff);
+
+    error_buff[max_length] = 0;
+    fprintf(stderr, "%s\n", error_buff);
+
+    glDeleteProgram(program);
+    return 0;
+  }
+
+  return program;
+}
+
+void destroy_program(GLuint program)
+{
+  glDeleteProgram(program);
+}
+
+void detach_shaders(GLuint program, GLuint* shaders, size_t num_shaders)
+{
+  for (size_t i = 0; i < num_shaders; i++)
+  {
+    glDetachShader(program, shaders[i]);
+  }
+}
+```
+
+### lib/gl_utils/include/gl_utils/gl_helpers.h
+```
+#pragma once
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+
+typedef struct
+{
+  char name[256];
+  int location;
+  int size;
+  GLenum type;
+  bool normalize;
+  size_t stride;
+  size_t offset;
+} vert_attrib_t;
+
+void create_vert_attrib(vert_attrib_t* attrib,
+                        const char* name,
+                        int location,
+                        int size,
+                        GLenum type,
+                        bool normalize,
+                        size_t stride,
+                        size_t offset);
+
+void set_vertex_spec(vert_attrib_t* vert_spec, size_t num_attribs);
+
+GLuint create_buffer(const void* data, size_t data_size, GLenum usage, GLenum access_type);
+
+void delete_buffer(GLuint buf);
+
+// Shaders
+
+GLuint compile_shader(const char* source, size_t size, GLenum shader_type);
+
+GLuint load_shader_source(const char* pathname, GLenum shader_type);
+
+void destroy_shader(GLuint shader);
+
+GLuint link_shader_program(GLuint* shaders, size_t num_shaders);
+
+void destroy_program(GLuint program);
+
+void detach_shaders(GLuint program, GLuint* shaders, size_t num_shaders);
+
+#ifdef __cplusplus
+}
+#endif
+```

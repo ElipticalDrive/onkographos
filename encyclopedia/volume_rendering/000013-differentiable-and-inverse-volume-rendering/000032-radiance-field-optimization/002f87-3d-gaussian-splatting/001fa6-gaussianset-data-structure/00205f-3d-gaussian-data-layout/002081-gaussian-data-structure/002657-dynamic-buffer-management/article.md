@@ -1,0 +1,81 @@
+# Dynamic Buffer Management
+
+Also called: Capacity Growth
+
+## Overview
+Dynamic Buffer Management handles the lifecycle of 3D Gaussian splat data structures during training by automatically resizing memory buffers when the number of active Gaussians exceeds current capacity. It solves the problem of frequent reallocation and data copying overhead by using a fixed over-allocation factor, differing from static allocation by adapting to scene complexity and from CUDA Virtual Memory management by relying on standard buffer reallocation rather than virtual memory mapping [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Current number of active Gaussians ($N_{active}$), current buffer capacity ($C_{current}$), stride size ($S$) in floats per Gaussian, and element size ($E$) in bytes.
+- Output: Updated buffer pointers and new capacity ($C_{new}$).
+
+**Data Structures:**
+Buffers are contiguous arrays of floats. Each Gaussian occupies $S$ floats. The total memory size is $C \times S \times E$ bytes.
+
+**Steps:**
+1. Check if $N_{active} > C_{current}$.
+2. If not, continue training.
+3. If yes, calculate new capacity $C_{new}$:
+   - If $2 \times C_{current} \ge N_{active}$, set $C_{new} = 2 \times C_{current}$.
+   - Else, set $C_{new} = N_{active}$.
+4. Allocate new zero-initialized buffers of size $C_{new} \times S \times E$.
+5. Copy existing data: Copy $N_{active} \times S \times E$ bytes from old buffers to new buffers.
+6. Update views/pointers to new buffers.
+7. Re-allocate densification flags as zeros for the new capacity.
+8. Resize scratch buffers based on $C_{new}$ and feature stride.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dynamic_buffer_management(active_count, current_capacity, stride, element_size):
+    if active_count <= current_capacity:
+        return current_capacity, buffers
+    
+    # Calculate new capacity
+    if 2 * current_capacity >= active_count:
+        new_capacity = 2 * current_capacity
+    else:
+        new_capacity = active_count
+        
+    # Allocate new zero-initialized buffers
+    new_buffers = allocate_zeroed(new_capacity * stride * element_size)
+    
+    # Copy existing data
+    copy_size = active_count * stride * element_size
+    copy_memory(old_buffers, new_buffers, copy_size)
+    
+    # Update views
+    buffers = new_buffers
+    
+    # Re-allocate densification flags as zeros
+    densification_flags = allocate_zeroed(new_capacity)
+    
+    # Resize scratch buffers
+    scratch_buffers = resize_scratch(new_capacity, stride)
+    
+    return new_capacity, buffers
+```
+
+**Edge Cases:**
+- If $N_{active}$ is significantly larger than $C_{current}$, the buffer doubles only once, potentially requiring another growth step in the next iteration.
+- Precision issues are minimal as data is copied byte-for-byte.
+- Boundary checks ensure no out-of-bounds access during copy.
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ for copying data during growth.
+- **Memory Complexity:** $O(C)$ where $C$ is capacity.
+- **Performance:** Reduces frequent reallocation overhead by doubling capacity.
+- **Strengths:** Adapts to scene complexity, simple implementation.
+- **Limitations:** Potential memory waste if capacity grows much larger than needed.
+- **When to use:** During training when Gaussian count is dynamic.
+- **When not to use:** Inference where Gaussian count is fixed.
+
+## Background
+Originated in 3D Gaussian Splatting implementations to handle dynamic Gaussian counts during training. Developed by Rayan H. in the Msplat project [S1, unofficial].
+
+## Sources
+[S1] Show HN: Msplat – 3D Gaussian Splatting training in ~90s on M4 Max, native Metal, https://github.com/rayanht/msplat, fetched 2026-10-26 (unofficial)

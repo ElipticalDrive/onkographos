@@ -1,0 +1,860 @@
+# WebGPU Volumetrics
+Based on the work by Maxime Heckel: [On Shaping Light](https://blog.maximeheckel.com/posts/shaping-light-volumetric-lighting-with-post-processing-and-raymarching/)
+
+[capture (23).webm](https://github.com/user-attachments/assets/c09f28f1-be51-4325-a430-5f949fca03a4)
+
+### main.js
+```
+import {
+  vec3,
+  mat4,
+} from './wgpu-matrix.module.min.js';
+
+const adapter = await navigator.gpu.requestAdapter();
+const device = await adapter.requestDevice({ requiredFeatures: ['timestamp-query'] });
+
+const canvas = document.getElementById("canvas");
+const context = canvas.getContext("webgpu");
+const format = navigator.gpu.getPreferredCanvasFormat();
+
+context.configure({
+	device,
+	format,
+	alphaMode: "opaque"
+});
+
+const sceneShader = device.createShaderModule({
+	code:
+`
+struct VSOut {
+	@builtin(position) position: vec4f,
+	@location(0) worldPosition: vec3f,
+	@location(1) normal: vec3f
+};
+
+struct Constants {
+	mvp: mat4x4<f32>,
+	cameraPosition: vec3f,
+	time: f32,
+	lightPosition: vec3f
+};
+
+const lightColor = vec3(1.0, 0.8, 0.8);
+
+@group(0) @binding(0) var<uniform> constants : Constants;
+
+@vertex
+fn vs_main(@location(0) in_pos: vec3f, @location(1) normal: vec3f) -> VSOut {
+	let pos = constants.mvp * vec4f(in_pos, 1.0);
+
+	var out: VSOut;
+	out.position = pos;
+	out.normal = normal;
+	return out;
+}
+
+@fragment
+fn fs_main(@location(0) worldPosition: vec3f, @location(1) normal: vec3f) -> @location(0) vec4f {
+	let N = normalize(normal);
+	let L = normalize(constants.lightPosition - worldPosition);
+	let V = normalize(constants.cameraPosition - worldPosition);
+	let H = normalize(L + V);
+
+	const objectColor = vec3f(0.95, 0.95, 0.95);
+	const ka = 0.15;
+	const ks = vec3f(0.2);
+	const shininess = 16.0;
+
+	let ambient = ka * objectColor;
+
+	let diff = max(dot(L, N), 0.0);
+	let diffuse = diff * objectColor;
+
+	let spec = pow(max(dot(N, H), 0.0), shininess);
+	let specular = vec3f(ks) * spec;
+
+	return vec4f(ambient + diffuse + specular, 1.0);
+}
+`
+});
+
+const postProcessShader = device.createShaderModule({
+	code:
+`
+struct Constants {
+	projectionInverse: mat4x4<f32>,
+	viewMatrixInverse: mat4x4<f32>,
+	lightTransform: mat4x4<f32>,
+
+	cameraPosition: vec3f,
+	time: f32,
+	lightPosition: vec3f,
+	frameIndex: u32,
+	lightDirection: vec3f
+};
+
+@group(0) @binding(0) var<uniform> constants : Constants;
+@group(0) @binding(1) var sceneTexture : texture_2d<f32>;
+@group(0) @binding(2) var depthTexture : texture_depth_2d;
+@group(0) @binding(3) var shadowTexture : texture_depth_2d;
+@group(0) @binding(4) var blueNoiseTexture : texture_2d<f32>;
+@group(0) @binding(5) var blueNoiseSampler : sampler;
+
+struct VSOut {
+	@builtin(position) position: vec4f,
+	@location(0) uv: vec2f
+};
+
+@vertex
+fn vs_main(@location(0) inPosition: vec2f) -> VSOut {
+	var out : VSOut;
+	out.position = vec4f(inPosition, 0.0, 1.0);
+	out.uv = inPosition * 0.5 + 0.5;
+	return out;
+}
+
+fn getWorldPosition(uv: vec2f, depth: f32) -> vec3f {
+	let clipZ = depth * 2.0 - 1.0;
+	let ndc = uv * 2.0 - 1.0; 
+	let clip = vec4f(ndc, clipZ, 1.0);
+
+	let world = constants.viewMatrixInverse * constants.projectionInverse * clip;
+	return world.xyz / world.w;
+}
+
+fn sdCylinder(p: vec3f, axisOrigin: vec3f, axisDir :vec3f, radius: f32) -> f32 {
+	let p_to_origin = p - axisOrigin;
+	let projectionLength = dot(p_to_origin, axisDir);
+	let closestPointOnAxis = axisOrigin + axisDir * projectionLength;
+	let distanceToAxis = length(p - closestPointOnAxis);
+	return distanceToAxis - radius;
+}
+
+fn sdCone(p: vec3f, axisOrigin: vec3f, axisDir: vec3f, angleRad: f32) -> f32 {
+	let p_to_origin = p - axisOrigin;
+
+	let h = dot(p_to_origin, axisDir); // Height along axis
+	let r = length(p_to_origin - axisDir * h); // Radius at height h
+
+	let c = cos(angleRad);
+	let s = sin(angleRad);
+
+	let q = vec2f(r, h);
+
+	let distToSurfaceLine = r * c - h * s;
+	let distToApexPlane = -h;
+
+	if (h < 0.0 && distToSurfaceLine > 0.0) {
+	  return length(p_to_origin); 
+	}
+
+	let boundaryDists = vec2f(distToSurfaceLine, distToApexPlane);
+	return length(max(boundaryDists, vec2f(0.0))) + min(max(boundaryDists.x, boundaryDists.y), 0.0);
+}
+
+fn calculateShadow(worldPosition: vec3f) -> f32 {
+	let clip = constants.lightTransform * vec4f(worldPosition, 1.0);
+	let ndc = clip.xyz / clip.w;
+
+	let coord = ndc.xy * 0.5 + 0.5;
+
+	if (any(coord > vec2f(1.0)) || any(coord < vec2f(0.0)))  {
+		return 1.0;
+	}
+
+	let pixelLocation = vec2f(coord.x, 1.0 - coord.y) * vec2f(textureDimensions(shadowTexture)) * (1023.0 / 1024.0);
+	let shadowMapDepth = textureLoad(shadowTexture, vec2u(pixelLocation), 0);
+	return step(ndc.z, shadowMapDepth);
+}
+
+
+fn pcg_hash_u32(x: u32) -> u32 {
+    var state = x * 747796405u + 2891336453u;
+    var word  = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+fn PCG(state: u32) -> f32 {
+    let h = pcg_hash_u32(state);
+	const invMaxInt = 1.0 / 16777216.0;
+	let result = f32(h >> 8) * invMaxInt;
+	return result;
+}
+
+fn hash11(n: u32) -> f32 {
+    // 32-bit mix → [0,1]
+    var x = n;
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+
+    let bits = (x & 0x007FFFFFu) | 0x3F800000u;
+    return bitcast<f32>(bits) - 1.0;
+}
+
+fn hash2i(p: vec2<i32>) -> f32 {
+    let ux = u32(p.x);
+    let uy = u32(p.y);
+    return PCG((ux * 0x27d4eb2du) ^ (uy * 0x165667b1u));
+}
+
+fn hash3i(p: vec3<i32>) -> f32 {
+    let ux = u32(p.x);
+    let uy = u32(p.y);
+    let uz = u32(p.z);
+    return PCG((ux * 0x27d4eb2du + 29u) ^ (uy * 0x165667b1u - 1u) ^ (uz * 0x9e3779b1u + 9u));
+}
+
+fn noise2D(st: vec2<f32>) -> f32 {
+	let i = vec2i(st);
+	let f = fract(st);
+
+	let a = hash2i(i + vec2i(0, 0));
+	let b = hash2i(i + vec2i(1, 0));
+	let c = hash2i(i + vec2i(0, 1));
+	let d = hash2i(i + vec2i(1, 1));
+
+	let u = f*f*(3.0-2.0*f);
+	return mix(a, b, u.x) + (c - a)*u.y*(1.0 - u.x) + (d - b)*u.x*u.y;
+}
+
+fn noise3D(st: vec3<f32>) -> f32 {
+	let s = st + vec3f(1234.0);
+	let i0 = vec3<i32>(floor(s));
+	let f  = fract(s);
+
+	let n0 = hash3i(i0);
+	let n1 = hash3i(i0 + vec3<i32>(1,0,0));
+	let n2 = hash3i(i0 + vec3<i32>(0,1,0));
+	let n3 = hash3i(i0 + vec3<i32>(1,1,0));
+	let n4 = hash3i(i0 + vec3<i32>(0,0,1));
+	let n5 = hash3i(i0 + vec3<i32>(1,0,1));
+	let n6 = hash3i(i0 + vec3<i32>(0,1,1));
+	let n7 = hash3i(i0 + vec3<i32>(1,1,1));
+
+	let x00 = mix(n0, n1, f.x);
+	let x10 = mix(n2, n3, f.x);
+	let x01 = mix(n4, n5, f.x);
+	let x11 = mix(n6, n7, f.x);
+
+	let y0  = mix(x00, x10, f.y);
+	let y1  = mix(x01, x11, f.y);
+	return mix(y0, y1, f.z);
+}
+
+fn hgPhase(mu: f32) -> f32 {
+	const g = 0.375;
+	const gg = g*g;
+
+	let denom = max(1.0+gg - 2.0*g*mu, 0.001);
+
+	let scatter = (1.0 - gg) / pow(denom, 1.5);
+	return scatter;
+}
+
+fn fbm2D(p: vec2<f32>) -> f32 {
+	var value = 0.0;
+	var amplitude = 0.5;
+	var freq = 0.0;
+	var st = p;
+
+	const octaves = 8;
+	for (var i = 0; i < octaves; i += 1) {
+		value += amplitude * noise2D(st);
+		st *= 2.0;
+		amplitude *= 0.5;
+	}
+
+	return value;
+}
+
+fn fbm3D(p: vec3<f32>) -> f32 {
+	var value = 0.0;
+	var amplitude = 0.5;
+	var freq = 0.0;
+	var st = p + vec3f(constants.time * 0.25, constants.time * 0.125, 0.0);
+
+	const octaves = 4;
+	for (var i = 0; i < octaves; i += 1) {
+		value += amplitude * noise3D(st);
+		st *= 2.0;
+		amplitude *= 0.5;
+	}
+
+	return value;
+}
+
+fn beersLaw(dist: f32, absorption: f32) -> f32 {
+	return exp(-dist * absorption);
+}
+
+fn blackAndWhite(c: vec3f) -> vec3f {
+	let l = dot(c, vec3f(0.299, 0.587, 0.114));
+	return vec3f(l);
+}
+
+
+fn filmicDesaturate(color: vec3f, strength: f32) -> vec3f {
+    let lum = dot(color, vec3f(0.299, 0.587, 0.114));
+    let gray = vec3f(lum);
+
+    let blended = mix(color, gray, strength);
+    return pow(blended, vec3f(0.95)); // tiny lift in shadows
+}
+
+const lightColor = vec3(1.0, 0.85, 0.85);
+
+@fragment
+fn fs_main(@builtin(position) frag: vec4f, @location(0) uv: vec2f) -> @location(0) vec4f {
+	let dimensions = vec2f(textureDimensions(sceneTexture));
+
+	let depth = textureLoad(depthTexture, vec2u(frag.xy), 0);
+	let worldPosition = getWorldPosition(vec2f(uv), depth);
+
+	let rayOrigin = constants.cameraPosition;
+	let rayDirection = normalize(worldPosition - rayOrigin);
+
+	let lightPosition = constants.lightPosition;
+	let lightDirection = constants.lightDirection;
+
+	let coneAngle = radians(30.0);
+	let coneAngleHalf = coneAngle * 0.5;
+
+	const stepSize = 0.5;
+	const stepCount = 16;
+	let lightIntensity = 1.0;
+
+	let blueNoiseUV = (frag.xy / 64.0) + f32(constants.frameIndex & 0xFFFF) * 0.61803399f;
+	var blueNoiseOffset = textureSample(blueNoiseTexture, blueNoiseSampler, blueNoiseUV).r;
+
+	let distanceToCone = sdCone(rayOrigin + rayDirection * 0.125, lightPosition, lightDirection, coneAngleHalf);
+	var t = stepSize + blueNoiseOffset;
+
+	var accumulatedLight = vec3f(0.0);
+	var transmittance = 5.0;
+
+	let sceneDepth = length(worldPosition - constants.cameraPosition);
+
+	for (var i = 0u; i < stepCount; i += 1) {
+		let samplePosition = rayOrigin + rayDirection * t;
+
+		if (t > sceneDepth || t > 16.0) {
+			break;
+		}
+
+		let shadow = calculateShadow(samplePosition);
+		if (shadow == 0.0) {
+			t += stepSize;
+			continue;
+		}
+
+		let toSample = normalize(samplePosition - lightPosition);
+		let cosineAngle = dot(toSample, lightDirection);
+
+		let sdfValue = sdCone(samplePosition, lightPosition, lightDirection, coneAngleHalf);
+
+		let shapeFactor = -sdfValue + (fbm3D(samplePosition) * 2.0);
+		if (shapeFactor == 0.0) {
+			t += stepSize;
+			continue;
+		}
+
+		let distanceToLight = length(samplePosition - lightPosition);
+		let sampleLightDirection = normalize(samplePosition - lightPosition);
+
+		let attenuation = exp(-0.24 * distanceToLight);
+		let scatterPhase = hgPhase(dot(rayDirection, -sampleLightDirection));
+
+		const fogDensity = 0.03;
+		const lightIntensity = 1.0;
+
+		let luminance = lightColor * lightIntensity * attenuation * scatterPhase;
+
+		let stepDensity = max(fogDensity * shapeFactor, 0.0);
+
+		let stepTransmittance = beersLaw(stepDensity * stepSize, 1.0);
+		transmittance *= stepTransmittance;
+
+		accumulatedLight += luminance * transmittance * stepDensity * stepSize;
+
+		t += stepSize;
+	}
+
+	let sceneColor = textureLoad(sceneTexture, vec2u(frag.xy), 0).rgb;
+
+	const grainIntensity = 1.0 / 8.0;
+
+	let filmGrain = hash2i(vec2i(vec2u(frag.xy) * vec2u(constants.frameIndex) * vec2u(49218, 9123))) * grainIntensity - (grainIntensity / 2.0);
+	// let filmGrain = hash2i(vec2i(frag.xy) * vec2i(i32(constants.frameIndex) * 1234) * vec2i(49218, 9123)) * grainIntensity - (grainIntensity / 2.0);
+
+	let finalColor = blackAndWhite(sceneColor + accumulatedLight) + filmGrain;
+
+	return vec4f(finalColor, 1.0);
+}
+`
+});
+
+const shadowMapShader = device.createShaderModule({
+	code:
+`
+struct VSOut {
+	@builtin(position) position: vec4f,
+	@location(0) worldPosition: vec3f,
+};
+
+struct Constants {
+	mvp: mat4x4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> constants : Constants;
+
+@vertex
+fn vs_main(@location(0) in_pos: vec3f) -> VSOut {
+	let pos = constants.mvp * vec4f(in_pos, 1.0);
+
+	var out: VSOut;
+	out.position = pos;
+	return out;
+}
+`
+});
+
+const vertices = new Float32Array([
+	-0.5, -0.5,  0.5, 0, 0, 1,
+	 0.5, -0.5,  0.5, 0, 0, 1,
+	 0.5,  0.5,  0.5, 0, 0, 1,
+	-0.5, -0.5,  0.5, 0, 0, 1,
+	 0.5,  0.5,  0.5, 0, 0, 1,
+	-0.5,  0.5,  0.5, 0, 0, 1,
+
+	 0.5, -0.5, -0.5, 0, 0, -1,
+	-0.5, -0.5, -0.5, 0, 0, -1,
+	-0.5,  0.5, -0.5, 0, 0, -1,
+	 0.5, -0.5, -0.5, 0, 0, -1,
+	-0.5,  0.5, -0.5, 0, 0, -1,
+	 0.5,  0.5, -0.5, 0, 0, -1,
+
+	 0.5, -0.5,  0.5, 1, 0, 0,
+	 0.5, -0.5, -0.5, 1, 0, 0,
+	 0.5,  0.5, -0.5, 1, 0, 0,
+	 0.5, -0.5,  0.5, 1, 0, 0,
+	 0.5,  0.5, -0.5, 1, 0, 0,
+	 0.5,  0.5,  0.5, 1, 0, 0,
+
+	-0.5, -0.5, -0.5, -1, 0, 0,
+	-0.5, -0.5,  0.5, -1, 0, 0,
+	-0.5,  0.5,  0.5, -1, 0, 0,
+	-0.5, -0.5, -0.5, -1, 0, 0,
+	-0.5,  0.5,  0.5, -1, 0, 0,
+	-0.5,  0.5, -0.5, -1, 0, 0,
+
+	-0.5,  0.5,  0.5, 0, 1, 0,
+	 0.5,  0.5,  0.5, 0, 1, 0,
+	 0.5,  0.5, -0.5, 0, 1, 0,
+	-0.5,  0.5,  0.5, 0, 1, 0,
+	 0.5,  0.5, -0.5, 0, 1, 0,
+	-0.5,  0.5, -0.5, 0, 1, 0,
+
+	-0.5, -0.5, -0.5, 0, -1, 0,
+	 0.5, -0.5, -0.5, 0, -1, 0,
+	 0.5, -0.5,  0.5, 0, -1, 0,
+	-0.5, -0.5, -0.5, 0, -1, 0,
+	 0.5, -0.5,  0.5, 0, -1, 0,
+	-0.5, -0.5,  0.5, 0, -1, 0,
+]);
+
+const vertexBuffer = device.createBuffer({
+	mappedAtCreation: true,
+	size: vertices.byteLength,
+	usage: GPUBufferUsage.VERTEX
+});
+
+{
+	const bufferHandle = new Float32Array(vertexBuffer.getMappedRange());
+	bufferHandle.set(vertices);
+	vertexBuffer.unmap();
+}
+
+const uniformBuffer = device.createBuffer({
+	size: 32 * 4,
+	usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+});
+
+const postProcessUniformBuffer = device.createBuffer({
+	size: 256,
+	usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+});
+
+const shadowMapUniformBuffer = device.createBuffer({
+	size: 64,
+	usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+});
+
+const renderLayout = device.createBindGroupLayout({
+	entries: [
+		{
+			binding: 0,
+			visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+			buffer: { type: "uniform" }
+		},
+	]
+});
+
+const renderPipeline = device.createRenderPipeline({
+	layout: device.createPipelineLayout({ bindGroupLayouts: [renderLayout] }),
+	vertex: {
+		entryPoint: "vs_main",
+		module: sceneShader,
+		buffers: [{
+			arrayStride: 6 * 4,
+			attributes: [
+				{ shaderLocation: 0, offset: 0, format: "float32x3" },
+				{ shaderLocation: 1, offset: 3*4, format: "float32x3" },
+			]
+		}]
+	},
+	fragment: {
+		entryPoint: "fs_main",
+		module: sceneShader,
+		targets: [ { format } ]
+	},
+	primitive: {
+		topology: "triangle-list",
+		frontFace: 'ccw',
+		cullMode: 'back'
+	},
+	depthStencil: {
+		format: "depth24plus",
+		depthWriteEnabled: true,
+		depthCompare: "less"
+	}
+});
+
+const quadBuffer = new Float32Array([
+	-1.0, 1.0,
+	-1.0, -1.0,
+	1.0, 1.0,
+	1.0, -1.0
+]);
+
+const quadVertexBuffer = device.createBuffer({
+	mappedAtCreation: true,
+	size: quadBuffer.byteLength,
+	usage: GPUBufferUsage.VERTEX
+});
+
+{
+	const bufferHandle = new Float32Array(quadVertexBuffer.getMappedRange());
+	bufferHandle.set(quadBuffer);
+	quadVertexBuffer.unmap();
+}
+
+const postProcessPipeline = device.createRenderPipeline({
+	layout: "auto",
+	vertex: {
+		entryPoint: "vs_main",
+		module: postProcessShader,
+		buffers: [{
+			arrayStride: 2*4,
+			attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }]
+		}]
+	},
+	primitive: {
+		topology: "triangle-strip",
+		cullMode: 'none'
+	},
+	fragment: {
+		entryPoint: "fs_main",
+		module: postProcessShader,
+		targets: [ { format } ]
+	},
+});
+
+const shadowMapPipeline = device.createRenderPipeline({
+	layout: "auto",
+	vertex: {
+		entryPoint: "vs_main",
+		module: shadowMapShader,
+		buffers: [{
+			arrayStride: 6 * 4,
+			attributes: [
+				{ shaderLocation: 0, offset: 0, format: "float32x3" },
+				{ shaderLocation: 1, offset: 3*4, format: "float32x3" },
+			]
+		}]
+	},
+	primitive: {
+		topology: "triangle-list",
+		cullMode: 'none'
+	},
+	depthStencil: {
+		format: "depth32float",
+		depthWriteEnabled: true,
+		depthCompare: "less"
+	}
+});
+
+const renderUniformBindGroup = device.createBindGroup({
+	layout: renderLayout,
+	entries: [
+		{ binding: 0, resource: { buffer: uniformBuffer } }
+	]
+});
+
+const querySet = device.createQuerySet({ type: 'timestamp', count: 4 });
+const queryBuffer = device.createBuffer({
+	size: 256,
+	usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC
+});
+const queryBufferCPU = device.createBuffer({
+	size: 256,
+	usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+});
+
+const start = document.timeline.currentTime;
+
+const frameSkip = 3;
+let frameIndex = -1;
+
+let writingBenchmarkResults = false;
+async function writeResults(frameIndex) {
+	writingBenchmarkResults = true;
+	await queryBufferCPU.mapAsync(GPUMapMode.READ);
+	const view = new BigInt64Array(queryBufferCPU.getMappedRange());
+	const renderPassDuration = view[1] - view[0];
+	const computePassDuration = view[3] - view[2];
+	queryBufferCPU.unmap();
+	writingBenchmarkResults = false;
+
+	const granularity = 1000;
+	const renderPassDurationMS = Number(renderPassDuration * BigInt(granularity) / BigInt(1e6)) / granularity;
+	const computePassDurationMS = Number(computePassDuration * BigInt(granularity) / BigInt(1e6)) / granularity;
+	console.log(`Frame ${frameIndex} - Render Pass: ${renderPassDurationMS}ms - Compute Pass: ${computePassDurationMS}ms`);
+}
+
+const shadowMap = device.createTexture({
+	size: [512, 512],
+	format: 'depth32float',
+	usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+});
+const shadowMapView = shadowMap.createView();
+const shadowMapBindGroup = device.createBindGroup({
+	layout: shadowMapPipeline.getBindGroupLayout(0),
+	entries: [
+		{ binding: 0, resource: shadowMapUniformBuffer }
+	]
+});
+
+let postProcessBindGroup;
+let sceneColor;
+let sceneDepth;
+let colorView;
+let depthView;
+
+const blueNoiseTexture = await loadTexture("./LDR_LLL1_16.png");
+
+async function frame(currentTime) {
+
+	frameIndex += 1;
+
+	const elapsedTime = (currentTime - start) * (1.0 / 1024.0);
+
+	const lightPosition = vec3.create(3.0, 0.0 + Math.cos(elapsedTime * 1.2), -3.0);
+	const lightDirection = vec3.normalize(vec3.negate(lightPosition));
+	// const lightDirection = vec3.create(0.0, -1.0, 0.0);
+
+	let lightTransform;
+	{
+		const coneFOV = 30 * (Math.PI / 180);
+		const proj = mat4.perspective(coneFOV, 1.0, 1/8, 512.0);
+		const target = vec3.add(lightPosition, lightDirection);
+		const up = vec3.create(0, 1, 0);
+		const view = mat4.lookAt(lightPosition, target, up);
+		lightTransform = mat4.multiply(proj, view);
+	}
+
+	{
+		const eye = vec3.create(Math.sin(elapsedTime * 0.5 - 1.5) * 4.0, 1.0, Math.cos(elapsedTime * 0.5 - 1.5) * 4.0);
+		const target = vec3.create(0, 0, 0);
+		const up = vec3.create(0, 1, 0);
+		const view = mat4.lookAt(eye, target, up);
+
+		const fovy = 60 * (Math.PI / 180);
+		const proj = mat4.perspective(fovy, canvas.width / canvas.height, 1/8, 512.0);
+
+		const model = mat4.identity();
+		const pv = mat4.multiply(proj, view);
+		const mvp = mat4.multiply(pv, model);
+
+		const renderUpload = new Float32Array(32);
+		renderUpload.set(mvp, 0);
+		renderUpload.set(eye, 16);
+		renderUpload[19] = elapsedTime;
+		renderUpload.set(lightPosition, 20);
+		device.queue.writeBuffer(uniformBuffer, 0, renderUpload);
+
+		const projectionInverse = mat4.inverse(proj);
+		const viewMatrixInverse = mat4.inverse(view);
+
+		const postProcessUpload = new Float32Array(64);
+		const postProcessUploadU32 = new Uint32Array(postProcessUpload.buffer);
+		postProcessUpload.set(projectionInverse, 0);
+		postProcessUpload.set(viewMatrixInverse, 16);
+		postProcessUpload.set(lightTransform, 32);
+
+		postProcessUpload.set(eye, 48);
+		postProcessUpload[51] = elapsedTime;
+		postProcessUpload.set(lightPosition, 52);
+
+		postProcessUploadU32[55] = frameIndex;
+
+		postProcessUpload.set(lightDirection, 56);
+		device.queue.writeBuffer(postProcessUniformBuffer, 0, postProcessUpload);
+	}
+
+	{
+
+		const upload = new Float32Array(16);
+		upload.set(lightTransform, 0);
+		device.queue.writeBuffer(shadowMapUniformBuffer, 0, upload);
+	}
+
+	const view = context.getCurrentTexture().createView();
+	const encoder = device.createCommandEncoder();
+	{
+		const pass = encoder.beginRenderPass({
+			colorAttachments: [{
+				view: colorView,
+				loadOp: "clear",
+				storeOp: "store",
+				clearValue: { r: 0.0, g: 0, b: 0, a: 1 }
+			}],
+			depthStencilAttachment: {
+				view: depthView,
+				depthLoadOp: "clear",
+				depthStoreOp: "store",
+				depthClearValue: 1.0
+			},
+		});
+		pass.setPipeline(renderPipeline);
+		pass.setVertexBuffer(0, vertexBuffer);
+		pass.setBindGroup(0, renderUniformBindGroup);
+		pass.draw(36, 1);
+		pass.end();
+	}
+
+	{
+		const pass = encoder.beginRenderPass({
+			colorAttachments: [],
+			depthStencilAttachment: {
+				view: shadowMapView,
+				depthLoadOp: "clear",
+				depthStoreOp: "store",
+				depthClearValue: 1.0
+			}
+		});
+		pass.setPipeline(shadowMapPipeline);
+		pass.setBindGroup(0, shadowMapBindGroup);
+		pass.setVertexBuffer(0, vertexBuffer);
+		pass.draw(36, 1);
+		pass.end();
+	}
+
+	{
+		const pass = encoder.beginRenderPass({
+			colorAttachments: [{
+				view: view,
+				loadOp: "load",
+				storeOp: "store",
+			}],
+		});
+		pass.setPipeline(postProcessPipeline);
+		pass.setBindGroup(0, postProcessBindGroup);
+		pass.setVertexBuffer(0, quadVertexBuffer);
+		pass.draw(4);
+		pass.end();
+	}
+
+	// encoder.resolveQuerySet(querySet, 0, 2, queryBuffer, 0);
+	// if (!writingBenchmarkResults) {
+	// 	encoder.copyBufferToBuffer(queryBuffer, 0, queryBufferCPU, 0, 256);
+	// }
+
+	device.queue.submit([encoder.finish()]);
+	// if (!writingBenchmarkResults) {
+	// 	writeResults(frameIndex);
+	// }
+	requestAnimationFrame(frame);
+
+}
+requestAnimationFrame(frame);
+
+async function loadTexture(url, flipY = true) {
+	const res = await fetch(url, { mode: "cors" });
+	const blob = await res.blob();
+	const bitmap = await createImageBitmap(blob);
+
+	const texture = device.createTexture({
+		size: [bitmap.width, bitmap.height],
+		format: "rgba8unorm",
+		usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
+	});
+
+	device.queue.copyExternalImageToTexture(
+		{ source: bitmap, flipY },
+		{ texture },
+		{ width: bitmap.width, height: bitmap.height }
+	);
+
+	const view = texture.createView();
+	const sampler = device.createSampler({
+		addressModeU: "repeat",
+		addressModeV: "repeat",
+		magFilter: "nearest",
+		minFilter: "nearest",
+		mipmapFilter: "nearest"
+	});
+
+	return { texture, view, sampler };
+}
+
+function resize() {
+	const w = Math.max(window.innerWidth, 1);
+	const h = Math.max(window.innerHeight, 1);
+	if (w == canvas.width && h == canvas.height) return;
+
+	canvas.width = w;
+	canvas.height = h;
+
+	sceneColor = device.createTexture({
+		size: [w, h],
+		format,
+		usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+	});
+
+	sceneDepth = device.createTexture({
+		size: [w, h],
+		format: 'depth24plus',
+		usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+	});
+
+	colorView = sceneColor.createView();
+	depthView = sceneDepth.createView();
+
+	postProcessBindGroup = device.createBindGroup({
+		layout: postProcessPipeline.getBindGroupLayout(0),
+		entries: [
+			{ binding: 0, resource: postProcessUniformBuffer },
+			{ binding: 1, resource: colorView },
+			{ binding: 2, resource: depthView },
+			{ binding: 3, resource: shadowMap },
+			{ binding: 4, resource: blueNoiseTexture.view },
+			{ binding: 5, resource: blueNoiseTexture.sampler },
+		]
+	});
+}
+resize();
+window.onresize = resize;
+```

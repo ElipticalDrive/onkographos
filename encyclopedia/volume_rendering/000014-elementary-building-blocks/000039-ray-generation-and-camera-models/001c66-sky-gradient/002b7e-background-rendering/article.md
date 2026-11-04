@@ -1,0 +1,328 @@
+# Background Rendering
+
+
+## Overview
+Background Rendering is a volume rendering technique that simulates a distant background field (such as a sky dome or infinite horizon) represented as a 3D grid, sampled along concentric spheres to handle infinite distance [S2, unofficial]. It is used to render the background color for rays that have low transmittance (high opacity) through the primary volume, utilizing pre-computed log-transmittance values to determine how much of the background is visible [S2, unofficial]. It differs from [Sky Gradient](1262-sky-gradient.md) by using a learnable or procedural 3D grid sampled via trilinear interpolation on spherical shells rather than simple linear interpolation of zenith/horizon colors, and from [SkyboxRendering](2619-skyboxrendering.md) by supporting volumetric attenuation and density-based sampling rather than a static cubemap or single-layer texture [S2, unofficial].
+
+## How it works
+**Inputs:**
+*   `grid`: A structure containing:
+    *   `background_reso`: Integer resolution for the spherical grid (e.g., 512) [S2, unofficial].
+    *   `background_nlayers`: Integer number of radial layers (e.g., 32) [S2, unofficial].
+    *   `background_data`: A 3D array of shape `(background_reso * 2, background_reso, background_nlayers)` with 4 channels per voxel (3 for color, 1 for density) [S2, unofficial].
+*   `ray_spec`: A `SingleRaySpec` structure containing `origin` (vec3) and `dir` (vec3) [S2, unofficial].
+*   `log_transmit`: A scalar float representing the accumulated log-transmittance from the primary volume rendering pass [S2, unofficial].
+*   `opt`: An options structure containing:
+    *   `stop_thresh`: Float threshold for stopping early (e.g., derived from `log_transmit`) [S2, unofficial].
+    *   `background_brightness`: Float multiplier for the final background contribution [S2, unofficial].
+    *   `step_size`: Float used to calculate `n_steps` [S2, unofficial].
+*   `C0`: The SH DC factor (typically $1/\sqrt{4\pi}$) [S2, unofficial].
+*   `grad_output`: (Backward pass only) Gradient tensor of shape `(3,)` corresponding to the output color channels [S2, unofficial].
+
+**Outputs:**
+*   `out`: A pointer to an output buffer of 3 floats (RGB) for the forward pass [S2, unofficial].
+*   `grads`: (Backward pass only) Structures `grad_background_out` and `mask_background_out` for gradients with respect to the background grid data [S2, unofficial].
+
+**Data Structures:**
+*   `SingleRaySpec`: Contains `origin` (vec3) and `dir` (vec3).
+*   `ConcentricSpheresIntersector`: Helper to intersect a ray with spherical shells.
+*   `trilerp_bg_one`: Trilinear interpolation function for 4-channel data.
+*   `trilerp_backward_bg_one`: Backward pass for trilinear interpolation.
+
+**Parameters:**
+*   `inner_radius`: Minimum sampling radius, calculated as $\max(\text{dist\_ray\_to\_origin}(ray.origin, ray.dir) + 10^{-3}, 1.0)$ [S2, unofficial].
+*   `n_steps`: Number of sampling steps, calculated as $\lfloor \text{grid.background\_nlayers} / \text{opt.step\_size} \rfloor + 2$ [S2, unofficial].
+
+**Algorithm (Forward Pass):**
+1.  **Initialization:** Initialize output color `outv[3]` to zeros [S2, unofficial].
+2.  **Early Exit Check:** If `log_transmit < -25.0`, return early (skip background rendering) to avoid numerical instability for fully opaque rays [S2, unofficial].
+3.  **Bounds Calculation:** Call `ray_find_bounds_bg` to determine the start and end radii for the background sampling based on `ray_spec` and `inner_radius` [S2, unofficial].
+4.  **Loop Setup:** Initialize `invr_mid` and `invr_last` for inverse radius tracking. The sampling radius $r$ for step $i$ is computed as:
+    $$ r_i = \frac{n\_steps}{n\_steps - i - 0.5} $$
+    This creates non-linear spacing, denser near the origin and sparser at infinity [S2, unofficial].
+5.  **Sampling Loop:** For $i$ from $0$ to $n\_steps - 1$:
+    a.  **Intersection:** Intersect the ray with a sphere of radius $r_i$ using `ConcentricSpheresIntersector`. If intersection fails or $r_i < inner\_radius$, skip to next step [S2, unofficial].
+    b.  **Position Calculation:** Calculate the ray position at intersection $t$:
+        $$ ray.pos[j] = \text{fmaf}(t, ray.dir[j], ray.origin[j]) \quad \text{for } j \in \{0,1,2\} $$
+        [S2, unofficial]
+    c.  **Coordinate Conversion:** Convert the unit vector `ray.pos` to equirectangular grid coordinates:
+        $$ \text{_unitvec2equirect}(ray.pos, grid.background\_reso, ray.pos) $$
+        [S2, unofficial]
+    d.  **Depth Coordinate:** Calculate the depth coordinate (layer index) based on inverse radius:
+        $$ ray.pos[2] = \text{fminf}(\text{fmaxf}((1.0 - invr\_mid) \times grid.background\_nlayers - 0.5, 0.0), grid.background\_nlayers - 1) $$
+        [S2, unofficial]
+    e.  **Grid Indices:** Compute integer grid indices `ray.l` from `ray.pos` and clamp them:
+        *   `ray.l[0]` clamped to $[0, grid.background\_reso \times 2 - 1]$
+        *   `ray.l[1]` clamped to $[0, grid.background\_reso - 1]$
+        *   `ray.l[2]` clamped to $[0, grid.background\_nlayers - 2]$
+        [S2, unofficial]
+    f.  **Fractional Offsets:** Compute fractional offsets:
+        $$ ray.pos[j] -= ray.l[j] \quad \text{for } j \in \{0,1,2\} $$
+        [S2, unofficial]
+    g.  **Trilinear Interpolation:** Compute density $\sigma$ and color channels from `grid.background_data` using `trilerp_bg_one` with indices `ray.l` and offsets `ray.pos` [S2, unofficial].
+    h.  **Optical Depth & Weight:** If $\sigma > 0.0$:
+        *   Calculate optical depth:
+            $$ pcnt = (invr\_last - invr\_mid) \times ray.world\_step \times \sigma $$
+            [S2, unofficial]
+        *   Calculate weight:
+            $$ weight = \exp(log\_transmit) \times (1.0 - \exp(-pcnt)) $$
+            [S2, unofficial]
+        *   Update log-transmittance:
+            $$ log\_transmit -= pcnt $$
+            [S2, unofficial]
+    i.  **Color Accumulation:** For each color channel $k \in \{0,1,2\}$:
+        *   Interpolate color $c_k$ from `grid.background_data` (channel $k$).
+        *   Scale by SH DC factor $C_0$: $c_k = c_k \times C_0$.
+        *   Clamp: $c_k = \max(c_k + 0.5, 0.0)$ [S2, unofficial].
+        *   Accumulate:
+            $$ outv[k] += weight \times c_k $$
+            [S2, unofficial]
+    j.  **Early Termination:** If $\exp(log\_transmit) < opt.stop\_thresh$, break loop [S2, unofficial].
+    k.  **Update Inverse Radius:** Set $invr\_last = invr\_mid$ for the next iteration [S2, unofficial].
+6.  **Final Output:** For each channel $i \in \{0,1,2\}$:
+    $$ out[i] += outv[i] + \exp(log\_transmit) \times opt.background\_brightness $$
+    [S2, unofficial]
+
+**Algorithm (Backward Pass):**
+1.  **Initialization:** Initialize `total_color = 0.0` and `accum = 0.0` [S2, unofficial].
+2.  **Loop Setup:** Same radius calculation and bounds as forward pass [S2, unofficial].
+3.  **Sampling Loop:** For $i$ from $0$ to $n\_steps - 1$:
+    a.  **Intersection & Coordinates:** Same steps 5a-5f as forward pass [S2, unofficial].
+    b.  **Interpolation:** Compute $\sigma$ and color channels $c_k$ using `trilerp_bg_one` [S2, unofficial].
+    c.  **Optical Depth & Weight:** If $\sigma > 0.0$:
+        *   Calculate optical depth:
+            $$ pcnt = ray.world\_step \times (invr\_last - invr\_mid) \times \sigma $$
+            [S2, unofficial]
+        *   Calculate weight:
+            $$ weight = \exp(log\_transmit) \times (1.0 - \exp(-pcnt)) $$
+            [S2, unofficial]
+        *   Update log-transmittance:
+            $$ log\_transmit -= pcnt $$
+            [S2, unofficial]
+    d.  **Color Gradient Accumulation:** For each channel $k \in \{0,1,2\}$:
+        *   Interpolate color $c_k$, scale by $C_0$, add 0.5: $c_k = \text{trilerp\_bg\_one}(\dots, k) \times C_0 + 0.5$ [S2, unofficial].
+        *   Accumulate total color:
+            $$ total\_color += \max(c_k, 0.0) \times grad\_output[k] $$
+            [S2, unofficial]
+    e.  **Color Gradient Propagation:** If $c_k > 0.0$:
+        *   Compute gradient for color:
+            $$ curr\_grad\_color = C_0 \times weight \times grad\_output[k] $$
+            [S2, unofficial]
+        *   Call `trilerp_backward_bg_one` to propagate gradient to `grads.grad_background_out` [S2, unofficial].
+    f.  **Accumulation Update:**
+        $$ accum -= weight \times total\_color $$
+        [S2, unofficial]
+    g.  **Sparsity Loss Gradient:** If `sparsity_loss > 0.0`:
+        *   Compute density gradient:
+            $$ curr\_grad\_sigma += sparsity\_loss \times \frac{4 \sigma}{1 + 2 \sigma^2} $$
+            [S2, unofficial]
+    h.  **Density Gradient Propagation:**
+        *   Compute density gradient:
+            $$ curr\_grad\_sigma = ray.world\_step \times (invr\_last - invr\_mid) \times (total\_color \times \exp(log\_transmit) - accum) $$
+            [S2, unofficial]
+        *   Call `trilerp_backward_bg_one` for channel 3 (density) to `grads.grad_background_out` and `grads.mask_background_out` [S2, unofficial].
+    i.  **Early Termination:** If $\exp(log\_transmit) < opt.stop\_thresh$, break loop [S2, unofficial].
+    j.  **Update Inverse Radius:** Set $invr\_last = invr\_mid$ [S2, unofficial].
+
+**Pseudocode (Forward Pass):**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_background_forward(grid, ray_spec, log_transmit, opt, C0, out):
+    # Early exit for fully opaque rays
+    if log_transmit < -25.0:
+        return
+
+    # Initialize output
+    outv = [0.0, 0.0, 0.0]
+    
+    # Calculate bounds and steps
+    inner_radius = max(dist_ray_to_origin(ray_spec.origin, ray_spec.dir) + 1e-3, 1.0)
+    n_steps = int(grid.background_nlayers / opt.step_size) + 2
+    
+    # Initialize inverse radius tracking
+    invr_mid = 1.0 / inner_radius
+    invr_last = invr_mid
+    
+    # Ray world step size (constant for concentric spheres)
+    # Note: world_step is derived from the difference in radii, 
+    # but in the source it is used as a constant factor in pcnt calculation.
+    # We assume ray.world_step is pre-calculated or derived from grid resolution.
+    # For implementation, we calculate delta_r for each step.
+    
+    for i in range(n_steps):
+        # Calculate sampling radius r
+        r = n_steps / (n_steps - i - 0.5)
+        
+        # Intersect ray with sphere of radius r
+        t = concentric_spheres_intersector(ray_spec.origin, ray_spec.dir, r, inner_radius)
+        if t < 0:
+            invr_mid = 1.0 / r
+            invr_last = invr_mid
+            continue
+            
+        # Calculate position
+        ray_pos = [t * ray_spec.dir[j] + ray_spec.origin[j] for j in range(3)]
+        
+        # Convert to equirectangular coordinates
+        unitvec2equirect(ray_pos, grid.background_reso)
+        
+        # Calculate depth coordinate
+        inv_r = 1.0 / r
+        depth_coord = min(max((1.0 - inv_r) * grid.background_nlayers - 0.5, 0.0), grid.background_nlayers - 1)
+        
+        # Compute integer indices
+        l = [int(ray_pos[j]) for j in range(3)]
+        l[0] = clamp(l[0], 0, grid.background_reso * 2 - 1)
+        l[1] = clamp(l[1], 0, grid.background_reso - 1)
+        l[2] = clamp(int(depth_coord), 0, grid.background_nlayers - 2)
+        
+        # Compute fractional offsets
+        frac = [ray_pos[j] - l[j] for j in range(3)]
+        frac[2] = depth_coord - l[2]
+        
+        # Trilinear interpolation
+        sigma = trilerp_bg_one(grid.background_data, l, frac, channel=3)
+        
+        if sigma > 0.0:
+            # Optical depth
+            # Note: ray.world_step is typically the radial step size. 
+            # Here we use (invr_last - invr_mid) which relates to radial distance.
+            # The source uses: pcnt = (invr_last - invr_mid) * ray.world_step * sigma
+            # We need to define ray.world_step. In concentric sampling, 
+            # the physical distance between shells is r_{i} - r_{i+1}.
+            # However, the source formula uses invr difference. 
+            # We follow the source formula exactly.
+            pcnt = (invr_last - invr_mid) * ray.world_step * sigma
+            
+            # Weight
+            weight = exp(log_transmit) * (1.0 - exp(-pcnt))
+            
+            # Update log_transmit
+            log_transmit -= pcnt
+            
+            # Accumulate color
+            for k in range(3):
+                color_k = trilerp_bg_one(grid.background_data, l, frac, channel=k) * C0
+                color_k = max(color_k + 0.5, 0.0)
+                outv[k] += weight * color_k
+                
+            # Update inverse radius
+            invr_last = invr_mid
+            invr_mid = 1.0 / r
+            
+            # Early termination
+            if exp(log_transmit) < opt.stop_thresh:
+                break
+        else:
+            invr_last = invr_mid
+            invr_mid = 1.0 / r
+            
+    # Final output
+    for i in range(3):
+        out[i] += outv[i] + exp(log_transmit) * opt.background_brightness
+```
+
+**Pseudocode (Backward Pass):**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_background_backward(grid, ray_spec, log_transmit, opt, C0, grad_output, grads, sparsity_loss):
+    if log_transmit < -25.0:
+        return
+
+    total_color = 0.0
+    accum = 0.0
+    inner_radius = max(dist_ray_to_origin(ray_spec.origin, ray_spec.dir) + 1e-3, 1.0)
+    n_steps = int(grid.background_nlayers / opt.step_size) + 2
+    
+    invr_mid = 1.0 / inner_radius
+    invr_last = invr_mid
+    
+    for i in range(n_steps):
+        r = n_steps / (n_steps - i - 0.5)
+        t = concentric_spheres_intersector(ray_spec.origin, ray_spec.dir, r, inner_radius)
+        
+        if t < 0:
+            invr_mid = 1.0 / r
+            invr_last = invr_mid
+            continue
+            
+        ray_pos = [t * ray_spec.dir[j] + ray_spec.origin[j] for j in range(3)]
+        unitvec2equirect(ray_pos, grid.background_reso)
+        
+        inv_r = 1.0 / r
+        depth_coord = min(max((1.0 - inv_r) * grid.background_nlayers - 0.5, 0.0), grid.background_nlayers - 1)
+        
+        l = [int(ray_pos[j]) for j in range(3)]
+        l[0] = clamp(l[0], 0, grid.background_reso * 2 - 1)
+        l[1] = clamp(l[1], 0, grid.background_reso - 1)
+        l[2] = clamp(int(depth_coord), 0, grid.background_nlayers - 2)
+        
+        frac = [ray_pos[j] - l[j] for j in range(3)]
+        frac[2] = depth_coord - l[2]
+        
+        sigma = trilerp_bg_one(grid.background_data, l, frac, channel=3)
+        
+        if sigma > 0.0:
+            pcnt = ray.world_step * (invr_last - invr_mid) * sigma
+            weight = exp(log_transmit) * (1.0 - exp(-pcnt))
+            log_transmit -= pcnt
+            
+            # Accumulate total color for density gradient
+            current_total_color = 0.0
+            for k in range(3):
+                color_k = trilerp_bg_one(grid.background_data, l, frac, channel=k) * C0 + 0.5
+                color_k = max(color_k, 0.0)
+                current_total_color += color_k * grad_output[k]
+            
+            total_color += current_total_color
+            
+            # Propagate color gradients
+            for k in range(3):
+                color_k = trilerp_bg_one(grid.background_data, l, frac, channel=k) * C0 + 0.5
+                if color_k > 0.0:
+                    curr_grad_color = C0 * weight * grad_output[k]
+                    trilerp_backward_bg_one(grid.background_data, l, frac, channel=k, grad=curr_grad_color, grads=grads.grad_background_out)
+            
+            accum -= weight * total_color
+            
+            # Sparsity loss gradient
+            if sparsity_loss > 0.0:
+                curr_grad_sigma = sparsity_loss * (4 * sigma / (1 + 2 * sigma * sigma))
+            else:
+                curr_grad_sigma = 0.0
+                
+            # Density gradient
+            curr_grad_sigma += ray.world_step * (invr_last - invr_mid) * (total_color * exp(log_transmit) - accum)
+            
+            # Propagate density gradient
+            trilerp_backward_bg_one(grid.background_data, l, frac, channel=3, grad=curr_grad_sigma, grads=grads.grad_background_out)
+            # Mask gradient propagation (if applicable)
+            trilerp_backward_bg_one(grid.background_data, l, frac, channel=3, grad=curr_grad_sigma, grads=grads.mask_background_out)
+            
+            invr_last = invr_mid
+            invr_mid = 1.0 / r
+            
+            if exp(log_transmit) < opt.stop_thresh:
+                break
+        else:
+            invr_last = invr_mid
+            invr_mid = 1.0 / r
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of sampling steps (`n_steps`), which scales with `background_nlayers` and inversely with `step_size` [S2, unofficial].
+*   **Memory Complexity:** $O(R^2 \times L \times C)$ where $R$ is `background_reso`, $L$ is `background_nlayers`, and $C=4$ is the number of channels (3 color + 1 density) [S2, unofficial].
+*   **Performance:** Performance depends on the resolution of the background grid and the number of steps. Early termination based on `log_transmit` can significantly reduce computation for rays that are fully occluded by the primary volume [S2, unofficial].
+*   **Strengths:** Supports volumetric attenuation of the background, allowing for realistic fog/haze effects over the sky. Handles infinite distance via concentric sphere sampling [S2, unofficial].
+*   **Limitations:** Requires additional memory for the background grid. Sampling along concentric spheres can be computationally expensive if `n_steps` is large. Numerical instability is mitigated by early exit for `log_transmit < -25.0` [S2, unofficial].
+*   **When to use:** When a volumetric, attenuated background is needed, such as in outdoor scenes with atmospheric haze or fog.
+*   **When not to use:** For simple sky gradients or when memory is constrained, [Sky Gradient](1262-sky-gradient.md) is more efficient. For static, non-volumetric backgrounds, [SkyboxRendering](2619-skyboxrendering.md) is simpler.
+
+## Background
+Background Rendering in the context of neural volume rendering was introduced in the Svox2 paper [S2, unofficial]. It extends the concept of neural radiance fields to include a learnable background field represented as a 3D grid, sampled along concentric spheres. This allows for the modeling of complex, volumetric backgrounds that interact with the primary scene's opacity. The method is part of the broader family of volume rendering techniques that decompose the scene into foreground (volumetric) and background components.
+
+## Sources
+[S1] el-bakkali/manim-glsl-butterflies, https://github.com/el-bakkali/manim-glsl-butterflies, fetched 2026-10-26 (unofficial)
+[S2] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)

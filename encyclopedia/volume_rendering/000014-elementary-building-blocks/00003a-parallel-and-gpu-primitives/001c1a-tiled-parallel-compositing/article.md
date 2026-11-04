@@ -1,0 +1,204 @@
+# Tiled Parallel Compositing
+
+Also called: Tile-Based Parallel Compositing, Disjoint Tile Compositing
+
+## Overview
+Tiled Parallel Compositing is a rendering strategy that divides the framebuffer into disjoint spatial tiles to enable lock-free, zero-synchronization parallel processing of semi-transparent primitives [S1, unofficial]. It solves the concurrency conflict inherent in alpha compositing by ensuring that each tile is written to by only one thread, eliminating the need for atomics or locks [S1, unofficial]. This approach is distinct from [Parallel Direct Compositing](3201-parallel-direct-compositing.md) which may use global atomic counters, and from [Y-Bucket Parallelization](2108-y-bucket-parallelization.md) which groups pixels by depth rather than spatial locality.
+
+## How it works
+The method processes the screen by assigning each tile to a separate worker thread. The core guarantee of correctness is that tile $(tx, ty)$ only writes to pixels in the range $[tx \cdot W_{tile}, (tx+1) \cdot W_{tile}) \times [ty \cdot H_{tile}, (ty+1) \cdot H_{tile})$, preventing data races without synchronization primitives [S1, unofficial].
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   `splats`: Array of projected splat data (e.g., 2D Gaussians with position, covariance, color, opacity).
+    *   `bins`: A histogram/binning structure mapping tile indices to ranges of splat IDs.
+    *   `framebuffer`: A mutable buffer of RGBA values (or Vec3 + alpha).
+    *   `image_dims`: Width $W$ and Height $H$ of the output image.
+    *   `tile_dims`: Width $W_{tile}$ and Height $H_{tile}$ of each tile.
+*   **Outputs**:
+    *   `framebuffer`: The final composited image.
+
+### Data Structures
+The implementation typically relies on a pre-computed binning structure to map geometry to tiles.
+
+**TileBins Layout** (from [S1, unofficial]):
+*   `offsets`: An array of size $N_{tiles} + 1$.
+    *   `offsets[i]` stores the start index in the `splats` array for tile $i$.
+    *   `offsets[i+1]` stores the end index (exclusive).
+    *   The splats for tile $i$ are located in `splats[offsets[i] ... offsets[i+1]-1]`.
+
+**ScratchBuffers** (from [S1, unofficial]):
+*   `sort_aux`: Temporary storage for sorting or auxiliary data.
+*   `tiles`: The `TileBins` structure described above.
+
+### Numbered Steps
+
+1.  **Parallel Iteration**: Iterate over all tile indices $t$ from $0$ to $N_{tiles}-1$ in parallel using a thread pool or parallel iterator (e.g., `rayon::par_iter` in Rust) [S1, unofficial].
+2.  **Tile Coordinate Calculation**: For each tile index $t$, calculate its grid coordinates $(tx, ty)$ and pixel bounds:
+    $$ tx = t \pmod{N_{tiles\_x}} $$
+    $$ ty = \lfloor t / N_{tiles\_x} \rfloor $$
+    $$ px_0 = tx \cdot W_{tile} $$
+    $$ py_0 = ty \cdot H_{tile} $$
+    $$ px_1 = \min(px_0 + W_{tile} - 1, W - 1) $$
+    $$ py_1 = \min(py_0 + H_{tile} - 1, H - 1) $$
+    where $N_{tiles\_x} = \lceil W / W_{tile} \rceil$ [S1, unofficial].
+3.  **Bounds Validation**: If $px_0 > px_1$ or $py_0 > py_1$, the tile is invalid or empty; return immediately [S1, unofficial].
+4.  **Splat Range Retrieval**: Retrieve the range of splat indices for this tile from the binning structure:
+    $$ start = bins.offsets[t] $$
+    $$ end = bins.offsets[t + 1] $$
+5.  **Empty Check**: If $start == end$, the tile has no splats; return immediately [S1, unofficial].
+6.  **Splat Processing**: For each splat ID $sid$ in the range $[start, end)$:
+    a. Retrieve the projected splat data $p$ from the global splat array [S1, unofficial].
+    b. Calculate the intersection of the splat's bounding box $[bx_0, by_0, bx_1, by_1]$ with the tile's pixel bounds $[px_0, py_0, px_1, py_1]$:
+       $$ x_0 = \max(bx_0, px_0) $$
+       $$ y_0 = \max(by_0, py_0) $$
+       $$ x_1 = \min(bx_1, px_1) $$
+       $$ y_1 = \min(by_1, py_1) $$
+    c. If $x_0 > x_1$ or $y_0 > y_1$, the splat does not intersect the tile; continue to the next splat [S1, unofficial].
+    d. Call `composite_splat_region(p, framebuffer, W, x_0, y_0, x_1, y_1)` to render the splat into the intersecting pixels [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def tiled_parallel_compositing(splats, bins, framebuffer, W, H, W_tile, H_tile):
+    """
+    Parallel compositing using disjoint tiles.
+    Assumes bins.offsets is pre-computed.
+    """
+    N_tiles_x = (W + W_tile - 1) // W_tile
+    N_tiles_y = (H + H_tile - 1) // H_tile
+    N_tiles = N_tiles_x * N_tiles_y
+
+    # Parallel loop over tiles
+    for t in parallel_range(N_tiles):
+        # 1. Calculate tile coordinates
+        tx = t % N_tiles_x
+        ty = t // N_tiles_x
+
+        # 2. Calculate pixel bounds
+        px0 = tx * W_tile
+        py0 = ty * H_tile
+        px1 = min(px0 + W_tile - 1, W - 1)
+        py1 = min(py0 + H_tile - 1, H - 1)
+
+        # 3. Validate bounds
+        if px0 > px1 or py0 > py1:
+            continue
+
+        # 4. Retrieve splat range
+        start = bins.offsets[t]
+        end = bins.offsets[t + 1]
+
+        # 5. Check empty range
+        if start == end:
+            continue
+
+        # 6. Process splats
+        for sid in range(start, end):
+            p = splats[sid]
+            
+            # Calculate intersection with tile bounds
+            x0 = max(p.bbox_x0, px0)
+            y0 = max(p.bbox_y0, py0)
+            x1 = min(p.bbox_x1, px1)
+            y1 = min(p.bbox_y1, py1)
+
+            # Check intersection validity
+            if x0 > x1 or y0 > y1:
+                continue
+
+            # Composite splat into framebuffer
+            # Note: framebuffer access is safe because tile t only writes to
+            # pixels [px0..px1, py0..py1], which are disjoint from other tiles.
+            composite_splat_region(p, framebuffer, W, x0, y0, x1, y1)
+
+def composite_splat_region(splat, framebuffer, width, x0, y0, x1, y1):
+    """
+    Renders a single splat into the specified pixel region.
+    Uses front-to-back alpha compositing.
+    """
+    # Initialize transmittance for this splat pass if needed, 
+    # or read current framebuffer state.
+    # Standard alpha compositing formula:
+    # C_out = C_in * (1 - alpha) + C_splat * alpha
+    # A_out = A_in * (1 - alpha) + alpha
+    
+    for y in range(y0, y1 + 1):
+        for x in range(x0, x1 + 1):
+            idx = y * width + x
+            current_color = framebuffer[idx].color
+            current_alpha = framebuffer[idx].alpha
+            
+            # Get splat color and alpha at (x,y)
+            # This requires evaluating the splat function (e.g., 2D Gaussian)
+            splat_color, splat_alpha = evaluate_splat(splat, x, y)
+            
+            # Composite
+            new_alpha = current_alpha + splat_alpha * (1 - current_alpha)
+            if new_alpha > 0.0:
+                new_color = (current_color * current_alpha * (1 - splat_alpha) + 
+                             splat_color * splat_alpha) / new_alpha
+            else:
+                new_color = current_color
+                
+            framebuffer[idx].color = new_color
+            framebuffer[idx].alpha = new_alpha
+```
+
+### Parameters
+*   **Tile Dimensions**: Commonly $16 \times 16$ or $16 \times 32$ pixels [S2].
+*   **Alpha Threshold**: An optional threshold to terminate compositing early if transmittance drops below a value (e.g., $0.01$) [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Concurrency Safety**: In languages with strict borrow checking (e.g., Rust), multiple threads cannot hold mutable references to the same buffer. This is resolved by wrapping the raw framebuffer pointer in a `Send + Sync` newtype (e.g., `FbPtr(*mut Vec3, f32)`) and relying on the geometric guarantee that tiles are disjoint [S1, unofficial].
+*   **Boundary Conditions**: The last tile in each row/column may be smaller than the standard tile size. The bounds calculation must clamp to the image dimensions $W-1$ and $H-1$ [S1, unofficial].
+*   **Empty Tiles**: Tiles with no overlapping splats must be skipped efficiently to avoid overhead [S1, unofficial].
+
+## Subtopics
+
+### [Tile-Based Alpha Compositing](1215-tile-based-alpha-compositing.md)
+Tile-Based Alpha Compositing is a rendering technique that blends multiple semi-transparent primitives (such as 2D Gaussians or splats) into a final image by processing them in depth order from nearest to farthest within disjoint tiles. It is distinguished from back-to-front compositing by its ability to use early termination: once the accumulated transmittance drops below a threshold, the pixel is considered fully opaque and remaining splats are skipped, providing a significant computational speedup.
+
+### [Dynamic Load Balancing via Tile Queue](1763-dynamic-load-balancing-via-tile-queue.md)
+A parallel processing scheme that splits the screen space into tiles and assigns them to processors via a shared queue to ensure high processor utilization over a wide range of views, addressing the unpredictability of isosurface extraction complexity per pixel.
+
+### [Tile Boundary Computation Setup](2678-tile-boundary-computation-setup.md)
+This method initializes the data structures required for tiled parallel compositing by computing which triangles (or splats) overlap with each tile in the output framebuffer. It solves the problem of mapping spatial geometry to disjoint processing units without synchronization. It differs from its siblings by relying on a global radix-sort to organize triangle-tile relationships rather than per-tile queues or expensive coverage tests during setup.
+
+### [Parallel Image Assembly](3271-parallel-image-assembly.md)
+Parallel Image Assembly is the final stage of tiled parallel volume rendering where per-process or per-rank RGBA sub-images are collected and blended into a single final image. It solves the problem of reconstructing a coherent global view from disjoint spatial tiles processed independently. Unlike its siblings which handle tile distribution or boundary computation, this method focuses on the global accumulation of color and opacity, typically using front-to-back alpha compositing.
+
+### [Multi-Threaded Tile-Based Rendering](3784-multi-threaded-tile-based-rendering.md)
+Multi-Threaded Tile-Based Rendering is a CPU-based parallelization strategy that divides the screen height into disjoint horizontal tiles, assigning each tile to a separate thread to parallelize the rasterization workload. It builds on [Tiled Parallel Compositing](1192-tiled-parallel-compositing.md) by providing the thread management and tile decomposition logic, allowing for lock-free, zero-synchronization processing of screen regions. Unlike [Screen Parallel Rendering](#screen-parallel-rendering), which requires every processor to hold the entire volume in memory, this method allows for more flexible memory management as tiles are processed independently.
+
+### Adaptive Tile Sizing
+A strategy to select between two tile dimensions ($16 \times 16$ and $16 \times 32$) based on the number of pixels to render to optimize performance [S2].
+*   **Threshold**: $1.5$ million pixels. If pixel count $< 1.5$M, use $16 \times 32$ tiles; otherwise use $16 \times 16$ tiles [S2].
+*   **Pitfall**: Tile orientation performance depends on memory indexing. With column-major indexing, $16 \times 32$ outperforms $32 \times 16$. With row-major indexing, the reverse is true [S2].
+*   **Performance**: On the low-resolution Bicycle scene, using $16 \times 32$ tiles increased the average render time to $9.77$ ms, demonstrating that larger tiles are not always faster [S2].
+*   **Comparison**: Increasing tile size reduces duplicated Gaussians but increases sequential processing load per tile and complicates thread-block size optimization [S2].
+
+### Tile-Based Wave Synchronization
+Manages tile assignment and synchronization across worker threads using wave indices and tokens [S3, unofficial].
+*   **Token**: Holds a tile index, wave index, and job ID. Created by `TileProvider::next()` [S3, unofficial].
+*   **Synchronization**: When a token is destroyed, it updates the provider's tile wave map and notifies all waiting threads: `m_tp.m_tile_wave[m_idx] = m_wave_idx; m_tp.m_tile_wave[m_idx].notify_all();` [S3, unofficial].
+*   **ETA Calculation**: `avg_progress_rate = progress / elapsed_time`, `eta = (1 - progress) / avg_progress_rate` [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(N_{tiles} \cdot N_{splat\_per\_tile} \cdot N_{pix\_per\_tile})$ in the worst case, but typically much lower due to early termination and sparse splat distribution.
+*   **Memory Complexity**: $O(W \cdot H)$ for the framebuffer, plus $O(N_{splats})$ for the splat data and $O(N_{tiles})$ for the binning structure [S1, unofficial].
+*   **Scalability**: Scales linearly with the number of threads on CPU, as there is no synchronization overhead between tiles [S1, unofficial].
+*   **Strengths**: Zero synchronization, no atomics, no locks, simple implementation, excellent cache locality within tiles [S1, unofficial].
+*   **Limitations**: Load imbalance if splat distribution is highly uneven across tiles. Performance sensitive to tile size and memory access patterns (row-major vs column-major) [S2].
+*   **When to Use**: CPU-based rendering, scenarios requiring lock-free parallelism, or when splat distribution can be efficiently binned [S1, unofficial].
+*   **When Not to Use**: When splat distribution is extremely uneven and cannot be balanced, or when global synchronization is required for other rendering passes.
+
+## Background
+Tiled Parallel Compositing is a fundamental technique in modern Gaussian Splatting and volume rendering implementations, particularly on CPU architectures where atomic operations are expensive or unavailable. It was popularized in implementations such as `tsplat` [S1, unofficial] and is discussed in the context of fast 3D Gaussian Splatting rendering [S2]. The method leverages spatial locality to avoid the race conditions inherent in alpha compositing, allowing for efficient multi-threaded execution.
+
+## Sources
+[S1] Tsplat – Run Gaussian splatting in your terminal, https://github.com/darshanmakwana412/tsplat, fetched 2026-10-26 (unofficial)
+[S2] Fast 3D Gaussian Splatting Rendering via Easily Integrable Improvements, https://doi.org/10.1109/lsp.2024.3521379, fetched 2026-10-26
+[S3] Shibodd/volume_path_tracer, https://github.com/Shibodd/volume_path_tracer, fetched 2026-10-26 (unofficial)

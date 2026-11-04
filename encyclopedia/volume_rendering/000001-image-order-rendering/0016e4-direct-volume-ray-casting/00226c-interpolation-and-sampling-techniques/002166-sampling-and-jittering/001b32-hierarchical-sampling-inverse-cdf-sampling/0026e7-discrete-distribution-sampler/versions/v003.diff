@@ -1,0 +1,156 @@
+--- v002.md
++++ v003.md
+@@ -22,34 +22,9 @@
+ 
+ **Algorithm Steps:**
+-1. **Calculate Total Weight**: Sum all weights in the distribution.
+-   $$ W_{\text{total}} = \sum_{i} w_i $$
+-   where $w_i$ is the weight of the $i$-th choice [S1, unofficial].
+-2. **Scale Random Number**: Map the uniform random number $u$ to the range $[0, W_{\text{total}})$.
+-   $$ u' = u \times W_{\text{total}} $$
+-   [S1, unofficial].
+-3. **Select Mode**:
+-   - If `deterministic` is true, select the top-$k$ indices with the highest probability densities using `gather_discrete_topk(pdf, num_samples)` [S2, unofficial].
+-   - If `deterministic` is false, proceed to stochastic sampling [S2, unofficial].
+-4. **Stochastic Sampling (Inverse CDF Walk)**:
+-   - Initialize a cumulative sum variable $C = 0$.
+-   - Iterate through the choices in order (index $i = 0, 1, \dots, N-1$):
+-     - Subtract the current weight $w_i$ from $u'$.
+-     - If $u' \le 0$, return index $i$ and density $w_i / W_{\text{total}}$ [S1, unofficial].
+-   - If the loop completes without returning (due to floating-point precision or $u'$ slightly exceeding $W_{\text{total}}$), return the last index $N-1$ and its density [S1, unofficial].
+-5. **Gather Values (Post-Sampling)**:
+-   - After obtaining indices, gather corresponding values from a target tensor [S2, unofficial].
+-   - Determine the bucket dimension as the second-to-last dimension of the index tensor:
+-     $$ \text{bucket\_dim} = \text{index.ndim} - 1 $$
+-     [S2, unofficial].
+-   - Expand the index tensor dimensions by appending singleton dimensions until it matches the target tensor's dimensionality:
+-     $$ \text{while } \text{len}(\text{index.shape}) < \text{len}(\text{target.shape}): \text{index} = \text{index}[..., \text{None}] $$
+-     [S2, unofficial].
+-   - Broadcast the index tensor to match the target tensor's shape, preserving the bucket dimension size from the index [S2, unofficial].
+-   - If the target tensor's bucket dimension size is 1, reset the index to zeros to handle broadcasting correctly:
+-     $$ \text{if } \text{target.shape}[\text{bucket\_dim}] == 1: \text{index} = \text{zeros\_like}(\text{index}) $$
+-     [S2, unofficial].
+-   - Perform the gather operation along the bucket dimension:
+-     $$ \text{result} = \text{target.gather}(\text{dim}=\text{bucket\_dim}, \text{index}=\text{index}) $$
+-     [S2, unofficial].
++1. **Calculate Total Weight**: Sum all weights in the distribution to get $W_{\text{total}} = \sum_{i} w_i$ [S1, unofficial].
++2. **Scale Random Number**: Map the uniform random number $u$ to the range $[0, W_{\text{total}})$ via $u' = u \times W_{\text{total}}$ [S1, unofficial].
++3. **Select Mode**: If `deterministic` is true, select the top-$k$ indices with the highest probability densities using `gather_discrete_topk(pdf, num_samples)` [S2, unofficial]. If `deterministic` is false, proceed to stochastic sampling [S2, unofficial].
++4. **Stochastic Sampling (Inverse CDF Walk)**: Initialize a cumulative sum variable $C = 0$ [G]. Iterate through the choices in order (index $i = 0, 1, \dots, N-1$): subtract the current weight $w_i$ from $u'$ [S1, unofficial]. If $u' \le 0$, return index $i$ and density $w_i / W_{\text{total}}$ [S1, unofficial]. If the loop completes without returning, return the last index $N-1$ and its density [S1, unofficial].
++5. **Gather Values (Post-Sampling)**: After obtaining indices, gather corresponding values from a target tensor [S2, unofficial]. Determine the bucket dimension as the second-to-last dimension of the index tensor: $\text{bucket\_dim} = \text{index.ndim} - 1$ [S2, unofficial]. Expand the index tensor dimensions by appending singleton dimensions until it matches the target tensor's dimensionality: $\text{while } \text{len}(\text{index.shape}) < \text{len}(\text{target.shape}): \text{index} = \text{index}[..., \text{None}]$ [S2, unofficial]. Broadcast the index tensor to match the target tensor's shape, preserving the bucket dimension size from the index [S2, unofficial]. If the target tensor's bucket dimension size is 1, reset the index to zeros to handle broadcasting correctly: $\text{if } \text{target.shape}[\text{bucket\_dim}] == 1: \text{index} = \text{zeros\_like}(\text{index})$ [S2, unofficial]. Perform the gather operation along the bucket dimension: $\text{result} = \text{target.gather}(\text{dim}=\text{bucket\_dim}, \text{index}=\text{index})$ [S2, unofficial].
+ 
+ **Pseudocode:**
+@@ -72,38 +47,26 @@
+     """
+     if deterministic:
+-        # Select top-k indices with highest probability densities [S2, unofficial]
+         k = min(num_samples, pdf.shape[-1])
+         top_k_values, top_k_indices = torch.topk(pdf, k, dim=-1)
+-        
+-        # Calculate densities (normalized probabilities)
+         total_weights = pdf.sum(dim=-1, keepdim=True)
+         densities = top_k_values / total_weights
++        return top_k_indices, densities.squeeze(-1)
++
++    total_w = pdf.sum(dim=-1)
++    u_scaled = u * total_w
++    indices = torch.zeros_like(total_w, dtype=torch.int64)
++    densities = torch.zeros_like(total_w)
++    
++    for i in range(pdf.shape[-1]):
++        u_scaled -= pdf[..., i]
++        mask = u_scaled <= 0
++        indices[mask] = i
++        densities[mask] = pdf[..., i] / total_w[mask]
+         
+-        return top_k_indices, densities
+-
+-    else:
+-        # Stochastic sampling [S1, unofficial]
+-        # Calculate total weight [S1, unofficial]
+-        total_w = pdf.sum(dim=-1)
+-        
+-        # Scale u [S1, unofficial]
+-        u_scaled = u * total_w
+-        
+-        # Initialize cumulative sum and find first index where cumulative_sum >= u_scaled
+-        cumulative_sum = torch.cumsum(pdf, dim=-1)
+-        mask = cumulative_sum >= u_scaled.unsqueeze(-1)
+-        
+-        # Find the first True in each row
+-        indices = torch.argmax(mask.int(), dim=-1)
+-        
+-        # Handle edge case where u_scaled > total_w (should not happen if u in [0,1) and weights > 0)
+-        # If all masks are False, argmax returns 0, but we should return last index [S1, unofficial]
+-        any_true = mask.any(dim=-1)
+-        indices = torch.where(any_true, indices, torch.full_like(indices, pdf.shape[-1] - 1))
+-        
+-        # Get densities
+-        densities = pdf.gather(dim=-1, index=indices.unsqueeze(-1)).squeeze(-1) / total_w
+-        
+-        return indices, densities
++    mask_last = u_scaled > 0
++    indices[mask_last] = pdf.shape[-1] - 1
++    densities[mask_last] = pdf[..., -1] / total_w[mask_last]
++    
++    return indices, densities
+ 
+ def gather_values(target: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+@@ -112,33 +75,22 @@
+     Handles broadcasting and bucket dimension logic [S2, unofficial].
+     """
+-    # Determine bucket dimension [S2, unofficial]
+     bucket_dim = index.ndim - 1
+-    
+-    # Expand index dimensions [S2, unofficial]
+     while len(index.shape) < len(target.shape):
+         index = index[..., None]
+-        
+-    # Broadcast index to match target shape [S2, unofficial]
+     broadcasted_shape = torch.broadcast_shapes(index.shape, target.shape)
+     index = index.broadcast_to(broadcasted_shape)
+-    
+-    # Handle bucket dimension size 1 [S2, unofficial]
+     if target.shape[bucket_dim] == 1:
+         index = torch.zeros_like(index)
+-        
+-    # Gather [S2, unofficial]
+-    result = target.gather(dim=bucket_dim, index=index)
+-    
+-    return result
++    return target.gather(dim=bucket_dim, index=index)
+ ```
+ 
+ **Parameters:**
+-- `u`: Uniform random number. Typical value: Not given in the sources.
+-- `deterministic`: Boolean. Typical value: Not given in the sources.
+-- `num_samples`: Integer. Typical value: Not given in the sources.
++- `u`: Uniform random number. Typical value: Not given in the sources. [S1, unofficial]
++- `deterministic`: Boolean. Typical value: Not given in the sources. [S2, unofficial]
++- `num_samples`: Integer. Typical value: Not given in the sources. [S2, unofficial]
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision Errors**: If $u$ is very close to 1 and weights are small, floating-point errors may cause $u' > W_{\text{total}}$. The algorithm must return the last element in this case [S1, unofficial].
+-- **Zero Weights**: If all weights are zero, the behavior is undefined. Sources do not specify a default; implementers should handle this by returning the first index or raising an error [G].
++- **Precision Errors**: If $u$ is very close to 1 and weights are small, floating-point errors may cause $u' > W_{\text{total}}$ [S1, unofficial]. The algorithm must return the last element in this case [S1, unofficial].
++- **Zero Weights**: If all weights are zero, the behavior is undefined [G].
+ - **Bucket Dimension Size 1**: When gathering, if the target tensor's bucket dimension is 1, the index must be reset to zeros to avoid broadcasting errors [S2, unofficial].
+ 
+@@ -155,12 +107,12 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Not given in the sources.
++- **Time Complexity**: Not given in the sources. [S2, unofficial]
+ - **Memory Complexity**: $O(N)$ to store the PDF tensor [S2, unofficial].
+-- **Measured Performance**: Not given in the sources.
+-- **Scaling**: Not given in the sources.
++- **Measured Performance**: Not given in the sources. [S2, unofficial]
++- **Scaling**: Not given in the sources. [S2, unofficial]
+ - **Strengths**: Simple to implement, supports both stochastic and deterministic top-k selection [S1, S2, unofficial].
+-- **Limitations**: Not given in the sources.
++- **Limitations**: Not given in the sources. [S2, unofficial]
+ - **When to Use**: When the distribution is small or when hierarchical sampling is not applicable [S2, unofficial].
+-- **When Not to Use**: Not given in the sources.
++- **When Not to Use**: Not given in the sources. [S2, unofficial]
+ 
+ ## Background

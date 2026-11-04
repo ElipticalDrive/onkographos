@@ -1,0 +1,184 @@
+Please describe the feature you would like to see. Architecture Proposal: GPU-Instanced Event Proxy Rewrite Core Objective Transition the rendering pipeline from CPU-bound mesh combining (Mesh.CombineMeshes) to low-overhead GPU Instancin...
+
+[Feature Request] convert valheim scalability to Graphics Deferred (GPU render) · Issue #350 · zolantris/ValheimMods · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Feature Request] convert valheim scalability to Graphics Deferred (GPU render) #350
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+[Feature Request] convert valheim scalability to Graphics Deferred (GPU render) #350
+Copy link
+Assignees
+Description
+zolantris
+opened on Oct 7, 2026
+Issue body actions
+Please describe the feature you would like to see.
+Architecture Proposal: GPU-Instanced Event Proxy Rewrite
+Core Objective
+Transition the rendering pipeline from CPU-bound mesh combining (Mesh.CombineMeshes) to low-overhead GPU Instancing via Indirect Drawing (Graphics.RenderMeshIndirect). This decouples visual optimization from simulation state, eliminates re-bake stuttering, and allows the PlayerUnclusterRadius to be safely set to 0 without breaking mod compatibility or networking.
+Technical Data Flow Strategy
+Instead of generating new unique geometry per sector, the mod will maintain structured GPU buffers containing flat arrays of transformation matrices (Matrix4x4) and optional instance properties (like damage or stability colors).
+The Data Struct Layout
+```
+csharp
+// Unmanaged struct layout to stream data efficiently to VRAM
+public struct InstanceData
+{
+    public Matrix4x4 ObjectToWorld; // 64 bytes
+    public Vector4 ColorOverride;  // 16 bytes (Handles wear/tear/stability overlays)
+}
+```
+The GPU Batch Class Structure
+Each active world chunk will replace its combined mesh holder with an instanced tracking block:
+csharp
+public class GPUInstancedBatch
+{
+public Mesh SourceMesh;
+public Material SourceMaterial;
+```
+// CPU-side tracking maps
+public List<InstanceData> CPUInstances = new List<InstanceData>();
+public Dictionary<ZDOID, int> ZdoToIndexMap = new Dictionary<ZDOID, int>();
+
+// Unity GPU Compute Buffers
+public ComputeBuffer InstanceBuffer; // Holds array of InstanceData
+public ComputeBuffer ArgsBuffer;     // Holds indirect draw arguments
+
+private uint[] argsArray = new uint[5] { 0, 0, 0, 0, 0 };
+
+public void InitializeBuffers(int initialCapacity = 512)
+{
+    // 80 bytes per instance (64 matrix + 16 color vector)
+    InstanceBuffer = new ComputeBuffer(initialCapacity, 80, ComputeBufferType.Structured);
+    ArgsBuffer = new ComputeBuffer(1, 5 * sizeof(uint), ComputeBufferType.IndirectArguments);
+    
+    argsArray[0] = SourceMesh.GetIndexCount(0); // Index count per instance
+    argsArray[1] = 0;                           // Instance count (starts at 0)
+    ArgsBuffer.SetData(argsArray);
+}
+
+public void Release()
+{
+    InstanceBuffer?.Release();
+    ArgsBuffer?.Release();
+}
+```
+}
+Use code with caution.
+Component Modification Requirements
+A. Rendering/Clustering (The Data Harvesting Layer)
+• What to remove: Strip out the code extracting vertex arrays, UV channels, and polygon indices into CombineInstance arrays.
+• What to add: Create a routine that iterates over eligible prefabs within a sector cell. Extract their transform.localToWorldMatrix and any active material color flags (_Color or wear thresholds). Append this data directly to the CPUInstances list of the corresponding GPUInstancedBatch.
+B. Presentation (The Visibility Switching Layer)
+• What to change: Currently, the mod toggles the GameObject.SetActive() state or removes/replaces objects completely to switch between normal and combined views. This must be swapped out for an Invisible Proxy Pattern.
+• The Rule: The GameObject must remain 100% active. Simply mutate the visibility component:
+csharp
+public void ToggleProxyState(bool enableProxy)
+{
+foreach (var target in m_sectorObjects)
+{
+if (target.MeshRendererComponent != null)
+{
+// The GameObject stays fully awake for WearNTear, netviews, and other mods.
+// We just turn off its native drawing call.
+target.MeshRendererComponent.enabled = !enableProxy;
+}
+}
+}
+Use code with caution.
+C. The Central Render Loop (Update / OnRenderObject)
+Because indirect draw calls bypass Unity’s standard scene graph, the mod must tell the graphics card to draw the instanced chunks manually every frame:
+```
+csharp
+public void RenderActiveBatches()
+{
+    foreach (var batch in ActiveBatches)
+    {
+        if (batch.CPUInstances.Count == 0) continue;
+
+        // Configure standard Valheim material rendering properties safely
+        RenderParams rParams = new RenderParams(batch.SourceMaterial);
+        rParams.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+        rParams.receiveShadows = true;
+
+        // Stream positions to the custom shader property
+        batch.SourceMaterial.SetBuffer("_InstanceDataBuffer", batch.InstanceBuffer);
+
+        // Hardware drawing call executed directly on the GPU
+        Graphics.RenderMeshIndirect(rParams, batch.SourceMesh, batch.ArgsBuffer, batch.CPUInstances.Count);
+    }
+}
+```
+Real-Time Mutation Pipeline (Bypassing Re-Bake Stutter)
+The core limitation of the current static mesh implementation is the necessity to wait for a sector unload/reload or execute a massive CPU-bound mesh compilation when objects are damaged. Under this proposed GPU-instanced layer, live updates are handled seamlessly using a Swap-with-Last Array Mutation Technique:
+```
+csharp
+public void RemoveInstanceLive(ZDOID zdoid)
+{
+    if (!ZdoToIndexMap.TryGetValue(zdoid, out int indexToRemove)) return;
+
+    int lastIndex = CPUInstances.Count - 1;
+    if (indexToRemove != lastIndex)
+    {
+        // Move the last element into the hole left by the deleted piece
+        InstanceData lastElement = CPUInstances[lastIndex];
+        CPUInstances[indexToRemove] = lastElement;
+
+        // Fix the tracking map for the item that was moved
+        // (Need to look up the ZDO ID associated with lastIndex to update its map pointer)
+        ZdoToIndexMap[MovedElementZdoID] = indexToRemove;
+    }
+
+    // Shrink the array
+    CPUInstances.RemoveAt(lastIndex);
+    ZdoToIndexMap.Remove(zdoid);
+
+    // Update GPU data cleanly in under a millisecond
+    InstanceBuffer.SetData(CPUInstances);
+    
+    // Update indirect draw instance count argument
+    argsArray[1] = (uint)CPUInstances.Count;
+    ArgsBuffer.SetData(argsArray);
+}
+```
+Why is this feature necessary?
+No render delay or overhead with this approach compared to CombinedMesh
+If your request relates to an existing mod, please specify which one:
+No response
+Additional context
+No response
+Proposed Solution
+No response
+Activity
+zolantris
+self-assigned this
+on Oct 7, 2026
+zolantris
+changed the title [-][Feature Request] convert valheim scalability to GraphicsDeferred[/-] [+][Feature Request] convert valheim scalability to Graphics Deferred (GPU render) [/+] on Oct 7, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+zolantris
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

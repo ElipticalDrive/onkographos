@@ -1,0 +1,138 @@
+Summary instancedMesh() reserves the API surface for GPU instancing with a typed per-instance schema and a full onBeforeRender hook contract available on every node. This issue specs the API; implementation is an explicit fast-follow aft...
+
+Scene: instancedMesh with typed instance schema and onBeforeRender · Issue #217 · vercel-labs/vgpu · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Scene: instancedMesh with typed instance schema and onBeforeRender #217
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Scene: instancedMesh with typed instance schema and onBeforeRender#217
+Copy link
+Description
+matiasngf
+opened on Jul 30, 2026
+Issue body actions
+Summary
+instancedMesh() reserves the API surface for GPU instancing with a typed per-instance schema
+and a full onBeforeRender hook contract available on every node. This issue specs the API;
+implementation is an explicit fast-follow after the MVP (program protocol + renderTree + lighting)
+lands — reserve the surface now so the ABI's location 8-11 reservation (see the program-protocol
+sub-issue) has a concrete consumer.
+See the parent issue for the full boundary/context.
+Typed instance schema → typed writer
+```
+const forest = instancedMesh(pine(), barkProgram, {
+  count: 500,
+  instance: { tint: "float32x3", sway: "float32" }, // schema → typed writer, locations 12+
+});
+
+forest.instances.set(17, { matrix: empty.worldMatrix, sway: 0.5 }); // partial update is OK
+forest.count = 350; // shrink without reallocating
+```
+Schema fields compile to a typed writer (no manual DataView offset math for authors).
+Writes are staged CPU-side with dirty-range tracking; one upload per frame regardless of how
+many instances.set() calls happened that frame.
+instanceMatrix always occupies location 8-11 (see the core-ABI sub-issue); schema fields
+start at location 12.
+onBeforeRender — full timing contract (applies to any node, not just instanced meshes)
+Fires during the walk, in DFS order, at the moment the node is visited, with that node's own
+worldMatrix and all ancestor matrices already resolved.
+Reading worldMatrix of any node (visited yet or not) is valid — matrices are lazy.
+Writing GPU data (e.g. instances.set(...)) takes effect this same frame.
+Writing the transform of a node already visited earlier in this walk takes effect
+next frame (its matrix for this frame is already resolved/consumed).
+Nodes pruned by visible: false never fire onBeforeRender at all.
+Use case: empties driving instances
+```
+const spawnPoints = group(); // "empties" — nodes with no geometry, pure transform carriers
+for (let i = 0; i < 350; i++) spawnPoints.add(group({ position: randomPointOnTerrain() }));
+
+forest.onBeforeRender = () =>
+  spawnPoints.children.forEach((empty, i) =>
+    forest.instances.set(i, { matrix: empty.worldMatrix }));
+```
+Edge cases
+```
+// (a) writing a transform on a node visited EARLIER in this same walk: takes effect next frame.
+world.onBeforeRender = () => { someEarlierSibling.position = [1, 0, 0]; }; // next frame, not this one
+
+// (b) a node pruned by visibility never fires onBeforeRender:
+hiddenRig.visible = false;
+hiddenRig.onBeforeRender = () => { throw new Error("never called while pruned"); };
+
+// (c) partial instance update leaves untouched slots as-is:
+forest.instances.set(3, { sway: 1.2 }); // matrix for instance 3 keeps its previous value
+
+// (d) shrinking count doesn't reallocate or touch retained slot data beyond the new count:
+forest.count = 350; // slots 350-499 keep their staged data but stop being drawn
+```
+Two GPU paths
+```
+// path 1 (pack-friendly): instanceMatrix at locations 8-11; the vertex std detects it and
+// multiplies automatically — zero custom WGSL needed for the common case.
+const forest = instancedMesh(pine(), barkProgram, { count: 500, instance: { tint: "float32x3" } });
+
+// path 2 (custom / GPU-driven): storage buffer + @builtin(instance_index), authored with
+// { shader } for full control — e.g. compute-driven culling/placement.
+const gpuForest = instancedMesh(pine(), program({ shader: instanceStorageShaderWGSL }), {
+  count: 100_000,
+  storage: true, // opts out of the CPU staging path entirely
+});
+```
+Batching levels
+Level 1 — free today: meshes that share a fingerprint (see the program-protocol sub-issue)
+already share one compiled pipeline with zero extra API surface.
+Level 2 — mergeGeometries util: an explicit CPU pre-process/authoring-time utility,
+orthogonal to instancing itself (tracked in the follow-ups sub-issue).
+Level 3 — dynamic/indirect batching + culling: phase 3, GPU-driven; low-level indirect draw
+already exists as a primitive to build on (tracked in the follow-ups sub-issue).
+Future sugar (not this issue)
+```
+forest.instances.follow(nodes); // sugar over the onBeforeRender pattern above
+```
+Acceptance
+instancedMesh(geometry, program, { count, instance }) typed schema compiles to a typed
+writer with no manual offset math.
+instances.set(index, partial) supports partial updates; staged CPU-side with dirty-range
+tracking; exactly one GPU upload per frame regardless of set() call count.
+count can shrink without reallocating the underlying buffer.
+onBeforeRender timing contract (documented above) holds for instanced meshes AND plain
+nodes/empties, verified with a DFS-order test.
+instanceMatrix reserved at location 8-11; schema fields start at location 12, verified
+against the core-ABI sub-issue's reservation.
+Path 1 (vertex-std auto-detect) and path 2 (storage: true / custom { shader }) both
+documented with a working example.
+Explicitly scoped as fast-follow: this issue defines the contract; landing it is sequenced
+after the program-protocol and renderTree sub-issues.
+Activity
+matiasngf
+added a parent issue on Jul 30, 2026
+Scene API north star: tree orchestration + program protocol #219
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

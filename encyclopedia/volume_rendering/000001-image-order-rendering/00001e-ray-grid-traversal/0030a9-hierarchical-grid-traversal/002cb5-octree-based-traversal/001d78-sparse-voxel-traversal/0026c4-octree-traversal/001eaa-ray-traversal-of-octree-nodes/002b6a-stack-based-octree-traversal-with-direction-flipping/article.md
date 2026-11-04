@@ -1,0 +1,338 @@
+# Stack-based Octree Traversal with Direction Flipping
+
+Also called: Octree Ray Traversal with Direction Flipping, Stack-based Octree Traversal, TreeTraverser
+
+## Overview
+A stack-based algorithm for traversing an octree structure along a ray, handling arbitrary ray directions by flipping the coordinate system and ray parameters to ensure positive traversal direction [S1, unofficial]. It differs from [Ray Traversal of Octree Nodes](1841-ray-traversal-of-octree-nodes.md) by using an explicit stack to manage non-linear traversal paths and direction flipping to simplify child selection logic, and from [IEEE-754 Bit Manipulation Octree Traversal](3907-ieee-754-bit-manipulation-octree-traversal.md) by relying on floating-point comparisons and explicit stack management rather than bit-level integer arithmetic for step determination.
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   `Octree`: An octree structure with fields `min`, `max`, `size`, `gridlength`, and a vector of `Node` objects. Each `Node` has methods `hasChild(i)`, `isLeaf()`, and `isNull()`.
+*   `Ray`: A ray defined by `origin` (vec3) and `direction` (vec3).
+
+**Outputs:**
+*   A sequence of visited nodes in traversal order, accessible via the stack state.
+*   The current node and its associated t-intervals during traversal.
+
+### Data Structures
+**TraversalNodeInfo_**
+A struct representing a node on the traversal stack.
+*   `const Node* node`: Pointer to the current octree node.
+*   `vec3 t0`: Entry t-values for the current node's bounding box (x, y, z components).
+*   `vec3 t1`: Exit t-values for the current node's bounding box (x, y, z components).
+*   `vec3 tm`: Midpoint t-values for the current node's bounding box (x, y, z components).
+*   `int nextchild`: Index of the next child to visit.
+    *   `-1`: First visit to this node; children not yet determined.
+    *   `0-7`: Index of the next child octant to visit.
+    *   `8`: All children visited; node is done.
+
+**TreeTraverser**
+The main traversal class.
+*   `unsigned char a`: Direction flip mask. Bits 0, 1, 2 correspond to Z, Y, X axes respectively. If bit $i$ is set, the corresponding axis was flipped.
+*   `Octree const* octree`: Pointer to the octree being traversed.
+*   `Ray ray`: The modified ray with flipped origin/direction if necessary.
+*   `Ray original_ray`: The original ray before any flips, used for final position calculation.
+*   `std::vector<TraversalNodeInfo_> stack`: The stack of nodes to visit.
+*   `int stepcount`: Counter for traversal steps.
+
+### Numbered Steps
+
+#### 1. Initialization (`initTraversal`)
+1.  Set `stepcount = 0`, `a = 0`.
+2.  Store `original_ray`.
+3.  For each axis $i \in \{0, 1, 2\}$ (corresponding to X, Y, Z):
+    *   Check ray direction sign. The source code uses specific logic: if `ray.direction[i] < 0` for X and Y, or `ray.direction[i] > 0` for Z (note: this Z check is non-standard and specific to the source implementation) [S1, unofficial].
+    *   If the condition is met:
+        *   Flip `ray.origin[i] = octree->size[i] - ray.origin[i]`.
+        *   Flip `ray.direction[i] = -ray.direction[i]`.
+        *   Set the corresponding bit in `a`: bit 0 for Z, bit 1 for Y, bit 2 for X.
+4.  Calculate entry/exit t-values for the octree bounding box using the modified ray:
+    *   $tx_0 = (octree->min[0] - ray.origin[0]) \times (1.0f / ray.direction[0])$
+    *   $tx_1 = (octree->max[0] - ray.origin[0]) \times (1.0f / ray.direction[0])$
+    *   Similarly for $ty_0, ty_1$ (Y axis) and $tz_0, tz_1$ (Z axis).
+5.  Check if the ray intersects the octree:
+    *   $t_{enter} = \max(\max(tx_0, ty_0), tz_0)$
+    *   $t_{exit} = \min(\min(tx_1, ty_1), tz_1)$
+    *   If $t_{enter} < t_{exit}$:
+        *   Create `TraversalNodeInfo_` for the root node.
+        *   Set `t0 = (tx_0, ty_0, tz_0)`, `t1 = (tx_1, ty_1, tz_1)`, `tm = 0.5f * (t0 + t1)`.
+        *   Set `nextchild = -1`.
+        *   Push onto `stack`.
+    *   Else: Stack remains empty; no traversal occurs.
+
+#### 2. Step Function (`step`)
+Repeatedly call until the stack is empty or traversal is complete.
+
+1.  **POP Check**:
+    *   If `stack` is empty, return.
+    *   Let `top = stack.back()`.
+    *   If `top.nextchild == 8` (all children visited) or `top.node->isLeaf()`, pop `stack` and return.
+
+2.  **PUSH (First Visit)**:
+    *   If `top.nextchild == -1`:
+        *   Calculate `tm = 0.5f * (top.t0 + top.t1)`.
+        *   Determine the first child to visit using `firstNode(top.t0, tm)`.
+        *   Set `top.nextchild` to the result of `firstNode`.
+        *   Update `stack.back()` with the new `nextchild`.
+
+3.  **ADVANCE (Visit Child)**:
+    *   Let `current_case = top.nextchild`.
+    *   Calculate `child_index = current_case ^ a`. This maps the logical child index to the physical child index based on the direction flip mask [S1, unofficial].
+    *   Check if the child exists: `if (top.node->hasChild(child_index))`.
+    *   If it exists:
+        *   Calculate the new `t0` and `t1` bounds for the child voxel. The source code implies calculating `newNode(tm, t1 values)` for each case. Specifically, for each axis, if the child is in the "negative" half (relative to the flipped coordinate system), the new `t0` is the current `tm` for that axis; otherwise, it remains the current `t0`. Similarly for `t1`. *Note: The exact formula for `newNode` is not fully detailed in the provided snippets, but it involves updating t-intervals based on the child's octant position relative to the midpoint `tm`.*
+        *   Create `TraversalNodeInfo_` for the child:
+            *   `node`: `top.node->getChild(child_index)` (or equivalent access).
+            *   `t0`: Updated entry t-values.
+            *   `t1`: Updated exit t-values.
+            *   `tm`: `0.5f * (t0 + t1)`.
+            *   `nextchild`: `-1` (first visit to child).
+        *   Push the new `TraversalNodeInfo_` onto `stack`.
+        *   Set `top.nextchild` to the next child to visit after the current one (increment `current_case`, handling wrap-around if necessary, though the source logic suggests a specific order determined by `firstNode` and subsequent steps). *Note: The exact logic for determining the "next" child after the current one is not fully explicit in the snippets, but it typically involves checking the remaining children in the order determined by the initial `firstNode` logic.*
+
+#### 3. First Child Selection (`firstNode`)
+Given `t0` and `tm` for the current node:
+1.  If $tx_0 > ty_0$ and $tx_0 > tz_0$ (entering via YZ plane, i.e., X-axis first):
+    *   If $ty_m < tx_0$, set bit 1.
+    *   If $tz_m < tx_0$, set bit 0.
+    *   Result is the combined bit value.
+2.  Else if $ty_0 > tz_0$ (entering via XZ plane, i.e., Y-axis first):
+    *   If $tx_m < ty_0$, set bit 2.
+    *   If $tz_m < ty_0$, set bit 0.
+    *   Result is the combined bit value.
+3.  Else (entering via XY plane, i.e., Z-axis first):
+    *   If $tx_m < tz_0$, set bit 2.
+    *   If $ty_m < tz_0$, set bit 1.
+    *   Result is the combined bit value.
+
+*Note: The bit mapping in `firstNode` (bits 0, 1, 2) corresponds to the child index. The exact mapping of bits to child indices (0-7) depends on the octree's child ordering convention, which is assumed to be standard (e.g., LSB is X, etc.).*
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class TraversalNodeInfo:
+    def __init__(self, node, t0, t1, tm, nextchild):
+        self.node = node
+        self.t0 = t0  # vec3
+        self.t1 = t1  # vec3
+        self.tm = tm  # vec3
+        self.nextchild = nextchild  # int
+
+class TreeTraverser:
+    def __init__(self, octree, ray):
+        self.octree = octree
+        self.original_ray = ray
+        self.ray = Ray(ray.origin, ray.direction)
+        self.a = 0  # direction flip mask
+        self.stack = []
+        self.stepcount = 0
+
+    def init_traversal(self):
+        self.stepcount = 0
+        self.a = 0
+        
+        # Flip coordinates if necessary
+        # Note: The source code uses specific logic for Z (positive direction check)
+        # which is non-standard. We replicate it exactly.
+        for i in range(3):
+            axis_name = ['x', 'y', 'z'][i]
+            dir_val = self.ray.direction[i]
+            
+            # Non-standard Z check: if direction > 0, flip
+            # Standard X/Y check: if direction < 0, flip
+            should_flip = False
+            if i == 0 or i == 1:  # X or Y
+                if dir_val < 0:
+                    should_flip = True
+            elif i == 2:  # Z
+                if dir_val > 0:
+                    should_flip = True
+            
+            if should_flip:
+                self.ray.origin[i] = self.octree.size[i] - self.ray.origin[i]
+                self.ray.direction[i] = -self.ray.direction[i]
+                # Set bit in a: bit 0 for Z, bit 1 for Y, bit 2 for X
+                if i == 2:
+                    self.a |= 1
+                elif i == 1:
+                    self.a |= 2
+                elif i == 0:
+                    self.a |= 4
+
+        # Calculate t0, t1 for the octree bounding box
+        # Avoid division by zero if direction is 0 (assume no intersection or handle separately)
+        # For simplicity, assume non-zero direction as per source logic
+        inv_dir = [1.0 / self.ray.direction[i] for i in range(3)]
+        
+        tx0 = (self.octree.min[0] - self.ray.origin[0]) * inv_dir[0]
+        tx1 = (self.octree.max[0] - self.ray.origin[0]) * inv_dir[0]
+        ty0 = (self.octree.min[1] - self.ray.origin[1]) * inv_dir[1]
+        ty1 = (self.octree.max[1] - self.ray.origin[1]) * inv_dir[1]
+        tz0 = (self.octree.min[2] - self.ray.origin[2]) * inv_dir[2]
+        tz1 = (self.octree.max[2] - self.ray.origin[2]) * inv_dir[2]
+
+        t0 = [tx0, ty0, tz0]
+        t1 = [tx1, ty1, tz1]
+
+        t_enter = max(max(t0[0], t0[1]), t0[2])
+        t_exit = min(min(t1[0], t1[1]), t1[2])
+
+        if t_enter < t_exit:
+            tm = [0.5 * (t0[i] + t1[i]) for i in range(3)]
+            root_node = self.octree.get_root_node()
+            info = TraversalNodeInfo(root_node, t0, t1, tm, -1)
+            self.stack.append(info)
+        else:
+            self.stack = []
+
+    def first_node(self, t0, tm):
+        tx0, ty0, tz0 = t0
+        txm, tym, tzm = tm
+        
+        # Entering via YZ plane (X axis first)
+        if tx0 > ty0 and tx0 > tz0:
+            child = 0
+            if tym < tx0:
+                child |= 2  # bit 1 for Y
+            if tzm < tx0:
+                child |= 1  # bit 0 for Z
+            return child
+        
+        # Entering via XZ plane (Y axis first)
+        elif ty0 > tz0:
+            child = 0
+            if txm < ty0:
+                child |= 4  # bit 2 for X
+            if tzm < ty0:
+                child |= 1  # bit 0 for Z
+            return child
+        
+        # Entering via XY plane (Z axis first)
+        else:
+            child = 0
+            if txm < tz0:
+                child |= 4  # bit 2 for X
+            if tym < tz0:
+                child |= 2  # bit 1 for Y
+            return child
+
+    def step(self):
+        if not self.stack:
+            return False
+        
+        top = self.stack[-1]
+        
+        # POP check
+        if top.nextchild == 8 or top.node.is_leaf():
+            self.stack.pop()
+            return True
+        
+        # PUSH (First Visit)
+        if top.nextchild == -1:
+            tm = [0.5 * (top.t0[i] + top.t1[i]) for i in range(3)]
+            first_child = self.first_node(top.t0, tm)
+            top.nextchild = first_child
+            # Update stack back since we modified top
+            self.stack[-1] = top
+        
+        # ADVANCE
+        current_case = top.nextchild
+        child_index = current_case ^ self.a
+        
+        if top.node.has_child(child_index):
+            # Calculate new t0, t1 for the child
+            # This part is not fully detailed in the source, but logically:
+            # For each axis, if the child is in the "negative" half (relative to flipped coords),
+            # the new t0 is the current tm, else it's the current t0.
+            # Similarly for t1.
+            # We need to determine which half the child is in.
+            # The child index (after XOR with a) tells us the position.
+            # Assuming standard octree child ordering:
+            # bit 0: X, bit 1: Y, bit 2: Z
+            # 0: (-,-,-), 1: (+,-,-), 2: (-,+,-), 3: (+,+,-), 4: (-,-,+), 5: (+,-,+), 6: (-,+,+), 7: (+,+,+)
+            
+            new_t0 = list(top.t0)
+            new_t1 = list(top.t1)
+            for i in range(3):
+                bit = (child_index >> i) & 1
+                # If bit is 0, it's the "negative" half (lower bound)
+                # If bit is 1, it's the "positive" half (upper bound)
+                # Note: This assumes the flipped coordinate system where 0 is always the lower half
+                if bit == 0:
+                    new_t0[i] = top.tm[i]
+                else:
+                    new_t1[i] = top.tm[i]
+            
+            new_tm = [0.5 * (new_t0[i] + new_t1[i]) for i in range(3)]
+            
+            # Get the child node
+            # The source uses top.node->hasChild(child_index) and then presumably gets the child
+            # We assume a method to get the child node by index
+            child_node = top.node.get_child(child_index)
+            
+            # Determine the next child to visit after the current one
+            # This is not fully specified in the source, but typically it's the next in the order
+            # determined by first_node. For simplicity, we increment and handle wrap-around
+            next_child = (current_case + 1) % 8
+            # If we've visited all children, next_child would be 8, but we need to handle the order
+            # The source logic for "next child" is not explicit. We assume a simple increment for now.
+            # A more robust implementation would track the order of children to visit.
+            
+            new_info = TraversalNodeInfo(child_node, new_t0, new_t1, new_tm, -1)
+            self.stack.append(new_info)
+            
+            # Update the parent's nextchild to the next one to visit
+            # This is tricky because the order is determined by first_node
+            # For now, we set it to the next sequential child, which may not be correct
+            # but is a placeholder for the missing logic
+            top.nextchild = next_child
+            self.stack[-2] = top
+            
+        else:
+            # Child does not exist, move to next child
+            top.nextchild = (current_case + 1) % 8
+            self.stack[-1] = top
+            
+        return True
+
+    def get_current_position(self):
+        if not self.stack:
+            return None
+        top = self.stack[-1]
+        t = max(top.t0)
+        pos = self.original_ray.get_ray_point(t)
+        # Negate z-coordinate to compensate for z-flip
+        pos[2] = -pos[2]
+        return pos
+```
+
+### Parameters
+*   `a`: Direction flip mask, computed during initialization.
+*   `stepcount`: Traversal step counter.
+
+### Edge Cases and Pitfalls
+*   **Ray Direction Handling**: The code assumes specific sign checks for each axis (negative for X and Y, positive for Z) to determine flipping. This is non-standard and must be replicated exactly [S1, unofficial].
+*   **Position Calculation**: `getCurrentPosition` uses `original_ray.getRayPoint(t)` where `t = stack.back().t0.max()`, and then negates the z-coordinate: `answer[2] = -answer[2]`. This compensates for the z-flip during traversal [S1, unofficial].
+*   **Division by Zero**: If a ray direction component is zero, the t-calculation will result in division by zero. The source code does not explicitly handle this, so it is assumed that rays with zero direction components are either pre-filtered or handled elsewhere.
+*   **Child Order**: The exact logic for determining the "next" child to visit after the current one is not fully specified in the source. The pseudocode uses a simple increment, which may not match the source's intended order.
+
+## Operating characteristics
+*   **Time Complexity**: $O(N)$ where $N$ is the number of nodes visited along the ray path. Each node is visited once.
+*   **Memory Complexity**: $O(D)$ where $D$ is the depth of the octree, due to the stack.
+*   **Measured Performance**: Not given in the sources.
+*   **Scaling**: Scales with the depth of the octree and the number of nodes intersected by the ray.
+*   **Strengths**: Handles arbitrary ray directions efficiently by flipping coordinates. Simple stack-based implementation.
+*   **Limitations**: Non-standard direction flipping logic for Z-axis. Child order logic is not fully specified.
+*   **When to Use**: When traversing an octree with arbitrary ray directions and a simple stack-based approach is preferred.
+*   **When Not to Use**: When bit-manipulation based traversal is preferred for performance, or when the non-standard Z-flip logic is a concern.
+
+## Background
+The method is derived from an unofficial CPU voxel raycaster implementation [S1, unofficial]. The specific direction flipping logic for the Z-axis (positive direction check) is unique to this implementation and not standard in ray tracing literature.
+
+## Sources
+[S1] Forceflow/cpu_voxel_raycaster, https://github.com/Forceflow/cpu_voxel_raycaster, fetched 2026-10-24 (unofficial)

@@ -1,0 +1,198 @@
+# Local Piecewise Integration for Light Propagation
+
+Also called: Local Piecewise Integration
+
+## Overview
+Local Piecewise Integration is a precomputation technique used in direct volume rendering to efficiently calculate high-resolution global shadows and light propagation from a distant light source through a participating medium [S1, unofficial]. It solves the problem of expensive per-voxel absorption integration by approximating the opacity integral using short, reusable local segments, enabling interactive frame rates for large-scale volumes [S1, unofficial]. Unlike object-order light propagation methods, it allows the light source to be positioned anywhere in the scene, including within the volume, and handles large scales via multi-resolution data management [S1, unofficial]. Compared to simple blur-based approximations like Kniss et al. [KPH*03], it provides nearly physically correct scattering effects [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Volumetric dataset with extinction/opacity field.
+*   Light source direction and intensity $I_0$.
+*   Transfer Function (TF) mapping scalar values to opacity $\alpha$.
+*   Parameters:
+    *   $N$: Number of samples per local segment (Not given in the sources).
+    *   $\Delta s$: Step length for global integration, equal to the local piecewise segment length (Typically 8-16 voxels) [S1, unofficial].
+    *   $I_{bias}$: Minimum lighting bias to prevent completely dark regions [S1, unofficial].
+    *   $R\Omega$: Scattering sphere radius (Not given in the sources).
+    *   SVR Resolution: Resolution of the Shadow Volume Representation storage (Not given in the sources).
+
+**Outputs:**
+*   Precomputed local piecewise transparency values $T_{lp}(s_n)$ stored in the Shadow Volume Representation (SVR) [S1, unofficial].
+*   Global light intensity $I(s)$ for each voxel during rendering [S1, unofficial].
+
+**Data Structures:**
+*   **Shadow Volume Representation (SVR):** A 3D grid storing precomputed light information. The resolution can differ from the volume dataset to balance performance and quality [S1, unofficial].
+*   **Local Piecewise Segments:** For each voxel, a sequence of transparency values $T_{lp}(s_n)$ corresponding to segments of length $\Delta s$ extending towards the light source [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Local Segment Opacity Calculation:**
+    For each voxel location $s_0$ in the volume, cast a ray in the direction of the light source. Divide the ray into segments of length $\Delta s$. For the $n$-th segment starting at $s_n = n \Delta s$:
+    a. Sample $N$ points $n_i$ along the segment $[s_n, s_{n+1}]$ using the current Transfer Function to get point opacities $\alpha(n_i)$ [S1, unofficial].
+    b. Compute the segment opacity $\alpha_{lp}(s_n)$ using the product of individual sample transparencies:
+       $$ \alpha_{lp}(s_n) = 1 - \prod_{i=0}^{N} (1 - \alpha(n_i)) $$
+    c. Compute the segment transparency $T_{lp}(s_n)$:
+       $$ T_{lp}(s_n) = 1 - \alpha_{lp}(s_n) $$
+       (Note: The source defines $T_{lp}(s_n) = e^{-\int_{s_n}^{s_n+1} \tau(t) dt}$ and relates it to opacity via $\alpha_{lp} = 1 - T_{lp}$) [S1, unofficial].
+    d. Store $T_{lp}(s_n)$ in the SVR for the voxel at $s_n$ [S1, unofficial].
+
+2.  **Global Light Integration (Precomputation/Update):**
+    Using the precomputed local segments, calculate the global light intensity reaching each voxel. The intensity $I(s)$ at position $s$ is:
+    $$ I(s) = I_0 \times \prod_{n=0}^{k} T_{lp}(s_n) $$
+    where $k$ is the number of segments from the light source to $s$ [S1, unofficial].
+    *   This integration is updated at a lower frequency than the rendering frame rate [S1, unofficial].
+    *   An bias term $I_{bias}$ may be applied to ensure no region is completely dark [S1, unofficial].
+
+3.  **Rendering:**
+    During ray marching for image generation:
+    a. For each sample along the view ray, perform one additional texture look-up in the SVR to retrieve the pre-computed light intensity/transparency [S1, unofficial].
+    b. Composite the volume color using the retrieved lighting information [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_local_piecewise_segments(volume_data, light_direction, delta_s, num_samples_per_segment):
+    """
+    Precomputes local piecewise transparency segments for all voxels.
+    
+    Args:
+        volume_data: 3D array of scalar values.
+        light_direction: Normalized vector pointing from volume to light.
+        delta_s: Length of each piecewise segment in voxels.
+        num_samples_per_segment: Number of samples N to take within each segment.
+        
+    Returns:
+        svr: 3D array storing T_lp(s_n) for each voxel and segment index.
+    """
+    # Determine grid dimensions
+    dims = volume_data.shape
+    svr = np.zeros(dims)
+    
+    # For each voxel, compute the local segment transparency towards the light
+    for x in range(dims[0]):
+        for y in range(dims[1]):
+            for z in range(dims[2]):
+                # Current voxel position
+                current_pos = np.array([x, y, z])
+                
+                # Cast ray in light direction
+                # We need to compute T_lp for segments starting at s_0, s_1, ...
+                # s_0 is current_pos. s_n = current_pos + n * delta_s * light_direction
+                
+                n = 0
+                while True:
+                    s_n = current_pos + n * delta_s * light_direction
+                    
+                    # Check if segment start is within volume bounds
+                    if not is_within_bounds(s_n, dims):
+                        break
+                        
+                    # Sample N points along the segment [s_n, s_n + delta_s * light_direction]
+                    segment_opacities = []
+                    for i in range(num_samples_per_segment + 1): # i from 0 to N
+                        # Interpolate position within segment
+                        t = i / num_samples_per_segment
+                        sample_pos = s_n + t * delta_s * light_direction
+                        
+                        # Get scalar value from volume
+                        val = interpolate_volume(volume_data, sample_pos)
+                        
+                        # Get opacity from Transfer Function
+                        alpha_ni = transfer_function(val)
+                        segment_opacities.append(alpha_ni)
+                    
+                    # Compute segment transparency T_lp(s_n)
+                    # alpha_lp = 1 - product(1 - alpha(n_i))
+                    # T_lp = 1 - alpha_lp = product(1 - alpha(n_i))
+                    product_transparency = 1.0
+                    for alpha in segment_opacities:
+                        product_transparency *= (1.0 - alpha)
+                    
+                    T_lp = product_transparency
+                    
+                    # Store in SVR
+                    # Note: SVR might have different resolution, but for simplicity assuming 1:1 mapping here
+                    svr[int(s_n[0]), int(s_n[1]), int(s_n[2])] = T_lp
+                    
+                    n += 1
+                    
+    return svr
+
+def render_with_local_piecewise(volume_data, svr, light_intensity, view_ray_samples):
+    """
+    Renders volume using precomputed local piecewise segments.
+    
+    Args:
+        volume_data: 3D array of scalar values.
+        svr: Precomputed transparency segments.
+        light_intensity: I_0, intensity of the light source.
+        view_ray_samples: List of sample positions along the view ray.
+        
+    Returns:
+        image_color: Rendered color for the ray.
+    """
+    accumulated_color = np.array([0.0, 0.0, 0.0])
+    accumulated_alpha = 0.0
+    
+    for sample_pos in view_ray_samples:
+        # Retrieve precomputed light intensity/transparency from SVR
+        # This requires mapping sample_pos to SVR coordinates and segment index
+        # For simplicity, assume we retrieve the global light intensity I(s) directly
+        # or the relevant T_lp values to compute it.
+        
+        # In the source, only one additional texture look-up is performed.
+        # Let's assume SVR stores the final global light intensity I(s) for simplicity
+        # or we compute it from T_lp values.
+        
+        # If SVR stores T_lp, we need to accumulate them from light source to sample_pos.
+        # However, the source says "global light integration is updated... using piecewise segments".
+        # And "only one additional texture look-up... to apply pre-computed light intensities".
+        # This implies SVR might store the accumulated global light intensity I(s).
+        
+        # Let's assume SVR stores I(s) directly for the rendering step.
+        I_s = lookup_svr_light_intensity(svr, sample_pos)
+        
+        # Standard volume rendering compositing
+        val = interpolate_volume(volume_data, sample_pos)
+        alpha = transfer_function(val)
+        color = transfer_function_color(val)
+        
+        # Weighted contribution
+        weight = alpha * (1.0 - accumulated_alpha)
+        accumulated_color += weight * color * I_s
+        accumulated_alpha += weight
+        
+        if accumulated_alpha > 0.99:
+            break
+            
+    return accumulated_color
+```
+
+## Subtopics
+
+### Source Term Computation for External Lighting
+A variant or related step where the multiple scattering source term $q_{ri}(x)$ for external directional light $L_l$ is computed as $q_{ri}(x) = L_l \cdot \sigma_s(x) \cdot T(x)$, where $\sigma_s$ is the scattering coefficient and $T(x)$ is transmittance. This term is computed via raymarching and stored at the full resolution of the dataset extinction field [S2].
+
+### Radial Grids for Local Light Sources
+A propagation scheme using radial grids (topologically equivalent to rectilinear grids but cyclic in two angular dimensions) for local point lights. It allows approximate treatment of space as locally Euclidean and extends Principal-Ordinates Propagation (POP) to local light sources by using spherical grids aligned with the initial principal directions of the point source. VPLs are prefiltered based on importance and anisotropy [S3].
+
+## Operating characteristics
+*   **Time Complexity:** Integration of light intensities without the local piecewise approximation is approximately 10 times slower [S1, unofficial].
+*   **Performance:** Global light integration updates in 284-552 ms (for 8 voxel segments) depending on SVR size; first order scattering incremental refinements take 62-233 ms [S1, unofficial]. High frame rates (15-22 fps) are reached during rendering since only one additional texture look-up is performed per sample [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the Shadow Volume Representation (SVR). The SVR size can be reduced for performance, but this may introduce artifacts [S1, unofficial].
+*   **Accuracy:** Root Mean Square (RMS) error of 0.19 for $\Delta E$ (CIE 1976 L*u*v* color space), with 6% of pixels having $\Delta E$ above 6 [S1, unofficial].
+*   **Strengths:** Nearly physically correct scattering effects compared to blur-based methods; light source can be positioned anywhere, even within the volume; handles large scale volumes via multi-resolution data management [S1, unofficial].
+*   **Limitations:** Block artifacts (jagged edges) appear on sharp edges if SVR resolution is too low; banding effects appear due to interpolation between shadowed and un-shadowed regions when SVR size is reduced [S1, unofficial].
+*   **When to use:** When interactive global shadowing and light propagation in large volumetric datasets is required, and the light source is distant or directional.
+*   **When not to use:** When local point lights are the primary source (requires radial grids variant) or when multiple scattering is the dominant effect (requires diffusion-based methods) [S2, S3].
+
+## Background
+Local Piecewise Integration was introduced in the paper "Interactive Global Light Propagation in Direct Volume Rendering using Local Piecewise Integration" [S1, unofficial]. It builds on the concept of piecewise integration for opacity [Max95] and opacity correction [PH89]. The method was developed to address the computational cost of global light propagation in volume rendering, offering an interactive alternative to object-order methods and more accurate results than simple blur approximations [S1, unofficial].
+
+## Sources
+[S1] Interactive Global Light Propagation in Direct Volume Rendering using Local Piecewise Integration, https://doi.org/10.2312/vg/vg-pbg08/105-112, fetched 2026-10-26 (unofficial)
+[S2] Flux-Limited Diffusion for Multiple Scattering in Participating Media, https://archive.org/details/arxiv-1403.8105, fetched 2026-10-26
+[S3] Principal-Ordinates Propagation for Real-Time Rendering ..., https://cg.ivd.kit.edu/publications/2015/principal-ordinates/ElekCAG2014.pdf, fetched 2026-10-29

@@ -1,0 +1,152 @@
+# Nonparametric Uncertainty Modeling for DVR
+
+Also called: IQR Visualization, Quantile Mean, Quantile Range
+
+## Overview
+Nonparametric Uncertainty Modeling for DVR is a technique that represents volumetric uncertainty using empirical quantiles rather than parametric distributions (such as Gaussian or Uniform models), enabling accurate visualization of asymmetric or multimodal noise distributions [S1]. It differs from its parent method, Uniform and Gaussian Noise Models, by avoiding distributional assumptions, thereby capturing complex statistical structures in ensemble data that parametric models fail to represent [S1].
+
+## How it works
+**Inputs:** An ensemble of $N$ volumetric datasets (members) $\{V_1, V_2, \dots, V_N\}$ sampled from an uncertain scalar field, and a 2D Transfer Function (TF) mapping intensity and gradient magnitude to color/opacity.
+**Outputs:** A rendered image representing the expected visual appearance of the uncertain volume.
+
+**Data Structures:**
+*   **Grid Vertex:** Stores $K$ quantile values for the scalar field at that location.
+*   **Quantile Representation:** For a vertex $v$, the uncertainty is stored as a set of $K$ values $\{q_1, q_2, \dots, q_K\}$ corresponding to specific cumulative probabilities.
+*   **Memory Layout:** Each quantile value is stored as a floating-point number. The total storage per vertex is $K$ times the size of a single scalar value.
+
+**Parameters:**
+*   **Ensemble Size ($N$):** The number of members in the ensemble. Minimum 50 members are recommended for stable Kernel Density Estimation (KDE) and quantile interpolation [S1].
+*   **Number of Quantiles ($K$):** Typically 8 for 'Quantile Mean' and 'Quantile Range' methods [S1]. Increasing $K$ from 2 to 4 decreases Root Mean Squared Error (RMSE); 8 provides stable accuracy for sufficient ensemble sizes [S1].
+*   **Interpolation Weights:** Linear interpolation weights for neighboring voxels.
+
+**Steps:**
+
+1.  **Ensemble Generation:** Generate an ensemble of $N$ volumetric datasets by injecting noise (e.g., bimodal distribution) into ground truth data [S1].
+2.  **Empirical CDF Computation:** At each grid vertex $v$, compute the empirical Cumulative Distribution Function (CDF) from the $N$ ensemble samples $\{X_1, X_2, \dots, X_N\}$ [S1].
+3.  **Quantile Selection:** Select $K$ specific quantiles from the empirical CDF to represent the distribution. For example, $K=8$ equidistant quantiles [S1].
+4.  **Linear Interpolation Formulation:** For a query position, interpolate the intensity $X$ and gradient magnitude $|Y|$ as linear combinations of the $M$ neighboring voxel values $X_i$.
+    *   Intensity: $X = \sum_{i=1}^{M} w_i X_i$
+    *   Gradient Magnitude: $|Y| = \sum_{i=1}^{M} u_i X_i$
+    *   Here, $w_i$ and $u_i$ are interpolation weights derived from the geometry and the gradient calculation [S1]. Note that the gradient magnitude approximation uses the mean gradient $\mu_Y$, obtained by substituting $X_i$ with their mean values in the gradient formula [S1].
+5.  **Joint PDF Construction:** The joint Probability Density Function (PDF) of the bivariate random variable $Z = [X, |Y|]^T$ is exactly described by a bivariate box spline. The parameters of this spline are defined by the weight vectors $[w_1, u_1]^T, \dots, [w_M, u_M]^T$ associated with the neighboring voxels [S1].
+6.  **Rendering Integration:** Compute the expected color at position $v$ by integrating the 2D Transfer Function $TF(x, y)$ with the joint PDF $pdf_Z(x, y)$:
+    $$ E(TF(Z)) = \iint TF(x, y) pdf_Z(x, y) dx dy $$
+    This integral is evaluated using the bivariate box spline representation [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_nonparametric_dvr(ensemble, transfer_function, num_quantiles=8):
+    """
+    Renders a volume using nonparametric uncertainty modeling.
+    
+    Args:
+        ensemble: List of N volumetric datasets (members).
+        transfer_function: 2D TF mapping (intensity, gradient) to color.
+        num_quantiles: Number of quantiles K to store per vertex.
+        
+    Returns:
+        Rendered image.
+    """
+    N = len(ensemble)
+    # Grid dimensions assumed to be known from ensemble structure
+    grid_shape = ensemble[0].shape
+    
+    # Step 1 & 2: Compute empirical quantiles for each vertex
+    # Store K quantile values per vertex
+    quantile_grid = compute_quantiles(ensemble, num_quantiles)
+    
+    # Step 3-6: Render using quantile grid
+    image = render_quantile_volume(quantile_grid, transfer_function)
+    return image
+
+def compute_quantiles(ensemble, num_quantiles):
+    """
+    Computes K quantiles for each vertex across the ensemble.
+    """
+    N = len(ensemble)
+    grid_shape = ensemble[0].shape
+    K = num_quantiles
+    
+    # Initialize grid to store K quantiles per vertex
+    # Shape: (D, H, W, K)
+    quantile_grid = np.zeros(grid_shape + (K,))
+    
+    # For each vertex, collect values from all ensemble members
+    # and compute the empirical quantiles.
+    for z in range(grid_shape[0]):
+        for y in range(grid_shape[1]):
+            for x in range(grid_shape[2]):
+                # Collect scalar values at this vertex from all members
+                values = [member[z, y, x] for member in ensemble]
+                
+                # Sort values to compute empirical CDF
+                values.sort()
+                
+                # Compute K equidistant quantiles
+                # Quantile p corresponds to the value at index floor(p * (N-1))
+                for k in range(K):
+                    p = (k + 1) / (K + 1) # Example equidistant spacing
+                    idx = int(p * (N - 1))
+                    idx = min(idx, N - 1) # Guard against out of bounds
+                    quantile_grid[z, y, x, k] = values[idx]
+                    
+    return quantile_grid
+
+def render_quantile_volume(quantile_grid, transfer_function):
+    """
+    Renders the volume using the quantile grid.
+    This step involves ray marching and evaluating the joint PDF
+    via bivariate box splines as described in the source.
+    """
+    # Implementation details for ray marching and bivariate box spline
+    # integration are complex and depend on the specific renderer.
+    # The core concept is that for each ray step, the intensity X
+    # and gradient |Y| are interpolated from neighboring quantile values,
+    # and the joint PDF is constructed from the interpolation weights.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Small Ensemble Size:** If the ensemble size is small (e.g., $N=5$), the average number of samples per quantile is low, leading to unreliable quantile interpolation and poor Kernel Density Estimation (KDE) at grid vertices [S1]. In such cases, using more quantiles (4 or 8) may result in higher RMSE than using fewer (2) [S1].
+*   **Multimodal Distributions:** Parametric models (Gaussian/Uniform) fail to capture multimodal noise. Nonparametric models handle this naturally by storing multiple quantiles [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Memory:** Memory usage scales linearly with the number of quantiles $K$.
+    *   Mean-field: 1 unit per vertex.
+    *   Uniform/Gaussian: 2 units per vertex (mean + width/variance) [S1].
+    *   Gaussian Mixture Model (GMM, 4 Gaussians): 12 units per vertex (mean, variance, weight per Gaussian) [S1].
+    *   Nonparametric ($K=8$): 9 units per vertex [S1].
+    *   IQR (single quantile, middle 50%): 2 units per vertex [S1].
+*   **Time:** Rendering performance is comparable to parametric models but depends on the complexity of evaluating the bivariate box spline integral. The mean-field is rendered at 10 fps on a Quadro P6000; nonparametric models add overhead for quantile interpolation and PDF evaluation [S1].
+
+**Measured Performance:**
+*   On a synthetic tangle dataset with 50 ensemble members:
+    *   RMSE for Mean-field: 0.0245 [S1].
+    *   RMSE for Uniform: 0.0200 [S1].
+    *   RMSE for Nonparametric (8 quantiles): Lower than mean/uniform/Gaussian [S1].
+    *   RMSE for IQR (middle 50%): Lowest among all visualizations [S1].
+*   Tested on real Red Sea eddy simulation ensemble (20 members, 500x500x50 resolution) [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Accurately reconstructs asymmetric or multimodal noise distributions; lower RMSE than parametric models for complex noise; flexible memory usage based on required accuracy [S1].
+*   **Limitations:** Requires larger ensemble sizes ($N \ge 50$) for stable results; higher memory usage than mean-field or IQR; sensitive to small sample sizes [S1].
+
+**When to Use:**
+*   Use when the underlying uncertainty distribution is known or suspected to be non-Gaussian, asymmetric, or multimodal [S1].
+*   Use when high-fidelity uncertainty visualization is required and sufficient ensemble members are available [S1].
+
+**When Not to Use:**
+*   Avoid when ensemble size is very small ($N < 10$), as quantile interpolation becomes unreliable [S1].
+*   Avoid when memory is extremely constrained and mean-field accuracy is sufficient [S1].
+
+## Background
+**Origin:** The method was introduced in the paper "Direct Volume Rendering with Nonparametric Models of Uncertainty" [S1].
+**History:** It was developed to address the limitations of parametric statistical models (mean, uniform, Gaussian) in volume rendering, which assume specific distribution shapes that may not reflect real-world uncertainty [S1].
+**Usage:** Implemented in the Voreen volume rendering engine for DVR of uncertain data [S1]. Tested on synthetic datasets (tangle, teardrop) and real-world data (Red Sea eddy simulation) [S1].
+
+## Sources
+[S1] Direct Volume Rendering with Nonparametric Models of Uncertainty, https://doi.org/10.1109/tvcg.2020.3030394, fetched 2026-10-26

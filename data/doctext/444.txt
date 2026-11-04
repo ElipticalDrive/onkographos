@@ -1,0 +1,921 @@
+camera - Cast ray to select block in voxel game - Game Development Stack Exchange
+The 2026 Annual Developer Survey Results Site is live—
+view the results here!.
+Cast ray to select block in voxel game
+Ask Question
+Asked
+13 years, 9 months ago
+Modified
+3 years, 10 months ago
+Viewed
+21k times
+Report this ad
+This question shows research effort; it is useful and clear
+25
+This question does not show any research effort; it is unclear or not useful
+Save this question.
+Show activity on this post.
+I am developing a game with a Minecraft-like terrain made out of blocks. Since basic rendering and chunk loading is done now, I want to implement block selecting.
+Therefore I need to find out what block the first person camera is facing. I already heard of unprojecting the whole scene but I decided against that because it sounds hacky and isn't accurate. Maybe I could somehow cast a ray in view direction but I do not know how to check the collision with a block in my voxel data. Of course this calculations must be done on the CPU since I need the results to perform game logic operations.
+So how could I find out which block is in front of the camera? If it is preferable, how could I cast a ray and check collisions?
+camera
+voxels
+raycasting
+selection
+Share
+Share a link to this question
+Copy linkCC BY-SA 3.0
+Short permalink to this question
+Follow
+Follow this question to receive notifications
+edited Feb 18, 2013 at 5:57
+Kevin Reid
+5,6712323 silver badges3030 bronze badges
+asked Jan 14, 2013 at 9:33
+danijar
+5,7711010 gold badges4444 silver badges6666 bronze badges
+1
+I've never done it myself. But couldn't you just have a "ray" ( linesegment in this case ) from the camera plane, a normal vector, with a certain length( you only want it to be within a radius) and see if it intersects with one of the blocks. I assume partial spacing and clipping is implemented as well. So knowing which blocks to test with shouldn't be that much of an issue...i think?
+Sidar
+–
+Sidar
+2013-01-14 12:17:19 +00:00
+Commented
+Jan 14, 2013 at 12:17
+Add a comment
+|
+6 Answers 6
+Sorted by:
+Reset to default
+Highest score (default)
+Date modified (newest first)
+Date created (oldest first)
+This answer is useful
+25
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+When I had this problem while working on my Cubes, I found the paper "A Fast Voxel Traversal Algorithm for Ray Tracing" by John Amanatides and Andrew Woo, 1987 which describes an algorithm which can be applied to this task; it is accurate and needs only one loop iteration per voxel intersected.
+I have written an implementation of the relevant parts of the paper's algorithm in JavaScript. My implementation adds two features: it allows specifying a limit on the distance of the raycast (useful for avoiding performance issues as well as defining a limited 'reach'), and also computes which face of each voxel the ray entered.
+The input origin vector must be scaled such that the side length of a voxel is 1. The length of the direction vector is not significant but may affect the numerical accuracy of the algorithm.
+The algorithm operates by using a parameterized representation of the ray, origin + t * direction. For each coordinate axis, we keep track of the t value which we would have if we took a step sufficient to cross a voxel boundary along that axis (i.e. change the integer part of the coordinate) in the variables tMaxX, tMaxY, and tMaxZ. Then, we take a step (using the step and tDelta variables) along whichever axis has the least tMax — i.e. whichever voxel-boundary is closest.
+```
+/**
+ * Call the callback with (x,y,z,value,face) of all blocks along the line
+ * segment from point 'origin' in vector direction 'direction' of length
+ * 'radius'. 'radius' may be infinite.
+ * 
+ * 'face' is the normal vector of the face of that block that was entered.
+ * It should not be used after the callback returns.
+ * 
+ * If the callback returns a true value, the traversal will be stopped.
+ */
+function raycast(origin, direction, radius, callback) {
+  // From "A Fast Voxel Traversal Algorithm for Ray Tracing"
+  // by John Amanatides and Andrew Woo, 1987
+  // <http://www.cse.yorku.ca/~amana/research/grid.pdf>
+  // <http://citeseer.ist.psu.edu/viewdoc/summary?doi=10.1.1.42.3443>
+  // Extensions to the described algorithm:
+  //   • Imposed a distance limit.
+  //   • The face passed through to reach the current cube is provided to
+  //     the callback.
+
+  // The foundation of this algorithm is a parameterized representation of
+  // the provided ray,
+  //                    origin + t * direction,
+  // except that t is not actually stored; rather, at any given point in the
+  // traversal, we keep track of the *greater* t values which we would have
+  // if we took a step sufficient to cross a cube boundary along that axis
+  // (i.e. change the integer part of the coordinate) in the variables
+  // tMaxX, tMaxY, and tMaxZ.
+
+  // Cube containing origin point.
+  var x = Math.floor(origin[0]);
+  var y = Math.floor(origin[1]);
+  var z = Math.floor(origin[2]);
+  // Break out direction vector.
+  var dx = direction[0];
+  var dy = direction[1];
+  var dz = direction[2];
+  // Direction to increment x,y,z when stepping.
+  var stepX = signum(dx);
+  var stepY = signum(dy);
+  var stepZ = signum(dz);
+  // See description above. The initial values depend on the fractional
+  // part of the origin.
+  var tMaxX = intbound(origin[0], dx);
+  var tMaxY = intbound(origin[1], dy);
+  var tMaxZ = intbound(origin[2], dz);
+  // The change in t when taking a step (always positive).
+  var tDeltaX = stepX/dx;
+  var tDeltaY = stepY/dy;
+  var tDeltaZ = stepZ/dz;
+  // Buffer for reporting faces to the callback.
+  var face = vec3.create();
+
+  // Avoids an infinite loop.
+  if (dx === 0 && dy === 0 && dz === 0)
+    throw new RangeError("Raycast in zero direction!");
+
+  // Rescale from units of 1 cube-edge to units of 'direction' so we can
+  // compare with 't'.
+  radius /= Math.sqrt(dx*dx+dy*dy+dz*dz);
+
+  while (/* ray has not gone past bounds of world */
+         (stepX > 0 ? x < wx : x >= 0) &&
+         (stepY > 0 ? y < wy : y >= 0) &&
+         (stepZ > 0 ? z < wz : z >= 0)) {
+
+    // Invoke the callback, unless we are not *yet* within the bounds of the
+    // world.
+    if (!(x < 0 || y < 0 || z < 0 || x >= wx || y >= wy || z >= wz))
+      if (callback(x, y, z, blocks[x*wy*wz + y*wz + z], face))
+        break;
+
+    // tMaxX stores the t-value at which we cross a cube boundary along the
+    // X axis, and similarly for Y and Z. Therefore, choosing the least tMax
+    // chooses the closest cube boundary. Only the first case of the four
+    // has been commented in detail.
+    if (tMaxX < tMaxY) {
+      if (tMaxX < tMaxZ) {
+        if (tMaxX > radius) break;
+        // Update which cube we are now in.
+        x += stepX;
+        // Adjust tMaxX to the next X-oriented boundary crossing.
+        tMaxX += tDeltaX;
+        // Record the normal vector of the cube face we entered.
+        face[0] = -stepX;
+        face[1] = 0;
+        face[2] = 0;
+      } else {
+        if (tMaxZ > radius) break;
+        z += stepZ;
+        tMaxZ += tDeltaZ;
+        face[0] = 0;
+        face[1] = 0;
+        face[2] = -stepZ;
+      }
+    } else {
+      if (tMaxY < tMaxZ) {
+        if (tMaxY > radius) break;
+        y += stepY;
+        tMaxY += tDeltaY;
+        face[0] = 0;
+        face[1] = -stepY;
+        face[2] = 0;
+      } else {
+        // Identical to the second case, repeated for simplicity in
+        // the conditionals.
+        if (tMaxZ > radius) break;
+        z += stepZ;
+        tMaxZ += tDeltaZ;
+        face[0] = 0;
+        face[1] = 0;
+        face[2] = -stepZ;
+      }
+    }
+  }
+}
+
+function intbound(s, ds) {
+  // Find the smallest positive t such that s+t*ds is an integer.
+  if (ds < 0) {
+    return intbound(-s, -ds);
+  } else {
+    s = mod(s, 1);
+    // problem is now s+t*ds = 1
+    return (1-s)/ds;
+  }
+}
+
+function signum(x) {
+  return x > 0 ? 1 : x < 0 ? -1 : 0;
+}
+
+function mod(value, modulus) {
+  return (value % modulus + modulus) % modulus;
+}
+```
+Permanent link to this version of the source on GitHub.
+Share
+Share a link to this answer
+Copy linkCC BY-SA 3.0
+Short permalink to this answer
+Follow
+Follow this answer to receive notifications
+edited Mar 12, 2013 at 1:56
+answered Feb 15, 2013 at 17:54
+Kevin Reid
+5,6712323 silver badges3030 bronze badges
+18
+1
+Does this algorithm also work for negative number space? I implemented the algorithm only just and generally I am impressed. It works great for positive coordinates. But for some reason I get strange results if negative coordinates are involved sometimes.
+danijar
+–
+danijar
+2013-03-11 23:15:25 +00:00
+Commented
+Mar 11, 2013 at 23:15
+2
+@danijar I couldn't get the intbounds/mod stuff to work with negative space, so I use this: function intbounds(s,ds) { return (ds > 0? Math.ceil(s)-s: s-Math.floor(s)) / Math.abs(ds); }. As Infinity is greater than all numbers, I don't think you need to guard against ds being 0 there either.
+Will
+–
+Will
+2013-07-05 21:00:07 +00:00
+Commented
+Jul 5, 2013 at 21:00
+1
+@BotskoNet That sounds like you have a problem with unprojecting to find your ray. I had problems like that early on. Suggestion: Draw a line from origin to origin+direction, in world space. If that line is not under the cursor, or if it does not appear as a point (since projected X and Y should be equal) then you have a problem in the unprojection (not part of this answer's code). If it's reliably a point under the cursor then the problem is in the raycast. If you still have a problem, please ask a separate question instead of extending this thread.
+Kevin Reid
+–
+Kevin Reid
+2013-12-11 23:18:39 +00:00
+Commented
+Dec 11, 2013 at 23:18
+3
+Here is my port to Unity: gist.github.com/dogfuntom/cc881c8fc86ad43d55d8 . Though, with some additional changes: integrated Will's and codewarrior's contributions and made possible to cast in an unlimited world.
+Maxim Kamalov
+–
+Maxim Kamalov
+2015-09-12 01:28:50 +00:00
+Commented
+Sep 12, 2015 at 1:28
+2
+I know this is old, but: I have spent a long time now playing with this algorithm in both Go and C99 and I have a recommendation for future readers: Don't use it. I'm pretty sure there are still edge cases here related to negatives, and tracing through the various dependent functions (intbound etc.) is difficult and tedious when there is an issue. Save yourself some time and build on a 3D Bresenham algorithm instead. The performance difference is effectively negligible as well.
+David Roberts
+–
+David Roberts
+2016-02-20 12:26:27 +00:00
+Commented
+Feb 20, 2016 at 12:26
+|
+Show 13 more comments
+This answer is useful
+1
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+To find the first block in front of the camera, create a for loop that loops from 0 to some maximum distance. Then, multiply the camera's forward vector by the counter and check if the block at that position is solid. If it is, then store the position of the block for later use and stop looping.
+If you also want to be able to place blocks, face-picking is no harder. Simply loop back from the block and find the first empty block.
+Share
+Share a link to this answer
+Copy linkCC BY-SA 3.0
+Short permalink to this answer
+Follow
+Follow this answer to receive notifications
+answered Jan 16, 2013 at 0:31
+untitled
+68444 silver badges1313 bronze badges
+3
+Wouldn't work, with an angled forward vector it would be very possible to have a point before one part of a block, and the subsequent point after, missing the block. The only solution with this would be to reduce the size of the increment, but you'd have to get it so small as to make other algorithms far more effective.
+Phil
+–
+Phil
+2013-01-16 03:07:47 +00:00
+Commented
+Jan 16, 2013 at 3:07
+This works pretty well with my engine; I use an interval of 0.1.
+untitled
+–
+untitled
+2013-01-17 23:27:25 +00:00
+Commented
+Jan 17, 2013 at 23:27
+Like @Phil pointed out, the algorithm would miss blocks where only a small edge is seen. Furthermore looping backwards for placing blocks wouldn't work. We would have to loop forward as well and decrement the result by one.
+danijar
+–
+danijar
+2013-02-17 14:53:54 +00:00
+Commented
+Feb 17, 2013 at 14:53
+Add a comment
+|
+This answer is useful
+1
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+Perhaps look into Bresenham's line algorithm, particularly if you're working with unit-blocks (as most minecraftish games tend to).
+Basically this takes any two points, and traces an unbroken line between them. If you cast a vector from the player to their maximum picking distance, you can use this, and the players positions as points.
+I have a 3D implementation in python here: bresenham3d.py.
+Share
+Share a link to this answer
+Copy linkCC BY-SA 3.0
+Short permalink to this answer
+Follow
+Follow this answer to receive notifications
+edited Jun 30, 2017 at 5:38
+Theraot
+28.5k44 gold badges5757 silver badges8484 bronze badges
+answered Jan 16, 2013 at 1:22
+salmonmoose
+85466 silver badges1212 bronze badges
+1
+9
+A Bresenham-type algorithm will miss some blocks, though. It doesn't consider every block the ray passes through; it'll skip some in which the ray doesn't get close enough to the block center. You can see this clearly from the diagram on Wikipedia. The block 3rd down and 3rd right from the top-left corner is an example: the line passes through it (barely) but Bresenham's algorithm doesn't hit it.
+Nathan Reed
+–
+Nathan Reed
+2013-01-16 07:02:34 +00:00
+Commented
+Jan 16, 2013 at 7:02
+Add a comment
+|
+This answer is useful
+0
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+I made a post on Reddit with my implementation, which uses Bresenham's Line Algorithm. Here's an example of how you would use it:
+```
+// A plotter with 0, 0, 0 as the origin and blocks that are 1x1x1.
+PlotCell3f plotter = new PlotCell3f(0, 0, 0, 1, 1, 1);
+// From the center of the camera and its direction...
+plotter.plot( camera.position, camera.direction, 100);
+// Find the first non-air block
+while ( plotter.next() ) {
+   Vec3i v = plotter.get();
+   Block b = map.getBlock(v);
+   if (b != null && !b.isAir()) {
+      plotter.end();
+      // set selected block to v
+   }
+}
+```
+Here is the implementation itself:
+```
+public interface Plot<T> 
+{
+    public boolean next();
+    public void reset();
+    public void end();
+    public T get();
+}
+
+public class PlotCell3f implements Plot<Vec3i>
+{
+
+    private final Vec3f size = new Vec3f();
+    private final Vec3f off = new Vec3f();
+    private final Vec3f pos = new Vec3f();
+    private final Vec3f dir = new Vec3f();
+
+    private final Vec3i index = new Vec3i();
+
+    private final Vec3f delta = new Vec3f();
+    private final Vec3i sign = new Vec3i();
+    private final Vec3f max = new Vec3f();
+
+    private int limit;
+    private int plotted;
+
+    public PlotCell3f(float offx, float offy, float offz, float width, float height, float depth)
+    {
+        off.set( offx, offy, offz );
+        size.set( width, height, depth );
+    }
+
+    public void plot(Vec3f position, Vec3f direction, int cells) 
+    {
+        limit = cells;
+
+        pos.set( position );
+        dir.norm( direction );
+
+        delta.set( size );
+        delta.div( dir );
+
+        sign.x = (dir.x > 0) ? 1 : (dir.x < 0 ? -1 : 0);
+        sign.y = (dir.y > 0) ? 1 : (dir.y < 0 ? -1 : 0);
+        sign.z = (dir.z > 0) ? 1 : (dir.z < 0 ? -1 : 0);
+
+        reset();
+    }
+
+    @Override
+    public boolean next() 
+    {
+        if (plotted++ > 0) 
+        {
+            float mx = sign.x * max.x;
+            float my = sign.y * max.y;
+            float mz = sign.z * max.z;
+
+            if (mx < my && mx < mz) 
+            {
+                max.x += delta.x;
+                index.x += sign.x;
+            }
+            else if (mz < my && mz < mx) 
+            {
+                max.z += delta.z;
+                index.z += sign.z;
+            }
+            else 
+            {
+                max.y += delta.y;
+                index.y += sign.y;
+            }
+        }
+        return (plotted <= limit);
+    }
+
+    @Override
+    public void reset() 
+    {
+        plotted = 0;
+
+        index.x = (int)Math.floor((pos.x - off.x) / size.x);
+        index.y = (int)Math.floor((pos.y - off.y) / size.y);
+        index.z = (int)Math.floor((pos.z - off.z) / size.z);
+
+        float ax = index.x * size.x + off.x;
+        float ay = index.y * size.y + off.y;
+        float az = index.z * size.z + off.z;
+
+        max.x = (sign.x > 0) ? ax + size.x - pos.x : pos.x - ax;
+        max.y = (sign.y > 0) ? ay + size.y - pos.y : pos.y - ay;
+        max.z = (sign.z > 0) ? az + size.z - pos.z : pos.z - az;
+        max.div( dir );
+    }
+
+    @Override
+    public void end()
+    {
+        plotted = limit + 1;
+    }
+
+    @Override
+    public Vec3i get() 
+    {
+        return index;
+    }
+
+    public Vec3f actual() {
+        return new Vec3f(index.x * size.x + off.x,
+                index.y * size.y + off.y,
+                index.z * size.z + off.z);
+    }
+
+    public Vec3f size() {
+        return size;
+    }
+
+    public void size(float w, float h, float d) {
+        size.set(w, h, d);
+    }
+
+    public Vec3f offset() {
+        return off;
+    }
+
+    public void offset(float x, float y, float z) {
+        off.set(x, y, z);
+    }
+
+    public Vec3f position() {
+        return pos;
+    }
+
+    public Vec3f direction() {
+        return dir;
+    }
+
+    public Vec3i sign() {
+        return sign;
+    }
+
+    public Vec3f delta() {
+        return delta;
+    }
+
+    public Vec3f max() {
+        return max;
+    }
+
+    public int limit() {
+        return limit;
+    }
+
+    public int plotted() {
+        return plotted;
+    }
+
+
+
+}
+```
+Share
+Share a link to this answer
+Copy linkCC BY-SA 3.0
+Short permalink to this answer
+Follow
+Follow this answer to receive notifications
+edited Jan 16, 2013 at 7:50
+user1430
+answered Jan 16, 2013 at 1:18
+ClickerMonkey
+31211 silver badge55 bronze badges
+1
+1
+As someone in the comments noticed, your code is undocumented. While the code may be helpful, it doesn't quite answer the question.
+Anko
+–
+Anko
+2013-01-16 07:03:22 +00:00
+Commented
+Jan 16, 2013 at 7:03
+Add a comment
+|
+This answer is useful
+0
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+My approach is somewhat different, yet heavily relies on answers in this thread (especially @Maxim Kamalov's comment with his gist - was great starting point, basically main logic is taken from there and improved).
+The problem with existing code for me was different edge-cases (coordinate delta equal to zero ("straight lines"), hitting exactly the edge (where tMax values are equal), negative traversal, not accounting the fact that blocks in my data structure are .5f-based, not 0-based (center is in the very center of the cube), floating point precision, and a few others).
+Information upon this is not so spread, so I decided to share my traversal approach. You can think of it as variation of Amanatides and Woo algorithm. Main difference is that I'm not using ray, but rather 2 points - but it shouldn't be too hard to adjust.
+Note that It might (and probably will) be slower, but it is more precise than face-to-face traversal.
+Also, I'm not quite fond of using local functions, but that made developing the logic for me easier.
+Hope it helps to whoever it may concern :)
+```
+using System.Collections.Generic;
+
+public static class Foo
+{
+    public static IEnumerable<Vector3> GetIntersectedWorldBlocksD(Vector3 pointA, Vector3 pointB)
+    {
+        var line = new HashSet<Vector3>
+        {
+            new Vector3(Mathf.Round(pointA.X), Mathf.Round(pointA.Y), Mathf.Round(pointA.Z))
+        };
+
+        var x = (float) Mathf.Round(pointA.X);
+        var y = (float) Mathf.Round(pointA.Y);
+        var z = (float) Mathf.Round(pointA.Z);
+
+        var delta = pointB - pointA;
+        var deltaNormal = delta.Normal;
+        var dx = deltaNormal.X;
+        var dy = deltaNormal.Y;
+        var dz = deltaNormal.Z;
+
+        var stepX = Signum(dx);
+        var stepY = Signum(dy);
+        var stepZ = Signum(dz);
+
+        var tMaxX = Intbound(pointA.X - 0.5f, deltaNormal.x);
+        var tMaxY = Intbound(pointA.Y - 0.5f, deltaNormal.y);
+        var tMaxZ = Intbound(pointA.Z - 0.5f, deltaNormal.z);
+
+        var tDeltaX = stepX / dx;
+        var tDeltaY = stepY / dy;
+        var tDeltaZ = stepZ / dz;
+
+        var lineLength = delta.Length;
+
+        bool StepX()
+        {
+            if (tMaxX >= lineLength) return true;
+            x += stepX;
+            tMaxX += tDeltaX;
+            return false;
+        }
+
+        bool StepY()
+        {
+            if (tMaxY >= lineLength) return true;
+            y += stepY;
+            tMaxY += tDeltaY;
+            return false;
+        }
+
+        bool StepZ()
+        {
+            if (tMaxZ >= lineLength) return true;
+            z += stepZ;
+            tMaxZ += tDeltaZ;
+            return false;
+        }
+
+        var res = true;
+
+        if (stepX != 0 && stepY != 0 && stepZ != 0)
+            while (true)
+            {
+                var tX = tMaxX.Precision5();
+                var tY = tMaxY.Precision5();
+                var tZ = tMaxZ.Precision5();
+                if (tX < tY)
+                {
+                    if (tX < tZ)
+                        res = StepX();
+                    else if (tZ < tX)
+                        res = StepZ();
+                    else
+                        res = StepZ() || StepX();
+                }
+                else if (tY < tX)
+                {
+                    if (tY < tZ)
+                        res = StepY();
+                    else if (tZ < tY)
+                        res = StepZ();
+                    else
+                        res = StepY() || StepZ();
+                }
+                else
+                {
+                    if (tY < tZ)
+                        res = StepX() || StepY();
+                    else if (tZ < tY)
+                        res = StepZ();
+                    else
+                        res = StepX() || StepY() || StepZ();
+                }
+
+                line.Add(new Vector3(x, y, z));
+                if (res) break;
+            }
+        else if (stepX == 0 && stepY != 0 && stepZ != 0)
+            while (true)
+            {
+                var tY = tMaxY.Precision5();
+                var tZ = tMaxZ.Precision5();
+                if (tY < tZ)
+                    res = StepY();
+                else if (tZ < tY)
+                    res = StepZ();
+                else
+                    res = StepY() || StepZ();
+                line.Add(new Vector3(x, y, z));
+                if (res) break;
+            }
+        else if (stepX != 0 && stepY == 0 && stepZ != 0)
+            while (true)
+            {
+                var tX = tMaxX.Precision5();
+                var tZ = tMaxZ.Precision5();
+                if (tX < tZ)
+                    res = StepX();
+                else if (tZ < tX)
+                    res = StepZ();
+                else
+                    res = StepZ() || StepX();
+
+                line.Add(new Vector3(x, y, z));
+                if (res)
+                {
+                    break;
+                }
+            }
+        else if (stepX != 0 && stepY != 0 && stepZ == 0)
+            while (true)
+            {
+                var tY = tMaxY.Precision5();
+                var tX = tMaxZ.Precision5();
+                if (tY < tX)
+                    res = StepY();
+                else if (tX < tY)
+                    res = StepX();
+                else
+                    res = StepY() || StepX();
+
+                line.Add(new Vector3(x, y, z));
+                if (res) break;
+            }
+        else if (stepX != 0 && stepY == 0 && stepZ == 0)
+            while (true)
+            {
+                res = StepX();
+                line.Add(new Vector3(x, y, z));
+                if (res) break;
+            }
+        else if (stepX == 0 && stepY != 0 && stepZ == 0)
+            while (true)
+            {
+                res = StepY();
+                line.Add(new Vector3(x, y, z));
+                if (res) break;
+            }
+        else if (stepX == 0 && stepY == 0 && stepZ != 0)
+            while (true)
+            {
+                res = StepZ();
+                line.Add(new Vector3(x, y, z));
+                if (res) break;
+            }
+
+        return line;
+    }
+
+    private static int Signum(float x)
+    {
+        return x > 0 ? 1 : x < 0 ? -1 : 0;
+    }
+
+    private static float Ceil(float s)
+    {
+        return s == 0f ? 1f : Mathf.Ceil(s);
+    }
+
+    private static float Intbound(float s, float ds)
+    {
+        if (ds < 0 && Mathf.Round(s) == s) return 0;
+        s = Mod(s, 1);
+        return (ds > 0 ? Ceil(s) - s : s - Mathf.Floor(s)) / Mathf.Abs(ds);
+    }
+
+    private static float Mod(float value, float modulus)
+    {
+        return (value % modulus + modulus) % modulus;
+    }
+    
+    public static float Precision5(this float val)
+    {
+        return  ((int)(100000 * val)) / 100000.0f;
+    }
+}
+```
+```
+Share
+Share a link to this answer
+Copy linkCC BY-SA 4.0
+Short permalink to this answer
+Follow
+Follow this answer to receive notifications
+answered Sep 20, 2020 at 17:08
+Jamminroot
+101
+Add a comment
+|
+This answer is useful
+0
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+I read this question a few years ago and found the other answer by Reid (2013) linking to Amanatides and Woo (1987) [1]. While the underlying raycasting algorithm is actually quite nice, the code of all other answers so far seem rather complicated with a lot of lines and many branches, making it hard to understand.
+Here is a elegant variant of the code using vectors and operator overloading in pseudocode more fitting to our modern times:
+```
+def castRay(pos: V3, step: V3, isWall: (V3, Int) => Boolean): (Double, Int) =
+  val sign: V3 = step.sign
+  val reci: V3 = 1/step.abs
+
+  var grid: V3 = pos.floor
+  var steps: V3 = (sign+1)/2 - (pos-grid)/step
+  while true:
+    val axis: Int = steps.argmin
+    grid[axis] += sign[axis]
+    if isWall(grid, axis): return (pos + step * steps[axis], axis)
+    steps[axis] += reci[axis]
+```
+This method works for raycasts into arbitrary dimensions (0,1,2,3,4,...). But only the 2d and 3d variants are of practical use. (Still, considering the 1d case can be a useful simplification to understand the essence of the algorithm.)
+The algorithm works like this:
+Precalculate the elementwise signs of the step vector, and the elementwise absolute reciprocal of the steps, cause we'll need them soon.
+The starting position can be separated into the position snapped to the grid (grid = pos.floor), and the delta between the grid position and the actual position (pos-grid).
+During the following loop, the vector steps will keep for each axis track of how many steps we did in that direction to cross a grid-boundary. Because we snapped to the grid in the previous step, we shall initialize the distance with the amount of steps needed to traverse that delta (- (pos-grid)/step).
+However if we are walking into a negative direction, we need the amount of steps of the complement of the delta, which we get by adding one ((sign+1)/2).
+Repeat
+in what axis is the nearest border steps.argmin
+move into the direction of that axis on the grid (+= sign[axis])
+if this move crossed a wall, RETURN
+update steps by amount of steps needed to traverse a unit distance (+= 1/steps.abs or equivalently += reci[axis])
+The helper functions are as follows: + - * / .floor .sign .abs are the element-wise operations (the element-wise multiplication is called hadamard product). What do i mean with element-wise? Well they are implemented like this:
+```
+def a * b :=
+  val c = new V3
+  for i: c[i] = a[i] * b[i]
+  return c
+```
+And argmin should return the index of the axis which has the minimal value. For example argmin(V3(12, -42, 28)) = 1, because the value -42 at index 1 is the lowest of the vector.
+Pitfalls:
+.sign should either return -1 or +1 for each element of the vector but never 0, or the algorithm may run infinitely. For example sign(0) = +1 is good, while sign(0) = 0 is not ok.
+To avoid infinite loops, when the ray never hits a collision, you should add a maximum distance traveled check in the loop condition.
+Ensure that your isWall method doesn't throw IndexOutOfBounds exceptions, but simply returns a sensible value for out of bounds wall queries.
+Note:
+With regard to the discussion in the comments about problems with negative positions. I believe I have tested this algorithm for positive and negative positions, and positive and negative steps, and it should work either way.
+[1] "A Fast Voxel Traversal Algorithm for Ray Tracing". Amanatides and Woo, 1987
+Share
+Share a link to this answer
+Copy linkCC BY-SA 4.0
+Short permalink to this answer
+Follow
+Follow this answer to receive notifications
+edited Dec 28, 2022 at 0:44
+answered Dec 25, 2022 at 16:47
+drcicero
+111 bronze badge
+Add a comment
+|
+You must log in to answer this question.
+Start asking to get answers
+Find the answer to your question by asking.
+Ask question
+Explore related questions
+camera
+voxels
+raycasting
+selection
+See similar questions with these tags.
+The Overflow Blog
+Survey Says: You'll swap the model, but everything you build around it is...
+Rumors of the SaaS demise are greatly exaggerated
+Featured on Meta
+We’ve reworked automatic question deletion. Let’s talk about why
+How can we improve duplicate handling?
+Report this ad
+Report this ad
+Linked
+1
+Solving the "bullet problem"
+1
+3D Camera raytracing (PSM SDK)
+7
+Face-Click Detection ( like in Minecraft )
+5
+How do I find voxels along a ray?
+2
+C++ Ray Traversing in 3D Voxel game
+2
+Dealing with block corners in a grid-based raycaster
+1
+How to do FoV similiar to Nethack?
+0
+Raycast algorithm fails to collide with diagonal walls in specific locations
+Related
+4
+Weird block selector selection (to floor or not to floor)?
+1
+Voxel Engine in XNA - Block as Class Renders, Block as Struct Doesn't
+4
+Unity3D: Efficiently loading chunks in an infinite voxel engine
+3
+How animated block in voxel engine?
+2
+Voxel Game - High Memory and CPU Usage
+Hot Network Questions
+How should I remedy self-leveling compound which has cracked?
+Mtt 27:46: What does Jesus' loud cry signify?
+Understanding Astable Multivibrator with 4 BJTs
+What does "Auto-retry on stage failure" do?
+What does "open" mean in this truth table?
+what's the difference between 街坊 (jiēfāng) and 邻居 (línjū)?
+Fox ideals are invariant under automorphisms reference request
+A story that involves a rogue exoplanet, very probably by Poul Anderson
+When was it established that telepathic or telekinetic attacks are no longer effective against Invisible Woman?
+How do people get precise information from datasheet charts?
+Who wrote this note on triangular numbers in Sophie Germain's correspondence (BnF NAF 4073)?
+Negative function not evaluating
+What is the difference between a "Standard Class" and a "Base/Basic Class" in D&D 3.5?
+Is there any PIE ghost word / fake word?
+Why is there no documented baseline control group using macroscopically unentangled, twin-polarized single-photon pulses in modern CHSH/Bell tests?
+Could centrifugal force from a fast-spinning playground merry-go-round crack my watch glass?
+Valid assumptions for integrating a polynomial in an exponential
+Output Text Only
+How to write a function `RealPartitionJoin` in wolfram?
+How respected is Lawvere's readings of Hegel among Hegelians?
+Tight spacing when typesetting limit of a function in TeX Gyre fonts
+What is the LXX translation of Daniel 9:26 after the words "cut off"?
+What makes 4 a bad private key? How are P-384 keys generated?
+Does US Homeland Security operate at the border of the Compact of Free Association states?
+Question feed
+default
+By continuing to use this website, you agree Stack Exchange can store cookies on your device and disclose information in accordance with our Cookie Policy. By exiting this window, default cookies will be accepted. To reject cookies, select an option from below.
+Necessary cookies only
+Customize settings
+Cookie consent preference center
+When you visit any of our websites, it may store or retrieve information on your browser, mostly in the form of cookies. This information might be about you, your preferences, or your device and is mostly used to make the site work as you expect it to. The information does not usually directly identify you, but it can give you a more personalized experience. Because we respect your right to privacy, you can choose not to allow some types of cookies. Click on the different category headings to find out more and manage your preferences. Please note, blocking some types of cookies may impact your experience of the site and the services we are able to offer.
+Cookie policy
+Accept all cookies
+Manage consent preferences
+Strictly Necessary Cookies
+Always Active
+These cookies are necessary for the website to function and cannot be switched off in our systems. They are usually only set in response to actions made by you which amount to a request for services, such as setting your privacy preferences, logging in or filling in forms. You can set your browser to block or alert you about these cookies, but some parts of the site will not then work. These cookies do not store any personally identifiable information.
+Targeting Cookies
+Targeting Cookies
+These cookies are used to make advertising messages more relevant to you and may be set through our site by us or by our advertising partners. They may be used to build a profile of your interests and show you relevant advertising on our site or on other sites. They do not store directly personal information, but are based on uniquely identifying your browser and internet device.
+Performance Cookies
+Performance Cookies
+These cookies allow us to count visits and traffic sources so we can measure and improve the performance of our site. They help us to know which pages are the most and least popular and see how visitors move around the site. All information these cookies collect is aggregated and therefore anonymous. If you do not allow these cookies we will not know when you have visited our site, and will not be able to monitor its performance.
+Functional Cookies
+Functional Cookies
+These cookies enable the website to provide enhanced functionality and personalisation. They may be set by us or by third party providers whose services we have added to our pages. If you do not allow these cookies then some or all of these services may not function properly.
+Back Button
+Cookie List
+Search Icon
+Filter Icon
+Clear
+checkbox label label
+Apply Cancel
+Consent Leg.Interest
+checkbox label label
+checkbox label label
+checkbox label label
+Necessary cookies only Confirm my choices
+Report this ad

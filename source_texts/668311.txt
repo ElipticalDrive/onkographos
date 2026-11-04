@@ -1,0 +1,301 @@
+OpenCL and parallel computing compression codecs. Contribute to ChrisLundquist/libpz development by creating an account on GitHub.
+
+Replace bitonic sort with radix sort in GPU BWT + adaptive key width + event chaining by ChrisLundquist · Pull Request #21 · ChrisLundquist/libpz · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ChrisLundquist
+commented
+Feb 11, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Replace bitonic sort with radix sort in the GPU BWT suffix array construction. LSB-first 8-bit radix sort (8 passes) replaces bitonic sort's O(log²n) kernel launches per doubling step. New kernels: bwt_radix.cl (compute_keys, histogram, scatter) and bwt_rank.cl (compare, prefix_sum, propagate, rank_scatter) move rank assignment to the GPU via parallel Blelloch scan.
+Adaptive key width: skip radix passes where digits are guaranteed zero based on max_rank. First doubling step uses 2 passes instead of 8; later steps scale up as ranks grow (4 for <64K, 6 for <16M, 8 otherwise).
+Event chain batching: replace per-kernel .wait() calls with OpenCL event dependencies. All run_* methods accept wait_event: Option<&Event> and return Event. Only one host sync per doubling step (the convergence scalar read).
+Fix critical bug: enqueue_read_buffer offset was in elements instead of bytes, causing convergence detection to read garbage.
+Remove dead bitonic sort code, add FSE benchmark, expand all benchmarks with large size tiers.
+Benchmarks (GPU BWT encode, vs master's bitonic sort)
+Size
+Master (bitonic)
+This PR
+Speedup
+Throughput
+1KB
+23.1ms
+3.4ms
+6.8x
+295 KiB/s
+10KB
+41.6ms
+5.9ms
+7.1x
+1.6 MiB/s
+64KB
+56.1ms
+4.1ms
+13.7x
+15.3 MiB/s
+256KB
+48.8ms*
+11.6ms
+4.2x
+21.6 MiB/s
+4MB
+new
+333ms
+—
+12.0 MiB/s
+16MB
+new
+1.73s
+—
+9.2 MiB/s
+* 256KB+ sizes are new benchmarks not present on master.
+Key design decisions
+GPU uses circular comparison (sa[i]+k) % n vs CPU SA-IS's doubled-text approach. Both produce valid BWTs that round-trip correctly, but byte output may differ for periodic inputs. Tests use round-trip verification.
+Radix sort histogram uses column-major layout (hist[digit * num_groups + group_id]) so the existing prefix sum produces global scatter offsets directly.
+Scatter kernel uses sequential per-workgroup processing (thread 0 only) for stability — simple and correct.
+Test plan
+cargo test --features opencl — 374 tests pass
+cargo clippy --all-targets --features opencl — zero warnings
+cargo test (without opencl) — 352 tests pass
+All 7 GPU BWT tests pass (banana, round_trip, binary_data, medium_sizes, single_byte, all_same, large_structured)
+Benchmarks show consistent improvement at all sizes
+🤖 Generated with Claude Code
+ChrisLundquist
+and others
+added 3 commits
+February 11, 2026 01:48
+Replace bitonic sort with radix sort in GPU BWT and add parallel rank…
+…
+436a9e2
+```
+… assignment
+
+The GPU BWT was 14-640x slower than CPU due to bitonic sort's O(log²n)
+kernel launches per doubling step. This replaces it with LSB-first 8-bit
+radix sort (8 passes per step) and moves rank assignment from sequential
+CPU readback to parallel GPU prefix sum (Blelloch scan + scatter).
+
+Key changes:
+- New kernels: bwt_radix.cl (compute_keys, histogram, scatter) and
+  bwt_rank.cl (compare, prefix_sum, propagate, rank_scatter)
+- Fix critical bug: enqueue_read_buffer offset is in bytes, not elements
+- Remove dead bitonic sort code (kernel compilation + method)
+- GPU BWT tests use round-trip verification (GPU circular prefix-doubling
+  produces valid but not byte-identical output vs CPU SA-IS for periodic inputs)
+- Add FSE benchmark to stages.rs, expand all benchmarks with large sizes
+  and timeout caps
+
+GPU BWT throughput improved ~1.8x at 64KB (56ms → 31ms) but remains
+slower than CPU — future work needs fused kernels or a different algorithm.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+Add adaptive key width and event chain batching to GPU BWT radix sort
+…
+d558f04
+```
+Two optimizations that reduce GPU BWT time by 4-9x at small/medium sizes:
+
+1. Adaptive key width: skip radix passes where digits are guaranteed zero.
+   If max_rank < 256 (e.g. first doubling step), only 2 passes instead
+   of 8. Passes scale up as ranks grow: 4 passes for <64K, 6 for <16M.
+
+2. Event chain batching: replace per-kernel .wait() with OpenCL event
+   dependencies. All run_* methods now accept wait_event and return Event.
+   Only one host sync per doubling step (the convergence scalar read).
+
+Benchmark results (vs previous radix sort commit):
+  1KB:   29.8ms → 3.4ms  (8.8x faster, 295 KiB/s)
+  10KB:  33.1ms → 5.9ms  (5.6x faster, 1.6 MiB/s)
+  64KB:  30.8ms → 4.1ms  (7.5x faster, 15.3 MiB/s)
+  256KB: 48.8ms → 11.6ms (4.2x faster, 21.6 MiB/s)
+  4MB:   562ms  → 333ms  (1.7x faster, 12.0 MiB/s)
+  16MB:  2.50s  → 1.73s  (1.4x faster, 9.2 MiB/s)
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+Merge origin/master into claude/nostalgic-shaw
+…
+3827bb6
+```
+Resolve conflicts with GPU hash-table LZ77 kernel (#20) and FSE
+optimizer (#19). Both sets of changes are additive — hash kernel
+fields/compilation added alongside BWT radix sort fields.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+Hide details
+View details
+ChrisLundquist
+merged commit 135adf1
+into
+master
+Feb 11, 2026
+6 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ChrisLundquist
+deleted the
+claude/nostalgic-shaw
+branch
+February 11, 2026 10:45
+ChrisLundquist
+added a commit
+that referenced
+this pull request
+Feb 11, 2026
+Fix rebase conflict marker and update CLAUDE.md for radix sort BWT
+…
+4999c5d
+```
+Remove stray <<<<<<< HEAD marker left from rebase onto origin/master.
+Update CLAUDE.md to reflect PR #21's radix sort replacing bitonic sort
+in GPU BWT: new kernel files (bwt_radix.cl, bwt_rank.cl), adaptive key
+width, event chain batching, 7-14x speedup over bitonic sort, and fixed
+all-same-byte BWT bug. Update next steps to reflect current state.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+ChrisLundquist
+added a commit
+that referenced
+this pull request
+Feb 11, 2026
+Add analysis, auto-selection, parallel LZ77, GPU Huffman, and stage c…
+…
+4307354
+```
+…haining (#22)
+
+* Add data analysis, auto-selection, parallel LZ77, GPU Huffman, and benchmarks
+
+- Data analysis module (src/analysis.rs): DataProfile with entropy,
+  autocorrelation, run ratio, match density, distribution classification
+- Pipeline auto-selection: heuristic select_pipeline() and trial-based
+  select_pipeline_trial() with CLI flags -a/--auto and --trial
+- Parallel LZ77 match finding: compress_lazy_parallel() splits match
+  computation across threads with warmup windows, sequential lazy pass
+- CPU OpenCL detection: is_cpu_device() skips GPU BWT on CPU devices
+- GPU Huffman encoding: two-pass kernel (ComputeBitLengths + WriteCodes)
+  with byte histogram helper, integrated into OpenClEngine
+- Benchmarks for parallel LZ77, analysis, auto-selection, and pipeline
+  parallel throughput
+
+Baseline benchmark results (Canterbury corpus ~135KB):
+  Parallel LZ77 1MB: 1t=50MiB/s, 8t=27MiB/s (overhead dominates)
+  Analysis: 180-800 MiB/s full, 4.5-19.6 GiB/s sampled
+  Auto-select heuristic: 200-808 MiB/s, trial: 8-219 MiB/s
+  Pipeline 1t: Deflate=43MiB/s, Bw=6MiB/s, Lza=11MiB/s
+  Pipeline mt: Deflate=40MiB/s, Bw=18MiB/s, Lza=12MiB/s
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+* Optimize parallel LZ77 thresholds, add GPU prefix sum and Deflate chaining
+
+Parallel LZ77 improvements:
+- Raise MIN_PARALLEL_SIZE from 64KB to 256KB to avoid thread overhead
+  dominating at small sizes (was 8x slower, now correctly falls back)
+- Add MIN_SEGMENT_SIZE (128KB) to cap thread count: each thread must
+  process enough data to amortize the 32KB hash-chain warmup cost
+- Skip warmup for the first segment (starts at position 0, no prior context)
+- Reduce test data sizes to keep debug-mode test times under 60s
+
+GPU prefix sum (Blelloch scan):
+- New PrefixSumBlock kernel: work-efficient parallel scan within work-groups
+  using local memory, with block totals output for multi-level reduction
+- New PrefixSumApply kernel: adds block offsets after recursive scan
+- Multi-level recursive scan handles arbitrarily large arrays
+- Replaces CPU prefix sum in Huffman encoding, eliminating host round-trip
+
+GPU Deflate stage chaining:
+- New deflate_chained() method: LZ77 → Huffman on GPU without intermediate
+  host download of LZ77 data for the prefix sum step
+- Integrated into pipeline: Deflate with OpenCL backend uses chained path
+  for inputs >= MIN_GPU_INPUT_SIZE (64KB)
+- New huffman_encode_gpu_scan() uses GPU Blelloch scan instead of CPU
+
+Benchmarks added for GPU Huffman (CPU vs GPU scan) and GPU chained Deflate.
+
+Post-optimization parallel LZ77 results (Canterbury corpus):
+  65KB: 2t/4t/8t now fall back to 1t (was 8-16x slower, now no overhead)
+  1MB 8t: ~24 MiB/s (thread overhead still significant for match-finding)
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+* Fix OpenCL build: use correct API for local memory kernel args
+
+Replace non-existent `set_local_arg` with `set_arg_local_buffer` from
+the opencl3 crate for the Blelloch prefix sum kernel's __local parameter.
+Fix PrefixSumApply kernel to compute block_id from gid/block_size instead
+of get_group_id, avoiding local_work_size exceeding max work group size.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+* Update CLAUDE.md with new features, BWT SA-IS, and GPU benchmark results
+
+Document data analysis module, auto-selection, parallel LZ77, GPU Huffman
+with Blelloch prefix sum, GPU Deflate chaining, and updated benchmark
+tables. Note that CPU BWT uses SA-IS (O(n)) while GPU BWT still uses
+bitonic sort (vastly slower). Add Huffman GPU and Deflate chained benchmark
+results from AMD RDNA3 testing.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+* Fix rebase conflict marker and update CLAUDE.md for radix sort BWT
+
+Remove stray <<<<<<< HEAD marker left from rebase onto origin/master.
+Update CLAUDE.md to reflect PR #21's radix sort replacing bitonic sort
+in GPU BWT: new kernel files (bwt_radix.cl, bwt_rank.cl), adaptive key
+width, event chain batching, 7-14x speedup over bitonic sort, and fixed
+all-same-byte BWT bug. Update next steps to reflect current state.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+* Add SIMD acceleration, larger benchmarks, and optimize GPU Deflate chain
+
+- Create src/simd.rs with runtime-dispatched SIMD primitives:
+  - SSE2 baseline: 16-byte compare_bytes, unrolled byte_frequencies
+  - AVX2: 32-byte compare_bytes, 4-bank histogram with SIMD merge,
+    u64-widened sum_u32 (overflow-safe for u32::MAX values)
+  - aarch64 NEON/SVE stubs (dispatch to scalar pending hardware)
+  - Dispatcher with cached is_x86_feature_detected! for zero-cost dispatch
+
+- Integrate SIMD into CPU hot paths:
+  - FrequencyTable::count() uses SIMD byte_frequencies (~2.5x at 1MB)
+  - HashChainFinder::find_match() uses SIMD compare_bytes (~20x at 1KB)
+  - HashChainFinder::find_top_k() uses SIMD compare_bytes
+
+- Optimize GPU Deflate chain (deflate_chained):
+  - Upload LZ77 bytes once, reuse buffer for histogram + Huffman encode
+  - Run ByteHistogram kernel on-device instead of CPU frequency scan
+  - Download only 256×u32 (1KB) histogram instead of full LZ77 stream
+  - GPU chained now 1.3x faster than CPU at 1MB, 1.2x at 4MB, 1.2x at 16MB
+
+- Add larger GPU benchmark tiers (4MB, 16MB) for Huffman and Deflate
+- Add SIMD comparison benchmarks (scalar vs dispatched at 1KB-1MB)
+- Update CLAUDE.md with SIMD docs, optimized chaining flow, next steps
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+---------
+
+Co-authored-by: Claude Opus 4.6 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

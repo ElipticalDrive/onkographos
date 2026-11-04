@@ -1,0 +1,140 @@
+# EWA Approximation with Tangent Vector Adjustment
+
+Also called: Dynamic EWA Filtering, Minification-aware Splat Filtering
+
+## Overview
+A high-quality filtering technique for point-based rendering that approximates the EWA resampling filter by dynamically adjusting the tangent vectors of isotropic splats during setup to prevent aliasing during minification, without requiring expensive per-fragment convolution [S1, unofficial]. It sets itself apart from the original EWA framework by using projective mapping and tangent adjustment rather than affine mapping and Gaussians for both reconstruction and low-pass filters, and from Botsch et al. [BHZK05] by avoiding per-fragment filter evaluation, thus eliminating the fragment shader bottleneck [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of isotropic splats, each defined by a center position $\mathbf{p}_k$, a surface normal $\mathbf{n}_k$, and an initial radius (implicitly handled by the filter radius $h$).
+*   **Output:** Adjusted tangent vectors $\mathbf{s}_k$ and $\mathbf{t}_k$ for each splat, which define the orientation and extent of the reconstruction kernel for rasterization.
+
+**Data Structures:**
+*   **Splat Data:** For each splat $k$, store $\mathbf{p}_k = [p_x, p_y, p_z]^T$ (position in camera space), $\mathbf{n}_k = [n_x, n_y, n_z]^T$ (normalized normal).
+*   **Tangent Vectors:** $\mathbf{s}_k, \mathbf{t}_k$ are 3D vectors.
+
+**Parameters:**
+*   $h$: Radius of the low-pass filter in the normalized image plane. Typical value: $h = \sqrt{2} v_{pw}$, where $v_{pw}$ is the viewport width [S1, unofficial].
+
+**Steps:**
+1.  **Compute Initial Tangents:** For an isotropic splat with normal $\mathbf{n}_k$, compute orthogonal initial tangent vectors $\mathbf{s}_k^0$ and $\mathbf{t}_k^0$ using cross products:
+    $$ \mathbf{s}_k^0 = \mathbf{p}_k \times \mathbf{n}_k $$
+    $$ \mathbf{t}_k^0 = \mathbf{n}_k \times \mathbf{s}_k^0 $$
+    [S1, unofficial]
+
+2.  **Project Tangent:** For each tangent vector (e.g., $\mathbf{t}_k^0 = [t_x, t_y, t_z]^T$), compute its perspective projection $\mathbf{t}_k'$ onto the screen space:
+    $$ \mathbf{t}_k' = \frac{1}{p_z^2 - t_z^2} \begin{bmatrix} t_x p_z - t_z p_x \\ t_y p_z - t_z p_y \\ 0 \end{bmatrix} $$
+    [S1, unofficial]
+
+3.  **Check Minification:** Calculate the length of the projected half-diameter $\|\mathbf{t}_k'\|$.
+    *   If $\|\mathbf{t}_k'\| \ge h$, the splat is not significantly minified in this direction. Set the final tangent vector $\mathbf{t}_k = \mathbf{t}_k^0$.
+    *   If $\|\mathbf{t}_k'\| < h$, the splat is in minification. Adjust the tangent vector by projecting $\mathbf{t}_k^0$ onto the image plane and scaling it so its projection size equals the filter radius:
+        $$ \mathbf{t}_k = \frac{\mathbf{t}_k'}{\|\mathbf{t}_k'\|} p_z h $$
+    [S1, unofficial]
+
+4.  **Repeat for Second Tangent:** Perform steps 2-3 for $\mathbf{s}_k^0$ to obtain $\mathbf{s}_k$. The vectors are adjusted independently.
+
+5.  **Rasterize:** Rasterize the reconstruction kernel using the adjusted tangent vectors $\mathbf{s}_k$ and $\mathbf{t}_k$. The kernel is treated as an isotropic splat stretched by these vectors [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adjust_tangent_vectors(p_k, n_k, h):
+    """
+    Adjusts tangent vectors for a splat to handle minification.
+    
+    Args:
+        p_k: 3D position vector [px, py, pz] in camera space.
+        n_k: 3D normal vector [nx, ny, nz], assumed normalized.
+        h: Filter radius in normalized image plane.
+        
+    Returns:
+        s_k, t_k: Adjusted tangent vectors.
+    """
+    # Step 1: Compute initial orthogonal tangents
+    s_k_0 = cross(p_k, n_k)
+    t_k_0 = cross(n_k, s_k_0)
+    
+    # Step 2-4: Adjust each tangent independently
+    s_k = adjust_single_tangent(p_k, s_k_0, h)
+    t_k = adjust_single_tangent(p_k, t_k_0, h)
+    
+    return s_k, t_k
+
+def adjust_single_tangent(p_k, t_k_0, h):
+    """
+    Adjusts a single tangent vector based on minification criteria.
+    """
+    tx, ty, tz = t_k_0
+    px, py, pz = p_k
+    
+    # Step 2: Project tangent to screen space
+    # Denominator: pz^2 - tz^2
+    denom = pz**2 - tz**2
+    if abs(denom) < 1e-9:
+        # Degenerate case: tangent parallel to view direction projection
+        # Return original or handle as zero stretch? 
+        # Source implies this is handled by the heuristic or results in parallel vectors.
+        # We return the projected vector scaled by h if length is small, 
+        # but strictly following formula:
+        t_k_prime = [0, 0, 0] 
+    else:
+        t_k_prime = [
+            (tx * pz - tz * px) / denom,
+            (ty * pz - tz * py) / denom,
+            0
+        ]
+    
+    # Step 3: Check length
+    norm_t_prime = length(t_k_prime)
+    
+    if norm_t_prime >= h:
+        # No adjustment needed
+        return t_k_0
+    else:
+        # Adjust: scale projection to radius h, then scale back to object space magnitude
+        # Formula: t_k = (t_k' / ||t_k'||) * pz * h
+        if norm_t_prime < 1e-9:
+            # Avoid division by zero if projection is zero
+            # This implies the tangent is parallel to the view ray in a way that projects to a point.
+            # The source states depth correction is lost and vectors become parallel to screen plane.
+            # We return a vector parallel to screen plane with magnitude related to h.
+            # A safe default is to return a vector in the direction of the original tangent's screen projection (zero) 
+            # or a default basis. However, the formula divides by norm.
+            # If norm is 0, the direction is undefined. 
+            # Given the heuristic, this case is rare or handled by the orthogonality assumption.
+            # We will return the original tangent to avoid NaNs, acknowledging potential artifact.
+            return t_k_0
+        
+        unit_t_prime = [v / norm_t_prime for v in t_k_prime]
+        t_k = [v * pz * h for v in unit_t_prime]
+        return t_k
+```
+
+**Edge Cases and Pitfalls:**
+*   **Orthogonality Assumption:** The heuristic for generating initial tangent vectors assumes orthogonality. For a 90-degree view frustum, the angle $\alpha$ between screen-space projections of basis vectors ranges from 60 to 90 degrees (average 81.7). If $\alpha \neq 90$, the low-pass filter may be slightly truncated, but this is acceptable as the error is below output resolution [S1, unofficial].
+*   **Depth Correction:** Depth correction is lost for splats in minification because tangent vectors become parallel to the screen plane. This is intentional to prevent visibility artifacts caused by arbitrary depth values from infinite stretch values. Depth correction is not required for splats below a single pixel [S1, unofficial].
+*   **Numerical Stability:** Division by $p_z^2 - t_z^2$ can be unstable if $t_z \approx p_z$. This corresponds to the tangent vector being nearly parallel to the view direction in a way that projects to infinity or zero. The source notes that for minified splats, the vectors become parallel to the screen plane, implying $t_z$ behavior is managed by the scaling [S1, unofficial].
+
+## Subtopics
+
+### Object-Space MIP Filter
+A band-limiting technique that evaluates the reconstruction kernel in the surfel's tangent frame using object-space ray-splat intersection to eliminate perspective distortion of affine screen-space approximations [S2, unofficial]. It maps a screen-space Gaussian pixel prefilter with covariance $\sigma_f \mathbf{I}$ into the local coordinate system via the Jacobian $\mathbf{J} = \partial(u, v)/\partial(x, y)$ of the ray-splat intersection mapping. The combined reconstruction-plus-prefilter kernel in object space has the modified covariance $\Sigma_{\text{mip}} = \mathbf{I} + \sigma_f \mathbf{J} \mathbf{J}^\top$ [S2, unofficial]. The MIP-filtered Gaussian kernel is evaluated as $G_{\text{mip}}(\mathbf{u}) = n_f \cdot \exp(-\frac{1}{2} \mathbf{u}^T \Sigma_{\text{mip}}^{-1} \mathbf{u})$, where $\mathbf{u}$ is the local coordinate vector and $n_f$ is the normalization factor [S2, unofficial]. A pitfall is that per-pixel evaluation of $\mathbf{J}$ can introduce numerical instability for highly tilted or thin surfels where the denominator of quotient-rule derivatives approaches zero [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Computations are done during splat setup, not rasterization. Unlike original EWA, no additional fragments are generated when not necessary (splats are extended only in directions of minification) [S1, unofficial].
+*   **Memory Complexity:** Requires storing adjusted tangent vectors per splat. No per-fragment filter data needed [S1, unofficial].
+*   **Performance:** Avoids the fragment shader bottleneck associated with evaluating resampling and low-pass filters per fragment [S1, unofficial].
+*   **Strengths:** High-quality filtering, prevents aliasing during minification, efficient rasterization, handles hybrid splat/polygon rendering easily [S1, unofficial].
+*   **Limitations:** Approximation error due to non-orthogonal basis projections (though small), loss of depth correction for minified splats (intentional) [S1, unofficial].
+*   **When to Use:** Point-based rendering requiring high-quality anti-aliasing without the cost of full EWA per-fragment computation, especially when splats are isotropic and preprocessing is acceptable [S1, unofficial].
+*   **When Not to Use:** When exact EWA filtering is required for extreme anisotropy or when depth precision is critical for minified splats (though artifacts are prevented) [S1, unofficial].
+
+## Background
+Originated in the context of point-based rendering and EWA filtering approximations. It was proposed as a new approximation between the optimal EWA resampling filter and the approximation of Botsch et al. [BHZK05] to dynamically adjust tangent vectors in object space [S1, unofficial]. It addresses the issue where fine parts of a splat may fall between image samples during minification [S1, unofficial].
+
+## Sources
+[S1] Splat/Mesh Blending, Perspective Rasterization and Transparency for Point-Based Rendering, https://doi.org/10.2312/spbg/spbg06/049-057, fetched 2026-10-26 (unofficial)
+[S2] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,116 @@
+# Coarse-to-Fine Volume Maximum Search
+
+Also called: Two-stage volume maximum search, Coarse-fine peak localization
+
+## Overview
+A two-stage search algorithm to find the approximate location of the maximum value in a volume along a ray. The first stage performs a coarse linear scan, and the second stage refines the position using a divide-by-two approach. It sets itself apart from sibling methods by combining a global linear sweep with a localized binary-search-like refinement, prioritizing robustness in finding the global maximum within a segment over pure convergence speed.
+
+## How it works
+**Inputs:**
+*   `start_coord`: The starting 3D coordinate in the volume grid.
+*   `step_coord`: The step vector (direction and magnitude) for the coarse scan.
+*   `nsteps`: The number of steps for the coarse linear scan (integer).
+*   `sizef`: The dimensions of the volume grid (used for sampling bounds/normalization).
+*   `sample_vol(coord, sizef)`: A function that samples the volume at `coord`, returning a `vec4<f32>` (typically RGBA).
+
+**Outputs:**
+*   `the_coord`: The 3D coordinate of the found maximum.
+*   `the_ref`: The scalar maximum value found (extracted from the `r` component).
+*   `the_value`: The full sampled value (`vec4<f32>`) at `the_coord`.
+
+**Data Structures:**
+*   `the_ref`: `f32`, initialized to a large sentinel value (999999.0).
+*   `the_coord`: `vec3<f32>`, initialized to `start_coord`.
+*   `the_value`: `vec4<f32>`, initialized to zero.
+*   `substep_coord`: `vec3<f32>`, initialized to `step_coord`.
+
+**Steps:**
+
+1.  **Coarse Linear Scan:**
+    Initialize `the_ref = 999999.0`, `the_coord = start_coord`, and `the_value = vec4<f32>(0.0)`.
+    Loop `iter` from `0.0` to `nsteps` (exclusive).
+    In each iteration:
+    a. Calculate `coord = start_coord + iter * step_coord`.
+    b. Sample `value = sample_vol(coord, sizef)`.
+    c. Extract `reff = value.r`.
+    d. If `reff < the_ref`, update `the_ref = reff`, `the_coord = coord`, and `the_value = value`.
+
+2.  **Fine Refinement (Divide-by-Two):**
+    Initialize `substep_coord = step_coord`.
+    Loop `iter2` from `0` to `3` (4 iterations).
+    In each iteration:
+    a. Halve the step: `substep_coord = substep_coord * 0.5`.
+    b. Calculate neighbors: `coord1 = the_coord - substep_coord` and `coord2 = the_coord + substep_coord`.
+    c. Sample neighbors: `value1 = sample_vol(coord1, sizef)` and `value2 = sample_vol(coord2, sizef)`.
+    d. Extract values: `ref1 = value1.r` and `ref2 = value2.r`.
+    e. Update logic:
+       i. If `ref1 <= the_ref` (deliberate less-equal), update `the_ref = ref1`, `the_coord = coord1`, `the_value = value1`.
+       ii. Else if `ref2 < the_ref`, update `the_ref = ref2`, `the_coord = coord2`, `the_value = value2`.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def coarse_to_fine_max_search(start_coord, step_coord, nsteps, sizef, sample_vol):
+    # Stage 1: Coarse Linear Scan
+    the_ref = 999999.0
+    the_coord = start_coord
+    the_value = vec4(0.0, 0.0, 0.0, 0.0)
+    
+    for iter in range(nsteps):
+        coord = start_coord + iter * step_coord
+        value = sample_vol(coord, sizef)
+        reff = value.r
+        if reff < the_ref:
+            the_ref = reff
+            the_coord = coord
+            the_value = value
+            
+    # Stage 2: Fine Refinement
+    substep_coord = step_coord
+    for iter2 in range(4):
+        substep_coord = substep_coord * 0.5
+        coord1 = the_coord - substep_coord
+        coord2 = the_coord + substep_coord
+        
+        value1 = sample_vol(coord1, sizef)
+        value2 = sample_vol(coord2, sizef)
+        
+        ref1 = value1.r
+        ref2 = value2.r
+        
+        if ref1 <= the_ref:  # Deliberate less-equal
+            the_ref = ref1
+            the_coord = coord1
+            the_value = value1
+        elif ref2 < the_ref:
+            the_ref = ref2
+            the_coord = coord2
+            the_value = value2
+            
+    return the_coord, the_ref, the_value
+```
+
+**Parameters:**
+*   `nsteps`: Number of steps in the coarse linear scan. Typical values depend on ray length and desired coarse resolution. Not given in the sources.
+*   Refinement iterations: Fixed at 4.
+
+**Edge Cases and Pitfalls:**
+*   The refinement loop uses a deliberate less-equal (`<=`) comparison for the first neighbor (`coord1`) to handle ties or specific boundary conditions, while using strict less-than (`<`) for the second neighbor (`coord2`) [S1, unofficial].
+*   The sentinel value `999999.0` assumes volume values are significantly smaller. If values exceed this, the algorithm may fail to update [S1, unofficial].
+*   Boundary checks for `coord1` and `coord2` are not explicitly detailed in the source snippet; implementation must ensure `sample_vol` handles out-of-bounds coordinates gracefully or clamps them [G].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N + K)$, where $N$ is `nsteps` and $K$ is the number of refinement iterations (4). The coarse scan dominates if $N \gg 4$.
+*   **Memory Complexity:** $O(1)$ auxiliary space.
+*   **Strengths:** Simple to implement; robustly finds the global maximum within the coarse segment; the refinement stage quickly converges to a local peak.
+*   **Limitations:** The coarse scan may miss narrow peaks if `nsteps` is too small; the refinement is local and may get stuck in a local maximum if the coarse scan lands in a basin of attraction.
+*   **When to use:** When a reliable estimate of the maximum location is needed before further processing (e.g., isosurface extraction), and computational cost of a full binary search is prohibitive.
+*   **When not to use:** When high precision is required immediately without a coarse stage, or when the volume has very high-frequency noise that could mislead the coarse scan.
+
+## Background
+Originating from implementations in the pygfx library (WGPU renderer), this method is used in image-order volume rendering to efficiently locate peaks along rays for isosurface extraction or maximum intensity projection. It builds on [Differential Sampling and Peak Finding](1533-differential-sampling-and-peak-finding.md).
+
+## Sources
+[S1] volume_ray.wgsl, https://github.com/pygfx/pygfx/blob/main/pygfx/renderers/wgpu/wgsl/volume_ray.wgsl, fetched 2026-10-29 (unofficial)

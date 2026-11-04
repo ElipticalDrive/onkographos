@@ -1,0 +1,839 @@
+Vorion: A RISC-V GPU with Hardware-Accelerated
+3D Gaussian Rendering and Training
+Yipeng Wang, Mengtian Yang, Chieh-pu Lo, and Jaydeep P. Kulkarni
+arXiv:2511.16831v1 [cs.AR] 20 Nov 2025
+University of Texas at Austin Austin, TX
+yipeng.wang@utexas.edu, jaydeep@austin.utexas.edu
+Abstract—3D Gaussian Splatting (3DGS) has recently emerged
+as a foundational technique for real-time neural rendering, 3D
+scene generation, volumetric video (4D) capture. However, its
+rendering and training impose massive computation, making
+real-time rendering on edge devices and real-time 4D reconstruction on workstations currently infeasible. Given its fixedfunction nature and similarity with traditional rasterization,
+3DGS presents a strong case for dedicated hardware in the graphics pipeline of next-generation GPUs. This work, Vorion, presents
+the first GPGPU prototype with hardware-accelerated 3DGS
+rendering and training. Vorion features scalable architecture,
+minimal hardware change to traditional rasterizers, z-tiling to
+increase parallelism, and Gaussian/pixel-centric hybrid dataflow.
+We prototype the minimal system (8 SIMT cores, 2 Gaussian
+rasterizer) using TSMC 16nm FinFET technology, which achieves
+19 FPS for rendering. The scaled design with 16 rasterizers
+achieves 38.6 iterations/s for training.
+I. I NTRODUCTION
+The recent emergence of 3D Gaussian Splatting [7] has revolutionized neural scene representation by combining explicit
+3D point-based modeling with the efficiency of differentiable
+Gaussian rendering. 3DGS represents a scene with a set of
+anisotropic 3D Gaussian primitives, each represented with
+position, covariance, color, and opacity attributes. The explicit
+and continuous representation enables real-time photorealistic rendering while maintaining high reconstruction fidelity.
+Driven by these advantages, 3DGS has rapidly become the
+foundation for 3D intelligence, including 3D rendering and
+reconstruction, 3D generation [16], Simultaneous Localization
+and Mapping (SLAM) [6], robotic perceptions [8], and volumetric video (4D) capture [20].
+However, deploying 3DGS rendering in real-time and edge
+scenarios remains challenging. Existing implementations, even
+on high-end GPUs, struggle to sustain interactive frame
+rates when rendering large-scale or dynamic scenes [2]. On
+resource-constrained platforms such as the Jetson Orin NX,
+rendering throughput often falls below 20 FPS, far from
+the 60–90 FPS requirement of immersive AR/VR applications [23]. For example, Mobile Volta GPUs achieve less
+than 21 FPS on real-world scenes, while the Jetson Orin
+platform delivers only under 8 FPS on complex datasets such
+as CoMap [2].
+Meanwhile, training iteratively refines the attributes of
+millions of Gaussian primitives through backpropagation and
+poses an even greater computational challenge. On a modern
+workstation equipped with a single RTX 4090–class GPU,
+full 3DGS training for a typical 150–300-view scene with
+Fig. 1. Rendeing and training runtime breakdown on edge and server GPUs;
+Total Gaussian Invocations v.s. tile size ; Fraction of occluded pixels v.s.
+blending progress (depth).
+30k iterations generally requires 30–90 minutes, depending
+on image resolution and Gaussian count. In contrast, serverclass hardware such as an H100 or a multi-GPU node can
+only reduce this to 10–40 minutes, as performance remains
+constrained by memory bandwidth and host–device communication overhead. Achieving real-time 4D dynamic capture
+or 3DGS-based SLAM, however, demands continuous reconstruction and radiance-field updates at tens of hertz to keep
+pace with live sensor streams. This reveals a 100x performance
+gap between current training pipelines and true real-time
+capability.
+Multiple rendering accelerators have been proposed by the
+architecture and solid-state communities [1], [10], [11], [22],
+[23], and several simulation-based training accelerators have
+also emerged [3], [19]. However, unlike large language models
+which have massive economic impacts and justify specialized
+commercial hardware, dedicated accelerators for 3DGS are unlikely to materialize without broader adoption and influence of
+the algorithm. This creates a paradox: current general-purpose
+hardware limits the quality and scalability of 3DGS results, yet
+those limitations hinder the algorithm from achieving the impact needed to motivate custom silicon. Given 3DGS’s fixedfunction nature and its strong resemblance to traditional mesh
+rasterization, there is a compelling opportunity to integrate
+1
+Fig. 2. 3D Gaussian Splatting rendering and training pipeline.
+a pixel position, the Mahalanobis distance to Gaussian i is
+computed, and the Gaussian’s opacity contribution is
+
+αi = oi exp − 12 ∆P ⊤ Σ−1
+i ∆P ,
+dedicated support into the graphics pipeline of next-generation
+GPUs at low cost. We therefore propose augmenting the
+conventional GPU rasterizer to support both 3DGS rendering
+and training within the same hardware, reducing silicon cost
+while maintaining high throughput and scalability.
+In this paper, we first analyze the rendering and training
+pipelines and identify alpha blending and Gaussian-gradient
+accumulation as the bottlenecks. We then make two additional
+observations (Figure. 1) that motivate using a larger tile size
+as well as the proposed z-tiling and hybrid dataflow strategies.
+The detailed Vorion GPU architecture with Gaussian rasterizer
+and memory subsystem is subsequently presented. Finally, we
+evaluate performance using a minimal prototype system (8
+SIMT cores and 2 Gaussian rasterizers) fabricated in TSMC
+16nm FinFET technology, and through post-layout simulation
+of a scaled configuration featuring 16 rasterizers.
+where oi is its learned opacity and ∆P measures the pixel’s
+offset from the projected mean. The pixel’s transmittance
+before encountering Gaussian i, and the final pixel color are:
+Ti =
+i−1
+Y
+(1 − αi ),
+j=1
+C=
+n
+X
+Ti αi ci .
+i=1
+Blending terminates early when transmittance becomes negligible. In this way, pre-processing produces screen-space
+Gaussians, sorting determines visibility order, and alphablending synthesizes the final pixel color.
+B. 3DGS Training
+Forward rasterization. Training in 3D Gaussian Splatting
+begins with the same rasterization procedure used at inference
+time. Rendering the full image and comparing it to the groundtruth frame produces a pixel-wise loss, whose derivatives with
+respect to the final pixel colors serve as the entry point for
+backpropagation.
+Gradients computation and accumulation. Backpropagation distributes these pixel-level gradients to all Gaussians
+that contributed to the image. Because each pixel depends on
+a depth-ordered sequence of Gaussians, and each Gaussian
+influences many pixels, the gradient flow is many-to-many.
+For Gaussian i, let Pi denote the set of pixels influenced by
+it. The gradients with respect to its color ci and opacity αi
+are:
+
+X 
+∂L
+∂L
+=
+TiP · αiP ·
+∂ci
+∂CP
+P ∈Pi
+
+
+
+T ∂L
+P
+X
+∂L
+∂L
+Tfinal
+P
+(i,P )
+T
+· Cbg ·
+=
+Ti · ci − Caccum ·
+−
+∂αi
+∂CP
+∂CP
+1 − αiP
+II. BACKGROUND
+A. 3DGS Rendering
+Rendering in 3D Gaussian Splatting transforms a set of
+3D anisotropic Gaussians into screen-space elliptical splats
+and blends their contributions in visibility order. Figure 2
+shows the rendering process which consists of pre-processing,
+sorting, and alpha-blending.
+Pre-processing. In pre-processing, each Gaussian is transformed into camera space, where its depth is extracted for
+visibility ordering. The 3D covariance, formed from scale
+parameters and rotation, is projected to a 2D covariance that
+defines an ellipse on the image plane. Similarly, the mean is
+projected to pixel coordinates, and a conservative bounding
+box around the ellipse identifies whether the tiles are touched
+by the Gaussian. The Gaussian’s view-dependent color is
+evaluated from spherical harmonics, producing a screen-space
+representation consisting of a 2D mean, a 2D covariance, an
+opacity, a color, and a depth.
+Sorting. For each tile, all overlapping Gaussians are sorted
+by increasing depth, ensuring that blending proceeds from
+nearest to farthest. The ordering depends solely on the cameraspace depth computed in pre-processing.
+Alpha-blending. During alpha-blending, each pixel iterates
+through the Gaussians assigned to its tile front to back. For
+P ∈Pi
+All other Gaussian gradients, including those for position,
+scale, rotation, and spherical-harmonic coefficients, are derived
+by chaining derivatives from these color and opacity gradients.
+This stage is the primary bottleneck of training. Although differentiating every Gaussian–pixel interaction introduces significant computational load, the primary performance bottleneck
+2
+arises from gradient accumulation: every Gaussian aggregates
+gradients from potentially thousands of pixels, requiring frequent atomic operations on shared memory buffers. Modern
+GPUs worsen this effect, as their SM throughput has grown
+faster than their ROP bandwidth, causing atomic updates to
+become a serialization point that limits overall training speed.
+Parameter update. After all gradients have been accumulated, the optimizer (typically Adam) updates every Gaussian’s
+parameters. Because color and opacity gradients propagate
+through all earlier computations, these updates adjust every
+aspect of the Gaussian representation, including its geometry,
+orientation, scale, opacity, and illumination-dependent spherical harmonics.
+Density control. Beyond standard gradient descent, 3DGS
+employs density control to dynamically adjust the number
+and placement of Gaussians. Regions that show large residual
+error or persistent high gradients may trigger cloning or
+splitting operations, increasing the representational granularity.
+Conversely, Gaussians that receive consistently small gradients
+or have near-zero opacity may be removed. This mechanism
+ensures that model capacity expands as required while avoiding unnecessary growth in areas already well represented.
+of scenes, with especially pronounced gains on outdoor scenes
+containing large, spatially extended Gaussian distributions.
+These reductions directly translate into lower memory bandwidth pressure and improved arithmetic efficiency. Note that
+our findings differ from those reported in GSCore [10]. The
+false-positive issue highlighted in GSCore can be eliminated
+by a simple intersection between each tile’s range and the
+Gaussian’s bounding box prior to blending.
+Motivated by this behavior, we adopt an aggressive 64 × 64
+tile size in our architecture. In this work, we use Gaussiancentric execution model [22] for its memory bandwidth benefits. To further increase parallelism and scalability, we propose
+z-tiling.
+Z-tiling. In addition to spatial tiling, we also introduce a
+new form of parallelism based on the depth axis, which we
+call z-tiling. Unlike spatial tiling, which partitions the image
+plane, z-tiling partitions the sorted Gaussian list itself along
+the depth dimension, enabling parallel or tiled execution while
+preserving the correct front-to-back compositing semantics. To
+support this, the depth-sorted set of Gaussians {1, . . . , N } is
+partitioned into K consecutive z-tiles, with tile k containing
+the index range
+III. O BSERVATION AND A NALYSIS
+G (k) = {nk−1 +1, . . . , nk }.
+Alpha blending and gradient accumulation are the
+dominant bottlenecks. Figure 1(a) and (b) report the rendering and training time breakdowns on the CoMap [24] and
+Tanks & Temples [9] datasets for the NVIDIA Jetson Orin
+and A100 platforms, respectively. Alpha blending consistently
+accounts for more than 70% of the total rendering time. During training, gradient computation and accumulation together
+exceed 60% of the runtime, while rasterization contributes
+roughly 20%, again dominated by alpha blending. In addition,
+matrix multiplication in Pre-processing and GPU radix sort in
+Gaussian sorting are scalable and fully optimized in modern
+GPUs. These observations motivate our proposed Gaussian
+Rasterizer, designed to only accelerate blending as well as
+gradient computation and accumulation, while leaving the remaining stages to programmable SIMT cores. Importantly, this
+design remains compatible with recent 3DGS ray-tracing [13],
+[21] pipelines and other extensions [5] in which preprocessing
+and sorting may differ, but the alpha-blending stage remains
+unchanged.
+Larger tile sizes reduce Gaussian loads. Traditional GPU
+rasterizers typically adopt small tiles (e.g., 16×16) to minimize
+DRAM traffic between pipeline stages. Gaussian splatting,
+however, does not rely on the multi-stage rasterization pipeline
+and does not introduce intermediate framebuffer exchanges
+between stages. Because each Gaussian directly accumulates
+its contribution into final pixel colors, increasing the tile
+size does not increase DRAM traffic. Instead, it substantially
+reduces duplicated Gaussian fetches and sorting overhead,
+since Gaussians that previously overlapped multiple small tiles
+now fall within a single enlarged tile. As shown in Figure 1
+(c), expanding the tile size from 16×16 to 64×64 reduces perframe Gaussian invocations by more than 80% across a variety
+Each z-tile independently performs local volumetric composit(k)
+ing, producing a local color Cloc and an internal residual
+(k)
+transmittance Tbout :
+Y
+X (k)
+(k)
+(k)
+Cloc =
+Tbi αi ci ,
+Tbout =
+(1 − αi ),
+i∈G (k)
+where
+i∈G (k)
+(k)
+Tbi =
+Y
+(1 − αj )
+j∈G (k)
+j<i
+is the transmittance accumulated within depth tile k. To merge
+the tiles back into a globally consistent front-to-back order, we
+(k)
+(1)
+define an inter-tile transmittance Tin , initialized as Tin = 1
+and updated recursively as
+(k+1)
+Tin
+(k) (k)
+= Tin Tbout .
+The final pixel color is therefore
+C=
+K
+X
+(k)
+(k)
+Tin Cloc .
+k=1
+This z-tiling formulation is mathematically equivalent to a
+single global front-to-back compositing sweep, but it enables
+depth-parallel execution and hardware-efficient scheduling
+without altering the underlying Alpha blending model. We
+note, however, that z-tiling is not applicable during training,
+as the backward pass must traverse Gaussians in back-tofront order. This limitation is not restrictive in practice, since
+the training procedure already exhibits substantial data parallelism.
+Many scenes exhibit a strong occluded tail. As demonstrated in Figure 1 (d), a small prefix of the depth-sorted
+3
+Controller
+cores
+Scoreboard
+Core 1
+Tile buffer A
+Dispatch
+…
+INT32
+(x16)
+FP32
+(x16)
+D$
+D$
+LSU (x16)
+Socket 0
+Commit
+Core 2
+Handles threads
+activate, sync,
+branch instructions
+Raster
+agent
+RISC-V
+Core 0
+Gather
+Shared
+Shared
+memory
+memory
+…
+Socket N
+Pixels
+Pixel buf
+Bank 1
+…
+Bank 16
+Pixel buffer (64x64)
+L2
+Dispatch unit
+Dispatch unit
+64
+64
+Dispatch
+Lanes
+(x4)
+Compute
+…
+Gaussian 0
+Pixel unit
+Command
+Control
+(Optional)
+exp
+power
+Stage 2
+Update Pixel buffer
+Intersected AABB
+(Removes false positive)
+Rasterizer
+opacity
+x2
+Queue, MUX
+64
+Gather
+Stage 1
+Dispatch
+Pixel 0
+64
+Pixel Unit
+DMA
+Pixel 1
+Bank 0
+Front-to-back alpha blending
+Gaus buf
+Kernal^
+LLC
+PE
+Pixel 0
+RGBT
+Traditional rasterizer architecture
+L2 cache
+Cluster N
+PE … PE
+Raster
+agent
+Memory
+interface
+L2
+cores
+Gaussian
+Rasterizer
+Core 3
+Socket 1
+Lanes
+(x16)
+CSR
+Gaussian buffer (1r1w)
+Tile buffer B
+Register file (512 x 32bit)
+SFU
+(x16)
+Top control
+Dispatch unit
+Control signals
+L2
+L2 inf
+Cluster 0
+Pixel buffer
+Instruction fetch
+Decode
+Cmd
+Preprocessing
+and sort (PnS)
+PnS
+Chain
+z-tiles
+PnS
+Chain
+z-tiles
+^ Final processing after
+pixel unit not shown.
+* Not to scale
+Blending
+Pixel-tile 1
+2
+x3
+Lane 0
+To raster
+agent in core
+3
+Time*
+(x16)
+Gaussian
+buffer
+MUX
+I$I$
+Wrap
+states
+Wrap scheduler
+Primitives
+PC, masks
+Branch
+Unit
+Stage 3
+Gather unit
+Gaussian Rasterizer
+Fig. 4. Traditional rasterizer architecture; Gaussian rasterizer architecture in
+rendering setup; Dataflow chart for rendering.
+Fig. 3. Overall Vorion GPGPU architecture.
+Gaussians accounts for nearly all visible contributions. Beyond
+a certain depth threshold, more than 90% of pixels in many
+scenes—especially indoor scenes such as Room—are fully occluded. Despite this, a Gaussian-centric [22] execution model
+still projects and evaluates all back-layer Gaussians, even
+though most pixels have already saturated their transmittance.
+This results in substantial wasted work.
+Observing this, we propose an optional heterogeneous architecture and hybrid dataflow for edge rendering. For the early
+z-tiles, where most pixels remain visible, Gaussian-centric
+processing is ideal: each Gaussian updates all influenced pixels
+efficiently. Once the system enters the occluded tail, we switch
+to a pixel-centric mode. In this region, most pixels have
+negligible remaining transmittance, allowing them to terminate
+early without evaluating additional Gaussians. This hybrid
+approach reduces compute and memory pressure on deeply
+occluded layers, particularly in dense indoor scenes where the
+occlusion curve saturates rapidly.
+Together, with the combination of large spatial tiles, depthaxis z-tiling, and an optional hybrid Gaussian-/pixel-centric
+dataflow, we present Vorion architecture.
+special arithmetic, branch handling, and thread synchronization. A lightweight Raster Agent coordinates data movement
+between the register file and the rasterizer buffers through
+CSR interfaces, managing dispatch and result collection for
+the Gaussian rasterizer with minimal software overhead.
+B. Rendering
+During the forward pass, programmable kernels handle
+view transformations, spherical-harmonic color evaluation, and
+Gaussian sorting on a per-tile basis. Depth tiles (z-tiles) are
+then distributed across the rasterizers, and rendered pixels are
+written to the frame buffer or directly to DRAM.
+Gaussian rasterizer architecture. As shown in Figure 4
+Vorion’s Gaussian rasterizer intentionally mirrors the structure of conventional triangle rasterizers. It features a 1R1W
+Gaussian buffer, a 1R1W pixel buffer, a set of raster lanes,
+and dispatch/gather units. The command processor configures
+Gaussian address spaces, initializes pixel buffers, and programs control registers prior to execution.
+The rasterizer employs a Gaussian-centric dataflow: each
+Gaussian is brought into the on-chip buffer once per tile, avoiding redundant memory traffic. The Gaussian buffer stores the
+parameters (µ, Σ, o, c), hiding L2 latency during rasterization.
+Before blending, each Gaussian’s axis-aligned bounding box
+(AABB) is intersected with the tile region to eliminate false
+positives, addressing issues previously noted in GSCore [10].
+Surviving pixel tasks are dispatched to raster lanes via a
+streamlined three-stage pipeline, after which updated pixel
+values are gathered and written back to the pixel buffer.
+Memory subsystem. Unlike a conventional rasterizer [11],
+the Gaussian and pixel buffers in our design do not form a
+symmetric ping–pong pair. The Gaussian buffer is a small,
+low-latency structure used to hide L2 access delays, whereas
+the pixel buffer is sized to hold the entire 64×64 pixel tile. The
+pixel buffer is banked into 16 independent slices to match the
+16 raster lanes. Because adjacent pixels tend to be updated in
+IV. VORION ARCHITECTURE
+A. Overall Architecture
+Figure 3 presents the overall architecture of our system,
+built atop the RISC-V GPGPU Vortex platform [17], [18].
+The design consists of a command controller, a DMA engine,
+a last-level cache, and multiple compute clusters. Each cluster
+integrates several sockets, a pixel unit, and an associated L2
+cache slice. Within each socket, there are four RISC-V SIMT
+cores, a Gaussian rasterizer, and a shared memory block.
+Each SIMT core implements a five-stage in-order pipeline
+and features a warp scheduler capable of launching up to 16
+threads sharing a common program counter (PC). The register
+file is single-context, comprising 16 × 32 registers. The execution unit provides 16 INT32/FP32 ALUs and 16 SFUs for
+4
+As illustrated in Figure 5, kernels first compute the loss and
+per-pixel gradients. Each pixel tile is then assigned to a rasterization engine. Per-pixel gradients and the final transmittance
+Tfinal are loaded into the pixel buffer, which also tracks the
+currently accumulated color. As gradients need to be stored
+per pixel, we adopt a 32 × 64 tile shape to keep same buffer
+dimensions across training and inference.
+Gaussians are processed in back-to-front order. Evennumbered lanes compute Ti and αi , while chained oddnumbered lanes compute color and opacity gradients. A gather
+unit accumulates these gradients into the per-Gaussian accumulator. Every 16 Gaussians, the Raster Agent offloads partial
+results to the SIMT cores, where kernels compute Σ, o, and
+µ gradients. For Gaussians intersecting multiple tiles, partial
+accumulations are computed locally; a cross-tile scan and
+parameter-update stage (e.g., Adam) is then performed by new
+kernels.
+Because reciprocal hardware is substantially more expensive than multipliers or exponent units, we adopt a hybrid
+approximation for (1 − α)−1 . Empirically, most α values lie
+below 0.1 or above 0.9. For α < 0.5, we use a fourthorder Taylor approximation; for α ≥ 0.5 (but < 0.99), we
+apply two Newton–Raphson iterations, seeded from an 8entry LUT shared across lanes. This approach limits error to
+within 3% with no measurable PSNR degradation. Supporting
+these gradient computations adds only three adders and three
+multipliers per pair of lanes, increasing per-lane area by just
+7%.
+Dispatch unit
+Pixel 0
+Gaussian 0
+64
+64
+a b
+c d
+C=
+Tf=
+Pixel 1
+GR GG GB T CR CG CB Tf
+Bank 0
+Dispatch
+…
+a
+b
+c
+d
+e
+f
+g
+Stage 3
+h
+Bank 1
+Lane 2
+Lane 3
+Lane 1
+Lane 0
+Replace
+Gaus 0
+Gaussian buffer (32 Gaus)
+…
+Lane 14
+Lane 15
+Pixel buffer (64x32 pixels)
+Σ, o, μ, c
+L2 cache
+Reuse
+g h
+Raster
+Agent
+Transfer a block
+of 16 gaussians
+Σ, o, μ
+Gradients
+Gather (Accumulation)
+Parameter
+update
+Lane 0 (same with rendering)
+G=
+32
+e f
+After forward
+pass and loss, Tile
+start from back
+Stage 4
+Stage 5
+x3
+Kernal
+PnS
+PnS
+(c α gradients)
+Adder tree – 8 entry
+Grad
+update
+Iteration 1
+c α gradients
+Blending
+Iteration 2
+…
+3 extra adders
+and 3 multipliers
+per 2 lanes.
+Lane 1
+Density control
+Loss
+Blending
+x3
+x3
+Kernel on RISC-V core
+Rasterizer
+x3
+x3
+Lane 2 (same with rendering)
+Lane 3 (c α gradients)
+32
+Adder tree – 8 entry
+Gather unit
+Loss PnS
+c α grad
+Grad
+update
+Blending
+Time*
+Fig. 5. Gaussian rasterizer architecture in training setup; Training dataflow
+chart.
+close succession, we use a staggered banking layout to mitigate
+conflicts and sustain lane-level parallelism.
+The combination of large pixel tiles and a Gaussian-centric
+execution model eliminates the need for a dedicated raster
+cache; the rasterizer connects directly to the L2 slice with
+high locality. To support cache-aware scheduling, we embed
+an “intersect” bit in the MSB of each Gaussian tag, indicating
+whether it spans multiple tiles and helping guide the replacement policy.
+Pixel unit. A pixel-centric dataflow may be selected to
+trade latency for throughput under high occlusion. When
+the remaining number of Gaussians becomes small or the
+accumulated occlusion ratio exceeds a threshold, the tail of
+the computation is offloaded to the pixel unit. Architecturally,
+this unit mirrors the Gaussian rasterizer but employs four
+lanes, a larger Gaussian buffer, and a smaller pixel buffer.
+Each lane processes one pixel by iterating over the remaining
+Gaussians until transmittance collapses. In heavily occluded
+indoor scenes such as Room, offloading the final quarter of
+Gaussians to the pixel unit improves throughput by 82.4%.
+Together, Kernel pre-processing, Gaussian rasterizer, and
+Pixel unit forms a 3-stage pipeline. The introduction of the
+pixel unit and pixel-centric dataflow is also due to intention
+to support 3D Gaussian Ray tracing [13], [21] in the future.
+D. Software stack
+Fig. 6. Vorion software stack.
+The 3DGS implementation follows the official CUDA, with
+the primary algorithmic difference being the use of AABB tile
+intersection. All GPU-side Gaussian rasterizer operations are
+exposed through memory-mapped CSRs, allowing kernels to
+configure rasterizer state, launch raster operations, and retrieve
+results without any specialized driver support.
+Figure 6 illustrates the complete software toolchain. Applications are written in OpenCL, consisting of host code and
+device kernels. Both components are compiled using POCL,
+which serves as the OpenCL front end and partitions the
+program into host and kernel modules. Kernel code is lowered through LLVM’s Vortex back end, which emits binaries
+targeting the Vorion ISA extensions, including our rasterizer
+intrinsics. The host-side OpenCL runtime links against the
+Vortex runtime library, which provides device discovery, memory management, kernel scheduling, and CSR access.
+At execution time, the host program issues OpenCL commands through the POCL runtime, which forwards kernel
+C. Training
+The Gaussian rasterizer extends naturally to support gradient computation and accumulation for tile-based training,
+requiring only modest additions to the raster lanes. Gradients
+with respect to Gaussian color c and opacity α account for
+over 60% of overall training computation, and the dominant
+bottleneck is the accumulation of per-pixel gradients back into
+Gaussian accumulators. Consequently, the rasterizer accelerates c- and α-gradient evaluation directly in hardware, while
+gradients for Σ, o, and µ offloaded to programmable kernels.
+5
+binaries and launch parameters to the Vortex driver. The kernel
+modules execute on SIMT cores while interacting with the
+Gaussian rasterizer through CSR operations (e.g., pushing
+Gaussian descriptors, initiating tile rendering, draining pixel
+buffers). The final host executable thus consists of POCLgenerated host code linked with Vortex runtime libraries,
+while the device binary contains LLVM-generated kernel code
+augmented with native rasterizer commands.
+of each benchmark. For system simulation, we assume an
+LPDDR4–3200 memory subsystem providing 51.2 GB/s of
+bandwidth modeled using Ramulator 2 [12].
+Performance evaluation. As Vorion is a general-purpose
+V. E VALUATION
+A. Methodology and Experiment Setup
+To evaluate the performance of Vorion for both edge and
+server senarios. We develope two setups, including a silicon
+prototype with 8 SIMT cores + 2 rasterizer configuration, and
+a post layout simulation environment with 64 SIMT core + 16
+rasterizer.
+Fig. 8. Rendering and training performance evaluation results; Voltagefrequency-power-throughput scaling.
+GPU, we do not compare it to prior fixed-function accelerators.
+Instead, we evaluate the impact of the Gaussian rasterizer
+by comparing designs with and without rasterization support. As shown in Figure 8, across supply voltages from
+0.57 V to 1.15 V and frequencies from 100 MHz to 530 MHz,
+the silicon prototype delivers 6.4–19 FPS for rendering and
+2.43–4.97 iterations/s for training using two rasterizers. These
+results correspond to a 30.2–38.4× speedup in rendering
+throughput and a 51–58.4× speedup in training throughput
+relative to the GPU-kernel implementation running on eight
+SIMT cores without rasterization support. Figure 8 shows that
+both rendering and training performance scale quasi-linearly
+with voltage and frequency, while the measured power remains
+below 600 mW across all operating points.
+Fig. 7. Silicon die shot and prototype setup.
+Silicon prototype. Our edge-oriented silicon prototype consists of two sockets, each integrating four SIMT cores and one
+Gaussian rasterizer, all operating in FP32 precision. The chip
+is fabricated in TSMC 16 nm FinFET technology, occupying
+a 4 mm2 die with a 1.6 mm2 core area, and is packaged
+using a cPGA package. System-level functionality—including
+the command processor, L2 cache, and DRAM controller—is
+implemented on an AMD VC707 FPGA. The FPGA interfaces
+with the silicon through an FMC connector and provides
+12.8 GB/s of DRAM bandwidth.
+We evaluate the prototype across supply voltages from
+0.57 V to 1.15 V and operating frequencies from 100 MHz to
+530 MHz. High-frequency clocks are generated on-chip using
+a 63-stage ring oscillator, which runs at 2.12 GHz at nominal
+voltage (0.8 V) and is subsequently divided down. Lowerfrequency clocks are generated on the FPGA to allow finergrained control during characterization.
+Scaled design. The scaled configuration, featuring 64 SIMT
+cores and 16 rasterizers, uses the same RTL and technology
+libraries as the silicon prototype but instantiates more clusters
+and raster units. The design is synthesized using Cadence
+Genus and placed and routed with Cadence Innovus. Postlayout parasitics are extracted using Cadence Quantus, and
+timing closure is achieved in Cadence Tempus at a target
+frequency of 500 MHz. Power is estimated with Cadence Voltus using activity traces collected from representative portions
+Fig. 9. Images rendered by Vorion; Comparison table with prior arts.
+6
+The scaled configuration reaches up to 152 FPS for rendering and 38.6 iterations/s for training, demonstrating that our
+Gaussian-centric pipeline maintains high efficiency as rasterization resources are replicated, without limiting by memory
+bandwidth.
+Finally, extrapolating the measured and simulated scaling trends to a configuration with 1,024 rasterizers—well
+within the integration density of modern multi-cluster accelerators—yields end-to-end training times below 3 s for
+a full 3DGS optimization pass. With future integration of
+quantization and compression techniques [14], [15], which are
+out of scope of this work, this gap can be further narrowed,
+pushing the system toward true real-time operation.
+Compared to state-of-the-art 3DGS accelerators [1], [4],
+[10], as shown in Figure 9, the scaled design achieves competitive throughput while preserving full programmability, FP32
+precision, and zero accuracy loss. Relative to GPU rasterizer
+designs [11], Vorion achieves 1.7× normalized area efficiency
+(FPS/mm2 /MHz) per rasterizer.
+[7] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3d gaussian
+splatting for real-time radiance field rendering,” in ACM SIGGRAPH,
+2023.
+[8] S. Kim and J. Kim, “Gpmap: A unified framework for robotic mapping
+based on sparse gaussian processes,” in Field and Service Robotics:
+Results of the 9th International Conference. Springer, 2015, pp. 319–
+332.
+[9] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun, “Tanks and temples:
+Benchmarking large-scale scene reconstruction,” ACM Transactions on
+Graphics (ToG), vol. 36, no. 4, pp. 1–13, 2017.
+[10] J. Lee, S. Lee, J. Lee, J. Park, and J. Sim, “Gscore: Efficient radiance
+field rendering via architectural support for 3d gaussian splatting,” in
+Proceedings of the 29th ACM International Conference on Architectural
+Support for Programming Languages and Operating Systems, Volume 3,
+2024, pp. 497–511.
+[11] S. Li, B. Keller, Y. C. Lin, and B. Khailany, “Gaurast: Enhancing gpu
+triangle rasterizers to accelerate 3d gaussian splatting,” arXiv preprint
+arXiv:2503.16681, 2025.
+[12] H. Luo, Y. C. Tuğrul, F. N. Bostancı, A. Olgun, A. G. Yağlıkçı, and
+O. Mutlu, “Ramulator 2.0: A modern, modular, and extensible dram
+simulator,” IEEE Computer Architecture Letters, vol. 23, no. 1, pp. 112–
+116, 2023.
+[13] N. Moenne-Loccoz, A. Mirzaei, O. Perel, R. de Lutio, J. Martinez Esturo, G. State, S. Fidler, N. Sharp, and Z. Gojcic, “3d gaussian ray
+tracing: Fast tracing of particle scenes,” ACM Transactions on Graphics
+(TOG), vol. 43, no. 6, pp. 1–19, 2024.
+[14] K. Navaneet, K. Pourahmadi Meibodi, S. Abbasi Koohpayegani, and
+H. Pirsiavash, “Compgs: Smaller and faster gaussian splatting with
+vector quantization,” in European Conference on Computer Vision.
+Springer, 2024, pp. 330–349.
+[15] P. Papantonakis, G. Kopanas, B. Kerbl, A. Lanvin, and G. Drettakis,
+“Reducing the memory footprint of 3d gaussian splatting,” Proceedings
+of the ACM on Computer Graphics and Interactive Techniques, vol. 7,
+no. 1, pp. 1–17, 2024.
+[16] J. Tang, J. Ren, H. Zhou, Z. Liu, and G. Zeng, “Dreamgaussian:
+Generative gaussian splatting for efficient 3d content creation,” arXiv
+preprint arXiv:2309.16653, 2023.
+[17] B. Tine, V. Saxena, S. Srivatsan, J. R. Simpson, F. Alzammar, L. Cooper,
+and H. Kim, “Skybox: Open-source graphic rendering on programmable
+risc-v gpus,” in Proceedings of the 28th ACM International Conference
+on Architectural Support for Programming Languages and Operating
+Systems, Volume 3, 2023, pp. 616–630.
+[18] B. Tine, K. P. Yalamarthy, F. Elsabbagh, and K. Hyesoon, “Vortex:
+Extending the risc-v isa for gpgpu and 3d-graphics,” in MICRO-54:
+54th Annual IEEE/ACM International Symposium on Microarchitecture,
+2021, pp. 754–766.
+[19] H. Wang, Z. Zhu, T. Zhao, Y. Xiang, Z. Wang, J. Yu, H. Yang, Y. Xie,
+and Y. Wang, “React3d: Real-time edge accelerator for incremental
+training in 3d gaussian splatting based slam systems,” in IEEE/ACM
+International Symposium on Microarchitecture (MICRO), 2025.
+[20] G. Wu, T. Yi, J. Fang, L. Xie, X. Zhang, W. Wei, W. Liu, Q. Tian, and
+X. Wang, “4d gaussian splatting for real-time dynamic scene rendering,”
+in Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition, 2024, pp. 20 310–20 320.
+[21] Q. Wu, J. M. Esturo, A. Mirzaei, N. Moenne-Loccoz, and Z. Gojcic,
+“3dgut: Enabling distorted cameras and secondary rays in gaussian splatting,” in Proceedings of the Computer Vision and Pattern Recognition
+Conference, 2025, pp. 26 036–26 046.
+[22] M. Yang, Y. Wang, C.-P. Lo, X. Zhang, S. Oruganti, and J. P. Kulkarni,
+“Gsacc: Accelerate 3d gaussian splatting via depth speculation and
+gaussian-centric rasterization,” in 2025 62nd ACM/IEEE Design Automation Conference (DAC). IEEE, 2025, pp. 1–7.
+[23] Z. Ye, Y. Fu, J. Zhang, L. Li, Y. Zhang, S. Li, C. Wan, C. Wan,
+C. Li, S. Prathipati et al., “Gaussian blending unit: An edge gpu
+plug-in for real-time gaussian-based rendering in ar/vr,” in 2025 IEEE
+International Symposium on High Performance Computer Architecture
+(HPCA). IEEE, 2025, pp. 353–365.
+[24] Y. Yuan and M. Sester, “Comap: A synthetic dataset for collective multiagent perception of autonomous driving,” The International Archives of
+the Photogrammetry, Remote Sensing and Spatial Information Sciences,
+vol. 43, pp. 255–263, 2021.
+VI. C ONCLUSION
+This work presented Vorion, a RISC-V–based GPU architecture that introduces the first unified rasterizer for both
+3DGS rendering and training. By integrating a Gaussiancentric, large-tile processing, z-tiling, and an optional hybrid dataflow, Vorion directly addresses the computational
+bottlenecks of alpha blending and gradient accumulation.
+Our silicon prototype demonstrates 30.4-58.2X speedups over
+SIMT-only execution while preserving full programmability
+and FP32 accuracy. Scaled evaluations further show nearlinear performance growth with additional rasterization units,
+achieving up to 152 FPS for rendering and 38.6 iterations/s
+for training. These results highlight Vorion’s efficiency and
+scalability, indicating a clear path toward real-time 3DGS for
+next-generation graphics, robotics, and AR/VR systems.
+R EFERENCES
+[1] X. Feng, H. Wang, C. Tang, T. Wu, H. Yang, and Y. Liu, “1.78 mj/frame
+373fps 3d gs processor based on shape-aware hybrid architecture using
+earlier computation skipping and gaussian cache scheduler,” in 2025
+IEEE International Solid-State Circuits Conference (ISSCC), vol. 68.
+IEEE, 2025, pp. 1–3.
+[2] Y. Feng, W. Lin, Y. Cheng, Z. Liu, J. Leng, M. Guo, C. Chen,
+S. Sun, and Y. Zhu, “Lumina: Real-time neural rendering by exploiting
+computational redundancy,” in International Symposium on Computer
+Architecture (ISCA), 2025.
+[3] H. He, G. Li, F. Liu, L. Jiang, X. Liang, and Z. Song, “Gsarch: Breaking
+memory barriers in 3d gaussian splatting training via architectural support,” in IEEE International Symposium on High Performance Computer
+Architecture (HPCA), 2025.
+[4] ——, “Gsarch: Breaking memory barriers in 3d gaussian splatting training via architectural support,” in 2025 IEEE International Symposium
+on High Performance Computer Architecture (HPCA). IEEE, 2025, pp.
+366–379.
+[5] B. Huang, Z. Yu, A. Chen, A. Geiger, and S. Gao, “2d gaussian splatting
+for geometrically accurate radiance fields,” in ACM SIGGRAPH 2024
+conference papers, 2024, pp. 1–11.
+[6] N. Keetha, J. Karhade, K. M. Jatavallabhula, G. Yang, S. Scherer,
+D. Ramanan, and J. Luiten, “Splatam: Splat track & map 3d gaussians
+for dense rgb-d slam,” in Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, 2024, pp. 21 357–21 366.
+7

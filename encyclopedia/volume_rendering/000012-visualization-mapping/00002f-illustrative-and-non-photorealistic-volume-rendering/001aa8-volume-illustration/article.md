@@ -1,0 +1,168 @@
+# Volume Illustration
+
+Also called: Ebert and Rheingans volume illustration
+
+## Overview
+Volume illustration is a non-photorealistic volume rendering method that augments a physics-based illumination pipeline with artistic techniques to enhance the perception of structure, shape, orientation, and depth in volumetric data [S1, unofficial][S2, unofficial][S3]. It solves the problem of ambiguous internal structure in traditional physics-based or classification-based renderings by applying feature enhancement and depth cues derived from local volumetric properties rather than sample values alone [S3]. Unlike surface-based NPR where features are well-defined boundaries, volume illustration determines feature areas through continuous analysis of local gradients and properties, requiring less manual tuning of transfer functions than traditional direct volume rendering [S3].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D scalar volume dataset $V$, a physics-based volume renderer (capable of atmospheric or Phong illumination with linear accumulation and shadowing), and a set of NPR transformation parameters.
+*   **Output:** A 2D non-photorealistic image.
+
+**Data Structures**
+The method operates on the standard volume rendering pipeline. For each ray cast through the volume, the following properties are computed per voxel sample $i$:
+*   $p_i$: 3D spatial location of the sample.
+*   $v_i$: Scalar volume sample value (intensity).
+*   $g_i$: Gradient vector $\nabla v_i$ at the sample.
+*   $d_i$: Minimal change direction (normalized gradient direction).
+*   $l_i$: Light direction vector.
+*   $r_i$: View direction vector (ray direction).
+*   $c_i$: Color assigned by classification.
+*   $\alpha_i$: Opacity assigned by classification.
+
+**Numbered Steps**
+1.  **Physics-Based Rendering Base:** Render the volume using a physics-based illumination model (e.g., Kajiya’s cloud rendering or Phong illumination with linear accumulation) to establish base lighting, including volumetric and self-shadowing [S3].
+2.  **Classification:** Apply classification functions to each voxel to determine initial color $c_i$ and opacity $\alpha_i$ based on sample value $v_i$ [S2, unofficial].
+3.  **NPR Transformation:** Subject the resulting colors and opacities to transformations that encapsulate specific volume illustration techniques. These transformations use the parameters listed above ($p_i, v_i, g_i, d_i, l_i, r_i$) to modify the visual appearance [S2, unofficial][S3].
+    *   *Feature Enhancement Techniques:* Boundary enhancement, silhouettes, fading, and sketch lines. These are applied based on local volumetric characteristics (e.g., high gradient magnitude for boundaries) [S2, unofficial][S3].
+    *   *Depth/Orientation Cues:* Distance color blending, feature halos, and tone shading. These use global orientation information (view and light directions) to enhance local features [S3].
+4.  **Compositing:** Perform standard front-to-back alpha compositing. All voxels in the volume contribute to the final image; the NPR techniques modify the contribution of each sample during the transformation step but do not change the accumulation mechanism itself [S2, unofficial].
+
+**Formulas**
+The core modification occurs in the color and opacity accumulation. Let $C_{base}$ and $\alpha_{base}$ be the color and opacity from the physics-based classification. The illustrative color $C_{ill}$ and opacity $\alpha_{ill}$ are computed via transformation functions $T_c$ and $T_\alpha$:
+$$ C_{ill} = T_c(c_i, v_i, g_i, r_i, l_i, \dots) $$
+$$ \alpha_{ill} = T_\alpha(\alpha_i, v_i, g_i, r_i, l_i, \dots) $$
+The final pixel color $C_{final}$ is computed via standard front-to-back compositing:
+$$ C_{final} = \sum_{i=1}^{N} T_{ill}(i) \cdot C_{ill,i} \cdot \alpha_{ill,i} \cdot \prod_{j=1}^{i-1} (1 - \alpha_{ill,j}) $$
+where $T_{ill}$ represents any additional transmission modifiers if required by specific techniques (e.g., fading) [S2, unofficial][S3].
+
+**Parameters**
+*   **Local Properties:** Gradient magnitude, minimal change direction.
+*   **Global Properties:** View direction, light direction.
+*   **Sample Properties:** Location, scalar value.
+*   **Tuning:** Parameters are often dataset-specific. For example, boundary enhancement thresholds depend on the exact voxel intensity values and gradient magnitudes of the specific dataset [S2, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Parameter Tuning:** A local implementation requires significant parameter tuning before effective images emerge. Parameters often depend heavily on exact voxel intensity values, requiring prior knowledge of the dataset [S2, unofficial].
+*   **Feature Definition:** Unlike surfaces, volumetric features vary continuously. Defining "features" requires careful analysis of local properties to avoid noise amplification or over-smoothing [S3].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_illustration_render(volume, camera, light, npr_params):
+    """
+    Renders a volume using the Volume Illustration pipeline.
+    volume: 3D array of scalar values.
+    camera: Object with get_ray(origin, direction) method.
+    light: Object with get_direction(point) method.
+    npr_params: Dictionary containing thresholds and styles for NPR techniques.
+    """
+    width, height = camera.resolution
+    image = zeros((height, width, 3))
+
+    for y in range(height):
+        for x in range(width):
+            ray_origin, ray_direction = camera.get_ray(x, y)
+            accumulated_color = vec3(0, 0, 0)
+            accumulated_alpha = 0.0
+            
+            # Ray marching through the volume
+            t = 0.0
+            while t < ray_length and accumulated_alpha < 1.0:
+                point = ray_origin + t * ray_direction
+                sample_value = trilinear_interpolate(volume, point)
+                
+                # Compute local properties
+                gradient = compute_gradient(volume, point)
+                gradient_magnitude = length(gradient)
+                minimal_change_dir = normalize(gradient)
+                light_dir = normalize(light.get_direction(point))
+                view_dir = -ray_direction
+                
+                # Step 1: Classification (Physics-based base)
+                base_color, base_alpha = classify(sample_value, npr_params.classification)
+                
+                # Step 2: NPR Transformation
+                # Apply feature enhancement and depth cues
+                illustrative_color, illustrative_alpha = apply_npr_transformations(
+                    base_color, 
+                    base_alpha, 
+                    sample_value, 
+                    gradient_magnitude, 
+                    minimal_change_dir, 
+                    view_dir, 
+                    light_dir, 
+                    npr_params
+                )
+                
+                # Step 3: Compositing (Unchanged from standard volume rendering)
+                transmittance = 1.0 - accumulated_alpha
+                accumulated_color += illustrative_color * illustrative_alpha * transmittance
+                accumulated_alpha += illustrative_alpha * transmittance
+                
+                t += step_size
+
+            image[y, x] = accumulated_color
+
+    return image
+
+def apply_npr_transformations(base_color, base_alpha, value, grad_mag, grad_dir, view_dir, light_dir, params):
+    """
+    Applies Volume Illustration techniques to base color and alpha.
+    """
+    color = base_color
+    alpha = base_alpha
+    
+    # Example: Boundary Enhancement
+    # Enhance regions with high gradient magnitude
+    if grad_mag > params.boundary_threshold:
+        # Boost opacity or contrast at boundaries
+        alpha = min(1.0, alpha * params.boundary_boost)
+        # Optional: Sketch lines or edge highlighting
+        if params.style == "sketch":
+            color = mix(color, vec3(0, 0, 0), params.sketch_intensity)
+
+    # Example: Silhouettes
+    # Enhance edges where view direction is perpendicular to gradient
+    dot_product = abs(dot(grad_dir, view_dir))
+    if dot_product < params.silhouette_threshold:
+        alpha = min(1.0, alpha * params.silhouette_boost)
+
+    # Example: Distance Color Blending (Depth Cue)
+    # Blend color based on distance from camera
+    distance = length(camera.origin - point) # Note: 'point' must be passed or computed
+    depth_factor = map_distance_to_factor(distance, params.min_dist, params.max_dist)
+    color = mix(color, params.background_color, depth_factor)
+
+    # Example: Tone Shading
+    # Modify color based on lighting and orientation
+    diffuse = max(0.0, dot(grad_dir, light_dir))
+    color = color * (params.ambient + params.diffuse * diffuse)
+
+    return color, alpha
+```
+*[G] The pseudocode assumes standard ray-marching and trilinear interpolation. The `apply_npr_transformations` function is a composite of the techniques described in [S2, unofficial] and [S3]. Specific formulas for `boundary_boost` or `silhouette_threshold` are not provided in the sources and are dataset-dependent.*
+
+## Subtopics
+
+### [Interest-Based NPR Toolkit](1158-interest-based-npr-toolkit.md)
+A flexible framework within the Volume Illustration pipeline that generates 2D non-photorealistic illustrations by associating user-defined "interest labels" with subsets of rendering techniques. It allows variable detail levels per segment, where different labels trigger different artistic styles simultaneously. Unlike physics-based rendering, it prioritizes communicative abstraction and artistic vision over physical accuracy.
+
+## Operating characteristics
+*   **Time Complexity:** Same as the underlying physics-based volume renderer, typically $O(N)$ per pixel where $N$ is the number of samples per ray, plus the cost of NPR transformations per sample.
+*   **Memory Complexity:** $O(V)$ for the volume dataset, plus storage for intermediate ray properties (gradient, etc.).
+*   **Performance:** Tested on a $256 \times 256 \times 128$ abdominal CT dataset [S3]. Performance depends on the complexity of the NPR transformations applied per sample.
+*   **Strengths:** Enhances structural perception more clearly than traditional methods; requires less manual tuning of transfer functions than standard direct volume rendering; produces images suitable for textbooks and scientific articles [S2, unofficial][S3].
+*   **Limitations:** Local implementation requires significant parameter tuning dependent on the specific dataset's voxel intensity values [S2, unofficial]. Features are not as well-defined as in surface-based NPR, making automatic feature detection challenging [S3].
+*   **When to use:** When the goal is to create illustrative, textbook-quality images that emphasize internal structure and depth, and when manual tuning of transfer functions is undesirable.
+*   **When not to use:** When physical accuracy is required, or when real-time performance is critical and the overhead of per-sample NPR transformations is prohibitive.
+
+## Background
+Volume illustration was introduced by Rheingans and Ebert in 2000/2001 [S1, unofficial][S2, unofficial][S3]. It combines the familiarity of physics-approximated illumination (such as Kajiya’s cloud rendering [S2, unofficial]) with non-photorealistic rendering (NPR) techniques. The method was developed to address the limitations of surface-based NPR, which cannot easily handle the continuous, ill-defined features of volumetric data. Popular styles include stippling, hatching, and silhouettes, drawing from the pen-and-ink family of illustration [S1, unofficial]. Subsequent work included Csébfalvi et al.'s contour visualization [S1, unofficial] and Lu et al.'s interactive stipple drawing system [S1, unofficial].
+
+## Sources
+[S1] Advanced illumination and view-selection techniques for volume rendering and its application to medical imaging, http://hdl.handle.net/10803/371154, fetched 2026-10-27 (unofficial)
+[S2] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)
+[S3] PDF Volume illustration: nonphotorealistic rendering of volume models ..., https://www.csee.umbc.edu/~rheingan/pubs/volillus.tvcg01.pdf, fetched 2026-10-27

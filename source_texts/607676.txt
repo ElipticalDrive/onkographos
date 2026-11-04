@@ -1,0 +1,1076 @@
+Guile-based library implementing flexible control files for scientific simulations - Mesh geometry import by Luochenghuang · Pull Request #74 · NanoComp/libctl
+
+Mesh geometry import by Luochenghuang · Pull Request #74 · NanoComp/libctl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Luochenghuang
+commented
+Apr 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Summary
+Closes #67. Adds a new MESH geometric object type for importing arbitrary triangulated 3D surfaces (e.g., from STL files) into libctl's geometry system.
+Design
+The mesh follows the same tagged-union dispatch as SPHERE, CYLINDER, BLOCK, and PRISM. A flat-array BVH with SAH binning accelerates all queries to O(log N).
+All seven core operations are implemented:
+Operation
+Implementation
+point_in_mesh
+Ray casting with lazy 3-ray majority vote (Moller-Trumbore + BVH)
+normal_to_mesh
+BVH nearest-face search (Eberly closest-point-on-triangle)
+intersect_line_segment_with_mesh
+Sorted ray-mesh intersections with even-odd parity accumulation
+get_mesh_volume
+Divergence theorem (signed tetrahedron volumes)
+get_mesh_bounding_box
+Cached from BVH root node
+display_mesh_info
+Vertex/face counts and closure status
+init_mesh
+Validates, computes normals, checks closure, fixes winding, builds BVH
+Meep's subpixel smoothing works automatically. No meep C++ changes required.
+API
+```
+// Closed triangulated 3D mesh. The mesh must be watertight (every edge
+// shared by exactly 2 faces); open meshes are detected and produce a warning.
+geometric_object make_mesh(material_type material,
+                           const vector3 *vertices, int num_vertices,
+                           const int *triangles, int num_triangles);
+
+geometric_object make_mesh_with_center(material_type material, vector3 center,
+                                       const vector3 *vertices, int num_vertices,
+                                       const int *triangles, int num_triangles);
+```
+Robustness
+Lazy majority vote: casts 1 ray; only falls back to 3-ray vote when deduplication detects a shared-edge hit. Correct and fast for the common case.
+Mesh closure validation: edge-adjacency hash table detects boundary and non-manifold edges. point_in_mesh returns false for open meshes.
+reinit_mesh guard: skips redundant BVH rebuilds in geom_fix_object_ptr (mesh uses absolute coordinates, not lattice-relative).
+Test plan
+16 unit tests: point-in, volume, bbox, normals, line-segment intersection, copy/destroy, closure detection (open, boundary edge, non-manifold, isolated vertex)
+Cube mesh vs Block primitive: 10K random points, 0 mismatches
+Luochenghuang
+force-pushed
+the
+mesh-geometry-import
+branch
+from
+006ae18 to
+b14367f
+Compare
+April 7, 2026 23:07
+Luochenghuang
+mentioned this pull request
+Apr 7, 2026
+Mesh geometry import
+NanoComp/meep#3197
+Merged
+stevengj
+reviewed
+Apr 10, 2026
+View reviewed changes
+Comment thread
+utils/geom.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+stevengj
+reviewed
+Apr 10, 2026
+View reviewed changes
+Comment thread
+utils/geom.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+stevengj
+reviewed
+Apr 10, 2026
+View reviewed changes
+Comment thread
+utils/geom.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Luochenghuang
+added 9 commits
+April 18, 2026 23:45
+Add MESH geometric object type for arbitrary triangulated 3D surfaces
+…
+901fbbf
+```
+Implement a new MESH primitive alongside SPHERE, CYLINDER, BLOCK, and
+PRISM. A mesh is defined by a vertex array and triangle index array,
+with a BVH (bounding volume hierarchy) for O(log N) queries.
+
+Core operations implemented:
+- point_in_mesh: ray casting with parity counting and deduplication
+- normal_to_mesh: BVH-accelerated closest-face search
+- get_mesh_bounding_box: from BVH root node
+- get_mesh_volume: divergence theorem (signed tetrahedron volumes)
+- intersect_line_segment_with_mesh: for subpixel smoothing integration
+- init_mesh: validates geometry, computes normals, fixes winding, builds BVH
+
+BVH uses SAH (surface area heuristic) binned construction with flat
+array layout. Ray-triangle intersection uses Moller-Trumbore algorithm.
+Closest-point queries use Eberly's algorithm with BVH pruning.
+
+Also adds make_mesh/make_mesh_with_center constructors, mesh
+copy/equal/destroy in geom-ctl-io.c, and 11 unit tests covering
+point-in, volume, bbox, normals, line-segment intersection, and
+comparison against the Block primitive.
+```
+Fix point_in_mesh robustness and reinit_mesh performance
+…
+8e485b3
+```
+Two fixes:
+
+1. point_in_mesh: use 3-ray majority vote instead of a single ray.
+   A single ray can pass through a shared mesh edge, causing the
+   deduplication to either miss or double-count a crossing and flip
+   the inside/outside parity. Three rays in irrational directions
+   make it extremely unlikely that more than one hits a degenerate
+   case at the same query point.
+
+2. reinit_mesh: skip BVH rebuild if already initialized. Unlike
+   blocks/cylinders, mesh uses absolute coordinates and doesn't
+   depend on the lattice basis. geom_fix_object_ptr is called
+   hundreds of times during meep's init_sim via geometry copies;
+   without the guard, each call rebuilt the BVH (~150ms for 9K
+   triangles), causing ~40s of wasted time.
+```
+Lazy majority vote and mesh closure validation
+…
+bf127c3
+```
+- point_in_mesh: cast 1 ray first, only fall back to 3-ray majority
+  vote if deduplication removed near-duplicate t-values (indicating
+  an edge/vertex hit). 3x faster for the common case (no edge hits).
+
+- init_mesh: validate mesh closure by building an edge-to-face-count
+  hash table. Every edge must be shared by exactly 2 faces. Sets
+  is_closed=false and prints a warning for open/non-manifold meshes.
+  point_in_mesh returns false for all points on open meshes.
+
+- Add 2 new tests: open mesh detection, closed mesh detection (13
+  tests total, all passing).
+```
+Add closure validation edge case tests
+…
+4172d4d
+```
+Test boundary edges (1 face per edge), non-manifold edges (4 faces
+sharing an edge), and isolated vertices (vertex unreferenced by any
+face). 16 tests total, all passing.
+```
+Eliminate redundant BVH build and point_in_mesh fallback
+…
+f9e8d30
+```
+1. make_mesh_with_center: shift vertices before calling init_mesh
+   so the BVH is only built once (was building twice when center
+   was specified).
+
+2. intersect_line_segment_with_mesh: determine inside/outside at
+   the segment start from the full intersection list parity
+   (count crossings before parameter 'a') instead of calling
+   point_in_mesh as a fallback. Eliminates millions of extra ray
+   casts during subpixel smoothing. ~20% faster set_epsilon on
+   the Utah teapot (28.6s → 22.9s).
+```
+Minor cleanups: remove dead code, optimize BVH queries
+…
+ca738ad
+```
+- Remove unused bvh_node_box helper function
+- find_closest_face: push nearer BVH child last so it's popped first,
+  improving pruning and reducing nodes visited for normal queries
+- Extract mesh_triangle_vertices helper to avoid redundant vertex
+  fetches. Add mesh_triangle_bbox_centroid to compute both in one
+  pass during BVH binning (was fetching 3 vertices twice per face)
+```
+Add mesh API documentation to ctlgeom.h
+6b3b589
+Include generated ctlgeom-types.h and geom-ctl-io.c
+…
+643acf1
+```
+These files are normally auto-generated from geom.scm via gen-ctl-io
+(requires Guile). Including them allows building libctlgeom without
+Guile, which is the common case for meep's Python-only builds.
+```
+Address PR feedback: relative lengthscale tolerances and mesh input d…
+…
+a1001d3
+```
+…ocumentation
+```
+Luochenghuang
+force-pushed
+the
+mesh-geometry-import
+branch
+from
+b14367f to
+a1001d3
+Compare
+April 19, 2026 07:07
+Fix 3 bugs found in code review: per-component winding, dynamic ray-h…
+…
+ad9e00d
+```
+…it buffer, vertex mutation rebuild
+```
+Luochenghuang
+commented
+Apr 20, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Hi Prof. @stevengj,
+I wanted to get your preference on how to handle STL/mesh file loading on the Python side.
+Option A: Lightweight custom parser (zero dependencies)
+I've written an 85-line STL parser using only Python's struct module, no pip dependencies at all
+Supports both ASCII and binary STL, deduplicates vertices, returns arrays ready for make_mesh()
+Pros: No new dependencies, simple, easy to audit, ships with libctl
+Cons: Only handles STL
+Option B: Use an existing library (e.g. trimesh, meshio, or numpy-stl)
+trimesh: full mesh processing (40+ formats, boolean ops, repair, validation). Heavy dependency tree
+Pros: Broad format support, battle-tested, handles edge cases we might miss, trimesh can also validate/repair meshes before passing to libctl
+Cons: Adds a dependency to meep's install, potential version conflicts, overkill if users only need STL
+Which approach do you prefer? Also happy to hear if there are specific mesh formats beyond STL that meep users commonly work with.
+Thanks!
+stevengj
+commented
+Apr 24, 2026
+Copy link
+Copy Markdown
+Collaborator
+Let's just have the C api in libctl, and in meep a corresponding MeshObject constructor that takes a list of triangles. Then we can just document an example about how to use an existing library to load the list of triangles from a file and pass it to the MeshObject constructor. This way we don't need to add an explicit dependency to Meep itself — the user can call whatever library they want.
+stevengj
+reviewed
+Apr 24, 2026
+View reviewed changes
+Comment thread
+utils/geom.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Drop vertex_hash mutation detection in reinit_mesh
+…
+4e795b4
+```
+A non-NULL bvh is sufficient to skip rebuild: there is no documented
+way for callers to mutate mesh vertices post-construction, and none of
+our internal functions do so. Hash-based detection was also unsound on
+collisions. Removes the mesh_vertex_hash function, the vertex_hash
+field, and the now-irrelevant test_vertex_mutation case.
+```
+stevengj
+reviewed
+May 1, 2026
+View reviewed changes
+Comment thread
+utils/test-mesh.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+stevengj
+reviewed
+May 1, 2026
+View reviewed changes
+Comment thread
+utils/ctlgeom.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+stevengj
+reviewed
+May 1, 2026
+View reviewed changes
+Comment thread
+utils/geom.c
+slist[++j] = slist[i];
+}
+return j + 1;
+}
+stevengj
+May 1, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This code should ideally be merged with the slist code for prisms after #75, because it's very similar data structures and operations
+Fix double-counted interior length in mesh segment intersection
+…
+235c836
+```
+intersect_line_segment_with_mesh added (b - last_s) when a hit fell at
+or past b, then the post-loop cleanup added the same length again
+because inside/last_s were not updated in the break branch. Drop the
+in-branch addition and let the post-loop check handle the inside-at-b
+case.
+
+Add test_cube_segments_vs_block: 1000 random unit-direction line
+segments through a unit cube mesh vs make_block, comparing interior
+lengths within 1e-4. This test surfaced the bug; max diff after the
+fix is ~4e-16.
+
+Also note that remove_duplicate_intersections should be unified with
+the prism slist dedup after NanoComp#75.
+```
+stevengj
+approved these changes
+May 15, 2026
+View reviewed changes
+Luochenghuang
+and others
+added 2 commits
+May 26, 2026 10:52
+Merge branch 'NanoComp:master' into mesh-geometry-import
+ecd0f02
+Verify mesh thread-safety via parallel test loops
+…
+0ffdfc5
+```
+Mirror the test-prism.c thread-safety verification (PR NanoComp#75 / commit
+926527c): parallelize the two random-comparison loops in test-mesh.c
+that already use the pure _fixed_* query variants:
+
+  - test_cube_vs_block (10000 random points, point_in_fixed_pobjectp)
+  - test_cube_segments_vs_block (1000 random segments,
+    intersect_line_segment_with_object — for MESH this dispatches
+    directly to intersect_line_segment_with_mesh, which uses a
+    stack-local mesh_hit_list with per-call heap fallback)
+
+Both objects (mesh + block) are constructed on the main thread before
+the parallel region, so init_mesh / BVH build happens once,
+single-threaded. After that, every query path through point_in_mesh,
+normal_to_mesh, find_closest_face, mesh_ray_all_intersections,
+ray_triangle_intersect, ray_bvh_node_intersect, and BVH traversal is
+a pure read against the mesh struct — no shared mutable state, no
+module-level statics (the only static module data is the const
+mesh_ray_dirs table).
+
+rand() is replaced with rand_r() seeded per iteration so results are
+deterministic across thread counts; this lets the assertions (0
+mismatches, max_diff at machine precision) hold uniformly in serial
+and parallel runs.
+
+Verified with --enable-openmp at OMP_NUM_THREADS = 1, 2, 4, 8, 16, 64,
+166: identical results (0 mismatches, max_diff = 4.44e-16) at every
+thread count, no heap corruption. 20 repeated trials at 64 threads:
+all clean.
+```
+Luochenghuang
+requested a review
+from stevengj
+May 26, 2026 19:03
+stevengj
+reviewed
+May 29, 2026
+View reviewed changes
+Comment thread
+utils/ctlgeom.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Apply suggestion from @stevengj
+a159c4f
+stevengj
+merged commit 52555f6
+into
+NanoComp:master
+May 29, 2026
+Luochenghuang
+deleted the
+mesh-geometry-import
+branch
+May 29, 2026 20:41
+stevengj
+mentioned this pull request
+May 30, 2026
+compilation failre with new mesh feature
+#86
+Closed
+This was referenced May 30, 2026
+Treat ctlgeom-types.h and geom-ctl-io.c as checked-in, not BUILT_SOURCES
+#87
+Closed
+Refactor mesh pimpl
+#88
+Closed
+This was referenced May 31, 2026
+Build errors when compiling from source
+#89
+Closed
+Generated files are included in the git repository
+#90
+Closed
+Luochenghuang
+added a commit
+to Luochenghuang/libctl
+that referenced
+this pull request
+Jun 4, 2026
+Treat geom-ctl-io.c as checked-in, not BUILT_SOURCES
+…
+62857bd
+```
+The PIMPL refactor added two hand-tweaks to utils/geom-ctl-io.c that gen-ctl-io would not emit: extern declarations for mesh_init_internal and mesh_internal_free, plus calls to them inside the auto-generated mesh_copy and mesh_destroy bodies. These hooks complete the opaque mesh_internal lifecycle (eagerly rebuild the cache on mesh_copy so the copy has its own state; free the cache on mesh_destroy).
+
+But geom-ctl-io.c was still classified as a BUILT_SOURCE with an active regen rule. On any build that detects Guile (WITH_GUILE=true, true on the new GitHub Actions CI), the regen rule sed-rewrites geom-ctl-io.c from ctl-io.c and silently overwrites the hand-tweaks. Compilation still succeeds, but the runtime contract breaks: mesh_destroy stops freeing the internal cache (silent leak per mesh) and mesh_copy reverts to a shallow pointer copy (two meshes sharing one mesh_internal allocation, with a dangling-pointer footgun on first destroy). PR NanoComp#74 didn't expose this because legacy Guile detection in configure.ac fails on modern distros so WITH_GUILE was effectively false; the new CI is the first build where Guile is actually detected.
+
+This commit removes geom-ctl-io.c from BUILT_SOURCES, deletes its regen rule, adds it to EXTRA_DIST so it ships in tarballs, and drops it from clean-local so 'make clean' doesn't wipe it. ctlgeom-types.h stays as-is because the PIMPL refactor doesn't hand-edit it (the regenerated content matches the committed content byte-for-byte).
+
+Verified: 'make -n geom-ctl-io.c' reports 'Nothing to be done' (regen rule successfully gone). test-mesh and test-prism both pass cleanly at OMP_NUM_THREADS=1 and 8.
+```
+Luochenghuang
+added a commit
+to Luochenghuang/libctl
+that referenced
+this pull request
+Jun 4, 2026
+Refresh ctlgeom-types.h and geom-ctl-io.c against current geom.scm
+…
+50e5498
+```
+PR NanoComp#74 committed both ctlgeom-types.h and geom-ctl-io.c, but the versions it shipped were generated from a pre-PR-NanoComp#75 geom.scm that still had the prism workspace field. After NanoComp#75 removed workspace from geom.scm and from the C code in geom.c, the committed copies became stale. Without-Guile builds silently kept compiling because the two stale files were consistent with each other (prism_copy/destroy/equal operated on a workspace field that nothing else touched). With-Guile builds papered over it by regenerating ctlgeom-types.h to match the post-NanoComp#75 geom.scm, which silently differed from the committed copy.
+
+The previous commit (treat geom-ctl-io.c as checked-in) exposed the inconsistency by removing the regeneration safety net: with WITH_GUILE=true, ctlgeom-types.h gets regenerated fresh from geom.scm (no workspace, no number_list typedef), while the committed geom-ctl-io.c still tried to access prism->workspace, producing 'has no member named workspace' compile errors in prism_copy / prism_equal / prism_destroy.
+
+This commit aligns both committed files with current geom.scm:
+  - ctlgeom-types.h: replaced with the gen-ctl-io output. Drops the unused number_list typedef and the workspace field from prism struct. Same mesh struct as before (vertices, face_indices, is_closed, internal).
+  - geom-ctl-io.c: removed the stale workspace handling from prism_copy / prism_equal / prism_destroy. Kept the PIMPL hand-tweaks (extern mesh_init_internal / mesh_internal_free + their calls in mesh_copy / mesh_destroy) since the file is no longer auto-regenerated.
+
+Verified locally in both build modes:
+  - WITHOUT Guile (WITH_GUILE=false, no regen): make + make check + OMP=1/8 clean.
+  - WITH Guile (WITH_GUILE=true, ctlgeom-types.h regenerates and matches committed): make + make install + examples/ build (which exercises the cp utils/geom.c -> examples/geom.c MPB-style copy path) + make check + OMP=1/8 clean.
+```
+Luochenghuang
+added a commit
+to Luochenghuang/libctl
+that referenced
+this pull request
+Jun 5, 2026
+Stop tracking generated geom-ctl-io.c and ctlgeom-types.h
+…
+b102a35
+```
+Both files are mechanical output of gen-ctl-io / sed from geom.scm.
+PR NanoComp#74 began tracking them so WITHOUT_GUILE git-clone builds could
+compile, but that "courtesy" introduced the schema-vs-committed drift
+class of bugs (the same one 50e5498 had to fix and that motivated the
+refactor-mesh-pimpl workaround). With the (after-copy ...) /
+(after-destroy ...) DSL absorbing the hand-edits, the committed copies
+match the regenerated ones by construction — yet keeping them in git
+still requires every geom.scm edit to come with a manually regenerated
+commit, which is brittle and easy to forget.
+
+Restore the pre-NanoComp#74 contract: WITHOUT_GUILE is supported via tarball
+install only. Building WITHOUT_GUILE from a git clone now fails fast
+(no rule to make geom-ctl-io.c) instead of silently using a stale
+checked-in copy.
+
+Changes:
+- git rm utils/geom-ctl-io.c utils/ctlgeom-types.h
+- utils/Makefile.am: move both files from libctlgeom_la_SOURCES to
+  nodist_libctlgeom_la_SOURCES (they're built, not distributed-as-
+  source). Add them to EXTRA_DIST so `make dist` bundles the
+  regenerated copies into the tarball, restoring the tarball-install
+  WITHOUT_GUILE path. ctlgeom-types.h was already nodist_include_
+  HEADERS; that stays.
+
+Verified:
+- WITH_GUILE from clean git clone: make + make check clean. 3/3
+  PASS (test-prism, test-mesh, test-lifecycle-hooks.sh).
+- `make dist` on a Guile machine: tarball contains both regenerated
+  files at libctl-4.6.0/utils/.
+- Tarball → extract → configure --without-guile → make + make
+  check: 2/2 PASS (test-prism, test-mesh; lifecycle hooks skipped
+  per existing WITH_GUILE gate).
+- WITHOUT_GUILE from git clone: fails as expected with "No rule to
+  make target 'geom-ctl-io.c'".
+
+Net effect: zero hand-maintained generated files. Schema is the
+single source of truth. CI (which has Guile) is unaffected.
+```
+Luochenghuang
+mentioned this pull request
+Jun 5, 2026
+Add mesh primitive with PIMPL cache via gen-ctl-io lifecycle hooks
+#91
+Merged
+Luochenghuang
+added a commit
+to Luochenghuang/libctl
+that referenced
+this pull request
+Jun 5, 2026
+Stop tracking generated geom-ctl-io.c and ctlgeom-types.h
+…
+5288b47
+```
+Both files are mechanical output of gen-ctl-io / sed from geom.scm.
+PR NanoComp#74 began tracking them so WITHOUT_GUILE git-clone builds could
+compile, but that "courtesy" introduced the schema-vs-committed drift
+class of bugs (the same one 50e5498 had to fix and that motivated the
+refactor-mesh-pimpl workaround). With the (after-copy ...) /
+(after-destroy ...) DSL absorbing the hand-edits, the committed copies
+match the regenerated ones by construction — yet keeping them in git
+still requires every geom.scm edit to come with a manually regenerated
+commit, which is brittle and easy to forget.
+
+Restore the pre-NanoComp#74 contract: WITHOUT_GUILE is supported via tarball
+install only. Building WITHOUT_GUILE from a git clone now fails fast
+(no rule to make geom-ctl-io.c) instead of silently using a stale
+checked-in copy.
+
+Changes:
+- git rm utils/geom-ctl-io.c utils/ctlgeom-types.h
+- utils/Makefile.am: move both files from libctlgeom_la_SOURCES to
+  nodist_libctlgeom_la_SOURCES (they're built, not distributed-as-
+  source). Add them to EXTRA_DIST so `make dist` bundles the
+  regenerated copies into the tarball, restoring the tarball-install
+  WITHOUT_GUILE path. ctlgeom-types.h was already nodist_include_
+  HEADERS; that stays.
+
+Verified:
+- WITH_GUILE from clean git clone: make + make check clean. 3/3
+  PASS (test-prism, test-mesh, test-lifecycle-hooks.sh).
+- `make dist` on a Guile machine: tarball contains both regenerated
+  files at libctl-4.6.0/utils/.
+- Tarball → extract → configure --without-guile → make + make
+  check: 2/2 PASS (test-prism, test-mesh; lifecycle hooks skipped
+  per existing WITH_GUILE gate).
+- WITHOUT_GUILE from git clone: fails as expected with "No rule to
+  make target 'geom-ctl-io.c'".
+
+Net effect: zero hand-maintained generated files. Schema is the
+single source of truth. CI (which has Guile) is unaffected.
+```
+Luochenghuang
+added a commit
+to Luochenghuang/libctl
+that referenced
+this pull request
+Jun 5, 2026
+Stop tracking generated geom-ctl-io.c and ctlgeom-types.h
+…
+46ba2cf
+```
+Both files are mechanical output of gen-ctl-io / sed from geom.scm.
+PR NanoComp#74 began tracking them so WITHOUT_GUILE git-clone builds could
+compile, but that "courtesy" introduced the schema-vs-committed drift
+class of bugs (the same one 50e5498 had to fix and that motivated the
+refactor-mesh-pimpl workaround). With the (after-copy ...) /
+(after-destroy ...) DSL absorbing the hand-edits, the committed copies
+match the regenerated ones by construction — yet keeping them in git
+still requires every geom.scm edit to come with a manually regenerated
+commit, which is brittle and easy to forget.
+
+Restore the pre-NanoComp#74 contract: WITHOUT_GUILE is supported via tarball
+install only. Building WITHOUT_GUILE from a git clone now fails fast
+(no rule to make geom-ctl-io.c) instead of silently using a stale
+checked-in copy.
+
+Changes:
+- git rm utils/geom-ctl-io.c utils/ctlgeom-types.h
+- utils/Makefile.am: move both files from libctlgeom_la_SOURCES to
+  nodist_libctlgeom_la_SOURCES (they're built, not distributed-as-
+  source). Add them to EXTRA_DIST so `make dist` bundles the
+  regenerated copies into the tarball, restoring the tarball-install
+  WITHOUT_GUILE path. ctlgeom-types.h was already nodist_include_
+  HEADERS; that stays.
+
+Verified:
+- WITH_GUILE from clean git clone: make + make check clean. 3/3
+  PASS (test-prism, test-mesh, test-lifecycle-hooks.sh).
+- `make dist` on a Guile machine: tarball contains both regenerated
+  files at libctl-4.6.0/utils/.
+- Tarball → extract → configure --without-guile → make + make
+  check: 2/2 PASS (test-prism, test-mesh; lifecycle hooks skipped
+  per existing WITH_GUILE gate).
+- WITHOUT_GUILE from git clone: fails as expected with "No rule to
+  make target 'geom-ctl-io.c'".
+
+Net effect: zero hand-maintained generated files. Schema is the
+single source of truth. CI (which has Guile) is unaffected.
+```
+Luochenghuang
+added a commit
+to Luochenghuang/libctl
+that referenced
+this pull request
+Jun 5, 2026
+Refactor mesh storage with PIMPL: opaque internal cache behind scheme…
+…
+178517c
+```
+…-driven public struct
+
+PR NanoComp#74 (mesh geometry import) hand-extended utils/ctlgeom-types.h with C-only internal fields (mesh_bvh_node, face_normals, face_areas, bvh, bvh_face_ids, is_closed, centroid, lengthscale, num_bvh_nodes, and a flat int* face_indices) because none of those had natural Scheme representations in geom.scm. That worked when Guile wasn't detected at configure time, but any from-git build with Guile installed (including the new GitHub Actions CI) regenerated ctlgeom-types.h from geom.scm, clobbered the hand-extensions, and failed to compile with 'unknown type name mesh_bvh_node'.
+
+This commit applies the PIMPL (pointer-to-implementation) idiom to clean up that situation properly. The public mesh struct in ctlgeom-types.h now contains only Scheme-visible fields — vertices, face_indices (as a vector3_list, each vector3 packing one triangle's three int indices), and a void* internal pointer. All C-only state moves into mesh_internal in a new private header utils/mesh-internal.h, accessed via a static-inline mesh_priv(m) cast helper. ctlgeom-types.h goes back to being a regular auto-generated artifact derived from geom.scm; no Makefile.am workaround needed.
+
+Lifecycle:
+  - make_mesh / make_mesh_with_center: populate public fields, then call init_mesh which calloc()s mesh_internal, unpacks face_indices into a flat int[], computes face normals/areas, checks watertight closure, builds the BVH, and stores the pointer in m->internal.
+  - reinit_mesh: fast-path returns when m->internal != NULL; otherwise calls init_mesh. Same single-threaded-init contract as before.
+  - mesh_destroy (auto-generated): frees vertices.items + face_indices.items, then calls mesh_internal_free (defined in geom.c) to free the cache.
+  - mesh_copy (auto-generated): deep-copies the public fields, sets internal=NULL, then calls mesh_init_internal (defined in geom.c) to eagerly rebuild the BVH on the copy. Eliminates the previous shallow-pointer-share footgun where two mesh copies pointed at the same BVH allocation.
+
+geom.c gets ~105 mechanical m->X → mesh_priv(m)->X rewrites for the 10 internal fields (the cast inlines to nothing at runtime). test-mesh.c gets the same rewrite for 6 sites where tests poke directly at m->is_closed.
+
+Both auto-generated files (ctlgeom-types.h and geom-ctl-io.c) now match what gen-ctl-io would emit from the simplified geom.scm, with one hand-tweak in geom-ctl-io.c: mesh_destroy and mesh_copy call into the externally-defined mesh_internal_free / mesh_init_internal so they can manage the opaque cache. This is the minimum manual surface required for any PIMPL design.
+
+Verified: configure + make + make check all clean. test-prism passes (0/10000 point failures, 0/1000 segment failures, 0/65 prism helper failures). test-mesh passes 0 failures across all 19 cases including test_copy_destroy (which exercises mesh_copy + point queries on the copy + destroy of both original and copy).
+```
+Luochenghuang
+added a commit
+to Luochenghuang/libctl
+that referenced
+this pull request
+Jun 5, 2026
+Stop tracking generated geom-ctl-io.c and ctlgeom-types.h
+…
+d4bcf61
+```
+Both files are mechanical output of gen-ctl-io / sed from geom.scm.
+PR NanoComp#74 began tracking them so WITHOUT_GUILE git-clone builds could
+compile, but that "courtesy" introduced the schema-vs-committed drift
+class of bugs (the same one 50e5498 had to fix and that motivated the
+refactor-mesh-pimpl workaround). With the (after-copy ...) /
+(after-destroy ...) DSL absorbing the hand-edits, the committed copies
+match the regenerated ones by construction — yet keeping them in git
+still requires every geom.scm edit to come with a manually regenerated
+commit, which is brittle and easy to forget.
+
+Restore the pre-NanoComp#74 contract: WITHOUT_GUILE is supported via tarball
+install only. Building WITHOUT_GUILE from a git clone now fails fast
+(no rule to make geom-ctl-io.c) instead of silently using a stale
+checked-in copy.
+
+Changes:
+- git rm utils/geom-ctl-io.c utils/ctlgeom-types.h
+- utils/Makefile.am: move both files from libctlgeom_la_SOURCES to
+  nodist_libctlgeom_la_SOURCES (they're built, not distributed-as-
+  source). Add them to EXTRA_DIST so `make dist` bundles the
+  regenerated copies into the tarball, restoring the tarball-install
+  WITHOUT_GUILE path. ctlgeom-types.h was already nodist_include_
+  HEADERS; that stays.
+
+Verified:
+- WITH_GUILE from clean git clone: make + make check clean. 3/3
+  PASS (test-prism, test-mesh, test-lifecycle-hooks.sh).
+- `make dist` on a Guile machine: tarball contains both regenerated
+  files at libctl-4.6.0/utils/.
+- Tarball → extract → configure --without-guile → make + make
+  check: 2/2 PASS (test-prism, test-mesh; lifecycle hooks skipped
+  per existing WITH_GUILE gate).
+- WITHOUT_GUILE from git clone: fails as expected with "No rule to
+  make target 'geom-ctl-io.c'".
+
+Net effect: zero hand-maintained generated files. Schema is the
+single source of truth. CI (which has Guile) is unaffected.
+```
+stevengj
+pushed a commit
+that referenced
+this pull request
+Jun 5, 2026
+Add mesh primitive with PIMPL cache via gen-ctl-io lifecycle hooks (#91)
+…
+118b15c
+```
+* Refactor mesh storage with PIMPL: opaque internal cache behind scheme-driven public struct
+
+PR #74 (mesh geometry import) hand-extended utils/ctlgeom-types.h with C-only internal fields (mesh_bvh_node, face_normals, face_areas, bvh, bvh_face_ids, is_closed, centroid, lengthscale, num_bvh_nodes, and a flat int* face_indices) because none of those had natural Scheme representations in geom.scm. That worked when Guile wasn't detected at configure time, but any from-git build with Guile installed (including the new GitHub Actions CI) regenerated ctlgeom-types.h from geom.scm, clobbered the hand-extensions, and failed to compile with 'unknown type name mesh_bvh_node'.
+
+This commit applies the PIMPL (pointer-to-implementation) idiom to clean up that situation properly. The public mesh struct in ctlgeom-types.h now contains only Scheme-visible fields — vertices, face_indices (as a vector3_list, each vector3 packing one triangle's three int indices), and a void* internal pointer. All C-only state moves into mesh_internal in a new private header utils/mesh-internal.h, accessed via a static-inline mesh_priv(m) cast helper. ctlgeom-types.h goes back to being a regular auto-generated artifact derived from geom.scm; no Makefile.am workaround needed.
+
+Lifecycle:
+  - make_mesh / make_mesh_with_center: populate public fields, then call init_mesh which calloc()s mesh_internal, unpacks face_indices into a flat int[], computes face normals/areas, checks watertight closure, builds the BVH, and stores the pointer in m->internal.
+  - reinit_mesh: fast-path returns when m->internal != NULL; otherwise calls init_mesh. Same single-threaded-init contract as before.
+  - mesh_destroy (auto-generated): frees vertices.items + face_indices.items, then calls mesh_internal_free (defined in geom.c) to free the cache.
+  - mesh_copy (auto-generated): deep-copies the public fields, sets internal=NULL, then calls mesh_init_internal (defined in geom.c) to eagerly rebuild the BVH on the copy. Eliminates the previous shallow-pointer-share footgun where two mesh copies pointed at the same BVH allocation.
+
+geom.c gets ~105 mechanical m->X → mesh_priv(m)->X rewrites for the 10 internal fields (the cast inlines to nothing at runtime). test-mesh.c gets the same rewrite for 6 sites where tests poke directly at m->is_closed.
+
+Both auto-generated files (ctlgeom-types.h and geom-ctl-io.c) now match what gen-ctl-io would emit from the simplified geom.scm, with one hand-tweak in geom-ctl-io.c: mesh_destroy and mesh_copy call into the externally-defined mesh_internal_free / mesh_init_internal so they can manage the opaque cache. This is the minimum manual surface required for any PIMPL design.
+
+Verified: configure + make + make check all clean. test-prism passes (0/10000 point failures, 0/1000 segment failures, 0/65 prism helper failures). test-mesh passes 0 failures across all 19 cases including test_copy_destroy (which exercises mesh_copy + point queries on the copy + destroy of both original and copy).
+
+* Eliminate slist_unique VLA in intersect_line_with_prism
+
+The duplicate-removal step previously wrote deduped values into a stack VLA slist_unique[num_vertices+2] and then did 'slist = slist_unique;' before returning the new count. That assignment is a dead store: slist is a pass-by-value pointer parameter, so reassigning it only rebinds the local variable. The caller's buffer is never touched and slist_unique is destroyed when the function returns, so the caller reads the first num_unique_elements entries of the sorted-but-undeduped buffer instead of the actual deduped values.
+
+In intersect_line_segment_with_prism this corrupts the inside/outside parity walk: a near-duplicate that the dedup loop intended to drop stays in the buffer (producing a phantom thin 'inside' sliver of width ~1e-3*|s|), and a real far-end crossing is silently dropped because the caller stops at the smaller returned count. The bug triggers when two s-values fall within 1e-3*|s| of each other — edge-grazing rays, rays through a shared vertex, near-tangent rays. test-prism's random-ray distribution didn't statistically hit the window often enough at OMP=1 to flag it, but parallel runs (e.g. OMP=8) shuffle the libc rand() sequence and hit the window often enough that the strict 1e-6 segment-length check fails.
+
+The fix eliminates the VLA entirely. The dedup is done in place with a write head 'iv' and read head 'nv': because writes go to slist[iv++] with iv <= nv, position nv-1 is either untouched or was previously written with its own value as a no-op, so reading slist[nv-1] still yields the original sorted value and the comparison semantics are bit-identical to the original intent. Net effect: removes the dead store, removes a potentially huge stack allocation, and the dedup now actually applies to the caller's buffer.
+
+Verified with --enable-openmp: test-prism passes at both OMP_NUM_THREADS=1 (0/10000 points failed, 0/1000 segments failed, 0/65 prism helper failures) and OMP_NUM_THREADS=8 across multiple trials. test-mesh remains clean at OMP=8 as well.
+
+* Inline mesh-internal.h into geom.c so MPB-style cp builds still work
+
+The previous PIMPL commit placed the private mesh_bvh_node / mesh_internal definitions and the mesh_priv() accessor in a separate header utils/mesh-internal.h, included by geom.c. That breaks MPB, meep, and the libctl examples/ directory itself: all of those build by 'cp -f utils/geom.c their_tree/geom.c' and compile the copy in their own build context, without the companion header.
+
+Until those downstreams are taught to link against libctlgeom directly (instead of copying geom.c), geom.c must remain self-contained. This commit inlines the private definitions directly at the top of geom.c (right after the existing includes) and removes the #include 'mesh-internal.h' line. The mesh-internal.h file is deleted.
+
+To preserve test-mesh's ability to verify the closure check without exposing mesh_priv outside geom.c, the is_closed field is promoted to the public mesh struct via geom.scm. It is conceptually a derived public property anyway (users may want to query 'did init_mesh detect this mesh as watertight?'), and the auto-generated mesh_copy / mesh_equal handle it as a plain boolean value with no special code. ctlgeom-types.h and geom-ctl-io.c are updated to match. test-mesh.c drops the #include 'mesh-internal.h' line and reverts mesh_priv(m)->is_closed back to m->is_closed.
+
+Build clean. test-prism and test-mesh both pass at OMP_NUM_THREADS=1 and 8: test-mesh 0 failures (including 0 mismatches in test_cube_vs_block and test_cube_segments_vs_block); test-prism 0/10000 point failures, 0/1000 segment failures, 0/65 prism helper failures.
+
+* gen-ctl-io: add (after-copy ...) / (after-destroy ...) class options
+
+Extend define-class so a class can declare two optional class-level
+hooks, each naming a C function that gen-ctl-io invokes from the
+generated copy/destroy bodies:
+
+    (define-class mesh geometric-object
+      (define-property vertices ...)
+      ...
+      (define-property internal '() 'SCM)
+      (after-copy    mesh_after_copy)
+      (after-destroy mesh_after_destroy))
+
+The hooks have signature void fn(<type> *o). after-copy is appended
+to the end of <type>_copy after the standard field copies, so it sees
+a fully-populated destination object. after-destroy is appended to
+the end of <type>_destroy and is called by value-then-address
+(fn(&o);), so it can still read opaque SCM/void* fields that
+gen-ctl-io's destroy is a no-op for (e.g. an opaque cache pointer).
+
+This is the upstream fix for the problem refactor-mesh-pimpl worked
+around by committing a hand-edited geom-ctl-io.c with extern decls
+and call sites manually spliced into mesh_copy / mesh_destroy. With
+this DSL, the lifecycle contract lives in geom.scm and the generated
+file stays regenerable on every build.
+
+Changes:
+- base/class.scm: make-class takes properties as a list arg and
+  carries an opt alist; new accessors class-after-copy /
+  class-after-destroy. define-class macro recognises trailing
+  (after-copy <fn>) / (after-destroy <fn>) forms in the body and
+  threads them through to make-class. Existing specs unaffected.
+- utils/ctl-io.scm: class-copy-function / class-destroy-function emit
+  the hook calls at the body tail. output-class-copy-functions-header
+  / output-class-destruction-functions-header emit corresponding
+  extern void <fn>(<type> *); prototypes.
+- utils/lifecycle-hooks-spec.scm + utils/test-lifecycle-hooks.sh:
+  fixture spec exercising both hooks, plus a shell test that runs
+  gen-ctl-io against it and greps for the expected externs and call
+  sites. Wired into TESTS under WITH_GUILE in utils/Makefile.am.
+
+Verified:
+- WITHOUT_GUILE: make + make check clean (test-prism, test-mesh).
+- Backwards compat: regenerating utils/geom.scm produces zero hook
+  artifacts (no class declares them yet).
+- Test passes: gen-ctl-io emits the expected externs and calls.
+- WITH_GUILE full build blocked by an unrelated pre-existing master
+  bug (geom.c references mesh_bvh_node / m->bvh / m->centroid that
+  master never declared); standalone gen-ctl-io invocation against
+  the fixture spec works correctly.
+
+* mesh: migrate PIMPL lifecycle hooks to DSL
+
+Replace the hand-edited geom-ctl-io.c workaround on the mesh class with
+the (after-copy ...) / (after-destroy ...) DSL keywords added in the
+previous commit. The lifecycle contract now lives in geom.scm; the
+generated file is regenerable on every build.
+
+geom.scm: declare the mesh class's lifecycle hooks alongside the
+internal property.
+
+geom.c: add two adapter functions (mesh_after_copy, mesh_after_destroy)
+that gen-ctl-io invokes from the auto-generated copy / destroy.
+mesh_after_copy nulls the shallow-copied internal pointer and calls
+mesh_init_internal to build a fresh BVH for the copy. mesh_after_destroy
+calls mesh_internal_free on the opaque pointer. The original
+mesh_init_internal / mesh_internal_free are now static since they are
+only called from within geom.c.
+
+Makefile.am: undo the workaround. geom-ctl-io.c goes back to
+BUILT_SOURCES with its original sed-from-ctl-io.c regen rule (under
+WITH_GUILE), back into clean-local, and out of EXTRA_DIST. The long
+"hand-maintained" comment block is deleted. The committed
+geom-ctl-io.c stays committed (mirrors the existing ctlgeom-types.h
+arrangement) so WITHOUT_GUILE git-clone builds can compile; WITH_GUILE
+builds regenerate over it and the content matches.
+
+geom-ctl-io.c (regenerated, committed): mesh_copy now does the
+standard shallow copy of internal followed by mesh_after_copy(o);
+mesh_destroy does the standard frees followed by mesh_after_destroy(&o).
+Hand-edited extern declarations and inline init/free calls removed.
+
+ctlgeom-types.h (regenerated, committed): two extra extern void
+mesh_after_*(mesh *); declarations.
+
+Verified:
+- WITH_GUILE: make + make check clean. test-prism, test-mesh,
+  test-lifecycle-hooks.sh all PASS.
+- The regenerated geom-ctl-io.c differs from the committed copy only
+  in whitespace (no indent(1) on this host); the semantic diff is
+  exactly the expected hook-call substitution. Pre-existing concern,
+  not introduced here.
+
+* Stop tracking generated geom-ctl-io.c and ctlgeom-types.h
+
+Both files are mechanical output of gen-ctl-io / sed from geom.scm.
+PR #74 began tracking them so WITHOUT_GUILE git-clone builds could
+compile, but that "courtesy" introduced the schema-vs-committed drift
+class of bugs (the same one 50e5498 had to fix and that motivated the
+refactor-mesh-pimpl workaround). With the (after-copy ...) /
+(after-destroy ...) DSL absorbing the hand-edits, the committed copies
+match the regenerated ones by construction — yet keeping them in git
+still requires every geom.scm edit to come with a manually regenerated
+commit, which is brittle and easy to forget.
+
+Restore the pre-#74 contract: WITHOUT_GUILE is supported via tarball
+install only. Building WITHOUT_GUILE from a git clone now fails fast
+(no rule to make geom-ctl-io.c) instead of silently using a stale
+checked-in copy.
+
+Changes:
+- git rm utils/geom-ctl-io.c utils/ctlgeom-types.h
+- utils/Makefile.am: move both files from libctlgeom_la_SOURCES to
+  nodist_libctlgeom_la_SOURCES (they're built, not distributed-as-
+  source). Add them to EXTRA_DIST so `make dist` bundles the
+  regenerated copies into the tarball, restoring the tarball-install
+  WITHOUT_GUILE path. ctlgeom-types.h was already nodist_include_
+  HEADERS; that stays.
+
+Verified:
+- WITH_GUILE from clean git clone: make + make check clean. 3/3
+  PASS (test-prism, test-mesh, test-lifecycle-hooks.sh).
+- `make dist` on a Guile machine: tarball contains both regenerated
+  files at libctl-4.6.0/utils/.
+- Tarball → extract → configure --without-guile → make + make
+  check: 2/2 PASS (test-prism, test-mesh; lifecycle hooks skipped
+  per existing WITH_GUILE gate).
+- WITHOUT_GUILE from git clone: fails as expected with "No rule to
+  make target 'geom-ctl-io.c'".
+
+Net effect: zero hand-maintained generated files. Schema is the
+single source of truth. CI (which has Guile) is unaffected.
+```
+Luochenghuang
+added a commit
+to Luochenghuang/meep
+that referenced
+this pull request
+Jun 18, 2026
+Export Mesh through SWIG codegen import list
+…
+6306b69
+```
+Add Mesh to the 'from .geom import (...)' block in meep.i so it is
+exported into the meep namespace via the normal codegen path, removing
+the need for the manual __init__.py edit noted in the original commit.
+
+Now that the libctl MESH support is upstream (NanoComp/libctl#74), the
+binding works against the released libctl with no further changes.
+```
+stevengj
+pushed a commit
+to NanoComp/meep
+that referenced
+this pull request
+Jul 5, 2026
+Mesh geometry import (#3197)
+…
+ede0b32
+```
+* Add Mesh geometry type: Python class, STL/OBJ parsers, C++ binding
+
+- Mesh class in geom.py: vertices + triangles, optional center,
+  from_stl() and from_obj() classmethods with built-in parsers
+  (binary/ASCII STL with vertex welding, OBJ with quad triangulation)
+- pymesh_to_mesh in typemap_utils.cpp: extracts vertices and triangles
+  from Python, calls make_mesh_with_center from libctl
+- Mesh exported from meep.__init__ (requires manual addition to
+  generated __init__.py until codegen is updated)
+
+Requires libctl with MESH support (Luochenghuang/libctl#mesh-geometry-import).
+
+* Add mesh geometry integration test
+
+Two tests (~1s total):
+1. Geometric convergence: mesh icosphere L2 error vs native Sphere
+   decreases with subdivision (20 faces -> 5120 faces -> exact match)
+2. Subpixel smoothing: eps_averaging=True produces intermediate
+   epsilon values at mesh-air interfaces, confirming Kottke averaging
+   works for mesh objects
+
+* Export Mesh through SWIG codegen import list
+
+Add Mesh to the 'from .geom import (...)' block in meep.i so it is
+exported into the meep namespace via the normal codegen path, removing
+the need for the manual __init__.py edit noted in the original commit.
+
+Now that the libctl MESH support is upstream (NanoComp/libctl#74), the
+binding works against the released libctl with no further changes.
+
+* CI: rebuild cached libctl when its revision changes
+
+libctl's default branch now carries the mesh geometric object (and the
+C++ fixes) the Mesh binding needs, so the plain checkout + build is fine.
+The actual failure was the dependency cache: ~/local was keyed only on
+the workflow-file hash, so CI kept restoring a pre-mesh libctl and never
+rebuilt it.
+
+Add libctl's checked-out commit to the deps-cache key so a new libctl
+revision rebuilds the cached deps instead of restoring a stale build.
+The libctl checkout and autogen build steps are otherwise unchanged.
+
+* STL import: weld only bit-identical vertices (zero tolerance)
+
+Replace the spatial-hash quantization weld (tol=1e-8) with exact-equality
+welding keyed on the raw float tuple. This recovers shared-vertex
+connectivity for exporters that write bit-identical shared vertices (e.g.
+Blender) while never merging vertices that are only approximately equal.
+
+* guard mesh geometry behind HAVE_MAKE_MESH_WITH_CENTER so meep still builds against libctl < 4.7.0 (raises NotImplementedError when mesh support is absent)
+
+* Mesh import: delegate file parsing to trimesh via Mesh.from_file
+
+Replace the hand-rolled STL/OBJ parsers (from_stl/from_obj and
+_parse_stl/_parse_obj) with a single Mesh.from_file() that delegates to
+trimesh, per review feedback (avoid maintaining in-house parsers). This
+supports STL/OBJ/PLY/GLB/VRML/etc. for free, flattens multi-part scenes
+into one mesh (noting the merge), warns on non-watertight/inconsistently
+wound meshes, and rejects non-mesh files.
+
+trimesh is an optional runtime dependency (lazy import with a helpful
+error); added to python/requirements.txt so CI exercises the test.
+
+Update test_mesh.py accordingly (test_from_file, skips without trimesh).
+
+* Lint
+
+* docs: document Mesh in the Python API reference with a teapot example
+
+Add a Mesh entry to Python_User_Interface.md.in and regenerate the API
+reference. The class docstring now documents the Mesh.from_file class
+method (signature, trimesh requirement, scene-merge/watertight behavior)
+and includes a worked example importing the Utah teapot into a Simulation.
+
+(from_file is a classmethod, which the docstring generator does not emit
+as a separate method entry, so it is documented in the class docstring.)
+```
+MaansAndersson
+pushed a commit
+to MaansAndersson/meep-waveholtz
+that referenced
+this pull request
+Oct 8, 2026
+Mesh geometry import (NanoComp#3197)
+…
+de30a7e
+```
+* Add Mesh geometry type: Python class, STL/OBJ parsers, C++ binding
+
+- Mesh class in geom.py: vertices + triangles, optional center,
+  from_stl() and from_obj() classmethods with built-in parsers
+  (binary/ASCII STL with vertex welding, OBJ with quad triangulation)
+- pymesh_to_mesh in typemap_utils.cpp: extracts vertices and triangles
+  from Python, calls make_mesh_with_center from libctl
+- Mesh exported from meep.__init__ (requires manual addition to
+  generated __init__.py until codegen is updated)
+
+Requires libctl with MESH support (Luochenghuang/libctl#mesh-geometry-import).
+
+* Add mesh geometry integration test
+
+Two tests (~1s total):
+1. Geometric convergence: mesh icosphere L2 error vs native Sphere
+   decreases with subdivision (20 faces -> 5120 faces -> exact match)
+2. Subpixel smoothing: eps_averaging=True produces intermediate
+   epsilon values at mesh-air interfaces, confirming Kottke averaging
+   works for mesh objects
+
+* Export Mesh through SWIG codegen import list
+
+Add Mesh to the 'from .geom import (...)' block in meep.i so it is
+exported into the meep namespace via the normal codegen path, removing
+the need for the manual __init__.py edit noted in the original commit.
+
+Now that the libctl MESH support is upstream (NanoComp/libctl#74), the
+binding works against the released libctl with no further changes.
+
+* CI: rebuild cached libctl when its revision changes
+
+libctl's default branch now carries the mesh geometric object (and the
+C++ fixes) the Mesh binding needs, so the plain checkout + build is fine.
+The actual failure was the dependency cache: ~/local was keyed only on
+the workflow-file hash, so CI kept restoring a pre-mesh libctl and never
+rebuilt it.
+
+Add libctl's checked-out commit to the deps-cache key so a new libctl
+revision rebuilds the cached deps instead of restoring a stale build.
+The libctl checkout and autogen build steps are otherwise unchanged.
+
+* STL import: weld only bit-identical vertices (zero tolerance)
+
+Replace the spatial-hash quantization weld (tol=1e-8) with exact-equality
+welding keyed on the raw float tuple. This recovers shared-vertex
+connectivity for exporters that write bit-identical shared vertices (e.g.
+Blender) while never merging vertices that are only approximately equal.
+
+* guard mesh geometry behind HAVE_MAKE_MESH_WITH_CENTER so meep still builds against libctl < 4.7.0 (raises NotImplementedError when mesh support is absent)
+
+* Mesh import: delegate file parsing to trimesh via Mesh.from_file
+
+Replace the hand-rolled STL/OBJ parsers (from_stl/from_obj and
+_parse_stl/_parse_obj) with a single Mesh.from_file() that delegates to
+trimesh, per review feedback (avoid maintaining in-house parsers). This
+supports STL/OBJ/PLY/GLB/VRML/etc. for free, flattens multi-part scenes
+into one mesh (noting the merge), warns on non-watertight/inconsistently
+wound meshes, and rejects non-mesh files.
+
+trimesh is an optional runtime dependency (lazy import with a helpful
+error); added to python/requirements.txt so CI exercises the test.
+
+Update test_mesh.py accordingly (test_from_file, skips without trimesh).
+
+* Lint
+
+* docs: document Mesh in the Python API reference with a teapot example
+
+Add a Mesh entry to Python_User_Interface.md.in and regenerate the API
+reference. The class docstring now documents the Mesh.from_file class
+method (signature, trimesh requirement, scene-merge/watertight behavior)
+and includes a worked example importing the Utah teapot into a Simulation.
+
+(from_file is a classmethod, which the docstring generator does not emit
+as a separate method entry, so it is documented in the class docstring.)
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,467 @@
+Hybrid bundle-adjusting 3D Gaussians for view consistent
+rendering with pose optimization
+Yanan Guoa , Ying Xiea , Ying Changb , Benkui Zhangb,* , Bo Jiaa , and Lin Caoa
+a
+arXiv:2410.13280v1 [cs.CV] 17 Oct 2024
+Key Laboratory of Information and Communication Systems, Ministry of Information
+Industry, Beijing Information Science and Technology University, Beijing, China
+b
+Key Laboratory of Target Cognition and Application Technology, Aerospace Information
+Research Institute, Beijing, China
+ABSTRACT
+Novel view synthesis has made significant progress in the field of 3D computer vision. However, the rendering
+of view-consistent novel views from imperfect camera poses remains challenging. In this paper, we introduce
+a hybrid bundle-adjusting 3D Gaussians model that enables view-consistent rendering with pose optimization.
+This model jointly extract image-based and neural 3D representations to simultaneously generate view-consistent
+images and camera poses within forward-facing scenes. The effective of our model is demonstrated through
+extensive experiments conducted on both real and synthetic datasets. These experiments clearly illustrate that
+our model can effectively optimize neural scene representations while simultaneously resolving significant camera
+pose misalignments. The source code is available at https://github.com/Bistu3DV/hybridBA.
+Keywords: novel view synthesis, view consistent rendering, hybrid bundle-adjusting 3D Gaussians, camera
+poses register
+1. INTRODUCTION
+Novel view synthesis refers to the task of rendering a target image corresponding to a target pose, given a source
+image and source pose, as well as the target pose. Novel view synthesis is a long-standing challenge in the
+domain of 3D computer vision with applications in deep learning data augmentation, automatic driving, and
+robot navigation.
+Recent methods have demonstrated powerful rendering effects on novel view synthesis. NeRF1 and NeRF–2
+optimise a continuous 5D neural radiation field representation of the scene from a set of input images using
+volume rendering in order to render the scene from any angle. 3D Gaussian Splatting (3DGS)3 and Scaffold-GS4
+are initialised with point cloud derived from the Structure from Motion (SfM),5 optimising a set of 3D Gaussian
+distributions to represent the scene. However, these methods exhibit a high sensitivity to camera pose noise
+during training, and even small pose deviations can have a significant impact on the final rendered view.
+To improve the quality of novel view synthesis, current research trends can be broadly categorized into
+two main methods. Techniques such as BARF6 and SPARF7 have shown significant success in overcoming
+challenges related to imperfect camera pose inputs. However, these methods are computationally intensive,
+require substantial memory, and suffer from slow rendering speeds during the optimization of individual scenes.
+The other method, exemplified by Gaussian-barf,8 concentrates on optimizing 3DGS. This method offers a
+differentiable and straightforward method for estimating camera and geometric parameters. It utilizes preexisting optical flow and point track correspondences to monitor and direct the optimization process, which
+is then refined with a scene-dependent gradient descent algorithm. The end result is the synthesis of highly
+realistic and novel views. However, this method suffers from the challenge of baking perspective-related effects
+into a single Gaussian parameter that lacks interpolation capabilities. Consequently, the effectiveness of these
+methods is compromised under significant viewpoint variations and changes in lighting conditions. Our method
+introduces image features into Gaussian framework to achieve view consistent rendering under pose inaccuracy
+conditions, while jointly optimising the pose and model parameters to correct the camera pose.
+*Address all correspondence to Benkui Zhang zhangbk0566@126.com
+In this paper, we introduce a hybrid bundle-adjusting 3D Gaussians model that enables view-consistent
+rendering with pose optimization to solve these challenges. Firstly, to render view consistent novel images, our
+model initiates the rendering process by transforming the scene’s point cloud into a voxelized format, thereby
+extracting neural 3D anchor features. As each anchor feature is projected onto a specific view, we further enhance
+the rendering process by extracting image features from nearby views. The features surrounding the projected
+anchor point location are instrumental in constructing the image-based features for view consistent rendering.
+Subsequently, we employ a coarse-to-fine bundle adjustment technique to parameterize camera pose, which allows
+us to jointly reconstruct the 3D scene and register the camera poses. To ensure alignment of camera poses for
+test views prior to rendering, we preserve our model’s trained state on the training views, keeping it frozen while
+we register the camera poses for the test views. This optimization is achieved by minimizing the discrepancies
+between the synthesized images and the actual test views. Finally, based on the registered camera pose, we
+refine the alignment between the image-based representation and the neural 3D representation to improve the
+overall quality of the rendered images. The effective of our model is demonstrated through extensive experiments
+conducted on both real and synthetic datasets. These experiments clearly illustrate that our model can effectively
+optimize neural scene representations while simultaneously resolving significant camera pose misalignments.
+While our model is built upon the state-of-the-art 3D and image-based neural rendering models, our contribution is mainly in imperfect camera pose calibration, which produces images and camera poses with a consistent
+view in the scene. Our main contributions are as follows: 1) In the case of imperfect camera pose, we introduce
+the features of nearby images and propose a method of fusing point cloud with image features; 2) We employ a
+coarse-to-fine bundle adjustment technique to parameterize camera pose, keep the trained model and frozen the
+camera pose in the test view.
+2. RELATED WORK
+2.1 Image-Based Rendering
+The task of novel view synthesis is to render images from perspectives that differ from the original input view.
+This process is often achieved through image-based rendering9, 10 techniques. Traditional methods11–13 generally
+involve selecting a number of similar images, altering them to align with the target viewpoint, and then combining
+them to produce the final image. PixelNeRF14 can be trained across various scenes to understand scene-specific
+priors, enabling it to synthesize novel views from a limited set of input views in a feed-forward fashion. LIRF15
+gathers information from conical view cones to form rays and renders high-quality novel views at continuous-value
+scales using volume rendering. However, these methods have challenges in view-consistent novel view synthesis,
+especially if the input camera position is not accurate.
+2.2 Joint Camera Pose Optimization
+Recently, the NeRF–2 has introduced an enhanced NeRF1 that facilitates the learning and refinement of camera
+parameters. This innovation streamlines the training of NeRF for forward scenes by obviating the need for known
+or precomputed camera parameters, such as intrinsic settings and 6DoF poses. SC-NeRF16 leverages information
+from input views to derive density and color data within a continuous space, thereby illustrating the potential
+for enhancing both camera intrinsic and extrinsic. GARF17 employs an encoder-decoder architecture combined
+with a point-level, learnable multi-view feature fusion module to extract common attributes for novel view
+synthesis, effectively mitigating issues related to occlusion. Nope-NeRF18 incorporates an external monocular
+depth prediction model to refine camera positioning. The underlying concept of PoRF19 is to utilize a single
+MLP to optimize the camera pose across all images within the dataset. However, each of these methods suffers
+from the shortcomings of optimising only the positions or model parameters.
+3. METHOD
+3.1 Overview
+Given n nearby visible light images {I1 , I2 , ..., In } as input to our model, our task is to perform a novel view
+synthesis of the scene and jointly optimise the camera poses and parameters. As shown in Fig. 1, our model
+contains three main parts which are neural feature extraction, neural feature matching and joint optimisation of
+Fig. 1. Overview of the method. We first input a set of nearby views to extract pixel-level features for each image as
+well as key anchor point features in the scene. Next, we accurately match these image features with the 3D anchor points
+generated through the point cloud, which in turn enables the fusion of the image features with the anchor point features.
+In order to improve the accuracy, we correct the camera’s position through joint optimisation, which ensures the accuracy
+of the camera parameters. Finally, we render the corrected data using 3DGS to synthesise novel views with high quality.
+the position. The neural feature extraction module is divided into two parts. On the one hand, we use MLP to
+extract image-based features gij pixel by pixel for the input images. On the other hand, we use SfM5 on the input
+images to generate sparse point cloud and divide the voxel grid V to extract anchor points v. On the neural
+feature matching module, we perform pixel-by-pixel matching of 3D anchor features with 2D image features
+to obtain 3D anchor points with hybrid image features hi . On the joint optimisation of the position module,
+we introduce a self-correction mechanism to jointly optimise for noisy anchor points and inaccurate camera bit
+positions, and render novel views via 3DGS.3
+3.2 Neural Feature Extraction
+Our model renders novel views by converting scene point cloud to voxels and extracting 3D anchor point features
+to ensure view consistency. At the same time, it uses the image features of nearby views to enhance rendering
+and achieve view consistency. As shown in the Fig. 1, we assign neural 3D features and image-based features for
+each 3D Gaussian.
+3.2.1 Image-based Features
+We employ a lightweight MLP to extract multi-scale image features {I1j , I2j , ..., Inj }. These features are critical
+for subsequent processing steps because they provide detailed information about the image, allowing us to make
+the most of that information during the rendering process.
+As shown in Eq.1, we take into account not only color cji , but also the deviations of view directions ∆dji .
+The deviations of view directions refers to the difference in the perception of distance between the observer and
+the viewer when viewing the image due to the difference in viewing angle. By adding the deviations of view
+directions ∆dji to image-based features {I1j , I2j , ..., Inj }, we are able to make the rendered results more humanfriendly, increasing the realism of the rendered effect.
+cji = Fc (Iij ), ∆dji = Fd (Iij )
+(1)
+where F is a function that extracts features from the images. Therefore, the image-based features are denoted
+by gij = {gi1 , gi2 , ..., gim }, which is formed by integrating color cji and the deviations of view directions ∆dji as
+follows:
+gij = G(cji , ∆dji )
+where the function G incorporates both cji and ∆dji into the image-based features gij .
+(2)
+3.2.2 Anchor Point Features
+Our method uses the point cloud P ∈ R generated by SfM5 as input. On this basis, we further divide this point
+cloud scene into sparse voxel mesh V for more efficient processing and analysis of the point cloud. V is defined
+as follows:
+ 
+P
+·ε
+(3)
+V =
+ε
+where ε is the voxel scale.
+After dividing the 3D space into a series of square voxel meshes V , we designate the position of the centre of
+each voxel as the anchor point of that voxel and denote it by the variable v ∈ V . The anchor points will be used
+for the extraction and generalisation of the surrounding point cloud. Specifically, these anchor points v will be
+used as basic units for subsequent operations to extract and generalise feature information from the surrounding
+point cloud.
+3.3 Neural Feature Matching
+In this section, we will expound upon the processing for precisely aligning anchor points with image features.
+Specifically, our method involves projecting the 2D image features into the 3D world coordinate system. By calculating the minimal distance between each anchor point and the respective pixels, we ascertain the corresponding
+pixel position for each anchor point, thereby facilitating an efficient matching of neural features.
+Since images are defined in 2D space and these images
+have corresponding camera extrinsic, we can use
+
+the inverse matrix of these camera extrinsic Rc C 3×4 to transform the camera coordinates Pcc , which are
+originally in 2D space, to 3D space. In this way, we can obtain the specific position of the camera corresponding
+to each image in the world coordinate system in 3D space, denoted as Pcw as follows:
+Pcw =
+
+Rc
+ 
+ Pcc
+C
+1
+(4)
+
+
+where Rc C 3×4 is the inverse matrix of the camera extrinsic, also known as the camera-to-world (c2w) matrix,
+used to transform coordinates from the camera coordinate system to the world coordinate system. Rc is the
+rotation matrix and C is the translation vector.
+Given the coordinates Paw of the anchor point in the world coordinate system and the camera position Pcw ,
+the relative distance δac between them is calculated as shown in Eq.5. We are able to calculate the minimum
+′
+from each anchor point to the image, from which it is possible to determine which specific image
+distance δac
+corresponds to each anchor point.
+′
+δac = ∥Paw − Pcw ∥2 , δac
+= min(δac )
+(5)
+Similar to the method described above, we map the image pixel by pixel into 3D space using the c2w matrix
+such that each pixel point in the image corresponds to a specific coordinate in the world coordinate system,
+denoted as Ppw as shown in Eq.6. Next, we calculate the distance between each anchor point and its corresponding
+′
+′
+pixel points in the image and select the minimum distance δap
+from it, and the pixel point corresponding to δap
+is the matching pixel of the anchor point.
+′
+δap = ∥Paw − Ppw ∥2 , δap
+= min(δap )
+(6)
+By means of this process, we achieve accurate match of neural features to obtain hybrid neural features hi . The
+matching process involves the precise pairing of anchor points with pixel, thereby not only ensuring the accuracy
+of the positional calibration but also enhancing the information content of the point cloud by incorporating
+image features into the anchor points to compensate for the absence of inherent point cloud features.
+3.4 Optimization and Loss
+3.4.1 Neural Gaussian Derivation
+We parameterise the neural Gaussian as position µ ∈ R, opacity α ∈ R, covariance-dependent quaternion q ∈ R,
+scale s ∈ R, and color c ∈ R. A series of linear transformations and activation functions are used to decode
+these neural Gaussian properties from the hybrid neural features. Each of these transformations corresponds to
+a property of the neural Gaussian. Specifically, the opacity α generated from the hybrid neural features can be
+computed using a specific formula:
+{α0 , ..., αk−1 } = Eα (hi , δap )
+(7)
+Similarly, we can derive the covariance-related quaternion Eq , scale Es , and color Ec of the neural Gaussian
+in a similar way. The core idea of this process is to break down complex properties into simple elements, and then
+learn the relationships between them through neural networks. It is worth noting that the prediction of neural
+Gaussian attributes in our method is dynamic. This way of dynamic activation greatly improves the efficiency
+of the algorithm because it avoids unnecessary calculations.
+3.4.2 Joint Optimization for Alignment
+In order to improve the accuracy and efficiency of registration, we adopted a coarse-to-fine bundle-adjusting
+registration strategy to optimize the pose. We first initialise a Gaussian distribution model based on the collected
+anchor data, and in the process employ the heuristic rules described in detail in 3DGS. In order to solve a series
+of problems due to inaccuracies in the camera position, we specifically introduce a self-correction mechanism.
+This mechanism efficiently adjusts the camera parameters and the parameters of the Gaussian distribution by
+utilising the photometric loss function, thus effectively improving the robustness and accuracy of the whole
+system. In this way, we are able to better adapt to the uncertainties in the camera imaging process and optimise
+the performance of the model.
+Given multiple views and a rough 3D model featuring noise-laden poses characterised by a set of Gaussian
+distributions G, we investigated how to apply gradient descent to minimise the residuals between GT pixels
+and the real view. Specifically, we adopted a joint optimisation strategy, tuning the parameters of all Gaussian
+distributions as well as the parameters of the camera. Such tuning enables G to achieve a significant reduction
+in the photometric error at the target view position T . The corresponding equation is expressed as follows:
+G∗ , T ∗ = arg min
+G,T
+X HW
+X
+C̃vi (G, T ) − Cvi (G, T )
+(8)
+v∈N i=1
+where the height and width of a pixel are defined as W and H respectively.
+In contrast to traditional methods, the camera poses for test views are accurately known and typically
+estimated within a unified coordinate system in conjunction with the training views. However, our scenes
+involves test views with unknown or noisy poses. We maintain the Gaussian model, trained on the training
+views, in a frozen state while directing our efforts towards optimising the camera pose for the test view. The
+primary objective of this optimisation process is to minimise the photometric discrepancy between the synthetic
+image and the actual test view, thereby enhancing the precision of the alignment assessment.
+3.4.3 Loss Function
+In order to improve the accuracy of image quality evaluation, we use SSIM20 and its Lssim as the optimization
+term, and add volumetric regularization Lvol to jointly optimize the learnable parameters and MLP. This process
+is designed to allow the model to more accurately capture the L1 loss between pixel colors. The total loss function
+is given by the following formula:
+L = L1 + λssim Lssim + λvol Lvol ,
+(9)
+where λssim is SSIM loss weight and λvol is volumetric loss weight. This formula represents the structure of
+the entire loss function, which combines SSIM and Lssim terms to measure image quality, while limiting the
+complexity of the model through Lvol terms. In particular, volumetric regularized Lvol is calculated as:
+Nng
+Lvol =
+X
+Prod(si )
+(10)
+i=1
+Nng refers to the number of neural Gaussians in the scene, which is an important parameter that we use to
+represent image features in our model. Prod(·) is the product of the vector values, which in our case is the
+product of the scale si of each neural Gaussian. In this way, the volumetric regularization term encourages the
+neural Gaussians amounts in the model to remain small, and the overlap between them is reduced. Such the
+regularization strategy helps prevent overlapping and improves the accuracy of the assessment.
+Bundle-adjusting not only significantly improves the accuracy of the pose by iteratively adjusting the camera
+pose parameters, but also ensures consistency in the reconstruction process and avoids pose distortion caused by
+camera movement.
+4. EXPERIMENTS
+4.1 Experimental Setup
+Dataset. In order to fully evaluate the effectiveness of our method, we conducted exhaustive experiments on
+a total of three datasets. These three datasets contain four different scenes to ensure the applicability and
+robustness of our method in different environments. Specifically, we selected two scenes (train and family) from
+the Tanks & Temples dataset21 and one scene (hydrant) from the CO3D dataset,22 which are widely used within
+the field of novel view synthesis and highly recognised in the industry for their high quality and diversity. Where
+the input images contain 301 images from the train scene, 150 images from the family scene and 68 images from
+the hydrant scene.
+Furthermore, we created a special dataset as shown in Fig. 2. The subject of this dataset is an glasses case
+and a lens wipe with folds placed on the floor of the room, and the background contains complexly rendered
+equipment such as a drainpipe. In order to capture detailed perspective information about these items, we used
+a handheld mobile phone to rotate and shoot video from three different angles: top, middle and bottom. This
+method allowed us to comprehensively capture the 3D structure and surface details of the entire scene. After
+data collection was completed, we randomly selected 102 frames from the video as input images.
+Fig. 2. A number of representative input images of the glasses case have been selected for presentation. With these
+images, it can be observed that the input images not only contain a complete view of the glasses case, but also cover three
+different perspectives of its background: top, middle and bottom, thus providing a full range of information.
+For each scene, we created two folders in: a folder named images for storing the input images, and a blank
+folder named sparse for storing the subsequently generated sparse point cloud data. We performed preliminary
+feature extraction and matching operations on the input images stored in the images folder using SfM. In order
+to better manage these data, we created a new database file in .db format and set the images folder as the data
+source of this database. In the operation interface, we selected the options of “feature extract” and “feature
+matching” to start the process of feature extraction and matching. After completing these steps, we select
+the “reconstruction” option to start the reconstruction of the sparse point cloud. After a series of complex
+calculations and processing, the final sparse point cloud file will be saved in the previously created sparse folder
+for subsequent analysis and evaluation.
+Metrics. We chose three metrics to evaluate the experimental quality: PSNR, SSIM,20 and LPIPS.23 PSNR,
+an engineering metric, quantifies the ratio of the maximum possible power of a signal to the power of the
+destructive noise that degrades its representation accuracy, thereby indicating pixel-level perception error. This
+metric treats all errors as noise without distinguishing between structural and non-structural distortions. SSIM,
+gauges both the distortion level within an image and the similarity between two images. In contrast to PSNR’s
+measurement of absolute error, SSIM operates as a perceptual model, aligning more closely with human visual
+perception. LPIPS is a metric for assessing image similarity that leverages a deep learning model to evaluate
+the perceptual differences between two images. LPIPS posits that even minute differences at the pixel level can
+lead to perceivable disparities to a human observer. Consequently, LPIPS employs a pre-trained deep neural
+network to extract image features and computes the distance between these features to determine the perceived
+similarity of the images.
+Fig. 3. We selected two scenes from the Tanks & Temples dataset (train and family), one scene from the CO3D dataset
+(hydrant), and one scene from the self-made dataset (Glasses case) to conduct experiments and validate the validity and
+generalization of our method.
+Baseline and Implementation. After 30k iterations of training, we recorded the results of rendering the
+Tanks & Temples, CO3D, and Glasses case datasets with our method, as shown in Fig. 3. In our method, to
+enhance the precision of anchor localization, we deliberately configured each anchor to learn a set number of
+offsets, specifically k = 10. The configuration facilitates the model’s ability to capture spatial information more
+effectively. Our method employs a streamlined two-layer MLP, with both layers equipped with the ReLU activation function to efficiently encode nonlinear characteristics. Furthermore, to maintain the model’s computational
+capacity, we standardized the number of hidden units across both layers to 32. Regarding the experimental setup
+of the loss function, we carefully fine-tuned the crucial loss weights: the SSIM loss weight, λssim , was assigned
+a value of 0.2, while the volumetric loss weight, λvol , was set to 0.001.
+We extract the translation vector and the quaternion vector from the camera poses generated during training
+and initialise these two vectors as well as the original poses. The iterative process will continue for 200 times in
+each loop of the test to ensure that the camera poses are optimised to the desired accuracy. Subsequently, we
+concatenate the initialised translation vector and the quaternion vector into a single vector that serves as the
+optimised camera pose so that we are able to obtain more accurate rendering results.
+Fig. 4. We show the results of our method to synthesise camera poses in four scenes. The first row is the camera pose by
+our method without bundle-adjusting; the second row is the camera pose by our method; and the third row is the camera
+pose of the ground truth(gt) images.
+4.2 Comparison with Baselines
+Table 1 provides a detailed account of the experimental outcomes on three distinct datasets, wherein the performance of Scaffold-GS,4 Gaussian-barf,8 and our method is comparatively analyzed. The results indicate that our
+method consistently attains superior PSNR and SSIM metrics across the Tanks & Temples, CO3D, and Glasses
+case datasets, signifying its notable edge in these benchmark evaluations. As shown in Fig. 3, the rendered
+views produced by our method are notably richer in detail and exhibit greater sharpness, thereby reinforcing the
+outstanding capabilities of our method in the realm of image rendering. These findings comprehensively validate
+the efficacy of our method in augmenting both image quality and visual impact.
+Table 1. Quantitative metrics. The subsequent section presents the outcomes of the numerical experiments conducted
+on the test view. The first row of the dataset indicate that no optimisation was performed for akin bit positions. The
+second row introduces bundle-adjusting optimisation, which is built upon the foundation of 3DGS.3 The third row clearly
+demonstrates the superior performance of our proposed method.
+Tanks & Temples
+Method
+Scaffold-GS4
+Gaussian-barf
+Ours
+8
+CO3D
+Glasses case
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+24.92
+0.852
+0.163
+25.51
+0.855
+0.203
+31.55
+0.930
+0.188
+24.73
+0.833
+0.110
+23.29
+0.810
+0.136
+29.27
+0.916
+0.091
+25.17
+0.855
+0.164
+26.43
+0.856
+0.204
+31.90
+0.934
+0.186
+4.3 Ablation Studies
+To ascertain the efficacy of incorporating point cloud features and pose optimization at anchor points, we carried
+out a suite of ablation studies. These experiments involved a comparative analysis of the baseline against
+our enhanced version, which includes two additional modules, on the Tanks&Temples dataset. The detailed
+quantitative outcomes are presented in Table 2. The results show that, in contrast to the baseline, the integration
+of image features results in elevated PSNR and SSIM , coupled with a reduction in the LPIPS value, signifying
+the beneficial impact of image features on pose correction. Our proposed method is represented in the third row
+of the table, where, building on the second row, we have introduced a joint optimization module. This addition
+has led to an improvement in the PSNR and SSIM to 22.67 and 0.831, respectively, thereby substantiating the
+effectiveness of our method. The visualisation results of the image sparse reconstruction are shown in Fig. 4.
+Table 2. Quantitative metric. The numerical results obtained for the test images are shown below. The first row
+shows the results of the baseline, the second row presents the results after enhancing the image features based on the
+baseline, and the third row shows the experimental results of our proposed method. The experimental results show that
+our method achieves optimal results in all metrics.
+No.
+1
+2
+3
+Baseline
+✓
+✓
+✓
+Image Feature
+✓
+✓
+Bundle-Adjusting
+✓
+Tanks & Temples (train)
+PSNR
+SSIM
+LPIPS
+22.18
+22.48
+22.67
+0.813
+0.829
+0.831
+0.196
+0.192
+0.192
+5. CONCLUSION
+In this work, we present a innovative mixed-beam adjusted 3D Gaussian model. The model’s primary advantage
+is its capability to produce high-fidelity renderings that are consistent across different viewpoints, along with
+precise optimization of poses. This is achieved through an integrated method that merges two distinct methods
+for extracting 3D representations: one based on image analysis and the other on neural network techniques.
+Our model can concurrently generate images that maintain viewpoint consistency and the corresponding camera
+poses within forward-facing scenes. To assess the efficacy of our proposed model, we performed a comprehensive
+series of experiments on a combination of real-world and synthetic datasets. The outcomes of these experiments
+confirm that our model delivers superior performance in rendering quality and pose optimization, underscoring
+its significant potential for practical applications.
+ACKNOWLEDGMENTS
+This research was supported by the National Natural Science Foundation of China (No.62001033, No.U20A20163,
+No.62201066), and Beijing Municipal Education Commission Research Program (No.KZ202111232049, No.KM20
+2111232014).
+REFERENCES
+[1] Mildenhall, B. et al., “Nerf: Representing scenes as neural radiance fields for view synthesis,” Communications of the ACM 65(1), 99–106 (2021).
+[2] Wang, Z. et al., “Nerf–:
+Neural radiance fields without known camera parameters,”
+https://arxiv.org/abs/2102.07064 (2021).
+[3] Kerbl, B. et al., “3d gaussian splatting for real-time radiance field rendering.,” ACM Trans. Graph. 42(4),
+139–1 (2023).
+[4] Lu, T. et al., “Scaffold-gs: Structured 3d gaussians for view-adaptive rendering,” in IEEE Conf. Computer
+Vision and Pattern Recognit.(CVPR) , IEEE, pp.20654–20664 (2024).
+[5] Schönberger, J. L. and Frahm, J.-M., “Structure-from-motion revisited,” in IEEE Conf. Computer Vision
+and Pattern Recognit.(CVPR) , IEEE, pp.4104–4113 (2016).
+[6] Lin, C.-H. et al., “Barf: Bundle-adjusting neural radiance fields,” in IEEE Int. Conf. Comput. Vision
+(ICCV) , pp.5721–5731 (2021).
+[7] Truong, P. et al., “Sparf: Neural radiance fields from sparse and noisy poses,” in IEEE Conf. Computer
+Vision and Pattern Recognit.(CVPR) , IEEE, pp.4190–4200 (2023).
+[8] Smith, C. et al., “Flowmap: High-quality camera poses, intrinsics, and depth via gradient descent,”
+https://arxiv.org/abs/2404.15259 (2024).
+[9] Levoy, M. and Hanrahan, P., “Light field rendering,” Seminal Graphics Papers: Pushing the Boundaries,
+Volume 2 (2023).
+[10] Riegler, G. and Koltun, V., “Free view synthesis,” in Proc. Eur. Conf. Comput. Vision (ECCV) , Springer,
+pp.623–640 (2020).
+[11] Hedman, P. et al., “Deep blending for free-viewpoint image-based rendering,” ACM Transactions on Graphics (TOG) 37, 1 – 15 (2018).
+[12] Hedman, P. et al., “Scalable inside-out image-based rendering,” ACM Transactions on Graphics (TOG) 35,
+1 – 11 (2016).
+[13] Riegler, G. and Koltun, V., “Free view synthesis,” in Proc. Eur. Conf. Comput. Vision (ECCV) , Springer,
+pp. 623-640 (2020).
+[14] Yu, A. et al., “pixelnerf: Neural radiance fields from one or few images,” in IEEE Conf. Comput. Vision
+and Pattern Recognit. (CVPR) , IEEE, pp.4578–4587 (2021).
+[15] Huang, X. et al., “Local implicit ray function for generalizable radiance field representation,” in IEEE Conf.
+Comput. Vision and Pattern Recognit. (CVPR) , IEEE, pp.97–107 (2023).
+[16] Jeong, Y. et al., “Self-calibrating neural radiance fields,” in IEEE Int. Conf. Comput. Vision (ICCV), ,
+pp.5846–5854 (2021).
+[17] Shi, Y. et al., “Garf: Geometry-aware generalized neural radiance field,” https://arxiv.org/abs/2212.02280
+(2022).
+[18] Bian, W. et al., “Nope-nerf: Optimising neural radiance field with no pose prior,” in IEEE Conf. Comput.
+Vision and Pattern Recognit. (CVPR), IEEE, pp.4160–4169 (2023).
+[19] Bian, J.-W. et al.,“Porf:
+Pose residual field for accurate neural surface reconstruction,”
+https://export.arxiv.org/abs/2310.07449 (2023).
+[20] Wang, Z. et al.,“Image quality assessment: from error visibility to structural similarity,” IEEE Transactions
+on Image Processing 13(4), 600–612 (2004).
+[21] Knapitsch, A., et al., “Tanks and temples: Benchmarking large-scale scene reconstruction,” ACM Transactions on Graphics (ToG) 36(4), 1–13 (2017).
+[22] Reizenstein, J. et al., “Common objects in 3d: Large-scale learning and evaluation of real-life 3d category
+reconstruction,” in IEEE Int. Conf. Comput. Vision (ICCV), pp.10901–10911 (2021).
+[23] Zhang, R., et al., “The unreasonable effectiveness of deep features as a perceptual metric,” in IEEE Conf.
+Comput. Vision and Pattern Recognit. (CVPR) , IEEE, pp.586–595 (2018).

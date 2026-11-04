@@ -1,0 +1,164 @@
+# Laplacian Pyramid Volume Rendering
+
+Also called: Laplacian Pyramid Compression Rendering, Laplacian Transform, Laplacian Transform / Laplacian Pyramid, Laplacian Transform/Pyramid
+
+## Overview
+Laplacian Pyramid Volume Rendering is a direct volume rendering technique that compresses 3D volume data using a Laplacian pyramid representation, allowing voxel values to be reconstructed on-the-fly during ray tracing [S1, unofficial][S2][S3, unofficial]. It distinguishes itself from sibling methods like Wavelet-based Volume Rendering by using a specific Gaussian-based decomposition and prediction scheme rather than orthogonal wavelet bases, while sharing the multiresolution caching benefits of both [S2][S3, unofficial].
+
+## How it works
+**Inputs:** Compressed Laplacian pyramid data (quantized coefficients) and rendering parameters (viewpoint, transfer function, opacity threshold).
+**Outputs:** 2D rendered image.
+
+**Data Structures:**
+The method uses a pyramid data structure suitable for multiresolution representations [S3, unofficial]. The structure consists of $k+1$ levels, indexed $l_0$ to $l_k$ [S1, unofficial].
+*   **Level $l_0$ (Coarsest):** Contains the base approximation.
+*   **Levels $l_1$ to $l_k$ (Finer):** Contain Laplacian detail coefficients.
+*   **Quantization:** Uniform quantization is applied to the coefficients at each level [S1, unofficial]. The bin size (quantization step) varies by level. For a typical 5-level pyramid ($k=5$), the bin sizes are $\{32, 16, 16, 16, 16, 1\}$ for levels $l_0$ through $l_5$ respectively [S1, unofficial]. This results in $2^{\text{bits}}$ gray levels per level: 8 levels at $l_0$, 16 levels at $l_1$ through $l_4$, and 256 levels at $l_5$ [S1, unofficial].
+
+**Rendering Algorithm:**
+1.  **Ray Casting:** Sweep projection rays across the viewing plane [S1, unofficial].
+2.  **On-the-Fly Reconstruction:** For each sample point along a ray, reconstruct the voxel value from the compressed Laplacian pyramid data [S1, unofficial][S2][S3, unofficial].
+3.  **Caching:** Maintain recently reconstructed voxel values in a cache to avoid redundant reconstruction calculations [S1, unofficial].
+4.  **Compositing:** Accumulate color and opacity along the ray.
+5.  **Termination:** Stop ray tracing when the accumulated opacity exceeds a pre-specified threshold [S1, unofficial].
+
+**Reconstruction Formula:**
+The Laplacian pyramid is formed by pre-applying a Gaussian filter, expansion, and prediction of values [S2][S3, unofficial]. To reconstruct a voxel value $v$ at a specific resolution level, the algorithm combines the coarse approximation from the lower level with the detail coefficients from the current level. While the exact mathematical formula for the Gaussian filter and prediction steps is not explicitly provided in the source notes, the process is defined as:
+1.  **Gaussian Filtering:** Apply a Gaussian filter to the volume data [S2][S3, unofficial].
+2.  **Expansion:** Expand the filtered data (upsampling) [S2][S3, unofficial].
+3.  **Prediction:** Predict values and compute the difference (Laplacian detail) [S2][S3, unofficial].
+4.  **Reconstruction:** Sum the expanded lower-level approximation and the current-level detail coefficients to recover the finer resolution value [S1, unofficial][S2][S3, unofficial].
+
+**Parameters:**
+*   **$k$ (Pyramid Levels):** Number of levels in the Laplacian pyramid. Typical value: 5 levels [S1, unofficial].
+*   **Quantization Bin Sizes:** Vary by level. Example for $k=5$: $\{32, 16, 16, 16, 16, 1\}$ [S1, unofficial].
+*   **Opacity Threshold:** Pre-specified threshold for ray termination [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def laplacian_pyramid_rendering(compressed_pyramid, viewpoint, transfer_function, opacity_threshold):
+    """
+    Renders a volume using Laplacian Pyramid compression.
+    
+    Args:
+        compressed_pyramid: List of quantized coefficient arrays for levels l0 to lk.
+        viewpoint: Camera parameters for ray generation.
+        transfer_function: Maps voxel values to color and opacity.
+        opacity_threshold: Stop ray tracing when accumulated opacity exceeds this value.
+        
+    Returns:
+        Rendered 2D image.
+    """
+    # Initialize cache for reconstructed voxels
+    # Cache structure scales with volume size; for CT data (256^3), size is ~2 MB
+    # Cache key: voxel coordinates (x, y, z)
+    # Cache value: reconstructed voxel intensity
+    cache = {} 
+    
+    image = empty_image(viewpoint.width, viewpoint.height)
+    
+    # Sweep projection rays across the viewing plane
+    for u in range(viewpoint.width):
+        for v in range(viewpoint.height):
+            ray = viewpoint.generate_ray(u, v)
+            accumulated_color = [0.0, 0.0, 0.0]
+            accumulated_opacity = 0.0
+            
+            # Traverse ray through volume
+            while ray.has_next_sample():
+                sample_point = ray.get_next_sample()
+                voxel_coords = sample_point.to_voxel_coords()
+                
+                # Check cache
+                if voxel_coords in cache:
+                    voxel_value = cache[voxel_coords]
+                else:
+                    # Reconstruct voxel value on-the-fly from compressed data
+                    # This involves inverse Laplacian pyramid transform:
+                    # 1. Retrieve coefficients for relevant levels
+                    # 2. Apply inverse prediction and expansion
+                    # 3. Sum with lower-level approximation
+                    voxel_value = reconstruct_voxel_from_pyramid(compressed_pyramid, voxel_coords)
+                    
+                    # Store in cache
+                    cache[voxel_coords] = voxel_value
+                
+                # Apply transfer function
+                color, opacity = transfer_function(voxel_value)
+                
+                # Front-to-back compositing
+                # C_out = C_in + C_new * alpha_new * (1 - alpha_in)
+                # alpha_out = alpha_in + alpha_new * (1 - alpha_in)
+                weight = opacity * (1.0 - accumulated_opacity)
+                accumulated_color = [
+                    accumulated_color[i] + color[i] * weight 
+                    for i in range(3)
+                ]
+                accumulated_opacity += weight
+                
+                # Stop if accumulated opacity exceeds threshold
+                if accumulated_opacity >= opacity_threshold:
+                    break
+            
+            image.set_pixel(u, v, accumulated_color)
+            
+    return image
+
+def reconstruct_voxel_from_pyramid(pyramid, coords):
+    """
+    Reconstructs a voxel value from the Laplacian pyramid.
+    Note: Exact Gaussian filter and prediction formulas are not provided in sources.
+    This function assumes access to the inverse transform logic.
+    """
+    # Start from the coarsest level (l0)
+    # The source notes state: "formed by pre-applying a Gaussian filter, expansion and prediction"
+    # Reconstruction is the inverse: sum of expanded lower level and current detail
+    
+    # Placeholder for the actual inverse transform implementation
+    # which requires the specific Gaussian kernel and expansion/prediction operators
+    # defined in the original Laplacian pyramid construction [S2][S3, unofficial].
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Quantization errors accumulate during reconstruction. The source notes report an RMSE of 1.3 for the specific quantization settings used [S1, unofficial].
+*   **Cache Size:** The cache memory size depends on the volume resolution. For CT data (256x256x113), the cache size is approximately 2 MB [S1, unofficial]. If the volume data size doubles in each dimension, the cache size doubles in depth and width only [S1, unofficial].
+*   **Degenerate Input:** The method assumes uniform quantization and a valid pyramid structure [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Memory:** The compressed data size is significantly smaller than the original volume. For the CTHead dataset, the entropy is 0.464 bits/pixel [S1, unofficial]. The cache size is approximately 2 MB for CT data [S1, unofficial].
+*   **Time:** The average rendering time, including online reconstruction overhead, is about three minutes per image on a Silicon Graphics Indigo running at 150 MHz [S1, unofficial]. The average number of reconstructions per voxel is about 1.08, indicating high cache hit rates [S1, unofficial].
+
+**Measured Performance:**
+*   **Dataset:** CTHead (113 slices, 256x256) [S1, unofficial].
+*   **Quality:** Entropy 0.464 bits/pixel, RMSE 1.3 [S1, unofficial].
+*   **Comparison:** Compared to wavelet transform, the Laplacian pyramid achieved lower entropy (0.464 bpv) and lower RMSE (1.3) in the specific experiment described, though direct quality comparison depends on quantization settings [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Effective multiresolution representation with low entropy; cache algorithm reduces redundant reconstruction overhead [S1, unofficial][S2][S3, unofficial].
+*   **Limitations:** Performance is hardware-dependent; reconstruction overhead is included in timing measurements [S1, unofficial].
+
+**When to Use:**
+*   Use for direct volume rendering applications where compression is critical and multiresolution access is beneficial [S2][S3, unofficial].
+*   Suitable for scenarios where similarity to wavelet transforms is desired but a Gaussian-based pyramid structure is preferred [S2][S3, unofficial].
+
+**When Not to Use:**
+*   Not specified in the sources.
+
+## Background
+**Origin:**
+The Laplacian pyramid compression technique was applied to volume data rendering in research cited as [S1, unofficial]. The Laplacian transform/pyramid is formed by pre-applying a Gaussian filter, expansion, and prediction of values [S2][S3, unofficial].
+
+**History and Development:**
+The method shares many similarities with the wavelet transform and is a good choice for multiresolution representations due to its pyramid data structure [S2][S3, unofficial]. Volume compressed DVR applications using Laplacian pyramid were presented in [GY95, SW03] [S2][S3, unofficial].
+
+**Usage:**
+Used in volume compressed DVR applications [S2][S3, unofficial].
+
+## Sources
+[S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
+[S2] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S3] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27 (unofficial)

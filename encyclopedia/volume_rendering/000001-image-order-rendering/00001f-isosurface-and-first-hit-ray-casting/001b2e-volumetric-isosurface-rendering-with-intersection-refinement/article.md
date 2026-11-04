@@ -7,8 +7,8 @@ Volumetric isosurface rendering with intersection refinement is a real-time tech
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D volumetric scalar field texture ($f$), camera parameters (view/projection matrices, position), an isovalue ($uIsovalue$), a ray marching step size ($uStepSize$), and rendering parameters (refinement iterations, shadow enablement) [S2, unofficial, S3].
-*   **Output:** A 2D image where each pixel contains the color of the first isosurface intersection, shaded with lighting and shadows [S1, S3].
+*   **Input:** A 3D volumetric scalar field texture ($f$), camera parameters (view/projection matrices, position), an isovalue ($uIsovalue$), a ray marching step size ($uStepSize$), and rendering parameters (refinement iterations, shadow enablement) [S2, unofficial][S3].
+*   **Output:** A 2D image where each pixel contains the color of the first isosurface intersection, shaded with lighting and shadows [S1, unofficial][S3].
 
 **Data Structures:**
 The method relies on Uniform Buffer Objects (UBOs) and a 3D texture sampler [S2, unofficial].
@@ -168,14 +168,14 @@ def sample_volume(pos, volume_data):
 
 ## Operating characteristics
 *   **Time Complexity:** Linear with respect to the number of samples along the ray [S3]. Refinement adds a constant factor ($k$ iterations) only when a hit is found [S2, unofficial]. Shadow rays add another traversal pass [S2, unofficial].
-*   **Memory Complexity:** Low. Requires storage for the 3D volume texture and small UBOs [S2, unofficial]. No explicit mesh geometry is stored [S1, S3].
+*   **Memory Complexity:** Low. Requires storage for the 3D volume texture and small UBOs [S2, unofficial]. No explicit mesh geometry is stored [S1, unofficial][S3].
 *   **Performance:** Real-time on modern GPUs [S2, unofficial]. Performance scales with step size and number of samples [S3]. Smaller step sizes increase accuracy but reduce frame rate [S2, unofficial].
 *   **Optimizations:**
     *   **Empty-space skipping:** Using a 32x32x32 brick min/max acceleration structure allows rays to jump over regions that cannot contain the isovalue [S3].
     *   **Interaction Step Size:** A coarser step size can be used during camera interaction to maintain frame rate, with refinement restoring quality [S3].
     *   **Grid Type:** Performance varies by grid type; hybrid or auxiliary pressure grids are significantly more expensive than simple pressure level grids due to complex sampling requirements [S3].
 *   **Strengths:**
-    *   No preprocessing/mesh extraction required [S1, S3].
+    *   No preprocessing/mesh extraction required [S1, unofficial][S3].
     *   Dynamic isovalue changes are instantaneous without CPU geometry rebuilds [S3].
     *   Avoids the high computational cost of full volume rendering (DVR) for opaque surfaces [S4].
     *   High-quality intersection refinement reduces stair-stepping artifacts [S4].
@@ -187,7 +187,7 @@ def sample_volume(pos, volume_data):
 This method was developed as a real-time GPU-based implementation for scientific visualization, notably in the SciVisLab framework [S2, unofficial]. It is also implemented in Met.3D for meteorological data visualization [S3] and has been integrated into the Visualization Toolkit (VTK) as `vtkGPUVolumeRayCastMapper2` with features like refined isosurface rendering and shadow mapping [S4]. The technique addresses the limitations of traditional isosurface extraction (marching cubes) by providing a direct, flexible, and performant way to visualize scalar fields in real-time [S4].
 
 ## Sources
-[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26
+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
 [S2] shalu-007-git/isosurface-ray-casting, https://github.com/shalu-007-git/isosurface-ray-casting, fetched 2026-10-26 (unofficial)
 [S3] Isosurface raycasting — Met.3D 2.0.0 documentation, https://met3d.readthedocs.io/en/latest/05_developer_manual/03_actors/algorithms/isosurfaces.html, fetched 2026-10-27
 [S4] Adding Refined Isosurface Rendering and Shadow Mapping to vtkGPUVolumeRayCastMapper, https://insight-journal.org/pdfs/880.pdf, fetched 2026-10-27

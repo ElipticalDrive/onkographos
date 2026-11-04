@@ -1,0 +1,164 @@
+# Mesh-to-TSDF Sequence Encoding Pipeline
+
+Also called: codec_mesh workflow
+
+## Overview
+This method loads a sequence of triangle meshes matching a printf-style pattern, fits a single similarity transform to their union bounds, converts each frame to a TSDF voxel grid, encodes it into a codec stream, decodes it, and compares the original, uncompressed TSDF, and decoded surfaces [S1, unofficial]. It differs from single-frame conversion by handling temporal sequences with a unified spatial transform and performing codec-specific compression with built-in surface verification [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A sequence of triangle mesh files matching a printf-style path pattern [S1, unofficial].
+- **Output:** A codec stream containing the TSDF data, plus optional output meshes for verification (input, uncompressed TSDF surface, decoded surface) [S1, unofficial].
+
+**Data Structures:**
+- `Pattern`: A struct defining the file path template with `head` (prefix), `tail` (suffix), and `width` (digit padding width, -1 if no number placeholder) [S1, unofficial].
+- `MeshSequence`: Represents the open sequence of meshes, providing frame count and global transform metadata [S1, unofficial].
+- `EncoderConfig`: Configuration for the TSDF codec, including the `true_sdf` flag and band constraints [S1, unofficial].
+- `MeshSdfParams`: Parameters for SDF generation, including voxel size, truncation distance, and topology handling flags [S1, unofficial].
+
+**Parameters:**
+- `source.path`: Printf-style pattern for frame files (e.g., `%03d.ply`). Must contain at most one number placeholder [S1, unofficial].
+- `source.height_m`: Target height in metres used by `mesh_io::fit_transform` to compute the similarity transform [S1, unofficial].
+- `source.metres_per_unit`: Scale factor used by `mesh_io::scale_transform` as an alternative to height-based fitting [S1, unofficial].
+- `source.allow_holes`: Boolean flag that permits signed mode to accept meshes with topology defects (holes) [S1, unofficial].
+- `codec.inspect_only`: Boolean flag that skips GPU work and runs a host-only second pass to audit frames [S1, unofficial].
+- `fusion.voxel_size_m`: Resolution of the voxel grid [S1, unofficial].
+- `trunc`: Truncation distance for the TSDF [S1, unofficial].
+
+**Steps:**
+1. Parse `source.path` to extract `head`, `tail`, and `width`. Validate exactly one number placeholder in `%d` or `%0Nd` format. Reject `%5d` because printf pads with spaces while other tools pad with zeros, causing path mismatches. Handle escaped `%%` by converting to a single `%` [S1, unofficial].
+2. Open the mesh sequence defined by the parsed pattern. Compute the union of bounding boxes of all meshes. Fit a single similarity transform to this union using `source.height_m` or `source.metres_per_unit` as an alternative scale. Store the transform for application to all frames [S1, unofficial].
+3. Configure `EncoderConfig` and `MeshSdfParams`. Set `config.true_sdf = true` because the mesh field represents a true distance that codes without an observed mask in a band that observes every voxel it codes. Validate the true SDF band constraints against the grid resolution and truncation [S1, unofficial].
+4. Initialize GPU resources (Vulkan instance, physical device, device, allocator) if not in inspect-only mode. Prepare volume data structures for TSDF storage [S1, unofficial].
+5. Process each frame: load the mesh, apply the similarity transform, check topology (reject in signed mode if defects exist and `allow_holes` is false; shell mode accepts any topology), convert to TSDF voxel grid (closest-face sign for signed mode, closed surface for shell mode), truncate at `trunc`, and encode into the codec stream. Track statistics like triangle counts [S1, unofficial].
+6. Decode the codec stream back to a TSDF grid. Extract surfaces from the input mesh, uncompressed TSDF, and decoded TSDF. Write output meshes if `opt.output.prefix` is set. Compare surfaces using `eval::CompareOptions` based on `voxel_size_m` and `trunc`. Calculate and report conversion error (uncompressed TSDF vs normalized input), codec error (decoded vs uncompressed TSDF), and total error (decoded vs normalized input) [S1, unofficial].
+7. If `codec.inspect_only` is true, skip GPU work, run a host-only audit of frames, print details of the last frame, and write the input mesh if output prefix is set [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def parse_pattern(text):
+    head, tail, width = "", "", -1
+    i = 0
+    while i < len(text):
+        if text[i] != '%':
+            head += text[i]
+            i += 1
+            continue
+        rest = len(text) - i - 1
+        if rest >= 1 and text[i + 1] == '%':
+            head += '%'
+            i += 2
+            continue
+        if rest >= 1 and text[i + 1] == 'd':
+            width = 0
+            i += 2
+        elif rest >= 3 and text[i + 1] == '0' and text[i + 2].isdigit() and text[i + 3] == 'd':
+            width = int(text[i + 2])
+            i += 4
+        else:
+            raise ValueError("Invalid pattern: must be %d or %0Nd")
+        tail = text[i:]
+        break
+    if width == -1:
+        raise ValueError("No number placeholder")
+    return {"head": head, "tail": tail, "width": width}
+
+def fit_similarity_transform(bounding_boxes, height_m, metres_per_unit=None):
+    min_y = min(b.min_y for b in bounding_boxes)
+    max_y = max(b.max_y for b in bounding_boxes)
+    union_height = max_y - min_y
+    if metres_per_unit is not None:
+        scale = metres_per_unit
+    else:
+        scale = height_m / union_height if union_height > 0 else 1.0
+    center = ((bounding_boxes[0].min_x + bounding_boxes[0].max_x) / 2,
+              (min_y + max_y) / 2,
+              (bounding_boxes[0].min_z + bounding_boxes[0].max_z) / 2)
+    return {"scale": scale, "translation": center}
+
+def check_true_sdf_band(sdf_params, grid):
+    assert sdf_params["voxel_size"] > 0 and sdf_params["trunc"] > 0
+    assert grid["width"] > 0 and grid["height"] > 0 and grid["depth"] > 0
+
+def run_mesh_to_tsdf_pipeline(opt):
+    pattern = parse_pattern(opt.source.path)
+    if pattern["width"] == 5:
+        raise ValueError("Pattern %5d is refused: printf pads with spaces while ffmpeg pads with zeros")
+
+    sequence = MeshSequence.open(opt.source.path, pattern)
+    transform = fit_similarity_transform(sequence.bounding_boxes, opt.source.height_m, opt.source.metres_per_unit)
+
+    config = {"true_sdf": True}
+    sdf_params = {"voxel_size": opt.fusion.voxel_size_m, "trunc": opt.trunc, "allow_holes": opt.source.allow_holes, "transform": transform}
+    check_true_sdf_band(sdf_params, sequence.grid_resolution)
+
+    if not opt.codec.inspect_only:
+        instance = create_vulkan_instance({})
+        gpu = select_physical_device(instance, device_requirements())
+        device = create_vulkan_device(instance, gpu, device_requirements())
+        allocator = create_vulkan_allocator(instance, device)
+    else:
+        device = None
+        allocator = None
+
+    for frame_idx in range(sequence.count()):
+        mesh = sequence.load_frame(frame_idx)
+        mesh.apply_transform(transform)
+        if not opt.source.allow_holes and has_topology_defects(mesh):
+            if opt.codec.mode == "signed":
+                raise TopologyError(f"Frame {frame_idx} has holes")
+        tsdf_grid = voxelize_mesh(mesh, sdf_params)
+        if device is not None:
+            encode_to_codec_stream(tsdf_grid, config, device, allocator)
+
+    if not opt.codec.inspect_only:
+        decoded_tsdf = decode_codec_stream()
+        input_mesh = sequence.load_last_frame()
+        input_mesh.apply_transform(transform)
+        source_mesh = extract_surface(tsdf_grid)
+        decoded_mesh = extract_surface(decoded_tsdf)
+        if opt.output.prefix:
+            write_ply(f"{opt.output.prefix}_input.ply", input_mesh)
+            write_ply(f"{opt.output.prefix}_source.ply", source_mesh)
+            write_ply(f"{opt.output.prefix}_decoded.ply", decoded_mesh)
+        compare_options = {"voxel_size": opt.fusion.voxel_size_m, "trunc": opt.trunc}
+        input_ref = ReferenceMesh.create(input_mesh, compare_options)
+        source_ref = ReferenceMesh.create(source_mesh, compare_options)
+        decoded_ref = ReferenceMesh.create(decoded_mesh, compare_options)
+        conversion_error = input_ref.compare(source_ref)
+        codec_error = source_ref.compare(decoded_ref)
+        total_error = input_ref.compare(decoded_ref)
+        print_comparison(conversion_error)
+        print_comparison(codec_error)
+        print_comparison(total_error)
+
+    if opt.codec.inspect_only:
+        inspected = inspect_frames(sequence)
+        print_frame(inspected.last)
+        if opt.output.prefix:
+            write_ply(f"{opt.output.prefix}_input.ply", inspected.last.mesh)
+
+    return {}
+```
+
+**Edge Cases and Pitfalls:**
+- **Path Pattern Mismatch:** Using `%5d` causes issues because printf pads with spaces while other tools pad with zeros [S1, unofficial].
+- **Topology Defects:** Signed mode requires valid topology (no holes) unless `source.allow_holes` is true [S1, unofficial].
+- **True SDF Band:** The pipeline uses `true_sdf = true`, meaning it codes without an observed mask [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of frames and the number of voxels per frame [S1, unofficial].
+- **Memory Complexity:** $O(V)$ per frame for the TSDF grid [S1, unofficial].
+- **Performance:** Measured performance depends on GPU hardware, resolution, and scene complexity [S1, unofficial].
+- **Strengths:** Automated handling of sequences, unified transform, codec compression, verification pipeline [S1, unofficial].
+- **Limitations:** Requires valid topology for signed mode (unless `allow_holes` is set). Path pattern restrictions [S1, unofficial].
+- **When to Use:** When processing animated geometry sequences into compressed TSDF volumes [S1, unofficial].
+- **When Not to Use:** For single-frame conversion (use [Explicit Surface to TSDF Conversion](2615-explicit-surface-to-tsdf-conversion.md) directly) [S1, unofficial].
+
+## Background
+This pipeline is part of the volumetric kit grid project, providing a complete workflow for mesh sequence to TSDF conversion [S1, unofficial]. It integrates mesh I/O, SDF generation, and codec compression into a single tool [S1, unofficial].
+
+## Sources
+[S1] taojin-6/volumetric_kit_grid, https://github.com/taojin-6/volumetric_kit_grid, fetched 2026-10-28 (unofficial)

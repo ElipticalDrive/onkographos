@@ -1,0 +1,108 @@
+# Tile-Based Culling
+
+Also called: StopThePop Tile-Based Culling
+
+## Overview
+Tile-Based Culling computes a precise Gaussian-to-Tile mapping to cull irrelevant tiles during 3D Gaussian Splatting rasterization [S1]. It improves upon standard conservative bounding box assignment by computing tight, opacity-aware bounding boxes and iteratively verifying tile intersections [S1]. It is distinguished from [SnugBox](3378-snugbox.md) by its iterative tile examination process, which results in higher runtime costs for the culling phase compared to AccuTile, though it may show marginal downstream performance gains due to undercounting artifacts [S1].
+
+## How it works
+**Inputs:** 3D Gaussian parameters (position, covariance, opacity, color); image resolution; tile dimensions (typically 32x32 pixels, inherited from [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md)) [G].
+**Outputs:** A list of tile IDs for each Gaussian that require processing [S1].
+
+**Data Structures:**
+*   `Gaussian`: Structure containing 3D position $\mathbf{p}$, 3x3 covariance matrix $\mathbf{\Sigma}$, opacity $\alpha$, and color [G].
+*   `Tile`: Identified by integer coordinates $(t_x, t_y)$ [G].
+*   `Bounding Box`: Axis-aligned bounding box (AABB) in screen space, defined by min/max coordinates $(x_{min}, y_{min})$ and $(x_{max}, y_{max})$ [S1].
+
+**Parameters:**
+*   **Padded Alpha Threshold:** A value required to accurately compute bounding boxes and prevent undercounting of Gaussian-to-Tile mappings [S1]. The specific value is not provided in the source ablation study [S1]. In the cited implementation, this parameter was omitted, leading to loose bounding boxes and undercounting [S1].
+
+**Steps:**
+1.  **Compute Tight Bounding Box:** For each Gaussian, compute a tight, opacity-aware axis-aligned bounding box in screen space [S1]. This involves projecting the Gaussian's 2D extent into screen space and determining the bounds based on opacity [G].
+    *   *Note:* The source indicates that using thresholds in the original code prevents all bounding boxes from being tight [S1].
+2.  **Iterative Tile Examination:** For each Gaussian, identify all tiles that intersect with the computed bounding box [S1]. Iteratively examine each candidate tile to determine if it should be included in the final mapping [S1].
+3.  **Warp-Level Load Balancing:** Accelerate the tile examination process using warp-level load balancing techniques to handle the iterative checks efficiently on the GPU [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def tile_based_culling(gaussians, image_width, image_height, tile_size):
+    num_tiles_x = image_width // tile_size
+    num_tiles_y = image_height // tile_size
+    gaussian_tile_map = []
+    
+    for gaussian in gaussians:
+        # Step 1: Compute tight, opacity-aware bounding box [S1]
+        bbox = compute_tight_bbox(gaussian, tile_size)
+        
+        # Determine tile range covering the bounding box
+        tile_min_x = max(0, bbox.x_min // tile_size)
+        tile_min_y = max(0, bbox.y_min // tile_size)
+        tile_max_x = min(num_tiles_x - 1, bbox.x_max // tile_size)
+        tile_max_y = min(num_tiles_y - 1, bbox.y_max // tile_size)
+        
+        candidate_tiles = []
+        
+        # Step 2: Iteratively examine each tile touching the bounding box [S1]
+        for ty in range(tile_min_y, tile_max_y + 1):
+            for tx in range(tile_min_x, tile_max_x + 1):
+                if is_tile_intersecting_gaussian(tx, ty, gaussian, tile_size):
+                    candidate_tiles.append((tx, ty))
+        
+        # Step 3: Warp-level load balancing accelerates this examination on GPU [S1]
+        gaussian_tile_map.append(candidate_tiles)
+        
+    return gaussian_tile_map
+
+def compute_tight_bbox(gaussian, tile_size):
+    # [G] Project 3D position to screen space
+    center_screen = project_to_screen(gaussian.position)
+    # [G] Compute 2D extent from covariance and opacity
+    extent = compute_2d_extent(gaussian.covariance, gaussian.opacity)
+    return BoundingBox(center_screen[0] - extent[0], center_screen[1] - extent[1],
+                       center_screen[0] + extent[0], center_screen[1] + extent[1])
+
+def is_tile_intersecting_gaussian(tx, ty, gaussian, tile_size):
+    tile_x_min, tile_y_min = tx * tile_size, ty * tile_size
+    tile_x_max, tile_y_max = (tx + 1) * tile_size, (ty + 1) * tile_size
+    # [G] Check intersection between tile rectangle and Gaussian 2D ellipse
+    # Standard implementation uses separating axis theorem or point-in-ellipse tests
+    return check_ellipse_rect_intersection(gaussian, tile_x_min, tile_y_min, tile_x_max, tile_y_max)
+
+def project_to_screen(position):
+    # [G] Standard perspective projection to normalized device coordinates
+    return (position.x / position.z, position.y / position.z)
+
+def compute_2d_extent(covariance, opacity):
+    # [G] Project 3D covariance to 2D, compute eigenvalues, scale by opacity threshold
+    return (covariance.eigenvalues[0] * opacity, covariance.eigenvalues[1] * opacity)
+
+def check_ellipse_rect_intersection(gaussian, x_min, y_min, x_max, y_max):
+    # [G] Standard geometric intersection test between 2D ellipse and axis-aligned rectangle
+    # Not given in the sources. Typically evaluates if any tile corner lies within the 
+    # Gaussian's 2D sigma ellipse or uses separating axis theorem.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Undercounting:** Without a padded alpha threshold, the method undercounts Gaussian-to-Tile mappings [S1]. This artificially improves downstream performance (Radix Sort, Identify Tile Ranges, Render) by reducing the number of elements to process, but leads to incorrect rendering if not corrected [S1].
+*   **Loose Bounding Boxes:** The use of thresholds in the original code causes not all bounding boxes to be tight, reducing the effectiveness of the culling [S1].
+
+## Subtopics
+
+### [SnugBox](3378-snugbox.md)
+Computes a precise Gaussian-to-tile bounding box intersection in 3D Gaussian Splatting, replacing the overly conservative tile assignment of standard 3D-GS to reduce the number of pixels processed per Gaussian. It computes an axis-aligned bounding box (AABB) around each Gaussian using its elliptical extent in image space, allowing for tighter identification of intersected tiles compared to the standard method which inscribes a circle within a square. Choose it when maximum culling efficiency is required over iterative examination.
+
+## Operating characteristics
+*   **Time Complexity:** The method involves an iterative examination of candidate tiles for each Gaussian [S1]. This results in higher runtime cost for the culling phase (Preprocess and Duplicate with Keys) compared to AccuTile, which does not iterate over all candidate tiles [S1].
+*   **Measured Performance:** In ablation studies on the Preprocess and Duplicate with Keys stages, Tile-Based Culling is significantly slower than AccuTile [S1]. However, Tile-Based Culling slightly outperforms AccuTile in downstream functions (Radix Sort, Identify Tile Ranges, Render) due to undercounting artifacts [S1]. When padded alpha thresholds are introduced to fix undercounting, the downstream advantage disappears, and the culling cost increases further [S1].
+*   **Strengths:** Provides a more precise Gaussian-to-Tile mapping than standard conservative bounding box methods [S1].
+*   **Limitations:** High computational cost in the culling phase due to iterative tile examination [S1]. Prone to undercounting if parameters are not correctly tuned [S1].
+*   **When to use:** When a balance between precision and standard rasterization pipelines is needed, and the overhead of iterative culling is acceptable [G]. Not recommended when maximum culling efficiency is required (use [AccuTile](3378-snugbox.md) instead) [S1].
+
+## Background
+Tile-Based Culling was introduced in the "StopThePop" paper [S1]. It was designed to improve the efficiency of 3D Gaussian Splatting rasterization by reducing the number of pixels processed per Gaussian through precise tile culling [S1]. The method was evaluated in the "Speedy-Splat" paper, where the authors' AccuTile algorithm was ablated against StopThePop Tile-Based Culling to highlight the trade-offs between iterative culling and sparse primitive processing [S1].
+
+## Sources
+[S1] Speedy-Splat: Fast 3D Gaussian Splatting with Sparse Pixels and Sparse Primitives, https://doi.org/10.1109/cvpr52734.2025.02006, fetched 2026-10-26

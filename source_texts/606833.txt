@@ -1,0 +1,224 @@
+PC Software for BambuLab and other 3D printers. Contribute to bambulab/BambuStudio development by creating an account on GitHub.
+
+fix(rendering): share painted geometry and release upload buffers by flavioheleno · Pull Request #12859 · bambulab/BambuStudio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+flavioheleno
+commented
+Nov 2, 2026
+Copy link
+Copy Markdown
+Opening a project with many copies of a dense painted mesh can exhaust system
+memory while rendering the assembly thumbnail, before slicing starts. On the
+tested Linux/NVIDIA setup, a project with 41 painted objects reached a 12 GiB
+memory-cgroup limit and was killed. With this change, plate 2 completed slicing
+under the same limit at approximately 7.3 GiB application peak RSS.
+Changes
+Release CPU vector capacity after geometry has been uploaded to OpenGL.
+Reuse colored geometry between volumes that share the same underlying mesh
+and face painting, in both normal rendering and thumbnail rendering.
+Validate cached bindings using annotation timestamps and remove bindings when
+their owning volume is released. Borrowers reuse the owner's arrays without
+copying VBO handles or taking ownership of them.
+Reproduction
+The project contains one painted object on plate 1 and twenty copies each on
+plates 2 and 3. Its two mesh payloads each contain 795,273 vertices and 1,590,562
+triangles. Forty components reference the second mesh payload.
+Open an equivalent dense painted project with many matching copies.
+Allow assembly thumbnails to render, then select plate 2 and slice it.
+Compare the original and patched GUI with the same renderer and memory cap:
+```
+systemd-run --user --scope -p MemoryMax=12G -p MemorySwapMax=0 \
+  env WEBKIT_DISABLE_DMABUF_RENDERER=1 \
+  ./BambuStudio.AppImage /path/to/project.3mf
+```
+Tested with Bambu Studio 02.08.04.57, an Ubuntu 24.04 AppImage on Arch Linux,
+GNOME/Wayland through Xwayland, and an RTX 3070 with NVIDIA driver 615.78.08.
+No software-rendering override was used.
+Results
+Variant
+Result
+Original
+Kernel-confirmed memory-cgroup OOM kill during thumbnail rendering
+CPU buffer release only
+Loaded at about 8.7 GiB RSS; memory-cgroup OOM kill after slicing started
+Both changes
+Loaded at about 3.8 GiB RSS; plate 2 slicing completed; about 7.3 GiB application peak RSS and 7.8 GiB sampled cgroup peak
+The successful run's /proc/PID/status reported VmHWM: 7625940 kB and
+VmSwap: 0 kB after slicing. Cgroup memory includes child processes and other
+charged memory; it is a different metric from application RSS. Cgroup samples
+were taken approximately once per second. These are single interactive runs,
+not repeated benchmarks; the original never completed under the cap.
+A debugger stack captured before the original OOM kill showed:
+```
+TriangleSelector::get_facets
+FacetsAnnotation::get_facets
+GLVolume::simple_render
+GLCanvas3D::_render_assembly_thumbnail_internal
+GLCanvas3D::render_thumbnail_framebuffer
+GLCanvas3D::render_thumbnail
+GLCanvas3D::_update_assembly_view_thumbnail
+...
+Plater::select_plate
+```
+Validation
+Compiled the changed translation unit and relinked using the cached Ubuntu
+24.04 build's compiler and linker commands; no public header or class layout
+changed.
+Repeated GUI loading, plate selection, and plate 2 slicing with the supplied
+project under the same 12 GiB cap. The user confirmed slicing completed.
+Checked the packaged AppImage's host CLI launch and verified the embedded
+executable's checksum against the tested executable.
+git diff --check passed.
+No automated rendering regression tests were added. Painting edits, cache-owner
+deletion/replacement, repeated load/unload cycles, plate 3, and other platforms
+or drivers have not been exercised. The reproduction supports excessive retained
+and duplicated rendering memory; it does not prove an unbounded allocation leak.
+References
+Baseline upload-buffer implementation:
+BambuStudio/src/slic3r/GUI/3DScene.cpp
+Line 205
+in
+79df7ae
+void GLIndexedVertexArray::finalize_geometry(bool opengl_initialized)
+Baseline colored thumbnail rendering:
+BambuStudio/src/slic3r/GUI/3DScene.cpp
+Line 1125
+in
+79df7ae
+void GLVolume::simple_render(const std::shared_ptr<GLShaderProgram>& shader, ModelObjectPtrs &model_objects, std::vector<std::array<float, 4>> &extruder_colors, bool ban_light) const
+Khronos glBufferData reference (initialization copies the supplied data):
+https://github.com/KhronosGroup/OpenGL-Refpages/blob/main/gl4/glBufferData.xml
+C++ working draft, vector capacity and non-binding shrink_to_fit request:
+https://eel.is/c++draft/vector.capacity
+fix(rendering): share painted geometry and release upload buffers
+…
+cf53eff
+```
+Release retained CPU vector capacity after uploading geometry to OpenGL.
+Reuse colored buffers between volumes with the same mesh and face painting
+in both normal rendering and thumbnail rendering. Validate reuse using
+annotation timestamps and remove bindings when their owner is released.
+
+A dense painted project with forty matching copies exhausted a 12 GiB
+memory scope during assembly thumbnail rendering. With both changes,
+plate 2 completed slicing at approximately 7.3 GiB application peak RSS
+and 7.8 GiB sampled scope memory on the tested NVIDIA/Linux setup.
+
+Validation: targeted Ubuntu 24.04 compilation and relink, interactive GUI
+reproduction, packaged AppImage launch, executable checksum verification,
+and git diff --check.
+```
+BambulabRobot
+requested a review
+from Haidiye00
+November 2, 2026 04:19
+Haidiye00
+commented
+Nov 2, 2026
+Copy link
+Copy Markdown
+Contributor
+Hi, is this an issue that only happens on Linux? Could you record a GIF of before and after the changes? Thanks!
+flavioheleno
+commented
+Nov 2, 2026
+Copy link
+Copy Markdown
+Author
+Hi @Haidiye00, unfortunately I can't test it in other platforms, right now I only have access to this Linux Desktop. I'll record a video before and after the fix. Shall I provide anything else?
+flavioheleno
+commented
+Nov 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+Pre Fix:
+Post Fix:
+RAM usage (pre-fix):
+Idle: 5.0 GB (baseline)
+Start: 8.5 GB (+3.5 GB)
+Open file: 21.5 GB (+16.5 GB)
+Select plate: 22.3 GB (+17.3 GB)
+Slice: OOM killed
+RAM usage (post-fix):
+Idle: 5.5 GB (baseline)
+Start: 9.1 GB (+3.6 GB)
+Open file: 12.2 GB (+6.7 GB)
+Select plate: 12.8 GB (+7.3 GB)
+Slice: 15.3 GB (+9.8 GB)
+Memory usage trend:
+Open file: 59.4% reduction in memory growth relative to baseline (16.5 GB → 6.7 GB).
+Select plate: 57.8% reduction in memory growth relative to baseline (17.3 GB → 7.3 GB).
+Slice: Previously OOM killed; now completes successfully with 15.3 GB total RAM usage.
+Notes:
+These results are based on a single run per version and should be considered preliminary observations rather than statistically validated improvements. Memory growth is measured relative to each run's idle baseline to account for differences in initial system memory usage.
+These numbers represent total system RAM usage rather than the application's process memory (RSS), subtracting the idle baseline provides an estimate of additional system memory consumption, not a precise measurement of application memory.
+The measurements are snapshots at specific stages, not necessarily peak memory usage.
+flavioheleno
+commented
+Nov 2, 2026
+Copy link
+Copy Markdown
+Author
+I've got to try it on a Mac Book Pro early 2013 running macOS Catalina (10.15.8), it has an Intel Code i7 and 8GB of RAM.
+Using Bambu Studio 2.8.2.61, memory was exhausted trying to open the same file, so I couldn't even get to the point to test it, can't say for sure it's the same issue though.
+Haidiye00
+requested a review
+from Erjingtiao00
+November 3, 2026 01:12
+Haidiye00
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Contributor
+Hi, could you send us the 3mf you tested? We'll test and confirm it again. Thanks.
+flavioheleno
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Author
+I've prepared a similar file just to be sure it could be reproduced and it did.
+Steps:
+Downloaded the reference file (source link below)
+Selected "Bambu Lab H2C" as the printer
+Moved the prime tower to the top right corner of the plate
+Selected the model / right click / clicked "Fill bed with copies"
+Saved file (attached below)
+Reproducing:
+Click on "Slice plate"
+Select "Filament-Saving mode"
+Killed after a few seconds (OOM Killed)
+Source: https://makerworld.com/en/models/2655564-mini-jesus-sitting-on-monitor-or-shelf?from=search#profileId-3290637
+Note: Added the .zip extension so GitHub would let me upload it.
+Test file: memory-testfile.3mf.zip
+flavioheleno
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Author
+Please note that although I limited RAM usage to 12 GB using systemd-run during some of my tests, the video recording, all other evidence I've provided, and all previously experienced issues were captured or reproduced without any resource limits.
+These issues occurred with access to the full 32 GB of installed RAM (~30 GB usable), even when Bambu Studio was the only application running, aside from essential OS background services.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

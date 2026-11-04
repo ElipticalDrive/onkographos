@@ -1,0 +1,131 @@
+# Screen-Space God Rays
+
+Also called: Crepuscular Rays, Light Shafts, Radial Blur God Rays, Screen-Space Radial Blur, Volumetric Light Shaft
+
+## Overview
+Screen-Space God Rays is a post-processing technique that renders screen-space crepuscular rays by accumulating radial blur from the sun's screen position, modulated by density, decay, and weight [S1, S2, unofficial]. It fakes volumetric light shafts using a radial blur on an occlusion map, dominating implementations for over a decade due to speed and simplicity [S2, unofficial]. Unlike volumetric ray marching, it is cheaper (two extra passes, handful of texture samples) but less accurate, failing with multiple lights or off-screen lights [S2, unofficial].
+
+## How it works
+The method operates in three passes: generating an occlusion map, applying radial blur, and compositing.
+
+### Inputs and Outputs
+**Inputs:**
+*   `tDiffuse`: The main scene color buffer (sampler2D) [S1, unofficial].
+*   `tOcclusion`: The black-and-white occlusion map generated in Pass 1 (sampler2D) [S2, unofficial].
+*   `sunScreenPos` / `uLightPos`: The 3D light source projected to 2D screen coordinates in UV space [0,1] (vec2) [S1, S2, unofficial].
+*   `density` / `uDensity`: Controls the spread of the ray delta or how far each ray extends outward from the light (float) [S1, S2, unofficial].
+*   `decay` / `uDecay`: How quickly brightness falls off along each ray (float) [S1, S2, unofficial].
+*   `weight` / `uWeight`: Sample weight multiplier or initial brightness of each sample (float) [S1, S2, unofficial].
+*   `exposure` / `uExposure`: Final exposure multiplier scaling the composite brightness (float) [S1, S2, unofficial].
+*   `NUM_SAMPLES`: Number of samples per ray (int). 64 is a common sweet spot balancing smoothness and cost [S2, unofficial].
+
+**Outputs:**
+*   `godRaysTexture`: The final radial blur result containing only the god ray light shafts [S2, unofficial].
+*   `gl_FragColor`: The final composited color [S1, S2, unofficial].
+
+### Data Structures
+**Uniforms (Pass 2):**
+*   `tOcclusion`: sampler2D [S2, unofficial].
+*   `uLightPos`: vec2 [S2, unofficial].
+*   `uExposure`: float [S2, unofficial].
+*   `uDecay`: float [S2, unofficial].
+*   `uDensity`: float [S2, unofficial].
+*   `uWeight`: float [S2, unofficial].
+*   `NUM_SAMPLES`: const int [S2, unofficial].
+
+### Steps
+
+#### Pass 1: Occlusion Map Generation
+1.  Render the scene with all geometry as solid black and the light source as a bright shape (circle/sphere) to create a black-and-white occlusion map where bright pixels indicate direct light visibility [S2, unofficial].
+    *   Set scene override material to black.
+    *   Render scene geometry to `occlusionTarget`.
+    *   Render light source geometry (bright) to `occlusionTarget` with depth testing to ensure proper occlusion by foreground geometry [S2, unofficial].
+
+#### Pass 2: Radial Blur
+1.  **Project Light Position:** Project the 3D sun direction to 2D screen space using the view-projection matrix. Scale `sunDir` by 10000.0, transform by `viewProjMatrix`, divide by clipW, convert to NDC, and then to [0,1] screen coordinates [S1, unofficial].
+    *   *Edge Case:* If `clipW <= 0.0001`, the sun is behind the camera. Return center screen `(0.5, 0.5)` and set `inFront = false` [S1, unofficial].
+2.  **Initialize:** Set `textCoord = vUv`, `color = texture2D(tDiffuse, textCoord)` (or `vec3(0.0)` if accumulating only rays), `illuminationDecay = 1.0` (or `illumination = 1.0`) [S1, S2, unofficial].
+3.  **Radial Accumulation Loop:** For `i` from 0 to `NUM_SAMPLES - 1`:
+    *   Calculate delta vector: `deltaUV = (vUv - uLightPos) * uDensity / float(NUM_SAMPLES)` [S2, unofficial]. (Note: [S1, unofficial] uses `(vUv - sunScreenPos) * (1.0 / 64.0) * density`, which is equivalent if `density` in [S1, unofficial] corresponds to `uDensity/NUM_SAMPLES` in [S2, unofficial]. We follow the explicit loop structure in [S2, unofficial] for clarity).
+    *   Update coordinate: `uv -= deltaUV` [S2, unofficial].
+    *   Sample occlusion map: `samp = texture2D(tOcclusion, clamp(uv, 0.0, 1.0)).rgb` [S2, unofficial].
+    *   Accumulate: `color += samp * illumination * uWeight` [S2, unofficial]. (Note: [S1, unofficial] uses `sample * illuminationDecay * weight`).
+    *   Update decay: `illumination *= uDecay` [S2, unofficial]. (Note: [S1, unofficial] uses `illuminationDecay *= decay`).
+4.  **Finalize:** `gl_FragColor = vec4(color * uExposure, 1.0)` [S2, unofficial]. (Note: [S1, unofficial] uses `color * exposure` where `color` included the initial diffuse texture sample).
+
+### Pseudocode (Pass 2)
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Inputs: vUv (vec2), tOcclusion (sampler2D), uLightPos (vec2), uExposure (float), uDecay (float), uDensity (float), uWeight (float)
+# Constants: NUM_SAMPLES = 64
+
+def main():
+    # Calculate the step vector for radial blur
+    # deltaUV points from light position towards current pixel, scaled by density and sample count
+    delta_uv = (vUv - uLightPos) * uDensity / float(NUM_SAMPLES)
+    
+    uv = vUv
+    illumination = 1.0
+    color = vec3(0.0)
+    
+    for i in range(NUM_SAMPLES):
+        # Move towards the light source (opposite to delta_uv direction if delta_uv is defined as pixel-to-light)
+        # In the source [S2, unofficial], delta_uv is (vUv - uLightPos)... and uv -= deltaUV.
+        # This means we are moving AWAY from the light if delta_uv is positive? 
+        # Let's re-read [S2, unofficial]: "sample repeatedly along the line from that pixel toward the light's screen position".
+        # If uv starts at vUv, and we want to go TOWARD uLightPos, we should subtract (vUv - uLightPos).
+        # delta_uv = (vUv - uLightPos) * ...
+        # uv -= delta_uv => uv = vUv - (vUv - uLightPos)*... = vUv + (uLightPos - vUv)*...
+        # This moves towards uLightPos. Correct.
+        
+        uv = uv - delta_uv
+        
+        # Clamp to screen bounds to avoid sampling outside the texture
+        uv_clamped = clamp(uv, 0.0, 1.0)
+        
+        # Sample the occlusion map
+        samp = texture2D(tOcclusion, uv_clamped).rgb
+        
+        # Apply decay and weight
+        samp = samp * illumination * uWeight
+        
+        # Accumulate
+        color = color + samp
+        
+        # Update illumination decay
+        illumination = illumination * uDecay
+        
+    # Final exposure
+    gl_FragColor = vec4(color * uExposure, 1.0)
+```
+
+### Parameters
+*   `density` / `uDensity`: Controls the spread of the ray delta. Higher values stretch rays longer. Default 0.92 [S1, S2, unofficial].
+*   `weight` / `uWeight`: Sample weight multiplier. Controls overall ray intensity. Default 0.58 [S1, S2, unofficial].
+*   `decay` / `uDecay`: How quickly brightness falls off along each ray. Values close to 1.0 (like 0.97) produce long, gradual rays. [S1, S2, unofficial].
+*   `exposure` / `uExposure`: Final exposure multiplier. Default 0.35 [S1, S2, unofficial].
+*   `NUM_SAMPLES`: Number of samples per ray. 64 is a common sweet spot [S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Sun Behind Camera:** If `clipW <= 0.0001` during projection, the sun is behind the camera. Return center screen `(0.5, 0.5)` and handle accordingly [S1, unofficial].
+*   **Off-Screen Light:** The technique only works for a single, visible light source. If the light moves off-screen, the rays disappear [S2, unofficial].
+*   **Multiple Lights:** The technique fails with multiple light sources [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** O(N) per pixel, where N is `NUM_SAMPLES`. Constant number of texture samples (64) per pixel in Pass 2.
+*   **Memory Complexity:** O(W*H) for the occlusion map and god rays texture, where W and H are screen dimensions.
+*   **Measured Performance:** Requires two extra render passes and a handful of texture samples per pixel, a fraction of the cost of volumetric ray marching [S2, unofficial].
+*   **Strengths:** Fast, simple, convincing results for single light sources [S2, unofficial].
+*   **Limitations:** Less accurate than volumetric ray marching. Fails with multiple lights or off-screen lights [S2, unofficial].
+*   **When to use:** Mobile or lower-end hardware, single dominant light source (sun) [S2, unofficial].
+*   **When not to use:** Multiple light sources, physically accurate requirements, lights moving off-screen [S2, unofficial].
+
+## Background
+*   **Origin:** Published by Kenny Mitchell in GPU Gems 3 in 2007 [S2, unofficial].
+*   **History:** One of the first mainstream implementations in games, notably Crysis (2007), setting a standard expectation for high-end PC games [S2, unofficial]. Dominated god ray implementations for over a decade [S2, unofficial].
+*   **Usage:** Used in Crysis (2007) [S2, unofficial].
+
+## Sources
+[S1] nff747/volumetric-clouds-wgsl, https://github.com/nff747/volumetric-clouds-wgsl, fetched 2026-10-27 (unofficial)
+[S2] Volumetric Lighting (God Rays) — How It Works - Moonjump, https://moonjump.com/game-dev-mechanics-volumetric-lighting-god-rays-how-it-works/, fetched 2026-10-28 (unofficial)

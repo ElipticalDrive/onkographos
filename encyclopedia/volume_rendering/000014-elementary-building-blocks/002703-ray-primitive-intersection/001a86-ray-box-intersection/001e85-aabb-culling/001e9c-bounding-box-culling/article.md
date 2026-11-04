@@ -1,0 +1,133 @@
+# Bounding Box Culling
+
+Also called: 2D Gaussian Bounding Box Culling, Bounding Box Culling and Pre-processing, Viewport Culling via AABB
+
+## Overview
+Bounding Box Culling is a view-dependent pre-processing step that filters out 3D Gaussians whose projected 2D footprint does not intersect the camera viewport [S1, unofficial]. It differs from general [AABB Culling](1789-aabb-culling.md) by operating on the projected 2D ellipse of a Gaussian rather than a static 3D axis-aligned box, thereby enabling early rejection of primitives that are off-screen in screen space [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A list of 3D Gaussians, each defined by a 3D center position $\mathbf{c}$ and a $3 \times 3$ covariance matrix $\Sigma$ [S1, unofficial].
+
+**Outputs:**
+- A buffer of alive primitives containing packed major/minor axes, depth, and color/opacity data [S1, unofficial].
+
+**Data Structures:**
+1.  **Alive Primitive Buffer:**
+    -   **Major/Minor Axes:** Packed into two 32-bit unsigned integers. Each 32-bit integer stores a 2D vector component pair using 16-bit floats (half-precision) per component [S1, unofficial].
+    -   **Depth:** Stored as a 32-bit floating-point value in a dedicated buffer [S1, unofficial].
+    -   **Color/Opacity:** Packed into a single 32-bit unsigned integer using RGBA8 format (8 bits per channel) [S1, unofficial].
+
+**Steps:**
+1.  **Projection:** For each Gaussian, project its 3D center $\mathbf{c}$ and covariance matrix $\Sigma$ into 2D screen space to yield a 2D ellipse [S1, unofficial].
+2.  **Axis Calculation:** Calculate the major and minor axes of the projected 2D ellipse [S1, unofficial].
+3.  **AABB Calculation:** Compute an axis-aligned bounding box (AABB) for the 2D ellipse [S1, unofficial].
+4.  **Culling Test:** Drop the Gaussian if its bounding box does not intersect the camera viewport [S1, unofficial].
+5.  **Depth Storage:** For alive primitives, calculate the depth and store it as a 32-bit floating point in a dedicated buffer [S1, unofficial].
+6.  **Color Evaluation:** Evaluate Spherical Harmonics (SH) coefficients based on the current viewing direction to compute the final RGB color [S1, unofficial].
+7.  **Axis Packing:** Compress and pack the major and minor axis vectors into a pair of 32-bit unsigned integers, using 16-bit floats for each vector component [S1, unofficial].
+8.  **Color Packing:** Compress and pack the resulting floating-point color and the splat’s opacity into a single 32-bit unsigned integer using an RGBA8 format [S1, unofficial].
+9.  **Write:** Write the alive primitives to the next stage [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bounding_box_culling(gaussians, view_proj_matrix, viewport_bounds):
+    alive_primitives = []
+    depth_buffer = []
+    
+    for g in gaussians:
+        # 1. Project 3D center and covariance to 2D screen space
+        clip_c = view_proj_matrix @ np.append(g.center, 1.0)
+        screen_c = clip_c[:2] / clip_c[2]
+        J = compute_projection_jacobian(g.center, view_proj_matrix)
+        screen_cov = J @ g.covariance @ J.T
+        
+        # 2. Calculate major and minor axes of the projected 2D ellipse
+        eigenvalues, eigenvectors = np.linalg.eigh(screen_cov)
+        major_axis = eigenvectors[:, 1] * np.sqrt(eigenvalues[1])
+        minor_axis = eigenvectors[:, 0] * np.sqrt(eigenvalues[0])
+        
+        # 3. Compute AABB for the 2D ellipse
+        extent_x = np.abs(major_axis[0]) + np.abs(minor_axis[0])
+        extent_y = np.abs(major_axis[1]) + np.abs(minor_axis[1])
+        aabb_min = screen_c - np.array([extent_x, extent_y])
+        aabb_max = screen_c + np.array([extent_x, extent_y])
+        
+        # 4. Culling Test: Check intersection with camera viewport
+        if aabb_min[0] > viewport_bounds[1][0] or aabb_max[0] < viewport_bounds[0][0] or \
+           aabb_min[1] > viewport_bounds[1][1] or aabb_max[1] < viewport_bounds[0][1]:
+            continue  # Drop the Gaussian
+            
+        # 5. Calculate depth and store as 32-bit float
+        depth = clip_c[2]
+        depth_buffer.append(depth)
+        
+        # 6. Evaluate SH coefficients for RGB color
+        view_dir = normalize(view_proj_matrix[:3, 3] - g.center)
+        rgb = evaluate_sh(g.sh_coeffs, view_dir)
+        
+        # 7. Pack major/minor axes into pair of 32-bit uints (16-bit floats per component)
+        packed_axes = pack_16bit_vectors(major_axis, minor_axis)
+        
+        # 8. Pack color and opacity into single 32-bit uint (RGBA8)
+        packed_color = pack_rgba8(rgb, g.opacity)
+        
+        alive_primitives.append({
+            'axes': packed_axes,
+            'depth': depth,
+            'color': packed_color,
+            'screen_center': screen_c
+        })
+        
+    return alive_primitives, depth_buffer
+
+def compute_projection_jacobian(center, view_proj):
+    x, y, z = center
+    w = view_proj[2, 0]*x + view_proj[2, 1]*y + view_proj[2, 2]*z + view_proj[2, 3]
+    f = 1.0 / w
+    f2 = f * f
+    J = np.zeros((2, 3))
+    J[0, 0] = view_proj[0, 0] * f - view_proj[0, 2] * x * f2
+    J[0, 1] = view_proj[0, 1] * f - view_proj[0, 2] * y * f2
+    J[0, 2] = -view_proj[0, 2] * z * f2
+    J[1, 0] = view_proj[1, 0] * f - view_proj[1, 2] * x * f2
+    J[1, 1] = view_proj[1, 1] * f - view_proj[1, 2] * y * f2
+    J[1, 2] = -view_proj[1, 2] * z * f2
+    return J
+
+def evaluate_sh(coeffs, direction):
+    # Standard SH evaluation [G]
+    return np.clip(np.dot(coeffs, direction), 0.0, 1.0)
+
+def pack_16bit_vectors(major, minor):
+    def pack_2d(v):
+        return (int(v[0] * 65535) & 0xFFFF) | ((int(v[1] * 65535) & 0xFFFF) << 16)
+    return (pack_2d(major), pack_2d(minor))
+
+def pack_rgba8(rgb, opacity):
+    r = int(np.clip(rgb[0], 0, 1) * 255)
+    g = int(np.clip(rgb[1], 0, 1) * 255)
+    b = int(np.clip(rgb[2], 0, 1) * 255)
+    a = int(np.clip(opacity, 0, 1) * 255)
+    return (r << 24) | (g << 16) | (b << 8) | a
+```
+
+**Edge Cases and Pitfalls:**
+-   **Precision:** The use of 16-bit floats for axis packing may introduce quantization errors for very small or very large splats [G].
+-   **Degenerate Input:** If a Gaussian is projected to a point or line (degenerate ellipse), the AABB calculation must handle zero-area cases gracefully [G].
+-   **Boundary Conditions:** The intersection test must correctly handle Gaussians that are partially off-screen but still contribute to the visible area [G].
+
+## Operating characteristics
+-   **Time Complexity:** Linear with respect to the number of Gaussians $O(N)$, as each Gaussian is processed independently [S1, unofficial].
+-   **Memory Complexity:** Requires additional buffers for depth, packed axes, and packed color/opacity, increasing memory bandwidth requirements during the pre-processing stage but reducing it during rasterization [S1, unofficial].
+-   **Performance:** Significantly reduces the number of primitives passed to the Sort and Rasterization stages, improving overall rendering efficiency [S1, unofficial].
+-   **Strengths:** Effective early rejection of off-screen primitives; reduces memory bandwidth for subsequent stages [S1, unofficial].
+-   **Limitations:** Requires projection and ellipse axis calculation for every Gaussian, even those culled [S1, unofficial].
+
+## Background
+Bounding Box Culling is a key component of the pre-processing stage in WebSplatter, a system designed for efficient Gaussian Splatting in web browsers via WebGPU [S1, unofficial]. It was introduced to address the computational bottleneck of sorting and rendering large numbers of Gaussians by filtering out invisible ones early [S1, unofficial].
+
+## Sources
+[S1] WebSplatter: Enabling Cross-Device Efficient Gaussian Splatting in Web Browsers via WebGPU, https://doi.org/10.48550/arxiv.2602.03207, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,448 @@
+A refreshingly simple data-driven game engine built in Rust - Meshlet rendering (initial feature) by JMS55 · Pull Request #10164 · bevyengine/bevy
+
+Meshlet rendering (initial feature) by JMS55 · Pull Request #10164 · bevyengine/bevy · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+JMS55
+commented
+Oct 17, 2023
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Objective
+Implements a more efficient, GPU-driven (Gpu Driven Rendering By Default #1342) rendering pipeline based on meshlets.
+Meshes are split into small clusters of triangles called meshlets, each of which acts as a mini index buffer into the larger mesh data. Meshlets can be compressed, streamed, culled, and batched much more efficiently than monolithic meshes.
+Misc
+Future work: Meshlet tracking issue #11518
+Nanite reference: https://advances.realtimerendering.com/s2021/Karis_Nanite_SIGGRAPH_Advances_2021_final.pdf
+Two pass occlusion culling explained very well: https://medium.com/@mil_kru/two-pass-occlusion-culling-4100edcad501
+JMS55
+added
+A-Rendering
+Drawing game state to the screen
+C-Performance
+A change motivated by improving speed, memory usage or compile times
+D-Complex
+Quite challenging from either a design or technical perspective. Ask for help!
+labels
+Oct 17, 2023
+JMS55
+added this to the
+0.13 milestone
+Oct 17, 2023
+superdump
+commented
+Oct 18, 2023
+Copy link
+Copy Markdown
+Contributor
+Awesome!
+Two-pass occlusion culling should not be tied to meshlets specifically. We should just do that separately.
+JMS55
+commented
+Oct 18, 2023
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+I don't see how they could.
+The meshlet system is already setup to do occlusion culling, basically. I already upload the bounding sphere information per meshlet, and have a culling and indirect draw pipeline in place.
+I don't see how we could share occlusion culling passes with meshlet meshes and regular meshes without basically duplicating all of the meshlet system and indirect draw setup, bounding info, etc, but changing it to operate on whole meshes instead of meshlets which is just more inefficient. If we were going that route, there would be no point in doing all the work for meshlets in the first place.
+BeastLe9enD
+commented
+Oct 21, 2023
+Copy link
+Copy Markdown
+Contributor
+Gate meshoptimizer dependency behind a cargo feature, or rewrite it in Rust.
+If you are looking for a pure-rust implementation, have a look at https://github.com/yzsolt/meshopt-rs
+JMS55
+commented
+Oct 21, 2023
+Copy link
+Copy Markdown
+Contributor
+Author
+Unfortunately meshopt-rs does not support the meshlet APIs (it's ported from an older version of meshoptimizer), which is why I'm using a different crate.
+JMS55
+commented
+Oct 25, 2023
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Plan for materials (assuming opaque meshes only, will extend to other passes later):
+In extract_meshlet_meshes, create a Vec of all meshlet mesh entities
+In a new Queue system, as part of MaterialPlugin for each material, for each entity from step one check if it's using the material via RenderMaterialInstances, and if so, push the material index (gotten from the hashmap in step 3) to a new Vec in MeshletGpuScene
+In a new PrepareAssets system that runs after prepare_materials::<M>, as part of MaterialPlugin for each material, upload changed opaque materials to MeshletGpuScene
+3a. Queue new render pipeline for the material, store pipeline ID + material bind group in a Vec
+3b. Use a HashMap to store index of material in the Vec, hashing based on material AssetId
+3c. Could skip materials not used by any meshlet mesh, at the cost of extra queries
+Optionally (may improve GPU coherence, at the cost of CPU time) in prepare_meshlet_per_frame_resources, sort per-frame-buffers by the material index before uploading
+In prepare_meshlet_per_frame_resources, instead of a single DrawIndexedIndirect item, make draw_command_buffer hold M items equal to the total material count
+5a. Each DrawIndexedIndirect::base_index needs to be equal to the total count of possible indices (after instancing) for that material
+5b. We can skip draws for materials that aren't used by any meshlet mesh entities
+In cull_meshlets, for each meshlet, index into the draw command array based on the material index to get the DrawIndexedIndirect for the meshlet's material, and then write to location draw_index_buffer_start + draw_indirect_command.base_index + offset in the index buffer
+JMS55
+commented
+Oct 28, 2023
+Copy link
+Copy Markdown
+Contributor
+Author
+This PR is usable atm, and has large chunks of code ready. The plan is once 0.12 is released, I'll start opening smaller PRs with parts of these changes. The goal is to incrementally merge chunks of code for meshlet rendering, instead of one big PR with all the changes.
+This was referenced Oct 29, 2023
+Add frustum to shader View
+#10306
+Merged
+Allow using no vertex buffers for render pipeline layouts
+#10307
+Closed
+Replace instance index vertex output with mesh flags
+#10308
+Closed
+github-merge-queue Bot
+pushed a commit
+that referenced
+this pull request
+Oct 31, 2023
+Add frustum to shader View (#10306)
+…
+3628e09
+```
+# Objective
+- Work towards GPU-driven culling
+(#10164)
+
+## Solution
+- Pass the view frustum to the shader view uniform
+
+---
+
+## Changelog
+- View Frustums are now extracted to the render world and made available
+to shaders
+```
+JMS55
+mentioned this pull request
+Oct 31, 2023
+Keep track of when a texture is first cleared
+#10325
+Merged
+JMS55
+commented
+Nov 1, 2023
+Copy link
+Copy Markdown
+Contributor
+Author
+Plan to support (occlusion culling, visibility buffer, shadows, forward + prepass, deferred):
+Each view will get a visibility buffer (not to be confused with the vbuffer texture)
+Stores visible/not visible in view as a boolean for each meshlet, persisted across two frames (previous and current)
+Instances of meshlets (thread_meshlet) can get their previous visibility via previous_visibility[previous_visibility_id[thread_id]], where previous_visibility_id is uploaded on the CPU during the current frame, using a resource holding the data from the previous frame (might be a better way to do this without the extra indirection and previous_visibility_id buffer...)
+MeshletVBufferNode - Render depth, vbuffer (thread_id + triangle_id), and material depth
+PreviousOccluderPreparePass - Take meshlets visible last frame, as indicated by previous_visibility, write index buffer to render them
+VBufferRenderPass1 - Render the 3 node outputs using a single draw_indirect_indexed()
+GenerateHzbPass - Take depth buffer generated so far, downscale several times to create a hierarchical depth buffer
+CullPass - Take all meshlets, frustum cull, occlusion cull against hzb, write visibility to visibility buffer for next frame, and if visible write index buffer to render them
+VBufferRenderPass2 - Render the 3 node outputs using a single draw_indirect_indexed()
+MeshletShadowMapNode/MeshletPrepassNode/MeshletOpaque3dMainPassNode
+For each material, draw a single triangle/quad using the material depth trick, reconstruct vertex properties, and then shade the fragment
+The messiest part is having to use a previous/next visibility buffer with separate indices, instead of being able to assume [object/instance/entity] index is constant across frames, and use a single read_write visibility buffer. Will have to think more on how to do this.
+JMS55
+commented
+Nov 1, 2023
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Additional complication: Vertex data can't be provided to the fragment shader via the vertex output. Fragment shader will need to read the vbuffer pixel, and load all the meshlet and then vertex data. This means we need to modify the fragment shader.
+I'll probably have to re-write shaders using naga_oil somehow to load the vbuffer data to construct the VertexOutput, instead of directly reading it as the fragment input.
+JMS55
+commented
+Nov 5, 2023
+Copy link
+Copy Markdown
+Contributor
+Author
+Useful reference for visbuffer barycentrics, partial derivatives, and the other complicated stuff: https://github.com/JuanDiegoMontoya/Frogfood/blob/main/data/shaders/visbuffer/VisbufferResolve.frag.glsl
+JMS55
+commented
+Nov 5, 2023
+Copy link
+Copy Markdown
+Contributor
+Author
+Next step is to emit "material id" to a depth texture. Visbuffer fragment shader will output material ID to a R16Uint color attachment, and then an extra fullscreen triangle render pass will read that texture and write to a depth target.
+ameknite
+pushed a commit
+to ameknite/bevy
+that referenced
+this pull request
+Nov 6, 2023
+Add frustum to shader View (bevyengine#10306)
+…
+894a704
+```
+# Objective
+- Work towards GPU-driven culling
+(bevyengine#10164)
+
+## Solution
+- Pass the view frustum to the shader view uniform
+
+---
+
+## Changelog
+- View Frustums are now extracted to the render world and made available
+to shaders
+```
+JMS55
+mentioned this pull request
+Nov 9, 2023
+Swap material and mesh bind groups
+#10485
+Merged
+JMS55
+added 9 commits
+November 19, 2023 00:08
+Misc?
+f370980
+Fixes
+21e52aa
+Merge commit '951c9bb1a25caddc97ac69bbe8a2937f97227e90' into meshlet
+5bf13ba
+Add texture_attachment module
+a6266e1
+Switch shadow view to new API
+e48b7b1
+Depth target attachment
+f875497
+Make ColorAttachment hold CachedTexture directly
+52c429d
+WIP
+66aeff0
+WIP
+d89d118
+JMS55
+added 2 commits
+March 17, 2024 22:37
+Add warning on the material trait methods
+bdc87f1
+Add warning to example
+8510640
+atlv24
+reviewed
+Mar 18, 2024
+View reviewed changes
+Comment thread
+crates/bevy_pbr/src/material.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+atlv24
+reviewed
+Mar 18, 2024
+View reviewed changes
+Comment thread
+crates/bevy_pbr/src/material.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+atlv24
+reviewed
+Mar 18, 2024
+View reviewed changes
+Comment thread
+crates/bevy_pbr/src/material.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+JMS55
+and others
+added 3 commits
+March 17, 2024 23:26
+Update crates/bevy_pbr/src/material.rs
+…
+7eb151c
+```
+Co-authored-by: vero <email@atlasdostal.com>
+```
+Update crates/bevy_pbr/src/material.rs
+…
+b13b324
+```
+Co-authored-by: vero <email@atlasdostal.com>
+```
+Update crates/bevy_pbr/src/material.rs
+…
+a0b2bbf
+```
+Co-authored-by: vero <email@atlasdostal.com>
+```
+cart
+reviewed
+Mar 22, 2024
+View reviewed changes
+cart
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This is definitely exciting work! The approach (while complicated) is surprisingly straightforward given what its doing and what we get. Very curious to see how this performs if you've already done testing (not blocking: I know theres a lot of changes planned).
+Makes me want to consider "fragment shader abstractions" so people can write custom fragment shaders that "just work" with meshlets / deferred / prepass / normal forward without needing a bunch of ifdefs + import knowledge. Doesn't seem like a particularly challenging problem to solve given that its mostly import differences and a bit of setup code. (obviously not something we should handle in this PR)
+Comment thread
+crates/bevy_pbr/src/meshlet/meshlet_bindings.wgsl
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/bevy_pbr/src/lib.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+JMS55
+commented
+Mar 22, 2024
+Copy link
+Copy Markdown
+Contributor
+Author
+Performance varies wildly depending on the scene. There's considerable base overhead, but it should scale up to much higher density scenes, especially with lots of occlusion. It's really meant for rendering really dense, ridiculously high resolution scenes where the goal is to render 1 triangle per pixel, so you're never limited by lack of geometric detail. We're not there yet due to lack of lods or software raster though. So performance can be quite good in certain scenes with lots of occlusion atm, but it can't render higher resolution stuff like it's intended to, and on simpler scenes the base overhead dominates compared to bevy's standard renderer. I don't have specific numbers to give ATM, I'll do a lot more in depth comparisons once we have LODs and software raster in.
+I agree on the material shader needing some abstraction in the future. You kind of can do that already with our existing ifdefs, but it's not the best. One complication is that derivatives need to be manually calculated when using the visbuffer. We'd probably need some kind of automatic chain rule applier that differentiates functions, like Slang has.
+JMS55
+added 4 commits
+March 22, 2024 17:49
+Merge commit '67cc605e9ff1f7b8d059e7bed32c76732e02d8b5' into meshlet
+cdd83cb
+Rename indirect draw buffer
+78dec88
+Gate meshlets behind a feature (kinda ugly)
+8636e82
+Use async asset loader/saver
+f27af6e
+github-actions
+Bot
+commented
+Mar 23, 2024
+Copy link
+Copy Markdown
+Contributor
+You added a new feature but didn't update the readme. Please run cargo run -p build-templated-pages -- update features to update it, and commit the file change.
+Regen feature docs
+898f527
+JMS55
+added
+the
+S-Ready-For-Final-Review
+This PR has been approved by the community. It's ready for a maintainer to consider merging it
+label
+Mar 23, 2024
+atlv24
+approved these changes
+Mar 23, 2024
+View reviewed changes
+JMS55
+added 2 commits
+March 24, 2024 22:50
+Early submission for GPU data uploads
+95bf6e5
+Ensure we halve depth pyramid mip 0 even when the view size is alread…
+…
+087ab5c
+```
+…y a power of 2
+```
+alice-i-cecile
+enabled auto-merge
+March 25, 2024 18:19
+alice-i-cecile
+added this pull request to the merge queue
+Mar 25, 2024
+Merged
+via the queue into
+bevyengine:main
+with commit 4f20faa
+Mar 25, 2024
+JMS55
+mentioned this pull request
+Mar 26, 2024
+Meshlet tracking issue
+#11518
+Open
+atlv24
+mentioned this pull request
+Apr 15, 2024
+64 bit Image Atomics
+gfx-rs/wgpu#5537
+Merged
+4 of 6 tasks
+JMS55
+mentioned this pull request
+Apr 20, 2024
+Depth clamp/clip improvements
+gfx-rs/wgpu#3900
+Open
+alice-i-cecile
+mentioned this pull request
+Jun 3, 2024
+Write release notes for PR #10164: Meshlet rendering (initial feature)
+bevyengine/bevy-website#1288
+Closed
+alice-i-cecile
+commented
+Jun 3, 2024
+Copy link
+Copy Markdown
+Member
+Thank you to everyone involved with the authoring or reviewing of this PR! This work is relatively important and needs release notes! Head over to bevyengine/bevy-website#1288 if you'd like to help out.
+cart
+removed this from @cart's attention
+Jan 28, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+A-Rendering
+Drawing game state to the screen
+C-Performance
+A change motivated by improving speed, memory usage or compile times
+D-Complex
+Quite challenging from either a design or technical perspective. Ask for help!
+M-Release-Note
+Work that should be called out in the blog due to impact
+S-Ready-For-Final-Review
+This PR has been approved by the community. It's ready for a maintainer to consider merging it
+16 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

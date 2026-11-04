@@ -1,0 +1,91 @@
+# Stackless Traversal
+
+Also called: Algorithme sans pile, Parcours sans pile
+
+## Overview
+Stackless Traversal is a method for traversing hierarchical volume structures (specifically N3-trees) that eliminates the need for a stack data structure by recalculating Digital Differential Analyzer (DDA) parameters at each tree descent and ascent [S1, unofficial]. It differs from sibling methods like [Leaf Collection](899-leaf-collection.md) and [Point Plane Test Traversal](982-point-plane-test-traversal.md) by relying on parent pointers for ascent and full DDA recalculation rather than incremental updates or explicit leaf enumeration, optimizing for GPU register usage and branch divergence [S1, unofficial].
+
+## How it works
+**Inputs:** A hierarchical volume structure (N3-tree) where each node stores a pointer to its parent and, if non-empty, an average color/value and occupancy status. A ray defined by origin and direction.
+**Outputs:** Integrated color and opacity for the ray.
+
+**Data Structures:**
+*   **Node:** Contains a pointer to the parent node, a pointer to child nodes (if internal), and metadata (average color, occupancy).
+*   **DDA State:** Current position, step size, and direction signs for the current voxel/brick.
+
+**Steps:**
+1.  **Initialization:** Compute initial DDA parameters for the root node based on the ray origin and direction [S1, unofficial].
+2.  **Descent:** Traverse down the tree. At each step, recalculate all DDA parameters for the child node based on the current ray state and the child's spatial bounds [S1, unofficial].
+3.  **Node Evaluation:**
+    *   If the current node is empty, ignore it and proceed to the next candidate [S1, unofficial].
+    *   If the node is not empty, extract the current cell information from the direct pointer to the exact child node within the parent's grid, avoiding recalculation [S1, unofficial].
+4.  **Accumulation:** If the node is a leaf or contains data, use the stored average color/value and accumulate it based on the distance traversed by the ray in that brick (pre-integration) [S1, unofficial]. If the node is a loaded brick, sample it; if it is an unloaded brick (due to dynamic loading failure or out-of-core constraints), use the stored average [S1, unofficial].
+5.  **Ascent:** Return to the parent node using the parent pointer stored in the hierarchical structure [S1, unofficial].
+6.  **Iteration:** Repeat descent and ascent until the ray exits the volume or is fully occluded.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def stackless_traverse(ray, root):
+    # Initialize DDA for the root
+    dda = compute_dda(ray, root.bounds)
+    current_node = root
+    
+    while current_node is not None:
+        # Descent: Recalculate DDA for the next child
+        # This step replaces stack-based state preservation
+        next_node, dda = descend_and_recalc_dda(current_node, dda)
+        
+        if next_node is None:
+            # Ascent: Use parent pointer to go back up
+            current_node = current_node.parent
+            if current_node is not None:
+                # Extract current cell info from parent's grid using direct pointer
+                # to the exact child node, avoiding recalculation
+                dda = extract_dda_from_parent(current_node, next_node_was)
+            continue
+            
+        current_node = next_node
+        
+        # Evaluate node
+        if current_node.is_empty:
+            # Ignore empty nodes
+            current_node = current_node.parent
+            continue
+            
+        # Accumulate contribution
+        distance = compute_ray_brick_intersection_distance(ray, current_node.bounds)
+        if current_node.is_loaded:
+            color = sample_voxel_data(ray, current_node.data, dda)
+        else:
+            # Use stored average for unloaded bricks
+            color = current_node.average_color
+            
+        accumulate(color, distance)
+        
+        # Continue traversal
+        # Logic to determine next child or ascent is handled in descend_and_recalc_dda
+        # based on ray exit from current brick
+```
+
+**Parameters:**
+*   **Conditional Block Size:** Limited to reduce divergent threads on GPU multiprocessors [S1, unofficial].
+*   **Register Usage:** Limited to allow multiprocessors to handle more parallel threads, better covering texture access latency [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **GPU Memory Latency:** On NVIDIA G80 architecture, dynamically indexed arrays are placed in 'local' memory (device memory) by the shader compiler, which is uncached and up to 50x slower than registers [S1, unofficial]. This negatively impacts performance compared to register-based stack access [S1, unofficial].
+*   **Dynamic Loading Failure:** If a brick fails to load dynamically (e.g., due to sudden load overload), the algorithm falls back to using the stored average color in the node [S1, unofficial].
+
+## Operating characteristics
+*   **Performance:** Approximately 50% faster than the mini-stack algorithm on the tested hardware (G80) [S1, unofficial].
+*   **Strengths:** Eliminates stack memory overhead; reduces register pressure by avoiding stack storage; limits branch divergence through constrained conditional blocks [S1, unofficial].
+*   **Limitations:** Recalculating DDA parameters at every step increases computational cost per node compared to incremental updates; performance is sensitive to GPU memory hierarchy (local memory penalty) [S1, unofficial].
+*   **When to use:** When stack memory is constrained or when GPU register pressure is a bottleneck; suitable for hierarchical structures with parent pointers [S1, unofficial].
+*   **When not to use:** On architectures where local memory latency is prohibitive and register usage cannot be sufficiently optimized; when incremental DDA updates are significantly cheaper than recalculation [S1, unofficial].
+
+## Background
+Stackless Traversal was developed as part of research into interactive exploration of procedural volume data, specifically targeting N3-tree structures [S1, unofficial]. It was designed to optimize GPU rendering by minimizing stack usage and branch divergence, addressing performance bottlenecks observed in stack-based traversals on early GPU architectures like the G80 [S1, unofficial].
+
+## Sources
+[S1] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)

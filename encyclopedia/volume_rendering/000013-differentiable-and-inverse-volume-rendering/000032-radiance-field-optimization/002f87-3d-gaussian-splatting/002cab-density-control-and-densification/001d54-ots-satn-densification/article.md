@@ -1,0 +1,120 @@
+# OTS+SAtn Densification
+Also called: Densification for Real-World Scenes
+
+## Overview
+OTS+SAtn Densification is a density control strategy for 3D Gaussian Splatting (3DGS) that adapts the densification parameters of the OTS+SAtn method to match the behavior of standard 3DGS, primarily for evaluation on large real-world scenes [S1]. It differs from its sibling [Adaptive Densification](3034-adaptive-densification.md) and [3D Gaussian Splatting Adaptive Density Control](3526-3d-gaussian-splatting-adaptive-density-control.md) by explicitly prioritizing parameter parity with the baseline 3DGS implementation to eliminate discrepancies in primitive count, rather than optimizing for a specific theoretical density metric [S1]. It is used when evaluating the quality and performance of OTS+SAtn against 3DGS on datasets like MipNeRF360 [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A set of 3D Gaussians, camera poses, and training images.
+- Output: An updated set of 3D Gaussians with controlled density.
+
+**Data Structures:**
+- Gaussian primitives: Position $\mathbf{p}$, covariance $\Sigma$ (or scale/rotation), opacity $\alpha$, color $\mathbf{c}$.
+- Accumulated position gradients: $\mathbf{g}_{pos}$ per primitive.
+- Current Gaussian count: $N$.
+
+**Parameters:**
+- Maximum Gaussian count: $N_{max} \in \{100\text{k}, 500\text{k}, 1\text{m}, 5\text{m}\}$ [S1].
+- Position gradient threshold: $T_{grad} = 1.5 \times 10^{-4}$ [S2].
+- Opacity removal threshold: $T_{op} = 0.025$ [S2].
+- Size removal threshold: $T_{size\_scene} = 40\%$ of scene size or $T_{size\_pixel} = 20$ pixels [S2].
+- Duplication size threshold: $T_{dup} = 1\%$ of scene size [S2].
+- Split relative size: $1.2^{-1}$ (i.e., scaled by $1/1.2$) [S2].
+
+**Steps:**
+1. **Gradient Accumulation:** During training, accumulate position gradients for each Gaussian primitive. Do not propagate gradients through the density normalization factor [S2].
+2. **Pruning:**
+   - Remove primitives with opacity $\alpha < T_{op}$ [S2].
+   - Remove primitives with size larger than $T_{size\_scene}$ or $T_{size\_pixel}$ [S2].
+3. **Densification Decision:**
+   - Identify primitives with accumulated position gradient magnitude $\|\mathbf{g}_{pos}\| > T_{grad}$ [S2].
+4. **Densification Action:**
+   - For primitives smaller than $T_{dup}$: Duplicate the primitive [S2].
+   - For primitives larger than or equal to $T_{dup}$: Replace the primitive with two new primitives [S2].
+     - The new primitives have a relative size of $1.2^{-1}$ compared to the original [S2].
+     - **Position Sampling:**
+       - If the primitive is an **octahedron**: Sample new positions normally with standard deviation aligned with and equal to the distances in each dimension [S2].
+       - If the primitive is a **tetrahedron**: Sample new positions normally with standard deviations equal to half of the largest distance [S2].
+5. **Termination:** Stop densification when the total number of Gaussians $N$ reaches $N_{max}$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ots_sats_densification_step(gaussians, gradients, scene_size, max_gaussians):
+    # Step 2: Pruning
+    to_remove = []
+    for g in gaussians:
+        if g.opacity < 0.025:
+            to_remove.append(g)
+        elif g.size > 0.4 * scene_size or g.size > 20: # 20 pixels
+            to_remove.append(g)
+    
+    gaussians = [g for g in gaussians if g not in to_remove]
+    
+    # Step 3 & 4: Densification
+    new_gaussians = []
+    for g in gaussians:
+        if g.grad_norm > 1.5e-4:
+            if g.size < 0.01 * scene_size:
+                # Duplicate
+                new_g = copy(g)
+                new_gaussians.append(new_g)
+            else:
+                # Split into two
+                scale_factor = 1.0 / 1.2
+                # Determine sampling strategy based on primitive type
+                if g.type == "octahedron":
+                    std_dev = g.dim_distances # distances in each dimension
+                elif g.type == "tetrahedron":
+                    std_dev = 0.5 * g.max_distance # half of largest distance
+                else:
+                    std_dev = g.dim_distances # [G] Default fallback
+                    
+                pos1 = sample_normal(g.position, std_dev)
+                pos2 = sample_normal(g.position, std_dev)
+                
+                g1 = copy(g)
+                g1.position = pos1
+                g1.scale *= scale_factor
+                
+                g2 = copy(g)
+                g2.position = pos2
+                g2.scale *= scale_factor
+                
+                new_gaussians.append(g1)
+                new_gaussians.append(g2)
+        else:
+            new_gaussians.append(g)
+            
+    gaussians = new_gaussians
+    
+    # Step 5: Termination check
+    if len(gaussians) >= max_gaussians:
+        return gaussians, False # Stop densification
+        
+    return gaussians, True
+```
+
+## Subtopics
+
+### [Gradient-based Densification Control](3182-gradient-based-densification-control.md)
+Gradient-based Densification Control is a mechanism for allocating 3D Gaussian primitives to regions with high reconstruction error by using gradient magnitude as a proxy for representational need. It differs from sibling methods by explicitly decoupling the *decision* to densify (based on gradient magnitude) from the *strategy* of densification (splitting vs. cloning, based on spatial extent), allowing for dataset-specific tuning of densification aggressiveness.
+
+### LinPrim Densification and Anti-Aliasing
+LinPrim Densification uses linear primitives (octahedra and tetrahedra) instead of Gaussians. During densification, primitives smaller than 1% of the scene are duplicated, while larger ones are replaced with two newer ones with a relative size of $1.2^{-1}$ [S2]. Position sampling is normal, with standard deviations aligned with dimension distances for octahedra or half the largest distance for tetrahedra [S2]. Gradients are not propagated through the density normalization factor [S2]. For anti-aliasing, a 2D filter kernel size of 0.1 is used, moving the ray space vector by half that amount (0.05) for octahedra, while the 3D filter remains consistent with Mip-Splatting [S2].
+
+## Operating characteristics
+- **Time Complexity:** Training times are slightly lower (2%) for OTS+SAtn compared to 3DGS across all sizes [S1].
+- **Memory Complexity:** Controlled by the maximum Gaussian count $N_{max}$ [S1].
+- **Performance:** On MipNeRF360, OTS+SAtn and 3DGS differ by at most 4% PSNR across all tested sizes and scenes [S1].
+- **Strengths:** Eliminates egregious discrepancies in primitive count between OTS+SAtn and 3DGS, allowing for fair comparison on real-world scenes [S1].
+- **Limitations:** The procedure is not as controlled as the main setup for OTS+SAtn, as it forces 3DGS-like parameters [S1].
+
+## Background
+OTS+SAtn Densification was proposed in the context of evaluating 3D Gaussian Splatting variants on real-world datasets [S1]. It adapts the densification variables of the OTS+SAtn method to match 3DGS as closely as possible, stopping densification at specific Gaussian counts (100k, 500k, 1m, 5m) to facilitate comparison [S1]. The method is cited in "Does 3D Gaussian Splatting Need Accurate Volumetric Rendering?" [S1].
+
+## Sources
+[S1] Does 3D Gaussian Splatting Need Accurate Volumetric Rendering?, https://doi.org/10.1111/cgf.70032, fetched 2026-10-26
+[S2] LinPrim: Linear Primitives for Differentiable Volumetric Rendering, https://arxiv.org/abs/2501.16312, fetched 2026-10-26

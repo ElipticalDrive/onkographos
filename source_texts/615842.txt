@@ -1,0 +1,191 @@
+Hi, I want to save as mesh after running a whole sequence of images, but the saved ply is empty. I checked the code, and in the Marching Cubes method (ITMMeshingEngine_CUDA.tcu), there is a problem with the buildVertList function called ...
+
+Problem With Saving Mesh. · Issue #1 · AIS-Bonn/DirectionalTSDF · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Problem With Saving Mesh. #1
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Problem With Saving Mesh.#1
+Copy link
+Description
+sjwaabc
+opened on Aug 30, 2024
+Issue body actions
+Hi, I want to save as mesh after running a whole sequence of images, but the saved ply is empty.
+I checked the code, and in the Marching Cubes method (ITMMeshingEngine_CUDA.tcu), there is a problem with the buildVertList function called in the meshScene_device function, where all the values of ” sdfVals” values are all 0, which leads to the MC method error. The reason for this problem is that the readVoxel function does not work? I look forward to your reply.Thanks.
+(The version I am compiling and running is ECMR2021_initial_submission.)
+By the way, I am running the TUM dataset mentioned in readme.md, thanks!
+Activity
+sjwaabc commented on Aug 30, 2024
+sjwaabc
+on Aug 30, 2024
+Author
+More actions
+@splietker
+splietker commented on Aug 30, 2024
+splietker
+on Aug 30, 2024
+Collaborator
+More actions
+Hi, thanks for checking out my project!
+Are you running tsdfMode: directional or tsdfMode: default (Files/settings.yaml)? The meshing for directional is currently not supported, but you can find it in the previous project https://github.com/AIS-Bonn/MeshHashingDTSDF.
+Also, unless you have a good reason to use an old tag, I would encourage you to use main branch, since it contains the latest state, including lots of bug fixes.
+sjwaabc commented on Aug 30, 2024
+sjwaabc
+on Aug 30, 2024
+Last edited by sjwaabc
+Author
+More actions
+Thanks for your reply！
+I'm running in DIRECTIONAL mode and I seem to have found the problem, when doing the voxel coordinate conversion to block coordinates, it keeps traversing the block coordinates at (0,0,0) because the voxel's xyz coordinates are all less than 8.
+MeshHashingDTSDF project which I have similarly run and used on my own dataset is excellent, but this project does not seem to be an incremental Marching Cubes method as the time increases rapidly with the number of frames, not so good for my application.
+Do you have any good insights or suggestions on this issue? Or ideas for modifications?Anything at all, thanks again.
+splietker commented on Aug 30, 2024
+splietker
+on Aug 30, 2024
+Last edited by splietker
+Collaborator
+More actions
+Like I said, DIRECTIONAL meshing is NOT supported in this project. You would need to port it yourself from the other project.
+Regarding the incremental Marching cubes: what is slow in your scenario? fusing frames or the actual mesh extraction using the MC algorithm? For the latter, the problem is, that the entire mesh is computed at once in GPU memory, before being stored. But if you check out the main branch, in ITMMeshingEngine_CUDA.cu I wrote a MeshSceneStreamed function, which computes only a chunk of voxels at a time. Therefore it has only constant GPU memory requirements!
+edit:
+Just figured, you probably mean fusion time. The reason the time to integrate new frames increases with a growing map is, that finding visible blocks is naively implemented as linear search (FindVisibleBlocks in ITMSceneReconstructionEngine_CUDA.tcu).
+To analyze where you are actually spending most of the time, have a look at the file Output/time_stats.txt. You can also plot the summary with Scripts/time_stats.py Output/time_stats.txt
+👍React with 👍1Reacted by sjwa
+sjwaabc commented on Aug 30, 2024
+sjwaabc
+on Aug 30, 2024
+Author
+More actions
+Thanks again for the reply.
+To answer your first question: I've read your MeshHashingDTSDF project, and I found that every time, the actual mesh extraction using the MC algorithm is re-done for all the current Blocks, which is the reason for the gradual increase in runtime. And tsdf fusion on the contrary the time is not so exaggerated...
+(And what I want is an “incremental” MC method like: “only update voxel positions where the sdf value changes”...)
+I will read what you said about the MeshSceneStreamed function, and try to modify it!
+splietker commented on Aug 30, 2024
+splietker
+on Aug 30, 2024
+Collaborator
+More actions
+Now I get what you mean! Yes, you can probably use theallocationFusionBlocksList in ITMSceneReconstructionEngine and only update the mesh for those blocks. But you'll need an intermediate data structure to swap out parts of the mesh.
+sjwaabc commented on Aug 30, 2024
+sjwaabc
+on Aug 30, 2024 · Hidden as duplicate
+Last edited by sjwaabc
+Author
+show commentMore actions
+sjwaabc commented on Aug 31, 2024
+sjwaabc
+on Aug 31, 2024
+Last edited by sjwaabc
+Author
+More actions
+Hi, @splietker, I have two last questions.
+I just checked the MeshSceneStreamed function you mentioned, and I found that he differs from the MeshSceneDefault function (including the MeshScene function in the 2021 branch) in that it uses multiple CUDA streams and splits the task into multiple batches (N) for processing.
+If I want to do Marching Cubes every frame and only update the location with a change in sdf value every frame, I need to use the allocationFusionBlocksList after voxel fusion in each frame to get the Voxel Block that generates the change in the current frame, and the incremental MC method would require me to write my own code.
+Is my understanding correct? Thank you!
+splietker commented on Sep 1, 2024
+splietker
+on Sep 1, 2024
+Collaborator
+More actions
+That's correct. I wrote the MeshSceneStreamed function to reduce the memory requirements of mesh extraction by only computing small batches on the GPU and streaming the results back to the CPU. The CUDA streams are used to allow asynchronous copying, while a different batch is computed. But this is optional.
+You got the idea, alright. In the meshing function findAllocatedBlocks is used, and you would need to use the allocationFusionBlocksList instead. The problem in you scenario is, that right now after computing the triangles for a given batch of blocks, the triangles are simply concatenated on the CPU side. You would need to change that, since you want to keep the entire mesh in RAM and replace parts, i.e. you need a mapping from block id (or voxel id) to triangles. This is a bit tricky, since the number of triangles per block varies.
+I suppose the easiest way would be use a std::map, mapping from block id to a separate submesh. The issue here is, however, that after updating you would need to iterate over the map to gather the global mesh. It works, but might be too slow, depending on you scenario.
+👍React with 👍1Reacted by sjwa
+sjwaabc commented on Sep 3, 2024
+sjwaabc
+on Sep 3, 2024
+Last edited by sjwaabc
+Author
+More actions
+I get it. a mapping from block to triangles...
+By the way, "The meshing for directional is currently not supported" , after looking at the code, my understanding is that you are not storing the tsdf fusion results in a hash structure, right?
+Specifically : it doesn't go in the right place to execute the “hashEntry >= 0” OR "hashEntry <= -1" code.
+splietker commented on Sep 3, 2024
+splietker
+on Sep 3, 2024
+Collaborator
+More actions
+What I mean by "currently not supported" is, that all the code required for meshing the DTSDF (as used in the MeshHashing repository) has not been ported yet. You can probably mesh individual directions rather easily, but if you want to mesh the DTSDF with directional combining etc. you need to port the code yourself.
+Regarding the hashEntry: Yeah, that might be rather confusing, if you hop between ECMR2021_initial_submission and main. The original hash map had some problems (e.g. requiring multiple allocation passes), so I replaced it by stdgpu. It still uses hash mapping under the hood, though.
+To be clear, the fused SDF values are not stored in the hash map itself. The hash map maps from block indices to offsets in a linear array, where the actual SDF and weight values are stored.
+I don't know which specific code section containing “hashEntry >= 0” you are referring to, but all those sections have been replaced by stdgpu. There you can just use find(..) and emplace(...) to check for and add entries, as well as thrust::for_each to iterate over all entries.
+👀React with 👀1Reacted by sjwa
+sjwaabc commented on Sep 3, 2024
+sjwaabc
+on Sep 3, 2024
+Last edited by sjwaabc
+Author
+More actions
+I guess I'm really confused.
+What is meant about "linear array"？you mean the "stdgpu::set"? the one controlled by the gridDim, blockDim parameter of the kernel function?
+2.Maybe I change the traversal of the hash structure (blockidxy and blockdim) in the Marchingcubes algorithm to a traversal of the container you are talking about? That would generate the mesh? Even if it's not the mesh DTSDF in your paper.
+But in the main branch, the MeshSceneStreamed Function(i mean it's not meshing DTSDF, just a normal grid extraction) doesn't work(noTotalTriangles = 0), is that normal?
+->"auto tsdf = scene->tsdf->toCUDA()->getMap();" have a error: Access conflicts, and scene->tsdf = null.
+->But if do "auto tsdf = scene->tsdfDirectional->toCUDA()->getMap();" ，noTotalTriangles = 0.
+I don't want to jump between two branches either, the problem is that my code in branch 2021 runs fine(Besides mesh), but the main branch has problems...
+splietker commented on Sep 3, 2024
+splietker
+on Sep 3, 2024
+Collaborator
+More actions
+By linear array I mean a simple array of voxels. It is defined here.
+The actual tsdf hashmap is defined in this line (Map is a template parameter for generalization on std::map and stdgpu::map). It maps from block coordinates to a TVoxel pointer, which points to a location in the voxels array.
+The gridDim and blockDim parameters just tell the kernel, which instance to compute. If you are not familiar with CUDA kernels you can find an introduction here.
+I'm not sure I get you question correctly. For the meshing to work you need to first find all the relevant blocks (in your case the updated ones) and then extract the triangles for each voxel in these blocks.
+The gridDim/blockDim dictates how many kernels are executed. Inside the kernel you can use the blockIdx variable to determine this instance number. For example the meshScene_device kernel uses the blockIdx to look up a block, for which to compute the triangles.
+Well I don't really know what is up in your current branch. I just tested meshing on the main branch (with tsdfMode: default) and it works for me. I've not yet encountered the error you mentioned. Obviously, if the tsdf is Null, the kernel cannot extract a mesh from it. But that error should also occur during allocation and fusion. Can you maybe check there?
+This might also be a problem in stdgpu. I assume you checked out the git subdirectories correctly? The stdgpu commit I just tested with is 0091cee675bf64eddf61523108e2e53a985e51ec
+sjwaabc commented on Sep 4, 2024
+sjwaabc
+on Sep 4, 2024
+Last edited by sjwaabc
+Author
+More actions
+Now, i get you mean!
+I just ran the code on the main trunk and I added cudaLastError after the core function and the error was reported as: invalid device function.
+Actually it is the reason that the declaration and implementation parameter lists of the kernel function in your code are inconsistent, the modifier of tsdf:const.
+DirectionalTSDF/ITMLib/src/Engines/Meshing/CUDA/ITMMeshingEngine_CUDA.cu
+Line 180
+in
+4769fe2
+const stdgpu::unordered_map<TIndex, ITMVoxel*> tsdf,
+and
+DirectionalTSDF/ITMLib/src/Engines/Meshing/CUDA/ITMMeshingEngine_CUDA.cu
+Line 24
+in
+4769fe2
+stdgpu::unordered_map<TIndex, ITMVoxel*> tsdf,
+And I added -maxrregcount to my cuda compilation parameter to limit the number of thread registrations, otherwise I get an error (too many resources requested for lauch).
+But the fusion of tsdfMode: default doesn't work very well, I'm now trying to modify the code on the main trunk to the fusion method of DTSDF in your paper.
+sjwaabc
+closed this as completedon Sep 9, 2024
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

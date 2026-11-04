@@ -1,0 +1,145 @@
+Part 1 of the RUXP LOD extension accepted in #321 (see docs/research/potree-vs-ruxp-lod.md §6–7, Issue A). Store the fused cloud in Morton/Hilbert curve order in the ProjectDB blobs at rux create clouds time, so any prefix of the stored ...
+
+GUI LOD 1/3: store fused clouds in Morton order at create clouds time · Issue #394 · pfmephisto/ReUseX · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+GUI LOD 1/3: store fused clouds in Morton order at create clouds time #394
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#400
+Closed
+GUI LOD 1/3: store fused clouds in Morton order at create clouds time#394
+#400
+Copy link
+Labels
+workstream: guiAnchor #265 — rux gui web frontend + backendAnchor #265 — rux gui web frontend + backend
+Description
+pfmephisto
+opened on Sep 21, 2026
+Issue body actions
+Part 1 of the RUXP LOD extension accepted in #321 (see docs/research/potree-vs-ruxp-lod.md §6–7, Issue A).
+Store the fused cloud in Morton/Hilbert curve order in the ProjectDB blobs at rux create clouds time, so any prefix of the stored points is a uniform spatial sample — prefix paging then doubles as LOD with no per-request server compute (this is #320's stated design goal: LOD and paging collapse into one mechanism).
+Write path: sort points by Morton code of their voxel coordinates before chunking into blobs; record a storage_order=morton flag in the cloud metadata (additive schema/metadata change following the existing conventions).
+Read path: point_lod.cpp skips the voxel-downsample pass when the flag says storage order is already spatial.
+Determinism: same input cloud → same ordering (STANDARDS §6).
+Existing projects without the flag keep the current path (no migration required).
+Estimated effort per the research doc: ~1 week. Blocks #B (tile index) and #C (multi-level LOD).
+Activity
+pfmephisto
+added
+workstream: guiAnchor #265 — rux gui web frontend + backendAnchor #265 — rux gui web frontend + backend
+on Sep 21, 2026
+pfmephisto commented on Sep 21, 2026
+pfmephisto
+on Sep 21, 2026
+OwnerAuthor
+More actions
+Implementation complete — feat/morton-order-clouds-394
+What was built
+Write path (libs/reusex/src/segmentation/reconstruct.cpp):
+After the outlier-removal step produces out_cloud / out_normals / out_labels, a Morton sort is applied before the DB write:
+Compute the cloud's bounding box.
+Quantise each point's x/y/z to 10-bit integers ([0, 1023]) relative to the bbox.
+Interleave bits with expand3 (x→bits 0,3,6,…; y→1,4,7,…; z→2,5,8,…) to produce a 30-bit code.
+std::stable_sort by code — ties resolved by storage index (STANDARDS §6).
+Apply the same permutation to out_normals and out_labels (CONTRACTS.md §3.2).
+Metadata (stays at schema v14): "storage_order":"morton_10bit" is injected into the existing parameters JSON column of the point_clouds table. No schema migration, no new column. Absent key → sequential/unspecified. Two new public API members:
+ProjectDB::point_cloud_storage_order(name) — single-cloud accessor.
+ProjectSummary::CloudInfo::storage_order — populated in project_summary().
+Read path (apps/rux/src/gui/point_lod.cpp):
+voxel_lod() now calls point_cloud_storage_order() after the under-budget early return. When the result is "morton_10bit" and the cloud is over budget, it returns db.point_cloud_page(name, 0, max_points) directly with subsampled=true and voxel_size=0.0 (same sentinel the under-budget path uses). The full voxel pass is skipped entirely. The unflagged path is byte-identical to before.
+Test results (935/935 pass)
+4 new cases in tests/unit/rux_gui/test_gui_point_lod.cpp:
+Test
+What it checks
+MortonLod_StorageOrderMetadata_RoundTrips
+point_cloud_storage_order() and project_summary() both return "morton_10bit"; absent key = ""
+MortonLod_FlaggedCloud_ReturnsPrefixNotVoxels
+Morton cloud → indices [0..N-1], voxel_size==0.0; unflagged cloud still runs voxel pass
+MortonLod_Prefix_IsSpatiallyConcentrated
+700-point prefix of an 8 000-point uniform cloud: all points below the Morton bbox midpoint on all 3 axes (first octant of the Z-curve)
+MortonLod_PermutationAlignedLabels_MatchGeometryPoints
+Same permutation applied to cloud and labels, verified via gather_points round-trip
+Render sanity check — ARKitScenes 41069050
+Re-ran create clouds -g 0.05 on a scratch copy. sqlite3 confirms the metadata:
+```
+cloud | {"resolution":0.05,...,"storage_order":"morton_10bit"}
+```
+Full cloud (26 144 pts, plan view):
+First 10 % prefix (2 614 pts, plan view):
+The prefix covers most of the scan footprint at lower density — spatially coherent, not a corner. For this room-scale scan the first Morton octant corresponds to the lower-z half of the space (floor plane), which aligns with the denser ceiling/floor scan returns.
+Design note — what "uniform spatial sample" means here
+For synthetic uniform 3D volumes, a Morton prefix covers one Z-curve octant (the first ~12.5 %). For real indoor point clouds (which are surface-heavy, not solid volumes), the first Morton octant spans the most densely scanned surfaces, producing a usable sparse whole-room representation. The voxel LOD path remains available for cases that need guaranteed uniform coverage.
+Ready for review
+PR: feat/morton-order-clouds-394 → Closes #394. Does NOT implement #395 (tile index) or #396 (multi-level stride LOD).
+pfmephisto
+added 2 commits that reference this issue on Sep 21, 2026
+fix(clouds): bit-reverse 30-bit Morton code for breadth-first LOD pre…
+...
+22b5858
+chore(assets): replace #394 renders with bit-reversed Morton correcte…
+...
+d28b8b7
+pfmephisto commented on Sep 21, 2026
+pfmephisto
+on Sep 21, 2026
+OwnerAuthor
+More actions
+Fix applied — bit-reversed Morton ordering (review verdict addressed)
+Three items from the merge review verdict:
+1. Sort key: plain → bit-reversed (the central fix)
+Was wrong: plain ascending Morton puts all of the first ~12.5% of points in one octant (x<mid ∧ y<mid ∧ z<mid). The spatial concentration test in my original commit even proved the defect — it asserted every prefix point lies below the bbox midpoint on all three axes.
+Fixed: Added reverse_bits30(v) helper (standard 32-bit swap then >> 2) applied to the sort key before stable_sort. Bit-reversal promotes the coarsest-level octant bits to the most-significant position, giving BFS-style coverage: the sort visits one representative from each of the 8 top-level octants, then from each of the 64 sub-octants, etc. Any stored prefix now round-robins across all spatial octants rather than concentrating in one.
+Metadata updated: "storage_order":"morton_10bit_bitrev".
+2. Spatial coverage test (was proving the defect, now guards the fix)
+Replaced MortonLod_Prefix_IsSpatiallyConcentrated (which asserted all prefix points below bbox midpoint — i.e. the WRONG property) with MortonLod_Prefix_IsStratiified:
+A 5 % prefix (400 of 8 000 points) must span ≥ 80 % of the full cloud's per-axis bbox range on all three axes
+Fails against plain Morton (a 5 % prefix spans ~50 % = one octant); passes against bit-reversed Morton
+3. Render: honest method, correct result
+Previous render used a sqlite3 truncation on a plain-Morton cloud. The new renders:
+Re-ran rux create clouds on a scratch copy with the fixed code → storage_order: morton_10bit_bitrev confirmed in sqlite3
+Extracted 10 % prefix by reading the first N * point_step bytes from the cloud blob — this is byte-identical to what point_cloud_page(name, 0, N) returns, which is what the LOD path serves
+Full cloud (26 144 pts):
+First 10 % prefix (2 614 pts) — bit-reversed Morton:
+The 10 % prefix covers the whole scan footprint at low density — sparse whole room, not a corner.
+Bonus fix: PlanarRegionGrowing ordering sensitivity
+The bit-reversed cloud ordering exposed a pre-existing bug in libs/reusex/extern/include/pcl/planar_region_growing.hpp: the algorithm found 3 planes instead of 5 on the corridor fixture, because two internal operations depended on array ordering:
+Seed curvature sort: used array-index tie-breaking → different seeds for the same physical points in different orderings. Fixed with spatial (x,y,z) tie-breaking.
+Radius search neighbor lists: FLANN's tree-traversal order changes with input ordering, causing different growing sequence for equidistant neighbors. Fixed by re-sorting each neighbor list by (distance, x, y, z) after the radius search.
+Both fixes make PlanarRegionGrowing::segment() fully invariant to cloud ordering (STANDARDS §6). All 935 tests pass.
+pfmephisto
+added a commit that references this issue on Sep 21, 2026
+Merge pull request #400 from pfmephisto/feat/morton-order-clouds-394
+...
+c72455a
+pfmephisto
+closed this as completedin #400on Sep 21, 2026
+pfmephisto
+added a commit that references this issue on Oct 9, 2026
+feat(clouds): sort fused cloud by Morton code at create clouds time (p…
+...
+6b30476
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+workstream: guiAnchor #265 — rux gui web frontend + backendAnchor #265 — rux gui web frontend + backend
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

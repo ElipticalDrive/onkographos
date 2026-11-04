@@ -1,0 +1,221 @@
+# Morphological Pyramid
+
+Also called: Adjunction Pyramid, Erosion/Dilation Pyramid, Morphological Adjunction Pyramid, Morphological Pyramid Construction, Pyramid Synthesis for MIP
+
+## Overview
+The Morphological Pyramid is a multiresolution representation scheme for volume data that uses morphological erosion and dilation combined with dyadic downsampling/upsampling to create a hierarchy of approximations and detail signals [S1, S2, unofficial]. It solves the problem of interactive rendering latency in Maximum Intensity Projection (MIP) by allowing coarse approximations to be rendered during user interaction and progressively refined with detail coefficients once interaction ceases [S1, unofficial]. Unlike linear pyramid-based MIP methods which rely on additive reconstruction, the Morphological Pyramid exploits the commutativity of the MIP operator with morphological dilation and upsampling, allowing the projection to be performed on coarse levels and expanded in 2-D, thereby avoiding expensive 3-D reconstruction for certain pyramid types [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3-D volume dataset $f_0$ defined on a discrete grid domain $F \subseteq \mathbb{Z}^d$ (where $d=3$ for volumes, though the pyramid operators often operate in 2-D for projection purposes) taking values in a finite set of nonnegative integers. A structuring element $A \subseteq \mathbb{Z}^d$.
+*   **Output:** An approximation pyramid $\{f_0, f_1, \dots, f_L\}$ and a detail pyramid $\{d_0, d_1, \dots, d_{L-1}, f_L\}$, where $L$ is the decomposition depth.
+
+**Data Structures:**
+*   **Approximation Pyramid:** A set of signals $\{f_j\}_{j=0}^L$. Each $f_j$ has a spatial resolution reduced by a factor of $2^j$ in each dimension compared to $f_0$.
+*   **Detail Pyramid:** A set of signals $\{d_j\}_{j=0}^{L-1}$ and the coarsest approximation $f_L$. Each $d_j$ has the same spatial resolution as $f_j$.
+
+**Morphological Operators:**
+Let $f$ be a signal with domain $F$ and $A$ be the structuring element.
+*   **Dilation:** $\delta_A(f)(x) = \max_{y \in A, x-y \in F} f(x-y)$ [S1, S2, unofficial].
+*   **Erosion:** $\epsilon_A(f)(x) = \min_{y \in A, x+y \in F} f(x+y)$ [S1, S2, unofficial].
+*   **Opening:** $\alpha_A(f)(x) = \delta_A(\epsilon_A(f))(x)$ [S1, S2, unofficial].
+
+**Pyramid Operators:**
+*   **REDUCE (Analysis):** $\psi_A^\uparrow(f) = \text{DOWNSAMPLE}(\epsilon_A(f))$ for Adjunction Pyramids [S2, unofficial]. For Sun-Maragos Pyramids, $\psi_A^\uparrow(f) = \text{DOWNSAMPLE}(\alpha_A(f))$ [S1, unofficial].
+*   **EXPAND (Synthesis):** $\psi_A^\downarrow(f) = \delta_A(\text{UPSAMPLE}(f))$ [S2, unofficial].
+    *   Note: In the context of MIP rendering, a 2-D variant $\psi_{\tilde{A}}^\downarrow$ is used, where $\tilde{A}$ is the MIP of $A$ (i.e., $\tilde{A} := M_\Theta(A)$) [S2, unofficial].
+
+**Generalized Subtraction:**
+To ensure non-negative detail signals, the generalized subtraction operator $\dot{-}$ is defined as [S1, S2, unofficial]:
+$$ t \dot{-} s = \begin{cases} t, & \text{if } t > s \\ 0, & \text{if } t = s \end{cases} $$
+where 0 is the smallest possible image or voxel value [S1, S2, unofficial].
+
+**Parameters:**
+*   **Structuring Element $A$:** A subset of $\mathbb{Z}^d$ defining the local neighborhood. It must satisfy the **pyramid condition**: there exists an $a \in A$ such that the translates of $a$ over an even number of grid steps are never contained in $A$ [S1, S2, unofficial].
+*   **Decomposition Depth $L$:** The number of levels in the pyramid.
+
+**Algorithm Steps:**
+
+1.  **Initialization:** Set $f_0$ as the input volume.
+2.  **Analysis (Decomposition):** For $j = 1$ to $L$:
+    a. Compute the approximation at level $j$: $f_j = \text{REDUCE}(f_{j-1})$.
+    b. Compute the expanded version of the coarser approximation: $\hat{f}_j = \text{EXPAND}(f_j)$.
+    c. Compute the detail signal: $d_{j-1} = f_{j-1} \dot{-} \hat{f}_j$.
+3.  **Reconstruction (Synthesis):** To reconstruct $f_0$ from $\{d_k\}$ and $f_L$:
+    $$ f = \psi_A^{\downarrow L}(f_L) \vee \bigvee_{k=0}^{L-1} \psi_A^{\downarrow k}(d_k) $$
+    where $\vee$ denotes the maximum operation [S1, unofficial]. This relies on the generalized addition being defined as $t \dot{+} s = t \vee s = \max(t, s)$ [S1, S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def morphological_pyramid_decomposition(volume, structuring_element_A, depth_L):
+    """
+    Constructs a morphological pyramid from a volume.
+    
+    Args:
+        volume: 3D array f_0.
+        structuring_element_A: Set of coordinates defining the structuring element.
+        depth_L: Number of pyramid levels.
+        
+    Returns:
+        approximations: List [f_0, f_1, ..., f_L]
+        details: List [d_0, d_1, ..., d_{L-1}]
+    """
+    approximations = [volume]
+    details = []
+    current_f = volume
+    
+    for j in range(1, depth_L + 1):
+        # 1. Erosion
+        eroded = morphological_erosion(current_f, structuring_element_A)
+        
+        # 2. Downsampling (dyadic, factor of 2 in each dimension)
+        # Implementation note: Keep every other voxel in each dimension.
+        f_j = downsample(eroded)
+        approximations.append(f_j)
+        
+        # 3. Upsampling (dyadic, factor of 2 in each dimension)
+        # Implementation note: Insert zeros or replicate values? 
+        # Standard morphological pyramid upsampling typically inserts zeros 
+        # or uses nearest neighbor before dilation. The source defines 
+        # EXPAND as dilation of upsampled. We assume standard upsampling 
+        # that creates a grid of size 2x2x2 for each voxel.
+        upscaled = upsample(f_j)
+        
+        # 4. Dilation
+        expanded = morphological_dilation(upscaled, structuring_element_A)
+        
+        # 5. Generalized Subtraction
+        # d_{j-1} = f_{j-1} dot-minus expanded
+        d_j_minus_1 = generalized_subtraction(current_f, expanded)
+        details.append(d_j_minus_1)
+        
+        current_f = f_j
+
+    return approximations, details
+
+def morphological_pyramid_reconstruction(approximations, details, structuring_element_A):
+    """
+    Reconstructs the volume from the pyramid.
+    
+    Args:
+        approximations: List [f_0, ..., f_L]
+        details: List [d_0, ..., d_{L-1}]
+        structuring_element_A: Structuring element for dilation.
+        
+    Returns:
+        reconstructed_volume: 3D array f_0
+    """
+    L = len(approximations) - 1
+    f_L = approximations[L]
+    
+    # Start with the coarsest approximation expanded back to full resolution
+    # Reconstruction formula: f = psi^L(f_L) vee vee_{k=0}^{L-1} psi^k(d_k)
+    
+    # We can compute this iteratively from coarse to fine
+    # However, the formula suggests expanding f_L and then OR-ing with expanded details.
+    
+    # Let's compute the contribution of each level
+    # Level L contribution: psi^L(f_L)
+    # Level k contribution: psi^k(d_k)
+    
+    # To implement psi^k, we apply EXPAND k times.
+    # EXPAND(f) = dilation(upsample(f))
+    
+    reconstructed = expand_n_times(f_L, L, structuring_element_A)
+    
+    for k in range(L):
+        # Expand d_k k times
+        d_k_expanded = expand_n_times(details[k], k, structuring_element_A)
+        # Take maximum
+        reconstructed = max(reconstructed, d_k_expanded)
+        
+    return reconstructed
+
+def morphological_erosion(volume, A):
+    """
+    Computes erosion: min_{y in A, x+y in F} f(x+y)
+    """
+    # Implementation: For each voxel x, find the minimum value in the neighborhood defined by A.
+    # Boundary handling: voxels outside F are treated as infinity for min? 
+    # Or the domain F is restricted. Source says x+y in F.
+    # If x+y is not in F, it is not considered.
+    # Standard implementation: pad with infinity.
+    pass
+
+def morphological_dilation(volume, A):
+    """
+    Computes dilation: max_{y in A, x-y in F} f(x-y)
+    """
+    # Implementation: For each voxel x, find the maximum value in the neighborhood defined by A.
+    # Boundary handling: voxels outside F are treated as -infinity for max.
+    # Standard implementation: pad with -infinity.
+    pass
+
+def downsample(volume):
+    """
+    Dyadic downsampling by factor of 2 in each dimension.
+    """
+    # Return volume[::2, ::2, ::2]
+    pass
+
+def upsample(volume):
+    """
+    Dyadic upsampling by factor of 2 in each dimension.
+    """
+    # Create a new volume of size 2x. Insert zeros or original values?
+    # Morphological upsampling usually inserts zeros (or background value) 
+    # before dilation.
+    pass
+
+def generalized_subtraction(t, s):
+    """
+    t dot-minus s
+    """
+    result = t.copy()
+    result[t <= s] = 0
+    return result
+
+def expand_n_times(f, n, A):
+    """
+    Applies EXPAND operator n times.
+    EXPAND(f) = dilation(upsample(f))
+    """
+    current = f
+    for _ in range(n):
+        upscaled = upsample(current)
+        current = morphological_dilation(upscaled, A)
+    return current
+```
+
+**Edge Cases and Pitfalls:**
+*   **Pyramid Condition:** If the structuring element $A$ does not satisfy the pyramid condition (existence of $a \in A$ such that translates over even grid steps are never contained in $A$), perfect reconstruction may fail [S1, S2, unofficial].
+*   **Detail Signal Size:** In Adjunction Pyramids, too few small features are retained in higher levels, making detail signals "too large" [S1, unofficial]. This can be mitigated by using the Sun-Maragos variant [S1, unofficial].
+*   **Precision:** The generalized subtraction relies on the smallest possible voxel value being 0. If the data contains negative values, this definition must be adjusted [S1, S2, unofficial].
+
+## Subtopics
+
+### [Multiresolution Maximum Intensity Projection (MMIP)](1745-multiresolution-maximum-intensity-projection-mmip.md)
+Multiresolution Maximum Intensity Projection (MMIP) is a progressive rendering algorithm for 3-D volume data that computes the maximum value along lines through the data set. It solves the problem of interactive rendering latency by using a morphological pyramid to provide coarse approximations during user interaction and progressively refining the image with detail coefficients once interaction ceases. Unlike linear pyramid-based MIP methods which rely on additive reconstruction, MMIP exploits the commutativity of the MIP operator with morphological dilation and upsampling, allowing the projection to be performed on coarse levels and expanded in 2-D, thereby avoiding expensive 3-D reconstruction for certain pyramid types.
+
+### Sun-Maragos Pyramid
+The Sun-Maragos Pyramid is an alternative morphological pyramid scheme for MIP volume rendering where a morphological opening is used for pyramidal analysis instead of erosion, while the synthesis operator remains a dilation [S1, unofficial]. The opening is defined as $\alpha_A(f)(x) = \delta_A(\epsilon_A(f))(x)$ [S1, S2, unofficial]. This variant improves approximation accuracy when rendering from higher levels of the pyramid compared to the standard Adjunction Pyramid, which uses erosion for analysis [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The construction of the pyramid involves $L$ levels of erosion/dilation and downsampling/upsampling. Each level reduces the data size by a factor of 8 (in 3D). The total time is proportional to the sum of the volumes at each level, which is dominated by the finest level. Reconstruction involves upsampling and dilation, which is also efficient.
+*   **Memory Complexity:** The pyramid stores $L+1$ approximation levels and $L$ detail levels. The total memory is roughly $2 \times \frac{8}{7}$ times the size of the original volume (geometric series sum).
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** The method scales well with resolution due to the multiresolution nature. Coarse levels can be rendered quickly for interactive feedback.
+*   **Strengths:** Perfect reconstruction property; commutativity with MIP allows efficient 2-D projection; progressive refinement.
+*   **Limitations:** Detail signals can be large in Adjunction Pyramids; requires careful selection of structuring element to satisfy pyramid condition.
+*   **When to use:** Interactive MIP volume rendering where progressive refinement is beneficial.
+*   **When not to use:** When small features are critical and Adjunction Pyramids are used without the Sun-Maragos variant; when memory is extremely constrained.
+
+## Background
+The Morphological Pyramid was introduced in the context of multiresolution algorithms for Maximum Intensity Projection (MIP) volume rendering [S1, S2, unofficial]. It is widely used in the display of magnetic resonance angiography (MRA) and ultrasound data due to its computational simplicity and effectiveness [S1, unofficial]. The concept of adjunction pyramids was introduced by Roefer [Roe01, Roe03, Roe05] [S2, unofficial]. The Sun-Maragos variant was studied by Sun and Maragos [15] and referenced in [3] [S1, unofficial]. The method is categorized under Interaction techniques (I.3.6) and Image Representation, Hierarchical, Morphological (I.4.10) [S1, unofficial].
+
+## Sources
+[S1] Comparison of Morphological Pyramids for Multiresolution MIP Volume Rendering, https://doi.org/10.2312/vissym/vissym02/061-070, fetched 2026-10-29 (unofficial)
+[S2] Multiresolution MIP Rendering of Large Volumetric Data Accelerated on Graphics Hardware, https://doi.org/10.2312/vissym/eurovis07/243-250, fetched 2026-10-26 (unofficial)

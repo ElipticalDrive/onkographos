@@ -1,0 +1,943 @@
+OpenVDB - Sparse volume data structure and tools. Contribute to AcademySoftwareFoundation/openvdb development by creating an account on GitHub.
+
+NanoVDB: CUDA connected-components labeling for ValueOnIndex grids by sifakis · Pull Request #2261 · AcademySoftwareFoundation/openvdb · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+sifakis
+commented
+Jul 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Summary
+Adds nanovdb::tools::cuda::ConnectedComponents — a CUDA connected-components labeling of the
+active voxels of a NanoVDB ValueOnIndex grid (6-connectivity). Two active voxels share a label
+iff they are connected through a path of adjacent active voxels. The public
+getVoxelLabelsAndCount() returns an owning label buffer indexed like the grid's values (each
+active voxel holds its component's dense id in [0, N); every other entry, including slot 0, the
+background, holds an all-ones sentinel), plus the component count N.
+Input requirements, as for the other topology operators:
+the grid must be a ValueOnIndex grid, enforced by a static_assert;
+it must have no active tiles, which are rejected with the same exception the other operators throw;
+it must index exactly its active voxels, with no statistics, as NanoVDB's CUDA builders produce. Debug builds assert this.
+The source grid is read in order on the operator's stream, so it may still be in flight there.
+All device scratch, the CUB temp pool and the returned label buffer are allocated through an
+injectable stream-ordered resource (ConnectedComponents<BuildT, ResourceT>, defaulting to
+nanovdb::cuda::DeviceResource). Scratch buffers are released right after their last use, and the
+label buffer outlives the operator.
+Algorithm
+Hierarchical, exploiting the 8³ leaf structure:
+Per-leaf union-find in shared memory (one block per leaf, one thread per voxel), using the
+primitives of Liu & Tarjan, "Simple Concurrent Connected Components Algorithms" (algorithm P,
+switching to algorithm R for the tail), producing each leaf-local component's voxel Mask<3> and
+six face bitmasks.
+Cross-leaf edge detection by intersecting the touching face masks over each leaf's +X/+Y/+Z
+neighbours (each undirected boundary visited once).
+Global lock-free union-find over the resulting component graph, with relaxed device-scope
+atomics; the representative is each class's minimum slot, so the result is order-independent.
+Also included
+ex_connected_components_cuda — rasterizes an .obj to a narrow band (MeshToGrid), drops the
+√3/2-voxel surface shell (PruneGrid), then labels; a CPU union-find oracle independently
+verifies the GPU component count and per-voxel partition.
+Unit tests, each of which checks every returned label against a CPU union-find:
+ConnectedComponents_MultiSphere, with analytic ground truth: N separated spheres give 2N shells, and an overlapping pair gives 2;
+ConnectedComponents_VoxelLabels, with a known-answer case and a seeded random fill near the percolation threshold;
+ConnectedComponents_InFlightGrid, with a grid still being uploaded on a non-blocking stream.
+TestMemoryResource tests: all allocations routed through an injected resource and balanced,
+label buffer outliving the operator, and buffer lifetime on a non-blocking stream.
+A pendingchanges/ entry.
+Notes
+The operator depends only on existing NanoVDB CUDA utilities + CUB; no new third-party
+dependencies. The example additionally uses MeshToGrid/PruneGrid and needs no OpenVDB.
+Targets develop/nanovdb.
+🤖 Generated with Claude Code
+swahtz
+added
+the
+nanovdb
+label
+Jul 23, 2026
+swahtz
+assigned
+sifakis
+Jul 23, 2026
+linux-foundation-easycla
+Bot
+commented
+Jul 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+The committers listed above are authorized under a signed CLA.
+✅ login: JaeHyunLee94 / name: JaeHyun Lee (0bcbb46)
+✅ login: sifakis / name: Efty Sifakis (a2e1c20)
+swahtz
+assigned
+sifakis and unassigned
+sifakis
+Jul 24, 2026
+sifakis
+force-pushed
+the
+connected-components
+branch
+from
+0bcbb46 to
+c3ee877
+Compare
+August 5, 2026 20:45
+sifakis
+force-pushed
+the
+connected-components
+branch
+3 times, most recently
+from
+d364d90 to
+cac85b3
+Compare
+September 3, 2026 20:48
+sifakis
+force-pushed
+the
+connected-components
+branch
+from
+f70273f to
+db65b0b
+Compare
+September 14, 2026 22:30
+sifakis
+changed the base branch from
+master
+to
+develop/nanovdb
+October 12, 2026 19:35
+sifakis
+marked this pull request as ready for review
+October 12, 2026 19:45
+sifakis
+requested a review
+from kmuseth
+as a code owner
+October 12, 2026 19:45
+sifakis
+force-pushed
+the
+connected-components
+branch
+from
+588b816 to
+b92524a
+Compare
+October 12, 2026 20:49
+sifakis
+mentioned this pull request
+Oct 21, 2026
+NanoVDB: stream-ordered DeviceGridTraits getters
+#2383
+Merged
+kmuseth
+requested changes
+Oct 22, 2026
+View reviewed changes
+kmuseth
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Cool algorithm for hierarchical decomposition into leaf-local labeling and cross-leaf connectivity! I’m requesting changes for the three correctness issues noted inline: sizing the label buffer for the grid’s actual index space, handling or explicitly rejecting active tiles, and making concurrent parent accesses consistently atomic.
+Please also add regression tests that inspect the returned per-voxel labels and verify the partition, including grids with statistics enabled and the intended behavior for active tiles. The existing component-count tests are useful, but they do not cover these cases.
+Comment thread
+nanovdb/nanovdb/tools/cuda/ConnectedComponents.cuh
+Outdated
+util::cuda::DeviceGridTraits<BuildT>::getActiveVoxelCount(mDeviceSrcGrid);
+// Per-active-voxel dense-label sidecar (indexed by leaf.getValue(n); slot 0 = background).
+mVoxelLabel = BufT<ComponentLabelT>(mStream, this->ref(), activeCount + 1, nanovdb::cuda::noInit);
+kmuseth
+Oct 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Please size this buffer using getValueCount() rather than getActiveVoxelCount() + 1, since the scatter indexes it with leaf.getValue(n). Valid ValueOnIndex grids can reserve indices for statistics: a single active voxel converted with default createNanoGrid options has index 13, but this allocation provides only two entries. The scatter therefore writes out of bounds. Could we add a regression test using a grid with statistics enabled and verify the returned voxel labels?
+Comment thread
+nanovdb/nanovdb/tools/cuda/ConnectedComponents.cuh
+const nanovdb::Coord neighborOrigin = (axis == 0) ? leafOrigin.offsetBy(8, 0, 0)
+: (axis == 1) ? leafOrigin.offsetBy(0, 8, 0)
+: leafOrigin.offsetBy(0, 0, 8);
+const auto* neighborLeaf = d_grid->tree().root().probeLeaf(neighborOrigin);
+kmuseth
+Oct 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+A null result from probeLeaf() can also mean an active tile, so it does not necessarily indicate an unoccupied region. The current leaf-only traversal omits these regions: one active 8³ tile produces zero components, and two leaf voxels connected through that tile produce two components instead of one. Please either support active tiles or reject inputs with nonzero active-tile counts before processing and document the restriction. Tile-only and tile-bridge cases would make useful regression tests.
+Comment thread
+nanovdb/nanovdb/tools/cuda/ConnectedComponents.cuh
+Outdated
+/// No path compression: the walk length is the tree depth, which is data-dependent and
+/// diverges across a warp. Trees are shallow in practice, but long chains of components
+/// united in an unlucky order can deepen them; path halving here would be the remedy.
+__device__ inline uint64_t find(const uint64_t* parent, uint64_t x)
+kmuseth
+Oct 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+These ordinary loads can overlap with atomicCAS updates to the same parent entries in other threads. The flattening pass has a similar issue: each thread writes its own entry while other threads may traverse it. These accesses constitute data races under the CUDA memory model; monotonically decreasing parent links do not remove that requirement. Please use device-scope atomic accesses consistently during concurrent traversal and updates. Flattening could use atomic loads/stores or write to a separate output array while reading an immutable parent array.
+sifakis
+and others
+added 14 commits
+October 22, 2026 17:02
+nanovdb: add CUDA ConnectedComponents labeling for ValueOnIndex grids
+…
+ef1cd2a
+```
+Add nanovdb::tools::cuda::ConnectedComponents, which labels the active voxels
+of a NanoVDB ValueOnIndex grid by 6-connectivity: two active voxels share a
+label iff they are connected through a path of adjacent active voxels. The
+public getVoxelLabelsAndCount() returns a per-active-voxel dense component id
+in [0,N) plus the component count N.
+
+The implementation is hierarchical:
+  - per-leaf Shiloach-Vishkin union-find in shared memory (one block per leaf),
+    yielding each leaf-local component's voxel Mask<3> and six face bitmasks;
+  - cross-leaf edge detection by intersecting touching face masks over +X/+Y/+Z
+    neighbours;
+  - a global lock-free union-find over the resulting component graph.
+
+Also add the ex_connected_components_cuda example (rasterize an .obj to a
+narrow band via MeshToGrid, drop the sqrt(3)/2-voxel surface shell via
+PruneGrid, then label; a CPU union-find oracle verifies the result) and a
+ConnectedComponentsMultiSphere unit test.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ex_connected_components_cuda: merge multiple OBJs + --discard-surface…
+…
+9d9cafd
+```
+…-voxels
+
+Accept one or more .obj files (concatenated into a single mesh) and add a
+--discard-surface-voxels switch: by default label the full narrow band (one
+component per closed surface), or prune the sqrt(3)/2-voxel barrier shell first
+when the switch is given. --voxel-size / --band-width replace the old positional args.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: JaeHyun Lee <jaehlee@nvidia.com>
+```
+nanovdb: match the shared CALL_CUBS macro idiom in ConnectedComponents
+…
+ee374b8
+```
+Use the same #ifndef-define / #ifdef-#undef pattern as TopologyBuilder.cuh
+and PointsToGrid.cuh so the helper macro neither leaks nor collides.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+nanovdb: replace unicode characters with ASCII in ConnectedComponents
+…
+e31ea4e
+```
+Comment-only: +/-, x, ->, - in place of the plus-minus, times, arrow, and
+em-dash glyphs.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+nanovdb: group the leaf-local SV primitives into a LeafUnionFind class
+…
+e073380
+```
+Scope neighborMin/hook/compress and the INACTIVE sentinel under
+LeafUnionFind, dropping the redundant cc prefixes, and add solve() so the
+warm-up plus convergence loop lives in one place instead of being copied
+into both leaf functors.
+
+Also drop the single-use ParentsT alias and LEAF_DIM constant, and the
+redundant `current` argument of neighborMin (it was always parents[n]).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ConnectedComponents: bound the leaf union-find's worst case
+…
+d822814
+```
+The per-leaf loop runs Liu & Tarjan's algorithm P, which has no proven
+step bound, so its 64-round cap rested on a heuristic. Restrict the hook
+to root parents after SwitchToRootAfter rounds, which turns the tail into
+their algorithm R and its O(lg n) bound. Leaves are observed to converge
+in far fewer rounds than the switch, so it normally never runs. The
+warm-up gains a fourth compress: leaving the forest flat rather than
+merely shallow is what keeps the root-restricted hook free.
+
+A leaf that did exhaust the cap was abandoned mid-solve and reported too
+many components, which nothing downstream could tell from genuine
+fragmentation. solve() now reports whether it converged, and leaves that
+did not are counted and warned about on stderr. The counter is read back
+alongside the component offsets, so it costs no extra synchronization.
+
+Also from review: spell out the L/N suffixes in the cross-leaf enumerator
+as Leaf/Neighbor, document the two cross-leaf edge functors and the
+unnamed callback parameters, and note that the primitives' `changed` flag
+lives in shared memory.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Signed-off-by: JaeHyun Lee <jaehlee@nvidia.com>
+```
+nanovdb: clarify the LeafUnionFind primitive comments
+…
+e979f04
+```
+Name each primitive by its union-find operation and state the Liu &
+Tarjan correspondence separately: hook is parent-connect, or
+parent-root-connect when rootsOnly is set, and compress is shortcut.
+Previously the summary lines said "SV" while the detail below them used
+the paper's vocabulary. The rootsOnly @PARAM no longer carries the
+naming and now only explains why the restriction buys monotonicity.
+
+Note in compress that parent[v] <- parent[parent[v]] is pointer jumping
+applied to every node at once, so it is not mistaken for the sequential
+path halving it resembles.
+
+Also drop a forward pointer to the cross-leaf stage from the class
+comment, drop an orphan "Phase A" label in hook (there is no phase B),
+and split an overloaded comment in compress so the branch condition and
+the grandparent read are documented separately.
+
+Comment-only; no functional change.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ConnectedComponents: allocate device scratch from an injected resource
+…
+3ef2bcc
+```
+Give ConnectedComponents a ResourceT template parameter, defaulted to
+cuda::DeviceResource, and move its device buffers from the dual
+cuda::DeviceBuffer onto the single-space cuda::Buffer, borrowing the injected
+resource through a ResourceRef so all traffic reaches the caller's instance
+rather than a copy.
+
+None of the buffers is read on the host, so none needs DeviceBuffer's host
+pointer or per-device array. Typing each by its element removes fifteen casts,
+and sizes are now counts of elements rather than hand-computed byte products.
+
+Two defects go away with the representation rather than by hand:
+
+  - DeviceBuffer::create(bytes, nullptr, false) bound the (int device) overload,
+    because the (bool host) overload has no default for its stream argument. The
+    false was therefore a device id, pinning every buffer to device 0 and the
+    null stream instead of the current device and mStream. cuda::Buffer takes no
+    device argument at all and its stream is a mandatory constructor parameter.
+
+  - The rank buffer in processVoxelLabels was freed at scope exit on the null
+    stream while the voxel-label scatter was still reading it on mStream, which
+    is safe only for a blocking stream. cuda::Buffer retains its allocation
+    stream and frees on that, so the free is ordered behind the scatter.
+
+getVoxelLabelsAndCount now returns the label buffer by value instead of a raw
+pointer into a member. Ownership passes to the caller, so the labels no longer
+require the operator to outlive them -- only the caller's own resource -- and
+the buffer carries its element count and frees itself on its retained stream.
+The stream is synchronized before returning, so the contents are complete.
+
+Add three tests: the injected resource observes every allocation with no leak,
+the labels stay valid after the operator is destroyed, and the pipeline runs on
+a non-blocking stream, a path the suite did not exercise before.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ConnectedComponents: name the component-label type and bound its range
+…
+2dc8a39
+```
+The per-voxel labels, the dense count N, and the global slots stored in
+CrossLeafEdge were each spelled uint32_t independently. Give them one
+namespace-scope alias, ComponentLabelT, since their capacities provably
+coincide: when every active voxel is isolated no fragments merge, so N equals
+the leaf-local component count K, and neither use can be narrowed relative to
+the other. The two label functors take the type by deduction, so nothing
+outside the class has to name it.
+
+The three cub scans took their item counts as int, which halved the addressable
+range and pinned the scans to 32-bit offsets for no reason: cub deduces its
+offset type from the argument's size, so passing leafCount and K in their
+natural types is a deletion rather than an addition. Measured on a 1M-voxel
+checkerboard, the now 64-bit rank scan costs 0.025 ms of a 4.35 ms pipeline.
+
+That leaves ComponentLabelT as the only thing bounding the addressable range,
+which MaxLeafComponents now states directly. K is carried as uint64_t precisely
+so a value that fails the bound survives to be tested, and it is tested once the
+leaf-local components have been counted -- before any global slot is stored, and
+before N exists. Past that point every narrower type is known to fit, which is
+what lets N share the label type.
+
+Also add the missing timer around the rank scan, the largest of the three, and
+an alignment assert for the word-sized scratch.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+nanovdb: tighten ConnectedComponents types, scoping and docs
+…
+6a742e7
+```
+Complete the ComponentLabelT unification. The enumerator that produces the
+global slots still spelled them uint32_t, so widening the alias would have
+raised MaxComponentCount past 2^32 while the cast kept truncating, leaving
+the bound and the cast to disagree silently. Name the alias at the cast and
+in both consuming callbacks, and record at the cast itself why narrowing
+from the uint64_t offsets is safe, since the check that licenses it lives in
+another function.
+
+Move LeafNeighborTap into cc_detail. Every use of it in code is already
+there, and at namespace scope it placed six very generic names -- minusX,
+plusX, minusY, plusY, minusZ, plusZ -- into the namespace shared by every
+CUDA tool.
+
+Rename MaxLeafComponents to MaxComponentCount: "leaf-local" reads as a
+per-leaf ceiling, which is 256, rather than the grid-wide aggregate the
+constant actually bounds. Its comment also leaned on K and N, neither of
+which is defined at that point, so cut it to one line; the reasoning it
+carried is already stated at the check.
+
+Describe the returned labels as a per-voxel sidecar instead of spelling out
+its length and leaf.getValue(n) indexing, both of which the term implies.
+Say that the resource is needed only to free the buffer, not to read it, and
+that the default one has program lifetime; as written it read as a standing
+obligation on the caller.
+
+Finally, note that no scratch buffer is released before the operator is
+destroyed, though the face masks and the cross-leaf edges each die a stage
+early.
+
+Comment and naming only; no functional change.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ConnectedComponents: put each stage's device helpers above the method…
+…
+e29da80
+```
+… that drives them
+
+The cc_detail helpers were grouped partly by pipeline stage and partly by
+mechanism: a "small element-wise functors driven by lambdaKernel" block cut
+across three stages, which left UpcastCountsFunctor -- a stage 1 helper, feeding
+the per-leaf offset scan -- among the stage 3 label functors, some 400 lines
+from its only caller. All four stages' helpers also preceded all four drivers,
+so reading one stage meant jumping between two distant parts of the file.
+
+Group strictly by stage and reopen cc_detail once per stage, so each stage's
+device code sits directly above the member function that launches it. LEAF_SIZE
+and LeafNeighborTap stay in a shared preamble, being used by more than one
+stage. The rationale for named structs over extended __device__ lambdas moves to
+the top of the namespace, where it applies to every functor rather than to one
+arbitrary subset, and the Stage 1 and Stage 4 headers the file was missing are
+added.
+
+Reordering and comments only: normalizing both revisions (comments and
+whitespace stripped, sorted) leaves no difference beyond the three extra
+namespace open/close pairs the interleaving needs.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ConnectedComponents: give the shared vocabulary a scope of its own
+…
+2978f9d
+```
+ComponentLabelT and CrossLeafEdge sat at tools::cuda scope, the namespace every
+NanoVDB CUDA tool shares, though only the first is something a caller ever names
+and neither belongs to that namespace's vocabulary. 507b8b1 moved
+LeafNeighborTap into cc_detail for the same reason, but a detail namespace is
+the wrong home for a type callers legitimately need.
+
+Collect all four -- ComponentLabelT, CrossLeafEdge, LeafNeighborTap and
+MaxComponentCount -- into a ConnectedComponentsBase that the operator derives
+from, so this header adds only the operator and that base to tools::cuda.
+
+The base is deliberately not a template, though it sits under one. None of its
+members depends on BuildT or ResourceT, and a type nested in the class template
+would instead be a distinct type per instantiation: the device functors, which
+are templated on BuildT alone, would have had to name a ResourceT they have no
+other use for, duplicating the stage 2 and 3 kernels once per injected resource.
+That is the hazard AcademySoftwareFoundation#2268 and AcademySoftwareFoundation#2269 hoisted Data and BoxTrianglePair to avoid.
+Being a plain base also means ordinary lookup reaches it from inside the derived
+class, so the operator's own uses are untouched; only cc_detail, which does not
+inherit, names the vocabulary explicitly, through a using declared in each
+functor that reads it.
+
+Comment and scoping only; no functional change.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ex_connected_components_cuda: name the dual-space buffer DualDeviceBu…
+…
+a215745
+```
+…ffer
+
+AcademySoftwareFoundation#2301 deprecated the cuda::DeviceBuffer alias, renaming the implementation to
+cuda::DualDeviceBuffer so the attribute reaches only external code. The example
+still spelled the old name for its grid handle and its retain-mask scratch,
+which is now a deprecation warning and, with NANOVDB_CUDA_WERROR, an error.
+
+Use the new name, matching what every tool's getHandle default was changed to.
+The per-translation-unit suppression pragma that TestNanoVDB.cu and
+TestMemoryResource.cu carry is deliberately not used here: that is for tests
+that keep exercising the deprecated surface on purpose, which this is not.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ConnectedComponents: use the library's leaf size, and name the detail…
+…
+23a06b0
+```
+… namespace
+
+after its domain
+
+Two naming cleanups, no functional change.
+
+Drop the local LEAF_SIZE constants, one in the operator and one in the example.
+NanoLeaf<BuildT>::SIZE already names this and derives it as 1u << 3*LOG2DIM,
+where the local copies hard-coded 512 and so silently assumed LOG2DIM == 3.
+IndexToGrid and GridStats already spell it that way and SignedFloodFill uses
+LeafT::SIZE; ours were the only local definitions of it in the library. Every
+use site sits in a functor templated on BuildT, so nothing else had to move.
+
+Rename cc_detail to components::detail. The prefix existed because a bare
+detail in tools::cuda would be shared with every other tool, but the library
+already solves that by interposing a domain name -- TopologyBuilder and
+MeshToGrid share topology::detail, and PointsToGrid, DistributedPointsToGrid
+and SignedFloodFill share kernels. No header uses a bare tools::cuda::detail.
+
+With the domain in the namespace, the cc prefixes that disambiguated the
+helpers are redundant: ccFind, ccUnite, ccNeighborLeafIndex and
+ccForEachCrossLeafEdge become find, unite, neighborLeafIndex and
+forEachCrossLeafEdge, which is what they read as at the call sites anyway.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+sifakis
+and others
+added 15 commits
+October 22, 2026 17:02
+ConnectedComponents: attribute the leaf union-find correctly, and tri…
+…
+73e762c
+```
+…m its comments
+
+The leaf primitives were attributed to Shiloach-Vishkin in three places, including
+the release note. They are not: 8b5a526 established that the per-leaf loop runs
+Liu & Tarjan's algorithm P, switching to their algorithm R for the tail so the
+O(lg n) bound applies, and 0473b69 moved the primitive comments onto that
+paper's vocabulary -- parent-connect, parent-root-connect, shortcut. The summary
+lines above them were never updated to match. Name the right algorithms, and give
+the full reference where they are first mentioned rather than partway down the
+class, leaving the later use as a back-reference.
+
+Also drop the paragraph announcing that the helpers are named structs grouped by
+stage. The surrounding operators do the same without saying so, and the stage
+headers already show the grouping. Condense what is left of the LeafUnionFind
+summary to what is not evident from the declarations: the lockstep pointer swap,
+the all-threads-must-call constraint, and why the changed flag needs no atomic.
+
+Comments only; no functional change.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ConnectedComponents: assert the leaf union-find's backstop instead of…
+…
+e9f9556
+```
+… reporting it
+
+The convergence cap carried a whole reporting path: a device counter, its scratch
+buffer and memset, an extra kernel parameter, an atomicAdd, a readback, a member,
+and a five-line warning on stderr -- plus a bool return from solve() that the mask
+functor already ignored. All of it existed to count an event that cannot happen
+without a bug, since 8b5a526 made the loop's tail algorithm R and so gave it a
+proven O(lg n) step bound.
+
+Replace it with NANOVDB_ASSERT on the loop's fallthrough, which SignedFloodFill
+and IndexToGrid already use inside kernels. The bound itself stays -- without it a
+violated assumption would hang the kernel rather than produce a wrong answer, and
+that is the worse failure -- but it moves into solve() beside the loop it guards,
+since nothing outside referred to it once the warning stopped quoting it.
+
+This also drops the last use of <cstdio>.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ConnectedComponents: document the leaf functors, and put doc comments…
+…
+1f9be9e
+```
+… above template<>
+
+LeafComponentCountFunctor and LeafComponentMaskFunctor had no summary of what they
+produce. Give each a brief that names its output and how it pairs with the other: the
+count pass sizes the per-leaf component slices, and the mask pass re-solves the leaf
+and fills them, in ascending root order, with each component's voxel mask and the six
+face masks the cross-leaf edge stage intersects.
+
+The two CrossLeafEdge*Functor briefs sat between template<> and the struct. NanoVDB
+and OpenVDB otherwise always place the doc comment above template<>, so move them
+there.
+
+Also realign LeafComponentMaskFunctor::operator()'s parameters: the continuation
+lines started one column right of the opening parenthesis.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+ConnectedComponents: size lambdaKernel grids with util::cuda::blocksP…
+…
+2694a6b
+```
+…erGrid
+
+The five lambdaKernel launches computed their block counts three different ways --
+an inline (n + 255) / 256, a local blocks lambda, and the same with a cast -- and
+each repeated 256 as both the grid divisor and the block size, with nothing tying
+the two together. Use the shared util::cuda::blocksPerGrid instead, as GridChecksum
+does, with one threadsPerBlock constant per stage feeding both launch arguments.
+
+Block size stays a per-stage choice rather than a class-wide constant: half of this
+operator's launches already take theirs from the functor's MaxThreadsPerBlock. The
+helper also takes size_t, so the uint64_t component and edge counts cannot overflow
+the rounding, and it asserts a non-empty launch, which every call site already
+guarantees by returning or skipping early. The value stays 256.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+ConnectedComponents: rename the cross-leaf stages, and document their…
+…
+538edfa
+```
+… contracts
+
+- Rename processCrossLeafEdges -> collectCrossLeafEdges (it only gathers the edges;
+  no unioning happens there) and processComponentLabels ->
+  processGlobalConnectedComponents (the cross-leaf union-find, pairing with
+  processLeafConnectedComponents). Timer labels follow.
+- Document on getVoxelLabelsAndCount() that the source grid must be complete on the
+  device when called, since its tree header is read synchronously on the host.
+- Document the cross-leaf edge layout: each edge belongs to the leaf on its -side,
+  the per-leaf slices are only a write partition, and (min,max) storage hides the owner.
+- Document why Stage 3 uses an asynchronous CAS union-find rather than Stage 1's
+  synchronous hook/compress rounds, and that find() does no path compression.
+- neighborLeafIndex: clearer variable names, and fix the signature's indentation.
+
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+ConnectedComponents: name the unit test ConnectedComponents_MultiSphere
+…
+26ac50f
+```
+Match the Tool_Case naming of the neighboring tool tests in TestNanoVDB.cu
+(MergeGrids_ValueOnIndex, MeshToGrid_UnitTetrahedron, ...), and the pending
+changes entry that cites it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: JaeHyun Lee <jaehlee@nvidia.com>
+```
+ConnectedComponents: release each scratch buffer after its last use
+…
+d91e4f4
+```
+getVoxelLabelsAndCount() now destroys every scratch buffer as soon as the
+pipeline no longer reads it, instead of holding all of them until the
+operator is destroyed:
+
+  - mLeafComponentCounts after Stage 1,
+  - mLeafComponentFaceMasks and mCrossLeafEdgeOffsets after Stage 2,
+  - mCrossLeafEdges after Stage 3,
+  - mLeafComponentOffsets, mLeafComponentMasks and mComponentParent after
+    the voxel labels are built.
+
+Each free is ordered on mStream behind the kernels that read the buffer, so
+there is no host synchronization. The releases sit between the stage calls
+rather than inside the stages, so early returns cannot skip them. This
+resolves the TODO on the scratch members.
+
+Peak scratch memory drops by roughly 48 B per leaf-local component plus
+8 B per cross-leaf edge, and a live operator no longer holds any scratch
+after returning its labels. The labels and component count are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: JaeHyun Lee <jaehlee@nvidia.com>
+```
+TestMemoryResource: give the ConnectedComponents tests their own section
+…
+4c4df62
+```
+The ConnectedComponents tests sat at the end of the small-builders section,
+whose banner lists other tools and says their counts are exact. Give them a
+banner of their own that says what they route through the injected resource
+and why their counts are checked for balance, and add ConnectedComponents to
+the file's @brief.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: JaeHyun Lee <jaehlee@nvidia.com>
+```
+ConnectedComponents: check the per-voxel labels in the unit tests
+…
+931f2e2
+```
+The unit tests asserted only the component count N, so a regression in the
+leaf masks, the flatten, the rank computation or the label scatter that kept
+N right would have gone unnoticed.
+
+checkConnectedComponentLabels() compares a result against a CPU union-find
+over the 6-connected active voxels of a host copy of the grid: every active
+voxel's label is in [0, N), no component is split across labels, no label
+spans two components, all N labels are used, and every other entry of the
+label buffer, including slot 0, holds the all-ones sentinel.
+
+ConnectedComponents_MultiSphere now runs this check on each of its inputs,
+and the new ConnectedComponents_VoxelLabels test adds inputs that the sphere
+shells do not produce: a few hand-placed components with a known count, and
+a seeded random fill near the percolation threshold, whose leaves each hold
+many components and merge with their neighbors across all six faces. The
+pending changes entry now cites the unit tests in general.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ConnectedComponents: require a ValueOnIndex grid
+…
+9cb4966
+```
+The operator labels the active voxels of a ValueOnIndex grid: its label
+sidecar is indexed by value index and sized for the active voxels alone.
+Other index grids compiled regardless, among them ValueIndex, whose value
+indices also cover inactive voxels, and the brief and the constructor
+documentation even named an "indexGrid". Restrict BuildT with a
+static_assert, as TopologyBuilder does for the other topology operators,
+and name the grid type in the documentation.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ConnectedComponents: read the tree header once, in order on the stream
+…
+f2e23db
+```
+Each stage read the source's tree header, or its active-voxel count, with
+its own DeviceGridTraits call on the legacy default stream, which is not
+ordered after work on a non-blocking stream or on a per-thread default
+stream. A grid still being uploaded or built on the operator's stream could
+be read before it arrived, so the documentation told callers to synchronize
+first.
+
+getVoxelLabelsAndCount() now reads the tree header once, on mStream, and
+every stage sizes its work from that copy. The warning becomes a note that
+the grid may still be in flight on the operator's stream.
+
+The new ConnectedComponents_InFlightGrid test queues the grid's upload
+behind a busy-wait on a non-blocking stream, into a zeroed device buffer,
+and runs the operator on that stream right away. A header read that is not
+ordered on the stream sees an empty tree there, and the test fails.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ConnectedComponents: reject grids with active tiles
+…
+06a099c
+```
+Only leaf voxels are labeled, so active tiles were silently ignored: the
+voxels of a tile got no label, and two components joined only through a
+tile were counted as two. Reject such grids up front, with the exception
+that the other topology operators throw, and document the restriction.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ConnectedComponents: size the label buffer by the grid's value count
+…
+4a69cad
+```
+The label sidecar is indexed by leaf.getValue(n) but was sized by the
+active-voxel count plus one. The two agree only when the grid indexes
+exactly its active voxels. A grid that also indexes per-node statistics,
+as createNanoGrid's default options produce, has larger value indices, and
+the scatter wrote past the end of the buffer.
+
+Size the buffer by the grid's value count, so that every value index has an
+entry; the entries that are not active voxels keep the all-ones sentinel,
+as slot 0 already did. Grids with statistics stay outside the supported
+inputs, pending a decision on which index layouts to support: the
+documentation says so, and debug builds assert that the value count is the
+active-voxel count plus one. The example's oracle reads the whole buffer.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ConnectedComponents: make the cross-leaf union-find race-free
+…
+50fd7a6
+```
+find() walked the parent array with plain loads while other threads linked
+roots with atomicCAS, and the flatten pass stored to entries that other
+threads were still walking. Both are data races under the CUDA C++ memory
+model. Beyond that model, PTX does not guarantee that a plain load racing
+with the CAS returns a whole value rather than a mix of the old and new
+parents.
+
+Every access that can overlap a write in the same pass is now a relaxed,
+device-scope cuda::atomic_ref access: the loads in find(), the link in
+unite() and the store in flatten. Relaxed ordering suffices, since each
+entry only ever decreases and publishes nothing else.
+
+This costs some performance, mostly in unite: about 5-9% end to end on
+dense 384^3 grids, and up to ~2x on a pathological straight line of 2M
+voxels. find()'s comment no longer suggests path halving, which was tried
+here and measured slower.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+ConnectedComponents: detect leaf convergence with __syncthreads_or
+…
+1f561cc
+```
+The leaf solver's threads raised a block-shared `changed` flag with
+concurrent plain stores: a formal data race, even though every store wrote
+the same value and barriers ordered the reset and the reads. Each thread
+now keeps its own flag, and solve() combines them with __syncthreads_or().
+That removes the shared flag, its reset by thread 0, and two of the six
+barriers in each round; the leaf kernels got 1-11% faster on 384^3 dense
+and random grids.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+sifakis
+force-pushed
+the
+connected-components
+branch
+from
+b92524a to
+1f561cc
+Compare
+October 23, 2026 21:44
+sifakis
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Thanks for the review. All four points are addressed:
+Label buffer sizing: 4a69cad.
+Active tiles, now rejected: 06a099c.
+Atomic parent accesses: 50fd7a6 and 1f561cc.
+Label tests: 931f2e2 adds checkConnectedComponentLabels(), which compares every returned label against a CPU union-find over the 6-connected active voxels. It checks that:
+labels are in [0, N);
+no component is split across labels;
+no label spans two components;
+all N labels are used;
+every other entry holds the sentinel.
+ConnectedComponents_MultiSphere now runs it on all of its inputs. The new ConnectedComponents_VoxelLabels adds a known-answer case and a seeded random fill near the percolation threshold, with many components per leaf and merges across all six faces. We checked that these tests catch regressions that keep N right but break the labels: a wrong rank lookup, a skipped flatten, and a wrong background fill. Statistics and tiles are out of scope, as noted inline.
+Two more fixes came from our own review:
+9cb4966 restricts the operator to ValueOnIndex grids with a static_assert.
+f2e23db reads the tree header once, in order on the operator's stream, so a grid still in flight on that stream is fine. ConnectedComponents_InFlightGrid covers it.
+sifakis
+requested a review
+from kmuseth
+October 23, 2026 21:53
+ConnectedComponents: use the NANOVDB_ prefix for the include guard
+…
+f1c26c7
+```
+The include guard carried the NVIDIA_ prefix of the topology operators this
+header was modeled on, while the rest of NanoVDB uses NANOVDB_. Rename it to
+NANOVDB_TOOLS_CUDA_CONNECTEDCOMPONENTS_CUH_HAS_BEEN_INCLUDED, following the
+rest of the library; nothing else refers to the macro.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Efty Sifakis <esifakis@nvidia.com>
+```
+sifakis
+mentioned this pull request
+Oct 23, 2026
+NanoVDB: use the NANOVDB_ prefix for the CUDA topology tools' include guards
+#2395
+Merged
+kmuseth
+approved these changes
+Oct 26, 2026
+View reviewed changes
+kmuseth
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+thanks for addressing my review comments
+Hide details
+View details
+kmuseth
+merged commit 7d2d36b
+into
+AcademySoftwareFoundation:develop/nanovdb
+Oct 26, 2026
+16 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+kmuseth
+deleted the
+connected-components
+branch
+October 26, 2026 16:24
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+nanovdb
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

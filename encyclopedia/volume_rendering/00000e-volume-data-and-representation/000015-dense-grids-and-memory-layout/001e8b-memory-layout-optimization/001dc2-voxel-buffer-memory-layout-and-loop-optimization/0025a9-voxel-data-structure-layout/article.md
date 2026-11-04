@@ -1,0 +1,98 @@
+# Voxel Data Structure Layout
+
+Also called: Array2, Array2<T>, Structure Field Alignment, Voxel Field Ordering
+
+## Overview
+Voxel Data Structure Layout defines the memory organization of per-voxel attributes in dense volume rendering, solving memory bandwidth and capacity constraints by packing essential state into a minimal footprint [S2]. It differs from [Voxel Data Layout](4076-voxel-data-layout.md) by focusing on the internal struct definition and field ordering to optimize for specific rendering algorithms (e.g., shading vs. classification) [S2]. It builds on [Voxel Buffer Memory Layout and Loop Optimization](1598-voxel-buffer-memory-layout-and-loop-optimization.md) by defining the atomic unit stored within that buffer [S2].
+
+## How it works
+**Inputs:** Voxel attribute types (e.g., scalar, normal, gradient) and rendering requirements (shading-only vs. classification) [S2].
+**Outputs:** A contiguous memory layout for a voxel structure and the corresponding access logic [S2].
+
+**Data Structures:**
+The core unit is a C-style struct containing fields for voxel properties [S2]. A typical example includes:
+- `Normal`: 16-bit unsigned integer (`unsigned short`), encoding surface normal.
+- `Scalar`: 8-bit unsigned integer (`unsigned char`), encoding density or intensity.
+- `Gradient`: 8-bit unsigned integer (`unsigned char`), encoding gradient magnitude.
+
+The layout of the struct `Voxel` is defined as:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```cpp
+typedef unsigned char Scalar;
+typedef unsigned short Normal;
+typedef unsigned char Gradient;
+typedef struct {
+    Normal normal;
+    Scalar scalar;
+    Gradient gradient;
+} Voxel;
+```
+
+**Numbered Steps:**
+1. **Identify Field Requirements:** Determine which fields are required for the primary rendering pass (e.g., shading) and which are secondary (e.g., classification) [S2].
+2. **Order Fields by Priority:** Place shading-critical fields first in the struct, followed by classification-only fields. This allows the creation of a "shading-only" subset of the data, reducing memory footprint and improving cache performance for fast rendering algorithms [S2].
+3. **Check Alignment Constraints:** Verify that field ordering satisfies machine alignment restrictions. For example, 16-bit quantities must be aligned to 2-byte boundaries. If fields are ordered poorly, the compiler may insert padding bytes, increasing the struct size. Use `sizeof()` to verify the total size matches expectations [S2].
+4. **Define Accessor Logic:** Map 2D logical coordinates $(i, j)$ to a 1D index in the underlying array using row-major ordering: $index = i + ni \times j$, where $ni$ is the width (number of columns) and $j$ is the row index [G].
+5. **Implement Bounds Checking:** Ensure access operators assert that $0 \le i < ni$ and $0 \le j < nj$ to prevent out-of-bounds access [G].
+
+**Formulas:**
+- 1D Index from 2D coordinates:
+  $$ idx = i + ni \cdot j $$
+  Where:
+  - $i$: Column index ($0 \le i < ni$)
+  - $j$: Row index ($0 \le j < nj$)
+  - $ni$: Number of columns (width)
+
+**Parameters:**
+- `ni`: Width of the 2D slice or grid dimension.
+- `nj`: Height of the 2D slice or grid dimension.
+- `sizeof(Voxel)`: Must be verified to be 4 bytes in the example layout (2 + 1 + 1) with no padding, or adjusted if padding is introduced by the compiler [S2].
+
+**Edge Cases and Pitfalls:**
+- **Alignment Padding:** If fields are not ordered to satisfy alignment (e.g., placing an 8-bit field before a 16-bit field on some architectures), the compiler may insert padding. This increases memory usage and breaks the assumption of tight packing [S2].
+- **Out-of-Bounds Access:** Accessing $i \ge ni$ or $j \ge nj$ triggers an assertion failure if bounds checking is enabled [G].
+- **Shading vs. Classification Mismatch:** If classification fields are placed before shading fields, the fast rendering algorithm cannot skip the classification data, negating the memory and cache benefits [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Voxel struct layout and access logic [G]
+import struct
+
+# Pack fields: Normal (H, 2B), Scalar (B, 1B), Gradient (B, 1B) -> 4 bytes total
+VOXEL_FORMAT = '<HBB'  # Little-endian, unsigned short, unsigned char, unsigned char
+VOXEL_SIZE = struct.calcsize(VOXEL_FORMAT)
+
+def pack_voxel(normal: int, scalar: int, gradient: int) -> bytes:
+    return struct.pack(VOXEL_FORMAT, normal, scalar, gradient)
+
+def unpack_voxel(data: bytes) -> tuple:
+    return struct.unpack(VOXEL_FORMAT, data)
+
+def get_voxel_index(i: int, j: int, ni: int) -> int:
+    return i + ni * j
+```
+
+## Subtopics
+
+### SerializedArray Binary Layout
+A binary serialization format for voxel data structures, including name, data type, shape, and raw data. It consists of: 8 bytes for `name_size` (uint64), N bytes for `name` (char, N=name_size), 4 bytes for `dtype` (uint32), 8 bytes for `shape_dim_count` (uint64), M*8 bytes for shape dimensions (uint64, M=shape_dim_count), 8 bytes for `data_byte_count` (uint64), and K bytes for `data` (uint8, K=data_byte_count) [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** $O(ni \times nj \times sizeof(Voxel))$. The layout is dense, allocating memory for every voxel in the defined bounding box [S2].
+- **Performance:** Placing shading fields first improves cache locality for rendering passes that do not require classification data, reducing memory bandwidth usage [S2].
+- **Strengths:** Predictable access patterns, high cache efficiency for dense volumes, and flexibility to subset data for specific rendering algorithms [S2].
+- **Limitations:** Inefficient for sparse scenes due to contiguous allocation of empty space; alignment padding can increase memory usage if not carefully managed [S2].
+- **When to Use:** Dense volume rendering where cache locality is critical and the volume is fully occupied or nearly fully occupied [S2].
+- **When Not to Use:** Not given in the sources.
+
+## Background
+The concept of struct field alignment and ordering for voxel data originates from the VolPack library, which emphasized the importance of field ordering to support both shading and classification algorithms efficiently [S2]. The SerializedArray binary layout is described in the sparse-voxels repository, detailing a specific serialization format for voxel data [S3, unofficial].
+
+## Sources
+[S1] czq142857/NMC, https://github.com/czq142857/NMC, fetched 2026-10-26 (unofficial)
+[S2] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
+[S3] hectorpiteau/sparse-voxels, https://github.com/hectorpiteau/sparse-voxels, fetched 2026-10-24 (unofficial)

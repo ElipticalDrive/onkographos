@@ -1,0 +1,168 @@
+Solid Angle: August 2009
+Thursday, August 27, 2009
+Big O doesn't always matter
+The other day I was optimizing a bit of debug code which verifies the integrity of objects in memory. The details aren't super-important, but the gist is it is a function which runs periodically and makes sure that objects that should have been garbage collected were indeed purged from memory.
+I don't make a general habit of optimizing debug code, but this was a special case -- before, this process only ran in the debug build. Artists and designers run a "development" build, which is an optimized build that still includes assertions and many other development checks.
+We recently ran into a bug that would have been detected much earlier if this process had been running in the development build. While programmers run the debug build almost exclusively, we tend to stick to simpler test levels. Trying to debug an issue on a quick loading, small level is much easier than on a full-blown one.
+The algorithm is pretty simple -- objects have somewhat of a tree structure, but for various reasons they only have parent links and not child links. For objects at the top-level of the tree, we know for sure whether they should be in memory or not. Objects at the bottom of the tree keep all their parents in memory if they are connected to the reference graph. So the debug check looks at each object and verifies that it is not parented (via an arbitrarily long parent chain) to an object which should have been purged.
+First thing I did was measure how long the process was taking, and did some lower level profiling to get an idea of where time was spent. Most importantly, I also saw where I was running into cache misses.
+The first pass of optimization -- the original loop was doing a lot of work per-object that was simply unnecessary. This was because it was using a generalized iterator that had more functionality than needed for this specific case -- for most operations, particularly at editor time, this extra overhead is not a big deal. Removing this extra work sped up the process and it was now took about 90% of the time of the original.
+I then tried some high-level optimizations. There were two things I tried - one, the inner loop linearly checked each high-level object against an unsorted array of objects we know should be purged. I replaced this with a hash table from our container library. Finally, I realized that a memoizing approach should help here -- since I'm dealing with a tree, I could use a bit array to remember if I've already processed a parent object and deemed it OK. This would allow me to cut off traversal of the parent chain, which should eliminate a lot of work. Or so I thought.
+The new algorithm was faster, but not by much - only 85% of the original running time. The additional complexity was not worth 5% of running time, so I went back to the simpler approach. This isn't unusual in optimization -- you often can try something you think will be a big help but turns out not to matter much. I've made mistakes in the past where I stuck with the more complicated implementation for a marginal gain -- but it was not worth it, and it made other optimizations that may have bigger impact harder to do.
+As far as why the gain wasn't that much: The unsorted array was relatively small (a handful of elements), so a linear search was faster because it was simpler and had better cache behavior than the hash table implementation I was using. The tree structure of the objects was broad but not deep, so its obvious in hindsight why memoization would not be a win.
+Now, one thing that is nice to have is a decent container and algorithm library. I have that at my disposal, so implementing these two changes was a matter of minutes instead of hours. With that kind of arsenal, it is easy to try out algorithmic changes, even if they end up not working out.
+At this point, I took another look at the cache behavior from my profiling tools. I tried something incredibly simple -- prefetching the next object into the cache while I was processing the current. This resulted in the process now running at 50% of the time of the original -- a 2X speedup, and likely fast enough for me to enable this in the development build. I'm going to measure again, and see if there are any other easy wins like this to be had.
+The processors we use are fast -- incredibly fast, and even with branch penalties on the in-order processors of today's consoles, they can still do a lot of work in the time it takes to retrieve data from main memory. So while on paper, I'm using "slow" algorithms with worse O(n) times, in practice, your memory access patterns can easily drown out any extra calculation. The key, as always, is to measure and test your theories, and not just assume that any given approach will make something faster.
+Posted by
+Steve
+at
+8:36 AM
+No comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+big o notation,
+cache misses,
+game programming,
+optimization,
+profiling
+Monday, August 24, 2009
+Stencil states for rendering light volumes
+In the ShaderX 7 article "Designing a Renderer for Multiple Lights: The Light Pre-Pass Renderer", the author describes a number of approaches for rendering the lights into the lighting buffer. These are all pretty standard approaches for any deferred technique, but I thought the description of using stencil does not explain how to set up the stencil states very clearly. This was probably due to space constraints.
+The way it is worded implies that you still need to change the depth comparison function. This is not the case, and is most of the point of the technique. As the article points out, changing the depth test makes many GPUs take their early-Z rejection and go home.
+I'm sure you can find this detail elsewhere on the net, but my cursory searches did not find anything, and hopefully this will save at least one person some time. Standard caveats apply: I haven't extensively tested this stuff.
+Assuming convex light volumes, this is what I found worked well:
+// render backfaces so that only pixels in front of the backface have stencil incremented
+AlphaBlendEnable = false
+StencilEnable = true
+ColorWriteChannels = None
+CullMode = Clockwise
+DepthBufferEnable = true
+StencilFunction = Always
+StencilPass = Keep
+// If a pixel is front of the volume backface, then we want it lit
+StencilDepthBufferFail = Increment
+// render volume
+// render frontfaces so that any pixel in back of them have stencil decremented
+CullMode = CounterClockwise
+// pass stencil test if reference value < buffer, so we only process pixels marked above.
+// Reference value is 0. This is not strictly necessary but an optimization
+StencilFunction = Less
+// If a pixel is in front of the volume frontface, then it is not inside the volume
+StencilDepthBufferFail = Decrement;
+// render volume
+AlphaBlendEnable = true
+ColorWriteChannels = RGB
+// only process pixels with 0 < buffer
+StencilFunction = Less
+// zero out pixels for so we don't need a separate clear for next volume
+StencilPass = Zero
+// don't want to do anything if we fail the depth test
+StencilDepthBufferFail = Keep
+//render a screen space rectangle scissored to the projection of the light volume
+Note that unlike shadow volumes, the light volume intersecting the near plane is not a concern here. We are rendering the frontfaces to find pixels that are in front of the light volume -- if parts of the light volume are in front of the near plane, by definition any pixels we're rendering are in back of those parts. So there is no need to render a cap in this case.
+The light volume intersecting the far plane is a concern. One way to handle this case is to use a projection matrix with an infinite far plane, like shadow volumes do. Another way to handle it would be to detect this case and not use the stencil approach at all, instead rendering a screen space rectangle scissored to the light bounds.
+Finally, I've had better luck switching to rendering the backfaces without depth testing when the camera is inside the light volume, instead of using a screen space rectangle. But I think this has more to do with a bug in my scissoring code than with any fundamental problem!
+Posted by
+Steve
+at
+12:41 AM
+3 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+deferred lighting,
+game programming
+Sunday, August 23, 2009
+XNA: at times awesome, at times frustrating
+I'm not sure why, but Microsoft seems intent on crippling XNA for the 360. Perhaps they want to sell more dev kits.
+I recently had some more time to work on my little toy project. After some work, I've now got a deferred lighting implementation on the PC.
+For the lighting buffer construction, at first I was using a tiled approach similar to Uncharted, which did not require blending during the lighting stage. It did work for the most part, and allowed me to use LogLUV for encoding the lighting information, which was faster. But it had issues - I didn't have any lighting target ping-ponging set up, so I was stuck with a fixed limit of seven lights per tile. Also, even with smallish tiles, you end up doing a lot of work on pixels not actually affected by the lights in question. So I wanted to compare it to a straightforward blending approach, and switched back to an FP16 target, and render the light volumes directly (using the stencil approach detailed in ShaderX7's Light Pre-Pass article).
+So this all worked great and my little toy is rendering 100 lights. Of course, on the 360, there's a problem. Microsoft, in its infinite wisdom, decided that the FP10 buffer format on 360 would blow people's minds and it is not supported in XNA. They are using an actual FP16 target, which does not support blending.
+So I guess it is going to be back to alternate lighting buffer encoding schemes, bucketing, render target ping-ponging for me. It's not a huge deal, but it is frustrating.
+It is a real shame that XNA gives the impression that the 360 GPU is crippled, when in reality it is anything but. Couple lack of FP10 support with inability to sample the z-buffer directly, and the lack of control of XNA's use of EDRAM, and they've managed to turn the 360 into a very weak, very old PC.
+Least common denominator approaches generally haven't fared that well over the years. An XBLA title implemented in XNA is going to be at a fundamental disadvantage -- I don't think you are going to see anything approaching the richness of Shadow Complex, for example.
+At the end of the day, Microsoft needs to figure out where they are going with XNA. If they are going to dumb it down and keep it as a toy for people who can't afford a real development kit (people who've been bumping into these low ceilings much longer than me), then they should keep on their current path.
+The potential for XNA is really much more, though. Today I wrote a pretty decent menu system in about 45 minutes, that handles gamepad, keyboard, and mouse input seamlessly. I don't think I could write that in C++/DirectX anywhere near as fast. If you start looking down the road to future generations of hardware, I'm not worried about the overhead of C# being fundamentally limiting. Games today already use much less efficient scripting languages than C#, and while you are limited to the heavy lifting Microsoft has chosen to implement for you today, who is to say that a future version of XNA couldn't allow shelling out to C++ for really performance intensive stuff?
+XNA has a chance to become something really great that would be very powerful for a large class of games. It remains to be seen if Microsoft will let it.
+Posted by
+Steve
+at
+11:28 PM
+No comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+deferred lighting,
+game programming,
+leaky abstractions,
+least common denominator approaches,
+rendering,
+xbox 360,
+XNA Studio
+Wednesday, August 19, 2009
+One has to have had inflated expectations to experience disillusionment
+A colleague sent along this item, which asks if Transactional Memory is beyond the "trough of disillusionment".
+I've never had any expectations that STM would be some silver-bullet solution to concurrency, and from the get-go just viewed it as just another tool in the toolbox. Granted, it is a technique that I haven't had much practical experience with yet -- it's on my TODO list. Others might disagree with me, but I'm not even sure how much of a major factor it is going to be in writing games. Of course, if some major piece of middleware is built around it, I suppose a lot of people will end up using STM, but that doesn't necessarily make it a good idea.
+The latest piece of evidence against STM as a silver bullet comes from conversations I've had with colleagues and friends who have a lot of experience building highly-scalable web or network servers. STM advocates hail transactions as a technique with decades of research, implementation, and use. About this they are correct. The programming model is stable, and the problems are well known. But what has struck me is how often my colleagues with much more experience in highly-scalable network servers try to avoid traditional transactional databases. If data can be stored outside of a database reliably, they do so. There are large swaths of open source software devoted to avoiding transactions with the database. The main thrust is to keep each layer independent and simple, and talk to a database as little as possible. The reasons? Scalability and cost. Transactional databases are costly to operate and very costly to scale to high load.
+I found the link above a little too dismissive of the costs of STM, particularly with memory bandwidth. I've already discussed the memory wall before, but I see this as a serious problem down the road. We're already in a situation where memory access is a much more serious cost to performance than the actual computation we're doing, and that's with a small number of cores. I don't see this situation improving when we have 16 or more general-purpose cores.
+A digression about GPUs. GPUs are often brought up as a counter-argument to the memory wall as they already have a very large number of cores. GPUs also have a very specialized memory access pattern that allow for this kind of scalability - for any given operation (i.e. draw call), they generally have a huge amount of read-only data and a relatively small amount of data they write to compared to the read set. Those two data areas are not the same within a draw call. With no contention between reads and writes, they avoid the memory issues that a more general purpose processor would have.
+STM does not follow this memory access model, and I do not dismiss the concerns of having to do multiple reads and writes for a transaction. Again, we are today in a situation where just a single read or write is already hideously slow. If your memory access patterns are already bad, spreading it out over more cores and doubling or tripling the memory bandwidth isn't really going to help. Unlike people building scalable servers, we can't just spend some money on hardware -- we've got a fixed platform and have to use it the best we can.
+I don't think that STM should be ignored -- some problems are simpler to express with transactions than with alternatives (functional programming, stream processing, message passing, traditional locks). But I wouldn't design a game architecture around the idea that all game code will use STM for all of its concurrency problems. To be fair, Sweeney isn't proposing that either, as he proposes a layered design that uses multiple techniques for different types of calculations.
+What I worry about though is games are often written in a top-down fashion, with the needs at the gameplay level dictating the system support required. If at that high level the only tool being offered is STM with the expectation that it is always appropriate, I think it will be easy to find yourself in a situation where refactoring that code to use other methods for performance or fragility reasons may be very difficult and very expensive than if the problem had been tackled with a more general toolbox in the first place.
+Concurrency is hard, and day to day I'm still dealing with the problems of the now, rather than four or five years down the road. So I will admit I have no fully thought out alternative to offer.
+The one thing I think we underestimate is the ability of programmers to grow and tackle new challenges. The problems we deal with today are much harder and much more complex than those of just a decade ago. Yes, the tools are better for dealing with those problems, and the current set of tools for dealing with concurrency are weak.
+That means we need to write better tools -- and more importantly, a better toolbox. Writing a lock-free sw/sr queue is much harder than using one. What I want is a bigger toolbox that includes a wide array of solutions for tackling concurrency (including STM), not a fruitless search for a silver bullet that I don't think exists, and not a rigid definition of what tools are appropriate for different types of game problems.
+Posted by
+Steve
+at
+9:01 AM
+No comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+concurrency,
+game programming,
+memory wall,
+silver bullets,
+software transactional memory
+Thursday, August 13, 2009
+Diminishing returns
+One thing that has been on my mind since SIGGRAPH is the problem diminishing returns poses: when do you switch from an approach, algorithm, or model because any gains to be had are increasingly diminishing?
+The specific thing that has got me thinking about this is the rapid approach of fully programmable GPUs. So far this is not looking like it will be another evolutionary change to the venerable D3D/OpenGL programming model, and will in fact be a radical change in the way we program graphics. Which is just another way for saying it will be a change in the way we *think* about graphics.
+At SIGGRAPH there was a panel of various industry and academic luminaries discussing the ramifications -- is the OpenGL/D3D model dead? (not yet), what will be the model that replaces it? (no one knows), is this an interesting time to be a graphics programmer? (yes). A colleague pointed out that the members of the panel lacked a key constituency -- a representative from a game studio that's just trying to make a game without a huge graphics programming team. The old model is on its last legs, the new world is so open that to call it a "model" would be an insult to programming models. If you're an academic or an engine maker, this doesn't present a problem, in fact, it is a huge opportunity -- back to the old-school, software renderer days. Anything's possible!
+But for your average game developer, it could mean you are one poor middleware choice away from disaster. You don't have the resources of the engine creators, so being ripped asunder from the warm embrace of the familiar D3D/OpenGL model can be a little terrifying. To put it another way: the beauty of a model like D3D/OpenGL is that no matter what engine or middleware you use, when it comes to the renderer, there is a lot of commonality. In this new world, there are a bunch of competing models or approaches -- that's part of the point. Engine creators will have a bevy of approaches to choose from -- but if you're just trying to get a game done, and you find your engine's choice of approach doesn't match what you need to do, well, you've got a lot of work all of the sudden.
+But we face these choices in software development all the time: when to abandon an algorithm or model because of diminishing returns. Change too soon and you've done a lot of extra work you could have avoided by just refining the existing code. Change too late and you miss opportunities that could differentiate your offerings. We like to pretend like doing cost/benefit analysis on this kind of stuff is easy, as if we were comparing a Volvo against a Toyota at the car dealer. But often the issues can be quite complex, and the fallout quite unexpected.
+It's cliche, but we live in interesting times.
+Posted by
+Steve
+at
+8:52 AM
+2 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+programming models,
+random musings,
+SIGGRAPH
+Sunday, August 9, 2009
+Fresh from SIGGRAPH
+You don't know what heat is until you spend a week in New Orleans in August.
+Here's a quick list of my favorites:
+Favorite course:
+Advances in Real-Time Rendering.
+Favorite technical paper:
+Inferred Lighting
+Favorite somewhat technical talk:
+Immersive and Impressive: The Impressionistic Look of Flower on the PS3
+Favorite non-technical talk:
+Making Pixar's "Partly Cloudy": A Director's Vision
+Posted by
+Steve
+at
+7:48 PM
+No comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+new orleans,
+SIGGRAPH
+Newer Posts
+Older Posts
+Home
+Subscribe to:
+Posts (Atom)

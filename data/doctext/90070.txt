@@ -1,0 +1,476 @@
+Contribute to kmatzen/sinter development by creating an account on GitHub.
+
+Over-relax the viewport sphere tracer so scaled fields stop dropping out by kmatzen · Pull Request #79 · kmatzen/sinter · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+kmatzen
+commented
+Jul 26, 2026
+Copy link
+Copy Markdown
+Owner
+Mitigates #76 (does not close it — see below).
+Problem
+A non-uniform scale multiplies the child distance field by min(sx,sy,sz) — the correct 1-Lipschitz correction — so a scaled subtree under-reports distance by up to max(scale)/min(scale). The fixed-budget marcher in SdfMesh.ts (256 steps, stepping t += abs(d) * 0.7) then needs that many times the usual step count, and rays that exhaust the budget fall through to discard: valid geometry silently vanishes at grazing angles and reappears as you orbit back.
+Change
+Enhanced sphere tracing (Keinert et al. 2014): over-relax the step by omega = 1.6, and retreat when the over-relaxed step overshoots the field's safe radius. The backtrack lands back inside the last known safe sphere, so a surface is never skipped — at least as robust as plain sphere tracing, while converging in far fewer steps through conservative fields.
+Its precondition is that the field never overstates distance, which is exactly what #75 pinned down and property-tests. The two changes fit together: over-relaxation is only sound on a conservative field.
+Measured on the compiled shader
+Worst-angle filled coverage over an orbit, for a union squeezed in X by 1/ratio with the box pre-widened so the rendered solid stays ~100mm across (this isolates field conditioning from mere thinness):
+conditioning ratio
+before
+after
+12.8 (the #76 project)
+11.25%
+11.87%
+30
+1.49%
+12.05%
+60
+0.00%
+12.42%
+120
+0.00%
+12.78%
+250
+0.00%
+11.48%
+500
+0.00%
+6.06%
+The reported project sits at ratio 12.8, where both marchers largely cope — consistent with the revised "real but modest" severity on the issue. The failure is total from ratio 60 upward.
+Cost at the worst angle: 0.105 → 0.165 ms/frame (432x756, ANGLE/Metal) — well inside a frame budget, though a weak integrated GPU will pay more than this. The step cap goes to 1024 purely as headroom; per the analysis on #76 the budget is not what fixes this (384 and 1024 both measure clean), the over-relaxation is.
+Test
+#76 noted the algorithm had only been verified by simulating both marchers against the TypeScript evaluator, which cannot see the compiled GLSL — the thing that actually ships. e2e/marcher-grazing.spec.ts closes that gap: it drives the real app, orbits to near-edge-on views of the badly-conditioned axis, and asserts the shader still fills the surface.
+Validated as a real guard, not a decoration — reverting SdfMesh.ts to the old marcher makes it fail at 0.00% coverage (elev 20 / azim 90); it passes at 12.78% with the fix. The suite covers both the literal #76 project (kept for regression coverage, though a weak discriminator) and the ratio-120 case that actually separates the two marchers.
+The size of the improvement is deliberately not asserted — coverage percentages vary with GPU and ANGLE backend, so the floor sits far below every measured passing value and far above a dropout.
+Verification
+tsc --noEmit clean
+258 unit tests pass (18 files)
+50 e2e tests pass, including the new spec (the one reported failure is the pre-existing documented text with glyph outlines divergence)
+Not closing #76
+The complete fix is anisotropic marching in the child's local space. This is the incremental mitigation that issue explicitly calls for, so #76 should stay open for the proper fix.
+🤖 Generated with Claude Code
+github-actions
+Bot
+commented
+Jul 26, 2026
+Copy link
+Copy Markdown
+🚀 Preview deployed: https://enhanced-sphere-tracing.sinter.pages.dev
+(updates on every push to this PR)
+This was referenced Jul 26, 2026
+Remove the X-Ray view mode from the viewport
+#81
+Merged
+A more rigorous way to verify rendering correctness
+#52
+Closed
+Adaptive ray march quality during orbit
+#33
+Closed
+Over-relax the viewport sphere tracer so scaled fields stop dropping out
+…
+d3ef263
+```
+A non-uniform `scale` multiplies the child distance field by `min(sx,sy,sz)` —
+the correct 1-Lipschitz correction — so a scaled subtree under-reports distance
+by up to `max(scale)/min(scale)`. The fixed-budget marcher (256 steps, stepping
+`t += abs(d) * 0.7`) then needs that many times the usual step count, and rays
+that exhaust the budget fall through to `discard`: valid geometry silently
+vanishes at grazing angles and reappears as you orbit back (#76).
+
+Replace it with enhanced sphere tracing (Keinert et al. 2014): over-relax the
+step by omega = 1.6, and retreat when the over-relaxed step overshoots the
+field's safe radius. The backtrack lands back inside the last known safe
+sphere, so a surface is never skipped — the scheme is at least as robust as
+plain sphere tracing while converging in far fewer steps through conservative
+fields. Its precondition is that the field never *overstates* distance, which
+is exactly what #75 pinned down and property-tests; the two changes fit
+together, since over-relaxation is only sound on a conservative field.
+
+Measured on the compiled shader — worst-angle filled coverage over an orbit,
+for a union squeezed in X by 1/ratio with the box pre-widened to keep the
+rendered solid ~100mm across:
+
+  conditioning ratio       before     after
+  12.8 (the #76 project)   11.25%     11.87%
+  30                        1.49%     12.05%
+  60                        0.00%     12.42%
+  120                       0.00%     12.78%
+  250                       0.00%     11.48%
+  500                       0.00%      6.06%
+
+The reported project sits at ratio 12.8, where both marchers largely cope —
+consistent with the revised "real but modest" severity on the issue. The
+failure is total from ratio 60 upward, and that is what the new test pins.
+
+Cost at the worst angle: 0.105 -> 0.165 ms/frame (432x756, ANGLE/Metal) — well
+inside a frame budget, though a weak integrated GPU will pay more than this.
+The step cap is raised to 1024 as headroom; per the analysis on #76 the budget
+is not what fixes this (384 and 1024 both measure clean), the over-relaxation
+is.
+
+#76 also noted that the algorithm had only been verified by simulating both
+marchers against the TypeScript evaluator, which cannot see the compiled GLSL —
+the thing that actually ships. The new e2e closes that gap: it drives the real
+app, orbits to near-edge-on views of the badly-conditioned axis, and asserts
+the shader still fills the surface. It fails on the old marcher (0.00% at
+elev 20 / azim 90) and passes on the new one.
+
+This does not close #76. The complete fix is anisotropic marching in the
+child's local space; this is the incremental mitigation that issue calls for.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+kmatzen
+force-pushed
+the
+enhanced-sphere-tracing
+branch
+from
+f1baf3f to
+d3ef263
+Compare
+July 26, 2026 05:55
+kmatzen
+added a commit
+that referenced
+this pull request
+Jul 26, 2026
+Make the grazing-angle e2e survive a loaded CI runner
+…
+9877b6f
+```
+Both cases failed on CI while passing locally, timing out on the wait for
+`sdfDisplay` and `__ENGINE_REF__`. Not a rendering difference: reproduced the CI
+environment locally with `--use-gl=swiftshader` and the engine comes up fine
+under software rendering, with no console errors. It is contention plus a clamped
+timeout.
+
+- The project sets `actionTimeout: 15000`, which silently clamps
+  `waitForFunction` no matter what timeout the call passes — the failure reported
+  15s against a stated 20s. Lift it for this file and wait on an explicit
+  90s budget instead.
+- Wait for the engine and for the first evaluated field separately, so a failure
+  says which precondition is missing rather than reporting a bare timeout on a
+  compound predicate.
+- CI runs 50 tests across two workers on a two-core runner under SwiftShader, and
+  `app.spec.ts` alone occupies ~7 minutes of it, so bringing up a WebGL context
+  here can stall a long time. Raise the per-test budget to 240s and widen the
+  waits on the way into the modeler.
+- Cut the work: 7 grazing angles instead of 11, and a 256px probe instead of
+  320px. Roughly halves the render cost per test (12.7s vs 21s locally for the
+  ratio-120 case) while keeping ~65k pixels per view, so coverage percentages
+  stay stable to well under 1%.
+
+The reduced angle set still includes elev 20 / azim 90, which is the angle that
+measures 0.00% on the pre-#79 marcher — re-verified that reverting `SdfMesh.ts`
+still fails the ratio-120 case at exactly that angle, so the guard survives the
+trim rather than being weakened into a smoke test.
+
+Full suite green locally: 264 unit tests, 50 e2e.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+kmatzen
+added a commit
+that referenced
+this pull request
+Jul 26, 2026
+Make the grazing-angle e2e survive a loaded CI runner
+…
+7b4639f
+```
+Both cases failed on CI while passing locally, timing out on the wait for
+`sdfDisplay` and `__ENGINE_REF__`. Not a rendering difference: reproduced the CI
+environment locally with `--use-gl=swiftshader` and the engine comes up fine
+under software rendering, with no console errors. It is contention plus a clamped
+timeout.
+
+- The project sets `actionTimeout: 15000`, which silently clamps
+  `waitForFunction` no matter what timeout the call passes — the failure reported
+  15s against a stated 20s. Lift it for this file and wait on an explicit
+  90s budget instead.
+- Wait for the engine and for the first evaluated field separately, so a failure
+  says which precondition is missing rather than reporting a bare timeout on a
+  compound predicate.
+- CI runs 50 tests across two workers on a two-core runner under SwiftShader, and
+  `app.spec.ts` alone occupies ~7 minutes of it, so bringing up a WebGL context
+  here can stall a long time. Raise the per-test budget to 240s and widen the
+  waits on the way into the modeler.
+- Cut the work: 7 grazing angles instead of 11, and a 256px probe instead of
+  320px. Roughly halves the render cost per test (12.7s vs 21s locally for the
+  ratio-120 case) while keeping ~65k pixels per view, so coverage percentages
+  stay stable to well under 1%.
+
+The reduced angle set still includes elev 20 / azim 90, which is the angle that
+measures 0.00% on the pre-#79 marcher — re-verified that reverting `SdfMesh.ts`
+still fails the ratio-120 case at exactly that angle, so the guard survives the
+trim rather than being weakened into a smoke test.
+
+Full suite green locally: 264 unit tests, 50 e2e.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+kmatzen
+force-pushed
+the
+enhanced-sphere-tracing
+branch
+from
+9877b6f to
+7b4639f
+Compare
+July 26, 2026 06:12
+kmatzen
+added a commit
+that referenced
+this pull request
+Jul 26, 2026
+Make the grazing-angle e2e survive a loaded CI runner
+…
+f117bb2
+```
+The new spec passed locally and failed on CI, and fixing it took two rounds
+because there were two independent causes.
+
+**Round 1 — a clamped timeout.** Both cases timed out waiting for `sdfDisplay`
+and `__ENGINE_REF__`. Not a rendering difference: reproduced the CI environment
+locally with `--use-gl=swiftshader` and the engine comes up fine under software
+rendering with no console errors. The real cause is that the project sets
+`actionTimeout: 15000`, which silently clamps `waitForFunction` no matter what
+timeout the call passes — the failure reported 15s against a stated 20s. So:
+
+- Lift `actionTimeout` for this file and wait on an explicit 90s budget.
+- Wait for the engine and for the first evaluated field separately, so a failure
+  names the missing precondition instead of reporting a bare timeout on a
+  compound predicate.
+- Raise the per-test budget to 240s and widen the waits entering the modeler.
+- Cut the work: 7 grazing angles instead of 11, and a 256px probe instead of
+  320px, keeping ~65k pixels per view so coverage stays stable to well under 1%.
+
+**Round 2 — the load I added.** With those fixes these tests passed, but an
+unrelated spec started failing: `sdf-parity`'s `page.goto` exceeded the 30s
+per-test default. CI runs 49 tests across two workers on a two-core runner under
+SwiftShader for ~8.5 min, and entering the modeler twice — app boot plus WebGL
+context creation, the expensive part — was enough to tip a neighbour over.
+
+- Merge the two cases into one test sharing a single modeler session. Loading a
+  second tree into the running editor costs a worker evaluation rather than a
+  second boot.
+- Raise the suite's per-test timeout to 60s and the global cap to 20 min. A 30s
+  ceiling on a loaded SwiftShader runner produces failures about machine
+  contention rather than the code under test, and 8.5 min of work under a 10 min
+  cap left no margin. This part is separable from the marcher change.
+
+The trimmed angle set still includes elev 20 / azim 90, the angle that measures
+0.00% on the pre-#79 marcher. Re-verified after restructuring that reverting
+`SdfMesh.ts` still fails there, so the guard survived the trim rather than
+decaying into a smoke test.
+
+Green locally: 264 unit tests, 49 e2e.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+kmatzen
+force-pushed
+the
+enhanced-sphere-tracing
+branch
+from
+7b4639f to
+f117bb2
+Compare
+July 26, 2026 06:28
+Make the grazing-angle e2e survive a loaded CI runner
+…
+210b856
+```
+The new spec passed locally and failed on CI three times, for three different
+reasons. Recorded in full because each cause was invisible from the previous
+failure.
+
+**1. A clamped timeout.** Both cases timed out waiting for `sdfDisplay` and
+`__ENGINE_REF__`. Not a rendering difference — reproduced the CI environment
+locally with `--use-gl=swiftshader` and the engine comes up fine under software
+rendering with no console errors. The cause is `actionTimeout: 15000` in the
+project config, which silently clamps `waitForFunction` regardless of the timeout
+the call passes; the failure reported 15s against a stated 20s. So: lift
+`actionTimeout` for this file, wait on an explicit 90s budget, and wait for the
+engine and the first evaluated field separately so a failure names the missing
+precondition instead of reporting a bare timeout on a compound predicate.
+
+**2. The load this spec added.** With that fixed these tests passed, but
+`sdf-parity`'s `page.goto` began exceeding the 30s per-test default. CI runs this
+suite across two workers on a two-core runner under SwiftShader for ~8.5 min, and
+entering the modeler twice — app boot plus WebGL context creation — was enough to
+tip a neighbour over. Merged the two cases into one test sharing a single modeler
+session, so the second scenario costs a worker evaluation rather than a second
+boot. Also raised the suite's per-test timeout to 60s and the global cap to 20
+min: a 30s ceiling on a loaded software renderer produces failures about machine
+contention rather than the code under test, and 8.5 min of work under a 10 min
+cap left no margin. That config change is separable from the marcher fix.
+
+**3. Render cost.** The test then exceeded its own 240s budget inside
+`page.evaluate`. Measured the actual cost under SwiftShader rather than guessing
+again — one render at the worst angle:
+
+  | probe | per render | coverage |
+  |-------|-----------|----------|
+  | 256px |    346 ms |   21.89% |
+  | 160px |    152 ms |   23.30% |
+  |  96px |     65 ms |   26.02% |
+  |  64px |     31 ms |   28.56% |
+
+So rendering was never the headline cost locally — 14 renders at 256px projects
+to 4.8s — and the 240s overrun is how much slower two shared cores are while
+`app.spec.ts` saturates them. Sized for a large margin instead: 96px probe and 5
+angles, ~0.65s of local SwiftShader render work, which absorbs a 50x slowdown.
+Coverage is a ratio, so shrinking the probe doesn't weaken it: 9,216 pixels still
+puts 1% at 92 pixels against a 5% floor.
+
+The trimmed angle set still includes elev 20 / azim 90, the angle that measures
+0.00% on the pre-#79 marcher. Re-verified at 96px after every restructuring that
+reverting `SdfMesh.ts` still fails there, so the guard survived the trim rather
+than decaying into a smoke test.
+
+Green locally: 264 unit tests, 49 e2e.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+kmatzen
+force-pushed
+the
+enhanced-sphere-tracing
+branch
+from
+f117bb2 to
+210b856
+Compare
+July 26, 2026 06:41
+Run the e2e suite with a single worker on CI
+…
+740d968
+```
+Fourth CI failure on this branch, and the pattern across the four runs identifies
+the cause: `sdf-parity`'s `page.goto` times out only when the marcher spec runs
+to completion alongside it. When the marcher spec died early instead, its
+neighbour passed. Raising the per-test timeout from 30s to 60s did not help —
+`page.goto` blew through 60s too.
+
+Every spec in this suite drives a WebGL context, which CI renders in software.
+Two Playwright workers on a two-core runner therefore oversubscribe it: whichever
+test is marching pixels starves the other, and the failure surfaces on the victim
+rather than the cause. That makes it look like a flaky `page.goto` when it is
+really CPU exhaustion.
+
+Serial execution costs little wall clock here, because one file dominates:
+`app.spec.ts` is ~9 of the suite's ~10 minutes, so the other specs were never
+buying much from parallelism. The 20 min global cap leaves room.
+
+Scoped to CI via `process.env.CI`, so local runs keep Playwright's default worker
+count and stay fast.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+kmatzen
+marked this pull request as ready for review
+July 26, 2026 15:13
+Hide details
+View details
+kmatzen
+merged commit 73c552e
+into
+main
+Jul 26, 2026
+5 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+kmatzen
+deleted the
+enhanced-sphere-tracing
+branch
+July 26, 2026 15:14
+kmatzen
+mentioned this pull request
+Aug 1, 2026
+Key the marcher's normal and hit threshold to the pixel, not the scene
+#96
+Merged
+kmatzen
+added a commit
+that referenced
+this pull request
+Aug 1, 2026
+Key the marcher's normal and hit threshold to the pixel, not the scene (
+…
+5e7d4db
+```
+#96)
+
+Tier 2 of #89, plus its outline-kernel item.
+
+`calcNormal` used central differences on three axes: six full sdf()
+evaluations per hit pixel. The tetrahedron technique gets the same
+gradient in four. On a shape filling the viewport that is a third of the
+shading cost.
+
+Its epsilon was `length(u_bbMax - u_bbMin) * 0.0002`, and u_bbMin/u_bbMax
+are the diagonal-expanded cube the mesh is drawn as, not the model's box
+— so it was ~1.7x larger than it reads as intending. Being tied to the
+scene's size, it also did not shrink when you zoomed into a small feature
+of a large model, which is exactly where an oversized epsilon smooths
+detail away. It is now a fraction of the marched distance.
+
+The hit threshold was `length(u_cameraPos) * 0.00005` — the camera's
+distance from the world origin, which no ray-surface intersection depends
+on. It is now half a pixel at the marched distance: there is nothing to
+resolve below that and it costs steps to try.
+
+The outline kernel swept -4..4 and culled past r = 3.0, so 32 of its 81
+taps did a sqrt and two depth linearisations only to be discarded. -3..3
+is the smallest box containing the disc, and the radius is a compile-time
+constant rather than a uniform.
+
+Item 5 in the issue is already done and its text is stale: the marcher
+has used Keinert over-relaxation since #79, not `t += abs(d) * 0.7`.
+
+The image changes, and only where it should. Five of six golden scenes
+are unchanged; box-minus-sphere differs by 169 pixels, confined to the
+crease edges, which is where a corrected normal epsilon shows up and
+where the creases now read slightly crisper. The diff was inspected
+before the reference was regenerated.
+
+Also added: an invariance test rendering the same model at the origin and
+700mm away and comparing the two directly. It passes under the old
+formulation too — the old threshold was wrong in kind but stayed under a
+pixel in practice, so it wasted steps rather than producing a wrong image
+— so it is a regression guard, not a demonstration. Stated as such in the
+test.
+
+Refs #89.
+
+Co-authored-by: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+kmatzen
+mentioned this pull request
+Aug 1, 2026
+Rendering performance: the viewport marches the SDF twice per frame, continuously, at full DPR
+#89
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

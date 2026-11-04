@@ -1,0 +1,158 @@
+# Sparse AABB Collision Test
+
+Also called: TestAabb
+
+## Overview
+The Sparse AABB Collision Test determines whether an Axis-Aligned Bounding Box (AABB) intersects any occupied voxels within a sparse volume representation. It solves the problem of static collision detection for volumetric objects by iterating through the voxel grid defined by the AABB's bounds. It differs from its sibling [Point-in-Box Inclusion Test](1400-point-in-box-inclusion-test.md) by evaluating a continuous volume rather than discrete points, and from [Voxel Filled Check](1705-voxel-filled-check.md) by supporting heterogeneous voxel types (solid, liquid, unknown) and caching terrain noise evaluation per column to optimize performance.
+
+## How it works
+**Inputs:**
+- `aabb`: A `SparseCollisionAabb` structure defining the test volume with `min` and `max` coordinates (floats).
+- `liquidsBlock`: A boolean flag indicating if liquid voxels count as blocking collisions.
+
+**Outputs:**
+- A result structure containing:
+  - `blocked`: Boolean, true if any blocking voxel was found.
+  - `sampledVoxels`: Count of voxels sampled.
+  - `solidVoxels`: Count of solid voxels.
+  - `liquidVoxels`: Count of liquid voxels.
+  - `unknownVoxels`: Count of unknown/blocked voxels.
+  - `hasLiquid`: Boolean, true if any liquid was encountered.
+  - `hasUnknown`: Boolean, true if any unknown voxel was encountered.
+  - `firstBlockingSample`: The `CollisionSample` of the first blocking voxel.
+  - `firstBlockingX`, `firstBlockingY`, `firstBlockingZ`: Integer coordinates of the first blocking voxel.
+
+**Data Structures:**
+- `SparseCollisionAabb`: Contains `min` and `max` vectors.
+- `CollisionSample`: Contains `status` (enum: `KnownAir`, `KnownSolid`, `KnownLiquid`, `UnknownBlocked`) and potentially other metadata.
+- `colHeight`, `colRelief`: Arrays of floats indexed by column index, caching terrain height and relief values.
+
+**Steps:**
+1. **Validation**: Check if `aabb.min` or `aabb.max` contains non-finite values (NaN or Inf). If so, return immediately with `blocked = true` and status `UnknownBlockedVolume` [S1, unofficial].
+2. **Voxel Range Calculation**: Convert `aabb.min` and `aabb.max` to voxel indices `minX, minY, minZ` and `maxX, maxY, maxZ` using a helper `TryBuildVoxelRange`. This helper uses `nextafter` on the max coordinates to handle floating-point precision boundaries correctly [S1, unofficial].
+3. **Sample Limit Check**: Calculate the total number of voxels: $N = (maxX - minX + 1) \times (maxY - minY + 1) \times (maxZ - minZ + 1)$. If $N > kMaxCollisionVolumeSamples$ (where $kMaxCollisionVolumeSamples = 32768$), return immediately with `blocked = true` and status `UnknownBlockedVolume` [S1, unofficial].
+4. **Column Cache Initialization**: Determine the XZ footprint of the AABB. For each column $(x, z)$ in the footprint, precompute and store the terrain height and relief in `colHeight` and `colRelief` arrays. This collapses the noise evaluation cost from $O(voxels)$ to $O(columns)$ [S1, unofficial].
+5. **Voxel Iteration**: Iterate through the voxel grid in the order: $Z$ from $minZ$ to $maxZ$, $Y$ from $minY$ to $maxY$, $X$ from $minX$ to $maxZ$ [S1, unofficial].
+6. **Index Calculation**: For each voxel $(x, y, z)$, calculate the linear index for the column cache:
+   $$idx = (x - minX) + (z - minZ) \times (maxX - minX + 1)$$
+   [S1, unofficial].
+7. **Sampling**: Call `SampleWithColumn(x, y, z, colHeight[idx], colRelief[idx])` to get the `CollisionSample` status [S1, unofficial].
+8. **Classification**:
+   - Increment `sampledVoxels`.
+   - If `status` is `KnownAir`: Continue.
+   - If `status` is `KnownSolid`: Increment `solidVoxels`. Set `sampleBlocks = true`.
+   - If `status` is `KnownLiquid`: Increment `liquidVoxels`. Set `hasLiquid = true`. Set `sampleBlocks = liquidsBlock`.
+   - If `status` is `UnknownBlocked` (or default): Increment `unknownVoxels`. Set `hasUnknown = true`. Set `sampleBlocks = true`.
+9. **Blocking Check**: If `sampleBlocks` is true and `result.blocked` is false:
+   - Set `result.blocked = true`.
+   - Store `sample` in `result.firstBlockingSample`.
+   - Store $x, y, z$ in `result.firstBlockingX`, `result.firstBlockingY`, `result.firstBlockingZ`.
+10. **Return**: Return the populated result structure [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sparse_aabb_collision_test(aabb, liquids_block):
+    # Step 1: Validation
+    if not is_finite(aabb.min) or not is_finite(aabb.max):
+        return Result(blocked=True, status=UnknownBlockedVolume)
+
+    # Step 2: Voxel Range Calculation
+    min_x, min_y, min_z = TryBuildVoxelRange(aabb.min)
+    max_x, max_y, max_z = TryBuildVoxelRange(aabb.max)
+
+    # Step 3: Sample Limit Check
+    span_x = max_x - min_x + 1
+    span_y = max_y - min_y + 1
+    span_z = max_z - min_z + 1
+    total_voxels = span_x * span_y * span_z
+    
+    if total_voxels > 32768:
+        return Result(blocked=True, status=UnknownBlockedVolume)
+
+    # Step 4: Column Cache Initialization
+    col_height = [0.0] * (span_x * span_z)
+    col_relief = [0.0] * (span_x * span_z)
+    
+    for z in range(min_z, max_z + 1):
+        for x in range(min_x, max_x + 1):
+            idx = (x - min_x) + (z - min_z) * span_x
+            col_height[idx], col_relief[idx] = compute_terrain_noise(x, z)
+
+    # Initialize Result
+    result = Result(
+        blocked=False,
+        sampled_voxels=0,
+        solid_voxels=0,
+        liquid_voxels=0,
+        unknown_voxels=0,
+        has_liquid=False,
+        has_unknown=False
+    )
+
+    # Step 5-9: Voxel Iteration and Classification
+    for z in range(min_z, max_z + 1):
+        for y in range(min_y, max_y + 1):
+            for x in range(min_x, max_x + 1):
+                idx = (x - min_x) + (z - min_z) * span_x
+                sample = sample_with_column(x, y, z, col_height[idx], col_relief[idx])
+                
+                result.sampled_voxels += 1
+                sample_blocks = False
+                
+                if sample.status == KnownAir:
+                    pass
+                elif sample.status == KnownSolid:
+                    result.solid_voxels += 1
+                    sample_blocks = True
+                elif sample.status == KnownLiquid:
+                    result.liquid_voxels += 1
+                    result.has_liquid = True
+                    sample_blocks = liquids_block
+                else: # UnknownBlocked or default
+                    result.unknown_voxels += 1
+                    result.has_unknown = True
+                    sample_blocks = True
+                
+                if sample_blocks and not result.blocked:
+                    result.blocked = True
+                    result.first_blocking_sample = sample
+                    result.first_blocking_x = x
+                    result.first_blocking_y = y
+                    result.first_blocking_z = z
+
+    return result
+```
+
+**Parameters:**
+- `liquidsBlock`: Boolean. Default behavior in the source code suggests it is a configurable flag. If true, liquids block movement; if false, they do not [S1, unofficial].
+- `kMaxCollisionVolumeSamples`: Constant `32768`. Hard limit on voxel count to prevent excessive computation [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Non-finite Bounds**: If the AABB contains NaN or Inf, the test returns `UnknownBlockedVolume` immediately [S1, unofficial].
+- **Precision Boundaries**: `TryBuildVoxelRange` uses `nextafter` on the max coordinate to ensure floating-point inaccuracies do not cause off-by-one errors in voxel indexing [S1, unofficial].
+- **Excessive Volume**: If the AABB spans more than 32,768 voxels, the test fails fast with `UnknownBlockedVolume` rather than iterating [S1, unofficial].
+
+## Subtopics
+
+### [Sparse AABB Sweep Test](5413-sparse-aabb-sweep-test.md)
+The Sparse AABB Sweep Test is a voxel occupancy test that determines whether an Axis-Aligned Bounding Box (AABB) moving along a displacement vector intersects any occupied voxels in a sparse volume. It solves the problem of continuous collision detection for volumetric objects by sampling the path at discrete intervals, offering a balance between the accuracy of continuous sweep tests and the performance of static point tests. It differs from its sibling [Support Below Search](5414-support-below-search.md) by testing the entire swept volume rather than just the base support, and from its parent [Sparse AABB Collision Test](3047-sparse-aabb-collision-test.md) by handling non-zero displacement vectors through temporal sampling.
+
+### [Support Below Search](5414-support-below-search.md)
+Support Below Search determines if a voxel position has structural support directly beneath it within a specified vertical drop distance. It solves the problem of identifying valid standing positions for entities or objects in a voxel world by finding the first non-empty voxel (solid, liquid, or blocked unknown) below a given footprint. It differs from [Sparse AABB Sweep Test](5413-sparse-aabb-sweep-test.md) by iterating through a defined volume to find the *first* support rather than sweeping for *any* collision along a path, and builds on [Sparse AABB Collision Test](3047-sparse-aabb-collision-test.md) by utilizing its collision sample semantics.
+
+## Operating characteristics
+- **Time Complexity**: $O(C + V)$, where $C$ is the number of columns in the XZ footprint and $V$ is the total number of voxels in the AABB. The column cache initialization is $O(C)$, and the voxel sampling is $O(V)$ [S1, unofficial].
+- **Memory Complexity**: $O(C)$ for the `colHeight` and `colRelief` caches, plus $O(1)$ for the result structure [S1, unofficial].
+- **Performance**: The method optimizes terrain noise evaluation by caching it per column, reducing the cost from $O(V)$ to $O(C)$ for the noise component [S1, unofficial].
+- **Strengths**: Handles heterogeneous voxel types (solid, liquid, unknown); provides detailed statistics on voxel composition; fast early exit for invalid or excessively large volumes.
+- **Limitations**: Limited to static AABBs; does not handle continuous motion (use [Sparse AABB Sweep Test](5413-sparse-aabb-sweep-test.md) for that); capped at 32,768 voxels per test.
+- **When to Use**: Static collision detection for entities in a voxel world where terrain noise is expensive to evaluate per voxel.
+- **When Not to Use**: Continuous collision detection (use [Sparse AABB Sweep Test](5413-sparse-aabb-sweep-test.md)); very large volumes exceeding 32,768 voxels; simple point-in-box checks where volume sampling is unnecessary (use [Point-in-Box Inclusion Test](1400-point-in-box-inclusion-test.md)).
+
+## Background
+The Sparse AABB Collision Test is part of the VENPOD voxel physics engine, developed by asajid2-cell. It is designed for high-performance voxel simulation, targeting 100M+ active voxels at 60 FPS. The method is implemented in C++ and integrated into the sandbox mode of the engine [S1, unofficial].
+
+## Sources
+[S1] asajid2-cell/voxelrender, https://github.com/asajid2-cell/voxelrender, fetched 2026-10-27 (unofficial)

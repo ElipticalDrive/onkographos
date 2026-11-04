@@ -1,0 +1,192 @@
+# Spectral MIS with Unidirectional Path Tracing
+
+Also called: Spectral MIS
+
+## Overview
+Spectral MIS with Unidirectional Path Tracing is a method for estimating direct illumination in spectrally varying participating media by combining multiple per-channel sampling techniques via Multiple Importance Sampling (MIS) [S1, unofficial]. It addresses the high variance and computational cost of standard spectral tracking, which requires a conservative majorant for all color components, by allowing each color channel to be sampled independently while combining the results [S1, unofficial]. Unlike [Spectral+NEE MIS (Shadow Connection Routine)](1907-spectral-nee-mis-shadow-connection-routine.md), which adds a shadow connection routine for next-event estimation, this method focuses on the core path construction and MIS weighting for unidirectional paths [S1, unofficial].
+
+## How it works
+The method estimates the spectral radiance by computing separate path contributions for each color component $c \in \{c_1, \dots, c_N\}$, but combines them using a balance heuristic to reduce color noise [S1, unofficial].
+
+**Inputs:**
+- Current path vertex $x_{r-1}$ and incoming direction $\omega_{in}$.
+- Spectral extinction $\mu_t^c(x)$, scattering $\mu_s^c(x)$, and absorption $\mu_a^c(x)$ coefficients for each component $c$.
+- Phase function $\rho_m(\omega)$.
+- Light source radiance $L_e(x, -\omega)$.
+
+**Outputs:**
+- Estimated spectral radiance contribution.
+
+**Data Structures:**
+- Vectors $f$ and $p$ of size $N$ (number of color components), initialized to ones. $f$ stores path contributions; $p$ stores path PDFs.
+
+**Steps:**
+1. Initialize per-component path contributions $f \leftarrow \langle 1, \dots, 1 \rangle_N$ and per-component path PDFs $p \leftarrow \langle 1, \dots, 1 \rangle_N$ [S1, unofficial].
+2. Select a random color component $\tilde{c}$ from $\{c_1, \dots, c_N\}$ uniformly [S1, unofficial].
+3. Sample the medium interaction distance $t$ using the extinction coefficient of the selected component $\tilde{c}$:
+   $$ t = -\frac{\ln(1-\xi)}{\mu_t^{\tilde{c}}(x)} $$
+   where $\xi \in [0, 1)$ is a uniform random number [S1, unofficial].
+4. Update the new vertex position $x \leftarrow x_{r-1} + t\omega_{in}$ [S1, unofficial].
+5. Sample the event type $e \in \{a, s, n\}$ (absorption, scattering, null) based on the coefficients of $\tilde{c}$:
+   $$ P(e=a) = \frac{\mu_a^{\tilde{c}}(x)}{\mu_t^{\tilde{c}}(x)}, \quad P(e=s) = \frac{\mu_s^{\tilde{c}}(x)}{\mu_t^{\tilde{c}}(x)}, \quad P(e=n) = \frac{\mu_n^{\tilde{c}}(x)}{\mu_t^{\tilde{c}}(x)} $$
+   [S1, unofficial].
+6. Update the path contributions $f$ component-wise:
+   $$ f \leftarrow f \circ \langle T(t)\mu_e^{c_1}(x), \dots, T(t)\mu_e^{c_N}(x) \rangle $$
+   where $T(t)$ is the transmittance over distance $t$ (computed using the majorant or specific coefficients depending on implementation, but the formula in the source uses $\mu_e$) [S1, unofficial]. Note: The source formula (line 9 of Algorithm 2) shows $T(t)\mu_e^c(x)$. In null scattering, $T(t)$ is typically $e^{-\hat{\mu}_t t}$ where $\hat{\mu}_t$ is the majorant, but the specific weighting in the MIS balance heuristic handles the discrepancy. The source explicitly writes $T(t)\mu_e^c(x)$ [S1, unofficial].
+7. Update the path PDFs $p$ component-wise. For each component $c$, the PDF is updated by the ratio of the true PDF to the sampled PDF. The source indicates:
+   $$ p \leftarrow p \circ \left\langle \frac{\mu_t^{c_1}(x)}{p_{\tilde{c}}(x)} T(t)^{c_1}, \dots, \frac{\mu_t^{c_N}(x)}{p_{\tilde{c}}(x)} T(t)^{c_N} \right\rangle $$
+   However, the source text for line 10 is garbled: `p←p◦ @ µ ct 1 T c 1 (t) e c1 , . . . ,  @ Z t`. Reconstructing from the context of MIS and the balance heuristic, the PDF update accounts for the fact that the distance was sampled using $\tilde{c}$ but we are estimating for all $c$. The term $\frac{\mu_t^c(x)}{p_{\tilde{c}}(x)}$ represents the importance weight ratio. The source explicitly states "Update path pdfs $p$. If $e=a$, $p_{\tilde{c}}(x) \leftarrow p_{\tilde{c}}(x) \cdot 1$". This implies the PDF vector $p$ accumulates the product of these ratios [S1, unofficial].
+8. If $e = a$ (absorption), terminate the path and return the average of $f$ weighted by $p$ (balance heuristic) [S1, unofficial].
+9. If $e = s$ (scattering), sample the outgoing direction $\omega$ from the phase function $\rho_m(\omega)$ and continue the path walk [S1, unofficial].
+10. If $e = n$ (null), continue the path walk [S1, unofficial].
+11. Return the average of the path contributions $f$ across all $N$ components using the balance heuristic:
+    $$ \text{Result} = \frac{1}{N} \sum_{i=1}^N \frac{f_i}{p_i} $$
+    [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def spectral_mis_unidirectional(x_prev, omega_in, mu_t, mu_s, mu_a, mu_n, rho_m, L_e, N):
+    # mu_t, mu_s, mu_a, mu_n are functions returning vector of size N for a given x
+    # Initialize per-component path contributions and PDFs
+    f = [1.0] * N
+    p = [1.0] * N
+    
+    # Select a random color component
+    c_tilde = random.randint(0, N - 1)
+    
+    while True:
+        # Sample medium interaction distance using c_tilde
+        xi = random.uniform(0, 1)
+        mu_t_val = mu_t(x_prev)[c_tilde]
+        t = -ln(1 - xi) / mu_t_val
+        
+        # Update position
+        x_new = x_prev + t * omega_in
+        
+        # Sample event type using c_tilde
+        mu_t_all = mu_t(x_new)
+        mu_s_all = mu_s(x_new)
+        mu_a_all = mu_a(x_new)
+        mu_n_all = mu_n(x_new)
+        
+        # Probabilities for c_tilde
+        p_a = mu_a_all[c_tilde] / mu_t_all[c_tilde]
+        p_s = mu_s_all[c_tilde] / mu_t_all[c_tilde]
+        p_n = mu_n_all[c_tilde] / mu_t_all[c_tilde]
+        
+        # Determine event
+        r = random.uniform(0, 1)
+        if r < p_a:
+            event = 'a'
+        elif r < p_a + p_s:
+            event = 's'
+        else:
+            event = 'n'
+            
+        # Update contributions f
+        # T(t) is transmittance. In null scattering, T(t) = exp(-mu_hat * t).
+        # The source formula uses T(t) * mu_e^c(x).
+        # We assume T(t) is computed using the majorant mu_hat.
+        # However, the source formula line 9: f <- f ◦ <T(t)mu_e^c1(x), ...>
+        # This implies the contribution is weighted by the specific coefficient of the event.
+        # For absorption, mu_e is mu_a. For scattering, mu_s. For null, mu_n.
+        # But wait, the source says "Update path contributions f component-wise with transmittance and event coefficient".
+        # And the formula is T(t) * mu_e^c(x).
+        # This is slightly ambiguous. Usually, the estimator is L * mu_s / mu_t * T.
+        # The source formula is explicit: T(t) * mu_e^c(x).
+        
+        # Compute T(t) using majorant mu_hat (assumed known or passed)
+        # If not passed, we cannot implement T(t) exactly. 
+        # [G] Assuming mu_hat is available as a constant or function.
+        # For the purpose of this article, we assume T(t) is computed.
+        # Note: The source does not explicitly define T(t) in the pseudocode snippet, 
+        # but it is part of the transmittance. In null scattering, T(t) = exp(-mu_hat * t).
+        
+        # Update f
+        for i in range(N):
+            if event == 'a':
+                coeff = mu_a_all[i]
+            elif event == 's':
+                coeff = mu_s_all[i]
+            else:
+                coeff = mu_n_all[i]
+            # T(t) is the same for all components in the vector update
+            # [G] T(t) = exp(-mu_hat * t)
+            f[i] = f[i] * T(t) * coeff
+            
+        # Update p
+        # The source formula for p update is garbled.
+        # "p <- p ◦ < mu_t^c1(x) / p_c_tilde(x) * T(t)^c1, ... >"
+        # This interpretation is based on the text "ratio of the true pdf to the sampled pdf".
+        # The sampled PDF for distance t is mu_t^c_tilde * T(t).
+        # The true PDF for distance t for component c is mu_t^c * T(t).
+        # The ratio is mu_t^c / mu_t^c_tilde.
+        # The source text says: "p_c_tilde(x) <- p_c_tilde(x) * 1" if e=a.
+        # This suggests p accumulates the MIS weights.
+        # Let's use the ratio of extinction coefficients.
+        for i in range(N):
+            # Ratio of true PDF to sampled PDF for the distance sampling
+            # The distance was sampled with mu_t^c_tilde.
+            # The weight for component i is mu_t^i / mu_t^c_tilde.
+            # The source formula includes T(t) in the p update? 
+            # "p <- p ◦ < ... T(t) ... >"
+            # This is likely a typo in the source or refers to the full path PDF.
+            # Given the balance heuristic, we divide by p.
+            # Let's stick to the ratio of extinction coefficients as the primary MIS weight for distance.
+            # [G] The source is ambiguous on the exact p update formula due to garbled text.
+            # We use the ratio of extinction coefficients.
+            p[i] = p[i] * (mu_t_all[i] / mu_t_all[c_tilde])
+            
+        if event == 'a':
+            # Absorption: terminate and return
+            # Return average of f/p
+            result = 0.0
+            for i in range(N):
+                result += f[i] / p[i]
+            return result / N
+            
+        elif event == 's':
+            # Scattering: sample direction
+            omega_out = sample_phase_function(rho_m)
+            # Update x_prev and omega_in for next iteration
+            x_prev = x_new
+            omega_in = omega_out
+            # Continue loop
+            
+        else: # event == 'n'
+            # Null scattering: continue
+            x_prev = x_new
+            # omega_in remains the same
+            # Continue loop
+```
+
+**Parameters:**
+- $N$: Number of color components (e.g., 3 for RGB).
+- $\xi$: Uniform random number in $[0, 1)$.
+
+**Edge cases and pitfalls:**
+- Precision issues may arise if $\mu_t^{\tilde{c}}$ is very small, leading to large $t$.
+- Boundary conditions for the medium must be handled when $x$ exits the medium.
+- The balance heuristic requires that all techniques have non-zero probability of being selected.
+
+## Subtopics
+
+### Spectral+NEE MIS (Shadow Connection Routine)
+Extends Spectral MIS by adding a shadow connection routine for next-event estimation to handle light sources inside the medium more efficiently. Choose this when light sources are embedded in the medium. Link: [Spectral+NEE MIS (Shadow Connection Routine)](1907-spectral-nee-mis-shadow-connection-routine.md).
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot r)$, where $N$ is the number of color components and $r$ is the path length. Each step involves $N$ operations for updating $f$ and $p$.
+- **Memory Complexity**: $O(N)$ for storing $f$ and $p$ vectors.
+- **Measured Performance**: In a 1D medium experiment, Spectral MIS achieved a reduction of color noise comparable to spectral tracking but at a lower cost (fewer medium lookups) [S1, unofficial]. In the left plume of Fig. 9 (high density, low albedo green channel), Spectral MIS achieved RMSE: 0.047 and LTUV: 4.12M lookups, outperforming Spectral tracking (RMSE: 0.055, LTUV: 5.82M) and Independent tracking (RMSE: 0.077, LTUV: 11.5M) [S1, unofficial]. In the right plume of Fig. 9 (similar spectral variation), Spectral MIS achieved RMSE: 0.029 and LTUV: 1.09M lookups, outperforming Spectral tracking (RMSE: 0.035, LTUV: 1.51M) [S1, unofficial]. In the malachite material (Fig. 10), Spectral MIS achieved RMSE: 0.032 and LTUV: 0.56M lookups, outperforming Spectral tracking (RMSE: 0.042, LTUV: 2.85M) [S1, unofficial].
+- **Strengths**: Reduces color noise compared to independent tracking; lower computational cost than spectral tracking by avoiding a common conservative majorant for all color components [S1, unofficial].
+- **Limitations**: Still requires sampling per component; may not handle complex light source geometries as well as NEE methods [S1, unofficial].
+- **When to use**: When simulating spectrally varying media and color noise is a concern, but computational resources are limited compared to full spectral tracking.
+- **When not to use**: When light sources are inside the medium and next-event estimation is critical; consider [Spectral+NEE MIS (Shadow Connection Routine)](1907-spectral-nee-mis-shadow-connection-routine.md) instead.
+
+## Background
+The method was introduced by [S1, unofficial] as part of a null-scattering path integral formulation of light transport. It extends the work of Wilkie et al. and Fajardo [2012] by combining per-channel sampling techniques via MIS to reduce color noise while maintaining computational efficiency [S1, unofficial]. The method is used in volumetric path tracing for rendering participating media with spectrally varying properties.
+
+## Sources
+[S1] A Null-Scattering Path Integral Formulation of Light Transport, https://www.scribd.com/document/1067625811/A-Null-scattering-Path-Integral-Formulation-of-Light-Transport, fetched 2026-10-29 (unofficial)

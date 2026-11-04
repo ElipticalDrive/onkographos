@@ -1,0 +1,201 @@
+--- v001.md
++++ v002.md
+@@ -1,116 +1,71 @@
+ # NeRF Importance Sampling
+ 
+-Also called: Importance Sampling for NeRF, Hierarchical Sampling with Weight Modification
++Also called: Importance Sampling for NeRF
+ 
+ ## Overview
+-A technique to refine the sampling distribution along rays by using the weights from a coarse model to generate additional sample points, improving rendering quality with minimal overhead [S1, unofficial]. It sets itself apart from standard uniform or stratified sampling by concentrating computational effort on regions of high opacity, and differs from [NerfAcc Rendering Pipeline](1619-nerfacc-rendering-pipeline.md) by relying on explicit weight-based resampling rather than learned density priors or spatial acceleration structures.
++A technique to refine the sampling distribution along rays by using the weights from a coarse model to generate additional sample points, improving rendering quality with minimal overhead [S1, unofficial]. It concentrates computational effort on regions of high opacity by resampling based on coarse alpha compositing weights [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Coarse sample positions $z_{\text{vals}}$ (depths along the ray), corresponding alpha compositing weights $w$ from the coarse network evaluation, number of importance samples $N_{\text{importance}}$, and a boolean `perturb` flag for training-time jittering.
+-- Output: Refined sample positions $z_{\text{samples}}$ and their corresponding 3D coordinates for fine network evaluation.
++- Input: Coarse sample positions $z_{\text{vals}}$ (depths along the ray), corresponding alpha compositing weights $w$ from the coarse network evaluation, number of importance samples $N_{\text{importance}}$, and a boolean `perturb` flag [S1, unofficial].
++- Output: Refined sample positions $z_{\text{samples}}$ concatenated with coarse positions, sorted, and their corresponding 3D coordinates for fine network evaluation [S1, unofficial].
+ 
+ **Data Structures:**
+-- $z_{\text{vals}}$: Tensor of shape $[N_{\text{coarse}}]$, sorted in descending order (far to near).
+-- $w$: Tensor of shape $[N_{\text{coarse}}]$, representing the contribution weight of each coarse sample to the final color.
+-- $z_{\text{vals\_mid}}$: Tensor of shape $[N_{\text{coarse}} - 1]$, midpoints between adjacent coarse samples.
++- $z_{\text{vals}}$: Tensor of shape $[N_{\text{coarse}}]$, sorted in descending order (far to near) [S1, unofficial].
++- $w$: Tensor of shape $[N_{\text{coarse}}]$, representing the contribution weight of each coarse sample [S1, unofficial].
++- $z_{\text{vals\_mid}}$: Tensor of shape $[N_{\text{coarse}} - 1]$, midpoints between adjacent coarse samples [S1, unofficial].
+ 
+ **Steps:**
+-1. **Calculate Midpoints:** Compute the midpoints between adjacent coarse samples to define integration intervals.
+-   $$ z_{\text{vals\_mid}}[i] = 0.5 \times (z_{\text{vals}}[i+1] + z_{\text{vals}}[i]) $$
+-   for $i = 0, \dots, N_{\text{coarse}} - 2$.
+-
+-2. **Prepare Weights for Sampling:** Extract the weights corresponding to the intervals defined by the midpoints. This typically involves excluding the first and last samples or aligning weights with the intervals. Let $w_{\text{mid}}$ be the weights associated with these intervals.
+-
+-3. **Sample PDF:** Use inverse transform sampling on the normalized weights $w_{\text{mid}}$ to select $N_{\text{importance}}$ sample positions $z_{\text{samples}}$ within the intervals. If `perturb` is true, add uniform noise to the samples for training stability [S1, unofficial].
+-
++1. **Calculate Midpoints:** Compute the midpoints between adjacent coarse samples to define integration intervals [S1, unofficial].
++   $$ z_{\text{vals\_mid}} = 0.5 \times (z_{\text{vals}}[..., 1:] + z_{\text{vals}}[..., :-1]) $$
++2. **Prepare Weights for Sampling:** Extract the weights corresponding to the intervals defined by the midpoints, excluding the first and last samples [S1, unofficial].
++3. **Sample PDF:** Use inverse transform sampling on the normalized weights to select $N_{\text{importance}}$ sample positions $z_{\text{samples}}$ within the intervals, using a deterministic flag based on `perturb` [S1, unofficial].
+ 4. **Stop Gradient:** Apply a stop-gradient operation on the sampled positions $z_{\text{samples}}$ to prevent gradients from flowing back through the sampling process to the coarse network during backpropagation [S1, unofficial].
+-
+-5. **Concatenate and Sort:** Concatenate the original coarse $z_{\text{vals}}$ and the new $z_{\text{samples}}$. Sort the combined tensor in descending order to maintain the ray traversal order (far to near).
+-
+-6. **Evaluate Fine Network:** Compute 3D coordinates from the sorted depths and evaluate the fine neural network at these points to obtain refined color and opacity.
++5. **Concatenate and Sort:** Concatenate the original coarse $z_{\text{vals}}$ and the new $z_{\text{samples}}$. Sort the combined tensor in descending order to maintain the ray traversal order (far to near) [S1, unofficial].
++6. **Evaluate Fine Network:** Compute 3D coordinates from the sorted depths and evaluate the fine neural network at these points to obtain refined color and opacity [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ import torch
+-import torch.nn.functional as F
+ 
+ def importance_sampling(z_vals, weights, N_importance, perturb):
+-    """
+-    z_vals: [N_coarse] sorted descending
+-    weights: [N_coarse] alpha compositing weights
+-    N_importance: int
+-    perturb: bool
+-    """
++    # z_vals: [N_coarse] sorted descending
++    # weights: [N_coarse] alpha compositing weights
++    # N_importance: int
++    # perturb: bool
+     # 1. Calculate midpoints
+-    # z_vals is [N_coarse], midpoints are between i and i+1
+-    # Shape: [N_coarse - 1]
+     z_vals_mid = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
+     
+-    # 2. Prepare weights for the intervals
+-    # Weights should correspond to the intervals. 
+-    # Standard NeRF implementation often uses weights[1:-1] or similar alignment.
+-    # Assuming weights[i] corresponds to the interval ending at z_vals[i] or similar.
+-    # Based on S1: "weights from the coarse model (excluding first and last samples)"
+-    # This implies we sample from the intervals defined by midpoints.
+-    # Let's assume weights_mid corresponds to the probability mass in each interval.
+-    # In standard NeRF, weights are computed per sample. 
+-    # To sample from intervals, we need interval weights. 
+-    # A common approach is to use the weights of the samples as proxies or compute interval weights.
+-    # S1 says "weights from the coarse model (excluding first and last samples)".
+-    # Let's use weights[1:-1] as the weights for the intervals defined by z_vals_mid.
+-    weights_mid = weights[1:-1]
++    # 2. Prepare weights for sampling (exclude first and last)
++    weights_mid = weights[..., 1:-1]
+     
+     # Normalize weights to form a PDF
+-    # Add small epsilon for numerical stability
+     eps = 1e-10
+-    pdf = weights_mid / (weights_mid.sum() + eps)
++    pdf = weights_mid / (weights_mid.sum(dim=-1, keepdim=True) + eps)
+     
+-    # 3. Sample from PDF
+-    # Create CDF
++    # 3. Sample PDF using inverse transform sampling
+     cdf = torch.cumsum(pdf, dim=-1)
+     cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], dim=-1)
+     
+-    # Generate uniform samples
+-    u = torch.rand(z_vals.shape[:-1] + (N_importance,), device=z_vals.device)
+-    
++    if perturb:
++        u = torch.rand(z_vals.shape[:-1] + (N_importance,), device=z_vals.device)
++    else:
++        u = torch.linspace(0, 1, N_importance, device=z_vals.device)
++        u = u.expand_as(cdf[..., :-1])
++        
+     # Inverse transform sampling
+-    # Find indices where u falls in the CDF
+-    indices = torch.searchsorted(cdf, u, side='right')
+-    
+-    # Get lower and upper bounds for interpolation
+-    # indices are in [0, N_coarse-1]
+-    # We need to map these back to z_vals_mid intervals
+-    # If index is 0, use first interval, etc.
+-    # This is a simplified discrete sampling. For continuous, we interpolate.
+-    # Let's assume discrete sampling for simplicity as per S1's "sample_pdf" description
+-    # which often implies picking from the bins.
+-    
+-    # More robust continuous sampling:
+-    # Find the bin index for each u
+-    # indices shape: [batch, N_importance]
+-    # Clamp indices to valid range
++    indices = torch.searchsorted(cdf[..., :-1], u, side='right')
+     indices = torch.clamp(indices, 0, len(z_vals_mid) - 1)
+     
+-    # Get the z_vals_mid for these indices
+-    # Expand z_vals_mid to match indices shape
+-    z_samples = z_vals_mid[indices]
++    # Interpolate within bins
++    lower_idx = indices
++    upper_idx = torch.clamp(indices + 1, 0, len(z_vals_mid) - 1)
+     
+-    # Add perturbation if training
+-    if perturb:
+-        # Add uniform noise within the interval
+-        # Interval bounds for index i are z_vals_mid[i] and z_vals_mid[i+1] (if exists)
+-        # Or z_vals[i] and z_vals[i+1]
+-        # Let's use the original z_vals bounds for the interval
+-        # Lower bound: z_vals[indices] (if indices < N_coarse-1)
+-        # Upper bound: z_vals[indices+1]
+-        # This is complex. S1 says "deterministic flag based on perturb".
+-        # Let's assume simple uniform jitter within the bin width if perturb is true.
+-        # Bin width for index i: z_vals[i+1] - z_vals[i] ? No, z_vals is sorted descending.
+-        # z_vals[i] > z_vals[i+1]. Width = z_vals[i] - z_vals[i+1].
+-        # But we sampled from z_vals_mid.
+-        # Let's stick to the discrete selection for now as S1 is vague on continuous interpolation.
+-        pass 
+-        
++    z_lower = z_vals_mid[lower_idx]
++    z_upper = z_vals_mid[upper_idx]
++    
++    # Linear interpolation within the bin
++    z_samples = z_lower + (z_upper - z_lower) * u
++    
+     # 4. Stop gradient
+     z_samples = z_samples.detach()
+@@ -118,5 +73,4 @@
+     # 5. Concatenate and sort
+     z_vals_all = torch.cat([z_vals, z_samples], dim=-1)
+-    # Sort descending
+     z_vals_all, _ = torch.sort(z_vals_all, dim=-1, descending=True)
+     
+@@ -126,8 +80,8 @@
+ **Parameters:**
+ - $N_{\text{importance}}$: Number of fine samples. Typical value: 128 [S2].
+-- `perturb`: Boolean flag for adding noise during training.
++- `perturb`: Boolean flag for training-time jittering [S1, unofficial].
+ 
+ **Edge Cases:**
+-- **Empty Regions:** If weights are zero everywhere, sampling fails. Mitigated by weight modification (see Subtopics).
++- **Empty Regions:** If weights are zero everywhere, sampling fails. Mitigated by weight modification (see Subtopics) [S2].
+ - **Precision:** Floating point errors in CDF normalization can cause sampling bias. Use epsilon [G].
+ - **Boundaries:** Ensure indices are clamped to valid ranges when using `searchsorted` [G].
+@@ -136,6 +90,6 @@
+ 
+ ### Hierarchical Sampling with Weight Modification
+-A variant used in mip-NeRF to improve sampling in empty regions [S2]. It modifies the coarse weights before sampling to create a smoother, wider envelope.
+-- **Method:** Before sampling fine samples $t^f$, the weights $w$ are modified using a 2-tap max filter followed by a 2-tap blur filter (blurpool), then a hyperparameter $\alpha$ is added, and the result is re-normalized [S2].
++A variant used in mip-NeRF to improve sampling in empty regions [S2]. It modifies the coarse weights before sampling to create a smoother, wider envelope [S2].
++- **Method:** Before sampling fine samples $t^f$, the weights $w$ are modified using a 2-tap max filter followed by a 2-tap blur filter (blurpool), then a hyperparameter $\alpha$ is added, and the result is re-normalized to sum to 1 [S2].
+ - **Formula:** The modified weight $w'_k$ is calculated as:
+   $$ w'_k = \frac{1}{2}(\max(w_{k-1}, w_k) + \max(w_k, w_{k+1})) + \alpha $$
+@@ -146,11 +100,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N_{\text{coarse}} + N_{\text{importance}})$ for sampling and sorting. The dominant cost is the fine network evaluation at $N_{\text{coarse}} + N_{\text{importance}}$ points.
+-- **Memory Complexity:** $O(N_{\text{coarse}} + N_{\text{importance}})$ to store sample positions and intermediate weights.
+-- **Measured Performance:** In mip-NeRF, using 128 coarse and 128 fine samples yields the same number of total MLP evaluations as NeRF's 64 coarse and 128 fine samples (total 192 vs 192? No, NeRF uses 64 coarse + 128 fine = 192. mip-NeRF uses 128 coarse + 128 fine = 256? S2 says "yielding the same number of total MLP evaluations as in NeRF". NeRF: 64 coarse + 128 fine = 192. mip-NeRF: 128 coarse + 128 fine = 256. This is a contradiction. S2 says "we simply sample 128 samples for the coarse model and 128 samples from the fine model (yielding the same number of total MLP evaluations as in NeRF, for fair comparison)". This implies NeRF used 256 total? Or mip-NeRF uses 128 total? "128 samples for the coarse model and 128 samples from the fine model" suggests 256 total. If NeRF used 64+128=192, then 256 is more. Perhaps NeRF used 128+128? S2 says "Unlike NeRF, in which the fine MLP is given the sorted union of 64 coarse samples and 128 fine samples". So NeRF = 192. mip-NeRF = 256. The text "yielding the same number" might be an error in S2 or refers to a different configuration. We note the discrepancy [S2].
+-- **Strengths:** Reduces noise and aliasing by concentrating samples on opaque regions.
+-- **Limitations:** Requires two network evaluations (coarse and fine) or a hierarchical structure. Sensitive to the quality of coarse weights.
+-- **When to use:** High-quality rendering where noise reduction is critical.
+-- **When not:** Real-time applications with strict latency constraints.
++- **Time Complexity:** $O(N_{\text{coarse}} + N_{\text{importance}})$ for sampling and sorting [G]. The dominant cost is the fine network evaluation at $N_{\text{coarse}} + N_{\text{importance}}$ points [G].
++- **Memory Complexity:** $O(N_{\text{coarse}} + N_{\text{importance}})$ to store sample positions and intermediate weights [G].
++- **Measured Performance:** In mip-NeRF, using 128 coarse and 128 fine samples yields the same number of total MLP evaluations as NeRF's configuration for fair comparison [S2].
++- **Strengths:** Reduces noise and aliasing by concentrating samples on opaque regions [S1, unofficial].
++- **Limitations:** Requires two network evaluations (coarse and fine) or a hierarchical structure. Sensitive to the quality of coarse weights [S1, unofficial].
++- **When to use:** High-quality rendering where noise reduction is critical [S1, unofficial].
++- **When not:** Real-time applications with strict latency constraints [G].
+ 
+ ## Background

@@ -1,0 +1,78 @@
+On Nvidia, interpolation of pixel shader input is performed in a way that, even when all vertices have equal values of an output register, the result may end up being slightly different than the vertex values. While in most cases this ca...
+
+Use SV_Barycentrics for interpolation on Nvidia Turing+ to fix noise when vertex outputs are equal · Issue #2012 · xenia-project/xenia · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Use SV_Barycentrics for interpolation on Nvidia Turing+ to fix noise when vertex outputs are equal #2012
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Use SV_Barycentrics for interpolation on Nvidia Turing+ to fix noise when vertex outputs are equal#2012
+Copy link
+Assignees
+Labels
+buggpu
+Description
+Triang3l
+opened on Apr 18, 2022
+Issue body actions
+On Nvidia, interpolation of pixel shader input is performed in a way that, even when all vertices have equal values of an output register, the result may end up being slightly different than the vertex values. While in most cases this can be neglected, some games, such as Perfect Dark (-0.999… pixel shader input for -1, -1 and -1 vertex outputs) and Tenchu Z, treat certain pixel shader input values specially, and have an exact equality comparison in their pixel shaders. This results in noise in those games on Nvidia GPUs.
+While unfortunately there's nothing we can do on older Nvidia architectures (aside from extremely complicated suboptimal solutions like separating all vertex shading and pixel shading into two passes by doing transform feedback so vertex values can be accessed explicitly), starting from Turing, it's possible to fetch and interpolate the per-vertex data manually using barycentric coordinates provided to pixel shaders.
+On AMD, the issue isn't present because its interpolation formula evaluated by v_interp_p1/2_f32 is p0 + p10*i + p20*j. In this formula, i and j are barycentric coordinates for two vertices (the third can be calculated as 1 - i - j), and p10 = p1 - p0 and p20 = p2 - p0. And when three vertices have the same values, p0 == p1 == p2, so p10 = p1 - p0 = 0 and p20 = p2 - p0 = 0, so the formula becomes p0 + 0*i + 0*j — and the result becomes just p0, the exact value for one vertex.
+DXIL and SPIR-V can provide barycentric coordinates and explicit per-vertex values.
+Unlike on AMD, however, not two, but three barycentric coordinates (i, j, k) are passed to the pixel shader, and normally, interpolation should be performed using the p0*i + p1*j + p2*k formula. In this case, the result may still be rounded improperly (also the DXIL barycentrics specification doesn't require the three coordinates to add up to exactly 1), so merely doing interpolation manually this way is not enough to resolve this issue.
+However, we can transform this formula to use the exact p0, and p1-p0 and p2-p0, similar to how interpolation is done on AMD:
+p0*i + (p1-p0+p0)*j + (p2-p0+p0)*k
+p0*i + (p1-p0)*j + p0*j + (p2-p0)*k + p0*k
+p0*(i+j+k) + (p1-p0)*j + (p2-p0)*k
+Considering that i+j+k (analytically) is supposed to be 1, p0 + (p1-p0)*j + (p2-p0)*k
+So, AMD-style interpolation can be done with Nvidia jk used in place of AMD ij. This should resolve the case when three vertices have the same values.
+Note that DXIL allows specifying only up to two SV_Barycentrics inputs — one perspective-correct, and one affine. The Xenos offers two settings of interpolation modes: the global perspective correction switch (possibly PA_SU_SC_MODE_CNTL::PERSP_CORR_DIS, but unsure; not emulated in Xenia at all as of April 18, 2022), and per-interpolant center/centroid switches (SQ_INTERPOLATOR_CNTL::SAMPLING_PATTERN), so we need either two perspective-correct or two affine barycentric coordinates. VK_NV_fragment_shader_barycentric doesn't even have a decorator for a centroid-interpolated input. Thankfully, it looks like both DXIL and VK_NV_fragment_shader_barycentric allow the use of evalCentroid/InterpolateAtCentroid for the barycentrics input, and the issues section of the VK_NV_fragment_shader_barycentric documentation suggest using explicit attribute interpolation instructions.
+For line primitives, this should also just work without any changes to the shaders — k for them is constant 0, and i and j essentially become (1-t) and t respectively, so interpolation will be p0 + (p1-p0)*t.
+In Direct3D, explicit barycentric coordinates are a new feature, however, available only in DXIL, and not in the legacy DXBC. We currently emit only DXBC though — to use explicit barycentrics, as of April 18, 2022, we have to write an entire shader translator targeting DXIL — though DXIL is an SSA form, while we currently work with preallocated Xenos hardware register numbers that map nicely to DXBC. While we can still, I think, use variables, they likely make the work harder for the driver's shader compiler. Eventually, for targeting all SSA intermediate representations (DXIL, SPIR-V, Metal IR), we need to write control flow structurization and mem2reg for the Xenos microcode, which is a pretty large task in itself.
+If we need an even higher accuracy, we can possibly even reproduce the behavior specified in the "15. IJ Format" section of IPR2015-00325 "Ex. 2039 - R400_Sequencer 2.11 (10)" (note that it's still a preliminary version of the specification — the actual logic on the Xenos may be different):
+"All pixel’s parameters are always interpolated at full 20x24 mantissa precision."
+"Multiplies (Full Precision)"
+"Subtracts 19x24"
+"Mantissa 20 Exp 4 for I + Sign" [and for J]
+"All numbers are kept using the un-normalized floating point convention: if exponent is different than 0 the number is normalized if not, then the number is un-normalized. The maximum range for the IJs (Full precision) is +/- 1024." [Such a wide extended range is likely needed when extrapolating the barycentric coordinates when using center interpolation, and the center of the pixel is not covered by the primitive with MSAA.]
+"Because of the floating point imprecision, we need to take special provisions if all the interpolated terms are the same or if two of the terms are the same."
+However, just for handling the equal values case that is causing actual issues, accurately emulating the interpolation precision is not necessary.
+👍React with 👍6Reacted by katastic, backgamon, madmodder123, Billie, Margen67 and James0124
+👎React with 👎1Reacted by Mattscreative
+👀React with 👀1Reacted by mirh
+Activity
+Triang3l
+added
+bug
+gpu
+on Apr 18, 2022
+Triang3l
+self-assigned this
+on Apr 18, 2022
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+Triang3l
+Labels
+buggpu
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

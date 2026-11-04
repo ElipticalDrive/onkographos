@@ -1,0 +1,195 @@
+Under Enhanced graphics the terrain casts no sun shadow: a mountain does not shade the valley at its foot, a cliff does not shade the lake below it, and the sun's glint on the water shines inside what should be the cliff's shadow. The gr...
+
+Enhanced: terrain self-shadowing and terrain shadows on water from a baked shadow-height map · Issue #269 · Laeresh/CSVM · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Enhanced: terrain self-shadowing and terrain shadows on water from a baked shadow-height map #269
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Enhanced: terrain self-shadowing and terrain shadows on water from a baked shadow-height map#269
+Copy link
+Labels
+backlogInternal engine work (what backlog.md held)Internal engine work (what backlog.md held)evidence:traceNo original-game source: a read of CSVM code, a log or a profileNo original-game source: a read of CSVM code, a log or a profileimpact:highA player notices it in ordinary playA player notices it in ordinary playnext:codeFirst step: write code or tests, nothing owed firstFirst step: write code or tests, nothing owed firstsize:MOne subsystem, a few files, or a change that re-pins goldensOne subsystem, a few files, or a change that re-pins goldenstheme:environmentEnvironment & worldEnvironment & worldtype:featureSomething the engine does not do yetSomething the engine does not do yet
+Description
+Laeresh
+opened on Oct 30, 2026
+Issue body actions
+Under Enhanced graphics the terrain casts no sun shadow: a mountain does not shade the valley at
+its foot, a cliff does not shade the lake below it, and the sun's glint on the water shines inside
+what should be the cliff's shadow. The ground was taken out of the sun's shadow maps because, under
+a 25° sun, Godot's soft directional filter makes a flat sheet shadow itself in bands at the shadow
+map's texel pitch (WorldBuilder.IsShadowlessGround; git log --grep=BL-1037 holds the
+measurements). The original's world is fullbright and has no terrain shadow either, so this is a
+remake-only feature of Enhanced mode; Faithful is untouched.
+The cause is in Godot's renderer, not in a setting: every tap of the PCF and PCSS filters compares
+one depth per fragment (no receiver-plane bias), and the PCSS blocker-search radius grows with the
+fragment's distance from the cascade's light-space near plane, which for a terrain cascade is set
+by the tallest caster. No bias reaches that disc without detaching every contact shadow. The design
+keeps the terrain out of the shadow maps and bakes its sun occlusion instead, which the static sun
+allows.
+Design
+The sun's orientation is authored once per chapter (SUNLIGHT_ORIENTATION,
+docs/formats/weather.md; only C2/MP2 and C2/MP3 author a different pitch in ZONE2) and the
+terrain never moves, so the terrain's sun occlusion is baked at world build into a
+shadow-height texture over the ocean mask's grid (8 m texels, the world's rect, OceanMask):
+per texel, the height of the sun ray grazing the highest terrain upstream along the sun's azimuth,
+and the horizontal distance to the blocker that set it. A fragment below that height is in terrain
+shadow; the edge softens over blocker distance × tan(sun angle), floored at one texel, so the
+penumbra is contact-hardening like the building shadows beside it. The compare is a world height
+against a bilinearly filtered height, so there is no texel-depth acne by construction.
+Casters: the terrain. The bake rasterises WorldBuilder.IsTerrainMesh meshes to a
+max-height field; the water sheets are in it only as floor fill (a sheet never rises above its
+shore, so it shades nothing). Buildings, zeppelins and aircraft stay on Godot's cascaded shadow
+maps, and the ground stays out of them.
+Receivers: every Enhanced world-lit arm (terrain, water sheet, buildings, clutter) and the
+ocean shader. Aircraft are unchanged; the original's SHADE_* darkening of the player's
+aircraft under a mountain (docs/org/shadows.md) is a separate item the same texture would
+answer.
+Bake: a max-height raster (the OceanMaskRaster fill, thread-pool row bands), then one
+scanline sweep along the sun's azimuth, linear in the texel count. One bake per distinct
+orientation among the mission's zones, all at build; a zone apply rebinds the global uniform.
+Outside the rect reads lit.
+Delivery: a light() on the three arms (Lambert diffuse; a copy of Godot's Schlick-GGX
+specular on the water and ocean arms) multiplies the directional light's ATTENUATION by the baked
+factor, so Godot's shadow maps compose with it, ambient is untouched, and the omni LIGHT_STATE
+lamps and fireball bursts light these surfaces as before. Globals follow the csky_ocean_*
+pattern: the texture, its rect, and the live sun angle's tangent.
+Switch: follows Shadow Quality (ShadowQualitySetting): Off bakes nothing and shades
+nothing, every casting level is on, and the level's angular distance (1 / 0.5 / 0.25 / 0°) is
+the edge's sun angle. --terrain-shadows=on|off is the A/B lever; the default is on.
+Placement: Effects/TerrainShadow.cs beside OceanMask.cs, the pure compute in its own file
+like OceanMaskRaster.cs, a csky_terrain_shadow.gdshaderinc.
+Steps
+The height raster and the sweep as engine-free compute, with a CSVM.Tests unit: a ramp and
+a wall give the exact shadow line and blocker distance.
+The bake at world build for every distinct zone orientation, the globals, the rebind on the
+zone apply, --terrain-shadows=on|off, and --dump-terrain-shadow= writing the PNG.
+light() on the world-lit and water-lit arms (SceneBuilder) and on OceanShader, the
+factor on the directional light only.
+One --run-tests suite over the built world: a C3 waterline texel under the cliff reads
+shaded and an open-sea texel lit, through the published texture.
+The complete RunTests.ps1; the Enhanced goldens that move (c1-lake-enhanced and
+c1b-ocean-enhanced at least) re-pinned in the landing; the architecture entries, the
+docs/cli.md bullets, and one line in docs/org/shadows.md naming this remake-only.
+⚠ Traps
+Do not put the terrain back into the sun's shadow maps to get this: the banding is Godot's
+single-depth filter compare against the PCSS search disc, and no bias, atlas size, filter rung,
+sun angle or pitch cured it everywhere (git log --grep=BL-1037).
+Multiply ALBEDO instead of writing a light() and the ambient dims too (black shadows under a
+low sun), while the sun's glint, which is not albedo-scaled, keeps shining inside the shadow on
+water.
+The sweep direction is the scene sun's SUNLIGHT_ORIENTATION, never the original's
+SHADOW_ANGLES, which is straight down in every shipped mission and drives only the aircraft
+ground shadow.
+A heightfield casts an overhang or a bridge as a solid column; accepted, since the terrain tiles
+are heightfield-shaped and buildings are not in the bake.
+Beyond the map edge the repeated border tiles read lit: a border mountain's shadow stops at the
+edge. A known limit, at or past the fog ramp on every chapter.
+The spyglass disc is lit by a shadowless copy of the sun and shows the baked terrain shadow
+through the global, which matches the main view; do not read that as a leak.
+Done when
+Under Enhanced at any casting Shadow Quality level, the C1 cliff shades its lake and the C3 cliff
+shades the waterline below it, with the glint gone inside the shadow and no banding on open
+ground or water at the C3 poses --pos=-5200,120,-2250 and --pos=-5200,10,-2250.
+Shadow Quality Off shows no terrain shadow and runs no bake; --terrain-shadows=off gives the
+present picture at any level.
+C2/MP2 and C2/MP3 show the ZONE2 sun's shadows after the zone change, with no hitch.
+The unit test, the suite and the complete battery are green, the moved goldens are re-pinned,
+and the project owner's look at the controls is recorded in the closing commit.
+Researched and drafted with the help of an AI coding agent (Claude Code, Claude Fable 5.1); the
+design decisions are the project owner's.
+Activity
+Laeresh
+added
+backlogInternal engine work (what backlog.md held)Internal engine work (what backlog.md held)
+theme:environmentEnvironment & worldEnvironment & world
+type:featureSomething the engine does not do yetSomething the engine does not do yet
+size:MOne subsystem, a few files, or a change that re-pins goldensOne subsystem, a few files, or a change that re-pins goldens
+next:codeFirst step: write code or tests, nothing owed firstFirst step: write code or tests, nothing owed first
+impact:highA player notices it in ordinary playA player notices it in ordinary play
+evidence:traceNo original-game source: a read of CSVM code, a log or a profileNo original-game source: a read of CSVM code, a log or a profile
+on Oct 30, 2026
+Laeresh commented on Oct 31, 2026
+Laeresh
+on Oct 31, 2026
+OwnerAuthor
+More actions
+Landed on the issue-269 worktree branch as 633e722 (not yet merged to main), awaiting the owner's look at the controls before the close. The complete battery on that tree is green: build, 7872 units, 631 engine suites with engine errors clean, goldens regenerated with the six Enhanced shots the shadow reaches moved (c1-lake, c5-city-night, c1-rocket-hit, c1-cockpit, c1-cockpit-xr-sim, c1b-ocean) and all 38 hash-identical on a following check.
+What the branch does, against the steps:
+TerrainShadowRaster (engine-free): ground heights at the 8 m texel centres, then the grazing-line sweep along the sun's azimuth with the blocker distance. TerrainShadowRasterTests hold the wall's exact line and distance, an oblique azimuth, a ramp lit facing the sun and shaded behind its ridge, and band-count independence.
+TerrainShadow bakes at the world build (or on the switch to Enhanced) while Shadow Quality casts, once per distinct zone sun; the zone apply rebinds the global, a Shadow Quality apply reaches it through ShadowQualitySetting.Revision; --terrain-shadows=on|off, --dump-terrain-shadow=.
+light() on the world-lit and water-lit arms, the ocean and the lit ground cover: Godot's own Lambert and Schlick-GGX (the world shaders declare no diffuse_* mode, so Lambert is the exact match) with the directional light's share scaled by the bake. The Rich cards, vegetation models and canopy clumps scale their sun-side gain by it.
+graphics-terrain-shadow suite: C3's waterline texel under the cliff at (-6860, 0, -5756) reads shaded, an open-sea texel lit, through the published texture; Original withdraws the globals.
+Complete RunTests.ps1, goldens re-pinned, architecture entries, docs/cli.md, one line in docs/org/shadows.md.
+Deviations from the design text, each deliberate:
+Casters are the meshes SceneBuilder set casting no Godot shadow (IsShadowlessGround), not every IsTerrainMesh tile: a tile carrying a building wall still casts on Godot's maps and would otherwise cast twice.
+The penumbra's growth per metre of blocker distance is tan(angular) × (1 + tan²(elevation)), the slope span of the sun's disc, which is the design's distance × tan(angle) with the vertical factor that turns a horizontal width into a height.
+A launch at Shadow Quality Off bakes nothing, so a level raised live shows terrain shadows from the next load only (a ponytail: comment marks it).
+Evidence in the closing commit: the C3 cliff pose on and off, the C3 open-water poses --pos=-5200,120,-2250 and --pos=-5200,10,-2250 with no banding and the glint intact, and the bake timings (C3 2048², 178 to 372 ms; C1 1536², 297 ms).
+Laeresh commented on Oct 31, 2026
+Laeresh
+on Oct 31, 2026
+OwnerAuthor
+More actions
+Landed on main in c7886bb (branch issue-269, closing commit cb1c768).
+Fixed. Under Enhanced the terrain's sun occlusion is baked at the world build into a shadow-height texture (TerrainShadowRaster: the ground height at 4 m texel centres, then one sweep along the sun's azimuth carrying the grazing line and the blocker distance), once per distinct zone sun, and the lit arms' light() scale the directional light by it, so Godot's shadow maps compose on top and the ambient stays. The ground stays out of the shadow maps, as the trap requires. The switch follows Shadow Quality, --terrain-shadows=on|off is the lever, --terrain-shadow-cell= the texel.
+What settled it: the C1 lake and the C3 waterline read shaded in the goldens and in the graphics-terrain-shadow suite (the cliff's waterline texel at sun share under 0.05, the open sea over 0.99, Original back on the lit defaults); the C3 open-water poses --pos=-5200,120,-2250 and --pos=-5200,10,-2250 show no banding and keep the glint at 4 m texels under the aimed sun; a C2 MP2 run forced to zone 2 bakes both zone suns at the build (zone 1 aimed at its dome's sun at -26/166, zone 2 its authored -25/90, since dome_zone2 draws no sun card), so the zone change rebinds and bakes nothing; Shadow Quality Off bakes nothing and --terrain-shadows=off draws the picture without the shade. The owner judged the look at the controls in C1B and C3.
+The owner's decisions on the way: the Enhanced light aims at the zone's dome sun or moon card, so the baked shadow and the visible moon agree (Original keeps the authored SUNLIGHT_ORIENTATION); the texel is 4 m, not the 8 m above, at 64 MB and under a second per zone sun over C3; the flat sea tiles stay casters, so a swell trough under a low moon reads shaded, and the ocean shader reads the shade at a point that fades to sea level with the waves; the ocean grid's first band ends at 1400 m so no swell cuts at a band step (+0.11 ms on a sea-filled 1080p frame); a 768-segment grid measured +0.40 ms and was declined; the shadow-map distance stays as it is.
+Limits that do not reopen it: a heightfield casts an overhang as a column; the repeated border tiles read lit past the map edge; a Shadow Quality level raised live from Off shows terrain shadows from the next load; the line height is a half float, 0.5 m steps above 512 m; the off lever keeps the aimed light, a look choice independent of the bake.
+Verification: the complete battery on the merged tree: 7896 units passed and 6 skipped, 632 engine suites passed and 2 skipped with engine errors clean, 38 goldens regenerated (six Enhanced shots moved: c1-lake, c5-city-night, c1-rocket-hit, c1-cockpit, c1-cockpit-xr-sim, c1b-ocean) and hash-identical on a following check.
+Laeresh
+closed this as completedon Oct 31, 2026
+Laeresh
+added 9 commits that reference this issue on Nov 1, 2026
+#269: the Enhanced terrain shades the ground, the water and the build…
+...
+633e722
+#269: Enhanced aims its light at the sky's sun or moon, and the terra…
+...
+9f021d2
+#269: the sea receives the terrain shadow and never casts it
+...
+12e7a4f
+#269: the swell's terrain shading fades with the waves instead of cut…
+...
+7a449ba
+#269: the ocean grid's first band reaches 1400 m, so no swell cuts at…
+...
+0dbcf6b
+#269: review fixes: a withdrawn bake stays withdrawn, the dead ocean …
+...
+433d5e9
+#269: goldens re-pinned on the merged tree, the six Enhanced shots th…
+...
+bf0cd7c
+Close #269: the Enhanced terrain shades the ground, the water and the…
+...
+cb1c768
+Merge issue-269: the Enhanced terrain shades the ground, the water an…
+...
+c7886bb
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+backlogInternal engine work (what backlog.md held)Internal engine work (what backlog.md held)evidence:traceNo original-game source: a read of CSVM code, a log or a profileNo original-game source: a read of CSVM code, a log or a profileimpact:highA player notices it in ordinary playA player notices it in ordinary playnext:codeFirst step: write code or tests, nothing owed firstFirst step: write code or tests, nothing owed firstsize:MOne subsystem, a few files, or a change that re-pins goldensOne subsystem, a few files, or a change that re-pins goldenstheme:environmentEnvironment & worldEnvironment & worldtype:featureSomething the engine does not do yetSomething the engine does not do yet
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

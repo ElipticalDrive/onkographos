@@ -1,0 +1,1774 @@
+<img alt="Hair Rendering for Stanford Bunny with and without OIT" src="figures/bunny.webp?raw=true" />
+
+This is an implementation of *volumetric spot noise*, a technique for
+representing three dimensional textures algorithmically using small kernels.
+This work is largely based on the method presented by Nicolas Pavie
+et al. in the paper [Volumetric Spot Noise for Procedural 3D Shell
+Texture Synthesis](https://hal.archives-ouvertes.fr/hal-02413269)
+with several modifications. The details of the method are given below.
+
+# Background
+
+*Spot noise* is a method of texture synthesis presented by Jarke J. Wijk
+in the paper [Spot Noise Texture Synthesis for Data Visualization](https://doi.org/10.1145/127719.122751])
+where textures are created using a sum of impulses each convolved by a
+kernel function. Various textural effects can be produced by controlling
+the distribution of these impulses and by the type of kernel functions
+used. Both ordered or stochastic effects can be achieved depending on
+the distributions used, and compared with earlier methods such as Perlin
+noise, spot noise has the distinct advantage of maintaining local
+control over the texture making it particularly versatile.
+
+Spot noise as described by Jarke J. Wijk was purely two-dimensional,
+however the concept can be extended to the third dimension. Note that we
+can assume that kernels only affect a small neighborhood around each
+impulse’s position. This allows us to treat the textures as sparse
+volumetric data, only storing the set of impulses rather than explicitly
+storing the texture which would be prohibitive on memory. This has the
+added advantage of the resulting texture being resolution independent.
+
+There are many ways to render sparse volumetric data. One
+straightforward method would be to ray trace a shell mesh surrounding
+the texture, where rays are cast from the camera origin through each
+pixel and into the scene and samples are then accumulated at points
+along each ray. Unfortunately this means we must sample our entire
+volume multiple times per pixel.
+
+*EWA splatting* is a technique [due to Matthias Zwicker et al](https://doi.org/10.1109/TVCG.2002.1021576). for
+rendering point cloud surfaces efficiently. Their method uses three
+dimensional Gaussian functions as the kernel of choice for rendering
+impulses since they are closed under linear transformations and have a
+closed form solution to integration along an axis, which results in a
+two dimensional Gaussian. This allows us to find an approximate analytic
+solution for the screen-space projection of the kernels for a given
+view. This is much faster than raytracing since we only need to splat
+each kernel once, accumulating the results to a single buffer. Note
+however that this can only be an approximation because the perspective
+divide is not a linear operation.
+
+Note that the set of impulses must be ordered with respect to their
+depth from the camera if we wish to use translucent kernels with
+traditional methods of blending. Since the camera typically moves
+per-frame, this means the impulses must also be sorted per-frame which
+can be computationally prohibitive with large sets of impulses.
+
+Morgan McGuire and Louis Bavoil propose a method of [depth weighted
+order independent transparency](http://jcgt.org/published/0002/02/09/)
+for rendering transparent objects in a
+scene by weighting the kernels according to their depth from the camera.
+In addition to allowing us to continue to use the more efficient EWA
+splatting, this also avoids an artifact known as popping which can be an
+issue with sorting based methods.
+
+# Method
+
+## Initialization
+
+The process of texture generation begins by creating a set of impulses.
+Each has a position, orientation, and color associated with it. Our goal
+is to place these kernels close to the surface of the input mesh, and to
+be able to associate their parameters with points on the surface of the
+mesh.
+
+One simple method which can yield acceptable results for sparse textures
+is to simply iterate the faces of the mesh. This can partially solved by
+adjusting how many impulses to place per face based upon the area of the
+faces. However for wildly varying face sizes or for dense textures
+another approach is needed, otherwise the structure of the underlying
+mesh will become apparent.
+
+An octree is suggested by Pavie et al. for this purpose. The leaf nodes
+were each assigned a certain number of impulses which could be projected
+onto a planar approximation of the surface using the surface normal of a
+face nearest the center of the leaf node. Each leaf node must be small
+enough that the linear approximation is sufficient, so for manifolds of
+high curvature this will be a slow process.
+
+## EWA Splatting
+
+The EWA splatting method which was used and will be described in this
+section is the [two dimensional kernel approximation](https://doi.org/10.1109/TVCG.2002.1021576)
+due to Matthias Zwicker et al. rather than the hybrid raymarching
+approach suggested by Pavie et al. This was chosen because of its
+computational efficiency, while yielding comparable results.
+
+Recall that our kernel is a three-dimensional Gaussian of the form:
+
+$$
+\begin{aligned}
+K(x;x_0) = \frac{\exp\left({-\frac{1}{2}(x-x_0)^T\Sigma^{-1}(x-x_0)}\right)}{\sqrt{(2\pi)^3|\Sigma|}}
+\end{aligned}
+$$
+
+Where $x_0$ is the center of each impulse and $\Sigma=RSS^TR^T$
+where $R$ is the orientation and $S$ the scale of our impulse.
+
+Now we transform from world to camera coordinates. The position \(x_0\)
+will be transformed separately, for now we focus on the orientation and
+scale of the new kernel.
+
+$$
+\begin{aligned}
+\Sigma' = JW_{3\times 3} \; \Sigma \; W_{3\times 3}^TJ^T
+\end{aligned}
+$$
+
+Here $W_{3\times 3}$ is the rotational component of the transformation
+from world to camera coordinates and $J$ is the Jacobian matrix of the
+approximation of the perspective divide. To transform from camera
+coordinates to screen coordinates we need to perform what is known as a
+perspective divide but this is a non-linear operation which usually
+involves dividing the homogeneous coordinates by their last coordinate.
+Since this is not a linear operation the resulting function would no
+longer be Gaussian.
+
+To work around this we can use an affine approximation of the
+perspective divide. Let $m$ take the points from camera space to
+screen space.
+
+$$
+\begin{aligned}
+m = \left[
+\begin{array}{ccc}
+x_1/x_3 \\
+x_2/x_3 \\
+|x| \\
+\end{array}
+\right]\end{aligned}
+$$
+
+We can approximate this with the first two terms of the Taylor series as
+$m(x_0)+\frac{\partial m}{\partial x}(x-x_0)$ where $J$ is the
+Jacobian of $m$ given below.
+
+$$
+\begin{aligned}
+J = \frac{\partial m}{\partial x} = \left[
+\begin{array}{ccc}
+    1/x_3   &        0 &  -x_1/x_3^2 \\
+    0       &    1/x_3 &  -x_2/x_3^2 \\
+    x_1/|x| &  x_2/|x| &   x_3/|x|   \\
+\end{array}
+\right]\end{aligned}
+$$
+
+The transformed two dimensional Gaussian becomes:
+
+$$
+\begin{aligned}
+ \label{eq:1}
+K'(x';x_0') = \frac{ \exp\left(-\frac{1}{2}{(x'-x_0')^T(\Sigma'_{2\times 2})^{-1}(x'-x_0')}\right) }{2\pi\sqrt{|\Sigma'_{2\times 2}|}}
+\end{aligned}
+$$
+
+Where $\Sigma'_{2\times 2}$ is the top left $2\times 2$ partition of
+$\Sigma$ and $x_0'$ is the transformed impulse center (such that
+$x_0'=Wx_0$).
+
+To avoid aliasing this function is convolved with a low pass filter
+$h$ - another Gaussian function. This has the effect of softening the
+output, particularly at the edges. This amounts to adding the filter’s
+variance matrix (the identity matrix multiplied by some constant factor
+$\lambda$) to $\Sigma'_{2\times 2}$ before inversion in the equation above.
+
+The final two dimensional Gaussian with low-pass filter is:
+
+$$
+\begin{aligned}
+ \label{eq:2}
+K'(x';x_0')\circ h = \frac{ \exp\left(-\frac{1}{2}{(x'-x_0')^T(\Sigma'_{2\times 2} + \lambda I)^{-1}(x'-x_0')}\right) }{2\pi\sqrt{|\Sigma'_{2\times 2}|}}
+\end{aligned}
+$$
+
+## Order Independent Transparency
+
+The traditional method of blending uses a simple linear interpolation
+between the current color value and the color value being blended over
+top, which can be represented as the recurrance relation in Equation
+[\[eq:blend\]](#eq:blend).
+
+$$
+\begin{aligned}
+ \label{eq:blend}
+C_{n+1} = \alpha_{n+1} c_{n+1} + (1-\alpha_{n+1}) C_{n}
+\end{aligned}
+$$
+
+This operation is highly order dependent: the colors blended later
+generally have a much larger effect on the final color. For this reason
+the traditional alpha blending method involves sorting by depth each
+frame, so that the objects nearer to the camera have a greater visual
+effect on the final color.
+
+This means that we can use depth as a heuristic in approximating the
+effect which a given color will have on the final color at each pixel.
+Since the distribution of depth values in a scene is often not uniform
+this means we must tailor our approximation to the nature of an
+individual scene.
+
+Morgan McGuire and Louis Bavoil suggest the following function to
+approximate blending.
+
+$$
+\begin{aligned}
+ \label{eq:wblend}
+C_f \approx \frac{\sum\limits^n_{i=1} w_iC_i}{\sum\limits^n_{i=1} w_i\alpha_i}
+    \left[ 1-\prod_{i=1}^n{(1-\alpha_i)} \right] + C_0\prod_{i=1}^n{(1-\alpha_i)}
+\end{aligned}
+$$
+
+The weight factor must be chosen carefully depending on the effect
+desired. For example for the hair in this report the following hybrid
+weight function was used which uses both depth and the color itself, due
+to Morgan McGuire.
+
+$$
+\begin{aligned}
+ \label{eq:3}
+w_i = \text{clamp}(\alpha\text{max}\{r, g, b\}, \alpha, 1) \cdot
+    \text{clamp}\left(\frac{0.03}{10^{-5} + (z / 200)^4}, 0.01, 3\times10^3\right)
+\end{aligned}
+$$
+
+Where $\alpha$ is is the transparency of the material multiplied by
+$K'(x';x_0')\circ h$ above, $r,g,b$ are the color values
+of the material and $z$ is the depth of the impulse in screen space.
+
+# Results
+
+While this method is not restricted to rendering strand particles, this was
+the predominant use-case evaluated. The both hair and grass textures were created by using long thin
+translucent Gaussian kernels. The long axis of each kernel was
+transformed to camera space and used to add a color gradient so that the
+roots of each strand were darker - simulating the effect of strands
+occluding eachother from light nearer to the mesh’s surface. For the
+hair example each strand was also flat shaded. Hair direction mostly
+followed the surface normal with slight random variation. Adding a
+manual bias to the hair direction would be a source for future
+improvement as it would better cover the underlying mesh.
+
+One issue observed when using order independent transparency is that
+lighter bands or ‘halos’ tend to be present around the objects due to
+the large amount of blending in these areas. This could potentially be solved by
+further adjusting the weight function used for blending.
+
+As a method for creating strand based textures such as grass and hair I
+believe that compelling visual results can be achieved. However there
+are significant downsides to this method which limit its use. Since the
+graphics pipeline is adapted for more traditional polygonal based
+approaches these have a speed advantage over splatting based methods.
+When compared with curve based approaches the method currently lacks a
+direct way to bend individual strands. Using several kernels for each
+strand might address this, however preliminary tests suggest that making
+the transition between kernels seamless would be difficult, especially
+for animation.
+
+This method does however still present several advantages. Depth
+weighted transparency does not suffer the same ‘popping’ artifacts
+during animation that the common shell based method might. The method is
+also well suited to handle the translucent effect present in hair and
+foilage, as well as to add subtle blur with the low-pass filter that
+would be much more difficult to achieve using a polygonal technique.
+
+Future work could be done to combine the advantages of this
+method such as the low-pass filter and weighted order independent
+transparency with a more traditional curve based approach.
+
+### Demo.hpp
+```
+#include "Mesh.hpp"
+#include "Shader.hpp"
+#include "Texture.hpp"
+#include "Framebuffer.hpp"
+#include <GL/glew.h>
+#define NO_SDL_GLEXT
+#include <SDL2/SDL.h>
+#include <iostream>
+
+class Demo {
+public:
+    Demo();
+    ~Demo();
+
+    bool create();
+    bool poll();
+    void swap();
+
+    glm::mat4 projection() const;
+    glm::mat4 modelview() const;
+    float time() const { return m_time; }
+
+private:
+    SDL_Window* m_window;
+    SDL_GLContext m_context;
+    float m_angleX, m_angleY;
+    float m_ofsY;
+    float m_zoom;
+    float m_time;
+};
+
+Demo::Demo()
+: m_angleX(M_PI_4),
+  m_angleY(M_PI_4),
+  m_ofsY(0.0f),
+  m_zoom(-10.0f),
+  m_time(0.0f) {
+}
+
+Demo::~Demo() {
+}
+
+bool Demo::create() {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+        std::cerr << "Error: Failed to initialize SDL2." << std::endl;
+        return false;
+    }
+    atexit(SDL_Quit);
+    
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetSwapInterval(1);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+
+    m_window = SDL_CreateWindow("Volumetric",
+        100, 100, 1024, 1024, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    if (!m_window) {
+        std::cerr << "Failed to create window. "
+                  << SDL_GetError() << std::endl;
+        return false;
+    }
+
+    m_context = SDL_GL_CreateContext(m_window);
+    if (!m_context) {
+        std::cerr << "Error: Failed to create OpenGL context. "
+                  << SDL_GetError() << std::endl;
+        return false;
+    }
+    SDL_GL_MakeCurrent(m_window, m_context);
+
+    glewExperimental = GL_TRUE;
+    if (glewInit() != GLEW_OK) {
+        std::cerr << "Error: Failed to initialize GLEW." << std::endl;
+        return false;
+    }
+
+    glClampColor(GL_CLAMP_FRAGMENT_COLOR, GL_FALSE);
+    glClampColor(GL_CLAMP_VERTEX_COLOR, GL_FALSE);
+    glClampColor(GL_CLAMP_READ_COLOR, GL_FALSE);
+
+    SDL_ShowWindow(m_window);
+    return true;
+}
+
+bool Demo::poll() {
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_QUIT) {
+            SDL_Quit();
+            return false;
+        } else if (event.type == SDL_MOUSEMOTION) {
+            if (event.motion.state & SDL_BUTTON_LMASK) {
+                m_angleX += 0.01f*event.motion.yrel;
+                m_angleY += 0.01f*event.motion.xrel;
+            } else if (event.motion.state & SDL_BUTTON_RMASK) {
+                m_ofsY += 0.01f*event.motion.yrel;
+            }
+        } else if (event.type == SDL_MOUSEWHEEL) {
+            m_zoom += 0.1*event.wheel.y;
+        }
+    }
+    m_time += 0.01f;
+    return true;
+}
+
+void Demo::swap() {
+    SDL_GL_SwapWindow(m_window);
+}
+
+glm::mat4 Demo::modelview() const {
+    return glm::translate(glm::mat4{1.0f}, glm::vec3{0.0f,m_ofsY-1.0f,m_zoom})
+         * glm::rotate(glm::mat4{1.0f}, m_angleX, {1.0f,0.0f,0.0f})
+         * glm::rotate(glm::mat4{1.0f}, m_angleY, {0.0f,1.0f,0.0f});
+}
+
+glm::mat4 Demo::projection() const {
+    return glm::perspective(float(M_PI)/4.0f, 1.0f, 1.0f, 500.0f);
+}
+```
+
+### Framebuffer.hpp
+```
+#pragma once
+
+#include "Texture.hpp"
+#include <map>
+#include <GL/glew.h>
+
+class Framebuffer {
+public:
+    Framebuffer()
+        : m_fbo(0), m_hasdepth(false) {}
+
+    bool complete() {
+        if (!m_fbo)
+		    glGenFramebuffers(1, &m_fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
+
+        m_hasdepth = false;
+        for (const auto &channel : m_channels) {
+            glFramebufferTexture2D(GL_FRAMEBUFFER, channel.first,
+                GL_TEXTURE_2D, channel.second.texid(), 0);
+            if (channel.first == GL_DEPTH_ATTACHMENT)
+                m_hasdepth = true;
+        }
+        const GLenum buffers[] = {
+            GL_COLOR_ATTACHMENT0,
+            GL_COLOR_ATTACHMENT1,
+            GL_COLOR_ATTACHMENT2,
+            GL_COLOR_ATTACHMENT3,
+            GL_COLOR_ATTACHMENT4,
+            GL_COLOR_ATTACHMENT5,
+            GL_COLOR_ATTACHMENT6,
+            GL_COLOR_ATTACHMENT7,
+            GL_COLOR_ATTACHMENT8,
+            GL_COLOR_ATTACHMENT9,
+            GL_COLOR_ATTACHMENT10,
+            GL_COLOR_ATTACHMENT11,
+            GL_COLOR_ATTACHMENT12,
+            GL_COLOR_ATTACHMENT13,
+            GL_COLOR_ATTACHMENT14,
+            GL_COLOR_ATTACHMENT15,
+        };
+        glDrawBuffers(numcolors(), buffers);
+        return (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+    }
+
+    void bind(int x, int y, int width, int height) const {
+        glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
+        glViewport(x, y, width, height);
+    }
+    void bind() const {
+        const auto &first = m_channels.at(GL_COLOR_ATTACHMENT0);
+        bind(0, 0, first.width(), first.height());
+    }
+
+
+	Texture &channel(GLenum channel) {
+        return m_channels[channel];
+    }
+private:
+    int numcolors() const {
+        return m_hasdepth? (m_channels.size()-1):m_channels.size();
+    }
+
+    GLuint m_fbo;
+    bool m_hasdepth;
+    std::map<GLenum, Texture> m_channels;
+};
+```
+
+### Mesh.hpp
+```
+#pragma once
+#define GLM_FORCE_PURE
+#include <GL/glew.h>
+#include <glm/glm.hpp>
+#include <glm/ext.hpp>
+#include <glm/gtx/vector_angle.hpp>
+#include <glm/gtx/string_cast.hpp>
+#include <tuple>
+#include <vector>
+#include <array>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+#include <optional>
+#include <map>
+
+extern "C"{
+    int triBoxOverlap(float boxcenter[3], float boxhalfsize[3], float triverts[3][3]);
+};
+
+struct AABB {
+    glm::vec3 min;
+    glm::vec3 max;
+
+    glm::vec3 center() const { return (min+max)/2.0f; }
+    glm::vec3 radius() const { return (max-min)/2.0f; }
+    AABB squarify() const;
+};
+
+AABB AABB::squarify() const {
+    auto c = center();
+    auto r = radius();
+    r.x = r.y = r.z = std::max({r.x,r.y,r.z});
+    return AABB{c-r,c+r};
+}
+
+template <typename Vertex>
+class IndexedMesh {
+public:
+    unsigned push_vert(const Vertex &v) {
+        return (unsigned)std::distance(verts.begin(), verts.insert(verts.end(), v));
+    }
+    void push_face(std::initializer_list<unsigned> &&indices) {
+        this->indices.insert(this->indices.end(), indices);
+    }
+
+    void rebuild();
+
+    void draw(GLenum primitive) const;
+    void draw(GLenum primitive, int count) const;
+
+    AABB bound() const;
+    std::optional<unsigned> collides(const AABB &bound) const;
+
+    IndexedMesh()
+        : vao(0), vbo(0), ibo(0)
+        {}
+    IndexedMesh(std::vector<unsigned> &&indices, std::vector<Vertex> &&verts)
+        : indices(std::move(indices)), verts(std::move(verts)),
+          vao(0), vbo(0), ibo(0)
+        {}
+
+    std::vector<unsigned> indices;
+    std::vector<Vertex> verts;
+private:
+    GLuint vao;
+    GLuint vbo;
+    GLuint ibo;
+};
+
+template <typename T>
+struct VertexDescriptor {
+    static void describe();
+};
+
+struct LocVertex {
+    glm::vec3 loc;
+};
+
+template <>
+struct VertexDescriptor<LocVertex> {
+    static void describe() {
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+            sizeof(float)*3, (void *)0);
+    }
+};
+
+struct LocTexNormVertex {
+    glm::vec3 loc;
+    glm::vec2 uv;
+    glm::vec3 norm;
+    int id;
+};
+
+template <>
+struct VertexDescriptor<LocTexNormVertex> {
+    static void describe() {
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+            sizeof(LocTexNormVertex), (void *)offsetof(LocTexNormVertex, loc));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE,
+            sizeof(LocTexNormVertex), (void *)offsetof(LocTexNormVertex, uv));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE,
+            sizeof(LocTexNormVertex), (void *)offsetof(LocTexNormVertex, norm));
+        glEnableVertexAttribArray(3);
+        glVertexAttribIPointer(3, 1, GL_INT,
+            sizeof(LocTexNormVertex), (void *)offsetof(LocTexNormVertex, id));
+    }
+};
+
+template <typename Vertex>
+bool load_obj(IndexedMesh<Vertex> &mesh, const char *fname) {
+    std::ifstream is{fname};
+    if (!is)
+        return false;
+
+    std::string linebuf;
+    std::vector<glm::vec3> locs;
+    std::vector<glm::vec2> texs;
+    std::vector<glm::vec3> norms;
+    std::map<std::tuple<unsigned,unsigned,unsigned>,unsigned> verts;
+    while (std::getline(is, linebuf)) {
+        std::stringstream ls{linebuf};
+        std::string cmd;
+
+        if (!(ls >> cmd))
+            continue;  // Ignore empty lines
+        if (cmd == "vt") {
+            float x, y;
+            ls >> x >> y;
+            texs.push_back({x, y});
+        }
+        else if (cmd == "vn") {
+            float x, y, z;
+            ls >> x >> y >> z;
+            norms.push_back({x, y, z});
+        }
+        else if (cmd == "v") {
+            float x, y, z;
+            ls >> x >> y >> z;
+            locs.push_back({x, y, z});
+        }
+        else if (cmd == "f") {
+            unsigned a,b,c;
+            while (ls >> a) {
+                if (ls.get() == '/') {
+                    ls >> b;
+                    ls.clear();
+                    if (ls.get() == '/')
+                        ls >> c;
+                }
+
+                // Combine the location and normal to form a vertex, and
+                // insert if not already added.
+                auto it = verts.find({a-1, b-1, c-1});
+                if (it == verts.end()) {
+                    unsigned v = mesh.push_vert({locs[a-1], texs[b-1], norms[c-1], -1});
+                    it = verts.insert({{a-1, b-1, c-1}, v}).first;
+                }
+                mesh.indices.push_back(it->second);
+            }
+        }
+        else
+            continue;  // Silently ignore unrecognized commands
+    }
+    return true;
+}
+
+IndexedMesh<LocVertex> makequad() {
+    std::vector<LocVertex> verts {
+        {glm::vec3(-1,-1,0)},
+        {glm::vec3(-1,1,0)},
+        {glm::vec3(1,1,0)},
+        {glm::vec3(1,-1,0)}
+    };
+    std::vector<unsigned> indices {
+        0,1,2,
+        0,2,3
+    };
+    return IndexedMesh<LocVertex>(std::move(indices),std::move(verts));
+}
+
+IndexedMesh<LocVertex> cube() {
+    std::vector<LocVertex> verts {
+        {glm::vec3(1.000000, 1.000000, -1.000000)},
+        {glm::vec3(1.000000, -1.000000, -1.000000)},
+        {glm::vec3(1.000000, 1.000000, 1.000000)},
+        {glm::vec3(1.000000, -1.000000, 1.000000)},
+        {glm::vec3(-1.000000, 1.000000, -1.000000)},
+        {glm::vec3(-1.000000, -1.000000, -1.000000)},
+        {glm::vec3(-1.000000, 1.000000, 1.000000)},
+        {glm::vec3(-1.000000, -1.000000, 1.000000)},
+    };
+    std::vector<unsigned> indices {
+        6-1, 8-1,
+        2-1, 6-1,
+        1-1, 2-1,
+        8-1, 7-1,
+        3-1, 4-1,
+        5-1, 6-1,
+        3-1, 7-1,
+        1-1, 3-1,
+        8-1, 4-1,
+        7-1, 5-1,
+        5-1, 1-1,
+        4-1, 2-1,
+    };
+    return IndexedMesh<LocVertex>(std::move(indices),std::move(verts));
+}
+
+template <typename Vertex>
+void IndexedMesh<Vertex>::rebuild() {
+    if (!vao) {
+        glGenBuffers(1, &vbo);
+        glGenBuffers(1, &ibo);
+        
+        glGenVertexArrays(1, &vao);
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        VertexDescriptor<Vertex>::describe();
+    }
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+        verts.size()*sizeof(Vertex),
+        verts.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+        indices.size()*sizeof(unsigned),
+        indices.data(), GL_STATIC_DRAW);
+}
+
+template <typename Vertex>
+void IndexedMesh<Vertex>::draw(GLenum primitive) const {
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+    glDrawElements(primitive, indices.size(), GL_UNSIGNED_INT, (void *)0);
+}
+
+template <typename Vertex>
+void IndexedMesh<Vertex>::draw(GLenum primitive, int count) const {
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+    glDrawElementsInstanced(primitive, indices.size(), GL_UNSIGNED_INT, (void *)0, count);
+}
+
+template <typename Vertex>
+AABB IndexedMesh<Vertex>::bound() const {
+    AABB result;
+    for (int i = 0; i < verts.size(); i++) {
+        const glm::vec3 &pt = verts[i].loc;
+        result.min = glm::vec3{
+            std::min(result.min.x, pt.x),
+            std::min(result.min.y, pt.y),
+            std::min(result.min.z, pt.z)};
+        result.max = glm::vec3{
+            std::max(result.max.x, pt.x),
+            std::max(result.max.y, pt.y),
+            std::max(result.max.z, pt.z)};
+    }
+    return result;
+}
+
+template <typename Vertex>
+std::optional<unsigned>
+IndexedMesh<Vertex>::collides(const AABB &bound) const {
+    glm::vec3 center = bound.center();
+    glm::vec3 radius = bound.radius();
+    for (size_t i = 0; i < indices.size(); i+=3) {
+        float triverts[][3] = {
+            verts[indices[i+0]].loc.x, verts[indices[i+0]].loc.y, verts[indices[i+0]].loc.z,
+            verts[indices[i+1]].loc.x, verts[indices[i+1]].loc.y, verts[indices[i+1]].loc.z,
+            verts[indices[i+2]].loc.x, verts[indices[i+2]].loc.y, verts[indices[i+2]].loc.z
+        };
+        if (triBoxOverlap(glm::value_ptr(center), glm::value_ptr(radius), triverts))
+            return std::optional<size_t>(i);
+    }
+    return std::nullopt;
+}
+```
+
+### Shader.hpp
+```
+#pragma once
+
+#include "Texture.hpp"
+
+#include <string>
+#include <vector>
+#include <fstream>
+#include <iostream>
+#include <GL/glew.h>
+#include <glm/gtc/type_ptr.hpp>
+
+class Shader {
+private:
+    bool compile(GLuint &sh, const std::string &filename, std::ostream &log) {
+        std::ifstream fs{filename, std::ios_base::binary};
+        if (!fs) {
+            log << "Error: Cannot open " << filename << "\n";
+            return 0;
+        }
+
+        // Read in file to buffer
+        std::vector<char> buffer;
+		for (;;) {
+			int c = fs.get();
+			if (c == EOF || fs.eof())
+				break;
+			buffer.push_back((char)c);
+		}
+		buffer.push_back(0);
+        
+        // Compile shader
+        const char *p = buffer.data();
+        glShaderSource(sh, 1, &p, NULL);
+        glCompileShader(sh);
+
+        // Handle errors and warnings
+        GLint loglen, stat;
+        glGetShaderiv(sh, GL_INFO_LOG_LENGTH, &loglen);
+        if (loglen > 0) {
+            std::vector<char> buffer(loglen+1);
+            glGetShaderInfoLog(sh, loglen, NULL, buffer.data());
+			log << "Compiling " << filename << std::endl;
+			log << buffer.data();
+        }
+        glGetShaderiv(sh, GL_COMPILE_STATUS, &stat);
+        return (stat == GL_TRUE);
+    }
+public:
+    bool create(const std::string &filename, std::ostream &log) noexcept {
+        m_prog = glCreateProgram();
+		GLuint vert = glCreateShader(GL_VERTEX_SHADER);
+		GLuint frag = glCreateShader(GL_FRAGMENT_SHADER);
+
+        // Compile and link shaders
+		if (compile(vert, filename + ".vert.glsl", log)
+         && compile(frag, filename + ".frag.glsl", log)) {
+        	glAttachShader(m_prog, vert);
+        	glAttachShader(m_prog, frag);
+        	glLinkProgram(m_prog);
+		}
+        glDeleteShader(vert);
+		glDeleteShader(frag);
+		
+        // Handle errors and warnings
+        GLint loglen, stat;
+        glGetProgramiv(m_prog, GL_INFO_LOG_LENGTH, &loglen);
+        if (loglen > 0) {
+            std::vector<char> buffer(loglen+1);
+            glGetProgramInfoLog(m_prog, loglen, NULL, buffer.data());
+			log << "Linking " << filename << std::endl;
+			log << buffer.data();
+        }
+        glGetProgramiv(m_prog, GL_LINK_STATUS, &stat);
+        return (stat == GL_TRUE);
+    }
+	void create(const std::string &filename) {
+		if (!create(filename, std::cerr))
+			throw std::runtime_error("Failed to create shader program.");
+	}
+ 
+    void use() const
+        { glUseProgram(m_prog); }
+
+    void uniform(const char *name, int i) const
+        { glUniform1i(glGetUniformLocation(m_prog, name), i); }
+    void uniform(const char *name, float f) const
+        { glUniform1f(glGetUniformLocation(m_prog, name), f); }
+    void uniform(const char *name, const glm::mat4 &mat) const {
+		auto location = glGetUniformLocation(m_prog, name);
+		glUniformMatrix4fv(location, 1, GL_FALSE, glm::value_ptr(mat));
+	}
+    void uniform(const char *name, const glm::mat3 &mat) const {
+		auto location = glGetUniformLocation(m_prog, name);
+		glUniformMatrix3fv(location, 1, GL_FALSE, glm::value_ptr(mat));
+	}
+    void uniform(const char *name, const glm::vec3 &vec) const
+        { glUniform3fv(glGetUniformLocation(m_prog, name),
+            1, glm::value_ptr(vec)); }
+    void uniform(const char *name, const glm::vec4 &vec) const
+        { glUniform4fv(glGetUniformLocation(m_prog, name),
+            1, glm::value_ptr(vec)); }
+    template <size_t N>
+    void uniform(const char *name, const std::array<glm::mat4,N> &mats) const
+        { glUniformMatrix4fv(glGetUniformLocation(m_prog, name),
+            N, GL_FALSE, glm::value_ptr(mats[0])); }
+    void uniform(const char *name, int slot, const Texture &texture) const {
+		texture.bind(slot);
+        glUniform1i(glGetUniformLocation(m_prog, name), slot);
+    }
+    void uniform(const char *name, const Texture &texture, GLenum slot = GL_TEXTURE0) const {
+		texture.bind(slot);
+        glUniform1i(glGetUniformLocation(m_prog, name), slot-GL_TEXTURE0);
+    }
+    GLuint m_prog;
+};
+```
+
+### Texture.hpp
+```
+#pragma once
+
+#include <GL/glew.h>
+#include <vector>
+#include <map>
+#include <glm/gtc/type_ptr.hpp>
+
+class Texture {
+public:
+	Texture()
+	: m_texid(0)
+		{}
+	
+    void create(int width, int height, GLenum intformat = GL_RGBA32F, GLenum format = GL_RGBA) {
+		if (m_texid)
+			return; // Already created!
+		m_width = width;
+		m_height = height;
+
+		glGenTextures(1, &m_texid);
+		glBindTexture(GL_TEXTURE_2D, m_texid);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexImage2D(GL_TEXTURE_2D, 0, intformat, m_width, m_height, 0,
+			format, GL_UNSIGNED_BYTE, NULL);
+    }
+    void bind(GLenum slot = GL_TEXTURE0) const {
+        glActiveTexture(slot);
+        glBindTexture(GL_TEXTURE_2D, m_texid);
+    }
+
+	void subimage(glm::ivec2 pos, glm::ivec2 size, const std::vector<glm::vec4> &pixels) {
+		glBindTexture(GL_TEXTURE_2D, m_texid);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, pos.x, pos.y,
+			size.x, size.y, GL_RGBA, GL_FLOAT, &pixels.front().x);
+	}
+
+	void subimage(glm::ivec2 pos, glm::ivec2 size, GLenum format, GLenum type, const void *pixels) {
+		glBindTexture(GL_TEXTURE_2D, m_texid);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, pos.x, pos.y,
+			size.x, size.y, format, type, pixels);
+	}
+
+    GLuint texid() const
+        { return m_texid; }
+	bool valid() const
+		{ return m_texid != 0; }
+	GLsizei width() const
+		{ return m_width; }
+	GLsizei height() const
+		{ return m_height; }
+private:
+    GLuint m_texid;
+    GLsizei m_width, m_height;
+};
+```
+
+### VertexBuffer.hpp
+```
+#pragma once
+
+#include <GL/glew.h>
+#include <glm/glm.hpp>
+#include <vector>
+
+
+template <typename T>
+struct VertexDescriptor {
+    static void describe();
+};
+
+struct LocVertex {
+    glm::vec3 loc;
+};
+
+template <>
+struct VertexDescriptor<LocVertex> {
+    static void describe() {
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+            sizeof(float)*3, (void *)0);
+    }
+};
+
+struct LocTexNormVertex {
+    glm::vec3 loc;
+    glm::vec2 uv;
+    glm::vec3 norm;
+    int id;
+};
+
+template <>
+struct VertexDescriptor<LocTexNormVertex> {
+    static void describe() {
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+            sizeof(LocTexNormVertex), (void *)offsetof(LocTexNormVertex, loc));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE,
+            sizeof(LocTexNormVertex), (void *)offsetof(LocTexNormVertex, uv));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE,
+            sizeof(LocTexNormVertex), (void *)offsetof(LocTexNormVertex, norm));
+        glEnableVertexAttribArray(3);
+        glVertexAttribIPointer(3, 1, GL_INT,
+            sizeof(LocTexNormVertex), (void *)offsetof(LocTexNormVertex, id));
+    }
+};
+
+template <typename Vertex>
+struct IndexedVertexBuffer {
+    int count;
+    GLuint vao;
+    GLuint vbo;
+    GLuint ibo;
+
+    void recompile(const std::vector<Vertex> &verts,
+                 const std::vector<unsigned> &indices) {
+        if (!vao) {
+            glGenBuffers(1, &vbo);
+            glGenBuffers(1, &ibo);
+            
+            glGenVertexArrays(1, &vao);
+            glBindVertexArray(vao);
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            VertexDescriptor<Vertex>::describe();
+            
+        }
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER,
+            verts.size()*sizeof(Vertex),
+            verts.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+            indices.size()*sizeof(unsigned),
+            indices.data(), GL_STATIC_DRAW);
+        count = indices.size();
+    }
+
+    void draw(int primtype = GL_TRIANGLES) const {
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+        glDrawElements(primtype, count, GL_UNSIGNED_INT, (void *)0);
+    }
+    void draw(int ntimes, int primtype) const {
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+        glDrawElementsInstanced(primtype, count, GL_UNSIGNED_INT, (void *)0, ntimes);
+    }
+};
+
+template <typename Vertex>
+struct VertexBuffer {
+    int count;
+    GLuint vao;
+    GLuint vbo;
+
+    void recompile(const std::vector<Vertex> &verts) {
+        if (!vao) {
+            glGenBuffers(1, &vbo);
+            
+            glGenVertexArrays(1, &vao);
+            glBindVertexArray(vao);
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            VertexDescriptor<Vertex>::describe();
+        }
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER,
+            verts.size()*sizeof(Vertex),
+            verts.data(), GL_STATIC_DRAW);
+        count = verts.size();
+    }
+
+    void draw(int primtype = GL_TRIANGLES) const {
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glDrawArrays(primtype, 0, count);
+    }
+    void draw(int ntimes, int primtype) const {
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glDrawArraysInstanced(primtype, 0, count, ntimes);
+    }
+};
+```
+
+### tribox.c
+```
+/********************************************************/
+/* AABB-triangle overlap test code                      */
+/* by Tomas Akenine-Möller                              */
+/* Function: int triBoxOverlap(float boxcenter[3],      */
+/*          float boxhalfsize[3],float triverts[3][3]); */
+/* History:                                             */
+/*   2001-03-05: released the code in its first version */
+/*   2001-06-18: changed the order of the tests, faster */
+/*                                                      */
+/* Acknowledgement: Many thanks to Pierre Terdiman for  */
+/* suggestions and discussions on how to optimize code. */
+/* Thanks to David Hunt for finding a ">="-bug!         */
+/********************************************************/
+/*
+Copyright 2020 Tomas Akenine-Möller
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and
+to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
+OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT
+OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*/
+#include <math.h>
+#include <stdio.h>
+
+#define X 0
+#define Y 1
+#define Z 2
+
+#define CROSS(dest,v1,v2) \
+          dest[0]=v1[1]*v2[2]-v1[2]*v2[1]; \
+          dest[1]=v1[2]*v2[0]-v1[0]*v2[2]; \
+          dest[2]=v1[0]*v2[1]-v1[1]*v2[0];
+
+#define DOT(v1,v2) (v1[0]*v2[0]+v1[1]*v2[1]+v1[2]*v2[2])
+
+#define SUB(dest,v1,v2) \
+          dest[0]=v1[0]-v2[0]; \
+          dest[1]=v1[1]-v2[1]; \
+          dest[2]=v1[2]-v2[2];
+
+#define FINDMINMAX(x0,x1,x2,min,max) \
+  min = max = x0;   \
+  if(x1<min) min=x1;\
+  if(x1>max) max=x1;\
+  if(x2<min) min=x2;\
+  if(x2>max) max=x2;
+
+int planeBoxOverlap(float normal[3], float vert[3], float maxbox[3])	// -NJMP-
+{
+  int q;
+  float vmin[3],vmax[3],v;
+  for(q=X;q<=Z;q++)
+  {
+    v=vert[q];					// -NJMP-
+    if(normal[q]>0.0f)
+    {
+      vmin[q]=-maxbox[q] - v;	// -NJMP-
+      vmax[q]= maxbox[q] - v;	// -NJMP-
+    }
+    else
+    {
+      vmin[q]= maxbox[q] - v;	// -NJMP-
+      vmax[q]=-maxbox[q] - v;	// -NJMP-
+    }
+  }
+  if(DOT(normal,vmin)>0.0f) return 0;	// -NJMP-
+  if(DOT(normal,vmax)>=0.0f) return 1;	// -NJMP-
+
+  return 0;
+}
+
+
+/*======================== X-tests ========================*/
+#define AXISTEST_X01(a, b, fa, fb)			   \
+	p0 = a*v0[Y] - b*v0[Z];			       	   \
+	p2 = a*v2[Y] - b*v2[Z];			       	   \
+        if(p0<p2) {min=p0; max=p2;} else {min=p2; max=p0;} \
+	rad = fa * boxhalfsize[Y] + fb * boxhalfsize[Z];   \
+	if(min>rad || max<-rad) return 0;
+
+#define AXISTEST_X2(a, b, fa, fb)			   \
+	p0 = a*v0[Y] - b*v0[Z];			           \
+	p1 = a*v1[Y] - b*v1[Z];			       	   \
+        if(p0<p1) {min=p0; max=p1;} else {min=p1; max=p0;} \
+	rad = fa * boxhalfsize[Y] + fb * boxhalfsize[Z];   \
+	if(min>rad || max<-rad) return 0;
+
+/*======================== Y-tests ========================*/
+#define AXISTEST_Y02(a, b, fa, fb)			   \
+	p0 = -a*v0[X] + b*v0[Z];		      	   \
+	p2 = -a*v2[X] + b*v2[Z];	       	       	   \
+        if(p0<p2) {min=p0; max=p2;} else {min=p2; max=p0;} \
+	rad = fa * boxhalfsize[X] + fb * boxhalfsize[Z];   \
+	if(min>rad || max<-rad) return 0;
+
+#define AXISTEST_Y1(a, b, fa, fb)			   \
+	p0 = -a*v0[X] + b*v0[Z];		      	   \
+	p1 = -a*v1[X] + b*v1[Z];	     	       	   \
+        if(p0<p1) {min=p0; max=p1;} else {min=p1; max=p0;} \
+	rad = fa * boxhalfsize[X] + fb * boxhalfsize[Z];   \
+	if(min>rad || max<-rad) return 0;
+
+/*======================== Z-tests ========================*/
+
+#define AXISTEST_Z12(a, b, fa, fb)			   \
+	p1 = a*v1[X] - b*v1[Y];			           \
+	p2 = a*v2[X] - b*v2[Y];			       	   \
+        if(p2<p1) {min=p2; max=p1;} else {min=p1; max=p2;} \
+	rad = fa * boxhalfsize[X] + fb * boxhalfsize[Y];   \
+	if(min>rad || max<-rad) return 0;
+
+#define AXISTEST_Z0(a, b, fa, fb)			   \
+	p0 = a*v0[X] - b*v0[Y];				   \
+	p1 = a*v1[X] - b*v1[Y];			           \
+        if(p0<p1) {min=p0; max=p1;} else {min=p1; max=p0;} \
+	rad = fa * boxhalfsize[X] + fb * boxhalfsize[Y];   \
+	if(min>rad || max<-rad) return 0;
+
+int triBoxOverlap(float boxcenter[3],float boxhalfsize[3],float triverts[3][3])
+{
+
+  /*    use separating axis theorem to test overlap between triangle and box */
+  /*    need to test for overlap in these directions: */
+  /*    1) the {x,y,z}-directions (actually, since we use the AABB of the triangle */
+  /*       we do not even need to test these) */
+  /*    2) normal of the triangle */
+  /*    3) crossproduct(edge from tri, {x,y,z}-directin) */
+  /*       this gives 3x3=9 more tests */
+   float v0[3],v1[3],v2[3];
+//   float axis[3];
+   float min,max,p0,p1,p2,rad,fex,fey,fez;		// -NJMP- "d" local variable removed
+   float normal[3],e0[3],e1[3],e2[3];
+
+   /* This is the fastest branch on Sun */
+   /* move everything so that the boxcenter is in (0,0,0) */
+   SUB(v0,triverts[0],boxcenter);
+   SUB(v1,triverts[1],boxcenter);
+   SUB(v2,triverts[2],boxcenter);
+
+   /* compute triangle edges */
+   SUB(e0,v1,v0);      /* tri edge 0 */
+   SUB(e1,v2,v1);      /* tri edge 1 */
+   SUB(e2,v0,v2);      /* tri edge 2 */
+
+   /* Bullet 3:  */
+   /*  test the 9 tests first (this was faster) */
+   fex = fabsf(e0[X]);
+   fey = fabsf(e0[Y]);
+   fez = fabsf(e0[Z]);
+   AXISTEST_X01(e0[Z], e0[Y], fez, fey);
+   AXISTEST_Y02(e0[Z], e0[X], fez, fex);
+   AXISTEST_Z12(e0[Y], e0[X], fey, fex);
+
+   fex = fabsf(e1[X]);
+   fey = fabsf(e1[Y]);
+   fez = fabsf(e1[Z]);
+   AXISTEST_X01(e1[Z], e1[Y], fez, fey);
+   AXISTEST_Y02(e1[Z], e1[X], fez, fex);
+   AXISTEST_Z0(e1[Y], e1[X], fey, fex);
+
+   fex = fabsf(e2[X]);
+   fey = fabsf(e2[Y]);
+   fez = fabsf(e2[Z]);
+   AXISTEST_X2(e2[Z], e2[Y], fez, fey);
+   AXISTEST_Y1(e2[Z], e2[X], fez, fex);
+   AXISTEST_Z12(e2[Y], e2[X], fey, fex);
+
+   /* Bullet 1: */
+   /*  first test overlap in the {x,y,z}-directions */
+   /*  find min, max of the triangle each direction, and test for overlap in */
+   /*  that direction -- this is equivalent to testing a minimal AABB around */
+   /*  the triangle against the AABB */
+
+   /* test in X-direction */
+   FINDMINMAX(v0[X],v1[X],v2[X],min,max);
+   if(min>boxhalfsize[X] || max<-boxhalfsize[X]) return 0;
+
+   /* test in Y-direction */
+   FINDMINMAX(v0[Y],v1[Y],v2[Y],min,max);
+   if(min>boxhalfsize[Y] || max<-boxhalfsize[Y]) return 0;
+
+   /* test in Z-direction */
+   FINDMINMAX(v0[Z],v1[Z],v2[Z],min,max);
+   if(min>boxhalfsize[Z] || max<-boxhalfsize[Z]) return 0;
+
+   /* Bullet 2: */
+   /*  test if the box intersects the plane of the triangle */
+   /*  compute plane equation of triangle: normal*x+d=0 */
+   CROSS(normal,e0,e1);
+   // -NJMP- (line removed here)
+   if(!planeBoxOverlap(normal,v0,boxhalfsize)) return 0;	// -NJMP-
+
+   return 1;   /* box and triangle overlaps */
+}
+```
+
+### volumetric.cc
+```
+#include "Mesh.hpp"
+#include "Shader.hpp"
+#include "Texture.hpp"
+#include "Framebuffer.hpp"
+#include "Demo.hpp"
+#include <GL/glew.h>
+#define NO_SDL_GLEXT
+#include <SDL2/SDL.h>
+#include <iostream>
+#include <random>
+#include <deque>
+#include <boost/math/distributions/beta.hpp>
+
+#define USE_OCTREE
+//#define USE_GRASS
+
+std::random_device rdev;
+std::mt19937 rng(rdev());
+
+#ifdef USE_OCTREE
+
+void generate_impulse(Texture &tex, const IndexedMesh<LocTexNormVertex> &mesh,
+    unsigned k, unsigned i, const AABB &bounds, const glm::vec3 &orientation, float minrad)
+{
+    std::uniform_real_distribution<> unif1(0.0f, 1.0f);
+    std::uniform_real_distribution<> unif2(-1.0f, 1.0f);
+    boost::math::beta_distribution<> bathtub(0.5, 0.5);
+
+    glm::vec3 a = mesh.verts[mesh.indices[i]].loc;
+    glm::vec3 na = mesh.verts[mesh.indices[i]].norm;
+    glm::vec3 b = mesh.verts[mesh.indices[i+1]].loc;
+    glm::vec3 nb = mesh.verts[mesh.indices[i+1]].norm;
+    glm::vec3 c = mesh.verts[mesh.indices[i+2]].loc;
+    glm::vec3 nc = mesh.verts[mesh.indices[i+2]].norm;
+    glm::vec3 n = glm::normalize((na+nb+nc)/3.0f);
+
+    glm::vec3 radius = bounds.radius();
+    glm::vec3 loc = bounds.center() + minrad*glm::vec3(unif2(rng),unif2(rng),unif2(rng));
+    loc -= n*dot(loc-a,n);
+
+    glm::vec3 forward = glm::normalize(0.5f*n+(float)unif1(rng)*(b-a)+(float)unif1(rng)*(c-a));
+    glm::vec3 side = glm::normalize(glm::cross(glm::vec3(0,1,0), forward));
+    glm::vec3 up = glm::cross(forward, side);
+    glm::mat3 rot = glm::mat3(forward, side, up);
+
+#ifdef USE_GRASS
+    glm::vec4 color = glm::vec4(0.55f,0.71f,0.0f,1.0f);
+    glm::vec3 size = glm::vec3(100.0,2.0,2.0);
+#else
+    glm::vec4 color = glm::mix(
+        glm::vec4(147.0f, 92.0f, 66.0f,255.0f),
+        glm::vec4(67.0f, 35.0f, 27.0f,255.0f),
+        (float)unif1(rng))/255.0f;
+    glm::vec3 size = glm::vec3(100.0,2.0,2.0);
+#endif
+
+    tex.subimage({(6*k+0)%tex.width(),(6*k+0)/tex.width()},
+        {1,1}, {{loc, 0}});
+    tex.subimage({(6*k+1)%tex.width(),(6*k+1)/tex.width()},
+        {1,1}, {{column(rot,0), 0}});
+    tex.subimage({(6*k+2)%tex.width(),(6*k+2)/tex.width()},
+        {1,1}, {{column(rot,1), 0}});
+    tex.subimage({(6*k+3)%tex.width(),(6*k+3)/tex.width()},
+        {1,1}, {{column(rot,2), 0}});
+    tex.subimage({(6*k+4)%tex.width(),(6*k+4)/tex.width()},
+        {1,1}, {{size, 0}});
+    tex.subimage({(6*k+5)%tex.width(),(6*k+5)/tex.width()},
+        {1,1}, {color});
+}
+
+int generate_impulses(Texture &tex, const IndexedMesh<LocTexNormVertex> &mesh, float radius = 0.2)
+{
+    int k = 0;
+    std::deque<AABB> pending = {mesh.bound().squarify()};
+    do {
+        AABB bounds = pending.front(); pending.pop_front();
+        if (auto idx = mesh.collides(bounds)) {
+            if (bounds.radius().x < radius) {
+                for (glm::vec3 disp : {
+                        glm::vec3(0.0,0.0,0.0),
+                        //glm::vec3(1.0,1.0,1.0),
+                        //glm::vec3(1.0,-1.0,-1.0),
+                        //glm::vec3(-1.0,1.0,-1.0),
+                        //glm::vec3(-1.0,-1.0,1.0)
+                    })
+                for (int i = 0; i < 15; i++)
+                    generate_impulse(tex, mesh, k+=1, *idx, bounds, disp, radius);
+            } else {
+                glm::vec3 c = bounds.center();
+                glm::vec3 r = bounds.radius();
+                glm::vec3 e1(r.x,0,0), e2(0,r.y,0), e3(0,0,r.z);
+                for (glm::vec3 o : {
+                    c-e1-e2-e3, c-e1-e2, c-e1-e3, c-e1,
+                    c-e2-e3, c-e2, c-e3, c,
+                })
+                    pending.push_back(AABB{o,o+r});
+            }
+        }
+    } while (!pending.empty());
+    return k;
+}
+
+#else // USE_OCTREE
+
+int generate_impulses(Texture &impulses, const IndexedMesh<LocTexNormVertex> &mesh)
+{
+    std::random_device rdev;
+    std::mt19937 rng(rdev());
+    std::uniform_real_distribution<> unif(0.0f, 1.0f);
+
+    int count = 0;
+    for (int i = 0; i < mesh.indices.size(); i += 3)
+    for (int j = 0; j < 1; j++) {
+        glm::vec3 a = mesh.verts[mesh.indices[i]].loc;
+        glm::vec3 na = mesh.verts[mesh.indices[i]].norm;
+        glm::vec3 b = mesh.verts[mesh.indices[i+1]].loc;
+        glm::vec3 nb = mesh.verts[mesh.indices[i+1]].norm;
+        glm::vec3 c = mesh.verts[mesh.indices[i+2]].loc;
+        glm::vec3 nc = mesh.verts[mesh.indices[i+2]].norm;
+        glm::vec3 n = glm::normalize((na+nb+nc)/3.0f);
+
+        float t = unif(rng), s = unif(rng);
+        if (s > 1-t)
+            s = 1-s;  // Keep within triangle
+        glm::vec3 pt = a + t*(b-a) + s*(c-a);
+        
+        glm::vec3 forward = glm::normalize(n+(2.0f*glm::vec3(unif(rng),unif(rng),unif(rng))-1.0f)*0.25f);
+        glm::vec3 side = glm::normalize(glm::cross(glm::vec3(0,1,0), forward));
+        glm::vec3 up = glm::cross(forward, side);
+        glm::mat3 W = glm::mat3(forward, side, up);
+        
+        glm::vec4 colorA = glm::vec4(111, 78, 55, 196)/255.0f;
+        glm::vec4 colorB = glm::vec4(92, 64, 51, 196)/255.0f;
+        glm::vec4 color = mix(colorA,colorB, unif(rng));
+        
+        glm::vec3 size = glm::vec3(sqrt(unif(rng)*400.0f+100.0f),0.1,0.1);
+
+        int k = count*6;
+        impulses.subimage({k%impulses.width(),k/impulses.width()}, {1,1}, {{pt, 0}});
+        impulses.subimage({(k+1)%impulses.width(),(k+1)/impulses.width()}, {1,1}, {{column(W,0), 0}});
+        impulses.subimage({(k+2)%impulses.width(),(k+2)/impulses.width()}, {1,1}, {{column(W,1), 0}});
+        impulses.subimage({(k+3)%impulses.width(),(k+3)/impulses.width()}, {1,1}, {{column(W,2), 0}});
+        impulses.subimage({(k+4)%impulses.width(),(k+4)/impulses.width()}, {1,1}, {{size, 0}});
+        impulses.subimage({(k+5)%impulses.width(),(k+5)/impulses.width()}, {1,1}, {color});
+        count++;
+    }
+    return count;
+}
+
+#endif // USE_OCTREE
+
+int main(int argc, char **argv)
+{
+    if (argc < 2) {
+        std::cerr << "Usage: volumetric MESH" << std::endl;
+        return EXIT_FAILURE;
+    }
+    Demo demo;
+    demo.create();
+
+    Shader solid;
+    solid.create("../shaders/solid");
+    Shader composite;
+    composite.create("../shaders/composite");
+    Shader accum;
+    accum.create("../shaders/accum");
+
+    IndexedMesh<LocTexNormVertex> teapot;
+    if (!load_obj(teapot, argv[1])) {
+        std::cerr << "Failed to load " << argv[1] << std::endl;
+        return EXIT_FAILURE;
+    }
+
+    Texture impulses;
+    impulses.create(4046, 4046);
+    int count = generate_impulses(impulses, teapot);
+    std::cout << count << std::endl;
+    IndexedMesh<LocVertex> quad = makequad();
+
+    Framebuffer accumbuf;
+    accumbuf.channel(GL_COLOR_ATTACHMENT0)
+        .create(1024,1024,GL_RGBA32F,GL_RGBA);
+    accumbuf.channel(GL_COLOR_ATTACHMENT1)
+        .create(1024,1024,GL_R8,GL_RED);
+    accumbuf.channel(GL_DEPTH_ATTACHMENT)
+        .create(1024,1024,GL_DEPTH_COMPONENT32,GL_DEPTH_COMPONENT);
+    accumbuf.complete();
+
+    teapot.rebuild();
+    quad.rebuild();
+
+    while (demo.poll()) {
+
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+
+        // Draw opaque
+        accumbuf.bind();
+        glDepthMask(GL_TRUE);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        solid.use();
+        solid.uniform("mvp", demo.projection() * demo.modelview());
+        solid.uniform("color", glm::vec4(1.0, 1.0, 1.0, 1.0));
+        teapot.draw(GL_TRIANGLES);
+
+        // Accumulate
+
+        glDepthMask(GL_FALSE);
+        glEnable(GL_BLEND);
+
+        glBlendFunci(0, GL_ONE, GL_ONE);
+        glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_COLOR);
+        glBlendEquation(GL_FUNC_ADD);
+
+        accumbuf.bind();
+        glClearBufferfv(GL_COLOR, 0, glm::value_ptr(glm::vec4(0.0f))); 
+        glClearBufferfv(GL_COLOR, 1, glm::value_ptr(glm::vec4(1.0f)));
+
+        accum.use();
+        accum.uniform("mvp", demo.projection() * demo.modelview());
+        accum.uniform("proj", demo.projection());
+        accum.uniform("invproj", glm::inverse(demo.projection()));
+        accum.uniform("mv", demo.modelview());
+        accum.uniform("impulses", impulses, GL_TEXTURE0);
+        accum.uniform("impulses2", impulses, GL_TEXTURE1);
+        accum.uniform("time", demo.time());
+        quad.draw(GL_TRIANGLES, count);
+
+        // Composite
+
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, 1024, 1024);
+        glClearColor(1.0,1.0,1.0,1.0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        solid.use();
+        solid.uniform("mvp", demo.projection() * demo.modelview());
+        solid.uniform("color", glm::vec4(0.0, 0.0, 0.0, 1.0));
+        teapot.draw(GL_TRIANGLES);
+
+        glDisable(GL_DEPTH);
+        glDepthFunc(GL_ALWAYS);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        composite.use();
+        composite.uniform("accumbuf", accumbuf.channel(GL_COLOR_ATTACHMENT0), GL_TEXTURE0);
+        composite.uniform("countbuf", accumbuf.channel(GL_COLOR_ATTACHMENT1), GL_TEXTURE1);
+        quad.draw(GL_TRIANGLES);
+
+        demo.swap();
+    }
+}
+```
+
+### shaders/accum.frag.glsl
+```
+#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler3D;
+
+uniform int mode;
+uniform sampler2D impulses;
+uniform mat4 invproj;
+uniform mat4 proj;
+uniform mat4 mv;
+uniform mat4 mvp;
+
+layout (location = 0) out vec4 accum_out;
+layout (location = 1) out float count_out;
+
+in vec2 axis;
+in mat2 Q;
+in vec4 U;
+in vec4 color;
+in float scalefactor;
+in float light;
+
+float d(float z) {
+    return ((1.0*500.0)/(z)-500.0)/(1.0-500.0);
+}
+float w(float z) {
+    return max(1e-2,min(3e3,10.0/(1e-5+pow(abs(z)/5.0,2.0)+pow(abs(z)/200.0,6.0))));
+}
+
+void main() {
+    vec4 ndcPos;
+    ndcPos.xy = ((2.0 * gl_FragCoord.xy)) / 1024.0 - 1.0;
+    ndcPos.z = 1.0;
+    ndcPos.w = 1.0;
+
+    vec2 disp = 1024.0*(ndcPos.xy-U.xy);
+    float dist = dot(disp, Q*disp);
+    float ai = min(1.0, scalefactor*exp(-0.5*dist));
+
+    //if (dot(vec3(disp,1.0), vec3(axis,1.0))<0.0)
+    //    discard;
+    //if (ai < 1e-6)
+    //    discard;
+    //0.04 for grass
+    float lightfactor = light*0.06*max(0.0,abs(dot(disp, axis)));
+    float weight =
+        max(min(1.0, max(max(color.r, color.g), color.b) * ai*color.a), ai*color.a)
+        * clamp(0.03 / (1e-5 + pow(U.z / 200.0, 4.0)), 1e-2, 3e3);
+
+    accum_out = vec4(color.rgb * lightfactor, ai*color.a)*weight;
+    count_out = ai*color.a;
+}
+```
+
+### shaders/accum.vert.glsl
+```
+#version 300 es
+precision highp float;
+precision highp int;
+
+layout (location = 0) in vec3 loc_in;
+
+float M_PI = 3.1415;
+
+out mat2 Q;
+out vec4 U;
+out vec4 color;
+out float scalefactor;
+out vec2 axis;
+out float light;
+
+uniform mat4 mvp;
+uniform mat4 mv;
+uniform mat4 proj;
+uniform sampler2D impulses;
+uniform sampler2D impulses2;
+uniform float time;
+
+mat3 rotate(vec3 v, float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+    float x = v.x;
+    float y = v.y;
+    float z = v.z;
+
+    return transpose(mat3(
+                x*x*(1.0-c)+c     ,x*y*(1.0-c)-z*s   ,x*z*(1.0-c)+y*s ,
+                y*x*(1.0-c)+z*s   ,y*y*(1.0-c)+c     ,y*z*(1.0-c)-x*s ,
+                z*x*(1.0-c)-y*s   ,z*y*(1.0-c)+x*s   ,z*z*(1.0-c)+c   ));
+}
+
+void main() {
+    int id = gl_InstanceID*6;
+
+    mat3 R1;
+    vec3 M1 = texelFetch(impulses, ivec2(id%4046,id/4046), 0).xyz;
+    R1[0] = texelFetch(impulses, ivec2((id+1)%4046,(id+1)/4046), 0).xyz;
+    R1[1] = texelFetch(impulses, ivec2((id+2)%4046,(id+2)/4046), 0).xyz;
+    R1[2] = texelFetch(impulses, ivec2((id+3)%4046,(id+3)/4046), 0).xyz;
+    vec3 S1 = texelFetch(impulses, ivec2((id+4)%4046,(id+4)/4046), 0).xyz;
+    vec4 color1 = texelFetch(impulses, ivec2((id+5)%4046,(id+5)/4046), 0);
+
+    mat3 R2;
+    vec3 M2 = texelFetch(impulses2, ivec2(id%4046,id/4046), 0).xyz;
+    R2[0] = texelFetch(impulses2, ivec2((id+1)%4046,(id+1)/4046), 0).xyz;
+    R2[1] = texelFetch(impulses2, ivec2((id+2)%4046,(id+2)/4046), 0).xyz;
+    R2[2] = texelFetch(impulses2, ivec2((id+3)%4046,(id+3)/4046), 0).xyz;
+    vec3 S2 = texelFetch(impulses2, ivec2((id+4)%4046,(id+4)/4046), 0).xyz;
+    vec4 color2 = texelFetch(impulses2, ivec2((id+5)%4046,(id+5)/4046), 0);
+
+    float x = 0.0;// 0.5+0.5*sin((sin(M1.x+M2.x)*cos(M1.z+M2.z)+time)*5.0);
+    float dx = 0.5*cos((M1.x-M1.y-M1.z-0.5*cos(time)-time)*5.0);
+
+    
+
+    vec3 M = M1; //mix(M1,M2,x);
+    mat3 R;
+    R[0] = mix(R1[0],R2[0],x);
+    R[1] = mix(R1[1],R2[1],x);
+    R[2] = mix(R1[2],R2[2],x);
+    
+    R = R*rotate(R[1], dx);
+    vec3 S = mix(S1,S2,x);
+    color = color1; //mix(color1,color2,x);
+
+    light = 0.5+max(0.0,dot(R1[0],vec3(-0.5,1,-0.5)));
+
+    mat3 Sigma = R*mat3(S.x*S.x,0.0,0.0,
+                        0.0,S.y*S.y,0.0,
+                        0.0,0.0,S.z*S.z)*transpose(R);
+
+    // Compute camera coords
+    U = mvp * vec4(M, 1.0);
+
+    // Compute Jacobian
+    float l = length(U.xyz);
+    mat3 J = transpose(mat3(
+        1.0/U.z,     0.0,  -U.x/(U.z*U.z),
+        0.0,     1.0/U.z,  -U.y/(U.z*U.z),
+        U.x/l,   U.y/l,   U.z/l));
+    mat3 W = mat3(mvp);
+    
+    
+    // Compute variance matrix
+    mat3 V = J*W*Sigma*transpose(W)*transpose(J);
+
+    // Setup resampling filter rho
+    Q = inverse(mat2(V)+mat2(1.0));
+    scalefactor = 1.0/sqrt(2.0*M_PI*determinant(Q));
+
+    vec4 temp = mvp*vec4(R[0],0.0);
+    axis = normalize(temp.xy / temp.w);
+
+    // Project U to screen coords
+    U /= U.w;
+    gl_Position = vec4(0.04*loc_in.xy+U.xy,U.z,1.0);
+}
+```
+
+### shaders/composite.frag.glsl
+```
+#version 300 es
+precision highp float;
+precision highp sampler3D;
+
+uniform sampler2D accumbuf;
+uniform sampler2D countbuf;
+
+layout (location = 0) out vec4 color_out;
+
+const float EPSILON = 0.00001;
+
+bool isApproximatelyEqual(float a, float b) {
+    return abs(a - b) <= (abs(a) < abs(b) ? abs(b) : abs(a)) * EPSILON;
+}
+float max3(vec3 v) {
+    return max(max(v.x, v.y), v.z);
+}
+
+void main() {
+    vec4 accum = texelFetch(accumbuf, ivec2(gl_FragCoord.xy), 0);
+    float reveal = texelFetch(countbuf, ivec2(gl_FragCoord.xy), 0).r;
+    if (isApproximatelyEqual(reveal, 1.0f))
+        discard;
+    if (isinf(max3(abs(accum.rgb))))
+        accum.rgb = vec3(accum.a);
+    vec3 avg = accum.rgb / max(accum.a, EPSILON);
+
+    color_out = vec4(avg.rgb, 1.0-reveal);
+}
+```
+
+### shaders/composite.vert.glsl
+```
+#version 300 es
+precision highp float;
+
+layout (location = 0) in vec3 loc_in;
+
+void main() {
+    gl_Position = vec4(loc_in,1.0);
+}
+```
+
+### shaders/solid.frag.glsl
+```
+#version 300 es
+precision highp float;
+
+layout (location = 0) out vec4 color_out;
+
+uniform vec4 color;
+
+void main() {
+    color_out = color;
+}
+```
+
+### shaders/solid.vert.glsl
+```
+#version 300 es
+precision highp float;
+
+layout (location = 0) in vec3 loc_in;
+
+uniform mat4 mvp;
+
+void main() {
+    gl_Position = mvp * vec4(loc_in, 1.0);
+}
+```

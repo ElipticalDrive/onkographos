@@ -1,0 +1,81 @@
+# 2-D-PROG
+
+Also called: Bi-dimensional MLZC
+
+## Overview
+2-D-PROG is the bi-dimensional variant of the MLZC algorithm, serving as a benchmark for 2-D wavelet-based coding systems and enabling independent encoding of subbands within the 3-D/2-D MLZC framework [S1]. It distinguishes itself from general 2-D standards like JPEG2000 by its specific integration into the MLZC context, utilizing spatial support and interband conditioning to optimize lossless compression rates for medical data [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 2-D image block (subband) derived from the volume decomposition.
+*   **Output:** An arithmetic-encoded bitstream representing the quantized wavelet coefficients.
+
+**Data Structures:**
+The method relies on context modeling defined by a spatial support window and optional interband conditioning.
+*   **Spatial Support:** A neighborhood of coefficients used to predict the current coefficient. The sources specify that supports like (060) and (070) are optimal [S1].
+*   **Interband Conditioning:** A binary flag or mechanism indicating whether coefficients from adjacent subbands are used in the context model [S1].
+
+**Parameters:**
+*   **Spatial Support Size:** The (060) and (070) configurations yield the highest compression ratios [S1].
+*   **Interband Conditioning:** Optional. Its impact is small, reducing the minimum rate by approximately 1.2% [S1].
+
+**Steps:**
+1.  **Decomposition:** The input 2-D image is decomposed using a Discrete Wavelet Transform (DWT) implemented via lifting steps, consistent with MLZC and JPEG2000 standards [S1].
+2.  **Context Modeling:** For each coefficient, a context is formed based on the chosen spatial support (e.g., neighbors at specific offsets) and optionally interband neighbors [S1].
+3.  **Symbol Generation:** The current coefficient's quantized value is mapped to a symbol based on the context. The sparseness of the conditioning space limits the effective support size; larger supports are beneficial for larger datasets but degrade if the space becomes too sparse for adequate statistics [S1].
+4.  **Arithmetic Encoding:** The sequence of symbols is encoded using arithmetic coding [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def encode_2d_prog(image, spatial_support, use_interband):
+    # 1. Wavelet Decomposition
+    # Implemented via lifting steps scheme as per MLZC/JPEG2000 standards [S1]
+    subbands = wavelet_decompose_lifting(image)
+    
+    bitstream = []
+    
+    for subband in subbands:
+        # 2. Context Modeling and Encoding
+        for y, x in subband.coordinates:
+            # Determine context based on spatial support (e.g., 060 or 070) [S1]
+            context_neighbors = get_neighbors(subband, x, y, spatial_support)
+            
+            # Optional interband conditioning [S1]
+            if use_interband:
+                interband_neighbors = get_interband_neighbors(subband, x, y)
+                context = combine(context_neighbors, interband_neighbors)
+            else:
+                context = context_neighbors
+            
+            # Map coefficient to symbol based on context statistics
+            # The efficiency depends on the sparseness of the conditioning space [S1]
+            symbol = map_to_symbol(subband[y, x], context)
+            
+            # 3. Arithmetic Encoding
+            bitstream.append(arithmetic_encode(symbol, context))
+            
+    return bitstream
+```
+
+**Edge Cases and Pitfalls:**
+*   **Sparseness Limit:** If the spatial support is too wide for the dataset size, the conditioning space becomes too sparse, preventing adequate representation of symbol statistics and degrading performance [S1].
+*   **Dataset Size Dependency:** Larger volumes benefit from wider spatial supports, while smaller ones may not [S1].
+
+## Subtopics
+
+### [LPL-PROG Mode](5897-lpl-prog-mode.md)
+LPL-PROG Mode is a bitstream organization scheme for the MLZC 3-D encoding/2-D decoding system that enables quality scalability for both the entire volume and individual 2-D slices. It is derived from G-PROG mode by inserting markers after every quantization layer of every subband image. It is chosen when 2-D local-scale conditioning is used and slice-level progressiveness is required, at the cost of increased bitstream overhead due to markers.
+
+## Operating characteristics
+*   **Compression Efficiency:** The (060) and (070) spatial supports lead to the highest compression ratios [S1].
+*   **Impact of Interband Conditioning:** Using interband conditioning reduces the minimum lossless rate by about 1.2% [S1].
+*   **Scalability:** The method supports scalability by quality and resolution, consistent with its wavelet-based nature and comparison to JPEG2000 [S1].
+*   **Performance:** It serves as a benchmark for 2-D systems, comparable to JPEG2000 in lossless performance for medical data [S1].
+
+## Background
+2-D-PROG is the bi-dimensional version of the MLZC algorithm, designed to handle 2-D slices independently or as part of the 3-D/2-D MLZC approach [S1]. It is compared against JPEG2000, a standard designed to overcome JPEG limitations with improved compression, lossy-to-lossless performance, and scalability [S1]. The algorithm uses DWT implemented by lifting steps, similar to MLZC and EZW-3-D [S1].
+
+## Sources
+[S1] Three-dimensional encoding/two-dimensional decoding of medical data, https://doi.org/10.1109/tmi.2003.809689, fetched 2026-10-26

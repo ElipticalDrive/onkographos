@@ -1,0 +1,92 @@
+# Scene SDF Evaluation
+Also called: SDF Scene Composition, Signed Distance Function (SDF) Scene Composition
+
+## Overview
+Scene SDF Evaluation computes the minimum signed distance from a query point to any primitive in a scene, effectively performing a union operation across all defined geometry [S1, unofficial]. It differs from [Smooth SDF Composition](2685-smooth-sdf-composition.md) by aggregating multiple distinct primitives into a single scene-level distance field rather than composing a single smooth blend of shapes.
+
+## How it works
+**Inputs:**
+- `point`: The 3D query position ($p \in \mathbb{R}^3$).
+- `scene`: A structure containing arrays of primitives (spheres, cuboids) and their counts.
+
+**Outputs:**
+- `min_dist`: The scalar signed distance to the nearest surface in the scene.
+
+**Data Structures:**
+- `Sphere`: Contains `center` ($c \in \mathbb{R}^3$) and `radius` ($r \in \mathbb{R}$).
+- `Cuboid`: Contains `center` ($c \in \mathbb{R}^3$), `half_extents` ($h \in \mathbb{R}^3$), and potentially `orientation` ($q \in \mathbb{R}^4$) if rotated.
+- `Scene`: Contains `sphere_count` (uint), `cuboid_count` (uint), `spheres` (array of Sphere), `cuboids` (array of Cuboid).
+
+**Steps:**
+1. Initialize `min_dist` to a large positive value representing infinity, typically `10000.0` [S1, unofficial].
+2. Iterate through all spheres in the scene:
+   - For each sphere $i$, evaluate the sphere SDF: $d_{sphere} = \| p - c_i \| - r_i$.
+   - Update `min_dist = min(min_dist, d_{sphere})`.
+3. Iterate through all cuboids in the scene:
+   - For each cuboid $j$, evaluate the cuboid SDF. This involves transforming $p$ into the cuboid's local space (if rotated), computing the distance to the box, and returning the result.
+   - Update `min_dist = min(min_dist, d_{cuboid})`.
+4. Return `min_dist`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def evaluate_scene_sdf(point, scene):
+    # Initialize with a large value representing infinity
+    min_dist = 10000.0
+    
+    # Evaluate all spheres
+    for i in range(scene.sphere_count):
+        sphere = scene.spheres[i]
+        # Distance from point to sphere surface
+        dist_to_center = length(point - sphere.center)
+        sphere_dist = dist_to_center - sphere.radius
+        if sphere_dist < min_dist:
+            min_dist = sphere_dist
+            
+    # Evaluate all cuboids
+    for j in range(scene.cuboid_count):
+        cuboid = scene.cuboids[j]
+        # Evaluate cuboid SDF (implementation details depend on rotation)
+        # Assuming a standard axis-aligned or rotated box SDF function
+        cuboid_dist = evaluate_sdf_cuboid(cuboid, point)
+        if cuboid_dist < min_dist:
+            min_dist = cuboid_dist
+            
+    return min_dist
+
+def evaluate_sdf_sphere(sphere, point):
+    return length(point - sphere.center) - sphere.radius
+
+def evaluate_sdf_cuboid(cuboid, point):
+    # [G] Standard cuboid SDF logic: transform point to local space,
+    # compute distance to box, return max(0, dist) - half_extents logic.
+    # Specifically: d = max(|p_local| - h, 0) + length(max(|p_local| - h, 0))
+    # This step is implied by the source's loop structure but not detailed in S1.
+    pass
+```
+
+**Parameters:**
+- `MAX_SIGNED_DISTANCE`: `10000.0` [S1, unofficial].
+
+**Edge Cases:**
+- If the scene is empty, the function returns `MAX_SIGNED_DISTANCE` [S1, unofficial].
+- Precision issues may arise if primitives are extremely close or overlapping, though the min operation handles overlaps correctly for unions.
+
+## Subtopics
+
+### SDF Intersection
+A boolean intersection operation for SDFs that returns the maximum distance value at any point, representing the region common to both shapes [S2, unofficial]. To implement, evaluate the SDF for both shapes at point $p$ and return $\max(d_1, d_2)$ [S2, unofficial]. This is the dual of the union operation used in the main scene evaluation.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the total number of primitives in the scene. Each primitive is evaluated exactly once.
+- **Memory Complexity:** $O(N)$ to store the primitive data structures.
+- **Strengths:** Simple to implement; allows for complex scene composition using basic primitives.
+- **Limitations:** Performance degrades linearly with scene complexity. Not suitable for very large scenes without spatial acceleration structures (which are not part of this basic evaluation method).
+
+## Background
+The method originates from ray marching techniques using Signed Distance Functions. The specific implementation pattern of iterating through spheres and cuboids is documented in the `ray-marcher` project [S1, unofficial]. The theoretical basis for using min for union and max for intersection is established by Alan Zucconi [S2, unofficial].
+
+## Sources
+[S1] unfinishedprogram/ray-marcher, https://github.com/unfinishedprogram/ray-marcher, fetched 2026-10-26 (unofficial)
+[S2] Volumetric Rendering: Signed Distance Functions - Alan Zucconi, https://www.alanzucconi.com/2016/07/01/signed-distance-functions/, fetched 2026-10-28 (unofficial)

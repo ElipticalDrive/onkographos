@@ -1,0 +1,207 @@
+--- v001.md
++++ v002.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-Batch Stratified Sampling generates $N_c$ evenly-spaced depth bins in the interval $[near, far]$ and perturbs sample positions within each bin to reduce aliasing artifacts during volume rendering [S1, unofficial]. It extends Uniform Ray Sampling by introducing stratification, ensuring that samples are distributed more evenly across the ray's depth range, which mitigates the high-frequency noise and moiré patterns associated with purely uniform random sampling [S1, unofficial].
++Batch Stratified Sampling generates $N_c$ evenly-spaced depth bins in the interval $[near, far]$ and perturbs sample positions within each bin to reduce aliasing artifacts during volume rendering [S1, unofficial]. It extends Uniform Ray Sampling by stratifying the depth interval, ensuring samples are distributed more evenly across the ray's depth range [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `ray_o`: Ray origins, shape $(N, 3)$ or broadcastable to $(N, 1, 3)$.
+-- `ray_d`: Ray directions, shape $(N, 3)$ or broadcastable to $(N, 1, 3)$.
++- `ray_o`: Ray origins, shape $(N, 3)$.
++- `ray_d`: Ray directions, shape $(N, 3)$.
+ - `near`: Minimum depth, scalar or shape $(N, 1)$.
+ - `far`: Maximum depth, scalar or shape $(N, 1)$.
+@@ -16,50 +16,17 @@
+ 
+ **Outputs:**
+-- `t_vals`: Sample depths along the ray, shape $(N, N_c)$.
+-- `pts`: 3D sample points, shape $(N, N_c, 3)$.
+-- `dirs`: Ray directions repeated for each sample, shape $(N, N_c, 3)$.
+-
+-**Data Structures:**
+-- Tensors are typically stored in contiguous memory. `t_vals` uses float32 precision. `pts` and `dirs` use float32.
++- `t_vals`: Sample depths along the ray, shape `(*, N_c)`.
++- `pts`: 3D sample points, shape `(*, N_c, 3)`.
++- `dirs`: Ray directions repeated for each sample, shape `(*, N_c, 3)`.
+ 
+ **Steps:**
+-1.  **Create Base Grid:** Compute evenly spaced depth values $z_{vals}$ in $[near, far]$ using linear spacing.
+-    $$ z_{vals} = \text{linspace}(near, far, N_c) $$
+-    Shape: $(N_c)$ [S1, unofficial].
+-
+-2.  **Compute Midpoints:** Calculate the midpoints between adjacent $z_{vals}$ to define bin boundaries.
+-    $$ mids_i = 0.5 \times (z_{vals}[i+1] + z_{vals}[i]) \quad \text{for } i = 0 \dots N_c-2 $$
+-    Shape: $(N_c-1)$ [S1, unofficial].
+-
+-3.  **Normalize and Expand:** If `near` and `far` are scalars, treat them as shape $(1, 1)$. Expand $z_{vals}$ to shape $(N, N_c)$ to match the batch dimension of rays [S1, unofficial].
+-
+-4.  **Construct Bin Boundaries (Normalized):**
+-    -   Create normalized $t_{vals}$ in $[0, 1]$ corresponding to $z_{vals}$.
+-    -   Compute bin boundaries in normalized space.
+-    -   **Lower Bound ($L$):** Concatenate the first normalized $t$ value with the midpoints.
+-        $$ L = \text{concat}(t_{vals}[:, 0:1], mids_{norm}) $$
+-        Shape: $(N, N_c)$ [S1, unofficial].
+-    -   **Upper Bound ($U$):** Concatenate the midpoints with the last normalized $t$ value.
+-        $$ U = \text{concat}(mids_{norm}, t_{vals}[:, -1:]) $$
+-        Shape: $(N, N_c)$ [S1, unofficial].
+-
+-5.  **Interpolate to World Depth:** Map the normalized bin boundaries back to the $[near, far]$ interval for each ray.
+-    $$ bins_i = near_i \times (1.0 - t_{norm}) + far_i \times t_{norm} $$
+-    This results in lower and upper bounds in world depth space [S1, unofficial].
+-
+-6.  **Sample Within Bins:**
+-    -   If `perturb` is `True`: Generate random uniform values $r \sim U(0, 1)$ for each sample.
+-        $$ t_{sample} = L + (U - L) \times r $$
+-    -   If `perturb` is `False`: Use the bin midpoints directly (or the original $z_{vals}$ if they represent the centers).
+-        $$ t_{sample} = \text{midpoints} $$
+-    Resulting $t_{vals}$ has shape $(N, N_c)$ [S1, unofficial].
+-
+-7.  **Compute 3D Points:**
+-    $$ pts = ray_o + ray_d \times t_{vals} $$
+-    Broadcasting handles the dimensions: $(N, 1, 3) + (N, 1, 3) \times (N, N_c, 1)$ results in $(N, N_c, 3)$ [S1, unofficial].
+-
+-8.  **Compute Directions:**
+-    $$ dirs = \text{expand}(ray_d, (N, N_c, 3)) $$
+-    This ensures each sample point has the associated ray direction for MLP input [S1, unofficial].
++1.  **Create Base Grid:** Compute evenly spaced depth values $t_{vals}$ in $[near, far]$ using linear spacing: $t_{vals} = \text{linspace}(near, far, N_c)$ [S1, unofficial].
++2.  **Compute Midpoints:** Calculate the midpoints between adjacent $t_{vals}$ to define bin boundaries: $mids = 0.5 \times (t_{vals}[1:] + t_{vals}[:-1])$ [S1, unofficial].
++3.  **Normalize and Expand:** Normalize `near` and `far` tensors to 2D shape `[num_rays, 1]` if they are 1D [S3, unofficial]. Expand $t_{vals}$ to shape `(*, N_c)` to match ray batch dimensions [S1, unofficial].
++4.  **Construct Bin Boundaries (Normalized):** Create normalized $t_{vals}$ in $[0, 1]$ and expand to `[num_rays, N_c]` [S3, unofficial]. Calculate bin midpoints in normalized space: $mid = (t_{vals}[...,:-1] + t_{vals}[...,1:]) / 2$ [S1, unofficial]. Construct lower interval boundaries by concatenating the first $t$ value with midpoints: $lower = \text{concat}(t_{vals}[...,:1], mid)$ [S1, unofficial]. Construct upper interval boundaries by concatenating midpoints with the last $t$ value: $upper = \text{concat}(mid, t_{vals}[...,-1:])$ [S1, unofficial].
++5.  **Interpolate to World Depth:** Map the normalized bin boundaries back to the $[near, far]$ interval for each ray: $bins = near \times (1.0 - t_{norm}) + far \times t_{norm}$ [S3, unofficial].
++6.  **Sample Within Bins:** If `perturb` is `True`, perturb $t_{vals}$ by adding a random value scaled by bin width: $t_{vals} = lower + (upper - lower) \times \text{rand}()$ [S1, unofficial]. If `perturb` is `False`, use the bin midpoints directly [S1, unofficial].
++7.  **Compute 3D Points:** Compute sample positions along the ray: $pts = ray\_o.\text{unsqueeze}(-2) + ray\_d.\text{unsqueeze}(-2) \times t_{vals}.\text{unsqueeze}(-1)$ [S1, unofficial].
++8.  **Compute Directions:** Compute ray directions for MLP input: $dirs = ray\_d.\text{unsqueeze}(-2).\text{expand\_as}(pts)$ [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -77,16 +44,11 @@
+     """
+     # 1. Create evenly spaced depth values
+-    # z_vals shape: (num_samples,)
+-    z_vals = torch.linspace(near, far, num_samples)
++    t_vals = torch.linspace(near, far, num_samples, device=ray_o.device)
+     
+-    # 2. Compute midpoints between adjacent z_vals
+-    # mids shape: (num_samples - 1,)
+-    mids = 0.5 * (z_vals[1:] + z_vals[:-1])
++    # 2. Compute midpoints between adjacent t_vals
++    mids = 0.5 * (t_vals[1:] + t_vals[:-1])
+     
+-    # 3. Normalize near/far to 2D shape [num_rays, 1] if needed
+-    # Assuming ray_o is (N, 3), we infer N
++    # 3. Normalize near/far to 2D shape [num_rays, 1] if they are 1D
+     N = ray_o.shape[0]
+-    
+-    # Handle near/far broadcasting
+     if near.ndim == 0:
+         near = near.expand(N, 1)
+@@ -94,54 +56,30 @@
+         far = far.expand(N, 1)
+         
+-    # 4. Expand z_vals to [N, num_samples]
+-    # Note: torch.linspace with scalar near/far creates 1D tensor.
+-    # We need to map the linear space [0, 1] to [near, far] per ray.
+-    
+-    # Create normalized positions in [0, 1]
+-    t_norm = torch.linspace(0, 1, num_samples).to(ray_o.device)
+-    
+-    # Expand t_norm to [N, num_samples]
++    # 4. Create normalized t_vals in [0, 1] and expand to [num_rays, num_samples]
++    t_norm = torch.linspace(0, 1, num_samples, device=ray_o.device)
+     t_norm = t_norm.expand(N, num_samples)
+     
+-    # Interpolate bin boundaries in normalized space
+-    # Lower bounds: first t_norm + midpoints of normalized intervals
+-    # Upper bounds: midpoints of normalized intervals + last t_norm
++    # 5. Calculate bin midpoints in normalized space
++    mid_norm = (t_norm[:, :-1] + t_norm[:, 1:]) / 2
+     
+-    # Compute midpoints in normalized space
+-    mids_norm = 0.5 * (t_norm[:, 1:] + t_norm[:, :-1]) # Shape (N, num_samples-1)
++    # 6. Construct lower and upper interval boundaries
++    lower_norm = torch.cat((t_norm[:, :1], mid_norm), dim=-1)
++    upper_norm = torch.cat((mid_norm, t_norm[:, -1:]), dim=-1)
+     
+-    # Construct lower bounds: [t_norm[:, 0:1], mids_norm]
+-    lower_norm = torch.cat([t_norm[:, 0:1], mids_norm], dim=-1) # Shape (N, num_samples)
+-    
+-    # Construct upper bounds: [mids_norm, t_norm[:, -1:]]
+-    upper_norm = torch.cat([mids_norm, t_norm[:, -1:]], dim=-1) # Shape (N, num_samples)
+-    
+-    # 5. Interpolate to world depth
+-    # bins = near * (1 - t_norm) + far * t_norm
+-    # Apply to lower and upper bounds
++    # 7. Interpolate bin boundaries for each ray to world depth
+     lower_depth = near * (1.0 - lower_norm) + far * lower_norm
+     upper_depth = near * (1.0 - upper_norm) + far * upper_norm
+     
+-    # 6. Sample within bins
++    # 8. Sample within bins
+     if perturb:
+-        # Generate random uniform values [0, 1]
+-        rand_vals = torch.rand_like(lower_depth)
+-        t_vals = lower_depth + (upper_depth - lower_depth) * rand_vals
++        t_vals = lower_depth + (upper_depth - lower_depth) * torch.rand_like(lower_depth)
+     else:
+-        # Use midpoints of the depth bins
+         t_vals = 0.5 * (lower_depth + upper_depth)
+         
+-    # 7. Compute 3D points
+-    # ray_o: (N, 3), ray_d: (N, 3), t_vals: (N, num_samples)
+-    # Expand ray_o and ray_d to (N, 1, 3)
+-    ray_o_exp = ray_o.unsqueeze(1) # (N, 1, 3)
+-    ray_d_exp = ray_d.unsqueeze(1) # (N, 1, 3)
+-    t_vals_exp = t_vals.unsqueeze(2) # (N, num_samples, 1)
++    # 9. Compute 3D points
++    pts = ray_o.unsqueeze(1) + ray_d.unsqueeze(1) * t_vals.unsqueeze(2)
+     
+-    pts = ray_o_exp + ray_d_exp * t_vals_exp # (N, num_samples, 3)
+-    
+-    # 8. Compute directions
+-    # Expand ray_d to (N, num_samples, 3)
+-    dirs = ray_d_exp.expand_as(pts)
++    # 10. Compute ray directions for MLP input
++    dirs = ray_d.unsqueeze(1).expand_as(pts)
+     
+     return t_vals, pts, dirs
+@@ -149,26 +87,26 @@
+ 
+ **Edge Cases and Pitfalls:**
+--   **Precision:** Using float32 for `t_vals` is standard, but if `near` and `far` differ by orders of magnitude, precision loss may occur in the interpolation step. [G] Ensure `near` and `far` are normalized or scaled appropriately if extreme values are expected.
+--   **Boundaries:** The first sample bin starts at `near` and the last ends at `far`. The midpoints ensure that the bins cover the entire interval without gaps or overlaps. [S1, unofficial]
+--   **Degenerate Input:** If `near == far`, the bin width is zero. The code should handle this by returning `near` for all samples or raising an error. [G]
++-   **Precision:** Using float32 for `t_vals` is standard, but if `near` and `far` differ by orders of magnitude, precision loss may occur in the interpolation step [G]. Ensure `near` and `far` are normalized or scaled appropriately if extreme values are expected [G].
++-   **Boundaries:** The first sample bin starts at `near` and the last ends at `far`. The midpoints ensure that the bins cover the entire interval without gaps or overlaps [S1, unofficial].
++-   **Degenerate Input:** If `near == far`, the bin width is zero [G]. The implementation should handle this by returning `near` for all samples or raising an error [G].
+ 
+ ## Subtopics
+ 
+ ### Jittered Sampling
+-Generates a regular grid of samples per pixel with independent uniform random offsets within each grid cell to reduce aliasing while maintaining stratification [S4, unofficial]. It loops over grid indices $ax, ay$ from $0$ to $A_{depth}-1$, computes offsets $xOffset = ax/A_{depth}$, $yOffset = ay/A_{depth}$, and adds random jitter $xOffset_{random} = rand() \times xOffset$, $yOffset_{random} = rand() \times yOffset$ to the base sample position [S4, unofficial]. This is often used in rasterization or path tracing for anti-aliasing rather than volume ray casting depth sampling.
++Generates a regular grid of samples per pixel with independent uniform random offsets within each grid cell to reduce aliasing while maintaining stratification [S4, unofficial]. It loops over grid indices $ax, ay$ from $0$ to $A_{depth}-1$, computes offsets $xOffset = ax/A_{depth}$, $yOffset = ay/A_{depth}$, and adds random jitter $xOffset_{random} = rand() \times xOffset$, $yOffset_{random} = rand() \times yOffset$ to the base sample position [S4, unofficial].
+ 
+ ## Operating characteristics
+--   **Time Complexity:** $O(N \cdot N_c)$, where $N$ is the number of rays and $N_c$ is the number of samples per ray. The operations are vectorizable and efficient on GPUs [S1, unofficial].
+--   **Memory Complexity:** $O(N \cdot N_c)$ for storing `t_vals`, `pts`, and `dirs`.
+--   **Performance:** Reduces aliasing artifacts significantly compared to uniform random sampling, leading to faster convergence in Monte Carlo integration for volume rendering [S1, unofficial].
+--   **Strengths:** Simple to implement, deterministic structure with random perturbation, effective for reducing high-frequency noise.
+--   **Limitations:** Still susceptible to aliasing if the scene has features smaller than the bin width. Not optimal for importance sampling where density varies significantly.
+--   **When to Use:** Standard direct volume rendering, NeRF training, when uniform distribution is desired but jitter is needed to break up regularity.
+--   **When Not to Use:** When importance sampling based on density is required (use [Stratified Monte Carlo Radiance Estimate](1373-stratified-monte-carlo-radiance-estimate.md) or similar).
++-   **Time Complexity:** $O(N \cdot N_c)$, where $N$ is the number of rays and $N_c$ is the number of samples per ray [G].
++-   **Memory Complexity:** $O(N \cdot N_c)$ for storing `t_vals`, `pts`, and `dirs` [G].
++-   **Strengths:** Simple to implement, deterministic structure with random perturbation, effective for reducing high-frequency noise [G].
++-   **Limitations:** Not optimal for importance sampling where density varies significantly [G].
++-   **When to Use:** Standard direct volume rendering, NeRF training, when uniform distribution is desired but jitter is needed to break up regularity [G].
++-   **When Not to Use:** When importance sampling based on density is required (use [Stratified Monte Carlo Radiance Estimate](1373-stratified-monte-carlo-radiance-estimate.md) or similar) [G].
+ 
+ ## Background
+-Batch Stratified Sampling is a fundamental technique in computer graphics, particularly in the context of Neural Radiance Fields (NeRF) and volume rendering. It was popularized by the original NeRF paper (Mildenhall et al., 2020) and subsequent implementations [S1, unofficial]. The method builds on the concept of stratified sampling, which divides the domain into bins and samples uniformly within each bin to reduce variance. In the context of NeRF, it is used to sample points along rays for querying the neural network.
++Batch Stratified Sampling is a fundamental technique in computer graphics, particularly in the context of Neural Radiance Fields (NeRF) and volume rendering [S1, unofficial]. It builds on the concept of stratified sampling, which divides the domain into bins and samples uniformly within each bin to reduce variance [S1, unofficial]. In the context of NeRF, it is used to sample points along rays for querying the neural network [S1, unofficial].
+ 
+ ## Sources
+ [S1] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)
++[S3] InanXR/FLASH, https://github.com/InanXR/FLASH, fetched 2026-10-27 (unofficial)
+ [S4] wangyuehi/VolumeSingleScattering, https://github.com/wangyuehi/VolumeSingleScattering, fetched 2026-10-26 (unofficial)

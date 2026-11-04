@@ -1,0 +1,88 @@
+# Capsule Signed Distance Function
+
+Also called: 3D Capsule SDF, Capsule SDF, Capsule3D SDF, Signed Capsule, sdCapsule
+
+## Overview
+The Capsule Signed Distance Function computes the signed distance from a query point to a capsule defined by two endpoints and a radius [S2, unofficial]. It provides a closed-form solution for a shape with rotational symmetry along a finite segment, building on [SDF Primitives](1731-sdf-primitives.md) [S2, S4, unofficial]. It is distinguished from the [Sphere Signed Distance Function](1237-sphere-signed-distance-function.md) by its linear axis and from the [Signed Box Distance Function](1092-signed-box-distance-function.md) by its smooth, rounded geometry [S2, S4, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Query point $p \in \mathbb{R}^3$, capsule endpoints $a, b \in \mathbb{R}^3$, radius $r \in \mathbb{R}^+$ [S2, S4, unofficial].
+- Output: Signed distance $d \in \mathbb{R}$, positive outside, negative inside, zero on surface [S2, S4, unofficial].
+
+**Data Structures:**
+- Vectors $p, a, b$ are 3D Cartesian coordinates [S2, S4, unofficial].
+- Scalar $r$ is a single floating-point value [S2, S4, unofficial].
+
+**Steps:**
+1. Compute the vector from endpoint $a$ to the query point: $pa = p - a$ [S2, S4, unofficial].
+2. Compute the vector representing the capsule axis: $ba = b - a$ [S2, S4, unofficial].
+3. Compute the squared length of the axis: $len\_sq = ba \cdot ba$ [S4, unofficial].
+4. Determine the projection parameter $h$ of $p$ onto the segment $ab$: If $len\_sq < \epsilon$ (e.g., $10^{-12}$), set $h = 0.0$ [S4, unofficial]. Otherwise, compute $h = \text{clamp}\left(\frac{pa \cdot ba}{len\_sq}, 0.0, 1.0\right)$ [S2, S4, unofficial].
+5. Compute the closest point on the segment: $closest = a + ba \cdot h$ [S2, unofficial].
+6. Compute the vector from the closest point to $p$: $diff = p - closest$ [S2, unofficial].
+7. Return the distance: $d = \|diff\| - r$ [S2, S4, unofficial].
+
+**Formula:**
+$$
+h = \text{clamp}\left(\frac{(p-a) \cdot (b-a)}{\|b-a\|^2}, 0, 1\right)
+$$
+$$
+d = \|(p-a) - h(b-a)\| - r
+$$
+
+**Parameters:**
+- $r$: Radius of the capsule [S2, S4, unofficial].
+- $a, b$: Endpoints defining the central axis segment [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Capsule:** If $a = b$, the axis length is zero and $len\_sq = 0$; the division is guarded by clamping $h$ to $0.0$ when $len\_sq < 10^{-12}$, effectively treating the shape as a sphere centered at $a$ [S4, unofficial].
+- **Precision:** Using squared length in the denominator avoids square roots during projection but requires a threshold guard to prevent division by zero [S4, unofficial]. Single-precision `length()` evaluations in ray marchers may yield ~1e-3 error due to floating-point accumulation; the analytical formula is exact in double precision [G].
+- **Coordinate Systems:** The function is general for any orientation in 3D space [S2, S4, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def clamp(val, min_val, max_val):
+    return max(min_val, min(max_val, val))
+
+def sd_capsule(p, a, b, r):
+    """
+    Computes the signed distance from point p to a capsule defined by endpoints a, b and radius r.
+    """
+    pa = p - a
+    ba = b - a
+    len_sq = ba.dot(ba)
+    if len_sq < 1e-12:
+        h = 0.0
+    else:
+        h = clamp(pa.dot(ba) / len_sq, 0.0, 1.0)
+    closest = a + ba * h
+    diff = p - closest
+    return diff.length() - r
+```
+
+## Subtopics
+
+### Axis-Aligned Capsule
+A specialized case where the capsule is aligned with a coordinate axis (typically Y), simplifying the projection to a simple clamp on the Y coordinate [S1, unofficial].
+
+### 2D Capsule
+The 2D equivalent, often called a "stadium" in 2D graphics, computed as the distance to a line segment minus the radius [S4, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$, involving a constant number of vector operations (subtraction, dot product, clamp, length) [S2, S4, unofficial].
+- **Memory Complexity:** $O(1)$, requiring no auxiliary data structures [S2, S4, unofficial].
+- **Strengths:** Exact analytical solution with no approximation error and fast evaluation for arbitrary 3D orientations [S2, S4, unofficial].
+- **Limitations:** The degenerate case $a=b$ must be handled to avoid division by zero [S4, unofficial].
+- **When to use:** Rendering or ray-marching objects with cylindrical bodies and rounded ends [S2, S4, unofficial].
+
+## Background
+The capsule SDF is a standard primitive in Signed Distance Field rendering, implemented in various graphics repositories [S2, S4, unofficial]. The axis-aligned variant provides a simplified calculation for specific use cases [S1, unofficial]. The 2D equivalent is used in planar graphics [S4, unofficial].
+
+## Sources
+[S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
+[S2] marklundin/glsl-sdf-primitives, https://github.com/marklundin/glsl-sdf-primitives, fetched 2026-10-26 (unofficial)
+[S3] erbenpeter/sdf, https://github.com/erbenpeter/sdf, fetched 2026-10-26 (unofficial)
+[S4] bhubbard/sdf-math-rs, https://github.com/bhubbard/sdf-math-rs, fetched 2026-10-27 (unofficial)

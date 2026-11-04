@@ -1,0 +1,145 @@
+# Phong Shading with Exponential Fog
+
+Also called: Fragment Shader Lighting, Standard Lighting
+
+## Overview
+A fragment shading model that combines the standard Phong lighting components (ambient, diffuse, specular) with exponential distance fog to blend the computed surface color with a fog color based on the fragment's distance from the camera [S1, unofficial]. It differs from standard Phong shading by adding a distance-based attenuation factor that simulates atmospheric depth, and from linear fog models by using an exponential decay function which provides a smoother, more natural falloff [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Vertex attributes (`Normal`, `Position`), view-space position (`viewSpace`), light properties (`color`, `ambientIntensity`, `diffuseIntensity`, `direction`), camera properties (`eyePosition`), material properties (`shininess`, `specularIntensity`), and fog parameters (`FogDensity`, `fogColor`).
+*   **Outputs:** Final fragment color (`finalColor`).
+
+**Data Structures:**
+The vertex shader outputs the following to the fragment shader:
+*   `Normal`: `vec3` (normalized surface normal in world or view space, as passed through).
+*   `Position`: `vec4` (world-space position).
+*   `viewSpace`: `vec4` (position in view/camera space).
+
+**Parameters:**
+*   `FogDensity`: Exponential fog density constant. Typical value: `0.01f` [S1, unofficial].
+*   `fogColor`: The color of the fog. Typical value: `vec3(0.0f, 0.3f, 0.6f)` [S1, unofficial].
+*   `material.shininess`: Exponent for the specular highlight.
+*   `material.specularIntensity`: Multiplier for the specular component.
+
+**Steps:**
+1.  **Calculate Ambient Component:**
+    Compute the ambient color by multiplying the light's color by its ambient intensity.
+    $$ \text{ambientColor} = \text{light.color} \times \text{light.ambientIntensity} $$
+    *(Note: Source uses `vec4(light.color, 1.0f)`, implying alpha is set to 1.0)* [S1, unofficial].
+
+2.  **Calculate Diffuse Component:**
+    Compute the diffuse factor using the dot product of the normalized surface normal and the normalized light direction.
+    $$ \text{diffuseFactor} = \max(\text{dot}(\text{normalize}(\text{Normal}), \text{normalize}(\text{direction})), 0.0) $$
+    Compute the diffuse color:
+    $$ \text{diffuseColor} = \text{light.color} \times \text{light.diffuseIntensity} \times \text{diffuseFactor} $$
+
+3.  **Calculate Specular Component:**
+    If `diffuseFactor > 0.0`:
+    a. Compute the vector from the fragment to the eye (camera):
+       $$ \text{fragToEye} = \text{normalize}(\text{eyePosition} - \text{Position.xyz}) $$
+    b. Compute the reflection vector of the light direction about the normal:
+       $$ \text{reflectedVertex} = \text{normalize}(\text{reflect}(\text{direction}, \text{normalize}(\text{Normal}))) $$
+    c. Compute the specular factor:
+       $$ \text{specularFactor} = \text{dot}(\text{fragToEye}, \text{reflectedVertex}) $$
+    d. If `specularFactor > 0.0`:
+       $$ \text{specularFactor} = \text{pow}(\text{specularFactor}, \text{material.shininess}) $$
+    e. Compute specular color:
+       $$ \text{specularColor} = \text{light.color} \times \text{material.specularIntensity} \times \text{specularFactor} $$
+    *(Note: If `diffuseFactor <= 0.0`, specular is typically 0.0)* [S1, unofficial].
+
+4.  **Combine Lighting:**
+    Sum the components:
+    $$ \text{finalColor} = \text{ambientColor} + \text{diffuseColor} + \text{specularColor} $$
+
+5.  **Calculate Fog Factor:**
+    Compute the distance from the camera in view space:
+    $$ \text{dist} = \text{length}(\text{viewSpace}) $$
+    Compute the exponential fog factor:
+    $$ \text{fogFactor} = \frac{1.0}{\exp(\text{dist} \times \text{FogDensity})} $$
+    Clamp `fogFactor` to the range $[0.0, 1.0]$ [S1, unofficial].
+
+6.  **Apply Fog:**
+    Mix the lit color with the fog color. The source code uses a specific mixing formula:
+    $$ \text{color} = \text{mix}(\text{finalColor} \times 1.5, \text{fogColor}, 1.0 - \text{fogFactor}) $$
+    *(Note: The source multiplies the lit color by 1.5 before mixing. This is an implementation detail from the specific source code)* [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Inputs:
+# Normal: vec3
+# Position: vec4 (world space)
+# viewSpace: vec4 (view space)
+# light.color: vec3
+# light.ambientIntensity: float
+# light.diffuseIntensity: float
+# light.direction: vec3
+# eyePosition: vec3
+# material.shininess: float
+# material.specularIntensity: float
+# FogDensity: float (default 0.01)
+# fogColor: vec3 (default vec3(0.0, 0.3, 0.6))
+
+# 1. Ambient
+ambientColor = light.color * light.ambientIntensity
+
+# 2. Diffuse
+N = normalize(Normal)
+L = normalize(light.direction)
+diffuseFactor = max(dot(N, L), 0.0)
+diffuseColor = light.color * light.diffuseIntensity * diffuseFactor
+
+# 3. Specular
+specularColor = vec3(0.0)
+if diffuseFactor > 0.0:
+    V = normalize(eyePosition - Position.xyz)
+    R = normalize(reflect(-L, N)) # Note: reflect takes incident vector. If L is light direction, incident is -L. 
+                                  # Source uses reflect(direction, Normal). Assuming 'direction' is light direction vector.
+                                  # Standard GLSL reflect(I, N) reflects I about N. 
+                                  # If light.direction is FROM light TO surface, incident is -light.direction.
+                                  # Source code: reflect(direction, normalize(Normal)). 
+                                  # This implies 'direction' might be treated as the incident vector or the source has a specific convention.
+                                  # We follow the source's explicit call: reflect(direction, normalize(Normal))
+    R = normalize(reflect(light.direction, N))
+    specFactor = dot(V, R)
+    if specFactor > 0.0:
+        specFactor = pow(specFactor, material.shininess)
+        specularColor = light.color * material.specularIntensity * specFactor
+
+# 4. Combine
+finalColor = ambientColor + diffuseColor + specularColor
+
+# 5. Fog
+dist = length(viewSpace)
+fogFactor = 1.0 / exp(dist * FogDensity)
+fogFactor = clamp(fogFactor, 0.0, 1.0)
+
+# 6. Apply Fog
+# Source: mix(color*1.5f, vec4(fogColor, 1.0f), (1.0f - fogFactor))
+# Note: Source mixes with vec4(fogColor, 1.0f). We assume finalColor is treated as RGB.
+foggedColor = mix(finalColor * 1.5, fogColor, 1.0 - fogFactor)
+
+return foggedColor
+```
+
+**Edge Cases and Pitfalls:**
+*   **Light Direction Convention:** The source code calls `reflect(direction, normalize(Normal))`. In standard graphics, `reflect(I, N)` expects `I` to be the incident vector (pointing *towards* the surface). If `light.direction` is defined as pointing *from* the light *to* the surface, it should be negated before reflection or the reflection formula adjusted. The source code does not negate it, implying either `direction` is defined as the incident vector or the implementation relies on a specific non-standard definition. Implementers should verify the sign convention of `direction` [S1, unofficial].
+*   **Brightness Boost:** The source multiplies the final lit color by `1.5` before fog mixing. This is not part of the standard Phong model and may lead to over-brightening in scenes without fog or with low fog density. It is an artifact of the specific implementation [S1, unofficial].
+*   **Fog Density:** With `FogDensity = 0.01`, fog becomes significant at distances around 100 units ($1/e \approx 0.37$). Adjust based on scene scale [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per fragment. The calculations involve a fixed number of vector operations, dot products, and a single exponential function.
+*   **Memory Complexity:** $O(1)$ additional memory per fragment.
+*   **Performance:** Very fast, suitable for real-time rendering. The exponential function is computationally more expensive than linear interpolation but is generally optimized in hardware.
+*   **Strengths:** Provides a natural-looking depth cue. Simple to implement in fragment shaders.
+*   **Limitations:** Does not account for light scattering within the volume (unlike full participating media rendering). The `1.5` boost is arbitrary and may require tuning. Linear fog is simpler but less realistic [S1, unofficial].
+*   **When to use:** Real-time applications where atmospheric depth is desired but full volumetric lighting is too expensive.
+*   **When not to use:** When physically accurate light transport in participating media is required.
+
+## Background
+This method is derived from the standard Phong shading model, which was introduced by Bui Tuong Phong in 1975. The addition of exponential fog is a common technique in real-time graphics to simulate atmospheric perspective. The specific implementation with the `1.5` brightness boost and the particular fog mixing formula is documented in the "Proccraft" project by Fredrik Erik Johansson [S1, unofficial].
+
+## Sources
+[S1] Proccraft, https://github.com/FredrikErikJohansson/Proccraft, fetched 2026-10-27 (unofficial)

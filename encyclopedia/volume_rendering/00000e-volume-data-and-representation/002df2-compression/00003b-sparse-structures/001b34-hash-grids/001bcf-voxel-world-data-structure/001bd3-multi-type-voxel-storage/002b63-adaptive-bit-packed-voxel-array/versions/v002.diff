@@ -1,0 +1,319 @@
+--- v001.md
++++ v002.md
+@@ -4,31 +4,26 @@
+ 
+ ## Overview
+-The Adaptive Bit-Packed Voxel Array is a memory-efficient storage structure for a fixed-size 16×16×16 voxel section (4096 voxels) that dynamically adjusts its memory layout based on the number of unique voxel IDs present [S1, unofficial]. It supports four states—Empty, Uniform, Palette, and bit-packed indices—to optimize memory usage for homogeneous or sparse sections [S1, unofficial]. Unlike [Typed Voxels](1399-typed-voxels.md), which may use fixed-size arrays or more complex sparse structures, this method uses a single palette and bit-packed indices, allowing it to collapse to zero heap memory for empty or uniform data [S1, unofficial].
++The Adaptive Bit-Packed Voxel Array is a storage structure for a fixed-size 16×16×16 voxel section (4096 voxels) that dynamically adjusts its memory layout based on the number of unique voxel IDs present [S1, unofficial]. It supports Empty, Uniform, and Palette states to optimize memory usage for homogeneous or sparse sections [S1, unofficial]. Unlike [Typed Voxels](1399-typed-voxels.md), which may use fixed-size arrays or more complex sparse structures, this method uses a single palette and bit-packed indices, allowing it to collapse to zero heap memory for empty or uniform data [S1, unofficial].
+ 
+ ## How it works
+ ### Inputs and Outputs
+-- **Input**: A sequence of voxel updates (position, ID) or a bulk array of 4096 `VoxelId`s.
+-- **Output**: A `SectionStorage` object that resolves to `VoxelId` values at any local position, or an iterator over all 4096 voxels.
++- **Input**: A sequence of voxel updates `(position, id)` or a bulk array of 4096 `VoxelId`s [S1, unofficial].
++- **Output**: A `SectionStorage` object that resolves to `VoxelId` values at any local position, or an iterator over all 4096 voxels [S1, unofficial].
+ 
+ ### Data Structures
+-The structure uses a `Representation` enum to manage state:
+-
+-1.  **Empty**: No heap memory. Represents all voxels as `VoxelId::AIR`.
+-2.  **Uniform**: Stores a single `VoxelId` inline. No heap memory.
+-3.  **Palette**: Stores a `Palette` struct on the heap.
+-    -   `entries`: `Vec<PaletteEntry>`. Each `PaletteEntry` contains:
+-        -   `id`: `VoxelId` (the unique voxel type).
+-        -   `count`: `u16` (number of voxels referencing this entry). This count enables efficient uniform/empty collapse checks without scanning all 4096 voxels [S1, unofficial].
+-    -   `words`: `Vec<u64>`. Bit-packed indices.
+-    -   `bits`: `u8`. The number of bits per index (1 to 12).
+-
+-**Memory Accounting**:
+--   `inline_bytes`: Size of the `SectionStorage` struct itself (no heap).
+--   `heap_capacity_bytes`: Size of `entries` + `words` + allocator overhead.
+--   `heap_used_bytes`: Actual data size.
++The structure uses a `Representation` enum (mapped to `StorageKind`) to manage state:
++
++1.  **Empty**: No heap memory. Represents all voxels as `VoxelId::AIR` [S1, unofficial].
++2.  **Uniform**: Stores a single `VoxelId` inline. No heap memory [S1, unofficial].
++3.  **Palette**: Stores a `Palette` struct on the heap [S1, unofficial].
++    -   `entries`: `Vec<PaletteEntry>`. Each contains `id: VoxelId` and `count: u16` (number of voxels referencing this entry, enabling uniform/empty collapse checks without scanning all 4096 voxels) [S1, unofficial].
++    -   `words`: `Vec<u64>`. Bit-packed indices [S1, unofficial].
++    -   `bits`: `u8`. Bits per index (1 to 12) [S1, unofficial].
++
++Memory accounting fields include `inline_bytes`, `heap_used_bytes`, `heap_capacity_bytes`, `palette_entries`, and `bits_per_index` [S1, unofficial].
+ 
+ ### Parameters
+--   `SECTION_VOLUME`: 4096 (total voxels).
+--   `SECTION_EDGE`: 16 (side length).
++-   `SECTION_VOLUME`: 4096 (total voxels) [S1, unofficial].
++-   `SECTION_EDGE`: 16 (side length) [S1, unofficial].
+ -   `bits_per_index`: Capped at 12 bits, supporting up to $2^{12} = 4096$ unique IDs [S1, unofficial].
+ 
+@@ -37,5 +32,5 @@
+ 1.  **Initialization**:
+     -   `SectionStorage::default()` creates an `Empty` section with 0 heap capacity [S1, unofficial].
+-    -   `SectionStorage::filled(id)` creates a `Uniform` section if `id != AIR`, or `Empty` if `id == AIR` [S1, unofficial].
++    -   `SectionStorage::filled(id)` creates a `Uniform` section if `id != AIR`, or `Empty` if `id == AIR`, using 0 heap capacity [S1, unofficial].
+ 
+ 2.  **Bulk Construction (`from_voxels`)**:
+@@ -51,12 +46,9 @@
+     -   Calculate `index = position.x + position.y * 16 + position.z * 256` [G].
+     -   If `Representation` is `Empty` or `Uniform`:
+-        -   If the new `id` matches the current value, return `false` (no change).
+-        -   If `id` is `AIR` and current is `Uniform`, switch to `Empty`.
+-        -   Otherwise, transition to `Palette`:
+-            -   Create `Palette` with current `id` and new `id`.
+-            -   Set `bits = 1`.
+-            -   Write old value as index 0, new value as index 1 [S1, unofficial].
++        -   If the new `id` matches the current value, return `false` (no change) [S1, unofficial].
++        -   If `id` is `AIR` and current is `Uniform`, switch to `Empty` [S1, unofficial].
++        -   Otherwise, transition to `Palette` with the current `id` and new `id` as the two entries, set `bits = 1`, and write the new index [S1, unofficial].
+     -   If `Representation` is `Palette`:
+-        -   Read current slot: `old_slot = read_index(words, bits, index)`.
++        -   Read current slot: `old_slot = read_index(words, bits, index)` [S1, unofficial].
+         -   If `palette.entries[old_slot].id == id`, return `false` [S1, unofficial].
+         -   If `palette.entries[old_slot].count == 1`:
+@@ -64,9 +56,6 @@
+             -   Return `true` [S1, unofficial].
+         -   Else, check if `id` exists in `palette.entries`:
+-            -   If yes, update `count` for old slot (decrement) and new slot (increment).
+-            -   If no, and `palette.entries.len() < 4096`:
+-                -   Add `id` to `palette.entries`.
+-                -   Update `count` for old slot (decrement) and new slot (increment).
+-                -   If `palette.entries.len() > 2^bits`, trigger repacking (increase `bits`, resize `words`, rewrite all indices) [S1, unofficial].
++            -   If yes, update `count` for old slot (decrement) and new slot (increment) [S1, unofficial].
++            -   If no, add `id` to `palette.entries`, update counts, and if the palette crosses a bit-width boundary, trigger repacking (increase `bits`, resize `words`, rewrite all indices) [S1, unofficial].
+         -   Return `true` [S1, unofficial].
+ 
+@@ -77,5 +66,5 @@
+ 5.  **Compaction (`compact`)**:
+     -   Scan `palette.entries` to find entries with `count > 0` (live entries) [S1, unofficial].
+-    -   Remove entries with `count == 0` (dead slots).
++    -   Remove entries with `count == 0` (dead slots) [S1, unofficial].
+     -   Rebuild the palette mapping:
+         -   Create a new `entries` vector with only live entries.
+@@ -94,10 +83,8 @@
+ 
+ ```python
+-# Constants
+ SECTION_VOLUME = 4096
+ SECTION_EDGE = 16
+ MAX_BITS = 12
+ 
+-# Helper functions
+ def index_bits(n_unique):
+     if n_unique <= 1: return 1
+@@ -114,5 +101,4 @@
+     word_idx = bit_offset // 64
+     bit_in_word = bit_offset % 64
+-    # Handle cross-word boundaries if necessary
+     val = words[word_idx] >> bit_in_word
+     if bit_in_word + bits > 64:
+@@ -125,9 +111,6 @@
+     bit_in_word = bit_offset % 64
+     mask = (1 << bits) - 1
+-    # Clear bits
+     words[word_idx] &= ~(mask << bit_in_word)
+-    # Set bits
+     words[word_idx] |= (slot & mask) << bit_in_word
+-    # Handle cross-word boundaries
+     if bit_in_word + bits > 64:
+         words[word_idx + 1] &= ~(mask >> (64 - bit_in_word))
+@@ -136,121 +119,74 @@
+ class SectionStorage:
+     def __init__(self):
+-        self.data = None # Empty, Uniform, or Palette
++        self.data = None  # None, ("Uniform", id), or ("Palette", entries, words, bits)
+ 
+     @staticmethod
+     def default():
+-        return SectionStorage.filled(0) # Assuming 0 is AIR
++        return SectionStorage.filled(0)  # 0 represents AIR
+ 
+     @staticmethod
+     def filled(id):
+         s = SectionStorage()
+-        if id == 0: # AIR
+-            s.data = ("Empty",)
+-        else:
+-            s.data = ("Uniform", id)
++        s.data = ("Uniform", id) if id != 0 else None
+         return s
+ 
+     def set(self, position, id):
+-        # position is (x, y, z)
+         index = position[0] + position[1] * SECTION_EDGE + position[2] * SECTION_EDGE * SECTION_EDGE
+-        
+-        if self.data[0] == "Empty":
++        if self.data is None:  # Empty
+             if id == 0: return False
+-            # Transition to Palette with 2 entries
+-            self.data = ("Palette", [
+-                {"id": 0, "count": SECTION_VOLUME - 1},
+-                {"id": id, "count": 1}
+-            ], [0], 1)
+-            write_index(self.data[3], self.data[4], index, 1)
++            entries = [{"id": 0, "count": SECTION_VOLUME - 1}, {"id": id, "count": 1}]
++            words = [0] * word_count(1)
++            write_index(words, 1, index, 1)
++            self.data = ("Palette", entries, words, 1)
+             return True
+-        
+         elif self.data[0] == "Uniform":
+             current_id = self.data[1]
+             if current_id == id: return False
+             if id == 0:
+-                self.data = ("Empty",)
++                self.data = None
+                 return True
+-            # Transition to Palette
+-            self.data = ("Palette", [
+-                {"id": current_id, "count": SECTION_VOLUME - 1},
+-                {"id": id, "count": 1}
+-            ], [0], 1)
+-            write_index(self.data[3], self.data[4], index, 1)
++            entries = [{"id": current_id, "count": SECTION_VOLUME - 1}, {"id": id, "count": 1}]
++            words = [0] * word_count(1)
++            write_index(words, 1, index, 1)
++            self.data = ("Palette", entries, words, 1)
+             return True
+-        
+-        elif self.data[0] == "Palette":
++        else:  # Palette
+             entries, words, bits = self.data[1], self.data[2], self.data[3]
+             old_slot = read_index(words, bits, index)
+             old_id = entries[old_slot]["id"]
+-            
+             if old_id == id: return False
+-            
+-            # Find new slot
+-            new_slot = None
+-            for i, e in enumerate(entries):
+-                if e["id"] == id:
+-                    new_slot = i
+-                    break
+-            
++            new_slot = next((i for i, e in enumerate(entries) if e["id"] == id), None)
+             if new_slot is None:
+-                # New ID
+-                if len(entries) >= 4096:
+-                    # Cap at 4096, reuse dead slot if possible, else ignore?
+-                    # For simplicity, assume we can always add if < 4096
+-                    pass 
+                 new_slot = len(entries)
+                 entries.append({"id": id, "count": 0})
+-            
+-            # Update counts
+             entries[old_slot]["count"] -= 1
+             entries[new_slot]["count"] += 1
+-            
+-            # Write new index
+             write_index(words, bits, index, new_slot)
+-            
+-            # Check if repacking needed
+             if len(entries) > (1 << bits):
+                 new_bits = index_bits(len(entries))
+                 if new_bits > bits:
+-                    # Repack
+                     new_words = [0] * word_count(new_bits)
+                     for i in range(SECTION_VOLUME):
+                         s = read_index(words, bits, i)
+-                        # Map old slot to new slot? 
+-                        # Actually, we need to rebuild palette to remove dead entries first or just remap
+-                        # For now, assume we just write the slot index. 
+-                        # If we removed dead entries, slots change.
+-                        # This is a simplification. In reality, compact() should be called.
+                         write_index(new_words, new_bits, i, s)
+                     self.data = ("Palette", entries, new_words, new_bits)
+-            
+             return True
+         return False
+ 
++    def set_batch(self, edits):
++        return sum(1 for pos, id in edits if self.set(pos, id))
++
+     def compact(self):
+-        if self.data[0] != "Palette": return False
++        if self.data is None or self.data[0] != "Palette": return False
+         entries, words, bits = self.data[1], self.data[2], self.data[3]
+-        
+-        # Filter live entries
+-        live_entries = [e for e in entries if e["count"] > 0]
+-        if len(live_entries) == len(entries):
+-            return False # No dead entries
+-        
+-        # Rebuild palette
+-        new_entries = []
+-        slot_map = {}
+-        for i, e in enumerate(entries):
+-            if e["count"] > 0:
+-                slot_map[i] = len(new_entries)
+-                new_entries.append({"id": e["id"], "count": e["count"]})
+-        
+-        # Rewrite indices
++        live = [e for e in entries if e["count"] > 0]
++        if len(live) == len(entries): return False
++        slot_map = {i: new_i for new_i, i in enumerate([idx for idx, e in enumerate(entries) if e["count"] > 0])}
++        new_entries = [{"id": e["id"], "count": e["count"]} for e in live]
+         new_bits = index_bits(len(new_entries))
+         new_words = [0] * word_count(new_bits)
+         for i in range(SECTION_VOLUME):
+             old_slot = read_index(words, bits, i)
+-            new_slot = slot_map.get(old_slot, 0)
+-            write_index(new_words, new_bits, i, new_slot)
+-            
++            write_index(new_words, new_bits, i, slot_map.get(old_slot, 0))
+         self.data = ("Palette", new_entries, new_words, new_bits)
+         return True
+@@ -258,16 +194,25 @@
+     def get(self, position):
+         index = position[0] + position[1] * SECTION_EDGE + position[2] * SECTION_EDGE * SECTION_EDGE
+-        if self.data[0] == "Empty": return 0
+-        elif self.data[0] == "Uniform": return self.data[1]
+-        else:
+-            entries, words, bits = self.data[1], self.data[2], self.data[3]
+-            slot = read_index(words, bits, index)
+-            return entries[slot]["id"]
++        if self.data is None: return 0
++        if self.data[0] == "Uniform": return self.data[1]
++        entries, words, bits = self.data[1], self.data[2], self.data[3]
++        return entries[read_index(words, bits, index)]["id"]
++
++    def copy_voxels(self, out_array):
++        if self.data is None:
++            out_array[:] = [0] * SECTION_VOLUME
++            return
++        if self.data[0] == "Uniform":
++            out_array[:] = [self.data[1]] * SECTION_VOLUME
++            return
++        entries, words, bits = self.data[1], self.data[2], self.data[3]
++        for i in range(SECTION_VOLUME):
++            out_array[i] = entries[read_index(words, bits, i)]["id"]
+ ```
+ 
+ ### Edge Cases and Pitfalls
+ -   **Palette Width Limit**: The implementation caps `bits_per_index` at 12 bits. If more than 4096 unique IDs are introduced, the behavior is constrained by this limit [S1, unofficial].
+--   **Dead Slot Reuse**: When a palette entry is no longer referenced, its slot is marked dead (count=0) but not removed immediately. New unique IDs can reuse dead slots without repacking, provided the slot is available [S1, unofficial].
+--   **Boundary Conditions**: Bit-packing must handle word boundaries correctly. Indices 0, 63, 64, 2048, 4095 are critical test cases to ensure `read_index` and `write_index` handle cross-word bit shifts [S1, unofficial].
++-   **Dead Slot Reuse**: When a palette entry is no longer referenced, its slot is marked dead (count=0) but not removed immediately. New unique IDs can reuse dead slots without repacking the indices [S1, unofficial].
++-   **Boundary Conditions**: Indices 0, 63, 64, 2048, 4095 are tested to ensure bit-packing handles word boundaries and edge indices correctly [S1, unofficial].
+ -   **Uniform Collapse**: If all voxels become identical after updates or compaction, the section collapses to `Uniform` state, freeing heap memory [S1, unofficial].
+ -   **Empty Collapse**: If all voxels become `AIR`, the section collapses to `Empty` state with 0 heap capacity [S1, unofficial].
+@@ -276,5 +221,5 @@
+ -   **Memory**:
+     -   `Empty` and `Uniform` states use 0 heap bytes [S1, unofficial].
+-    -   `Palette` state uses heap for `entries` (N * sizeof(PaletteEntry)) and `words` (ceil(4096 * bits / 64) * 8 bytes) [S1, unofficial].
++    -   `Palette` state uses heap for `entries` (N × sizeof(PaletteEntry)) and `words` (ceil(4096 × bits / 64) × 8 bytes) [S1, unofficial].
+     -   Memory is optimized for homogeneous sections, which are common in voxel worlds [S1, unofficial].
+ -   **Time Complexity**:
+@@ -288,10 +233,10 @@
+     -   Supports fast bulk updates and iteration.
+ -   **Limitations**:
+-    -   High memory usage if all 4096 voxels are unique (12 bits * 4096 / 8 = 6144 bytes for indices + palette overhead).
++    -   High memory usage if all 4096 voxels are unique (12 bits × 4096 / 8 = 6144 bytes for indices + palette overhead).
+     -   Repacking can be expensive if triggered frequently.
+     -   Not suitable for highly heterogeneous sections with many unique IDs.
+ 
+ ## Background
+-The Adaptive Bit-Packed Voxel Array is part of the Voxel Forge project, an unofficial voxel engine implementation [S1, unofficial]. It is designed to efficiently store and manage voxel data in a 3D grid, leveraging the sparsity and homogeneity often found in voxel-based games and simulations. The structure is a child of [Multi-type Voxel Storage](1104-multi-type-voxel-storage.md) and a sibling to [Typed Voxels](1399-typed-voxels.md) [S1, unofficial].
++The Adaptive Bit-Packed Voxel Array is implemented in the voxel-forge repository as an unofficial voxel engine implementation [S1, unofficial]. It is designed to efficiently store and manage voxel data in a 3D grid, leveraging the sparsity and homogeneity often found in voxel-based games and simulations [S1, unofficial].
+ 
+ ## Sources

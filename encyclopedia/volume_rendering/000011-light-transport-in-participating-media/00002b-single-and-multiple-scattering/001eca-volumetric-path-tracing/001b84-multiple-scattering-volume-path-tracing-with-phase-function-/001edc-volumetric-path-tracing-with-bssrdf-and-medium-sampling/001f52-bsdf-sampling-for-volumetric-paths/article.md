@@ -3,7 +3,7 @@
 Also called: Implicit Path Tracing with Volume Interaction, Surface scattering in volumetric path tracing
 
 ## Overview
-This method handles the surface interaction component of volumetric path tracing, calculating indirect lighting contributions based on surface BRDF/BSDF properties and sampling strategies [S1]. It determines the new volumetric path direction upon surface intersection, updating throughput and rescaled probabilities to maintain unbiased estimation [S2]. It differs from pure volume scattering integrators by explicitly managing the coupling between surface geometry and participating media, specifically handling the transition from a surface hit back into the medium or to another surface [S2].
+This method handles the surface interaction component of volumetric path tracing, calculating indirect lighting contributions based on surface BRDF/BSDF properties and sampling strategies [S1, unofficial]. It determines the new volumetric path direction upon surface intersection, updating throughput and rescaled probabilities to maintain unbiased estimation [S2]. It differs from pure volume scattering integrators by explicitly managing the coupling between surface geometry and participating media, specifically handling the transition from a surface hit back into the medium or to another surface [S2].
 
 ## How it works
 **Inputs:**
@@ -12,14 +12,14 @@ This method handles the surface interaction component of volumetric path tracing
 - Sampler (`sampler`): Provides random numbers (`Get1D()`, `Get2D())` [S2].
 - Current throughput (`beta`): Accumulated path weight [S2].
 - Rescaled probabilities (`r_u`, `r_l`): For Russian Roulette or importance rescaling [S2].
-- Sample mode (`sampleMode`): Defines the PDF calculation strategy (e.g., Uniform Hemisphere, Cosine Weighted) [S1].
-- Scene objects and lights: For recursive calls or light sampling [S1].
+- Sample mode (`sampleMode`): Defines the PDF calculation strategy (e.g., Uniform Hemisphere, Cosine Weighted) [S1, unofficial].
+- Scene objects and lights: For recursive calls or light sampling [S1, unofficial].
 
 **Outputs:**
 - Updated throughput (`beta`) [S2].
 - Rescaled probabilities (`r_l`) [S2].
 - New ray (`ray`) for continuation [S2].
-- Indirect radiance contribution (`L_indirect`) [S1].
+- Indirect radiance contribution (`L_indirect`) [S1, unofficial].
 - State flags (`specularBounce`, `anyNonSpecularBounces`, `etaScale`) [S2].
 
 **Data Structures:**
@@ -31,7 +31,7 @@ This method handles the surface interaction component of volumetric path tracing
 1. **Calculate Cosine Factor:**
    Compute the cosine of the angle between the surface normal and the ray direction:
    $$ \cos\theta = \text{clamp}(\mathbf{n} \cdot \mathbf{w}) $$
-   where $\mathbf{n}$ is the surface normal and $\mathbf{w}$ is the ray direction [S1].
+   where $\mathbf{n}$ is the surface normal and $\mathbf{w}$ is the ray direction [S1, unofficial].
 
 2. **Sample BSDF:**
    Generate random numbers and sample the BSDF to determine the outgoing direction $\mathbf{w}_o$ (stored as `bs.wi`):
@@ -102,25 +102,25 @@ This method handles the surface interaction component of volumetric path tracing
    ```python
    L_indirect = hit_obj.get_object_color() * get_pixel_color_implicit_path_tracing(objects, index_of_closest_object, hit_t, second_ray, light, depth_i + 1, sample_mode) * beta
    ```
-   [S1]
+   [S1, unofficial]
 
 8. **Accumulate Result:**
    Add the indirect radiance to the pixel color:
    $$ C = C + L_{\text{indirect}} $$
-   [S1]
+   [S1, unofficial]
 
 **Parameters:**
-- `brdf`: Bidirectional Reflectance Distribution Function value. In some implementations, this is hardcoded as $1/\pi$ [S1].
-- `sampleMode`: Sampling strategy (e.g., `Uniform_Hemisphere_Solid_Angle`, `Cosine_Weighted`). Affects PDF calculation [S1].
-  - If `sampleMode` is `Uniform_Hemisphere_Solid_Angle`, set `pdf = 1 / (2 * \pi)` and update `throughput *= brdf * cosine / pdf` [S1].
-  - If `sampleMode` is `Cosine_Weighted`, set `pdf = 1 / \pi` and update `throughput *= brdf / pdf` [S1].
-  - If `sampleMode` is neither, raise an error [S1].
+- `brdf`: Bidirectional Reflectance Distribution Function value. In some implementations, this is hardcoded as $1/\pi$ [S1, unofficial].
+- `sampleMode`: Sampling strategy (e.g., `Uniform_Hemisphere_Solid_Angle`, `Cosine_Weighted`). Affects PDF calculation [S1, unofficial].
+  - If `sampleMode` is `Uniform_Hemisphere_Solid_Angle`, set `pdf = 1 / (2 * \pi)` and update `throughput *= brdf * cosine / pdf` [S1, unofficial].
+  - If `sampleMode` is `Cosine_Weighted`, set `pdf = 1 / \pi` and update `throughput *= brdf / pdf` [S1, unofficial].
+  - If `sampleMode` is neither, raise an error [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 - **No BSDF Sample:** If `bsdf.Sample_f` returns null, the path terminates [S2].
 - **PDF Proportionality:** The formula for `r_l` changes based on `pdfIsProportional` [S2].
 - **Transmission Refraction:** The `etaScale` must be updated correctly for multiple refractions [S2].
-- **Undefined Sample Mode:** If `sampleMode` is neither Uniform Hemisphere nor Cosine Weighted, an error should be raised [S1].
+- **Undefined Sample Mode:** If `sampleMode` is neither Uniform Hemisphere nor Cosine Weighted, an error should be raised [S1, unofficial].
 
 ## Operating characteristics
 - **Time Complexity:** Depends on the BSDF complexity and scene depth [S2].
@@ -128,7 +128,7 @@ This method handles the surface interaction component of volumetric path tracing
 - **When to Use:** Scenes with complex surface materials and participating media [S2].
 
 ## Background
-This method is part of the broader field of volumetric path tracing, specifically addressing the coupling between surface and volume interactions [S2]. It builds upon the principles of path tracing [S2] and incorporates techniques for handling BSSRDFs in participating media [S2]. The specific implementation details in [S1] reflect an early or simplified approach to implicit path tracing with volume interactions [S1].
+This method is part of the broader field of volumetric path tracing, specifically addressing the coupling between surface and volume interactions [S2]. It builds upon the principles of path tracing [S2] and incorporates techniques for handling BSSRDFs in participating media [S2]. The specific implementation details in [S1, unofficial] reflect an early or simplified approach to implicit path tracing with volume interactions [S1, unofficial].
 
 ## Sources
 [S1] wangyuehi/VolumeSingleScattering, https://github.com/wangyuehi/VolumeSingleScattering, fetched 2026-10-26 (unofficial)

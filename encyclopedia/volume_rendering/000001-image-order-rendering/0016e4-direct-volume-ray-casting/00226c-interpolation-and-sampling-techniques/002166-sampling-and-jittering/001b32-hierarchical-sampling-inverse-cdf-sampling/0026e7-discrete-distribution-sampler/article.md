@@ -1,0 +1,173 @@
+# Discrete Distribution Sampler
+
+Also called: Discrete Distribution Sampling, DistributionSampler
+
+## Overview
+The Discrete Distribution Sampler selects indices from a finite set of choices based on associated probability weights, using a uniform random number to drive the selection via cumulative distribution function (CDF) traversal [S1, unofficial]. It serves as the core sampling primitive for Hierarchical Sampling (Inverse CDF Sampling), enabling efficient point selection along rays in volume rendering by prioritizing bins with higher density or opacity [S1, S2, unofficial]. Unlike [Inverse Opacity Calculation](1099-inverse-opacity-calculation.md) which computes transmittance, or [Proposal Network Sampling](1589-proposal-network-sampling.md) which uses learned neural networks, this method relies on explicit weight arrays and supports both stochastic and deterministic top-k selection modes [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `pdf`: Probability distribution tensor of shape `Float[Tensor, "*batch bucket"]` [S2, unofficial].
+- `u`: Uniform random number in $[0, 1)$ [S1, unofficial].
+- `deterministic`: Boolean flag. `True` selects top-$k$ indices; `False` samples stochastically [S2, unofficial].
+- `num_samples`: Integer specifying the number of samples to draw in deterministic mode [S2, unofficial].
+
+**Outputs:**
+- `index`: Selected indices, shape `Int64[Tensor, "*batch sample"]` [S2, unofficial].
+- `densities`: Probability densities corresponding to the sampled indices [S2, unofficial].
+
+**Data Structures:**
+- **PDF Tensor**: Input probability distribution tensor with shape `Float[Tensor, "*batch bucket"]` [S2, unofficial].
+- **Index Tensor**: Output tensor with shape `Int64[Tensor, "*batch sample"]` [S2, unofficial].
+
+**Algorithm Steps:**
+1. **Calculate Total Weight**: Sum all weights in the distribution.
+   $$ W_{\text{total}} = \sum_{i} w_i $$
+   where $w_i$ is the weight of the $i$-th choice [S1, unofficial].
+2. **Scale Random Number**: Map the uniform random number $u$ to the range $[0, W_{\text{total}})$.
+   $$ u' = u \times W_{\text{total}} $$
+   [S1, unofficial].
+3. **Select Mode**:
+   - If `deterministic` is true, select the top-$k$ indices with the highest probability densities using `gather_discrete_topk(pdf, num_samples)` [S2, unofficial].
+   - If `deterministic` is false, proceed to stochastic sampling [S2, unofficial].
+4. **Stochastic Sampling (Inverse CDF Walk)**:
+   - Initialize a cumulative sum variable $C = 0$.
+   - Iterate through the choices in order (index $i = 0, 1, \dots, N-1$):
+     - Subtract the current weight $w_i$ from $u'$.
+     - If $u' \le 0$, return index $i$ and density $w_i / W_{\text{total}}$ [S1, unofficial].
+   - If the loop completes without returning (due to floating-point precision or $u'$ slightly exceeding $W_{\text{total}}$), return the last index $N-1$ and its density [S1, unofficial].
+5. **Gather Values (Post-Sampling)**:
+   - After obtaining indices, gather corresponding values from a target tensor [S2, unofficial].
+   - Determine the bucket dimension as the second-to-last dimension of the index tensor:
+     $$ \text{bucket\_dim} = \text{index.ndim} - 1 $$
+     [S2, unofficial].
+   - Expand the index tensor dimensions by appending singleton dimensions until it matches the target tensor's dimensionality:
+     $$ \text{while } \text{len}(\text{index.shape}) < \text{len}(\text{target.shape}): \text{index} = \text{index}[..., \text{None}] $$
+     [S2, unofficial].
+   - Broadcast the index tensor to match the target tensor's shape, preserving the bucket dimension size from the index [S2, unofficial].
+   - If the target tensor's bucket dimension size is 1, reset the index to zeros to handle broadcasting correctly:
+     $$ \text{if } \text{target.shape}[\text{bucket\_dim}] == 1: \text{index} = \text{zeros\_like}(\text{index}) $$
+     [S2, unofficial].
+   - Perform the gather operation along the bucket dimension:
+     $$ \text{result} = \text{target.gather}(\text{dim}=\text{bucket\_dim}, \text{index}=\text{index}) $$
+     [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def sample_discrete_distribution(pdf: torch.Tensor, u: float, deterministic: bool = False, num_samples: int = 1) -> tuple:
+    """
+    Samples indices from a discrete probability distribution.
+    
+    Args:
+        pdf: Probability distribution tensor of shape (*batch, bucket).
+        u: Uniform random number in [0, 1).
+        deterministic: If True, returns top-k indices. If False, stochastic sampling.
+        num_samples: Number of samples to draw in deterministic mode.
+        
+    Returns:
+        indices: Tensor of sampled indices.
+        densities: Tensor of corresponding probability densities.
+    """
+    if deterministic:
+        # Select top-k indices with highest probability densities [S2, unofficial]
+        k = min(num_samples, pdf.shape[-1])
+        top_k_values, top_k_indices = torch.topk(pdf, k, dim=-1)
+        
+        # Calculate densities (normalized probabilities)
+        total_weights = pdf.sum(dim=-1, keepdim=True)
+        densities = top_k_values / total_weights
+        
+        return top_k_indices, densities
+
+    else:
+        # Stochastic sampling [S1, unofficial]
+        # Calculate total weight [S1, unofficial]
+        total_w = pdf.sum(dim=-1)
+        
+        # Scale u [S1, unofficial]
+        u_scaled = u * total_w
+        
+        # Initialize cumulative sum and find first index where cumulative_sum >= u_scaled
+        cumulative_sum = torch.cumsum(pdf, dim=-1)
+        mask = cumulative_sum >= u_scaled.unsqueeze(-1)
+        
+        # Find the first True in each row
+        indices = torch.argmax(mask.int(), dim=-1)
+        
+        # Handle edge case where u_scaled > total_w (should not happen if u in [0,1) and weights > 0)
+        # If all masks are False, argmax returns 0, but we should return last index [S1, unofficial]
+        any_true = mask.any(dim=-1)
+        indices = torch.where(any_true, indices, torch.full_like(indices, pdf.shape[-1] - 1))
+        
+        # Get densities
+        densities = pdf.gather(dim=-1, index=indices.unsqueeze(-1)).squeeze(-1) / total_w
+        
+        return indices, densities
+
+def gather_values(target: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """
+    Gathers values from target tensor using index tensor.
+    Handles broadcasting and bucket dimension logic [S2, unofficial].
+    """
+    # Determine bucket dimension [S2, unofficial]
+    bucket_dim = index.ndim - 1
+    
+    # Expand index dimensions [S2, unofficial]
+    while len(index.shape) < len(target.shape):
+        index = index[..., None]
+        
+    # Broadcast index to match target shape [S2, unofficial]
+    broadcasted_shape = torch.broadcast_shapes(index.shape, target.shape)
+    index = index.broadcast_to(broadcasted_shape)
+    
+    # Handle bucket dimension size 1 [S2, unofficial]
+    if target.shape[bucket_dim] == 1:
+        index = torch.zeros_like(index)
+        
+    # Gather [S2, unofficial]
+    result = target.gather(dim=bucket_dim, index=index)
+    
+    return result
+```
+
+**Parameters:**
+- `u`: Uniform random number. Typical value: Not given in the sources.
+- `deterministic`: Boolean. Typical value: Not given in the sources.
+- `num_samples`: Integer. Typical value: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Precision Errors**: If $u$ is very close to 1 and weights are small, floating-point errors may cause $u' > W_{\text{total}}$. The algorithm must return the last element in this case [S1, unofficial].
+- **Zero Weights**: If all weights are zero, the behavior is undefined. Sources do not specify a default; implementers should handle this by returning the first index or raising an error [G].
+- **Bucket Dimension Size 1**: When gathering, if the target tensor's bucket dimension is 1, the index must be reset to zeros to avoid broadcasting errors [S2, unofficial].
+
+## Subtopics
+
+### Inverse Opacity Calculation
+Computes transmittance from opacity values. Used when opacity is known and transmittance is needed for ray marching. Link: [Inverse Opacity Calculation](1099-inverse-opacity-calculation.md).
+
+### Proposal Network Sampling
+Uses a neural network to predict sampling distribution. More flexible but computationally expensive. Link: [Proposal Network Sampling](1589-proposal-network-sampling.md).
+
+### RangeFineSampler
+Samples uniformly within a range. Simpler but less efficient for sparse volumes. Link: [RangeFineSampler](3141-rangefinesampler.md).
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources.
+- **Memory Complexity**: $O(N)$ to store the PDF tensor [S2, unofficial].
+- **Measured Performance**: Not given in the sources.
+- **Scaling**: Not given in the sources.
+- **Strengths**: Simple to implement, supports both stochastic and deterministic top-k selection [S1, S2, unofficial].
+- **Limitations**: Not given in the sources.
+- **When to Use**: When the distribution is small or when hierarchical sampling is not applicable [S2, unofficial].
+- **When Not to Use**: Not given in the sources.
+
+## Background
+The Discrete Distribution Sampler is used in [Shibodd/volume_path_tracer](https://github.com/Shibodd/volume_path_tracer) for stochastic ray sampling [S1, unofficial] and in [dcharatan/pixelsplat](https://github.com/dcharatan/pixelsplat) for gathering values from sampled indices [S2, unofficial]. The method is derived from standard inverse transform sampling techniques for discrete distributions [G].
+
+## Sources
+[S1] Shibodd/volume_path_tracer, https://github.com/Shibodd/volume_path_tracer, fetched 2026-10-26 (unofficial)
+[S2] dcharatan/pixelsplat, https://github.com/dcharatan/pixelsplat, fetched 2026-10-27 (unofficial)

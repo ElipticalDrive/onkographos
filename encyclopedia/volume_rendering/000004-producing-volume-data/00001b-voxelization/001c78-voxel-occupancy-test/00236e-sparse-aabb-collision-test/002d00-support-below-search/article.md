@@ -1,0 +1,165 @@
+# Support Below Search
+
+Also called: FindSupportBelow
+
+## Overview
+Support Below Search determines if a voxel position has structural support directly beneath it within a specified vertical drop distance. It solves the problem of identifying valid standing positions for entities or objects in a voxel world by finding the first non-empty voxel (solid, liquid, or blocked unknown) below a given footprint. It differs from [Sparse AABB Sweep Test](5413-sparse-aabb-sweep-test.md) by iterating through a defined volume to find the *first* support rather than sweeping for *any* collision along a path, and builds on [Sparse AABB Collision Test](3047-sparse-aabb-collision-test.md) by utilizing its collision sample semantics.
+
+## How it works
+**Inputs:**
+- `footprintAabb`: A `SparseCollisionAabb` defining the XZ bounds of the search area and the starting Y coordinate.
+- `maxDrop`: A float specifying the maximum downward distance to search.
+- `liquidsSupport`: A boolean indicating whether liquid voxels count as valid support.
+
+**Outputs:**
+- A result structure containing:
+  - `found`: Boolean indicating if support was found.
+  - `supportX`, `supportY`, `supportZ`: The voxel coordinates of the found support.
+  - `voxel`: The voxel data of the support.
+  - `fromEdit`: Boolean indicating if the voxel was from an edit operation.
+  - `sampledVoxels`: Count of voxels checked.
+  - `solidVoxels`: Count of solid voxels checked.
+  - `liquidVoxels`: Count of liquid voxels checked.
+
+**Data Structures:**
+- `SparseCollisionAabb`: Defines the axis-aligned bounding box for the search footprint in X and Z, and the starting Y.
+- `CollisionSample`: Returned by `SampleWithColumn`, containing `status` (enum: `KnownSolid`, `KnownLiquid`, `UnknownBlocked`), `voxel` data, and `fromEdit` flag.
+- `colHeight` / `colRelief`: Precomputed per-column terrain height and relief arrays for the XZ footprint, used to optimize sampling.
+
+**Parameters:**
+- `kMaxCollisionSupportSamples`: Constant `uint64_t` set to 32768, limiting the maximum number of samples to prevent infinite loops or excessive computation.
+
+**Steps:**
+1. Validate that the footprint AABB bounds are finite and `maxDrop >= 0.0f`. If invalid, return an empty result.
+2. Convert the footprint's X and Z bounds to voxel indices (`minX`, `maxX`, `minZ`, `maxZ`). Convert the Y bounds to voxel indices, calculating `startY` from the AABB and `endY = startY - maxDrop`.
+3. Check if `endY > startY` or if the total sample count would exceed `kMaxCollisionSupportSamples`. If so, return an empty result.
+4. Precompute per-column terrain height and relief for the XZ footprint.
+5. Iterate Y from `startY` down to `endY`. For each Y, iterate Z from `minZ` to `maxZ`, and X from `minX` to `maxZ`.
+6. Sample the voxel at `(x, y, z)` using `SampleWithColumn`, passing the precomputed column height and relief.
+7. Increment `result.sampledVoxels`.
+8. If `sample.status` is `KnownSolid`:
+   - Increment `result.solidVoxels`.
+   - Set `result.found = true`.
+   - Record `supportX`, `supportY`, `supportZ`, `voxel`, and `fromEdit`.
+   - Return the result.
+9. If `sample.status` is `KnownLiquid`:
+   - Increment `result.liquidVoxels`.
+   - If `liquidsSupport` is true:
+     - Set `result.found = true`.
+     - Record `supportX`, `supportY`, `supportZ`, `voxel`, and `fromEdit`.
+     - Return the result.
+10. If `sample.status` is `UnknownBlocked`:
+    - Set `result.found = true`.
+    - Record `supportX`, `supportY`, `supportZ`, `voxel`, and `fromEdit`.
+    - Return the result.
+11. If the loop completes without finding support, return an empty result.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def support_below_search(footprint_aabb, max_drop, liquids_support):
+    # 1. Validate inputs
+    if not is_finite(footprint_aabb) or max_drop < 0.0:
+        return empty_result()
+
+    # 2. Convert bounds to voxel indices
+    start_y = footprint_aabb.start_y
+    end_y = start_y - max_drop
+    min_x, max_x = voxelize_xz(footprint_aabb.min_x, footprint_aabb.max_x)
+    min_z, max_z = voxelize_xz(footprint_aabb.min_z, footprint_aabb.max_z)
+
+    # 3. Check limits
+    if end_y > start_y:
+        return empty_result()
+    
+    # Estimate sample count to check against kMaxCollisionSupportSamples
+    span_x = max_x - min_x + 1
+    span_z = max_z - min_z + 1
+    span_y = start_y - end_y + 1
+    total_samples = span_x * span_z * span_y
+    
+    if total_samples > 32768:
+        return empty_result()
+
+    # 4. Precompute column data
+    col_height = precompute_column_heights(min_x, max_x, min_z, max_z)
+    col_relief = precompute_column_relief(min_x, max_x, min_z, max_z)
+
+    result = {
+        'found': False,
+        'sampledVoxels': 0,
+        'solidVoxels': 0,
+        'liquidVoxels': 0,
+        'supportX': 0,
+        'supportY': 0,
+        'supportZ': 0,
+        'voxel': None,
+        'fromEdit': False
+    }
+
+    # 5. Iterate Y, Z, X
+    for y in range(start_y, end_y - 1, -1):
+        for z in range(min_z, max_z + 1):
+            for x in range(min_x, max_x + 1):
+                # Calculate index for column data
+                idx = (x - min_x) + (z - min_z) * span_x
+                
+                # 6. Sample voxel
+                sample = sample_with_column(x, y, z, col_height[idx], col_relief[idx])
+                result['sampledVoxels'] += 1
+
+                # 7. Check KnownSolid
+                if sample.status == 'KnownSolid':
+                    result['solidVoxels'] += 1
+                    result['found'] = True
+                    result['supportX'] = x
+                    result['supportY'] = y
+                    result['supportZ'] = z
+                    result['voxel'] = sample.voxel
+                    result['fromEdit'] = sample.from_edit
+                    return result
+
+                # 8. Check KnownLiquid
+                if sample.status == 'KnownLiquid':
+                    result['liquidVoxels'] += 1
+                    if liquids_support:
+                        result['found'] = True
+                        result['supportX'] = x
+                        result['supportY'] = y
+                        result['supportZ'] = z
+                        result['voxel'] = sample.voxel
+                        result['fromEdit'] = sample.from_edit
+                        return result
+
+                # 9. Check UnknownBlocked
+                if sample.status == 'UnknownBlocked':
+                    result['found'] = True
+                    result['supportX'] = x
+                    result['supportY'] = y
+                    result['supportZ'] = z
+                    result['voxel'] = sample.voxel
+                    result['fromEdit'] = sample.from_edit
+                    return result
+
+    # 11. No support found
+    return result
+```
+
+**Edge Cases and Pitfalls:**
+- Invalid bounds or sample limit exceeded return immediately without sampling [S1, unofficial].
+- Boundary precision uses `nextafter` implicitly via `TryBuildVoxelRange` [S1, unofficial].
+
+## Operating characteristics
+**Time Complexity:** $O(N)$ where $N$ is the number of voxels in the search volume, bounded by `kMaxCollisionSupportSamples` (32768).
+**Memory Complexity:** $O(M)$ where $M$ is the area of the XZ footprint, for storing `colHeight` and `colRelief` arrays.
+**Strengths:** Efficiently finds the first support below a position; handles liquids and unknown blocks as configurable support types.
+**Limitations:** Limited by `kMaxCollisionSupportSamples`; may miss support if the drop distance is too large or the footprint is too wide.
+**When to use:** When determining if an entity can stand on terrain below a specific position.
+**When not to use:** When sweeping for any collision along a path is required (use [Sparse AABB Sweep Test](5413-sparse-aabb-sweep-test.md)).
+
+## Background
+Origin: Implemented in the `voxelrender` project by asajid2-cell [S1, unofficial]. The method is part of the voxel collision detection system, specifically designed for support checks in voxel-based simulations.
+
+## Sources
+[S1] asajid2-cell/voxelrender, https://github.com/asajid2-cell/voxelrender, fetched 2026-10-27 (unofficial)

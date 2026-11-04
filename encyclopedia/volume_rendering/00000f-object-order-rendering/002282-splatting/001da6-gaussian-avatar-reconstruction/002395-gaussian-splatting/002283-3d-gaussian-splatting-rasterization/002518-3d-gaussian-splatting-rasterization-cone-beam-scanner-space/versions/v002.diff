@@ -1,0 +1,228 @@
+--- v001.md
++++ v002.md
+@@ -8,9 +8,9 @@
+ **Inputs and Outputs:**
+ *   **Input:** A set of $M$ 3D Gaussians defined by position $p_i \in \mathbb{R}^3$, covariance $\Sigma_i \in \mathbb{R}^{3 \times 3}$, and 3D density $\rho_i \in \mathbb{R}$ [S1].
+-*   **Input:** Scanner parameters: Detector physical size $(D_x, D_y)$, Source-to-Detector distance $LSD$, Source-to-Object distance $LSO$, and rotation angle $\theta$ [S1].
++*   **Input:** Scanner parameters: detector physical size $(D_x, D_y)$, source-to-detector distance $LSD$, source-to-object distance $LSO$, and rotation angle $\theta$ [S1].
+ *   **Output:** A 2D projection image $I_r$ where each pixel value is the integrated density along the corresponding ray [S1].
+ 
+ **Data Structures:**
+-*   **3D Gaussian:** Stores $p_i$ (3 floats), $\Sigma_i$ (6 floats, symmetric positive definite), $\rho_i$ (1 float).
++*   **3D Gaussian:** Stores $p_i$ (3 floats), $\Sigma_i$ (6 floats, symmetric positive definite), $\rho_i$ (1 float) [S1].
+ *   **Scanner Space:** A coordinate system with origin at the X-ray source and z-axis pointing to the projection center [S1].
+ *   **Ray Space:** A local coordinate system for each Gaussian where viewing rays are parallel to the third coordinate axis, facilitating analytical integration [S1].
+@@ -99,6 +99,7 @@
+     LSO = scanner_params['LSO']
+     theta = scanner_params['theta']
+-    
+-    # Step 1: Define Transformation Matrix T
++    H_img, W_img = image_shape
++    
++    # Transformation matrix W and translation t
+     cos_t = np.cos(theta)
+     sin_t = np.sin(theta)
+@@ -111,18 +112,5 @@
+     
+     # Initialize projection image
+-    projection = np.zeros(image_shape)
+-    
+-    # Precompute detector pixel coordinates relative to center
+-    # Assuming origin of image is center, map to physical coordinates
+-    # Note: Exact pixel-to-physical mapping depends on specific implementation details
+-    # not fully specified in [S1], but standard pinhole projection is implied.
+-    # We assume image_shape is (H, W) and we iterate over pixels.
+-    
+-    # To optimize, we can iterate over Gaussians and splat to image.
+-    # However, standard rasterization iterates pixels or uses tile-based approach.
+-    # Given the analytical nature, we compute 2D Gaussian parameters for each Gaussian
+-    # and then rasterize them.
+-    
+-    projected_gaussians = []
++    projection = np.zeros((H_img, W_img))
+     
+     for g in gaussians:
+@@ -132,61 +120,30 @@
+         
+         # Step 2: Transform to Scanner Space
+-        # p_tilde = W * p_i + t
+-        p_tilde = W @ p_i + t
+-        
+-        # Step 3: Local Affine Approximation
+-        # J_i is the Jacobian of the projective mapping phi.
+-        # [S1] references Eq. 29 in [69] (Ewa Splatting).
+-        # The exact formula for J_i in cone-beam geometry is complex and depends on p_tilde.
+-        # For a pinhole camera, the projection is x = f * X / Z.
+-        # The Jacobian involves the depth Z.
+-        # Since [S1] does not provide the explicit formula for J_i, we note it must be computed.
+-        # [G] Assuming standard pinhole projection Jacobian for local affine approximation:
+-        # If p_tilde = [X, Y, Z], the projection to image plane at distance LSD is:
+-        # x_img = LSD * X / Z, y_img = LSD * Y / Z.
+-        # The Jacobian J maps world derivatives to image derivatives.
+-        # However, [S1] states J_i is from Eq 29 in [69]. 
+-        # We will compute Sigma_tilde using the provided formula.
+-        
+-        # Compute Sigma_tilde
+-        # Sigma_tilde = J_i * W * Sigma_i * W.T * J_i.T
+-        # We need J_i. 
+-        # [G] In Ewa Splatting [69], J is the Jacobian of the projection function.
+-        # For a point p in camera space [X,Y,Z], projected to [u,v]:
+-        # u = fx * X/Z, v = fy * Y/Z.
+-        # The Jacobian J (2x3) is:
+-        # [ fx/Z, 0,   -fx*X/Z^2 ]
+-        # [ 0,   fy/Z, -fy*Y/Z^2 ]
+-        # We need focal lengths fx, fy derived from FOV.
+-        
+-        # Compute Focal Lengths from FOV
+-        # FOV_x = 2 * arctan(Dx / (2 * LSD))
+-        # Image width in pixels is W_img.
+-        # fx = (W_img / 2) / tan(FOV_x / 2) = (W_img / 2) * (LSD / (Dx/2)) = W_img * LSD / Dx
+-        # Similarly fy = H_img * LSD / Dy
+-        
+-        H_img, W_img = image_shape
+-        fx = W_img * LSD / Dx
+-        fy = H_img * LSD / Dy
+-        
+-        X, Y, Z = p_tilde
++        p_scan = W @ p_i + t
++        X, Y, Z = p_scan
++        
++        # Skip Gaussians behind the source
+         if Z <= 0:
+-            continue # Gaussian is behind the source
++            continue
+             
+-        # Compute Jacobian J (2x3)
++        # Step 3: Projective mapping phi to detector plane (physical coordinates)
++        # phi maps scanner space [X,Y,Z] to detector plane [x,y]
++        p_hat_phys = np.array([LSD * X / Z, LSD * Y / Z])
++        
++        # Jacobian J of the projection from scanner space to detector plane
++        # Follows standard pinhole projection Jacobian [G]
+         J = np.array([
+-            [fx / Z, 0, -fx * X / (Z**2)],
+-            [0, fy / Z, -fy * Y / (Z**2)]
++            [LSD / Z, 0, -LSD * X / (Z**2)],
++            [0, LSD / Z, -LSD * Y / (Z**2)]
+         ])
+         
+-        # Compute Sigma_tilde
++        # Transform covariance: Sigma_tilde = J * W * Sigma_i * W.T * J.T
+         Sigma_tilde = J @ W @ Sigma_i @ W.T @ J.T
+         
+-        # Step 4: Project to 2D
+-        # Drop 3rd row/col
+-        p_hat = p_tilde[:2]
++        # Step 4: Project to 2D Gaussian (drop 3rd row/col)
++        p_hat = p_hat_phys
+         Sigma_hat = Sigma_tilde[:2, :2]
+         
+-        # Check if Sigma_hat is valid (positive definite)
++        # Skip degenerate projections
+         if np.linalg.det(Sigma_hat) <= 0:
+             continue
+@@ -195,66 +152,33 @@
+         det_tilde = np.linalg.det(Sigma_tilde)
+         det_hat = np.linalg.det(Sigma_hat)
+-        
+-        # mu_i = sqrt(2 * pi * |Sigma_tilde| / |Sigma_hat|)
+         mu_i = np.sqrt(2 * np.pi * det_tilde / det_hat)
+         rho_hat = mu_i * rho_i
+         
+-        projected_gaussians.append({
+-            'p': p_hat,
+-            'Sigma': Sigma_hat,
+-            'rho': rho_hat
+-        })
+-        
+-    # Step 6: Rasterize 2D Gaussians
+-    # Standard 2D Gaussian rasterization (alpha compositing or density sum)
+-    # [S1] states: "summing 2D Gaussians instead of alpha-compositing"
+-    # This implies a density accumulation, not opacity blending.
+-    
+-    for g_2d in projected_gaussians:
+-        p_2d = g_2d['p']
+-        Sigma_2d = g_2d['Sigma']
+-        rho_2d = g_2d['rho']
+-        
+-        # Compute bounding box for this Gaussian
+-        # Eigenvalues of Sigma_2d
+-        eigenvalues = np.linalg.eigvalsh(Sigma_2d)
+-        # Standard deviation in principal axes
+-        std_x = np.sqrt(eigenvalues[0])
+-        std_y = np.sqrt(eigenvalues[1])
+-        
+-        # Bounding box radius (e.g., 3 sigma)
+-        radius_x = 3 * std_x
+-        radius_y = 3 * std_y
+-        
+-        # Map to pixel coordinates
+-        # Note: p_2d is in physical units? 
+-        # In the derivation, x_hat is in the image plane coordinates.
+-        # The Jacobian J maps to image coordinates (pixels) if fx, fy are in pixels.
+-        # So p_2d is in pixel coordinates.
+-        
+-        min_x = int(np.floor(p_2d[0] - radius_x))
+-        max_x = int(np.ceil(p_2d[0] + radius_x))
+-        min_y = int(np.floor(p_2d[1] - radius_y))
+-        max_y = int(np.ceil(p_2d[1] + radius_y))
+-        
+-        # Clip to image bounds
+-        min_x = max(0, min_x)
+-        max_x = min(W_img, max_x)
+-        min_y = max(0, min_y)
+-        max_y = min(H_img, max_y)
++        # Convert physical coordinates to pixel coordinates
++        px = p_hat[0] * (W_img / Dx)
++        py = p_hat[1] * (H_img / Dy)
++        
++        # Compute bounding box in pixels (3-sigma radius [G])
++        eigenvalues = np.linalg.eigvalsh(Sigma_hat)
++        std_x, std_y = np.sqrt(eigenvalues[0]), np.sqrt(eigenvalues[1])
++        radius_x, radius_y = 3 * std_x * (W_img / Dx), 3 * std_y * (H_img / Dy)
++        
++        min_x, max_x = int(np.floor(px - radius_x)), int(np.ceil(px + radius_x))
++        min_y, max_y = int(np.floor(py - radius_y)), int(np.ceil(py + radius_y))
++        min_x, max_x = max(0, min_x), min(W_img, max_x)
++        min_y, max_y = max(0, min_y), min(H_img, max_y)
+         
+         if min_x >= max_x or min_y >= max_y:
+             continue
+             
+-        # Inverse covariance for Gaussian evaluation
+-        Sigma_inv = np.linalg.inv(Sigma_2d)
+-        norm_const = rho_2d / (2 * np.pi * np.sqrt(np.linalg.det(Sigma_2d)))
++        # Step 6: Rasterize (sum densities, not alpha-composite)
++        Sigma_inv = np.linalg.inv(Sigma_hat)
++        norm_const = rho_hat / (2 * np.pi * np.sqrt(det_hat))
+         
+         for y in range(min_y, max_y):
+             for x in range(min_x, max_x):
+-                diff = np.array([x - p_2d[0], y - p_2d[1]])
++                diff = np.array([x - px, y - py])
+                 exponent = -0.5 * diff @ Sigma_inv @ diff
+-                value = norm_const * np.exp(exponent)
+-                projection[y, x] += value
++                projection[y, x] += norm_const * np.exp(exponent)
+                 
+     return projection
+@@ -273,13 +197,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(M \cdot N)$ where $M$ is the number of Gaussians and $N$ is the number of pixels covered by the Gaussians. The transformation and projection steps are $O(M)$.
+-*   **Memory Complexity:** $O(M)$ to store Gaussian parameters. The output image is $O(H \cdot W)$.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Strengths:** Provides physically accurate X-ray projections by integrating density along rays. Solves the integration bias problem of standard 3DGS for tomographic reconstruction [S1].
+-*   **Limitations:** Requires accurate scanner geometry parameters. The local affine approximation may introduce errors for large Gaussians or extreme angles [S1].
+-*   **When to use:** When simulating X-ray CT projections from 3D Gaussian fields.
+-*   **When not to use:** For standard visible-light rendering where alpha-compositing is appropriate.
++*   **Limitations:** Requires accurate scanner geometry parameters. The method relies on a local affine approximation to enable analytical integration [S1].
++*   **When to use:** When simulating X-ray CT projections from 3D Gaussian fields [S1].
++*   **When not to use:** For standard visible-light rendering where alpha-compositing is appropriate [S1].
+ 
+ ## Background
+-This method was introduced in "R$^2$-Gaussian: Rectifying Radiative Gaussian Splatting for Tomographic Reconstruction" [S1]. It adapts the 3D Gaussian Splatting framework to cone-beam CT geometry, treating the X-ray scanner as a pinhole camera [S1]. The transformation module is based on the Ewa Splatting approach [69] for local affine approximation.
++This method was introduced in "R$^2$-Gaussian: Rectifying Radiative Gaussian Splatting for Tomographic Reconstruction" [S1]. It adapts the 3D Gaussian Splatting framework to cone-beam CT geometry, treating the X-ray scanner as a pinhole camera [S1]. The transformation module is based on the Ewa Splatting approach [69] for local affine approximation [S1].
+ 
+ ## Sources

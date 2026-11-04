@@ -1,0 +1,142 @@
+# Off-Axis Positional Encoding
+
+Also called: off-axis IPE
+
+## Overview
+Off-Axis Positional Encoding is a feature representation technique for neural radiance fields that encodes the full covariance structure of anisotropic Gaussians, rather than just their marginal variances along axis-aligned directions. It solves the ambiguity where axis-aligned encodings produce identical features for distinct Gaussian shapes that share the same diagonal covariance elements. It differs from standard Fourier Positional Encoding by utilizing a non-identity basis matrix derived from icosahedron vertices to capture off-axis correlations, enabling accurate Kalman-like warping in the presence of highly anisotropic primitives.
+
+## How it works
+**Inputs and Outputs**
+- Input: A $3 \times 3$ symmetric positive-definite covariance matrix $\Sigma$ representing the integrated Gaussian at a query point.
+- Output: A feature vector representing the projected variances along the basis directions.
+
+**Data Structures**
+The method relies on a fixed basis matrix $P$.
+- Dimensions: $20 \times 3$ (20 rows, 3 columns).
+- Content: Unit-norm vertices of a twice-tessellated icosahedron, with redundant negative copies removed.
+- Values (row-major):
+  $$
+  P = \begin{bmatrix}
+  0.8506508 & 0 & 0.5257311 \\
+  0.809017 & 0.5 & 0.309017 \\
+  0.5257311 & 0.8506508 & 0 \\
+  1 & 0 & 0 \\
+  0.809017 & 0.5 & -0.309017 \\
+  0.8506508 & 0 & -0.5257311 \\
+  0.309017 & 0.809017 & -0.5 \\
+  0 & 0.5257311 & -0.8506508 \\
+  0.5 & 0.309017 & -0.809017 \\
+  0 & 1 & 0 \\
+  -0.5257311 & 0.8506508 & 0 \\
+  -0.309017 & 0.809017 & -0.5 \\
+  0 & 0.5257311 & 0.8506508 \\
+  -0.309017 & 0.809017 & 0.5 \\
+  0.309017 & 0.809017 & 0.5 \\
+  0.809017 & 0.5 & 0.5 \\
+  0.309017 & 0.809017 & -0.5 \\
+  0.809017 & -0.5 & 0.309017 \\
+  -0.809017 & 0.5 & 0.309017 \\
+  -0.809017 & 0.5 & -0.309017
+  \end{bmatrix}
+  $$
+
+**Steps**
+1.  **Construct Basis**: Define the $20 \times 3$ matrix $P$ as specified above.
+2.  **Compute Projections**: Calculate the projected variances for each basis vector. The naive computation is the diagonal of the projected covariance: $\text{diag}(P \Sigma P^T)$.
+3.  **Optimize Calculation**: To avoid the computational cost of full matrix multiplication and diagonal extraction, use the equivalent element-wise operation:
+    $$
+    \mathbf{f} = \sum_{k=1}^{3} P_{k,:} \circ (\Sigma P^T)_{k,:}
+    $$
+    Where $\circ$ denotes element-wise multiplication and the sum is over the rows of the intermediate result. Specifically, if $Q = \Sigma P^T$ (a $3 \times 20$ matrix), then the output feature vector $\mathbf{f}$ (size 20) is computed as:
+    $$
+    f_j = \sum_{i=1}^{3} P_{i,j} \cdot Q_{i,j} \quad \text{for } j=1 \dots 20
+    $$
+    Note: The source describes `sum(P^T ◦ (ΣP^T), 0)`. Since $P$ is $20 \times 3$, $P^T$ is $3 \times 20$. $\Sigma P^T$ is $3 \times 20$. The element-wise product is $3 \times 20$. Summing over axis 0 (rows) yields a $1 \times 20$ vector.
+
+**Parameters**
+- Basis Matrix $P$: Fixed constants as defined. Not given in the sources as a tunable parameter.
+
+**Edge Cases and Pitfalls**
+- **Axis-Aligned Ambiguity**: Using the identity matrix as $P$ (axis-aligned IPE) fails to distinguish between Gaussians with identical diagonal elements but different off-diagonal correlations. This leads to inaccurate warping for highly anisotropic Gaussians, which are frequent in distant parts of the scene [S1].
+- **Performance Cost**: Computing $\text{diag}(P \Sigma P^T)$ directly is prohibitively expensive for large $P$. The element-wise optimization is required for tractability [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def get_basis_matrix():
+    """
+    Returns the 20x3 basis matrix P derived from a twice-tessellated icosahedron.
+    """
+    P = np.array([
+        [ 0.8506508,  0.        ,  0.5257311],
+        [ 0.809017  ,  0.5       ,  0.309017 ],
+        [ 0.5257311 ,  0.8506508 ,  0.        ],
+        [ 1.        ,  0.        ,  0.        ],
+        [ 0.809017  ,  0.5       , -0.309017 ],
+        [ 0.8506508 ,  0.        , -0.5257311],
+        [ 0.309017  ,  0.809017  , -0.5       ],
+        [ 0.        ,  0.5257311 , -0.8506508],
+        [ 0.5       ,  0.309017  , -0.809017 ],
+        [ 0.        ,  1.        ,  0.        ],
+        [-0.5257311 ,  0.8506508 ,  0.        ],
+        [-0.309017  ,  0.809017  , -0.5       ],
+        [ 0.        ,  0.5257311 ,  0.8506508],
+        [-0.309017  ,  0.809017  ,  0.5       ],
+        [ 0.309017  ,  0.809017  ,  0.5       ],
+        [ 0.809017  ,  0.5       ,  0.5       ],
+        [ 0.309017  ,  0.809017  , -0.5       ],
+        [ 0.809017  , -0.5       ,  0.309017 ],
+        [-0.809017  ,  0.5       ,  0.309017 ],
+        [-0.809017  ,  0.5       , -0.309017 ]
+    ])
+    return P
+
+def off_axis_pe(covariance_matrix, P):
+    """
+    Computes off-axis positional encoding features for a given covariance matrix.
+    
+    Args:
+        covariance_matrix: 3x3 numpy array, symmetric positive-definite.
+        P: 20x3 numpy array, the basis matrix.
+        
+    Returns:
+        features: 1D numpy array of size 20, containing the projected variances.
+    """
+    # Compute Sigma * P^T. Result is 3x20.
+    # Sigma is 3x3, P^T is 3x20.
+    P_T = P.T
+    Sigma_P_T = covariance_matrix @ P_T
+    
+    # Compute element-wise product of P^T (3x20) and Sigma_P_T (3x20)
+    # P^T is 3x20.
+    element_wise_prod = P_T * Sigma_P_T
+    
+    # Sum over rows (axis 0) to get a 1x20 vector, then flatten to 20.
+    features = np.sum(element_wise_prod, axis=0)
+    
+    return features
+```
+
+## Subtopics
+
+### Axis-Aligned IPE
+Uses the identity matrix as the basis. Only diagonal elements of $\Sigma$ are used. Fails to capture anisotropic shape information. Choose when computational budget is extremely tight and scene geometry is isotropic. [1267-fourier-positional-encoding.md](1267-fourier-positional-encoding.md)
+
+### Random Fourier Features
+Uses random projections for frequency encoding. Similar intuition to off-axis IPE for capturing shape, but stochastic. [1267-fourier-positional-encoding.md](1267-fourier-positional-encoding.md)
+
+## Operating characteristics
+- **Time Complexity**: The optimized calculation requires one matrix-vector multiplication ($\Sigma P^T$) and element-wise operations. It is modestly more expensive than axis-aligned IPE (which requires only diagonal extraction) but significantly cheaper than the naive $\text{diag}(P \Sigma P^T)$ approach.
+- **Memory Complexity**: Requires storing the fixed $20 \times 3$ basis matrix. Negligible overhead.
+- **Measured Performance**: In the "bicycle" scene, ablating off-axis features reduces SSIM from 0.687 to 0.664 [S1].
+- **Strengths**: Disambiguates anisotropic Gaussians with identical marginal distributions; improves warping accuracy for distant, highly anisotropic primitives.
+- **Limitations**: Slightly higher computational cost than axis-aligned encoding; requires full covariance matrix $\Sigma$ (not just diagonal).
+
+## Background
+Off-Axis Positional Encoding was introduced in the context of mip-NeRF 360 to improve the handling of anisotropic Gaussians in unbounded scenes. It addresses a limitation of the original mip-NeRF approach, which used axis-aligned encoding (identity basis). The method leverages the full covariance matrix, which is already computed for the Kalman-like warping step, to extract additional shape information via projections onto an icosahedral basis.
+
+## Sources
+[S1] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26

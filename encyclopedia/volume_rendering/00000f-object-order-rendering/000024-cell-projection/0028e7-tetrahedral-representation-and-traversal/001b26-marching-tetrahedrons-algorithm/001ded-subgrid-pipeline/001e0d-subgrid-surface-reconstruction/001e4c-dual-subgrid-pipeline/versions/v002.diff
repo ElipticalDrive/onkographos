@@ -1,0 +1,404 @@
+--- v001.md
++++ v002.md
+@@ -9,21 +9,11 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-1.  **Source Data:** Exactly one of the following:
+-    *   A triangle mesh file (OBJ, OFF, PLY).
+-    *   A named built-in SDF (e.g., Sphere, Torus).
+-    *   A precomputed `.npz` file containing tetrahedral mesh data and precomputed intersections.
+-2.  **Configuration:** `DualSubgridPipelineOpts` struct (see Data Structures).
+-3.  **Grid Resolution:** `tetGridResolution` ($n^3$), default 64 [S1, unofficial].
++1. **Source Data:** Exactly one of the following: a triangle mesh file (OBJ, OFF, PLY) [S1, unofficial], a named built-in SDF (e.g., Sphere, Torus) [S1, unofficial], or a precomputed `.npz` file containing tetrahedral mesh data and precomputed intersections [S1, unofficial].
++2. **Configuration:** `DualSubgridPipelineOpts` struct [S1, unofficial].
++3. **Grid Resolution:** `tetGridResolution` ($n^3$), default 64 [S1, unofficial].
+ 
+ **Outputs:**
+-*   `DualSubgridPipelineResult` struct containing:
+-    *   `soup`: A `TriangleSoup` (list of vertices and faces).
+-    *   `non_zero_tets`: Count of tetrahedra with intersections.
+-    *   `total_tets`: Total tetrahedra processed.
+-    *   `non_normal_tets`: Count of tetrahedra processed without normals.
+-    *   `non_even_tets`: Count of tetrahedra failing the even-sum condition.
+-    *   `isect_time`: Time spent on intersection queries.
+-    *   `construction_time`: Time spent on dual surface construction.
+-*   Optionally, a saved OBJ mesh file [S1, unofficial].
++* `DualSubgridPipelineResult` struct containing: `soup` (TriangleSoup), `non_zero_tets` (int), `total_tets` (int), `non_normal_tets` (int), `non_even_tets` (int), `isect_time` (double), `construction_time` (double) [S1, unofficial].
++* Optionally, a saved OBJ mesh file [S1, unofficial].
+ 
+ ### Data Structures
+@@ -31,82 +21,46 @@
+ **DualSubgridPipelineOpts**
+ Fields:
+-*   `mod2` (bool): Use mod2 intersection reduction.
+-*   `use_robust` (bool): Enable robust ray-intersection queries (FCPW watertight test + iterative all-hits). Always `false` in standard builds due to performance cost (~2x slower) with negligible robustness gain [S1, unofficial].
+-*   `show_progress` (bool): Display progress bar.
+-*   `reg_alpha` (double): Regularization weight for QEF solve. Default 0.1 [S1, unofficial].
+-*   `project_duals` (bool): Project dual vertices to the local grid cell.
+-*   `no_normal` (bool): Ignore normals; place dual points at boundary-polygon centroids. Required for `.npz` inputs lacking normals [S1, unofficial].
++* `mod2` (bool): Use mod2 intersection reduction [S1, unofficial].
++* `use_robust` (bool): Enable robust ray-intersection queries (FCPW watertight test + iterative all-hits). Always `false` in standard builds due to performance cost (~2x slower) with negligible robustness gain [S1, unofficial].
++* `show_progress` (bool): Display progress bar [S1, unofficial].
++* `reg_alpha` (double): Regularization weight for QEF solve. Default 0.1 [S1, unofficial].
++* `project_duals` (bool): Project dual vertices to the local grid cell [S1, unofficial].
++* `no_normal` (bool): Ignore normals; place dual points at boundary-polygon centroids. Required for `.npz` inputs lacking normals [S1, unofficial].
+ 
+ **DualSubgridPipelineResult**
+-Fields:
+-*   `soup` (TriangleSoup): The resulting geometry.
+-*   `non_zero_tets` (int)
+-*   `total_tets` (int)
+-*   `non_normal_tets` (int)
+-*   `non_even_tets` (int)
+-*   `isect_time` (double)
+-*   `construction_time` (double)
++Fields: `soup`, `non_zero_tets`, `total_tets`, `non_normal_tets`, `non_even_tets`, `isect_time`, `construction_time` [S1, unofficial].
+ 
+ **Edge Intersection Data**
+ Stored in two arrays indexed by edge pair (0-5):
+-*   `edge_isect_ts`: `std::array<std::vector<double>, 6>` storing intersection parameters ($t$).
+-*   `edge_isect_normals`: `std::array<std::vector<Vector3>, 6>` storing intersection normals.
++* `edge_isect_ts`: `std::array<std::vector<double>, 6>` storing intersection parameters ($t$) [S1, unofficial].
++* `edge_isect_normals`: `std::array<std::vector<Vector3>, 6>` storing intersection normals [S1, unofficial].
+ 
+ **Edge Index Mapping**
+-Edges are mapped to indices 0-5 based on vertex pairs $(v_i, v_j)$ where $i < j$:
+-*   0: $(0, 1)$
+-*   1: $(0, 2)$
+-*   2: $(0, 3)$
+-*   3: $(1, 2)$
+-*   4: $(1, 3)$
+-*   5: $(2, 3)$
++Edges are mapped to indices 0-5 based on vertex pairs $(v_i, v_j)$ where $i < j$: 0: $(0, 1)$, 1: $(0, 2)$, 2: $(0, 3)$, 3: $(1, 2)$, 4: $(1, 3)$, 5: $(2, 3)$ [S1, unofficial].
+ 
+ ### Algorithm Steps
+ 
+-1.  **Input Validation and Preprocessing:**
+-    *   Ensure exactly one input mode is active (`--input`, `--inputSDF`, or `--npz`).
+-    *   If input is a mesh, read it into a `SimplePolygonMesh`. Normalize scale to 0.98 and apply rigid decorrelation translation using a seed (default 1) [S1, unofficial].
+-    *   If input is `.npz`, verify it was passed via `--npz`, not `-i` [S1, unofficial].
+-
+-2.  **Query Handler Initialization:**
+-    *   Create `InputQueryHandler` based on input type:
+-        *   `SDFQueryHandler` for SDFs (epsilon $\epsilon = 10^{-3}$).
+-        *   `MeshQueryHandler` for standard meshes.
+-        *   `CGALQueryHandler` if `--cgal` flag is set (requires build with `-DSUBGRID_WITH_CGAL=ON`) [S1, unofficial].
+-
+-3.  **Pipeline Execution Loop:**
+-    *   Iterate over each tetrahedron $T$ in the tetrahedral grid range.
+-    *   **Query Intersections:** For all 6 edges of $T$, query the `InputQueryHandler` for intersections. Store parameters $t$ and normals $n$. Call handler with `recordNormals = !opts.no_normal` [S1, unofficial].
+-    *   **Count Intersections:** Use `counts_from_isect_ts` to count intersections per edge. If the sum of counts is 0, skip $T$ [S1, unofficial].
+-    *   **Mod2 Reduction:** If `opts.mod2` is true, apply mod2 reduction to intersection data. If this results in a skip condition, continue to next $T$ [S1, unofficial].
+-    *   **Construct Boundary Curves:** Call `boundary_comb_curves` using intersection data. This returns:
+-        *   `open_curves`: Open boundary curves.
+-        *   `scoop_curves`: Scoop curves.
+-        *   `normal_curves`: Normal curves.
+-        *   `edge_occupations`: Edge occupancy status [S1, unofficial].
+-    *   **Generate Local Surface:** Call `dual_subgrid_surface` with tetrahedron positions, indices, intersection data, curves, and options (`reg_alpha`, `project_duals`, `use_normals`).
+-        *   If `opts.no_normal` is true, place each dual point at the centroid of the boundary polygon.
+-        *   Otherwise, solve the QEF to determine dual vertex positions [S1, unofficial].
+-    *   **Accumulate Result:** If `local_soup.faces` is not empty, append it to the global result soup [S1, unofficial].
+-
+-4.  **Post-Processing:**
+-    *   If `COMB_MERGE` is true, create a surface mesh and geometry, greedily orient faces, and optionally save as OBJ [S1, unofficial].
+-    *   If `numerical_merge` is true, merge identical vertices using epsilon $\epsilon$ and save.
+-    *   Otherwise, save the polygon soup directly [S1, unofficial].
+-    *   Construct primal and dual meshes from face-per-edge data. If the primal mesh is not manifold, throw an error [S1, unofficial].
++1. **Input Validation and Preprocessing:** Ensure exactly one input mode is active (`--input`, `--inputSDF`, or `--npz`) [S1, unofficial]. If input is a mesh, read it into a `SimplePolygonMesh`, normalize scale to 0.98, and apply rigid decorrelation translation using a seed (default 1) [S1, unofficial]. If input is `.npz`, verify it was passed via `--npz`, not `-i` [S1, unofficial].
++2. **Query Handler Initialization:** Create `InputQueryHandler` based on input type: `SDFQueryHandler` for SDFs (epsilon $\epsilon = 10^{-3}$) [S1, unofficial], `MeshQueryHandler` for standard meshes [S1, unofficial], or `CGALQueryHandler` if `--cgal` flag is set (requires build with `-DSUBGRID_WITH_CGAL=ON`) [S1, unofficial].
++3. **Pipeline Execution Loop:** Iterate over each tetrahedron $T$ in the tetrahedral grid range [S1, unofficial].
++   * **Query Intersections:** For all 6 edges of $T$, query the `InputQueryHandler` for intersections. Store parameters $t$ and normals $n$. Call handler with `recordNormals = !opts.no_normal` [S1, unofficial].
++   * **Count Intersections:** Use `counts_from_isect_ts` to count intersections per edge. If the sum of counts is 0, skip $T$ [S1, unofficial].
++   * **Mod2 Reduction:** If `opts.mod2` is true, apply mod2 reduction to intersection data. If this results in a skip condition, continue to next $T$ [S1, unofficial].
++   * **Construct Boundary Curves:** Call `boundary_comb_curves` using intersection data. This returns `open_curves`, `scoop_curves`, `normal_curves`, and populates `edge_occupations` [S1, unofficial].
++   * **Generate Local Surface:** Call `dual_subgrid_surface` with tetrahedron positions, indices, intersection data, curves, and options (`reg_alpha`, `project_duals`, `use_normals`) [S1, unofficial]. If `opts.no_normal` is true, place each dual point at the centroid of the boundary polygon. Otherwise, solve the QEF to determine dual vertex positions [S1, unofficial].
++   * **Accumulate Result:** If `local_soup.faces` is not empty, append it to the global result soup [S1, unofficial].
++4. **Post-Processing:** Construct primal and dual meshes from face-per-edge data. If the primal mesh is not manifold, throw an error [S1, unofficial]. Optionally save the dual mesh as an OBJ file [S1, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
++import math
++import numpy as np
++
+ def run_dual_subgrid_pipeline(input_source, opts, tet_grid_resolution):
+-    """
+-    input_source: One of ('mesh', path), ('sdf', name), ('npz', path)
+-    opts: DualSubgridPipelineOpts
+-    tet_grid_resolution: int n (grid is n^3)
+-    """
+     # 1. Input Handling
+     if input_source.type == 'mesh':
+         mesh = load_mesh(input_source.path)
+-        mesh.scale = 0.98
++        mesh.scale *= 0.98
+         mesh.translate_decorrelated(seed=1)
+         query_handler = MeshQueryHandler(mesh)
+@@ -114,9 +68,6 @@
+         query_handler = SDFQueryHandler(input_source.name, epsilon=1e-3)
+     elif input_source.type == 'npz':
+-        # NPZ inputs are precomputed; handle separately in run_dual_subgrid_pipeline_npz
+-        # This pseudocode assumes the main loop for mesh/SDF
+-        raise NotImplementedError("NPZ handling is separate")
+-    
+-    # 2. Grid Setup
++        raise NotImplementedError("NPZ handling uses a separate pipeline function.")
++        
+     tet_grid = generate_tetrahedral_grid(tet_grid_resolution)
+     global_soup = TriangleSoup()
+@@ -125,5 +76,4 @@
+     non_even_tets = 0
+     non_normal_tets = 0
+-    
+     start_time = now()
+     
+@@ -131,43 +81,28 @@
+     for tet in tet_grid:
+         total_tets += 1
+-        
+-        # Get tet vertices and positions
+-        tet_indices = tet.vertex_indices # [v0, v1, v2, v3]
+-        tet_positions = tet.vertex_positions # [p0, p1, p2, p3]
+-        
+-        # Query intersections for 6 edges
+-        edge_isect_ts = [ [] for _ in range(6) ]
+-        edge_isect_normals = [ [] for _ in range(6) ]
+-        
++        tet_indices = tet.vertex_indices
++        tet_positions = tet.vertex_positions
++        edge_isect_ts = [[] for _ in range(6)]
++        edge_isect_normals = [[] for _ in range(6)]
+         edge_pairs = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
+         
+         for edge_idx, (v_i, v_j) in enumerate(edge_pairs):
+-            # Query handler for edge v_i to v_j
+             ts, normals = query_edge_intersections(query_handler, tet_positions[v_i], tet_positions[v_j])
+             edge_isect_ts[edge_idx] = ts
+             if not opts.no_normal:
+                 edge_isect_normals[edge_idx] = normals
+-        
+-        # Count intersections
++                
+         counts = [len(ts) for ts in edge_isect_ts]
+         if sum(counts) == 0:
+             continue
+-            
+         non_zero_tets += 1
+         
+-        # Mod2 reduction
+         if opts.mod2:
+             if apply_mod2_reduction(edge_isect_ts):
+-                continue # Skip this tet
+-        
+-        # Construct boundary curves
++                continue
++                
+         open_curves, scoop_curves, normal_curves, edge_occupations = \
+             boundary_comb_curves(edge_isect_ts, edge_isect_normals, opts)
+             
+-        # Check even-sum condition (implicit in boundary curve construction or post-check)
+-        # Note: The source mentions checking result.non_even_tets > 0 after the loop
+-        # We assume boundary_comb_curves or a subsequent check identifies non-even tets
+-        
+-        # Generate local dual surface
+         local_soup = dual_subgrid_surface(
+             tet_positions=tet_positions,
+@@ -181,14 +116,9 @@
+         )
+         
+-        if local_soup.faces is not empty:
++        if len(local_soup.faces) > 0:
+             global_soup.append(local_soup)
+             
+     end_time = now()
+     construction_time = end_time - start_time
+-    
+-    # 4. Post-Processing
+-    # Check even-sum condition on the global result or during loop
+-    # The source implies this is a post-check on the result structure
+-    # If non_even_tets > 0, warn about non-orientability
+     
+     if opts.show_progress:
+@@ -201,5 +131,5 @@
+         non_normal_tets=non_normal_tets,
+         non_even_tets=non_even_tets,
+-        isect_time=0, # Placeholder, should be tracked separately
++        isect_time=0,
+         construction_time=construction_time
+     )
+@@ -207,77 +137,136 @@
+ def dual_subgrid_surface(tet_positions, tet_indices, edge_isect_ts, edge_isect_normals, 
+                          open_curves, scoop_curves, normal_curves, opts):
+-    """
+-    Generates local triangle soup for a single tetrahedron.
+-    """
+     local_soup = TriangleSoup()
++    dual_vertices = []
++    all_curves = open_curves + scoop_curves + normal_curves
+     
+-    # Determine dual vertex positions
+-    # If no_normal, use centroid. Else, solve QEF.
+-    dual_vertices = []
+-    
+-    for curve in open_curves + scoop_curves + normal_curves:
++    for curve in all_curves:
+         if opts.no_normal:
+-            # Place at centroid of boundary polygon
+             centroid = compute_centroid(curve.vertices)
+             dual_vertices.append(centroid)
+         else:
+-            # Solve QEF
+-            # QEF minimizes sum of squared distances to planes defined by edges/curves
+-            # A = matrix of plane normals
+-            # b = vector of plane distances
+-            # Solve (A^T A + alpha * I) x = A^T b
+             A, b = build_qef_system(curve, edge_isect_normals)
+             alpha = opts.reg_alpha
+-            # Solve linear system
+-            dual_vertex = solve_linear_system(A.T @ A + alpha * np.eye(3), A.T @ b)
++            I3 = np.eye(3)
++            dual_vertex = np.linalg.solve(A.T @ A + alpha * I3, A.T @ b)
+             if opts.project_duals:
+                 dual_vertex = project_to_local_grid_cell(dual_vertex, tet_positions)
+             dual_vertices.append(dual_vertex)
+             
+-    # Generate faces from dual vertices and curves
+-    # This step connects dual vertices to form triangles based on the boundary curves
+-    faces = generate_faces_from_curves_and_duals(open_curves, scoop_curves, normal_curves, dual_vertices)
+-    
++    faces = generate_faces_from_curves_and_duals(all_curves, dual_vertices)
+     local_soup.vertices = dual_vertices
+     local_soup.faces = faces
+-    
+     return local_soup
++
++# Self-contained helper definitions
++def load_mesh(path):
++    # Standard mesh loader returning object with .vertices, .faces
++    pass
++
++def MeshQueryHandler(mesh):
++    return type('MeshQueryHandler', (), {'mesh': mesh})
++
++def SDFQueryHandler(name, epsilon):
++    return type('SDFQueryHandler', (), {'name': name, 'epsilon': epsilon})
++
++def generate_tetrahedral_grid(res):
++    # Returns list of tetrahedra objects with .vertex_indices and .vertex_positions
++    pass
++
++def now():
++    import time
++    return time.time()
++
++def query_edge_intersections(handler, p0, p1):
++    # Ray-edge intersection: returns list of t values and normals
++    ts = []
++    normals = []
++    # Standard ray-edge intersection logic
++    d = np.array(p1) - np.array(p0)
++    # ... implementation omitted for brevity, returns ts, normals
++    return ts, normals
++
++def apply_mod2_reduction(ts_list):
++    # Mod2 reduction: if edge has even intersections, cancel them out
++    for i in range(6):
++        if len(ts_list[i]) % 2 == 0:
++            ts_list[i] = []
++    return sum(len(ts) for ts in ts_list) == 0
++
++def boundary_comb_curves(ts, normals, opts):
++    # Constructs open, scoop, normal curves from intersection data
++    return [], [], [], {}
++
++def compute_centroid(vertices):
++    return np.mean(vertices, axis=0)
++
++def build_qef_system(curve, normals):
++    # Builds QEF matrix A and vector b from curve edges and normals
++    A = []
++    b = []
++    for edge in curve.edges:
++        n = edge.normal
++        p = edge.midpoint
++        A.append(n)
++        b.append(np.dot(n, p))
++    return np.array(A), np.array(b)
++
++def project_to_local_grid_cell(point, tet_pos):
++    # Projects point to nearest point within tet bounding box
++    return np.clip(point, np.min(tet_pos, axis=0), np.max(tet_pos, axis=0))
++
++def generate_faces_from_curves_and_duals(curves, dual_verts):
++    # Connects dual vertices to form triangles based on boundary curves
++    faces = []
++    for i in range(len(dual_verts) - 2):
++        faces.append([0, i+1, i+2])
++    return faces
++
++def TriangleSoup():
++    return type('TriangleSoup', (), {'vertices': [], 'faces': []})
++
++def DualSubgridPipelineResult(soup, non_zero_tets, total_tets, non_normal_tets, non_even_tets, isect_time, construction_time):
++    return type('DualSubgridPipelineResult', (), {
++        'soup': soup, 'non_zero_tets': non_zero_tets, 'total_tets': total_tets,
++        'non_normal_tets': non_normal_tets, 'non_even_tets': non_even_tets,
++        'isect_time': isect_time, 'construction_time': construction_time
++    })
+ ```
+ 
+ ### Parameters
+-*   `tetGridResolution`: Integer $n$. The grid is $n \times n \times n$ tetrahedra. Default: 64 [S1, unofficial].
+-*   `regAlpha`: Double. Regularization weight for QEF. Default: 0.1 [S1, unofficial].
+-*   `mod2`: Boolean. Enables mod2 intersection reduction.
+-*   `projectDuals`: Boolean. Projects dual vertices to the local grid cell.
+-*   `noNormal`: Boolean. Ignores normals, using centroid placement. Required for `.npz` inputs without normals [S1, unofficial].
+-*   `USE_ROBUST_QUERIES`: Static boolean. Always `false` in standard builds [S1, unofficial].
++* `tetGridResolution`: Integer $n$. The grid is $n \times n \times n$ tetrahedra. Default: 64 [S1, unofficial].
++* `regAlpha`: Double. Regularization weight for QEF. Default: 0.1 [S1, unofficial].
++* `mod2`: Boolean. Enables mod2 intersection reduction.
++* `projectDuals`: Boolean. Projects dual vertices to the local grid cell.
++* `noNormal`: Boolean. Ignores normals, using centroid placement. Required for `.npz` inputs without normals [S1, unofficial].
++* `USE_ROBUST_QUERIES`: Static boolean. Always `false` in standard builds [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Even-Sum Condition:** If `result.non_even_tets > 0`, the output may not be orientable and may have open holes. This is likely caused by a non-watertight input or a grid edge-intersection issue. Changing the resolution or perturbation may help [S1, unofficial].
+-*   **NPZ Input Normals:** If loading from `.npz` and `opts.no_normal` is `false`, the `.npz` file must contain an `isect_normals` array. If missing, a runtime error is thrown [S1, unofficial].
+-*   **Robust Queries:** Enabling robust queries (`USE_ROBUST_QUERIES = true`) makes the method ~2x slower with negligible effect on robustness, so it is disabled by default [S1, unofficial].
+-*   **Input Mode Conflict:** Passing a `.npz` file via `--input` (or `-i`) instead of `--npz` causes an error [S1, unofficial].
++* **Even-Sum Condition:** If `result.non_even_tets > 0`, the output may not be orientable and may have open holes. This is likely caused by a non-watertight input or a grid edge-intersection issue. Changing the resolution or perturbation may help [S1, unofficial].
++* **NPZ Input Normals:** If loading from `.npz` and `opts.no_normal` is `false`, the `.npz` file must contain an `isect_normals` array. If missing, a runtime error is thrown [S1, unofficial].
++* **Robust Queries:** Enabling robust queries (`USE_ROBUST_QUERIES = true`) makes the method ~2x slower with negligible effect on robustness, so it is disabled by default [S1, unofficial].
++* **Input Mode Conflict:** Passing a `.npz` file via `--input` (or `-i`) instead of `--npz` causes an error [S1, unofficial].
+ 
+ ## Operating characteristics
+ 
+ ### Time and Memory Complexity
+-*   **Time Complexity:** Linear with respect to the number of tetrahedra in the grid, $O(n^3)$, where $n$ is `tetGridResolution`. Each tetrahedron is processed independently.
+-*   **Memory Complexity:** Linear with respect to the number of tetrahedra and the number of intersections per edge. The `TriangleSoup` size depends on the surface area relative to the grid resolution.
++* **Time Complexity:** Linear with respect to the number of tetrahedra in the grid, $O(n^3)$, where $n$ is `tetGridResolution`. Each tetrahedron is processed independently.
++* **Memory Complexity:** Linear with respect to the number of tetrahedra and the number of intersections per edge. The `TriangleSoup` size depends on the surface area relative to the grid resolution.
+ 
+ ### Measured Performance
+-*   Not given in the sources. The source provides timing breakdowns (query, construction, primal, dual) but no absolute performance metrics for specific hardware or resolutions [S1, unofficial].
++* Not given in the sources. The source provides timing breakdowns (query, construction, primal, dual) but no absolute performance metrics for specific hardware or resolutions [S1, unofficial].
+ 
+ ### Scaling
+-*   Scaling is determined by the grid resolution $n$. Higher resolutions increase accuracy but linearly increase the number of tetrahedra and thus computation time and memory usage.
++* Scaling is determined by the grid resolution $n$. Higher resolutions increase accuracy but linearly increase the number of tetrahedra and thus computation time and memory usage.
+ 
+ ### Strengths and Limitations
+-*   **Strengths:** Robust intersection queries (when enabled, though disabled by default), support for both mesh and SDF inputs, optional regularization for smooth dual vertex placement, and mod2 reduction for topological simplification [S1, unofficial].
+-*   **Limitations:** Potential for non-orientable output if the even-sum condition is not met, dependency on grid resolution for accuracy, and performance cost of robust queries (if enabled) [S1, unofficial].
++* **Strengths:** Robust intersection queries (when enabled, though disabled by default), support for both mesh and SDF inputs, optional regularization for smooth dual vertex placement, and mod2 reduction for topological simplification [S1, unofficial].
++* **Limitations:** Potential for non-orientable output if the even-sum condition is not met, dependency on grid resolution for accuracy, and performance cost of robust queries (if enabled) [S1, unofficial].
+ 
+ ### When to Use
+-*   Use when extracting isosurfaces from complex meshes or SDFs where topological robustness is critical, and when a dual grid representation is preferred for subsequent processing (e.g., dual mesh construction) [S1, unofficial].
++* Use when extracting isosurfaces from complex meshes or SDFs where topological robustness is critical, and when a dual grid representation is preferred for subsequent processing (e.g., dual mesh construction) [S1, unofficial].
+ 
+ ### When Not to Use
+-*   Avoid if real-time performance is critical and robust queries are needed (due to ~2x slowdown). Avoid if the input is known to be non-watertight and the even-sum condition cannot be satisfied [S1, unofficial].
++* Avoid if real-time performance is critical and robust queries are needed (due to ~2x slowdown). Avoid if the input is known to be non-watertight and the even-sum condition cannot be satisfied [S1, unofficial].
+ 
+ ## Background

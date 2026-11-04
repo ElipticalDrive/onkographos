@@ -1,0 +1,222 @@
+# Differential Sampling and Peak Finding
+
+Also called: Adaptive Surface Detection, Peak Finding, Surface Ray Marching, Surface Raycasting with Adaptive Step Size
+
+## Overview
+Differential Sampling and Peak Finding is a volume rendering technique that combines adaptive ray stepping with explicit root finding to render sharp, Dirac-like features in transfer functions as semi-transparent isosurfaces [S1]. Unlike standard postclassification which misses these features or preintegration which skews their opacity and shading due to piecewise summation assumptions, this method solves directly for the roots of the transfer function [S1]. It sets itself apart from its siblings by using a 2D lookup table to query potential peak isovales rather than precomputed integrals, allowing for correct shading and opacity handling of high-frequency transfer function components [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Volume scalar field $V$, transfer function $\rho_\alpha(f)$ (opacity as a function of field value), ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, isovalue $iso$, termination alpha threshold, and lookup table parameters.
+*   **Outputs:** Final pixel color and opacity.
+
+**Data Structures:**
+*   **Globals:**
+    *   `ps0`, `ps1`: `vec4` representing position $(x, y, z, t)$ at segment entry and exit.
+    *   `fs0`, `fs1`: `float` representing field values $f(\mathbf{ps0})$ and $f(\mathbf{ps1})$.
+    *   `dt`: `float` representing step size (time parameter $t$).
+    *   `iso`: `float` representing the target isovalue.
+*   **Lookup Table (`peakTable`):** A 2D texture where each entry stores an isovalue $\upsilon$ (or a set of up to four sequential isovales $\upsilon_i$) that possibly exists within the segment defined by entry and exit field values $[f_i, f_o]$. Entries are sorted from first to last peak value encountered. If no peak exists, a flag outside the range of scalar values is stored [S1].
+
+**Algorithm Steps:**
+
+1.  **Initialization:**
+    *   Set step size `dt = b`.
+    *   Set `ps1.w` (time $t$) to 0.
+    *   Set `ps1.xyz` to `ray.origin`.
+    *   Compute initial field value `fs1 = volume_filter(ps1.xyz)` [S1].
+
+2.  **Ray Casting Loop:**
+    *   Copy current state: `ps0 = ps1`, `fs0 = fs1`.
+    *   Advance position: `ps1 += dt * ray.direction`.
+    *   **Differential Sampling:** If `DIFFERENTIAL_SAMPLING` is defined, increment step size: `dt += a` [S1].
+    *   Compute new field value: `fs1 = volume_filter(ps1.xyz)` [S1].
+
+3.  **Peak Lookup:**
+    *   If `!DVR_ONLY`, sample the lookup table: `iso = texture2D(peakTable, float2(fs0, fs1))` [S1].
+    *   If `iso != invalid_flag`, a peak is potentially present. Proceed to **Peak Finding** (Step 4). Otherwise, skip to Step 5 [S1].
+
+4.  **Peak Finding (Root Solving):**
+    *   Define implicit function $f(t) = V(\mathbf{R}(t)) - iso$.
+    *   Compute boundary values: $f_0 = fs0 - iso$, $f_1 = fs1 - iso$.
+    *   **Sign Change Check:** If $f_0 \cdot f_1 < 0$, a root exists in the segment.
+        *   Set bracketing points: $\mathbf{p}_0 = \mathbf{ps0}$, $\mathbf{p}_1 = \mathbf{ps1}$.
+        *   **Bisection/Secant Iteration:** Iterate $k$ from 0 to 1 (2 iterations) [S1].
+            *   Compute intermediate point using secant formula:
+                $$ \mathbf{p}_{rt} = \mathbf{p}_0 - (\mathbf{p}_1 - \mathbf{p}_0) \frac{f_0}{f_1 - f_0} $$
+            *   Evaluate field at intermediate point: $f_{rt} = \text{volume\_filter}(\mathbf{p}_{rt}.xyz) - iso$.
+            *   Update bounds: If $f_{rt} \cdot f_0 < 0$, set $\mathbf{p}_1 = \mathbf{p}_{rt}$, $f_1 = f_{rt}$. Else, set $\mathbf{p}_0 = \mathbf{p}_{rt}$, $f_0 = f_{rt}$.
+        *   **Final Sample:**
+            *   Recompute root estimate: $\mathbf{p}_{rt} = \mathbf{p}_0 - (\mathbf{p}_1 - \mathbf{p}_0) \frac{f_0}{f_1 - f_0}$.
+            *   Set field value $f_{rt} = iso$ (assume exact isovalue to avoid Moiré patterns) [S1].
+            *   Set `dt = 1.0` to scale opacity (constant segment distance) [S1].
+            *   Call `dvr_sample(p_rt, f_rt, dt)` to render the peak [S1].
+    *   *Note:* If multiple peaks are handled, the table returns up to four sequential isovales. The algorithm performs peak finding sequentially on all four values in precomputed order [S1].
+
+5.  **Standard DVR Sampling:**
+    *   If `!PEAK_ONLY` (or if `PEAK_XOR_DVR` is set and no peak was found), call `dvr_sample(ps1, fs1, dt)` [S1].
+
+6.  **Termination:**
+    *   If `color.a > termination_alpha`, break loop [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Globals
+ps0: vec4  # Position at segment entry
+ps1: vec4  # Position at segment exit
+fs0: float # Field value at ps0
+fs1: float # Field value at ps1
+dt: float  # Step size (time parameter)
+iso: float # Target isovalue
+color: vec4 # Accumulated color/alpha
+
+def volume_filter(pos: vec3) -> float:
+    """Sample volume at position."""
+    return texture(volume_texture, pos).r
+
+def dvr_sample(pos: vec4, field_val: float, step_dt: float):
+    """Perform standard volume rendering sample."""
+    # Implementation depends on specific DVR method (e.g., front-to-back compositing)
+    # Uses field_val to lookup color/opacity from transfer function
+    pass
+
+def peak_find():
+    """Solve for root within current segment [ps0, ps1]."""
+    f0 = fs0 - iso
+    f1 = fs1 - iso
+    
+    # Check for sign change indicating a root
+    if f0 * f1 < 0:
+        p0 = ps0
+        p1 = ps1
+        
+        # Secant method iterations (2 iterations as per source)
+        for k in range(2):
+            # Secant formula for root estimation
+            # prt = p0 - (p1 - p0) * (f0 / (f1 - f0))
+            # Note: Vector subtraction and scalar division
+            delta_p = p1 - p0
+            fraction = f0 / (f1 - f0)
+            prt = p0 - (delta_p * fraction)
+            
+            frt = volume_filter(prt.xyz) - iso
+            
+            # Update bracketing bounds
+            if frt * f0 < 0:
+                p1 = prt
+                f1 = frt
+            else:
+                p0 = prt
+                f0 = frt
+        
+        # Final root estimate
+        delta_p = p1 - p0
+        fraction = f0 / (f1 - f0)
+        prt = p0 - (delta_p * fraction)
+        
+        # Assume exact isovalue to avoid Moire patterns
+        frt = iso
+        
+        # Use constant dt=1 for opacity scaling at peak
+        dt = 1.0
+        
+        # Render the peak
+        dvr_sample(prt, frt, dt)
+
+def raycast(ray_origin: vec3, ray_direction: vec3):
+    global ps0, ps1, fs0, fs1, dt, iso, color
+    
+    # Initialization
+    dt = b # Initial step size parameter
+    ps1 = vec4(ray_origin, 0.0) # w component is time t
+    fs1 = volume_filter(ps1.xyz)
+    
+    while True:
+        # Save current state
+        ps0 = ps1
+        fs0 = fs1
+        
+        # Advance ray
+        ps1 = ps1 + vec4(ray_direction * dt, dt)
+        
+        # Differential sampling: adapt step size
+        # 'a' is the increment parameter for differential sampling
+        dt = dt + a 
+        
+        # Sample new position
+        fs1 = volume_filter(ps1.xyz)
+        
+        # Peak Finding Logic
+        if not DVR_ONLY:
+            # Query lookup table for potential isovales
+            # peakTable is a 2D texture indexed by (fs0, fs1)
+            iso = texture2D(peakTable, vec2(fs0, fs1)).r
+            
+            if iso != invalid_flag:
+                peak_find()
+        
+        # Standard DVR Logic
+        if not PEAK_ONLY:
+            if PEAK_XOR_DVR:
+                # Only sample DVR if no peak was found/processed
+                # Note: Logic implies checking if peak_find was actually called
+                # For simplicity, we assume if iso was invalid_flag, we DVR
+                if iso == invalid_flag:
+                    dvr_sample(ps1, fs1, dt)
+            else:
+                # DVR always, or XOR if peak_find wasn't triggered (implementation dependent)
+                # Source says: "If !PEAK_ONLY (or if PEAK_XOR_DVR is set and peak_find was not called)"
+                # We assume standard behavior if not XOR or if peak not found
+                dvr_sample(ps1, fs1, dt)
+        
+        # Termination check
+        if color.a > termination_alpha:
+            break
+```
+
+**Parameters:**
+*   `b`: Initial step size.
+*   `a`: Increment for differential sampling step size.
+*   `termination_alpha`: Alpha threshold for ray termination.
+*   `invalid_flag`: Value indicating no peak found in the lookup table.
+*   `iso`: Target isovalue for peak detection.
+
+**Edge Cases and Pitfalls:**
+*   **Moire Patterns:** Evaluating the field $f(\mathbf{R}(t))$ at the root estimate can cause Moire patterns with sharp transfer functions. The method assumes the value is exactly `iso` at the root position [S1].
+*   **Opacity Scaling:** Opacity $\rho_\alpha$ is not scaled by the segment distance $\Delta t$ at the peak; a constant $\Delta t = 1$ is used. This biases the integral towards peaks but ensures correct rendering of sharp features regardless of sampling rate [S1].
+*   **Multiple Peaks:** If multiple peaks exist in a segment, the lookup table must store up to four sequential peaks. The algorithm processes them sequentially. Handling multiple peaks costs roughly 20% more performance [S1].
+*   **Lookup Table Resolution:** A coarser discretization (128 bins) is often sufficient for peak finding, whereas preintegration requires larger tables for comparable quality near isosurfaces [S1].
+
+## Subtopics
+
+### [Coarse-to-Fine Volume Maximum Search](4657-coarse-to-fine-volume-maximum-search.md)
+A two-stage search algorithm to find the approximate location of the maximum value in a volume along a ray. The first stage performs a coarse linear scan, and the second stage refines the position using a divide-by-two approach. It sets itself apart from sibling methods by combining a global linear sweep with a localized binary-search-like refinement, prioritizing robustness in finding the global maximum within a segment over pure convergence speed.
+
+## Operating characteristics
+*   **Time Complexity:** Building the lookup table proceeds in $O(N^2)$ time, similarly to preintegration [S1].
+*   **Memory Complexity:** Requires a 2D lookup table. The table size depends on the discretization resolution (e.g., 128 bins).
+*   **Performance:**
+    *   Building the peak-finding table is roughly twice as fast as building a preintegrated table at the same resolution [S1].
+    *   **Heptane fire scene (1024x900):** Peak finding renders at 7.1 fps, postclassification at 11.6 fps, preintegration at 8.8 fps [S1].
+    *   **Zebrafish optic tract (1600x512):** Peak finding at 2.1 fps, Preintegration at 2.0 fps, Semi-transparent isosurfacing at 4.3 fps [S1].
+    *   Finding multiple peaks costs roughly 20% more performance [S1].
+*   **Strengths:**
+    *   Correctly renders sharp, Dirac-like features in transfer functions as semi-transparent isosurfaces [S1].
+    *   Avoids Moire patterns and incorrect opacity integration associated with preintegration for noisy or high-frequency data [S1].
+    *   Supports different rendering modalities (PEAK_XOR_DVR, PEAK_ONLY, DVR_ONLY) with no performance penalty [S1].
+*   **Limitations:**
+    *   Introduces bias in the volume rendering integral by assuming discrete impulses at peaks [S1].
+    *   Requires construction and storage of a 2D lookup table [S1].
+    *   May miss features if the sampling rate is too low to detect sign changes, though differential sampling helps mitigate this [S1].
+
+## Background
+*   **Origin:** The method was introduced by Knoll et al. in "Volume Ray Casting with Peak Finding and Differential Sampling" [S1].
+*   **History:** It was developed to address the shortcomings of standard postclassified and preintegrated volume rendering when dealing with transfer functions containing sharp features approaching Dirac impulses. The technique borrows from ray differentials formulations of Igehy for sampling strategy and uses Descartes' rule of signs and secant methods for root solving, similar to other interactive ray tracing algorithms [S1].
+*   **Usage:** It is used for interactive high-fidelity volume rendering of noisy or entropic data (e.g., from scanned sources in medicine or biology) where high-frequency features are critical [S1].
+
+## Sources
+[S1] Volume Ray Casting with Peak Finding and Differential Sampling, https://www.sci.utah.edu/~knolla/avrc.pdf, fetched 2026-10-27
+[S2] GitHub - m-pilia/volume-raycasting: Simple visualiser based on GPU ..., https://github.com/m-pilia/volume-raycasting, fetched 2026-10-27 (unofficial)

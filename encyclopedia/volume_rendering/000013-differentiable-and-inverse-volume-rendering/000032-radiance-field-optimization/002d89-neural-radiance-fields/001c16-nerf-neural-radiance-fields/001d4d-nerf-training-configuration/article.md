@@ -1,0 +1,187 @@
+# NeRF Training Configuration
+
+Also called: NeRF Training Loop Configuration, NeRF Training Setup, Sparsity Prior, Sparsity Regularization
+
+## Overview
+NeRF Training Configuration defines the optimization loop, data handling, and regularization strategies required to train a Neural Radiance Field (NeRF) model for novel view synthesis. It solves the problem of converging a continuous volumetric representation to match observed multi-view images while preventing the generation of arbitrary, non-photorealistic geometry in unobserved regions. It distinguishes itself from sibling methods like [NeRF-SH](1348-nerf-sh.md) by focusing on the standard MLP architecture and training dynamics, and from [NeuS Training Loss](2535-neus-training-loss.md) by relying on volumetric opacity rather than explicit surface constraints like the Eikonal equation.
+
+## How it works
+The training process involves loading datasets, initializing coarse and fine NeRF models, and optimizing them using a composite loss function that includes a sparsity prior.
+
+**Inputs and Outputs:**
+- **Inputs:** Multi-view images of a static scene, camera poses (extrinsics and intrinsics), and bounding box defining the scene volume.
+- **Outputs:** Optimized NeRF models (coarse and fine) and associated optimizer states.
+
+**Data Structures:**
+- **Dataset:** Images are resized such that the shorter side is 400 pixels [S2, unofficial]. Camera intrinsics are derived from height ($H$), width ($W$), and focal length ($f$). The intrinsic matrix $K$ is:
+  $$
+  K = \begin{bmatrix} f & 0 & 0.5W \\ 0 & f & 0.5H \\ 0 & 0 & 1 \end{bmatrix}
+  $$
+  [S2, unofficial].
+- **Checkpoint:** Saved as a `.pt` file containing a dictionary with keys: `'epoch'`, `'coarse_model_state_dict'`, `'fine_model_state_dict'`, and `'optimizer_state_dict'` [S2, unofficial]. Note that model loading does not restore the epoch number from the checkpoint [S2, unofficial].
+
+**Numbered Steps:**
+1. **Data Loading:** Load training, validation, and test datasets using a standard dataset loader (e.g., `BlenderDataset`) with the specified resolution [S2, unofficial].
+2. **Data Preparation:** Create a `DataLoader` with `batch_size=1` and `shuffle=True` for training [S2, unofficial].
+3. **Model Initialization:** Initialize two NeRF models: a coarse model and a fine model [S2, unofficial].
+4. **Parameter Combination:** Combine the parameters of the coarse and fine models into a single parameter set for optimization [S2, unofficial].
+5. **Optimizer Setup:** Initialize the Adam optimizer with a learning rate of $5 \times 10^{-4}$ and betas $(0.9, 0.999)$ [S2, unofficial].
+6. **Loss Definition:** Define the primary photometric loss as Mean Squared Error (MSE) between predicted and target colors [S2, unofficial].
+7. **Sparsity Regularization:** Compute the sparsity loss term to encourage empty space in unobserved regions [S1, unofficial].
+8. **Training Loop:** Initialize a trainer with the models, optimizer, loss, and dataloader, then call `trainer.train()` [S2, unofficial].
+
+**Formulas:**
+The total loss $\mathcal{L}$ is a combination of the RGB loss and the sparsity loss:
+$$
+\mathcal{L} = \mathcal{L}_{\text{RGB}} + \lambda_{\text{sparsity}} \mathcal{L}_{\text{sparsity}}
+$$
+
+The RGB loss is the sum of squared errors over a batch of rays $\mathcal{R}$:
+$$
+\mathcal{L}_{\text{RGB}} = \sum_{\mathbf{r} \in \mathcal{R}} \| C(\mathbf{r}) - \hat{C}(\mathbf{r}) \|_2^2 \quad [S1, unofficial]
+$$
+where $C(\mathbf{r})$ is the target color and $\hat{C}(\mathbf{r})$ is the rendered color.
+
+The sparsity loss $\mathcal{L}_{\text{sparsity}}$ is defined as:
+$$
+\mathcal{L}_{\text{sparsity}} = \frac{1}{K} \sum_{k=1}^K |1 - \exp(-\lambda \sigma_k)| \quad [S1, unofficial]
+$$
+where:
+- $K$ is the number of uniformly random points sampled within the bounding box.
+- $\sigma_k$ is the density value at the $k$-th random point.
+- $\lambda$ is a hyperparameter controlling the strength of the sparsity prior [S1, unofficial].
+
+**Parameters:**
+- **Learning Rate:** $5 \times 10^{-4}$ [S2, unofficial].
+- **Batch Size:** 1 [S2, unofficial].
+- **Image Resolution:** 400 pixels on the shorter side [S2, unofficial].
+- **Optimizer:** Adam with betas $(0.9, 0.999)$ [S2, unofficial].
+- **Sparsity Hyperparameter:** $\lambda$ is used in the exponential term; specific value not given in sources [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Solid Background:** Without the sparsity prior, the model may converge to a solution where unobserved portions or the background are solid, which degrades the spatial resolution of subsequent octree-based representations (e.g., PlenOctrees) [S1, unofficial].
+- **Checkpoint Epoch:** When loading a checkpoint, the epoch number is not restored from the file, requiring manual handling or resetting [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+def compute_sparsity_loss(density_samples, lambda_param):
+    """
+    Computes the sparsity loss for NeRF training.
+    
+    Args:
+        density_samples (torch.Tensor): Tensor of density values sigma_k at K random points.
+        lambda_param (float): Hyperparameter lambda for the sparsity prior.
+        
+    Returns:
+        torch.Tensor: Scalar sparsity loss value.
+    """
+    # L_sparsity = (1/K) * sum_{k=1}^K |1 - exp(-lambda * sigma_k)|
+    exp_term = torch.exp(-lambda_param * density_samples)
+    sparsity_loss = torch.mean(torch.abs(1.0 - exp_term))
+    return sparsity_loss
+
+def train_nerf(config):
+    """
+    Main training loop for NeRF configuration.
+    
+    Args:
+        config (dict): Configuration dictionary containing dataset path, resolution, etc.
+    """
+    # 1. Load datasets
+    train_dataset = BlenderDataset(resolution=config['resolution'], split='train')
+    val_dataset = BlenderDataset(resolution=config['resolution'], split='val')
+    test_dataset = BlenderDataset(resolution=config['resolution'], split='test')
+    
+    # 2. Create DataLoaders
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, 
+        batch_size=1, 
+        shuffle=True
+    )
+    
+    # 3. Extract camera intrinsics
+    # Assuming dataset provides height, width, focal_length
+    H, W, f = train_dataset.height, train_dataset.width, train_dataset.focal_length
+    K = torch.tensor([
+        [f, 0, 0.5 * W],
+        [0, f, 0.5 * H],
+        [0, 0, 1]
+    ])
+    
+    # 4. Initialize models
+    coarse_model = NeRFMLP()
+    fine_model = NeRFMLP()
+    
+    # 5. Combine parameters
+    all_params = list(coarse_model.parameters()) + list(fine_model.parameters())
+    
+    # 6. Create optimizer
+    optimizer = optim.Adam(all_params, lr=5e-4, betas=(0.9, 0.999))
+    
+    # 7. Create loss functions
+    mse_loss = nn.MSELoss()
+    lambda_sparsity = 1.0  # Example value, not specified in sources
+    lambda_rgb = 1.0       # Weight for RGB loss
+    
+    # 8. Training loop
+    num_epochs = config.get('num_epochs', 1000)
+    for epoch in range(num_epochs):
+        coarse_model.train()
+        fine_model.train()
+        
+        for batch in train_loader:
+            images = batch['image']
+            rays = batch['rays']  # Contains origins, directions, etc.
+            
+            optimizer.zero_grad()
+            
+            # Render coarse and fine colors
+            # Note: Actual ray marching and volume rendering logic is encapsulated in NeRFMLP.forward
+            coarse_color = coarse_model(rays)
+            fine_color = fine_model(rays)
+            
+            # Compute RGB loss
+            loss_rgb = mse_loss(fine_color, images)
+            
+            # Compute sparsity loss
+            # Sample random points in bounding box
+            random_points = sample_random_points_in_bbox(config['bbox'], K=1000)
+            random_densities = coarse_model.get_density(random_points)
+            loss_sparsity = compute_sparsity_loss(random_densities, lambda_sparsity)
+            
+            # Total loss
+            loss = lambda_rgb * loss_rgb + loss_sparsity
+            
+            loss.backward()
+            optimizer.step()
+            
+        # Validation and checkpointing would occur here
+        # Checkpoint format: {'epoch': epoch, 'coarse_model_state_dict': ..., ...}
+```
+
+## Subtopics
+
+### [NeuS Training Loss](2535-neus-training-loss.md)
+The NeuS training loss is a composite objective function used to optimize neural implicit surface representations (specifically Signed Distance Fields or Unsigned Distance Fields) from multi-view images without 3D ground-truth supervision. It solves the problem of recovering high-fidelity open surfaces by combining photometric consistency with geometric regularization. It distinguishes itself from standard NeRF training [NeRF Training Configuration](1203-nerf-training-configuration.md) by explicitly enforcing the Eikonal equation on the SDF/UDF gradients and using a mask-based binary cross-entropy loss to drive opacity toward binary values, thereby stabilizing the thin-surface approximation.
+
+## Operating characteristics
+- **Time Complexity:** Training time is dominated by the volume rendering process, which requires sampling points along rays and querying the MLP. The addition of sparsity loss requires additional forward passes for random points, increasing computational cost slightly [S1, unofficial].
+- **Memory Complexity:** Memory usage is proportional to the number of parameters in the coarse and fine MLPs and the batch size. The sparsity loss does not significantly increase memory footprint as it operates on a fixed number of random points [S1, unofficial].
+- **Measured Performance:** On NeRF-synthetic test scenes, the approach achieves comparable image quality to state-of-the-art methods like NSVF, with PSNR values around 31.71 and SSIM around 0.958 after fine-tuning [S1, unofficial].
+- **Strengths:** The sparsity prior prevents the model from learning arbitrary geometry in unobserved regions, which is crucial for efficient octree-based compression and rendering [S1, unofficial].
+- **Limitations:** Without the sparsity prior, the model may converge to solid backgrounds, degrading the quality of subsequent octree conversions [S1, unofficial]. The method relies on careful tuning of the sparsity hyperparameter $\lambda$ [S1, unofficial].
+- **When to use:** Use when the goal is to train a standard NeRF model that will be converted to an octree-based representation (e.g., PlenOctrees) for real-time rendering [S1, unofficial].
+- **When not to use:** Use [NeuS Training Loss](2535-neus-training-loss.md) if explicit surface reconstruction is required rather than volumetric rendering.
+
+## Background
+The NeRF Training Configuration, particularly the inclusion of the sparsity prior, was introduced in the context of PlenOctrees for real-time rendering of Neural Radiance Fields [S1, unofficial]. The work demonstrated that while arbitrary geometry in unobserved regions does not directly worsen image quality metrics, it adversely impacts the conversion process to octree-based representations by occupying significant voxel space [S1, unofficial]. The implementation details, such as the specific PyTorch training loop and data loading procedures, are documented in unofficial repositories [S2, unofficial].
+
+## Sources
+[S1] PlenOctrees For Real-time Rendering of Neural Radiance Fields (NeRFs), http://alexyu.net/plenoctrees/, fetched 2026-10-28 (unofficial)
+[S2] charan2598/NeRF-PyTorch, https://github.com/charan2598/NeRF-PyTorch, fetched 2026-10-27 (unofficial)

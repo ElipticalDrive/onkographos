@@ -1,0 +1,2878 @@
+# rust-voxlap-vxl
+
+Reimplementation of VOXLAP's voxel storage in hopefully-idiomatic Rust:
+
+- Compressed in-memory using the same RLE format as .vxl map files
+- Batched edits
+
+Todo:
+
+- Floating block detection
+- Make errors less catastrophic?
+
+VOXLAP engine by Ken Silverman (http://advsys.net/ken)
+
+## Why?
+
+Just to learn more about VOXLAP and Rust. Frankly this project has been "outdated" from its very beginning, and for that reason I won't be publishing this as a crate. Any modern project will want to use data structures that are tailored more to working with GPUs. Ace of Spades was an abberation, cause CPU renderers like VOXLAP are cool but they've been pretty much irrelevant for, what, a quarter of a century?
+
+## Was this made with AI?
+
+Not exactly, but it's tricky. I used AI to dissect VOXLAP's impenetrable codebase. Unfortunately, AI is good at picking out patterns that would take me weeks of study. Really, [you try reading it yourself](https://github.com/MuffinTastic/wowanothervoxlap/blob/master/voxlap/voxlap/voxlap5.c). I also used it to get suggestions on code I've already written.
+
+Other than that, I'm a staunch believer in AI melting your brain if you let it. I make all the decisions, even if it takes me like 10x as long. AI is not a "co-engineer", it's a tool.
+
+## License
+
+MIT
+
+### src/arena.rs
+```
+use std::{mem::MaybeUninit, ops::Range, slice};
+
+use bitvec::array::BitArray;
+
+use crate::VSID;
+
+/// Represents a range of words in the arena
+pub type VxlArenaSpanRange = Range<usize>;
+
+#[derive(Debug, Clone, Copy)]
+#[packbits::pack(u32)]
+pub struct VxlArenaSpanRangePacked {
+    #[bits(22)]
+    start: u32,
+    #[bits(10)]
+    len: u16,
+}
+
+impl VxlArenaSpanRangePacked {
+    const __: () = {
+        assert!(std::mem::size_of::<Self>() == std::mem::size_of::<u32>());
+        assert!(std::mem::align_of::<Self>() == std::mem::align_of::<u32>());
+    };
+}
+
+impl From<VxlArenaSpanRange> for VxlArenaSpanRangePacked {
+    fn from(value: VxlArenaSpanRange) -> Self {
+        Self {
+            start: value.start as u32,
+            len: value.len() as u16,
+        }
+    }
+}
+
+impl VxlArenaSpanRangePacked {
+    pub fn unpack(self) -> Range<usize> {
+        let start = self.start as usize;
+        let len = self.len as usize;
+
+        start..start + len
+    }
+}
+
+pub type VxlData = u32;
+pub const VXL_WORD_SIZE: usize = std::mem::size_of::<VxlData>();
+
+// A value of 16 here with a VSID of 512 comes out to 16mb
+// It's unlikely that the arena will get saturated through normal use
+const VXL_ARENA_WORDS_PER_COLUMN: usize = 16;
+const VXL_ARENA_WORDS: usize = VSID * VSID * VXL_ARENA_WORDS_PER_COLUMN;
+
+type VxlArenaBits = BitArray<[usize; bitvec::mem::elts::<usize>(VXL_ARENA_WORDS)]>;
+type VxlArenaData = [MaybeUninit<VxlData>; VXL_ARENA_WORDS];
+
+pub struct VxlArena {
+    /// Bit array representing word usage in the arena
+    /// Tracks whether data is actually valid, letting us safely transmute from MaybeUninit
+    used: Box<VxlArenaBits>,
+
+    /// Raw data for the arena
+    data: Box<VxlArenaData>,
+
+    /// Cursor for new allocations
+    ///
+    /// This gets incremented for new allocations, and wraps once it reaches the end of the arena.
+    next_alloc_start: usize,
+}
+
+impl VxlArena {
+    pub fn new() -> VxlArena {
+        let used = unsafe { Box::<VxlArenaBits>::new_zeroed().assume_init() };
+        // SAFETY: This is just saying the array exists, not that the data inside it is initialized
+        let data = unsafe { Box::<VxlArenaData>::new_uninit().assume_init() };
+        let next_alloc_start = 0;
+
+        Self {
+            used,
+            data,
+            next_alloc_start,
+        }
+    }
+
+    pub fn raw_data(&self) -> &VxlArenaData {
+        &self.data
+    }
+
+    pub fn raw_data_mut(&mut self) -> &mut VxlArenaData {
+        &mut self.data
+    }
+
+    pub fn get(&self, span_range: VxlArenaSpanRange) -> &[VxlData] {
+        assert!(span_range.start < VXL_ARENA_WORDS && span_range.end <= VXL_ARENA_WORDS);
+        assert!(self.used[span_range.clone()].all());
+
+        // All bits are valid, return a slice
+
+        unsafe {
+            let len = span_range.end - span_range.start;
+            let ptr = self.data.as_ptr().add(span_range.start).cast::<VxlData>();
+            slice::from_raw_parts(ptr, len)
+        }
+    }
+
+    pub fn get_bytes(&self, span_range: VxlArenaSpanRange) -> &[u8] {
+        assert!(span_range.start < VXL_ARENA_WORDS && span_range.end <= VXL_ARENA_WORDS);
+        assert!(self.used[span_range.clone()].all());
+
+        // All bits are valid, return a slice
+
+        unsafe {
+            let len = span_range.end - span_range.start;
+            let ptr = self.data.as_ptr().add(span_range.start).cast::<u8>();
+            slice::from_raw_parts(ptr, len * VXL_WORD_SIZE)
+        }
+    }
+
+    pub fn get_mut(&mut self, span_range: VxlArenaSpanRange) -> &mut [VxlData] {
+        assert!(span_range.start < VXL_ARENA_WORDS && span_range.end <= VXL_ARENA_WORDS);
+        assert!(self.used[span_range.clone()].all());
+
+        // All bits are valid, return a mutable slice
+
+        unsafe {
+            let len = span_range.end - span_range.start;
+            let ptr = self
+                .data
+                .as_mut_ptr()
+                .add(span_range.start)
+                .cast::<VxlData>();
+            slice::from_raw_parts_mut(ptr, len)
+        }
+    }
+
+    pub fn used_bytes_count(&self) -> usize {
+        self.used.count_ones() * VXL_WORD_SIZE
+    }
+
+    pub fn free_bytes_count(&self) -> usize {
+        VXL_ARENA_WORDS * VXL_WORD_SIZE - self.used_bytes_count()
+    }
+
+    /// Finds an open spot in the arena, copies the span to that spot and returns where it lives
+    pub fn alloc(&mut self, span_data: &[VxlData]) -> VxlArenaSpanRange {
+        let span_len = span_data.len();
+        debug_assert!(span_len > 0, "attempted to add 0-length span");
+
+        let mut range = None;
+
+        // Suppose we start in the middle of the arena when it has a lot of fragmentation like so:
+        //    ..xxxxx....xxxx..xx..x.xx.xxxx.xx.x.
+        //                          ^
+        // and we want to allocate a small span like xxx. It's going to reach the end even though there's open space.
+        // To handle this we simply search to the end, wrap, then search again:
+        // 1) ..xxxxx....xxxx..xx..x.xx.xxxx.xx.x.
+        //                                       ^
+        // 2) ..xxxxx....xxxx..xx..x.xx.xxxx.xx.x.
+        //    ^
+        // 3) ..xxxxx!!!.xxxx..xx..x.xx.xxxx.xx.x.
+        //          !^!
+        // We only wrap once, because if it fails after a single wrap there's really no space left.
+        // To achieve this wrap we run the search pass twice, which means we need a range of 0..2
+        'search: for _pass in 0..2 {
+            'candidate_pass: for sample_pos in
+                (self.next_alloc_start..self.data.len()).step_by(span_len)
+            {
+                if self.used[sample_pos] {
+                    continue;
+                }
+
+                // Sample position says there's a candidate opening here. Let's check it...
+
+                // Slide the position back until it's up against a used word from a different allocation
+                let candidate_start = {
+                    let mut pos = sample_pos;
+
+                    'slide: loop {
+                        if pos == 0 || self.used[pos - 1] {
+                            break 'slide;
+                        }
+
+                        pos -= 1;
+                    }
+
+                    pos
+                };
+
+                let candidate_end = candidate_start + span_len;
+
+                if candidate_end > self.data.len() {
+                    self.next_alloc_start = 0;
+                    break 'candidate_pass;
+                }
+
+                // By this point we know that [candidate_start, sample_pos] is free.
+                // So we sample from (sample_pos, candidate_end), and do it in reverse to discard small holes more quickly
+                for pos in (sample_pos + 1..candidate_end).rev() {
+                    if self.used[pos] {
+                        continue 'candidate_pass;
+                    }
+                }
+
+                // We have space!
+                range = Some(candidate_start..candidate_end);
+
+                if candidate_end == self.data.len() {
+                    self.next_alloc_start = 0;
+                } else {
+                    self.next_alloc_start = candidate_end;
+                }
+
+                break 'search;
+            }
+
+            self.next_alloc_start = 0;
+        }
+
+        let range = range.expect("alloc couldn't find space after wrap - vxl arena full");
+        debug_assert_eq!(span_len, range.len());
+
+        self.used[range.clone()].fill(true);
+        self.get_mut(range.clone()).copy_from_slice(span_data);
+
+        range
+    }
+
+    pub fn dealloc(&mut self, span_range: VxlArenaSpanRange) {
+        self.used[span_range].fill(false);
+    }
+
+    pub fn realloc(
+        &mut self,
+        span_range: VxlArenaSpanRange,
+        new_span_data: &[VxlData],
+    ) -> VxlArenaSpanRange {
+        self.dealloc(span_range);
+        self.alloc(new_span_data)
+    }
+
+    pub fn populate_raw(&mut self, raw_data: &[u8]) -> VxlArenaSpanRange {
+        assert!(
+            raw_data
+                .len()
+                .is_multiple_of(std::mem::size_of::<VxlData>()),
+            "tried to populate vxl arena with partial word data"
+        );
+
+        let src_data: &[VxlData] = bytemuck::cast_slice(raw_data);
+        self.used[..src_data.len()].fill(true);
+
+        self.get_mut(0..src_data.len()).copy_from_slice(src_data);
+
+        self.used[src_data.len()..].fill(false);
+
+        0..src_data.len()
+    }
+
+    pub fn clear(&mut self) {
+        self.used.fill(false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn span_range_pack_round_trips_start_and_len() {
+        let range = 1234..1299;
+
+        let packed = VxlArenaSpanRangePacked::from(range.clone());
+
+        assert_eq!(packed.unpack(), range);
+    }
+
+    #[test]
+    fn alloc_stores_words_and_advances_to_next_free_range() {
+        let mut arena = VxlArena::new();
+
+        let first = arena.alloc(&[1, 2, 3]);
+        let second = arena.alloc(&[4, 5]);
+
+        assert_eq!(first, 0..3);
+        assert_eq!(second, 3..5);
+        assert_eq!(arena.get(first), &[1, 2, 3]);
+        assert_eq!(arena.get(second), &[4, 5]);
+    }
+
+    #[test]
+    fn get_mut_allows_in_place_updates_for_allocated_range() {
+        let mut arena = VxlArena::new();
+        let range = arena.alloc(&[10, 20, 30]);
+
+        arena.get_mut(range.clone())[1] = 99;
+
+        assert_eq!(arena.get(range), &[10, 99, 30]);
+    }
+
+    #[test]
+    fn dealloc_makes_range_available_for_later_allocations() {
+        let mut arena = VxlArena::new();
+        let first = arena.alloc(&[1, 2, 3]);
+        let _second = arena.alloc(&[4, 5, 6]);
+
+        arena.dealloc(first.clone());
+        arena.next_alloc_start = 0;
+
+        let reused = arena.alloc(&[7, 8, 9]);
+
+        assert_eq!(reused, first);
+        assert_eq!(arena.get(reused), &[7, 8, 9]);
+    }
+
+    #[test]
+    fn realloc_replaces_data_and_invalidates_old_range() {
+        let mut arena = VxlArena::new();
+        let first = arena.alloc(&[1, 2, 3]);
+        let _block_reuse = arena.alloc(&[4, 5]);
+
+        let replacement = arena.realloc(first.clone(), &[9, 10, 11, 12]);
+
+        assert_ne!(replacement, first);
+        assert_eq!(arena.get(replacement), &[9, 10, 11, 12]);
+    }
+
+    #[test]
+    fn populate_raw_loads_words_and_clears_remaining_usage() {
+        let mut arena = VxlArena::new();
+        let old_range = arena.alloc(&[1, 2, 3, 4]);
+        assert_eq!(arena.get(old_range), &[1, 2, 3, 4]);
+
+        let raw_words = [10_u32, 20, 30];
+        let raw_bytes: &[u8] = bytemuck::cast_slice(&raw_words);
+
+        arena.populate_raw(raw_bytes);
+
+        assert_eq!(arena.get(0..3), &[10, 20, 30]);
+        assert!(!arena.used[3]);
+    }
+
+    #[test]
+    #[should_panic(expected = "tried to populate vxl arena with partial word data")]
+    fn populate_raw_rejects_partial_words() {
+        let mut arena = VxlArena::new();
+
+        arena.populate_raw(&[1, 2, 3]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn get_rejects_deallocated_range() {
+        let mut arena = VxlArena::new();
+        let range = arena.alloc(&[1, 2, 3]);
+
+        arena.dealloc(range.clone());
+
+        let _ = arena.get(range);
+    }
+
+    #[test]
+    fn clear_marks_allocated_data_unused() {
+        let mut arena = VxlArena::new();
+        let range = arena.alloc(&[1, 2, 3]);
+
+        arena.clear();
+
+        assert!(!arena.used[range].any());
+    }
+}
+```
+
+### src/compiled.rs
+```
+use std::io;
+
+use smallvec::SmallVec;
+
+use crate::{
+    MAX_VERTICAL_STACK, MAXZDIM, VSID, VxlColor, VxlColorSet, VxlState,
+    arena::{VXL_WORD_SIZE, VxlArena, VxlArenaSpanRangePacked, VxlData},
+    slab::{VxlSlab, VxlSlabColumn, VxlSlabScanner},
+};
+
+type VxlCompiledColumns = [VxlArenaSpanRangePacked; VSID * VSID];
+
+pub struct VxlCompiledRLE {
+    arena: VxlArena,
+    columns: Box<VxlCompiledColumns>,
+}
+
+impl VxlCompiledRLE {
+    // Initialize
+    pub fn new_flat_at_z(z: i32, color_set: &VxlColorSet) -> Self {
+        assert!((0..MAXZDIM as i32).contains(&z));
+
+        let mut arena = VxlArena::new();
+        let mut columns = unsafe { Box::<VxlCompiledColumns>::new_zeroed().assume_init() };
+
+        for (i, column) in columns.iter_mut().enumerate() {
+            let x = (i % VSID) as i32;
+            let y = (i / VSID) as i32;
+
+            let color = match color_set {
+                VxlColorSet::ColorFunc(func) => func(x, y, z),
+                VxlColorSet::Color(vxl_color) => *vxl_color,
+            };
+
+            let column_data: [VxlData; 2] = [
+                VxlCompiledSpanHeader {
+                    len: 0,
+                    top_color_start: z as u8,
+                    top_color_end: z as u8,
+                    air_start: 0,
+                }
+                .into(),
+                color.into(),
+            ];
+
+            *column = arena.alloc(&column_data).into();
+        }
+
+        Self { arena, columns }
+    }
+
+    pub fn new_from_data(data: &[u8]) -> Self {
+        assert!(
+            data.len() > VXL_WORD_SIZE * VSID * VSID * 2,
+            "not enough data for a valid map"
+        );
+
+        let arena = VxlArena::new();
+        let columns = unsafe { Box::<VxlCompiledColumns>::new_zeroed().assume_init() };
+        let mut map = Self { arena, columns };
+
+        map.clear_and_load_data(data);
+
+        map
+    }
+
+    pub fn clear_and_load_data(&mut self, data: &[u8]) {
+        self.arena.clear();
+
+        // Copy data into the arena
+        let range = self.arena.populate_raw(data);
+
+        // Now we populate the columns
+        // Get a reference to the column data
+        let data = self.arena.get(range);
+
+        let mut cursor = 0;
+
+        // Walk through every column...
+        for i in 0..VSID * VSID {
+            let len = Self::get_column_len(&data[cursor..]);
+            self.columns[i] = (cursor..cursor + len).into();
+            cursor += len;
+        }
+    }
+
+    pub fn arena(&self) -> &VxlArena {
+        &self.arena
+    }
+
+    pub fn write_columns<W: io::Write>(&self, writer: &mut W) -> Result<(), io::Error> {
+        for column in self.columns.iter() {
+            let data = self.arena.get_bytes(column.unpack());
+            writer.write_all(data)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn write_column<W: io::Write>(
+        &self,
+        writer: &mut W,
+        x: i32,
+        y: i32,
+    ) -> Result<(), io::Error> {
+        let column_range = self.columns[Self::get_index(x, y)];
+        let data = self.arena.get_bytes(column_range.unpack());
+        writer.write_all(data)?;
+
+        Ok(())
+    }
+
+    pub fn write_column_index<W: io::Write>(
+        &self,
+        writer: &mut W,
+        i: usize,
+    ) -> Result<(), io::Error> {
+        let column_range = self.columns[i];
+        let data = self.arena.get_bytes(column_range.unpack());
+        writer.write_all(data)?;
+
+        Ok(())
+    }
+
+    fn get_index(x: i32, y: i32) -> usize {
+        assert!((0..VSID as i32).contains(&x));
+        assert!((0..VSID as i32).contains(&y));
+
+        y as usize * VSID + x as usize
+    }
+
+    fn column_data(&self, x: i32, y: i32) -> &[VxlData] {
+        let column_range = self.columns[Self::get_index(x, y)];
+        self.arena.get(column_range.unpack())
+    }
+
+    pub fn is_voxel_solid(&self, x: i32, y: i32, z: i32) -> bool {
+        if !(0..VSID as i32).contains(&x) || !(0..VSID as i32).contains(&y) {
+            return false;
+        }
+
+        let column = self.column_data(x, y);
+        Self::is_voxel_solid_inner(column, z)
+    }
+
+    fn is_voxel_solid_inner(column: &[VxlData], z: i32) -> bool {
+        let mut cursor = 0;
+
+        loop {
+            let span = VxlCompiledSpan::new(&column[cursor..]);
+
+            if z < span.solid_start() as i32 {
+                return false;
+            }
+
+            // Everything inside and below the last span's top color run is solid
+            if span.header.is_last_span() {
+                return true;
+            }
+
+            if z <= span.solid_end() as i32 {
+                return true;
+            }
+
+            cursor += span.header.len as usize;
+        }
+    }
+
+    /// range is [z_start, z_end] - inclusive
+    pub fn any_voxel_solid(&self, x: i32, y: i32, z_start: i32, z_end: i32) -> bool {
+        if !(0..VSID as i32).contains(&x) || !(0..VSID as i32).contains(&y) {
+            return false;
+        }
+
+        let column = self.column_data(x, y);
+        Self::any_voxel_solid_inner(column, z_start, z_end)
+    }
+
+    fn any_voxel_solid_inner(column: &[VxlData], z_start: i32, z_end: i32) -> bool {
+        if z_end < 0 {
+            return false;
+        }
+
+        if z_start >= MAXZDIM as i32 {
+            return true;
+        }
+
+        let mut cursor = 0;
+
+        loop {
+            let span = VxlCompiledSpan::new(&column[cursor..]);
+
+            if z_end < span.solid_start() as i32 {
+                return false;
+            }
+
+            if span.header.is_last_span() {
+                return true;
+            }
+
+            if z_start <= span.solid_end() as i32 {
+                return true;
+            }
+
+            cursor += span.header.len as usize;
+        }
+    }
+
+    /// range is [z_start, z_end] - inclusive
+    pub fn any_voxel_empty(&self, x: i32, y: i32, z_start: i32, z_end: i32) -> bool {
+        if !(0..VSID as i32).contains(&x) || !(0..VSID as i32).contains(&y) {
+            return true;
+        }
+
+        let column = self.column_data(x, y);
+        Self::any_voxel_empty_inner(column, z_start, z_end)
+    }
+
+    fn any_voxel_empty_inner(column: &[VxlData], z_start: i32, z_end: i32) -> bool {
+        if z_end >= MAXZDIM as i32 {
+            return true;
+        }
+
+        if z_start >= MAXZDIM as i32 {
+            return false;
+        }
+
+        let mut cursor = 0;
+
+        loop {
+            let span = VxlCompiledSpan::new(&column[cursor..]);
+
+            if z_start < span.solid_start() as i32 {
+                return true;
+            }
+
+            // Start of the range is below the last air voxel, all solid past that point
+            if span.header.is_last_span() {
+                return false;
+            }
+
+            if z_end <= span.solid_end() as i32 {
+                return false;
+            }
+
+            cursor += span.header.len as usize;
+        }
+    }
+
+    pub fn get_floor_z(&self, x: i32, y: i32, z: i32) -> i32 {
+        if !(0..VSID as i32).contains(&x) || !(0..VSID as i32).contains(&y) {
+            return z;
+        }
+
+        let column = self.column_data(x, y);
+        Self::get_floor_z_inner(column, z)
+    }
+
+    fn get_floor_z_inner(column: &[VxlData], z: i32) -> i32 {
+        if z >= MAXZDIM as i32 {
+            return z;
+        }
+
+        let mut cursor = 0;
+
+        loop {
+            let span = VxlCompiledSpan::new(&column[cursor..]);
+
+            if z <= span.solid_start() as i32 {
+                return span.solid_start() as i32;
+            }
+
+            if span.header.is_last_span() {
+                break;
+            }
+
+            if span.solid_start() as i32 <= z && z <= span.solid_end() as i32 {
+                break;
+            }
+
+            cursor += span.header.len as usize;
+        }
+
+        z
+    }
+
+    pub fn get_voxel(&self, x: i32, y: i32, z: i32) -> VxlState {
+        if !(0..VSID as i32).contains(&x) || !(0..VSID as i32).contains(&y) {
+            return VxlState::Air;
+        }
+
+        let column = self.column_data(x, y);
+        Self::get_voxel_inner(column, z)
+    }
+
+    fn get_voxel_inner(column: &[VxlData], z: i32) -> VxlState {
+        if z >= MAXZDIM as i32 {
+            return VxlState::Unexposed;
+        }
+
+        let mut cursor = 0;
+
+        loop {
+            let span = VxlCompiledSpan::new(&column[cursor..]);
+
+            if let Some(top_colors) = span.top_colors()
+                && z <= top_colors.end as i32
+            {
+                if z < top_colors.start as i32 {
+                    return VxlState::Air;
+                }
+
+                return VxlState::Color(top_colors.at_z(z as u8));
+            }
+
+            if span.header.is_last_span() {
+                return VxlState::Unexposed;
+            }
+
+            if let Some(bottom_colors) = span.bottom_colors() {
+                if z <= bottom_colors.end as i32 {
+                    if z < bottom_colors.start as i32 {
+                        return VxlState::Unexposed;
+                    }
+
+                    return VxlState::Color(bottom_colors.at_z(z as u8));
+                }
+            } else if z <= span.solid_end() as i32 {
+                return VxlState::Unexposed;
+            }
+
+            cursor += span.header.len as usize;
+        }
+    }
+
+    pub(crate) fn populate_slabs(&self, x: i32, y: i32, slab_column: &mut VxlSlabColumn) {
+        if !(0..VSID as i32).contains(&x) || !(0..VSID as i32).contains(&y) {
+            return;
+        }
+
+        let compiled_column = self.column_data(x, y);
+        Self::populate_slabs_inner(compiled_column, slab_column);
+    }
+
+    fn populate_slabs_inner(compiled_column: &[VxlData], slab_column: &mut VxlSlabColumn) {
+        let mut cursor = 0;
+
+        loop {
+            let span = VxlCompiledSpan::new(&compiled_column[cursor..]);
+
+            slab_column.insert(VxlSlab {
+                start: span.solid_start(),
+                end: span.solid_end() + 1, // exclusive
+            });
+
+            if span.header.is_last_span() {
+                break;
+            }
+
+            cursor += span.header.len as usize;
+        }
+    }
+
+    pub(crate) fn recompile_column(
+        &mut self,
+        x: i32,
+        y: i32,
+        slab_column: &VxlSlabColumn,
+        slab_neighbors: [Option<&VxlSlabColumn>; 4],
+        color_set: &VxlColorSet,
+    ) {
+        assert!(
+            slab_column.len() != 0,
+            "VxlCompiledRLE tried to compile empty slab column"
+        );
+
+        let last_slab_end = slab_column.slabs()[slab_column.len() - 1].end;
+        assert!(
+            last_slab_end as usize == MAXZDIM,
+            "VxlCompiledRLE last slab wasn't at world bottom, {last_slab_end}",
+        );
+
+        let column_index = Self::get_index(x, y);
+        let old_column_range = self.columns[column_index];
+
+        // Allocate enough space on the stack for the worst case scenario for the RLE
+        let mut new_column: [VxlData; MAXZDIM * 2 + 1] = [Default::default(); _];
+
+        let new_column_len = {
+            // We'll need the range later for realloc so this access is split
+            let old_column = self.arena.get(old_column_range.unpack());
+
+            Self::compile_column_inner(
+                slab_column,
+                slab_neighbors,
+                &mut new_column,
+                old_column,
+                x,
+                y,
+                color_set,
+            )
+        };
+
+        let new_column_range = self
+            .arena
+            .realloc(old_column_range.unpack(), &new_column[..new_column_len]);
+
+        self.columns[column_index] = new_column_range.into();
+    }
+
+    fn compile_column_inner(
+        slab_column: &VxlSlabColumn,
+        slab_neighbors: [Option<&VxlSlabColumn>; 4],
+        new_column: &mut [VxlData],
+        old_column: &[VxlData],
+        x: i32,
+        y: i32,
+        color_set: &VxlColorSet,
+    ) -> usize {
+        // Grab existing color data
+        let mut old_color_runs: ColorRunVec<'_> = SmallVec::new();
+        Self::compile_get_column_color_runs(old_column, &mut old_color_runs);
+
+        // Avoids doing the old color search from zero every time
+        let mut old_color_run_cursor = 0;
+
+        let slabs = slab_column.slabs();
+        let mut neighbor_scanners = slab_neighbors.map(|n| n.map(VxlSlabScanner::new));
+
+        let mut z = slabs[0].start as i32;
+
+        let mut header_cursor = 0;
+        let mut cursor = header_cursor + 1;
+
+        let mut slab_iter = slab_column.slabs().iter();
+
+        let mut slab = slab_iter
+            .next()
+            .expect("VxlCompiledRLE no slabs in column to compile");
+
+        const UNKNOWN: u8 = 0;
+
+        // We don't know the length of the span until we're done, so we store this work-in-progress header data
+        let mut unfinished_header = VxlCompiledSpanHeader {
+            len: UNKNOWN,
+            top_color_start: z as u8,
+            top_color_end: slab.end - 1,
+            air_start: 0,
+        };
+
+        #[derive(Debug, Clone, Copy)]
+        enum CompileState {
+            TopColorRun,
+            Unexposed,
+            BottomColorRun,
+            FinishSpan,
+            Exit,
+        }
+
+        let mut state = CompileState::TopColorRun;
+
+        'compile: loop {
+            match state {
+                CompileState::TopColorRun => {
+                    while Self::compile_needs_color(slab, &mut neighbor_scanners, z) {
+                        Self::compile_write_color(
+                            new_column,
+                            &mut cursor,
+                            &mut old_color_run_cursor,
+                            &old_color_runs,
+                            x,
+                            y,
+                            z,
+                            color_set,
+                        );
+
+                        z += 1;
+
+                        if z >= slab.end as i32 {
+                            state = CompileState::FinishSpan;
+                            continue 'compile;
+                        }
+                    }
+
+                    // Top color run has finished and the state machine
+                    // has reached an unexposed interior region
+
+                    // - = AIR   S = SURFACE   U = UNEXPOSED
+                    // ---SUUU         or         ---SUUUS--
+                    //     ^                          ^
+
+                    // Set the end of the top color run appropriately
+                    unfinished_header.top_color_end = z as u8 - 1;
+
+                    state = CompileState::Unexposed;
+                }
+                CompileState::Unexposed => {
+                    // Skip past all the unexposed voxels
+                    z = Self::compile_next_possible_surface_z(
+                        slab.end as i32,
+                        &mut neighbor_scanners,
+                        z,
+                    );
+
+                    for neighbor in neighbor_scanners.iter_mut().flatten() {
+                        neighbor.advance_to(z);
+                    }
+
+                    if z >= MAXZDIM as i32 - 1 {
+                        // We reached the bottom of the map and there were no more colors to write.
+                        state = CompileState::Exit;
+                        continue 'compile;
+                    }
+
+                    state = CompileState::BottomColorRun;
+                }
+                CompileState::BottomColorRun => {
+                    while Self::compile_needs_color(slab, &mut neighbor_scanners, z) {
+                        Self::compile_write_color(
+                            new_column,
+                            &mut cursor,
+                            &mut old_color_run_cursor,
+                            &old_color_runs,
+                            x,
+                            y,
+                            z,
+                            color_set,
+                        );
+
+                        z += 1;
+
+                        if z >= slab.end as i32 {
+                            state = CompileState::FinishSpan;
+                            continue 'compile;
+                        }
+                    }
+
+                    // Bottom color run has finished and the state machine
+                    // has reached an unexposed interior region
+
+                    // This is a situation where we have a stack of spans with no air gaps
+                    // - = AIR   S = SURFACE   U = UNEXPOSED
+                    // ---SUUSUU       or         ---SUUSUUS-
+                    //        ^                          ^
+                    // It needs special treatment...
+
+                    // Finish the previous span and start a new one
+                    Self::compile_write_header(
+                        new_column,
+                        &mut header_cursor,
+                        &mut cursor,
+                        unfinished_header,
+                        false,
+                    );
+
+                    // Prime new header data
+                    // if end == start - 1, then length = (end - start + 1) = 0
+                    // so this span has no top color run
+                    unfinished_header = VxlCompiledSpanHeader {
+                        len: UNKNOWN,
+                        top_color_start: z as u8,
+                        top_color_end: z as u8 - 1,
+                        air_start: z as u8,
+                    };
+
+                    state = CompileState::Unexposed;
+                }
+                CompileState::FinishSpan => {
+                    if slab.end as i32 >= MAXZDIM as i32 {
+                        state = CompileState::Exit;
+                        continue 'compile;
+                    }
+
+                    let last_slab = match slab_iter.next() {
+                        Some(new_slab) => {
+                            let last_slab = slab;
+                            slab = new_slab;
+                            last_slab
+                        }
+                        None => {
+                            state = CompileState::Exit;
+                            continue 'compile;
+                        }
+                    };
+
+                    Self::compile_write_header(
+                        new_column,
+                        &mut header_cursor,
+                        &mut cursor,
+                        unfinished_header,
+                        false,
+                    );
+
+                    unfinished_header = VxlCompiledSpanHeader {
+                        len: UNKNOWN,
+                        top_color_start: slab.start,
+                        top_color_end: slab.end - 1,
+                        air_start: last_slab.end,
+                    };
+
+                    // Start next slab
+                    z = slab.start as i32;
+
+                    state = CompileState::TopColorRun;
+                }
+                CompileState::Exit => {
+                    Self::compile_write_header(
+                        new_column,
+                        &mut header_cursor,
+                        &mut cursor,
+                        unfinished_header,
+                        true,
+                    );
+
+                    break 'compile;
+                }
+            }
+        }
+
+        cursor
+    }
+
+    fn compile_write_header(
+        new_column: &mut [VxlData],
+        header_cursor: &mut usize,
+        cursor: &mut usize,
+        mut header: VxlCompiledSpanHeader,
+        column_end: bool,
+    ) {
+        // Write to header position (which is before the colors we wrote)
+        // HCCCC
+        // |    ^
+        let write: &mut VxlCompiledSpanHeader = bytemuck::cast_mut(&mut new_column[*header_cursor]);
+        header.len = if column_end {
+            0
+        } else {
+            (*cursor - *header_cursor) as u8
+        };
+
+        *write = header;
+
+        // Set cursor position past it so colors start after this
+        if !column_end {
+            // Set next header position
+            *header_cursor = *cursor;
+            *cursor += 1;
+            // HCCCCH
+            //      |^
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_write_color(
+        new_column: &mut [VxlData],
+        cursor: &mut usize,
+        color_run_cursor: &mut usize,
+        color_runs: &ColorRunVec,
+        x: i32,
+        y: i32,
+        z: i32,
+        color_set: &VxlColorSet,
+    ) {
+        let color =
+            Self::compile_get_old_color(color_run_cursor, color_runs, z).unwrap_or_else(|| {
+                match color_set {
+                    VxlColorSet::ColorFunc(func) => func(x, y, z),
+                    VxlColorSet::Color(vxl_color) => *vxl_color,
+                }
+            });
+
+        let write: &mut VxlColor = bytemuck::cast_mut(&mut new_column[*cursor]);
+        *write = color;
+        *cursor += 1;
+    }
+
+    fn compile_needs_color(
+        slab: &VxlSlab,
+        neighbor_scanners: &mut [Option<VxlSlabScanner<'_>>; 4],
+        z: i32,
+    ) -> bool {
+        let top_exposed = z == slab.start as i32;
+
+        let bottom_exposed = if (z as usize) == (MAXZDIM - 1) {
+            false
+        } else {
+            z == slab.end as i32 - 1
+        };
+
+        let side_exposed = neighbor_scanners.iter_mut().any(|o| {
+            !o.as_mut().map(|n| n.is_solid(z)).unwrap_or({
+                // Ace of Spades' version of VOXLAP treats the edges of the map as empty columns
+                false
+            })
+        });
+
+        top_exposed || bottom_exposed || side_exposed
+    }
+
+    fn compile_next_possible_surface_z(
+        slab_end: i32,
+        neighbor_scanners: &mut [Option<VxlSlabScanner<'_>>; 4],
+        z: i32,
+    ) -> i32 {
+        let mut next = slab_end - 1;
+
+        for neighbor in neighbor_scanners.iter_mut().flatten() {
+            if let Some(boundary) = neighbor.next_boundary_from(z)
+                && boundary < next
+            {
+                next = boundary;
+            }
+        }
+
+        next
+    }
+
+    fn compile_get_old_color(
+        cursor: &mut usize,
+        color_runs: &ColorRunVec,
+        z: i32,
+    ) -> Option<VxlColor> {
+        while *cursor < color_runs.len() && (color_runs[*cursor].end as i32) < z {
+            *cursor += 1;
+        }
+
+        if *cursor == color_runs.len() {
+            return None;
+        }
+
+        if color_runs[*cursor].start as i32 <= z && z <= color_runs[*cursor].end as i32 {
+            Some(color_runs[*cursor].at_z(z as u8))
+        } else {
+            None
+        }
+    }
+
+    fn compile_get_column_color_runs<'d>(column: &'d [VxlData], color_runs: &mut ColorRunVec<'d>) {
+        let mut cursor = 0;
+
+        loop {
+            let span = VxlCompiledSpan::new(&column[cursor..]);
+
+            if let Some(top_colors) = span.top_colors() {
+                color_runs.push(top_colors);
+            }
+
+            if span.header.is_last_span() {
+                break;
+            }
+
+            if let Some(bottom_colors) = span.bottom_colors() {
+                color_runs.push(bottom_colors);
+            }
+
+            cursor += span.header.len as usize;
+        }
+    }
+
+    fn get_column_len(column: &[VxlData]) -> usize {
+        let mut cursor = 0;
+
+        loop {
+            let header = VxlCompiledSpanHeader::ref_from(&column[cursor]);
+
+            cursor += header.true_len();
+
+            if header.is_last_span() {
+                break;
+            }
+        }
+
+        cursor
+    }
+}
+
+#[derive(Debug)]
+struct VxlCompiledSpan<'d> {
+    data: &'d [VxlData],
+    header: &'d VxlCompiledSpanHeader,
+}
+
+impl<'d> VxlCompiledSpan<'d> {
+    const MIN_WORDS: usize = 2; // header + 1 color
+    const COLOR_DATA_START: usize = 1;
+
+    /// Assumes the header is at [0]. Use slices!
+    fn new(data: &'d [VxlData]) -> Self {
+        let header = VxlCompiledSpanHeader::ref_from(&data[0]);
+
+        Self { data, header }
+    }
+
+    fn top_colors(&self) -> Option<VxlCompiledColorRun<'d>> {
+        let has_top_colors = self.header.top_color_len() != 0;
+        let top_color_data_end = Self::COLOR_DATA_START + self.header.top_color_len() as usize;
+
+        match has_top_colors {
+            true => Some(VxlCompiledColorRun {
+                start: self.header.top_color_start,
+                end: self.header.top_color_end,
+                colors: bytemuck::cast_slice(
+                    &self.data[Self::COLOR_DATA_START..top_color_data_end],
+                ),
+            }),
+            false => None,
+        }
+    }
+
+    fn bottom_colors(&self) -> Option<VxlCompiledColorRun<'d>> {
+        let top_color_data_end = Self::COLOR_DATA_START + self.header.top_color_len() as usize;
+        let has_bottom_colors = !self.header.is_last_span() && self.header.bottom_color_len() != 0;
+
+        // To find the bottom color start and end z coords we need to read the next header
+        let next_header: Option<&VxlCompiledSpanHeader> = (!self.header.is_last_span())
+            .then(|| VxlCompiledSpanHeader::ref_from(&self.data[self.header.len as usize]));
+
+        match has_bottom_colors {
+            true => {
+                let bottom_color_len = self.header.bottom_color_len();
+
+                let next_header = next_header.unwrap();
+
+                Some(VxlCompiledColorRun {
+                    start: next_header.air_start - bottom_color_len,
+                    end: next_header.air_start - 1,
+                    colors: bytemuck::cast_slice(
+                        &self.data
+                            [top_color_data_end..top_color_data_end + bottom_color_len as usize],
+                    ),
+                })
+            }
+            false => None,
+        }
+    }
+
+    fn solid_start(&self) -> u8 {
+        // If there's a top color run, this is the start of the solid region, plain and simple
+        // If there's no top color run, this is still the start of the solid region, because of how
+        // spans without top color runs are encoded. See recompile_column
+        self.header.top_color_start
+    }
+
+    fn solid_end(&self) -> u8 {
+        let next_header: Option<&VxlCompiledSpanHeader> = (!self.header.is_last_span())
+            .then(|| VxlCompiledSpanHeader::ref_from(&self.data[self.header.len as usize]));
+
+        next_header
+            .map(|header| header.air_start - 1)
+            .unwrap_or(MAXZDIM as u8 - 1)
+    }
+}
+
+#[derive(Debug)]
+struct VxlCompiledColorRun<'d> {
+    start: u8, // inclusive
+    end: u8,   // inclusive
+    colors: &'d [VxlColor],
+}
+
+impl<'d> VxlCompiledColorRun<'d> {
+    fn is_in_range(&self, z: u8) -> bool {
+        self.start <= z && z <= self.end
+    }
+
+    fn at_z(&self, z: u8) -> VxlColor {
+        assert!(self.is_in_range(z));
+
+        let i = z - self.start;
+        self.colors[i as usize]
+    }
+}
+
+type ColorRunVec<'d> = SmallVec<[VxlCompiledColorRun<'d>; MAX_VERTICAL_STACK]>;
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C, packed)]
+struct VxlCompiledSpanHeader {
+    /// Length of the slab data, including the header, in words
+    ///
+    /// Special case: `0` for end of column
+    len: u8,
+    top_color_start: u8, // inclusive
+    top_color_end: u8,   // inclusive
+    air_start: u8,
+}
+
+impl VxlCompiledSpanHeader {
+    const __: () = {
+        assert!(std::mem::size_of::<Self>() == std::mem::size_of::<VxlData>());
+        assert!(std::mem::align_of::<Self>() <= std::mem::align_of::<VxlData>());
+    };
+
+    fn ref_from(data: &VxlData) -> &Self {
+        bytemuck::cast_ref(data)
+    }
+
+    fn is_last_span(&self) -> bool {
+        self.len == 0
+    }
+
+    fn total_colors(&self) -> u8 {
+        self.len - 1
+    }
+
+    fn top_color_len(&self) -> u8 {
+        if self.top_color_end < self.top_color_start {
+            0
+        } else {
+            self.top_color_end - self.top_color_start + 1
+        }
+    }
+
+    fn bottom_color_len(&self) -> u8 {
+        self.total_colors() - self.top_color_len()
+    }
+
+    fn true_len(&self) -> usize {
+        if self.is_last_span() {
+            let top_color_len = self.top_color_len();
+            assert_ne!(top_color_len, 0, "something went really bad");
+            (top_color_len + 1) as usize
+        } else {
+            self.len as usize
+        }
+    }
+}
+
+unsafe impl bytemuck::Pod for VxlCompiledSpanHeader {}
+
+unsafe impl bytemuck::Zeroable for VxlCompiledSpanHeader {
+    fn zeroed() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+impl From<VxlCompiledSpanHeader> for VxlData {
+    fn from(value: VxlCompiledSpanHeader) -> Self {
+        bytemuck::cast(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::slab::VxlSlabColumnPriority;
+
+    fn header_at(column: &[VxlData], i: usize) -> VxlCompiledSpanHeader {
+        bytemuck::cast(column[i])
+    }
+
+    fn test_column() -> Vec<VxlData> {
+        vec![
+            // Air: 0..3, top colors: 3..=4, solid: 5..=7, bottom colors: 8..=10
+            VxlCompiledSpanHeader {
+                len: 6,
+                top_color_start: 3,
+                top_color_end: 4,
+                air_start: 0,
+            }
+            .into(),
+            VxlColor::new(3, 30, 0, 0x80).into(),
+            VxlColor::new(4, 40, 0, 0x80).into(),
+            VxlColor::new(8, 80, 0, 0x80).into(),
+            VxlColor::new(9, 90, 0, 0x80).into(),
+            VxlColor::new(10, 100, 0, 0x80).into(),
+            // Air: 11..15, top color: 16, solid: 17..=18, no bottom colors
+            VxlCompiledSpanHeader {
+                len: 2,
+                top_color_start: 16,
+                top_color_end: 16,
+                air_start: 11,
+            }
+            .into(),
+            VxlColor::new(16, 160, 0, 0x80).into(),
+            // No air, no top colors, solid: 19..=23, bottom colors: 24..=26
+            VxlCompiledSpanHeader {
+                len: 4,
+                top_color_start: 19,
+                top_color_end: 18,
+                air_start: 19,
+            }
+            .into(),
+            VxlColor::new(24, 240, 0, 0x80).into(),
+            VxlColor::new(25, 250, 0, 0x80).into(),
+            VxlColor::new(26, 255, 0, 0x80).into(),
+            // Air: 27..31, top colors: 32..=33, unexposed solid: 34..=63
+            VxlCompiledSpanHeader {
+                len: 0,
+                top_color_start: 32,
+                top_color_end: 33,
+                air_start: 27,
+            }
+            .into(),
+            VxlColor::new(32, 250, 0, 0x80).into(),
+            VxlColor::new(33, 255, 0, 0x80).into(),
+        ]
+    }
+
+    fn all_empty_neighbors() -> [Option<&'static VxlSlabColumn>; 4] {
+        [None, None, None, None]
+    }
+
+    fn full_neighbor() -> VxlSlabColumn {
+        VxlSlabColumn::new(
+            VxlSlabColumnPriority::Support,
+            &[VxlSlab { start: 8, end: 64 }],
+        )
+    }
+
+    fn gapped_neighbor() -> VxlSlabColumn {
+        VxlSlabColumn::new(
+            VxlSlabColumnPriority::Support,
+            &[
+                VxlSlab { start: 9, end: 13 },
+                VxlSlab { start: 16, end: 64 },
+            ],
+        )
+    }
+
+    #[test]
+    fn span_header_interprets_top_and_bottom_color_runs() {
+        let column = test_column();
+        let span = VxlCompiledSpan::new(&column);
+
+        assert_eq!(span.solid_start(), 3);
+        assert_eq!(span.solid_end(), 10);
+
+        let top_colors = span.top_colors().unwrap();
+        assert_eq!(top_colors.start, 3);
+        assert_eq!(top_colors.end, 4);
+        assert_eq!(top_colors.at_z(3), VxlColor::new(3, 30, 0, 0x80));
+        assert_eq!(top_colors.at_z(4), VxlColor::new(4, 40, 0, 0x80));
+
+        let bottom_colors = span.bottom_colors().unwrap();
+        assert_eq!(bottom_colors.start, 8);
+        assert_eq!(bottom_colors.end, 10);
+        assert_eq!(bottom_colors.at_z(8), VxlColor::new(8, 80, 0, 0x80));
+        assert_eq!(bottom_colors.at_z(10), VxlColor::new(10, 100, 0, 0x80));
+    }
+
+    #[test]
+    fn voxel_state_inner_distinguishes_air_surface_and_unexposed() {
+        let column = test_column();
+
+        assert!(matches!(
+            VxlCompiledRLE::get_voxel_inner(&column, 2),
+            VxlState::Air
+        ));
+        assert!(matches!(
+            VxlCompiledRLE::get_voxel_inner(&column, 5),
+            VxlState::Unexposed
+        ));
+        assert!(matches!(
+            VxlCompiledRLE::get_voxel_inner(&column, 12),
+            VxlState::Air
+        ));
+        assert!(matches!(
+            VxlCompiledRLE::get_voxel_inner(&column, 18),
+            VxlState::Unexposed
+        ));
+        assert!(matches!(
+            VxlCompiledRLE::get_voxel_inner(&column, 22),
+            VxlState::Unexposed
+        ));
+
+        assert_eq!(
+            VxlCompiledRLE::get_voxel_inner(&column, 8),
+            VxlState::Color(VxlColor::new(8, 80, 0, 0x80))
+        );
+        assert_eq!(
+            VxlCompiledRLE::get_voxel_inner(&column, 24),
+            VxlState::Color(VxlColor::new(24, 240, 0, 0x80))
+        );
+    }
+
+    #[test]
+    fn solidity_queries_inner_use_inclusive_z_ranges() {
+        let column = test_column();
+
+        assert!(!VxlCompiledRLE::is_voxel_solid_inner(&column, 2));
+        assert!(VxlCompiledRLE::is_voxel_solid_inner(&column, 3));
+        assert!(VxlCompiledRLE::is_voxel_solid_inner(&column, 10));
+        assert!(!VxlCompiledRLE::is_voxel_solid_inner(&column, 11));
+        assert!(VxlCompiledRLE::is_voxel_solid_inner(&column, 16));
+        assert!(VxlCompiledRLE::is_voxel_solid_inner(&column, 19));
+        assert!(!VxlCompiledRLE::is_voxel_solid_inner(&column, 27));
+        assert!(VxlCompiledRLE::is_voxel_solid_inner(&column, 25));
+
+        assert!(!VxlCompiledRLE::any_voxel_solid_inner(&column, 0, 2));
+        assert!(VxlCompiledRLE::any_voxel_solid_inner(&column, 2, 3));
+        assert!(VxlCompiledRLE::any_voxel_solid_inner(&column, 10, 11));
+        assert!(!VxlCompiledRLE::any_voxel_solid_inner(&column, 11, 13));
+        assert!(VxlCompiledRLE::any_voxel_solid_inner(&column, 21, 22));
+
+        assert!(VxlCompiledRLE::any_voxel_empty_inner(&column, 0, 2));
+        assert!(VxlCompiledRLE::any_voxel_empty_inner(&column, 10, 11));
+        assert!(!VxlCompiledRLE::any_voxel_empty_inner(&column, 3, 10));
+        assert!(!VxlCompiledRLE::any_voxel_empty_inner(&column, 16, 18));
+        assert!(!VxlCompiledRLE::any_voxel_empty_inner(&column, 22, 26));
+        assert!(!VxlCompiledRLE::any_voxel_empty_inner(&column, 32, 63));
+    }
+
+    #[test]
+    fn populate_slabs_inner_recovers_solid_ranges() {
+        let column = test_column();
+        let mut slabs = VxlSlabColumn::empty(VxlSlabColumnPriority::Support);
+
+        VxlCompiledRLE::populate_slabs_inner(&column, &mut slabs);
+
+        assert_eq!(slabs.len(), 3);
+        assert_eq!(slabs.slabs()[0].start, 3);
+        assert_eq!(slabs.slabs()[0].end, 11);
+        assert_eq!(slabs.slabs()[1].start, 16);
+        assert_eq!(slabs.slabs()[1].end, 27);
+        assert_eq!(slabs.slabs()[2].start, 32);
+        assert_eq!(slabs.slabs()[2].end, 64);
+    }
+
+    #[test]
+    fn get_floor_z_inner_returns_first_solid_at_or_below_z() {
+        let column = test_column();
+
+        assert_eq!(VxlCompiledRLE::get_floor_z_inner(&column, 0), 3);
+        assert_eq!(VxlCompiledRLE::get_floor_z_inner(&column, 3), 3);
+        assert_eq!(VxlCompiledRLE::get_floor_z_inner(&column, 11), 16);
+        assert_eq!(VxlCompiledRLE::get_floor_z_inner(&column, 19), 19);
+        assert_eq!(VxlCompiledRLE::get_floor_z_inner(&column, 27), 32);
+        assert_eq!(VxlCompiledRLE::get_floor_z_inner(&column, 32), 32);
+        assert_eq!(VxlCompiledRLE::get_floor_z_inner(&column, 64), 64);
+    }
+
+    #[test]
+    fn compile_get_column_color_runs_collects_runs_in_z_order() {
+        let column = test_column();
+        let mut runs = ColorRunVec::new();
+
+        VxlCompiledRLE::compile_get_column_color_runs(&column, &mut runs);
+
+        assert_eq!(runs.len(), 5);
+        assert_eq!((runs[0].start, runs[0].end), (3, 4));
+        assert_eq!((runs[1].start, runs[1].end), (8, 10));
+        assert_eq!((runs[2].start, runs[2].end), (16, 16));
+        assert_eq!((runs[3].start, runs[3].end), (24, 26));
+        assert_eq!((runs[4].start, runs[4].end), (32, 33));
+    }
+
+    #[test]
+    fn varied_column_handles_zero_bottom_color_run() {
+        let column = test_column();
+        let first = VxlCompiledSpan::new(&column);
+        let second = VxlCompiledSpan::new(&column[first.header.len as usize..]);
+        let third =
+            VxlCompiledSpan::new(&column[first.header.len as usize + second.header.len as usize..]);
+
+        assert_eq!(first.solid_start(), 3);
+        assert_eq!(first.solid_end(), 10);
+        assert_eq!(second.solid_start(), 16);
+        assert_eq!(second.solid_end(), 18);
+        assert!(second.bottom_colors().is_none());
+        assert_eq!(third.solid_start(), 19);
+        assert_eq!(third.solid_end(), 26);
+        assert!(third.top_colors().is_none());
+        assert_eq!(third.bottom_colors().unwrap().start, 24);
+        assert_eq!(third.bottom_colors().unwrap().end, 26);
+
+        assert!(matches!(
+            VxlCompiledRLE::get_voxel_inner(&column, 15),
+            VxlState::Air
+        ));
+        assert_eq!(
+            VxlCompiledRLE::get_voxel_inner(&column, 16),
+            VxlState::Color(VxlColor::new(16, 160, 0, 0x80))
+        );
+        assert!(matches!(
+            VxlCompiledRLE::get_voxel_inner(&column, 18),
+            VxlState::Unexposed
+        ));
+        assert!(matches!(
+            VxlCompiledRLE::get_voxel_inner(&column, 19),
+            VxlState::Unexposed
+        ));
+        assert_eq!(
+            VxlCompiledRLE::get_voxel_inner(&column, 24),
+            VxlState::Color(VxlColor::new(24, 240, 0, 0x80))
+        );
+
+        let mut runs = ColorRunVec::new();
+        VxlCompiledRLE::compile_get_column_color_runs(&column, &mut runs);
+
+        assert_eq!(runs.len(), 5);
+        assert_eq!((runs[0].start, runs[0].end), (3, 4));
+        assert_eq!((runs[1].start, runs[1].end), (8, 10));
+        assert_eq!((runs[2].start, runs[2].end), (16, 16));
+        assert_eq!((runs[3].start, runs[3].end), (24, 26));
+        assert_eq!((runs[4].start, runs[4].end), (32, 33));
+    }
+
+    #[test]
+    fn compile_column_inner_uses_old_colors_for_matching_surface_z() {
+        let old_column = test_column();
+        let new_slabs = VxlSlabColumn::new(
+            VxlSlabColumnPriority::Support,
+            &[VxlSlab { start: 8, end: 64 }],
+        );
+        let mut new_column = vec![0; MAX_VERTICAL_STACK * VxlCompiledSpan::MIN_WORDS + 1];
+
+        let color_set = VxlColorSet::Color(VxlColor::new(1, 2, 3, 4));
+
+        let len = VxlCompiledRLE::compile_column_inner(
+            &new_slabs,
+            all_empty_neighbors(),
+            &mut new_column,
+            &old_column,
+            0,
+            0,
+            &color_set,
+        );
+
+        let new_column = &new_column[..len];
+        let header = header_at(new_column, 0);
+        assert!(header.is_last_span());
+        assert_eq!(header.top_color_start, 8);
+        assert_eq!(header.top_color_end, 63);
+        assert_eq!(header.air_start, 0);
+
+        let span = VxlCompiledSpan::new(new_column);
+        let colors = span.top_colors().unwrap();
+        assert_eq!(colors.at_z(8), VxlColor::new(8, 80, 0, 0x80));
+        assert_eq!(colors.at_z(10), VxlColor::new(10, 100, 0, 0x80));
+        assert_eq!(colors.at_z(12), VxlColor::new(1, 2, 3, 4));
+        assert_eq!(colors.at_z(16), VxlColor::new(16, 160, 0, 0x80));
+        assert_eq!(colors.at_z(13), VxlColor::new(1, 2, 3, 4));
+    }
+
+    #[test]
+    fn compile_column_inner_splits_around_air_gap_after_modification() {
+        let old_column = test_column();
+        let new_slabs = VxlSlabColumn::new(
+            VxlSlabColumnPriority::Support,
+            &[
+                VxlSlab { start: 10, end: 13 },
+                VxlSlab { start: 20, end: 64 },
+            ],
+        );
+        let mut new_column = vec![0; MAX_VERTICAL_STACK * VxlCompiledSpan::MIN_WORDS + 1];
+
+        let color_set = VxlColorSet::Color(VxlColor::new(1, 2, 3, 4));
+
+        let len = VxlCompiledRLE::compile_column_inner(
+            &new_slabs,
+            all_empty_neighbors(),
+            &mut new_column,
+            &old_column,
+            0,
+            0,
+            &color_set,
+        );
+
+        let new_column = &new_column[..len];
+        let first = header_at(new_column, 0);
+        let second = header_at(new_column, first.len as usize);
+
+        assert_eq!(first.len, 4);
+        assert_eq!(first.top_color_start, 10);
+        assert_eq!(first.top_color_end, 12);
+        assert_eq!(first.air_start, 0);
+
+        assert!(second.is_last_span());
+        assert_eq!(second.top_color_start, 20);
+        assert_eq!(second.top_color_end, 63);
+        assert_eq!(second.air_start, 13);
+
+        assert!(matches!(
+            VxlCompiledRLE::get_voxel_inner(new_column, 19),
+            VxlState::Air
+        ));
+        match VxlCompiledRLE::get_voxel_inner(new_column, 10) {
+            VxlState::Color(actual) => assert_eq!(actual, VxlColor::new(10, 100, 0, 0x80)),
+            _ => panic!("expected old color to be preserved at z=10"),
+        }
+    }
+
+    #[test]
+    fn compile_column_inner_uses_neighbor_solidity_to_limit_surface_colors() {
+        let old_column = test_column();
+        let new_slabs = VxlSlabColumn::new(
+            VxlSlabColumnPriority::Support,
+            &[VxlSlab { start: 8, end: 64 }],
+        );
+        let full_north = full_neighbor();
+        let full_south = full_neighbor();
+        let full_east = full_neighbor();
+        let gapped_west = gapped_neighbor();
+        let neighbors = [
+            Some(&full_north),
+            Some(&full_south),
+            Some(&gapped_west),
+            Some(&full_east),
+        ];
+        let mut new_column = vec![0; MAX_VERTICAL_STACK * VxlCompiledSpan::MIN_WORDS + 1];
+
+        let color_set = VxlColorSet::Color(VxlColor::new(1, 2, 3, 4));
+
+        let len = VxlCompiledRLE::compile_column_inner(
+            &new_slabs,
+            neighbors,
+            &mut new_column,
+            &old_column,
+            0,
+            0,
+            &color_set,
+        );
+
+        let new_column = &new_column[..len];
+        let first = header_at(new_column, 0);
+        let second = header_at(new_column, first.len as usize);
+
+        assert_eq!(first.len, 5);
+        assert_eq!(first.top_color_start, 8);
+        assert_eq!(first.top_color_end, 8);
+        assert_eq!(first.air_start, 0);
+
+        let first_span = VxlCompiledSpan::new(new_column);
+        let top_colors = first_span.top_colors().unwrap();
+        let bottom_colors = first_span.bottom_colors().unwrap();
+        assert_eq!(top_colors.at_z(8), VxlColor::new(8, 80, 0, 0x80));
+        assert_eq!((bottom_colors.start, bottom_colors.end), (13, 15));
+        assert_eq!(bottom_colors.at_z(13), VxlColor::new(1, 2, 3, 4));
+        assert_eq!(bottom_colors.at_z(15), VxlColor::new(1, 2, 3, 4));
+
+        assert!(second.is_last_span());
+        assert_eq!(second.top_color_start, 16);
+        assert_eq!(second.top_color_end, 15);
+        assert_eq!(second.air_start, 16);
+
+        assert!(matches!(
+            VxlCompiledRLE::get_voxel_inner(new_column, 12),
+            VxlState::Unexposed
+        ));
+        assert_eq!(
+            VxlCompiledRLE::get_voxel_inner(new_column, 14),
+            VxlState::Color(VxlColor::new(1, 2, 3, 4))
+        );
+        assert!(matches!(
+            VxlCompiledRLE::get_voxel_inner(new_column, 16),
+            VxlState::Unexposed
+        ));
+    }
+}
+```
+
+### src/lib.rs
+```
+mod arena;
+mod compiled;
+mod generator;
+mod slab;
+
+use std::io;
+
+use crate::{
+    arena::VxlData,
+    compiled::VxlCompiledRLE,
+    slab::{VxlSlab, VxlSlabCache},
+};
+
+// ----- //
+
+/// Maximum .VXL dimensions in both x & y directions
+pub const VSID: usize = 512;
+
+/// Maximum .VXL dimensions in z direction (height)
+pub const MAXZDIM: usize = 64;
+
+// ----- //
+
+const MAX_VERTICAL_STACK: usize = MAXZDIM / 2;
+
+/// Arena-backed voxel storage
+///
+/// The map is stored as a 2D array
+pub struct VxlMap {
+    compiled: VxlCompiledRLE,
+
+    /// For caching solidity edits
+    slab_cache: VxlSlabCache,
+}
+
+impl VxlMap {
+    pub fn new_flat_at_z(z: i32, set: &VxlColorSet) -> Self {
+        let compiled = VxlCompiledRLE::new_flat_at_z(z, set);
+        let slab_cache = VxlSlabCache::new();
+
+        Self {
+            compiled,
+            slab_cache,
+        }
+    }
+
+    pub fn new_from_data(data: &[u8]) -> Self {
+        let compiled = VxlCompiledRLE::new_from_data(data);
+        let slab_cache = VxlSlabCache::new();
+
+        Self {
+            compiled,
+            slab_cache,
+        }
+    }
+
+    pub fn clear_and_load_data(&mut self, data: &[u8]) {
+        self.compiled.clear_and_load_data(data);
+    }
+
+    pub fn write_columns<W: io::Write>(&self, writer: &mut W) -> Result<(), io::Error> {
+        self.compiled.write_columns(writer)
+    }
+
+    pub fn write_column<W: io::Write>(
+        &self,
+        writer: &mut W,
+        x: i32,
+        y: i32,
+    ) -> Result<(), io::Error> {
+        self.compiled.write_column(writer, x, y)
+    }
+
+    pub fn used_bytes_count(&self) -> usize {
+        self.compiled.arena().used_bytes_count()
+    }
+
+    pub fn free_bytes_count(&self) -> usize {
+        self.compiled.arena().free_bytes_count()
+    }
+
+    pub fn write_column_index<W: io::Write>(
+        &self,
+        writer: &mut W,
+        i: usize,
+    ) -> Result<(), io::Error> {
+        self.compiled.write_column_index(writer, i)
+    }
+
+    /// Checks if a given voxel is solid.
+    pub fn is_voxel_solid(&self, x: i32, y: i32, z: i32) -> bool {
+        self.compiled.is_voxel_solid(x, y, z)
+    }
+
+    /// Checks if any voxels are solid within the inclusive range [z_start, z_end]
+    pub fn any_voxel_solid(&self, x: i32, y: i32, z_start: i32, z_end: i32) -> bool {
+        self.compiled.any_voxel_solid(x, y, z_start, z_end)
+    }
+
+    /// Checks if any voxels are empty within the inclusive z range [z_start, z_end]
+    pub fn any_voxel_empty(&self, x: i32, y: i32, z_start: i32, z_end: i32) -> bool {
+        self.compiled.any_voxel_empty(x, y, z_start, z_end)
+    }
+
+    // Gets the solid surface z position directly below x, y, z.
+    pub fn get_floor_z(&self, x: i32, y: i32, z: i32) -> i32 {
+        self.compiled.get_floor_z(x, y, z)
+    }
+
+    // Gets the state of a given voxel.
+    pub fn get_voxel(&self, x: i32, y: i32, z: i32) -> VxlState {
+        self.compiled.get_voxel(x, y, z)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_rect(
+        &mut self,
+        x_start: i32,
+        x_end: i32,
+        y_start: i32,
+        y_end: i32,
+        z_start: i32,
+        z_end: i32,
+        color_set: &VxlColorSet,
+        solid: bool,
+    ) {
+        let mut ctx = self.slab_cache.start_edits(
+            &mut self.compiled,
+            x_start,
+            x_end,
+            y_start,
+            y_end,
+            color_set,
+        );
+
+        let slab = VxlSlab {
+            start: z_start as u8,
+            end: z_end as u8 + 1,
+        };
+
+        for _y in y_start..=y_end {
+            for x in x_start..=y_end {
+                if let Some(column) = ctx.edit_column(x) {
+                    match solid {
+                        true => column.insert(slab),
+                        false => column.remove(slab),
+                    }
+                }
+            }
+
+            ctx.advance_and_flush();
+        }
+
+        ctx.finish();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C, packed)]
+pub struct VxlColor {
+    b: u8,
+    g: u8,
+    r: u8,
+    /// Used for shading in VOXLAP's rendering. Perhaps a brightness multiplier.
+    ///
+    /// 0x00 -> 0.0, 0x80 -> 1.0, 0xFF -> 2.0? Very bright.
+    shade: u8,
+}
+
+impl VxlColor {
+    const __: () = {
+        assert!(std::mem::size_of::<Self>() == std::mem::size_of::<VxlData>());
+        assert!(std::mem::align_of::<Self>() <= std::mem::align_of::<VxlData>());
+    };
+
+    pub const fn new(r: u8, g: u8, b: u8, shade: u8) -> Self {
+        VxlColor { b, g, r, shade }
+    }
+}
+
+impl From<VxlColor> for arena::VxlData {
+    fn from(value: VxlColor) -> Self {
+        bytemuck::cast(value)
+    }
+}
+
+unsafe impl bytemuck::Pod for VxlColor {}
+
+unsafe impl bytemuck::Zeroable for VxlColor {
+    fn zeroed() -> Self {
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VxlState {
+    Air,
+    Unexposed,
+    Color(VxlColor),
+}
+
+pub enum VxlColorSet {
+    ColorFunc(Box<dyn Fn(i32, i32, i32) -> VxlColor>),
+    Color(VxlColor),
+}
+
+impl VxlColorSet {
+    const DEFAULT: VxlColorSet = VxlColorSet::Color(VxlColor::new(0, 0, 0, 0));
+
+    pub fn color_func<F>(color_func: F) -> Self
+    where
+        F: Fn(i32, i32, i32) -> VxlColor + 'static,
+    {
+        let boxed_func = Box::new(color_func);
+        Self::ColorFunc(boxed_func)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum VxlDirection {
+    North = 0,
+    South,
+    West,
+    East,
+}
+
+impl VxlDirection {
+    pub const ARRAY: [VxlDirection; 4] = [Self::North, Self::South, Self::West, Self::East];
+
+    pub fn from_offset(x: i32, y: i32) -> Option<Self> {
+        match (x, y) {
+            (0, -1) => Some(Self::North),
+            (0, 1) => Some(Self::South),
+            (-1, 0) => Some(Self::West),
+            (1, 0) => Some(Self::East),
+            _ => None,
+        }
+    }
+}
+
+impl From<VxlDirection> for (i32, i32) {
+    fn from(value: VxlDirection) -> Self {
+        match value {
+            VxlDirection::North => (0, -1),
+            VxlDirection::South => (0, 1),
+            VxlDirection::West => (-1, 0),
+            VxlDirection::East => (1, 0),
+        }
+    }
+}
+```
+
+### src/slab.rs
+```
+use crate::{
+    MAX_VERTICAL_STACK, MAXZDIM, VSID, VxlColorSet, VxlDirection, compiled::VxlCompiledRLE,
+};
+
+/// Rolling cache of edited voxel columns
+///
+/// Only solidity information is stored, and colors are copied back from
+/// the original compiled span, so this is pretty cheap
+pub struct VxlSlabCache {
+    columns: Box<[Option<VxlSlabColumn>; Self::COLUMN_COUNT]>,
+}
+
+impl VxlSlabCache {
+    const WIDTH: usize = 3;
+    const COLUMN_COUNT: usize = VSID * Self::WIDTH;
+
+    pub fn new() -> Self {
+        let columns = boxarray::boxarray(None);
+
+        Self { columns }
+    }
+
+    pub fn start_edits<'c, T: VxlRLETarget>(
+        &'c mut self,
+        compiled: &'c mut T,
+        mut x_start: i32,
+        mut x_end: i32,
+        mut y_start: i32,
+        mut y_end: i32,
+        color_set: &'c VxlColorSet,
+    ) -> VxlSlabCacheCtx<'c, T> {
+        x_start = x_start.max(0);
+        x_end = x_end.min(VSID as i32 - 1);
+        y_start = y_start.max(0);
+        y_end = y_end.min(VSID as i32 - 1);
+
+        let flush_x_start = i32::max(0, x_start - 1);
+        let flush_x_end = i32::min(VSID as i32 - 1, x_end + 1);
+
+        let support_x_start = i32::max(0, flush_x_start - 1);
+        let support_x_end = i32::min(VSID as i32 - 1, flush_x_end + 1);
+
+        let mut ctx = VxlSlabCacheCtx {
+            columns: self.columns.as_mut_slice(),
+            compiled,
+            color_set,
+            base_slot: 0,
+            edit_x_start: x_start,
+            edit_x_end: x_end,
+            flush_x_start,
+            flush_x_end,
+            support_x_start,
+            support_x_end,
+            y_end,
+            current_y: y_start,
+        };
+
+        ctx.init();
+
+        ctx
+    }
+}
+
+pub(crate) trait VxlRLETarget {
+    fn populate_slabs(&self, x: i32, y: i32, slab_column: &mut VxlSlabColumn);
+    fn recompile_column(
+        &mut self,
+        x: i32,
+        y: i32,
+        slab_column: &VxlSlabColumn,
+        slab_neighbors: [Option<&VxlSlabColumn>; 4],
+        color_set: &VxlColorSet,
+    );
+}
+
+impl VxlRLETarget for VxlCompiledRLE {
+    fn populate_slabs(&self, x: i32, y: i32, slab_column: &mut VxlSlabColumn) {
+        self.populate_slabs(x, y, slab_column);
+    }
+
+    fn recompile_column(
+        &mut self,
+        x: i32,
+        y: i32,
+        slab_column: &VxlSlabColumn,
+        slab_neighbors: [Option<&VxlSlabColumn>; 4],
+        color_set: &VxlColorSet,
+    ) {
+        self.recompile_column(x, y, slab_column, slab_neighbors, color_set);
+    }
+}
+
+/// Example usage:
+///
+/// ```rust,ignore
+/// let x_start = 0;
+/// let x_end = 32;
+/// let y_start = 0;
+/// let y_end = 32;
+///
+/// let mut ctx = self.slab_cache.start_edits(&mut self.compiled, x_start, x_end, y_start, y_end);
+///
+/// for y in y_start..=y_end {
+///     for x in x_start..=x_end {
+///         if let Some(column) = ctx.edit_column(x) {
+///             column.insert(VxlSlab {
+///                 start: 0,
+///                 end: 32,
+///             });
+///         }
+///     }
+///
+///     ctx.advance_and_flush();
+/// }
+///
+/// ctx.finish();
+/// ```
+pub(crate) struct VxlSlabCacheCtx<'c, T: VxlRLETarget> {
+    columns: &'c mut [Option<VxlSlabColumn>],
+    compiled: &'c mut T,
+    color_set: &'c VxlColorSet,
+
+    base_slot: usize,
+
+    edit_x_start: i32,
+    edit_x_end: i32,
+    flush_x_start: i32,
+    flush_x_end: i32,
+    support_x_start: i32,
+    support_x_end: i32,
+    y_end: i32,
+
+    current_y: i32,
+}
+
+impl<'c, T: VxlRLETarget> VxlSlabCacheCtx<'c, T> {
+    const STALE_ROW: usize = 0;
+    const FLUSH_ROW: usize = 1;
+    const EDIT_ROW: usize = 2;
+
+    fn get_slot(base_slot: usize, slot: usize) -> usize {
+        assert!((0..3).contains(&slot));
+
+        (base_slot + slot) % 3
+    }
+
+    fn get_index_slot(base_slot: usize, x: i32, slot: usize) -> Option<usize> {
+        if !(0..VSID as i32).contains(&x) {
+            return None;
+        }
+
+        Some(x as usize * VxlSlabCache::WIDTH + Self::get_slot(base_slot, slot))
+    }
+
+    fn get_stale_y(base_y: i32) -> i32 {
+        base_y - 2
+    }
+
+    fn get_flush_y(base_y: i32) -> i32 {
+        base_y - 1
+    }
+
+    fn get_edit_y(base_y: i32) -> i32 {
+        base_y
+    }
+
+    fn get_index_y(base_slot: usize, base_y: i32, x: i32, y: i32) -> Option<usize> {
+        if !(0..VSID as i32).contains(&y) {
+            return None;
+        }
+
+        let y_offset = y - base_y;
+
+        if !(-2..=0).contains(&y_offset) {
+            return None;
+        }
+
+        let slot = (y_offset + 2) as usize;
+
+        Self::get_index_slot(base_slot, x, slot)
+    }
+
+    fn init(&mut self) {
+        for i in (self.support_x_start as usize * VxlSlabCache::WIDTH)
+            ..(self.support_x_end as usize * VxlSlabCache::WIDTH)
+        {
+            self.columns[i] = None;
+        }
+    }
+
+    fn reset_stale_row(&mut self) {
+        for x in self.support_x_start..=self.support_x_end {
+            if let Some(i) = Self::get_index_slot(self.base_slot, x, Self::STALE_ROW) {
+                self.columns[i] = None;
+            }
+        }
+    }
+
+    fn cache_column(&mut self, x: i32, y: i32, priority: VxlSlabColumnPriority) {
+        if let Some(i) = Self::get_index_y(self.base_slot, self.current_y, x, y) {
+            // Valid index
+
+            if let Some(existing_column) = self.columns[i].as_mut() {
+                if priority > existing_column.priority() {
+                    // Column type is of higher priority (e.g. user edit is higher priority than support)
+                    existing_column.set_priority(priority);
+                }
+            } else {
+                // Unloaded, load it
+
+                // Init in-place
+                self.columns[i] = Some(VxlSlabColumn::empty(priority));
+                let column = self.columns[i].as_mut().unwrap();
+
+                self.compiled.populate_slabs(x, y, column);
+            }
+        }
+    }
+
+    fn cache_neighbors(&mut self, x: i32, y: i32) {
+        let Some(i) = Self::get_index_y(self.base_slot, self.current_y, x, y) else {
+            return;
+        };
+
+        let column = self.columns[i]
+            .as_ref()
+            .expect("VxlSlabCacheCtx prepare_neighbors has no center");
+
+        let neighbor_priority = column.priority().decrease();
+
+        for dir in VxlDirection::ARRAY {
+            let (x_offset, y_offset) = dir.into();
+            let x = x + x_offset;
+            let y = y + y_offset;
+
+            self.cache_column(x, y, neighbor_priority);
+        }
+    }
+
+    fn flush(&mut self) {
+        let flush_y = Self::get_flush_y(self.current_y);
+
+        if !(0..VSID as i32).contains(&flush_y) {
+            return;
+        }
+
+        for flush_x in self.flush_x_start..=self.flush_x_end {
+            let i = Self::get_index_y(self.base_slot, self.current_y, flush_x, flush_y)
+                .unwrap_or_else(|| panic!("VxlSlabCacheCtx current row flush OOB, flush_x {flush_x} flush_x_start {} flush_x_end {} flush_y {flush_y} current_y {}", self.flush_x_start, self.flush_x_end, self.current_y));
+
+            let should_flush = self.columns[i]
+                .as_ref()
+                .map(|c| c.priority() > VxlSlabColumnPriority::Support)
+                .unwrap_or(false);
+
+            if !should_flush {
+                continue;
+            }
+
+            // We're going to recompile this column, make sure its neighbors are loaded
+
+            self.cache_neighbors(flush_x, flush_y);
+
+            // Gather columns
+
+            let column = self.columns[i]
+                .as_ref()
+                .expect("VxlSlabCacheCtx flush dirty column disappeared");
+
+            let neighbors = VxlDirection::ARRAY.map(|dir| {
+                let (x_offset, y_offset) = dir.into();
+                let neighbor_x = flush_x + x_offset;
+                let neighbor_y = flush_y + y_offset;
+
+                Self::get_index_y(self.base_slot, self.current_y, neighbor_x, neighbor_y).map(
+                    |ni| {
+                        self.columns[ni]
+                            .as_ref()
+                            .expect("VxlSlabCacheCtx flush in-bounds neighbor unloaded")
+                    },
+                )
+            });
+
+            // Do it
+
+            self.compiled
+                .recompile_column(flush_x, flush_y, column, neighbors, self.color_set);
+
+            // I don't think this is even necessary, rows only get flushed once and then the cache advances
+            // But just to be sure...
+            let column = self.columns[i]
+                .as_mut()
+                .expect("VxlSlabCacheCtx flush compiled column disappeared");
+            column.set_priority(VxlSlabColumnPriority::Support);
+        }
+    }
+
+    pub fn edit_column(&mut self, x: i32) -> Option<&mut VxlSlabColumn> {
+        if !(self.edit_x_start..=self.edit_x_end).contains(&x) {
+            return None;
+        }
+
+        // Get i here for an early return
+        let i = Self::get_index_y(self.base_slot, self.current_y, x, self.current_y)?;
+
+        self.cache_column(x, self.current_y, VxlSlabColumnPriority::Edit);
+
+        // Since the edit row is at the edge of the cache, one of the 4 neighbors won't be immediately loaded
+        // But this is okay, it'll get loaded as a neighbor as part of the flush
+        self.cache_neighbors(x, self.current_y);
+
+        self.columns[i].as_mut()
+    }
+
+    /// *Always* call this after a row has been edited
+    ///
+    /// See example code in VxlSlabCacheCtx doc.
+    pub fn advance_and_flush(&mut self) {
+        // Compile
+        self.flush();
+
+        // Clear stale data, now that we're done with it
+        self.reset_stale_row();
+
+        // Advance
+        self.current_y += 1;
+        self.base_slot = (self.base_slot + 1) % 3;
+    }
+
+    /// *Always* call this after edits are done.
+    ///
+    /// See example code in VxlSlabCacheCtx doc.
+    pub fn finish(mut self) {
+        // Clear cache by advancing twice
+        self.advance_and_flush();
+        self.advance_and_flush();
+    }
+}
+
+#[derive(Clone)]
+/// A sorted stack of non-overlapping, non-touching slabs,
+/// representing solidity information for a column of the vxl map
+pub(crate) struct VxlSlabColumn {
+    len: usize,
+    priority: VxlSlabColumnPriority,
+    slabs: [VxlSlab; MAX_VERTICAL_STACK],
+}
+
+impl VxlSlabColumn {
+    pub(crate) fn empty(priority: VxlSlabColumnPriority) -> Self {
+        let mut column = VxlSlabColumn {
+            len: 0,
+            priority,
+            slabs: [Default::default(); _],
+        };
+
+        column.insert(VxlSlab { start: 63, end: 64 });
+
+        column
+    }
+
+    pub(crate) fn new(priority: VxlSlabColumnPriority, slabs: &[VxlSlab]) -> Self {
+        let mut column = Self::empty(priority);
+
+        for slab in slabs {
+            column.insert(*slab);
+        }
+
+        column
+    }
+
+    fn reset(&mut self) {
+        *self = Self::empty(self.priority);
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn slabs(&self) -> &[VxlSlab] {
+        &self.slabs[..self.len]
+    }
+
+    fn priority(&self) -> VxlSlabColumnPriority {
+        self.priority
+    }
+
+    fn set_priority(&mut self, priority: VxlSlabColumnPriority) {
+        self.priority = priority;
+    }
+
+    pub fn insert(&mut self, mut slab: VxlSlab) {
+        if slab.start >= slab.end {
+            return;
+        }
+
+        if slab.end as usize > MAXZDIM {
+            slab.end = MAXZDIM as u8;
+        }
+
+        let mut i = 0;
+
+        // Skip slabs that end before the inserted slab
+        while i < self.len && self.slabs[i].end < slab.start {
+            i += 1;
+        }
+
+        // Merge overlapping and touching slabs
+        while i < self.len && self.slabs[i].start <= slab.end {
+            // i does not change here so this is safe to run multiple times
+            // It simply eats away from the middle of the stack
+
+            slab.start = slab.start.min(self.slabs[i].start);
+            slab.end = slab.end.max(self.slabs[i].end);
+
+            // Remove self.slabs[i] by shifting left
+            for j in i + 1..self.len {
+                self.slabs[j - 1] = self.slabs[j];
+            }
+
+            self.len -= 1;
+        }
+
+        // We're about to insert the merged slab, make sure we have space
+        debug_assert!(
+            self.len < self.slabs.len(),
+            "VxlSlabColumn overflow in insert"
+        );
+
+        // Make room for new slab by shifting right
+        for j in (i..self.len).rev() {
+            self.slabs[j + 1] = self.slabs[j];
+        }
+
+        // Insert new slab
+        self.slabs[i] = slab;
+        self.len += 1;
+    }
+
+    pub fn remove(&mut self, mut slab: VxlSlab) {
+        if slab.start >= slab.end {
+            return;
+        }
+
+        if slab.end as usize >= MAXZDIM {
+            slab.end = MAXZDIM as u8 - 1;
+        }
+
+        let mut i = 0;
+
+        while i < self.len {
+            let current = self.slabs[i];
+
+            // Skip slabs that will go unaffected
+            if current.end <= slab.start {
+                i += 1;
+                continue;
+            }
+
+            // Slabs are sorted so nothing past this will overlap
+            if current.start >= slab.end {
+                break;
+            }
+
+            let left_remains = current.start < slab.start;
+            let right_remains = slab.end < current.end;
+
+            match (left_remains, right_remains) {
+                (true, true) => {
+                    // Split slab in the middle
+
+                    //   ccccccccc
+                    // -   sssss
+                    // = cc     cc
+
+                    // This involves inserting a new slab, so make sure we have room
+                    debug_assert!(
+                        self.len < self.slabs.len(),
+                        "VxlSlabColumn overflow in remove"
+                    );
+
+                    self.slabs[i].end = slab.start;
+
+                    // Make room for new slab by shifting right
+                    for j in (i + 1..self.len).rev() {
+                        self.slabs[j + 1] = self.slabs[j];
+                    }
+
+                    // Insert merged slab at i + 1
+                    self.slabs[i + 1] = VxlSlab {
+                        start: slab.end,
+                        end: current.end,
+                    };
+                    self.len += 1;
+
+                    // End handled here, break
+                    break;
+                }
+                (true, false) => {
+                    // Trim end of current slab
+
+                    //   ccccc
+                    // -   sssss
+                    // = cc
+
+                    self.slabs[i].end = slab.start;
+
+                    // End unhandled, advance to next slab
+                    i += 1;
+                }
+                (false, true) => {
+                    // Trim beginning of current slab
+
+                    //     ccccc
+                    // - sssss
+                    // =      cc
+
+                    self.slabs[i].start = slab.end;
+
+                    // End handled, break
+                    break;
+                }
+                (false, false) => {
+                    // Eat up entire slab
+
+                    //     ccccc
+                    // - sssssssss
+                    // =
+
+                    // No manipulation needed, just remove the slab
+                    for j in i + 1..self.len {
+                        self.slabs[j - 1] = self.slabs[j];
+                    }
+
+                    self.len -= 1;
+
+                    // End unhandled, advance
+                    // But don't touch i, because a new slab slid into place
+                }
+            }
+        }
+    }
+
+    pub fn is_z_solid_cursor(&self, cursor: &mut usize, z: u8) -> bool {
+        while *cursor < self.len && self.slabs[*cursor].end <= z {
+            *cursor += 1;
+        }
+
+        if *cursor == self.len {
+            return false;
+        }
+
+        let slab = &self.slabs[*cursor];
+        (slab.start..slab.end).contains(&z)
+    }
+
+    pub fn is_z_solid(&self, z: i32) -> bool {
+        if !(0..MAXZDIM as i32).contains(&z) {
+            return false;
+        }
+
+        let mut cursor = 0;
+        self.is_z_solid_cursor(&mut cursor, z as u8)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub(crate) enum VxlSlabColumnPriority {
+    // Sorted in order of priority
+    Support = 0, // read-only, clean
+    Neighbor,    // dirty
+    Edit,        // dirty
+}
+
+impl VxlSlabColumnPriority {
+    fn decrease(self) -> Self {
+        match self {
+            Self::Edit => Self::Neighbor,
+            Self::Neighbor => Self::Support,
+            Self::Support => unreachable!(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+/// A single solid region in a column
+pub(crate) struct VxlSlab {
+    pub start: u8,
+    pub end: u8, // exclusive
+}
+
+pub(crate) struct VxlSlabScanner<'c> {
+    column: &'c VxlSlabColumn,
+    cursor: usize,
+}
+
+impl<'c> VxlSlabScanner<'c> {
+    pub fn new(column: &'c VxlSlabColumn) -> Self {
+        Self { column, cursor: 0 }
+    }
+
+    pub fn is_solid(&mut self, z: i32) -> bool {
+        self.advance_to(z);
+
+        self.column
+            .slabs()
+            .get(self.cursor)
+            .map(|s| (s.start as i32..s.end as i32).contains(&z))
+            .unwrap_or(false)
+    }
+
+    pub fn advance_to(&mut self, z: i32) {
+        while self.cursor < self.column.len() && self.column.slabs()[self.cursor].end as i32 <= z {
+            self.cursor += 1;
+        }
+    }
+
+    pub fn next_boundary_from(&self, z: i32) -> Option<i32> {
+        let slabs = self.column.slabs();
+        let slab = slabs.get(self.cursor)?;
+
+        if z < slab.start as i32 {
+            Some(slab.start as i32)
+        } else if z < slab.end as i32 {
+            Some(slab.end as i32)
+        } else {
+            slabs.get(self.cursor + 1).map(|s| s.start as i32)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::VxlColor;
+
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecompileCall {
+        x: i32,
+        y: i32,
+        column: Vec<(u8, u8)>,
+        neighbors: [Option<Vec<(u8, u8)>>; 4],
+    }
+
+    #[derive(Default)]
+    struct MockRleTarget {
+        source_columns: Vec<((i32, i32), Vec<(u8, u8)>)>,
+        recompile_calls: Vec<RecompileCall>,
+    }
+
+    impl MockRleTarget {
+        fn with_source(mut self, x: i32, y: i32, slabs: &[(u8, u8)]) -> Self {
+            self.source_columns.push(((x, y), slabs.to_vec()));
+            self
+        }
+
+        fn source_slabs(&self, x: i32, y: i32) -> &[(u8, u8)] {
+            self.source_columns
+                .iter()
+                .find(|((sx, sy), _)| *sx == x && *sy == y)
+                .map(|(_, slabs)| slabs.as_slice())
+                .unwrap_or(&[])
+        }
+    }
+
+    impl VxlRLETarget for MockRleTarget {
+        fn populate_slabs(&self, x: i32, y: i32, slab_column: &mut VxlSlabColumn) {
+            for &(start, end) in self.source_slabs(x, y) {
+                slab_column.insert(VxlSlab { start, end });
+            }
+        }
+
+        fn recompile_column(
+            &mut self,
+            x: i32,
+            y: i32,
+            slab_column: &VxlSlabColumn,
+            slab_neighbors: [Option<&VxlSlabColumn>; 4],
+            _color_set: &VxlColorSet,
+        ) {
+            self.recompile_calls.push(RecompileCall {
+                x,
+                y,
+                column: slab_snapshot(slab_column),
+                neighbors: slab_neighbors.map(|neighbor| neighbor.map(slab_snapshot)),
+            });
+        }
+    }
+
+    fn slab_snapshot(column: &VxlSlabColumn) -> Vec<(u8, u8)> {
+        column.slabs().iter().map(|s| (s.start, s.end)).collect()
+    }
+
+    fn call_for(target: &MockRleTarget, x: i32, y: i32) -> &RecompileCall {
+        target
+            .recompile_calls
+            .iter()
+            .find(|call| call.x == x && call.y == y)
+            .expect("missing recompile call")
+    }
+
+    #[test]
+    fn slab_cache_flushes_edit_and_dirty_neighbors_through_target() {
+        let mut cache = VxlSlabCache::new();
+        let mut target = MockRleTarget::default()
+            .with_source(10, 10, &[(20, 30)])
+            .with_source(10, 9, &[(4, 8)])
+            .with_source(10, 11, &[(40, 44)])
+            .with_source(9, 10, &[(12, 14)])
+            .with_source(11, 10, &[(50, 54)]);
+
+        let color_set = VxlColorSet::Color(VxlColor::new(1, 2, 3, 4));
+
+        {
+            let mut ctx = cache.start_edits(&mut target, 10, 10, 10, 10, &color_set);
+            let column = ctx.edit_column(10).expect("edit column should load");
+            column.insert(VxlSlab { start: 24, end: 36 });
+
+            ctx.advance_and_flush();
+            ctx.finish();
+        }
+
+        let mut recompiled: Vec<_> = target
+            .recompile_calls
+            .iter()
+            .map(|call| (call.x, call.y))
+            .collect();
+        recompiled.sort();
+
+        assert_eq!(
+            recompiled,
+            vec![(9, 10), (10, 9), (10, 10), (10, 11), (11, 10)]
+        );
+
+        let center = call_for(&target, 10, 10);
+        assert_eq!(center.column, vec![(20, 36)]);
+        assert_eq!(
+            center.neighbors,
+            [
+                Some(vec![(4, 8)]),
+                Some(vec![(40, 44)]),
+                Some(vec![(12, 14)]),
+                Some(vec![(50, 54)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn slab_cache_only_allows_edit_columns_inside_requested_x_range() {
+        let mut cache = VxlSlabCache::new();
+        let mut target = MockRleTarget::default().with_source(5, 7, &[(10, 12)]);
+
+        let color_set = VxlColorSet::Color(VxlColor::new(1, 2, 3, 4));
+
+        {
+            let mut ctx = cache.start_edits(&mut target, 5, 6, 7, 7, &color_set);
+
+            assert!(ctx.edit_column(4).is_none());
+            assert!(ctx.edit_column(7).is_none());
+
+            let column = ctx.edit_column(5).expect("x=5 should be editable");
+            assert_eq!(slab_snapshot(column), vec![(10, 12)]);
+        }
+    }
+}
+```
+
+### example/src/main.rs
+```
+use std::{fs::File, io::Write};
+
+use rand::RngExt;
+use voxlap_vxl::{VxlColor, VxlColorSet, VxlMap, VxlState};
+
+fn main() {
+    let Some(command) = std::env::args().nth(1) else {
+        help();
+        return;
+    };
+
+    match command.as_str() {
+        "mapgen" => mapgen(),
+        _ => help(),
+    }
+}
+
+fn help() {
+    println!("example [command]");
+    println!();
+    println!("Available commands:");
+    println!("- mapgen");
+}
+
+fn mapgen() {
+    let color_set = VxlColorSet::color_func(|x, y, z| {
+        let veins = ((x * 17) ^ (y * 31) ^ (z * 47)).wrapping_mul(0x45d9f3b);
+        let pulse = ((x * x + y * y + z * 19) as f32).sin();
+        let swirl = (((x - y) as f32 * 0.11) + (z as f32 * 0.27)).sin();
+
+        let fade = z as f32 / 63.0;
+        let r =
+            (255.0 + ((120.0 + pulse * 80.0 + ((veins >> 3) & 63) as f32) - 255.0) * fade) as u8;
+        let g = (255.0 + ((20.0 + swirl.abs() * 55.0 + ((veins >> 11) & 31) as f32) - 255.0) * fade)
+            as u8;
+        let b = (255.0
+            + ((90.0 + (pulse * swirl).abs() * 140.0 + ((veins >> 19) & 63) as f32) - 255.0) * fade)
+            as u8;
+
+        let shade = if (veins & 7) == 0 {
+            0xff
+        } else {
+            (0x70 + ((veins >> 24) & 0x3f)) as u8
+        };
+
+        VxlColor::new(r, g, b, shade)
+    });
+
+    let mut map = VxlMap::new_flat_at_z(63, &color_set);
+    let mut rng = rand::rng();
+
+    for _ in 0..2048 {
+        let solid = rng.random_bool(0.5);
+
+        let x_start = rng.random_range(0..voxlap_vxl::VSID) as i32;
+        let y_start = rng.random_range(0..voxlap_vxl::VSID) as i32;
+        let z_start = rng.random_range(0..voxlap_vxl::MAXZDIM) as i32;
+        let x_end = i32::min(
+            x_start + rng.random_range(0..32) as i32,
+            voxlap_vxl::VSID as i32,
+        );
+        let y_end = i32::min(
+            y_start + rng.random_range(0..32) as i32,
+            voxlap_vxl::VSID as i32,
+        );
+        let z_end = i32::min(
+            z_start + rng.random_range(0..32) as i32,
+            voxlap_vxl::MAXZDIM as i32,
+        );
+
+        map.set_rect(
+            x_start, x_end, y_start, y_end, z_start, z_end, &color_set, solid,
+        );
+    }
+
+    let mut file =
+        File::create("out/mapgen.vxl").expect("Couldn't open out/mapgen.vxl for writing");
+    map.write_columns(&mut file)
+        .expect("Couldn't write map data");
+}
+```
+
+### src/generator/classicgen.rs
+```
+
+```
+
+### src/generator/mod.rs
+```
+
+```
+
+### src/generator/random.rs
+```
+
+```

@@ -1,0 +1,282 @@
+A custom ray-tracing engine for blender that allows the plug in of custom materials and custom ray tracing methods for astrophysically based ray tracing. - feat(pkg120): two-sided MIS for the spectral integrator (restore BSDF-ray-hits-emitter term) by HendrikGC02 · Pull Request #534 · HendrikGC02/Astroray
+
+feat(pkg120): two-sided MIS for the spectral integrator (restore BSDF-ray-hits-emitter term) by HendrikGC02 · Pull Request #534 · HendrikGC02/Astroray · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+HendrikGC02
+commented
+Aug 1, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Restores the dropped BSDF-ray-hits-emitter MIS leg for diffuse bounces in the spectral integrator. Before this PR the integrator applied only the NEE light-sampling leg (w_L) and dropped the complementary BSDF-sampled leg (w_B), biasing direct lighting dark by exactly the BSDF-weighted portion of the light — the softbox / large-near-area-light regime where bsdfPdf ~ lightPdf. When a BSDF-sampled continuation ray from a diffuse bounce (bounce>0 && !wasSpecular) hits an emitter, we now add throughput·Le·powerHeuristic(bsdfPdf_prev, lightPdf_hit), the complement of the NEE leg.
+Spec: .astroray_plan/packages/pkg120-two-sided-mis-spectral.md
+Research/citations: .astroray_plan/docs/pkg120-two-sided-mis-research.md
+Landing sites
+The spec names two production integrators; keeping CI green additionally required mirroring the term into the two pkg55 CPU oracles those integrators are pinned against. Four implementations, all computing w_B from the same inputs:
+#
+File
+Role
+Parity gate that requires it
+1
+include/raytracer.h pathTraceSpectral
+CPU production
+—
+2
+src/gpu/wavefront/stage_advance.cu
+GPU production
+HW wavefront-diff
+3
+src/cpu/wavefront/reference_pt_production.cpp
+CPU production oracle
+test_pkg55_reference_pt_production_parity (bit-exact trip-wire)
+4
+src/cpu/wavefront/path_kernel.cpp (shared CPU wavefront kernel)
+CPU wavefront oracle
+test_pkg55_reference_pt_oracles_equivalent, test_pkg55_session_n1_ssim_parity (5% mean-ratio)
+Scope note: the spec said "exactly two places." That is true for the production integrators, but the pkg55 oracle web (a bit-exact production trip-wire + cross-family mean-ratio parity gates comparing the wavefront family to the production family) means the term must move in all four to keep CI green. #4 is the single shared kernel advance_one_bounce used by both CPU wavefront oracles, so it's one file; bit-identity between them is preserved by construction. bsdfPdfPrev is carried through the CPU wavefront SoA round-trip (cpu_wavefront_state) mirroring the GPU path_bsdf_pdf SoA field.
+Supporting GPU plumbing: gpu_reconstruct_light_pdf (new, src/gpu/gpu_nee.cuh), path_bsdf_pdf SoA field (gpu_wavefront_state.h + wavefront_state.cu), and lights/numLights/totalLightPower/lightTree threaded into the intersect stage (intersectPathSlot + stageIntersectQueuedKernel + launchStageIntersectQueued + the ReSTIR extern decl, which passes empty light data since ReSTIR is bounce-0-only).
+CPU↔GPU lockstep (by construction)
+Both sides compute w_B from the same values: prev-ray origin/direction (written verbatim, no snapshot skew), bsdfPdf_prev, and the reconstructed lightPdf_hit — LightList::pdfValue on CPU vs gpu_reconstruct_light_pdf on GPU, which mirrors it exactly including the normal = -dir proxy the CPU TreeLightSampler::pdfValue uses, the power-CDF selection pdf, and per-shape solid-angle pdfs. Same power-heuristic form (bp²/(bp²+lp²+1e-8)).
+Tests / gate
+tests/test_pkg120_two_sided_mis.py (CPU-gated on CI):
+test_two_sided_recovers_large_near_light — direction+fix, convention-free: max_depth=1 (one-sided) vs max_depth=2 (two-sided) with a large emissive sphere; asserts two-sided/one-sided > 1.20.
+test_two_sided_matches_analytic_formfactor — magnitude: one-sided reads dark vs the analytic oracle ρ·L_e·(R/d)² (L_e read from a calibration render so the emission convention cancels); two-sided matches within a convention-tolerant band.
+test_no_regression_distant_compact_light — compact light (R/d≈0.06, w_B≈0): two-sided ≈ one-sided.
+The max_depth=1 vs 2 mechanic isolates the one-sided leg without any integrator toggle: at max_depth=1 the BSDF continuation ray is never traced, so the two-sided term cannot fire.
+Acceptance criteria
+Two-sided term added, gated to diffuse bounces; full-emission (bounce==0||wasSpecular) path unchanged.
+lightPdf_hit reconstruction includes selection × solid-angle and light-tree traversal pdf, consistent with the NEE leg.
+Ground-truth gate: direction + magnitude + no-regression.
+CPU and GPU kept in lockstep (same heuristic + pdf reconstruction).
+Research/citation note recorded (Veach 1997 §9.2; Cycles light_sample_from_intersection / kernel/light/sample.h, Apache-2.0).
+No regression on the wavefront leg / white-furnace / C2 PostNEE_MIS parity — awaits team-lead RTX HW verification.
+Build / verification status
+Per the dispatch, this subagent cannot build the CUDA .pyd (no MSVC vcvars in subagent shells), so no build log is pasted and the GPU leg is unbuilt here. CPU legs are the CI acceptance gates; the wavefront leg awaits team-lead build + RTX HW verification (wavefront-diff parity harness). CUDA C++ was written to mirror existing patterns and verified by inspection (operators/types confirmed against gpu_types.h; all intersectPathSlot/stageIntersectQueuedKernel/launchStageIntersectQueued call sites swept and updated).
+🤖 Generated with Claude Code
+HendrikGC02
+and others
+added 4 commits
+August 1, 2026 23:59
+feat(pkg120): two-sided MIS for the spectral integrator
+…
+097b5ae
+```
+Restore the dropped BSDF-ray-hits-emitter MIS leg for diffuse bounces. The
+spectral integrator applied only the NEE light-sampling leg (w_L) and dropped
+the complementary BSDF-sampled leg (w_B), biasing direct lighting dark by the
+BSDF-weighted portion of the light — the softbox / large-near-area-light regime
+where bsdfPdf ~ lightPdf. Now, when a BSDF-sampled continuation ray from a
+diffuse bounce hits an emitter, add throughput*Le*powerHeuristic(bsdfPdf_prev,
+lightPdf_hit), with lightPdf_hit reconstructed (selection x solid-angle x
+light-tree pdf) exactly as the NEE leg would sample it.
+
+Landed in the two production integrators the spec names plus the two pkg55 CPU
+oracles they are pinned against (so CI stays green):
+- CPU pathTraceSpectral (include/raytracer.h)
+- GPU wavefront stage_advance.cu (gpu_reconstruct_light_pdf in gpu_nee.cuh;
+  new path_bsdf_pdf SoA field; lights threaded into the intersect stage)
+- reference_pt_production.cpp (bit-exact trip-wire mirror)
+- shared CPU wavefront kernel path_kernel.cpp (+ bsdf_pdf_prev carried through
+  the CPU wavefront SoA round-trip) — keeps the cross-family parity gates green
+
+CPU and GPU compute w_B from the same inputs (prev-ray origin/direction,
+bsdfPdf_prev, LightList::pdfValue vs gpu_reconstruct_light_pdf with the -dir
+proxy normal) so they agree by construction. Full-emission camera/post-specular
+path (bounce==0 || wasSpecular) unchanged.
+
+Gate: tests/test_pkg120_two_sided_mis.py — max_depth=1 isolates the one-sided
+leg, max_depth=2 adds the two-sided term; asserts direction (one-sided dark),
+magnitude (two-sided ~ analytic rho*L_e*(R/d)^2), and no-regression (compact
+light). CPU-gated on CI; wavefront leg awaits team-lead RTX HW verification.
+
+Cite: Veach 1997 §9.2 (power heuristic); Cycles light_sample_from_intersection
++ kernel/light/sample.h (Apache-2.0). Research:
+.astroray_plan/docs/pkg120-two-sided-mis-research.md
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs(pkg120): record PR #534 in spec status
+…
+9f42c07
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+test(pkg120): fix analytic-magnitude gate — measure 2x2 point-consist…
+…
+4f0c2a7
+```
+…ent patch
+
+The two_sided/analytic gate failed at 0.745 not because of a transport bug but
+because it averaged an 8x8 pixel patch of a steep near-light radiance gradient
+and compared it to a POINT analytic oracle (L_r directly under the sphere).
+Shrinking the measurement region to a point-consistent 2x2 center patch makes
+the gate read 0.963 on the large-near scene — comfortably inside the untouched
+(0.75, 1.35) band. Only the absolute-magnitude assertion changes; the relative
+direction and no-regression gates keep their 8x8 patch (the patch cancels in a
+ratio).
+
+Transport verified CORRECT three independent ways (diagnostic 2026-08-01):
+- center-point component accumulator: <cos>=0.80, <1/pdf>=2.41, <Le>=4.00, all
+  matching theory (emission not clipped, cone pdf/cosine correct);
+- single center pixel == analytic across the R/d sweep (compact 1.005, mid
+  0.995, large 0.979 — the ~0.98 is the known pkg122 Defect-4 convention residual);
+- independent pure-Python cosine-MC oracle = 0.9999x analytic.
+Patch-size sweep on the large scene (two-sided MIS path): 8x8=0.745, 2x2=0.963,
+exact-center=0.979.
+
+This SUPERSEDES the earlier gate-failure review's "biased BSDF-leg estimator"
+conclusion: both pure legs (nee_only, bsdf_only) undershot IDENTICALLY only
+because both were read through the same 8x8 patch — the tell the biased-leg
+hypothesis could not explain. No integrator/transport code changed; the shipped
+diff is the original 4-site two-sided-MIS fix plus this test-measurement change.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs(pkg120): record RTX 5070 Ti hardware verification 2026-08-02
+…
+90b05db
+```
+Full sweep (pkg120 gates, pkg55 oracle web, wavefront bit-identity/
+threshold parity, furnace/energy suites, visual inspection) all PASS
+on 4f0c2a7. Records the measured numbers and the gamma-furnace
+energy-gain-blindspot caveat.
+```
+HendrikGC02
+commented
+Aug 1, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Hardware verification 2026-08-02
+Hardware: NVIDIA GeForce RTX 5070 Ti, driver 610.47, CUDA v12.8, OptiX 9.1.0.
+OS: Windows 11 Enterprise 10.0.26200.
+Worktree/SHA: .claude/worktrees/pkg120 pinned to 4f0c2a7fce4d31a057354808e3d40634092a1c81 (PR #534 head). Foreground build via build_cuda_worktree.bat succeeded; up-to-date rebuild (the delta from the previously-built SHA was test-only, no C++ recompile needed). .pyd import verified from the worktree build_cuda/ path (not a shadow copy).
+Context: an earlier verifier run stopped at test_two_sided_matches_analytic_formfactor (0.745 vs 0.75 tolerance), since diagnosed as an 8x8-patch-vs-point-oracle measurement artifact and fixed test-only in 4f0c2a7. This is the full sweep the earlier run never reached.
+Pass/fail table
+Gate
+Result
+Measured
+test_two_sided_recovers_large_near_light
+PASS
+one_sided=0.74320, two_sided=0.95497, ratio=1.2849 (gate: >1.20)
+test_two_sided_matches_analytic_formfactor
+PASS
+L_e=3.9974, analytic=1.27917, one_sided=0.87924 (one_sided/analytic=0.6874, gate <0.85), two_sided=1.23093 (two_sided/analytic=0.9623, gate 0.75<r<1.35)
+test_no_regression_distant_compact_light
+PASS
+one_sided=0.00763, two_sided=0.00763, ratio=1.0000 (gate 0.94<r<1.12)
+test_reference_pt_production_parity
+PASS
+max diff 6.258487701416016e-07 (tol 1e-05)
+test_reference_pt_oracles_equivalent
+PASS
+R ratio=1.0006, G ratio=0.9918, B ratio=0.9868 (all within 5%)
+test_cpu_wavefront_ssim_parity
+PASS
+R ratio=1.0023, G ratio=1.0000, B ratio=0.9989 (all within 5%)
+test_cpu_wavefront_nonzero_output
+PASS
+mean=0.1316, max=0.4988, 760/768 nonzero
+test_cpu_wavefront_diffuse_light_bit_identity
+PASS
+max_abs_diff = 0.0 exactly, 0 diverging fields, all stages BIT-IDENTICAL
+test_cpu_wavefront_lambertian/metal/dielectric/disney/closure_graph/thin_glass/session_n1_bit_identity (+ determinism variants)
+PASS (14 tests)
+all max_abs_diff = 0.0, 0 diverging fields
+test_cpu_to_cpu_baseline_bit_identity
+PASS
+max diff = 0.0, 0 diverging fields
+test_cpu_to_gpu_threshold_gate
+PASS
+PostInit ULP=2 p99.9=1.435664e-07; PostIntersect ULP=32 p99.9=2.170602e-06; PostShade p99.9=2.165780e-06; PostLightSample p99.9=2.211559e-06; PostRR p99.9=0.0
+test_post_nee_mis_gate (C2 PostNEE_MIS)
+PASS
+Tier1 CPU-wf<->CPU-ref exact: 0 diverging fields; Tier1b CPU power-heuristic max residual 6.932e-08 over 99 rows; Tier2 GPU power-heuristic max residual 7.472e-08 over 97 rows (tol 1e-05)
+test_wavefront_dedicated_light_nee[point_only/area_only/mixed]
+PASS
+WF/CPU = [0.9965,0.997,0.9967] / [0.9965,0.9972,0.9967] / [0.9973,0.9972,0.9971]
+test_dielectric_glass_furnace, test_disney_rough_glass_furnace, test_disney_energy_conservation (278 param cases total)
+PASS
+all green, no regression
+Skipped (pkg153 quarantine, per dispatch instructions): test_megakernel_open_env_scene_mean_ratio, test_megakernel_world_max_bounces_env_gate, test_gpu_wavefront_final_image_mean_ratio — R-channel ratio drift, owned by pkg153, unrelated to pkg120.
+Energy-gate linearity note
+The dielectric/Disney furnace tests (test_dielectric_glass_furnace.py, test_disney_rough_glass_furnace.py) render with apply_gamma=True (4th positional render() arg True). Per the gamma-furnace-cannot-detect-energy-gain finding, gamma clamps to [0,1] and cannot detect an energy gain — only loss. pkg120 adds energy (recovers the previously-dropped BSDF-side MIS leg), so a hypothetical energy-gain regression from this change would NOT be caught by these two furnace tests; they passing is necessary but not sufficient evidence against over-counting. The pkg120 gate itself (test_pkg120_two_sided_mis.py) is the one that correctly measures gain, and it renders apply_gamma=False (linear) by design.
+Visual inspection
+Rendered the large-near-light scene (R=1.6, d=2.0, matching the gate scene) at 256x256/256spp for both max_depth=1 (one-sided) and max_depth=2 (two-sided): floor directly under the sphere is smoothly bright in both, fading gradually outward with no fireflies, no banding/quantization steps, no NaN pixels (np.isnan false on both), no dark ring near the light, and no mode regression (still monochrome/RGB as expected, not spectral). The two-sided render is visibly brighter in the floor region near the light base, consistent with the measured +28-38% energy recovery. No visual anomalies.
+Anomalies worth watching
+None found in this sweep. The test_two_sided_matches_analytic_formfactor patch-size sensitivity (8x8 vs 2x2 vs point) documented in the test file's own comment is a measurement-methodology property of the analytic oracle, not a rendering defect — reconfirmed here since transport correctness was independently triple-checked per that comment (center-point accumulator, single-pixel match, independent Python cosine-MC oracle at 0.9999x analytic).
+HendrikGC02
+added a commit
+that referenced
+this pull request
+Aug 1, 2026
+docs(pkg166): file furnace/energy-suite linear-rendering hygiene spec…
+…
+9930802
+```
+… (gamma clamp cannot detect energy gain — PR #534 sweep finding)
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Hide details
+View details
+HendrikGC02
+merged commit 7495691
+into
+main
+Aug 1, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+HendrikGC02
+added a commit
+that referenced
+this pull request
+Aug 1, 2026
+docs(pkg120): flip spec to DONE, finalize overnight standup, open dayrun
+…
+760c42b
+```
+pkg120 two-sided MIS landed (PR #534, 7495691) across 4 sites; initial HW
+FAIL overturned by a patch-size control and confirmed independently, then
+re-gated and passed. Files pkg166 (furnace suites are gamma-blind to
+energy gain).
+
+Finalizes 2026-08-01-overnight.md with all three overnight ships
+(#533/#535/#534), the session-limit freeze window, and closeout notes; the
+owner extended the run into the day rather than closing out, so opens
+2026-08-02-dayrun.md as the continuation. Folds and removes the
+orchestrator's machine-generated 2026-08-01.md (no new information beyond
+what the finalized standup already carries).
+```
+HendrikGC02
+mentioned this pull request
+Aug 1, 2026
+fix(pkg156): gate pkg120 two-sided-MIS emissive leg on enableNEE (naive-mode wavefront parity)
+#537
+Merged
+3 tasks done
+HendrikGC02
+deleted the
+pkg120-two-sided-mis-spectral
+branch
+October 3, 2026 09:42
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

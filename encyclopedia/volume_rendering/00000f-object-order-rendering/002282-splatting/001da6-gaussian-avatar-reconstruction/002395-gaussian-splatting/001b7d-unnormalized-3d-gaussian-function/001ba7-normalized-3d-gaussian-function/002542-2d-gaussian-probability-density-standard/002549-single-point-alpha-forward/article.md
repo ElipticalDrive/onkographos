@@ -1,0 +1,140 @@
+# Single Point Alpha Forward
+
+Also called: Gaussian Alpha Computation, Single Point Alpha
+
+## Overview
+Computes the alpha value for a single 3D Gaussian projected onto a 2D pixel by evaluating the 2D Gaussian probability density function (PDF) at the pixel center [S1, unofficial]. It builds on [2D Gaussian Probability Density (Standard)](3466-2d-gaussian-probability-density-standard.md) by handling the full pipeline of transforming 3D Gaussian parameters (position, rotation, scale) into camera space, projecting the covariance to screen space, and combining the resulting PDF with the Gaussian's intrinsic opacity [S1, unofficial]. It differs from its sibling [Gradient of 2D Gaussian PDF (Conic)](3472-gradient-of-2d-gaussian-pdf-conic.md) by returning a scalar alpha value rather than the gradient of the PDF [G].
+
+## How it works
+**Inputs:**
+- 3D Gaussian parameters: mean position $\mathbf{xyz} \in \mathbb{R}^3$, pre-activation scale $s \in \mathbb{R}^3$, pre-activation quaternion $q \in \mathbb{R}^4$ (w, x, y, z), pre-activation opacity $\sigma_{pre} \in \mathbb{R}$ [S1, unofficial].
+- Camera matrices: World-to-camera transformation $T_{camera} \in \mathbb{R}^{4 \times 4}$, camera intrinsic matrix $K \in \mathbb{R}^{3 \times 3}$ [S1, unofficial].
+- Pixel coordinates: $\mathbf{uv}_{center} \in \mathbb{R}^2$ (the center of the pixel in screen space) [G].
+
+**Outputs:**
+- Alpha value $\alpha \in [0, 1]$ [S1, unofficial].
+
+**Data Structures:**
+- No persistent data structures; computation is stateless for a single Gaussian [G].
+
+**Steps:**
+1. **Homogenize Position:** Construct the homogeneous coordinate vector $\mathbf{xyz1} = [\mathbf{xyz}, 1]^T$ [S1, unofficial].
+2. **Transform to Camera Space:** Compute $\mathbf{xyz1}_{camera} = T_{camera} \cdot \mathbf{xyz1}$ [S1, unofficial].
+3. **Extract Camera Coordinates:** Let $\mathbf{xyz}_{camera}$ be the first three components of $\mathbf{xyz1}_{camera}$ [S1, unofficial].
+4. **Project to Screen Space:** Compute $\mathbf{uv1} = K \cdot \mathbf{xyz}_{camera}$ [S1, unofficial]. The screen coordinates are $\mathbf{uv} = \mathbf{uv1}_{0:2} / \mathbf{uv1}_2$ (perspective division) [S1, unofficial].
+5. **Compute Scale Matrix:** Construct the diagonal scale matrix $S = \text{diag}(\exp(s))$ [S1, unofficial].
+6. **Compute Rotation Matrix:** Construct the rotation matrix $R$ from the quaternion $q$ [S1, unofficial].
+7. **Compute 3D Covariance:** Compute the 3D covariance matrix $\Sigma = R S S R^T$ [S1, unofficial].
+8. **Compute Projection Jacobian:** Compute the Jacobian $J$ of the projection transformation [S1, unofficial].
+9. **Compute 2D Covariance:** Let $W$ be the upper-left $3 \times 3$ rotation part of $T_{camera}$ [S1, unofficial]. Compute the 2D covariance matrix in screen space: $cov = J W \Sigma W^T J^T$ [S1, unofficial].
+10. **Compute Probability Density:** Evaluate the 2D Gaussian PDF at the pixel center [S1, unofficial]. Let $\mathbf{d} = \mathbf{uv}_{center} - \mathbf{uv}$ [G]. The exponent is $p = \exp(-0.5 \mathbf{d}^T cov^{-1} \mathbf{d})$ [S1, unofficial].
+11. **Compute Alpha:** Apply the sigmoid function to the pre-activation opacity $\sigma_{pre}$ to get the base opacity $\sigma(\sigma_{pre}) = \frac{1}{1 + e^{-\sigma_{pre}}}$ [G]. The final alpha is $\alpha = \sigma(\sigma_{pre}) \cdot p$ [S1, unofficial].
+
+**Parameters:**
+- Sigmoid activation for opacity: Standard logistic sigmoid [G].
+- Exponential activation for scale: Standard exponential [G].
+
+**Edge Cases and Pitfalls:**
+- **Depth Zero:** If $Z=0$ (camera plane), perspective division fails. Guard against $Z \le \epsilon$ [G].
+- **Singular Covariance:** If the Gaussian is degenerate (e.g., zero scale), $cov$ may be singular. In practice, scales are regularized or clamped to prevent this [G].
+- **Numerical Stability:** Very small or large exponents in the PDF evaluation can lead to underflow/overflow. Clamping the exponent or the final alpha is recommended [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def single_point_alpha_forward(xyz, s, q, sigma_pre, T_camera, K, uv_center):
+    """
+    Computes alpha for a single 3D Gaussian projected to a 2D pixel.
+    
+    Args:
+        xyz: (3,) array, 3D mean position.
+        s: (3,) array, pre-activation scale (log scale).
+        q: (4,) array, pre-activation quaternion (w, x, y, z).
+        sigma_pre: float, pre-activation opacity.
+        T_camera: (4, 4) array, world-to-camera transformation matrix.
+        K: (3, 3) array, camera intrinsic matrix.
+        uv_center: (2,) array, pixel center coordinates (u, v).
+        
+    Returns:
+        alpha: float, the computed alpha value.
+    """
+    # 1. Homogenize position
+    xyz1 = np.append(xyz, 1.0)
+    
+    # 2. Transform to camera space
+    xyz1_camera = T_camera @ xyz1
+    
+    # 3. Extract camera coordinates
+    xyz_camera = xyz1_camera[:3]
+    X, Y, Z = xyz_camera
+    
+    # 4. Project to screen space
+    uv1 = K @ xyz_camera
+    uv = uv1[:2] / uv1[2]
+    
+    # 5. Compute scale matrix S
+    S = np.diag(np.exp(s))
+    
+    # 6. Compute rotation matrix R from quaternion q
+    w, x, y, z = q
+    R = np.array([
+        [1 - 2*(y**2 + z**2), 2*(x*y - w*z), 2*(x*z + w*y)],
+        [2*(x*y + w*z), 1 - 2*(x**2 + z**2), 2*(y*z - w*x)],
+        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x**2 + y**2)]
+    ])
+    
+    # 7. Compute 3D covariance Sigma
+    Sigma = R @ S @ S @ R.T
+    
+    # 8. Compute Jacobian J of projection
+    if abs(Z) < 1e-6:
+        return 0.0
+    
+    J_proj = np.array([
+        [1/Z, 0, -X/(Z**2)],
+        [0, 1/Z, -Y/(Z**2)]
+    ])
+    K_2x3 = K[:2, :]
+    J = K_2x3 @ J_proj
+    
+    # 9. Compute 2D covariance cov
+    W = T_camera[:3, :3]
+    cov = J @ W @ Sigma @ W.T @ J.T
+    
+    # 10. Compute probability density p
+    d = uv_center - uv
+    # Regularize covariance for numerical stability [G]
+    cov += np.eye(2) * 1e-6
+    cov_inv = np.linalg.inv(cov)
+    
+    exponent = -0.5 * (d @ cov_inv @ d)
+    p = np.exp(exponent)
+    
+    # 11. Compute alpha
+    sigma = 1.0 / (1.0 + np.exp(-sigma_pre))
+    alpha = sigma * p
+    
+    return alpha
+```
+
+## Subtopics
+
+### 2D Gaussian Alpha Computation (Batched)
+Evaluates the alpha for all pixels in a frame for a set of Gaussians using batched tensor operations [S2, unofficial]. It creates a meshgrid of pixel coordinates xs, ys from W, H, stacks and flattens them to points_2D of shape (W*H, 2), and expands dimensions so points_2D becomes (1, W*H, 2) and means_2D becomes (N, 1, 2) [S2, unofficial]. It evaluates the 2D Gaussian function to produce power with shape (N, W*H), computes the exponential term using `torch.where(power > 0.0, 0.0, torch.exp(power))`, multiplies by opacity to get alphas of shape (N, W*H), and reshapes alphas to (N, H, W) [S2, unofficial]. It clamps alphas to a maximum of 0.99 for numerical stability and zeros out values below $1/255.0$ [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per Gaussian per pixel [S1, unofficial]. For batched evaluation over $N$ Gaussians and $P$ pixels, it is $O(N \cdot P)$ [S2, unofficial].
+- **Memory Complexity:** Not given in the sources for single-point evaluation. For batched evaluation, it stores $(N, H, W)$ tensors [S2, unofficial].
+- **Strengths:** Direct evaluation allows for precise alpha computation at specific points [S1, unofficial]. The batched variant enables full-frame rendering via tensor operations [S2, unofficial].
+- **Limitations:** Single-point evaluation only accounts for the pixel center, not the full coverage area. Requires careful handling of singular covariances and perspective division edge cases [G].
+- **When to use:** When precise alpha values at specific pixel centers are needed, or as a component in a larger rasterization pipeline. The batched version is suitable for full-frame rendering [S1, S2, unofficial].
+
+## Background
+The method is part of the 3D Gaussian Splatting rendering pipeline, specifically the alpha computation step for projecting 3D Gaussians to 2D [S1, S2, unofficial]. It relies on the mathematical formulation of projecting 3D covariance matrices to 2D screen space using the Jacobian of the projection transformation [S1, unofficial].
+
+## Sources
+[S1] wanmeihuali/taichi_3d-gaussian-splatting, https://github.com/wanmeihuali/taichi_3d-gaussian-splatting, fetched 2026-10-27 (unofficial)
+[S2] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,255 @@
+# Gaussian Splat PLY Loader
+
+Also called: PLYLoader::load
+
+## Overview
+The Gaussian Splat PLY Loader parses 3D Gaussian parameters (position, scale, rotation, color, opacity, and spherical harmonics) from a PLY file into a structured data container. It solves the problem of converting raw file data into a format suitable for differentiable rendering by applying necessary inverse transformations (e.g., exponentiation for scale, sigmoid for opacity) and packing data for GPU consumption. It differs from sibling loaders by specifically handling the `gsplat`-style PLY format which stores scales and opacities in latent space, requiring explicit decoding during load.
+
+## How it works
+**Inputs:** A PLY file containing vertex properties `x`, `y`, `z`, `scale_0`, `scale_1`, `scale_2`, `rot_0`, `rot_1`, `rot_2`, `rot_3`, and optionally `red`, `green`, `blue`, `opacity`, and `f_dc_0`, `f_dc_1`, `f_dc_2`.
+**Outputs:** A `GaussianData` structure populated with `positions`, `scales`, `rotations`, `colors`, and a `packedData` buffer ready for GPU upload.
+
+**Data Structures:**
+*   `GaussianData`:
+    *   `positions`: `std::vector<glm::vec3>`
+    *   `scales`: `std::vector<glm::vec3>`
+    *   `rotations`: `std::vector<glm::quat>`
+    *   `colors`: `std::vector<glm::u8vec4>`
+    *   `packedData`: `std::vector<uint32_t>` (size $8 \times N$, where $N$ is vertex count)
+    *   `worldPositions`: `std::vector<float>` (size $3 \times N$)
+
+**Constants:**
+*   $SH\_C0 = \frac{1}{\sqrt{4\pi}}$ [S1, unofficial]
+
+**Steps:**
+1.  **Property Inspection:** Attempt to request vertex properties `red`, `green`, `blue`. If successful, set `hasRGB = true`; otherwise, catch exception and leave `hasRGB = false` [S1, unofficial].
+2.  **Opacity Inspection:** Attempt to request vertex property `opacity`. If successful, store pointer to opacity data; otherwise, set pointer to `nullptr` [S1, unofficial].
+3.  **Data Loading:** Read file data into a string stream `ss`. Determine `vertexCount` from the count of `vertices_x` [S1, unofficial].
+4.  **Array Resizing:** Resize `positions`, `scales`, `rotations`, and `colors` vectors to `vertexCount` [S1, unofficial].
+5.  **Buffer Reinterpretation:**
+    *   Reinterpret buffer pointers for `x`, `y`, `z` as `const float*` (`x_data`, `y_data`, `z_data`) [S1, unofficial].
+    *   Reinterpret buffer pointers for `scale_0`, `scale_1`, `scale_2` as `const float*` (`scale_0_data`, etc.) [S1, unofficial].
+    *   Reinterpret buffer pointers for `rot_0` through `rot_3` as `const float*` (`rot_0_data`, etc.) [S1, unofficial].
+    *   If spherical harmonics are present (`hasSH`), reinterpret `f_dc_0`, `f_dc_1`, `f_dc_2` as `const float*` (`f_dc_0_data`, etc.) [S1, unofficial].
+    *   If `hasRGB` is true, reinterpret `red`, `green`, `blue` as `const int*` (`red_data`, etc.) [S1, unofficial].
+    *   If opacity data exists, store as `const float*` (`opacity_data`); otherwise `nullptr` [S1, unofficial].
+6.  **Property Decoding Loop:** For each vertex $i$ from $0$ to `vertexCount` - 1:
+    *   **Position:** Set `positions[i] = glm::vec3(x_data[i], y_data[i], z_data[i])` [S1, unofficial].
+    *   **Scale:** Compute scale components using exponential inverse:
+        $$ \text{scale}_x = \exp(\text{scale\_0\_data}[i]) $$
+        $$ \text{scale}_y = \exp(\text{scale\_1\_data}[i]) $$
+        $$ \text{scale}_z = \exp(\text{scale\_2\_data}[i]) $$
+        Set `scales[i] = glm::vec3(scale_x, scale_y, scale_z)` [S1, unofficial].
+    *   **Rotation:** Construct quaternion $q = (\text{rot\_0\_data}[i], \text{rot\_1\_data}[i], \text{rot\_2\_data}[i], \text{rot\_3\_data}[i])$. Normalize $q$ and store in `rotations[i]` [S1, unofficial].
+    *   **Color:**
+        *   If `hasSH` is true:
+            $$ r = \text{clamp}\left( \left( 0.5 + SH\_C0 \times \text{f\_dc\_0\_data}[i] \right) \times 255.0, 0.0, 255.0 \right) $$
+            $$ g = \text{clamp}\left( \left( 0.5 + SH\_C0 \times \text{f\_dc\_1\_data}[i] \right) \times 255.0, 0.0, 255.0 \right) $$
+            $$ b = \text{clamp}\left( \left( 0.5 + SH\_C0 \times \text{f\_dc\_2\_data}[i] \right) \times 255.0, 0.0, 255.0 \right) $$
+            [S1, unofficial]
+        *   Else if `hasRGB` is true:
+            $$ r = \text{clamp}(\text{red\_data}[i], 0, 255) $$
+            $$ g = \text{clamp}(\text{green\_data}[i], 0, 255) $$
+            $$ b = \text{clamp}(\text{blue\_data}[i], 0, 255) $$
+            [S1, unofficial]
+        *   Else: Set $r = g = b = 255$ (white) [S1, unofficial].
+    *   **Opacity:**
+        *   If `opacity_data` is not null:
+            $$ a = \text{sigmoid}(\text{opacity\_data}[i]) = \frac{1.0}{1.0 + \exp(-\text{opacity\_data}[i])} $$
+            $$ a = \text{clamp}(a \times 255.0, 0.0, 255.0) $$
+            [S1, unofficial]
+        *   Else: Set $a = 255$ (implicit from `glm::u8vec4` initialization or default, though code explicitly assigns `a` only if opacity exists; if null, `a` remains uninitialized in the snippet but `glm::u8vec4` default construction is 0. However, standard PLY loaders often default to 255 if not present. The source snippet shows `if (opacity_data is not null)... assign to a`. It does not specify else. We assume default 255 or 0 based on struct init. Given `glm::u8vec4` default is 0, but opacity is usually 1.0. The source says "assign to a". If null, `a` is not assigned. We must initialize `a` to 255 if null to be safe, or follow source strictly. Source says "If opacity_data is not null... assign to a". It does not say else. We will assume default 255 for completeness as is standard, or note it. Let's stick to source: if null, `a` is not set. But `glm::u8vec4` constructor initializes to 0. This is a pitfall. [G] Initialize `a` to 255 if `opacity_data` is null to prevent transparent splats.)
+    *   **Store:** Set `colors[i] = glm::u8vec4(r, g, b, a)` [S1, unofficial].
+7.  **Pack Data:** Call `data.pack()` to prepare GPU data [S1, unofficial].
+
+**Packing Details (`pack()`):**
+1.  Iterate $i$ from $0$ to $N-1$.
+2.  **First `uvec4` (Indices 0-3):**
+    *   Copy `positions[i].x`, `positions[i].y`, `positions[i].z` bytes to `uint32_t` variables `ux`, `uy`, `uz` using `memcpy` to avoid strict aliasing violations [S1, unofficial].
+    *   `packedData[i*8 + 0] = ux`
+    *   `packedData[i*8 + 1] = uy`
+    *   `packedData[i*8 + 2] = uz`
+    *   `packedData[i*8 + 3] = 0` (selection flag) [S1, unofficial].
+3.  **World Positions:** Store `positions[i]` in `worldPositions` [S1, unofficial].
+4.  **Covariance Calculation:**
+    *   Convert `rotations[i]` to rotation matrix $R$ [S1, unofficial].
+    *   Create scale matrix $S = \text{diag}(\text{scales}[i])$ [S1, unofficial].
+    *   Compute $M = R \times S$ [S1, unofficial].
+    *   Compute symmetric covariance matrix $\Sigma = M M^T$. Extract upper triangle elements:
+        $$ \sigma_0 = M_{00}^2 + M_{10}^2 + M_{20}^2 \quad (\Sigma_{xx}) $$
+        $$ \sigma_1 = M_{00}M_{01} + M_{10}M_{11} + M_{20}M_{21} \quad (\Sigma_{xy}) $$
+        $$ \sigma_2 = M_{00}M_{02} + M_{10}M_{12} + M_{20}M_{22} \quad (\Sigma_{xz}) $$
+        $$ \sigma_3 = M_{01}^2 + M_{11}^2 + M_{21}^2 \quad (\Sigma_{yy}) $$
+        $$ \sigma_4 = M_{01}M_{02} + M_{11}M_{12} + M_{21}M_{22} \quad (\Sigma_{yz}) $$
+        $$ \sigma_5 = M_{02}^2 + M_{12}^2 + M_{22}^2 \quad (\Sigma_{zz}) $$
+        [S1, unofficial]
+5.  **Second `uvec4` (Indices 4-7):**
+    *   Pack covariance halves using `packHalf2x16`:
+        *   `packedData[i*8 + 4] = packHalf2x16(sigma_0, sigma_1)` [S1, unofficial]
+        *   `packedData[i*8 + 5] = packHalf2x16(sigma_2, sigma_3)` [S1, unofficial]
+        *   `packedData[i*8 + 6] = packHalf2x16(sigma_4, sigma_5)` [S1, unofficial]
+    *   Pack color `colors[i]` (RGBA) into `uint32_t` and store in `packedData[i*8 + 7]` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import struct
+from typing import List, Optional, Tuple
+
+# Helper for half-precision packing (standard implementation)
+def pack_half_2x16(x: float, y: float) -> int:
+    x_bytes = struct.pack('e', x)
+    y_bytes = struct.pack('e', y)
+    return struct.unpack('<I', x_bytes + y_bytes)[0]
+
+def load_gaussian_splats(ply_data: dict) -> dict:
+    """
+    Loads Gaussian splat data from PLY vertex properties.
+    Returns a dict with 'positions', 'scales', 'rotations', 'colors', 'packed_data'.
+    """
+    vertex_count = len(ply_data['x'])
+    has_rgb = 'red' in ply_data and 'green' in ply_data and 'blue' in ply_data
+    has_sh = 'f_dc_0' in ply_data and 'f_dc_1' in ply_data and 'f_dc_2' in ply_data
+    has_opacity = 'opacity' in ply_data
+    
+    SH_C0 = 1.0 / math.sqrt(4 * math.pi)
+    
+    positions = []
+    scales = []
+    rotations = []
+    colors = []
+    
+    for i in range(vertex_count):
+        # Position
+        pos = (ply_data['x'][i], ply_data['y'][i], ply_data['z'][i])
+        positions.append(pos)
+        
+        # Scale (inverse exp)
+        sx = math.exp(ply_data['scale_0'][i])
+        sy = math.exp(ply_data['scale_1'][i])
+        sz = math.exp(ply_data['scale_2'][i])
+        scales.append((sx, sy, sz))
+        
+        # Rotation (normalize quaternion)
+        qw, qx, qy, qz = ply_data['rot_0'][i], ply_data['rot_1'][i], ply_data['rot_2'][i], ply_data['rot_3'][i]
+        norm = math.sqrt(qw**2 + qx**2 + qy**2 + qz**2)
+        rotations.append((qw/norm, qx/norm, qy/norm, qz/norm))
+        
+        # Color
+        if has_sh:
+            r = max(0.0, min(255.0, (0.5 + SH_C0 * ply_data['f_dc_0'][i]) * 255.0))
+            g = max(0.0, min(255.0, (0.5 + SH_C0 * ply_data['f_dc_1'][i]) * 255.0))
+            b = max(0.0, min(255.0, (0.5 + SH_C0 * ply_data['f_dc_2'][i]) * 255.0))
+        elif has_rgb:
+            r = max(0, min(255, ply_data['red'][i]))
+            g = max(0, min(255, ply_data['green'][i]))
+            b = max(0, min(255, ply_data['blue'][i]))
+        else:
+            r, g, b = 255, 255, 255
+            
+        # Opacity
+        if has_opacity:
+            a_raw = ply_data['opacity'][i]
+            a_sig = 1.0 / (1.0 + math.exp(-a_raw))
+            a = max(0.0, min(255.0, a_sig * 255.0))
+        else:
+            a = 255.0 # [G] Default to opaque if not specified
+            
+        colors.append((int(r), int(g), int(b), int(a)))
+        
+    # Pack Data
+    packed_data = [0] * (vertex_count * 8)
+    world_positions = []
+    
+    for i in range(vertex_count):
+        x, y, z = positions[i]
+        sx, sy, sz = scales[i]
+        qw, qx, qy, qz = rotations[i]
+        r, g, b, a = colors[i]
+        
+        # First uvec4: Position bytes + selection flag
+        ux = struct.unpack('<I', struct.pack('f', x))[0]
+        uy = struct.unpack('<I', struct.pack('f', y))[0]
+        uz = struct.unpack('<I', struct.pack('f', z))[0]
+        
+        packed_data[i*8 + 0] = ux
+        packed_data[i*8 + 1] = uy
+        packed_data[i*8 + 2] = uz
+        packed_data[i*8 + 3] = 0 # Selection flag
+        
+        world_positions.extend([x, y, z])
+        
+        # Covariance Calculation
+        # Rotation Matrix from Quaternion
+        # R = [1-2(qy^2+qz^2), 2(qx*qy-qw*qz), 2(qx*qz+qw*qy)]
+        #     [2(qx*qy+qw*qz), 1-2(qx^2+qz^2), 2(qy*qz-qw*qx)]
+        #     [2(qx*qz-qw*qy), 2(qy*qz+qw*qx), 1-2(qx^2+qy^2)]
+        
+        r00 = 1 - 2*(qy**2 + qz**2)
+        r01 = 2*(qx*qy - qw*qz)
+        r02 = 2*(qx*qz + qw*qy)
+        r10 = 2*(qx*qy + qw*qz)
+        r11 = 1 - 2*(qx**2 + qz**2)
+        r12 = 2*(qy*qz - qw*qx)
+        r20 = 2*(qx*qz - qw*qy)
+        r21 = 2*(qy*qz + qw*qx)
+        r22 = 1 - 2*(qx**2 + qy**2)
+        
+        # Scale Matrix M = R * S
+        m00 = r00 * sx
+        m01 = r01 * sy
+        m02 = r02 * sz
+        m10 = r10 * sx
+        m11 = r11 * sy
+        m12 = r12 * sz
+        m20 = r20 * sx
+        m21 = r21 * sy
+        m22 = r22 * sz
+        
+        # Sigma = M * M^T
+        sigma_0 = m00**2 + m10**2 + m20**2
+        sigma_1 = m00*m01 + m10*m11 + m20*m21
+        sigma_2 = m00*m02 + m10*m12 + m20*m22
+        sigma_3 = m01**2 + m11**2 + m21**2
+        sigma_4 = m01*m02 + m11*m12 + m21*m22
+        sigma_5 = m02**2 + m12**2 + m22**2
+        
+        # Second uvec4: Covariance halves + Color
+        packed_data[i*8 + 4] = pack_half_2x16(sigma_0, sigma_1)
+        packed_data[i*8 + 5] = pack_half_2x16(sigma_2, sigma_3)
+        packed_data[i*8 + 6] = pack_half_2x16(sigma_4, sigma_5)
+        
+        # Color packing: RGBA -> uint32
+        packed_color = r | (g << 8) | (b << 16) | (a << 24)
+        packed_data[i*8 + 7] = packed_color
+        
+    return {
+        'positions': positions,
+        'scales': scales,
+        'rotations': rotations,
+        'colors': colors,
+        'packed_data': packed_data,
+        'world_positions': world_positions
+    }
+```
+
+**Edge Cases and Pitfalls:**
+*   **Strict Aliasing:** Direct casting of float pointers to uint32 pointers for packing violates C++ strict aliasing rules. Must use `memcpy` or `std::bit_cast` (C++20) [S1, unofficial].
+*   **Opacity Default:** If opacity property is missing, the source code does not explicitly set a default. Assuming 0 (transparent) is dangerous for visualization. [G] Default to 255 (opaque) if opacity is absent.
+*   **SH vs RGB:** The code checks `hasSH` first. If both are present, SH is used. If neither, white is used.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$, where $N$ is the number of Gaussians. Linear pass for decoding and packing.
+*   **Memory Complexity:** $O(N)$. Stores raw vectors plus a packed buffer of $8 \times N$ uint32s.
+*   **Performance:** Fast CPU-side loading. The packing step involves matrix multiplications per Gaussian, which is lightweight for typical scene sizes ($10^5-10^6$ splats).
+*   **Strengths:** Handles latent space decoding (exp/sigmoid) automatically. Packs data efficiently for GPU shaders.
+*   **Limitations:** Requires specific PLY property names. Does not handle coordinate system conversion (handled by sibling).
+
+## Background
+This loader is part of the `gsplat` OpenGL implementation, an unofficial port of 3D Gaussian Splatting rendering. It adapts the PLY format generated by the original 3DGS optimization pipeline, which stores scales and opacities in a latent space to facilitate gradient-based optimization.
+
+## Sources
+[S1] liaozhangsheng/gsplat-opengl, https://github.com/liaozhangsheng/gsplat-opengl, fetched 2026-10-28 (unofficial)

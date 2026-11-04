@@ -1,0 +1,136 @@
+# N-DGS Bounded Cholesky Parameterization
+
+Also called: N-DGS
+
+## Overview
+N-DGS (N-Dimensional Gaussian Splatting) is a parameterization method for the joint covariance matrix of 3D Gaussians in differentiable volume rendering. It solves the problem of optimizing the cross-covariance between spatial and query dimensions while maintaining positive-definiteness and numerical stability. Unlike sibling methods that may use direct regression or unbounded factorizations, N-DGS uses a bounded Cholesky factorization where coefficients are scaled by query diagonal scales, ensuring that the resulting cross-covariance and spatial extent remain within controlled bounds [S1, unofficial]. It builds on [GaussianSet Data Structure](2074-gaussianset-data-structure.md) by defining how the covariance matrix components are stored and optimized.
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** The method parameterizes the joint covariance matrix $\Sigma$ for a Gaussian primitive. It takes as parameters the bounded Cholesky coefficients and query diagonal scales.
+- **Output:** The full joint covariance matrix $\Sigma$, from which the spatial covariance $\Sigma_{pp}$, cross-covariance $\Sigma_{pq}$, and query covariance $\Sigma_{qq}$ are derived.
+
+**Data Structures:**
+The joint covariance $\Sigma$ is partitioned into blocks:
+$$ \Sigma = \begin{pmatrix} \Sigma_{pp} & \Sigma_{pq} \\ \Sigma_{qp} & \Sigma_{qq} \end{pmatrix} $$
+where $\Sigma_{pp}$ is the spatial covariance ($p \times p$), $\Sigma_{qq}$ is the query covariance ($q \times q$), and $\Sigma_{pq}$ is the cross-covariance ($p \times q$).
+
+The parameterization relies on a Cholesky factor $A$ of the joint covariance. The off-diagonal entries of $A$ contribute to both $\Sigma_{pq}$ and the spatial extent $(\Sigma_{pp})_{ii}$ [S1, unofficial].
+
+**Formulas:**
+1.  **Bounded Cholesky Factor:**
+    The cross-covariance block is derived from a bounded Cholesky factor $B$. Let $s_q$ be the diagonal scales of the query covariance. The factor $B$ is defined as:
+    $$ B = \text{diag}(s_q) B_e $$
+    where $|B_{e,jk}| \leq 1$. This ensures:
+    $$ \|B\|_2 \leq \|B\|_F \leq \sqrt{p} \|s_q\|_2 $$
+    Consequently, the cross-covariance block satisfies:
+    $$ \|(\Sigma_{pq})_{i,:}\|_2 \leq \sqrt{p} \|s_q\|_2 \sqrt{(\Sigma_{pp})_{ii}} \quad [S1, \text{unofficial}, unofficial] $$
+
+2.  **Regression Operator:**
+    The rendered spatial shift (conditional mean) is given by:
+    $$ \Delta \mu_{\text{N-DGS}} = \Sigma_{pq} \Sigma_{qq}^{-1} \delta = M_{\text{N-DGS}} \delta \quad [S1, \text{unofficial}, unofficial] $$
+    where $\delta$ is the query deviation.
+
+3.  **Invariant Gaussian Bound:**
+    To analyze the shift independently of basis, define the normalized cross-covariance:
+    $$ K = \Sigma_{pp}^{-1/2} \Sigma_{pq} \Sigma_{qq}^{-1/2} $$
+    Positive-definiteness implies $\|K\|_2 < 1$. With the whitened query deviation $h = \Sigma_{qq}^{-1/2} \delta$, the shift is:
+    $$ \Delta \mu_{\text{N-DGS}} = \Sigma_{pp}^{1/2} K h $$
+    This yields the bound:
+    $$ \|\Sigma_{pp}^{-1/2} \Delta \mu_{\text{N-DGS}}\|_2 \leq \|\Sigma_{qq}^{-1/2} \delta\|_2 \quad [S1, \text{unofficial}, unofficial] $$
+
+**Parameters:**
+- $s_q$: Diagonal scales of the query covariance.
+- $B_e$: Bounded Cholesky coefficients with entries in $[-1, 1]$.
+- Typical values are not explicitly given, but the bounds rely on the magnitude of $s_q$ and the spatial scale $\bar{s}$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Interpretation of Off-Diagonals:** The off-diagonal entries of the Cholesky factor $A$ contribute to both $\Sigma_{pq}$ and the spatial extent $(\Sigma_{pp})_{ii}$. They should not be interpreted as producing cross-covariance independently of spatial scale [S1, unofficial].
+- **Ill-Conditioning:** A bound on $\Sigma_{pq}$ alone does not bound the shift $\Delta \mu$. The inverse query covariance $\Sigma_{qq}^{-1}$ and the query deviation $\delta$ also enter the regression. A narrow or ill-conditioned query covariance can amplify the regression operator [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_n_dgs_covariance(A_chol, s_q):
+    """
+    Compute joint covariance blocks from bounded Cholesky factor and query scales.
+    
+    Args:
+        A_chol: Cholesky factor A of the joint covariance.
+        s_q: Diagonal scales of the query covariance.
+        
+    Returns:
+        Sigma_pp, Sigma_pq, Sigma_qq: Blocks of the joint covariance.
+    """
+    # Extract blocks from Cholesky factor A
+    # A is structured such that its off-diagonals influence both Sigma_pp and Sigma_pq
+    # The exact mapping from A to Sigma blocks depends on the specific Cholesky ordering
+    # and is assumed to be handled by the underlying GaussianSet structure.
+    
+    # Compute B = diag(s_q) * B_e
+    # B_e is derived from A_chol, with entries bounded by 1
+    B_e = extract_bounded_cholesky(A_chol)
+    B = diag(s_q) @ B_e
+    
+    # Compute Sigma_pq from B
+    # Sigma_pq is related to B via the spatial covariance structure
+    # For simplicity, assume Sigma_pq is directly derived from B in the context of the joint factorization
+    Sigma_pq = compute_cross_covariance_from_B(B, A_chol)
+    
+    # Compute Sigma_pp from A_chol
+    Sigma_pp = compute_spatial_covariance(A_chol)
+    
+    # Compute Sigma_qq from s_q
+    Sigma_qq = diag(s_q) @ diag(s_q)
+    
+    return Sigma_pp, Sigma_pq, Sigma_qq
+
+def compute_shift(Sigma_pq, Sigma_qq, delta):
+    """
+    Compute the rendered spatial shift.
+    
+    Args:
+        Sigma_pq: Cross-covariance block.
+        Sigma_qq: Query covariance block.
+        delta: Query deviation.
+        
+    Returns:
+        Delta_mu: Spatial shift.
+    """
+    # Invert Sigma_qq
+    Sigma_qq_inv = invert(Sigma_qq)
+    
+    # Compute shift
+    Delta_mu = Sigma_pq @ Sigma_qq_inv @ delta
+    
+    return Delta_mu
+```
+
+## Subtopics
+
+### [dGS Direct Regression Parameterization](2821-dgs-direct-regression-parameterization.md)
+dGS is a direct parameterization method for radiance-field optimization that replaces the covariance-derived conditioning steps of N-DGS with three explicit per-primitive parameters to compute opacity and position directly. It solves the problem of query-block inversion and covariance correction required by sibling methods like N-DGS and UBS, exposing rendered quantities instead. Unlike N-DGS, which parameterizes the joint covariance and derives regression via inversion, dGS explicitly stores the precision matrix and spatial coupling, avoiding intermediate tensor construction during slicing.
+
+### [Conditional-coordinate parameterization](2822-conditional-coordinate-parameterization.md)
+Conditional-coordinate parameterization provides a non-redundant, smooth bijection between the space of joint Gaussian covariances and a set of operational quantities: conditional spatial covariance, query-space precision, and a regression operator. It solves the problem of efficiently representing and optimizing the cross-covariance between spatial and query dimensions in differentiable Gaussian splatting by avoiding the computational cost and instability of inverting the query covariance block during rendering. Unlike N-DGS, which derives the regression operator from a joint Cholesky factor, this method directly optimizes the regression operator and precision, treating the coupling as a block shear.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+N-DGS requires the inversion of the query covariance block $\Sigma_{qq}$ to compute the regression operator $M_{\text{N-DGS}} = \Sigma_{pq} \Sigma_{qq}^{-1}$. This inversion is computationally expensive, especially for high-dimensional query spaces. The bounded Cholesky parameterization ensures numerical stability but does not reduce the complexity of the inversion step [S1, unofficial].
+
+**Measured Performance:**
+On two trained MCMC scenes with six views each, the opacity-weighted $\|\Delta \mu\|/\bar{s}$ has a median of 0.29–0.30 and a 99th percentile of 4.8–7.0 for N-DGS [S1, unofficial]. This is compared to dGS, which has a 99th percentile of 2.9–4.8. The ordering reverses when normalized by the smallest principal axis, supporting $\bar{s}$ as an isotropic prior rather than a per-axis optimum [S1, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths:** The bounded Cholesky factorization ensures that the cross-covariance and spatial extent remain within controlled bounds, improving numerical stability during optimization. The invariant Gaussian bound provides a basis-independent guarantee on the shift magnitude [S1, unofficial].
+- **Limitations:** The method requires the inversion of the query covariance block, which can be computationally expensive and unstable if the query covariance is ill-conditioned. The interpretation of the Cholesky coefficients is complex, as off-diagonal entries contribute to both cross-covariance and spatial extent [S1, unofficial].
+
+**When to Use:**
+N-DGS is suitable when numerical stability is a primary concern and the query covariance is well-conditioned. It is less suitable for high-dimensional query spaces where the inversion cost is prohibitive, or when the query covariance is likely to be ill-conditioned.
+
+## Background
+N-DGS was introduced in the context of differentiable Gaussian splatting to address the challenges of optimizing the joint covariance matrix. The method builds on the bounded Cholesky factorization to ensure positive-definiteness and stability. It is part of the broader family of N-Dimensional Gaussian Splatting methods, which extend 3D Gaussian Splatting to higher dimensions [S1, unofficial].
+
+## Sources
+[S1] Direct Conditional Parameterization for N-Dimensional Splatting, https://arxiv.org/abs/2610.22778, fetched 2026-10-30 (unofficial)

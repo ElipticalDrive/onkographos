@@ -1,0 +1,310 @@
+Contribute to XAsinity/CollinNewProject development by creating an account on GitHub.
+
+Extract cloud rendering from skybox into standalone volumetric URP render pass by Copilot · Pull Request #52 · XAsinity/CollinNewProject · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Copilot
+AI
+commented
+Mar 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Clouds were embedded in DayNightSkybox.shader as a surface projection — no real volumetric depth, flat self-shadowing, and all cloud/weather uniforms routed to the same material as stars/atmosphere. This PR strips all cloud code from the skybox and moves it into a dedicated fullscreen render pass with proper volumetric raymarching.
+New files
+Assets/Shaders/VolumetricClouds.shader — Fullscreen URP shader using SV_VertexID fullscreen triangle. Reconstructs world-space ray directions from inverse camera matrices. Marches 32 shell layers (L1) / 24 (L2) using Beer-Lambert transmittance accumulation. Henyey-Greenstein phase function for forward scattering. Depth-based self-shadowing (outer shell lit → inner shell shadowed). All existing uniform names preserved exactly (_CloudScale, _Cloud2Coverage, _CloudDissolveOffset, etc.).
+Assets/Scripts/Rendering/VolumetricCloudRenderPass.cs — ScriptableRendererFeature + ScriptableRenderPass injecting at RenderPassEvent.AfterRenderingSkybox. Sets _InvProjectionMatrix / _InvViewMatrix per frame; draws via DrawProcedural.
+Modified files
+DayNightSkybox.shader — Removed all cloud Properties, uniforms, CalculateCloudLayer(), CalculateClouds(), cloud compositing in frag(), cloud-tinted horizon haze, and unused Hash2D/ValueNoise helpers.
+WeatherManager.cs — Added public Material cloudMaterial field. All _Cloud* SetFloat/SetColor/SetVector calls rerouted from _skyboxMaterial to cloudMaterial. Non-cloud skybox properties (_DayAtmosphereStrength, _HorizonHaze*, _StarBrightness) remain on _skyboxMaterial. Null-guarded with actionable warning.
+DayNightCycle.cs — Added public Material cloudMaterial field. UpdateSkyboxMaterial() pushes _TimeOfDay, _SunDirection, _MoonDirection to both materials each frame.
+WEATHER_SETUP.md — Added Step 7: create material, add renderer feature, assign to WeatherManager + DayNightCycle.
+Routing summary
+```
+Before: WeatherManager → _skyboxMaterial (all cloud + atmosphere uniforms)
+After:  WeatherManager → cloudMaterial   (_Cloud* uniforms)
+        WeatherManager → _skyboxMaterial  (atmosphere, haze, stars only)
+        DayNightCycle  → both materials   (_TimeOfDay, _SunDirection, _MoonDirection)
+```
+All WeatherProfile fields and transition logic are unchanged — only the material target changed.
+Original prompt
+Rewrite cloud system: Extract clouds from skybox shader into a standalone volumetric cloud render pass
+Summary
+Move ALL cloud rendering out of DayNightSkybox.shader into a new dedicated volumetric cloud system that renders as a separate URP ScriptableRendererFeature. The skybox shader should only handle sky gradient, sun/moon discs, stars, nebula, aurora, dust, horizon haze, and vignette — zero cloud code remaining.
+Files to create
+1. Assets/Shaders/VolumetricClouds.shader
+A new fullscreen shader that raymarches through a cloud volume slab. It must accept ALL the same uniform names that WeatherManager currently sets on the skybox material for clouds, so the C# routing "just works":
+Layer 1 uniforms (must match existing names exactly):
+_CloudScale, _CloudSpeed, _CloudDirection, _CloudDensity, _CloudSharpness
+_CloudCoverage, _CloudBrightness, _CloudDarkness, _CloudColor, _CloudShadowColor
+_CloudEdgeSoftness, _CloudVariation, _CloudDissolveOffset
+_CloudHeight, _CloudDayColor, _CloudNightColor, _CloudSunsetColor, _CloudAlpha
+_CloudHorizonCoverage, _CloudZenithBlend
+_CloudShellRadius, _CloudShellFlattening
+Layer 2 uniforms:
+_Cloud2Coverage, _Cloud2Scale, _Cloud2Speed, _Cloud2Density, _Cloud2Sharpness
+_Cloud2Brightness, _Cloud2Darkness, _Cloud2Color, _Cloud2ShadowColor, _Cloud2Opacity
+_Cloud2ShellRadius, _CloudLayer2Height
+Shared:
+_EnableClouds (toggle), _TimeOfDay, _SunDirection, _MoonDirection
+The shader should:
+Render as a fullscreen pass after the skybox but before opaque geometry
+Use raymarching through a volume slab (cloud altitude layer) with 24-48 steps
+Sample 3D noise (FBM) for cloud shapes with detail noise for erosion
+Apply Henyey-Greenstein phase function for realistic light scattering from sun direction
+Support two cloud layers (Layer 1 lower altitude, Layer 2 higher altitude) with independent properties
+Apply wind scrolling via _CloudDirection and _CloudSpeed
+Apply dissolve offset via _CloudDissolveOffset for storm transitions
+Apply time-of-day coloring using _CloudDayColor, _CloudNightColor, _CloudSunsetColor with _TimeOfDay
+Apply _CloudColor and _CloudShadowColor tinting
+Apply coverage, density, sharpness, edge softness, variation controls
+Output alpha-blended clouds over the sky background
+Only render above the horizon (respect _CloudHeight bias)
+2. Assets/Scripts/Rendering/VolumetricCloudRenderPass.cs
+A URP ScriptableRendererFeature + ScriptableRenderPass that:
+Injects after the skybox render event (RenderPassEvent.BeforeRenderingOpaques or AfterRenderingSkybox)
+Draws a fullscreen quad using the VolumetricClouds material
+Has a public cloudMaterial field for the material reference
+Passes camera matrices to the shader for proper world-space ray reconstruction
+3. Assets/Materials/Sky/VolumetricClouds.mat is NOT created by code — user will create it manually. But document the setup.
+Files to modify
+4. Assets/Shaders/DayNightSkybox.shader
+Remove ALL cloud-related code:
+Remove ALL cloud Properties entries (lines ~45-70 for Layer 1, ~100-155 for Layer 2, shell radius, dissolve, zenith blend, horizon coverage, cloud layer 2 height, etc.)
+Remove ALL cloud uniform declarations in the CGPROGRAM block
+Remove the CalculateCloudLayer() function entirely
+Remove the CalculateClouds() function entirely
+Remove cloud compositing from the frag() function (the part that calls CalculateClouds and blends cloudColor into finalColor)
+Keep EVERYTHING else: HDR panorama, atmosphere, sun/moon discs, stars, nebula, aurora, dust, horizon haze, vignette
+5. Assets/Scripts/Weather/WeatherManager.cs
+Re-route ALL cloud SetFloat/SetVector/SetColor calls from _skyboxMaterial to a new _cloudMaterial:
+Add new field:
+```
+[Header("Cloud Material")]
+[Tooltip("Material using the VolumetricClouds shader. WeatherManager routes all cloud properties here instead of the skybox material.")]
+public Material cloudMaterial;
+```
+In Start():
+Keep caching base cloud values but read them from cloudMaterial instead of _skyboxMaterial
+Keep the clear-sky baseline initialization but set cloud properties on cloudMaterial instead of _skyboxMaterial
+Still set _CloudShellRadius, _Cloud2ShellRadius, _CloudShellFlattening on cloudMaterial
+In ApplyWeatherLerp():
+ALL cloud-related _skyboxMaterial.SetFloat/SetVector/SetColor calls must target cloudMaterial instead:
+_CloudCoverage, _CloudDensity, _CloudSharpness, _CloudScale
+_CloudBrightness, _CloudDarkness, _CloudColor, _CloudShadowColor
+_CloudEdgeSoftness, _CloudVariation
+_CloudDirection, _CloudSpeed
+_Cloud2Coverage, _Cloud2Density, _Cloud2Sharpness, _Cloud2Scale
+_Cloud2Speed, _Cloud2Brightness, _Cloud2Darkness, _Cloud2Color, `_Cloud2ShadowColo...
+This pull request was created from Copilot chat.
+Initial plan
+752d3ad
+Copilot
+AI
+assigned
+Copilot and
+XAsinity
+Mar 30, 2026
+Copilot started work on behalf of
+XAsinity
+March 30, 2026 23:08
+View session
+Copilot
+AI
+and others
+added 2 commits
+March 30, 2026 23:30
+Add VolumetricClouds shader, render pass, and reroute cloud properties
+…
+7da55e2
+```
+Agent-Logs-Url: https://github.com/XAsinity/CollinNewProject/sessions/86802433-7d27-410b-9b79-3742d6243e8e
+
+Co-authored-by: XAsinity <75650868+XAsinity@users.noreply.github.com>
+```
+Address code review: EPSILON constant, step count comments, feature n…
+…
+f09f848
+```
+…ame, and warning message
+
+Agent-Logs-Url: https://github.com/XAsinity/CollinNewProject/sessions/86802433-7d27-410b-9b79-3742d6243e8e
+
+Co-authored-by: XAsinity <75650868+XAsinity@users.noreply.github.com>
+```
+Copilot
+AI
+changed the title
+[WIP] Extract clouds from skybox shader into volumetric cloud render pass
+Extract cloud rendering from skybox into standalone volumetric URP render pass
+Mar 30, 2026
+Copilot
+AI
+requested a review
+from XAsinity
+March 30, 2026 23:34
+Copilot finished work on behalf of
+XAsinity
+March 30, 2026 23:34
+XAsinity
+marked this pull request as ready for review
+March 30, 2026 23:55
+Copilot
+AI
+review requested due to automatic review settings
+March 30, 2026 23:55
+XAsinity
+merged commit 4bfd594
+into
+main
+Mar 30, 2026
+Copilot started reviewing on behalf of
+XAsinity
+March 30, 2026 23:56
+View session
+Copilot
+AI
+reviewed
+Mar 31, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR extracts procedural cloud rendering from DayNightSkybox.shader into a dedicated URP ScriptableRendererFeature + fullscreen volumetric raymarch shader, and reroutes weather/day-night uniforms to a separate cloud material.
+Changes:
+Added a fullscreen Custom/VolumetricClouds shader and a URP renderer feature/pass to render clouds as a standalone pass.
+Removed all cloud properties/uniforms/functions/compositing from DayNightSkybox.shader so it only renders sky/stars/haze/etc.
+Updated WeatherManager and DayNightCycle to drive cloud-related uniforms via a new cloudMaterial reference, plus documented the new setup steps.
+Reviewed changes
+Copilot reviewed 9 out of 9 changed files in this pull request and generated 4 comments.
+Show a summary per file
+File
+Description
+WEATHER_SETUP.md
+Documents the new volumetric cloud material + renderer feature setup.
+Assets/Shaders/VolumetricClouds.shader
+New fullscreen volumetric cloud raymarch shader (two layers) using inverse camera matrices.
+Assets/Shaders/VolumetricClouds.shader.meta
+Unity meta for the new shader asset.
+Assets/Shaders/DayNightSkybox.shader
+Removes all cloud rendering and cloud-tinted haze/occlusion logic from the skybox shader.
+Assets/Scripts/Rendering/VolumetricCloudRenderPass.cs
+New URP renderer feature + pass that draws the fullscreen procedural triangle.
+Assets/Scripts/Rendering/VolumetricCloudRenderPass.cs.meta
+Unity meta for the new renderer feature script.
+Assets/Scripts/Rendering.meta
+Unity meta for the new Assets/Scripts/Rendering/ folder.
+Assets/Scripts/Weather/WeatherManager.cs
+Adds cloudMaterial and routes all _Cloud* property writes from the skybox material to the cloud material.
+Assets/Scripts/DayNightCycle.cs
+Adds cloudMaterial and pushes _TimeOfDay, _SunDirection, _MoonDirection to it each frame.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+Assets/Scripts/Rendering/VolumetricCloudRenderPass.cs
+Comment on lines
++29
+to
++33
+_pass = new VolumetricCloudPass
+{
+renderPassEvent = RenderPassEvent.AfterRenderingSkybox
+};
+}
+Copilot
+AI
+Mar 31, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+RenderPassEvent.AfterRenderingSkybox runs after opaque geometry in URP, and this pass draws with ZTest Always (and doesn’t sample depth). As a result, clouds will render over scene geometry instead of being occluded by it. To match the intended behavior (“clouds can be occluded by game objects”), either (a) keep this event but render only where the depth buffer is at far plane (set fullscreen triangle depth to far and use an appropriate ZTest), or (b) sample _CameraDepthTexture and discard/attenuate where scene depth is closer.
+Copilot uses AI. Check for mistakes.
+Comment thread
+Assets/Shaders/VolumetricClouds.shader
+{
+Tags { "RenderType"="Transparent" "RenderPipeline"="UniversalPipeline" "Queue"="Transparent" }
+ZWrite Off
+ZTest Always
+Copilot
+AI
+Mar 31, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This pass is configured with ZTest Always, which will draw clouds over existing scene geometry when the render feature runs after opaques (the default URP ordering around skybox). If the goal is “clouds behind objects,” set up depth testing so the fullscreen triangle only renders where the depth buffer is at the far plane (and output far depth from the vertex shader), or implement depth-texture-based clipping.
+Suggested change
+ZTest Always
+ZTest LEqual
+Copilot uses AI. Check for mistakes.
+Comment thread
+WEATHER_SETUP.md
+Comment on lines
++260
+to
++263
+- All **WeatherProfile** fields work exactly as before — they are now routed to the cloud material instead of the skybox material.
+- The skybox material should **not** receive cloud properties — WeatherManager no longer sets any `_Cloud*` values on it.
+- The cloud pass renders **after the skybox** (`RenderPassEvent.AfterRenderingSkybox`) and **before opaque geometry**, so clouds appear above the sky background and can be occluded by game objects.
+- **Shell radius, shell flattening, and zenith blend** are geometry properties — set them on the cloud material directly. WeatherManager intentionally never overrides them during transitions.
+Copilot
+AI
+Mar 31, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The setup note claims the cloud pass renders “after the skybox … and before opaque geometry” and that clouds “can be occluded by game objects.” In URP, RenderPassEvent.AfterRenderingSkybox is after opaques, and the current shader uses ZTest Always, so clouds will actually draw over geometry. Please update these notes to match the actual behavior, or adjust the render pass + depth testing so occlusion works as documented.
+Copilot uses AI. Check for mistakes.
+Comment thread
+Assets/Scripts/Rendering/VolumetricCloudRenderPass.cs
+Comment on lines
++84
+to
++97
+Camera cam = renderingData.cameraData.camera;
+// Build inverse projection/view matrices so the shader can reconstruct
+// world-space ray directions from screen-space coordinates.
+//
+// GL.GetGPUProjectionMatrix accounts for platform-specific clip-space
+// conventions (e.g. reversed Z on DX12/Vulkan, Y-flip on Metal).
+Matrix4x4 gpuProj = GL.GetGPUProjectionMatrix(cam.projectionMatrix, false);
+Matrix4x4 invProj = gpuProj.inverse;
+Matrix4x4 invView = cam.cameraToWorldMatrix; // camera → world (rotation + translation)
+_material.SetMatrix("_InvProjectionMatrix", invProj);
+_material.SetMatrix("_InvViewMatrix", invView);
+Copilot
+AI
+Mar 31, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+_material.SetMatrix(...) mutates the shared material asset at runtime, so in multi-camera scenarios (camera stacking, SceneView + GameView, minimap cameras) the matrices can be left in the wrong state between cameras/passes. Prefer setting per-camera values via a MaterialPropertyBlock passed to DrawProcedural, or via cmd.SetGlobalMatrix (and read globals in the shader), to keep the material immutable.
+Copilot uses AI. Check for mistakes.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

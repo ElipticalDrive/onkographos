@@ -1,0 +1,187 @@
+# Camera Control via Euler Angles (Pitch/Yaw)
+Also called: 2-axis aircraft rotation, Camera View Matrix and Vector Generation, Pitch/Yaw Camera Control, Scene Rotation via Elevation and Azimuth, forward-vec, rotate-point
+
+## Overview
+This method computes a camera's orientation and view matrix using two rotation angles: yaw (azimuth) and pitch (elevation), without roll [S2, S3, unofficial]. It solves the problem of navigating a 3D scene by rotating the view around vertical and horizontal axes passing through a center point or by updating the camera's forward vector directly [S1, S3, unofficial]. It sets itself apart from full 3-axis Euler rotation by reducing computational cost and avoiding roll, and from quaternion-based approaches by using explicit trigonometric vector construction [S3, S4, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Inputs: Camera position $\mathbf{p} = (x, y, z)$, yaw angle $\theta_y$ (or $z$-rotate), pitch angle $\theta_p$ (or $x$-rotate). Optional: scene center $\mathbf{c} = (x_c, y_c, z_c)$ if rotating the scene rather than the camera [S1, S3, unofficial].
+- Outputs: Camera forward vector $\mathbf{f}$, right vector $\mathbf{r}$, up vector $\mathbf{u}$, and view matrix $\mathbf{V}$ [S2, S3, unofficial].
+
+**Data Structures:**
+- Angles are typically stored in degrees but converted to radians for trigonometric functions [S3, unofficial].
+- Vectors are 3D floating-point coordinates [S2, S3, unofficial].
+
+**Steps:**
+
+1. **Angle Normalization and Clamping:**
+   - Clamp pitch $\theta_p$ to $[-\theta_{p,max}, \theta_{p,max}]$ to prevent gimbal lock or inversion. A common value is $\theta_{p,max} = 89^\circ$ [S2, S3, unofficial].
+   - Convert angles from degrees to radians: $\theta_{rad} = \theta_{deg} \times \frac{\pi}{180}$ [S3, unofficial].
+
+2. **Compute Forward Vector:**
+   - Calculate the forward vector $\mathbf{f}$ using spherical coordinate projection onto the Y-axis for pitch [S2, S3, unofficial]:
+     $$
+     \mathbf{f} = (\cos\theta_y \cos\theta_p, \sin\theta_p, \sin\theta_y \cos\theta_p)
+     $$
+   - Normalize $\mathbf{f}$: $\mathbf{f} \leftarrow \frac{\mathbf{f}}{\|\mathbf{f}\|}$ [S2, unofficial].
+
+3. **Compute Right and Up Vectors:**
+   - Define a world up vector, typically $\mathbf{u}_{world} = (0, 1, 0)$ [S2, unofficial].
+   - Compute right vector: $\mathbf{r} = \text{normalize}(\mathbf{f} \times \mathbf{u}_{world})$ [S2, unofficial].
+   - Compute up vector: $\mathbf{u} = \text{normalize}(\mathbf{r} \times \mathbf{f})$ [S2, unofficial].
+   - [G] If $\mathbf{f}$ is parallel to $\mathbf{u}_{world}$ (pitch near $\pm 90^\circ$), $\mathbf{r}$ becomes zero. The clamping in Step 1 prevents this.
+
+4. **Construct View Matrix:**
+   - Use the `lookAt` function: $\mathbf{V} = \text{lookAt}(\mathbf{p}, \mathbf{p} + \mathbf{f}, \mathbf{u})$ [S2, unofficial].
+
+**Alternative: Scene Rotation Approach**
+If the method rotates the scene around a center point $\mathbf{c}$ instead of the camera:
+1. Translate scene points $\mathbf{P}$ relative to center: $\mathbf{P}' = \mathbf{P} - \mathbf{c}$ [S1, S3, unofficial].
+2. Apply combined rotation matrix components derived from aircraft principal axes (pitch around X, yaw around Z) [S3, unofficial]:
+   $$
+   \begin{aligned}
+   x_{rot} &= \cos(A_x)\cos(A_z)P'_x - \sin(A_x)P'_y + \cos(A_x)\sin(A_z)P'_z \\
+   y_{rot} &= \sin(A_x)\cos(A_z)P'_x + \cos(A_x)P'_y - \sin(A_x)\sin(A_z)P'_z \\
+   z_{rot} &= -\sin(A_z)P'_x + \cos(A_z)P'_z
+   \end{aligned}
+   $$
+   Where $A_x$ is pitch and $A_z$ is yaw [S3, unofficial].
+3. Translate back: $\mathbf{P}_{final} = \mathbf{P}_{rot} + \mathbf{c}$ [S1, S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_camera_vectors(position, yaw_deg, pitch_deg):
+    # Clamp pitch to prevent gimbal lock
+    PITCH_MAX = math.radians(89)
+    pitch_rad = max(-PITCH_MAX, min(PITCH_MAX, math.radians(pitch_deg)))
+    yaw_rad = math.radians(yaw_deg)
+
+    # Compute forward vector
+    cos_pitch = math.cos(pitch_rad)
+    sin_pitch = math.sin(pitch_rad)
+    
+    forward = (
+        math.cos(yaw_rad) * cos_pitch,
+        sin_pitch,
+        math.sin(yaw_rad) * cos_pitch
+    )
+    
+    # Normalize forward
+    length = math.sqrt(forward[0]**2 + forward[1]**2 + forward[2]**2)
+    forward = (forward[0]/length, forward[1]/length, forward[2]/length)
+
+    # Compute right vector (cross product of forward and world up)
+    # World up is (0, 1, 0)
+    # cross(forward, up) = (f_y*0 - f_z*1, f_z*0 - f_x*0, f_x*1 - f_y*0)
+    #                   = (-f_z, 0, f_x)
+    right = (-forward[2], 0, forward[0])
+    
+    # Normalize right
+    r_len = math.sqrt(right[0]**2 + right[1]**2 + right[2]**2)
+    if r_len == 0:
+        # Fallback if forward is parallel to up (should be prevented by clamping)
+        right = (1, 0, 0)
+    else:
+        right = (right[0]/r_len, right[1]/r_len, right[2]/r_len)
+
+    # Compute up vector (cross product of right and forward)
+    # cross(right, forward)
+    up = (
+        right[1]*forward[2] - right[2]*forward[1],
+        right[2]*forward[0] - right[0]*forward[2],
+        right[0]*forward[1] - right[1]*forward[0]
+    )
+    
+    # Normalize up
+    u_len = math.sqrt(up[0]**2 + up[1]**2 + up[2]**2)
+    up = (up[0]/u_len, up[1]/u_len, up[2]/u_len)
+
+    return forward, right, up
+
+def look_at(position, target, up):
+    """
+    Constructs a view matrix.
+    Note: This is a simplified representation. A full implementation 
+    would construct a 4x4 matrix with basis vectors.
+    """
+    # Forward vector for lookAt is normalized(target - position)
+    f = (
+        target[0] - position[0],
+        target[1] - position[1],
+        target[2] - position[2]
+    )
+    f_len = math.sqrt(f[0]**2 + f[1]**2 + f[2]**2)
+    f = (f[0]/f_len, f[1]/f_len, f[2]/f_len)
+    
+    # Right vector
+    r = (
+        up[1]*f[2] - up[2]*f[1],
+        up[2]*f[0] - up[0]*f[2],
+        up[0]*f[1] - up[1]*f[0]
+    )
+    r_len = math.sqrt(r[0]**2 + r[1]**2 + r[2]**2)
+    r = (r[0]/r_len, r[1]/r_len, r[2]/r_len)
+    
+    # True Up vector
+    t_up = (
+        f[1]*r[2] - f[2]*r[1],
+        f[2]*r[0] - f[0]*r[2],
+        f[0]*r[1] - f[1]*r[0]
+    )
+    
+    # View matrix construction (row-major or column-major depends on convention)
+    # Assuming column-major OpenGL style:
+    # [ r.x  r.y  r.z  -dot(r, pos) ]
+    # [ t_up.x t_up.y t_up.z -dot(t_up, pos) ]
+    # [ -f.x -f.y -f.z  dot(f, pos) ]
+    # [ 0    0    0    1            ]
+    
+    return {
+        'r': r,
+        't_up': t_up,
+        'f': f,
+        'pos': position
+    }
+
+def update_view_matrix(position, yaw_deg, pitch_deg):
+    forward, right, up = compute_camera_vectors(position, yaw_deg, pitch_deg)
+    target = (
+        position[0] + forward[0],
+        position[1] + forward[1],
+        position[2] + forward[2]
+    )
+    return look_at(position, target, up)
+```
+
+**Edge Cases and Pitfalls:**
+- **Gimbal Lock:** Pitch angles near $\pm 90^\circ$ cause the right vector to become undefined or zero when crossing with the world up vector. Clamping pitch to $\pm 89^\circ$ prevents this [S2, S3, unofficial].
+- **Input Scaling:** Controller axes (e.g., L2/R2) often range from $[-1, 1]$ but may require offset/scaling to $[0, 2]$ for proper elevation control if the logic assumes non-negative inputs [S3, unofficial].
+- **Precision:** Using degrees requires conversion to radians before trigonometric evaluation [S3, unofficial].
+
+## Subtopics
+
+### Camera Control via Quaternions (Pitch/Yaw)
+Updates camera orientation vectors (_forward, _right, _up) using quaternion rotation for yaw and pitch, avoiding gimbal lock [S4, unofficial]. Yaw rotation is applied around the world up axis $(0,1,0)$, and pitch rotation is applied around the local right axis [S4, unofficial]. The forward and right vectors are rotated using quaternion conjugation: $\mathbf{v}' = q^{-1} \mathbf{v} q$ [S4, unofficial]. The up vector is recomputed as $\mathbf{u} = \text{normalize}(\mathbf{f} \times \mathbf{r})$ [S4, unofficial]. This method is chosen when smooth interpolation or avoidance of gimbal lock is critical, at the cost of higher computational complexity compared to direct Euler vector construction [S4, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per frame for vector computation. The scene rotation variant is $O(N)$ for $N$ vertices if applied to geometry, but $O(1)$ if applied to the view matrix [S1, S3, unofficial].
+- **Memory Complexity:** $O(1)$ for storing angles and vectors [S2, S3, unofficial].
+- **Performance:** In a Lua/Luajit implementation on a single thread, this method achieved ~25 FPS at 256×224 resolution for a single object [S3, unofficial].
+- **Strengths:** Simple to implement, computationally inexpensive, intuitive for orbit controls [S2, S3, unofficial].
+- **Limitations:** Susceptible to gimbal lock if not clamped, less smooth for interpolation compared to quaternions [S2, S3, S4, unofficial].
+- **When to use:** Basic camera navigation, orbit controls, raymarching camera movement [S2, S3, unofficial].
+- **When not to use:** When smooth interpolation or complex multi-axis rotation is required [S4, unofficial].
+
+## Background
+The method originates from early 3D visualization tools like Smokeview, which used elevation and azimuth angles to rotate scenes around a center point [S1, unofficial]. It was later adapted for game engines and raymarchers, such as in LÖVE with Fennel/Lua, where it was used for camera navigation in raymarching applications [S3, unofficial]. The approach is based on aircraft principal axes, utilizing only two rotation axes (pitch and yaw) to reduce computation [S3, unofficial].
+
+## Sources
+[S1] Smokeview (Version 6) A Tool for Visualizing Fire Dynamics Simulation Data Volume II : Technical Reference Guide, https://doi.org/10.6028/nist.sp.1017-2, fetched 2026-10-26 (unofficial)
+[S2] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)
+[S3] Raymarching with Fennel and LÖVE · Andrey Listopadov, https://andreyor.st/posts/2020-10-15-raymarching-with-fennel-and-love/, fetched 2026-10-30 (unofficial)
+[S4] Onlinerocker/SVO, https://github.com/Onlinerocker/SVO, fetched 2026-10-24 (unofficial)

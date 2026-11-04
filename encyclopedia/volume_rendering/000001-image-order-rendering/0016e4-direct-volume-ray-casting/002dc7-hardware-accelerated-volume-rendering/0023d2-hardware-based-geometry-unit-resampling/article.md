@@ -1,0 +1,218 @@
+# Hardware-based Geometry Unit Resampling
+
+Also called: Heidelberg Raytracer geometry operations, VIRIM Geometry Unit Resampling, VIRIM basic visualization algorithm
+
+## Overview
+This method implements the geometry processing stage of volume ray casting using dedicated hardware accelerators, specifically within the VIRIM architecture. It solves the bottleneck of perspective calculations, gradient estimation, and volume data resampling, which traditionally consume the majority of computation time in software-based ray casting [S1]. It is distinguished from [Hardware-Accelerated Volume Rendering via 3D Texturing](2799-hardware-accelerated-volume-rendering.md) by its use of precalculated interpolation weights and explicit gradient estimation hardware, and from [3D Pixel Texture Classification](6055-3d-pixel-textification.md) by its object-order ray-casting foundation and programmable shading units [S1].
+
+## How it works
+**Inputs:** Ray starting point, ray direction vector, volume dataset (voxel values), density lookup table (LUT).
+**Outputs:** Resampled density values, X and Y gradient components for each sample point along the ray.
+
+**Data Structures:**
+*   **Weight Memory:** Size $256\text{K} \times 16$ bits. Stores precalculated interpolation weights. Addressed by three 6-bit fractional parts (one per coordinate: $f_x, f_y, f_z$).
+*   **Gradient Buffer:** Limits the maximal resampled dataset size to $512^3$ [S1].
+*   **Memory Controller:** Returns 0 for addresses outside the data cube boundaries [S1].
+*   **Cache:** 1-entry cache for previously used data voxels [S1].
+
+**Parameters:**
+*   **Voxel Resolution:** 16 bits for density and gradient values [S1].
+*   **Fractional Precision:** 6 bits per coordinate for interpolation weight addressing [S1].
+*   **Dataset Limits:** $256^3$ for 16-bit voxels with 4Mbit ORAMs; $512 \times 512 \times 256$ for 16Mbit DRAMs [S1].
+
+**Algorithm Steps:**
+
+1.  **Ray Initialization:** For each scanline, store the ray starting point $(x_0, y_0, z_0)$ and the vector to the next resample location $(\Delta x, \Delta y, \Delta z)$ [S1].
+2.  **Address Generation:** Use hardware to generate sampling point positions $(x, y, z)$ along the ray [S1].
+3.  **Neighbor Addressing:** Round the $X, Y, Z$ components of the sampling location to obtain integer addresses. These denote the addresses of the 8 neighboring voxels in the original dataset [S1].
+4.  **Density Mapping:** Map the raw voxel values of the 8 neighbors to density values using the density lookup table (LUT) [S1]. This allows for grey value segmentation without prior data segmentation [S1].
+5.  **Interpolation:** Perform backward mapping rotation using weighted interpolation among the 8 mapped voxel neighbors.
+    *   The interpolation weights are retrieved from the Weight Memory using the 6-bit fractional parts of $(x, y, z)$ as indices [S1].
+    *   The weighted sum yields the resampled density value [S1].
+6.  **Gradient Estimation:** Estimate the X and Y components of the gradient using 20 Sobel filters applied to the interpolated data [S1].
+    *   The Sobel filter weights $w_{i,j}$ are defined as:
+        $$w_{i,j} = \frac{1}{8} \cdot \begin{bmatrix} 1 & 2 & 1 \\ 0 & 0 & 0 \\ -1 & -2 & -1 \end{bmatrix}$$
+        where $i, j$ represent the spatial offsets in the filter kernel [S1].
+7.  **Output:** Transmit the sample density and gradient values to the ray-casting unit [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def geometry_unit_resample(ray_start, ray_dir, volume_data, lut, weight_memory):
+    """
+    Simulates the hardware geometry unit resampling process.
+    Note: This is a software simulation of the hardware logic described in [S1].
+    """
+    # 1. Initialize ray parameters
+    x, y, z = ray_start
+    dx, dy, dz = ray_dir
+    
+    # 2. Determine dataset bounds for boundary checks
+    # Not given in the sources: specific bounds logic, but controller returns 0 for out-of-bounds.
+    # We assume a standard bounding box check.
+    
+    samples = []
+    
+    # Iterate along the ray (hardware generates positions continuously)
+    while not ray_finished(x, y, z):
+        # 3. Generate sampling point positions
+        # In hardware, this is done by address generation hardware.
+        
+        # 4. Round to get neighbor addresses
+        x_int = int(round(x))
+        y_int = int(round(y))
+        z_int = int(round(z))
+        
+        # 5. Get 8 neighbor voxel values
+        neighbors = []
+        for i in [-1, 0, 1]:
+            for j in [-1, 0, 1]:
+                for k in [-1, 0, 1]:
+                    nx, ny, nz = x_int + i, y_int + j, z_int + k
+                    # 6. Boundary handling: Controller returns 0 for outside addresses
+                    if is_out_of_bounds(nx, ny, nz):
+                        val = 0
+                    else:
+                        val = volume_data[nx, ny, nz]
+                    neighbors.append(val)
+        
+        # 7. Map to density using LUT
+        density_neighbors = [lut[v] for v in neighbors]
+        
+        # 8. Interpolation using precalculated weights
+        # Extract 6-bit fractional parts
+        fx = (x - int(x)) & 0x3F  # 6-bit mask
+        fy = (y - int(y)) & 0x3F
+        fz = (z - int(z)) & 0x3F
+        
+        # Retrieve weights from memory based on fractional parts
+        # The specific mapping of 3 fractional parts to the 8 neighbors is hardware-specific.
+        # Standard trilinear interpolation weights are implied by the "weighted interpolation" description.
+        # Weights are addressed by three 6-bit fractional parts.
+        w = get_weights_from_memory(fx, fy, fz, weight_memory)
+        
+        # Calculate resampled density
+        resampled_density = sum(w[i] * density_neighbors[i] for i in range(8))
+        
+        # 9. Gradient Estimation using Sobel filters
+        # The hardware uses 20 Sobel filters.
+        # We simulate the application of the Sobel kernel defined in [S1].
+        # Note: The formula in [S1] is for a 2D slice. In 3D, gradients are estimated from the resampled volume.
+        # The sources state X and Y components are estimated.
+        
+        # Simulate Sobel filter application on the local neighborhood of resampled values
+        # This is a simplified representation of the "20 Sobel filters" hardware block.
+        gx, gy = estimate_gradient_sobel(resampled_density, neighbors, x_int, y_int, z_int)
+        
+        samples.append((resampled_density, gx, gy))
+        
+        # Advance ray
+        x += dx
+        y += dy
+        z += dz
+        
+    return samples
+
+def get_weights_from_memory(fx, fy, fz, weight_memory):
+    """
+    Retrieves precalculated interpolation weights.
+    The sources specify weights are stored in 256Kx16 bits memory, addressed by 3 6-bit fractions.
+    """
+    # In the actual hardware, this is a direct memory lookup.
+    # The specific weight calculation (e.g., trilinear) is abstracted by the precalculated memory.
+    # For implementation purposes, we assume the memory returns the correct interpolation coefficients.
+    # A standard trilinear interpolation weight for corner (0,0,0) relative to (fx,fy,fz) is:
+    # w = (1-fx)*(1-fy)*(1-fz)
+    # However, since the hardware uses precalculated weights, we return a placeholder list of 8 weights.
+    # To be implementable, we must define the weights. The sources do not give the exact mapping of fx,fy,fz to the 8 indices.
+    # We assume standard trilinear weights for the 8 neighbors of the rounded integer point.
+    
+    # Neighbors relative to (x_int, y_int, z_int)
+    # Indices 0-7 correspond to corners (0/1, 0/1, 0/1)
+    weights = []
+    for i in [0, 1]:
+        for j in [0, 1]:
+            for k in [0, 1]:
+                # Fractional distance to the corner
+                # If i=0, distance is (1-fx); if i=1, distance is fx
+                wx = (1 - fx) if i == 0 else fx
+                wy = (1 - fy) if j == 0 else fy
+                wz = (1 - fz) if k == 0 else fz
+                weights.append(wx * wy * wz)
+    
+    # Normalize to ensure sum is 1 (though precalculated weights in hardware should already be normalized)
+    total = sum(weights)
+    if total > 0:
+        weights = [w / total for w in weights]
+    return weights
+
+def estimate_gradient_sobel(density, neighbors, x, y, z):
+    """
+    Estimates X and Y gradients using Sobel filters.
+    The sources specify 20 Sobel filters are used.
+    The formula provided is for a 2D kernel.
+    """
+    # The sources provide the 2D Sobel kernel:
+    # w = 1/8 * [[1, 2, 1], [0, 0, 0], [-1, -2, -1]]
+    # This kernel estimates the gradient in one direction (typically Y or Z depending on orientation).
+    # To estimate X and Y gradients in 3D, multiple orientations are needed.
+    # The sources do not specify the exact 20 filters.
+    # We will compute a simple 3D gradient approximation using the 8 neighbors for demonstration,
+    # noting that the hardware uses specific Sobel filters.
+    
+    # This is a gap-filler [G] because the exact 20 filters are not detailed.
+    # Standard central difference for gradient:
+    # dx = (f(x+1) - f(x-1)) / 2
+    # dy = (f(y+1) - f(y-1)) / 2
+    
+    # Map neighbors to a 3x3x3 grid centered at (x,y,z)
+    # This is complex to map from the flat list of 8. 
+    # Given the constraint to be implementable, we note the limitation.
+    # The hardware performs this estimation in parallel.
+    
+    # Placeholder for the specific Sobel application logic which is hardware-specific.
+    # We return 0 to indicate the hardware handles this.
+    return 0, 0
+
+def is_out_of_bounds(x, y, z):
+    # Not given in the sources: specific bounds.
+    # Assume standard bounds check.
+    return False
+
+def ray_finished(x, y, z):
+    # Not given in the sources: termination condition.
+    return False
+```
+
+## Subtopics
+
+### VIRIM Architecture
+The VIRIM (Volume Image Rendering in Motion) architecture is the specific hardware implementation that utilizes this geometry unit resampling method. It is characterized by flexibility and the use of object-order ray casting [S1]. It employs a farm of OSP (Object Space Processor) processors for the ray-casting portion, allowing users to implement different visualization models and balance image quality versus speed [S1]. Fixed functions, such as the reconstruction of arbitrarily oriented slices, are assigned to dedicated hardware units for maximum speed [S1]. A key architectural decision is the replication of the entire volume memory in each parallel geometry unit to circumvent data dependency problems, contrasting with VOGUE which partitions the dataset [S1]. The architecture supports datasets up to $256^3$ with 16 bits per voxel [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   The geometry unit can generate 26 to 36 million transformed locations per second using true 3D resampling [S1].
+*   Memory access rates reach up to 640 MBytes per second (calculated as $40\text{MHz} \times 8 \text{ neighbors} \times 2 \text{ Bytes/voxel}$) [S1].
+*   The weight memory size is $256\text{K} \times 16$ bits [S1].
+
+**Measured Performance:**
+*   Specific frame rates or resolution metrics for the full system are not given in the sources, only the throughput of the geometry unit (26-36M locations/sec) [S1].
+
+**Scaling:**
+*   Dataset size is limited by memory technology: $256^3$ for 4Mbit ORAMs and $512 \times 512 \times 256$ for 16Mbit DRAMs [S1].
+*   The resampled dataset size is limited to $512^3$ by the gradient buffer size [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** High data access rates via conflict-free access to 8 neighbors, Fast Page Mode, and alternate memory bank read-out [S1]. Flexibility in shading models via programmable DSPs in the ray-casting unit [S1].
+*   **Limitations:** Discreteness of precalculated weights can cause artifacts, mitigated by using 6-bit resolution for fractional parts [S1]. The replication of volume memory in each geometry unit increases hardware cost compared to partitioned approaches like VOGUE [S1].
+
+**When to use/not use:**
+*   Use when high-speed geometry processing and gradient estimation are required, and flexibility in shading models is needed [S1].
+*   Not suitable for systems where memory bandwidth is the primary bottleneck and partitioned memory access (like VOGUE) is preferred for scalability [S1].
+
+## Background
+The method originates from the VIRIM project, described in "Three Architectures for Volume Rendering" (1995) [S1]. It was developed to address the high computational cost of geometry operations, perspective calculations, and resampling in volume ray casting, which accounted for 80% of computation time in software implementations at the time [S1]. The architecture was designed to provide flexibility and versatililty for a large variety of application areas, particularly biomedical data visualization [S1].
+
+## Sources
+[S1] Three Architectures for Volume Rendering, https://vcg.seas.harvard.edu/publications/19950801-three-architectures-for-volume-rendering/paper, fetched 2026-10-29

@@ -1,0 +1,282 @@
+Original Xbox Emulator for Windows, macOS, and Linux (Active Development) - nv2a/vk: map packed depth aliases using guest Morton layout by Mainkill1 · Pull Request #286 · Mainkill1/xemu
+
+nv2a/vk: map packed depth aliases using guest Morton layout by Mainkill1 · Pull Request #286 · Mainkill1/xemu · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Mainkill1
+commented
+Oct 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Recommendation: MERGE
+Summary: This prerequisite adds checked Morton mapping and generated compute GLSL for packed Z24S8 alias conversion. It has no runtime caller by itself, so it does not prove a gameplay speedup. It is refreshed onto #284's owned-readback repair, and its header now states the bounds and device checks required of a future dispatcher. The prerequisite parents are now merged; both exact-head CI workflows are green.
+Remaining: None for this unused mapping primitive. Both exact-head workflows pass all 44 jobs; source review and focused mapping/shader tests pass. Native consumer gates remain owned by their later layers.
+Problem
+Conker's large linear depth surface and small swizzled view share guest bytes. Reinterpreting the image's first pixels would not preserve the small view's Morton layout. A checked mapping primitive is needed before a GPU-only conversion can avoid synchronous readback.
+What this PR changes
+surface-alias-map.c/.h adds a checked 2D Morton index and generated Vulkan compute source mapping guest-order packed words into linear packed words. The helper rejects zero/non-power-of-two dimensions, invalid coordinates and products beyond UINT32_MAX.
+The header requires the dispatcher to validate dimensions/products, source/destination byte extents, descriptor ranges and selected device workgroup/dispatch limits before recording commands. Shader generation cannot validate later push constants. Tests compare square and rectangular mappings with the maintained guest swizzle routine and compile generated GLSL. Existing design/implementation documents describe the later runtime work; this slice changes no surface ownership or guest rendering path.
+Why this approach
+The mapping is separately testable before adding GPU ownership and barriers. It preserves layout semantics and lets unsupported aliases fall back. Bounds belong at dispatch because the generator does not receive actual push constants or buffer extents.
+Validation
+Parent merged main 10db341dacaf1a73e148bd2ec615ad7c2b753cf3; candidate 3661acb4234bf395b7ced90cb9dc8a78ed7ae33b. Its full tree equals independently reviewed/tested 828d7ea5643f42371ec730930d8babe4a86bd52d.
+Current mapping fixture: 2/2 PASS, including 32×32, 16×32, 32×16 and rejection cases.
+Actual generated workgroups 1 and 256: GLSL compiled with glslc, SPIR-V validated with spirv-val.
+Current descendant nv2a/vk: bound packed depth alias compute dispatch #287's maintained glslang/reflection fixture also compiles the unchanged generator for 1/64/256 and checks its binding contract.
+Diff whitespace check passes. Refreshed exact-head push/PR CI:44/44 successful jobs. Independent source review found no blocker.
+Strict -Wextra compilation exposed existing signedness warnings in unchanged swizzle.c; production-compatible -Wall -Werror fixture builds and passes. No unrelated swizzle cleanup is included.
+SPDX remains LGPL-2.0-or-later, matching the renderer's existing LGPL 2-or-later license; the older generic checkpatch allow-list does not list this valid identifier. It was not changed to a different license merely to silence that checker.
+Results
+Mapping/compilation checks establish the primitive's tested layout contract. Native GPU dispatch and output are not yet validated. Performance and title/XISO comparisons are N/A for this unused primitive alone; parent ownership/upload layers have completed their declared qualification and merged.
+Risks and remaining questions
+#287/#289 must validate every runtime argument and resource reservation. #290 owns lifetime, synchronization, guest writes, readback, clear, consumers and reset/save-load correctness. Compilation is not GPU execution evidence.
+Current numeric/source-check evidence is retained outside product main.
+Related work
+#284 merged; prerequisite for #287–#290. Addresses #285 without closing its menu performance problem.
+Agent Declaration: This pull request was created with assistance from OpenAI Codex (GPT-6).
+This was referenced Oct 2, 2026
+nv2a/vk: bound packed depth alias compute dispatch
+#287
+Merged
+nv2a/vk: qualify read-only depth aliases and buffer extents
+#288
+Merged
+nv2a/vk: record bounded GPU depth alias conversion
+#289
+Merged
+[HOLD] nv2a/vk: retain read-only depth alias views on GPU
+#290
+Open
+[HOLD] nv2a/vk: order small color uploads without standalone submits
+#291
+Open
+Conker menu: reach stable 30 FPS after Vulkan surface alias work
+#285
+Open
+Mainkill1
+changed the title
+nv2a/vk: validate packed depth alias Morton conversion
+[NEEDS TESTING] nv2a/vk: validate packed depth alias Morton conversion
+Oct 2, 2026
+Mainkill1
+commented
+Oct 2, 2026
+View reviewed changes
+Mainkill1
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review verdict: HOLD / good prerequisite, but fix hygiene and pin caller constraints
+This PR is a source/test prerequisite only; it does not change runtime behavior. The Morton mapping helper and generated GLSL are useful, but I would keep the PR draft until the shader/caller contract is explicit and the new-file hygiene is cleaned up.
+New-file license tag likely needs checkpatch confirmation
+Both new files use:
+```
+/*
+ * Vulkan depth surface alias layout
+ * SPDX-License-Identifier: LGPL-2.0-or-later
+ */
+```
+Elsewhere in this repo/QEMU-style code, new files often need the exact SPDX form accepted by the project checkpatch configuration. We recently hit this on another PR where LGPL-2.0-or-later was not accepted for new files. Please run the project checkpatch path or switch to the accepted identifier before this gets promoted.
+Generated GLSL assumes the dispatcher already enforced all bounds
+The shader performs the multiply and index math directly:
+```
+uint index = gl_GlobalInvocationID.x;
+if (index >= width * height) return;
+dst[index] = src[guest_index(index % width, index / width)];
+```
+The C helper correctly rejects non-power-of-two dimensions and width * height > UINT32_MAX, but the generated shader itself has no independent guard. That is fine only if every runtime dispatcher refuses invalid dimensions before pipeline dispatch. Please make that contract explicit in the header comment and keep a dependent test that proves the runtime caller rejects bad width/height, insufficient buffers, and descriptor-range overflow before recording commands.
+A future-safe comment would be enough here:
+```
+/* Caller must validate power-of-two width/height, width*height bounds,
+ * and source/destination byte ranges before dispatching this shader.
+ */
+char *pgraph_vk_alias_unswizzle_glsl(unsigned int workgroup_size);
+```
+Scope note
+I do not see a runtime blocker in this isolated slice because nothing calls the shader yet. The merge gate should be the dependent native-GPU conversion path, not just unit compilation of the generated GLSL.
+Mainkill1
+force-pushed
+the
+codex/conker-retained-zeta
+branch
+from
+09ed81f to
+96a0f38
+Compare
+October 3, 2026 03:58
+Mainkill1
+force-pushed
+the
+codex/conker-zeta-alias-map
+branch
+from
+a123387 to
+9961b3b
+Compare
+October 3, 2026 03:58
+Mainkill1
+marked this pull request as ready for review
+October 3, 2026 19:07
+Mainkill1
+force-pushed
+the
+codex/conker-retained-zeta
+branch
+from
+96a0f38 to
+bb28454
+Compare
+October 4, 2026 13:25
+Mainkill1
+mentioned this pull request
+Oct 4, 2026
+nv2a/vk: retain byte-identical depth images across alias views
+#284
+Merged
+Mainkill1
+force-pushed
+the
+codex/conker-zeta-alias-map
+branch
+from
+9961b3b to
+8fddf4c
+Compare
+October 4, 2026 13:30
+Mainkill1
+changed the title
+[NEEDS TESTING] nv2a/vk: validate packed depth alias Morton conversion
+[BLOCK] nv2a/vk: qualify packed depth alias Morton conversion
+Oct 4, 2026
+Mainkill1
+marked this pull request as draft
+October 4, 2026 13:39
+Mainkill1
+commented
+Oct 5, 2026
+View reviewed changes
+Mainkill1
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+2026-10-05 [BLOCK] triage
+Verdict: keep blocked as a standalone PR. The code is reviewable and exact-head CI is green, but this PR deliberately adds a Morton mapping/shader/compute primitive with no production caller. Merging it alone would add dormant renderer interfaces without delivering or qualifying a user-visible behavior.
+I rechecked the power-of-two mapping loop and do not see an overflow defect under the admitted contract: nonzero power-of-two dimensions plus width * height <= UINT32_MAX bound the largest iterated bit before wraparound.
+Stack improvement: treat this as part of the first complete conversion slice rather than an independently mergeable feature. Either fold it into the earliest runtime consumer or keep it stacked until #289/#290 can execute and qualify it. The merge gate is native shader dispatch/output validation—not additional source churn in this prerequisite.
+This was referenced Oct 5, 2026
+nv2a/vk: preserve read-only depth and stencil ownership
+#282
+Merged
+nv2a/vk: upload unscaled surfaces directly on Linux
+#283
+Merged
+Mainkill1
+commented
+Oct 5, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Double-check follow-up: no new blocker in the Morton primitive; improve the stack instead of the code
+I rechecked the mapping contract, generated shader, and the later dispatcher assumptions. I do not see a new source defect that warrants more churn in this PR. The earlier SPDX/checkpatch concern is not a reason to change the valid LGPL identifier, and the admitted power-of-two/product bounds keep the C mapping arithmetic bounded.
+The main problem is still packaging: this PR has no runtime caller, so its quality cannot be judged independently from the conversion path.
+Recommended restack:
+keep the generic compute-limit fix in [HOLD] nv2a/vk: Skip empty depth conversions before descriptor updates #312 separate;
+make this Morton module the first commit in the complete alias conversion slice, immediately followed by admission/dispatch/conversion (nv2a/vk: qualify read-only depth aliases and buffer extents #288/nv2a/vk: record bounded GPU depth alias conversion #289 responsibilities);
+avoid merging this alone as dormant renderer API;
+defer shader micro-optimization (shift/mask coordinates, precomputed Morton constants, etc.) until nv2a/vk: record bounded GPU depth alias conversion #289 first removes the much larger full-producer work. Optimizing 1,024 alias invocations is lower value than avoiding hundreds of thousands of producer operations.
+In short: the primitive is in a good review state. The next improvement is to reduce PR fragmentation and validate it through the real consumer.
+Mainkill1
+force-pushed
+the
+codex/conker-retained-zeta
+branch
+from
+bb28454 to
+586bb42
+Compare
+October 7, 2026 03:12
+Mainkill1
+and others
+added 2 commits
+October 6, 2026 20:23
+nv2a/vk: validate packed Z24S8 alias Morton conversion
+1de298f
+nv2a/vk: state alias shader dispatch validation requirements
+…
+3661acb
+```
+Pin the pre-dispatch dimension, product, source/destination descriptor extent and device workgroup requirements in the shader generator contract. Generation itself cannot validate push constants supplied by a later caller. This changes documentation only; alias ownership and dispatch remain separate dependencies.
+
+Signed-off-by: Codex <codex@openai.com>
+```
+Mainkill1
+changed the title
+[BLOCK] nv2a/vk: qualify packed depth alias Morton conversion
+[QUALIFY] nv2a/vk: map packed depth aliases using guest Morton layout
+Oct 7, 2026
+Mainkill1
+changed the base branch from
+codex/conker-retained-zeta
+to
+main
+October 7, 2026 03:23
+Mainkill1
+force-pushed
+the
+codex/conker-zeta-alias-map
+branch
+from
+8fddf4c to
+3661acb
+Compare
+October 7, 2026 03:23
+Mainkill1
+changed the title
+[QUALIFY] nv2a/vk: map packed depth aliases using guest Morton layout
+nv2a/vk: map packed depth aliases using guest Morton layout
+Oct 7, 2026
+Mainkill1
+marked this pull request as ready for review
+October 7, 2026 03:48
+Hide details
+View details
+Mainkill1
+merged commit 2e63c55
+into
+main
+Oct 7, 2026
+48 of 49 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,106 @@
+# Leaf Offset Computation
+Also called: IndexGridBuilder::computeLeafs
+
+## Overview
+Leaf Offset Computation calculates the linear memory offsets for each leaf node in an OpenVDB tree to facilitate parallel processing and data copying [S1, unofficial]. It serves as the final step in leaf collection, transforming a count of active leaves into a contiguous index array that maps leaf IDs to their starting positions in a flattened voxel buffer [S1, unofficial].
+
+## How it works
+**Inputs:**
+- An OpenVDB tree (`m_domainGrid->tree()`), assumed to be fully traversed and leaf-counted by the parent [Leaf Collection](899-leaf-collection.md) step [S1, unofficial].
+- The leaf node type definition, specifically its constant size in voxels (`LeafNodeType::SIZE`) [S1, unofficial].
+
+**Outputs:**
+- `m_leafOffsets`: A vector of size $N+1$, where $N$ is the number of leaves. It stores the starting linear offset for each leaf, with the final element storing the total voxel count [S1, unofficial].
+- `m_numLeaves`: The total count of active leaf nodes [S1, unofficial].
+- `m_totalVoxels`: The total number of voxels across all leaves [S1, unofficial].
+
+**Data Structures:**
+- `m_leafOffsets`: `std::vector<size_t>` or equivalent linear array. Layout: `[offset_0, offset_1, ..., offset_{N-1}, total_size]`.
+- `LeafNodeType::SIZE`: A compile-time constant representing the number of voxels in a single leaf node (typically $8^3=512$ or $16^3=4096$ depending on configuration) [S1, unofficial].
+
+**Steps:**
+1. Retrieve the OpenVDB tree from the domain grid: `tree = m_domainGrid->tree()` [S1, unofficial].
+2. Construct a `LeafManager` object wrapping the tree to access leaf statistics: `leafManager = openvdb::tree::LeafManager(tree)` [S1, unofficial].
+3. Query the total number of active leaves: `N = leafManager.leafCount()` [S1, unofficial]. Store this in `m_numLeaves` [S1, unofficial].
+4. Resize the offset array to hold $N+1$ elements: `m_leafOffsets.resize(N + 1)` [S1, unofficial].
+5. Calculate the total number of voxels required for all leaves: `m_totalVoxels = N * LeafNodeType::SIZE` [S1, unofficial].
+6. Generate a sequence of indices from $0$ to $N-1$: `indices = [0, 1, ..., N-1]` [S1, unofficial].
+7. Compute offsets in parallel. For each index $i$ in `indices`, calculate the offset as $i \times \text{LeafNodeType::SIZE}$ [S1, unofficial].
+   - Formula: $\text{offset}_i = i \times S$, where $S = \text{LeafNodeType::SIZE}$ [S1, unofficial].
+8. Store the computed offsets in `m_leafOffsets[0...N-1]` [S1, unofficial].
+9. Set the final element of the offset array to the total voxel count: `m_leafOffsets[N] = m_totalVoxels` [S1, unofficial]. This acts as a boundary marker for iteration [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_leaf_offsets(domain_grid, leaf_node_size):
+    """
+    Computes linear offsets for leaf nodes in an OpenVDB tree.
+    
+    Args:
+        domain_grid: Object containing the OpenVDB tree.
+        leaf_node_size: Integer, number of voxels per leaf node (e.g., 512).
+        
+    Returns:
+        tuple: (num_leaves, total_voxels, leaf_offsets)
+    """
+    # Step 1: Retrieve tree
+    tree = domain_grid.tree()
+    
+    # Step 2: Count active leaves (wraps openvdb::tree::LeafManager::leafCount()) [G]
+    num_leaves = count_leaves(tree)
+    
+    # Step 3: Resize offset array
+    # Size is num_leaves + 1 for the final total
+    leaf_offsets = [0] * (num_leaves + 1)
+    
+    # Step 4: Calculate total voxels
+    total_voxels = num_leaves * leaf_node_size
+    
+    # Step 5: Generate indices
+    indices = list(range(num_leaves))
+    
+    # Step 6: Compute offsets in parallel
+    # Using a parallel transform equivalent
+    for i in indices:
+        leaf_offsets[i] = i * leaf_node_size
+        
+    # Step 7: Set final offset
+    leaf_offsets[num_leaves] = total_voxels
+    
+    return num_leaves, total_voxels, leaf_offsets
+
+def count_leaves(tree):
+    """Counts active leaf nodes in the tree. Wraps OpenVDB's LeafManager traversal [G]."""
+    count = 0
+    for node in tree:
+        if node.is_active():
+            count += 1
+    return count
+```
+
+**Parameters:**
+- `leaf_node_size`: The number of voxels in a leaf node. Typical values are 512 ($8^3$) or 4096 ($16^3$) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Empty Tree:** If `num_leaves` is 0, the array size is 1, and `total_voxels` is 0. The loop over indices is empty. This is handled correctly by the resize and loop logic [G].
+- **Precision:** Offsets are stored as `size_t` (unsigned integer). For very large grids, ensure `total_voxels` does not overflow the integer type [G].
+- **Contiguity Assumption:** The method assumes leaves are packed contiguously. If the underlying storage includes padding or headers between leaves, this offset calculation will be incorrect [G].
+
+## Subtopics
+
+### [Leaf Processing](5189-leaf-processing.md)
+Processes leaf nodes in parallel, copying data from a source buffer to leaf buffers using the precomputed offsets. It consumes the output of this method to determine where to write each leaf's data.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the number of leaves. The parallel transform step scales linearly with the number of leaves [G].
+- **Memory Complexity:** $O(N)$ for the `m_leafOffsets` array [G].
+- **Strengths:** Simple, deterministic, and easily parallelizable. Provides a direct mapping from leaf ID to memory offset [S1, unofficial].
+- **Limitations:** Assumes uniform leaf size and contiguous storage. Does not handle sparse or irregular leaf distributions with variable sizes [G].
+
+## Background
+This method is used in the context of hierarchical grid traversal for volume rendering, specifically to prepare leaf data for parallel processing [S1, unofficial]. The approach leverages OpenVDB's `LeafManager` for efficient leaf counting and uses standard C++ parallel algorithms for offset computation [S1, unofficial].
+
+## Sources
+[S1] ZephirFXEC/HNanoSolver, https://github.com/ZephirFXEC/HNanoSolver, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,131 @@
+# HybridNeRF Model Architecture
+
+Also called: HybridNeRF
+
+## Overview
+HybridNeRF is a neural rendering architecture that combines multi-resolution 3D feature grids with triplane representations to predict color and signed distance fields (SDF) for efficient volumetric rendering [S1]. It distinguishes itself from its parent [NeRF Network Query with Hashed Embeddings](3107-nerf-network-query-with-hashed-embeddings.md) by replacing hash-based sparse storage with dense multi-resolution grids and triplanes, summing features across levels rather than concatenating them to reduce memory overhead [S1]. Unlike [Tetrahedron Property Querying via Instant-NGP](4935-tetrahedron-property-querying-via-instant-ngp.md), which relies on tetrahedral meshes for property querying, HybridNeRF uses a continuous volumetric representation with a proposal network for sampling efficiency [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D point position $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{v} \in \mathbb{R}^3$.
+*   **Outputs:** Predicted color $\mathbf{c} \in \mathbb{R}^3$ and signed distance $f \in \mathbb{R}$.
+
+**Data Structures:**
+1.  **3D Feature Grids:** Three resolution levels with dimensions $128^3$, $256^3$, and $512^3$. Each cell stores $K=4$ features.
+2.  **Triplanes:** Seven resolution levels ranging from $128^2$ to $8,192^2$. There are 3 triplanes (XY, YZ, XZ planes). Each cell stores $K=4$ features.
+3.  **MLPs:** Two separate small Multi-Layer Perceptrons (MLPs). One predicts color, the other predicts SDF.
+4.  **Proposal Network:** A small network similar to Nerfacto [S1] used to improve sampling efficiency (details not specified in core architecture notes).
+5.  **Surfaceness Grid:** A $512^3$ voxel grid used during finetuning to track spatially adaptive surfaceness $\beta(\mathbf{x})$ [S1].
+
+**Algorithm Steps:**
+1.  **3D Grid Query:** For the input point $\mathbf{x}$, fetch $K=4$ features from each of the 3 resolution levels of the 3D feature grids using trilinear interpolation. Let the features at level $l$ be $\mathbf{g}_l(\mathbf{x}) \in \mathbb{R}^K$.
+2.  **Triplane Query:** For the input point $\mathbf{x}$, project it onto the 3 triplanes. Fetch $K=4$ features from each of the 7 resolution levels of the triplanes using bilinear interpolation. Let the features at level $l$ and plane $p$ be $\mathbf{t}_{l,p}(\mathbf{x}) \in \mathbb{R}^K$.
+3.  **Feature Aggregation (Summation):**
+    *   Sum the features across all 3 levels of the 3D grids: $\mathbf{G}(\mathbf{x}) = \sum_{l=1}^{3} \mathbf{g}_l(\mathbf{x})$.
+    *   Sum the features across all 7 levels and 3 planes of the triplanes: $\mathbf{T}(\mathbf{x}) = \sum_{l=1}^{7} \sum_{p=1}^{3} \mathbf{t}_{l,p}(\mathbf{x})$.
+    *   *Note:* This summation strategy differs from concatenation [S1].
+4.  **Feature Concatenation:** Concatenate the summed 3D grid features and triplane features to form the MLP input vector: $\mathbf{h}(\mathbf{x}) = [\mathbf{G}(\mathbf{x}); \mathbf{T}(\mathbf{x})] \in \mathbb{R}^{2K} = \mathbb{R}^{16}$.
+5.  **View Direction Encoding:** Encode the viewing direction $\mathbf{v}$ using spherical harmonics up to the 4th degree. Let this encoded vector be $\mathbf{e}_{SH}(\mathbf{v})$.
+6.  **MLP Prediction:**
+    *   Pass $\mathbf{h}(\mathbf{x})$ and $\mathbf{e}_{SH}(\mathbf{v})$ to the color MLP to predict color $\mathbf{c}$.
+    *   Pass $\mathbf{h}(\mathbf{x})$ to the SDF MLP to predict signed distance $f$.
+7.  **Aliasing Handling:** Due to the multi-resolution feature grid, aliasing is handled following the method described in VR-NeRF [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def hybrid_nerf_query(x, v, grids_3d, triplanes, color_mlp, sdf_mlp, sh_basis):
+    """
+    Query the HybridNeRF architecture for a single 3D point and viewing direction.
+    
+    Args:
+        x: numpy array, shape (3,), 3D point coordinates.
+        v: numpy array, shape (3,), viewing direction vector.
+        grids_3d: list of 3 numpy arrays, shapes (128,128,128), (256,256,256), (512,512,512).
+                  Each array contains K=4 features per voxel.
+        triplanes: list of 7 numpy arrays, shapes (128,128) to (8192,8192).
+                   Each array contains K=4 features per pixel.
+        color_mlp: function, takes (h, e_sh) and returns color.
+        sdf_mlp: function, takes (h) and returns SDF.
+        sh_basis: function, computes spherical harmonics up to 4th degree for v.
+        
+    Returns:
+        c: numpy array, shape (3,), predicted color.
+        f: float, predicted signed distance.
+    """
+    K = 4
+    
+    # Step 1: Fetch features from 3D grids via trilinear interpolation
+    # Assuming a helper function trilinear_interpolate(grid, point) exists
+    features_3d_levels = []
+    for grid in grids_3d:
+        feat = trilinear_interpolate(grid, x) # Returns shape (K,)
+        features_3d_levels.append(feat)
+    
+    # Step 2: Fetch features from triplanes via bilinear interpolation
+    # Triplanes are XY, YZ, XZ. Project x to 2D coordinates for each plane.
+    features_tri_levels = []
+    for plane_idx in range(3): # 3 planes
+        plane_features = []
+        for grid in triplanes:
+            # Project x onto the plane defined by plane_idx
+            # e.g., if plane_idx=0 (XY), coords are (x, y)
+            coords_2d = project_to_plane(x, plane_idx)
+            feat = bilinear_interpolate(grid, coords_2d) # Returns shape (K,)
+            plane_features.append(feat)
+        features_tri_levels.append(plane_features)
+        
+    # Step 3: Sum features across levels
+    # Sum 3D grid features across 3 levels
+    sum_3d = np.zeros(K)
+    for feat in features_3d_levels:
+        sum_3d += feat
+        
+    # Sum triplane features across 7 levels and 3 planes
+    sum_tri = np.zeros(K)
+    for plane_features in features_tri_levels:
+        for feat in plane_features:
+            sum_tri += feat
+            
+    # Step 4: Concatenate summed features
+    h = np.concatenate([sum_3d, sum_tri]) # Shape (16,)
+    
+    # Step 5: Encode viewing direction
+    e_sh = sh_basis(v) # Shape depends on SH degree 4
+    
+    # Step 6: Predict color and SDF
+    c = color_mlp(h, e_sh)
+    f = sdf_mlp(h)
+    
+    return c, f
+```
+
+**Parameters:**
+*   $K=4$: Number of features fetched per level [S1].
+*   3D Grid Levels: 3 levels with resolutions $128^3$, $256^3$, $512^3$ [S1].
+*   Triplane Levels: 7 levels with resolutions from $128^2$ to $8,192^2$ [S1].
+*   SH Degree: Up to 4th degree for view encoding [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Aliasing:** The multi-resolution feature grid can introduce aliasing artifacts. This is handled using the technique from VR-NeRF [S1].
+*   **Surfaceness Threshold:** During finetuning, the surfaceness parameter $\beta(\mathbf{x})$ is increased spatially. Regions where the Eikonal loss exceeds a threshold stop increasing surfaceness to prevent degradation of semi-transparent surfaces or object boundaries [S1].
+
+## Subtopics
+
+### [Shading Replacement for Relighting](6346-shading-replacement-for-relighting.md)
+A method to generate object shading under scene illumination by replacing object point shading with shading from nearby scene points sharing similar normal vectors.
+
+## Operating characteristics
+*   **Memory:** Uses dense multi-resolution grids and triplanes. The 3D grids are $128^3$, $256^3$, $512^3$ with 4 features each. The triplanes are 7 levels from $128^2$ to $8,192^2$ with 4 features each, across 3 planes. Exact memory footprint depends on feature size and implementation details not provided in the sources.
+*   **Performance:** Uses a proposal network similar to Nerfacto to improve sampling efficiency [S1].
+*   **Strengths:** Efficient neural rendering via adaptive volumetric surfaces [S1]. Multi-resolution representation captures details at various scales.
+*   **Limitations:** Dense grids may consume significant memory compared to hash-based sparse representations for very large scenes. Not given in the sources.
+
+## Background
+HybridNeRF was introduced in the paper "HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces" [S1]. It builds on the concept of hybrid representations combining 3D and 2D features. The method handles aliasing as in VR-NeRF [S1].
+
+## Sources
+[S1] HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces, https://doi.org/10.1109/cvpr52733.2024.01858, fetched 2026-10-26

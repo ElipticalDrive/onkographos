@@ -1,0 +1,144 @@
+--- v001.md
++++ v002.md
+@@ -4,121 +4,48 @@
+ 
+ ## Overview
+-Scaling and Biasing is a scalar field normalization technique used in volume rendering to adjust the contrast and brightness of volume data by applying a linear transformation to texture samples [S1, S2, unofficial]. It generates a fragment shader program that maps input voxel values to a target display range, effectively implementing window/level contrast adjustment [S1, unofficial]. It differs from [Power Transformation](2346-power-transformation.md) by applying a linear rather than non-linear mapping, making it suitable for linear intensity adjustments without altering the data's dynamic distribution shape.
++Scaling and Biasing applies scaling and biasing to texture samples for window/level contrast adjustment [S1, unofficial]. It sets the current sample's volume to $x \cdot 16 + y$ [S2, unofficial]. It differs from [Power Transformation](2346-power-transformation.md) by applying a linear transformation rather than a non-linear mapping [G].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Volume texture samples (scalar values), scaling factor $x$, bias factor $y$.
+-- Output: Normalized sample value for rendering.
++- Input: Texture sample value, scaling factor $x$, bias factor $y$, effect parameter, and a `vtkRenderWindow` pointer `w` for shader compilation context [S1, unofficial].
++- Output: Normalized sample value / target volume.
+ 
+ **Data Structures:**
+-The method is often implemented within a shader generation context or a voxel processing pipeline. In the specific implementation cited in [S2, unofficial], the state is managed via a pointer `cptr` to a structure containing a `volume` field.
++- `cptr`: Pointer to a structure containing a `volume` field [S2, unofficial].
+ 
+ **Steps:**
+-1. Retrieve the current volume sample value.
+-2. Apply the linear transformation: $v_{out} = x \cdot v_{in} + y$.
+-   - In the context of [S2, unofficial], this is described as setting the current sample's volume to $x \cdot 16 + y$ [S2, unofficial].
+-3. Clamp or constrain the result based on hardware or format limits.
++1. Extract the magnitude from the effect parameter using bitwise masking: `magnitude = effect & 0xFF` [S2, unofficial].
++2. Compute the target volume using the linear formula $v_{out} = x \cdot 16 + y$ [S2, unofficial].
++3. Assign the magnitude to the current sample: `cptr->volume = magnitude` [S2, unofficial].
++4. Clamp the volume to the legal range of 0 to 64 [S2, unofficial].
+ 
+ **Parameters:**
+-- $x$: Scaling factor. In [S2, unofficial], this is derived from an effect parameter where the multiplier is fixed at 16, i.e., $x = 16$.
+-- $y$: Bias factor. In [S2, unofficial], this is derived from the effect parameter.
+-- Target Volume: The resulting value range. Legal volumes are 0 to 64 [S2, unofficial].
++- $x$ and $y$: Coefficients for the linear transformation defining the target volume [S2, unofficial].
++- Legal volume range: 0 to 64 [S2, unofficial].
+ 
+ **Pseudocode:**
+-The following pseudocode represents the linear transformation logic. Note that [S2, unofficial] uses a specific bit-packing scheme for the effect parameter, while [S1, unofficial] describes the general shader generation.
+-
+ ```python
+-def apply_scaling_and_bias(sample_value, effect_param):
+-    """
+-    Applies scaling and biasing to a volume sample.
+-    
+-    Args:
+-        sample_value: The input scalar value from the volume texture.
+-        effect_param: An integer parameter encoding the scaling and biasing factors.
+-                      In [S2, unofficial], the lower 8 bits encode the operation type and magnitude.
+-    
+-    Returns:
+-        The normalized volume value.
+-    """
+-    # Extract the magnitude from the lower 8 bits of the effect parameter
+-    # [S2, unofficial] uses (effect & 0xFF) to determine the volume adjustment
++def apply_scaling_and_bias(cptr, effect_param):
+     magnitude = effect_param & 0xFF
+-    
+-    # Apply the transformation: x * 16 + y
+-    # [S2, unofficial] specifies the target volume is set to x*16 + y
+-    # Assuming x and y are derived from magnitude or fixed constants in this specific implementation
+-    # For a general linear transform v_out = scale * v_in + bias:
+-    scale = 16.0  # Fixed scale factor from [S2, unofficial]
+-    bias = magnitude  # Bias derived from effect parameter in [S2, unofficial]
+-    
+-    result = scale * sample_value + bias
+-    
+-    # Clamp to legal volume range [0, 64] as per [S2, unofficial]
+-    if result < 0:
+-        result = 0
+-    elif result > 64:
+-        result = 64
+-        
+-    return result
+-
+-def apply_volume_slide_down(sample_value, effect_param, direction):
+-    """
+-    Variant: Volume Slide Down.
+-    Increments or decrements the volume by a fixed amount before clamping.
+-    
+-    Args:
+-        sample_value: Input volume.
+-        effect_param: Parameter encoding the slide amount (lower 4 bits).
+-        direction: 'up' to increment, 'down' to decrement.
+-    """
+-    # Extract slide amount from lower 4 bits
+-    slide_amount = effect_param & 0xF
+-    
+-    if direction == 'up':
+-        # Increment volume
+-        # [S2, unofficial] Set cptr->volume += (effect & 0xF)
+-        result = sample_value + slide_amount
+-        # [S2, unofficial] If cptr->volume > 64, set cptr->volume = 64
+-        if result > 64:
+-            result = 64
+-    elif direction == 'down':
+-        # Decrement volume
+-        # [S2, unofficial] Set cptr->volume -= (effect & 0xF)
+-        result = sample_value - slide_amount
+-        # [S2, unofficial] If cptr->volume > 200, set cptr->volume = 0.
+-        # Note: This condition seems to imply a wrap-around or reset if the result 
+-        # exceeds a threshold, or potentially a bug in the source logic if 
+-        # decrementing leads to a value > 200. Given the context of "Lowers volume",
+-        # it likely means if the result is negative (or underflow), it resets to 0.
+-        # However, strictly following [S2, unofficial]: "If cptr->volume > 200, set cptr->volume = 0."
+-        # This is a pitfall: Cannot slide beyond volume 0.
+-        if result > 200:
+-            result = 0
+-        # Implicit clamp to 0 if result < 0? [S2, unofficial] says "Cannot slide beyond volume 0"
+-        if result < 0:
+-            result = 0
+-            
+-    return result
++    cptr.volume = magnitude
++    if cptr.volume > 64:
++        cptr.volume = 64
++    return cptr.volume
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** The implementation in [S2, unofficial] uses integer arithmetic and bit masking, which may introduce quantization errors.
+-- **Boundaries:** The volume value is constrained to 0–64 [S2, unofficial]. Attempting to slide beyond these limits results in clamping or reset behavior [S2, unofficial].
+-- **Degenerate Input:** If the effect parameter is 0, no change is applied.
++- The volume cannot slide beyond 64 [S2, unofficial].
++- The volume cannot slide beyond 0 [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Volume Slide Down
+-A variant that adjusts the volume by a fixed increment or decrement based on the lower 4 bits of an effect parameter [S2, unofficial]. It is used for fine-grained volume adjustments. Choose this when discrete, step-wise volume changes are required rather than continuous scaling. It cannot slide beyond volume 64 (for increment) or volume 0 (for decrement) [S2, unofficial].
++Increments the volume of the current sample by $x$ at the beginning of the division, with no sliding occurring [S2, unofficial]. Decrements the volume of the current sample by $x$ at the beginning of the division, lowering the volume [S2, unofficial]. The implementation sets `cptr->volume += (effect & 0xF)` and clamps to 64 if exceeded [S2, unofficial]. For decrement, it sets `cptr->volume -= (effect & 0xF)` and resets to 0 if the volume exceeds 200 [S2, unofficial]. Pitfalls include the inability to slide beyond volume 64 and the inability to slide beyond volume 0 [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per sample, as it involves a constant number of arithmetic operations and bit manipulations.
+-- **Memory Complexity:** $O(1)$ auxiliary memory.
+-- **Performance:** Very fast, suitable for real-time volume rendering. The specific implementation in [S2, unofficial] is designed for hardware acceleration via fragment shaders.
+-- **Strengths:** Simple to implement, computationally inexpensive, effective for linear contrast adjustment.
+-- **Limitations:** Limited to linear transformations; cannot handle non-linear intensity distributions as effectively as [Power Transformation](2346-power-transformation.md). The specific range constraints (0–64) in [S2, unofficial] may limit its applicability to standard 8-bit or lower precision data without rescaling.
++Not given in the sources.
+ 
+ ## Background
+-The method originates from implementations in voxel-based terrain rendering and volume ray casting. [S1, unofficial] describes its use in a VTK-based multi-volume ray caster for window/level adjustment. [S2, unofficial] details its use in a voxel space engine for terrain rendering, where it is used to adjust the "volume" of terrain samples. The technique is a standard approach in computer graphics for normalizing scalar fields for visualization.
++The method originates from implementations in voxel-based terrain rendering and volume ray casting [S1, unofficial][S2, unofficial]. [S1, unofficial] describes its use in a VTK-based multi-volume ray caster for window/level adjustment. [S2, unofficial] details its use in a voxel space engine for terrain rendering to adjust the volume of terrain samples.
+ 
+ ## Sources

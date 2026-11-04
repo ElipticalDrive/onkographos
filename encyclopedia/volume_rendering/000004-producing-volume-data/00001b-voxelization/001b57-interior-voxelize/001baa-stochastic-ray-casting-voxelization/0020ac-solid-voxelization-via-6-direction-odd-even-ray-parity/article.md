@@ -1,0 +1,208 @@
+# Solid Voxelization via 6-Direction Odd-Even Ray Parity
+
+Also called: 6-direction majority vote, odd-even ray parity solid voxelization
+
+## Overview
+This method converts a normalized, watertight mesh into a solid voxel target by determining the inside/outside status of each voxel center using the parity of ray intersections along six axis-aligned directions. It differs from its parent [Stochastic Ray-Casting Voxelization](1067-stochastic-ray-casting-voxelization.md) by using deterministic, axis-aligned rays and a majority vote on parity rather than random rays and intersection counts, providing a robust, non-stochastic solution for solid interior filling [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `mesh`: A watertight mesh defined by vertex positions and triangle indices.
+- `voxelMm`: The physical size of a voxel in millimeters.
+- `colorId`: The identifier to assign to filled voxels.
+
+**Outputs:**
+- A `Map` where keys are strings `"i,j,k"` and values are `colorId`.
+- A `seed` string representing the key of the seed voxel.
+- Voxel centers are located at $(i, j, k) \cdot \text{voxelMm}$ in world coordinates [S1, unofficial].
+
+**Data Structures:**
+- **Per-Axis Uniform Triangle Grids:** Three shared grids are used (one for each axis pair: XY, YZ, ZX). Each grid maps a 2D cell index (e.g., `"ui,vi"`) to a list of triangle indices that intersect that column [S1, unofficial].
+- **Triangle Indices Retrieval:** Given a world coordinate $(x, y, z)$ and an axis direction, the relevant triangles are retrieved by mapping the two non-axis coordinates to grid cell indices [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Grid Construction:**
+    - For each of the three axis pairs (e.g., X-axis rays use the YZ plane grid), construct a uniform grid covering the mesh bounding box.
+    - For each triangle, determine which grid cells it intersects in the projection plane. Add the triangle index to the lists of those cells [S1, unofficial].
+
+2.  **Seed Selection:**
+    - Identify the lowest $k$ layer of voxels that have at least one filled voxel (initially empty, but this step is conceptual for the seed definition; in practice, the seed is determined after processing or as a reference point). *Note: The source code implies the seed is selected from the "lowest-k layer of filled voxels". Since the voxelization is the process of determining filled voxels, the seed selection logic is applied to the result or a preliminary pass. The source code `pickSeed` takes `minKCells` (voxels on the lowest k-layer) and `minK`.*
+    - Find the bounding box of the voxels on the lowest $k$ layer (min/max $i$ and $j$).
+    - Calculate the center $(c_x, c_y)$ of this bounding box:
+      $$ c_x = \frac{\min(i) + \max(i)}{2}, \quad c_y = \frac{\min(j) + \max(j)}{2} $$
+    - Select the filled voxel on this lowest $k$ layer that is nearest to $(c_x, c_y)$ in Euclidean distance [S1, unofficial].
+
+3.  **Voxel Classification (for each voxel $(i, j, k)$):**
+    - Let the voxel center be $C = (i \cdot \text{voxelMm}, j \cdot \text{voxelMm}, k \cdot \text{voxelMm})$.
+    - Initialize `inside_votes = 0`.
+    - For each of the six axis directions $D \in \{+X, -X, +Y, -Y, +Z, -Z\}$:
+        - Cast a ray from $C$ in direction $D$.
+        - Retrieve candidate triangles using the corresponding per-axis grid.
+        - Perform a ray-triangle intersection test using the Möller–Trumbore algorithm.
+        - Count the number of intersections $N_D$.
+        - Determine parity: If $N_D$ is odd, the ray crosses the surface an odd number of times, implying the center is on the opposite side of the surface relative to the ray origin's infinite extent. In the context of the majority vote, an odd intersection count is treated as an "inside" vote for that direction [S1, unofficial].
+        - If $N_D$ is odd, increment `inside_votes`.
+    - **Majority Vote:** If `inside_votes` $\ge 3$, the voxel is considered inside. Ties (3-3) count as inside [S1, unofficial].
+
+4.  **Output Generation:**
+    - If the voxel is inside, add `("i,j,k", colorId)` to the output map.
+    - After processing all voxels, identify the seed voxel using the logic in Step 2 [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def solid_voxelize(mesh, voxel_mm, color_id):
+    # 1. Build per-axis triangle grids
+    # Grids are maps from "ui,vi" string to list of triangle indices
+    # Axis pairs: (Y,Z) for X-rays, (X,Z) for Y-rays, (X,Y) for Z-rays
+    grids = build_per_axis_grids(mesh, voxel_mm)
+    
+    # 2. Determine voxel bounds and iterate
+    bbox = mesh.bounding_box()
+    min_i = floor(bbox.min_x / voxel_mm)
+    max_i = ceil(bbox.max_x / voxel_mm)
+    min_j = floor(bbox.min_y / voxel_mm)
+    max_j = ceil(bbox.max_y / voxel_mm)
+    min_k = floor(bbox.min_z / voxel_mm)
+    max_k = ceil(bbox.max_z / voxel_mm)
+    
+    voxels = {}
+    filled_voxels_by_k = {} # Map k -> list of (i, j)
+    
+    for k in range(min_k, max_k + 1):
+        filled_in_k = []
+        for j in range(min_j, max_j + 1):
+            for i in range(min_i, max_i + 1):
+                # Voxel center
+                cx = i * voxel_mm
+                cy = j * voxel_mm
+                cz = k * voxel_mm
+                
+                inside_votes = 0
+                
+                # Check 6 directions
+                directions = [
+                    (1, 0, 0), (-1, 0, 0),
+                    (0, 1, 0), (0, -1, 0),
+                    (0, 0, 1), (0, 0, -1)
+                ]
+                
+                for dx, dy, dz in directions:
+                    # Determine which grid to use
+                    if dx != 0:
+                        grid = grids['yz'] # X-rays use YZ grid
+                        u, v = cy, cz
+                        origin_u, origin_v = bbox.min_y, bbox.min_z
+                    elif dy != 0:
+                        grid = grids['xz'] # Y-rays use XZ grid
+                        u, v = cx, cz
+                        origin_u, origin_v = bbox.min_x, bbox.min_z
+                    else:
+                        grid = grids['xy'] # Z-rays use XY grid
+                        u, v = cx, cy
+                        origin_u, origin_v = bbox.min_x, bbox.min_y
+                    
+                    # Get candidate triangles
+                    ui = cell_index(u, origin_v) # Note: source uses axisU/axisV mapping
+                    vi = cell_index(v, origin_v) # Simplified: assuming uniform grid aligned with bbox
+                    # Correction: cell_index should map world coord to grid cell index
+                    # Based on source: cellIndex(p[axisU], originU)
+                    # For X-rays (dx!=0), axisU=Y, axisV=Z. 
+                    # So ui = cellIndex(cy, originY), vi = cellIndex(cz, originZ)
+                    
+                    # Re-mapping for clarity based on source logic:
+                    if dx != 0:
+                        ui = cell_index(cy, bbox.min_y)
+                        vi = cell_index(cz, bbox.min_z)
+                    elif dy != 0:
+                        ui = cell_index(cx, bbox.min_x)
+                        vi = cell_index(cz, bbox.min_z)
+                    else:
+                        ui = cell_index(cx, bbox.min_x)
+                        vi = cell_index(cy, bbox.min_y)
+                        
+                    tri_indices = grid.get(f"{ui},{vi}", [])
+                    
+                    # Ray-triangle intersections
+                    intersection_count = 0
+                    for tri_idx in tri_indices:
+                        if ray_triangle_intersect(cx, cy, cz, dx, dy, dz, mesh.triangles[tri_idx]):
+                            intersection_count += 1
+                    
+                    if intersection_count % 2 == 1:
+                        inside_votes += 1
+                
+                # Majority vote
+                if inside_votes >= 3:
+                    voxels[f"{i},{j},{k}"] = color_id
+                    filled_in_k.append((i, j))
+        
+        if filled_in_k:
+            filled_voxels_by_k[k] = filled_in_k
+
+    # 3. Seed Selection
+    seed = pick_seed(filled_voxels_by_k)
+    
+    return voxels, seed
+
+def cell_index(world_coord, origin):
+    return floor((world_coord - origin) / voxel_mm)
+
+def ray_triangle_intersect(ox, oy, oz, dx, dy, dz, triangle):
+    # Hand-rolled Möller–Trumbore
+    # Returns true if intersection occurs
+    pass
+
+def pick_seed(filled_voxels_by_k):
+    if not filled_voxels_by_k:
+        return None
+    
+    # Find lowest k layer
+    min_k = min(filled_voxels_by_k.keys())
+    min_k_cells = filled_voxels_by_k[min_k]
+    
+    if not min_k_cells:
+        return None
+        
+    is_ = [c[0] for c in min_k_cells]
+    js_ = [c[1] for c in min_k_cells]
+    
+    cx = (min(is_) + max(is_)) / 2
+    cy = (min(js_) + max(js_)) / 2
+    
+    best = min_k_cells[0]
+    best_d = float('inf')
+    
+    for c in min_k_cells:
+        d = (c[0] - cx) ** 2 + (c[1] - cy) ** 2
+        if d < best_d:
+            best_d = d
+            best = c
+            
+    return f"{best[0]},{best[1]},{min_k}"
+```
+
+**Parameters:**
+- **Majority Threshold:** 3. A voxel is inside if $\ge 3$ directions yield odd parity [S1, unofficial].
+- **Voxel Size:** Determined by `voxelMm` input.
+
+**Pitfalls:**
+- **Axis-aligned ray degeneracy:** Rays parallel to triangle edges or lying in triangle planes can cause numerical instability or missed intersections. The source notes that the test sphere was placed off-origin to avoid this issue [S1, unofficial].
+- **Non-watertight meshes:** The method assumes a watertight mesh. Non-watertight meshes may produce incorrect parity results [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(V \cdot T_{avg})$, where $V$ is the number of voxels and $T_{avg}$ is the average number of candidate triangles per ray. The grid acceleration reduces $T_{avg}$ significantly.
+- **Memory Complexity:** $O(T + G)$, where $T$ is the number of triangles and $G$ is the number of grid cells.
+- **Performance:** ~75ms for a 40³-equivalent icosphere (20,480 faces, 32,764 voxels) [S1, unofficial].
+- **Accuracy:** Sphere error rate 1.44% (r=20mm, 1280 faces). Box error rate 0.0047%. Criterion was $\le 2\%$ [S1, unofficial].
+- **Strengths:** Deterministic, robust for watertight meshes, fast due to grid acceleration and simple parity checks.
+- **Limitations:** Assumes watertight mesh. Axis-aligned rays may suffer from degeneracy if not handled carefully (e.g., offsetting rays or meshes).
+
+## Background
+This method was implemented as part of issue 0010 in the Clothespin-Studio project, building on the design fixed by issue 0008 spike. It was developed to convert normalized MeshData into a solid voxel target for the `growAssembly` process. The implementation avoids dependencies on three.js for the domain layer and uses a hand-rolled Möller–Trumbore intersection test [S1, unofficial].
+
+## Sources
+[S1] feat: solid voxelization of normalized meshes (issue 0010), https://github.com/fumito-ito/Clothespin-Studio/pull/6, fetched 2026-10-26 (unofficial)

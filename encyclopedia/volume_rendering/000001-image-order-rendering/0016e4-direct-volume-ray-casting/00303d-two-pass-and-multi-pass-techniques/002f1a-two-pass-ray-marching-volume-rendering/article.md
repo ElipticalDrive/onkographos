@@ -1,0 +1,185 @@
+# Two-Pass Ray Marching Volume Rendering
+Also called: INTMeshVolumeRendering
+
+## Overview
+A two-pass GPU-based volume rendering technique that decouples depth estimation from ray marching to enable accurate front-to-back compositing within a single screen-space quad. It solves the problem of determining the correct entry and exit points of a ray through a volume bounding box without requiring complex ray-box intersection shaders in the final pass. It differs from [Half-angle slicing](1255-half-angle-slicing.md) by using full volumetric ray marching rather than slice accumulation, and from [Two-pass volume rendering](1292-two-pass-volume-rendering.md) by explicitly rendering the back-face depth to a texture to drive the marching range in the second pass.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A `THREE.WebGLRenderer`, a `THREE.Camera`, a `THREE.Vector3` defining the volume bounding box size (`size`), a 1D scalar dataset array (`data`), and optional parameters for marching steps (`steps`, default 50) and opacity correction (`alphaCorrection`, default 0.2).
+*   **Outputs:** A rendered 2D image where each pixel contains the accumulated color and opacity of the volume along the ray.
+
+**Data Structures:**
+1.  **`rtTexture` (Render Target):** A `THREE.WebGLRenderTarget` with dimensions matching the viewport (`window.innerWidth` x `window.innerHeight`). Format is `RGBA`, type is `FloatType`, filters are `Linear`, wrapping is `ClampToEdge`, and mipmaps are disabled. It stores the depth/position information from the first pass.
+2.  **`dataTexture`:** A `THREE.DataTexture` containing the scalar volume data.
+    *   **Width:** `renderer.capabilities.maxTextureSize`.
+    *   **Height:** `ceil(data.length / width)`.
+    *   **Format:** `AlphaFormat`.
+    *   **Type:** `FloatType`.
+    *   **Padding:** The input data array is padded with zeros to fill the rectangular texture dimensions completely.
+3.  **`transfertTex`:** A `THREE.Texture` generated from an 8x256 canvas. It contains a linear gradient mapping normalized scalar values (0.0 to 1.0) to RGBA colors. Wrapping is `ClampToEdgeWrapping`.
+
+**Numbered Steps:**
+
+1.  **Initialization:**
+    *   Validate that `renderer`, `camera`, and `size` are defined; otherwise, raise an error [S1, unofficial].
+    *   Store `steps` (default 50) and `alphaCorrection` (default 0.2).
+    *   Create a `BoxGeometry` with dimensions equal to `size` and set `doubleSided = true`.
+    *   Create `rtTexture` with screen dimensions and `FloatType` RGBA format.
+    *   Determine `dataTextureWidth` from `renderer.capabilities.maxTextureSize`.
+
+2.  **Data Preparation:**
+    *   Compute `dataMin` and `dataMax` from the dataset if not provided.
+    *   Pad the `data` array with zeros so its length equals `dataTextureWidth * dataTextureHeight`.
+    *   Create `dataTexture` using the padded array, `AlphaFormat`, and `FloatType`.
+    *   Update material uniforms `minData` and `maxData`.
+
+3.  **First Pass (Back-Face Depth):**
+    *   Create a temporary scene (`_sceneFirstPass`).
+    *   Create a mesh using the `BoxGeometry` and a `ShaderMaterial` with `side: THREE.BackSide`.
+    *   The fragment shader for this pass writes the depth or world position of the back face of the volume box to `rtTexture`.
+    *   Render `_sceneFirstPass` to `rtTexture` using the camera.
+
+4.  **Second Pass (Ray Marching):**
+    *   Create the final material with `side: THREE.FrontSide`.
+    *   Pass uniforms: `tex` (from `rtTexture`), `steps`, `transfertTex`, `alphaCorrection`, `size`, `dataTex`, `widthDataTex`, `heightDataTex`, `minData`, `maxData`.
+    *   The vertex shader passes screen coordinates or ray origins.
+    *   The fragment shader performs the following for each pixel:
+        a.  Sample `tex` to get the entry point (back-face depth/position) from the first pass.
+        b.  Calculate the ray direction from the camera to the front face (or use the back-face depth to determine the ray length through the volume).
+        c.  Iterate `steps` times along the ray:
+            i.  Sample `dataTex` at the current ray position.
+            ii. Normalize the scalar value using `minData` and `maxData`.
+            iii. Sample `transfertTex` to get color and opacity.
+            iv. Apply front-to-back compositing with `alphaCorrection`.
+        d.  Write the final accumulated color and opacity to the screen.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+def init(renderer, camera, size, steps=50, alpha_correction=0.2):
+    if renderer is None or camera is None or size is None:
+        raise Error("renderer, camera, and size must be defined")
+    
+    # Geometry
+    geometry = BoxGeometry(size.x, size.y, size.z)
+    geometry.doubleSided = True
+    
+    # Render Target for First Pass
+    rt_texture = WebGLRenderTarget(
+        width=window.innerWidth,
+        height=window.innerHeight,
+        format=RGBAFormat,
+        type=FloatType,
+        minFilter=LinearFilter,
+        magFilter=LinearFilter,
+        wrapS=ClampToEdgeWrapping,
+        wrapT=ClampToEdgeWrapping,
+        generateMipmaps=False
+    )
+    
+    # Data Texture Setup
+    max_tex_size = renderer.capabilities.maxTextureSize
+    data_min, data_max = compute_min_max(data)
+    padded_data = pad_to_rectangular(data, max_tex_size)
+    data_texture = DataTexture(
+        data=padded_data,
+        width=max_tex_size,
+        height=ceil(len(padded_data) / max_tex_size),
+        format=AlphaFormat,
+        type=FloatType
+    )
+    
+    # Transfer Function Texture
+    transfer_texture = create_transfer_texture(color_stops, color_positions)
+
+# First Pass
+def render_first_pass():
+    scene_first_pass = Scene()
+    back_face_material = ShaderMaterial(
+        vertex_shader=first_pass_vertex_shader,
+        fragment_shader=first_pass_fragment_shader,
+        side=BackSide
+    )
+    back_face_mesh = Mesh(geometry, back_face_material)
+    scene_first_pass.add(back_face_mesh)
+    
+    renderer.render(scene_first_pass, camera, rt_texture)
+
+# Second Pass Fragment Shader Logic (Conceptual)
+def fragment_shader_second_pass():
+    # 1. Get entry point from first pass
+    back_depth = texture2D(tex, gl_FragCoord.xy).r # Assuming depth stored in R channel
+    entry_point = compute_entry_point(back_depth, camera)
+    
+    # 2. Define ray
+    ray_origin = camera.position
+    ray_direction = normalize(entry_point - ray_origin)
+    ray_length = length(entry_point - ray_origin)
+    step_size = ray_length / steps
+    
+    # 3. Ray Marching
+    accumulated_color = vec4(0.0)
+    accumulated_opacity = 0.0
+    
+    for i in range(steps):
+        current_pos = ray_origin + ray_direction * (i * step_size)
+        
+        # Sample volume data
+        normalized_scalar = sample_data_texture(current_pos, data_texture, min_data, max_data)
+        
+        # Get color and opacity from transfer function
+        tf_sample = texture2D(transfertTex, vec2(normalized_scalar, 0.5))
+        color = tf_sample.rgb
+        opacity = tf_sample.a * alpha_correction
+        
+        # Front-to-back compositing
+        # C_out = C_in + C_src * alpha_src * (1 - alpha_in)
+        # A_out = A_in + alpha_src * (1 - A_in)
+        
+        weight = opacity * (1.0 - accumulated_opacity)
+        accumulated_color += color * weight
+        accumulated_opacity += weight
+        
+        if accumulated_opacity > 0.99:
+            break
+            
+    gl_FragColor = accumulated_color
+```
+
+**Parameters:**
+*   `steps`: Number of marching steps per ray. Default: 50. Higher values improve quality but reduce FPS.
+*   `alphaCorrection`: General opacity correction factor applied during compositing. Default: 0.2.
+*   `size`: Dimensions (x, y, z) of the volume bounding box.
+*   `dataMin` / `dataMax`: Minimum and maximum values of the dataset, used for normalizing voxel values before transfer function lookup. Computed automatically if undefined.
+
+**Edge Cases and Pitfalls:**
+*   **Missing Parameters:** If `renderer`, `camera`, or `size` are undefined, the constructor fails silently or throws an error depending on implementation guards [S1, unofficial].
+*   **Texture Size Limits:** The data texture width is capped at `renderer.capabilities.maxTextureSize`. If the dataset is large, the height increases, which may affect sampling precision or memory usage.
+*   **Padding:** The data array must be padded with zeros to fit the rectangular texture dimensions. Failure to pad correctly results in misaligned voxel sampling.
+
+## Subtopics
+
+### Half-angle slicing
+Renders the volume as a series of slices, accumulating color and opacity. It is faster than ray marching but less accurate for complex lighting and transparency effects. Choose when performance is critical and volume is relatively uniform. [Half-angle slicing](1255-half-angle-slicing.md)
+
+### Two-pass volume rendering
+A broader category that may use different techniques for the two passes (e.g., depth peeling). This specific method uses back-face depth rendering. [Two-pass volume rendering](1292-two-pass-volume-rendering.md)
+
+## Operating characteristics
+*   **Time Complexity:** O(N * S), where N is the number of pixels and S is the number of steps per ray.
+*   **Memory Complexity:** O(V + P), where V is the volume data size and P is the pixel buffer size. The data texture requires padding, which may increase memory usage by up to a factor of 2 if the data length is not a multiple of the max texture width.
+*   **Performance:** Dependent on GPU texture sampling speed and fragment shader complexity. The use of `FloatType` render targets may impact performance on older hardware.
+*   **Strengths:** Accurate ray marching with correct depth handling; simple implementation using standard WebGL primitives.
+*   **Limitations:** Fixed number of steps may lead to aliasing or slow performance; requires sufficient GPU memory for large textures; padding overhead.
+*   **When to use:** Real-time visualization of moderate-sized volumes in WebGL environments where accuracy is more important than maximum frame rate.
+*   **When not to use:** Very large volumes requiring adaptive step sizes or hierarchical data structures (e.g., Octrees); hardware with limited float texture support.
+
+## Background
+The method is implemented in the `INTMeshVolumeRendering` class, part of the WebGLVolumeRendering library by Interactive Network Technologies. It was authored by Vincent Dumestre and Nathan Krupa. The approach leverages standard Three.js primitives and shaders to achieve volume rendering in a browser environment.
+
+## Sources
+[S1] pyx61198/volume_rendering, https://github.com/pyx61198/volume_rendering, fetched 2026-10-27 (unofficial)

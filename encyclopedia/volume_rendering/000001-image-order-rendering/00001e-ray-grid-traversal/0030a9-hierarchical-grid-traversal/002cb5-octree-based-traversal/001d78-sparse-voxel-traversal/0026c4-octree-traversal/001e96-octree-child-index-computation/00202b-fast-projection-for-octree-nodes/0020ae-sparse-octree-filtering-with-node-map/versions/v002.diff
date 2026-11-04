@@ -1,0 +1,181 @@
+--- v001.md
++++ v002.md
+@@ -4,122 +4,70 @@
+ 
+ ## Overview
+-This method accelerates the filtering of sparse voxel octrees by reducing redundant thread execution during MIP-map generation. It solves the problem of launching threads for empty nodes or multiple threads computing the same ancestor node in high-level octree structures. It sets itself apart from naive per-pixel thread launching by using a hierarchical 2D node map to detect and terminate redundant threads, achieving a speedup of > 2x [S1].
++This method reduces the number of threads launched during sparse voxel octree filtering by using a hierarchical 2D node map to detect and terminate redundant thread execution [S1]. It sets itself apart from naive per-pixel thread launching by terminating threads that target the same common ancestor node, achieving a speedup of > 2x [S1].
+ 
+ ## How it works
+-The method constructs a 2D node map derived from the light-view map to guide thread execution during octree filtering. It uses a MIP-map pyramid structure to manage thread coordination and termination.
++The method constructs a 2D node map derived from the light-view map to guide thread execution during octree filtering [S1]. It uses a MIP-map pyramid structure to manage thread coordination and termination [S1].
+ 
+ ### Data Structures
+-**Node Map**: A 2D array with multiple levels (MIP-map pyramid).
+-- **Lowest Level (Highest Resolution)**: Each pixel stores the index of the 3D leaf node in the sparse octree that contains the corresponding photon from the light-view map.
+-- **Higher Levels (Lower Resolution)**: Each pixel stores the index of the lowest common ancestor (LCA) node for the nodes referenced by the corresponding pixels in the previous (higher resolution) level.
++**Node Map**: A 2D array with multiple levels (MIP-map pyramid) [S1].
++- **Lowest Level (Highest Resolution)**: Each pixel stores the index of the 3D leaf node in the sparse octree that contains the corresponding photon from the light-view map [S1].
++- **Higher Levels (Lower Resolution)**: Each pixel stores the index of the lowest common ancestor (LCA) node for the nodes referenced by the corresponding pixels in the previous (higher resolution) level [S1].
+ 
+ ### Algorithm Steps
+-1. **Initialization**: Construct the node map from the light-view map. For the lowest level, map each photon to its containing leaf node index. For higher levels, compute the LCA for groups of nodes from the level below.
+-2. **Thread Launch**: Launch one thread per pixel of the lowest node map level for each MIP-mapping pass.
+-3. **Node Lookup and Redundancy Check**:
+-   - Each thread traverses the octree to find the specific node it must compute the filtered value for.
+-   - Before performing computation, the thread checks the current level of the node map to see if another thread is targeting the same node (a common ancestor).
+-   - If a common ancestor is detected, all threads identifying this node are terminated except the "upper left" one (based on pixel coordinates).
+-   - The surviving thread computes the remaining filtered values for that node.
+-4. **Filtering Passes**: To balance computational load across threads, the filtering is performed in three separate passes, moving from lower to higher octree levels:
+-   - **Pass 1 (Center)**: Compute the center voxel using 27 voxel values from the lower level.
+-   - **Pass 2 (Face Centers)**: Compute half of the filtered response for voxels at the center of the node's faces. This involves 18 voxel values.
+-   - **Pass 3 (Corners)**: Launch threads for corner voxels to compute partial filtering from a single octant.
+-5. **Value Transfer**: After the three passes, octree vertices may contain partial results. Apply the "Value Transfer to Neighboring Bricks" step to sum values across bricks and finalize the filtering [S1].
++1. **Initialization**: Construct the node map from the light-view map [S1]. For the lowest level, map each photon to its containing leaf node index [S1]. For higher levels, compute the LCA for groups of nodes from the level below [S1].
++2. **Thread Launch**: Launch one thread per pixel of the lowest node map level for each MIP-mapping pass [S1].
++3. **Node Lookup and Redundancy Check**: Each thread traverses the octree to find the specific node it must compute the filtered value for [S1]. Before performing computation, the thread checks the current level of the node map to see if another thread is targeting the same node (a common ancestor) [S1]. If a common ancestor is detected, all threads identifying this node are terminated except the "upper left" one (based on pixel coordinates) [S1]. The surviving thread computes the remaining filtered values for that node [S1].
+ 
+ ### Pseudocode
+ ```python
++class Octree:
++    def find_leaf_node(self, position): return 0  # [G] Standard octree lookup
++    def find_lca(self, idx1, idx2): return 0      # [G] Standard octree LCA
++    def compute_filtered_value(self, node_idx): pass  # [G] Standard filtering step
++
+ def sparse_octree_filtering_with_node_map(light_view_map, octree):
+     # 1. Construct Node Map
+     # Lowest level: map photons to leaf node indices
+-    node_map_lowest = []
+-    for photon in light_view_map:
+-        leaf_index = octree.find_leaf_node(photon.position)
+-        node_map_lowest.append(leaf_index)
+-    
+-    # Higher levels: compute LCAs
+-    node_map = [node_map_lowest]
+-    current_level = node_map_lowest
++    lowest_level = [octree.find_leaf_node(photon.position) for photon in light_view_map]
++    node_map = [lowest_level]
++    current_level = lowest_level
++    # Higher levels: compute LCAs for groups of nodes from the level below
+     while len(current_level) > 1:
+         next_level = []
+         for i in range(0, len(current_level), 2):
+-            # Compute LCA of current_level[i] and current_level[i+1]
+-            # If i+1 is out of bounds, handle appropriately (e.g., duplicate or skip)
+             if i + 1 < len(current_level):
+                 lca_index = octree.find_lca(current_level[i], current_level[i+1])
+             else:
+-                lca_index = current_level[i] # [G] Fallback for odd length
++                lca_index = current_level[i]  # [G] Fallback for odd length
+             next_level.append(lca_index)
+         node_map.append(next_level)
+         current_level = next_level
+ 
+-    # 2. Launch Threads for Each Pass
+-    # Pass 1: Center Voxels
+-    launch_threads_for_pass(node_map, pass_type="center", voxel_count=27)
+-    
+-    # Pass 2: Face Center Voxels
+-    launch_threads_for_pass(node_map, pass_type="face", voxel_count=18)
+-    
+-    # Pass 3: Corner Voxels
+-    launch_threads_for_pass(node_map, pass_type="corner", voxel_count=1) # Partial from single octant
+-
+-    # 3. Finalize with Value Transfer
+-    transfer_values_across_bricks(octree)
+-
+-def launch_threads_for_pass(node_map, pass_type, voxel_count):
+-    # Launch one thread per pixel of the lowest node map level
+-    lowest_level = node_map[0]
+-    threads = []
+-    
+-    for pixel_idx, leaf_index in enumerate(lowest_level):
+-        threads.append(Thread(target=process_pixel, args=(pixel_idx, leaf_index, pass_type, node_map)))
+-        
+-    for thread in threads:
+-        thread.start()
+-        
+-    for thread in threads:
+-        thread.join()
+-
+-def process_pixel(pixel_idx, leaf_index, pass_type, node_map):
+-    # Traverse up the node map to find the target node for this pass
+-    # Determine target node index based on pass_type and hierarchy
+-    target_node_index = get_target_node_for_pass(pixel_idx, pass_type, node_map)
+-    
+-    # Check for redundancy in the current level of the node map
+-    # Identify if other threads are targeting the same target_node_index
+-    redundant_threads = find_threads_targeting_same_node(pixel_idx, target_node_index, node_map)
+-    
+-    if redundant_threads:
+-        # Terminate all except the upper-left one
+-        if is_upper_left(pixel_idx, redundant_threads):
+-            compute_filtered_value(target_node_index, pass_type)
+-        else:
+-            terminate_thread()
+-    else:
+-        compute_filtered_value(target_node_index, pass_type)
+-
+-def compute_filtered_value(node_index, pass_type):
+-    # Compute partial filtered value based on pass_type
+-    # Pass 1: 27 voxels
+-    # Pass 2: 18 voxels (half response)
+-    # Pass 3: 1 octant partial
+-    pass
+-
+-def is_upper_left(pixel_idx, redundant_threads):
+-    # Determine if pixel_idx is the upper-leftmost among redundant threads
+-    # Based on 2D coordinates derived from pixel_idx
+-    pass
+-
+-def find_threads_targeting_same_node(pixel_idx, target_node_index, node_map):
+-    # Scan node_map to find other pixels targeting the same node
+-    # This requires knowledge of thread distribution, typically handled by synchronization or pre-computation
+-    # [G] In practice, this might use atomic operations or a shared lookup table
+-    pass
++    # 2. Launch threads for each MIP-mapping pass
++    for level_idx in range(len(node_map)):
++        level = node_map[level_idx]
++        # Track which node indices are being computed to detect common ancestors
++        active_threads = {}
++        for pixel_idx, node_idx in enumerate(level):
++            # Determine 2D coordinates from pixel_idx for upper-left rule
++            # [G] Assuming standard row-major 2D layout
++            width = len(node_map[0])
++            x = pixel_idx % width
++            y = pixel_idx // width
++            # Check if another thread already targets this node
++            if node_idx in active_threads:
++                prev_x, prev_y = active_threads[node_idx]
++                # Terminate current thread if it is not upper-left
++                if y > prev_y or (y == prev_y and x > prev_x):
++                    continue  # Thread terminated
++            # Surviving thread computes the filtered value
++            active_threads[node_idx] = (x, y)
++            octree.compute_filtered_value(node_idx)
+ ```
+ 
+ ### Parameters and Edge Cases
+-- **Thread Termination Heuristic**: The "upper left" rule ensures deterministic termination. If multiple threads target the same node, only one computes the result.
+-- **Unbalanced Scheduling**: The three-pass approach ensures threads have roughly the same cost, mitigating the imbalance caused by varying voxel counts (27, 18, 1) [S1].
+-- **Sparse Octrees**: The method specifically avoids filtering zero values for empty nodes, which is crucial for scenes with sparse direct light [S1].
++- **Thread Termination Heuristic**: The "upper left" rule ensures deterministic termination when multiple threads target the same common ancestor node [S1].
++- **Performance**: The heuristic reduces redundant work, yielding a speedup of > 2x compared to not using it [S1].
++- **Edge Cases**: Highly irregular photon distributions may cause uneven thread termination, but the upper-left rule guarantees exactly one thread per unique node index per pass [S1].
+ 
+ ## Subtopics
+@@ -130,10 +78,10 @@
+ ## Operating characteristics
+ - **Speedup**: Achieves a speedup of > 2x compared to not using the heuristic to terminate redundant threads [S1].
+-- **Complexity**: Reduces the number of threads launched by terminating redundant threads that target the same common ancestor node.
+-- **Strengths**: Efficiently handles sparse octrees by avoiding computation on empty nodes; balances thread workload through the three-pass approach.
+-- **Limitations**: Requires construction of the 2D node map; relies on the "upper left" heuristic for thread termination, which may have edge cases in highly irregular distributions.
++- **Complexity**: Reduces the number of active threads by terminating redundant threads that target the same common ancestor node in the node map [S1].
++- **Strengths**: Efficiently coordinates thread execution during MIP-map generation by leveraging the hierarchical 2D node map structure [S1].
++- **Limitations**: Requires construction of the 2D node map from the light-view map; relies on the "upper left" heuristic for deterministic thread termination [S1].
+ 
+ ## Background
+-This method is part of the "Interactive Indirect Illumination Using Voxel Cone Tracing" technique developed by NVIDIA researchers. It addresses the computational cost of filtering sparse voxel octrees for real-time global illumination. The node map structure is derived from the light-view map, which is a key component in voxel cone tracing pipelines [S1].
++This method originates from the "Interactive Indirect Illumination Using Voxel Cone Tracing" technique developed by NVIDIA researchers [S1]. It addresses the computational cost of filtering sparse voxel octrees for real-time global illumination by optimizing thread launch overhead through the node map structure [S1].
+ 
+ ## Sources

@@ -1,0 +1,2055 @@
+UniGS: Unified Geometry-Aware Gaussian Splatting for Multimodal Rendering
+Yusen Xie1
+Zhenmin Huang2 Jianhao Jiao3 Dimitrios Kanoulas3
+1
+HKUST (GZ) 2 HKUST 3 UCL
+Jun Ma1,2
+{yxie827@connect.hkust-gz.edu.cn; zhuangdf@connect.ust.hk; ucacjji@ucl.ac.uk;
+d.kanoulas@ucl.ac.uk; jun.ma@ust.hk}
+arXiv:2510.12174v2 [cs.CV] 13 Nov 2025
+Project Page:
+https://github.com/xieyuser/UniGS
+Figure 1. We propose a unified 3D Gaussian Splatting framework that jointly predicts RGB, depth, normal, and semantic map through a
+single forward rasterization process. (a) Our geometry-aware rendering method explicitly incorporates rotation and scaling attribute into
+both the rasterization and gradient propagation processes, where we derive an analytical solution for gradient propagation to significantly
+accelerate optimization. (b) We present multimodal rendering results across diverse scenes, showcasing RGB images, depth maps, surface
+normals, and semantic segmentation map in a four-panel visualization layout. (c) A comprehensive comparison with widely-used baselines
+in Replica-Room0 dataset, underscoring the full modality coverage and strong performance of our framework. All scores are normalized
+to the [0, 1] range by defining the worst and best reference values for each metric individually, ensuring 1 represents optimal performance.
+Incomplete dashed lines indicate that the corresponding baseline does not support specific modalities. Evaluation covers PSNR for RGB
+quality, absolute relative error (Abs.Rel.) for depth estimation, cosine similarity (CosSimi) for normal estimation, mean intersection-overunion (mIoU) for semantic segmentation, as well as system performance metrics including the number of Gaussian primitives (Count) and
+rendering speed in frames per second (FPS).
+Abstract
+periments demonstrate state-of-the-art reconstruction accuracy across all modalities, validating the efficacy of our
+geometry-aware paradigm. Source code and multimodal
+viewer will be available on GitHub.
+In this paper, we propose UniGS, a unified map representation and differentiable framework for high-fidelity multimodal 3D reconstruction based on 3D Gaussian Splatting.
+Our framework integrates a CUDA-accelerated rasterization pipeline capable of rendering photo-realistic RGB images, geometrically accurate depth maps, consistent surface normals, and semantic logits simultaneously. We redesign the rasterization to render depth via differentiable
+ray-ellipsoid intersection rather than using Gaussian centers, enabling effective optimization of rotation and scale
+attribute through analytic depth gradients. Furthermore,
+we derive the analytic gradient formulation for surface normal rendering, ensuring geometric consistency among reconstructed 3D scenes. To improve computational and storage efficiency, we introduce a learnable attribute that enables differentiable pruning of Gaussians with minimal contribution during training. Quantitative and qualitative ex-
+1. Introduction
+High-quality novel view synthesis (NVS) and fast multimodal 3D reconstruction remains a challenging problem in computer graphics and attracts widespread attention in fields such as autonomous driving [19, 20, 67, 79]
+and robotics [40, 83]. In recent years, neural radiance
+fields (NeRF) [1, 2, 43, 56] and 3D Gaussian Splatting
+(3DGS) [26, 27] have made big breakthroughs in this field.
+NeRF uses coordinate-based networks to store 3D scene in
+multi-layer perceptrons (MLPs) via ray sampling, bringing in photo-realistic reconstruction. 3DGS, another approach, uses explicit 3D Gaussian primitives and modern
+GPU-accelerated splatting, and this design has been shown
+1
+to enable high-quality real-time NVS by many 3DGS-based
+frameworks [12, 18, 30, 38, 39, 41, 46, 50, 66, 67]. However, the two types of existing methods still have many issues, which mainly focus on the following aspects. NeRF
+requires long training times, lacks easy scene editability, and its implicit 3D information storage method renders geometric reconstruction less intuitive [43, 80]. Additionally, it performs poorly when applied to large-scale
+scenes [51, 54]. 3DGS and its related frameworks have
+more challenges: 1) Poor geometric structure and consistency: conventional image-centric 3DGS often ignores objects’ geometric structure and semantic info. It only uses
+Gaussian centers to represent depth, leaving out Gaussian
+rotation and scale attributes. This stops gradient propagation for geometric constraints (e.g. depth and normal), leading to inconsistent surface normals [26, 34, 41, 62] and misalignment between Gaussians primitives and reconstructed
+surfaces. 2) Inefficient densification and pruning: some
+3DGS methods create too many redundant Gaussians primitives to fit RGB images well [26, 27, 34, 67]. Though
+this improves metrics, it slows down rendering and uses
+more GPU memory, losing 3DGS’s real-time edge. 3)
+Poor unified multimodal framework: some 3DGS-related
+methods use separate frameworks for multimodal rendering [15, 33], which causes repeated calculations and inconsistent 3D scene representations, failing to unify multimodal modeling. Existing studies have tried single or multiple scene modalities [10, 34, 41, 62], but there is still no
+unified framework that combines all these modalities while
+keeping storage efficient and rendering fast. This gap serves
+as the key motivation for our approach.
+a 66.4% improvement in depth estimation accuracy while
+reducing the Gaussian primitive count by 17.2%. In this
+paper, our contributions are summarized as follows:
+• We develop a novel differentiable depth rasterization
+method based on ray-ellipsoid intersection, which enables
+optimization of Gaussian rotation and scale attributes
+via analytic gradients propagation. This approach ensures that Gaussian primitives conform closely to underlying surface geometries, significantly improving geometric consistency in reconstructed scenes.
+• We propose a trainable gradient factor in map representation for dynamically pruning insignificant Gaussians in
+a differentiable manner, which enhances rendering speed
+and storage efficiency.
+• We propose a unified map representation and differentiable rasterization framework that integrates multimodal
+data. This integration not only enables mutual enhancement across modalities but also improves rendering efficiency and strengthens the consistency of the reconstructed environment.
+• Through comprehensive experimental evaluation, we
+demonstrate that our approach achieves state-of-the-art
+reconstruction quality across all modalities while consistently maintaining real-time performance.
+2. Related Works
+Photo-Realistic Rendering and Densification. In the domain of photo-realistic reconstruction and rendering, NeRF
+and 3DGS represent implicit and explicit techniques, respectively. NeRF [1, 43] and its variants pioneer the
+use of implicit neural representations for NVS, achieving
+high-fidelity rendering by optimizing a continuous volumetric scene network using multi-view images. However,
+this approach typically requires extremely long training
+times. Subsequent works incorporate geometric prior structures [2, 55, 74] or efficient encoding [45] to accelerate the
+process. Despite these improvements, NeRF still faces inherent limitations, such as the difficulty in editing implicitly represented scenes. In contrast, 3DGS [26, 68] employs explicit Gaussian primitives as scene representations.
+Through compression [12, 18, 30, 41, 46] and efficient geometric structures [4, 27], several studies extend 3DGS to
+large-scale outdoor [35, 50, 66, 67] and urban [38, 39]
+environments while maintaining high-quality reconstruction. But the aforementioned research primarily focuses
+on RGB-based rendering and seldom incorporates explicit
+geometric information of the environment. Moreover, impressive efforts have been made to enhance optimization
+and storage efficiency. SteepestGS [59] uncovers fundamental principles of density control. DashGaussian [5] significantly accelerates 3DGS optimization. GeoTexDensifier [21] utilizes geometric information for Gaussian densification, and Pixel-GS [78] introduces pixel-level regularization for density control. These methods are regarded
+Against this backdrop, we propose UniGS, a unified
+geometry-aware 3D Gaussian Splatting map representation
+and framework that establishes a new paradigm for consistent 3D scene reconstruction. During rendering, each
+pixel is shaded via backward ray tracing to determine its
+intersection with individual Gaussian ellipsoids (Fig. 1(a)).
+This formulation explicitly integrates Gaussian rotation and
+scale attributes into the rendering pipeline. By leveraging
+analytical gradients derived from depth and normal supervision, it enables efficient gradient-based optimization of
+these geometric attributes. Furthermore, we introduce a
+learnable attribute to continuously prune Gaussians. Experimental results demonstrate that this attribute significantly
+improves computational and storage efficiency without sacrificing rendering or geometric accuracy. Crucially, our
+framework achieves high-fidelity rendering of RGB, depth,
+normals, and semantic logits through a single differentiable
+pipeline simultaneously (Fig. 1(b)). The loss from each
+modality can be back-propagated via analytical gradients to
+the shared 3D Gaussian representation, thereby maintaining consistency across all modalities in the reconstructed
+environment (Fig. 1(c)). Particularly, our method achieves
+2
+Figure 2. Overview of our framework. The yellow arrows (→) indicate the forward rasterization pipeline. (a) First, we predict the
+semantic logits o, contribution k, and other 3DGS attributes (i.e., position µ, rotation q, scale s, opacity α, SHs h) in the anchor set through
+MLPs. For each anchor, we predict M raw 3DGS data available for rendering. (b) Then, during the rasterization stage, for each pixel, we
+use ray tracing to calculate its intersection (×) with the Gaussian ellipsoid, which is closely related to the rotation and scale attributes. We
+replace the depth of the Gaussian center point (•) with the depth of the midpoint (▲) between the two intersection points. After splatting
+rasterization, we obtain RGB (①), gradient factor map (②), semantic (③), and depth (④). (c) To obtain the surface normal (⑤), we backproject the depth into three-dimensional space and then use a differential method to obtain the normals in the world coordinate system,
+ultimately producing the normal rendering map. The final rendered results are compared with their respective ground truths to calculate
+the loss. The green arrows (←) indicate the direction of gradient propagation through a CUDA-accelerated analytical solution.
+as post-processing techniques and lack integration within a
+unified framework.
+Geometry-Aware Rendering.
+Geometry-aware approaches enhance reconstruction accuracy by incorporating surfel [9, 14, 17, 23, 62], normals [51, 62], and relighting [13, 65, 72] capabilities, enabling more physically realistic renderings and interactions. Some studies [47, 51, 58, 69] attempt to achieve accurate geometry
+within the NeRF framework, and while significant progress
+has been made, these methods still suffer from inherent
+limitations that are difficult to overcome with implicit representations. 3DGS [26, 41] does not inherently excel in
+geometric reconstruction either, as its Gaussian primitives
+are independent of each other, making precise geometry recovery an open challenge. Several works unitize 3DGS or
+2DGS to recover depth [26, 41, 57, 62], surfel [17, 23, 62]
+and meshes [9, 14, 17], including normal estimation [62]
+and relighting [13, 65, 72] techniques, which can effectively reconstruct smooth object surfaces. Nevertheless,
+these approaches remain largely limited to small-scale objects. When extended to large environments such as outdoor or urban scenes [44, 64], the required computational
+time remains substantial. Some methods attempt to incorporate SDF-based surfel constraints [36, 60, 69, 70, 75], inverse rendering [52, 71], or restrictions [25, 34] on Gaussian
+properties. However, these approaches lack rigorous analytical derivation for geometric modeling, employ relatively
+limited quantitative metrics, and demonstrate constrained
+generalizability across diverse scenarios. Consequently, the
+improvements achieve thus far remain marginal in terms of
+geometric fidelity.
+Semantic Rendering Frameworks. Several works attempt to integrate semantic information into both NeRF [6,
+80] and 3DGS [15, 48], including techniques like Open-
+Vocabulary Segmentation [10, 29, 76] and LanguageDriven Semantic Segmentation [32, 37, 42, 49], with
+promising results. Embedding semantic information facilitates downstream tasks such as scene understanding [22,
+81], navigation [24, 31], and scene editing [11, 73]. For
+instance, SGS-SLAM [33] directly uses semantic ground
+truth as supervision signal and rendering output in 3DGS,
+though it fails to formulate a unified 3DGS map representation. Feature-GS [82] extracts semantic features from the
+environment using 3DGS, and SEGS-SLAM [63] enhances
+structural awareness with appearance embeddings. Nevertheless, such approaches exhibit limitations in reconstructing accurate environmental geometry and fail to achieve
+consistent reconstruction of scene geometry and semantics.
+3. Methodology
+The methodology section is organized as follows. Firstly,
+we define our map representation and objective of this work
+(Sec. 3.1). Then, the subsequent sections detail the key
+components of our framework: geometry-aware depth rasterization and normal estimation (Sec. 3.2); the novel gradient factor and differentiable pruning strategy (Sec. 3.3);
+and finally, the overall multimodal rendering pipeline, loss
+functions, and implementation details (Sec. 3.4). The brief
+overview of our framework is illustrated in Fig. 2.
+3.1. Unified Map Representation and Objectives
+Unified Map Representation. In our framework, each
+Gaussian G is defined by position µ ∈ R3 , quaternion
+q ∈ R4 , scale s ∈ R3 , opacity α ∈ R, and Spherical Harmonics (SHs) h ∈ RCh (Ch is the pre-difined SHs number
+per color channel), semantic logits (encode the probability
+distribution across Co semantic categories) o ∈ RCo and
+3
+gradient factor k ∈ R:
+G = {µ, q, s, α, h, o, k}.
+results. The replaced depth d of corresponding 3D primitive
+in camera coordinate can be computed by
+(1)
+world
+Pcam = Rcam
+world (tcam + tmid d),
+Objective. The objective of this framework is to render
+RGB color image, geometric depth, surface normals, semantic logits, and a gradient factor map (used in differentiable pruning) simultaneously within a unified rasterization
+pipeline. These rendered outputs are then compared against
+their corresponding 2D ground truth to compute respective
+loss, which guide the optimization of the 3D Gaussian scene
+through a differentiable backward process. To accelerate
+convergence and enhance computational efficiency, we derive the relevant analytical solutions and implement them
+using CUDA-accelerated gradient propagation. Finally, we
+can obtain a geometry consistent photo-realistic 3DGS map
+representation.
+d = Pcam, z .
+(6)
+The final depth value D̃(u, v) for pixel p = (u, v) is obtained by alpha-rendering the depths d of all overlapping
+Gaussians N :
+i−1
+Y
+X
+D̃(u, v) =
+αi di
+(1 − αj ).
+(7)
+i∈N
+j=1
+The above method allows to directly incorporate the geometric information (rotation q and scale s of the Gaussian
+G) into the rasterization pipeline. This enables us to compute the gradients of the loss function with respect to the
+rotation q and scale s, thereby effectively optimizing the
+Gaussian G. Related gradient backpropagation derivations
+are provided in the supplementary materials.
+3.2. Geometry-Aware Rasterization
+Algorithm 1: Surface Normal Estimation by Depth
+Ray-Gaussian Primitive Intersection Formulation. We
+define an ellipsoid E associated with Gaussian G by its center µ, rotation matrix R (converted from quaternion q) and
+diagonal scaling matrix S = diag(sx , sy , sz ), and this ellipsoid consists of all 3D points x on its surface that satisfy the
+following equation:
+⊤ −1 −1
+
+S−1 R−1 (x − µ)
+S R (x − µ) = 1. (2)
+Input: Depth D̃ (u, v), STEP 1, STEP 2, λ
+2 Output: Normal Ñ(u, v)
+3 for each pixel p = (u, v) in parallel do
+4
+1. Backproject to World Coordinate
+5
+2. Compute Multi-Scale Normals
+6
+for gi ∈ {STEP 1, STEP 2} do
+7
+Finite differences of neighboring points:
+vx,i = P(u + gi , v) − P(u − gi , v),
+1
+For each pixel p = (u, v), the corresponding camera ray
+r(t) = tworld
+cam + td is calculated through a unprojection process:
+
+ u−c 
+8
+vy,i = P(u, v + gi ) − P(u, v − gi ),
+Estimate normal: ni = vx,i × vy,i
+x
+fx
+ world  v−c
+y 
+,
+r(t) = tworld
+R
++
+normalize
+
+
+cam
+cam
+fy 
+9
+(3)
+10
+1
+11
+world
+where tworld
+cam and Rcam are the translation vector and rota-
+12
+tion matrix that transform a point in the camera frame to
+the world frame, respectively. The focal lengths fx , fy and
+principal point cx , cy are camera parameters.
+To find the intersection between the ray r(t) and the
+ellipsoid E, we transform the ray r(t) into the local (l)
+scaled (s) coordinate system of E:
+13
+vs = S−1 vl ,
+vl = R−1 (tworld
+cam − µ),
+ds = S−1 dl ,
+dl = R−1 d.
+Normal Rasterization from Depth. As mentioned previously, it is challenging to obtain sufficiently smooth and
+accurate surface normals through rasterization-based rendering due to the strong directional information inherent in
+normals. Therefore, in this paper, we compute normals indirectly from depth rasterization result. The focus lies on
+deriving the gradient propagation process from the normal
+loss back to the depth.
+Our approach begins by unprojecting the depth map into
+world coordinate using the camera parameters. We then
+estimate the normals in world coordinate through a multistep finite difference scheme, with step sizes denoted as
+STEP 1, STEP 2. The overall procedure is summarized
+in Alg. 1. Further details regarding the backprojection of
+depth pixels and orientation toward the view direction will
+be provided in the supplementary material. Additionally,
+the derivation of backpropagation from the normal loss to
+depth will also be included in the supplementary material.
+(4)
+The intersection problem is then reduced to solving for t in
+the unit sphere equation:
+∥vs + tds ∥2 = 1.
+3. Fuse and Normalize
+Ensure consistency: n2 ← n2 · sign(n1 · n2 )
+Fuse estimates: nfused = λn1 + (1 − λ)n2
+Normalize: Ñ(u, v) = nfused /∥nfused ∥
+4. Orient Towards View Direction
+(5)
+The solution to this equation can be treated as that of a
+quadratic equation: for a light ray intersecting an ellipsoid,
+there are two valid solutions (t1 , t2 ) for two intersection
+points, t1 = t2 for one point, and no valid solutions for
+no intersection. Details are in the supplementary materials.
+Depth Rasterization. We take the midpoint tmid = (t1 +
+t2 )/2 of the two valid solutions (t1 , t2 ) as the intersection
+4
+Algorithm 2: Multimodal Forward Rasterization
+Pipeline
+Input: G = {µ, q, s, α, h, o, k}, Image
+dimensions W, H
+Output: C̃ ∈ RW ×H×3 , Õ ∈ RW ×H×C ,
+D̃ ∈ RW ×H , K̃ ∈ RW ×H
+1 for each pixel = (u, v) do in parallel
+// Compute Ray of pixel
+2
+computeRay (3);
+3
+Initialize accumulators: C ← 0, O ← 0,
+D ← 0, K ← 0, T ← 0;
+4
+for each Gaussian i intersecting pixel (u, v) do
+5
+...
+6
+hi , oi , αi ← Gaussian i parameters;
+// Ray-Ellipsoid Intersection
+7
+rayEllipsoidIntersection (5) ;
+// Use Midpoint for Depth
+8
+di ← obtainDepth (6) ;
+// Alpha-Blending for All
+Attributes
+9
+for each ch in Ch do
+10
+C[ch] ← C + hi · αi · T ;
+3.3. Differentiable Pruning
+Gradient Factor Rasterization and Backpropagation.
+We define a new attribute k in (1) for each Gaussian G
+to measure its gradient level during the rendering process.
+Alongside the rendering of RGB image, we can render a 2D
+gradient factor map K̃ by alpha-blending:
+K̃(u, v) =
+X
+i∈N
+αi ki
+i−1
+Y
+(1 − αj ).
+(8)
+j=1
+Our objective is to drive each Gaussian’s k toward 1. Experimental results show this state corresponds to the optimal
+optimization effect of Gaussians. To enforce this, we minimize the L1-loss between K̃ and an all-ones matrix 1:
+LK = ∥K̃ − 1∥1 .
+(9)
+Detailed analysis on why k = 1 is optimal and gradient
+backpropagation are provided in the supplementary materials.
+Pruning. After a fixed interval of iterations Kp (Kp =
+3000 in our experiments), our framework directly eliminates Gaussians with abnormal gradient factor ∥k − 1∥1 >
+Tk , effectively pruning the set and reducing the number of
+Gaussians to enhance overall efficiency. After pruning operation, the k value of all Gaussians will be reset to 0.9 to
+maintain the sustainability of updates. Please refer to our
+code for details.
+for each ch in Co do
+O[ch] ← O + oi · αi · T ;
+11
+12
+D ← D + di · αi · T ;
+K ← K + ti · α i · T ;
+...
+13
+14
+15
+3.4. Multimodal Rendering Framework
+Architecture Overview. Our system is built upon a modified Scaffold-GS [41] architecture. For each anchor point,
+we maintain a foundational 3D Gaussian representation (1).
+During every training iteration, multiple MLPs are used to
+predict attribute offsets for each anchor.
+Attribute Prediction. For semantic logits o ∈ RCo and
+gradient factor k ∈ R of a Gaussian G, we replicate (denoted as Repeat) M times and modulate by the output of an
+MLP branch to obtain Gaussian features for rasterization:
+ 
+ 
+
+
+ovis
+oah
+MLPo (fah )
+kvis  = Repeat(kah  , M ) ⊗ σ MLPk (fah ) , (10)
+...
+...
+...
+16
+17
+18
+// Pixel-Wise Assignment
+C̃[x, y] ← C; Õ[x, y] ← O;
+D̃[x, y] ← D; K̃[x, y] ← K;
+Save Tfinal = T ;
+tion pipeline. The forward process for the semantic logits
+in pixel p = (u, v) and channel ch is defined as
+Õ[ch] (u, v) =
+X
+i∈N
+αi oi[ch]
+i−1
+Y
+(1 − αj ).
+(11)
+j=1
+Then the rendered semantic logits Õ will be compared to its
+ground truth Ogt using Cross-Entropy Loss, resulting in se∂Lseg
+mantic loss Lseg . Let ∂ õ[ch]
+be the gradient of the loss with
+respect to the rendered ch-th channel of a specific pixel. The
+chain rule for the gradient of Lseg with respect to a specific
+semantic channel oi[ch] of a Gaussian G is given by
+where oah ∈ RCo is the base semantic logits of the anchor,
+kah ∈ R is the base gradient factor of the anchor. M is the
+replication factor. fah represents the input feature for the anchor. MLPo : RF dim → RCo denotes the MLP branch for
+semantics. MLPk : RF dim → R denotes the MLP branch
+for gradient factor. σ is the sigmoid activation function.
+⊗ denotes element-wise multiplication. Fdim is the feature dimension. The resulting modulated attributes are then
+combined with other predicted properties (i.e., position µ,
+rotation q, scale s, opacity α, SHs h, denoted as ...) to form
+the final 3D Gaussians ready for projection and rendering.
+Semantic Rendering and Backpropagation. We render
+a 2D semantic logits Õ ∈ RH×W ×Co along with rasteriza-
+∂Lseg ∂ Õ[ch]
+∂Lseg
+=
+·
+,
+∂oi[ch]
+∂ Õ[ch] ∂oi[ch]
+(12)
+∂ Õ
+[ch]
+where ∂oi[ch]
+can be derived from (11).
+Tile-based Forward Rasterization. We extend the original
+3DGS’s tile-based rendering pipeline [26]. During rasterization, for each pixel p = (u, v), we calculate the direction
+5
+Table 1. Quantitative comparison experiments on the Replica dataset show that our method significantly outperforms other baselines.
+Dataset
+Method | Metrics
+GeoGaussian [34]
+3DGS [26]
+Scaffold-GS [41]
+2DGS [18]
+Normal-GS [62]
+Ours
+Abs.Rel ↓
+0.5828
+1.2231
+2.2857
+0.0089
+0.0074
+0.0062
+O0S1
+RMSE↓
+0.8006
+0.9183
+1.2102
+0.0679
+0.0657
+0.0310
+CS ↑
+0.3046
+0.2304
+0.2195
+0.8775
+0.8755
+0.8880
+Abs.Rel↓
+2.8959
+0.8711
+1.4609
+0.0172
+0.0154
+0.0015
+O1S2
+RMSE↓
+1.1092
+0.6238
+0.9413
+0.0399
+0.0344
+0.0073
+CS ↑
+0.1861
+0.3201
+0.2854
+0.9299
+0.9234
+0.9686
+Abs.Rel↓
+0.1336
+0.2134
+4.0575
+0.0451
+0.0243
+0.0136
+R1S2
+RMSE↓
+0.3236
+0.4092
+1.4786
+0.1400
+0.0766
+0.0467
+CS ↑
+0.5700
+0.4963
+0.1555
+0.9112
+0.9234
+0.9545
+Abs.Rel↓
+0.1082
+1.4422
+0.0735
+0.0192
+0.0144
+R2S2
+RMSE ↓
+0.2592
+1.0972
+0.1759
+0.0589
+0.0465
+CS↑
+0.5998
+0.2905
+0.1286
+0.8480
+0.8987
+0.9076
+Figure 3. Across various dataset tests, our method demonstrates impressive results in geometric reconstruction. Even in textureless areas
+and edge regions, it remains capable of recovering fine geometric details.
+d of the camera ray r(t) and then compute the intersection
+t1 /t2 with the Gaussian projected onto this pixel. Finally,
+we obtain the corresponding attributes using alpha blending
+rendering. The multimodal forward rasterization pipeline
+is outlined in Alg. 2. The corresponding backpropagation
+pipeline is described in the supplementary materials.
+scequences, the hyprparameters used in our experiments are
+listed in the supplementary materials.
+4. Experiments
+In this section, we first introduce the experimental setup in
+Sec. 4.1, including datasets, baselines, and parameter settings, etc. Given that RGB rendering is not the central focus of our study, the corresponding comparison will be provided in the supplementary material accordingly. Then in
+Sec. 4.2, we evaluate the geometry rendering performance
+(e.g. depth and normal). In Sec. 4.3, we evaluate the semantic rendering performance. In Sec. 4.4, we provide the
+analysis of running time and GPU memory consumption of
+the framework. Sec. 4.5 shows ablation experiments of the
+proposed framework.
+Loss Function. For the RGB image loss, we employ a combination of L1 loss Ll1 and SSIM [61] loss Lssim . For the
+normal loss Lnormal , we use cosine similarity, which is calculated as
+Lnormal = 1 − Cosine Similarity(Ñ, Ñgt ).
+(13)
+Incorporating the gradient factor loss LK and semantic loss
+Lseg , we construct the comprehensive loss function as
+|Ll1 |Lssim
+|Ll1 |Lnormal
++ λ3
+|Lssim |
+|Lnormal |
+|Ll1 |Ldepth
+|Ll1 |Lseg
+|Ll1 |LK
+λ4
++ λ5
++ λ6
+.
+|Ldepth |
+|Lseg |
+|LK |
+(14)
+Lall = λ1 Ll1 + λ2
+4.1. Experiment Setup
+Datasets. We conduct comparative experiments on widely
+used datasets, including 7 scenes from Mip-NeRF [1], 2
+scenes from Tanks & Temples [28] and 2 scenes from
+Deep Blending [16]. All of these datasets do not provide
+precise geometric and semantic ground truth. To address
+this, we use the results obtained from the depth rendering pipeline in Normal-GS [62] as geometric priors for supervision. At the same time, we utilize open vocabulary
+queries to pre-process semantic labels with OpenSeed [76].
+For accurate quantitative comparison experiments, we use
+where weights are applied as λ1 = 1, λ2 = λ3 = λ4 =
+λ4 = λ5 = λ6 = 0.1.
+Implementation Details. Our framework is implemented
+by CUDA using the LibTorch framework [7], incorporating
+CUDA code for Gaussian Splatting and trained on a server
+with a 2.60 GHz Intel(R) Xeon(R) Platinum 8358P CPU,
+1T GB RAM, and a NVIDIA RTX 4090 24 GB GPU. In all
+6
+Figure 5. Quantitative comparison between our method and SGSSLAM [33] in terms of RGB rendering and semantic segmentation
+clearly shows that our approach outperforms SGS-SLAM. The
+top-left corner of the image displays the PSNR value computed
+against the ground truth image.
+Figure 4. A qualitative demonstration showing that the Gaussian
+primitives reconstructed by our method are geometrically closer to
+the real surface.
+Table 2. Quantitative geometric comparison between our method
+and other methods after sampling the reconstructed Gaussian
+model, compared to the initial points or mesh points.
+the Replica [53] simulation dataset, which provides complete multimodal ground truth. We employ the pre-rendered
+Replica dataset from HiSplat [55], which includes 14 motion sequences across 7 scenes. The initial points in the
+Replica [53] dataset are obtained through mesh sampling,
+with a sampling interval of 5 in all sequences.
+Baselines and Metrics. We compare our method with
+the existing SOTA NeRF-based dense framework MipNeRF [1], iNGP [45] and 3DGS framework [26], ScaffoldGS [41], GeoGaussian [34], 2DGS [18], Normal-GS [62],
+SemanticGaussian [15]. We evaluate the RGB rendering
+performance using PSNR, SSIM [61], and LPIPS [77]. The
+evaluation metrics for depth estimation we used are Abs.Rel.
+and RMSE. The evaluation metric we used for normal estimation is cosine similarity (CosSimi), for semantic segmentation, we employed mean mIoU.
+Dataset
+Method | Metrics
+Scaffold-GS [41]
+2DGS [18]
+Normal-GS [62]
+Ours
+Radio↓
+0.0390
+0.0607
+0.0388
+0.0341
+MipNeRF-Garden
+Mean↓
+Std↓
+Hau-Dis↓
+0.0299 0.0383
+0.592
+0.0984 0.1272
+1.091
+0.0303 0.0377
+0.936
+0.0272 0.0298
+0.405
+Replica-Room0
+Mean↓
+Std ↓
+Hau-Dis ↓
+0.0120 0.0083
+0.141
+0.0519 0.0244
+0.462
+0.0120 0.0082
+0.131
+0.0137 0.0081
+0.078
+Radio ↓
+0.0476
+0.0628
+0.0477
+0.0339
+in Fig. 4). It is evident that our method, compared to others, results in optimized Gaussian primitives that tend to be
+closer to the actual surface of the object. This is because our
+method integrates rotation and scale attribute into the optimization process, thereby achieving geometric consistency.
+Additionally, we perform point sampling [34] of the Gaussian primitives within specific small regions, followed by a
+Z-score statistical comparison with the initial ground truth
+and a Hausdorff distance comparison, as shown in Tab. 2.
+It is evident that our method achieves consistent geometric
+surface reconstruction. The calculation method using the Zscore statistic is explained in the supplementary materials.
+4.2. Geometry Rendering Evaluation
+We conduct detailed qualitative and quantitative comparisons of depth and normal estimation against methods [26] [41] [23] [34] [62] [18] on the Replica [53] dataset.
+The comparison results are shown in Fig. 3 and Tab. 1.
+Normal-GS [62] and our method optimize the surface normals, and both qualitatively and quantitatively outperform
+other 3DGS frameworks. Our approach also exhibits superior geometric accuracy in some extreme scenarios, particularly in texture-less areas, surpassing even Normal-GS [62]
+and 2DGS [18]. More comparisons about geometry rendering can be found in supplementary materials.
+We further compare the geometric impact after modifying our depth rendering method. Firstly, we complete the
+reconstruction process of a 3D Gaussian scene and then
+identify a detailed area in the reconstructed scene (as shown
+Table 3. Quantitative comparison with the SGS-SLAM [33]
+method in terms of RGB rendering, semantic rendering and FPS.
+TT represents training time (minutes). Best results are underlined.
+Dataset
+Method | Metrics
+All
+TT↓
+PSNR ↑
+Room0
+FPS ↑
+mIoU ↑
+PSNR ↑
+Room2
+FPS ↑
+mIoU↑
+PSNR ↑
+Office2
+FPS ↑
+mIoU ↑
+SGS-SLAM [33]
+Ours
+212.6
+32.2
+36.28
+36.66
+96.4
+184.2
+0.976
+0.987
+39.14
+40.06
+72.2
+234.4
+0.978
+0.984
+36.94
+38.16
+112.3
+229.3
+0.944
+0.975
+4.3. Semantic Rendering Evalution
+We compare our method with the SGS-SLAM [33] framework, which employs a task-specific Gaussian map representation and is supervised using semantic result images for
+semantic tasks, differing from our unified framework that
+7
+Figure 7. Visualization of the distribution of the gradient factor. To enhance the visualization of the gradient factor, the brightness of all Gaussians is uniformly minimized, resulting in blue
+regions as rendered by SuperSplat [8]. (a) Scene with original
+brightness. (b) Areas highlighted in yellow indicate regions where
+the gradient factor k > 1.5. (c) Areas highlighted in yellow indicate regions where k < 0.5.
+Figure 6. The use of a ray casting-based depth rendering approach
+significantly enhances the algorithm’s robustness in textureless regions. Furthermore, the Gaussian splats provide a tighter fit to the
+actual object surfaces.
+predicts semantic logits. The comparison across multiple
+scenes is shown in Fig. 5 and Tab. 3. From the quantitative
+results, it can be observed that our method achieves superior
+performance in both image rendering quality (PSNR) and
+semantic segmentation quality (mIoU) within a very short
+training time. Thanks to our unified rendering architecture,
+the image rendering FPS is also fast. Additional results can
+be found in our supplementary video.
+ter points in terms of image quality. From the qualitative
+results presented in Fig. 6, it can be observed that incorporating set information forces the Gaussian spheres to align
+more closely with the actual surface of the objects. More
+quantitative ablation experiments on each modules can be
+found in our supplementary materials.
+Differentiable Pruning. We conduct continuous optimization of the gradient factor without pruning any Gaussians to
+examine its distribution, as shown in Fig. 7. It can be observed that regions with anomalous gradient factor, which
+deviate significantly from the ideal value of 1, are typically areas lacking observational data or corresponding to
+occluded edges. In these regions, due to insufficient supervisory information from images, the gradients fail to converge to the desired value. Such areas represent environmental redundancy that can be removed to improve computational efficiency.
+Table 4. Quantitative comparison results in terms of Gaussian splat
+count and rendering FPS.
+Dataset
+Method | Metrics
+Mip-NeRF360
+Count ↓ FPS ↑
+Tanks & Temples
+Count ↓ FPS ↑
+Deep Blending
+Count ↓ FPS ↑
+Replica
+Count ↓ FPS ↑
+GeoGaussian [34]
+3DGS [26]
+Scaffold-GS [41]
+Normal-GS [62]
+Ours
+126021
+504167
+301839
+318064
+161081
+94755
+421167
+247081
+226283
+119947
+53457
+285394
+182304
+185243
+48970
+100877
+543581
+235446
+204358
+169273
+440.9
+128.7
+240.1
+180.3
+169.8
+441.1
+136.9
+249.1
+178.7
+163.1
+436.2
+162.4
+324.0
+250.7
+296.7
+423.6
+137.5
+346.2
+180.0
+197.8
+4.4. Runtime and Memory Cost Analysis
+In Tab. 4, we present a comparison of the Count of Gaussians and rendering FPS against other methods. Our approach employs an effective differentiable pruning module,
+which removes a significant number of redundant Gaussians. As a result, the number of Gaussian splats in our
+reconstructed scenes is the smallest. However, since our
+method requires rendering multiple modalities simultaneously, the FPS experiences a certain degree of decrease.
+Nevertheless, this does not severely hinder our rendering
+speed. In some scenarios, our rendering speed remains superior even compared to Normal-GS [62].
+5. Conclusion
+In this paper, we present UniGS, a unified and differentiable
+framework for high-fidelity multimodal 3D reconstruction
+using 3DGS. Our rasterization pipeline effectively renders
+photo-realistic RGB images, accurate depth maps, consistent surface normals, and semantic labels simultaneously.
+By implementing differentiable ray-ellipsoid intersection,
+we optimize rotation and scaling parameters with CUDAaccelerated analytic gradient backpropagation, ensuring geometric consistency in surface. We also introduce a learnable attribute for efficient pruning of minimally contributing Gaussians. Extensive experiments demonstrate stateof-the-art performance in terms of both reconstruction accuracy across all modalities and storage efficiency.
+4.5. Ablation Study
+Geometry-Aware Rasterization. We compare the performance of depth rasterization that considers geometric information with that of depth rasterization using only the cen8
+UniGS: Unified Geometry-Aware Gaussian Splatting for Multimodal Rendering
+Supplementary Material
+6. Methodology
+flow is structured as
+∂di
+∂di
+∂tmid
+∂(a, b, c)
+=
+·
+·
+∂θ
+∂tmid ∂(a, b, c) ∂(vs , ds )
+(19)
+∂(vs , ds ) ∂(vl , dl )
+·
+·
+.
+∂(vl , dl )
+∂θ
+The key steps in this chain will be derived below.
+Gradient of Depth w.r.t. tmid . The depth di of the intersection point is a function of the midpoint ray parameter tmid .
+The gradient is computed as the dot product of the ray direction d with the z-axis of the camera view matrix Rcam
+world :
+∂di
+cam
+= Rcam
+world [2, 0] · d → x + Rworld [2, 1] · d → y
+∂tmid
++ Rcam
+(20)
+world [2, 2] · d → z.
+In Sec. 6.1, we provide additional details on solving the
+intersection points between pixel rays and Gaussians. In
+Sec. 6.2, we focuse on deriving the analytical solution for
+propagating depth gradients to the Gaussian parameters,
+specifically addressing the transition from depth to rotation,
+scale and positions. In Sec. 6.3, we include the implementation details that are omitted in Alg. 1. In Sec. 6.4, we
+develop the derivation of the gradient propagation from the
+cosine similarity loss of the normal estimation to the rendered depth map, enabling the normal gradients to flow
+back to depth gradient. This connection allows the normal gradients to be backpropagated further, thus linking the
+normal consistency loss directly to the Gaussian parameters. In Sec. 6.5, we expand the discussion on differentiable
+pruning, with a particular focus on elucidating why k = 1
+serves as the optimization objective. Finally, in Sec. 6.6, we
+provide the implementation process for the backward rasterization gradient propagation corresponding to Alg. 2.
+Gradient of tmid w.r.t. Quadratic Coefficients. The midpoint parameter tmid = (t1 + t2 )/2 = −b/(2a) is a function
+of the quadratic coefficients a and b. Its derivatives are
+b ∂tmid
+1 ∂tmid
+∂tmid
+(21)
+= 2,
+=− ,
+= 0.
+∂a
+2a
+∂b
+2a ∂c
+Gradients of Coefficients w.r.t. Local Coordinates. The
+coefficients a, b, and c are functions of the scaled local ray
+origin vs and direction ds from (17). Their gradients are
+∂a
+∂b
+= 2ds ,
+= 2ds ,
+∂ds
+∂vs
+(22)
+∂b
+∂c
+= 2vs ,
+= 2vs .
+∂ds
+∂vs
+Applying the chain rule through tmid and the coefficients,
+the gradients w.r.t. the local (l) scaled (s) coordinates are:
+∂tmid ∂b
+∂tmid ∂c
+∂tmid
+=
+·
++
+·
+∂vs
+∂b ∂vs
+∂c ∂vs
+1
+= − · ds ,
+a
+(23)
+∂tmid
+∂tmid ∂a
+∂tmid ∂b
+=
+·
++
+·
+∂ds
+∂a ∂ds
+∂b ∂ds
+b
+1
+= 2 · ds − · vs .
+a
+a
+Gradients w.r.t. Scale s. The local (l) scaled (s) coordinates are defined as vs = vl ⊘ s and ds = dl ⊘ s, where ⊘
+denotes element-wise division. The gradients with respect
+to the scale s are computed as:
+∂(vs , ds )
+= −vl,k ⊘ s − dl,k ⊘ s.
+(24)
+∂s
+Gradients w.r.t. Position µ and Rotation R. The local coordinates before scaling are obtained by rotating the worldspace vectors into the Gaussian’s local frame: vl = R⊤ v
+and dl = R⊤ d, where v = o − µ. The gradient with
+6.1. Ray-Eclipse Intersection Problem
+The ray-eclipse intersection problem in (5) aim to solve for
+t in the equation of a unit sphere
+∥vs + tds ∥2 = 1,
+(15)
+which simplifies to the quadratic equation:
+at2 + bt + c = 0,
+(16)
+where the coefficients are defined as:
+a = ds · ds ,
+b = 2vs · ds ,
+(17)
+c = vs · vs − 1.
+√
+∆
+, where ∆ = b2 −
+The solutions are given by t = −b±
+2a
+4ac. This is a simple quadratic equation solving problem.
+6.2. Backward Propagation for Depth Rendering
+The gradient of the loss Ldepth with respect to the a single
+Gaussian parameters θ ∈ {µ, s, R} is propagated by
+∂Ldepth
+∂Ldepth ∂ D̃ ∂di
+=
+·
+·
+,
+∂θ
+∂di ∂θ
+∂ D̃
+(18)
+∂ D̃
+where ∂d
+can be calculated from (7). The primary chali
+lenge is to compute the gradients of di with respect to the
+Gaussian parameters µ, s, and R, which requires backpropagating through the ray-ellipsoid intersection. The gradient
+1
+Algorithm 3: Backward Propagation from Normals to Depth
+respect to the position µ is
+
+
+∂di
+∂di
+= −R
+⊘s .
+(25)
+∂µ
+∂vl
+The gradient with respect to the rotation matrix R is accumulated from both v and d:
+
+
+
+
+∂di
+∂di
+∂di
+⊤
+=
+⊘s v +
+⊘ s d⊤ .
+(26)
+∂R
+∂vl
+∂dl
+Input: ∂Lnormal
+, STEP 1, STEP 2, λ
+∂ Ñ
+∂Lnormal
+2 Output:
+∂ D̃
+3 for each pixel p = (u, v) in parallel do
+4
+1. View-Facing Orientation
+normal
+Flip (32)← ∂L
+∂ Ñ(u,v)
+1
+5
+∂R
+i
+Finally, the gradient ∂d
+∂R is converted to a gradient ∂q
+with respect to the quaternion q using the standard adjointsensitive conversion, ensuring the constraint of staying on
+the S 3 manifold through tangent space projection.
+6
+7
+8
+9
+10
+6.3. Normal Estimation from Depth
+11
+Following the rendering of the depth map D̃, we estimate a
+corresponding surface normal map Ñ in a post-processing
+step. In this supplementary section, we will elaborate on
+two key operations of Alg. 1: backprojecting depth pixels
+and orienting towards the view direction.
+2. Grad Normalization (33)
+3. Grad Fusion (34)← λ
+4. Compute Multi-Scale Gradient
+for STEP X ∈ {STEP 1, STEP 2} do
+Gradient Atom Addition (35) (36)
+5. Backprojection Gradient (37)
+∂Lnormal
+← (29)
+∂ D̃(u,v)
+the depth map D̃ is propagated by
+∂Lnormal
+∂Lnormal ∂ Ñ(u, v) ∂n(orient)
+fused
+·
+=
+·
+∂n
+∂ D̃(u, v)
+∂ Ñ(u, v) ∂n(orient)
+fused
+fused
+
+
+∂n1
+∂nfused
+∂n2
+∂Pworld
+·
+·
++
+·
+,
+1
+2
+∂(n1 , n2 )
+∂Pnworld
+∂Pnworld
+∂ D̃(u, v)
+Depth Backprojection to 3D Points. Each pixel p = (u, v)
+with depth value D̃(u, v) is backprojected to a 3D point
+Pcam in the camera coordinate system using the intrinsic
+camera parameters:
+
+ (u−c )
+x
+· D̃(u, v)
+f
+x
+ world world   (v−c )
+
+Rcam
+tcam  f y · D̃(u, v)
+Pworld =
+ , (27)
+ y
+⊤
+0
+1
+
+
+D̃(u, v)
+1
+(29)
+1
+2
+where Pnworld
+and Pnworld
+represent the sets of 3D points in
+the neighborhoods used to compute n1 and n2 , respectively.
+Cosine Similarity w.r.t. Normal. For encouraging geometric consistency (13) is the negative cosine similarity between the predicted normal Ñ and a target normal Ñtarget :
+1 X
+Ñ(u, v) · Ñtarget (u, v), (30)
+Lnormal = 1 −
+|Ω|
+where cx = W/2, cy = H/2 are the coordinates of the
+principal point, and fx , fy are the focal lengths.
+(u,v)∈Ω
+where Ω denotes the set of pixels. The gradient of this loss
+with respect to the predicted normal at a specific pixel is
+straightforward:
+∂Lnormal
+1
+Ñtarget (u, v).
+(31)
+=−
+|Ω|
+∂ Ñ(u, v)
+View Direction Correction. Finally, the normal’s orientation is corrected to face the camera. The normal is flipped
+if it points away from the camera, determined by the sign
+of the dot product between the normalized view direction
+dview and the normal:
+(
+Ñ(u, v),
+if Ñ(u, v) · dview ≤ 0
+Ñ(u, v) ←
+, (28)
+−Ñ(u, v), otherwise
+This gradient ∂Lnormal
+is the seed that initiates the back∂ Ñ
+ward pass through the normal estimation pipeline.
+View-facing Orientation Flip. If the normal is flipped in
+the forward pass to face the viewer (defined by (28)), the
+incoming gradient is correspondingly flipped:
+( ∂L
+normal
+− ∂ Ñ(u,v)
+, if flipped
+∂Lnormal
+,
+(32)
+=
+∂Lnormal
+,
+otherwise
+∂n(orient)
+fused
+∂ Ñ(u,v)
+C−Pworld
+where dview = ∥C−P
+is the normalized vector from the
+world ∥
+3D point Pworld to the camera center C. This ensures all
+normals adhere to a consistent front-facing convention.
+Normalization. The gradient is then backpropagated
+through the normalization operation Ñ = nfused /∥nfused ∥.
+The gradient w.r.t. the unnormalized vector nfused is given
+by:
+
+
+⊤
+(orient)
+I
+−
+Ñ(u,
+v)
+Ñ(u,
+v)
+∂nfused
+=
+.
+(33)
+∂nfused
+∥nfused ∥
+6.4. Backward Propagation from Normals to Depth
+To enable optimization via losses defined on the rendered
+normal map Ñ, the gradients must be backpropagated
+through the normal estimation pipeline to the depth map D̃
+and subsequently to the underlying 3D Gaussian parameters. Overall gradient backpropagation pipeline is shown
+in Alg. 3. The gradient of the loss Lnormal with respect to
+Normal Fusion. The gradient is distributed to the two con2
+stituent normal estimates n1 and n2 from which nfused =
+λn1 + (1 − λ)n2 is computed. If their directions were inconsistent in the forward pass (n1 · n2 < 0), the sign of the
+gradient for n2 is flipped:
+∂nfused
+∂nfused
+= λ,
+= (1 − λ) · sign(n1 · n2 ). (34)
+∂n1
+∂n2
+expressed as
+∂LK (u, v)
+∂LK (u, v) ∂ K̃(u, v)
+=
+·
+,
+∂ki
+∂ki
+∂ K̃(u, v)
+(38)
+can be derived from (8) in main text.
+where ∂ K̃(u,v)
+∂ki
+Detailed Analysis of optimal state k = 1. The gradient
+factor k serves as a core indicator for Gaussian pruning. Its
+deviation from 1 directly reflects the optimization state of
+Gaussians, and the underlying causes along with pruning
+rationale are elaborated as follows.
+• Gaussians with k > 1: Anomalies from Gradient Fluctuations Caused by Data Noise. Gaussians with extremely
+large k-values are induced by gradient anomalies during
+multi-view optimization. During the rendering of specific
+views, data noise such as sensor noise and texture inconsistencies at scene edges leads to significant fluctuations in
+pixel gradients. These anomalous gradients propagate to the
+opacity α through backpropagation, causing α to deviate
+from its optimal value. This deviation results in unexpected
+optimization under specific view. Such abnormal k-values
+are usually accompanied by extreme Gaussian parameters
+including position, scale as shown in Fig. 7 in the main text.
+• Gaussians with k < 1: Redundancy Due to Insufficient Rendering Participation. Gaussians with small kvalues can be identified based on long-term optimization,
+especially considering the periodic k-reset strategy. During
+training, we periodically reset the k-value of all Gaussians
+to 0.9. This initial value is designed to provide a starting
+point for optimization driven by LK . The expectation is
+that after multiple optimization iterations, well-optimizing
+Gaussians will adjust their k-values from 0.9 toward 1. The
+ideal state is when k = 1, which makes the rendering formula of K̃ satisfy
+Finite Differences to 3D Points. The core of the backward pass involves computing how the estimated normals
+n1 and n2 change with respect to the 3D points Pworld in
+their finite-difference neighborhood. For simplicity, we will
+take nX ∈ {n1 , n2 }, STEP X ∈ {STEP 1, STEP 2} as an
+example for the subsequent derivation. For a normal estimate nX calculated from points P in a STEP X × STEP X
+X
+window, the gradient w.r.t. each involved point Pn
+world is
+derived from the cross product operation.
+X
+From Alg. 1, vxnX = Pn
+world (u + STEP X, v) −
+nX
+nX
+X
+Pworld (u−STEP X, v) and vy = Pn
+world (u, v+STEP X)−
+nX
+Pworld (u, v − STEP X)), the normal is nX = vxnX × vynX .
+The gradients of nX w.r.t. the vectors vxnX and vynX are:
+∂nX
+nX ∂nX
+(35)
+= vxnX .
+nX = vy ,
+∂vx
+∂vynX
+These gradients are then distributed to the specific points
+that contributed to vxnX and vynX :
+∂nX
++= vxnX ,
+X
+∂Pn
+(u
++ STEP X, v)
+world
+∂nX
+−= vxnX ,
+X
+∂Pn
+(u
+− STEP X, v)
+world
+(36)
+∂nX
+nX
++= vy ,
+X
+∂Pn
+world (u, v + STEP X)
+∂nX
+−= vynX .
+X
+∂Pn
+X)
+(u,
+v
+−
+STEP
+world
+This process is repeated for both normal estimates n1 and
+1
+2
+n2 and their respective neighborhoods Pnworld
+and Pnworld
+,
+and the gradients are accumulated atomically.
+K̃(u, v) =
+X
+i∈N
+αi · 1 ·
+i−1
+Y
+(1 − αj ) = 1.
+(39)
+j=1
+If a Gaussian’s k-value remains near 0.9 or changes minimally after a long optimization horizon, it indicates the
+Gaussian has not deeply participated in the rendering of
+any view. Specifically, it lacks sufficient effective alpharendering contributions to pixels across views. This situation will occur because the Gaussian is located in unobservable regions such as persistent occlusions. Such Gaussians
+are redundant, and their exclusion does not affect the accuracy of scene reconstruction as they contribute little to the
+rendering of K̃ or RGB images.
+Pruning Mechanism Based on k. In summary, welloptimized Gaussians can adjust their k-values toward 1 under the constraint of LK , and their α and geometric parameters can well match the scene without the need for extreme
+k-compensation. In contrast, Gaussians with |k − 1| > Tk
+are either anomalous with k > 1 or redundant with k < 1.
+By pruning these Gaussians, we can effectively reduce the
+∂Pworld
+∂ D̃(u,v)
+3D Points w.r.t Depth. The Jacobian matrix
+is
+derived from the backprojection and transformation chain
+Pworld = Rworld
+cam Pcam (D̃(u, v)):
+
+
+(u − cx )/fx
+ (v − cy )/fy 
+∂Pworld
+∂Pcam
+
+.
+= Rworld
+= Rworld
+cam
+cam 
+
+1
+∂ D̃(u, v)
+∂ D̃(u, v)
+0
+(37)
+6.5. Differentiable Pruning
+Gradient Propagation. During backpropagation of k, the
+gradient can be propagated to the gradient factor k through
+the rendering equation. The chain rule for the gradient of
+the loss with respect to a specific ki can be conceptually
+3
+total number of Gaussians while preserving the quality of
+scene reconstruction, thereby improving the overall computational efficiency.
+agation of gradients via the alpha rendering process. The
+backward propagation pipeline is illustrated in Alg. 4. We
+omit the gradient propagation process for RGB (indicated
+as ...), which is consistent with the original implementation [26].
+Algorithm 4: Tile-based Backward Gradient Propagation Pipeline
+Input: Forward rendering results: D̃, Ñ, Õ, K̃;
+∂L
+∂Lseg ∂LK
+Loss gradients: ∂depth
+, ∂Lnormal
+, ∂ Õ
+, ∂ K̃
+D̃
+∂ Ñ
+∂L ∂L ∂L ∂L ∂L
+Output: Parameter gradients: ∂µ , ∂R , ∂s , ∂o , ∂K
+1 for each pixel (x, y) do in parallel
+// Restore Saved Forward Values
+2
+Restore: T ← Tfinal ;
+3
+for each Gaussian i intersecting pixel pix (in
+reverse depth order) do
+4
+...
+5
+T ← T /(1 − αi ) ;
+6
+wα ← αi · T ;
+// Compute Gradients for
+Rendered Attributes
+7
+for each ch in Co do
+∂Lseg
+∂Lall
+8
+·wα ;
+∂oi[ch] ←
+∂ Õ[ch]
+| {z }
+7. More Experiments
+7.1. RGB Rendering Evaluation
+To validate the effectiveness of our method in providing
+valuable information for NVS, we compare its performance
+on novel view RGB rendering with state-of-the-art frameworks [1] [45] [74] [26] [41] [34]. All methods utilize their
+provided original code and unified original data. The qualitative results of the RGB rendering are shown in Fig. 8, and
+the quantitative comparisons are presented in Tab. 5. It can
+be observed that our method achieves state-of-the-art results in novel view synthesis for certain scenes. By incorporating geometric constraints into the framework, our algorithm achieves SOTA geometric performance while maintaining RGB reconstruction quality and significantly improving memory and rendering efficiency.
+7.2. Statistical Outlier Analysis
+(12)
+9
+∂LK
+∂Lall
+·wα ;
+∂ki ←
+To quantify the quality of predicted point clouds relative
+to ground truth data in Replica [53], we employ a statistical approach based on Z-score analysis of point-to-point
+distances. This method allows us to identify and measure
+outliers in predicted point clouds with respect to the ground
+truth mesh points.
+Distance. For each point pi in the predicted point cloud P ,
+we compute the minimum Euclidean distance to the ground
+truth point cloud G:
+K̃}
+|∂{z
+(38)
+10
+// Depth Gradient Propagation
+∂Lnormal ∂Ldepth
+∂Lall
++ ∂ D̃ ) · wα ;
+∂di ← (
+Ñ }
+| ∂{z
+(31)
+11
+// Propagate Depth Gradient
+to Ellipsoid Parameters
+∂di
+∂Lall
+∂Lall
+∂s = ∂di · ∂s ;
+|{z}
+di = min |pi − g|,
+g∈G
+where | · | denotes the Euclidean norm. This computation is
+efficiently implemented using a KD-tree data structure for
+nearest neighbor search.
+Statistical Measures.
+From the computed distances
+d1 , d2 , . . . , dn where n is the number of points in the predicted point cloud, we calculate the following statistical
+measures:
+n
+1X
+di ,
+(41)
+µd =
+n i=1
+(24)
+12
+∂di
+∂Lall
+∂Lall
+∂µ = ∂di · ∂µ ;
+|{z}
+(25)
+13
+∂di ∂R
+∂Lall
+∂Lall
+∂q = ∂di · ∂R · ∂q ;
+|{z}
+14
+...
+(40)
+(26)
+v
+u n
+u1 X
+σd = t
+(di − µd )2 ,
+n i=1
+6.6. Tile-Based Gradient Backpropagation
+In the previous sections, we obtain the losses for the semantic logits, depth, normal, and gradient factor map with
+respect to their respective ground truths, which are given by
+∂L ∂L ∂L
+,
+,
+, and ∂∂L
+. Corresponding to Alg. 2, we opti∂ Õ ∂ D̃ ∂ Ñ
+K̃
+mize the Gaussian parameters through the backward prop-
+(42)
+where µd represents the Mean distance and σd represents
+the standard deviation (Std) of distances.
+For each distance di , we compute its Z-score, which
+measures how many standard deviations the distance is
+4
+Table 5. Quantitative comparison of RGB rendering on widely used real and simulated datasets. Some metrics (∗ ) are extracted from the
+original data in respective papers. The results ranked from best to worst are highlighted as first , second , and third .
+Dataset
+Method | Metrics
+iNPG* [45]
+Mip-NeRF* [1]
+RaySplats* [3]
+GeoGaussian [34]
+3DGS [26]
+Scaffold-GS [41]
+2DGS [18]
+Normal-GS [62]
+Ours
+Mip-NeRF360
+PSNR ↑ SSIM ↑ LPIPS ↓
+26.43
+0.725
+0.339
+29.23
+0.844
+0.207
+27.31
+0.846
+0.237
+26.26
+0.813
+0.219
+0.870
+0.182
+28.69
+28.84
+0.848
+0.220
+27.34
+0.814
+0.234
+29.34
+0.869
+0.194
+30.10
+0.887
+0.148
+Tanks & Temples
+PSNR ↑ SSIM ↑ LPIPS ↓
+21.72
+0.723
+0.330
+22.22
+0.759
+0.257
+22.20
+0.829
+0.202
+20.00
+0.802
+0.261
+23.14
+0.841
+0.183
+23.96
+0.853
+0.177
+22.89
+0.833
+0.206
+24.22
+0.854
+0.174
+23.57
+0.860
+0.168
+Deep Blending
+PSNR ↑ SSIM ↑ LPIPS ↓
+23.62
+0.797
+0.423
+29.40
+0.901
+0.245
+29.57
+0.900
+0.320
+26.07
+0.873
+0.310
+29.41
+0.903
+0.243
+30.21
+0.906
+0.254
+27.96
+0.873
+0.281
+30.19
+0.910
+0.252
+29.66
+0.899
+0.231
+PSNR ↑
+24.55
+36.50
+37.45
+36.47
+38.19
+36.68
+Replica
+SSIM ↑
+0.946
+0.940
+0.951
+0.943
+0.977
+0.962
+LPIPS ↓
+0.114
+0.120
+0.090
+0.107
+0.043
+0.083
+Figure 8. Qualitative comparison results on NVS demonstrate that our RGB rendering achieves better performance in certain scenarios.
+The top-left corner of the image displays the PSNR value computed against the ground truth image.
+The outlier ratio (Radio) is then calculated as the proportion
+of points classified as outliers:
+n
+1X
+Radio =
+Fi .
+(45)
+n i=1
+from the mean:
+zi =
+|di − µd |
+.
+σd
+(43)
+Points are classified as outliers based on a threshold parameter τ (τ = 0.1 in our experiments):
+
+1 if zi > τ
+Fi =
+.
+(44)
+0 otherwise
+Hausdorff Distance. In addition to the statistical outlier
+analysis, we compute the Hausdorff distance to measure the
+5
+Table 6. Quantitative comparisons of the ablation experiments on each module.
+Datasets
+Settings | Metrics
+RayCasting-Point (All)
+Center Point
+w/o prune
+w/prune Tk =0.2
+w/o seg
+w/o normal
+w/o depth
+w/o depth&normal
+PSNR↑
+31.341
+31.800
+31.509
+31.273
+31.605
+32.750
+32.161
+33.691
+Abs.Rel.↓
+0.0062
+0.0071
+0.0070
+0.0068
+0.0226
+0.0061
+0.0184
+0.0214
+Room0-Sequence1
+CosSimi↑ mIoU↑
+0.855
+0.607
+0.849
+0.607
+0.851
+0.606
+0.847
+0.605
+0.837
+0.021
+0.774
+0.608
+0.850
+0.607
+0.658
+0.609
+Count↓
+170859
+174177
+229487
+144185
+174230
+167494
+171462
+167198
+PSNR↑
+36.892
+36.873
+37.100
+36.925
+36.833
+37.488
+37.318
+37.449
+Abs.Rel.↓
+0.0208
+0.0204
+0.0315
+0.0161
+0.0225
+0.00885
+0.0985
+0.1106
+Office3-Sequence3
+CosSimi↑ mIoU↑
+0.931
+0.534
+0.932
+0.534
+0.928
+0.534
+0.932
+0.534
+0.929
+0.024
+0.895
+0.535
+0.925
+0.539
+0.782
+0.539
+Count↓
+178905
+179128
+237914
+148167
+184952
+182019
+176346
+180747
+FPS↑
+184.8
+187.8
+165.5
+189.7
+168.9
+203.8
+184.1
+189.7
+8. Multimodal Viewer
+maximum deviation between point clouds:
+
+
+H(G, P ) = max sup inf |g − p|, sup inf |p − g| .
+g∈G p∈P
+FPS↑
+183.8
+181.7
+156.3
+204.1
+188.0
+206.5
+189.7
+202.6
+We also extend a visualization rendering software based on
+the SIBR viewer and a CUDA rendering pipeline we developed. This tool supports real-time visualization of RGB,
+depth, normal, and semantic maps, achieving a rendering
+speed of up to 200 FPS. The corresponding viewer will also
+been open-sourced on GitHub.
+p∈P g∈G
+(46)
+7.3. More Results on Geometric Rendering
+We present additional comparative results of depth and surface normal predictions across multiple datasets in Fig. 9,
+which demonstrate the superiority of our method in geometric rendering. Particularly in texture-sparse regions, where
+other methods fail to accurately reconstruct object surfaces,
+our approach consistently ensures high consistency among
+RGB, depth, and normal estimations.
+9. Limitations
+Real-world environments exhibit complex optical interactions including extensive light reflections and inter reflections. Image captured by a camera is the product of multipath light propagation and global illumination effects. Our
+current approach does not explicitly model these radiometric phenomena such as light reflection and composition.
+Furthermore, this work focuses exclusively on supervised
+offline reconstruction of static scenes. Extending the framework to incorporate temporal coherence for dynamic scene
+modeling remains a direction for future work.
+It is worth noting that in the Mip-NeRF [1], Tanks &
+Temples [28], and Deep Blending [16] datasets, the depth
+and normal information used for supervision is provided by
+Normal-GS [62] and may still be inaccurate in certain scenarios. Nevertheless, our method achieves competitive results in both depth and normal estimation.
+References
+[1] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded
+Anti-Aliased Neural Radiance Fields. In CVPR, pages 5470–
+5479, 2022. 1, 2, 6, 7, 4, 5
+[2] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Zip-NeRF: Anti-Aliased
+Grid-Based Neural Radiance Fields. In ICCV, pages 19697–
+19705, 2023. 1, 2
+[3] Krzysztof Byrski, Marcin Mazur, Jacek Tabor, Tadeusz
+Dziarmaga, Marcin Kadziolka, Dawid Baran, and Przemysław Spurek. RaySplats: Ray Tracing based Gaussian
+Splatting. arXiv preprint arXiv:2501.19196, 2025. 5
+[4] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi,
+and Jianfei Cai. HAC: Hash-Grid Assisted Context for 3D
+Gaussian Splatting Compression. In ECCV, pages 422–438,
+2024. 2
+[5] Youyu Chen, Junjun Jiang, Kui Jiang, Xiao Tang, Zhihao
+Li, Xianming Liu, and Yinyu Nie. DashGaussian: Optimizing 3D Gaussian Splatting in 200 Seconds. In CVPR, pages
+11146–11155, 2025. 2
+[6] Zi-Ting Chou, Sheng-Yu Huang, I Liu, Yu-Chiang Frank
+Wang, et al. GSNeRF: Generalizable Semantic Neural Ra-
+7.4. Ablation on Algorithm Components
+We test the quantitative rendering quality and runtime analysis with and without the differentiable pruning module, as
+shown in Tab. 6. It is evident that our differentiable pruning
+module effectively reduces the number of Gaussians used
+without significantly compromising image rendering quality. thereby improving rendering FPS and reducing stray
+points in the infinite distance.
+Furthermore, Tab. 6 demonstrates the performance gains
+achieved by our ray-casting based method on depth and normal estimation, as well as the impact of integrating various
+loss functions on their respective evaluation metrics. It can
+be observed that our ray-casting based approach enhances
+the algorithm’s performance on geometric metrics.
+Unlike methods that optimize for a single modality, our
+focus lies in achieving a consistent representation of all
+modalities in the scene. We therefore strive for a balanced
+performance across all metrics, which ultimately leads to a
+more faithful reconstruction of the real world.
+6
+Figure 9. Qualitative comparison of depth and normal estimation accuracy across different methods on several datasets.
+diance Fields with Enhanced 3D Scene Understanding. In
+CVPR, pages 20806–20815, 2024. 3
+[7] PyTorch Contributors. Installing C++ Distributions of PyTorch, 2024. 6
+[8] SuperSplat Contributors. SuperSplat - 3D Gaussian Splat
+Editor, 2025. 8
+[9] Pinxuan Dai, Jiamin Xu, Wenxiang Xie, Xinguo Liu,
+Huamin Wang, and Weiwei Xu. High-Quality Surface Reconstruction Using Gaussian Surfels. In ACM SIGGRAPH,
+pages 1–11, 2024. 3
+[10] Yinan Deng, Yufeng Yue, Jianyu Dou, Jingyu Zhao, Jiahui
+Wang, Yujie Tang, Yi Yang, and Mengyin Fu. OmniMap: A
+General Mapping Framework Integrating Optics, Geometry,
+and Semantics. IEEE TRO, 2025. 2, 3
+[11] Jiahua Dong and Yu-Xiong Wang. 3DGS-Drag: Dragging
+Gaussians for Intuitive Point-Based 3D Editing. In ICLR,
+2025. 3
+[12] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia
+Xu, Zhangyang Wang, et al. LightGaussian: Unbounded 3D
+Gaussian Compression with 15x Reduction and 200+ FPS.
+7
+Radiance Field Rendering. ACM TOG, 42(4):139–1, 2023.
+1, 2, 3, 5, 6, 7, 8, 4
+[27] Bernhard Kerbl, Andreas Meuleman, Georgios Kopanas,
+Michael Wimmer, Alexandre Lanvin, and George Drettakis.
+A Hierarchical 3D Gaussian Representation for Real-time
+Rendering of Very Large Datasets. ACM TOG, 43(4):1–15,
+2024. 1, 2
+[28] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen
+Koltun. Tanks and Temples: Benchmarking Large-Scale
+Scene Reconstruction. ACM TOG, 36(4):1–13, 2017. 6
+[29] Zihang Lai. Exploring Simple Open-Vocabulary Semantic
+Segmentation. In CVPR, pages 30221–30230, 2025. 3
+[30] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko,
+and Eunbyung Park. Compact 3D Gaussian Representation
+for Radiance Field. In CVPR, pages 21719–21728, 2024. 2
+[31] Xiaohan Lei, Min Wang, Wengang Zhou, and Houqiang Li.
+GaussNav: Gaussian Splatting for Visual Navigation. IEEE
+TPAMI, 2025. 3
+[32] Boyi Li, Kilian Q Weinberger, Serge Belongie, Vladlen
+Koltun, and René Ranftl. Language-Driven Semantic Segmentation. arXiv preprint arXiv:2201.03546, 2022. 3
+[33] Mingrui Li, Shuhong Liu, Heng Zhou, Guohao Zhu, Na
+Cheng, Tianchen Deng, and Hongyu Wang. SGS-SLAM:
+Semantic Gaussian Splatting for Neural Dense SLAM. In
+ECCV, pages 163–179, 2024. 2, 3, 7
+[34] Yanyan Li, Chenyu Lyu, Yan Di, Guangyao Zhai, Gim Hee
+Lee, and Federico Tombari. GeoGaussian: Geometry-Aware
+Gaussian Splatting for Scene Rendering. In ECCV, pages
+441–457, 2024. 2, 3, 6, 7, 8, 4, 5
+[35] Yue Li, Qi Ma, Runyi Yang, Huapeng Li, Mengjiao Ma, Bin
+Ren, Nikola Popovic, Nicu Sebe, Ender Konukoglu, Theo
+Gevers, et al. SceneSplat: Gaussian Splatting-Based Scene
+Understanding with Vision-Language Pretraining. arXiv
+preprint arXiv:2503.18052, 2025. 2
+[36] Zhaoshuo Li, Thomas Müller, Alex Evans, Russell H Taylor,
+Mathias Unberath, Ming-Yu Liu, and Chen-Hsuan Lin. Neuralangelo: High-Fidelity Neural Surface Reconstruction. In
+CVPR, pages 8456–8455, 2023. 3
+[37] Feng Liang, Bichen Wu, Xiaoliang Dai, Kunpeng Li, Yinan
+Zhao, Hang Zhang, Peizhao Zhang, Peter Vajda, and Diana
+Marculescu. Open-Vocabulary Semantic Segmentation with
+Mask-Adapted CLIP. In CVPR, pages 7061–7070, 2023. 3
+[38] Yang Liu, Chuanchen Luo, Lue Fan, Naiyan Wang, Junran Peng, and Zhaoxiang Zhang. CityGaussian: Real-Time
+High-Quality Large-Scale Scene Rendering with Gaussians.
+In ECCV, pages 265–282, 2024. 2
+[39] Yang Liu, Chuanchen Luo, Zhongkai Mao, Junran Peng, and
+Zhaoxiang Zhang. CityGaussianV2: Efficient and Geometrically Accurate Reconstruction for Large-Scale Scenes. arXiv
+preprint arXiv:2411.00771, 2024. 2
+[40] Guanxing Lu, Shiyi Zhang, Ziwei Wang, Changliu Liu, Jiwen Lu, and Yansong Tang. ManiGaussian: Dynamic Gaussian Splatting for Multi-Task Robotic Manipulation. In
+ECCV, pages 349–366. Springer, 2024. 1
+[41] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin
+Wang, Dahua Lin, and Bo Dai. Scaffold-GS: Structured
+3D Gaussians for View-adaptive Rendering. In CVPR, pages
+20654–20664, 2024. 2, 3, 5, 6, 7, 8, 4
+NeurIPS, 37:140138–140158, 2024. 2
+[13] Jian Gao, Chun Gu, Youtian Lin, Zhihao Li, Hao Zhu, Xun
+Cao, Li Zhang, and Yao Yao. Relightable 3D Gaussians:
+Realistic Point Cloud Relighting with BRDF Decomposition
+and Ray Tracing. In ECCV, pages 73–89, 2024. 3
+[14] Antoine Guédon and Vincent Lepetit. SUGAR: SurfaceAligned Gaussian Splatting for Efficient 3D Mesh Reconstruction and High-Quality Mesh Rendering. In CVPR,
+pages 5354–5363, 2024. 3
+[15] Jun Guo, Xiaojian Ma, Yue Fan, Huaping Liu, and Qing
+Li. Semantic Gaussians: Open-Vocabulary Scene Understanding with 3D Gaussian Splatting. arXiv preprint
+arXiv:2403.15624, 2024. 2, 3, 7
+[16] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm,
+George Drettakis, and Gabriel Brostow. Deep Blending for
+Free-Viewpoint Image-Based Rendering. ACM SIGGRAPH,
+37(6):1–15, 2018. 6
+[17] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and
+Shenghua Gao. 2D Gaussian Splatting for Geometrically Accurate Radiance Fields. ACM SIGGRAPH, 2024. 3
+[18] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and
+Shengha Gao. 2D Gaussian Splatting for Geometrically Accurate Radiance Fields. In ACM SIGGRAPH, pages 1–11,
+2024. 2, 6, 7, 5
+[19] Yuanhui Huang, Wenzhao Zheng, Yunpeng Zhang, Jie Zhou,
+and Jiwen Lu. GaussianFormer: Scene as Gaussians for
+Vision-Based 3D Semantic Occupancy Prediction. In ECCV,
+pages 376–393, 2024. 1
+[20] Yuanhui Huang, Amonnut Thammatadatrakoon, Wenzhao
+Zheng, Yunpeng Zhang, Dalong Du, and Jiwen Lu.
+GaussianFormer-2: Probabilistic Gaussian Superposition for
+Efficient 3D Occupancy Prediction. In CVPR, pages 27477–
+27486, 2025. 1
+[21] Hanqing Jiang, Xiaojun Xiang, Han Sun, Hongjie Li, Liyang
+Zhou, Xiaoyu Zhang, and Guofeng Zhang. GeoTexDensifier: Geometry-Texture-Aware Densification for HighQuality Photorealistic 3D Gaussian Splatting. arXiv preprint
+arXiv:2412.16809, 2024. 2
+[22] Minchao Jiang, Shunyu Jia, Jiaming Gu, Xiaoyuan Lu,
+Guangming Zhu, Anqi Dong, and Liang Zhang. VoteSplat:
+Hough Voting Gaussian Splatting for 3D Scene Understanding. arXiv preprint arXiv:2506.22799, 2025. 3
+[23] Yingwenqi Jiang, Jiadong Tu, Yuan Liu, Xifeng Gao, Xiaoxiao Long, Wenping Wang, and Yuexin Ma. GaussianShader:
+3D Gaussian Splatting with Shading Functions for Reflective
+Surfaces. In CVPR, pages 5322–5332, 2024. 3, 7
+[24] Rui Jin, Yuman Gao, Yingjian Wang, Yuze Wu, Haojian Lu,
+Chao Xu, and Fei Gao. GS-Planner: A Gaussian-SplattingBased Planning Framework for Active High-Fidelity Reconstruction. In IROS, pages 11202–11209, 2024. 3
+[25] Nikhil Varma Keetha, Jay Karhade, Krishna Murthy Jatavallabhula, Gengshan Yang, Sebastian Scherer, Deva Ramanan,
+and Jonathon Luiten. SplaTAM: Splat, Track & Map 3D
+Gaussians for Dense RGB-D SLAM. CVPR, pages 21357–
+21366, 2023. 3
+[26] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3D Gaussian Splatting for Real-Time
+8
+Gaussian Splatting for Generalizable Sparse-View Reconstruction. ICLR, 2025. 2, 7
+[56] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler,
+Jonathan T Barron, and Pratul P Srinivasan. Ref-NeRF:
+Structured View-Dependent Appearance for Neural Radiance Fields. In CVPR, pages 5481–5490, 2022. 1
+[57] Evangelos Ververas, Rolandos Alexandros Potamias, Jifei
+Song, Jiankang Deng, and Stefanos Zafeiriou. SAGS:
+Structure-Aware 3D Gaussian Splatting. In ECCV, pages
+221–238, 2024. 3
+[58] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku
+Komura, and Wenping Wang. NeuS: Learning Neural Implicit Surfaces by Volume Rendering for Multi-View Reconstruction. arXiv preprint arXiv:2106.10689, 2021. 3
+[59] Peihao Wang, Yuehao Wang, Dilin Wang, Sreyas Mohan, Zhiwen Fan, Lemeng Wu, Ruisi Cai, Yu-Ying Yeh,
+Zhangyang Wang, Qiang Liu, et al. Steepest Descent Density Control for Compact 3D Gaussian Splatting. In CVPR,
+pages 26663–26672, 2025. 2
+[60] Yiming Wang, Qin Han, Marc Habermann, Kostas Daniilidis, Christian Theobalt, and Lingjie Liu. NeuS2: Fast
+Learning of Neural Implicit Surfaces for Multi-View Reconstruction. In ICCV, pages 3295–3306, 2023. 3
+[61] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P
+Simoncelli. Image Quality Sssessment: from Error Visibility
+to Structural Similarity. IEEE TIP, 13(4):600–612, 2004. 6,
+7
+[62] Meng Wei, Qianyi Wu, Jianmin Zheng, Hamid Rezatofighi,
+and Jianfei Cai.
+Normal-GS: 3D Gaussian Splatting with Normal-Involved Rendering.
+arXiv preprint
+arXiv:2410.20593, 2024. 2, 3, 6, 7, 8, 5
+[63] Tianci Wen, Zhiang Liu, and Yongchun Fang. SEGS-SLAM:
+Structure-Enhanced 3D Gaussian Splatting SLAM with Appearance Embedding. arXiv preprint arXiv:2501.05242,
+2025. 3
+[64] Qi Wu, Janick Martinez Esturo, Ashkan Mirzaei, Nicolas
+Moenne-Loccoz, and Zan Gojcic. 3DGUT: Enabling Distorted Cameras and Secondary Rays in Gaussian Splatting.
+CVPR, pages 26036–26046, 2025. 3
+[65] Tong Wu, Jia-Mu Sun, Yu-Kun Lai, Yuewen Ma, Leif
+Kobbelt, and Lin Gao. DeferredGS: Decoupled and Editable
+Gaussian Splatting with Deferred Shading. arXiv preprint
+arXiv:2404.09412, 2024. 3
+[66] Yusen Xie, Zhenmin Huang, Jin Wu, and Jun Ma. GS-LIVM:
+Real-Time Photo-Realistic LiDAR-Inertial-Visual Mapping
+with Gaussian Splatting. ICCV, 2025. 2
+[67] Yunzhi Yan, Haotong Lin, Chenxu Zhou, Weijie Wang,
+Haiyang Sun, Kun Zhan, Xianpeng Lang, Xiaowei Zhou,
+and Sida Peng. Street Gaussians: Modeling Dynamic Urban
+Scenes with Gaussian Splatting. In ECCV, pages 156–173,
+2024. 1, 2
+[68] Runyi Yang, Zhenxin Zhu, Zhou Jiang, Baijun Ye, Xiaoxue
+Chen, Yifei Zhang, Yuantao Chen, Jian Zhao, and Hao Zhao.
+Spectrally Pruned Gaussian Fields with Neural Compensation. arXiv preprint arXiv:2405.00676, 2024. 2
+[69] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume Rendering of Neural Implicit Surfaces. NeurIPS, 34:
+4805–4815, 2021. 3
+[42] Huaishao Luo, Junwei Bao, Youzheng Wu, Xiaodong He,
+and Tianrui Li. SegCLIP: Patch Aggregation with Learnable Centers for Open-Vocabulary Semantic Segmentation.
+In ICML, pages 23033–23044, 2023. 3
+[43] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. NeRF:
+Representing Scenes as Neural Radiance Fields for View
+Synthesis. In ECCV, 2020. 1, 2
+[44] Nicolas Moenne-Loccoz, Ashkan Mirzaei, Or Perel, Riccardo de Lutio, Janick Martinez Esturo, Gavriel State, Sanja
+Fidler, Nicholas Sharp, and Zan Gojcic. 3D Gaussian Ray
+Tracing: Fast Tracing of Particle Scenes. ACM SIGGRAPH
+Asia, 2024. 3
+[45] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant Neural Graphics Primitives with a Multiresolution Hash Encoding. ACM TOG, 41(4):1–15, 2022.
+2, 7, 4, 5
+[46] Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. Compressed 3D Gaussian Splatting for Accelerated
+Novel View Synthesis. In CVPR, pages 10349–10358, 2024.
+2
+[47] Michael Oechsle, Songyou Peng, and Andreas Geiger.
+UniSurf: Unifying Neural Implicit Surfaces and Radiance
+Fields for Multi-View Reconstruction. In ICCV, pages 5589–
+5599, 2021. 3
+[48] Minghan Qin, Wanhua Li, Jiawei Zhou, Haoqian Wang, and
+Hanspeter Pfister. LangSplat: 3D Language Gaussian Splatting. In CVPR, pages 20051–20060, 2024. 3
+[49] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya
+Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry,
+Amanda Askell, Pamela Mishkin, Jack Clark, Gretchen
+Krueger, and Ilya Sutskever. Learning Transferable Visual
+Models From Natural Language Supervision. In ICML,
+pages 8748–8763, 2021. 3
+[50] Kerui Ren, Lihan Jiang, Tao Lu, Mulin Yu, Linning Xu,
+Zhangkai Ni, and Bo Dai. Octree-GS: Towards Consistent
+Real-Time Rendering with LOD-Structured 3D Gaussians.
+arXiv preprint arXiv:2403.17898, 2024. 2
+[51] Ji Shi, Xianghua Ying, Ruohao Guo, Bowei Xing, and Wenzhen Yue. Normal-NeRF: Ambiguity-Robust Normal Estimation for Highly Reflective Scenes. In AAAI, pages 6869–
+6877, 2025. 2, 3
+[52] Yahao Shi, Yanmin Wu, Chenming Wu, Xing Liu, Chen
+Zhao, Haocheng Feng, Jian Zhang, Bin Zhou, Errui Ding,
+and Jingdong Wang. GIR: 3D Gaussian Inverse Rendering
+for Relightable Scene Factorization. IEEE TPAMI, 2025. 3
+[53] Julian Straub, Thomas Whelan, Lingni Ma, Yufan Chen, Erik
+Wijmans, Simon Green, Jakob J Engel, Raul Mur-Artal, Carl
+Ren, Shobhit Verma, et al. The Replica Dataset: A Digital
+Replica of Indoor Spaces. arXiv preprint arXiv:1906.05797,
+2019. 7, 4
+[54] Matthew Tancik, Vincent Casser, Xinchen Yan, Sabeek Pradhan, Ben P. Mildenhall, Pratul Srinivasan, Jonathan T. Barron, and Henrik Kretzschmar. Block-NeRF: Scalable Large
+Scene Neural View Synthesis. In CVPR, pages 8238–8248,
+2022. 2
+[55] Shengji Tang, Weicai Ye, Peng Ye, Weihao Lin, Yang Zhou,
+Tao Chen, and Wanli Ouyang. HiSplat: Hierarchical 3D
+9
+[70] Lior Yariv, Peter Hedman, Christian Reiser, Dor Verbin,
+Pratul P Srinivasan, Richard Szeliski, Jonathan T Barron,
+and Ben Mildenhall. BakedSDF: Meshing Neural SDFs for
+Real-Time View Synthesis. In ACM SIGGRAPH, pages 1–9,
+2023. 3
+[71] Kai Ye, Chong Gao, Guanbin Li, Wenzheng Chen, and Baoquan Chen. GeoSplatting: Towards Geometry Guided Gaussian Splatting for Physically-Based Inverse Rendering. arXiv
+preprint arXiv:2410.24204, 2024. 3
+[72] Keyang Ye, Qiming Hou, and Kun Zhou. 3D Gaussian Splatting with Deferred Reflection. In ACM SIGGRAPH, pages
+1–10, 2024. 3
+[73] Mingqiao Ye, Martin Danelljan, Fisher Yu, and Lei Ke.
+Gaussian Grouping: Segment and Edit Anything in 3D
+Scenes. In ECCV, pages 162–179, 2024. 3
+[74] Alex Yu, Sara Fridovich-Keil, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance Fields Without Neural Networks. In CVPR, page 6,
+2021. 2, 4
+[75] Mulin Yu, Tao Lu, Linning Xu, Lihan Jiang, Yuanbo Xiangli, and Bo Dai. GSDF: 3DGS Meets SDF for Improved
+Neural Rendering and Reconstruction. NeurIPS, 37:129507–
+129530, 2024. 3
+[76] Hao Zhang, Feng Li, Xueyan Zou, Shilong Liu, Chunyuan
+Li, Jianwei Yang, and Lei Zhang. A Simple Framework
+for Open-Vocabulary Segmentation and Detection. In ICCV,
+pages 1020–1031, 2023. 3, 6
+[77] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman,
+and Oliver Wang. The Unreasonable Effectiveness of Deep
+Features as a Perceptual Metric. In CVPR, pages 586–595,
+2018. 7
+[78] Zheng Zhang, Wenbo Hu, Yixing Lao, Tong He, and Hengshuang Zhao. Pixel-GS: Density Control with Pixel-Aware
+Gradient for 3D Gaussian Splatting. In ECCV, pages 326–
+342, 2024. 2
+[79] Wenzhao Zheng, Junjie Wu, Yao Zheng, Sicheng Zuo, Zixun
+Xie, Longchao Yang, Yong Pan, Zhihui Hao, Peng Jia, Xianpeng Lang, et al. GaussianAD: Gaussian-Centric End-toEnd Autonomous Driving. arXiv preprint arXiv:2412.10371,
+2024. 1
+[80] Shuaifeng Zhi, Tristan Laidlow, Stefan Leutenegger, and Andrew J. Davison. In-Place Scene Labelling and Understanding with Implicit Scene Representation. In ICCV, 2021. 2,
+3
+[81] Hongyu Zhou, Jiahao Shao, Lu Xu, Dongfeng Bai, Weichao
+Qiu, Bingbing Liu, Yue Wang, Andreas Geiger, and Yiyi
+Liao. HuGS: Holistic Urban 3D Scene Understanding via
+Gaussian Splatting. In CVPR, pages 21336–21345, 2024. 3
+[82] Shijie Zhou, Haoran Chang, Sicheng Jiang, Zhiwen Fan, Zehao Zhu, Dejia Xu, Pradyumna Chari, Suya You, Zhangyang
+Wang, and Achuta Kadambi. Feature 3DGS: Supercharging
+3D Gaussian Splatting to Enable Distilled Feature Fields. In
+CVPR, pages 21676–21685, 2024. 3
+[83] Siting Zhu, Guangming Wang, Xin Kong, Dezhi Kong, and
+Hesheng Wang. 3D Gaussian Splatting in Robotics: A Survey. arXiv preprint arXiv:2410.12262, 2024. 1
+10

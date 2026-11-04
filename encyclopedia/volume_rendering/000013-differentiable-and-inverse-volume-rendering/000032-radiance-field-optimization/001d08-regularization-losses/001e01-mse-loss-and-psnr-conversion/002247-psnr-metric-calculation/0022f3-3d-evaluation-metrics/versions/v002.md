@@ -1,15 +1,15 @@
 # 3D Evaluation Metrics
 ## Overview
-3D Evaluation Metrics assess the fidelity of reconstructed volumetric or radiance-field representations against ground-truth data [G]. The method computes statistical similarity metrics on voxel grids and surface geometries to evaluate both visual appearance and spatial accuracy [S1, S2, S3]. Unlike [PSNR Metric Calculation](2742-psnr-metric-calculation.md) which measures pixel-level photometric error in 2D projections [S1], this method aggregates errors across 3D volume dimensions (axial, coronal, sagittal) and surface normals [S2, S3]. It complements [Mesh Reconstruction Evaluation](2909-mesh-reconstruction-evaluation.md), which focuses strictly on triangular mesh topology and spatial accuracy rather than volumetric or photometric appearance [S3].
+3D Evaluation Metrics assess the fidelity of reconstructed volumetric or radiance-field representations against ground-truth data [G]. The method computes statistical similarity metrics on voxel grids and surface geometries to evaluate both visual appearance and spatial accuracy [S1, S2, unofficial][S3]. Unlike [PSNR Metric Calculation](2742-psnr-metric-calculation.md) which measures pixel-level photometric error in 2D projections [S1, unofficial], this method aggregates errors across 3D volume dimensions (axial, coronal, sagittal) and surface normals [S2, unofficial][S3]. It complements [Mesh Reconstruction Evaluation](2909-mesh-reconstruction-evaluation.md), which focuses strictly on triangular mesh topology and spatial accuracy rather than volumetric or photometric appearance [S3].
 
 ## How it works
 **Inputs:**
-- Reconstructed volume $V_{rec}$ and ground-truth volume $V_{gt}$, normalized to $[0, 1]$ [S1].
+- Reconstructed volume $V_{rec}$ and ground-truth volume $V_{gt}$, normalized to $[0, 1]$ [S1, unofficial].
 - Reconstructed mesh/point cloud and ground-truth mesh/point cloud for geometric metrics [S3].
 - Rendered images or crops for standard rendering metrics [S4, unofficial].
 
 **Outputs:**
-- Mean PSNR and SSIM for axial, coronal, and sagittal views [S2].
+- Mean PSNR and SSIM for axial, coronal, and sagittal views [S2, unofficial].
 - Normal Consistency (NC) score [S3].
 - Standard rendering metrics (PSNR, SSIM, LPIPS, FID/KID) [S4, unofficial].
 
@@ -18,30 +18,30 @@
 - Meshes are represented as sets of vertices and faces or point clouds [S3].
 
 **Steps:**
-1. **Volume Normalization:** Ensure $V_{rec}$ and $V_{gt}$ are scaled to $[0, 1]$ [S1]. If not, apply $V' = \frac{V - V_{min}}{V_{max} - V_{min}}$ [G].
-2. **Axial/Coronal/Sagittal Slicing:** Iterate over the three principal axes [S2]. For each axis $k \in \{x, y, z\}$, extract 2D slices by fixing the coordinate along $k$ [G].
-3. **Slice-wise PSNR and SSIM:** Compute PSNR and SSIM for each slice pair $(S_{rec}, S_{gt})$ [S2]. Let $SSIM_{slice}$ be the score for a single slice [G].
+1. **Volume Normalization:** Ensure $V_{rec}$ and $V_{gt}$ are scaled to $[0, 1]$ [S1, unofficial]. If not, apply $V' = \frac{V - V_{min}}{V_{max} - V_{min}}$ [G].
+2. **Axial/Coronal/Sagittal Slicing:** Iterate over the three principal axes [S2, unofficial]. For each axis $k \in \{x, y, z\}$, extract 2D slices by fixing the coordinate along $k$ [G].
+3. **Slice-wise PSNR and SSIM:** Compute PSNR and SSIM for each slice pair $(S_{rec}, S_{gt})$ [S2, unofficial]. Let $SSIM_{slice}$ be the score for a single slice [G].
 4. **Volume PSNR Calculation:** Compute Mean Squared Error (MSE) averaged over all voxels, including background:
    $$ \text{MSE} = \frac{1}{N} \sum_{i=1}^N (V_{rec,i} - V_{gt,i})^2 $$
-   where $N$ is the total number of voxels [S1]. Compute PSNR:
+   where $N$ is the total number of voxels [S1, unofficial]. Compute PSNR:
    $$ \text{PSNR} = 10 \log_{10}\left(\frac{1}{\text{MSE}}\right) $$
-   This is equivalent to $10 \log_{10}(\text{MAX}^2 / \text{MSE})$ with $\text{MAX}=1$ [S1].
-5. **Aggregation:** Print the mean PSNR and SSIM for each view (axial, coronal, sagittal) [S2].
+   This is equivalent to $10 \log_{10}(\text{MAX}^2 / \text{MSE})$ with $\text{MAX}=1$ [S1, unofficial].
+5. **Aggregation:** Print the mean PSNR and SSIM for each view (axial, coronal, sagittal) [S2, unofficial].
 6. **Normal Consistency (NC) Calculation:** For surface reconstruction, compute the angular difference between estimated normals $N_i$ and ground-truth normals $N_i^*$ for $N$ points:
    $$ \text{NC} = \frac{1}{N} \sum_{i=1}^N (1 - \cos(N_i, N_i^*)) \times 100\% $$
    where $\cos(N_i, N_i^*)$ is the cosine similarity [S3].
 7. **Standard Rendering Metrics:** Compute PSNR, SSIM/MS-SSIM, LPIPS, and FID/KID on rendered images or crops as defined in standard rendering literature [S4, unofficial].
 
 **Parameters:**
-- **SSIM Window Size:** 11 [S1].
-- **SSIM Sigma:** 1.5 [S1].
-- **Splat Counts:** Geometrically spaced doubling from 1K to 512K, extended to 1M and 2M for specific light-sheet volumes [S1].
-- **Fitting Settings (Contextual):** Conservative culling (99.9% amplitude retention), 20,000 max iterations, early stopping patience 500 iterations, L1 loss, dynamic operations enabled [S1].
+- **SSIM Window Size:** 11 [S1, unofficial].
+- **SSIM Sigma:** 1.5 [S1, unofficial].
+- **Splat Counts:** Geometrically spaced doubling from 1K to 512K, extended to 1M and 2M for specific light-sheet volumes [S1, unofficial].
+- **Fitting Settings (Contextual):** Conservative culling (99.9% amplitude retention), 20,000 max iterations, early stopping patience 500 iterations, L1 loss, dynamic operations enabled [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Background Inclusion:** MSE must be averaged over *all* voxels, including background, to avoid artificially inflated scores [S1].
-- **Normalization:** Volumes must be normalized to $[0, 1]$ before PSNR calculation to ensure the $\text{MAX}=1$ assumption holds [S1].
-- **Held-out Voxels:** In benchmarking, 5% of voxels may be randomly selected and replaced with the median of their 26 neighbors in a 3×3×3 donut (excluding center) to simulate missing data or compression artifacts [S1].
+- **Background Inclusion:** MSE must be averaged over *all* voxels, including background, to avoid artificially inflated scores [S1, unofficial].
+- **Normalization:** Volumes must be normalized to $[0, 1]$ before PSNR calculation to ensure the $\text{MAX}=1$ assumption holds [S1, unofficial].
+- **Held-out Voxels:** In benchmarking, 5% of voxels may be randomly selected and replaced with the median of their 26 neighbors in a 3×3×3 donut (excluding center) to simulate missing data or compression artifacts [S1, unofficial].
 
 ## Subtopics
 
@@ -62,10 +62,10 @@ Standard Rendering Metrics include PSNR, SSIM, MS-SSIM, LPIPS, FID, and KID [S4,
 - **Limitations:** PSNR is insensitive to perceptual quality [S4, unofficial]. SSIM parameters (window size, sigma) can affect results [G]. NC requires accurate ground-truth normals, which are often unavailable in real-world scenarios [G].
 
 ## Background
-3D evaluation metrics have evolved alongside volume rendering and 3D reconstruction techniques [G]. Early metrics focused on simple error measures like MSE [G]. With the rise of differentiable rendering and Gaussian Splatting, more sophisticated metrics like SSIM and perceptual metrics (LPIPS) became standard [S4, unofficial]. The specific formulation of PSNR on normalized volumes including background is highlighted in microscopy applications [S1]. Normal Consistency is a standard metric in computer vision for surface reconstruction [S3]. The categorization of metrics into rendering and geometry types is common in recent 3D Gaussian Splatting literature [S4, unofficial].
+3D evaluation metrics have evolved alongside volume rendering and 3D reconstruction techniques [G]. Early metrics focused on simple error measures like MSE [G]. With the rise of differentiable rendering and Gaussian Splatting, more sophisticated metrics like SSIM and perceptual metrics (LPIPS) became standard [S4, unofficial]. The specific formulation of PSNR on normalized volumes including background is highlighted in microscopy applications [S1, unofficial]. Normal Consistency is a standard metric in computer vision for surface reconstruction [S3]. The categorization of metrics into rendering and geometry types is common in recent 3D Gaussian Splatting literature [S4, unofficial].
 
 ## Sources
-[S1] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26
+[S1] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)
 [S2] wskingdom/DGR, https://github.com/wskingdom/DGR, fetched 2026-10-26 (unofficial)
 [S3] Self-Supervised Dual Contouring, https://doi.org/10.1109/cvpr52733.2024.00448, fetched 2026-10-26
 [S4] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

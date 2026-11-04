@@ -1,0 +1,129 @@
+# Brute-Force QEF Solver
+Also called: Grid Search QEF Solver, Iterative Approximation via Grid Search
+## Overview
+The Brute-Force QEF Solver is a method for solving the Quadratic Error Function (QEF) by performing a grid search over the unit cube $[0,1]^3$ to find the point with the minimum squared distance to a set of planes, rather than using a closed-form linear algebra solution [S1, unofficial]. It serves as a fallback or simple implementation for the Dual Contouring QEF Solver [Parent](1424-dual-contouring-qef-solver.md). It is distinct from [Quadric Error Function (QEF) for Sharp Features](1604-quadric-error-function-qef-for-sharp-features.md) which handles non-smooth features, and [QEF Data Accumulation](3712-qef-data-accumulation.md) which gathers the plane data. It is chosen when computational resources are sufficient for a coarse search or when a robust, dependency-free solver is required, avoiding the numerical instability of matrix inversion [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `data`: A structure containing:
+  - `positions`: An array of 3D vectors representing points on the planes.
+  - `normals`: An array of 3D vectors representing the normals of the planes.
+  - `positions.Length` ($N$): The number of planes.
+  - `error`: A float initialized to `float.MaxValue` to track the minimum error found.
+  - `point`: A 3D vector to store the best point found.
+- `steps`: An integer defining the number of divisions along each axis of the search grid. Default value is 8 [S1, unofficial].
+
+**Outputs:**
+- `data.point`: The 3D vector $(x, y, z)$ in $[0,1]^3$ that minimizes the QEF.
+- `data.error`: The minimum squared distance value.
+
+**Data Structures:**
+The input `data` structure must contain arrays of equal length for `positions` and `normals`. The `point` is a standard 3D vector. The search space is the unit cube $[0,1]^3$.
+
+**Algorithm Steps:**
+1. Initialize `data.error` to `float.MaxValue` [S1, unofficial].
+2. Calculate the grid increment: $\Delta = \frac{1}{\text{steps}}$ [S1, unofficial].
+3. Iterate $x$ from $0$ to $1$ inclusive, with step size $\Delta$.
+4. For each $x$, iterate $y$ from $0$ to $1$ inclusive, with step size $\Delta$.
+5. For each $y$, iterate $z$ from $0$ to $1$ inclusive, with step size $\Delta$.
+6. Construct candidate point $P = (x, y, z)$ [S1, unofficial].
+7. Calculate the error for $P$:
+   - Initialize `current_error` to $0$.
+   - For each plane $i$ from $0$ to $N-1$:
+     - Let $n_i$ be `data.normals[i]` and $p_i$ be `data.positions[i]`.
+     - Calculate the signed distance from $P$ to the plane: $d_i = n_i \cdot (P - p_i)$ [S1, unofficial].
+     - Add $d_i^2$ to `current_error`.
+8. If `current_error` < `data.error`:
+   - Update `data.point` = $P$ [S1, unofficial].
+   - Update `data.error` = `current_error` [S1, unofficial].
+9. Return `data` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def solve_brute_force_qef(data, steps=8):
+    # Initialize minimum error to infinity
+    data.error = float('inf')
+    
+    # Calculate grid increment
+    increment = 1.0 / steps
+    
+    # Iterate over the unit cube [0, 1]^3
+    # Note: Using range to ensure we cover 0 to 1 inclusive with the calculated step
+    # In floating point, exact 1.0 might be missed by simple range, so we handle it explicitly or use a loop that includes the endpoint
+    # A robust way to iterate 0..1 with step size inc:
+    num_points = steps + 1
+    for i in range(num_points):
+        x = i * increment
+        for j in range(num_points):
+            y = j * increment
+            for k in range(num_points):
+                z = k * increment
+                
+                # Construct candidate point
+                point = Vector3(x, y, z)
+                
+                # Calculate error: sum of squared distances to all planes
+                current_error = 0.0
+                for plane_idx in range(len(data.normals)):
+                    normal = data.normals[plane_idx]
+                    position = data.positions[plane_idx]
+                    
+                    # Distance from point to plane defined by normal and position
+                    # d = dot(normal, point - position)
+                    diff = Vector3_sub(point, position)
+                    dist = Vector3_dot(normal, diff)
+                    
+                    # Add squared distance
+                    current_error += dist * dist
+                
+                # Update minimum if better
+                if current_error < data.error:
+                    data.error = current_error
+                    data.point = point
+                    
+    return data
+```
+
+**Parameters:**
+- `steps`: The number of divisions along each axis. Default is 8 [S1, unofficial]. Higher values increase accuracy but exponentially increase computation time ($O(\text{steps}^3)$).
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Floating point errors in distance calculation may affect the final point selection if errors are very close.
+- **Boundaries:** The search is strictly within $[0,1]^3$. If the optimal point lies outside this range, it will not be found. This method assumes the dual vertex is expected to be within the unit cube of the cell [S1, unofficial].
+- **Degenerate Input:** If `data.normals` or `data.positions` are empty, the error remains 0 and the point remains at $(0,0,0)$ (or the first point checked). Guard against empty inputs.
+- **Performance:** The complexity is $O(\text{steps}^3 \cdot N)$. For large $N$ or high `steps`, this is slow compared to linear algebra solvers.
+
+## Subtopics
+
+### [Quadric Error Function (QEF) for Sharp Features](1604-quadric-error-function-qef-for-sharp-features.md)
+Handles non-smooth features by modifying the QEF formulation. Choose when sharp edges/corners need to be preserved.
+
+### [QEF Data Accumulation](3712-qef-data-accumulation.md)
+Gathers plane data for the QEF. Choose when you need to collect intersection data before solving.
+
+### [Occupancy-Based Dual Contouring](3799-occupancy-based-dual-contouring.md)
+Uses occupancy grids for marching cubes-like dual contouring. Choose when working with voxelized data.
+
+### [Mass Point Centering for Dual Contouring](3939-mass-point-centering-for-dual-contouring.md)
+Uses mass points to initialize or constrain the QEF solution. Choose when better initial guesses are needed.
+
+### [QEF Solver Initialization](4722-qef-solver-initialization.md)
+Sets up the initial state for QEF solvers. Choose when preparing data for any QEF solver.
+
+## Operating characteristics
+- **Time Complexity:** $O(\text{steps}^3 \cdot N)$, where $N$ is the number of planes and `steps` is the grid resolution. With default `steps=8`, this is $9^3 = 729$ evaluations per plane set.
+- **Memory Complexity:** $O(N)$ to store plane data. The search grid itself requires minimal additional memory.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales poorly with resolution due to the cubic growth of grid points. Scales linearly with the number of planes.
+- **Strengths:** Simple to implement, no numerical instability from matrix inversion, robust for small numbers of planes.
+- **Limitations:** Slow for high precision or many planes. Limited to the unit cube search space.
+- **When to use:** Small scenes, low plane counts, or when a simple, dependency-free solver is preferred.
+- **When not to use:** High-resolution meshes, real-time applications with many planes, or when the optimal point is likely outside $[0,1]^3$.
+
+## Background
+The Brute-Force QEF Solver is an unofficial method described in the context of a Unity-based Dual Contouring implementation [S1, unofficial]. It is attributed to Alan Baylis in the repository `Alan-Baylis/DualContouring-3` [S1, unofficial]. It serves as a basic alternative to the standard least-squares solution of the QEF, which typically involves solving a linear system $A^T A x = A^T b$. This brute-force approach avoids linear algebra libraries entirely.
+
+## Sources
+[S1] Alan-Baylis/DualContouring-3, https://github.com/Alan-Baylis/DualContouring-3, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,411 @@
+# Vox2SDF
+## Description
+This is a model aiming to convert a voxel model into a neural SDF representation.
+
+## How to setup the environment
+### Dependencies
+* PyTorch
+* CUDA (this project has been tested on CUDA 12.2)
+* Trimesh
+* Voxypy
+* Open3D
+* tqdm
+#### Install Script
+```
+conda create -n Vox2SDF
+conda activate Vox2SDF
+conda install pytorch pytorch-cuda=12.4 -c pytorch -c nvidia
+pip install trimesh
+pip install voxypy
+pip install open3d
+conda install tqdm
+```
+### Tryout
+Without installing the dependencies, you can try this project in Vox2SDF.ipynb with google colab(this notebook has been tested in Kaggle)
+
+## Build
+
+### Scripts/config.py
+```
+import torch
+
+import os
+import json
+import logging
+
+class Config:
+    def __init__(self, config_file="Scripts/config.json"):
+        with open(config_file) as cfile:
+            self.config = json.load(cfile)
+        
+        self.input_voxel_grid_size = self.config["input_voxel_grid_size"]
+        self.decoder_hidden_dimension = self.config["decoder_hidden_dimension"]
+        self.decoder_num_hidden_layers = self.config["decoder_num_hidden_layers"]
+        self.latent_dimension = self.config["latent_dimension"]
+        self.num_sdf_samples = self.config["num_sdf_samples"]
+        self.num_points_per_minor_batch = self.config["num_points_per_minor_batch"]
+        self.dataset_path = self.config["dataset_path"]
+        self.shapenet_categories = self.config["shapenet_categories"]
+        self.seperate_ratio = self.config["seperate_ratio"]
+        self.train_epoch = self.config["train_epoch"]
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.learning_rate = self.config["learning_rate"]
+        self.check_point_filename = self.config["check_point_filename"]
+        self.loss_filename = self.config["loss_filename"]
+        self.is_train = self.config["is_train"]
+        self.is_validation = self.config["is_validation"]
+
+    def log(self): 
+        logging.info(self.config)
+
+if __name__ == "__main__":
+    config = Config()
+    logging.basicConfig(level=logging.DEBUG)
+    for category in config.shapenet_categories:
+        category_data_pickle_name = os.path.splitext(config.shapenet_pickle_name)[0] + "_" + category + ".pkl"
+        logging.debug(category_data_pickle_name)
+```
+
+### Scripts/module.py
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+import os
+import numpy as np
+
+import config
+
+class VoxelCNNEncoder(nn.Module):
+    def __init__(self, input_size=(128, 128, 128), latent_size=256):
+        super().__init__()
+        
+        self.input_size = input_size
+
+        # Add batch normalization for better training stability
+        self.encoder = nn.Sequential(
+            # First block
+            nn.Conv3d(1, 16, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm3d(16),
+            nn.ReLU(),
+            nn.MaxPool3d(kernel_size=2, stride=2),
+            nn.Dropout3d(0.3),
+            
+            # Second block
+            nn.Conv3d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm3d(32),
+            nn.ReLU(),
+            nn.MaxPool3d(kernel_size=2, stride=2),
+            nn.Dropout3d(0.3),
+            
+            # Third block
+            nn.Conv3d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm3d(64),
+            nn.ReLU(),
+            nn.MaxPool3d(kernel_size=2, stride=2),
+            nn.Dropout3d(0.3),
+            
+            nn.Flatten()
+        )
+        
+        # Calculate the size of the flattened features
+        # Input: 128x128x128
+        # After first block: 128x128x128 -> 64x64x64
+        # After second block: 16x16x16 -> 8x8x8
+        # After third block: 2x2x2 -> 1x1x1
+        flattened_size = 64 * 1 * 1 * 1
+        
+        # Add final linear layers with skip connection
+        self.fc1 = nn.Linear(flattened_size, 512)
+        self.bn1 = nn.BatchNorm1d(512)
+        self.fc2 = nn.Linear(512, latent_size)
+        
+    def forward(self, x):
+        # Main encoder path
+        features = self.encoder(x)
+        
+        # Final fully connected layers with skip connection
+        x = self.fc1(features)
+        x = self.bn1(x)
+        x = F.relu(x)
+        x = F.dropout(x, p=0.3, training=self.training)
+        x = self.fc2(x)
+        
+        return x
+
+class SDFDecoder(nn.Module):
+    def __init__(self, latent_dim=256, hidden_dim=512, num_layers=10):
+        super(SDFDecoder, self).__init__()
+
+        self.latent_dim = latent_dim
+        self.hiddem_dim = hidden_dim
+        self.num_layers = num_layers
+
+        self.layers = [nn.Linear(latent_dim + 3, hidden_dim)]
+        self.dropout03 = nn.Dropout(0.3)
+        self.hidden_activation = nn.ReLU()
+        self.output_activation = nn.Tanh()
+
+        for i in range(1, num_layers - 1):
+            if i % 4 == 0:
+                self.layers.append(nn.Linear(hidden_dim + latent_dim + 3, hidden_dim))
+            else:
+                self.layers.append(nn.Linear(hidden_dim, hidden_dim))
+
+        self.layers.append(nn.Linear(512, 1))
+
+        self.layers = nn.ModuleList(self.layers)
+
+    def forward(self, latent_code, position):
+        input_tensor = torch.hstack((latent_code, position))
+        x = self.layers[0](input_tensor)
+        for i in range(1, self.num_layers - 1):
+            if i % 4 == 0:
+                x = self.layers[i](torch.hstack((latent_code, position, x)))
+                x = self.dropout03(x)
+                x = self.hidden_activation(x)
+            else:
+                x = self.layers[i](x)
+                x = self.dropout03(x)
+                x = self.hidden_activation(x)
+        x = self.layers[-1](x)
+        x = self.output_activation(x)
+        return x
+
+class FullNetwork(nn.Module):
+    def __init__(self, config : config.Config):
+        super(FullNetwork, self).__init__()
+
+        self.config = config
+
+        latent_dim = config.latent_dimension
+        num_decoder_layer = config.decoder_num_hidden_layers
+
+        self.encoder = VoxelCNNEncoder(input_size=config.input_voxel_grid_size, latent_size=config.latent_dimension)
+        self.decoder = SDFDecoder(latent_dim=latent_dim, num_layers=num_decoder_layer)
+
+    def forward(self, voxel_grid, xyz):
+        latent_code = self.encoder(voxel_grid)
+
+        return self.decoder(latent_code, xyz)
+```
+
+### Scripts/train.py
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+import torch.optim as optim
+
+from einops import rearrange, repeat
+
+from module import FullNetwork, VoxelCNNEncoder, SDFDecoder
+import config
+
+import sys
+sys.path.append("./")
+from dataset.utils.torch_load import VoxelSDFDataset, create_test_validation_data_loader
+
+import os
+import numpy as np
+from tqdm import tqdm
+import logging
+import pickle
+import argparse
+
+class ModelTrainer:
+    def __init__(self, train_dataloader : DataLoader, config : config.Config):
+        self.epoch = config.train_epoch
+        self.dataloader = train_dataloader
+        self.network = FullNetwork(config=config)
+        self.device = config.device
+        self.checkpoint_filename = config.check_point_filename
+        self.losses = []
+
+        self.network = self.network.to(device=self.device)
+
+        self.config = config
+
+        self.criterion = nn.MSELoss()
+        self.optimizer = optim.Adam(self.network.parameters(), lr=config.learning_rate)
+
+    def train(self):
+        self.load_loss()
+
+        self.network.train()
+        for k in tqdm(range(self.epoch), desc="Epoch", position=2):
+            batch_loss = 0
+            length = 0
+            for i, (voxel_tensor, point, sdf) in tqdm(enumerate(self.dataloader), desc="Batch", position=3, ncols=80, leave=False):
+                point = rearrange(point, "b s c -> (b s) c")
+                sdf = rearrange(sdf, "b s c -> (b s) c")
+
+                voxel_tensor = voxel_tensor.to(device=self.device)
+                point = point.to(device=self.device)
+                sdf = sdf.to(device=self.device)
+                
+                voxel_tensor = voxel_tensor.unsqueeze(1)
+
+                latent = self.network.encoder(voxel_tensor)                
+                latent = repeat(latent, "b l -> b s l", s=self.config.num_points_per_minor_batch)
+                latent = rearrange(latent, "b s l -> (b s) l")
+                sdf_pred = self.network.decoder(latent, point)
+
+                loss = self.criterion(sdf_pred, sdf)
+                batch_loss += loss.item()
+
+                self.optimizer.zero_grad()
+                loss.backward()
+
+                self.optimizer.step()
+                length = i + 1
+            
+            self.losses.append(batch_loss / length)
+
+            if k % 10 == 0 and k != 0:
+                self.save_parameters()
+                self.save_loss()
+        
+    def save_parameters(self):
+        with open(self.checkpoint_filename, "wb") as cp_f:
+            torch.save(self.network.state_dict(), cp_f)
+        
+    def load_parameters(self):
+        if os.path.exists(self.checkpoint_filename):
+            with open(self.checkpoint_filename, "b+r") as cp_f:
+                self.network.load_state_dict(torch.load(cp_f))
+    
+    def save_loss(self):
+        with open(self.config.loss_filename, "wb") as f:
+            pickle.dump(self.losses, f)
+
+    def load_loss(self):
+        if os.path.exists(self.config.loss_filename):
+            with open(self.config.loss_filename, "rb") as f:
+                self.losses = pickle.load(f)
+        else: self.losses = []
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.WARNING)
+
+    cfg = config.Config()
+    train_dataloader, validation_loader = create_test_validation_data_loader(
+        dataset_dir=cfg.dataset_path,
+        batch_size=32,
+        dataset_config_file="dataset/config.json",
+        num_sdf_samples_per_minor_batch=cfg.num_points_per_minor_batch
+    )
+    
+    model_trainer = ModelTrainer(train_dataloader=train_dataloader, config=cfg)
+
+    model_trainer.load_parameters()
+    model_trainer.train()
+    model_trainer.save_parameters()
+
+    logging.basicConfig(level=logging.DEBUG)
+```
+
+### Scripts/validation.py
+```
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+
+from einops import rearrange, repeat
+from tqdm import tqdm
+import numpy as np
+
+from module import FullNetwork, SDFDecoder, VoxelCNNEncoder
+import config
+from dataset.utils.torch_load import create_test_validation_data_loader, VoxelSDFDataset
+
+import logging
+
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+from skimage import measure
+from skimage.draw import ellipsoid
+
+def create_marching_cube_mesh(voxel_grid : np.ndarray, network : FullNetwork, config : config.Config):
+    x = torch.linspace(0, 1, 100)
+    y = torch.linspace(0, 1, 100)
+    z = torch.linspace(0, 1, 100)
+    x, y, z = torch.meshgrid(x, y, z, indexing='ij')
+    points = torch.stack([x.flatten(), y.flatten(), z.flatten()], dim=1)
+    point_batch = torch.split(points, 200000)
+
+    latent_code = network.encoder(torch.from_numpy(voxel_grid))
+    sdfs = torch.zeros(0)
+    for points in point_batch:
+        points = points.to(device=config.device)
+        latent_code_repeated = repeat(latent_code, "l -> s l", s=points.shape[0])
+        sdfs = torch.cat((sdfs, network.decoder(latent_code_repeated, points)))
+    sdfs.flatten()
+    
+    sdfs = sdfs.cpu().numpy().reshape(100, 100, 100)
+    verts, faces, normals, values = measure.marching_cubes(sdfs, level=0)
+    
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+    
+    mesh = Poly3DCollection(verts[faces])
+    mesh.set_edgecolor('k')
+    ax.add_collection3d(mesh)
+    
+    ax.set_xlim(0, sdfs.shape[0])
+    ax.set_ylim(0, sdfs.shape[1])
+    ax.set_zlim(0, sdfs.shape[2])
+    
+    plt.show()
+
+
+def validation(network : FullNetwork, validation_loader : DataLoader, config : config.Config):
+    network.eval()
+    
+    criterion = nn.MSELoss()
+    losses = torch.zeros(0)
+    
+    with torch.no_grad():    
+        for i, (voxel_tensor, point, sdf) in tqdm(enumerate(validation_loader, desc="Validation")):
+            point = rearrange(point, "b s c -> (b s) c")
+            sdf = rearrange(sdf.unsqueeze(2), "b s c -> (b s) c")
+
+            voxel_tensor = voxel_tensor.to(device=config.device)
+            point = point.to(device=config.device)
+            sdf = sdf.to(device=config.device)
+            
+            voxel_tensor = voxel_tensor.unsqueeze(1)
+
+            latent = network.encoder(voxel_tensor)                
+            latent = repeat(latent, "b l -> b s l", s=config.num_points_per_minor_batch)
+            latent = rearrange(latent, "b s l -> (b s) l")
+            sdf_pred = network.decoder(latent, point)
+
+            loss = criterion(sdf_pred, sdf)
+            losses = torch.cat((losses, loss))
+
+    losses = losses.numpy()
+    loss_avg = np.average(losses)
+    loss_stddev = np.std(losses)
+    print(f"Average of losses: {loss_avg}")
+    print(f"Standard deviation of losses: {loss_stddev}")
+
+if __name__ == "__main__":
+    cfg = config.Config()
+    network = FullNetwork(config=cfg)
+    _, validation_dataloader = train_dataloader, validation_loader = create_test_validation_data_loader(
+        dataset_dir=cfg.dataset_path, 
+        dataset_config_file="dataset/config.json",
+        num_sdf_samples_per_item=cfg.num_points_per_minor_batch
+    )
+    validation(network, validation_dataloader, cfg)
+```
+
+### Scripts/visualize.py
+```
+
+```

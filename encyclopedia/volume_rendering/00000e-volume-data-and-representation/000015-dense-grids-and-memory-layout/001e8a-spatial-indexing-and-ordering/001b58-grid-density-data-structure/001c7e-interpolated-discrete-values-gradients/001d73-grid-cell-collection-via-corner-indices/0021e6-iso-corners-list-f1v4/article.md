@@ -3,104 +3,104 @@
 Also called: 64}
 
 ## Overview
-`iso_corners_list_f1v4` is a GPU kernel variant for computing grid cell corner indices from a list of input points, supporting 1, 8, 16, 32, or 64 functions [S1, unofficial]. It builds on [Grid Cell Collection via Corner Indices](1518-grid-cell-collection-via-corner-indices.md) by processing 256 consecutive lattice points per group across 2–4 neighboring bricks, sharing shell setup overhead across the group rather than per-brick [S1, unofficial].
+`iso_corners_list_f1v4` is a GPU kernel variant that computes the values of one function at the eight corners of the grid cells enclosing a list of input points, enabling trilinear interpolation or surface extraction [S1, unofficial]. It differs from its siblings by processing 256 consecutive lattice points per thread group across 2–4 neighboring bricks, sharing shell setup overhead among all points in the group rather than per-brick, which improves occupancy and reduces redundant memory accesses [S1, unofficial].
 
 ## How it works
-**Inputs:** A list of input points and a function set size (1, 8, 16, 32, or 64) [S1, unofficial].
-**Outputs:** Corner indices for each point, mapped to the appropriate brick slots [S1, unofficial].
+**Inputs:**
+- A list of input points (lattice coordinates) [S1, unofficial].
+- A set of functions (1 for `f1v4`, or 8/16/32/64 for variants) [S1, unofficial].
+- Grid data structures: brick hierarchy, shell definitions, and function coefficients (e.g., $C$ matrix for Gaussian-type orbitals) [S1, unofficial].
+
+**Outputs:**
+- For each input point, the values of the functions at the 8 corners of the enclosing voxel [S1, unofficial].
+- In the case of `iso_dcorners`, the values in the $\phi^T D \phi$ form (density-like quantities) [S1, unofficial].
 
 **Data Structures:**
-*   **Octree Brick Level:** Keeps slots of rejected siblings (mask 0, no corner slots) to ensure consecutive bricks are neighbors in memory [S1, unofficial].
-*   **Group:** A batch of 256 consecutive points [S1, unofficial].
-*   **Shell List:** Precomputed shells for the bounding box of the group's points [S1, unofficial].
+- **Brick Hash:** Built on-device, mapping brick IDs to memory slots [S1, unofficial]. Rejected siblings (mask 0) are kept in the octree structure to ensure consecutive bricks are neighbors in memory [S1, unofficial].
+- **Shells:** Precomputed lists of lattice points or coefficients for each shell level, stored in group-shared memory for the group [S1, unofficial].
+- **Function Coefficients ($C$):** Stored in global memory, accessed via tiled GEMM if enabled [S1, unofficial].
 
 **Steps:**
-1.  **Group Formation:** Group 256 consecutive points from the input list, which typically span 2–4 neighboring bricks [S1, unofficial].
-2.  **Shell Listing:** Compute the bounding box of the 256 points and list all shells that intersect this box [S1, unofficial].
-3.  **Thread Assignment:** Assign one thread per point in the group (256 threads total) [S1, unofficial].
-4.  **Shared Setup:** Perform shell setup calculations once for the entire group, rather than once per brick (which holds 70–125 points) [S1, unofficial].
-5.  **Point Processing:** For each point: determine which shells are within reach [S1, unofficial]. Skip shells that are out of reach for the point [S1, unofficial]. If no points in the group are in reach of a shell, skip the entire shell processing for that wave [S1, unofficial]. Compute corner indices for the point from the reachable shells [S1, unofficial].
-6.  **Output:** Emit corner indices. The octree hash skips rejected siblings; `num_bricks` counts only the kept bricks [S1, unofficial].
+1. **Thread Group Initialization:** Each thread group processes 256 consecutive points from the input list [S1, unofficial].
+2. **Brick Identification:** Determine the bricks enclosing the 256 points. This may span 2–4 neighboring bricks [S1, unofficial].
+3. **Shell Setup:** Compute the shells required for the bounding box of the group's points. This setup is shared among all 256 threads, reducing overhead compared to per-brick setup (which would handle 70–125 points) [S1, unofficial].
+4. **Point Processing:** For each point in the group: identify which shells are within reach and skip shells outside the point's bounding box [S1, unofficial]. Load the necessary shell data from group-shared memory. Compute the function values at the 8 corners. For `iso_corners_list_f1v4`, this involves one function. For variants, it involves 8, 16, 32, or 64 functions [S1, unofficial]. If using tiled GEMM (`iso_gcorners`), perform matrix multiplication of AO values and coefficients [S1, unofficial].
+5. **Output:** Store the computed corner values. Points that skip shells due to being out of reach simply do not access those shell data blocks [S1, unofficial].
 
 **Parameters:**
-*   **Group Size:** 256 points [S1, unofficial].
-*   **Functions:** 1, 8, 16, 32, or 64 [S1, unofficial].
-*   **Switch:** `GTO_ISO_CORNERS_LIST=0` (or `corners_list` switch) reverts to group-per-brick mode [S1, unofficial].
+- `GTO_ISO_GEMM`: Boolean flag enabling tiled GEMM for corner computation. Default value is 1 [S1, unofficial].
+- `GTO_ISO_CORNERS_LIST`: Switch to enable/disable the list-based processing mode. Default is 1 (enabled) [S1, unofficial].
 
-**Edge Cases:**
-*   **Precision:** Not given in the sources [S1].
-*   **Boundaries:** Not given in the sources [S1].
-*   **Degenerate Input:** Not given in the sources [S1].
+**Edge Cases and Pitfalls:**
+- **Boundaries:** Points near the edge of the grid or brick boundaries must correctly identify neighboring bricks. The octree structure ensures that rejected siblings are kept to maintain neighbor connectivity [S1, unofficial].
+- **Degenerate Input:** If a point is far from any brick, it may skip all shells. The kernel handles this by checking shell reachability [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def iso_corners_list_f1v4(points, function_count, octree):
+def iso_corners_list_f1v4_kernel(points, brick_ids, shell_data, coeffs):
     group_size = 256
-    for group_start in range(0, len(points), group_size):
-        group_points = points[group_start:group_start + group_size]
-        # Compute bounding box of the group
-        min_coord = min(p.coord for p in group_points)
-        max_coord = max(p.coord for p in group_points)
-        # List shells intersecting the box
-        shells = [s for s in octree.shells if box_intersects_shell(min_coord, max_coord, s)]
-        # Shared setup for the group
-        shell_setup = compute_shared_setup(shells)
-        # Process each point in the group
-        for i, point in enumerate(group_points):
-            # Determine reachable shells
-            reachable = [s for s in shells if shell_reaches_point(s, point)]
-            # Skip wave if no points in group reach a shell
-            if not reachable:
-                continue
-            # Compute corner indices for active shells (exact index math not given in sources) [G]
-            corners = []
-            for s, meta in zip(reachable, shell_setup):
-                corners.append(compute_single_corner(point, s, meta))
-            # Map to brick slots, skipping rejected siblings (mask 0)
-            for c in corners:
-                if octree.brick_mask[c.brick_id] != 0:
-                    octree.emit_corner(c)
+    shared_shells = [None] * 1024  # Group-shared memory allocation [G]
 
-def box_intersects_shell(box_min, box_max, shell):
-    return not (box_max.x < shell.min.x or box_min.x > shell.max.x or
-                box_max.y < shell.min.y or box_min.y > shell.max.y or
-                box_max.z < shell.min.z or box_min.z > shell.max.z)
+    # 1. Identify bricks for the 256 points (spans 2-4 neighbors) [S1, unofficial]
+    # Brick hash is built on-device; rejected siblings (mask 0) are kept for neighbor continuity [S1, unofficial]
 
-def shell_reaches_point(shell, point):
-    return (shell.min.x <= point.coord.x <= shell.max.x and
-            shell.min.y <= point.coord.y <= shell.max.y and
-            shell.min.z <= point.coord.z <= shell.max.z)
+    # 2. Shared shell setup for the group bounding box [S1, unofficial]
+    group_shells = [s for s in shell_data if is_in_box(s, points[:group_size])]
 
-def compute_shared_setup(shells):
-    return [s.metadata for s in shells]
+    # 3. Load shells into shared memory [S1, unofficial]
+    for i, shell_idx in enumerate(group_shells):
+        shared_shells[i] = shell_data[shell_idx]
 
-def compute_single_corner(point, shell, meta):
-    # Standard corner index calculation for a point within a shell [G]
-    return type('Corner', (), {'brick_id': shell.brick_id, 'index': 0})()
+    # 4. Process each point in the group [S1, unofficial]
+    for i in range(group_size):
+        point = points[i]
+        corner_values = [0.0] * 8
+
+        # Determine which shells are within reach; skip shells out of reach [S1, unofficial]
+        reachable_shells = [s for s in group_shells if distance(point, s.center) <= s.radius]
+
+        for shell in reachable_shells:
+            shell_entry = shared_shells[shell]
+            # Compute contribution to corner values [S1, unofficial]
+            # For f1v4, this is one function; variants handle 8/16/32/64 [S1, unofficial]
+            contribution = shell_entry.evaluate(point)
+            for c in range(8):
+                corner_values[c] += contribution[c]
+
+        # Store result [S1, unofficial]
+        output[i] = corner_values
+
+def is_in_box(shell, pts):
+    return all(shell.min <= p <= shell.max for p in pts)
+
+def distance(p, center):
+    return ((p.x - center.x)**2 + (p.y - center.y)**2 + (p.z - center.z)**2)**0.5
 ```
 
 ## Subtopics
 
+### [Cube Index Calculation](3717-cube-index-calculation.md)
+Computes an 8-bit integer index representing the configuration of a voxel's eight corners relative to an isolevel, determining which edges are intersected by the surface. It calculates the marching cubes case index for each voxel based on corner values relative to an iso-level. Unlike sibling methods that handle sparse point clouds or pre-gathered data, this method operates directly on the scalar values at the voxel corners to produce the topology case.
+
 ### iso_gcorners and iso_geval kernels (Tiled GEMM implementation)
-These variants implement `iso_gcorners` and `iso_geval` as tiled GEMM operations [S1, unofficial]. They process 128 rows per group for corner points of the list, or alternatively 32 vertices × value and gradient channels per group [S1, unofficial]. The parameter `GTO_ISO_GEMM` (default 1) enables this tiled GEMM approach [S1, unofficial]. Per chunk of at most 16 AOs, each thread stores its row's AO values in groupshared memory; thread `(pg, cg)` then multiplies rows `4*pg .. 4*pg + 3` by `F/4` columns of the chunk's C matrix, using one `float4` of AO values and `F/16` `float4` of C per `F/4` multiply-adds, instead of `F/4` `float4` of C per `F` [S1, unofficial]. The epilogues reduce the four column groups per row through groupshared memory (canonical terms) or stage the rows (other terms) [S1, unofficial]. Used for canonical sets of more than 64 functions (wide GEMM w128/w192/y256) or specific sizes 16/32/64 [S1, unofficial].
+Implementation of `iso_gcorners` and `iso_geval` kernels as tiled GEMM operations [S1, unofficial]. Tiled GEMM kernel for computing corners for sets of 16, 32, or 64 functions [S1, unofficial]. Process 128 rows per group for corner points of the list [S1, unofficial]. Alternatively, process 32 vertices x value and gradient channels per group [S1, unofficial]. GTO_ISO_GEMM: Boolean flag enabling tiled GEMM; default value is 1 [S1, unofficial]. Used for canonical sets of more than 64 functions (wide GEMM w128/w192/y256) or specific sizes 16/32/64 [S1, unofficial].
 
 ### Vertex evaluation kernel
-This kernel computes value and gradient at 64 vertices per group of 256 threads, used for sets with densities [S1, unofficial]. One warp per channel (value, d/dx, d/dy, d/dz) accumulates F function columns in registers [S1, unofficial]. Shells are listed and rows of C are staged as for corners [S1, unofficial]. One thread per vertex applies its field's terms from the channels staged 16 vertices at a time [S1, unofficial].
+Kernel for computing value and gradient at 64 vertices per group of 256 threads, used for sets with densities [S1, unofficial]. Kernel step: One warp per channel (value, d/dx, d/dy, d/dz) accumulating F function columns in registers [S1, unofficial]. Kernel step: Shells are listed and rows of C are staged as for corners [S1, unofficial]. Kernel step: One thread per vertex applies its field's terms from the channels staged 16 vertices at a time [S1, unofficial].
 
 ## Operating characteristics
-**Time Complexity:** Not given in the sources [S1].
-**Memory Complexity:** Not given in the sources [S1].
-**Measured Performance:** On lavapipe, mol at h=0.2, the corner kernel times reduced from 38ms to 34ms (HOMO), 168ms to 144ms (diff density), 197ms to 121ms (trans density), 315ms to 246ms (16 MOs) [S1, unofficial].
-**Scaling:** The method scales by processing 256 points per group, sharing setup costs across the group rather than per-brick [S1, unofficial].
-**Strengths:** High thread occupancy (every thread busy); reduced overhead by sharing shell setup across 256 points instead of per-brick (70–125 points) [S1, unofficial].
-**Limitations:** Requires octree brick level to keep slots of rejected siblings (mask 0) to maintain neighbor connectivity [S1, unofficial].
-**When to use:** When high throughput is needed for corner computation on GPU, and the octree structure can accommodate the sibling slot requirement [S1, unofficial].
-**When not:** When memory constraints prevent keeping rejected sibling slots, or when the number of points is too small to benefit from group processing [S1, unofficial].
+- **Time Complexity:** The kernel processes 256 points per group, with shared shell setup reducing overhead [S1, unofficial]. On lavapipe, mol at h=0.2, corner kernel times reduced from 38ms to 34ms (HOMO), 168ms to 144ms (diff density), 197ms to 121ms (trans density), 315ms to 246ms (16 MOs) [S1, unofficial].
+- **Memory Complexity:** Uses group-shared memory for shells, reducing global memory bandwidth [S1, unofficial]. The octree structure keeps rejected siblings to maintain neighbor connectivity, increasing memory usage slightly [S1, unofficial].
+- **Scaling:** Performance scales with the number of threads and groups [S1, unofficial]. Tiled GEMM improves performance for larger function sets [S1, unofficial].
+- **Strengths:** High occupancy due to shared shell setup [S1, unofficial]. Efficient for dense point lists [S1, unofficial].
+- **Limitations:** Requires careful management of shared memory for shells [S1, unofficial]. May not be optimal for very sparse point lists [S1, unofficial].
+- **When to use:** When processing large lists of points for isosurface extraction or interpolation [S1, unofficial].
+- **When not to use:** For very small point lists or sparse data where per-brick processing might be more efficient [S1, unofficial].
 
 ## Background
-Originated in the `md_gto_iso_gpu` optimization for GPU isosurface extraction, specifically in the `iso_corners_list_f{1,8,16,32,64}` kernel implementation [S1, unofficial]. It was developed to improve performance by grouping points and sharing computational overhead [S1, unofficial].
+Originated in the `md_gto_iso_gpu` optimization for GPU isosurface extraction, specifically for molecular orbitals and densities [S1, unofficial]. Co-authored with Claude Opus 5.5 [S1, unofficial]. Used in computational chemistry for visualizing electron densities and molecular orbitals [S1, unofficial].
 
 ## Sources
 [S1] md_gto_iso_gpu: optimized GPU isosurface extraction (non-blocking jobs, flood, one measured path), https://github.com/scanberg/mdlib/pull/15, fetched 2026-10-28 (unofficial)

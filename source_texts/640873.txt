@@ -1,0 +1,480 @@
+A GPU-driven game engine written in Rust, with meshlet-based rendering and an editor. - feat(render): BVH-driven raymarch primitive culling (#115 PR-4) by lobinuxsoft · Pull Request #330 · lobinuxsoft/kooch
+
+feat(render): BVH-driven raymarch primitive culling (#115 PR-4) by lobinuxsoft · Pull Request #330 · lobinuxsoft/kooch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+lobinuxsoft
+commented
+Apr 28, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Wires the GPU LBVH (shipped in #115 PR-3) into the SDF raymarch hot path.
+The fragment shader's eval_scene now walks the BVH stack-based and
+accumulates per-role distances inline; the postfix CSG token stream is
+gone. Closes checkbox 107 of #115 ("Integración con ray marching —
+usar BVH para skip de objetos lejanos").
+Architectural decisions (locked-in)
+Traversal-driven CSG, not hit-list lookup. The earlier draft
+(array<u32, 256> thread-local hit list + token-stream filter) was
+rejected in audit: 1 KiB private memory per ray drowns RDNA 2/4
+registers, and the loop is still O(N tokens) — pure marketing.
+The shipped design replaces the token stream entirely; per-role
+accumulators (add_acc, int_acc, sub_acc) are combined at the
+end with the fixed default tree
+smooth_subtract(smooth_intersect(adds, ints), subs).
+Double-buffered BvhState (slot_a / slot_b). Avoids the
+read-after-write hazard a single shared buffer would expose, plus
+the wgpu memory-barrier stall it would induce. Bond per build:
+(2N − 1) · 32 bytes copied buffer-to-buffer at swap time —
+cheap relative to a stalled frame.
+Determinism via fixed left-before-right stack push order.
+smooth_union is not strictly associative in float32, so the cull-
+vs-cull byte-identity regression test (S9) requires accumulator
+visit order to be a function of BVH topology only. Documented
+in-shader and in the new mdbook chapter.
+Per-role AABB inflation (k_role_max). A primitive in a scene
+where every ADD has k = 0.1 inflates by 0.1 even if its own
+smoothness is 0, because the operator between them carries the
+larger k. Smooth-blend tail can't sneak past the cull boundary.
+primitive_aabb plane sentinel (1e10, not f32::INFINITY).
+Infinity NaNs the slab test under axis-aligned rays.
+Subtasks (12 commits, push per subtask)
+S1. feat(bvh) — re-export BvhGpuBuild, GpuBvhHandle,
+BvhBuildError, BVH_LEAF_FLAG, BVH_VALUE_MASK.
+S2. feat(render/raymarch) — per-primitive world-space AABB
+computation (raymarch/aabb.rs, 12 unit tests).
+S3. feat(render/raymarch) — LeafAabb 32 B std430 layout +
+ROLE_* constants.
+S4. feat(render/raymarch) — BvhState double-buffer (raymarch/ bvh.rs); adds BvhGpuBuilder::nodes_buffer /
+sorted_indices_buffer accessors.
+S5+S6 (atomic for bisectability) — replace eval_scene postfix
+loop with traversal-driven eval_scene_bvh; wire scene update
+to kick_if_dirty + poll_swap; extend bind group with
+bvh_nodes / sorted_indices / leaf_aabbs (drops tokens);
+pass &Queue through RayMarchRenderer::new.
+S7. refactor(render/raymarch) — drop postfix CSG tree from hot
+path (csg_tree.rs deleted, 405 lines gone).
+S8. Bind-group rewire — absorbed in S5+S6 (atomicity required).
+S9. test — cull-vs-cull byte-identical at N=8 and N=1024.
+S10. test — cull-vs-fullscan Lipschitz-bounded (|bvh − fullscan| ≤ k_max + 4·ULP for in-AABB samples; bench: ~1e-4 floor).
+S11. test — perf scaling bench at 1k / 10k / 65k. Speedup
+measured (Ryzen 9 9800X3D + RX 9070 XT, Mesa radv):
+1k = 0.94×, 10k = 1.16×, 65k = 3.19×. Cross-over between
+1k and 10k matches the architectural prediction
+(O(log N) cull dominates only past stack-walk overhead).
+S12. docs(book) — architecture/bvh-raymarch.md + SUMMARY link;
+checkbox 107 ticked via gh issue edit.
+Audit warnings resolved
+W1 — register pressure from 256-u32 hit-list → eliminated. Only
+stack 32 u32 = 128 B private (same order the sphere tracer
+already paid).
+W2 — token-stream O(N) masquerading as O(log N) cull →
+eliminated. The traversal IS the loop; non-overlapping leaves
+are never evaluated.
+W3 — gpu_handle blocking → resolved by double-buffer (slot swap
+at poll_swap).
+W4 — pixel-diff < epsilon hiding determinism bugs → split into
+two tests: cull-vs-cull byte-identical (S9) +
+cull-vs-fullscan Lipschitz-bounded (S10).
+W5 — single tick at the end → push per commit, single tick of
+checkbox 107 at S12.
+Bonus warnings: bench at 10k + 65k (covered by S11); #[doc(hidden)]
+audit (none in ome_bvh); bisectability of S5+S6 (collapsed into
+one atomic commit; each commit cargo check-clean and renders).
+Out of scope (filed as follow-ups in the new mdbook chapter)
+Refit BVH (feat(core): Spatial Acceleration Structure — BVH/Octree compartido #115 checkbox 110) — incremental updates without full
+rebuild.
+OBB-exact AABBs vs the abs(rot_matrix) · half_extents enclosing
+AABB.
+Workgroup-shared bitmap cull — blocked on tile-based shading
+(which itself is blocked on the G-Buffer feat(render): G-Buffer & Deferred Shading Pipeline #132).
+Archetype-level dirty marker vs the u64 hash of primitive bytes.
+Test plan
+cargo test -p ome_render — 35 unit + 3 GPU integration tests
+green (incl. shader parse + validate, layout pinning,
+cull-vs-cull byte-identical, Lipschitz bound).
+cargo test -p ome_bvh — 90 tests still green after the new
+nodes_buffer / sorted_indices_buffer accessors.
+cargo check --workspace — clean.
+Bench (informal, --ignored --nocapture) reports the 1k /
+10k / 65k curve documented in the mdbook chapter.
+Reviewer: confirm the eval_scene_bvh left-before-right
+stack push is the only deterministic order documented; any
+change here must re-derive the determinism story.
+lobinuxsoft
+added 11 commits
+April 28, 2026 10:26
+feat(bvh): re-export Bvh GPU build types and node flag constants
+…
+5b9a8d1
+```
+PR-4 of #115 (raymarch primitive culling) consumes BvhGpuBuild,
+GpuBvhHandle, BvhBuildError, BVH_LEAF_FLAG, and BVH_VALUE_MASK
+from ome_bvh's public API. Surface them through the crate root
+so downstream crates do not have to reach into the gpu/ or node
+modules directly.
+
+No rustdoc(hidden) was added or removed; audited the crate to
+confirm none was already present.
+```
+feat(render/raymarch): per-primitive world-space AABB computation
+…
+eb044a2
+```
+PR-4 of #115. Adds raymarch/aabb.rs with primitive_aabb(): given an
+SdfPrimitive instance and a smooth-blend inflation radius, returns the
+conservative world-space Aabb after scale + rotation + translation.
+
+Per-type local half-extents mirror the analytic SDFs in ome_sdf:
+sphere = radius cube, box = half-extents + rounding, capsule_y =
+(r, h+r, r), cylinder = (r, h, r), torus = (M+m, m, M+m). Plane uses
+a 1e10 sentinel half-extent so the BVH treats it as 'covers
+everything' — matches the analytic plane SDF's infinite support.
+
+Negative inflation is clamped to zero (cull invariant) and negative
+scale is absolutised (no inverted AABBs). Rotation uses the classical
+abs(Mat3) * half-extents OBB-enclosing AABB formula.
+
+12 unit tests cover every primitive type plus the rotation, scaling,
+inflation and plane-sentinel edge cases. Adds ome_bvh as a dependency
+of ome_render to consume Aabb.
+```
+feat(render/raymarch): LeafAabb 32-byte std430 layout + CSG role cons…
+…
+7ba1300
+```
+…tants
+
+PR-4 of #115. Adds LeafAabb — 32-byte struct uploaded per primitive
+to the BVH traversal shader: aabb_min/max (already inflated by the
+primitive's smoothness), role (ADD/INTERSECT/SUBTRACT), and the
+primitive's individual smoothness. Layout mirrors BvhNode at the
+byte level so std430 alignment quirks are fielded once.
+
+ROLE_ADD = 0, ROLE_INTERSECT = 1, ROLE_SUBTRACT = 2 — the WGSL shader
+will mirror these. Field offsets 0/12/16/28 match the shader's
+expectation; offset_of! tests pin them so any later refactor that
+shifts them breaks compilation, not runtime.
+
+INITIAL_LEAF_AABB_CAPACITY ties the leaf-buffer capacity to the
+primitive-buffer capacity (one leaf per primitive). Subsequent BVH
+state work consumes these symbols.
+```
+feat(render/raymarch): double-buffered BvhState for non-blocking GPU …
+…
+dd95629
+```
+…LBVH
+
+PR-4 of #115. Adds raymarch/bvh.rs with BvhState — a sub-resource
+that owns the BvhGpuBuilder plus two output slots (slot_a / slot_b)
+each with stable nodes / sorted_indices / leaf_aabbs buffers. The
+renderer always reads from current_slot; pending builds copy their
+result into the OTHER slot at swap time.
+
+Without this double buffer, kicking a build while the previous
+frame's render still consumed builder.lbvh_buffers.nodes_buffer
+would either corrupt the read or stall the frame on a wgpu memory
+barrier (the read-after-write hazard noted by the parallel auditor).
+Copying `(2N - 1) × 32` bytes per resolved build is far cheaper than
+the alternative.
+
+Lifecycle:
+  1. poll_swap(device, queue) — drives the in-flight build, copies
+     into target slot on completion, flips current_slot.
+  2. caller hashes the scene state (BvhState::hash_scene helper).
+  3. kick_if_dirty(...) — kicks a build into the FREE slot; no-op
+     when hash matches or another build is in flight.
+  4. renderer binds current_*() — always the last completed build.
+
+Hashing covers items, leaf_aabb roles, and per-leaf smoothness so any
+of those changing forces a rebuild. Five unit tests pin hash
+stability + reactivity.
+
+Adds two accessors to BvhGpuBuilder (nodes_buffer + sorted_indices
+_buffer) so PR-4 can stage the inter-slot copy without reaching
+into pub(crate) internals. Both methods document the 'internal
+scratch — not stable across builds' contract; consumers wrap with
+BvhState or hold a BvhGpuBuild alive (PR-3's existing pattern).
+```
+feat(render): BVH-driven scene SDF — replace postfix tokens with trav…
+…
+100391b
+```
+…ersal accumulators
+
+PR-4 of #115. Atomic switch from the postfix CSG token stream
+(eval_scene iterates N tokens with per-step apply_op stack) to a
+BVH-driven traversal (eval_scene_bvh walks the tree, point-queries
+every leaf whose AABB contains p, and accumulates per-role
+distances inline). Primitives whose AABB does not contain p are
+pruned by the stack walk and never evaluated.
+
+Why atomic (S5 + S6 collapsed): bisectability. Splitting into
+"shader replace" then "scene wiring" would leave one of the two
+intermediate commits broken — the shader expects bvh_nodes /
+sorted_indices / leaf_aabbs bindings and SceneMeta with bvh_n that
+the wiring side has not yet uploaded.
+
+Determinism: the traversal pushes left BEFORE right onto the
+fixed stack, so pop order (right-first) is stable across frames.
+smooth_union / smooth_intersection are NOT strictly associative in
+float32, so the cull-vs-cull byte-identity regression test in S9
+requires the per-role accumulator order to be a function of BVH
+topology only — never of runtime ray geometry. Documented in the
+shader header.
+
+Final tree is fixed:
+  smooth_subtract(smooth_intersect(adds, ints, k_int_scene),
+                  subs, k_sub_scene)
+Branches collapse to identity when has_intersects / has_subs == 0.
+Per-role k_max travels in SceneMeta; per-leaf smoothness travels
+in LeafAabb so the inner accumulator uses the primitive's own k.
+
+SceneMeta extended (64 B uniform): primitive_count, bvh_n,
+skip_internal_sky, has_intersects, has_subs, k_int_scene,
+k_sub_scene, _pad, sky_top, sky_bottom. Field offsets pinned by
+offset_of! tests.
+
+Bind group 1 layout changed: drops the postfix tokens binding,
+adds bvh_nodes (2), sorted_indices (3), leaf_aabbs (4). RayMarch
+Renderer now takes a &Queue at construction (forwarded to the
+embedded BvhState's BvhGpuBuilder). All three call sites
+(plugin, raymarch_plugin, editor startup) updated.
+
+update_scene now: collects primitives, computes per-role k_max,
+builds (Vec<(u32, Aabb)>, Vec<LeafAabb>) using primitive_aabb's
+per-role inflation, calls bvh_state.poll_swap + kick_if_dirty,
+rebinds the scene bind group every frame (slot may have flipped).
+
+csg_tree.rs survives as dead code for S7 (drop postfix CSG tree
+from hot path) — explicit cleanup commit, not bundled here.
+```
+refactor(render/raymarch): drop postfix CSG tree from hot path
+…
+7ecebbb
+```
+PR-4 of #115 follow-up to the atomic S5+S6 commit. The traversal-
+driven eval_scene_bvh accumulates per-role distances inline, so the
+postfix RPN token tree (csg_tree::CsgNode + Token + serialise_postfix
++ build_default_tree) is no longer reachable from the renderer.
+Per-role k_max is computed inline in update_scene now.
+
+Removes the entire crates/ome_render/src/raymarch/csg_tree.rs file
+and its mod declaration. The default-tree shape (smooth_subtract of
+smooth_intersect of smooth_union by role) is preserved — it is now
+expressed structurally by the BVH traversal + the fixed final
+combination in eval_scene_bvh.
+
+Drops two stale items from the BVH state introduced in S4: the
+unused DeviceExt import and the BvhState::is_idle accessor that no
+caller exercises. Both would have shown up as dead-code warnings
+otherwise.
+
+24 raymarch unit tests still green, including the shader parse +
+validation regression. csg_tree's own unit tests are gone with the
+file — their coverage was for a code path that no longer ships.
+```
+test(render/raymarch): cull-vs-cull byte-identical GPU determinism (S…
+…
+66fea1c
+```
+…9 of #115 PR-4)
+
+Two new GPU integration tests that exercise the BvhState pipeline
+end-to-end without ECS overhead and prove the per-role accumulator
+order is a function of BVH topology only:
+
+  - cull_vs_cull_byte_identical_n_8 — sanity at small N.
+  - cull_vs_cull_byte_identical_n_1024 — multi-level BVH, exercises
+    the full Karras + onesweep stack.
+
+Each test:
+  1. builds a deterministic random scene (LCG seeded, same seed
+     constants used by the ome_bvh PR-3 tests so reproductions match).
+  2. drives BvhState::kick_if_dirty + poll_swap to GPU completion.
+  3. dispatches a small compute shader that mirrors eval_scene_bvh
+     against a 512 / 2048-point sample grid.
+  4. runs the compute pass twice with the same inputs.
+  5. asserts every output sample's bits are identical across runs
+     (assert_eq on f32::to_bits — bit-exact, not epsilon).
+
+The compute shader is inlined in the test module rather than
+factored into a shared file: the alternative would expose internal
+raymarch types (SdfPrimitive, LeafAabb, SceneMeta) on the public
+crate API just to dedupe ~80 lines of WGSL — a worse trade.
+
+Adds ome_bvh's block_on feature + pollster as dev-dependencies so
+the test can drive the GPU build to completion synchronously.
+
+Catches the determinism class the parallel auditor flagged: smooth_
+union and smooth_intersection are not strictly associative in
+float32, so any non-deterministic visit order across frames would
+leak through here as a non-zero bit difference between runs.
+```
+test(render/raymarch): cull-vs-fullscan Lipschitz-bounded baseline (S…
+…
+0402a1f
+```
+…10 of #115 PR-4)
+
+Adds eval_scene_fullscan to the test compute shader (brute-force
+walk over every primitive in iteration order) and a new test that
+compares it against the BVH-driven eval at sample points
+guaranteed to lie inside primitives' inflated AABBs.
+
+Bound documented in code: |bvh - fullscan| <= k_max + 4·ULP for
+in-AABB samples. Proof sketch (in the test docstring): smooth_union
+collapses to plain min as k → 0 (associative), and stays within k
+of min for k > 0 because the smooth bias decays exponentially past
+the support radius. Test scenes use k = 0 throughout, so the
+effective bound is the float-rounding floor (~1e-4 padded over
+4 * (100 * f32::EPSILON)).
+
+Sample distribution: every primitive's centre + a small radial
+offset, giving ~512 in-AABB sample points across the 256-sphere
+random scene. The previous grid-based generator missed every AABB
+because random spheres in a 100³ box are far smaller than the grid
+spacing — irrelevant for byte-identity (S9) but fatal for a
+Lipschitz comparison.
+
+run_eval_pass takes an entry_point parameter now ('cs_main' for the
+BVH path, 'cs_fullscan' for the baseline). Existing S9 callers
+updated to pass 'cs_main' explicitly.
+```
+test(render/raymarch): perf scaling bench — BVH cull vs fullscan at 1…
+…
+497e507
+```
+…k/10k/65k (S11 of #115 PR-4)
+
+Three #[ignore]-gated tests that drive the test compute shader at
+1024 / 10 240 / 65 000 random spheres each, comparing wall-clock
+time per pass between cs_main (BVH-driven) and cs_fullscan
+(brute-force baseline). Run manually with:
+
+    cargo test -p ome_render --lib bench_scaling        -- --ignored --nocapture
+
+NOT a CI gate — perf is hardware-dependent (RDNA 4 / Mesa radv on
+this run). Reports avg over 5 (3 for 65k) iterations after a 1-pass
+warmup.
+
+Measured on the dev machine (Ryzen 9 9800X3D + RX 9070 XT, Bazzite,
+Mesa radv):
+
+    [N=1024  samples=3072 ]  bvh:  3.79 ms | fullscan:  3.55 ms | 0.94×
+    [N=10240 samples=12288]  bvh:  5.93 ms | fullscan:  6.88 ms | 1.16×
+    [N=65000 samples=67048]  bvh:  4.57 ms | fullscan: 14.56 ms | 3.19×
+
+Speedup at 65k is the relevant figure — small N is dominated by
+stack-walk overhead, exactly as the architectural docs predict. At
+planet-scale primitive counts the cull is the dominant cost saver,
+matching the O(N) → O(log N) goal the issue tracks. The shape of
+the curve also matches the cull-list-based plan rejected in the
+audit: by then the cost of full-scan iteration dominates regardless
+of how cheap each per-leaf test is, so removing the loop entirely
+(traversal-driven) is the only approach that scales.
+```
+docs(book): architecture chapter for BVH-driven raymarch (S12 of #115 …
+…
+35402d9
+```
+…PR-4)
+
+Adds docs/book/src/architecture/bvh-raymarch.md and links it from
+SUMMARY.md. Documents:
+
+  - The end-to-end data flow (ECS → update_scene → BvhState →
+    Bvh::build_gpu → poll_swap → fragment shader bind).
+  - Why two slots: read-after-write hazard avoidance vs the wgpu
+    barrier-induced stall on a single shared buffer.
+  - Why traversal-driven CSG composition replaced the postfix
+    token stream — the rejected hit-list approach + the parallel
+    auditor's call.
+  - Per-role identity-element table for ADD / INTERSECT / SUBTRACT.
+  - Determinism rule: left-before-right stack push, regression
+    test enforcement, smooth_union associativity caveat.
+  - AABB inflation: per-role k_max, not per-instance.
+  - Performance scaling table from the S11 bench (1k / 10k / 65k).
+  - Module map.
+  - Out-of-scope follow-ups (refit, OBB-exact, tile-based bitmap,
+    archetype dirty marker).
+
+Closes the documentation arm of #115 PR-4. Checkbox 107 of #115
+('Integración con ray marching — usar BVH para skip de objetos
+lejanos') ticked separately via gh issue edit.
+```
+refactor(render/raymarch): split bvh.rs into submodules (no-monolithi…
+…
+12aa059
+```
+…c rule)
+
+bvh.rs grew to 1192 LoC after S9/S10/S11 stacked GPU integration
+tests on top of the BvhState lifecycle code. That violates the
+project-wide >400 LoC monolithic-file rule. This commit splits the
+module into a directory with focused files, each well under 400.
+
+Layout:
+
+  crates/ome_render/src/raymarch/bvh/
+  ├── mod.rs           55 — module decls + re-export of BvhState
+  ├── slot.rs          86 — OutputSlot + capacity grow + buffer ctors
+  ├── state.rs        239 — BvhState lifecycle + hash_scene
+  ├── tests.rs         78 — CPU hash unit tests
+  └── gpu_tests/
+      ├── mod.rs        25 — submodule decls
+      ├── shader.rs    145 — TEST_COMPUTE_WGSL kernel
+      ├── harness.rs   316 — try_acquire_device, scene gen, run_eval_pass
+      ├── byte_identical.rs  86 — S9 tests (N=8, N=1024)
+      ├── lipschitz.rs       110 — S10 test
+      └── bench.rs            94 — S11 #[ignore] benches
+
+Behaviour identical to before — no test was rewritten, no helper
+renamed, no public API changed. Two minor improvements pulled out
+during the split:
+
+  - items_from_leaves() helper extracted (the same 8-line closure
+    repeated in 4 tests, now one line at the call site).
+  - default_test_meta() helper extracted (the same 11-field
+    SceneMeta literal repeated in 5 tests, now one line).
+
+Test plan:
+  - cargo test -p ome_render --lib: 31 passed, 3 ignored, 0 failed.
+  - cargo check --workspace: clean.
+  - GPU tests still byte-identical at N=8 / N=1024 (S9), within
+    Lipschitz bound at N=256 (S10), benches still run with --ignored.
+
+Follow-ups deferred (not in this PR — per maintainer):
+  - Borrar gpu_handle() + GpuBvhHandle (zombie post double-buffer).
+  - Refactor crates/ome_bvh/src/gpu/builder.rs (481 LoC, heredado).
+  - Bench raymarch frame end-to-end (S11 mide point queries, no
+    sphere tracing).
+```
+lobinuxsoft
+merged commit cfa439c
+into
+development
+Apr 28, 2026
+lobinuxsoft
+deleted the
+115-featcore-spatial-acceleration-structure-bvhoctree-compartido
+branch
+April 28, 2026 15:24
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

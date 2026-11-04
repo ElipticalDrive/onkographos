@@ -1,0 +1,175 @@
+--- v001.md
++++ v002.md
+@@ -2,18 +2,18 @@
+ Also called: OpenVDB Hierarchical Compression, VDB
+ ## Overview
+-OpenVDB is a sparse voxel representation used for the hierarchical encoding and compression of volumetric grids, featuring fast $O(1)$ random access for modification and retrieval operations [S1, unofficial]. It solves the problem of efficiently storing and accessing large, sparse volumetric datasets by using a shallow tree structure that balances memory overhead with traversal speed. It is distinguished from its siblings by its specific four-level topology and 64-bit direct access bit masks that encode topology and data pointers, making it a standard in production visual effects and scientific visualization [S1, unofficial].
++OpenVDB is a sparse voxel representation used for the hierarchical encoding and compression of volumetric grids, featuring fast $O(1)$ random access for modification and retrieval operations [S1, unofficial]. It solves the problem of efficiently storing and accessing large, sparse volumetric datasets by using a shallow tree structure that balances memory overhead with traversal speed [S1, unofficial]. It is distinguished from its siblings by its specific four-level topology and 64-bit direct access bit masks that encode topology and data pointers, making it a standard in production visual effects and scientific visualization [S1, unofficial].
+ ## How it works
+ **Inputs and Outputs:**
+-Input is a dense or sparse volumetric grid. Output is a serialized OpenVDB tree structure containing hierarchical node data and voxel values.
++Input is a dense or sparse volumetric grid [S1, unofficial]. Output is a serialized OpenVDB tree structure containing hierarchical node data and voxel values [S1, unofficial].
+ 
+ **Data Structures:**
+-The structure is a shallow tree with four levels: Root, Internal (Tile), and Leaf.
+-1.  **Bit Masks:** Each level stores a 64-bit direct access bit mask.
+-    *   **Internal Nodes (Tiles):** The bit mask encodes the child ID or representative values for the entire tile.
+-    *   **Leaf Nodes:** The bit mask encodes the leaf origin using $3 \times 20$ bits. Other bits encode metadata (e.g., compression status, quantization).
++The structure is a shallow tree with four levels: Root, Internal (Tile), and Leaf [S1, unofficial].
++1.  **Bit Masks:** Each level stores a 64-bit direct access bit mask [S1, unofficial].
++    *   **Internal Nodes (Tiles):** The bit mask encodes the child ID or representative values for the entire tile [S1, unofficial].
++    *   **Leaf Nodes:** The bit mask encodes the leaf origin using $3 \times 20$ bits [S1, unofficial]. Other bits encode metadata (e.g., compression status, quantization) [S1, unofficial].
+ 2.  **Leaf Node Payload:**
+-    *   A bit mask indicating which voxels are active.
+-    *   A raw pointer to the voxel data array.
+-3.  **Voxel Data:** Stored in arrays pointed to by leaf nodes.
++    *   A bit mask indicating which voxels are active [S1, unofficial].
++    *   A raw pointer to the voxel data array [S1, unofficial].
++3.  **Voxel Data:** Stored in arrays pointed to by leaf nodes [S1, unofficial].
+ 
+ **Parameters:**
+@@ -22,22 +22,19 @@
+ 
+ **Algorithm (Tree Construction and Access):**
+-The tree is constructed to allow $O(1)$ access. The root has a variable number of children, while internal nodes have a fixed number of children.
++The tree is constructed to allow $O(1)$ access [S1, unofficial]. The root has a variable number of children, while internal nodes have a fixed number of children [S1, unofficial].
+ 
+-1.  **Initialization:** Create the root node.
++1.  **Initialization:** Create the root node [S1, unofficial].
+ 2.  **Insertion/Modification:**
+-    *   Calculate the node index for the target coordinate.
+-    *   Use the 64-bit bit mask at the current level to determine the child node index.
+-    *   If the child does not exist, create it.
+-    *   Recurse to the next level until the Leaf level is reached.
++    *   Calculate the node index for the target coordinate [S1, unofficial].
++    *   Use the 64-bit bit mask at the current level to determine the child node index [S1, unofficial].
++    *   If the child does not exist, create it [S1, unofficial].
++    *   Recurse to the next level until the Leaf level is reached [S1, unofficial].
+ 3.  **Leaf Access:**
+-    *   At the leaf level, use the 64-bit mask to decode the leaf origin ($3 \times 20$ bits) and metadata.
+-    *   Use the active voxel bit mask to locate the specific voxel within the leaf's data array.
+-    *   Return the value via the raw pointer.
++    *   At the leaf level, use the 64-bit mask to decode the leaf origin ($3 \times 20$ bits) and metadata [S1, unofficial].
++    *   Use the active voxel bit mask to locate the specific voxel within the leaf's data array [S1, unofficial].
++    *   Return the value via the raw pointer [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Assuming a 4-level tree: Root (Level 0), Internal (Level 1, 2), Leaf (Level 3)
+-# Node structure contains: bit_mask (64-bit int), children (list of nodes), data_ptr (pointer)
+-
+ def get_voxel(root, coords):
+     """
+@@ -49,21 +46,20 @@
+     # Traverse levels 0 to 2 (Root and Internal nodes)
+     for level in range(3):
+-        # Calculate child index based on coordinates and level-specific bit mask
+-        # The exact bit extraction depends on the specific topology (fixed vs variable children)
+-        # For OpenVDB, the 64-bit mask provides direct access to the child ID
+-        child_index = extract_child_index(node.bit_mask, coords, level)
++        # [G] Exact bit extraction from the 64-bit mask depends on OpenVDB version.
++        # Standard approach: shift coordinate bits by level-specific offsets.
++        child_index = (coords[0] >> (level * 3)) & 0x7
+         
+-        if child_index is None:
++        if child_index is None or not node.has_child(child_index):
+             return None # Voxel not present (empty space)
+         
+         node = node.children[child_index]
+         
+-        # If we are at the last internal level, the next node is a Leaf
+-        if level == 2:
+-            break
+-            
+     # Now node is a Leaf
+     # Decode leaf origin from the 64-bit mask (3 * 20 bits)
+-    leaf_origin = decode_leaf_origin(node.bit_mask)
++    # [G] Sources do not specify exact bit positions; standard extraction assumes contiguous blocks.
++    leaf_origin_x = (node.bit_mask >> 40) & 0xFFFFF
++    leaf_origin_y = (node.bit_mask >> 20) & 0xFFFFF
++    leaf_origin_z = node.bit_mask & 0xFFFFF
++    leaf_origin = (leaf_origin_x, leaf_origin_y, leaf_origin_z)
+     
+     # Calculate local coordinates within the leaf
+@@ -73,52 +69,18 @@
+     
+     # Check if the voxel is active using the leaf's active bit mask
+-    if not is_voxel_active(node.active_mask, local_coords):
++    local_idx = local_coords[0] + local_coords[1] * 8 + local_coords[2] * 64
++    if not (node.active_mask >> local_idx) & 1:
+         return None # Voxel is inactive (e.g., zero or background)
+     
+     # Retrieve value from the raw data pointer
+-    # The data array is typically stored in a linear format (e.g., XYZ order)
+-    data_index = compute_linear_index(local_coords, leaf_size=8)
++    data_index = local_idx
+     return node.data_ptr[data_index]
+-
+-def extract_child_index(bit_mask, coords, level):
+-    """
+-    Extracts the child node index from the 64-bit bit mask.
+-    Implementation detail: The specific bit positions and mapping depend on the 
+-    OpenVDB version and whether the level has fixed or variable children.
+-    [G] Placeholder for the specific bit-packing logic defined in the OpenVDB library.
+-    """
+-    # This function must implement the specific bit extraction for the 64-bit mask
+-    # at the given tree level.
+-    pass
+-
+-def decode_leaf_origin(bit_mask):
+-    """
+-    Decodes the leaf origin from the 3 * 20 bits of the 64-bit mask.
+-    """
+-    # Extract 20 bits for X, 20 for Y, 20 for Z
+-    # [G] Placeholder for specific bit extraction logic.
+-    pass
+-
+-def is_voxel_active(active_mask, local_coords):
+-    """
+-    Checks if a voxel is active in the leaf's active bit mask.
+-    """
+-    # Map local_coords to a bit index in the active_mask
+-    # [G] Placeholder for bit index calculation.
+-    pass
+-
+-def compute_linear_index(local_coords, leaf_size=8):
+-    """
+-    Computes the linear index in the leaf's data array.
+-    """
+-    x, y, z = local_coords
+-    return x + y * leaf_size + z * leaf_size * leaf_size
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Empty Space:** If a child node does not exist, the traversal stops, and the value is considered background/empty.
+-*   **Inactive Voxels:** Even if a leaf exists, individual voxels may be inactive. The active bit mask must be checked.
+-*   **Precision:** The leaf origin is encoded in 20 bits per axis. Ensure coordinates fit within this range.
+-*   **Memory:** The structure relies on raw pointers. When transferring data to GPU or other address spaces, pointers must be resolved or converted to offsets [S1, unofficial].
++*   **Empty Space:** If a child node does not exist, the traversal stops, and the value is considered background/empty [S1, unofficial].
++*   **Inactive Voxels:** Even if a leaf exists, individual voxels may be inactive. The active bit mask must be checked [S1, unofficial].
++*   **Precision:** The leaf origin is encoded in 20 bits per axis. Ensure coordinates fit within this range [S1, unofficial].
++*   **Memory:** The structure relies on raw pointers. The data prevails in address spaces visible to the CPU [S1, unofficial].
+ 
+ ## Subtopics
+@@ -131,9 +93,12 @@
+ 
+ ### [VDB 3-4-5 Tree Traversal](4996-vdb-3-4-5-tree-traversal.md)
+-A hierarchical sparse voxel grid structure using a 3-4-5 tree topology, where nodes are organized in levels of size $3^3$, $4^4$, and $5^5$ voxels, stored in compressed texture atlases.
++The VDB 3-4-5 Tree Traversal is a method for retrieving leaf node data from an OpenVDB file stored in a compressed texture atlas format using a hierarchical 3-4-5 tree topology. It solves the problem of random access to sparse volumetric data by mapping 3D coordinates to leaf values through a fixed-depth traversal of nodes with sizes $3^3$, $4^4$, and $5^5$. It differs from standard pointer-based OpenVDB by storing the tree structure in compressed texture atlases rather than explicit pointers, and from NanoVDB by using a specific 3-4-5 hierarchy instead of a linearized or standard octree representation.
++
++### [OpenVDB File Format Parsing](5173-openvdb-file-format-parsing.md)
++This method describes the binary parsing of the OpenVDB file format to reconstruct sparse voxel grids in memory. It solves the problem of loading hierarchical, compressed volumetric data from disk into a traversable tree structure. Unlike raw voxel grids, this method handles sparse storage via Node5 and Node4 internal nodes, and Node3 leaf nodes, supporting both active mask compression and value compression. It differs from [NanoVDB Linear Representation](1527-nanovdb-linear-representation.md) by maintaining a hierarchical tree structure in memory rather than a flat linear array, and from [VDB Volume Rendering with OpenVDB/NanoVDB](804-vdb-volume-rendering-with-openvdb-nanovdb.md) by focusing solely on data loading rather than rendering traversal.
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** $O(1)$ random access for modification and retrieval [S1, unofficial].
+-*   **Memory Complexity:** Sparse storage; only non-empty nodes and active voxels are stored. The 64-bit bit masks add a fixed overhead per node.
++*   **Memory Complexity:** Sparse storage; only non-empty nodes and active voxels are stored. The 64-bit bit masks add a fixed overhead per node [S1, unofficial].
+ *   **Performance:** Well-suited for visual effects rendering of volumetric data from fluid simulations [S1, unofficial]. Fast access and modification allow for runtime editing [S1, unofficial].
+ *   **Strengths:** Fast $O(1)$ access, out-of-core streaming support, integration with production tools (Houdini, Cycles) [S1, unofficial].
+@@ -143,5 +108,5 @@
+ 
+ ## Background
+-OpenVDB was introduced by Ken Museth in a paper that established the sparse voxel representation [S1, unofficial]. It is an open-source library resulting from Museth's work, designed for hierarchical encoding and compression of volumetric grids. It has become well-established due to its integration into production renderers like Cycles and visual effects software such as Houdini and Cinema 4D [S1, unofficial]. It is popular in industry-strength libraries optimized for construction and sampling on NVIDIA GPUs [S1, unofficial].
++OpenVDB was introduced by Ken Museth in a paper that established the sparse voxel representation [S1, unofficial]. It is an open-source library resulting from Museth's work, designed for hierarchical encoding and compression of volumetric grids [S1, unofficial]. It has become well-established due to its integration into production renderers like Cycles and visual effects software such as Houdini and Cinema 4D [S1, unofficial]. It is popular in industry-strength libraries optimized for construction and sampling on NVIDIA GPUs [S1, unofficial].
+ 
+ ## Sources

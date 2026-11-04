@@ -1,0 +1,312 @@
+# Gaussian Splatting Rendering Pipeline
+
+Also called: 3D Gaussian Splatting Rendering Pipeline, Gaussian Splatting Rasterization, Tile-based Gaussian Rasterization, render_view pipeline
+
+## Overview
+The Gaussian Splatting Rendering Pipeline orchestrates camera setup, spherical harmonic (SH) evaluation, feature assembly, and Gaussian rasterization for a single view [S1, unofficial]. It projects 3D Gaussians to 2D screen space, rasterizes them into tiles, and composites them front-to-back using alpha blending to produce novel views [S2, unofficial]. It sets apart from its siblings by managing the pre-computation of covariances, colors, and lighting models, and assembling auxiliary features before invoking the differentiable rasterizer [S1, unofficial].
+
+## How it works
+The pipeline processes a single camera view to produce a rendered image and associated auxiliary features [S1, unofficial]. It assumes the existence of a `GaussianModel` object (`pc`) containing the 3D Gaussians and a `pipeline` configuration object (`pipe`) controlling computation modes [S1, unofficial].
+
+### Inputs and Outputs
+**Inputs:**
+*   `pc`: The Gaussian model containing `means3D` (N, 3), `scales` (N, 3), `rotations` (N, 4), `opacities` (N), `shs` (N, K, 3), and covariance data [S1, unofficial].
+*   `camera`: Object with `image_width`, `image_height`, `fov_x`, `fov_y`, `cx`, `cy`, `world_view_transform`, `full_proj_transform`, `camera_center` [S1, unofficial].
+*   `pipe`: Configuration object with flags `compute_cov3D_python`, `compute_SHs_python`, and integer `sh_degree` [S1, unofficial].
+*   `background`: Tensor (3,) representing the background color [S1, unofficial].
+*   `override_color`: Optional tensor for direct color override [S1, unofficial].
+*   `light_transform`: Optional object providing light direction; if absent, headlights are used [S1, unofficial].
+
+**Outputs:**
+*   `rendered_image`: Tensor (H, W, 3) of the final RGB image [S2, unofficial].
+*   `rendered_opacity`: Tensor (H, W, 1) of accumulated opacity [S1, unofficial].
+*   `rendered_depth`: Tensor (H, W, 1) of depth [S1, unofficial].
+*   `rendered_feature`: Tensor containing concatenated auxiliary features [S1, unofficial].
+*   `radii`: Tensor (N,) of screen-space radii for each Gaussian [S1, unofficial].
+*   `num_rendered`: Count of Gaussians contributing to at least one pixel [S1, unofficial].
+*   `num_contrib`: Count of Gaussians contributing to each pixel [S1, unofficial].
+
+### Data Structures
+*   `GaussianRasterizationSettings`: A configuration object passed to the rasterizer. Fields include `image_width`, `image_height`, `tanfovx`, `tanfovy`, `cx`, `cy`, `background`, `scale_modifier`, `viewMatrix`, `projMatrix`, `sh_degree`, `cameraPosition` [S1, unofficial].
+*   `screenspace_points`: Tensor (N, 2) initialized to zeros on CUDA with `requires_grad=True` to capture 2D mean gradients [S1, unofficial].
+
+### Steps
+1.  **Initialize Gradient Tracking:**
+    Create `screenspace_points` as a zero tensor on CUDA with `requires_grad=True` [S1, unofficial]. Attempt to retain gradients via `retain_grad()` for debugging purposes [S1, unofficial].
+
+2.  **Compute Camera Intrinsics:**
+    Calculate tangent field-of-view values:
+    $$ \text{tanfovx} = \tan(\text{fov}_x / 2) $$
+    $$ \text{tanfovy} = \tan(\text{fov}_y / 2) $$
+    Extract principal points `cx` and `cy` from the camera intrinsics [S1, unofficial].
+
+3.  **Construct Rasterization Settings:**
+    Assemble `GaussianRasterizationSettings` with:
+    *   Image dimensions from `camera`.
+    *   `tanfovx`, `tanfovy`, `cx`, `cy`.
+    *   `background` color.
+    *   `scale_modifier` (default 1.0).
+    *   `viewMatrix` and `projMatrix` from `camera.world_view_transform` and `camera.full_proj_transform` [S1, unofficial].
+    *   `sh_degree` from `pipe`.
+    *   `cameraPosition` from `camera.camera_center` [S1, unofficial].
+
+4.  **Select Covariance Representation:**
+    *   If `pipe.compute_cov3D_python` is true:
+        Compute `cov3D_precomp` by calling `pc.get_covariance(scaling_modifier)` [S1, unofficial].
+    *   Otherwise:
+        Retrieve `scales` and `rotations` directly from `pc.get_scaling()` and `pc.get_rotation()` to be processed by the CUDA kernel [S1, unofficial].
+
+5.  **Select Color Representation:**
+    *   If `override_color` is None and `pipe.compute_SHs_python` is true:
+        *   Normalize view directions.
+        *   Extract SH coefficients from `pc.shs` [S1, unofficial].
+        *   Evaluate SH functions to compute colors [S1, unofficial].
+        *   Apply RGB conversion and clamp to $[0.0, 1.0]$ using:
+            $$ \text{colors\_precomp} = \max(\text{sh2rgb} + 0.5, 0.0) $$
+            (Note: The source specifies `clamp_min(sh2rgb + 0.5, 0.0)`, implying a specific SH basis or offset handling) [S1, unofficial].
+    *   Otherwise:
+        Pass `shs` directly to the rasterizer, allowing the CUDA kernel to handle SH evaluation [S1, unofficial].
+
+6.  **Compute Lighting and Features:**
+    *   Determine view directions and incident light directions. If `light_transform` exists and provides a light direction, use it; otherwise, default to view directions (headlights) [S1, unofficial].
+    *   Evaluate Blinn-Phong shading using `rendering_equation_BlinnPhong_python` to produce `brdf_color` and `extra_results` [S1, unofficial].
+    *   Concatenate features for rasterization:
+        *   **Training:** Concatenate `[brdf_color, normal, offset_color, diffuse_factor, shininess, ambient_factor, specular_factor, extra_results['offset_color_norm']]` [S1, unofficial].
+        *   **Inference:** Replace the last element with mean diffuse, specular, and ambient renders [S1, unofficial].
+
+7.  **Invoke Rasterizer:**
+    Call the `rasterizer` with the following arguments:
+    *   `means3D`: 3D positions.
+    *   `means2D`: Initial 2D positions (often zeros or projected means).
+    *   `shs`: Spherical harmonic coefficients.
+    *   `colors_precomp`: Pre-computed colors (if applicable).
+    *   `opacities`: Opacity values.
+    *   `scales`: Scale values.
+    *   `rotations`: Rotation quaternions.
+    *   `cov3D_precomp`: Pre-computed covariances (if applicable).
+    *   `features`: Concatenated feature tensor [S1, unofficial].
+
+    Unpack the outputs: `num_rendered`, `num_contrib`, `rendered_image`, `rendered_opacity`, `rendered_depth`, `rendered_feature`, `rendered_pseudo_normal`, `rendered_surface_xyz`, `radii` [S1, unofficial].
+
+8.  **Split Rendered Features:**
+    Split `rendered_feature` into components based on channel widths `[3, 3, 3, 1, 1, 1, 1, 1]` corresponding to:
+    *   `rendered_phong` (3 channels)
+    *   `rendered_normal` (3 channels)
+    *   `rendered_offset_color` (3 channels)
+    *   `rendered_diffuse_factor` (1 channel) [S1, unofficial].
+    *   `rendered_shininess` (1 channel) [S1, unofficial].
+    *   `rendered_amibent_factor` (1 channel) [S1, unofficial].
+    *   `rendered_specular_factor` (1 channel) [S1, unofficial].
+    *   `rendered_offset_color_norm` (1 channel) [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+
+class GaussianRasterizationSettings:
+    def __init__(self, image_width, image_height, tanfovx, tanfovy, cx, cy, background, scale_modifier, viewMatrix, projMatrix, sh_degree, cameraPosition):
+        self.image_width = image_width
+        self.image_height = image_height
+        self.tanfovx = tanfovx
+        self.tanfovy = tanfovy
+        self.cx = cx
+        self.cy = cy
+        self.background = background
+        self.scale_modifier = scale_modifier
+        self.viewMatrix = viewMatrix
+        self.projMatrix = projMatrix
+        self.sh_degree = sh_degree
+        self.cameraPosition = cameraPosition
+
+class GaussianRasterizer:
+    def __init__(self, settings):
+        self.settings = settings
+    def __call__(self, means3D, means2D, shs, colors_precomp, opacities, scales, rotations, cov3D_precomp, features):
+        # Stub for CUDA kernel invocation
+        return 0, torch.zeros_like(means2D[:, :1]), torch.zeros((self.settings.image_height, self.settings.image_width, 3)), torch.zeros((self.settings.image_height, self.settings.image_width, 1)), torch.zeros((self.settings.image_height, self.settings.image_width, 1)), torch.zeros((self.settings.image_height, self.settings.image_width, 10)), torch.zeros((self.settings.image_height, self.settings.image_width, 3)), torch.zeros((self.settings.image_height, self.settings.image_width, 3)), torch.zeros(means3D.shape[0])
+
+def normalize(v):
+    return v / torch.norm(v)
+
+def evaluate_sh(sh_coeffs, view_dirs):
+    # Standard SH evaluation stub
+    return torch.sum(sh_coeffs * view_dirs.unsqueeze(1), dim=-1)
+
+def rendering_equation_BlinnPhong_python(pc, light_dir, view_dir):
+    # Stub for Blinn-Phong shading
+    brdf_color = pc.normals * light_dir
+    extra_results = {'offset_color_norm': torch.zeros_like(pc.normals)}
+    return brdf_color, extra_results
+
+def render_view_pipeline(pc, camera, pipe, background, override_color=None, light_transform=None):
+    # Step 1: Initialize gradient tracking
+    screenspace_points = torch.zeros((pc.get_xyz().shape[0], 2), device='cuda', requires_grad=True)
+    try:
+        screenspace_points.retain_grad()
+    except Exception:
+        pass
+
+    # Step 2: Compute Camera Intrinsics
+    tanfovx = math.tan(camera.fov_x / 2)
+    tanfovy = math.tan(camera.fov_y / 2)
+    cx = camera.cx
+    cy = camera.cy
+
+    # Step 3: Construct Rasterization Settings
+    raster_settings = GaussianRasterizationSettings(
+        image_width=camera.image_width,
+        image_height=camera.image_height,
+        tanfovx=tanfovx,
+        tanfovy=tanfovy,
+        cx=cx,
+        cy=cy,
+        background=background,
+        scale_modifier=1.0,
+        viewMatrix=camera.world_view_transform,
+        projMatrix=camera.full_proj_transform,
+        sh_degree=pipe.sh_degree,
+        cameraPosition=camera.camera_center
+    )
+
+    # Step 4: Select Covariance Representation
+    if pipe.compute_cov3D_python:
+        cov3D_precomp = pc.get_covariance(1.0)
+    else:
+        scales = pc.get_scaling()
+        rotations = pc.get_rotation()
+        cov3D_precomp = None
+
+    # Step 5: Select Color Representation
+    if override_color is None and pipe.compute_SHs_python:
+        view_dirs = normalize(camera.view_direction)
+        sh_coeffs = pc.shs
+        sh2rgb = evaluate_sh(sh_coeffs, view_dirs)
+        colors_precomp = torch.clamp(sh2rgb + 0.5, min=0.0)
+    else:
+        colors_precomp = None
+        shs = pc.shs
+
+    # Step 6: Compute Lighting and Features
+    if light_transform is not None and light_transform.has_light_direction():
+        light_dir = light_transform.get_light_direction()
+    else:
+        light_dir = camera.view_direction
+
+    brdf_color, extra_results = rendering_equation_BlinnPhong_python(pc, light_dir, camera.view_direction)
+
+    # Concatenate features
+    if pipe.training_mode:
+        features = torch.cat([
+            brdf_color,
+            pc.normals,
+            pc.offset_color,
+            pc.diffuse_factor,
+            pc.shininess,
+            pc.ambient_factor,
+            pc.specular_factor,
+            extra_results['offset_color_norm']
+        ], dim=-1)
+    else:
+        mean_diffuse = torch.mean(pc.diffuse_factor)
+        mean_specular = torch.mean(pc.specular_factor)
+        mean_ambient = torch.mean(pc.ambient_factor)
+        features = torch.cat([
+            brdf_color,
+            pc.normals,
+            pc.offset_color,
+            pc.diffuse_factor,
+            pc.shininess,
+            pc.ambient_factor,
+            pc.specular_factor,
+            mean_diffuse
+        ], dim=-1)
+
+    # Step 7: Invoke Rasterizer
+    rasterizer = GaussianRasterizer(raster_settings)
+    means3D = pc.get_xyz()
+    means2D = screenspace_points
+
+    num_rendered, num_contrib, rendered_image, rendered_opacity, rendered_depth, rendered_feature, rendered_pseudo_normal, rendered_surface_xyz, radii = rasterizer(
+        means3D=means3D,
+        means2D=means2D,
+        shs=shs,
+        colors_precomp=colors_precomp,
+        opacities=pc.get_opacity(),
+        scales=scales if not pipe.compute_cov3D_python else None,
+        rotations=rotations if not pipe.compute_cov3D_python else None,
+        cov3D_precomp=cov3D_precomp,
+        features=features
+    )
+
+    # Step 8: Split Rendered Features
+    channel_widths = [3, 3, 3, 1, 1, 1, 1, 1]
+    start_idx = 0
+    rendered_phong = rendered_feature[..., start_idx:start_idx+3]
+    start_idx += 3
+    rendered_normal = rendered_feature[..., start_idx:start_idx+3]
+    start_idx += 3
+    rendered_offset_color = rendered_feature[..., start_idx:start_idx+3]
+    start_idx += 3
+    rendered_diffuse_factor = rendered_feature[..., start_idx:start_idx+1]
+    start_idx += 1
+    rendered_shininess = rendered_feature[..., start_idx:start_idx+1]
+    start_idx += 1
+    rendered_amibent_factor = rendered_feature[..., start_idx:start_idx+1]
+    start_idx += 1
+    rendered_specular_factor = rendered_feature[..., start_idx:start_idx+1]
+    start_idx += 1
+    rendered_offset_color_norm = rendered_feature[..., start_idx:start_idx+1]
+
+    return {
+        'rendered_image': rendered_image,
+        'rendered_opacity': rendered_opacity,
+        'rendered_depth': rendered_depth,
+        'rendered_feature': rendered_feature,
+        'radii': radii,
+        'num_rendered': num_rendered,
+        'num_contrib': num_contrib,
+        'features': {
+            'phong': rendered_phong,
+            'normal': rendered_normal,
+            'offset_color': rendered_offset_color,
+            'diffuse_factor': rendered_diffuse_factor,
+            'shininess': rendered_shininess,
+            'ambient_factor': rendered_amibent_factor,
+            'specular_factor': rendered_specular_factor,
+            'offset_color_norm': rendered_offset_color_norm
+        }
+    }
+```
+
+### Parameters and Edge Cases
+*   **Parameters:**
+    *   `near`: Depth clipping plane near distance. Default: 2e-3 [S2, unofficial].
+    *   `far`: Depth clipping plane far distance. Default: 100 [S2, unofficial].
+    *   `pix_guard`: Pixel guard band width for culling. Default: 64 [S2, unofficial].
+    *   `T`: Tile size for rasterization (number of pixels per tile dimension). Default: 16 [S2, unofficial].
+    *   `chi_square_clip`: Chi-square clipping threshold for covariance regularization. Default: 9.21 (approx 3σ) [S2, unofficial].
+    *   `alpha_max`: Maximum alpha value to prevent numerical instability. Default: 0.99 [S2, unofficial].
+    *   `alpha_cutoff`: Alpha cutoff threshold for early termination. Default: 1/255 [S2, unofficial].
+*   **Edge Cases and Pitfalls:**
+    *   **Precision:** SH evaluation can suffer from precision issues if not normalized correctly. The clamping step `clamp_min(sh2rgb + 0.5, 0.0)` is specific to the source implementation and may require adjustment for different SH bases [S1, unofficial].
+    *   **Boundaries:** The rasterizer handles screen-space boundaries, but Gaussians far outside the frustum should be culled before rasterization for efficiency (not explicitly detailed in the pipeline steps but implied by `num_rendered`) [S1, unofficial].
+    *   **Degenerate Input:** If `pc` has no Gaussians, the rasterizer should return empty tensors [G]. The `screenspace_points` initialization ensures gradients are tracked even if no Gaussians are rendered, which may cause unnecessary computation [S1, unofficial].
+
+## Subtopics
+
+### Octree-GS Rendering
+Octree-GS Rendering extends the standard pipeline by integrating an octree structure for efficient visibility culling and feature storage [S3, unofficial]. It initializes a `GaussianModel` with dataset-specific parameters including `feat_dim`, `n_offsets`, `fork`, `use_feat_bank`, `appearance_dim`, `add_opacity_dist`, `add_cov_dist`, `add_color_dist`, `add_level`, `visible_threshold`, `dist2level`, `base_layer`, `progressive`, and `extend` [S3, unofficial]. A compatibility patch is applied to `gaussian_renderer.generate_neural_gaussians` to replace `ape_code[0]` with `ape_code` [S3, unofficial]. The pipeline sets an anchor mask for the current view using `gaussians.set_anchor_mask(view.camera_center, scene.loaded_iter, view.resolution_scale)` [S3, unofficial]. It then pre-filters voxels to determine visibility using `prefilter_voxel(view, gaussians, pipeline, background)` [S3, unofficial]. Finally, it renders the scene using `render(view, gaussians, pipeline, background, visible_mask=visible, ape_code=args.ape)` where `ape_code` is an integer argument with a default value of 10 [S3, unofficial]. The rendered image is clamped to $[0.0, 1.0]$ and saved, and the number of visible Gaussians per view is recorded in `per_view_count.json` [S3, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The Gaussian Splatting Rendering Pipeline is part of the 3D Gaussian Splatting framework, which was introduced to provide efficient and high-quality novel view synthesis. The pipeline orchestrates the complex interactions between the 3D Gaussian representation and the 2D rasterization process, enabling differentiable rendering. The specific implementation details, such as the Blinn-Phong shading and feature concatenation, are derived from unofficial extensions and implementations of the original 3D Gaussian Splatting paper [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] ldyken53/VEG, https://github.com/ldyken53/VEG, fetched 2026-10-26 (unofficial)
+[S2] ashu1069/3D-Gaussian-Splatting-for-Novel-View-Synthesis, https://github.com/ashu1069/3D-Gaussian-Splatting-for-Novel-View-Synthesis, fetched 2026-10-27 (unofficial)
+[S3] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)

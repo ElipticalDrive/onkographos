@@ -1,0 +1,230 @@
+Contribute to elcritch/sdfy development by creating an account on GitHub.
+
+Add SIMD span rendering and optimize rounded boxes (0.8.5) by elcritch · Pull Request #7 · elcritch/sdfy · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+elcritch
+commented
+Oct 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Add a span renderer so callers can draw transformed, painted, masked SDF shapes directly into borrowed premultiplied RGBA rows without allocating or resampling a temporary image. SSE2/NEON evaluate coordinates, distances, gradients, coverage, mask multiplication, and blending in four-pixel packets; scalar code handles tails, unsupported CPUs, and per-call comparison.
+The new sdfy/spans API provides prepared circular/elliptical fields, solid/two-stop/three-stop/four-corner paints, local clipping, byte or RGBA alpha masks, fill/stroke/drop/inset-shadow coverage, source-over and masked replacement. drawRoundedBox is an image wrapper over drawRoundedBoxSpan; distance/distances support custom samplers. Inputs are borrowed synchronously. Public constructors validate finite prepared values, and mismatched masks fail before writes. Existing drawSdfShape behavior stays compatible.
+Elliptical rounded boxes previously spilled SIMD packets to arrays and called the scalar distance function four times. This change evaluates all four distances in SSE2 or NEON registers, including quadrant selection, radius clamping, and mixed elliptical, circular, and sharp corners.
+Batches without corner pixels skip corner math, and circular batches skip ellipse calculations. ARM64 uses vector hardware division and square roots; ARM32 uses vector reciprocal estimates with Newton refinement. Existing imports through the fallback modules remain compatible. No threading or GC behavior changes.
+Bump the package from 0.8.4 to 0.8.5, and document the SIMD behavior.
+Validation:
+Full nim test suite.
+Direct scalar/SIMD comparisons for mixed corners, degenerate bounds, quadrant boundaries, the near-center epsilon branch, and 2,000 deterministic randomized packets.
+Native ARM64 NEON and x86_64 SSE2 executed through Rosetta; scalar-only tests also pass.
+ARM32 semantic check passes; ARM32 runtime validation remains unavailable.
+Added a reproducible release benchmark comparing direct scalar calls, the former scalar-lane SIMD path, and the new SIMD path. Each sample evaluates 16,384,000 points; results are the minimum of five release-mode samples, with matching checksums.
+Times in milliseconds (lower is better):
+Platform
+Scenario
+Scalar
+Previous SIMD
+New SIMD
+Speedup vs previous
+macOS, M3 Pro, NEON
+Mixed field
+120.01
+100.76
+14.40
+6.99x
+macOS, M3 Pro, NEON
+Elliptical corners
+130.93
+113.23
+27.73
+4.08x
+macOS, M3 Pro, NEON
+Straight-edge batches
+110.28
+91.62
+10.26
+8.93x
+macOS, M3 Pro, NEON
+Circular corners
+127.46
+112.25
+14.59
+7.70x
+Docker/Linux, Ryzen 7 8745HS, SSE2
+Mixed field
+104.56
+96.32
+23.71
+4.06x
+Docker/Linux, Ryzen 7 8745HS, SSE2
+Elliptical corners
+144.96
+133.42
+45.65
+2.92x
+Docker/Linux, Ryzen 7 8745HS, SSE2
+Straight-edge batches
+94.16
+85.27
+16.05
+5.31x
+Docker/Linux, Ryzen 7 8745HS, SSE2
+Circular corners
+126.75
+112.54
+22.55
+4.99x
+Native macOS uses Nim 2.2.12/Clang; Docker uses nimlang/nim:2.2.4 with GCC 12.2. Docker executes on a native x86_64 remote host without CPU emulation. All 11 focused SIMD tests and 8 scalar-only tests pass in Docker. These timings compare implementations within each environment, not CPU performance across environments.
+The benchmark compares this kernel with the former four-scalar-lane implementation. Distance-kernel timings are not end-to-end FigDraw timings; the direct span integration is in elcritch/figdraw#100.
+Circular rounded-box SIMD
+Also reduce SSE2 absolute values from negate/max pairs to sign-bit clearing and reuse vector square roots for ARM32 instead of spilling four lanes to scalar sqrt. ARM64 retains its existing hardware vector-square-root path. Public signatures, threading, and GC behavior are unchanged.
+Added test_rounded_box_simd.nim to nim test, covering signed zero, quadrant selection, per-corner/zero/negative/oversized radii, degenerate bounds, and 2,000 deterministic randomized packets. Full local nim test, native Linux/x86_64 focused tests, and ARM32 semantic checks pass; ARM32 runtime is untested.
+nim r -d:release tests/bench_rounded_box.nim compares scalar, old/new circular SIMD, and elliptical equal/unequal axes. Same sample size and minimum-of-five methodology as above; measurement order alternates. Circular SIMD results:
+Platform
+Scenario
+Previous SIMD (ms)
+Updated SIMD (ms)
+Speedup
+M3 Pro, NEON
+Mixed field
+6.20
+6.19
+1.00x
+M3 Pro, NEON
+Corners
+6.26
+6.20
+1.01x
+M3 Pro, NEON
+Straight regions
+6.00
+6.09
+0.98x
+Docker/Linux, Ryzen 7 8745HS, SSE2
+Mixed field
+10.44
+9.62
+1.09x
+Docker/Linux, Ryzen 7 8745HS, SSE2
+Corners
+10.43
+9.59
+1.09x
+Docker/Linux, Ryzen 7 8745HS, SSE2
+Straight regions
+10.40
+9.60
+1.08x
+ARM64 performance is unchanged within timing noise. A conditional corner-skipping variant was benchmarked and discarded because its corner-heavy regression outweighed the gains in straight regions.
+Complete span pipeline
+nim r -d:release tests/bench_spans.nim measures the image wrapper/span pipeline, including transforms, shading, masks, byte premultiplication, and destination blending. Best of five alternating-order samples, 30 frames at 257x193:
+Platform
+Paint/effect
+Scalar ms
+SIMD ms
+Speedup
+M3 Pro, NEON
+Solid
+23.42
+5.08
+4.61x
+M3 Pro, NEON
+Linear + mask
+26.23
+6.01
+4.37x
+M3 Pro, NEON
+Bilinear stroke
+33.01
+8.29
+3.98x
+M3 Pro, NEON
+Three-stop inset shadow
+41.06
+12.58
+3.26x
+Docker/Linux, Ryzen 7 8745HS, SSE2
+Solid
+32.83
+9.37
+3.50x
+Docker/Linux, Ryzen 7 8745HS, SSE2
+Linear + mask
+45.32
+10.86
+4.17x
+Docker/Linux, Ryzen 7 8745HS, SSE2
+Bilinear stroke
+69.18
+14.39
+4.81x
+Docker/Linux, Ryzen 7 8745HS, SSE2
+Three-stop inset shadow
+71.08
+21.31
+3.34x
+Span tests cover paints/effects, clipping, both mask formats, both blend modes, odd/empty/short spans, unaligned views/guards, identical destination/mask aliasing, image-wrapper parity, and validation before writes. Solid compositing byte arithmetic matches scalar exactly. SIMD gradient/shadow comparisons allow one channel value at rounding boundaries; Gaussian shadows use vector range reduction and a polynomial approximation.
+Validation: full nim test; final span regressions on native NEON, Rosetta SSE2, Docker native Linux/x86_64 and scalar-only builds; ARM32 semantic check; AddressSanitizer. ARM32 runtime remains untested. Astra reviewed both the API and FigDraw integration; its gradient-reciprocal validation finding was fixed with regressions and rechecked, with no remaining findings.
+elcritch
+added 3 commits
+October 24, 2026 20:01
+Vectorize elliptical rounded boxes and bump to 0.8.5
+9eb6c05
+Benchmark scalar and both SIMD distance paths
+4b8e690
+Optimize circular rounded-box SIMD operations
+9a72cad
+elcritch
+changed the title
+Vectorize elliptical rounded boxes and bump to 0.8.5
+Optimize rounded-box SIMD kernels and bump to 0.8.5
+Oct 24, 2026
+elcritch
+mentioned this pull request
+Oct 24, 2026
+Add cached SIMD software rendering with native uirelays and Siwin
+elcritch/figdraw#100
+Merged
+Add SIMD spans for gradients masks and compositing
+ef37ccc
+elcritch
+changed the title
+Optimize rounded-box SIMD kernels and bump to 0.8.5
+Add SIMD span rendering and optimize rounded boxes (0.8.5)
+Oct 24, 2026
+Hide details
+View details
+elcritch
+merged commit 046d882
+into
+main
+Oct 24, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+elcritch
+deleted the
+feat/simd-elliptical-rounded-box
+branch
+October 24, 2026 18:01
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

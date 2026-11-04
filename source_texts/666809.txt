@@ -1,0 +1,152 @@
+My own game engine project. Contribute to blas1n/BSEngine development by creating an account on GitHub.
+
+feat: volumetric fog (froxel), sub-step 1/2 by blas1n · Pull Request #1814 · blas1n/BSEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+blas1n
+commented
+Aug 31, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Implements ENGINE_ROADMAP item 49, sub-step 1/2: froxel infrastructure and directional-light scattering. Satisfies completion conditions 1 (frustum-based volumetric fog pass) and 3 (scene/scripting parameters).
+Light shafts are sub-step 2/2 — shadow-map sampling in the injection pass, plus point/spot contribution. Deliberately excluded so that if fog looks wrong, it's unambiguous whether the new compute infrastructure or the shaft maths is at fault.
+This is the engine's first compute pipeline and first 3D texture
+Before this branch, ComputePipeline, @compute, and TextureDimension::D3 had zero hits anywhere in the codebase. Like the cubemap work in item 48, the froxel approach was chosen knowing it costs new infrastructure — and the engine comes away with reusable compute and volume-texture support rather than fog-shaped plumbing.
+How it works
+VolumetricFog { enabled, density, color, anisotropy } on the camera, matching Bloom/ToneMap/AmbientOcclusion/Taa. Absent means off, which is what keeps all sixteen existing pixel tests passing untouched.
+Two compute passes over a 160×90×64 Rgba16Float volume pair. Injection writes per-froxel scattering, extinction, and in-scattered sunlight weighted by the Henyey-Greenstein phase function; integration marches each screen column front-to-back accumulating scattering and transmittance, so the apply pass is a single lookup rather than a march.
+Z is distributed exponentially, not linearly. Perspective means near froxels cover far less world space; linear slicing wastes the volume on distance nobody notices and bands up close. This mapping appears in three places (Rust, injection WGSL, depth_to_froxel_w) and all three agree.
+Integration is analytic per slice, not a point sample — a point sample biases thick slices, which the exponential distribution guarantees you have at distance.
+Applied in HDR, before bloom reads the scene, so thick fog around a bright light blooms. That required routing HDR through a second target (a pass may not sample the texture it renders to), shipped as its own behaviour-preserving commit so any later pixel-test failure is attributable.
+Background pixels are fogged too — SSAO skips them, and copying that instinct would leave a crisp horizon behind thick fog.
+Scripting (condition 3): setFogEnabled / setFogDensity / setFogColor(cam, r, g, b) / setFogAnisotropy. Colour is one op deliberately — splitting into setFogColorR/G/B would trip the catalogue's R2 ratchet.
+Measured effect
+The assertion that matters is depth dependence, not haze — an implementation adding a constant everywhere would satisfy "the screen got foggier". Two identical cubes, near and far:
+colour shift with fog
+near cube
+17.0
+far cube
+219.0
+ratio
+12.9×
+Paired with the opposite-direction regressions: zero_density_leaves_the_image_unchanged and a_scene_with_no_fog_component_is_pixel_identical. positive_anisotropy_brightens_the_view_toward_the_light proves the phase function is actually applied rather than the fog being uniform grey.
+Unit tests target the silent failures: the phase function integrates to 1 over the sphere (dropping the 1/(4π) makes fog ~12× too bright, which reads as a mistuned density rather than a bug), and the Z slices are monotonic, end exactly on the far plane, and are >10× thicker far than near.
+Test plan
+cargo test -p bsengine-rhi-wgpu --lib froxel — 5/5
+cargo test -p bsengine-core --lib volumetric_fog — 1/1
+cargo test -p bsengine-rhi-wgpu --test pixels_fog — 5/5
+Scripting round-trip tests for all four ops
+All sixteen pre-existing pixel tests pass unchanged (eight pixels_*.rs, four pixels_ibl.rs, four pixels_light_probe.rs)
+cargo test --workspace --exclude bsengine-editor — zero failures
+cargo test -p bsengine-editor --lib — 937/937 (isolated, per CI's split)
+cargo run -p bsengine-catalog --bin catalog -- --check — 62 components, 262 ops, 0 violations (no R2 violation from the new ops)
+cargo clippy --workspace --all-targets — identical to the pre-existing baseline
+cargo +nightly fmt --all
+🤖 Generated with Claude Code
+blas1n
+and others
+added 9 commits
+August 31, 2026 14:10
+feat(rhi): add froxel grid geometry and the Henyey-Greenstein phase f…
+…
+7bb9142
+```
+…unction
+```
+feat(core): add the VolumetricFog camera component
+c29933a
+refactor(rhi): route HDR through a second target ahead of the fog pass
+…
+0697930
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(rhi): add compute pipelines and froxel volumes for volumetric fog
+…
+2b30231
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(rhi): apply integrated froxel fog to the HDR scene
+…
+42e9419
+```
+Replaces the fog pass passthrough with the real composite: sample the
+scene HDR, turn the pixel depth into a volume W coordinate, and return
+`scene.rgb * transmittance + in_scattering`.
+
+`depth_to_froxel_w` inverts `froxel_slice_depth` and lives next to it in
+the shared froxel WGSL, so the injection pass and the apply pass cannot
+drift apart; a new GPU probe test asserts the round trip on every slice.
+Background pixels take `fog.far` rather than being skipped -- skipping
+them would leave a crisp horizon standing behind thick fog.
+
+With `fog.enabled == 0` the shader returns the scene sample untouched,
+which is what keeps every existing pixel test producing its reference
+image.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(render): drive volumetric fog from the camera component
+…
+f44e45b
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+feat(scripting): add volumetric fog parameter ops
+…
+79afe84
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+test(rhi): prove volumetric fog is depth-dependent and anisotropic
+…
+d9166b0
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+style: cargo fmt
+…
+742b3a6
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Hide details
+View details
+blas1n
+merged commit 5e5be4e
+into
+master
+Aug 31, 2026
+5 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+blas1n
+deleted the
+feat/volumetric-fog
+branch
+August 31, 2026 07:51
+blas1n
+mentioned this pull request
+Aug 31, 2026
+feat: light shafts (volumetric fog sub-step 2/2)
+#1815
+Merged
+8 tasks done
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

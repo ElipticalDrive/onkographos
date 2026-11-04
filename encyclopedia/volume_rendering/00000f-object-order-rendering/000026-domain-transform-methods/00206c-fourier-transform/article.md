@@ -1,0 +1,109 @@
+# Fourier Transform
+Also called: Discrete Fourier Transform
+
+## Overview
+The Fourier Transform decomposes a signal into its constituent frequencies, providing a measure of high-frequency content but lacking spatial localization because the transform covers the entire spatial domain [S1, S1, unofficial]. In volume rendering, it serves as the foundational domain-transform method that enables frequency-domain operations such as convolution via the Convolution Theorem, where the Fourier transform of a convolution equals the product of individual transforms [S2, unofficial]. It differs from its siblings by operating on the global frequency spectrum rather than local projections or windowed segments, making it suitable for global filtering but poor for locating specific irregularities [S1, S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A discrete sequence of $N$ samples $h_k$ (1D) or $h_{x,y}$ (2D), representing voxel intensities or signal values.
+- Output: The Discrete Fourier Transform (DFT) coefficients $H_n$ (1D) or $H_{u,v}$ (2D), representing frequency components.
+
+**Data Structures:**
+- Input array: $h$ of size $N$ (1D) or $M \times N$ (2D).
+- Output array: $H$ of size $N$ (1D) or $M \times N$ (2D), storing complex numbers.
+
+**Parameters:**
+- $N$: Number of samples. Assumed to be even for standard frequency point derivation [S2, unofficial].
+- $\Delta$: Sampling interval (time or space between consecutive samples) [S2, unofficial].
+- $f_c$: Nyquist critical frequency, defined as $1/(2\Delta)$ [S2, unofficial].
+
+**Formulas:**
+The continuous Fourier transform $H(f_n)$ is approximated by scaling the DFT result $H_n$ by the sampling interval $\Delta$ [S2, unofficial]:
+$$ H(f_n) \approx \Delta H_n $$
+The frequency points $f_n$ are defined as [S2, unofficial]:
+$$ f_n = \frac{n}{N\Delta}, \quad n = -\frac{N}{2}, \dots, \frac{N}{2} $$
+The DFT of a sequence $h_k$ is [S2, unofficial]:
+$$ H_n = \sum_{k=0}^{N-1} h_k e^{2\pi i k n/N} $$
+The DFT is periodic with period $N$, such that [S2, unofficial]:
+$$ H_{-n} = H_{N-n} $$
+For a real-valued input, the DFT is Hermitian symmetric, meaning $H_{N-n}^* = H_n$, allowing storage of only $N/2$ complex numbers to fully define the transform of $N$ real numbers [S2, unofficial].
+
+**Steps:**
+1. **Sampling:** Sample the continuous function $h(t)$ at intervals $\Delta$ to obtain $h_k = h(k\Delta)$ for $k=0, \dots, N-1$ [S2, unofficial].
+2. **Centering (Optional but recommended for visualization):** To shift the zero-frequency component to the center of the spectrum and avoid boundary discontinuities, multiply the input signal by $(-1)^k$ (1D) or $(-1)^{x+y}$ (2D) before computing the DFT [S2, unofficial].
+3. **Compute DFT:** Calculate $H_n$ using the summation formula [S2, unofficial].
+4. **Frequency Mapping:** Map index $n$ to physical frequency $f_n$. Indices $0 < n < N/2$ correspond to positive frequencies $0 < f < f_c$. Indices $N/2 < n < N$ correspond to negative frequencies $-f_c < f < 0$. Index $n=N/2$ corresponds to both $f_c$ and $-f_c$ [S2, unofficial].
+5. **Scaling:** Multiply $H_n$ by $\Delta$ to approximate the continuous Fourier transform values $H(f_n)$ [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Aliasing:** If the signal is not bandwidth-limited to $f_c$, power spectral density outside $-f_c < f < f_c$ folds into the range, causing aliasing [S2, unofficial].
+- **Periodicity:** The DFT assumes the input signal is periodic. Discontinuities at the boundaries of the input data can introduce high-frequency artifacts [S2, unofficial].
+- **Hermitian Symmetry:** For real inputs, the negative frequency components are redundant conjugates of the positive ones. Ignoring this can lead to storage inefficiencies or reconstruction errors if not handled correctly [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_dft(h):
+    """
+    Computes the 1D Discrete Fourier Transform of a sequence h.
+    h: list of complex or real numbers.
+    Returns: list of complex numbers H.
+    """
+    N = len(h)
+    H = [0] * N
+    for n in range(N):
+        sum_val = 0 + 0j
+        for k in range(N):
+            # e^(2*pi*i*k*n/N)
+            exponent = 2 * math.pi * 1j * k * n / N
+            sum_val += h[k] * math.exp(exponent)
+        H[n] = sum_val
+    return H
+
+def center_dft(h):
+    """
+    Centers the DFT spectrum by shifting zero frequency to the center.
+    h: list of real or complex numbers.
+    Returns: list of complex numbers H_centered.
+    """
+    N = len(h)
+    # Multiply by (-1)^k to shift spectrum
+    shifted_h = [h[k] * ((-1)**k) for k in range(N)]
+    return compute_dft(shifted_h)
+
+def continuous_approximation(H_n, delta):
+    """
+    Approximates the continuous Fourier transform from DFT coefficients.
+    H_n: list of DFT coefficients.
+    delta: sampling interval.
+    Returns: list of approximated continuous transform values.
+    """
+    return [H * delta for H in H_n]
+```
+
+## Subtopics
+
+### Windowed Fourier Transform
+Unlike the standard Fourier transform which covers the whole spatial domain and is not spatially localized, the windowed Fourier transform uses a translated window to cover the whole signal, allowing localization of irregularities [S1, S1, unofficial]. It was defined by Gabor to address the lack of spatial information in the standard transform [S1, S1, unofficial].
+
+### Centered DFT
+A method to compute the DFT of a real signal such that the frequency spectrum is centered (zero frequency at the center), avoiding the discontinuity at the boundaries of the standard DFT output range [S2, unofficial]. For a 1D signal $h_k$ of length $N$, multiply each element by $(-1)^k$ before computing the DFT. For a 2D signal $h_{x,y}$ of size $M \times N$, multiply each element by $(-1)^{x+y}$ before computing the 2D DFT [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** The naive DFT implementation is $O(N^2)$. Fast Fourier Transform (FFT) algorithms reduce this to $O(N \log N)$, though the article notes do not specify FFT implementation details.
+- **Memory Complexity:** $O(N)$ for storing input and output arrays. For real inputs, Hermitian symmetry allows storage of only $N/2$ complex numbers, but standard implementations often use full arrays [S2, unofficial].
+- **Strengths:** Enables efficient global filtering and convolution via the Convolution Theorem [S2, unofficial].
+- **Limitations:** Lacks spatial localization, making it difficult to find the position of irregularities [S1, S1, unofficial]. Sensitive to aliasing if the Nyquist criterion is not met [S2, unofficial]. Assumes periodicity, which can cause boundary artifacts [S2, unofficial].
+- **When to use:** When global frequency analysis or convolution is required, and spatial localization is not critical.
+- **When not to use:** When local feature detection or spatially localized analysis is needed; consider Windowed Fourier Transform instead [S1, S1, unofficial].
+
+## Background
+The Fourier Transform is a classical theory for multiresolution decomposition [S1, S1, unofficial]. It is used in Fourier Volume Rendering to leverage the Convolution Theorem for efficient processing [S2, unofficial]. The discrete formulation and its properties, such as periodicity and Hermitian symmetry, are detailed in reports on Fourier volume rendering [S2, unofficial].
+
+## Sources
+[S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
+[S2] Fourier volume rendering, https://shiftleft.com/mirrors/www.hpl.hp.com/techreports/95/HPL-95-73.pdf, fetched 2026-10-31 (unofficial)

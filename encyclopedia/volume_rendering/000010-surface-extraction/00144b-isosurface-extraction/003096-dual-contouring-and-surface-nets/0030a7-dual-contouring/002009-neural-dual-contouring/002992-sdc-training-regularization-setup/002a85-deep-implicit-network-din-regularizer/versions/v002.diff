@@ -1,0 +1,180 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The Deep Implicit Network (DIN) Regularizer, also known as the Self-supervised Dual Contouring Regularizer (SDR), is a mesh-based training objective for Deep Implicit Networks (DINs) that ensures the predicted Signed Distance Field (SDF) is geometrically consistent with the mesh extracted via Self-Supervised Dual Contouring (SDC) [S1]. Unlike standard DIN training which minimizes error against ground-truth SDF values at query points, this method minimizes the discrepancy between the predicted field and the actual distances to the extracted mesh, thereby resolving ambiguous level sets and improving surface fidelity [S1]. It is distinct from direct SDF supervision by using the extracted mesh $\mathcal{M}$ as the geometric target rather than external ground-truth labels [S1].
++The Deep Implicit Network (DIN) Regularizer, also known as the Self-supervised Dual Contouring Regularizer (SDR), is a mesh-based training objective for Deep Implicit Networks (DINs) that ensures the predicted Signed Distance Field (SDF) is geometrically consistent with the mesh extracted via Self-Supervised Dual Contouring (SDC) [S1]. Unlike standard DIN training which minimizes error against ground-truth SDF values at query points, this method minimizes the discrepancy between the predicted field and the actual distances to the extracted mesh, thereby resolving ambiguous level sets and improving surface fidelity [S1]. It is distinct from direct SDF supervision by using the extracted mesh $\mathcal{M}$ as the geometric target rather than external ground-truth labels [S1]. The method remains self-supervised regarding the mesh target, as it does not require ground-truth mesh data for the regularization term, though it still relies on ground-truth SDF values for the primary training loss [S1].
+ 
+ ## How it works
+@@ -10,11 +10,11 @@
+ 
+ **Inputs:**
+-*   $\theta$: Weights of the DIN MLP $f_\theta$.
+-*   $\lambda_j$: Latent vector for shape $j$.
+-*   $\mathcal{G}$: Discrete 3D grid of nodes $g_i$.
+-*   $N$: Total number of shapes in the batch or dataset.
++*   $\theta$: Weights of the DIN MLP $f_\theta$ [S1].
++*   $\lambda_j$: Latent vector for shape $j$ [S1].
++*   $\mathcal{G}$: Discrete 3D grid of nodes $g_i$ [S1].
++*   $N$: Total number of shapes in the batch or dataset [S1].
+ 
+ **Outputs:**
+-*   $\mathcal{L}_{\text{SDR}}$: The regularization loss value.
++*   $\mathcal{L}_{\text{SDR}}$: The regularization loss value [S1].
+ 
+ **Data Structures:**
+@@ -35,6 +35,6 @@
+ $$
+ where:
+-*   $f_\theta(\lambda_j, g_i)$ is the predicted signed distance.
+-*   $\mathbf{d}^p(g_i, \mathcal{M})$ is the distance from grid node $g_i$ to mesh $\mathcal{M}$.
++*   $f_\theta(\lambda_j, g_i)$ is the predicted signed distance [S1].
++*   $\mathbf{d}^p(g_i, \mathcal{M})$ is the distance from grid node $g_i$ to mesh $\mathcal{M}$ [S1].
+ *   $\text{abs}(\cdot)$ denotes the absolute value, converting the signed distance to a distance field for comparison [S1].
+ 
+@@ -57,85 +57,79 @@
+ **Pseudocode:**
+ ```python
+-def compute_sdr_loss(f_theta, lambda_j, grid_nodes, sdc_extractor, alpha_2, 
+-                     query_points, ground_truth_sdfs, sigma, batch_shapes):
++def compute_sdr_loss(f_theta, lambdas, grid_nodes, sdc_extractor, alpha_2, 
++                     query_points, ground_truth_sdfs, sigma):
+     """
+     Computes the combined training loss including the DIN Regularizer.
+-    
+-    Args:
+-        f_theta: DIN MLP function.
+-        lambda_j: Latent vector for the current shape.
+-        grid_nodes: List of 3D points g_i in the evaluation grid G.
+-        sdc_extractor: Function to extract mesh M from grid SDF values.
+-        alpha_2: Weight for the SDR loss.
+-        query_points: List of points x_i for standard SDF supervision.
+-        ground_truth_sdfs: Ground truth SDF values s_i for query_points.
+-        sigma: Latent space compactness parameter.
+-        batch_shapes: Number of shapes N in the batch.
++    Matches the formulation: L_train = L_SDF + alpha_2 * L_SDR
++    """
++    n_shapes = len(lambdas)
++    l_sdf = 0.0
++    l_sdr = 0.0
++
++    for j in range(n_shapes):
++        lambda_j = lambdas[j]
+         
+-    Returns:
+-        Total loss value.
+-    """
+-    # 1. Standard DIN Training Loss (L_SDF)
+-    l_sdf = 0.0
+-    for j in range(batch_shapes):
+-        # Predict SDF at query points
+-        predicted_sdfs = [f_theta(lambda_j, x) for x in query_points]
++        # 1. Standard DIN Training Loss (L_SDF)
++        point_loss = 0.0
++        for x_i, s_i in zip(query_points, ground_truth_sdfs):
++            pred = f_theta(lambda_j, x_i)
++            point_loss += (pred - s_i) ** 2
++        l_sdf += point_loss + (1.0 / sigma**2) * sum(l**2 for l in lambda_j)
++
++        # 2. DIN Regularizer Loss (L_SDR)
++        # Evaluate DIN on the entire grid to get S_G
++        grid_sdfs = [f_theta(lambda_j, g) for g in grid_nodes]
+         
+-        # L2 error against ground truth
+-        point_loss = sum((pred - gt)**2 for pred, gt in zip(predicted_sdfs, ground_truth_sdfs))
++        # Extract mesh M from the grid using SDC
++        mesh_M = sdc_extractor(grid_sdfs, grid_nodes)
+         
+-        # Latent compactness regularization
+-        latent_loss = (1.0 / sigma**2) * sum(l**2 for l in lambda_j)
+-        
+-        l_sdf += point_loss + latent_loss
+-
+-    # 2. DIN Regularizer Loss (L_SDR)
+-    l_sdr = 0.0
+-    
+-    # Evaluate DIN on the entire grid to get S_G
+-    grid_sdfs = [f_theta(lambda_j, g) for g in grid_nodes]
+-    
+-    # Extract mesh M from the grid using SDC
+-    mesh_M = sdc_extractor(grid_sdfs, grid_nodes)
+-    
+-    # Compute distance from each grid node to the extracted mesh
+-    for g in grid_nodes:
+-        # Compute Euclidean distance from point g to mesh M
+-        dist_to_mesh = compute_distance_to_mesh(g, mesh_M)
+-        
+-        # Get predicted signed distance
+-        pred_sdf = f_theta(lambda_j, g)
+-        
+-        # Compute absolute difference
+-        diff = abs(pred_sdf - dist_to_mesh)
+-        l_sdr += diff**2
++        # Compute distance from each grid node to the extracted mesh
++        for g in grid_nodes:
++            dist_to_mesh = compute_distance_to_mesh(g, mesh_M)
++            pred_sdf = f_theta(lambda_j, g)
++            l_sdr += (abs(pred_sdf - dist_to_mesh)) ** 2
+ 
+     # 3. Combined Loss
+     total_loss = l_sdf + alpha_2 * l_sdr
+-    
+     return total_loss
+ 
+ def compute_distance_to_mesh(point, mesh):
+-    """
+-    Computes the Euclidean distance from a point to the closest point on a mesh.
+-    [G] Implementation detail: In practice, this is often approximated using 
+-    a nearest-neighbor search on mesh vertices or a distance field precomputed 
+-    on the mesh, as exact point-to-triangle distance is expensive.
+-    """
+-    # Placeholder for exact geometric distance calculation
+-    # Returns min distance to any triangle in mesh
+-    return 0.0 # Placeholder for implementation
++    """[G] Computes Euclidean distance from point to mesh surface."""
++    min_dist = float('inf')
++    for tri in mesh.triangles:
++        # Standard point-to-triangle distance [G]
++        v0, v1, v2 = tri.vertices
++        e1 = v1 - v0
++        e2 = v2 - v0
++        p = point - v0
++        b = dot(p, e1)
++        c = dot(p, e2)
++        d = dot(e1, e1)
++        e = dot(e1, e2)
++        f = dot(e2, e2)
++        denom = d * f - e * e
++        u = (f * b - e * c) / max(denom, 1e-8)
++        v = (d * c - e * b) / max(denom, 1e-8)
++        closest = v0 + e1 * clamp(u, 0.0, 1.0) + e2 * clamp(v, 0.0, 1.0 - u)
++        dist = norm(point - closest)
++        if dist < min_dist:
++            min_dist = dist
++    return min_dist
++
++def dot(a, b): return sum(x * y for x, y in zip(a, b))
++def norm(v): return (sum(x**2 for x in v))**0.5
++def clamp(x, lo, hi): return max(lo, min(hi, x))
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Mesh Extraction Dependency:** The loss depends on the SDC extractor. If SDC fails to produce a valid mesh (e.g., empty grid or degenerate topology), the distance computation $\mathbf{d}^p$ is undefined [S1].
+-*   **Gradient Flow:** The mesh extraction step (SDC) is typically non-differentiable. The regularization is applied as a self-supervised target, meaning gradients flow through the DIN to the latent vector and weights, but not through the mesh extraction itself [S1].
+-*   **Grid Resolution:** The accuracy of $\mathbf{d}^p(g_i, \mathcal{M})$ depends on the grid resolution. Coarse grids may miss fine details, leading to inaccurate regularization signals [S1].
++*   **Mesh Extraction Dependency:** The loss depends on the SDC extractor [S1].
++*   **Gradient Flow:** The mesh extraction step (SDC) is typically non-differentiable [G].
++*   **Grid Resolution:** The accuracy of $\mathbf{d}^p(g_i, \mathcal{M})$ depends on the grid resolution [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The loss computation requires evaluating the DIN over the entire grid $\mathcal{G}$ and performing mesh extraction via SDC for every optimization step. This is significantly more expensive than standard point-wise SDF supervision, which only queries sparse points [S1].
+-*   **Memory Complexity:** Requires storing the grid SDF values $S_G$ and the extracted mesh $\mathcal{M}$ during the forward pass [S1].
+-*   **Strengths:** Resolves ambiguous level sets and improves geometric consistency between the implicit field and the explicit mesh [S1]. It is self-supervised, requiring no ground-truth mesh data [S1].
+-*   **Limitations:** Computationally intensive due to grid evaluation and mesh extraction. Performance depends on the quality of the SDC extractor [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Resolves ambiguous level sets and improves geometric consistency between the implicit field and the explicit mesh [S1]. It is self-supervised regarding the mesh target, requiring no ground-truth mesh data for the regularization term [S1].
++*   **Limitations:** Computationally intensive due to grid evaluation and mesh extraction [S1]. Performance depends on the quality of the SDC extractor [S1].
+ *   **When to Use:** When high-fidelity mesh extraction from implicit fields is required and ground-truth meshes are unavailable [S1].
+ *   **When Not to Use:** When computational resources are limited or when ground-truth SDF values are available and sufficient for the task [S1].

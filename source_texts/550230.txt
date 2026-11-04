@@ -1,0 +1,172 @@
+Environment gaussian-splat-renderer-for-lam@0.0.9-alpha.2 Avatar exported through the LAM Chatting Avatar pipeline (offset.ply, skin.glb, and animation.glb) State-driven skeletal animation plus 52 ARKit blendshapes Problem When a state a...
+
+[Enhancement] Add optional global motion stabilization to prevent whole-avatar rotation · Issue #12 · aigc3d/LAM_WebRender · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Enhancement] Add optional global motion stabilization to prevent whole-avatar rotation #12
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+[Enhancement] Add optional global motion stabilization to prevent whole-avatar rotation#12
+Copy link
+Description
+liuzhao1225
+opened on Jul 22, 2026
+Issue body actions
+Environment
+gaussian-splat-renderer-for-lam@0.0.9-alpha.2
+Avatar exported through the LAM Chatting Avatar pipeline (offset.ply, skin.glb, and animation.glb)
+State-driven skeletal animation plus 52 ARKit blendshapes
+Problem
+When a state animation contains head or neck rotation, the entire Gaussian avatar rotates, including the neck and shoulder/body area visible in a bust avatar.
+Disabling Gaussian skeletal transformation removes the unwanted whole-avatar rotation, but it also removes all rigid head motion. The 52 ARKit blendshapes continue to work, which indicates that skeletal motion and facial blendshape deformation are independent paths, consistent with the explanation in #4.
+Root cause
+In the distributed renderer module, the vertex shader applies the head bone matrix at weight 1.0 to every Gaussian point:
+```
+vec4 skinned = vec4(0.0);
+
+if (headBoneIndex >= 0.0) {
+    mat4 boneMat = getBoneMatrix0(headBoneIndex);
+    skinned += boneMat * skinVertex * 1.0;
+}
+
+// Weighted skinning is currently commented out.
+transformed = skinned.xyz;
+```
+This makes head rotation a rigid transform of the complete Gaussian cloud.
+Proposed minimal, opt-in solution
+Add an optional global motion stabilization step:
+On a neutral/rest frame, record a small set of the lowest Gaussian centers as reference anchors.
+On each frame, run the existing blendshape and skeletal deformation first.
+Solve one best-fit rigid transform (Horn/Kabsch) that aligns the current anchors back to their rest positions.
+Apply that single compensation matrix to all Gaussian points.
+This does not use a mask, height blend, or head/body region split. It is one global correction applied after the existing deformation pipeline.
+The option should be disabled by default because it intentionally cancels overall rigid head rotation while preserving local 52-blendshape facial deformation. A possible API name is globalMotionStabilization.
+Prototype validation
+Using 24 lowest-point anchors:
+The neck/shoulder/body area remains visually fixed during state animations.
+ARKit facial motion remains active.
+Anchor alignment RMS error: approximately 9.12e-4 in model space.
+Maximum anchor error: approximately 1.60e-3 in model space.
+Contribution question
+The public LAM_WebRender repository appears to contain the demo integration, while the renderer implementation is distributed through npm.
+Could you please confirm:
+Is the source repository for gaussian-splat-renderer-for-lam available?
+Would an opt-in globalMotionStabilization implementation be acceptable?
+Which repository/branch should a pull request target?
+I can prepare a PR once the correct renderer source location is confirmed.
+Activity
+liuzhao1225
+changed the title [-][Bug] Head bone transform is applied to every Gaussian, rotating the whole avatar body[/-] [+][Enhancement] Add optional global motion stabilization to prevent whole-avatar rotation[/+] on Jul 22, 2026
+liuzhao1225 commented on Jul 22, 2026
+liuzhao1225
+on Jul 22, 2026
+Author
+More actions
+中文版：Issue #13
+liuzhao1225 commented on Jul 22, 2026
+liuzhao1225
+on Jul 22, 2026
+Author
+More actions
+Concrete prototype code changes
+The validated prototype was implemented on the consumer side because the renderer source is not present in the public repository.
+1. Added one global stabilization matrix to the splat shader
+A new identity-by-default uniform was added:
+```
+uniform mat4 gaussianStabilizationMatrix;
+```
+The existing head-bone transform is kept, and the compensation is applied afterward to every splat:
+```
+vec4 skinned = skinVertex;
+
+if (headBoneIndex >= 0.0) {
+    mat4 headBoneMatrix = getBoneMatrix0(headBoneIndex);
+    skinned = headBoneMatrix * skinVertex;
+}
+
+// One matrix for the complete Gaussian cloud; no mask or region split.
+skinned = gaussianStabilizationMatrix * skinned;
+transformed = skinned.xyz;
+```
+The original blendshape calculation is left unchanged.
+2. Captured neutral anchors once
+After the splat textures become available, the prototype reads the original center array and records the 24 centers with the lowest Y coordinate:
+```
+const anchors = selectLowestGaussianAnchors(
+    splatMesh.splatDataTextures.baseData.centers,
+    splatMesh.gaussianSplatCount,
+    24,
+);
+
+const headBoneIndex = skeleton.bones.findIndex(
+    (bone) => bone.name === "head",
+);
+```
+These positions are the fixed neutral reference for the lifetime of the avatar.
+3. Solved and uploaded one rigid correction per frame
+After the existing renderer update, the prototype reads the current head bone matrix, transforms the neutral anchors exactly as the renderer transforms the splats, solves a current-to-neutral rigid alignment with the Horn quaternion method, and uploads the resulting matrix:
+```
+const matrixOffset = headBoneIndex * 16;
+const headBoneMatrix = skeleton.boneMatrices.subarray(
+    matrixOffset,
+    matrixOffset + 16,
+);
+
+const currentAnchors = anchors.map(
+    (anchor) => transformPoint(headBoneMatrix, anchor),
+);
+
+const alignmentMatrix = fitRigidAlignment(
+    currentAnchors,
+    anchors,
+);
+
+splatMesh.material.uniforms
+    .gaussianStabilizationMatrix.value
+    .fromArray(alignmentMatrix);
+```
+The prototype hook is:
+```
+const originalUpdate = viewer.update.bind(viewer);
+
+viewer.update = (...args) => {
+    originalUpdate(...args);
+    updateGaussianStabilization(viewer);
+};
+```
+4. Added runtime contract checks
+The build verification checks that:
+gaussianStabilizationMatrix * skinned is present.
+The correction is applied globally, not through a mask.
+The original Gaussian blendshape expression path remains present.
+The previous unconditional head-bone-only statement is no longer the final transform.
+Upstream implementation note
+The current prototype injects the uniform with a Vite build-time transform and wraps viewer.update only because the npm package source is not public here. A proper PR should implement the option directly inside the renderer, expose it as disabled by default, reuse typed scratch buffers to avoid per-frame allocations, and reset the neutral anchors when the avatar asset changes.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

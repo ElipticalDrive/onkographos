@@ -1,0 +1,273 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)
+ 
+-Also called: Image-space visibility ordering for cell projection volume rendering, SXMPVO (Scan-conversion based MPVO), SXMPVO algorithm, Scalable Multi-Processor Volume Ordering, Scanline-based MPVO, Scanning Exact Meshed Polyhedra Visibilit, Scanning Exact Meshed Polyhedra Visibility Ordering, ZSWEEP
++Also called: Scanning Exact Meshed Polyhedra Visibility Ordering
+ 
+ ## Overview
+@@ -10,24 +10,24 @@
+ 
+ ### Inputs and Outputs
+-- **Input**: An unstructured mesh (cells, faces, vertices), a viewpoint, and an image resolution ($w \times h$).
+-- **Output**: A total ordering sequence of cells $b = c_{im} < c_{im-1} < \dots < c_{i1} < c_{i0} = a$, where $b$ comes before $a$ in the sorted sequence (i.e., $b$ is rendered after $a$ in back-to-front compositing) [S2, unofficial].
++- **Input**: An unstructured mesh (cells, faces, vertices), a viewpoint, and an image resolution ($w \times h$) [S2, S3, unofficial].
++- **Output**: A total ordering sequence of cells $b = c_{im} < c_{im-1} < \dots < c_{i1} < c_{i0} = a$, where $b$ comes before $a$ in the sorted sequence [S2, unofficial].
+ 
+ ### Data Structures
+-The algorithm builds on MPVO data structures. For a tetrahedral mesh, MPVO structures require $4f + 14n$ words, where $f$ is the number of interior faces and $n$ is the number of cells [S2, S3, unofficial]. This includes the adjacency graph, cell vertices, plane equation coefficients, arrows, and one word per cell for flags [S2, S3, unofficial].
++The algorithm builds on MPVO data structures [S3, unofficial]. For a tetrahedral mesh, MPVO structures require $4f + 14n$ words, where $f$ is the number of interior faces and $n$ is the number of cells [S2, S3, unofficial]. This includes the adjacency graph, cell vertices, plane equation coefficients, arrows, and one word per cell for flags [S2, S3, unofficial].
+ 
+ SXMPVO adds the following structures:
+-1.  **Exterior Face List**: A list holding a record for each exterior face. Each record contains:
+-    -   A pointer to the face.
+-    -   A pointer to the cell to which the face belongs.
+-    -   The face’s centroid.
++1.  **Exterior Face List**: A list holding a record for each exterior face [S2, S3, unofficial]. Each record contains:
++    -   A pointer to the face [S2, S3, unofficial].
++    -   A pointer to the cell to which the face belongs [S2, S3, unofficial].
++    -   The face’s centroid [S2, S3, unofficial].
+     -   A `next` pointer [S2, S3, unofficial].
+ 2.  **A-Buffer**: Implemented as an array of pixel (PIX) lists, one per pixel in the screen image ($w \times h$) [S2, S3, unofficial].
+     -   **PIX List Entry (PIX Entry)**: Contains:
+-        -   The distance $z$ from the screen to the point where the ray through pixel $p$ intersects face $f$.
+-        -   A pointer to $f$.
++        -   The distance $z$ from the screen to the point where the ray through pixel $p$ intersects face $f$ [S2, S3, unofficial].
++        -   A pointer to $f$ [S2, S3, unofficial].
+         -   A `next` pointer for the PIX list [S2, S3, unofficial].
+ 3.  **PN List**: Every cell has a `PN list pointer`, initially set to `NULL` [S2, S3, unofficial].
+     -   **PN List Entry (PN Entry)**: Contains:
+-        -   The cell number of the occluded cell.
++        -   The cell number of the occluded cell [S2, S3, unofficial].
+         -   A `next` pointer [S2, S3, unofficial].
+     -   The PN list for a cell contains all exterior cells it occludes (its dependencies) [S2, unofficial].
+@@ -59,5 +59,5 @@
+     -   For each pair of consecutive entries on a PIX list (after cleanup), identify a **Pseudoneighbor (PN)** relation [S2, S3, unofficial].
+     -   A PN pair consists of a front-facing face of cell $c_{ij}$ and a back-facing face of cell $c_{ij-1}$ [S2, S3, unofficial].
+-    -   The cell contributing the back-facing face ($c_{ij-1}$) is the **occluding PN**.
++    -   The cell contributing the back-facing face ($c_{ij-1}$) is the **occluding PN** [S3, unofficial].
+     -   The cell contributing the front-facing face ($c_{ij}$) is the **occluded PN** [S2, S3, unofficial].
+     -   Add a PN entry to the PN list of the occluding PN, containing the cell number of the occluded PN [S2, S3, unofficial].
+@@ -68,5 +68,5 @@
+ **Phase IV: Depth First Search (DFS) for Total Ordering**
+ 1.  Traverse all cells to find sink cells (those whose `sink cell flag` is still `true`) [S2, S3, unofficial].
+-2.  Perform a Depth First Search (DFS) on the directed graph to generate the total ordering [S2, S3, unofficial].
++2.  Perform a Depth First Search (DFS) on the directed graph to generate the total ordering of the cells [S2, S3, unofficial].
+     -   Traverse each edge in the graph twice [S3, unofficial].
+     -   *Modification*: Occluded neighbors (cells on the PN list of cell $c$) are now eligible neighbors of $c$ in the DFS [S2, S3, unofficial].
+@@ -76,94 +76,131 @@
+ 
+ ```python
+-def sxmpvo(mesh, viewpoint, image_width, image_height):
++def sxmpvo(mesh, viewpoint, image_width, image_height, viewpoint_outside):
+     n = mesh.num_cells
+     b = mesh.num_exterior_faces
+     w, h = image_width, image_height
+-    
+-    # Phase I: Partial Ordering
+-    # Initialize MPVO structures (adjacency, arrows, flags)
++
++    # Phase I: Create Partial Ordering of Interior Cells [S2, S3, unofficial]
++    exterior_faces = []
+     for cell in mesh.cells:
+         cell.sink_flag = True
+         for face in cell.faces:
+             if face.is_interior():
+-                mark_arrow(face) # MPVO logic
++                face.arrow = True  # Mark arrow for MPVO behind relation [S2, S3, unofficial]
+             else:
+-                add_to_exterior_face_list(face)
+-                
+-    # Phase II: Sort Exterior Faces
+-    exterior_faces = get_exterior_face_list()
+-    exterior_faces.sort(key=lambda f: distance(viewpoint, f.centroid))
+-    
+-    # Phase III: Scan Conversion and PN Relations
+-    a_buffer = [ [] for _ in range(w * h) ] # Array of PIX lists
+-    pn_lists = [ [] for _ in range(n) ]     # Array of PN lists
+-    
+-    for face in exterior_faces:
+-        # Rasterize face, sampling at pixel centers
+-        pixels = rasterize(face, viewpoint)
+-        for p in pixels:
+-            z = ray_face_intersection(viewpoint, p, face).z
+-            pix_entry = { 'z': z, 'face': face, 'next': None }
+-            insert_into_pix_list(a_buffer[p.index], pix_entry) # Insertion sort
+-            
+-    # Clean up PIX lists
+-    for p_index in range(w * h):
+-        pix_list = a_buffer[p_index]
++                exterior_faces.append({'face': face, 'cell': cell, 'centroid': face.centroid, 'next': None})
++
++    # Phase II: Sort Exterior Faces [S2, S3, unofficial]
++    exterior_faces.sort(key=lambda f: distance(viewpoint, f['centroid']))
++
++    # Phase III: Scan Convert Exterior Faces and Record PN Relations [S2, S3, unofficial]
++    a_buffer = [[] for _ in range(w * h)]  # Array of PIX lists [S2, S3, unofficial]
++    pn_lists = [None] * n  # PN list head pointers, initially NULL [S2, S3, unofficial]
++
++    def insert_pix_entry(pix_list, entry):
++        # Insertion sort by decreasing z [S2, S3, unofficial]
++        if not pix_list or entry['z'] >= pix_list[0]['z']:
++            entry['next'] = pix_list[0]
++            pix_list[0] = entry
++        else:
++            curr = pix_list[0]
++            while curr['next'] and curr['next']['z'] > entry['z']:
++                curr = curr['next']
++            entry['next'] = curr['next']
++            curr['next'] = entry
++
++    for f_record in exterior_faces:
++        face = f_record['face']
++        # Scan-convert face, sampling at pixel centers [S2, S3, unofficial]
++        pixels_covered = scan_convert_face(face, viewpoint)
++        for p_idx, p_center in pixels_covered:
++            z = compute_z_distance(viewpoint, p_center, face)
++            pix_entry = {'z': z, 'face': face, 'next': None}
++            insert_pix_entry(a_buffer[p_idx], pix_entry)
++
++    # Clean up PIX lists [S2, S3, unofficial]
++    for p_idx in range(w * h):
++        pix_list = a_buffer[p_idx]
+         if not pix_list: continue
+-        
+-        # Discard first entry (last exit)
+-        pix_list.pop(0)
+-        
+-        # Discard last entry if viewpoint outside mesh (first entry)
+-        # Note: Logic depends on viewpoint position relative to mesh bounding box
+-        if viewpoint_outside_mesh():
++
++        # Discard first entry (back-facing face where ray exits mesh last time) [S2, S3, unofficial]
++        pix_list = pix_list['next']
++        a_buffer[p_idx] = pix_list
++
++        # Discard last entry if viewpoint outside mesh [S2, S3, unofficial]
++        if viewpoint_outside:
+             if pix_list:
+-                pix_list.pop()
+-                
+-        # Process PN relations
+-        for i in range(len(pix_list) - 1):
+-            front_face = pix_list[i].face
+-            back_face = pix_list[i+1].face
+-            
+-            occluded_cell = front_face.cell
+-            occluding_cell = back_face.face.cell
+-            
+-            # Add PN relation: occluding_cell occludes occluded_cell
+-            add_pn_relation(pn_lists, occluding_cell, occluded_cell)
+-            
+-            # Update sink flag
+-            occluded_cell.sink_flag = False
+-
+-    # Phase IV: DFS for Total Ordering
++                curr = pix_list
++                while curr['next']: curr = curr['next']
++                curr['next'] = None
++
++        # Traverse PIX list to discover PN dependencies [S2, S3, unofficial]
++        curr = pix_list
++        while curr and curr['next']:
++            front_entry = curr['next']
++            back_entry = curr
++            occluded_cell = front_entry['face'].cell
++            occluding_cell = back_entry['face'].cell
++
++            # Add PN relation to occluding PN's list [S2, S3, unofficial]
++            add_pn_relation(pn_lists, occluding_cell.index, occluded_cell.index)
++            occluded_cell.sink_flag = False  # Update sink flag [S2, S3, unofficial]
++            curr = curr['next']
++
++    # Phase IV: Depth First Search (DFS) for Total Ordering [S2, S3, unofficial]
+     sink_cells = [c for c in mesh.cells if c.sink_flag]
+     ordering = []
+-    
++    visited = set()
++
++    def dfs(cell):
++        if cell.index in visited: return
++        visited.add(cell.index)
++        for pn_idx in get_pn_list(pn_lists, cell.index):
++            neighbor = mesh.cells[pn_idx]
++            dfs(neighbor)
++        ordering.append(cell)
++
+     for sink in sink_cells:
+-        if not sink.visited:
+-            dfs(sink, ordering, pn_lists)
+-            
++        dfs(sink)
++
+     return ordering
+ 
+-def add_pn_relation(pn_lists, occluding_cell_idx, occluded_cell_idx):
+-    pn_list = pn_lists[occluding_cell_idx]
+-    # Check for duplicates and move to head if found
+-    for entry in pn_list:
+-        if entry.cell_idx == occluded_cell_idx:
+-            # Move to head
+-            pn_list.remove(entry)
+-            pn_list.insert(0, entry)
++def add_pn_relation(pn_lists, occluding_idx, occluded_idx):
++    # Check for duplicates and move to head if found [S2, S3, unofficial]
++    head = pn_lists[occluding_idx]
++    curr = head
++    while curr:
++        if curr['cell_idx'] == occluded_idx:
++            # Move to head if not already there [S2, S3, unofficial]
++            if curr != head:
++                pn_lists[occluding_idx] = curr['next']
++                curr['next'] = head
++                head = curr
++                pn_lists[occluding_idx] = head
+             return
+-    # Add new entry to head
+-    pn_list.insert(0, { 'cell_idx': occluded_cell_idx, 'next': None })
+-
+-def dfs(cell, ordering, pn_lists):
+-    cell.visited = True
+-    # Visit neighbors via MPVO arrows (implicit in graph traversal)
+-    # Visit neighbors via PN lists (explicit dependencies)
+-    for pn_entry in pn_lists[cell.index]:
+-        neighbor = mesh.cells[pn_entry.cell_idx]
+-        if not neighbor.visited:
+-            dfs(neighbor, ordering, pn_lists)
+-    ordering.append(cell)
++        curr = curr['next']
++    # Add new entry to head [S2, S3, unofficial]
++    pn_lists[occluding_idx] = {'cell_idx': occluded_idx, 'next': head}
++
++def get_pn_list(pn_lists, cell_idx):
++    # Standard linked list traversal [G]
++    result = []
++    curr = pn_lists[cell_idx]
++    while curr:
++        result.append(curr['cell_idx'])
++        curr = curr['next']
++    return result
++
++def scan_convert_face(face, viewpoint):
++    # Standard rasterization returning list of (pixel_index, pixel_center) [G]
++    return []
++
++def compute_z_distance(viewpoint, pixel_center, face):
++    # Compute distance from viewpoint to intersection along ray [G]
++    return 0.0
++
++def distance(point1, point2):
++    # Euclidean distance [G]
++    return 0.0
+ ```
+ 
+@@ -178,6 +215,6 @@
+ ## Subtopics
+ 
+-### BSP-XMPVO
+-An algorithm that improves XMPVO results by building a view-independent BSP tree of the exterior faces to reduce the number of ray shooting queries needed [S2, unofficial]. It augments MPVO ordering using binary space partitions on boundary elements [S2, unofficial]. Runtime is $O(n + bp)$, where $p$ is the size of a small subset of exterior cells [S2, unofficial]. However, building the BSP structure is very slow, and the tree can become deep and unbalanced, leading to $O(b)$ cost per search and $O(b^2)$ overall flavor [S2, unofficial]. Results are orders of magnitude better than previous exact methods, but SXMPVO is faster and easier to implement than BSP-XMPVO [S2, S3, unofficial].
++### [BSP-XMPVO](1160-bsp-xmpvo.md)
++An algorithm that improves XMPVO results by building a view-independent BSP tree of the exterior faces to reduce the number of ray shooting queries needed. It augments MPVO ordering using binary space partitions on boundary elements. Runtime is $O(n + bp)$, where $p$ is the size of a small subset of exterior cells. However, building the BSP structure is very slow, and the tree can become deep and unbalanced, leading to $O(b)$ cost per search and $O(b^2)$ overall flavor. Results are orders of magnitude better than previous exact methods, but SXMPVO is faster and easier to implement than BSP-XMPVO.
+ 
+ ## Operating characteristics

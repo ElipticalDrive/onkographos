@@ -1,0 +1,677 @@
+Fast N-dimensional interpolation package for Julia - (feat): N-D Interpolation for Constant, Linear & Quadratic methods by mgyoo86 · Pull Request #31 · ProjectTorreyPines/FastInterpolations.jl
+
+(feat): N-D Interpolation for Constant, Linear & Quadratic methods by mgyoo86 · Pull Request #31 · ProjectTorreyPines/FastInterpolations.jl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mgyoo86
+commented
+Feb 5, 2026
+Copy link
+Copy Markdown
+Member
+Summary
+Extends FastInterpolations.jl from 1D + CubicND to a complete N-dimensional interpolation toolkit. Three new ND interpolant types — ConstantND, LinearND, and QuadraticND — plus a shared core infrastructure that unifies all ND algorithms.
+The API generalizes the 1D interface naturally: where 1D takes a scalar, ND takes a Tuple for grids, query points, and per-axis settings.
+New ND Interpolant Types
+ConstantInterpolantND
+N-dimensional step (nearest-neighbor) interpolation with per-axis side selection.
+```
+x = [0.0, 1.0, 2.0, 3.0]
+y = range(0.0, 2.0, 20)
+data = rand(4, 20)
+
+itp = constant_interp((x, y), data; side=:nearest, extrap=:constant)
+itp((0.5, 1.0))   # scalar query
+```
+Per-axis configuration: side=(:left, :right), extrap=(:none, :wrap)
+Batch evaluation: both SoA (xs, ys) and AoS [SVector(x,y), ...] forms
+LinearInterpolantND
+N-dimensional multilinear (bilinear, trilinear, ...) interpolation.
+```
+x = range(0.0, 1.0, 11)
+y = range(0.0, 2.0, 21)
+data = [sin(xi) * cos(yj) for xi in x, yj in y]
+
+itp = linear_interp((x, y), data)
+itp((0.5, 1.0))                    # bilinear interpolation
+itp((0.5, 1.0); deriv=(1, 0))     # ∂f/∂x (analytical)
+itp((0.5, 1.0); deriv=Val((1, 0))) # type-stable derivative via Val
+```
+O(2^N) tensor-product evaluation with @generated loop unrolling
+Full partial derivative support up to first order
+QuadraticInterpolantND
+N-dimensional quadratic interpolation with precomputed partial derivatives at grid nodes.
+```
+x = range(0.0, 2.0, 20)
+y = range(0.0, 1.0, 15)
+data = [xi^2 + yi^2 for xi in x, yi in y]
+
+itp = quadratic_interp((x, y), data; bc=QuadraticFit())
+itp((1.0, 0.5))                  # evaluate
+itp((1.0, 0.5); deriv=(1, 0))   # ∂f/∂x
+itp((1.0, 0.5); deriv=(0, 2))   # ∂²f/∂y²
+```
+Precomputes all 2^N partial derivative combinations per grid node at build time
+O(1) evaluation via tensor-product quadratic polynomial kernel
+Supports all QuadraticBC types: Left(...), Right(...), MinCurvFit()
+Automatic BC conversion: NaturalBC() → Right(Deriv2(0)), QuadraticFit() → Right(QuadraticFit())
+Unified API Design
+All ND interpolants follow a consistent pattern:
+Feature
+API
+Construction
+method_interp((x, y, ...), data; kwargs...)
+Scalar query
+itp((x, y, ...))
+Batch SoA
+itp((xs, ys, ...))
+Batch AoS
+itp(points)
+Derivatives
+itp(pt; deriv=(dx, dy, ...)) or deriv=Val((...))
+Per-axis config
+extrap=(:none, :wrap), search=(Binary(), Hunt())
+Shared Core Infrastructure (core/nd_utils.jl)
+Extracted ~476 lines of shared utilities used by all ND interpolants:
+_resolve_* functions — Convert flexible user input (scalar or tuple) to canonical N-tuple form for extrap, search, side, and BC parameters
+_compute_all_local_params — @generated function computing cell index, normalized coordinate, and grid spacing for all N dimensions in a single pass (zero-allocation)
+NodalDerivativesND{Tv, N, NP1} — Shared storage for 2^N partial derivative arrays at grid nodes, used by both CubicND and QuadraticND
+_resolve_deriv_nd — Unified derivative dispatch supporting Int, Val, and NTuple{N,Int} inputs
+CubicND Refactoring
+The existing CubicND module was refactored for consistency:
+File rename: nd_*.jl → cubic_nd_*.jl for clarity alongside sibling modules
+Shared infrastructure: NodalDerivativesND and _compute_all_local_params moved to core/nd_utils.jl
+Type constraints relaxed to support heterogeneous grids (see below)
+Heterogeneous Grid Support
+All ND interpolants now support mixing grid types across dimensions:
+```
+x = range(0.0, 1.0, 10)         # uniform (Range)
+y = [0.0, 0.3, 0.7, 1.5, 2.0]  # non-uniform (Vector)
+
+itp = cubic_interp((x, y), data; bc=CubicFit())  # works!
+```
+This required changing type constraints from NTuple{N, <:AbstractVector} (all same concrete type) to Tuple{Vararg{AbstractVector, N}} (each axis can differ).
+mgyoo86
+added 14 commits
+February 4, 2026 16:41
+feat: implement Val-recursive validation for ND interpolant and parti…
+…
+5eebc50
+```
+…als dimensions
+```
+refactor: move ND utilities to core for shared use by constant/linear…
+…
+d8bb963
+```
+…/cubic
+
+Phase 1 of ND constant/linear implementation (TDD).
+
+- Move nd_utils.jl from src/cubic/nd/ to src/core/
+- Add _resolve_side_nd for ConstantInterpolantND side selection
+- Add _validate_side helper for side symbol validation
+- Update include order in src/core/core.jl
+- Add test/test_nd_utils_shared.jl with 62 tests
+
+Shared utilities now available for Phase 2 (ConstantInterpolantND)
+and Phase 3 (LinearInterpolantND) implementations.
+```
+feat: implement ConstantInterpolantND for N-dimensional constant inte…
+…
+9fabadd
+```
+…rpolation
+
+Phase 2 of ND constant/linear implementation (TDD).
+
+Type: ConstantInterpolantND{Tg,Tv,N}
+- Per-axis side selection (:nearest, :left, :right)
+- Per-axis extrapolation (:none, :constant, :extension, :wrap)
+- Per-axis search policy support
+
+API:
+- constant_interp((x, y), data) - constructor
+- constant_interp((x, y), data, query) - one-shot
+- itp((xq, yq)) - scalar tuple query
+- itp([xq, yq]) - vector query (ForwardDiff compatible)
+- itp((xs, ys)) - batch SoA query
+- itp(points) - batch AoS query
+- deriv=0/1/2/3 or Val((d1,d2,...)) for derivatives
+
+Features:
+- All derivatives return zero (constant function)
+- Mixed Range/Vector grids supported
+- Show methods for REPL display
+- 72 tests covering all functionality
+
+Files:
+- src/constant/nd/nd_types.jl - type definition
+- src/constant/nd/nd_eval.jl - evaluation logic
+- src/constant/nd/nd_api.jl - public API
+- test/test_nd_constant.jl - comprehensive tests
+```
+refactor: move ND utilities to core, rename ND files for clarity
+…
+28ac54c
+```
+Move shared functions to core/nd_utils.jl:
+- _handle_all_extraps: extrapolation handling for all ND methods
+- _handle_axis_extrap: per-axis extrapolation (none/constant/extension/wrap)
+- _search_all_intervals: interval search across all axes
+
+Update type signatures to Tuple{Vararg{Any,N}} for heterogeneous tuples:
+- Mixed grid types (Vector + Range)
+- Per-axis extrapolation modes
+- Mixed search policies
+
+Rename ND files for stack trace clarity:
+- cubic: nd_*.jl → cubic_nd_*.jl (5 files)
+- constant: nd_*.jl → constant_nd_*.jl (3 files)
+
+Net effect: ~55 lines removed through deduplication
+```
+feat: implement LinearInterpolantND for N-dimensional multilinear int…
+…
+f3d5dd0
+```
+…erpolation
+
+Add N-dimensional linear (multilinear) interpolation:
+- Bilinear in 2D, trilinear in 3D, n-linear in N dimensions
+- Tensor-product interpolation exact for linear and product functions
+- First derivatives via weight replacement (-1/h, 1/h)
+- Second+ same-axis derivatives return zero (linear has constant slope)
+
+Type: LinearInterpolantND{Tg, Tv, N, G, S, E, P}
+- Reuses all shared utilities from core/nd_utils.jl
+- Supports heterogeneous grids (Range + Vector)
+- Per-axis extrapolation and search policies
+- Complex value support
+
+API:
+- linear_interp((x,y), data) - constructor
+- linear_interp((x,y), data, query) - one-shot
+- itp(query), itp((xs,ys)), itp(points) - callable
+
+Files:
+- src/linear/nd/linear_nd_types.jl - type definition
+- src/linear/nd/linear_nd_eval.jl - @generated multilinear kernel
+- src/linear/nd/linear_nd_api.jl - public constructors
+- src/linear/nd/nd.jl - module aggregator
+- test/test_nd_linear.jl - 75+ test cases
+```
+docs: update vector_calculus.jl to list new ND types
+…
+824f845
+```
+Vector calculus (gradient, hessian, laplacian) now explicitly supports:
+- CubicInterpolantND
+- LinearInterpolantND
+- ConstantInterpolantND
+
+All functions are generic for AbstractInterpolantND subtypes
+that implement the deriv keyword API.
+```
+feat: add N-dimensional interpolation tests for linear, constant, and…
+…
+f50d72a
+```
+… cubic interpolants
+```
+feat: enhance README with multi-dimensional interpolation examples an…
+…
+27ed20e
+```
+…d add 2D comparison plot
+
+feat: add 2D comparison plot image for README enhancement
+
+chore: remove obsolete 2D comparison plot image from repository
+```
+fix: relax NTuple constraints to support heterogeneous grid types and…
+…
+7f4550c
+```
+… mixed derivatives
+
+- Change _compute_all_local_params to accept Tuple{Vararg{Any,N}} for spacings
+  instead of NTuple{N}, allowing mixed grid types (Vector + Range)
+- Change N=2 specialization to accept heterogeneous ops and search tuples,
+  enabling mixed derivative orders (e.g., deriv=(2,0)) to use optimized path
+
+The NTuple{N,T} constraint requires all elements to have the same concrete type,
+which fails when grids have different types (Vector vs Range → VectorSpacing vs
+ScalarSpacing) or derivatives have different orders (EvalDeriv2 vs EvalValue).
+```
+feat: refine type constraints for N-dimensional interpolation functio…
+…
+7f32136
+```
+…ns to support heterogeneous types
+```
+feat: add NTuple{N,Int} deriv support for linear/constant ND + hetero…
+…
+f177517
+```
+…geneous grid regression tests
+
+- Add _resolve_deriv_nd Tuple method to wrap NTuple{N,Int} in Val,
+  enabling runtime per-axis derivative specification (e.g., deriv=(2,0))
+  for linear and constant ND interpolants (cubic already handled this)
+- Widen deriv kwarg type from Union{Int, Val} to Union{Int, Val, NTuple{N,Int}}
+  across all ND callable interfaces (linear, constant, cubic oneshot APIs)
+- Add comprehensive regression test suite (test_nd_heterogeneous_grids.jl)
+  covering: heterogeneous grids (Range × Vector), mixed derivatives with
+  CubicFit BC analytic verification, 3D mixed grids, mixed search/extrap/BC,
+  Val-based derivatives, and batch evaluation
+```
+refactor: move NodalDerivativesND and _compute_all_local_params to co…
+…
+8ae8b4d
+```
+…re/nd_utils.jl
+
+Shared ND coefficient storage and local parameter computation are now in
+core/ so both CubicInterpolantND and QuadraticInterpolantND can reuse them
+without include-order issues.
+```
+feat: implement QuadraticInterpolantND for N-dimensional quadratic in…
+…
+2833c34
+```
+…terpolation
+
+Follows the cubic ND architecture: bit-encoded NodalDerivativesND storage,
+@generated tensor-product evaluation kernel, and per-axis quadratic recurrence
+for 1D differentiation. Supports heterogeneous grids (Range x Vector), mixed
+BC/search/extrap policies, Val and NTuple derivative specs, batch SoA/AoS
+evaluation, and arbitrary dimensionality.
+```
+Add comprehensive tests for QuadraticInterpolantND
+…
+4db2c25
+```
+- Implement tests for 2D polynomial reproduction, derivatives, and boundary conditions.
+- Include coverage for search policies, extrapolation modes, and batch evaluation.
+- Add support for Float32 and complex values.
+- Enhance error handling and type introspection tests.
+- Introduce Val-based accessors and generated tuple extractors for improved usability.
+- Ensure coverage for heterogeneous grids and mixed derivative evaluations.
+```
+mgyoo86
+requested a review
+from Copilot
+February 5, 2026 22:42
+Copilot started reviewing on behalf of
+mgyoo86
+February 5, 2026 22:42
+View session
+Copilot
+AI
+reviewed
+Feb 5, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR extends FastInterpolations.jl from 1D + CubicND to a complete N-dimensional interpolation toolkit by adding ConstantInterpolantND, LinearInterpolantND, and QuadraticInterpolantND. The implementation follows a clean, consistent design pattern across all ND methods with shared utilities extracted to core/nd_utils.jl.
+Changes:
+New ND interpolants: ConstantND (step/nearest-neighbor), LinearND (multilinear), QuadraticND (tensor-product quadratic)
+Shared ND infrastructure (~476 lines in core/nd_utils.jl) with _resolve_* helpers, NodalDerivativesND storage, and _compute_all_local_params
+CubicND refactoring: files renamed (nd_*.jl → cubic_nd_*.jl), heterogeneous grid support via Tuple{Vararg{T,N}} instead of NTuple{N,<:T}
+Comprehensive tests (1,800+ lines) and plotting recipes for 2D visualization
+Reviewed changes
+Copilot reviewed 39 out of 41 changed files in this pull request and generated 2 comments.
+Show a summary per file
+File
+Description
+src/core/nd_utils.jl
+Shared ND utilities: parameter resolution, grid validation, extrapolation, interval search (476 lines)
+src/constant/nd/*.jl
+ConstantND implementation: types, evaluation, API (385 lines)
+src/linear/nd/*.jl
+LinearND implementation: types, evaluation, API (522 lines)
+src/quadratic/nd/*.jl
+QuadraticND implementation: types, build, evaluation, API (793 lines)
+src/cubic/nd/cubic_nd_*.jl
+CubicND refactoring: heterogeneous tuple support, shared utilities moved to core
+test/test_nd_*.jl
+Comprehensive test suite: 1,800+ lines covering all ND methods, heterogeneous grids, derivatives, batch queries
+ext/FastInterpolationsRecipesBaseExt.jl
+Plotting recipes for ND visualization
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/core/nd_utils.jl
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/core/nd_utils.jl
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+github-actions
+Bot
+reviewed
+Feb 5, 2026
+View reviewed changes
+github-actions
+Bot
+left a comment
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+FastInterpolations.jl Benchmarks
+Details
+Benchmark suite
+Current: 14fb483
+Previous: 7b13595
+Ratio
+1_cubic_oneshot/q00001
+502.43 ns
+530.39 ns
+0.95
+1_cubic_oneshot/q00100
+1083.42 ns
+1183.41 ns
+0.92
+1_cubic_oneshot/q10000
+61062.7 ns
+64074.5 ns
+0.95
+2_cubic_construct/g0010
+1476.75 ns
+1552.2 ns
+0.95
+2_cubic_construct/g0100
+2754.93 ns
+2757.15 ns
+1.00
+2_cubic_construct/g1000
+16883.4 ns
+17439.6 ns
+0.97
+3_cubic_eval/q00001
+41.48 ns
+38.27 ns
+1.08
+3_cubic_eval/q00100
+465.27 ns
+499.53 ns
+0.93
+3_cubic_eval/q10000
+41902 ns
+45477 ns
+0.92
+4_linear_oneshot/q00001
+47.29 ns
+44.78 ns
+1.06
+4_linear_oneshot/q00100
+392.23 ns
+413.08 ns
+0.95
+4_linear_oneshot/q10000
+34496.3 ns
+36924.9 ns
+0.93
+5_linear_construct/g0010
+13.42 ns
+15.02 ns
+0.89
+5_linear_construct/g0100
+13.93 ns
+14.33 ns
+0.97
+5_linear_construct/g1000
+14.73 ns
+14.32 ns
+1.03
+6_linear_eval/q00001
+30.25 ns
+30.86 ns
+0.98
+6_linear_eval/q00100
+410.57 ns
+444.92 ns
+0.92
+6_linear_eval/q10000
+36268.5 ns
+39543.9 ns
+0.92
+7_cubic_range/scalar_query
+27.35 ns
+29.15 ns
+0.94
+7_cubic_range/vec1_query
+41.37 ns
+38.07 ns
+1.09
+7_cubic_vec/scalar_query
+16.43 ns
+17.23 ns
+0.95
+7_cubic_vec/vec1_query
+36.77 ns
+34.27 ns
+1.07
+8_cubic_multi/construct_s001_q100
+1392.89 ns
+1397.71 ns
+1.00
+8_cubic_multi/construct_s010_q100
+6201.24 ns
+6263.81 ns
+0.99
+8_cubic_multi/construct_s100_q100
+47740.9 ns
+47178.2 ns
+1.01
+8_cubic_multi/eval_s001_q100
+2095.2 ns
+2148.31 ns
+0.98
+8_cubic_multi/eval_s001_q100_scalar_loop
+2788.69 ns
+2999.31 ns
+0.93
+8_cubic_multi/eval_s010_q100
+3070.81 ns
+3579.68 ns
+0.86
+8_cubic_multi/eval_s010_q100_scalar_loop
+3698.88 ns
+3907.41 ns
+0.95
+8_cubic_multi/eval_s100_q100
+14841.6 ns
+18697 ns
+0.79
+8_cubic_multi/eval_s100_q100_scalar_loop
+4581.6 ns
+5105.5 ns
+0.90
+This comment was automatically generated by workflow using github-action-benchmark.
+This comment was marked as outdated.
+Sign in to view
+Sorry, something went wrong.
+Uh oh!
+There was an error while loading. Please reload this page.
+mgyoo86
+added 5 commits
+February 5, 2026 14:50
+feat: add regression tests for integer grid promotion in constant and…
+…
+b3a03f5
+```
+… linear interpolation
+```
+feat: add ND support for Constant, Linear, and Quadratic interpolants…
+…
+06d2d7a
+```
+… in documentation
+```
+fix: update 2D comparison visualization in README with node points an…
+…
+b2da232
+```
+…d adjust color range
+```
+fix: update README to reflect N-dimensional support for interpolation
+cfe70fc
+fix: correct README for thread-safety wording and update usage exampl…
+…
+b0219e1
+```
+…es for cubic interpolation
+```
+mgyoo86
+changed the title
+(feat): N Interpolation for Constant, Linear & Quadratic methods
+(feat): N-D Interpolation for Constant, Linear & Quadratic methods
+Feb 5, 2026
+fix: update variable name in advanced usage example for clarity
+9fce5aa
+codecov
+Bot
+commented
+Feb 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 97.25849% with 21 lines in your changes missing coverage. Please review.
+✅ Project coverage is 97.89%. Comparing base (7b13595) to head (14fb483).
+⚠️ Report is 23 commits behind head on master.
+Files with missing lines
+Patch %
+Lines
+src/constant/nd/constant_nd_eval.jl
+96.26%
+4 Missing ⚠️
+src/linear/nd/linear_nd_eval.jl
+96.07%
+4 Missing ⚠️
+src/quadratic/nd/quadratic_nd_types.jl
+84.61%
+4 Missing ⚠️
+src/constant/nd/constant_nd_api.jl
+92.10%
+3 Missing ⚠️
+src/core/nd_utils.jl
+98.36%
+2 Missing ⚠️
+src/cubic/nd/cubic_nd_api.jl
+88.88%
+1 Missing ⚠️
+src/cubic/nd/cubic_nd_build.jl
+96.96%
+1 Missing ⚠️
+src/quadratic/nd/quadratic_nd_api.jl
+97.61%
+1 Missing ⚠️
+src/quadratic/nd/quadratic_nd_eval.jl
+99.25%
+1 Missing ⚠️
+Additional details and impacted files
+```
+@@            Coverage Diff             @@
+##           master      #31      +/-   ##
+==========================================
+- Coverage   97.96%   97.89%   -0.07%     
+==========================================
+  Files          49       59      +10     
+  Lines        4127     4761     +634     
+==========================================
++ Hits         4043     4661     +618     
+- Misses         84      100      +16     
+```
+Files with missing lines
+Coverage Δ
+src/FastInterpolations.jl
+100.00% <ø> (ø)
+src/constant/nd/constant_nd_types.jl
+100.00% <100.00%> (ø)
+src/core/show.jl
+99.07% <100.00%> (+0.08%)
+⬆️
+src/cubic/nd/cubic_nd_eval.jl
+94.48% <ø> (ø)
+src/cubic/nd/cubic_nd_math.jl
+95.62% <ø> (ø)
+src/cubic/nd/cubic_nd_types.jl
+92.15% <ø> (ø)
+src/linear/nd/linear_nd_api.jl
+100.00% <100.00%> (ø)
+src/linear/nd/linear_nd_types.jl
+100.00% <100.00%> (ø)
+src/quadratic/nd/quadratic_nd_build.jl
+100.00% <100.00%> (ø)
+src/vector_calculus.jl
+100.00% <ø> (ø)
+... and 9 more
+🚀 New features to boost your workflow:
+❄️ Test Analytics: Detect flaky tests, report on failures, and find test suite problems.
+mgyoo86
+added 2 commits
+February 5, 2026 15:34
+fix: update README and tests for ConstantInterpolantND show methods
+97cdbbd
+fix: update 2D visualization example in README for clarity
+14fb483
+Hide details
+View details
+mgyoo86
+merged commit d4603e8
+into
+master
+Feb 6, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+mgyoo86
+referenced
+this pull request
+Feb 7, 2026
+bump version to 0.2.8 and update benchmark results in README
+e0e8211
+mgyoo86
+deleted the
+feat/ND_const_linear_quadratic
+branch
+February 19, 2026 21:28
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

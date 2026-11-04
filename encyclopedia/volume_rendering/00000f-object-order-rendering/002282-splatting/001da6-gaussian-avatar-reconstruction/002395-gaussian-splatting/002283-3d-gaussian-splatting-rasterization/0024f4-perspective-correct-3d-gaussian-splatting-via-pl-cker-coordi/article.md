@@ -1,0 +1,118 @@
+# Perspective-Correct 3D Gaussian Splatting via Plücker Coordinates
+
+Also called: Hybrid 3D Gaussian Splatting intersection, Inversion-free splat evaluation, Matrix inversion-free ray-splat intersection, Perspective-Correct Ray-Splat Intersection, Plücker coordinate ray-splat intersection
+
+## Overview
+This method computes the value of a 3D Gaussian primitive for a given viewing ray in screen space without performing matrix inversion, utilizing Plücker coordinates to represent the ray and calculate the distance to the Gaussian's center [S1]. It sets itself apart from standard 3D Gaussian Splatting rasterization by providing a closed-form, numerically stable solution for perspective-correct splat evaluation that handles degenerate ellipsoids and avoids the computational cost of matrix inversions [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Model-view matrix $M \in \mathbb{R}^{4 \times 4}$, projection matrix $P \in \mathbb{R}^{4 \times 4}$, viewport transform $V \in \mathbb{R}^{4 \times 4}$, per-splat attributes defining the transformation $T' \in \mathbb{R}^{4 \times 4}$ from normalized splat space to screen space, pixel screen coordinates $(x_s, y_s)$, and hyperparameter $\tau_\alpha$ [S1].
+*   **Outputs:** The squared distance $\rho(x)^2$ from the viewing ray to the Gaussian center in splat space, used to evaluate the Gaussian's alpha value [S1].
+
+**Data Structures**
+*   **Homogeneous Plane:** Represented as a vector $p = (a, b, c, d)^\top$ such that a point $x$ lies on the plane if $p^\top x = 0$ [S1].
+*   **Dual Plücker Coordinates:** Represented as $\mathcal{L}_s^* = (d : m)$, where $d$ is the ray direction and $m$ is the moment around the origin [S1].
+
+**Steps**
+1.  **Compute Screen-Space Transformation:** Calculate the transformation matrix $T' \in \mathbb{R}^{4 \times 4}$ from normalized splat space to screen space using per-splat attributes [S1].
+2.  **Compute Bounding Box:** Calculate the tight 3D axis-aligned bounding box $[b_1, t_1] \times [b_2, t_2] \times [b_3, t_3]$ in screen space [S1]. The bounds $b_i$ and $t_i$ are computed from the $i$-th row of $T'$ using component-wise multiplication $\odot$ and dot products $\langle \cdot, \cdot \rangle$ [S1]. An individual cutoff value is computed for each splat based on $\tau_\alpha$ to optimize bounding box size when opacity $< 1$ [S1].
+3.  **Define Ray Planes:** Represent the viewing ray through pixel $(x_s, y_s)$ as two perpendicular planes in screen space:
+    $$ \pi_x = (1, 0, 0, -x_s)^\top $$
+    $$ \pi_y = (0, 1, 0, -y_s)^\top $$
+    [S1]
+4.  **Transform Planes to Splat Space:** Transform $\pi_x$ and $\pi_y$ into splat space using the inverse-transposed mapping $(VPMT)^{-\top}$ to obtain $\pi_{sx}$ and $\pi_{sy}$ [S1]. This avoids matrix inversion [S1].
+5.  **Compute Dual Plücker Coordinates:** Calculate the dual Plücker coordinates $\mathcal{L}_s^*$ from the intersection of $\pi_{sx}$ and $\pi_{sy}$ [S1]. Let $\pi_{sx} = (a_1 : a_2 : a_3 : a_0)$ and $\pi_{sy} = (b_1 : b_2 : b_3 : b_0)$ [S1]. The coordinates are derived from the 2×2 minors of the plane coefficient matrix [S1].
+6.  **Compute Squared Distance:** Calculate $\rho(x)^2$ directly using the equality distance formula:
+    $$ \rho(x)^2 = \frac{|m|^2}{|d|^2} $$
+    where $|m|^2 = m_x^2 + m_y^2 + m_z^2$ and $|d|^2 = d_x^2 + d_y^2 + d_z^2$ [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def evaluate_gaussian_plucker(T_prime, x_s, y_s, tau_alpha):
+    """
+    Evaluates the squared distance from a viewing ray to a Gaussian center
+    using Plücker coordinates, avoiding matrix inversion.
+    
+    Args:
+        T_prime: Transformation from normalized splat space to screen space (4x4)
+        x_s: Screen x coordinate
+        y_s: Screen y coordinate
+        tau_alpha: Minimum alpha threshold for bounding box cutoff
+        
+    Returns:
+        rho_sq: Squared distance from ray to Gaussian center
+    """
+    # Step 1: Define ray planes in screen space
+    # Plane equation: ax + by + cz + d = 0
+    pi_x = [1.0, 0.0, 0.0, -x_s]
+    pi_y = [0.0, 1.0, 0.0, -y_s]
+    
+    # Step 2: Transform planes to splat space
+    # Planes transform by the inverse-transpose of the spatial transformation matrix.
+    T_prime_inv_T = inverse_transpose_4x4(T_prime)
+    pi_sx = transform_plane(pi_x, T_prime_inv_T)
+    pi_sy = transform_plane(pi_y, T_prime_inv_T)
+    
+    # Step 3: Compute Dual Plücker Coordinates
+    # pi_sx = (a1, a2, a3, a0), pi_sy = (b1, b2, b3, b0)
+    a1, a2, a3, a0 = pi_sx
+    b1, b2, b3, b0 = pi_sy
+    
+    # Direction d = n1 x n2
+    d_x = a2 * b3 - a3 * b2
+    d_y = a3 * b1 - a1 * b3
+    d_z = a1 * b2 - a2 * b1
+    
+    # Moment m = a0 * n2 - b0 * n1
+    m_x = a0 * b1 - b0 * a1
+    m_y = a0 * b2 - b0 * a2
+    m_z = a0 * b3 - b0 * a3
+    
+    # Step 4: Compute squared distance
+    d_sq = d_x**2 + d_y**2 + d_z**2
+    m_sq = m_x**2 + m_y**2 + m_z**2
+    
+    if d_sq == 0.0:
+        return float('inf') # Vanishing denominator indicates ray misses splat
+        
+    return m_sq / d_sq
+
+def transform_plane(plane, inv_T):
+    """Transforms a homogeneous plane by the inverse-transpose of a 4x4 matrix."""
+    return [
+        inv_T[0][0]*plane[0] + inv_T[1][0]*plane[1] + inv_T[2][0]*plane[2] + inv_T[3][0]*plane[3],
+        inv_T[0][1]*plane[0] + inv_T[1][1]*plane[1] + inv_T[2][1]*plane[2] + inv_T[3][1]*plane[3],
+        inv_T[0][2]*plane[0] + inv_T[1][2]*plane[1] + inv_T[2][2]*plane[2] + inv_T[3][2]*plane[3],
+        inv_T[0][3]*plane[0] + inv_T[1][3]*plane[1] + inv_T[2][3]*plane[2] + inv_T[3][3]*plane[3]
+    ]
+
+def inverse_transpose_4x4(M):
+    """Computes the inverse-transpose of a 4x4 matrix using cofactors [G]."""
+    # Standard linear algebra operation [G]
+    # Computes adjugate matrix divided by determinant, then transposes.
+    # Omitted for brevity; implement via cofactor expansion or standard math routines.
+    pass
+```
+
+**Parameters**
+*   $\tau_\alpha$: Hyperparameter defining the minimum alpha value of a fragment for it not to be skipped during blending. Used to compute individual cutoff values for smaller bounding boxes when opacity $< 1$ [S1].
+
+**Edge Cases and Pitfalls**
+*   **Vanishing Denominator:** A vanishing denominator in the distance formula ($|d|^2 = 0$) indicates that the ray misses the splat or the ray direction is degenerate [S1]. This case is easily detected and handled [S1].
+*   **Degenerate Ellipsoids:** The method provides a closed-form solution that handles degenerate ellipsoids (where the Gaussian is flattened in one or more dimensions) without requiring special casing or matrix inversion [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Reduced setup costs per Gaussian compared to standard methods, but slightly higher costs per pixel due to the Plücker coordinate calculations [S1].
+*   **Memory Complexity:** Not given in the sources [G].
+*   **Strengths:** Numerically stable; avoids matrix inversion; handles degenerate Gaussians; fast and trivial to differentiate (additions, multiplications, and one division) [S1].
+*   **Limitations:** Slightly higher per-pixel cost compared to approximations, making it less ideal when primitives cover many pixels [S1].
+*   **When to Use:** Desirable when graphics primitives cover only a few pixels [S1].
+
+## Background
+This method was introduced in "Efficient Perspective-Correct 3D Gaussian Splatting Using Hybrid Transparency" [S1]. It builds on Weyrich et al.'s optimization of Sigg et al.'s bounding box computation [SWBG06] and extends it to non-degenerate 3D Gaussians [S1]. It also follows Radl et al. [RSP*24] for opacity-based cutoffs and contrasts with concurrent works like [YSG24, MLMP*24] which use numerically unstable or slower approaches [S1].
+
+## Sources
+[S1] Efficient Perspective‐Correct 3D Gaussian Splatting Using Hybrid Transparency, https://doi.org/10.1111/cgf.70014, fetched 2026-10-30

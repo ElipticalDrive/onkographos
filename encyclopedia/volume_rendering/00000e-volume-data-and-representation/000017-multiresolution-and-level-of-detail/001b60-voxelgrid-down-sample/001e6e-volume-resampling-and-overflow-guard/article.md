@@ -1,0 +1,152 @@
+# Volume Resampling and Overflow Guard
+
+Also called: Resampling with Max Voxel Cap, Safe Volume Resampling
+
+## Overview
+This method prevents downstream memory overflow by enforcing a strict maximum voxel count on a candidate volume grid. It calculates a scaling factor to reduce dimensions if the candidate count exceeds the limit, applies trilinear interpolation to resample the data, and includes a fallback mechanism to ensure the final voxel count is strictly reduced even if rounding prevents it. It builds on [VoxelGrid Down Sample](1014-voxelgrid-down-sample.md) by adding a safety cap and precise resampling logic.
+
+## How it works
+**Inputs:**
+- Candidate volume grid with dimensions $D_0, H_0, W_0$.
+- Candidate voxel count $N_{cand} = D_0 \times H_0 \times W_0$.
+- Maximum allowed voxel count $N_{max}$ (default $2^{24} - 1$).
+- Optional physical spacing $s_{old} = (s_d, s_h, s_w)$.
+
+**Outputs:**
+- Resampled volume grid with adjusted dimensions $D_{adj}, H_{adj}, W_{adj}$.
+- Updated physical spacing $s_{new}$ (if input spacing was provided).
+
+**Data Structures:**
+- The volume is treated as a tensor of shape $(1, 1, D, H, W)$ during interpolation to support batch and channel dimensions required by standard interpolation libraries.
+
+**Steps:**
+1. **Check Limit:** If $N_{cand} \le N_{max}$, no resampling is needed. Return original dimensions and spacing.
+2. **Calculate Scale:** Compute the global scaling factor:
+   $$ scale = \left( \frac{N_{max}}{N_{cand}} \right)^{1/3} $$
+3. **Compute Adjusted Dimensions:** Calculate initial adjusted dimensions:
+   $$ D_{init} = \lfloor D_0 \cdot scale \rfloor $$
+   $$ H_{init} = \lfloor H_0 \cdot scale \rfloor $$
+   $$ W_{init} = \lfloor W_0 \cdot scale \rfloor $$
+   Apply the minimum dimension constraint:
+   $$ D_{adj} = \max(32, D_{init}) $$
+   $$ H_{adj} = \max(32, H_{init}) $$
+   $$ W_{adj} = \max(32, W_{init}) $$
+4. **Fallback Check:** Calculate the new voxel count $N_{new} = D_{adj} \times H_{adj} \times W_{adj}$. If $N_{new} \ge N_{cand}$ (i.e., rounding or minimum constraints prevented reduction), decrement each dimension by 1 (minimum 32):
+   $$ D_{adj} = \max(32, D_0 - 1) $$
+   $$ H_{adj} = \max(32, H_0 - 1) $$
+   $$ W_{adj} = \max(32, W_0 - 1) $$
+5. **Resample Volume:** Resample the input volume to shape $(1, 1, D_{adj}, H_{adj}, W_{adj})$ using trilinear interpolation with `align_corners=True`. The volume is unsqueezed to add batch and channel dimensions before interpolation and squeezed back after.
+6. **Update Spacing:** If physical spacing $s_{old}$ is known, calculate scale factors for each axis to avoid division by zero for size 1 dimensions:
+   $$ scale_d = \frac{\max(D_0 - 1, 1)}{\max(D_{adj} - 1, 1)} $$
+   $$ scale_h = \frac{\max(H_0 - 1, 1)}{\max(H_{adj} - 1, 1)} $$
+   $$ scale_w = \frac{\max(W_0 - 1, 1)}{\max(W_{adj} - 1, 1)} $$
+   Compute new spacing:
+   $$ s_{new} = (s_d \cdot scale_d, s_h \cdot scale_h, s_w \cdot scale_w) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def resample_volume_with_overflow_guard(volume, dims, max_voxels=2**24 - 1, spacing=None):
+    """
+    Resample volume to prevent overflow.
+    
+    Args:
+        volume: Tensor of shape (D, H, W) or (1, 1, D, H, W).
+        dims: Tuple (D0, H0, W0).
+        max_voxels: Maximum allowed voxel count.
+        spacing: Tuple (sd, sh, sw) or None.
+        
+    Returns:
+        resampled_volume: Tensor of shape (D_adj, H_adj, W_adj).
+        new_dims: Tuple (D_adj, H_adj, W_adj).
+        new_spacing: Tuple (sd, sh, sw) or None.
+    """
+    D0, H0, W0 = dims
+    N_cand = D0 * H0 * W0
+    
+    # Step 1: Check limit
+    if N_cand <= max_voxels:
+        return volume, dims, spacing
+    
+    # Step 2: Calculate scale
+    scale = (max_voxels / N_cand) ** (1/3)
+    
+    # Step 3: Compute adjusted dimensions
+    D_init = math.floor(D0 * scale)
+    H_init = math.floor(H0 * scale)
+    W_init = math.floor(W0 * scale)
+    
+    D_adj = max(32, D_init)
+    H_adj = max(32, H_init)
+    W_adj = max(32, W_init)
+    
+    # Step 4: Fallback check
+    N_new = D_adj * H_adj * W_adj
+    if N_new >= N_cand:
+        D_adj = max(32, D0 - 1)
+        H_adj = max(32, H0 - 1)
+        W_adj = max(32, W0 - 1)
+        
+    # Step 5: Resample
+    # Ensure volume has batch and channel dims: (1, 1, D, H, W)
+    if volume.ndim == 3:
+        vol_input = volume.unsqueeze(0).unsqueeze(0)
+    else:
+        vol_input = volume
+        
+    # Perform trilinear interpolation with align_corners=True
+    # Note: In practice, this uses a library like torch.nn.functional.interpolate
+    # Here we describe the operation conceptually as per source
+    resampled_vol = interpolate_trilinear_align_corners(vol_input, (D_adj, H_adj, W_adj))
+    
+    # Squeeze back to (D, H, W)
+    resampled_vol = resampled_vol.squeeze(0).squeeze(0)
+    
+    # Step 6: Update spacing
+    new_spacing = None
+    if spacing is not None:
+        sd, sh, sw = spacing
+        # Avoid division by zero for size 1 dimensions
+        scale_d = max(D0 - 1, 1) / max(D_adj - 1, 1)
+        scale_h = max(H0 - 1, 1) / max(H_adj - 1, 1)
+        scale_w = max(W0 - 1, 1) / max(W_adj - 1, 1)
+        
+        new_spacing = (sd * scale_d, sh * scale_h, sw * scale_w)
+        
+    return resampled_vol, (D_adj, H_adj, W_adj), new_spacing
+
+def interpolate_trilinear_align_corners(volume, new_dims):
+    """
+    Placeholder for library-specific trilinear interpolation.
+    Implements: F.interpolate(volume, size=new_dims, mode='trilinear', align_corners=True)
+    """
+    # This function represents the core resampling operation described in [S1, unofficial]
+    # Actual implementation depends on the tensor library (e.g., PyTorch, TensorFlow)
+    pass
+```
+
+**Parameters:**
+- `max_voxels`: Conservative safety cap for voxel count. Default value is $2^{24} - 1$ (approximately 16 million voxels) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Rounding Prevention:** If the calculated adjusted dimensions result in a voxel count not strictly less than the candidate count (due to rounding down or minimum dimension constraints), the fallback mechanism decrements dimensions by 1 [S1, unofficial].
+- **Minimum Dimension:** Dimensions are clamped to a minimum of 32 to prevent degenerate grids [S1, unofficial].
+- **Spacing Division by Zero:** When calculating new spacing, `max(dim - 1, 1)` is used to handle cases where a dimension is 1, avoiding division by zero [S1, unofficial].
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** Dominated by the trilinear interpolation step, which is $O(D_{adj} \cdot H_{adj} \cdot W_{adj})$.
+- **Memory Complexity:** Requires temporary memory for the unsqueezed volume and the resampled volume.
+- **Strengths:** Prevents memory overflow in downstream processes; ensures a strict reduction in voxel count.
+- **Limitations:** Trilinear interpolation may blur high-frequency details; the fallback mechanism may result in suboptimal dimensions if the initial scale calculation is close to integer boundaries.
+- **When to Use:** When processing large volumes that might exceed memory limits in subsequent steps, especially in pipelines involving Gaussian splatting or dense voxel representations.
+
+## Background
+This method is part of the VGS (Volumetric Gaussian Splatting) pipeline, specifically designed to handle volume data efficiently. It addresses the issue of memory overflow when dealing with high-resolution voxel grids. The approach is documented in the VGS repository [S1, unofficial].
+
+## Sources
+[S1] ValentinKraft/vgs, https://github.com/ValentinKraft/vgs, fetched 2026-10-27 (unofficial)

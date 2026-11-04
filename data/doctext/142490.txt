@@ -1,0 +1,2630 @@
+# Voxel Mesh Optimization Library
+
+A C# library that converts a chunk of coloured voxels into an optimized triangle mesh.  Hidden faces are discarded and adjacent quads with the same colour are merged, producing compact meshes suitable for real‑time rendering.
+
+![Scheme](./docs/Readme_images/Scheme.png)
+
+## Known issues
+
+- **Compatibility** : The library as missing compatibility for a job system
+- **Not 100% optimized** : Some parts of the algorithm isn't fully optimized.
+- **Dependency Injections and chunk implementation** : Chunks are currently implemented inside the library which isn't perfect, I will add dependency injection later.
+
+
+## Features
+
+- **Occlusion culling** of non visible voxel faces.
+- **Disjoint‑set quad merging** to minimise triangle count.
+- **OBJ exporter** to inspect generated meshes.
+- **Chunk utilities** such as a Perlin noise generator and simple save/load helpers.
+- **Benchmark suite** with GitHub Actions and published results.
+- Targets **.NET 8** and is engine agnostic.
+- **TaskManager** for multithreading operations with and without thread blocking.
+
+## Installation
+```bash
+dotnet add package VoxelMeshOptimizer
+```
+
+## Usage
+
+### Direct optimization
+This way is recommended if you have a small amount of chunks, you'll run this one at the time and see the result directly.
+
+```csharp
+using VoxelMeshOptimizer.Core;
+using VoxelMeshOptimizer.Core.OptimizationAlgorithms.DisjointSet;
+using VoxelMeshOptimizer.Toolkit;
+
+// ExampleChunk implements Chunk<Voxel>
+var chunk = new Chunk(PerlinNoiseChunkGen.CreatePerlinLandscape(50, 123));
+var optimizer = new DisjointSetMeshOptimizer(new Mesh());
+Mesh mesh = optimizer.Optimize(chunk);
+
+// Option 1 : Export to Wavefront OBJ
+File.WriteAllText("chunk.obj", ObjExporter.MeshToObjString(mesh));
+
+// Option 2 : Get all the Quads for a in-engine usage (1 Quad = 2 triangles)
+List<MeshQuad> quads = mesh.Quads;
+```
+
+### Multithreading usage
+
+
+```csharp
+using VoxelMeshOptimizer.Core;
+using VoxelMeshOptimizer.Core.OptimizationAlgorithms.DisjointSet;
+using VoxelMeshOptimizer.Toolkit;
+
+// Initialization of the TaskManager
+using CancellationTokenSource cts = new();
+// Decomposition of the types : 
+// - Int3 pos : Position of the chunks, usefull when generating a bunch of chunks and you need to remember where to put them
+// - Func<Int3, Chunk> gen : Funciton to generate the Chunk's data
+// - (Chunk chunk, Mesh mesh) : Result of a task, the initial chunk and its mesh
+TaskManager<(Int3 pos, Func<Int3, Chunk> gen), (Chunk chunk, Mesh mesh)> manager =  new(
+    workerCount: Environment.ProcessorCount, // TODO : set to 1 if you want one worker
+    processor: (job, ct) => // TODO : What one job actually do
+    {
+        (Int3 pos, Func<Int3, Chunk> gen) = job;
+        Chunk chunk = gen(pos);
+
+        DisjointSetMeshOptimizer optimizer = new(new Mesh([]));
+        Mesh mesh = optimizer.Optimize(chunk);
+
+        return ValueTask.FromResult((chunk, mesh));
+    }
+);
+
+
+// Creating chunks
+int iterations = 3;
+Int3 chunkPos = new() { x = 0, y = 0, z = 0 };
+for (int i = 0; i < iterations; i++)
+{
+    _ = manager.Enqueue((chunkPos,
+        p => new Chunk(PerlinNoiseChunkGen.CreatePerlinLandscape(size: 16, seed: 123))));
+}
+
+for (int i = 0; i < iterations; i++)
+{
+    if (manager.TryDequeueCompleted(out TaskManager<(Int3 pos, Func<Int3, Chunk> gen), (Chunk chunk, Mesh mesh)>.Completion r))
+    {
+        if (r.Error) {
+            // An issue occured during the process
+            // TODO : Handle the error
+        }
+        
+        // TODO : Do what you like with the chunk
+    }
+    else
+    {
+        // TODO : Continue program's work and come back later
+    }
+    
+}
+
+// Destroy manager and prevent leaks
+await manager.DisposeAsync();
+```
+
+## General workflow
+1. Build or load a `Chunk<Voxel>`.
+2. `VoxelOcclusionOptimizer` determines visible faces.
+3. `DisjointSetVisiblePlaneOptimizer` merges faces on each plane.
+4. Quads are assembled into a single optimized mesh.
+
+## Development
+
+
+For detailed guidelines on setting up a development environment, contributing code, or reporting issues, please refer to:
+
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- [CHANGELOG.md](CHANGELOG.md)
+- Clone the repository and run :
+  ```bash
+  cd VoxelMeshOptimizerLibrary
+  dotnet restore
+  dotnet test
+  ```
+- Example applications and benchmarks live in the `examples` folder.
+- Benchmark results are published on the project’s GitHub Pages.
+
+### Benchmark
+- Move to benchmark directory
+- Execute : 
+  ```bash
+  dotnet restore
+  dotnet run --configuration Release
+  ```
+
+## Support
+
+If you have questions, need help, or wish to contribute further improvements, please open an issue in the repository or reach out directly. Contributions and feedback are greatly appreciated!
+
+## License
+Distributed under the MIT licence. See [LICENSE](LICENSE) for more information.
+
+### VoxelMeshOptimizerLibrary/examples/BenchmarkGithubPages/Program.cs
+```
+﻿using Benchmark;
+using BenchmarkGithubPages;
+
+namespace ConsoleAppExample;
+using BenchmarkDotNet.Running;
+
+class Program
+{
+    static void Main(string[] args)
+    {
+        BenchmarkRunner.Run<SpeedBenchmarks>();
+        BenchmarkRunner.Run<TasksBenchmark>();
+    }
+}
+```
+
+### VoxelMeshOptimizerLibrary/examples/BenchmarkGithubPages/SpeedBenchmarks.cs
+```
+using BenchmarkDotNet.Attributes;
+using VoxelMeshOptimizer.Core;
+using VoxelMeshOptimizer.Core.OcclusionAlgorithms;
+using VoxelMeshOptimizer.Core.OcclusionAlgorithms.Common;
+using VoxelMeshOptimizer.Core.OptimizationAlgorithms.DisjointSet;
+using VoxelMeshOptimizer.Core.Toolkit;
+using VoxelMeshOptimizer.Toolkit;
+
+namespace BenchmarkGithubPages;
+
+[JsonExporterAttribute.Full]
+[JsonExporterAttribute.FullCompressed]
+public class SpeedBenchmarks
+{
+    private Chunk exampleChunk;
+
+
+    [IterationSetup]
+    public void Setup()
+    {
+        exampleChunk = new Chunk(PerlinNoiseChunkGen.CreatePerlinLandscape(50, 123));
+    }
+
+
+    [Benchmark]
+    public void Occluder()
+    {
+        VoxelOcclusionOptimizer occluder = new VoxelOcclusionOptimizer(exampleChunk);
+        VisibleFaces visibileFaces = occluder.ComputeVisibleFaces();
+        VisibleFacesMesher.Build(visibileFaces, exampleChunk);
+    }
+
+
+    [Benchmark]
+    public void Optimize()
+    {
+        DisjointSetMeshOptimizer optimizer = new DisjointSetMeshOptimizer(new Mesh());
+        optimizer.Optimize(exampleChunk);
+    }
+    
+
+
+    [Benchmark(Baseline = true)]
+    public void Default_MeshToString()
+    {
+        Mesh baseMesh = exampleChunk.ToMesh();
+        ObjExporter.MeshToObjString(baseMesh);
+    }
+
+    [Benchmark]
+    public void Occluder_MeshToString()
+    {
+        VoxelOcclusionOptimizer occluder = new VoxelOcclusionOptimizer(exampleChunk);
+        VisibleFaces visibileFaces = occluder.ComputeVisibleFaces();
+        List<MeshQuad> occludedQuads = VisibleFacesMesher.Build(visibileFaces, exampleChunk);
+        Mesh occludedMesh = new Mesh(occludedQuads);
+        ObjExporter.MeshToObjString(occludedMesh);
+    }
+
+
+    [Benchmark]
+    public void Optimize_MeshToString()
+    {
+        DisjointSetMeshOptimizer optimizer = new DisjointSetMeshOptimizer(new Mesh());
+        Mesh optimizedMesh = optimizer.Optimize(exampleChunk);
+        ObjExporter.MeshToObjString(optimizedMesh);
+    }
+}
+```
+
+### VoxelMeshOptimizerLibrary/examples/BenchmarkGithubPages/TasksBenchmark.cs
+```
+using BenchmarkDotNet.Attributes;
+using VoxelMeshOptimizer.Core;
+using VoxelMeshOptimizer.Core.OptimizationAlgorithms.DisjointSet;
+using VoxelMeshOptimizer.Core.TaskManager;
+using VoxelMeshOptimizer.Helper;
+using VoxelMeshOptimizer.Toolkit;
+
+namespace Benchmark;
+
+public class TasksBenchmark
+{
+
+    private void VerifyResult(TaskManager<(Int3 pos, Func<Int3, Chunk> gen), (Chunk chunk, Mesh mesh)>.Completion result)
+    {
+        if (!result.Success || result.Result.chunk is null || result.Result.mesh is null) throw new InvalidOperationException();
+    }
+    
+    [Benchmark]
+    public async Task TestManagerStart_StopNoErrors()
+    {
+        using CancellationTokenSource cts = new();
+        // Example usage:
+        TaskManager<(Int3 pos, Func<Int3, Chunk> gen), (Chunk chunk, Mesh mesh)> manager =  new(
+            workerCount: Environment.ProcessorCount, // set to 1 if you want one worker
+            processor: (job, ct) =>
+            {
+                (Int3 pos, Func<Int3, Chunk> gen) = job;
+                Chunk chunk = gen(pos);
+
+                DisjointSetMeshOptimizer optimizer = new(new Mesh([]));
+                Mesh mesh = optimizer.Optimize(chunk);
+
+                return ValueTask.FromResult((chunk, mesh));
+            }
+        );
+        await manager.DisposeAsync();
+    }
+
+    [Benchmark]
+    public async Task TestManagerOneTaskAndWait()
+    {
+        
+        using CancellationTokenSource cts = new();
+        // Example usage:
+        TaskManager<(Int3 pos, Func<Int3, Chunk> gen), (Chunk chunk, Mesh mesh)> manager =  new(
+            workerCount: Environment.ProcessorCount, // set to 1 if you want one worker
+            processor: (job, ct) =>
+            {
+                (Int3 pos, Func<Int3, Chunk> gen) = job;
+                Chunk chunk = gen(pos);
+
+                DisjointSetMeshOptimizer optimizer = new(new Mesh([]));
+                Mesh mesh = optimizer.Optimize(chunk);
+
+                return ValueTask.FromResult((chunk, mesh));
+            }
+        );
+        
+        Int3 chunkPos = new() { x = 0, y = 0, z = 0 };
+        _ = manager.Enqueue((chunkPos, p => new Chunk(PerlinNoiseChunkGen.CreatePerlinLandscape(size: 16, seed: 123))));
+
+        
+        TaskManager<(Int3 pos, Func<Int3, Chunk> gen), (Chunk chunk, Mesh mesh)>.Completion next = await manager.WaitForCompletedAsync(cts.Token);
+
+        VerifyResult(next);
+        
+        await manager.DisposeAsync();
+    }
+    
+    
+    [Benchmark]
+    [Arguments(2)]
+    [Arguments(5)]
+    [Arguments(10)]
+    [Arguments(20)]
+    [Arguments(100)]
+    public async Task TestManagerMultipleTaskAndWait(int iterations)
+    {
+        
+        using CancellationTokenSource cts = new();
+        // Example usage:
+        TaskManager<(Int3 pos, Func<Int3, Chunk> gen), (Chunk chunk, Mesh mesh)> manager =  new(
+            workerCount: Environment.ProcessorCount, // set to 1 if you want one worker
+            processor: (job, ct) =>
+            {
+                (Int3 pos, Func<Int3, Chunk> gen) = job;
+                Chunk chunk = gen(pos);
+
+                DisjointSetMeshOptimizer optimizer = new(new Mesh([]));
+                Mesh mesh = optimizer.Optimize(chunk);
+
+                return ValueTask.FromResult((chunk, mesh));
+            }
+        );
+        
+        Int3 chunkPos = new() { x = 0, y = 0, z = 0 };
+
+        for (int i = 0; i < iterations; i++)
+        {
+            _ = manager.Enqueue((chunkPos,
+                p => new Chunk(PerlinNoiseChunkGen.CreatePerlinLandscape(size: 16, seed: 123))));
+        }
+
+
+        for (int i = 0; i < iterations; i++)
+        {
+            TaskManager<(Int3 pos, Func<Int3, Chunk> gen), (Chunk chunk, Mesh mesh)>.Completion next = await manager.WaitForCompletedAsync(cts.Token);
+            VerifyResult(next);
+        }
+
+        
+        await manager.DisposeAsync();
+    }
+    
+    
+    
+    [Benchmark]
+    [Arguments(2)]
+    [Arguments(5)]
+    [Arguments(10)]
+    [Arguments(20)]
+    [Arguments(100)]
+    public async Task TestManagerMultipleTaskAndNoWaitButThreadSleep(int iterations)
+    {
+        
+        using CancellationTokenSource cts = new();
+        // Example usage:
+        TaskManager<(Int3 pos, Func<Int3, Chunk> gen), (Chunk chunk, Mesh mesh)> manager =  new(
+            workerCount: Environment.ProcessorCount, // set to 1 if you want one worker
+            processor: (job, ct) =>
+            {
+                (Int3 pos, Func<Int3, Chunk> gen) = job;
+                Chunk chunk = gen(pos);
+
+                DisjointSetMeshOptimizer optimizer = new(new Mesh([]));
+                Mesh mesh = optimizer.Optimize(chunk);
+
+                return ValueTask.FromResult((chunk, mesh));
+            }
+        );
+        
+        Int3 chunkPos = new() { x = 0, y = 0, z = 0 };
+
+        for (int i = 0; i < iterations; i++)
+        {
+            _ = manager.Enqueue((chunkPos,
+                p => new Chunk(PerlinNoiseChunkGen.CreatePerlinLandscape(size: 16, seed: 123))));
+        }
+
+        int maxSleep = iterations * 1000;
+        for (int i = 0; i < iterations; i++)
+        {
+            if (manager.TryDequeueCompleted(out TaskManager<(Int3 pos, Func<Int3, Chunk> gen), (Chunk chunk, Mesh mesh)>.Completion r))
+            {
+                VerifyResult(r);
+            }
+            else
+            {
+                i--;
+                maxSleep--;
+                if (maxSleep <= 0)
+                {
+                    throw new InvalidOperationException("Benchmark failed, waited too long, probably infinite loop");
+                }
+                Thread.Sleep(100);
+            }
+            
+        }
+
+        
+        await manager.DisposeAsync();
+    }
+}
+```
+
+### VoxelMeshOptimizerLibrary/examples/BenchmarkGithubPages/verify_benchmarks.py
+```
+import json
+import os
+import sys
+
+
+def load_json(path):
+    with open(path, 'r') as f:
+        return json.load(f)
+
+
+def main():
+    result_path = sys.argv[1] if len(sys.argv) > 1 else 'BenchmarkDotNet.Artifacts/results/SpeedBenchmarks-report.json'
+    thresholds_path = os.getenv('BENCHMARK_THRESHOLDS', 'examples/Benchmark/benchmark_thresholds.json')
+
+    results = load_json(result_path)
+    thresholds = load_json(thresholds_path) if os.path.exists(thresholds_path) else {}
+
+    benchmarks = {b['Method']: b for b in results.get('Benchmarks', [])}
+    errors = []
+
+    for method, limits in thresholds.items():
+        bench = benchmarks.get(method)
+        if bench is None:
+            errors.append(f'Benchmark {method} not found in results')
+            continue
+
+        stats = bench.get('Statistics', {})
+        memory = bench.get('Memory', {})
+
+        mean_ms = stats.get('Mean', 0) / 1e6
+        stderr = stats.get('StandardError', 0)
+        error_ratio = (stderr / stats['Mean']) if stats.get('Mean') else 0
+        alloc = memory.get('BytesAllocatedPerOperation')
+
+        # Allow legacy single-value keys as maximum limits
+        if 'mean_ms' in limits and 'mean_ms_max' not in limits:
+            limits['mean_ms_max'] = limits['mean_ms']
+        if 'error_ratio' in limits and 'error_ratio_max' not in limits:
+            limits['error_ratio_max'] = limits['error_ratio']
+        if 'alloc_bytes' in limits and 'alloc_bytes_max' not in limits:
+            limits['alloc_bytes_max'] = limits['alloc_bytes']
+
+        if 'mean_ms_min' in limits and mean_ms < limits['mean_ms_min']:
+            errors.append(f'{method}: mean {mean_ms:.3f} ms below limit {limits["mean_ms_min"]} ms')
+        if 'mean_ms_max' in limits and mean_ms > limits['mean_ms_max']:
+            errors.append(f'{method}: mean {mean_ms:.3f} ms exceeds limit {limits["mean_ms_max"]} ms')
+        if 'error_ratio_min' in limits and error_ratio < limits['error_ratio_min']:
+            errors.append(f'{method}: error ratio {error_ratio:.4f} below limit {limits["error_ratio_min"]}')
+        if 'error_ratio_max' in limits and error_ratio > limits['error_ratio_max']:
+            errors.append(f'{method}: error ratio {error_ratio:.4f} exceeds limit {limits["error_ratio_max"]}')
+        if alloc is not None:
+            if 'alloc_bytes_min' in limits and alloc < limits['alloc_bytes_min']:
+                errors.append(f'{method}: allocations {alloc} bytes below limit {limits["alloc_bytes_min"]}')
+            if 'alloc_bytes_max' in limits and alloc > limits['alloc_bytes_max']:
+                errors.append(f'{method}: allocations {alloc} bytes exceed limit {limits["alloc_bytes_max"]}')
+
+    if errors:
+        for e in errors:
+            print(e, file=sys.stderr)
+        sys.exit(1)
+    else:
+        print('Benchmark thresholds satisfied.')
+
+
+if __name__ == '__main__':
+    main()
+```
+
+### VoxelMeshOptimizerLibrary/examples/ConsoleAppExample/Program.cs
+```
+using System.Collections.Concurrent;
+using VoxelMeshOptimizer.Core;
+using VoxelMeshOptimizer.Core.OptimizationAlgorithms.DisjointSet;
+using VoxelMeshOptimizer.Core.TaskManager;
+using VoxelMeshOptimizer.Helper;
+
+namespace ConsoleAppExample;
+
+using VoxelMeshOptimizer.Toolkit;
+
+class Program
+{
+    private static async Task Main(string[] args)
+    {
+        // ExampleChunk implements Chunk<Voxel>
+        var chunk = new Chunk(PerlinNoiseChunkGen.CreatePerlinLandscape(50, 123));
+        var optimizer = new DisjointSetMeshOptimizer(new Mesh());
+        Mesh mesh = optimizer.Optimize(chunk);
+
+        // Option 1 : Export to Wavefront OBJ
+        File.WriteAllText("chunk.obj", ObjExporter.MeshToObjString(mesh));
+        
+        // Option 2 : Get all the Quads for a in-engine usage (1 Quad = 2 triangles)
+        List<MeshQuad> quads = mesh.Quads;
+    }
+}
+```
+
+### VoxelMeshOptimizerLibrary/examples/ConsoleAppExample/TextureAtlas.cs
+```
+using System;
+
+namespace VoxelMeshOptimizer.Core;
+
+/// <summary>
+/// Represents a texture atlas divided into a grid where each cell corresponds
+/// to an individual texture. The atlas is defined by the number of textures
+/// along the horizontal and vertical axes as well as the total pixel size.
+/// </summary>
+public class TextureAtlas
+{
+    /// <summary>
+    /// Number of textures laid out horizontally in the atlas.
+    /// </summary>
+    public uint TexturesX { get; }
+
+    /// <summary>
+    /// Number of textures laid out vertically in the atlas.
+    /// </summary>
+    public uint TexturesY { get; }
+
+    /// <summary>
+    /// Total width of the atlas in pixels.
+    /// </summary>
+    public uint PixelsX { get; }
+
+    /// <summary>
+    /// Total height of the atlas in pixels.
+    /// </summary>
+    public uint PixelsY { get; }
+
+    /// <summary>
+    /// Width in pixels of a single texture inside the atlas.
+    /// </summary>
+    public uint TextureWidth => PixelsX / TexturesX;
+
+    /// <summary>
+    /// Height in pixels of a single texture inside the atlas.
+    /// </summary>
+    public uint TextureHeight => PixelsY / TexturesY;
+
+    /// <summary>
+    /// Initializes a new instance of <see cref="TextureAtlas"/>.
+    /// </summary>
+    /// <param name="texturesX">Number of textures horizontally.</param>
+    /// <param name="texturesY">Number of textures vertically.</param>
+    /// <param name="pixelsX">Total horizontal pixel count.</param>
+    /// <param name="pixelsY">Total vertical pixel count.</param>
+    /// <exception cref="ArgumentException">Thrown when textures count is zero
+    /// or when the pixel dimensions are not divisible by the number of textures.</exception>
+    public TextureAtlas(uint texturesX, uint texturesY, uint pixelsX, uint pixelsY)
+    {
+        if (texturesX == 0 || texturesY == 0)
+            throw new ArgumentException("Texture counts must be greater than zero.");
+
+        if (pixelsX % texturesX != 0 || pixelsY % texturesY != 0)
+            throw new ArgumentException("Pixel dimensions must be divisible by the number of textures.");
+
+        TexturesX = texturesX;
+        TexturesY = texturesY;
+        PixelsX = pixelsX;
+        PixelsY = pixelsY;
+    }
+
+    /// <summary>
+    /// Returns the pixel rectangle for the texture at the given index. The
+    /// index is zero-based and follows row-major order.
+    /// </summary>
+    /// <param name="index">Index of the texture.</param>
+    /// <returns>A tuple containing the x and y coordinates of the texture in
+    /// pixels along with its width and height.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when the index is
+    /// outside the bounds of the atlas.</exception>
+    public (uint x, uint y, uint width, uint height) GetTextureRect(uint index)
+    {
+        if (index >= TexturesX * TexturesY)
+            throw new ArgumentOutOfRangeException(nameof(index));
+
+        uint ix = index % TexturesX;
+        uint iy = index / TexturesX;
+
+        uint x = ix * TextureWidth;
+        uint y = iy * TextureHeight;
+
+        return (x, y, TextureWidth, TextureHeight);
+    }
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Core/Axis.cs
+```
+using System.Numerics;
+
+namespace VoxelMeshOptimizer.Core;
+
+/// <summary>
+/// Terminology:
+/// - MajorAxis: First axis iterated in the nested loops, also known as the "slice" axis (outermost loop).
+/// - MiddleAxis: Second axis iterated (middle loop).
+/// - MinorAxis: Third axis iterated (innermost loop).
+/// </summary>
+public enum Axis
+{
+    X,
+    Y,
+    Z
+}
+
+public enum AxisOrder{
+    Ascending,
+    Descending
+}
+
+
+public static class AxisExtensions {
+    public static VoxelFace ToVoxelFace(Axis axis, AxisOrder axisOrder){
+        return (axis, axisOrder) switch{
+            (Axis.X, AxisOrder.Ascending)   => VoxelFace.Xneg,
+            (Axis.X, AxisOrder.Descending)  => VoxelFace.Xpos,
+
+            (Axis.Y, AxisOrder.Ascending)   => VoxelFace.Yneg,
+            (Axis.Y, AxisOrder.Descending)  => VoxelFace.Ypos,
+
+            (Axis.Z, AxisOrder.Ascending)   => VoxelFace.Zneg,
+            (Axis.Z, AxisOrder.Descending)  => VoxelFace.Zpos,
+
+            _ => throw new ArgumentOutOfRangeException(),
+        };
+    }
+
+    /// <summary>
+    /// Returns the "depth" of the given coordinate when viewed from a face determined
+    /// by the specified axis and axis order.
+    /// </summary>
+    /// <param name="axis">The axis along which to measure the depth (X, Y or Z).</param>
+    /// <param name="axisOrder">The order (Ascending for front/low index, Descending for back/high index).</param>
+    /// <param name="x">The X coordinate of the voxel.</param>
+    /// <param name="y">The Y coordinate of the voxel.</param>
+    /// <param name="z">The Z coordinate of the voxel.</param>
+    /// <param name="chunk">The chunk containing the voxel.</param>
+    /// <returns>The depth of the voxel relative to the face specified by axis and order.</returns>
+    public static uint GetDepthFromAxis(
+        Axis axis,
+        AxisOrder axisOrder,
+        uint x,
+        uint y,
+        uint z,
+        Chunk chunk)
+    {
+        if (chunk.IsOutOfBound(x, y, z)) throw new ArgumentOutOfRangeException();
+
+        // Select the relevant coordinate based on the axis.
+        uint relativeDepth = axis switch
+        {
+            Axis.X => x,
+            Axis.Y => y,
+            Axis.Z => z,
+            _ => throw new ArgumentException("Invalid axis", nameof(axis))
+        };
+
+        // Get the total depth of the chunk along the selected axis.
+        uint totalDepth = chunk.GetDepth(axis);
+
+        // Calculate the depth from the face determined by the axis order.
+        if (axisOrder == AxisOrder.Ascending) return relativeDepth;
+        return totalDepth - 1 - relativeDepth;
+    }
+
+    public static void SetAxis(Vector3 vector, Axis axis, float value)
+    {
+        switch (axis)
+        {
+            case Axis.X: vector.X = value; break;
+            case Axis.Y: vector.Y = value; break;
+            case Axis.Z: vector.Z = value; break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(axis), axis, null);
+        }
+    }
+
+    public static Vector3 Direction(Axis axis, AxisOrder order)
+    {
+        float sign = order == AxisOrder.Ascending ? -1f : 1f;
+        return axis switch
+        {
+            Axis.X => new Vector3(sign, 0, 0),
+            Axis.Y => new Vector3(0, sign, 0),
+            Axis.Z => new Vector3(0, 0, sign),
+            _ => throw new ArgumentOutOfRangeException(paramName:nameof(axis), actualValue:axis, message:"Axis not recognized")
+        };
+    }
+    
+
+    /// <summary>
+    /// Defines the iteration axes and their orders for looping through a chunk.
+    /// The iteration follows these roles:
+    /// - MajorAxis: The outermost loop (a.k.a. the "slice" axis).
+    /// - MiddleAxis: The second loop.
+    /// - MinorAxis: The innermost loop.
+    ///
+    /// This method picks the two axes not used as the major axis using a default mapping.
+    /// The default mappings are:
+    ///   - If major is X, then middle = Y and minor = Z.
+    ///   - If major is Y, then middle = Z and minor = X.
+    ///   - If major is Z, then middle = Y and minor = X.
+    ///
+    /// All axes will use the same order as the provided major axis order.
+    /// </summary>
+    /// <param name="majorAxis">The axis to be used as the outermost (slice) axis.</param>
+    /// <param name="majorOrder">The order to use for the major axis (and by default for the others).</param>
+    /// <returns>
+    /// A tuple containing the axes and their orders in the following order: 
+    /// (majorAxis, majorOrder, middleAxis, middleOrder, minorAxis, minorOrder).
+    /// </returns>
+    public static (Axis major, AxisOrder majorOrder, Axis middle, AxisOrder middleOrder, Axis minor, AxisOrder minorOrder) DefineIterationOrder(Axis majorAxis, AxisOrder majorOrder)
+    {
+        Axis middle, minor;
+
+        switch (majorAxis)
+        {
+            case Axis.X:
+                // With X as major, choose Y for middle and Z for minor.
+                middle = Axis.Y;
+                minor = Axis.Z;
+                break;
+            case Axis.Y:
+                // With Y as major, choose Z for middle and X for minor.
+                middle = Axis.Z;
+                minor = Axis.X;
+                break;
+            case Axis.Z:
+                // For Z (interpreted as FrontToBack), choose Y for middle (BottomToTop)
+                // and X for minor (LeftToRight) so that the iteration reflects:
+                // (FrontToBack, BottomToTop, LeftToRight)
+                middle = Axis.Y;
+                minor = Axis.X;
+                break;
+            default:
+                throw new ArgumentException("Invalid major axis", nameof(majorAxis));
+        }
+
+        // Here we assign the same order to the remaining axes.
+        AxisOrder middleOrder = majorOrder;
+        AxisOrder minorOrder = majorOrder;
+
+        return (majorAxis, majorOrder, middle, middleOrder, minor, minorOrder);
+    }
+
+
+    /// <summary>
+    /// Maps the given voxel coordinates in the chunk into a 2D coordinate on a slice plane.
+    /// The first axis is considered the "slice" axis (perpendicular to the plane), and
+    /// the other two define the reading (in-plane) order.
+    ///
+    /// Each in-plane coordinate is adjusted based on the corresponding axis order:
+    /// if the order is Ascending, the coordinate is used as-is; if Descending,
+    /// the coordinate is “flipped” relative to the total depth along that axis.
+    /// </summary>
+    /// <param name="sliceAxis">The axis perpendicular to the slice plane (for checking distinctness).</param>
+    /// <param name="sliceOrder">The face (order) for the slice axis (not used in calculation here, but may be useful for debugging or consistency).</param>
+    /// <param name="planeAxis1">The axis that will determine the X coordinate on the slice plane.</param>
+    /// <param name="planeAxis1Order">The order (Ascending/Descending) for the axis that will map to X.</param>
+    /// <param name="planeAxis2">The axis that will determine the Y coordinate on the slice plane.</param>
+    /// <param name="planeAxis2Order">The order (Ascending/Descending) for the axis that will map to Y.</param>
+    /// <param name="x">The absolute x-coordinate of the voxel.</param>
+    /// <param name="y">The absolute y-coordinate of the voxel.</param>
+    /// <param name="z">The absolute z-coordinate of the voxel.</param>
+    /// <param name="chunk">The chunk in which the voxel resides.</param>
+    /// <returns>A tuple (x, y) representing the voxel’s position on the slice plane.</returns>
+    public static (uint planeX, uint planeY) GetSlicePlanePosition(
+        Axis sliceAxis, AxisOrder sliceOrder,
+        Axis planeAxis1, AxisOrder planeAxis1Order,
+        Axis planeAxis2, AxisOrder planeAxis2Order,
+        uint x, uint y, uint z,
+        Chunk chunk)
+    {
+        // Ensure that all three axes are distinct.
+        if (!Chunk.AreDifferentAxis(sliceAxis, planeAxis1, planeAxis2))
+            throw new ArgumentException("All axes must be distinct.");
+
+        // Determine the coordinate on the plane for planeAxis1 (mapped to the X coordinate on the slice plane).
+        uint coordForPlane1 = planeAxis1 switch
+        {
+            Axis.X => x,
+            Axis.Y => y,
+            Axis.Z => z,
+            _ => throw new ArgumentException("Invalid axis for planeAxis1")
+        };
+
+        // Get the corresponding total dimension for planeAxis1.
+        uint totalPlane1 = chunk.GetDepth(planeAxis1);
+        uint planeX = planeAxis1Order == AxisOrder.Ascending
+            ? coordForPlane1
+            : totalPlane1 - 1 - coordForPlane1;
+
+        // Determine the coordinate on the plane for planeAxis2 (mapped to the Y coordinate on the slice plane).
+        uint coordForPlane2 = planeAxis2 switch
+        {
+            Axis.X => x,
+            Axis.Y => y,
+            Axis.Z => z,
+            _ => throw new ArgumentException("Invalid axis for planeAxis2")
+        };
+
+        // Get the corresponding total dimension for planeAxis2.
+        uint totalPlane2 = chunk.GetDepth(planeAxis2);
+        uint planeY = planeAxis2Order == AxisOrder.Ascending
+            ? coordForPlane2
+            : totalPlane2 - 1 - coordForPlane2;
+
+        return (planeX, planeY);
+    }
+
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Core/Chunk.cs
+```
+using System.Numerics;
+using CommunityToolkit.Diagnostics;
+
+namespace VoxelMeshOptimizer.Core;
+public class Chunk
+{
+        private readonly Voxel[,,] voxels;
+        
+        public uint XDepth { get; init; }
+        public uint YDepth { get; init; }
+        public uint ZDepth { get; init; }
+
+        public Chunk(ushort[,,] voxelArray)
+        {
+            XDepth = (uint)voxelArray.GetLength(0);
+            YDepth = (uint)voxelArray.GetLength(1);
+            ZDepth = (uint)voxelArray.GetLength(2);
+
+            voxels = new Voxel[XDepth, YDepth, ZDepth];
+
+            // Initialize from the ushort array
+            for (uint x = 0; x < XDepth; x++)
+            {
+                for (uint y = 0; y < YDepth; y++)
+                {
+                    for (uint z = 0; z < ZDepth; z++)
+                    {
+                        ushort value = voxelArray[x, y, z];
+                        voxels[x, y, z] = new Voxel(value);
+                    }
+                }
+            }
+        }
+        
+        /// <summary>
+        /// Initializes a new chunk from a file on disk.
+        /// The first line contains the comma separated dimensions (X,Y,Z)
+        /// and the second line contains all voxel IDs in X-Y-Z order, separated by commas.
+        /// </summary>
+        public Chunk(string fileName)
+        {
+            string[] lines = File.ReadAllLines(fileName);
+            if (lines.Length < 2)
+            {
+                throw new ArgumentException("File must contain at least two lines", nameof(fileName));
+            }
+
+            string[] sizes = lines[0].Split(',', StringSplitOptions.RemoveEmptyEntries);
+            if (sizes.Length != 3)
+            {
+                throw new FormatException("First line must contain three comma-separated values.");
+            }
+
+            XDepth = uint.Parse(sizes[0]);
+            YDepth = uint.Parse(sizes[1]);
+            ZDepth = uint.Parse(sizes[2]);
+
+            voxels = new Voxel[XDepth, YDepth, ZDepth];
+
+            string[] voxelIds = lines[1].Split(',', StringSplitOptions.RemoveEmptyEntries);
+            if (voxelIds.Length != XDepth * YDepth * ZDepth)
+            {
+                throw new FormatException("Voxel count does not match chunk dimensions.");
+            }
+
+            int index = 0;
+            for (uint x = 0; x < XDepth; x++)
+            {
+                for (uint y = 0; y < YDepth; y++)
+                {
+                    for (uint z = 0; z < ZDepth; z++)
+                    {
+                        ushort id = ushort.Parse(voxelIds[index++]);
+                        voxels[x, y, z] = new Voxel(id);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Returns all voxels in this chunk in no guaranteed order.
+        /// </summary>
+        public IEnumerable<Voxel> GetVoxels()
+        {
+            for (uint x = 0; x < XDepth; x++)
+            {
+                for (uint y = 0; y < YDepth; y++)
+                {
+                    for (uint z = 0; z < ZDepth; z++)
+                    {
+                        yield return voxels[x, y, z];
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Retrieves the voxel at the given position (X,Y,Z), ignoring the axis fields for now.
+        /// Throws if out of range, or you could choose to return null.
+        /// </summary>
+        /// <exception cref="ArgumentOutOfRangeException"></exception>
+        public Voxel Get(uint x, uint y, uint z)
+        {
+            Guard.IsLessThan(x, XDepth);
+            Guard.IsLessThan(y, YDepth);
+            Guard.IsLessThan(z, ZDepth);
+
+            return voxels[x, y, z];
+        }
+
+        /// <summary>
+        /// Sets a voxel at the given position (X,Y,Z). 
+        /// </summary>
+        public void Set(uint x, uint y, uint z, Voxel voxel)
+        {
+            Guard.IsLessThan(x, XDepth);
+            Guard.IsLessThan(y, YDepth);
+            Guard.IsLessThan(z, ZDepth);
+
+            voxels[x, y, z] = voxel;
+        }
+
+        /// <summary>
+        /// Iterates over every (X,Y,Z) in the chunk in the order of three distinct axes 
+        /// (Major, Middle, Minor). The callback receives a VoxelPosition that includes 
+        /// the coordinate plus the iteration axes for debugging or advanced logic.
+        /// </summary>
+        public void ForEachCoordinate(
+            Axis majorA, AxisOrder majorAsc,
+            Axis middleA, AxisOrder middleAsc,
+            Axis minorA, AxisOrder minorAsc,
+            Action<uint, uint, uint> action
+        )
+        {
+            // 2) Ensure all axes are distinct
+            if (majorA == middleA || middleA == minorA || majorA == minorA)
+            {
+                throw new ArgumentException("All three HumanAxis values must target different axes (X/Y/Z).");
+            }
+
+            // 4) Triple-nested loop in the order: major -> middle -> minor
+            //    We find which axis is major, middle, minor, then nest them accordingly.
+            foreach (uint majorVal in BuildRange(GetDepth(majorA), majorAsc))
+            {
+                foreach (uint midVal in BuildRange(GetDepth(middleA), middleAsc))
+                {
+                    foreach (uint minVal in BuildRange(GetDepth(minorA), minorAsc))
+                    {
+                        uint x = 0, y = 0, z = 0;
+
+                        switch (majorA)
+                        {
+                            case Axis.X:
+                                x = majorVal;
+                                break;
+                            case Axis.Y:
+                                y = majorVal;
+                                break;
+                            case Axis.Z:
+                                z = majorVal;
+                                break;
+                            default:
+                                throw new ArgumentOutOfRangeException(nameof(majorA), majorA, null);
+                        }
+
+                        switch (middleA)
+                        {
+                            case Axis.X:
+                                x = midVal;
+                                break;
+                            case Axis.Y:
+                                y = midVal;
+                                break;
+                            case Axis.Z:
+                                z = midVal;
+                                break;
+                            default:
+                                throw new ArgumentOutOfRangeException(nameof(middleA), middleA, null);
+                        }
+
+                        switch (minorA)
+                        {
+                            case Axis.X:
+                                x = minVal;
+                                break;
+                            case Axis.Y:
+                                y = minVal;
+                                break;
+                            case Axis.Z:
+                                z = minVal;
+                                break;
+                            default:
+                                throw new ArgumentOutOfRangeException(nameof(minorA), minorA, null);
+                        }
+
+                        action(x, y, z);
+                    }
+                }
+            }
+        }
+
+
+        private IEnumerable<uint> BuildRange(uint size, AxisOrder order)
+        {
+            if (order == AxisOrder.Ascending)
+            {
+                for (uint i = 0; i < size; i++)
+                    yield return i;
+            }
+            else
+            {
+                for (int i = (int)size - 1; i >= 0; i--)
+                    yield return (uint)i;
+            }
+        }
+
+
+        /// <summary>
+        /// Simple helper to pick the chunk’s dimension (depth) by axis.
+        /// </summary>
+        public uint GetDepth(Axis axis)
+        {
+            return axis switch
+            {
+                Axis.X => XDepth,
+                Axis.Y => YDepth,
+                Axis.Z => ZDepth,
+                _ => throw new ArgumentOutOfRangeException(nameof(axis), axis, "Unknown axis.")
+            };
+        }
+
+        public bool IsOutOfBound(uint x, uint y, uint z)
+        {
+            return x >= GetDepth(Axis.X) || y >= GetDepth(Axis.Y) || z >= GetDepth(Axis.Z);
+        }
+
+        public static bool AreDifferentAxis(
+            Axis major,
+            Axis middle,
+            Axis minor
+        )
+        {
+            return major != middle && middle != minor && minor != major;
+        }
+
+        public (uint planeWidth, uint planeHeight) GetPlaneDimensions(
+            Axis major,
+            Axis middle,
+            Axis minor
+        )
+        {
+            // "Plane dimensions" = minor dimension (x-axis of the plane),
+            //                      middle dimension (y-axis of the plane).
+            uint planeWidth = GetDepth(middle);
+            uint planeHeight = GetDepth(minor);
+
+            return (planeWidth, planeHeight);
+        }
+        
+        
+        /// <summary>
+        /// Builds a mesh that contains every face for each solid voxel in the chunk.
+        /// This is a naïve implementation without any form of optimization.
+        /// </summary>
+        public Mesh ToMesh()
+        {
+            List<MeshQuad> list = new List<MeshQuad>();
+
+            for (uint x = 0; x < XDepth; x++)
+            {
+                for (uint y = 0; y < YDepth; y++)
+                {
+                    for (uint z = 0; z < ZDepth; z++)
+                    {
+                        Voxel voxel = voxels[x, y, z];
+                        if (!voxel.IsSolid)
+                            continue;
+
+                        list.AddRange(CreateVoxelQuads(x, y, z, voxel.ID));
+                    }
+                }
+            }
+            Mesh mesh = new Mesh(list);
+
+            return mesh;
+        }
+
+        private static IEnumerable<MeshQuad> CreateVoxelQuads(uint x, uint y, uint z, ushort voxelId)
+        {
+            float bx = x;
+            float by = y;
+            float bz = z;
+
+
+            yield return new MeshQuad
+            {
+                Vertex0 = new Vector3(bx, by, bz),
+                Vertex1 = new Vector3(bx, by + 1, bz),
+                Vertex2 = new Vector3(bx + 1, by + 1, bz),
+                Vertex3 = new Vector3(bx + 1, by, bz),
+                Normal = new Vector3(0, 0, -1),
+                VoxelId = voxelId
+            };
+
+            yield return new MeshQuad
+            {
+                Vertex0 = new Vector3(bx, by, bz + 1),
+                Vertex1 = new Vector3(bx + 1, by, bz + 1),
+                Vertex2 = new Vector3(bx + 1, by + 1, bz + 1),
+                Vertex3 = new Vector3(bx, by + 1, bz + 1),
+                Normal = new Vector3(0, 0, 1),
+                VoxelId = voxelId
+            };
+
+            yield return new MeshQuad
+            {
+                Vertex0 = new Vector3(bx, by, bz),
+                Vertex1 = new Vector3(bx, by, bz + 1),
+                Vertex2 = new Vector3(bx, by + 1, bz + 1),
+                Vertex3 = new Vector3(bx, by + 1, bz),
+                Normal = new Vector3(-1, 0, 0),
+                VoxelId = voxelId
+            };
+
+            yield return new MeshQuad
+            {
+                Vertex0 = new Vector3(bx + 1, by, bz + 1),
+                Vertex1 = new Vector3(bx + 1, by, bz),
+                Vertex2 = new Vector3(bx + 1, by + 1, bz),
+                Vertex3 = new Vector3(bx + 1, by + 1, bz + 1),
+                Normal = new Vector3(1, 0, 0),
+                VoxelId = voxelId
+            };
+
+            yield return new MeshQuad
+            {
+                Vertex0 = new Vector3(bx, by, bz),
+                Vertex1 = new Vector3(bx + 1, by, bz),
+                Vertex2 = new Vector3(bx + 1, by, bz + 1),
+                Vertex3 = new Vector3(bx, by, bz + 1),
+                Normal = new Vector3(0, -1, 0),
+                VoxelId = voxelId
+            };
+
+            yield return new MeshQuad
+            {
+                Vertex0 = new Vector3(bx, by + 1, bz + 1),
+                Vertex1 = new Vector3(bx + 1, by + 1, bz + 1),
+                Vertex2 = new Vector3(bx + 1, by + 1, bz),
+                Vertex3 = new Vector3(bx, by + 1, bz),
+                Normal = new Vector3(0, 1, 0),
+                VoxelId = voxelId
+            };
+        }
+
+
+        /// <summary>
+        /// Saves this chunk to a file. The first line contains the dimensions
+        /// (X,Y,Z) separated by commas. The second line contains all voxel IDs
+        /// separated by commas in X-Y-Z order.
+        /// </summary>
+        public void Save(string fileName)
+        {
+            using StreamWriter writer = new(fileName);
+            writer.WriteLine($"{XDepth},{YDepth},{ZDepth}");
+
+            List<string> ids = [];
+            for (uint x = 0; x < XDepth; x++)
+            {
+                for (uint y = 0; y < YDepth; y++)
+                {
+                    for (uint z = 0; z < ZDepth; z++)
+                    {
+                        ids.Add(voxels[x, y, z].ID.ToString());
+                    }
+                }
+            }
+
+            writer.WriteLine(string.Join(',', ids));
+        }
+
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Core/Mesh.cs
+```
+using System.Text;
+
+namespace VoxelMeshOptimizer.Core;
+
+public class Mesh
+{
+    public List<MeshQuad> Quads { get; set; }
+
+    public Mesh(List<MeshQuad> quads)
+    {
+        Quads = quads;
+
+    }
+
+    public Mesh()
+    {
+        Quads = [];
+    }
+
+    public string Describe()
+    {
+        StringBuilder sb = new();
+        sb.AppendLine($"Mesh of {Quads.Count} quads :\n");
+        foreach (MeshQuad meshQuad in Quads)
+        {
+            sb.Append(meshQuad.Describe());
+            sb.AppendLine();
+        }
+        return sb.ToString();
+    }
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Core/MeshQuad.cs
+```
+namespace VoxelMeshOptimizer.Core;
+using System.Numerics;
+
+public struct MeshQuad
+{
+    public Vector3 Vertex0 { get; init; } // bottom-left
+    public Vector3 Vertex1 { get; init; } // bottom-right
+    public Vector3 Vertex2 { get; init; } // top-right
+    public Vector3 Vertex3 { get; init; } // top-left
+
+    public Vector3 Normal { get; init; }
+    public int VoxelId { get; init; }
+
+
+
+    public string Describe()
+    {
+        return $"MeshQuad : V0 {Vertex0} ; V1 {Vertex1}; V2 {Vertex2}; V3 {Vertex3}; N {Normal}; ID {VoxelId}";
+    }
+
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Core/Voxel.cs
+```
+namespace VoxelMeshOptimizer.Core;
+using System;
+
+
+public struct Voxel
+{
+    public ushort ID { get;}
+    public bool IsSolid => ID != 0;
+    
+    
+    public Voxel (ushort id)
+    {
+        ID = id;
+    }
+}
+
+
+
+[Flags]
+public enum VoxelFace
+{
+    None = 0,
+    Zpos = 1 << 0,  // Back
+    Zneg = 1 << 1,   // Front
+    Xneg = 1 << 2,   // Left
+    Xpos = 1 << 3,  // Right
+    Ypos = 1 << 4,    // Top
+    Yneg = 1 << 5  // Bottom
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Core/VoxelVisibilityMap.cs
+```
+namespace VoxelMeshOptimizer.Core;
+
+public class VoxelVisibilityMap
+{
+    private readonly VoxelFace[,,] visibilityMap;
+    private readonly Chunk chunk;
+
+    public VoxelVisibilityMap(Chunk chunk)
+    {
+        this.chunk = chunk;
+        visibilityMap = new VoxelFace[chunk.XDepth, chunk.YDepth, chunk.ZDepth];
+        ComputeVisibilityMap();
+    }
+
+    private void ComputeVisibilityMap()
+    {
+        chunk.ForEachCoordinate(
+            Axis.X, AxisOrder.Ascending,
+            Axis.Y, AxisOrder.Ascending,
+            Axis.Z, AxisOrder.Ascending,
+        (x, y, z) => {
+            Voxel voxel = chunk.Get(x, y, z);
+            if (!voxel.IsSolid)
+            {
+                visibilityMap[x, y, z] = VoxelFace.None;
+                return;
+            }
+
+            VoxelFace visibleFaces = VoxelFace.None;
+
+            // Check adjacent voxels
+            if (IsAdjacentVoxelTransparent(x, y, z + 1)) visibleFaces |= VoxelFace.Zpos;
+            if (IsAdjacentVoxelTransparent(x, y, z - 1)) visibleFaces |= VoxelFace.Zneg;
+            if (IsAdjacentVoxelTransparent(x - 1, y, z)) visibleFaces |= VoxelFace.Xneg;
+            if (IsAdjacentVoxelTransparent(x + 1, y, z)) visibleFaces |= VoxelFace.Xpos;
+            if (IsAdjacentVoxelTransparent(x, y + 1, z)) visibleFaces |= VoxelFace.Ypos;
+            if (IsAdjacentVoxelTransparent(x, y - 1, z)) visibleFaces |= VoxelFace.Yneg;
+
+            visibilityMap[x, y, z] = visibleFaces;
+        });
+    }
+
+    private bool IsAdjacentVoxelTransparent(uint x, uint y, uint z)
+    {
+        if (chunk.IsOutOfBound(x,y,z)) return true;
+
+        Voxel adjacentVoxel = chunk.Get(x, y, z);
+        return !adjacentVoxel.IsSolid;
+    }
+
+    public VoxelFace GetVisibleFaces(uint x, uint y, uint z)
+    {
+        if (x >= chunk.XDepth || y >= chunk.YDepth || z >= chunk.ZDepth)
+            return VoxelFace.None;
+        return visibilityMap[x, y, z];
+    }
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Helper/Int3.cs
+```
+namespace VoxelMeshOptimizer.Helper;
+
+public struct Int3
+{
+    public int x;
+    public int y;
+    public int z;
+    
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Toolkit/ObjExporter.cs
+```
+namespace VoxelMeshOptimizer.Toolkit;
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Numerics;
+using System.Text;
+using VoxelMeshOptimizer.Core;
+
+/// <summary>
+/// Utility class to export a <see cref="Mesh"/> to the Wavefront OBJ format.
+/// </summary>
+public static class ObjExporter
+{
+    /// <summary>
+    /// Exports the provided <paramref name="mesh"/> into an OBJ file at <paramref name="filePath"/>.
+    /// </summary>
+    /// <param name="mesh">Mesh to export.</param>
+    /// <param name="filePath">Destination file path.</param>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="mesh"/> or <paramref name="filePath"/> is null.</exception>
+    public static string MeshToObjString(Mesh mesh)
+    {
+        if (mesh is null) throw new ArgumentNullException(nameof(mesh));
+
+        List<Vector3> vertices = new List<Vector3>();
+        Dictionary<Vector3, int> vertexIndices = new Dictionary<Vector3, int>();
+
+        StringBuilder sb = new StringBuilder();
+
+        // Collect unique vertices and assign indices (1-based as per OBJ spec)
+        foreach (MeshQuad quad in mesh.Quads)
+        {
+            AddVertex(quad.Vertex0, vertexIndices, vertices);
+            AddVertex(quad.Vertex1, vertexIndices, vertices);
+            AddVertex(quad.Vertex2, vertexIndices, vertices);
+            AddVertex(quad.Vertex3, vertexIndices, vertices);
+        }
+
+        // Write vertex positions
+        foreach (Vector3 v in vertices)
+        {
+            sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "v {0} {1} {2}", v.X, v.Y, v.Z));
+        }
+
+        // Write faces using quad indices
+        foreach (MeshQuad quad in mesh.Quads)
+        {
+            int i0 = vertexIndices[quad.Vertex0];
+            int i1 = vertexIndices[quad.Vertex1];
+            int i2 = vertexIndices[quad.Vertex2];
+            int i3 = vertexIndices[quad.Vertex3];
+            sb.AppendLine($"f {i0} {i1} {i2} {i3}");
+        }
+
+        return sb.ToString();
+
+    }
+
+
+    private static void AddVertex(Vector3 v, Dictionary<Vector3, int> vertexIndices, List<Vector3> vertices)
+    {
+        if (!vertexIndices.ContainsKey(v))
+        {
+            vertices.Add(v);
+            vertexIndices[v] = vertices.Count; // 1-based
+        }
+    }
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Toolkit/PerlinNoiseChunkGen.cs
+```
+namespace VoxelMeshOptimizer.Toolkit;
+
+public class PerlinNoiseChunkGen
+{
+    /// <summary>
+    /// Generates a 50x50x50 chunk using layered Perlin noise.
+    /// Each column's height is determined by combining several
+    /// noise frequencies, and blocks up to that height are
+    /// assigned the ID 1.
+    /// </summary>
+    public static ushort[,,] CreatePerlinLandscape(int size = 50, int seed = 0)
+    {
+        ushort[,,] voxels = new ushort[size, size, size];
+        PerlinNoise noise = new PerlinNoise(seed);
+
+        for (int x = 0; x < size; x++)
+        {
+            for (int z = 0; z < size; z++)
+            {
+                float nx = x / (float)size;
+                float nz = z / (float)size;
+
+                float height =
+                    noise.Noise(nx * 1f, nz * 1f) * 20f +
+                    noise.Noise(nx * 2f, nz * 2f) * 10f +
+                    noise.Noise(nx * 4f, nz * 4f) * 5f;
+
+                int h = Math.Clamp((int)(height + 5f), 0, size - 1);
+                for (int y = 0; y <= h; y++)
+                {
+                    voxels[x, y, z] = 1;
+                }
+            }
+        }
+
+        return voxels;
+    }
+
+
+
+    private class PerlinNoise
+    {
+        private readonly int[] p;
+        private static readonly int[] permutation = {
+            151,160,137,91,90,15,
+            131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,8,99,37,240,21,10,23,
+            190,6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,57,177,33,
+            88,237,149,56,87,174,20,125,136,171,168,68,175,74,165,71,134,139,48,27,166,
+            77,146,158,231,83,111,229,122,60,211,133,230,220,105,92,41,55,46,245,40,244,
+            102,143,54,65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,169,200,196,135,
+            130,116,188,159,86,164,100,109,198,173,186,3,64,52,217,226,250,124,123,5,
+            202,38,147,118,126,255,82,85,212,207,206,59,227,47,16,58,17,182,189,28,42,
+            223,183,170,213,119,248,152,2,44,154,163,70,221,153,101,155,167,43,172,9,
+            129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,218,246,97,228,
+            251,34,242,193,238,210,144,12,191,179,162,241,81,51,145,235,249,14,239,107,
+            49,192,214,31,181,199,106,157,184,84,204,176,115,121,50,45,127,4,150,254,
+            138,236,205,93,222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180
+        };
+
+        public PerlinNoise(int seed = 0)
+        {
+            p = new int[512];
+            int[] perm = (int[])permutation.Clone();
+            if (seed != 0)
+            {
+                Random random = new Random(seed);
+                for (int i = 0; i < 256; i++)
+                {
+                    int swapIndex = random.Next(i, 256);
+                    (perm[i], perm[swapIndex]) = (perm[swapIndex], perm[i]);
+                }
+            }
+            for (int i = 0; i < 256; i++)
+            {
+                p[i] = perm[i];
+                p[256 + i] = perm[i];
+            }
+        }
+
+        public float Noise(float x, float y)
+        {
+            int X = (int)MathF.Floor(x) & 255;
+            int Y = (int)MathF.Floor(y) & 255;
+
+            x -= MathF.Floor(x);
+            y -= MathF.Floor(y);
+
+            float u = Fade(x);
+            float v = Fade(y);
+
+            int A = p[X] + Y;
+            int B = p[X + 1] + Y;
+
+            float res = Lerp(v,
+                Lerp(u, Grad(p[A], x, y),
+                        Grad(p[B], x - 1, y)),
+                Lerp(u, Grad(p[A + 1], x, y - 1),
+                        Grad(p[B + 1], x - 1, y - 1)));
+
+            return (res + 1f) / 2f;
+        }
+
+        private static float Fade(float t) => t * t * t * (t * (t * 6 - 15) + 10);
+        private static float Lerp(float t, float a, float b) => a + t * (b - a);
+        private static float Grad(int hash, float x, float y)
+        {
+            int h = hash & 3;
+            float u = h < 2 ? x : y;
+            float v = h < 2 ? y : x;
+            return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
+        }
+    }
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Toolkit/VisibleFacesMesher.cs
+```
+using System.Numerics;
+using VoxelMeshOptimizer.Core.OcclusionAlgorithms.Common;
+
+namespace VoxelMeshOptimizer.Core.Toolkit;
+
+/// <summary>
+/// Utility class that converts <see cref="VisibleFaces"/> produced by
+/// <see cref="VoxelOcclusionOptimizer"/> into a list of <see cref="MeshQuad"/>.
+/// This does not perform any further optimization; each visible voxel face
+/// results in one quad in the output mesh.
+/// </summary>
+public static class VisibleFacesMesher
+{
+    /// <summary>
+    /// Builds a list of quads for every visible voxel face contained in
+    /// <paramref name="visibleFaces"/>.
+    /// </summary>
+    /// <param name="visibleFaces">The result of <see cref="VoxelOcclusionOptimizer.ComputeVisibleFaces"/>.</param>
+    /// <param name="chunk">The chunk from which the visibility information was computed.</param>
+    /// <returns>A list of quads representing each visible voxel face.</returns>
+    public static List<MeshQuad> Build(VisibleFaces visibleFaces, Chunk chunk)
+    {
+        List<MeshQuad> quads = [];
+
+        foreach (KeyValuePair<(Axis, AxisOrder), List<VisiblePlane>> kvp in visibleFaces.PlanesByAxis)
+        {
+            Axis sliceAxis = kvp.Key.Item1;
+            AxisOrder axisOrder = kvp.Key.Item2;
+            foreach (VisiblePlane plane in kvp.Value)
+            {
+                uint width = (uint)plane.Voxels.GetLength(0);
+                uint height = (uint)plane.Voxels.GetLength(1);
+
+                for (uint px = 0; px < width; px++)
+                {
+                    for (uint py = 0; py < height; py++)
+                    {
+                        Voxel? voxel = plane.Voxels[px, py];
+                        if (!voxel.HasValue || !voxel!.Value.IsSolid) continue;
+
+                        // reconstruct absolute coordinates
+                        (uint x, uint y, uint z) coords = ReconstructCoordinates(plane, px, py, chunk);
+                        quads.Add(CreateQuad(coords.x, coords.y, coords.z, voxel!.Value.ID, sliceAxis, axisOrder));
+                    }
+                }
+            }
+        }
+
+        return quads;
+    }
+
+    private static (uint x, uint y, uint z) ReconstructCoordinates(VisiblePlane plane, uint planeX, uint planeY, Chunk chunk)
+    {
+        uint majorCoord = plane.MajorAxisOrder == AxisOrder.Ascending
+            ? plane.SliceIndex
+            : chunk.GetDepth(plane.MajorAxis) - 1 - plane.SliceIndex;
+
+        uint middleCoord = plane.MiddleAxisOrder == AxisOrder.Ascending
+            ? planeX
+            : chunk.GetDepth(plane.MiddleAxis) - 1 - planeX;
+
+        uint minorCoord = plane.MinorAxisOrder == AxisOrder.Ascending
+            ? planeY
+            : chunk.GetDepth(plane.MinorAxis) - 1 - planeY;
+
+        uint x = 0, y = 0, z = 0;
+        switch (plane.MajorAxis)
+        {
+            case Axis.X: x = majorCoord; break;
+            case Axis.Y: y = majorCoord; break;
+            case Axis.Z: z = majorCoord; break;
+        }
+        switch (plane.MiddleAxis)
+        {
+            case Axis.X: x = middleCoord; break;
+            case Axis.Y: y = middleCoord; break;
+            case Axis.Z: z = middleCoord; break;
+        }
+        switch (plane.MinorAxis)
+        {
+            case Axis.X: x = minorCoord; break;
+            case Axis.Y: y = minorCoord; break;
+            case Axis.Z: z = minorCoord; break;
+        }
+
+        return (x, y, z);
+    }
+
+    private static MeshQuad CreateQuad(uint x, uint y, uint z, ushort voxelId, Axis axis, AxisOrder order)
+    {
+        float bx = x;
+        float by = y;
+        float bz = z;
+
+        return (axis, order) switch
+        {
+            (Axis.X, AxisOrder.Descending) => new MeshQuad
+            {
+                Vertex0 = new Vector3(bx + 1, by, bz + 1),
+                Vertex1 = new Vector3(bx + 1, by, bz),
+                Vertex2 = new Vector3(bx + 1, by + 1, bz),
+                Vertex3 = new Vector3(bx + 1, by + 1, bz + 1),
+                Normal = new Vector3(1, 0, 0),
+                VoxelId = voxelId
+            },
+            (Axis.X, AxisOrder.Ascending) => new MeshQuad
+            {
+                Vertex0 = new Vector3(bx, by, bz),
+                Vertex1 = new Vector3(bx, by, bz + 1),
+                Vertex2 = new Vector3(bx, by + 1, bz + 1),
+                Vertex3 = new Vector3(bx, by + 1, bz),
+                Normal = new Vector3(-1, 0, 0),
+                VoxelId = voxelId
+            },
+            (Axis.Y, AxisOrder.Descending) => new MeshQuad
+            {
+                Vertex0 = new Vector3(bx, by + 1, bz + 1),
+                Vertex1 = new Vector3(bx + 1, by + 1, bz + 1),
+                Vertex2 = new Vector3(bx + 1, by + 1, bz),
+                Vertex3 = new Vector3(bx, by + 1, bz),
+                Normal = new Vector3(0, 1, 0),
+                VoxelId = voxelId
+            },
+            (Axis.Y, AxisOrder.Ascending) => new MeshQuad
+            {
+                Vertex0 = new Vector3(bx, by, bz),
+                Vertex1 = new Vector3(bx + 1, by, bz),
+                Vertex2 = new Vector3(bx + 1, by, bz + 1),
+                Vertex3 = new Vector3(bx, by, bz + 1),
+                Normal = new Vector3(0, -1, 0),
+                VoxelId = voxelId
+            },
+            (Axis.Z, AxisOrder.Descending) => new MeshQuad
+            {
+                Vertex0 = new Vector3(bx, by, bz + 1),
+                Vertex1 = new Vector3(bx + 1, by, bz + 1),
+                Vertex2 = new Vector3(bx + 1, by + 1, bz + 1),
+                Vertex3 = new Vector3(bx, by + 1, bz + 1),
+                Normal = new Vector3(0, 0, 1),
+                VoxelId = voxelId
+            },
+            (Axis.Z, AxisOrder.Ascending) => new MeshQuad
+            {
+                Vertex0 = new Vector3(bx, by, bz),
+                Vertex1 = new Vector3(bx, by + 1, bz),
+                Vertex2 = new Vector3(bx + 1, by + 1, bz),
+                Vertex3 = new Vector3(bx + 1, by, bz),
+                Normal = new Vector3(0, 0, -1),
+                VoxelId = voxelId
+            },
+            _ => throw new ArgumentOutOfRangeException()
+        };
+    }
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Core/OcclusionAlgorithms/VoxelOcclusionOptimizer.cs
+```
+using System.Data;
+using VoxelMeshOptimizer.Core.OcclusionAlgorithms.Common;
+
+namespace VoxelMeshOptimizer.Core.OcclusionAlgorithms;
+/// <summary>
+/// Optimizes voxel occlusion by computing visible voxel planes based on the provided voxel chunk.
+/// </summary>
+public class VoxelOcclusionOptimizer
+{
+    /// <summary>
+    /// The voxel chunk to be processed.
+    /// </summary>
+    private readonly Chunk chunk;
+
+    /// <summary>
+    /// The visibility map generated from the voxel chunk.
+    /// </summary>
+    private readonly VoxelVisibilityMap visibilityMap;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="VoxelOcclusionOptimizer"/> class.
+    /// </summary>
+    /// <param name="chunk">The voxel chunk to optimize.</param>
+    public VoxelOcclusionOptimizer(Chunk chunk)
+    {
+        this.chunk = chunk ?? throw new NoNullAllowedException();
+        visibilityMap = new VoxelVisibilityMap(chunk);
+    }
+
+    /// <summary>
+    /// Computes and returns the visible voxel planes for all axes and their orientations.
+    /// </summary>
+    /// <returns>
+    /// A <see cref="VisibleFaces"/> instance containing the visible planes grouped by axis and order.
+    /// </returns>
+    public VisibleFaces ComputeVisibleFaces()
+    {
+        VisibleFaces result = new VisibleFaces
+        {
+            PlanesByAxis =
+            {
+                [(Axis.X, AxisOrder.Ascending)] = BuildPlanesForAxis(Axis.X, AxisOrder.Ascending),
+                [(Axis.X, AxisOrder.Descending)] = BuildPlanesForAxis(Axis.X, AxisOrder.Descending),
+                [(Axis.Y, AxisOrder.Ascending)] = BuildPlanesForAxis(Axis.Y, AxisOrder.Ascending),
+                [(Axis.Y, AxisOrder.Descending)] = BuildPlanesForAxis(Axis.Y, AxisOrder.Descending),
+                [(Axis.Z, AxisOrder.Ascending)] = BuildPlanesForAxis(Axis.Z, AxisOrder.Ascending),
+                [(Axis.Z, AxisOrder.Descending)] = BuildPlanesForAxis(Axis.Z, AxisOrder.Descending)
+            }
+        };
+
+        return result;
+    }
+
+    /// <summary>
+    /// Builds the visible planes for a specified slicing axis and order.
+    /// </summary>
+    /// <param name="sliceAxis">The axis that defines the slicing orientation.</param>
+    /// <param name="axisOrder">The order (ascending or descending) in which to iterate over the slice.</param>
+    /// <returns>
+    /// A list of <see cref="VisiblePlane"/> objects representing the visible voxel planes for the provided slice.
+    /// </returns>
+    /// <remarks>
+    /// The method maps the slice axis to the appropriate voxel face using a bitmask and 
+    /// determines the iteration order via a helper function (<see cref="AxisExtensions.DefineIterationOrder"/>).
+    /// This helper also computes the corresponding 2D plane dimensions and translates 
+    /// 3D voxel coordinates to 2D plane positions using <see cref="AxisExtensions.GetSlicePlanePosition"/>.
+    /// This design choice encapsulates complex logic within a dedicated helper, aiding maintainability.
+    /// </remarks>
+    private List<VisiblePlane> BuildPlanesForAxis(Axis sliceAxis, AxisOrder axisOrder)
+    {
+        // Map the slice axis to the corresponding voxel face flag.
+        VoxelFace faceFlag = AxisExtensions.ToVoxelFace(sliceAxis, axisOrder);
+
+        // Determine the order in which the voxels are iterated.
+        (Axis majorA, AxisOrder majorAO, Axis middleA, AxisOrder middleAO, Axis minorA, AxisOrder minorAO) = AxisExtensions.DefineIterationOrder(sliceAxis, axisOrder);
+
+        // Retrieve the dimensions of the 2D plane slice.
+        (uint planeWidth, uint planeHeight) = chunk.GetPlaneDimensions(majorA, middleA, minorA);
+
+        // Dictionary to store the visible planes keyed by the slice index.
+        uint sliceCount = chunk.GetDepth(sliceAxis);
+        VisiblePlane?[] planesBySlice = new VisiblePlane?[sliceCount];
+
+        chunk.ForEachCoordinate(
+            majorA: majorA, majorAsc: majorAO,
+            middleA: middleA, middleAsc: middleAO,
+            minorA: minorA, minorAsc: minorAO,
+            (x, y, z) =>
+            {
+                VoxelFace faces = visibilityMap.GetVisibleFaces(x, y, z);
+                if (!faces.HasFlag(faceFlag)) return;
+
+                // Retrieve the current slice index.
+                uint sliceIndex = AxisExtensions.GetDepthFromAxis(sliceAxis, axisOrder, x, y, z, chunk);
+
+                // Select the appropriate visible plane.
+                planesBySlice[sliceIndex] ??= new VisiblePlane(
+                    majorA, majorAO,
+                    middleA, middleAO,
+                    minorA, minorAO,
+                    sliceIndex,
+                    planeWidth, planeHeight
+                );
+                VisiblePlane? plane = planesBySlice[sliceIndex];
+
+                // Compute the 2D position on the plane from the 3D coordinates.
+                (uint planeX, uint planeY) = AxisExtensions.GetSlicePlanePosition(
+                    majorA, majorAO,
+                    middleA, middleAO,
+                    minorA, minorAO,
+                    x, y, z, chunk);
+
+                plane!.Voxels[planeX, planeY] = chunk.Get(x, y, z);
+            }
+        );
+
+        // Gather the resulting non-empty planes.
+        List<VisiblePlane> result = [];
+        result.AddRange(planesBySlice.OfType<VisiblePlane>().Where(plane => !plane.IsPlaneEmpty));
+
+        return result;
+    }
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Core/TaskManager/TaskManager.cs
+```
+using System.Threading.Channels;
+
+namespace VoxelMeshOptimizer.Core.TaskManager;
+
+public sealed class TaskManager<TIn, TOut> : IAsyncDisposable
+{
+    public readonly record struct Completion(int Id, bool Success, TOut? Result, Exception? Error);
+
+    private sealed record WorkItem(int Id, TIn Input, TaskCompletionSource<TOut> Tcs);
+
+    private readonly Func<TIn, CancellationToken, ValueTask<TOut>> _processor;
+    private readonly CancellationToken _shutdown;
+
+    private readonly Channel<WorkItem> _work;
+    private readonly Channel<Completion> _completed;
+
+    private readonly Task[] _workers;
+    private readonly Task _drainTask;
+
+    private int _nextId;
+
+    public TaskManager(
+        int workerCount,
+        Func<TIn, CancellationToken, ValueTask<TOut>> processor,
+        CancellationToken shutdown = default,
+        int? boundedCapacity = null)
+    {
+        if (workerCount <= 0) throw new ArgumentOutOfRangeException(nameof(workerCount));
+        _processor = processor ?? throw new ArgumentNullException(nameof(processor));
+        _shutdown = shutdown;
+
+        _work = boundedCapacity is { } cap
+            ? Channel.CreateBounded<WorkItem>(new BoundedChannelOptions(cap)
+            {
+                SingleReader = false,
+                SingleWriter = false,
+                FullMode = BoundedChannelFullMode.Wait
+            })
+            : Channel.CreateUnbounded<WorkItem>(new UnboundedChannelOptions
+            {
+                SingleReader = false,
+                SingleWriter = false
+            });
+
+        _completed = Channel.CreateUnbounded<Completion>(new UnboundedChannelOptions
+        {
+            SingleReader = false,
+            SingleWriter = false
+        });
+
+        _workers = Enumerable.Range(0, workerCount)
+            .Select(_ => Task.Run(WorkerLoop))
+            .ToArray();
+
+        // When workers stop, close the completed channel so consumers can finish cleanly.
+        _drainTask = Task.WhenAll(_workers).ContinueWith(t =>
+        {
+            _completed.Writer.TryComplete(t.Exception);
+        }, TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// Enqueue an item. Returns a Task you can await if you want the per-item result.
+    /// (Independently, the result also appears in the Completed queue.)
+    /// </summary>
+    public Task<TOut> Enqueue(TIn input)
+    {
+        _shutdown.ThrowIfCancellationRequested();
+
+        int id = Interlocked.Increment(ref _nextId);
+
+        TaskCompletionSource<TOut> tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        WorkItem item = new(id, input, tcs);
+
+        // If writer is completed, this will throw.
+        if (!_work.Writer.TryWrite(item))
+            throw new InvalidOperationException("TaskManager is not accepting more work (CompleteAdding was called).");
+
+        return tcs.Task;
+    }
+
+    /// <summary>
+    /// Stop accepting new work. Existing queued work will still be processed.
+    /// </summary>
+    private void CompleteAdding() => _work.Writer.TryComplete();
+
+    /// <summary>
+    /// Non-blocking: attempt to read a completion.
+    /// </summary>
+    public bool TryDequeueCompleted(out Completion completion)
+        => _completed.Reader.TryRead(out completion);
+
+    /// <summary>
+    /// Async blocking: wait for the next completion.
+    /// Throws ChannelClosedException when the manager is drained & disposed/closed.
+    /// </summary>
+    public ValueTask<Completion> WaitForCompletedAsync(CancellationToken ct = default)
+        => _completed.Reader.ReadAsync(ct);
+
+    /// <summary>
+    /// Wait until all workers finish (after CompleteAdding or shutdown cancellation).
+    /// </summary>
+    public Task WhenAllCompletedAsync() => _drainTask;
+
+    private async Task WorkerLoop()
+    {
+        try
+        {
+            await foreach (var item in _work.Reader.ReadAllAsync(_shutdown).ConfigureAwait(false))
+            {
+                try
+                {
+                    var result = await _processor(item.Input, _shutdown).ConfigureAwait(false);
+
+                    item.Tcs.TrySetResult(result);
+
+                    await _completed.Writer.WriteAsync(
+                        new Completion(item.Id, true, result, null),
+                        _shutdown).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    item.Tcs.TrySetException(ex);
+
+                    await _completed.Writer.WriteAsync(
+                        new Completion(item.Id, false, default, ex),
+                        _shutdown).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // shutdown requested: exit workers
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        CompleteAdding();
+        try { await WhenAllCompletedAsync().ConfigureAwait(false); }
+        catch { /* surfaced via completions/awaiters; ignore here */ }
+    }
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Core/OcclusionAlgorithms/Common/VisibleFaces.cs
+```
+namespace VoxelMeshOptimizer.Core.OcclusionAlgorithms.Common;
+
+
+// The result of the occlusion optimization: all visible planes, organized by direction.
+public class VisibleFaces
+{
+    public Dictionary<(Axis, AxisOrder), List<VisiblePlane>> PlanesByAxis { get; }
+        = new Dictionary<(Axis, AxisOrder), List<VisiblePlane>>();
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Core/OcclusionAlgorithms/Common/VisiblePlane.cs
+```
+using System.Text;
+
+namespace VoxelMeshOptimizer.Core.OcclusionAlgorithms.Common;
+/// <summary>
+/// Represents a 2D plane (slice) of visible voxels, defined by a specific iteration order and orientation.
+/// 
+/// Terminology:
+/// - MajorAxis: First axis iterated in the nested loops, also known as the "slice" axis (outermost loop).
+/// - MiddleAxis: Second axis iterated (middle loop).
+/// - MinorAxis: Third axis iterated (innermost loop).
+/// - SliceIndex is the index along the MinorAxis dimension. (Depth)
+/// - Voxels is the 2D array of (width x height) or (depth x height), etc., 
+///   depending on which axes form the plane.
+/// </summary>
+public class VisiblePlane
+{
+    /// <summary>
+    /// The outermost loop's iteration axis.
+    /// </summary>
+    public Axis MajorAxis { get; }
+    public AxisOrder MajorAxisOrder {get;}
+
+    /// <summary>
+    /// The middle loop's iteration axis.
+    /// </summary>
+    public Axis MiddleAxis { get; }
+    public AxisOrder MiddleAxisOrder {get;}
+
+    /// <summary>
+    /// The innermost loop's iteration axis, considered as the slicing axis.
+    /// </summary>
+    public Axis MinorAxis { get; }
+    public AxisOrder MinorAxisOrder {get;}
+
+    /// <summary>
+    /// The index along the MinorAxis for this plane. In other terms, the depth inside the chunk along the major axis.
+    /// For instance, if MinorAxis = FrontToBack, then this might be z=0,1,2...
+    /// </summary>
+    public uint SliceIndex { get; }
+
+    /// <summary>
+    /// 2D array of voxels contained within this visible plane.
+    /// The exact dimensions depend on the axes forming the plane. For instance:
+    /// - If MinorAxis is Z, the plane dimensions are Voxels[x, y].
+    /// </summary>
+    public Voxel?[,] Voxels { get; init; } 
+
+    /// <summary>
+    /// Initializes a new instance of the VisiblePlane class.
+    /// </summary>
+    /// <param name="majorAxis">Axis used in the outermost loop.</param>
+    /// <param name="middleAxis">Axis used in the middle loop.</param>
+    /// <param name="minorAxis">Axis used in the innermost loop.</param>
+    /// <param name="sliceIndex">Position along the slicing (MinorAxis) axis.</param>
+    /// <param name="width">Width of the voxel array along the MajorAxis.</param>
+    /// <param name="height">Height of the voxel array along the MiddleAxis.</param>
+    public VisiblePlane(
+        Axis majorAxis, AxisOrder majorAxisOrder,
+        Axis middleAxis, AxisOrder middleAxisOrder,
+        Axis minorAxis, AxisOrder minorAxisOrder,
+        uint sliceIndex,
+        uint width,
+        uint height)
+    {
+        MajorAxis = majorAxis;
+        MajorAxisOrder = majorAxisOrder;
+
+        MiddleAxis = middleAxis;
+        MiddleAxisOrder = middleAxisOrder;
+
+        MinorAxis = minorAxis;
+        MinorAxisOrder = minorAxisOrder;
+
+
+        SliceIndex = sliceIndex;
+        Voxels = new Voxel?[width, height];
+
+    }
+
+    /// <summary>
+    /// Checks whether the plane is empty, i.e., contains no visible voxels.
+    /// </summary>
+    public bool IsPlaneEmpty
+    {
+        get
+        {
+            int w = Voxels.GetLength(0);
+            int h = Voxels.GetLength(1);
+            for (int x = 0; x < w; x++)
+            {
+                for (int y = 0; y < h; y++)
+                {
+                    if (Voxels[x, y] is { IsSolid: true }) return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Returns a concise string representation of the VisiblePlane object.
+    /// Example:
+    /// "Plane(Major=+X, Middle=+Y, Minor=+Z, SliceIndex=2)"
+    /// </summary>
+    public override string ToString()
+    {
+        string majorSign = MajorAxisOrder == AxisOrder.Ascending ? "+" : "-";
+        string middleSign = MiddleAxisOrder == AxisOrder.Ascending ? "+" : "-";
+        string minorSign = MinorAxisOrder == AxisOrder.Ascending ? "+" : "-";
+
+        return $"Plane(Major={majorSign}{MajorAxis}, Middle={middleSign}{MiddleAxis}, Minor={minorSign}{MinorAxis}, SliceIndex={SliceIndex})";
+    }
+
+
+
+
+    /// <summary>
+    /// Produces a detailed multi-line description of the plane, including axes, slice index,
+    /// and voxel IDs in a human-readable 2D grid.
+    /// </summary>
+    public string Describe()
+    {
+        StringBuilder sb = new StringBuilder();
+
+        // Indique les signes +/- selon AxisOrder
+        string majorSign = MajorAxisOrder == AxisOrder.Ascending ? "+" : "-";
+        string middleSign = MiddleAxisOrder == AxisOrder.Ascending ? "+" : "-";
+        string minorSign = MinorAxisOrder == AxisOrder.Ascending ? "+" : "-";
+
+        // Header avec ordre ascendant/descendant
+        sb.AppendLine(ToString());
+        sb.AppendLine("Voxels (each cell shows 'ID' or '.' if null):");
+
+        int width = Voxels.GetLength(0);
+        int height = Voxels.GetLength(1);
+
+        for (int y = 0; y < height; y++)
+        {
+            sb.Append($"Row {y}: ");
+            for (int x = 0; x < width; x++)
+            {
+                Voxel? v = Voxels[x, y];
+                sb.Append(v is null ? ". " : $"{v.Value.ID} ");
+            }
+            sb.AppendLine();
+        }
+
+        return sb.ToString();
+    }
+
+
+    
+    /// <summary>
+    /// Converts the VisiblePlane's voxel array to a 2D int array,
+    /// mapping each non-null voxel to its ID and null voxels to -1.
+    /// </summary>
+    /// <returns>A 2D integer array with voxel IDs or -1 for empty spaces.</returns>
+    public int[,] ConvertToPixelArray()
+    {
+        int width = Voxels.GetLength(0);
+        int height = Voxels.GetLength(1);
+        int[,] pixelArray = new int[width, height];
+
+        for (int x = 0; x < width; x++)
+        {
+            for (int y = 0; y < height; y++)
+            {
+                Voxel? voxel = Voxels[x, y];
+                pixelArray[x, y] = voxel?.ID ?? -1; // TODO : Get a look at this later on, we may need to throw errors.
+            }
+        }
+        return pixelArray;
+    }
+
+
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Core/OptimizationAlgorithms/DisjointSet/DisjointSet.cs
+```
+using CommunityToolkit.Diagnostics;
+
+namespace VoxelMeshOptimizer.Core.OptimizationAlgorithms.DisjointSet;
+
+public struct DisjointSet {
+    private int[] parent;  // parent[i] = parent of i
+    private int[] size;    // size[i] = number of sites in tree rooted at i
+                            // Note: not necessarily correct if i is not a root node
+    private int count;     // number of components
+
+    /**
+        * Initializes an empty union-find data structure with
+        * {@code n} elements {@code 0} through {@code n-1}.
+        * Initially, each element is in its own set.
+        *
+        * @param  n the number of elements
+        * @throws IllegalArgumentException if {@code n < 0}
+        */
+    public DisjointSet(int n) {
+        Guard.IsGreaterThan(n, -1, "n");
+
+        count = n;
+        parent = new int[n];
+        size = new int[n];
+        for (int i = 0; i < n; i++) {
+            parent[i] = i;
+            size[i] = 1;
+        }
+    }
+
+    /**
+        * Returns the number of sets.
+        *
+        * @return the number of sets (between {@code 1} and {@code n})
+        */
+    public int GetCount() {
+        return count;
+    }
+
+    public bool IsRoot(int p) {
+        return parent[p] == p;
+    }
+
+
+    /**
+        * Returns the canonical element of the set containing element {@code p}.
+        *
+        * @param  p an element
+        * @return the canonical element of the set containing {@code p}
+        * @throws IllegalArgumentException unless {@code 0 <= p < n}
+        */
+    public int Find(int p) {
+        Validate(p);
+        int root = p;
+        while (root != parent[root])
+            root = parent[root];
+        while (p != root) {
+            int newp = parent[p];
+            parent[p] = root;
+            p = newp;
+        }
+        return root;
+    }
+
+    // validate that p is a valid index
+    private void Validate(int p) {
+        Guard.IsInRange(p, 0, parent.Length);
+    }
+
+    /**
+        * Merges the set containing element {@code p} with the set
+        * containing element {@code q}.
+        *
+        * @param  p one element
+        * @param  q the other element
+        * @throws IllegalArgumentException unless
+        *         both {@code 0 <= p < n} and {@code 0 <= q < n}
+        */
+    public void Union(int p, int q) {
+        int rootP = Find(p);
+        int rootQ = Find(q);
+        if (rootP == rootQ) return;
+
+        // make smaller root point to larger one
+        if (size[rootP] < size[rootQ]) {
+            parent[rootP] = rootQ;
+            size[rootQ] += size[rootP];
+        }
+        else {
+            parent[rootQ] = rootP;
+            size[rootP] += size[rootQ];
+        }
+        count--;
+    }
+
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Core/OptimizationAlgorithms/DisjointSet/DisjointSetMeshOptimizer.cs
+```
+using CommunityToolkit.Diagnostics;
+using VoxelMeshOptimizer.Core.OcclusionAlgorithms;
+using VoxelMeshOptimizer.Core.OcclusionAlgorithms.Common;
+
+namespace VoxelMeshOptimizer.Core.OptimizationAlgorithms.DisjointSet;
+
+public class DisjointSetMeshOptimizer
+{
+    private Mesh mesh;
+
+    public DisjointSetMeshOptimizer(Mesh mesh){
+        Guard.IsEmpty(mesh.Quads);
+        
+        this.mesh = mesh;
+    }
+
+
+    public Mesh Optimize(Chunk chunk)
+    {
+        VoxelOcclusionOptimizer occluder = new(chunk);
+        VisibleFaces visibileFaces = occluder.ComputeVisibleFaces();
+
+        foreach (DisjointSetVisiblePlaneOptimizer? optimizer in from visibleFace in visibileFaces.PlanesByAxis from face in visibleFace.Value select new DisjointSetVisiblePlaneOptimizer(face, chunk))
+        {
+            optimizer.Optimize();
+            List<MeshQuad> quads = optimizer.ToMeshQuads();
+            mesh.Quads.AddRange(quads);
+        }
+
+        return mesh;
+    }
+}
+```
+
+### VoxelMeshOptimizerLibrary/src/Core/OptimizationAlgorithms/DisjointSet/DisjointSetVisiblePlaneOptimizer.cs
+```
+using System.Numerics;
+using CommunityToolkit.Diagnostics;
+using VoxelMeshOptimizer.Core.OcclusionAlgorithms.Common;
+
+namespace VoxelMeshOptimizer.Core.OptimizationAlgorithms.DisjointSet;
+
+/// <summary>
+/// Optimizes a 2D VisiblePlane by merging contiguous regions of solid voxels with the same ID.
+/// </summary>
+public class DisjointSetVisiblePlaneOptimizer
+{
+    private DisjointSet disjointSet;
+    private readonly VisiblePlane plane;
+    private readonly Voxel?[,] voxels;
+    private readonly int width;
+    private readonly int height;
+    private readonly Chunk chunk;
+
+    public DisjointSetVisiblePlaneOptimizer(VisiblePlane plane, Chunk chunk)
+    {
+        Guard.IsNotNull(plane);
+        Guard.IsNotNull(plane.Voxels, nameof(plane.Voxels));
+        this.plane = plane;
+        voxels = plane.Voxels;
+        this.chunk = chunk;
+
+        width = voxels.GetLength(0);
+        height = voxels.GetLength(1);
+
+        Guard.IsGreaterThan(width, 0);
+        Guard.IsGreaterThan(height, 0);
+
+        disjointSet = new DisjointSet(width * height);
+    }
+
+    public void Optimize()
+    {
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                if (voxels[x, y] == null || IsNotAlone(x, y))
+                    continue;
+
+                CreateOneSet(x, y);
+            }
+        }
+    }
+
+    private void CreateOneSet(int x, int y)
+    {
+        Guard.IsInRange(x, 0, width);
+        Guard.IsInRange(y, 0, height);
+
+        Voxel? rootVoxel = voxels[x, y];
+        if (rootVoxel == null) return;
+
+        int currentWidth = 1;
+        int currentHeight = 1;
+
+        // Expand to the right
+        while (x + currentWidth < width &&
+               voxels[x + currentWidth, y]?.ID == rootVoxel?.ID &&
+               !IsNotAlone(x + currentWidth, y))
+        {
+            currentWidth++;
+        }
+
+        // Expand downward
+        while (y + currentHeight < height)
+        {
+            bool canExpand = true;
+            for (int dx = 0; dx < currentWidth; dx++)
+            {
+                Voxel? v = voxels[x + dx, y + currentHeight];
+                if (v?.ID != rootVoxel?.ID || IsNotAlone(x + dx, y + currentHeight))
+                {
+                    canExpand = false;
+                    break;
+                }
+            }
+            if (!canExpand) break;
+            currentHeight++;
+        }
+
+        // Union the whole block
+        int rootIndex = ToIndex(x, y);
+        for (int dy = 0; dy < currentHeight; dy++)
+        {
+            for (int dx = 0; dx < currentWidth; dx++)
+            {
+                disjointSet.Union(rootIndex, ToIndex(x + dx, y + dy));
+            }
+        }
+    }
+
+    private bool IsNotAlone(int x, int y)
+    {
+        Guard.IsInRange(x, 0, width);
+        Guard.IsInRange(y, 0, height);
+
+        Voxel? voxel = voxels[x, y];
+        if (voxel == null) return true;
+
+        int root = disjointSet.Find(ToIndex(x, y));
+        if (root != ToIndex(x, y)) return true;
+
+        return (x > 0 && AreSame(x, y, x - 1, y)) ||
+               (x < width - 1 && AreSame(x, y, x + 1, y)) ||
+               (y > 0 && AreSame(x, y, x, y - 1)) ||
+               (y < height - 1 && AreSame(x, y, x, y + 1));
+    }
+
+    private bool AreSame(int x1, int y1, int x2, int y2)
+    {
+        Voxel? v1 = voxels[x1, y1];
+        Voxel? v2 = voxels[x2, y2];
+        if (!v1.HasValue || !v2.HasValue) return false;
+        return v1.Value.ID == v2.Value.ID &&
+               disjointSet.Find(ToIndex(x2, y2)) == disjointSet.Find(ToIndex(x1, y1));
+    }
+
+    private int ToIndex(int x, int y) => y * width + x;
+
+
+    public List<MeshQuad> ToMeshQuads()
+    {
+        Dictionary<int, List<(int x, int y)>> groups = new();
+
+
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                if (voxels[x, y] == null) continue;
+
+                int root = disjointSet.Find(ToIndex(x, y));
+                if (!groups.TryGetValue(root, out List<(int x, int y)>? value))
+                {
+                    value = [];
+                    groups[root] = value;
+                }
+
+                value.Add((x, y));
+            }
+        }
+
+
+
+
+        List<MeshQuad> quads = [];
+        MeshQuad? quad; // Keep outside of loop, it keeps being re-created
+        foreach (KeyValuePair<int, List<(int x, int y)>> group in groups)
+        {
+
+            List<(int x, int y)> groupVoxels = group.Value;
+
+            int minX = groupVoxels.Min(p => p.x);
+            int maxX = groupVoxels.Max(p => p.x);
+            int minY = groupVoxels.Min(p => p.y);
+            int maxY = groupVoxels.Max(p => p.y);
+
+
+            int voxelId = voxels[minX, minY]!.Value.ID;
+
+
+            switch (plane.MajorAxis, plane.MajorAxisOrder)
+            {
+                case (Axis.X, AxisOrder.Descending):
+                    {
+                        uint x = chunk.XDepth - plane.SliceIndex;
+                        long y1 = chunk.YDepth - minX;
+                        long y2 = chunk.YDepth - maxX - 1;
+                        long z1 = chunk.ZDepth - minY;
+                        long z2 = chunk.ZDepth - maxY - 1;
+                        quad = new MeshQuad
+                        {
+                            Vertex0 = new Vector3(x, y1, z1),
+                            Vertex1 = new Vector3(x, y2, z1),
+                            Vertex2 = new Vector3(x, y2, z2),
+                            Vertex3 = new Vector3(x, y1, z2),
+                            Normal = new Vector3(1, 0, 0),
+                            VoxelId = voxelId
+                        };
+                        break;
+                    }
+                case (Axis.X, AxisOrder.Ascending):
+                    {
+                        
+                        uint x = plane.SliceIndex;
+                        int y1 = minX;
+                        int y2 = maxX + 1;
+                        int z1 = minY;
+                        int z2 = maxY + 1;
+                        quad = new MeshQuad
+                        {
+                            Vertex1 = new Vector3(x, y1, z1),
+                            Vertex0 = new Vector3(x, y2, z1),
+                            Vertex3 = new Vector3(x, y2, z2),
+                            Vertex2 = new Vector3(x, y1, z2),
+                            Normal = new Vector3(1, 0, 0),
+                            VoxelId = voxelId
+                        };
+                        break;
+                    }
+                case (Axis.Y, AxisOrder.Descending):
+                {
+                        long x1 = chunk.XDepth - minY;
+                        long x2 = chunk.XDepth - maxY - 1;
+                        uint y = chunk.YDepth - plane.SliceIndex;
+                        long z1 = chunk.ZDepth - minX;
+                        long z2 = chunk.ZDepth - maxX - 1;
+                        quad = new MeshQuad
+                        {
+                            Vertex0 = new Vector3(x1, y, z1),
+                            Vertex1 = new Vector3(x1, y, z2),
+                            Vertex2 = new Vector3(x2, y, z2),
+                            Vertex3 = new Vector3(x2, y, z1),
+                            Normal = new Vector3(1, 0, 0),
+                            VoxelId = voxelId
+                        };
+                        break;
+                    }
+                case (Axis.Y, AxisOrder.Ascending):
+                {
+                        int x1 = minY;
+                        int x2 = maxY + 1;
+                        uint y = plane.SliceIndex;
+                        int z1 = minX;
+                        int z2 = maxX + 1;
+                        quad = new MeshQuad
+                        {
+                            Vertex1 = new Vector3(x1, y, z1),
+                            Vertex0 = new Vector3(x1, y, z2),
+                            Vertex3 = new Vector3(x2, y, z2),
+                            Vertex2 = new Vector3(x2, y, z1),
+                            Normal = new Vector3(1, 0, 0),
+                            VoxelId = voxelId
+                        };
+                        break;
+                    }
+                case (Axis.Z, AxisOrder.Descending):
+                {
+                        long x1 = chunk.XDepth - minY;
+                        long x2 = chunk.XDepth - maxY - 1;
+                        long y1 = chunk.YDepth - minX;
+                        long y2 = chunk.YDepth - maxX - 1;
+                        uint z = chunk.ZDepth - plane.SliceIndex;
+                        quad = new MeshQuad
+                        {
+                            Vertex1 = new Vector3(x1, y1, z),
+                            Vertex0 = new Vector3(x1, y2, z),
+                            Vertex3 = new Vector3(x2, y2, z),
+                            Vertex2 = new Vector3(x2, y1, z),
+                            Normal = new Vector3(1, 0, 0),
+                            VoxelId = voxelId
+                        };
+                        break;
+                    }
+                case (Axis.Z, AxisOrder.Ascending):
+                    {
+                        int x1 = minY;
+                        int x2 = maxY + 1;
+                        int y1 = minX;
+                        int y2 = maxX + 1;
+                        uint z = plane.SliceIndex;
+                        quad = new MeshQuad
+                        {
+                            Vertex0 = new Vector3(x1, y1, z),
+                            Vertex1 = new Vector3(x1, y2, z),
+                            Vertex2 = new Vector3(x2, y2, z),
+                            Vertex3 = new Vector3(x2, y1, z),
+                            Normal = new Vector3(1, 0, 0),
+                            VoxelId = voxelId
+                        };
+                        break;
+                    }
+                default: throw new ArgumentOutOfRangeException();
+            }
+
+
+            if (!quad.HasValue) throw new Exception("Unexpected null value");
+
+            quads.Add(quad.Value);
+        }
+
+        return quads;
+    }
+
+}
+```

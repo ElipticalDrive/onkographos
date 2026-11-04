@@ -1,0 +1,277 @@
+# Robust Iso-surface Rendering via Bisection and Newton Refinement
+
+Also called: bisection trace with Newton refinement, isoray rendering pipeline
+
+## Overview
+This method renders implicit surfaces by tracing rays through a volume using a guaranteed-convergence bisection algorithm, followed by optional Newton refinement to achieve sub-pixel precision. It solves the problem of missing or inaccurate surface intersections in standard ray marching by using interval arithmetic (specifically Affine Arithmetic) to bound the implicit function, ensuring that the root-finding process never diverges or skips the surface [S1, unofficial]. It differs from [Volumetric Isosurface Rendering with Intersection Refinement](958-volumetric-isosurface-rendering-with-intersection-refinement.md) by prioritizing robustness via inclusion functions over pure speed, and from [Cell-Based First-Hit Ray Casting](1039-cell-based-first-hit-ray-casting.md) by operating continuously in ray space rather than discretely in voxel cells.
+
+## How it works
+The pipeline consists of camera setup, ray-AABB culling, robust bisection tracing using inclusion functions, optional Newton refinement, and shading.
+
+### Inputs and Outputs
+**Inputs:**
+*   `f`: Implicit function $f: \mathbb{R}^3 \to \mathbb{R}$ returning value and optionally gradient.
+*   `bounds`: Axis-aligned bounding box $(lo, hi)$ where $lo, hi \in \mathbb{R}^3$.
+*   `threshold`: Iso-value (typically 0.0).
+*   `camera_params`: Eye position, target, FOV, projection type.
+*   `newton_iter`: Number of Newton refinement steps (default 3).
+*   `max_depth`: Maximum bisection iterations.
+*   `lipschitz`: Lipschitz constant $L$ for the inclusion function, or `'auto'`.
+
+**Outputs:**
+*   `RenderResult`: Contains hit positions $p$, ray distances $t$, hit masks, and surface normals $n$.
+*   Image: RGB shaded image or depth map.
+
+### Data Structures
+
+**AffineForm**
+Used for tight interval bounds via Affine Arithmetic.
+*   `x0`: `(N,)` central value (midpoint).
+*   `xi`: `(N, K)` partial deviations for $K$ noise symbols.
+*   `delta`: `(N,)` accumulated non-affine error (remainder).
+*   `N`: Batch size.
+*   `K`: Number of noise symbols.
+
+**TraceResult**
+*   `position`: `(N, 3)` hit positions.
+*   `t`: `(N,)` ray distances.
+*   `hit`: `(N,)` boolean mask.
+*   `normal`: `(N, 3)` surface normals.
+
+### Parameters
+*   `margin`: AABB expansion factor, typically 0.01 (1% of bounds size) [S1, unofficial].
+*   `newton_iter`: Default 3 [S1, unofficial].
+*   `fov_deg`: Vertical field of view, default 60.0 [S1, unofficial].
+*   `projection`: `'perspective'` or `'parallel'` [S1, unofficial].
+*   `lipschitz`: `'auto'` or float. If `'auto'`, estimated via gradient sampling [S1, unofficial].
+*   `dtype`: Default `torch.float64` or `np.float64` [S1, unofficial].
+*   `safety`: Multiplier for Lipschitz estimation, default 1.5 [S1, unofficial].
+*   `n_samples`: Samples for Lipschitz estimation, default 10000 [S1, unofficial].
+*   `max_symbols`: Max noise symbols for AffineInclusion, default 8 [S1, unofficial].
+
+### Algorithm Steps
+
+1.  **Camera Setup**: Generate ray origins $O$ and directions $D$ for each pixel.
+    *   For perspective: $D$ depends on `fov_deg` and pixel coordinates.
+    *   For parallel: $D$ is constant, extent is `half_diag * 1.1` [S1, unofficial].
+2.  **AABB Culling**:
+    *   Compute margin: $m = (hi - lo) \times 0.01$.
+    *   Expand bounds: $aabb_{lo} = lo - m$, $aabb_{hi} = hi + m$.
+    *   Intersect rays with AABB to get $t_{min}, t_{max}$ and `hit_mask`. Rays missing the AABB are discarded [S1, unofficial].
+3.  **Lipschitz Estimation** (if `lipschitz == 'auto'`):
+    *   Sample $n\_samples$ points uniformly in bounds.
+    *   Evaluate gradient norms $\|\nabla f\|$. If analytic gradient unavailable, use centered differences with step $h=10^{-5}$ [S1, unofficial].
+    *   $L = \max(\|\nabla f\|) \times safety$.
+4.  **Bisection Trace**:
+    *   Construct `GradientInclusion` or `AffineInclusion` object using $f$ and $L$.
+    *   For each ray, perform bisection within $[t_{min}, t_{max}]$.
+    *   At each step, evaluate inclusion function $F(t)$ on the current interval.
+    *   If $0 \in F(t)$, split interval. Else, discard branch.
+    *   Stop when interval width $< \epsilon$ or `max_depth` reached.
+    *   Record hit position $p = O + t_{mid} D$ and $t$ [S1, unofficial].
+5.  **Newton Refinement** (Optional):
+    *   For each hit point $p$, iterate $k$ times:
+        $$ p_{new} = p - \frac{f(p)}{\nabla f(p) \cdot D} D $$
+    *   Update $p \leftarrow p_{new}$.
+    *   This refines the intersection along the ray direction [S1, unofficial].
+6.  **Normal Computation**:
+    *   Evaluate $\nabla f(p)$ at refined positions.
+    *   Normalize: $n = \frac{\nabla f(p)}{\max(\|\nabla f(p)\|, 10^{-12})}$.
+    *   If gradient unavailable, use `centered_difference_normals` [S1, unofficial].
+7.  **Shading/Depth**:
+    *   **Shaded**: Lambertian shading with ambient and light direction.
+    *   **Depth**: Normalize $t$ to $[0, 1]$ using $t_{min}, t_{max}$ of valid hits. Handle $t_{min}=t_{max}$ by setting range to 1.0 [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def robust_iso_surface_render(
+    f, bounds, camera_params, threshold=0.0,
+    newton_iter=3, max_depth=64, lipschitz='auto',
+    mode='shaded', safety=1.5, n_samples=10000
+):
+    """
+    Robust iso-surface rendering via bisection and Newton refinement.
+    
+    Args:
+        f: Implicit function f(pos) -> (val, grad_or_None)
+        bounds: (lo, hi) tuples of (3,) arrays
+        camera_params: Dict with 'eye', 'target', 'fov_deg', 'projection'
+        threshold: Iso-value
+        newton_iter: Number of Newton steps
+        max_depth: Max bisection iterations
+        lipschitz: 'auto' or float L
+        mode: 'shaded' or 'depth'
+        safety: Lipschitz estimation safety factor
+        n_samples: Samples for Lipschitz estimation
+        
+    Returns:
+        RenderResult object with position, t, hit, normal
+    """
+    lo, hi = bounds
+    margin = (hi - lo) * 0.01
+    aabb_lo = lo - margin
+    aabb_hi = hi + margin
+    
+    # 1. Camera Setup
+    if camera_params['projection'] == 'perspective':
+        origins, directions = generate_rays_perspective(
+            camera_params['eye'], camera_params['target'],
+            camera_params['fov_deg'], aabb_lo, aabb_hi
+        )
+    else:
+        origins, directions = generate_rays_parallel(
+            camera_params['eye'], camera_params['target'],
+            aabb_lo, aabb_hi
+        )
+        
+    N = origins.shape[0]
+    
+    # 2. Ray-AABB Intersection
+    t_min, t_max, hit_mask = ray_aabb_intersect(origins, directions, aabb_lo, aabb_hi)
+    
+    # Filter rays that hit the AABB
+    valid_indices = np.where(hit_mask)[0]
+    if len(valid_indices) == 0:
+        return RenderResult.empty(N)
+        
+    valid_origins = origins[valid_indices]
+    valid_dirs = directions[valid_indices]
+    valid_t_min = t_min[valid_indices]
+    valid_t_max = t_max[valid_indices]
+    
+    # 3. Lipschitz Estimation
+    if lipschitz == 'auto':
+        L = estimate_lipschitz(f, bounds, n_samples=n_samples, safety=safety)
+    else:
+        L = lipschitz
+        
+    # 4. Bisection Trace
+    # Create inclusion function (GradientInclusion or AffineInclusion)
+    inclusion = GradientInclusion(f, L)
+    
+    # Perform bisection
+    hit_positions, hit_ts = bisect_trace(
+        valid_origins, valid_dirs, valid_t_min, valid_t_max,
+        inclusion, threshold, max_depth
+    )
+    
+    # 5. Newton Refinement
+    if newton_iter > 0:
+        hit_positions = newton_refine(
+            hit_positions, valid_dirs, f, newton_iter
+        )
+        
+    # 6. Normal Computation
+    grad = f(hit_positions)[1] # (M, 3) or None
+    if grad is not None:
+        norms = np.linalg.norm(grad, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-12)
+        normals = grad / norms
+    else:
+        normals = centered_difference_normals(f, hit_positions)
+        
+    # 7. Construct Result
+    result = RenderResult.empty(N)
+    result.position[valid_indices] = hit_positions
+    result.t[valid_indices] = hit_ts
+    result.hit[valid_indices] = True
+    result.normal[valid_indices] = normals
+    
+    # 8. Shading/Depth
+    if mode == 'shaded':
+        image = shade_lambertian(result, camera_params)
+    elif mode == 'depth':
+        image = render_depth_map(result)
+        
+    return result
+
+def estimate_lipschitz(f, bounds, n_samples=10000, safety=1.5, h=1e-5):
+    """Estimate Lipschitz constant L = max(||grad f||) * safety."""
+    lo, hi = bounds
+    rng = np.random.default_rng()
+    pts = rng.uniform(lo, hi, (n_samples, 3))
+    
+    vals, grad = f(pts)
+    
+    if grad is not None:
+        grad_norms = np.linalg.norm(grad, axis=1)
+    else:
+        # Centered finite differences
+        offsets = np.array([
+            [h, 0, 0], [-h, 0, 0],
+            [0, h, 0], [0, -h, 0],
+            [0, 0, h], [0, 0, -h]
+        ])
+        all_points = (pts[None, :, :] + offsets[:, None, :]).reshape(6 * n_samples, 3)
+        all_vals, _ = f(all_points)
+        v = all_vals.reshape(6, n_samples)
+        gx = (v[0] - v[1]) / (2.0 * h)
+        gy = (v[2] - v[3]) / (2.0 * h)
+        gz = (v[4] - v[5]) / (2.0 * h)
+        grad_norms = np.sqrt(gx**2 + gy**2 + gz**2)
+        
+    return float(grad_norms.max() * safety)
+
+def newton_refine(positions, directions, f, iterations):
+    """Refine intersection points using Newton's method along ray."""
+    p = positions.copy()
+    for _ in range(iterations):
+        val, grad = f(p)
+        # Newton step: p_new = p - f(p)/grad(p).d * d
+        # grad(p).d is dot product of gradient and ray direction
+        grad_dot_d = np.sum(grad * directions, axis=1, keepdims=True)
+        # Avoid division by zero
+        grad_dot_d = np.maximum(np.abs(grad_dot_d), 1e-12) * np.sign(grad_dot_d)
+        p = p - (val / grad_dot_d) * directions
+    return p
+
+def centered_difference_normals(f, pos, h=1e-5):
+    """Compute normals via centered differences."""
+    N = pos.shape[0]
+    offsets = np.array([
+        [h, 0, 0], [-h, 0, 0],
+        [0, h, 0], [0, -h, 0],
+        [0, 0, h], [0, 0, -h]
+    ])
+    all_points = (pos[None, :, :] + offsets[:, None, :]).reshape(6 * N, 3)
+    all_vals, _ = f(all_points)
+    v = all_vals.reshape(6, N)
+    grad_x = (v[0] - v[1]) / (2.0 * h)
+    grad_y = (v[2] - v[3]) / (2.0 * h)
+    grad_z = (v[4] - v[5]) / (2.0 * h)
+    normals = np.stack([grad_x, grad_y, grad_z], axis=1)
+    norms = np.linalg.norm(normals, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-12)
+    return normals / norms
+```
+
+### Edge Cases and Pitfalls
+*   **Zero Gradient**: If $\|\nabla f\| \approx 0$, normalization uses $\max(\|\nabla f\|, 10^{-12})$ to prevent division by zero [S1, unofficial].
+*   **No Hits**: If no rays hit the AABB, the result is empty or filled with zeros/NaNs depending on mode [S1, unofficial].
+*   **Depth Normalization**: If $t_{min} = t_{max}$ for valid hits, the range is set to 1.0 to prevent division by zero [S1, unofficial].
+*   **Lipschitz Underestimation**: If $L$ is too small, the inclusion function may not contain the root, causing bisection to fail. The `safety` factor (default 1.5) mitigates this [S1, unofficial].
+
+## Subtopics
+
+### [Newton Refinement](1346-newton-refinement.md)
+Optional post-processing step applied after bisection to achieve sub-pixel accuracy by iteratively correcting the hit position using directional derivatives. Chosen when high precision is required beyond the bisection convergence threshold.
+
+## Operating characteristics
+*   **Time Complexity**: $O(N \cdot D)$ where $N$ is number of pixels and $D$ is max bisection depth. Newton refinement adds $O(N \cdot I)$ where $I$ is iterations.
+*   **Memory Complexity**: $O(N)$ for ray data and results. Affine arithmetic adds overhead proportional to number of noise symbols $K$.
+*   **Performance**: Robust but slower than simple ray marching due to interval evaluations. Affine Arithmetic is tighter than Interval Arithmetic but more expensive.
+*   **Strengths**: Guaranteed convergence, handles complex implicit functions, sub-pixel accuracy.
+*   **Limitations**: Slower than non-robust methods, sensitive to Lipschitz constant estimation, higher memory for Affine forms.
+*   **When to Use**: When visual correctness is critical and surface topology is complex.
+*   **When Not to Use**: When real-time performance is paramount and approximate results are acceptable.
+
+## Background
+This method is implemented in the `isoray` library, which provides a Python-based framework for robust iso-surface rendering using interval arithmetic [S1, unofficial]. It builds on the principles of guaranteed root-finding using inclusion functions, specifically leveraging Affine Arithmetic for tighter bounds than standard Interval Arithmetic. The approach is designed to address the reliability issues of standard ray marching in scientific visualization and implicit surface rendering.
+
+## Sources
+[S1] GitHub - narnia-ai-mason/iso-surface-rendering: Robust iso-surface ..., https://github.com/narnia-ai-mason/iso-surface-rendering, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,95 @@
+# Hierarchical Tensor-based Transform
+
+Also called: Wu hierarchical tensor, Wu et al. hierarchical tensor
+
+## Overview
+The Hierarchical Tensor-based Transform is a compression scheme for volume data that recursively partitions the input domain into smaller blocks, defining a truncated tensor-product basis for each block [S1][S2, unofficial]. It represents the original volume tensor as a summation of incomplete tensor approximations across multiple resolution levels, where tensors at each level are subdivided into residual tensors passed from higher levels [S1][S2, unofficial]. This method builds on [Tensor Approximation](5362-tensor-approximation.md) by introducing a hierarchical multiresolution structure to the factorization process.
+
+## How it works
+**Inputs:** An input volume dataset represented as a 3D tensor $V$.
+**Outputs:** A set of hierarchical coefficients representing the volume, consisting of truncated tensor-product bases and residual tensors for each partition level.
+
+**Data Structures:**
+The method relies on a hierarchical partitioning of the domain. While specific bit-packing is not detailed in the sources, the logical structure consists of:
+1.  **Blocks:** Recursive subdivisions of the volume domain.
+2.  **Bases:** A truncated tensor-product basis defined for each block.
+3.  **Residuals:** Residual tensors passed from higher levels to lower levels.
+
+**Steps:**
+1.  **Recursive Partitioning:** The entire domain of the input volume is recursively partitioned into smaller blocks [S1][S2, unofficial].
+2.  **Basis Definition:** For each block in the hierarchy, a truncated tensor-product basis is defined [S1][S2, unofficial].
+3.  **Residual Subdivision:** Tensors at each level are subdivided into residual tensors that are passed from the higher levels [S1][S2, unofficial].
+4.  **Approximation Summation:** The original tensor is represented as a summation of incomplete tensor approximations at multiple levels [S1][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hierarchical_tensor_transform(volume_tensor):
+    """
+    Implements the Hierarchical Tensor-based Transform.
+    Note: Specific algorithms for basis computation and residual calculation
+    are not provided in the source texts. This pseudocode reflects the
+    structural hierarchy described.
+    """
+    # Step 1: Recursive partitioning of the domain
+    # The source states the domain is recursively partitioned into smaller blocks.
+    # Implementation detail: Define a recursive function to split the volume
+    # into sub-blocks (e.g., octree-like or grid-based subdivision).
+    blocks = partition_domain(volume_tensor)
+    
+    # Step 2: Define truncated tensor-product basis for each block
+    # For each block, compute or select a truncated basis.
+    # The source mentions "truncated tensor-product basis" but does not specify
+    # the truncation criterion (e.g., SVD rank threshold).
+    bases = {}
+    for block in blocks:
+        bases[block.id] = compute_truncated_tensor_product_basis(block)
+        
+    # Step 3: Subdivide tensors into residual tensors passed from higher levels
+    # The source states tensors at each level are subdivided into residual tensors
+    # passed from higher levels. This implies a top-down or multi-level decomposition
+    # where residuals are propagated.
+    residuals = {}
+    # Assuming a hierarchical level structure
+    for level in sorted_levels(blocks):
+        for block in blocks_at_level(level):
+            # Get residual from parent (higher level)
+            parent_residual = get_parent_residual(block)
+            
+            # Subdivide current tensor into residual for children
+            # The exact mathematical operation for subdivision is not given.
+            current_residual = subdivide_tensor_into_residual(block, parent_residual)
+            residuals[block.id] = current_residual
+            
+    # Step 4: Represent original tensor as summation of incomplete approximations
+    # The original tensor V is approximated by summing contributions from all levels.
+    # V_approx = sum(incomplete_approximations)
+    # The source does not provide the explicit formula for the summation or how
+    # the bases and residuals combine to form the approximation.
+    approximation = compute_summation_of_incomplete_approximations(bases, residuals)
+    
+    return approximation
+```
+
+**Parameters:**
+*   **Partition Depth:** The number of recursive subdivisions. Not given in the sources.
+*   **Truncation Rank:** The rank of the tensor-product basis for each block. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Basis Computation:** The sources do not specify how the "truncated tensor-product basis" is computed (e.g., via HOSVD, CP decomposition, or other factorization methods). This is a critical implementation gap [G].
+*   **Residual Propagation:** The exact mechanism for passing residuals from higher to lower levels is not detailed [G].
+*   **Incomplete Approximations:** The term "incomplete tensor approximations" is used, but the specific mathematical form of these approximations is not provided [G].
+
+## Operating characteristics
+*   **Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Not given in the sources.
+*   **Limitations:** Not given in the sources.
+
+## Background
+The Hierarchical Tensor-based Transform was proposed by Wu et al. in 2008 [S1][S2, unofficial]. It is cited in the context of dictionary-based methods and tensor approximation techniques for compressed GPU-based direct volume rendering [S1][S2, unofficial].
+
+## Sources
+[S1] State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S2] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27 (unofficial)

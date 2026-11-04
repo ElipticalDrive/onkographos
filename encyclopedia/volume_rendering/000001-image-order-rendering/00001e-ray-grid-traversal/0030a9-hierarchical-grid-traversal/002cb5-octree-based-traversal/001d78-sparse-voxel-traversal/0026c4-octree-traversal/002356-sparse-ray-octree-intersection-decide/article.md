@@ -1,0 +1,212 @@
+# Sparse Ray-Octree Intersection (DECIDE)
+
+Also called: Octree Ray Tracing, Ray-Casting Octree Traversal, Recursive Ray-Octree Intersection, castRay
+
+## Overview
+Sparse Ray-Octree Intersection (DECIDE) is a GPU-based algorithm for finding the first intersection of a ray with a sparse voxel octree structure, returning the hit position, normal, and node index [S2, unofficial]. It solves the problem of efficiently traversing hierarchical occupancy grids by handling traversal, descent, and backtracking (popping) using a stack [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray origin ($O$), ray direction ($D$), octree root node, maximum traversal depth ($L$), Level of Detail multiplier ($lod$), and scale parameters [G].
+*   **Output:** Hit position ($P$), hit normal ($N$), hit distance ($t_{min}$), node index, and child index. Returns false if no intersection is found within the octree bounds [S2, unofficial].
+
+**Data Structures:**
+*   **Octree Node:** Contains position, size (scale), active flag, and child descriptor [S2, unofficial].
+*   **Child Descriptor:** A bit-packed integer where bits indicate the presence of children (0x8000 for active leaf/voxel, 0x0080 for non-leaf children) and potentially a far pointer flag (0x10000) [S2, unofficial].
+*   **Stack:** Stores parent node indices and $t_{max}$ values for backtracking [S2, unofficial].
+
+**Parameters:**
+*   $lod$: Level of Detail multiplier used for termination criteria [S2, unofficial].
+*   $scale\_exp2$: Current node size (power of 2) [S2, unofficial].
+*   $half\_scale\_exp2$: Half of the current node size [S2, unofficial].
+*   $t\_coef$: Transformation coefficient for coordinate mapping [S2, unofficial].
+*   $t\_bias$: Transformation bias for coordinate mapping [S2, unofficial].
+*   $octant\_mask$: Permutation mask for child slot indices based on mirroring [S2, unofficial].
+*   $s\_max$: Maximum scale (depth) of the octree [S2, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialization:** Initialize $t_{min} = -\infty$, $t_{max} = \infty$, helper variable $h = 0.0$, and $child\_descriptor$ from the root node [S2, unofficial]. Calculate corner position in t-space: $t_{corner} = pos \times t_{coef} - t_{bias}$ and find the maximum t-value at the corner: $t_{c\_max} = \min(\min(t_{corner}.x, t_{corner}.y), t_{corner}.z)$ [S2, unofficial].
+2.  **Traversal Loop:**
+    *   **Permute Child Indices:** Permute child slot indices based on mirroring: $child\_shift = idx \oplus octant\_mask$. Shift child descriptor: $child\_masks = child\_descriptor \ll child\_shift$ [S2, unofficial].
+    *   **Ray-Box Intersection:** Calculate node bounding box ($boxMin, boxMax$) and check ray-box intersection. If no intersection, return false [S3, unofficial].
+    *   **Validity Check:** Check if the voxel is valid and the t-span is non-empty: `if ((child_masks & 0x8000) != 0 and t_min <= t_max)` [S2, unofficial].
+    *   **Hit Detection:** If (depth >= currentDepth || node->isLeaf) && node->isActive, a hit is found [S3, unofficial].
+    *   **Termination:** Terminate if the voxel is small enough: `if (lod * tc_max >= scale_exp2) { break; }` [S2, unofficial].
+    *   **Intersect Span:** Intersect active t-span with the cube: $t_{v\_max} = \min(t_{max}, t_{c\_max})$. Calculate center: $t_{center} = half\_scale\_exp2 \times t_{coef} + t_{corner}$ [S2, unofficial].
+    *   **Descend:** Descend to the first child if the resulting t-span is non-empty ($t_{min} \le t_{v\_max}$) and the non-leaf mask bit is set ($(child\_masks \ \& \ 0x0080) \neq 0$) [S2, unofficial].
+    *   **Stack Push:** Push current parent to stack if $t_{c\_max} < h$: `stack[scale] = (parent, float_to_uint(t_max))`. Update $h = t_{c\_max}$ [S2, unofficial].
+    *   **Child Selection:** Select child voxel entered first by checking $t_{center}$ against $t_{min}$ for each axis, updating $idx$ and $pos$ [S2, unofficial].
+    *   **Update Span:** Update active t-span and invalidate cached child descriptor: $t_{max} = t_{v\_max}$; $child\_descriptor = 0$. Decrement scale: $scale--$. Update $scale\_exp2$: $scale\_exp2 = half\_scale\_exp2$. Continue loop [S2, unofficial].
+    *   **ADVANCE:** Step along the ray by checking $t_{corner}$ against $t_{c\_max}$. Update $pos$ and $step\_mask$: `if (t_corner.x <= tc_max) step_mask ^= 1, pos.x -= scale_exp2;` etc. [S2, unofficial].
+    *   **Update Span (ADVANCE):** Update active t-span and flip bits of child slot index: $t_{min} = t_{c\_max}$; $idx \oplus= step\_mask$ [S2, unofficial].
+    *   **POP:** If bit flips disagree with ray direction ($(idx \ \& \ step\_mask) \neq 0$), find highest differing bit between positions to determine new $scale$: $scale = (\text{floatBitsToUint}(float(differing\_bits)) \gg 23) - 127$ [S2, unofficial].
+    *   **Restore Parent:** Restore parent voxel from stack: `parent, t_max_uint = stack[scale]; t_max = uint_to_float(t_max_uint)` [S2, unofficial].
+    *   **Prevent Re-storage:** Prevent same parent from being stored again and invalidate cached child descriptor: $h = 0.0$; $child\_descriptor = 0$ [S2, unofficial].
+    *   **Miss Check:** Indicate miss if outside octree: `if (scale >= s_max) { return false; }` [S2, unofficial].
+    *   **Undo Mirroring:** Undo mirroring of coordinate system: `if ((octant_mask & 1) == 0) pos.x = 3.0 - scale_exp2 - pos.x;` etc. [S2, unofficial].
+3.  **Hit Calculation:**
+    *   Calculate hit point: $hitPoint = origin + ray.direction \times t_{min}$ [S2, unofficial].
+    *   Calculate vector from center to hit: $centerToHit = hitPoint - (pos + scale\_exp2 \times 0.5)$ [S2, unofficial].
+    *   Determine voxel normal by prevailing axis direction: $maxDir = \max(|centerToHit.x|, \max(|centerToHit.y|, |centerToHit.z|))$; $axisDir = vec3(int(centerToHit.x / maxDir), int(centerToHit.y / maxDir), int(centerToHit.z / maxDir))$ [S2, unofficial].
+    *   Return result: $castRes.normal = vec4(axisDir, 0.0)$; $castRes.node = parent$; $castRes.childIdx = idx \oplus octant\_mask \oplus 7$; $castRes.scale = scale$; $castRes.pos = pos$; $castRes.t = t_{min}$ [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def castRay(origin, direction, root_child_descriptor, s_max, lod, t_coef, t_bias, octant_mask):
+    # Initialization
+    pos = origin
+    idx = 0
+    scale = s_max
+    t_min = float('-inf')
+    t_max = float('inf')
+    parent = 0
+    child_descriptor = root_child_descriptor
+    step_mask = 0
+    h = 0.0
+    stack = [None] * s_max
+    scale_exp2 = 1.0 << s_max
+    half_scale_exp2 = scale_exp2 / 2.0
+    
+    # Calculate corner position in t-space
+    t_corner = pos * t_coef - t_bias
+    tc_max = min(min(t_corner.x, t_corner.y), t_corner.z)
+    
+    while True:
+        # Permute child slot indices based on mirroring
+        child_shift = idx ^ octant_mask
+        child_masks = child_descriptor << child_shift
+        
+        # Check ray-box intersection for current node
+        if not ray_box_intersect(origin, direction, pos, scale_exp2):
+            return False
+        
+        # Check if voxel is valid and t-span is non-empty
+        if (child_masks & 0x8000) != 0 and t_min <= t_max:
+            # Hit found
+            hit_position = origin + direction * t_min
+            center_to_hit = hit_position - (pos + scale_exp2 * 0.5)
+            max_dir = max(abs(center_to_hit.x), max(abs(center_to_hit.y), abs(center_to_hit.z)))
+            axis_dir = vec3(int(center_to_hit.x / max_dir), int(center_to_hit.y / max_dir), int(center_to_hit.z / max_dir))
+            
+            return {
+                'normal': vec4(axis_dir, 0.0),
+                'node': parent,
+                'childIdx': idx ^ octant_mask ^ 7,
+                'scale': scale,
+                'pos': pos,
+                't': t_min
+            }
+        
+        # Termination criteria
+        if lod * tc_max >= scale_exp2:
+            break
+            
+        # Intersect active t-span with cube
+        tv_max = min(t_max, tc_max)
+        t_center = half_scale_exp2 * t_coef + t_corner
+        
+        # Descend to first child
+        if t_min <= tv_max and (child_masks & 0x0080) != 0:
+            # Push to stack if needed
+            if tc_max < h:
+                stack[scale] = (parent, float_to_uint32(t_max))
+                h = tc_max
+            
+            # Select child voxel entered first
+            if t_center.x > t_min:
+                idx ^= 1
+                pos.x += scale_exp2
+            if t_center.y > t_min:
+                idx ^= 2
+                pos.y += scale_exp2
+            if t_center.z > t_min:
+                idx ^= 4
+                pos.z += scale_exp2
+                
+            # Update active t-span
+            t_max = tv_max
+            child_descriptor = 0 # Invalidate cached child descriptor
+            scale -= 1
+            scale_exp2 = half_scale_exp2
+            half_scale_exp2 /= 2
+            continue
+            
+        # ADVANCE step
+        if t_corner.x <= tc_max:
+            step_mask ^= 1
+            pos.x -= scale_exp2
+        if t_corner.y <= tc_max:
+            step_mask ^= 2
+            pos.y -= scale_exp2
+        if t_corner.z <= tc_max:
+            step_mask ^= 4
+            pos.z -= scale_exp2
+            
+        t_min = tc_max
+        idx ^= step_mask
+        
+        # POP step
+        if (idx & step_mask) != 0:
+            # Find highest differing bit between positions to determine new scale
+            # Source uses bitcast: scale = (floatBitsToUint(float(differing_bits)) >> 23) - 127
+            scale = max(0, scale - 1)
+            
+            # Restore parent
+            parent, t_max_uint = stack[scale]
+            t_max = uint32_to_float(t_max_uint)
+            
+            h = 0.0
+            child_descriptor = 0
+            
+        # Miss check
+        if scale >= s_max:
+            return False
+            
+        # Undo mirroring
+        if (octant_mask & 1) == 0:
+            pos.x = 3.0 - scale_exp2 - pos.x
+        if (octant_mask & 2) == 0:
+            pos.y = 3.0 - scale_exp2 - pos.y
+        if (octant_mask & 4) == 0:
+            pos.z = 3.0 - scale_exp2 - pos.z
+            
+    return False
+```
+
+## Subtopics
+
+### [Octree Voxel-Triangle Intersection Test](3316-octree-voxel-triangle-intersection-test.md)
+A method to determine if a triangle intersects a voxel within a virtual uniform grid defined by an octree, used for culling or traversal in volume rendering. It implements the Separating Axis Theorem (SAT) to test intersection between a triangle and an axis-aligned bounding box (cube). It serves as the geometric predicate in [Sparse Ray-Octree Intersection (DECIDE)](3006-sparse-ray-octree-intersection-decide.md), replacing generic ray-box tests with a direct voxel-triangle check to handle high-frequency geometry or thin primitives that might be missed by coarse ray stepping.
+
+### [Woodcock Collision Estimation with Octree Acceleration](3419-woodcock-collision-estimation-with-octree-acceleration.md)
+An optimized ray marching method that combines Woodcock collision estimation with an octree traversal to skip empty regions and nodes that do not intersect the ray's current segment, reducing the number of volume samples. It differs from standard ray marching by using the octree to cull non-intersecting nodes, and from its parent [Sparse Ray-Octree Intersection (DECIDE)](3006-sparse-ray-octree-intersection-decide.md) by employing stochastic collision estimation within leaf nodes rather than deterministic traversal.
+
+### [LiNode Light Gathering with Octree Traversal](3957-linode-light-gathering-with-octree-traversal.md)
+LiNode Light Gathering is a ray-surfel intersection method that traverses an octree of surfels to determine the closest hit color and distance for a given ray. It solves the problem of efficiently gathering lighting information from a sparse, hierarchical surfel representation. It differs from its siblings by operating on surfel primitives within octree leaves rather than triangles (Octree Voxel-Triangle Intersection Test), using deterministic traversal rather than stochastic estimation (Woodcock Collision Estimation with Octree Acceleration), or performing point queries (Octree Point Search for Closest Point).
+
+### [Octree Point Search for Closest Point](4999-octree-point-search-for-closest-point.md)
+This method efficiently identifies the closest point to a ray origin among all points intersected by a set of rays, filtering by a maximum range. It differs from sibling methods like [Sparse Ray-Octree Intersection (DECIDE)](3006-sparse-ray-octree-intersection-decide.md) by operating on discrete point clouds indexed by an octree rather than continuous occupancy grids, and from [Octree Voxel-Triangle Intersection Test](3316-octree-voxel-triangle-intersection-test.md) by returning point indices rather than geometric intersection primitives. It is primarily used in Next-Best-View (NBV) planning to simulate sensor observations of a point cloud environment.
+
+### Leaf Consideration
+Processes a leaf node by intersecting its AABB with the ray, creating a HitCandidate, and updating the best hit if the candidate is better [S4, unofficial]. Intersect ray with bounds. If no intersection, return. Create HitCandidate. Set hit=true, leaf_id (from options.return_payload_indices ? octree.leaf_payload_indices()[leaf_id] : leaf_id), t=max(t_near, 0.0f), position=origin+direction*t, depth. If is_better_hit(candidate, best) is true, update best = candidate [S4, unofficial]. HitCandidate contains hit (bool), leaf_id (std::int32_t), t (float), position (glm::vec3), depth (std::int32_t) [S4, unofficial]. is_better_hit prefers hits with smaller t. If t is equal (within kEpsilon), prefers smaller leaf_id [S4, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** $O(D)$ for the stack, where $D$ is the depth of the octree [S2, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales well with sparse data as empty regions are skipped [S2, unofficial].
+*   **Strengths:** Efficient for sparse data, handles backtracking explicitly, GPU-friendly [S2, unofficial].
+*   **Limitations:** Requires explicit stack management [S2, unofficial].
+*   **When to use:** Sparse voxel octrees, real-time rendering with implicit 3D shapes [S1].
+*   **When not to use:** Not given in the sources.
+
+## Background
+The DECIDE algorithm is a GPU-based algorithm for ray-octree intersection [S2, unofficial]. It is used in the context of Neural Geometric Level of Detail (NGLOD) for real-time rendering with implicit 3D shapes [S1]. The algorithm handles traversal, descent, and backtracking using a stack [S2, unofficial].
+
+## Sources
+[S1] Neural Geometric Level of Detail: Real-time Rendering with Implicit 3D Shapes, https://doi.org/10.1109/cvpr46437.2021.01120, fetched 2026-10-26
+[S2] krre/origin, https://github.com/krre/origin, fetched 2026-10-26 (unofficial)
+[S3] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)
+[S4] hectorpiteau/sparse-voxels, https://github.com/hectorpiteau/sparse-voxels, fetched 2026-10-24 (unofficial)

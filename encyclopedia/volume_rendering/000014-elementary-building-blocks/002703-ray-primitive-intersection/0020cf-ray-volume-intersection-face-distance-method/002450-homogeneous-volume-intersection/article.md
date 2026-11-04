@@ -1,0 +1,132 @@
+# Homogeneous Volume Intersection
+
+Also called: Constant-density volume intersection, Ray-Volume Intersection, Volume Intersection, Volume::intersect
+
+## Overview
+Homogeneous Volume Intersection computes the first interaction point of a ray within a constant-density volume, or determines if the ray exits the medium without interacting [S1, unofficial]. It differs from [Heterogeneous Volume Intersection](3261-heterogeneous-volume-intersection.md) by assuming a uniform density field, allowing for direct analytical sampling of the free path length without the overhead of majorant-based rejection sampling [S1, unofficial][S2, unofficial]. It serves as the core traversal logic for participating media where density does not vary spatially.
+
+## How it works
+**Inputs:**
+- World-space ray: origin $\mathbf{o}$, direction $\mathbf{d}$, and valid interval $[t_{min}, t_{max}]$.
+- Volume boundary: defined by entry hit $t_{in}$ and exit hit $t_{out}$ relative to the world ray.
+- Constant density $\sigma_t$ (extinction coefficient).
+- Random number generator for sampling free path length.
+
+**Outputs:**
+- A hit structure containing:
+  - $t$: the distance along the world ray to the interaction point.
+  - $T$: the transmittance from the ray origin to the interaction point.
+  - `is_transmission`: boolean indicating if the ray exited the volume without interaction.
+- Or `None`/`std::nullopt` if the ray does not intersect the volume or the index-space bounding box.
+
+**Data Structures:**
+- **Ray**: Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+- **Hit**: Contains $t$ (float), transmittance $T$ (float), and `is_transmission` (bool).
+- **Index Ray**: Ray parameters transformed into the voxel grid's index space.
+
+**Steps:**
+1. **Boundary Intersection**: Determine the entry ($t_{in}$) and exit ($t_{out}$) distances of the world ray with the volume's geometric bounding box [S1, unofficial].
+2. **Clamping**: Clamp $t_{in}$ to $t_{min}$ and $t_{out}$ to $t_{max}$ [S1, unofficial]. If $t_{in} < 0$, set $t_{in} = 0$ [S1, unofficial].
+3. **Coordinate Conversion**: Convert the world ray origin and direction into the index space of the density grid [S2, unofficial]. Let this be the index ray $\mathbf{i}_{ray}$ [S2, unofficial].
+4. **Index Space Clipping**: Clip the index ray against the density grid's index bounding box. If the ray does not intersect this box, return `None` [S2, unofficial].
+5. **Distance Calculation**: Compute the length of the ray segment inside the boundary:
+   $$ L_{inside} = (t_{out} - t_{in}) \cdot \|\mathbf{d}\| $$
+   where $\|\mathbf{d}\|$ is the norm of the direction vector [S1, unofficial].
+6. **Free Path Sampling**: Sample the distance to the next interaction using the exponential distribution:
+   $$ d_{hit} = -\frac{1}{\sigma_t} \ln(r) $$
+   where $r$ is a uniform random number in $(0, 1]$ [S1, unofficial].
+7. **Interaction Decision**:
+   - If $d_{hit} > L_{inside}$: The ray exits the volume without interaction.
+     - Compute transmittance: $T = \exp(-\sigma_t \cdot L_{inside})$ [S1, unofficial].
+     - Return a hit at $t_{out}$ with transmittance $T$ and `is_transmission = true` [S1, unofficial].
+   - Otherwise: The ray interacts within the volume.
+     - Compute interaction distance: $t_{hit} = t_{in} + \frac{d_{hit}}{\|\mathbf{d}\|}$ [S1, unofficial].
+     - Compute transmittance: $T = \exp(-\sigma_t \cdot d_{hit})$ [S1, unofficial].
+     - Return a hit at $t_{hit}$ with transmittance $T$ and `is_transmission = false` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def homogeneous_volume_intersect(ray_origin, ray_direction, t_min, t_max, 
+                                 t_in, t_out, sigma_t, random_generator):
+    """
+    Computes the first interaction point in a homogeneous volume.
+    
+    Args:
+        ray_origin: (x, y, z) world space origin.
+        ray_direction: (x, y, z) world space direction.
+        t_min: Minimum valid t for the ray.
+        t_max: Maximum valid t for the ray.
+        t_in: Entry t of the ray with the volume boundary.
+        t_out: Exit t of the ray with the volume boundary.
+        sigma_t: Constant extinction coefficient (density).
+        random_generator: Function returning a uniform random float in (0, 1].
+        
+    Returns:
+        Hit object or None.
+    """
+    # Step 1 & 2: Clamping
+    t_in_clamped = max(t_min, t_in)
+    if t_in_clamped < 0:
+        t_in_clamped = 0
+    t_out_clamped = min(t_max, t_out)
+    
+    # If no valid interval, no intersection
+    if t_in_clamped >= t_out_clamped:
+        return None
+
+    # Step 3: Coordinate Conversion (Index Space)
+    # Convert world ray to index ray based on grid transform
+    index_ray = world_to_index_ray(ray_origin, ray_direction)
+    
+    # Step 4: Index Space Clipping
+    if not index_ray.clip_against_index_bounding_box():
+        return None
+
+    # Step 5: Distance Calculation
+    dir_norm = vector_norm(ray_direction)
+    distance_inside_boundary = (t_out_clamped - t_in_clamped) * dir_norm
+
+    # Step 6: Free Path Sampling
+    r = random_generator()
+    hit_distance = -1.0 / sigma_t * math.log(r)
+
+    # Step 7: Interaction Decision
+    if hit_distance > distance_inside_boundary:
+        # Ray exits without interaction
+        transmittance = math.exp(-sigma_t * distance_inside_boundary)
+        return Hit(t=t_out_clamped, transmittance=transmittance, is_transmission=True)
+    else:
+        # Ray interacts within volume
+        t_hit = t_in_clamped + hit_distance / dir_norm
+        transmittance = math.exp(-sigma_t * hit_distance)
+        return Hit(t=t_hit, transmittance=transmittance, is_transmission=False)
+```
+
+**Parameters:**
+- $\sigma_t$: Extinction coefficient. Must be $> 0$.
+- $r$: Random number. Must be in $(0, 1]$. If $r=0$, $\ln(0)$ is undefined; implementations should clamp or shift $r$ [G].
+
+**Edge Cases:**
+- **Zero Density**: If $\sigma_t = 0$, the formula for $d_{hit}$ divides by zero. This case should be handled separately, typically by returning the exit hit with $T=1$ [G].
+- **Ray Origin Inside**: If the ray origin is inside the volume, $t_{in}$ may be negative or zero. The clamping logic handles this by ensuring $t_{in} \ge 0$ relative to the ray's valid range.
+- **Degenerate Ray**: If $\|\mathbf{d}\| = 0$, the ray has no direction. Division by zero occurs in $t_{hit}$ calculation. The caller must ensure valid rays [G].
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ for the intersection calculation itself, assuming constant-time random number generation and bounding box checks.
+- **Memory Complexity**: $O(1)$ auxiliary space.
+- **Performance**: Significantly faster than heterogeneous intersection because it avoids the overhead of querying a density field and performing rejection sampling with a majorant [S1, unofficial][S2, unofficial].
+- **Strengths**: Simple implementation, low computational cost, exact sampling for uniform media.
+- **Limitations**: Cannot model spatially varying density. Requires the volume to be homogeneous.
+- **When to use**: When simulating uniform fog, smoke, or participating media where density is constant.
+- **When not to use**: For clouds, smoke with varying density, or complex atmospheric effects requiring spatial variation [S2, unofficial].
+
+## Background
+Homogeneous volume intersection is a fundamental technique in volumetric path tracing. It relies on the analytical solution to the radiative transfer equation for constant coefficients. The method of sampling the free path length using the inverse transform sampling of the exponential distribution is standard in Monte Carlo rendering [S1, unofficial]. The integration of index-space clipping ensures robustness against grid boundaries [S2, unofficial].
+
+## Sources
+[S1] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)
+[S2] Shibodd/volume_path_tracer, https://github.com/Shibodd/volume_path_tracer, fetched 2026-10-26 (unofficial)

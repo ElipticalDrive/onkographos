@@ -1,0 +1,87 @@
+--- v002.md
++++ v003.md
+@@ -100,18 +100,18 @@
+     bg = raster_settings.bg
+     cx, cy = raster_settings.cx, raster_settings.cy
+-    scale_modifier = raster_settings.scale_modifier
++    tanfovx = raster_settings.tanfovx
+     
+     # 1. Projection: Project 3D camera-space centers to 2D pixel coordinates [S2, unofficial]
+     # f is derived from focal length and image dimensions [S2, unofficial]
+-    f = raster_settings.focal_length # [G] assumed available or computed from FOV
+-    xyz_cam = means3D # Assume already in camera space
++    f = (W / 2) / tanfovx  # [G] Standard pinhole camera focal length from tan(FOV/2)
++    xyz_cam = means3D  # Assume already in camera space
+     means2D_x = (xyz_cam[:, 0] * f / xyz_cam[:, 2]) + cx
+     means2D_y = (xyz_cam[:, 1] * f / xyz_cam[:, 2]) + cy
+-    means2D = torch.stack([means2D_x, means2D_y], dim=-1) # (N, 2)
++    means2D = torch.stack([means2D_x, means2D_y], dim=-1)  # (N, 2)
+     
+     # 2. Covariance Computation: Compute 2D covariance matrices [G]
+     # cov2d shape: (N, 2, 2)
+     # cov2d = compute_2d_covariance(means3D, scales, rotations, raster_settings) # [G]
+-    cov2d = torch.zeros((means3D.shape[0], 2, 2), device=means3D.device) # Placeholder for implementation
++    cov2d = torch.zeros((means3D.shape[0], 2, 2), device=means3D.device)  # [G] Placeholder for covariance projection logic
+     
+     # 3. Color Assembly: Select colors from precomputed or SH coefficients [G]
+@@ -120,5 +120,5 @@
+     else:
+         # colors = evaluate_sh(shs, raster_settings.sh_degree) # [G]
+-        colors = torch.zeros_like(means3D[:, :3]) # Placeholder for implementation
++        colors = torch.zeros_like(means3D[:, :3])  # [G] Placeholder for SH evaluation logic
+         
+     # 4. Sorting: Sort Gaussians by depth (z) in descending order [S2, unofficial]
+@@ -139,13 +139,13 @@
+     for i in range(N):
+         # Covariance Inverse [S2, unofficial]
+-        inv_cov = torch.inverse(cov2d[i]) # (2, 2)
++        inv_cov = torch.inverse(cov2d[i])  # (2, 2)
+         
+         # Displacement vector d from pixel center to Gaussian mean [S2, unofficial]
+         pixel_centers = torch.stack(torch.meshgrid(
+-            torch.arange(W, device=means3D.device), 
+-            torch.arange(H, device=means3D.device), 
++            torch.arange(W, device=means3D.device) + 0.5, 
++            torch.arange(H, device=means3D.device) + 0.5, 
+             indexing='ij'
+         ), dim=-1).float()
+-        d = pixel_centers - means2D[i] # (H, W, 2)
++        d = pixel_centers - means2D[i]  # (H, W, 2)
+         
+         # Power Calculation [S2, unofficial]
+@@ -154,8 +154,8 @@
+             d[:, :, 1]**2 * inv_cov[1, 1] + 
+             2 * d[:, :, 0] * d[:, :, 1] * inv_cov[0, 1]
+-        ) # (H, W)
++        )  # (H, W)
+         
+         # Alpha Computation [S2, unofficial]
+-        alpha = torch.clamp(torch.exp(power).unsqueeze(-1) * opacity[i], max=0.99) # (H, W, 1)
++        alpha = torch.clamp(torch.exp(power).unsqueeze(-1) * opacity[i], max=0.99)  # (H, W, 1)
+         
+         # Color Update [S2, unofficial]
+@@ -178,5 +178,5 @@
+ ### Edge Cases and Pitfalls
+ *   **Memory Constraints**: The Python/PyTorch loop implementation is slow and memory-intensive for large $N$ [S2, unofficial]. The roadmap indicates a transition to CUDA kernels for real-time performance [S2, unofficial].
+-*   **Covariance Singularity**: If the 2D covariance matrix is singular, `torch.inverse` will fail. A small epsilon should be added to the diagonal [G].
++*   **Covariance Singularity**: If the 2D covariance matrix is singular, `torch.inverse` will fail [G]. A small epsilon should be added to the diagonal [G].
+ *   **Alpha Clamping**: Alpha values are clamped to a maximum of 0.99 to prevent division by zero in transmittance updates and ensure numerical stability [S2, unofficial].
+ *   **Sorting Order**: Incorrect sorting (e.g., front-to-back) will result in incorrect alpha compositing and visual artifacts [S2, unofficial].
+@@ -186,8 +186,8 @@
+ 
+ ### [Analytic-Splatting](3025-analytic-splatting.md)
+-Analytic-Splatting is a differentiable rasterization method that replaces the point-sampling of 2D Gaussians in 3D Gaussian Splatting (3DGS) with an analytical approximation of the integral of the Gaussian signal over the pixel window area. It solves the aliasing artifacts (blurring or jaggies) caused by treating pixels as isolated points when the camera zooms or resolution changes. Unlike [Mip-Splatting](3415-gaussian-splatting-rendering-pipeline.md) which uses a hybrid low-pass filter that suppresses high-frequency details, Analytic-Splatting preserves high-quality details by calculating the integral analytically using a conditioned logistic function approximation of the Gaussian CDF.
++Analytic-Splatting is a differentiable rasterization method that replaces the point-sampling of 2D Gaussians in 3D Gaussian Splatting (3DGS) with an analytical approximation of the integral of the Gaussian signal over the pixel window area. It solves the aliasing artifacts (blurring or jaggies) caused by treating pixels as isolated points when the camera zooms or resolution changes. Unlike [Mip-Splatting](3415-gaussian-splatting-rendering-pipeline.md) which uses a hybrid low-pass filter that suppresses high-frequency components and causes over-smoothing, Analytic-Splatting preserves high-quality details by calculating the integral analytically using a conditioned logistic function approximation of the Gaussian CDF.
+ 
+ ### [LinPrim Gradient Computation](3038-linprim-gradient-computation.md)
+-LinPrim Gradient Computation computes the gradients of intersection depths $\mathbf{i}$ with respect to the ray-space triangle corners $\mathbf{v}^{\text{ray}}$ to enable differentiable rendering of linear primitives (triangles). It differs from standard 3D Gaussian Splatting (3DGS) by backpropagating gradients through a linear primitive rasterizer (MTIA) rather than a Gaussian splatting kernel, requiring specific handling of ray-space to world-space transformations and quaternion-based rotation updates. It builds on [3D Gaussian Splatting Differentiable Rasterizer](2813-3d-gaussian-splatting-differentiable-rasterizer.md) by replacing the Gaussian alpha-blending gradient flow with opacity calculations based on intersection depths.
++LinPrim Gradient Computation computes the gradients of intersection depths $\mathbf{i}$ with respect to the ray-space triangle corners $\mathbf{v}^{\text{ray}}$ to enable differentiable rendering of linear primitives. It differs from standard 3D Gaussian Splatting (3DGS) by backpropagating gradients through a linear primitive rasterizer (MTIA) rather than a Gaussian splatting kernel, requiring specific handling of ray-space to world-space transformations and quaternion-based rotation updates. It builds on [3D Gaussian Splatting Differentiable Rasterizer](2813-3d-gaussian-splatting-differentiable-rasterizer.md) by replacing the Gaussian alpha-blending gradient flow with opacity calculations based on intersection depths.
+ 
+ ### [Gaussian Splat Rasterization (Vertex Shader)](3253-gaussian-splat-rasterization-vertex-shader.md)
+@@ -201,5 +201,5 @@
+ 
+ ### GaussianRasterizer Initialization and Input Validation
+-Validates mutually exclusive input tensors for color representation and 3D covariance before invoking the CUDA rasterization backend [S1, unofficial]. It checks if exactly one of `shs` or `colors_precomp` is provided, and if exactly one of the scale/rotation pair or `cov3D_precomp` is provided. If both are None or both are not None, it raises an exception. It replaces any missing `shs`, `colors_precomp`, `scales`, `rotations`, or `cov3D_precomp` tensors with empty tensors of appropriate shape. If `features` is None, it initializes it as an empty tensor matching the feature dimension of `means3D` (slice `[..., :0]`). It then calls the CUDA rasterization routine `rasterize_gaussians` with all prepared tensors and `raster_settings` [S1, unofficial].
++Validates mutually exclusive input tensors for color representation and 3D covariance before invoking the CUDA rasterization backend [S1, unofficial]. It checks if exactly one of `shs` or `colors_precomp` is provided, and if exactly one of the scale/rotation pair or `cov3D_precomp` is provided [S1, unofficial]. If both are None or both are not None, it raises an exception [S1, unofficial]. It replaces any missing `shs`, `colors_precomp`, `scales`, `rotations`, or `cov3D_precomp` tensors with empty tensors of appropriate shape [S1, unofficial]. If `features` is None, it initializes it as an empty tensor matching the feature dimension of `means3D` (slice `[..., :0]`) [S1, unofficial]. It then calls the CUDA rasterization routine `rasterize_gaussians` with all prepared tensors and `raster_settings` [S1, unofficial].
+ 
+ ### GaussianRasterizationSettings

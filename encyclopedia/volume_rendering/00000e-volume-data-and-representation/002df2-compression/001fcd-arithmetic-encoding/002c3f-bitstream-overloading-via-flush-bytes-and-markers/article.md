@@ -1,0 +1,163 @@
+# Bitstream Overloading via Flush Bytes and Markers
+
+Also called: Bitstream partitioning, Disjoint bitstream segments
+
+## Overview
+Bitstream Overloading is a technique to partition a single arithmetic-coded bitstream into semantically disjoint, independently accessible segments [S1]. It solves the problem that standard arithmetic coders buffer bits into byte-sized units, making individual symbols or small groups of symbols inaccessible without decoding the entire preceding stream [S1]. Unlike [Arithmetic Encoding](2127-arithmetic-encoding.md), which produces a monolithic stream, this method introduces explicit boundaries to allow random access to specific data blocks within the same file. It differs from [MLZC 3-D Encoding/2-D Decoding](2501-mlzc-3-d-encoding-2-d-decoding.md) by operating at the entropy coding layer rather than the transform/quantization layer, and from [rANS (Asymmetric Numeral Systems)](5011-rans-asymmetric-numeral-systems.md) by using explicit buffer resets and syntactic markers rather than state synchronization [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A sequence of symbols to be encoded, partitioned into logical segments.
+*   **Output:** A single binary bitstream file containing disjoint segments separated by flush bytes and markers.
+
+**Data Structures**
+*   **Buffer:** An internal buffer in the arithmetic coder that accumulates bits. The elementary bitstream unit is a byte [S1]. The most significant byte is written to the file only when the buffer is completely filled [S1].
+*   **Symbol Set:** The alphabet of the arithmetic coder, typically 256 values (0–255) [S1].
+
+**Method Steps**
+1.  **Initialize:** Start the arithmetic encoder with the standard initial state.
+2.  **Encode Segment 1:** Encode the first set of symbols using the standard arithmetic coding procedure.
+3.  **Create Boundary (Flush):** To create a disjoint segment boundary, empty the arithmetic coder's internal buffer and reset all internal variables of the entropy coder [S1]. The sequence of bytes written to the file during this process is called 'flush bytes' [S1].
+4.  **Insert Marker:** Insert special markers into the bitstream to unambiguously identify segment boundaries [S1]. Since all 256 byte values are used by the arithmetic coder, a special syntactic rule is applied to one chosen symbol, denoted as $S_{special}$ [S1].
+5.  **Apply Syntactic Rule:** The chosen symbol $S_{special}$ is replaced by a sequence of two symbols depending on its semantic context [S1]:
+    *   In normal working condition, $S_{special}$ is replaced by a specific pair of symbols (e.g., $S_1, S_2$).
+    *   When used to build the marker, $S_{special}$ is replaced by a different pair (e.g., $S_3, S_4$) [S1].
+    *   *Note:* The source text lists specific symbol replacements but the exact symbols are garbled/missing; only the structure of replacing one symbol with a two-symbol sequence based on semantic role is defined [S1].
+6.  **Encode Next Segment:** Continue encoding the next set of symbols.
+7.  **Repeat:** Steps 3–6 are repeated for each subsequent segment boundary.
+
+**Parameters**
+*   **Elementary Unit:** One byte [S1].
+*   **Flush Bytes:** The number of flush bytes depends on the internal state of the buffer at the moment of reset. It cannot be calculated a priori because it depends on the statistics of the symbols to be encoded [S1].
+*   **Markers:** The number of separators depends on the volume size and dynamic range of transformed coefficients, which is known after transformation [S1].
+
+**Pitfalls and Edge Cases**
+*   **A Priori Calculation:** Neither the number of special symbols nor the number of flush bytes can be calculated a priori [S1].
+*   **Efficiency Degradation:** The method degrades entropy coding efficiency indirectly by increasing the number of information units associated with the special symbol used for markers, and directly by adding overhead (flush bytes and marker sequences) [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def encode_segmented_bitstream(symbols_list, context_model):
+    """
+    Encodes a list of symbol lists into a single bitstream with disjoint segments.
+    symbols_list: List of lists, where each inner list is a segment of symbols.
+    context_model: Function to estimate probabilities for arithmetic coding.
+    """
+    bitstream = []
+    # Initialize arithmetic coder state
+    coder_state = ArithmeticCoderState()
+    
+    for i, segment in enumerate(symbols_list):
+        # Encode symbols in the current segment
+        for symbol in segment:
+            # Standard arithmetic encoding step
+            coder_state.encode(symbol, context_model)
+            
+        # If this is not the last segment, create a boundary
+        if i < len(symbols_list) - 1:
+            # Step 1: Flush the buffer
+            # Empty the arithmetic coder's internal buffer and reset internal variables
+            flush_bytes = coder_state.flush_and_reset()
+            bitstream.extend(flush_bytes)
+            
+            # Step 2: Insert Marker
+            # Choose a special symbol S_special from the alphabet
+            S_special = 128  # Example value, arbitrary choice from 0-255
+            
+            # Apply syntactic rule: Replace S_special with a marker sequence
+            # The source specifies a replacement by a sequence of two symbols
+            # based on semantic role (normal vs marker).
+            # Since exact symbols are not provided, we use placeholders for the
+            # two-symbol marker sequence.
+            marker_sequence = get_marker_sequence(S_special)
+            bitstream.extend(marker_sequence)
+            
+            # Reset coder state for the next segment
+            # Note: The flush_and_reset() above handles the reset, 
+            # but we ensure the coder is ready for new probabilities if needed.
+            coder_state.reset_for_new_segment()
+            
+    return bitstream
+
+def get_marker_sequence(S_special):
+    """
+    Returns the two-symbol sequence used to represent the marker.
+    The source states: S_special -> (S1, S2) for normal, (S3, S4) for marker.
+    """
+    # Placeholder for the specific symbols defined in the source
+    # which are garbled in the provided text.
+    return [S_marker_1, S_marker_2]
+
+class ArithmeticCoderState:
+    def __init__(self):
+        self.buffer = []
+        self.low = 0
+        self.high = 0
+        self.range = 0
+        # ... other internal variables ...
+
+    def encode(self, symbol, context_model):
+        # Standard arithmetic encoding logic
+        # ...
+        pass
+
+    def flush_and_reset(self):
+        """
+        Empties the buffer and resets internal variables.
+        Returns the sequence of bytes written to the file.
+        """
+        # Write remaining bits to buffer if any
+        # Flush the most significant byte(s)
+        flush_bytes = []
+        if self.buffer:
+            # Write the most significant byte
+            flush_bytes.append(self.buffer[0])
+            self.buffer = []
+        
+        # Reset internal variables
+        self.low = 0
+        self.high = 0
+        self.range = 0
+        # ... reset other vars ...
+        
+        return flush_bytes
+
+    def reset_for_new_segment(self):
+        """
+        Resets the coder to initial state for a new segment.
+        """
+        self.low = 0
+        self.high = 0
+        self.range = 0
+        # ...
+        pass
+```
+
+## Subtopics
+
+### Arithmetic Encoding
+The base method that Bitstream Overloading extends. It encodes anchor attributes into a binary bitstream using arithmetic encoder based on probabilities estimated by the context model. [Arithmetic Encoding](2127-arithmetic-encoding.md)
+
+### MLZC 3-D Encoding/2-D Decoding
+A sibling method that uses a different approach to handle 3D data, focusing on transform and quantization rather than bitstream partitioning. [MLZC 3-D Encoding/2-D Decoding](2501-mlzc-3-d-encoding-2-d-decoding.md)
+
+### rANS (Asymmetric Numeral Systems)
+A sibling method that uses a different entropy coding technique, potentially offering better performance but requiring different synchronization mechanisms. [rANS (Asymmetric Numeral Systems)](5011-rans-asymmetric-numeral-systems.md)
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** The method degrades entropy coding efficiency indirectly by increasing the number of information units associated with the special symbol used for markers, and directly by adding overhead (flush bytes and marker sequences) [S1].
+*   **Scaling:** The number of separators depends on the volume size and dynamic range of transformed coefficients, which is known after transformation [S1].
+*   **Strengths:** Allows independent access to disjoint segments within a single bitstream file [S1].
+*   **Limitations:** Degrades coding efficiency due to overhead and syntactic rules; flush bytes and special symbol counts cannot be calculated a priori [S1].
+*   **When to use:** When random access to specific segments of an arithmetic-coded bitstream is required, and the overhead is acceptable.
+*   **When not to use:** When maximum coding efficiency is critical and random access is not needed.
+
+## Background
+The method was introduced in the context of lossless volumetric medical image compression, specifically addressing the architecture of the entropy coder used in such systems [S1]. It is described in the paper "Three-dimensional encoding/two-dimensional decoding of medical data" [S1]. The need for this technique arises from the fact that standard arithmetic coders buffer bits into byte-sized units, making individual symbols inaccessible without decoding the entire preceding stream [S1].
+
+## Sources
+[S1] Three-dimensional encoding/two-dimensional decoding of medical data, https://doi.org/10.1109/tmi.2003.809689, fetched 2026-10-26

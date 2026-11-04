@@ -1,0 +1,572 @@
+# Jellyfish School — art from pure mathematics
+
+There is no 3D model here. No mesh, no textures, no artwork of any kind. The jellyfish exist only as a set of equations, evaluated independently for every pixel, every frame. Change a coefficient and the creature changes shape.
+
+<p align="center">
+  <img src="poster.jpg" width="380" alt="Poster: a glowing blue-violet jellyfish under three equations describing the ray, the bell pulse and the tentacle wave">
+</p>
+
+Built with [Manim Community](https://www.manim.community/) and an original GLSL fragment shader. Manim keeps the clock and typesets the mathematics; the GPU solves the geometry.
+
+<p align="center">
+  <img src="docs/preview.jpg" width="300" alt="Still frame of the animation: a scalloped translucent bell with long trailing tentacles drifting in near-black water">
+</p>
+
+The rendered animation is committed as [`jellyfish.mp4`](jellyfish.mp4) — 1080x1920, 60 fps, 10 seconds.
+
+## How a picture comes out of an equation
+
+Nothing is ever *drawn*. Instead, each pixel asks a question about space.
+
+**1. Every pixel casts a ray.** A pixel is a direction looking out from the camera, so the points it can see form a line:
+
+$$p(s) = o + s\,\hat{r}$$
+
+**2. A function answers "how far to the nearest surface?"** This is a *signed distance field*. `sdBell`, `sdTentacles` and `sdArms` each take a point in 3D space and return the distance to that part of the animal. Nothing is stored — the shape is defined entirely by the arithmetic.
+
+**3. The ray walks forward by whatever distance is safe.** If the nearest surface is 0.4 units away, the ray can step 0.4 units without passing through anything. Repeat. When the distance falls near zero, the ray has found the surface, and that pixel gets a colour. This is *ray marching*, and it makes the image a solved equation rather than a rasterised object.
+
+## How the mathematics creates life
+
+A static distance field gives a sculpture. Motion comes from making the coefficients functions of time — and the *shape* of those functions decides whether it reads as alive or mechanical.
+
+**The swim cycle is deliberately asymmetric.** A real jellyfish snaps its bell shut and then coasts. A sine wave spends equal time contracting and relaxing, which looks robotic; this spends 28% of the cycle contracting and 72% gliding:
+
+```glsl
+x < 0.28 ? smoothstep(0.0, 1.0, x / 0.28)
+         : 1.0 - smoothstep(0.0, 1.0, (x - 0.28) / 0.72)
+```
+
+**Squeezing conserves the animal's shape.** That pulse $p(t)$ drives radius and height in *opposite* directions, so contracting makes the bell narrow and tall, exactly as a real bell deforms:
+
+$$R = 1.00 + 0.13\,p(t), \qquad H = 0.80 - 0.22\,p(t)$$
+
+**Follow-through comes from a phase lag.** Tentacles are placed by polar repetition, then each strand takes its own phase offset from `hash11(idx)` so they never move as one rigid sheet. The wave also arrives later further down the strand, which is what produces the trailing, unforced drift:
+
+$$\text{ring} = R\,(0.98 - 0.06\,d_n) + (0.05 + 0.78\,d_n^{2})\,\sin(1.55\,d - 2t + \phi)$$
+
+**Thin geometry is accumulated, not intersected.** Hair-thin tentacles hit as hard surfaces would flicker as they slip between sample points from one frame to the next. Instead each step adds a soft contribution, $e^{-95\,d}$, so a strand fades in smoothly rather than popping. This single choice is most of what makes the motion look fluid.
+
+## Running it
+
+Requires [`uv`](https://docs.astral.sh/uv/), `ffmpeg`, and a driver supporting OpenGL 3.3.
+
+```powershell
+uv sync
+.\render.ps1
+```
+
+Roughly one minute of rendering per 10 seconds of output on integrated graphics. Options:
+
+```powershell
+.\render.ps1 -Duration 15 -StartTime 4 -Fps 30 -OutFile study.mp4
+```
+
+Single frames are near-instant, which is the sane way to iterate on a shader:
+
+```powershell
+uv run python preview.py 4          # one frame at t=4
+uv run python preview.py 2 5 8      # contact sheet
+```
+
+## Colour, measured rather than guessed
+
+`palette.py` reports mean RGB across the shadow, midtone and highlight bands of an image.
+
+```powershell
+uv run python palette.py preview.png
+```
+
+Matching a look by eye is unreliable; measuring it is not. Comparing against a reference showed its shadows held *near-zero* red and green, while this render was carrying roughly three times too much green — the difference between deep blue-violet water and a washed-out teal. The cause is worth knowing: `pow(col, 1/2.2)` gamma **lifts near-black hard**, so a linear value of 0.001 surfaces as visible haze. "Almost zero" is not zero. The shader therefore applies a channel-wise black point, subtracting more red and green than blue:
+
+```glsl
+col = max(col - vec3(0.0175, 0.0160, 0.0060), vec3(0.0));
+```
+
+## The poster
+
+[`poster.jpg`](poster.jpg) composites a rendered frame with the governing equations typeset by Manim's `MathTex`.
+
+```powershell
+uv run manim -s -r 1080,1920 -o poster poster.py Poster
+```
+
+This step needs LaTeX, since `MathTex` shells out to it — the animation itself does not. On Windows:
+
+```powershell
+winget install --id MiKTeX.MiKTeX --exact --scope user
+initexmf --set-config-value "[MPM]AutoInstall=1"
+```
+
+The `AutoInstall` line matters: without it MiKTeX blocks on an interactive prompt the first time Manim requests a package.
+
+## Things worth knowing if you fork this
+
+| Where | Controls |
+| --- | --- |
+| `SCHOOL_DATA` | position and scale; index 0 is the hero |
+| `SCHOOL_TILT` | viewing angle per jellyfish |
+| `GLOW` / `HOT` | body colour and the white-clipping cores |
+| `pulse`, and `0.42` in `pc` | swim rhythm |
+| `sdTentacles` | strand count (`TAU / 40.0`), length, curl |
+| black point in `main` | shadow depth and colour purity |
+
+- **The camera lives in GLSL**, so Manim's own camera does not move it. Manim supplies the timeline: a `ValueTracker` feeds the `u_time` uniform, and the GPU re-evaluates every equation per pixel per frame.
+- **`Shader.set_uniform` swallows unknown names silently.** A typo, or a uniform the compiler optimised away, fails without complaint. Verify by rendering two timestamps and diffing them.
+- **`renderer = opengl` in `manim.cfg` is ignored** — the OpenGL renderer must be selected with the `--renderer=opengl` CLI flag, which `render.ps1` passes. Resolution and frame rate in the config file *are* honoured.
+- **Manim's OpenGL renderer draws meshes after mobjects**, so a full-screen shader quad paints over any text. `poster.py` sidesteps this by baking the frame to an image first.
+- Manim's shader API is experimental, so the dependency is pinned. Re-check shader compilation and a short export before upgrading.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
+
+### jellyfish.frag
+```
+#version 330
+
+uniform vec2 u_resolution;
+uniform float u_time;
+out vec4 frag_color;
+
+const float PI  = 3.14159265359;
+const float TAU = 6.28318530718;
+
+const int   SCHOOL      = 5;
+const int   MARCH_STEPS = 120;
+const float TENT_LEN    = 3.0;
+const float ARM_LEN     = 1.5;
+
+// xyz = drift centre, w = scale. Index 0 is the hero, composed for a vertical frame.
+const vec4 SCHOOL_DATA[5] = vec4[5](
+    vec4(-0.26,  0.42,  0.60, 0.80),
+    vec4( 1.90,  1.55, -3.40, 0.42),
+    vec4(-2.15,  2.30, -5.60, 0.34),
+    vec4( 1.35, -1.70, -7.20, 0.46),
+    vec4(-1.55,  3.10, -9.80, 0.30)
+);
+
+// Per-jellyfish tilt so the school is not all seen edge-on.
+const vec2 SCHOOL_TILT[5] = vec2[5](
+    vec2( 0.34,  0.16),
+    vec2( 0.95,  0.35),
+    vec2( 1.30, -0.45),
+    vec2( 0.50,  0.85),
+    vec2( 1.15,  0.20)
+);
+
+// Sampled from the reference: near-zero green, blue-violet body, cores that clip to white.
+const vec3 GLOW = vec3(0.26, 0.19, 1.00);
+const vec3 HOT  = vec3(1.00, 0.96, 1.00);
+
+float hash11(float n) { return fract(sin(n * 127.1 + 31.7) * 43758.5453); }
+
+mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+// Quick contraction then a long relaxed glide: the real jellyfish swim cycle.
+float pulse(float x) {
+    x = fract(x);
+    return x < 0.28 ? smoothstep(0.0, 1.0, x / 0.28)
+                    : 1.0 - smoothstep(0.0, 1.0, (x - 0.28) / 0.72);
+}
+
+float bellRadius(float pc) { return 1.00 + 0.13 * pc; }
+float bellHeight(float pc) { return 0.80 - 0.22 * pc; }
+
+float sdBell(vec3 p, float pc, float t, float ph) {
+    float R = bellRadius(pc);
+    float H = bellHeight(pc);
+    float a = atan(p.z, p.x);
+    float k = clamp(1.0 - p.y / H, 0.0, 1.6);
+    float frill = 0.105 * sin(16.0 * a + 1.6 * t + ph) * pow(k, 2.2);
+    float Rr = R + frill;
+    vec3 q = vec3(p.x / Rr, p.y / H, p.z / Rr);
+    float d = (length(q) - 1.0) * min(Rr, H);
+    float shell = max(abs(d) - 0.014, -(p.y + 0.02));
+    float rim = length(vec2(length(p.xz) - Rr, p.y + 0.01)) - 0.026;
+    return min(shell, rim);
+}
+
+vec3 bellNormal(vec3 p, float pc, float t, float ph) {
+    vec2 e = vec2(0.0035, 0.0);
+    return normalize(vec3(
+        sdBell(p + e.xyy, pc, t, ph) - sdBell(p - e.xyy, pc, t, ph),
+        sdBell(p + e.yxy, pc, t, ph) - sdBell(p - e.yxy, pc, t, ph),
+        sdBell(p + e.yyx, pc, t, ph) - sdBell(p - e.yyx, pc, t, ph)
+    ));
+}
+
+// Forty fine strands, each with its own phase so they never move as one rigid piece.
+float sdTentacles(vec3 p, float pc, float t, float ph) {
+    float depth = -p.y;
+    if (depth < 0.0 || depth > TENT_LEN) return 1e5;
+    float dn = depth / TENT_LEN;
+    float a = atan(p.z, p.x);
+    float sec = TAU / 40.0;
+    float idx = floor((a + sec * 0.5) / sec);
+    float fa = mod(a + sec * 0.5, sec) - sec * 0.5;
+    vec2 fp = length(p.xz) * vec2(cos(fa), sin(fa));
+    float w = depth * 1.55 - t * 2.0 + ph + hash11(idx * 1.73 + 5.0) * TAU;
+    float amp = 0.05 + 0.78 * dn * dn;
+    float ring = bellRadius(pc) * (0.98 - 0.06 * dn) + amp * sin(w);
+    float th = mix(0.010, 0.0012, dn);
+    return length(fp - vec2(ring, amp * 0.7 * cos(w * 0.85))) - th;
+}
+
+float sdArms(vec3 p, float t, float ph) {
+    float depth = -p.y;
+    if (depth < 0.0 || depth > ARM_LEN) return 1e5;
+    float dn = depth / ARM_LEN;
+    float a = atan(p.z, p.x);
+    float sec = TAU / 4.0;
+    float idx = floor((a + sec * 0.5) / sec);
+    float fa = mod(a + sec * 0.5, sec) - sec * 0.5;
+    vec2 fp = length(p.xz) * vec2(cos(fa), sin(fa));
+    float w = depth * 2.0 - t * 1.8 + ph + idx * 1.9;
+    float ring = 0.20 + (0.05 + 0.22 * dn) * sin(w);
+    float ruffle = 0.035 * sin(depth * 22.0 + idx * 3.0 - t * 2.4);
+    float th = mix(0.075, 0.012, dn) + ruffle * (1.0 - dn);
+    return length(fp - vec2(ring, 0.10 * cos(w * 0.9))) - th;
+}
+
+vec3 background(vec3 rd, vec2 uv) {
+    float up = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 col = mix(vec3(0.0, 0.0, 0.0010), vec3(0.0016, 0.0009, 0.0180), pow(up, 2.0));
+    float shafts = pow(0.5 + 0.5 * sin(rd.x * 7.0 + rd.y * 2.0 + u_time * 0.05), 20.0);
+    col += vec3(0.0020, 0.0010, 0.0130) * shafts * smoothstep(0.0, 1.0, up);
+    return col * (1.0 - 0.45 * smoothstep(0.25, 1.35, length(uv)));
+}
+
+void main() {
+    vec2 uv = (2.0 * gl_FragCoord.xy - u_resolution) / u_resolution.y;
+    float t = u_time;
+
+    vec3 ro = vec3(0.0, 0.10 + 0.16 * sin(t * 0.08), 5.60);
+    ro.xz = rot(0.07 * sin(t * 0.11)) * ro.xz;
+    vec3 fw = normalize(vec3(0.0, 0.62, 0.0) - ro);
+    vec3 rt = normalize(cross(fw, vec3(0.0, 1.0, 0.0)));
+    vec3 upv = cross(rt, fw);
+    vec3 rd = normalize(fw * 1.85 + rt * uv.x + upv * uv.y);
+
+    vec3 col = background(rd, uv);
+    float dither = hash11(gl_FragCoord.x * 7.1 + gl_FragCoord.y * 13.3) * 0.03;
+
+    for (int i = 0; i < SCHOOL; i++) {
+        vec4 data = SCHOOL_DATA[i];
+        float fi = float(i);
+        float ph = fi * 2.399963;
+
+        vec3 centre = data.xyz;
+        centre.x += 0.20 * sin(t * 0.17 + ph);
+        centre.y += (i == 0) ? 0.22 * sin(t * 0.35 + ph)
+                             : t * 0.055 + 0.18 * sin(t * 0.40 + ph);
+
+        vec3 o = (ro - centre) / data.w;
+        vec3 d = rd;
+        vec2 tilt = SCHOOL_TILT[i] * 0.5;
+        o.xy = rot(tilt.x) * o.xy;  d.xy = rot(tilt.x) * d.xy;
+        o.zy = rot(tilt.y) * o.zy;  d.zy = rot(tilt.y) * d.zy;
+
+        vec3 bo = o - vec3(0.0, -1.4, 0.0);
+        float b = dot(bo, d);
+        float disc = b * b - dot(bo, bo) + 2.7 * 2.7;
+        if (disc < 0.0) continue;
+        float sq = sqrt(disc);
+        float tmax = -b + sq;
+        if (tmax <= 0.0) continue;
+
+        float pc = pulse(t * 0.42 + ph * 0.37);
+        float travel = max(-b - sq, 0.0) + dither;
+        float trans = 1.0;
+        float strands = 0.0;
+        vec3 rad = vec3(0.0);
+
+        for (int s = 0; s < MARCH_STEPS; s++) {
+            if (travel > tmax || trans < 0.05) break;
+            vec3 p = o + d * travel;
+            float db = sdBell(p, pc, t, ph);
+            float dt = sdTentacles(p, pc, t, ph);
+            float da = sdArms(p, t, ph);
+            float stride = clamp(min(db, min(dt, da)) * 0.70, 0.010, 0.18);
+
+            // Soft accumulation keeps hair-thin strands from aliasing frame to frame.
+            float taper = 1.0 - smoothstep(0.55, 1.05, -p.y / TENT_LEN);
+            strands += exp(-max(dt, 0.0) * 95.0) * stride * 8.5 * taper;
+            strands += exp(-max(da, 0.0) * 45.0) * stride * 3.0;
+
+            if (db < 0.012) {
+                vec3 n = bellNormal(p, pc, t, ph);
+                float fres = pow(1.0 - abs(dot(n, -d)), 2.4);
+                float lam = 0.35 + 0.65 * abs(dot(n, normalize(vec3(-0.35, 1.0, 0.45))));
+                float ribs = pow(0.5 + 0.5 * cos(16.0 * atan(p.z, p.x)), 14.0);
+                float op = 0.075 + 0.42 * fres + ribs * 0.12;
+                rad += trans * op * (GLOW * (0.75 + 1.15 * lam) + HOT * (fres * 1.30 + ribs * 0.60));
+                trans *= 1.0 - op;
+                stride = 0.026;
+            }
+            travel += stride;
+        }
+
+        float fog = exp(-0.055 * max(length(ro - centre) - 3.0, 0.0));
+        col += (rad + GLOW * strands * 0.16 + HOT * strands * strands * 0.006) * fog;
+    }
+
+    for (int m = 0; m < 30; m++) {
+        float seed = float(m);
+        vec3 pos = vec3(
+            (hash11(seed + 11.0) - 0.5) * 16.0,
+            mod(hash11(seed + 37.0) * 14.0 + t * 0.10, 14.0) - 7.0,
+            hash11(seed + 71.0) * 12.0 - 8.0
+        );
+        vec3 rel = pos - ro;
+        float along = dot(rel, rd);
+        if (along < 0.0) continue;
+        float off = length(rel - along * rd);
+        float r = 0.010 + along * 0.0005;
+        col += GLOW * exp(-off * off / (r * r)) * 0.22;
+    }
+
+    col = vec3(1.0) - exp(-col * 1.85);
+    // Channel-wise black point: the reference darks carry no red or green at all.
+    col = max(col - vec3(0.0175, 0.0160, 0.0060), vec3(0.0));
+    frag_color = vec4(pow(col, vec3(1.0 / 2.2)), 1.0);
+}
+```
+
+### jellyfish.py
+```
+"""Manim supplies the timeline; GLSL supplies the perspective 3D scene."""
+
+import math
+import os
+from pathlib import Path
+
+import numpy as np
+from manim import Scene, ValueTracker, config, linear
+from manim.constants import RendererType
+from manim.renderer.shader import Mesh, Shader
+
+
+VERTEX_SHADER = """
+#version 330
+in vec2 in_position;
+void main() {
+    gl_Position = vec4(in_position, 0.0, 1.0);
+}
+"""
+
+
+def make_school(context, width: int, height: int) -> Mesh:
+    fragment = Path(__file__).with_name("jellyfish.frag").read_text(encoding="utf-8")
+    shader = Shader(
+        context,
+        source={"vertex_shader": VERTEX_SHADER, "fragment_shader": fragment},
+    )
+    vertices = np.zeros(6, dtype=[("in_position", np.float32, (2,))])
+    vertices["in_position"] = [
+        (-1, -1), (1, -1), (1, 1), (-1, -1), (1, 1), (-1, 1)
+    ]
+    shader.set_uniform("u_resolution", (float(width), float(height)))
+    shader.set_uniform("u_time", 0.0)
+    return Mesh(shader, vertices, use_depth_test=False)
+
+
+class JellyfishSchool(Scene):
+    def construct(self):
+        if config.renderer != RendererType.OPENGL:
+            raise RuntimeError("This scene requires --renderer=opengl.")
+        duration = float(os.environ.get("JELLY_DURATION", "10"))
+        start_time = float(os.environ.get("JELLY_START", "0"))
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError("JELLY_DURATION must be a finite positive number.")
+        if not math.isfinite(start_time):
+            raise ValueError("JELLY_START must be finite.")
+        school = make_school(self.renderer.context, config.pixel_width, config.pixel_height)
+        clock = ValueTracker(start_time)
+
+        def update_time(mesh, dt):
+            mesh.shader.set_uniform("u_time", clock.get_value())
+
+        school.add_updater(update_time)
+        self.add(school, clock)
+        self.play(clock.animate.set_value(start_time + duration), run_time=duration, rate_func=linear)
+```
+
+### palette.py
+```
+"""Sample the dominant colours of a reference frame to match its palette."""
+
+import sys
+
+import numpy as np
+from PIL import Image
+
+
+def main(path: str) -> None:
+    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.float32)
+    flat = image.reshape(-1, 3)
+    luma = flat @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+
+    bands = {
+        "background (darkest 40%)": luma <= np.percentile(luma, 40),
+        "midtone glow (70-92%)": (luma > np.percentile(luma, 70)) & (luma <= np.percentile(luma, 92)),
+        "highlight (top 2%)": luma >= np.percentile(luma, 98),
+    }
+    for name, mask in bands.items():
+        mean = flat[mask].mean(axis=0)
+        normalized = mean / max(mean.max(), 1e-6)
+        print(f"{name:26s} rgb=({mean[0]:5.1f},{mean[1]:5.1f},{mean[2]:5.1f})  "
+              f"normalized=({normalized[0]:.3f}, {normalized[1]:.3f}, {normalized[2]:.3f})")
+
+    bright = flat[luma >= np.percentile(luma, 85)]
+    hue_ratio = bright[:, 0] / np.maximum(bright[:, 2], 1e-6)
+    print(f"\nbright pixels R/B ratio: mean={hue_ratio.mean():.3f} median={np.median(hue_ratio):.3f}")
+    print(f"bright pixels G/B ratio: mean={(bright[:,1]/np.maximum(bright[:,2],1e-6)).mean():.3f}")
+    print(f"overall mean rgb: {flat.mean(axis=0).round(1)}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1])
+```
+
+### poster.py
+```
+"""A 1080x1920 still: the shader render as background, the maths typeset over it.
+
+Rendered with Manim's Cairo renderer, since the shader frame is baked to an image first.
+"""
+
+from pathlib import Path
+
+import moderngl
+import numpy as np
+from manim import DOWN, UP, ImageMobject, MathTex, Scene, Text, VGroup, config
+from PIL import Image, ImageDraw, ImageFilter
+
+from jellyfish import make_school
+
+WIDTH, HEIGHT = 1080, 1920
+BACKGROUND = Path(__file__).with_name("docs") / "poster-bg.png"
+FRAME_TIME = 4.0
+
+INK = "#EAF2FF"
+ACCENT = "#7AA2FF"
+
+BLOCKS = [
+    ("Every pixel casts a ray", [r"p(s) = o + s\,\hat{r}"]),
+    ("The bell squeezes as it pulses",
+     [r"R = 1.00 + 0.13\,p(t)", r"H = 0.80 - 0.22\,p(t)"]),
+    ("Each tentacle lags with depth", [r"A\,\sin(1.55\,d - 2t + \phi)"]),
+]
+
+# Drop the school into the lower half so the maths sits over empty water.
+SUBJECT_DROP = 520
+
+
+def bake_background(seconds: float, path: Path) -> None:
+    context = moderngl.create_standalone_context(require=330)
+    target = context.simple_framebuffer((WIDTH, HEIGHT))
+    target.use()
+    school = make_school(context, WIDTH, HEIGHT)
+    school.shader.set_uniform("u_time", seconds)
+    school.render()
+    pixels = np.frombuffer(target.read(), dtype=np.uint8).reshape(HEIGHT, WIDTH, 3)[::-1]
+    render = Image.fromarray(pixels.copy()).convert("RGBA")
+
+    # The top of the render is flat dark water, so stretching it fills the gap invisibly.
+    frame = Image.new("RGBA", (WIDTH, HEIGHT))
+    frame.paste(render.crop((0, 0, WIDTH, 4)).resize((WIDTH, SUBJECT_DROP)), (0, 0))
+    frame.paste(render.crop((0, 0, WIDTH, HEIGHT - SUBJECT_DROP)), (0, SUBJECT_DROP))
+
+    # Gentle lift of contrast behind the text only; a heavy scrim desaturates the blue.
+    mask = Image.new("L", (WIDTH, HEIGHT), 0)
+    draw = ImageDraw.Draw(mask)
+    fade_end = 1180
+    for y in range(fade_end):
+        draw.line([(0, y), (WIDTH, y)], fill=int(105 * min((fade_end - y) / 260, 1.0)))
+    mask = mask.filter(ImageFilter.GaussianBlur(50))
+
+    scrim = Image.new("RGBA", (WIDTH, HEIGHT), (0, 2, 10, 255))
+    scrim.putalpha(mask)
+    frame.alpha_composite(scrim)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.convert("RGB").save(path)
+
+
+class Poster(Scene):
+    def construct(self):
+        bake_background(FRAME_TIME, BACKGROUND)
+
+        backdrop = ImageMobject(str(BACKGROUND))
+        backdrop.height = config.frame_height
+        self.add(backdrop)
+
+        title = Text("A jellyfish made of equations", font_size=31, color=INK, weight="BOLD")
+        subtitle = Text("no mesh, no textures  ·  Manim + GLSL", font_size=19,
+                        color=ACCENT, slant="ITALIC")
+        heading = VGroup(title, subtitle).arrange(DOWN, buff=0.16)
+        heading.scale_to_fit_width(config.frame_width * 0.84)
+        heading.to_edge(UP, buff=0.85)
+
+        widest = config.frame_width * 0.86
+        blocks = VGroup()
+        for caption, equations in BLOCKS:
+            lines = VGroup(*[MathTex(e, font_size=30, color=INK) for e in equations])
+            lines.arrange(DOWN, buff=0.14)
+            if lines.width > widest:
+                lines.scale_to_fit_width(widest)
+            blocks.add(VGroup(Text(caption, font_size=17, color=ACCENT), lines).arrange(DOWN, buff=0.16))
+        blocks.arrange(DOWN, buff=0.34)
+        blocks.next_to(heading, DOWN, buff=0.42)
+
+        self.add(heading, blocks)
+
+        def band(mobject) -> str:
+            top = (config.frame_height / 2 - mobject.get_top()[1]) / config.frame_height * HEIGHT
+            bottom = (config.frame_height / 2 - mobject.get_bottom()[1]) / config.frame_height * HEIGHT
+            return f"y {top:6.0f} -> {bottom:6.0f} px"
+
+        print(f"heading  {band(heading)}")
+        print(f"blocks   {band(blocks)}   width {blocks.width:.2f} / {config.frame_width:.2f}")
+        print(f"text margins: 190 -> {HEIGHT - 330} px;  subject top approx {1050 + SUBJECT_DROP - 330} px")
+```
+
+### preview.py
+```
+"""Render still frames straight from the shader, without going through Manim."""
+
+import sys
+
+import moderngl
+import numpy as np
+from PIL import Image
+
+from jellyfish import make_school
+
+WIDTH, HEIGHT = 1080, 1920
+
+
+def main(times: list[float], out: str, scale: float) -> None:
+    context = moderngl.create_standalone_context(require=330)
+    target = context.simple_framebuffer((WIDTH, HEIGHT))
+    target.use()
+    school = make_school(context, WIDTH, HEIGHT)
+
+    tiles = []
+    for value in times:
+        school.shader.set_uniform("u_time", value)
+        school.render()
+        tiles.append(np.frombuffer(target.read(), dtype=np.uint8).reshape(HEIGHT, WIDTH, 3)[::-1])
+
+    sheet = np.concatenate(tiles, axis=1)
+    image = Image.fromarray(sheet)
+    image = image.resize((int(sheet.shape[1] * scale), int(sheet.shape[0] * scale)))
+    image.save(out)
+    print(f"{out}  tiles={len(tiles)}  std={sheet.std():.1f}  max={sheet.max()}")
+
+
+if __name__ == "__main__":
+    values = [float(arg) for arg in sys.argv[1:]] or [2.0, 5.0, 8.0]
+    main(values, "preview.png", 0.33 if len(values) > 1 else 0.5)
+```

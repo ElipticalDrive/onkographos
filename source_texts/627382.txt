@@ -1,0 +1,135 @@
+Unityで開発中に、Unity上で管理しているGPUリソース(Texture2D, GraphicsBuffer等)をCUDAで実装されたライブラリで高速に処理して、それをさらにUnityに戻して利用したい、みたいな場面が極々々々稀に存在します。 かなりニッチな需要だと感...
+
+Unity上のGPUリソースを直接CUDAから扱う #C# - Qiita
+12
+Go to list of users who liked
+7
+Share on X(Twitter)
+Share on Facebook
+Add to Hatena Bookmark
+more_horiz
+Delete article
+close
+Deleted articles cannot be recovered.
+Draft of this article would be also deleted.
+Are you sure you want to delete this article?
+CancelDeletedelete
+info
+More than 3 years have passed since last update.
+Day 23
+株式会社D2C ID Advent Calendar 2022
+@torinos
+Unity上のGPUリソースを直接CUDAから扱う
+C++
+C#
+CUDA
+Unity
+12
+Last updated at 2022-12-23Posted at 2022-12-23
+Unityで開発中に、Unity上で管理しているGPUリソース(Texture2D, GraphicsBuffer等)をCUDAで実装されたライブラリで高速に処理して、それをさらにUnityに戻して利用したい、みたいな場面が極々々々稀に存在します。
+かなりニッチな需要だと感じたので、備忘録的な意味でも実際に存在した場面でどうやったのかを紹介できればと思います。
+前提知識
+C++を使用したNative Plugin周り
+多少のCUDAの知識
+環境
+筆者側で動作確認できた環境なので、その他の環境でも動く可能性はあります(さすがにGPUはNVIDIA必須ですが)
+Windows 10以上
+Unity2020.1以上
+D3D11
+Pascal世代以降のNVIDIA GPU
+CUDA 11.3
+そもそもなぜCUDA?
+そもそもな話Unityは、Textureや、頂点データ等を含むGraphicsBufferなどを処理するために、Vertex ShaderやPixel Shaderなどの通常のレンダリングパイプライン(Graphics.Blitも含め)や、多少特殊なことを行いたい場合にもCompute Shaderを利用するなどすれば、ほとんどのケースで事足りるだけの柔軟性をもっていると思います。
+ただ、それでもCUDAの組み合わせを検討しなければならない場面はおおよそ
+すでにCUDAでの実装が存在するライブラリ・アルゴリズムを利用したい
+それでいて、元の実装がオープンでない、またはCSなどへの移植が現実的でない
+というパターンになると思います。
+ちなみに実際に私がCUDAを利用したパターンは、 「機械学習の推論を行いたいが、公式のBarracudaでは遅すぎる＆実行できないモデルが多すぎるので直接onnxruntime(というよりTensorRT)を使用したい」 という場面でした。
+方法
+結論から言うとCUDAのGraphics Interoperability機能を利用します。これを利用することで、D3D11やVulkunなど様々なGraphics APIで定義されているTextureやBufferの GPU上のデータをCUDAリソースとして直接マッピングする ことができます。
+では具体的にどのような手順で行うのかというと、実行されるGaphics API次第で多少の差異はありますが、
+cudaGraphics**RegisterResource関数で、グラフィックリソースをcuda側へ登録
+cudaGraphicsMapResourcesで、登録されたリソースをcudaメモリ空間にマップする
+cudaGraphicsResourceGetMappedPointerやcudaGraphicsSubResourceGetMappedArray等でcudaメモリ空間にマップされたリソースに対するポインタ等を取得
+リソースを使い終わる際にはcudaGraphicsUnmapResourcesでマップを解除し、cudaGraphicsUnregisterResourceでリソースの登録を解除する
+ここでいう グラフィックリソース とはD3D11であればID3D11Bufferへのポインタや、OpenGLであればBufferやTextureの名前を示すGLuintなど、Graphics APIネイティブのオブジェクトへの参照のことです。Unityであれば、Texture.GetNativeTexturePtrやGraphicsBuffer.GetNativeBufferPtrを使ってC#上で簡単に取得できます。これ以降は、CUDA APIを使用するので、C++を利用したNative Pluginでの開発になります。
+以下にD3D11環境でGraphicsBufferのGPUリソースへのポインターを取得するコードを例として書くと
+register.cpp
+```
+void* input; // GraphicsBuffer.GetNativeBufferPtr()で取得したポインタ
+
+cudaGraphicsResource_t resource;
+// グラフィックリソースをcudaへ登録
+cudaGraphicsD3D11RegisterResource(&resource, (ID3D11Resource*)input, cudaGraphicsRegisterFlagsNone);
+
+// cudaメモリ空間へマッピング
+cudaGraphicsMapResources(1, &resource);
+
+void* ptr;   // cudaにマップされたGPUリソースへのポインタ
+size_t size; // ptrからアクセス可能なリソースのサイズ
+
+// マップされたリソースへのポインタを取得
+cudaGraphicsResourceGetMappedPointer(&ptr, &size, resource);
+
+// -- 取得したリソースを使用したcudaカーネル等の実行 --　//
+
+// リソースのマップ解除
+cudaGraphicsUnmapResources(1, &resource);
+
+// リソースの登録解除
+cudaGraphicsUnregisterResource(resource);
+```
+と、エラーチェック等を気にしなければ割と簡単にcudaリソースまで持っていけることがわかると思います。
+一応これを利用せずとも、Texture2D.GetPixelsやGraphicsBuffer.GetDataなどで一度CPU側にリソースをダウンロードし、Native Plugin経由でcudaMemcpyを使用して、事前にGPU上に割り当てられたcudaメモリ領域にデータを持っていくことでも実現は可能です。
+しかし、一般にGPU上のリソースのCPUへのダウンロードは大きなオーバヘッドを伴い、さらにそれをcudaでの利用のためにもう一度GPUへアップロードし、その結果をUnityで利用したい場合はさらにGPU, CPU間でのやり取りが発生するという、2度手間3度手間な感じになってしまいます。
+というわけで、基本的にはこれを実行されるGraphics APIに合わせた対応や、複数のAPI対応であれば低レベルネイティブプラグインインターフェースを利用した分岐などを実装すれば、という感じになるのですが、いくつかハマりどころもあったので記述しておきます。
+毎フレームやり取りしたい場合に毎回Unmapすると固まる
+ケース次第ですが、毎フレームUnityとcudaの間でデータをやり取りしたいというのはパターンとして多いと思います。その場合、CUDA Toolkit DocumantationのcudaGraphicsMapResourcesの項に記述のあるように、通常はグラフィックリソースがcuda側にマップされている間は、ほかのシステムからはアクセスしないようにしなければなりません。
+The resources in resources may be accessed by CUDA until they are unmapped. The graphics API from which resources were registered should not access any resources while they are mapped by CUDA. If an application does so, the results are undefined.
+resources に含まれるリソースは、マッピングが解除されるまで CUDA からアクセスすることができます。リソースが登録されたグラフィックAPIは、CUDAによってマッピングされている間は、いかなるリソースにもアクセスしてはならない。アプリケーションがアクセスした場合、その結果は未定義である。(DeepL翻訳)
+なので、本来であればUnityのUpdateループを絡めて以下のような手順をとる必要がありそうです。
+アプリケーション起動時等、必要なタイミングでcudaGraphics**RegisterResource関数で登録
+Unity側でTextureやBufferの前処理
+cudaGraphicsMapResourcesでリソースをマップ
+cuda内でデータ処理
+cudaGraphicsUnmapResourcesでマップを解除
+Unity側で後処理や描画への利用
+2-5をUpdateで繰り返し
+アプリケーション終了時等、必要なくなったタイミングでcudaGraphicsUnregisterResourceでリソースの登録を解除
+とこのような感じで実装したいところですが、実際に上記の感じで実装してみるとGPUのTimeoutによって画面が固まってしまい、場合によってはエラーでプロセスごと落とされてしまいます。
+原因はよくわからないのですが、対処としてRegisterのタイミングでMapも行ってしまい、毎フレームUnmapを行わないという方法で一応何とかなっています。その場合も一応実装側の工夫でcuda側の処理とUnity側の処理がバッティングしないようにしたほうがよさそうです。
+ただ、Documentにあるようにこの場合の動作は未定義となるので、環境次第ではエラー落ちなんてこともあるかもしれません。どなたか根本的な解決策をご存知でしたら教えてもらえるとありがたいです。ちなみにほかのゲームエンジンで試した際は毎フレームMap, Unmapを繰り返しても特に問題はありませんでした...
+RenderTexture等一部の形式のTextureは登録ができない
+これはおそらくD3D系のGraphics APIだけの話だと思うのですが、UnityのRenderTextureはTypeless形式(DXGI_FORMAT_R32G32B32A32_TYPELESS等)でTextureを作成するので、Typeless形式に対応していないcudaのGraphics Interoperability機能では相互運用を行うことができません。
+それ以外にも、RGBなどの3チャンネルのみのTextureには対応していないなど、いくつか制限があるようなので詳しくはcuda側のDocumentの各Graphics APIの項のRegister関数について確認してください。
+個人的には、Textureであってもcudaライブラリ側でリニアメモリーでないといけない指定などがある場合もあるので、明確にcudaArrayが必要であることがわかっている場面などでない限り、最初はUnity側でGraphicsBufferに詰め替える前処理を行う方針にしたほうがいい気がしています。
+最後に
+処理的に若干怪しい場面はありますが、この方法を使えばUnityのGPUリソースをCPUを経由せずに高速にcudaに渡すことができ、リソースのサイズが大きいほどこの高速化の恩恵が受けられます。
+これを行うことでギリギリでリアルタイムアプリケーションとして成立する、みたいな場面もあると思うので、エンドユーザー配布のアプリケーションとかでなければ試す価値はあるかと思います。
+また、そもそもなぜCUDA?の項で書いていた、機械学習の推論を今回の記事の手法に加え、onnxruntimeでCUDAやTensorRTを利用して行うものについては、私個人のgithubに上げているので良ければ参考にしていただければと思います。
+NNOnnx
+参考リンク
+CUDA Toolkit Document - Graphics Interoperability
+Unity3D RenderTexture/Texture2D To OptixImage2D - Visualization / OptiX - NVIDIA 開発者フォーラム
+Unity 課題トラッカー - CUDA グラフィックスの相互運用がネイティブプラグインでレンダーテクスチャの使用時に失敗する (unity3d.com)
+12
+Go to list of users who liked
+7
+comment0
+Go to list of comments
+Register as a new user and use Qiita more conveniently
+You get articles that match your needs
+You can efficiently read back useful information
+You can use dark theme
+What you can do with signing up
+Sign upLogin
+12
+Go to list of users who liked
+7
+more_horiz
+Delete article
+close
+Deleted articles cannot be recovered.
+Draft of this article would be also deleted.
+Are you sure you want to delete this article?
+CancelDeletedelete

@@ -1,0 +1,96 @@
+# Curvature Loss
+
+Also called: Curvature Regularization, Laplacian Regularization
+
+## Overview
+Curvature loss is a geometric regularization term used in differentiable volume rendering and radiance-field optimization to penalize high-frequency oscillations in the predicted scalar field (typically an SDF or density field). By encouraging the output to be smooth or locally planar, it stabilizes training and reduces noise in the reconstructed geometry. It differs from normal alignment losses, which enforce consistency between predicted and ground-truth surface normals, by operating directly on the scalar field's derivatives rather than explicit normal vectors.
+
+## How it works
+Curvature loss is computed by applying a discrete curvature operator to the model's output field and scaling the result by a configurable weight. The specific implementation depends on the underlying representation (e.g., grid-based vs. neural network), but the core principle is to measure the deviation of a sample point from its local neighborhood.
+
+### Inputs and Outputs
+- **Input**: The predicted scalar field values (e.g., SDF values $f(x)$) at a set of query points or grid vertices.
+- **Output**: A scalar loss value representing the total curvature penalty.
+
+### Data Structures
+- **Scalar Field**: A tensor of shape $(N, 1)$ or $(N,)$ containing the predicted values at $N$ points.
+- **Curvature Operator**: A discrete approximation of the Laplacian, often implemented as a weighted sum of differences between a point and its neighbors.
+
+### Steps
+1. **Retrieve Weight**: Obtain the curvature loss weight $\lambda_{\text{curvature}}$ from the configuration. [S1, unofficial]
+2. **Apply Curvature Operator**: Compute the curvature $C(f)$ for the model output $f$. This typically involves calculating the second-order derivatives or the difference between a point and the mean of its neighbors. [S1, unofficial]
+3. **Compute Loss**: Multiply the curvature values by the weight.
+   $$ L_{\text{curvature}} = \lambda_{\text{curvature}} \cdot C(f) $$
+4. **Aggregate**: Sum or mean the loss over all relevant points (e.g., all samples along rays or all grid vertices). [S1, unofficial]
+
+### Formula
+While the exact form of $C(f)$ depends on the discretization, a common discrete Laplacian approximation for a point $i$ with neighbors $j$ is:
+$$ C(f)_i = \sum_{j \in \mathcal{N}(i)} w_{ij} (f_i - f_j) $$
+where $\mathcal{N}(i)$ is the set of neighbors and $w_{ij}$ are weights based on distance or geometry. The total loss is:
+$$ L_{\text{curvature}} = \lambda_{\text{curvature}} \sum_{i} C(f)_i^2 \quad \text{or} \quad \lambda_{\text{curvature}} \sum_{i} |C(f)_i| $$
+*Note: The specific norm (L1 vs L2) and neighbor selection are implementation-dependent.*
+
+### Parameters
+- **$\lambda_{\text{curvature}}$**: The weight for the curvature loss term. Retrieved from `self.config.system.loss.lambda_curvature`. [S1, unofficial]
+  - *Typical Value*: Not given in the sources.
+
+### Edge Cases and Pitfalls
+- **Precision**: High curvature values can lead to large gradients, potentially causing instability. Clipping or normalization may be required.
+- **Boundaries**: Points near the boundary of the domain or outside the object may have fewer neighbors, leading to biased curvature estimates.
+- **Degenerate Input**: If the field is constant, curvature is zero, providing no regularization signal.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_curvature_loss(model_output, lambda_curvature, curvature_operator):
+    """
+    Compute curvature loss for a given model output.
+    
+    Args:
+        model_output: Tensor of shape (N, 1) containing predicted scalar values.
+        lambda_curvature: Float, weight for the curvature loss.
+        curvature_operator: Function or tensor representing the discrete Laplacian matrix.
+        
+    Returns:
+        Scalar loss value.
+    """
+    # Apply curvature operator to the model output
+    # curvature_operator is typically a sparse matrix or a function that computes
+    # the difference between a point and its neighbors.
+    curvature_values = curvature_operator @ model_output
+    
+    # Compute the loss as the sum of squared curvature values (or absolute, depending on implementation)
+    # Using L2 norm for smoothness
+    loss = torch.sum(curvature_values ** 2)
+    
+    # Scale by the weight
+    total_loss = lambda_curvature * loss
+    
+    return total_loss
+```
+*Note: The exact implementation of `curvature_operator` depends on the grid structure or point cloud connectivity. For grid-based methods, this is often a precomputed sparse matrix. For neural networks, it may be approximated using finite differences.* [G]
+
+## Subtopics
+
+### SDF Edge Regularization Loss
+A loss function that penalizes SDF values at edges where the sign changes, encouraging sharp features or correct topology at boundaries. It operates by gathering SDF values at edge endpoints, creating a mask for edges where signs differ, and computing a binary cross-entropy loss between the endpoints. [S2, unofficial]
+
+### Normal Smoothness Loss
+A regularization loss that encourages consecutive normals along a ray to be similar, enforcing spatial smoothness. The loss is calculated as $L = w \cdot (1 - \mathbf{n}_p \cdot \mathbf{n}_{prev})$, where $\mathbf{n}_p$ is the normal at the current sample and $\mathbf{n}_{prev}$ is the normal at the previous sample. [S3, unofficial]
+
+## Operating characteristics
+- **Time Complexity**: Depends on the curvature operator. For grid-based methods, it is $O(N)$ where $N$ is the number of points. For neural networks, it requires additional forward passes or finite difference approximations, increasing computational cost.
+- **Memory Complexity**: $O(N)$ to store the scalar field and potentially the curvature operator.
+- **Strengths**: Effective at reducing noise and stabilizing training in radiance-field optimization. Encourages smooth geometry.
+- **Limitations**: May oversmooth fine details if the weight is too high. Requires careful tuning of the weight parameter.
+- **When to Use**: When the reconstructed geometry is noisy or exhibits high-frequency artifacts. Useful in early stages of training to stabilize the field.
+- **When Not to Use**: When preserving fine geometric details is critical and the weight is not carefully tuned.
+
+## Background
+Curvature loss is a standard technique in geometric optimization and computer graphics, often used in surface reconstruction and implicit surface modeling. In the context of differentiable volume rendering, it has been adopted to regularize the learned scalar fields, particularly in methods like NeRF and its variants. The specific implementation cited here is from the `instant-nsr-pl` repository, which adapts these concepts for neural implicit surface representations. [S1, unofficial]
+
+## Sources
+[S1] bennyguo/instant-nsr-pl, https://github.com/bennyguo/instant-nsr-pl, fetched 2026-10-27 (unofficial)
+[S2] GitHub - nv-tlabs/FlexiCubes, https://github.com/nv-tlabs/FlexiCubes, fetched 2026-10-27 (unofficial)
+[S3] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)

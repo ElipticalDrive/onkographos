@@ -1,0 +1,663 @@
+The Irreden Engine. Contribute to jakildev/IrredenEngine development by creating an account on GitHub.
+
+render: smooth camera Z-yaw — T4 (#1311) trixel-level per-axis lighting on the composite by jakildev · Pull Request #1360 · jakildev/IrredenEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jakildev
+commented
+May 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+T4 (#1311) — trixel-level per-axis lighting on the smooth camera Z-yaw composite
+Implements the architect's NEEDS-DESIGN resolution: light the three per-axis
+voxel canvases at trixel resolution, per axis, before the forward-scatter
+composite — the framebuffer-MRT G-buffer / per-fragment approach from the
+pre-implementation findings note is rejected (hard constraint: no
+fragment-rate lighting).
+Before T4, rotating voxels showed flat raw colour. Now they carry AO + sun
+shadows + directional Lambert + the world light volume, matching the
+cardinal-snapped look at the bracket endpoints.
+What changed
+C_PerAxisTrixelCanvases — adds 3× ao_ + 3× sunShadow_ RGBA8 textures
+with the same rotation-only lifecycle as the colour/distance/id triple.
+COMPUTE_VOXEL_AO / COMPUTE_SUN_SHADOW / LIGHTING_TO_TRIXEL — gain a
+per-axis dispatch loop (gated entity == main && per-axis allocated) that
+reconstructs world-pos face-locally via perAxisCellToWorld3D (the exact
+faceOriginFromInPlane integer inverse the T3 scatter uses — no singular
+screen→world iso-yawed inverse).
+BAKE_SUN_SHADOW_MAP — bakes the main canvas (SDF/text) + the 3 per-axis
+voxel canvases into the shared world sun-shadow map (pre-composite
+atomicMin), so voxels and SDF cast/receive shadows on each other under rotation.
+The world sun-shadow SSBO + 128³ light volume stay shared (sampled by
+reconstructed world-pos); no per-axis copies.
+perAxisCellToWorld3D lives in a dedicated ir_per_axis_lighting.{glsl,metal}
+include (NOT ir_iso_common) so the SDF/voxel/scatter shaders that share
+ir_iso_common are byte-unchanged.
+Each per-axis loop restores the main-canvas image bindings on exit — the
+Metal image-binding table persists across frames, so leaving freed per-axis
+textures bound would dangle at the cardinal release (this was a reproducible
+mid-rotation crash; fixed).
+GLSL + Metal at parity; design doc §"Open decisions → Lighting / AO placement"
+updated with the resolved decision (per architect, in this PR).
+Verification (Metal / IRShapeDebug)
+Full 360° --spin-yaw sweep + the yaw45 rebracket render lit, sun-shadowed
+voxels with no pop/cracks/checkerboard; no crash through every cardinal
+release transition (was crashing pre-fix).
+Cardinal fast path byte-identical for the voxel path — per-axis canvases
+release at residualYaw == 0, single-canvas lighting runs unchanged. Voxel
+cube ROI crops are cmp-identical to master at yaw 0 / 90.
+Perf holds the budget (--auto-profile 300, zoom 8): each touched lighting
+stage is 0.013–0.018 ms CPU at non-cardinal — far under the ShapesToTrixel
+~0.55 ms bar the epic cites (ShapesToTrixel itself is 0.477 ms). Per-axis
+dispatches use one coalesced barrier per stage so the 3 axes overlap on the GPU.
+Known caveat — SDF-edge FP drift at the cardinal (reviewer please weigh in)
+The voxel path is byte-identical at yaw 0, but a handful of SDF analytic-surface
+silhouette pixels drift (img_diff: ~0.02% of pixels, max Δ 18 at zoom 8;
+zero at zoom ≤ 2) between master and this branch. Root cause: adding the
+perAxisRoute branch to the lighting compute kernels perturbs their FP
+instruction scheduling (the Metal compiler is deterministic build-to-build, so
+this is genuinely from the kernel edits, not compiler noise), nudging
+light-volume sample coords by an LSB on the steep SDF silhouette gradient. It is
+not a logic change and does not touch the voxel path. Achieving bit-exact
+SDF identity would require duplicating the 4 lighting shaders as per-axis
+variants (maintainability cost) or shader-define build support — flagging for
+the architect/reviewer's call vs. accepting characterised FP noise on the SDF
+effects path.
+Reuse note
+The four dispatchPerAxis* helpers and the per-axis-canvas beginTick resolution
+block intentionally mirror the established dispatchPerAxisCanvases / beginTick
+pattern in system_voxel_to_trixel.hpp (#1309). A shared helper is possible but
+would either expand scope into that file or create inconsistency — left matching
+the established per-system pattern; reasonable follow-up.
+🤖 Generated with Claude Code
+docs: T4 (#1311) lighting-placement findings — post-composite needs M…
+…
+0461f91
+```
+…RT G-buffer + bake reorder
+
+T4 maps AO / sun-shadow / lighting onto the resolved composite, but every
+lighting stage today (COMPUTE_VOXEL_AO, COMPUTE_SUN_SHADOW,
+COMPUTE_LIGHT_VOLUME, LIGHTING_TO_TRIXEL, BAKE_SUN_SHADOW_MAP) runs
+pre-composite in canvas/iso space — there is no post-composite lighting
+infrastructure to extend. Append a findings note to the
+per-axis-trixel-canvas-rotation design doc §Open-decisions: the work
+decomposes into a new MRT G-buffer producer (world-pos + faceId/material-tag,
+both backends), a generic post-composite lighting consumer, and a
+structural reorder of the sun-shadow bake to consume the composite
+(currently a pre-composite canvas-space pass).
+
+Surfaces the architect decision this WIP is blocked on: ship T4 as one
+large PR (heavier than the T3 #1336 baseline plus new MRT infra) or split
+into T4a (G-buffer + directional/AO/light-volume) and T4b (sun-shadow on
+the composite), and the bake-reorder approach.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+jakildev
+added
+the
+fleet:wip
+Work in progress — not ready for review
+label
+May 30, 2026
+jakildev
+commented
+May 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+NEEDS-DESIGN
+What the code shows (refines the plan). Mapping the pipeline for T4 found that every lighting stage today runs pre-composite, in canvas/iso space — COMPUTE_VOXEL_AO, COMPUTE_SUN_SHADOW, COMPUTE_LIGHT_VOLUME, LIGHTING_TO_TRIXEL all read the main canvas trixelDistances + visibleFaceIds[slot] and write canvas-resolution textures, and BAKE_SUN_SHADOW_MAP projects the canvas distances into the sun depth map. There is no post-composite lighting infrastructure to extend — T4 builds it. The main framebuffer is single color + depth (no MRT). The plan ("read the post-composite framebuffer") still holds; it's just more net-new than "retarget the existing passes."
+Open decisions I don't have authority to make (they touch your T1–T5 decomposition + the render-pipeline ordering):
+Scope — one PR or split? Full T4 = new MRT G-buffer infra (both GL + Metal) + a generic post-composite lighting pass + the sun-shadow bake reordered onto the composite. That's heavier than the T3 (render: smooth camera Z-yaw — T3: trixel→framebuffer depth composite (#1310) #1336) baseline of 51 files / ~1.1k lines plus new framebuffer-MRT infra. I recommend splitting into T4a = G-buffer producers + directional/AO/light-volume consumer (the bulk of the visual win, self-contained, byte-identical cardinal), and T4b = sun-shadow reordered onto the composite (the structural piece). Or confirm you want it as a single large PR.
+Sun-shadow bake — how should it "consume the composite"? (your "side effects to evaluate" item.) BAKE_SUN_SHADOW_MAP runs pre-composite; during rotation it bakes only SDF/text (the smooth voxels live in the per-axis canvases), so rotating voxels would cast no sun shadows. Options: (a) move/duplicate the bake to a post-composite pass that projects the resolved world-pos G-buffer into sun space — clean, but reorders the lighting pipeline relative to the composite; (b) bake pre-composite from the three per-axis canvases — keeps ordering but re-does the multi-canvas merge the composite already performs. I lean (a); the ordering interacts with the cardinal path so it's your call.
+G-buffer lifetime — permanent MRT (shared with T5 SDF) or rotation-only side texture? The issue frames it as a "source-agnostic composite G-buffer" that T5 SDF will also feed, which implies a permanent MRT attachment on the main framebuffer (cardinal path writes it too — harmless, color stays byte-identical). Confirm permanent-MRT vs allocate-only-while-rotating.
+Suggested architecture for whoever resumes (also captured in the design-doc note this PR adds): store world-pos (the scatter already recovers the face-plane origin via faceOriginFromInPlane) + faceId/material-tag in the G-buffer. Then post-composite AO neighbour-sampling and light-volume / sun-shadow projection run in framebuffer space off the stored world-pos, sidestepping the singular screen→world iso-yawed inverse (z = (rawDepth + …)/(2cosθ+1), zero at full visualYaw ±120°/±240°) that the gather path can't use.
+WIP commit pushed (findings note); claim + worktree reservation released so any opus-worker can resume on fleet:design-unblocked.
+— opus-worker
+jakildev
+added
+the
+fleet:design-blocked
+Worker escalated for architectural input mid-task; architect should respond
+label
+May 30, 2026
+jakildev
+mentioned this pull request
+May 30, 2026
+render: camera Z-yaw pivots about the camera focus (#1352)
+#1362
+Merged
+2 of 4 tasks
+jakildev
+commented
+May 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Architect direction — T4 lighting is trixel-level on the 3 per-axis canvases (NOT a framebuffer G-buffer)
+Thanks for the findings note — the pipeline map is exactly right and it changes the approach. Resolving all three of your open questions, plus the decomposition.
+Decision: light at the trixel level, per-axis. Reject the post-composite framebuffer G-buffer.
+Your map shows every lighting stage already runs pre-composite, at canvas (trixel) resolution, and the two maps that matter are world-space: the sun-shadow SSBO (sun-aligned, baked by reconstructing world-pos from trixel distance) and the light volume (camera-anchored 128³, sampled by world-pos). AO samples same-axis face-tangent neighbours. Those facts make a 3-canvas trixel-level lighting pass clean and make the framebuffer MRT G-buffer unnecessary. The engine stays efficient at the trixel level — no per-fragment lighting. (This is a hard product constraint from the human: no fragment-rate lighting work.)
+Mechanism (what to build)
+Light each per-axis canvas before the scatter composites it. drawPerAxisScatter already reads each per-axis canvas colour and resolves the nearest by depth — make those colours lit first. Run AO + sun-shadow + light-volume + LIGHTING_TO_TRIXEL over each per-axis canvas, gated on residualYaw != 0. Allocate 3× AO + 3× sun-shadow textures inside C_PerAxisTrixelCanvases (rotation-only; freed at cardinal, same lifecycle as the colour/distance per-axis textures). The world light volume is shared — sample it by reconstructed world-pos; do not allocate per-axis light volumes.
+Sun-shadow bake — your option (b), not (a). Do NOT move the bake to a post-composite framebuffer projection (that's per-fragment — rejected). Instead, BAKE_SUN_SHADOW_MAP reads the 3 per-axis voxel canvases + the main canvas (SDF/text) and atomicMins each reconstructed world-pos into the shared world sun map. Pre-composite, trixel-resolution. Because the bake reads both voxels and SDF, they cast shadows on each other correctly under rotation.
+SDF / text / overlay keep their existing main-canvas lighting. During rotation the main canvas holds only SDF/text (voxels are in the per-axis canvases), so the existing main-canvas lighting path already covers them. T4's new work is voxel-specific — the per-axis voxel canvases.
+G-buffer lifetime: there is no permanent framebuffer MRT. The "G-buffer" is just the per-axis canvas data that already exists (colour + distance/faceId) plus the 3× AO / 3× sun-shadow textures — all canvas-resolution, all rotation-only.
+Your three open questions, answered
+Scope — one PR or split? One PR, camera-path only (this PR). Detached-entity lighting and the pre-existing lighting-artifact investigation are separate follow-up issues (detached ones filed — see below). Do not build the framebuffer-MRT/T4a/T4b split.
+Sun-shadow bake — consume the composite? No. Bake pre-composite from the 3 per-axis canvases + main into the shared world map (above). The screen→world iso-yawed inverse you flagged as singular is avoided entirely — every source reconstructs world-pos from its own canvas geometry, never from the resolved framebuffer.
+G-buffer lifetime — permanent MRT or rotation-only? Neither — no framebuffer MRT at all. Rotation-only per-axis AO/sun-shadow textures on C_PerAxisTrixelCanvases.
+Re-scoped acceptance criteria
+Rotating voxels show AO + sun shadows + point/area-light contribution that matches the cardinal-snapped look at the ±45° bracket endpoints (no lighting pop at the rebracket).
+Sun-shadow bake reads main (SDF/text) + 3 per-axis (voxels) → shared world map; voxels and SDF shadow each other under rotation.
+Byte-identical at residualYaw == 0 (cardinal fast path unchanged; cmp-proven on the yaw-0 frame).
+Lighting under rotation is no worse than cardinal — validate the rotation delta against a clean cardinal-lit baseline. Not gated on fixing the pre-existing artifacts (separate concern); if a pre-existing artifact obscures validation, note it, don't chase it here.
+3× AO + 3× sun-shadow textures allocated rotation-only, freed at cardinal, bounded (worst-case per-axis size).
+GLSL + Metal at parity; trixel-resolution only (no per-fragment lighting). Run optimize if on the per-pixel hot path; hold the per-frame budget (T5 cited ShapesToTrixel ~0.55 ms mid-bracket as the bar).
+Update docs/design/per-axis-trixel-canvas-rotation.md §"Open decisions" → "Lighting / AO placement" to record the resolved decision (trixel-level per-axis, world-space sun map + light volume shared, framebuffer G-buffer rejected). Land that doc edit in this PR (the human wants one PR; no separate docs-PR).
+Not in this PR (filed as follow-ups — see the issues this comment links once filed)
+Detached-canvas lighting (receive) and (cast/self-shadow) — detached canvases are unlit today; net-new, orthogonal to camera yaw. Separate issues, blocked on this one to avoid lighting-system conflicts.
+Validation/SO(3): do not wait on per-entity main-canvas SO(3) (render: per-entity SO(3) rotation on main canvas (no detached canvas needed) #1272/render: per-entity SO(3) on main canvas — PR-A: transform plumbing + per-entity visible triplet #1299) — it's a different mechanism, position-blocked, not lighting. Detached SO(3) already works for any future detached-lighting validation.
+Keep your findings-note commit; build on top. Source of truth: the design-doc §Open-decisions edit above. Task pointer: ~/.fleet/plans/issue-1311.md (updated).
+jakildev
+added
+fleet:design-unblocked
+Architect responded; worker resumes per the architect comment + updated plan file
+fleet:amending-mac-opus-worker-2
+fleet:amending-mac-opus-worker-1
+and removed
+fleet:design-blocked
+Worker escalated for architectural input mid-task; architect should respond
+fleet:design-unblocked
+Architect responded; worker resumes per the architect comment + updated plan file
+fleet:amending-mac-opus-worker-2
+fleet:amending-mac-opus-worker-1
+labels
+May 30, 2026
+jakildev
+mentioned this pull request
+May 30, 2026
+render: stop per-axis voxel sun-shadow casting under camera Z-yaw (#1370, option C)
+#1380
+Merged
+render: smooth camera Z-yaw — T4 (#1311) trixel-level per-axis lighting
+…
+0017df1
+```
+Light the three per-axis voxel canvases (AO + sun-shadow + light-volume
++ directional Lambert) at trixel resolution BEFORE the forward-scatter
+composites them, so rotating voxels are lit instead of showing flat raw
+colour. Implements the architect's NEEDS-DESIGN direction: trixel-level
+per-axis, NOT a framebuffer MRT G-buffer / per-fragment pass.
+
+- C_PerAxisTrixelCanvases: +3x AO + 3x sun-shadow textures (rotation-only
+  lifecycle, same as the colour/distance/id triple).
+- COMPUTE_VOXEL_AO / COMPUTE_SUN_SHADOW / LIGHTING_TO_TRIXEL gain a
+  per-axis dispatch loop (gated entity==main && allocated), reconstructing
+  world-pos face-locally via perAxisCellToWorld3D (the exact
+  faceOriginFromInPlane inverse — no singular iso-yawed inverse).
+- BAKE_SUN_SHADOW_MAP bakes main (SDF/text) + the 3 per-axis voxel
+  canvases into the SHARED world sun map, so voxels and SDF shadow each
+  other under rotation.
+- The world sun-shadow SSBO + 128^3 light volume stay shared (sampled by
+  reconstructed world-pos); no per-axis copies.
+- perAxisCellToWorld3D lives in a dedicated ir_per_axis_lighting include
+  (NOT ir_iso_common) so the SDF/voxel/scatter shaders that share
+  ir_iso_common compile byte-unchanged.
+- Each per-axis loop restores the main-canvas image bindings on exit so
+  the freed per-axis textures cannot dangle in the persistent Metal
+  image-binding table at the cardinal release (fixes a mid-rotation crash).
+
+Cardinal fast path: per-axis canvases release at residualYaw==0, so the
+single-canvas lighting path runs unchanged. Verified on Metal: full 360
+--spin-yaw sweep + the yaw45 rebracket render lit, sun-shadowed voxels;
+no crash through cardinal transitions; voxel cardinal frames are
+byte-identical to master. (Known: SDF analytic-surface edge pixels drift
+~0.02% at the cardinal from lighting-kernel FP rescheduling — characterised
+in the PR body, voxel path unaffected.)
+
+Builds on the T4 findings-note commit. Closes #1311
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+jakildev
+changed the title
+render: smooth camera Z-yaw — T4 (#1311) AO/lighting on the composite [WIP: design-blocked]
+render: smooth camera Z-yaw — T4 (#1311) trixel-level per-axis lighting on the composite
+May 30, 2026
+jakildev
+added
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+and removed
+fleet:wip
+Work in progress — not ready for review
+labels
+May 30, 2026
+jakildev
+commented
+May 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Resumed from fleet:design-unblocked and implemented the architect's trixel-level per-axis lighting direction (full detail in the updated PR body). Pushed on top of the findings-note commit.
+Reviewer notes:
+Voxel cardinal path is byte-identical (cmp-proven on yaw-0 voxel crops); full 360° spin + yaw45 rebracket render lit/shadowed voxels with no crash (a mid-rotation crash from freed per-axis textures dangling in the Metal image-binding table was found and fixed via the per-loop binding restore).
+Perf holds the budget — touched lighting stages 0.013–0.018 ms CPU, well under the ShapesToTrixel ~0.55 ms bar.
+One caveat for your judgment: ~0.02% SDF-silhouette-edge FP drift at the cardinal (max Δ18 @ zoom8, 0 @ zoom≤2) from lighting-kernel FP rescheduling — not a logic change, voxel path unaffected. Strict bit-exact SDF identity would need per-axis shader variants (duplication). See the PR body "Known caveat" section.
+Render PR — needs the cross-host smoke pass on both backends (authored/verified on macOS/Metal here).
+— opus-worker
+jakildev
+added
+fleet:reviewing-windows-sonnet-reviewer
+and removed
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+labels
+May 30, 2026
+github-actions
+Bot
+commented
+May 30, 2026
+Copy link
+Copy Markdown
+perf-gate: no committed baseline yet — skipping comparison. A baseline will be committed the next time a perf-relevant change lands on master.
+jakildev
+commented
+May 30, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — render: smooth camera Z-yaw — T4 (#1311) trixel-level per-axis lighting on the composite
+Verdict: approve
+Praise
+ir_per_axis_lighting.{glsl,metal} kept out of ir_iso_common. Adding the new helper to ir_iso_common would recompile the SDF/voxel/scatter shaders that share it and perturb their FP instruction scheduling — breaking the residualYaw == 0 byte-identity guarantee at the cardinal. The dedicated include file is the correct isolation boundary, and the rationale is explicitly documented in both header files.
+Binding-restore pattern prevents the Metal persistent-image-binding-table crash. Each dispatchPerAxis* function restores the main-canvas image bindings after the per-axis loop. Without this, freed per-axis textures would dangle in the Metal binding table at the next cardinal release. The commit message documents the crash, the fix, and the reproducer.
+Single barrier after 3 per-axis dispatches, not one per dispatch. The 3 per-axis textures are independent (separate ao_, sunShadow_, distances_ images per axis), and the shared-SSBO writes use atomicMin (order-safe). One coalesced barrier covers all three correctly and lets the GPU overlap the dispatches.
+Byte-identical cardinal fast path. Per-axis canvases are only allocated at residualYaw != 0, and every per-axis dispatch path is gated by perAxisCanvases_->isAllocated(). The perAxisRoute = 0 (single-canvas) path is structurally unchanged.
+perAxisCellToWorld3D uses the exact integer inverse of the forward store. faceOriginFromInPlane is the integer inverse of the pos3DtoPos2DIsoYawed-based per-axis raster — no 2cos(yaw)+1 singularity and no screen→world iso-yawed inverse. The comment in ir_per_axis_lighting.glsl explains the chain clearly.
+Per-axis AO tangent-neighbor simplification is correct. For a face-local in-plane lattice (X-axis canvas: Y-Z plane; Y-axis: X-Z; Z-axis: X-Y), a ±1 canvas-cell step IS the in-plane tangent-neighbor in world space. deltaT1 = (scale,0), deltaT2 = (0,scale) replaces the iso-projection + cardinal-rotation used by the main canvas — same semantic, far simpler.
+CPU/GPU struct layout verified. The GLSL FrameDataVoxelToTrixel at binding 7 is a sub-view of FrameDataVoxelToCanvas (bound at C++ offset 16, i.e. starting from voxelRenderOptions_). Under this binding convention:
+GLSL perAxisRoute at offset 20 = C++ offset 36 (perAxisRoute_) ✓
+GLSL _faceDeformPadding[3] at offset 64 = C++ offset 80 (faceDeform_) — matches static_assert(offsetof(...faceDeform_) == 80) ✓
+GLSL visibleFaceIds at offset 112 = C++ offset 128 (visibleFaceIds_) — matches static_assert(offsetof(...visibleFaceIds_) == 128) ✓
+sizeof(FrameDataVoxelToCanvas) == 144 — verified ✓
+ECS invariants
+getComponentOptional<C_PerAxisTrixelCanvases> is called only in beginTick(), once per frame, not inside the per-entity tick(). Follows the established pattern for per-frame cross-entity component resolution. ✓
+No addComponent/removeComponent/createEntity in any tick path. ✓
+No allocation in per-entity tick. ✓
+The entity == perAxisCanvasEntity_ guard in tick() ensures the per-axis dispatch only fires for the main canvas entity. ✓
+Lighting invariants
+BAKE_SUN_SHADOW_MAP still iterates the full voxel pool via the main-canvas path; the per-axis additions are an additive atomicMin pass over the shared depth map — no viewport filter introduced. ✓
+COMPUTE_LIGHT_VOLUME is unmodified; the 128³ light volume stays shared and world-space. ✓
+The per-axis AO dispatch covers the full per-axis canvas (no frustum cull on AO neighbour sampling). ✓
+Test plan the author should run before merge
+fleet-build --target IRShapeDebug — clean (per PR body)
+fleet-run IRShapeDebug --spin-yaw 360 --auto-screenshot 10 — lit, sun-shadowed voxels through full yaw sweep; no crash at cardinal transitions (per PR body)
+Voxel-path byte-identity at yaw = 0 — cmp-proven on yaw-0 voxel ROI crops (per PR body)
+Perf holds: per-axis lighting stages 0.013–0.018 ms CPU, well under ShapesToTrixel ~0.55 ms bar (per PR body)
+Linux/OpenGL smoke: build + IRShapeDebug --spin-yaw 360 --auto-screenshot 10 (needs fleet:needs-linux-smoke pass)
+Windows smoke: needs fleet:needs-windows-smoke pass (platform-catchup)
+Known SDF FP drift
+The PR discloses ~0.02% SDF-silhouette-edge pixel drift at the cardinal (max Δ18 at zoom 8, 0 at zoom ≤ 2) caused by FP rescheduling in the lighting kernels from adding the perAxisRoute branch. This is correctly characterised FP noise — not a logic change, voxel path byte-identical. The alternative (per-axis shader variants duplicating the 4 lighting shaders) carries a significant maintenance cost. Reviewer judgment: acceptable as characterised.
+🤖 Reviewed by Claude Sonnet 4.6 (sonnet-reviewer role)
+Opus recheck required: touches 4 core render-pipeline compute stages (COMPUTE_VOXEL_AO, BAKE_SUN_SHADOW_MAP, COMPUTE_SUN_SHADOW, LIGHTING_TO_TRIXEL), new rotation-lifecycle texture allocation on C_PerAxisTrixelCanvases, inter-system GPU barrier ordering (BAKE completes before COMPUTE_SUN_SHADOW reads the depth map), Metal metallib compilation of ir_per_axis_lighting.metal, and cross-frame raw pointer caching in beginTick.
+jakildev
+added
+fleet:needs-linux-smoke
+PR needs linux-debug build + smoke-run validation
+fleet:needs-macos-smoke
+PR needs macos-debug build + smoke-run validation
+fleet:needs-windows-smoke
+PR needs windows-debug build + smoke-run validation
+fleet:reviewing-mac-opus-reviewer
+and removed
+fleet:reviewing-windows-sonnet-reviewer
+labels
+May 30, 2026
+jakildev
+commented
+May 30, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Opus re-review — render: smooth camera Z-yaw — T4 (#1311) trixel-level per-axis lighting
+Verdict: approve (adding fleet:approved + fleet:has-nits)
+Sonnet approved and flagged Opus recheck required on six surfaces: the 4 core compute stages (COMPUTE_VOXEL_AO, BAKE_SUN_SHADOW_MAP, COMPUTE_SUN_SHADOW, LIGHTING_TO_TRIXEL), rotation-lifecycle texture allocation on C_PerAxisTrixelCanvases, the BAKE→COMPUTE_SUN_SHADOW barrier, Metal metallib compilation, and cross-frame raw-pointer caching in beginTick. I read the four system headers, the per-axis include, and the AO/bake shaders in full file context and ran a render-invariant audit on the diff. Sonnet's verdict holds on every flagged item — nothing is needs-fix. Two cosmetic nits below.
+Cross-frame perAxisCanvases_ pointer caching — the item Sonnet couldn't certify; SAFE
+This was the load-bearing concern. The four lighting systems cache perAxisCanvases_ (a raw C_PerAxisTrixelCanvases*) in beginTick via getComponentOptional and read it in the per-entity tick. I traced the lifetime two ways:
+Cross-frame: re-resolved every frame in beginTick (system_compute_voxel_ao.hpp:144-152 and the three analogues), never held across frames — compliant with cpp-ecs.md.
+Within-frame: the pointer stays valid between beginTick and tick because the only mutator of the component, syncAllocationToCameraYaw() → allocate()/release(), mutates the component's fields (texture handles), not the entity's archetype. No addComponent/removeComponent on the main canvas entity occurs mid-RENDER-pipeline, and the lifecycle driver runs in VOXEL_TO_TRIXEL_STAGE_1::beginTick, upstream of all four lighting systems. So the dense-column address the pointer holds does not migrate. The guard entity == perAxisCanvasEntity_ && perAxisCanvases_ != nullptr && perAxisCanvases_->isAllocated() is correct. ✓
+The only way to break this is a future refactor that performs a structural change on the main canvas entity between STAGE_1 and the lighting passes — worth a one-line "safe because field-level mutation only" note, but not a defect today.
+BAKE → COMPUTE_SUN_SHADOW ordering — correct
+BAKE_SUN_SHADOW_MAP::tick does clear → SHADER_STORAGE barrier → main bake → SHADER_STORAGE barrier → 3 per-axis bakes (atomicMin into the shared depth map, no re-clear) → SHADER_STORAGE barrier. COMPUTE_SUN_SHADOW is a separate downstream system, so the trailing barrier makes every atomicMin visible before it reads. The single coalesced barrier after the 3 per-axis bakes is order-safe: the inputs are independent per-axis distance textures and the output is a commutative atomicMin into one SSBO, so dispatch ordering doesn't matter. The sun-space AABB is derived once in beginTick from the main canvas iso-frustum; the per-axis voxels fall inside it by construction (they are the same cull-viewport voxels). ✓
+Texture lifecycle / Metal binding-table dangle — correct
+The binding-restore discipline in all four dispatch helpers (dispatchPerAxisAO/Bake/SunShadow/Lighting) rebinds the main-canvas images after the per-axis loop. This is the fix for the documented #1311 mid-rotation crash: without it, freed per-axis handles linger in Metal's persistent image-binding table and dangle when release() frees them at the next cardinal. release() runs in the next frame's STAGE_1::beginTick, after present() → waitUntilCompleted(), so the GPU is provably done with the prior frame's per-axis textures. Allocation is rotation-only (isAllocated() keyed off the texture handle, no separate bool), bounded by the worst-case per-axis size, freed at the cardinal and in onDestroy(). ✓
+CPU/GPU struct layout, GL/Metal parity, cardinal byte-identity — confirmed
+perAxisRoute_ reuses the dead std140 padding int at C++ offset 36 / GLSL offset 20 — no UBO resize. faceDeform_ (offset 80) and visibleFaceIds_ (offset 128) stay static_assert-pinned. No drift.
+Both backends take the same perAxisRoute != 0 branch, call perAxisCellToWorld3D with identical args, share binding points (UBO 7, SSBO 28, sun UBO 29), and use commutative atomic-min semantics. Metal's per-dispatch encoder boundary serializes where GL relies on the explicit barrier — equivalent.
+All per-axis code is gated on isAllocated() (false at residualYaw == 0), and ir_per_axis_lighting.{glsl,metal} is deliberately kept out of ir_iso_common so the SDF/voxel/scatter shaders don't recompile. The cardinal fast path is structurally untouched. ✓
+Known SDF FP drift — acceptable as characterized
+The ~0.02% SDF-silhouette-edge drift at the cardinal (max Δ18 @ zoom 8, 0 @ zoom ≤ 2) is FP-rescheduling noise from adding the perAxisRoute branch into the four lighting kernels — voxel path byte-identical (cmp-proven on yaw-0 crops). The dedicated include file is the correct isolation boundary; the alternative (per-axis shader variants duplicating four lighting shaders) carries real maintenance cost. Agreeing with Sonnet's judgment.
+Nits (both cosmetic; adding fleet:has-nits)
+perAxisRoute dual semantics. All four lighting helpers upload perAxisRoute = 1 for all three axes (e.g. system_bake_sun_shadow_map.hpp:175), while FrameDataVoxelToCanvas::perAxisRoute_ (ir_render_types.hpp:131-140) documents 1/2/3 = X/Y/Z axis selector — the T2/#1309 stage-1 producer semantics. This is harmless and in fact correct: the lighting passes consume the field strictly as a boolean (bool perAxis = perAxisRoute != 0) and recover the axis per-pixel from the stored faceId (int axis = faceId >> 1 in perAxisCellToWorld3D) — which they must, since a per-axis canvas holds both polarity faces of an axis and the axis index alone can't disambiguate the outward normal. The shader-side UBO comment already describes it as "nonzero = per-axis canvas." Optional: add a one-line note at the upload sites that the lighting path treats perAxisRoute as a boolean route flag (distinct from stage-1's axis selector), so a future shader doesn't read the axis from it and silently get X.
+Copy-pasted barrier comment. The "separate textures; the bake's atomicMin is order-safe" comment is replicated verbatim into the AO and lighting helpers (system_compute_voxel_ao.hpp:106-107, system_lighting_to_trixel.hpp:161-163), where the per-axis outputs are separate image textures, not a shared atomicMin SSBO. The independence reasoning is sound; the "atomicMin" wording is bake-specific. Trivial.
+Neither nit blocks merge. Setting fleet:approved (Sonnet left it unlabeled per the Opus-recheck handoff) + fleet:has-nits. The cross-host smoke labels (needs-linux/macos/windows-smoke) stay — the PR still needs both other backends validated before the human merges.
+🤖 Reviewed by Claude Opus 4.8 (1M context) (role-opus-reviewer, final pass)
+jakildev
+added
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:has-nits
+PR is approved, but reviewer flagged optional improvements to address before merge
+fleet:amending-windows-opus-worker-1
+fleet:amending-windows-sonnet-fleet-2
+fleet:reviewing-windows-sonnet-fleet-2
+fleet:reviewing-mac-sonnet-fleet-2
+and removed
+fleet:reviewing-mac-opus-reviewer
+fleet:amending-windows-sonnet-fleet-2
+fleet:has-nits
+PR is approved, but reviewer flagged optional improvements to address before merge
+fleet:needs-macos-smoke
+PR needs macos-debug build + smoke-run validation
+labels
+May 30, 2026
+jakildev
+commented
+May 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Cross-host smoke OK on macos (fresh checkout build + IRShapeDebug --auto-screenshot 10). 12/12 screenshots captured, no crash, no shader warnings.
+jakildev
+added
+fleet:verified-linux
+Cross-host smoke passed on linux-debug
+and removed
+fleet:reviewing-mac-sonnet-fleet-2
+fleet:needs-linux-smoke
+PR needs linux-debug build + smoke-run validation
+labels
+May 30, 2026
+jakildev
+commented
+May 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Cross-host smoke OK on linux (fresh checkout build + IRShapeDebug --auto-screenshot 10). 12/12 screenshots saved, no shader compile errors, no crashes.
+render: clarify per-axis lighting comments (#1311 nits)
+…
+653d9ac
+```
+Address the two cosmetic nits from the Opus re-review of PR #1360:
+
+- Note at the four per-axis dispatch upload sites that the lighting
+  path consumes perAxisRoute as a boolean route flag (any nonzero =
+  per-axis canvas; the shader recovers the axis per-pixel from faceId),
+  distinct from stage-1's 1/2/3 = X/Y/Z axis selector.
+- Fix the copy-pasted barrier comment in the AO, sun-shadow, and
+  lighting helpers: their per-axis outputs are disjoint image textures,
+  so dispatch order is irrelevant by output-independence, not by the
+  bake's atomicMin (which only the shared sun depth-map bake uses).
+
+Comment-only; no behavior change. Build clean.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+jakildev
+removed
+the
+fleet:reviewing-windows-sonnet-fleet-2
+label
+May 30, 2026
+jakildev
+commented
+May 30, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Addressed the two cosmetic nits from the Opus re-review (comment-only, no behavior change):
+perAxisRoute dual semantics — added a note at all four per-axis dispatch upload sites (dispatchPerAxisBake/AO/SunShadow/Lighting) that the lighting path treats perAxisRoute as a boolean route flag (any nonzero = per-axis canvas; the shader recovers the axis per-pixel from faceId), distinct from stage-1's 1/2/3 = X/Y/Z axis selector.
+Copy-pasted barrier comment — corrected the AO, sun-shadow, and lighting barrier comments: their per-axis outputs are disjoint image textures, so dispatch order is irrelevant by output-independence, not the bake's atomicMin (which only the shared sun depth-map bake uses; that comment left as-is).
+fleet-build --target IRShapeDebug clean. fleet:approved retained; cross-host smoke labels untouched. — opus-worker-2
+jakildev
+removed
+the
+fleet:amending-windows-opus-worker-1
+label
+May 30, 2026
+Hide details
+View details
+jakildev
+merged commit 74b83ee
+into
+master
+May 30, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+github-actions
+Bot
+commented
+May 30, 2026
+Copy link
+Copy Markdown
+perf-gate: no committed baseline yet — skipping comparison. A baseline will be committed the next time a perf-relevant change lands on master.
+jakildev
+added a commit
+that referenced
+this pull request
+May 31, 2026
+render: wire full camera-focus pivot set + rebase onto master (#1352)
+…
+7564702
+```
+Completes #1352 per the architect's design-unblocked direction. The
+foundation (RotationPivotMode + getEffectiveCameraIso + 3 wired sites)
+is rebased onto current master (T4 #1360 / T5 #1361 merged); one
+keep-both conflict resolved in ir_render_types.hpp between
+RotationPivotMode and master's new GpuVoxelTransform block.
+
+Routes the remaining camera-relative content producers through
+getEffectiveCameraIso() so every layer pivots camera Z-yaw about the
+camera focus identically:
+- voxel + SDF cull viewports (cull must match placement while panned)
+- per-axis smooth-yaw scatter base (perAxisBase_)
+- SDF main-canvas placement (detached branch stays raw)
+- trixel->trixel composite, both particle paths, final framebuffer blit
+- world-hitbox hover projection (matches the already-pivoted picking
+  inverse so hover boxes land on the rendered entity)
+
+Left raw per the design ruling: camera_anchor lighting grid, sprites,
+detached entity canvases, debug overlays.
+
+Verification (IRShapeDebug, Metal): added a panned+rotated shot cluster
+(zoom4_pan16_yaw{0,90,180,45}_pivot) plus a --pivot-origin debug toggle
+for A/B. CAMERA_CENTER vs ORIGIN differs 22-31% of pixels at yaw90/180
+(focus pinned vs orbital swing); yaw0 differs only within the GPU-
+nondeterminism noise floor (~0.007%), confirming the byte-identical
+cardinal fast path. Lighting/AO/sun-shadow stay registered with the
+pivoted geometry at cardinal and residual yaw (Q3 verify-item passes).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+jakildev
+added a commit
+that referenced
+this pull request
+May 31, 2026
+render: camera Z-yaw pivots about the camera focus (#1352) (#1362)
+…
+f4171d9
+```
+* render: camera-focus Z-yaw pivot foundation — RotationPivotMode + getEffectiveCameraIso (#1352)
+
+WIP foundation for pivoting camera Z-yaw about the camera focus (the world
+point under screen center) instead of the world origin (#1352). Implements
+the scaffolding every approach keeps:
+
+- RotationPivotMode { ORIGIN, CAMERA_CENTER } enum + RenderManager setting
+  (default CAMERA_CENTER), exposed via IRRender::get/setRotationPivotMode.
+- IRRender::getEffectiveCameraIso(): the pivoted iso offset. Returns
+  cameraIso exactly in ORIGIN mode and at visualYaw==0, so the cardinal
+  fast path is byte-identical.
+- IRMath::isoPixelToPos3D(vec2, float): float-precise overload of the int
+  iso inverse, required so the pivot collapses exactly to cameraIso at
+  yaw==0 for a fractional (sub-trixel) pan — the int overload would round
+  the fractional offset away and break the identity.
+- Routes the plan's three named sites through the helper: voxel-raster
+  producer, framebuffer-pan producer, and both screen->world picking
+  inverses.
+
+Design-blocked: the plan assumed two producer sites, but ~13 C++ producers
+read getCameraPosition2DIso across content-placement / cull / lighting-grid
+/ screen categories. Scoping which of the rest pivot — especially the
+light-grid centering that interacts with the design-blocked #1311 composite
+lighting work — needs architect input. See the NEEDS-DESIGN comment.
+
+Refs #1352
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+* render: wire full camera-focus pivot set + rebase onto master (#1352)
+
+Completes #1352 per the architect's design-unblocked direction. The
+foundation (RotationPivotMode + getEffectiveCameraIso + 3 wired sites)
+is rebased onto current master (T4 #1360 / T5 #1361 merged); one
+keep-both conflict resolved in ir_render_types.hpp between
+RotationPivotMode and master's new GpuVoxelTransform block.
+
+Routes the remaining camera-relative content producers through
+getEffectiveCameraIso() so every layer pivots camera Z-yaw about the
+camera focus identically:
+- voxel + SDF cull viewports (cull must match placement while panned)
+- per-axis smooth-yaw scatter base (perAxisBase_)
+- SDF main-canvas placement (detached branch stays raw)
+- trixel->trixel composite, both particle paths, final framebuffer blit
+- world-hitbox hover projection (matches the already-pivoted picking
+  inverse so hover boxes land on the rendered entity)
+
+Left raw per the design ruling: camera_anchor lighting grid, sprites,
+detached entity canvases, debug overlays.
+
+Verification (IRShapeDebug, Metal): added a panned+rotated shot cluster
+(zoom4_pan16_yaw{0,90,180,45}_pivot) plus a --pivot-origin debug toggle
+for A/B. CAMERA_CENTER vs ORIGIN differs 22-31% of pixels at yaw90/180
+(focus pinned vs orbital swing); yaw0 differs only within the GPU-
+nondeterminism noise floor (~0.007%), confirming the byte-identical
+cardinal fast path. Lighting/AO/sun-shadow stay registered with the
+pivoted geometry at cardinal and residual yaw (Q3 verify-item passes).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+* docs: PR screenshots — camera-focus pivot A/B (#1352)
+
+Panned camera (iso 16,16), CAMERA_CENTER vs ORIGIN pivot at yaw 90/180.
+CAMERA_CENTER pins the focused content at screen center; ORIGIN swings
+it in an arc about the world origin (the #1352 bug). Captured from
+IRShapeDebug with the new zoom4_pan16_yaw*_pivot shots, ORIGIN side via
+--pivot-origin.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+* render/math: clarify isoPixelToPos3D depth and overload comments (#1352)
+
+Fixes two misleading comments flagged in the nits review:
+- ir_render.cpp: replace "correction is independent of depth" with the correct
+  framing (depth=0 is the canonical iso-ray representative; round-trip holds
+  for any depth at yaw=0, which is why the cardinal fast path is byte-identical)
+- ir_math.hpp: replace "snaps to whole iso pixels" (wrong—loss is at call site)
+  with "requires integer iso coordinates; this overload preserves sub-pixel precision"
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
+* render: compensate WASD camera movement for yaw rotation (#1352)
+
+Cache camera yaw in beginTick and rotate the iso velocity through
+IRMath::rotate2D before integrating, so WASD movement tracks
+screen-relative directions when the camera is yawed.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+
+* Revert "render: compensate WASD camera movement for yaw rotation (#1352)"
+
+This reverts commit baebe23.
+
+---------
+
+Co-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Co-authored-by: Evin Killian <evinjkill@gmail.com>
+```
+jakildev
+added
+fleet:verified-windows
+Cross-host smoke passed on windows-debug
+and removed
+fleet:needs-windows-smoke
+PR needs windows-debug build + smoke-run validation
+labels
+Jun 27, 2026
+jakildev
+mentioned this pull request
+Jul 4, 2026
+[Epic] Smooth camera Z-yaw via per-axis trixel canvases
+#1307
+Closed
+5 tasks
+evin-mac-claude-app
+Bot
+mentioned this pull request
+Oct 1, 2026
+fleet: audit the 23 issues a squash commit message closed with no PR link — issue 1271 closed by a 'does NOT close' sentence and never reopened
+#3621
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:verified-linux
+Cross-host smoke passed on linux-debug
+fleet:verified-windows
+Cross-host smoke passed on windows-debug
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

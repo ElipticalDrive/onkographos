@@ -1,0 +1,164 @@
+--- v001.md
++++ v002.md
+@@ -27,80 +27,102 @@
+ **Algorithm Steps:**
+ 
+-1.  **Ray Segmentation**: Segment the camera ray into sub-intervals based on the distance to the skeleton. The strategy is chosen to capture main field variations while generating a small number of sub-intervals [S1]. This is performed using a dynamic view-dependent acceleration structure built on the fly [S1].
+-
+-2.  **Field Mapping**: Transform field values to a space that allows good quadratic polynomial approximation of the SCALIS field on each sub-interval. This is achieved by using a bijective mapping of the SCALIS field to an approximate smooth homothetic distance field (squared) which has the exact same isosurface of interest as the SCALIS field [S1]. All processing is done on this normalized field [S1].
+-
+-3.  **Iterative Interpolation and Root Finding**: For each sub-interval, iteratively build polynomial interpolations using fast quadratic roots computation to rapidly converge toward the real field function [S1]. A different interpolation is used and refined in each interval, locally producing an accurate approximation [S1].
+-
+-4.  **Primitive Selection**: Select primitives whose supports overlap a given interval along the ray using the dynamic A-buffer [S1].
++1.  **Primitive Selection**: Select primitives whose supports overlap a given interval along the ray using a dynamic view-dependent acceleration structure built on the fly using fast GPU construction of A-buffers [S1].
++2.  **Ray Segmentation**: Segment the camera ray into sub-intervals based on the distance to the skeleton. The strategy is chosen to capture main field variations while generating a small number of sub-intervals to be processed [S1].
++3.  **Field Mapping**: Transform field values to a space that allows good quadratic polynomial approximation of the SCALIS field on each sub-interval. This is achieved by using a bijective mapping of the SCALIS field to an approximate smooth homothetic distance field (squared) which has the exact same isosurface of interest as the SCALIS field [S1]. All processing is done on this normalized field [S1].
++4.  **Iterative Interpolation and Root Finding**: For each sub-interval, iteratively build polynomial interpolations using fast quadratic roots computation to rapidly converge toward the real field function [S1]. A different interpolation is used and refined in each interval, locally producing an accurate approximation [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def trace_scalis_ray(ray_origin, ray_direction, skeleton, isovalue):
+-    # 1. Dynamic Primitive Selection and Ray Segmentation
+-    # Build dynamic A-buffer to find primitives overlapping the ray's potential volume
+-    # This step determines the relevant primitives for the current view/ray
+-    active_primitives = build_dynamic_abuffer(ray_origin, ray_direction, skeleton)
+-    
+-    # Segment the ray into intervals capturing main field variations
+-    # The segmentation is based on distance to skeleton to ensure few sub-intervals
+-    intervals = segment_ray(ray_origin, ray_direction, active_primitives, skeleton)
+-    
+-    t_current = ray_origin.t_min
+-    t_hit = infinity
+-    
+-    for interval in intervals:
+-        # 2. Field Mapping
+-        # Map the SCALIS field to an approximate squared homothetic distance field
+-        # This normalized field exhibits variations similar to individual primitives
+-        # allowing for better quadratic approximation
+-        normalized_field_func = map_scalis_to_normalized_field(active_primitives, skeleton)
+-        
+-        # 3. Iterative Quadratic Interpolation
+-        # Use local interpolation refined in each interval
+-        # Start with an initial guess within the interval
+-        t_guess = interval.start
+-        
+-        for iteration in range(max_iterations):
+-            # Evaluate the normalized field and its derivatives at t_guess
+-            # The field evaluation uses the mapped function
+-            f_val = normalized_field_func(ray_at(t_guess))
+-            f_prime = compute_derivative(normalized_field_func, ray_at(t_guess))
+-            f_double_prime = compute_second_derivative(normalized_field_func, ray_at(t_guess))
+-            
+-            # Check convergence to isovalue in normalized space
+-            # Note: The isovalue mapping must be consistent with the normalization
+-            if abs(f_val - isovalue_normalized) < tolerance:
++import math
++
++def trace_scalis_ray(ray_origin, ray_direction, skeleton_segments, isovalue):
++    # 1. Primitive Selection (Dynamic A-Buffer simulation)
++    # Filter primitives whose bounding spheres overlap the ray segment [t_min, t_max]
++    # The sources describe a dynamic A-buffer built on the fly [S1]
++    active_primitives = []
++    for seg in skeleton_segments:
++        R = max(seg.r0, seg.r1) + math.dist(seg.v0, seg.v1)
++        oc = ray_origin - seg.center
++        b = math.dot(oc, ray_direction)
++        c = math.dot(oc, oc) - R * R
++        if c > 0.0 and b > 0.0:
++            continue
++        disc = b * b - c
++        if disc >= 0.0:
++            active_primitives.append(seg)
++
++    # 2. Ray Segmentation
++    # Divide ray into intervals based on distance to skeleton to capture field variations
++    # The exact subdivision heuristic is not specified in the sources [G]
++    intervals = compute_intervals(ray_origin, ray_direction, active_primitives)
++
++    t_hit = None
++    t_min, t_max = 0.0, 1e6
++
++    for t_start, t_end in intervals:
++        if t_start > t_max:
++            break
++        t_end = min(t_end, t_max)
++        if t_start >= t_end:
++            continue
++
++        # 3. Field Mapping
++        # Map SCALIS field to approximate squared homothetic distance field
++        # The isovalue c maps to 0 in the normalized space [S1]
++        target_normalized = 0.0
++        t_guess = t_start
++
++        for _ in range(50):
++            p = ray_origin + t_guess * ray_direction
++            f_val = evaluate_scalis_field(p, active_primitives)
++            # Bijective mapping to normalized squared distance space
++            f_norm = normalize_to_squared_distance(f_val, isovalue)
++
++            if abs(f_norm - target_normalized) < 1e-6:
+                 t_hit = t_guess
+                 break
+-            
+-            # Fast quadratic root computation for step update
+-            # Using Newton-Raphson or quadratic approximation step
+-            step = - (f_val - isovalue_normalized) / f_prime
+-            t_guess += step
+-            
+-            # Clamp t_guess to interval bounds to stay within the interpolation domain
+-            t_guess = clamp(t_guess, interval.start, interval.end)
+-            
+-            if abs(step) < precision_threshold:
++
++            # Compute derivatives along ray direction
++            # f'(t) = grad(f) . d, f''(t) = d . Hessian(f) . d
++            df = compute_ray_derivative(p, ray_direction, active_primitives)
++            d2f = compute_ray_second_derivative(p, ray_direction, active_primitives)
++
++            if abs(df) < 1e-12:
++                df = 1e-12
++
++            # Fast quadratic root computation: solve f_norm + df*dt + 0.5*d2f*dt^2 = 0
++            a = 0.5 * d2f
++            b = df
++            c = f_norm - target_normalized
++            if abs(a) < 1e-12:
++                dt = -c / b
++            else:
++                disc = b * b - 4 * a * c
++                if disc < 0:
++                    disc = 0
++                dt = (-b - math.sqrt(disc)) / (2 * a)
++
++            t_guess += dt
++            t_guess = max(t_start, min(t_end, t_guess))
++
++            if abs(dt) < 1e-8:
+                 t_hit = t_guess
+                 break
+-        
+-        if t_hit < infinity:
++
++        if t_hit is not None:
+             break
+-            
++
+     return t_hit
+ ```
+ 
+ **Parameters:**
+-- `max_iterations`: Number of iterations for quadratic root finding. Not given in the sources.
+-- `tolerance`: Convergence tolerance for the field value. Not given in the sources.
+-- `precision_threshold`: Step size threshold for convergence. Not given in the sources.
++- `max_iterations`: Fixed to 50 in the implementation to prevent infinite loops. Not given in the sources.
++- Convergence thresholds (`1e-6` for field value, `1e-8` for step size) are standard numerical values. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+ - **Precision**: The method relies on the bijective mapping to a normalized field to ensure good quadratic approximation. If the mapping is inaccurate, convergence may fail [S1].
+ - **Boundaries**: The ray segmentation must ensure that intervals are small enough to capture main field variations but large enough to minimize overhead [S1].
+-- **Degenerate Input**: The method assumes a skeleton structure with line segment primitives. Degenerate segments (zero length) may require special handling for radius interpolation [S1].
++- **Degenerate Input**: The method assumes a skeleton structure with line segment primitives. The sources do not specify handling for degenerate segments [G].
+ 
+ ## Operating characteristics

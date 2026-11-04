@@ -1,0 +1,161 @@
+# Octree-based Mesh Voxelization
+
+Also called: Recursive Triangle Voxelization via Octree, Voxelization using octree spatial partitioning
+
+## Overview
+Octree-based mesh voxelization converts a triangle mesh into a sparse voxel representation by recursively subdividing a 3D bounding box into an octree structure and marking leaf nodes that intersect with mesh triangles as active voxels [S1, unofficial]. It differs from uniform grid voxelization by adapting resolution locally, ensuring that only space occupied by the mesh is stored, which significantly reduces memory usage for sparse or complex geometries compared to fixed-resolution approaches [G].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: A triangle mesh defined by a vertex array and an index array (triangles specified as triplets of indices) [S1, unofficial].
+- **Output**: An octree structure where nodes represent spatial subdivisions, and leaf nodes marked as `active` correspond to voxels occupied by the mesh [S1, unofficial].
+
+**Data Structures**
+The core data structure is the `OctreeNode`, defined with the following fields [S1, unofficial]:
+- `isLeaf` (bool): Indicates if the node has no children [S1, unofficial].
+- `isActive` (bool): Indicates if the node represents a voxel occupied by the mesh [S1, unofficial].
+- `position` (glm::vec3): The center coordinates of the node's bounding box [S1, unofficial].
+- `size` (glm::vec3): The dimensions (width, height, depth) of the node's bounding box [S1, unofficial].
+- `color` (glm::vec3): Optional attribute for visualization (not used in core voxelization logic) [S1, unofficial].
+- `children` (OctreeNode* [8]): An array of pointers to 8 child nodes. If `isLeaf` is true, these are typically null or unused [G].
+
+**Parameters**
+- `currentDepth`: The target depth for voxelization, controlling the resolution. Default value is 6 [S1, unofficial].
+- `maxDepth`: The maximum allowed depth to prevent infinite recursion. Default value is 10 [S1, unofficial].
+
+**Algorithm Steps**
+1. **Initialization**: Create the root `OctreeNode` [S1, unofficial]. Set its `position` to `(0, 0, 0)` and `size` to `(2, 2, 2)`, defining a bounding box ranging from `-1` to `1` in all axes [S1, unofficial]. Initialize `currentDepth` to 6 and `maxDepth` to 10 [S1, unofficial].
+2. **Mesh Iteration**: Iterate through all meshes in the model [S1, unofficial]. For each mesh, iterate through the index array in steps of 3 to extract triangles [S1, unofficial].
+3. **Triangle Extraction**: For each triplet of indices `(i, i+1, i+2)`, retrieve the corresponding vertices `v0`, `v1`, and `v2` from the mesh's vertex array [S1, unofficial].
+4. **Recursive Voxelization**: Call the recursive function `voxelizeTriangle(root, v0, v1, v2, 1)` to process the triangle against the octree starting at depth 1 [S1, unofficial].
+5. **Intersection Test**: Inside `voxelizeTriangle(node, v0, v1, v2, depth)`:
+    - Calculate `halfSize = node->size * 0.5f` [S1, unofficial].
+    - Calculate `boxMin = node->position - halfSize` and `boxMax = node->position + halfSize` [S1, unofficial].
+    - Perform a bounding box overlap test between the triangle and the node's box [S1, unofficial]. This is implemented as a simplified AABB-AABB check: compute `triMin = min(v0, v1, v2)` and `triMax = max(v0, v1, v2)` component-wise [S1, unofficial]. If `triMin > boxMax` or `triMax < boxMin` in any axis, the triangle does not intersect the node's bounding box, and the function returns immediately [S1, unofficial].
+6. **Depth Check**: If `depth >= currentDepth`, mark the current `node` as a leaf (`isLeaf = true`) and active (`isActive = true`), then return [S1, unofficial].
+7. **Subdivision**: If the depth is less than `currentDepth`:
+    - Mark the node as not a leaf (`isLeaf = false`) [S1, unofficial].
+    - Iterate through 8 children (index `i` from 0 to 7) [S1, unofficial].
+    - For each child, if the pointer is null, allocate a new `OctreeNode` [S1, unofficial].
+    - Calculate the child's position offset based on the bit flags of `i`:
+        - x-offset: `+/- halfSize.x * 0.5f` if `(i & 1)` is true [S1, unofficial].
+        - y-offset: `+/- halfSize.y * 0.5f` if `(i & 2)` is true [S1, unofficial].
+        - z-offset: `+/- halfSize.z * 0.5f` if `(i & 4)` is true [S1, unofficial].
+        - Set `child->position = node->position + offset` and `child->size = halfSize` [S1, unofficial].
+    - Recursively call `voxelizeTriangle(child, v0, v1, v2, depth + 1)` [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxelize_mesh(mesh, current_depth=6, max_depth=10):
+    # Initialize root node
+    root = OctreeNode()
+    root.position = vec3(0.0, 0.0, 0.0)
+    root.size = vec3(2.0, 2.0, 2.0)
+    root.isLeaf = False
+    root.isActive = False
+    root.children = [None] * 8
+
+    # Iterate over all triangles in the mesh
+    for i in range(0, len(mesh.indices), 3):
+        v0 = mesh.vertices[mesh.indices[i]]
+        v1 = mesh.vertices[mesh.indices[i+1]]
+        v2 = mesh.vertices[mesh.indices[i+2]]
+        voxelize_triangle(root, v0, v1, v2, 1, current_depth, max_depth)
+    
+    return root
+
+def voxelize_triangle(node, v0, v1, v2, depth, current_depth, max_depth):
+    # Prevent infinite recursion
+    if depth > max_depth:
+        return
+
+    # Calculate bounding box of the current node
+    half_size = node.size * 0.5
+    box_min = node.position - half_size
+    box_max = node.position + half_size
+
+    # Simplified AABB-AABB intersection test
+    tri_min = min(v0, v1, v2)
+    tri_max = max(v0, v1, v2)
+
+    # Check for separation along any axis
+    if (tri_min.x > box_max.x or tri_max.x < box_min.x or
+        tri_min.y > box_max.y or tri_max.y < box_min.y or
+        tri_min.z > box_max.z or tri_max.z < box_min.z):
+        return
+
+    # If target depth reached, mark as active leaf
+    if depth >= current_depth:
+        node.isLeaf = True
+        node.isActive = True
+        return
+
+    # Subdivide
+    node.isLeaf = False
+    
+    for i in range(8):
+        # Allocate child if null
+        if node.children[i] is None:
+            node.children[i] = OctreeNode()
+        
+        child = node.children[i]
+        
+        # Calculate child position and size
+        child.size = half_size
+        offset = vec3(0.0, 0.0, 0.0)
+        
+        # Bit flags determine octant position
+        if i & 1:
+            offset.x += half_size.x * 0.5
+        else:
+            offset.x -= half_size.x * 0.5
+            
+        if i & 2:
+            offset.y += half_size.y * 0.5
+        else:
+            offset.y -= half_size.y * 0.5
+            
+        if i & 4:
+            offset.z += half_size.z * 0.5
+        else:
+            offset.z -= half_size.z * 0.5
+            
+        child.position = node.position + offset
+        
+        # Recurse
+        voxelize_triangle(child, v0, v1, v2, depth + 1, current_depth, max_depth)
+
+class OctreeNode:
+    def __init__(self):
+        self.isLeaf = False
+        self.isActive = False
+        self.position = vec3(0.0, 0.0, 0.0)
+        self.size = vec3(0.0, 0.0, 0.0)
+        self.color = vec3(0.0, 0.0, 0.0)
+        self.children = [None] * 8
+```
+
+**Edge Cases and Pitfalls**
+- The intersection test used is a simplified bounding box overlap test, not a precise triangle-box intersection [S1, unofficial]. This may result in false positives where a node is marked active even if the triangle only passes through the node's bounding box without intersecting the actual triangle surface within that volume [S1, unofficial].
+- The algorithm relies on a fixed initial bounding box of size `(2,2,2)` centered at `(0,0,0)` [S1, unofficial]. If the mesh lies outside this range, it will not be voxelized [G]. Pre-processing to scale or translate the mesh into this canonical space is required [G].
+
+## Subtopics
+
+### [Dynamic Sparse Voxel Octree with Morton Codes](4099-dynamic-sparse-voxel-octree-with-morton-codes.md)
+Uses Morton codes for efficient spatial indexing and memory layout, differing from the basic pointer-based octree by optimizing cache locality and enabling faster traversal. Choose when memory efficiency and traversal speed are critical.
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources. In the worst case, each triangle may traverse all nodes down to `currentDepth`, leading to $O(N \cdot 8^{D})$ where $N$ is the number of triangles and $D$ is the depth [G]. However, due to the bounding box culling, only nodes intersecting the triangle's bounding box are processed [S1, unofficial].
+- **Memory Complexity**: Not given in the sources. Memory usage is proportional to the number of active nodes in the octree [G]. Since it is a sparse structure, it uses significantly less memory than a uniform grid for the same resolution, especially for thin or complex surfaces [G].
+- **Strengths**: Adaptive resolution; memory efficient for sparse data; simple implementation [G].
+- **Limitations**: The simplified intersection test can lead to over-voxelization (false positives); fixed initial bounding box requires pre-processing; pointer-based structure may have poor cache performance compared to array-based or Morton-coded structures [G].
+- **When to use**: Suitable for applications where memory efficiency is more important than absolute geometric precision, or when the mesh is sparse [G].
+- **When not to use**: When high geometric fidelity is required without post-processing, or when the mesh is dense and fills the bounding box uniformly (a uniform grid might be simpler and faster) [G].
+
+## Background
+This method is described in the context of a 3D model voxelization tool that allows importing models, converting them to voxels using octree spatial partitioning, and exporting the result [S1, unofficial]. The specific implementation details, including the recursive triangle voxelization algorithm and data structures, are derived from the source code and documentation of the `model_voxelizer` project [S1, unofficial].
+
+## Sources
+[S1] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)

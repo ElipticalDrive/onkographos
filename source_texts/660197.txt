@@ -1,0 +1,635 @@
+Simple survival game built on Hermes 3D Engine - gather resources, craft, survive - Perf: full optimization pass v134–v183 (52 items) by imechad · Pull Request #25 · TeamBaker/survival-game
+
+Perf: full optimization pass v134–v183 (52 items) by imechad · Pull Request #25 · TeamBaker/survival-game · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+imechad
+commented
+Oct 13, 2026
+Copy link
+Copy Markdown
+Collaborator
+Completes all 52 items from OPTIMIZATIONS.md (v134 → v183), plus bug fixes.
+Memory & saves
+Voxel store: VOX_HEAD 200→16, on-demand column growth, arena allocator, 1-bit visBits (~76MB → ~9.5MB)
+Saves: IndexedDB + gzip (.svw), auto-migrates old saves; fixes const-SEED load crash
+Load time
+Time-sliced async world gen with staged progress bar
+Minified + pre-gzipped libs (1.6MB → 205KB over the wire, old-iOS fallback)
+Meshing Web Worker (LOD/save-load async, digging stays sync)
+Cache-busting via hash-versioned libs + ETag/immutable server headers
+Rendering
+One mesh per chunk, greedy meshing, Int16 positions + packed normals/colors
+Per-vertex sky/Lambert shading; speckle reconstructed in fragment shader
+Far-terrain 4x4 batched merged meshes; render-distance slider (1=28m, 2=44m)
+Static shadow caching (redraw only on change) + player-centered texel-snapped shadow box
+Removed all 26 backdrop-filter blurs; sky pinned to far depth; ghost/outline unified
+Mobile GPU
+MAX_PIXEL_RATIO 1.5 touch / 2 desktop, MSAA off on high-DPR touch
+Physics & colliders
+Adaptive physics tick (120Hz, drops under load)
+Collider streaming: radius-1 body + sync build guarantee, dirty-set batching, build-ahead scan with airLo early stop
+Powder/sand: sweep removed, budget carry, adrift flood fill anchored at airLo, per-frame debris catch bbox
+Sphere-collision contact hooks (6 hooks/step vs 344-contact scan)
+Allocation-free aim/tool/crouch paths
+Verified per-item with differential tests (byte-identical world gen over 3,000 seeds), in-browser playtests on the live tunnel, and syntax checks. Game version v134 → v183.
+chad
+added 30 commits
+October 9, 2026 18:30
+Cut voxel store memory: 16-level headroom, bitset visibility, arena a…
+…
+be5ae06
+```
+…llocator
+
+- VOX_HEAD 200 -> 16; columns grow on demand instead of pre-reserving
+- blockVisible byte array -> 1-bit-per-block visBits (~76MB -> ~9.5MB)
+- arena allocator: growColumn moves one column, repack closes waste
+- fixes growColumn doubling bug and cross-size save loading
+- cache v134
+```
+New save system: IndexedDB + gzip, no more giant JSON crash
+…
+7586244
+```
+- saves go to IndexedDB, gzipped (CompressionStream)
+- old saves migrate automatically, deleted only after new one is safe
+- export downloads .svw (gzip), import accepts old .json too
+- status messages: Saving..., size, old save upgraded
+- fixes load crash: applyWorldState no longer assigns to const SEED
+- save/load validated before replacing live world
+- cache v135
+```
+Fix mouse look on desktop: classify by primary pointer, not touch cap…
+…
+48cc9c8
+```
+…ability
+
+Computers that merely report touch support (touchscreen laptops, touch
+drivers) were classified as touch devices, which disabled pointer lock
+and made it impossible to turn the camera with the mouse.
+
+- isTouchDevice now uses (pointer: coarse) AND NOT (hover: hover),
+  falling back to the old check on browsers without matchMedia
+- requestLock also skips once touch input has actually been used, so
+  hybrid machines get mouse look with the mouse and touch UI with touch
+- Escape/pointerlockchange overlay gating updated the same way
+- Cache version 135 -> 136
+```
+Desktop mouse mode: Tab toggles free cursor for on-screen buttons
+…
+25c1793
+```
+Under pointer lock the player could not click any HUD buttons. Tab now
+toggles between look mode (pointer lock, camera turns) and mouse mode
+(free cursor, buttons clickable, keyboard still active).
+
+- Tab in look mode frees the cursor without the pause screen; a small
+  mouse-mode label shows near the SPRINT badge
+- Tab in mouse mode recaptures instantly; clicking the view also returns
+- Tab on the pause screen enters mouse mode directly
+- Opening Materials/Chart/Menu from look mode drops into mouse mode
+  instead of leaving the pause screen behind
+- Slider focus no longer swallows Tab; recapture un-focuses it
+- Help/start-screen key lists updated (Tab = Mouse mode, Esc = Pause)
+- Touch devices unaffected; cache version 136 -> 137
+```
+Fix sand-grain GPU leak: shared grain geometry per material
+…
+bcf2836
+```
+fallingGrainGeo(m) builds one speckled cube per material and reuses it for
+every falling grain; nothing per-grain to dispose on landing. Debris-child
+grains keep their seeded copies (already disposed by freeDebrisChild).
+cache v138
+```
+Instance placed blocks on debris: one draw call per piece, no per-blo…
+…
+7508ac4
+```
+…ck clones
+
+- solid placed blocks go in the piece's instance buffer with per-instance colour
+- powder gets one instanced grain layer per material per piece
+- digging/hammer/delete still remove single blocks; colliders + face culling intact
+- volume fill updates hidden faces once at the end, not per block
+- removed old per-block child-mesh code
+- cache v139
+```
+Progressive world generation with loading bar (no more frozen screen)
+…
+e2e1854
+```
+- generation sliced into ~12ms tasks; browser gets a frame between slices
+- staged progress bar: raising island, finding faces, building terrain...
+- scene renders behind the bar from the opening camera as chunks fill in
+- Enter button hidden until ready; keeps loading in background tabs
+- needs iOS 15+ (top-level await); world verified identical to before
+- cache v140
+```
+Fast visibility pass: per-column runs instead of 180M voxelAt calls
+…
+e242458
+```
+- after gen each column is solid to its top, so visibility = floor bit +
+  run above lowest neighbour top; ~4 lookups per column
+- pre-scan validates assumptions; falls back to old per-block loop if not
+- bit-exact vs old pass across 240 random test worlds
+- cache v141
+```
+Minified libraries: 1.6MB -> 205KB over the wire
+…
+9481ccd
+```
+- three.js + cannon swapped to minified builds served with pre-made .gz
+- loader picks compressed automatically, falls back to plain min on old iOS
+- web/lib 3.3MB -> 1.1MB, removed unused module/es builds
+- test.html now checks gz + unzip support
+- cache v142, libs ?v=3
+```
+Real browser caching: no more forced double-load
+…
+d7737d7
+```
+- dropped no-cache metas and localStorage reload gate
+- window.GAME_VERSION = 143; bump this after every change
+- libraries use per-content-hash URLs, cached hard
+- (server.py/server.js updated locally: caching headers, ETags, threaded)
+```
+Strip dead fillet-skin code: -824 lines
+…
+b3d2c4f
+```
+Removed the abandoned skin builder, its scene group, materials, stats,
+the filletMesh array, and the window.hermes debug entries for it.
+applyChunkView kept (rebuildChunk calls it). cache v144
+```
+Lazy sandbox iframe + shaders compile before first frame
+…
+41ad218
+```
+- 2D sandbox loads on first open (data-src -> src), state kept between opens
+- renderer.compileAsync while loading screen is up; falls back to old
+  first-frame compile if it fails
+- cache v145
+```
+One mesh per chunk: single material with per-vertex PBR
+…
+e532a99
+```
+- mesher writes all materials into one buffer; per-vertex vPbr attribute
+  (roughness/metalness/env intensity) drives a shader-injected lookup
+- colors, speckle, LOD merge, shadows, culling unchanged
+- tested headless: 1925 -> 1276 draw calls, pixel-identical except 14
+  edge pixels from draw-order shift
+- cache v146
+```
+Powder speckle in fragment shader: 1 quad per face, not 9
+…
+299af12
+```
+- pushFace emits plain 4-vertex faces; powder packs 9 cell shades into
+  3 bytes/vertex (grainRow) + 2 bytes corner position (grainUv)
+- TERRAIN_CHUNK_MAT reconstructs the same 3x3 grid in-shader, WebGL1-safe,
+  same JS hash and shades as before
+- falling-grain/rubble cubes untouched (shared geometries, out of scope)
+- cache v147
+```
+Greedy meshing: coplanar same-material faces merge into large quads
+…
+e18102b
+```
+- per-plane face sort + mergeFaces paints each plane with minimal rects
+- per-block colour variation survives (texel values carried on merged faces,
+  LOD merged cubes keep values at their start column)
+- verified in browser: terrain renders clean, no shader/JS errors
+- cache v148
+```
+Packed terrain vertex format + shared quad index buffer
+…
+d109feb
+```
+- Int16 chunk-relative positions, packed normals/colors, trimmed PBR
+- shared QUAD_INDEX buffer for chunks up to 16,384 quads
+- verified pixel-identical at all LOD steps, shadows on/off; packed
+  vertices decode to old data byte-for-byte
+- new limit: ~204m max column span in one chunk (was ~6.5km)
+- cache v150
+```
+Reuse chunk mesh buffers across rebuilds: near-zero GC churn
+…
+0b473c7
+```
+- pushQuad corner lists are grow-only typed buffers, reused
+- chunk meshes kept; rebuilds write in place, update draw range/matrix/
+  bounding sphere; 25% headroom so small digs don't realloc
+- full rebuild only on buffer growth or oversized chunks
+- verified: vertex data/draw range/sphere/matrix byte-match first build,
+  including coarse->full detail round trip
+- cache v151
+```
+collectColumn early stop: skip buried bands, jump to bedrock
+…
+7432ffd
+```
+- tracked lowest-neighbour airLo; blocks fully buried six sides draw
+  nothing, walk stops just above that point then jumps to bedrock
+- world edges and deep holes walk full depth as before; face order unchanged
+- verified vs old walk on 3,000 random simulated worlds (digs, fills,
+  missing columns, edges) with zero differences
+- cache v152
+```
+powder path: sin lookups instead of per-cell Math.sin (v153)
+c369095
+updateLOD: time-sliced rebuild queue, no per-frame work when camera s…
+…
+db97d47
+```
+…till (v154)
+```
+batch far LOD chunks into merged 4x4 meshes (v155)
+213599f
+render distance slider wired: chunk cull + LOD skip + fog match (v156)
+7e3d0ed
+chunk meshing + collider loading off main thread via worker (v157)
+75acf0c
+cap phone pixel ratio at 1.5x, drop MSAA on high-DPI touch (v158)
+58cf9f0
+terrain lighting: sky terms baked to vertices, per-pixel only sun hig…
+…
+a2f7861
+```
+…hlight (v159)
+```
+shadow map only re-renders when casters change (v160)
+6165c0d
+shadow frustum follows player, texel-snapped 4m steps (v161)
+b50f30a
+remove all HUD backdrop-filter blurs, darken panels for readability (…
+…
+799d510
+```
+…v162)
+```
+sky draws last at far depth: no overdraw under terrain (v163)
+952a1c1
+throttle sim/render while paused; 4Hz behind-menu redraw; dt clamped …
+…
+fa1f30d
+```
+…on resume (v164)
+```
+chad
+added 21 commits
+October 12, 2026 18:50
+volume ghost: single double-sided box instead of per-cell cubes (v165)
+56f6ad1
+debug collision view: single draw object, rebuild only on collider ch…
+…
+5962fb2
+```
+…ange (v166)
+```
+v167: adaptive physics rate - 60Hz steps on slow devices
+…
+9ffe4fd
+```
+Phones do 4 sub-steps per 30fps frame. Steps now drop from
+120Hz to 60Hz when the frame-time average passes ~45fps,
+halving the solver work on slow devices. Catch-up cap
+halved to match. Fast devices stay at 120Hz.
+```
+v168: batch collider rebuilds - one flush per frame
+…
+6a11752
+```
+editBlock, hammerStrike, breakOffAdrift, volumeFill and the
+col-test platform now mark their chunk dirty instead of
+rebuilding the collider per edit. A dirty set is flushed at
+3 points in tick plus before synchronous physics queries
+(hasHeadroom, respawn). Also removed the redundant collider
+rebuild in flushDirtyChunks (mesh-dirty chunks triggered up
+to 4 extra collider rebuilds per edit via neighbours).
+```
+v169: buildChunkColliderBoxes skips levels that cannot need a box
+…
+858b468
+```
+Level loop only visits levels a column could actually need a
+box at (at/below top, at/above lowest solid, below where
+higher boxes already reach). Box extension stops checking once
+below the airLo of every column in the footprint and goes
+straight to bedrock. Byte-identical output verified against
+old code across 300 randomized worlds (2,700 chunks,
+371,453 boxes): untouched, water, shafts, tunnels, builds,
+emptied columns, stale airLo. ~2x faster build.
+```
+v170: collider radius 5 chunks -> 1 chunk with hard no-fall guarantee
+…
+e1f30d0
+```
+- Travel bound for the guarantee now includes leftover
+  accumulator time and doubles speed for slope gain + 1 block
+  margin (~1.4m at sprint, chunk is 3.2m) - a missing collider
+  ahead is built synchronously before physics can use it.
+- Radius=1 is pure prefetch now: next missing chunk is >=2.8m
+  ahead, several frames even at 15fps.
+- Fixed unload path: loaded in a square but unloaded outside a
+  circle of 1.1x radius - 4 corner chunks built/dropped in a
+  loop. Unload is now a square with 1m slack.
+- Queued builds for chunks the player left are dropped.
+- respawn() builds spawn chunk collider before ground raycast;
+  collision tester keeps its 5m-ahead chunk while on.
+
+Verified: walk + sprint across 11 chunk borders, no fall-through,
+y tracks terrain. Debug collision view confirmed.
+```
+v171: batch powder-cascade gravity to once per pass
+…
+24f2b6e
+```
+Inside checkTerrainPowder, grain removals still write at once
+(the next grain's question needs it) but applyGravity's six
+flood fills and face refreshes are owed and paid once at the
+pass end (gravDefer/gravPending/flushGravity/gravGuard).
+
+Ordering guarantee: before a grain is shed while debt is
+owed, gravFate asks whether its group is already loose (same
+walk adriftGroup would do, stopping at anchored cells); if so
+the debt is paid there and the grain looked at again, so each
+group still breaks from the cell the old path would use, in
+old order, shaded against the surface its columns had then.
+
+Face refresh + chunk marks deferred to flushGravTouched.
+
+Verified: 3000-world differential old-vs-new (pt3) 0
+mismatches (13,501 chunks broken off, 75,911 grains landed,
+3,010 on water); pt2 3000 worlds 0 mismatches; pt4 edge
+cases (colDugLo stale/honest, group sort) PASS.
+```
+v172: adrift flood fill - early stop, integer keys, no recursion
+…
+d0d5edb
+```
+- adriftAnchored(): a block under its column's airLo and at/below
+  the bed is solid to the floor without walking - untouched
+  columns stop the fill at the first block instead of 100+ to
+  bedrock. Off-field neighbours skipped before keying (shared
+  wrap-around keys impossible).
+- Integer keys (gravCell), shared reused Set/flat arrays instead
+  of object-per-block; colors computed only after the group is
+  confirmed loose (grid unchanged during fill, so identical).
+- breakOffAdrift: iterative worklist with explicit neighbour
+  position per piece - same visit order as recursion, finishes
+  everything a piece sets loose before the parent's next
+  neighbour, no stack overflow on big cascades.
+
+Verified: pt4 PASS (colDugLo cases), pt3 1500 worlds 0
+mismatches incl. third run with the shortcut disabled (proves
+the shortcut itself is exercised), pt2 3000 worlds 0
+mismatches. Water placement below bed verified impossible
+(generation-only write).
+```
+v172+: remove terrain powder sweep, dirty-set is enough
+…
+7008a8a
+```
+- POWDER_SCAN_COLS / powderTick / powderCursor / the
+  every-10th-frame 120,000-column scan are gone.
+- Gap fixed: adriftFrame now marks columns dirty (loose group
+  breaking off can leave powder hanging over the gap - the
+  sweep used to find it up to 10 frames late, now same pass).
+- Budget overflow no longer drops columns: they wait in
+  powderCarry and are checked next frame with no fresh budget
+  that frame, so the per-frame limit is unchanged.
+- Save load does a one-off dug-column check (old saves could
+  hold hanging powder only the sweep would find), same budget.
+
+Verified: pt4 PASS, pt3 1200 worlds 0 mismatches, pt2 3000
+worlds 0 mismatches, new pt5 budget/carry test PASS on 5
+configurations (and fails if the carry is removed - proves it
+tests the new behavior). All syntax checks pass.
+```
+v174: catchPowder - bounding-box reject, one world-space pass per pie…
+…
+18d5afb
+```
+…ce per frame
+
+- powderCatchBox(): piece's blocks transformed once per frame
+  (stamp-invalidated), cached in a WeakMap with an AABB; the
+  piece list (restedChunks+fallingChunks) built once instead of
+  per grain.
+- Reject if grain at/below piece's lowest block or more than
+  one block outside the box on any axis (margin BLOCK*(1+1e-6)
+  so rounding can't wrongly reject). Surviving pairs run the
+  exact same per-block test as before.
+- Cache and piece list invalidated on any landing (editBlock
+  can spawn pieces, placeOnDebris grows them).
+
+Verified: pt4 PASS, pt3 1000 worlds 0 mismatches, pt2 3000
+worlds 0 mismatches, pt5 PASS. Note: pt3 has no fake debris
+pieces, so the piece-catch path needs its own targeted test.
+```
+v175: skip syncing sleeping debris; freeze long-settled pieces
+…
+170fa4e
+```
+- syncList skips sleeping bodies (position/quaternion copy is
+  a no-op for them).
+- Settled pieces that never sleep (cannon needs 1s of
+  near-stillness; ground jitter keeps them awake) are force-
+  slept after 120 frames of <2cm movement and negligible
+  rotation - low speed alone doesn't count, a slow slide keeps
+  syncing.
+- restsOnSleep: a piece is only frozen if everything it
+  touches is terrain or already asleep, so it can't be left
+  floating when what it rests on slides away; a piece the
+  player stands on is never frozen.
+- Wake check in rebuildChunkCollider now scans all sleeping
+  bodies incl. props with full bounds (not centre), fixing a
+  piece spanning into the dug chunk staying asleep and
+  floating. Sleepers keep marking ground as needed so colliders
+  never unload under them.
+- Known limit (inherited from cannon): a body woken only by
+  contact >0.14m/s - standing still against a frozen piece
+  won't wake it, walking into it will.
+
+Verified in browser: v175 loads, no JS errors, game-mode walk
+y tracks terrain normally.
+```
+v176: ground contacts - hook sphere collision fns instead of scanning…
+…
+c8a12b1
+```
+… all contacts
+
+The player is 3 spheres, so every player contact comes from
+cannon's 7 sphere collision functions; debris-vs-* contacts
+never do. Those functions are wrapped to check only the
+contacts they just created (same player test + normal maths as
+before), keeping the steepest upward normal in stepGroundNy;
+postStep just copies it. No more scanning every contact (avg
+344/step) after every step, 6x/second.
+
+Verified: headless sim with the game's own cannon copy -
+heightfield + step block + 60 debris + 3-sphere player walking
+and jumping, old full scan vs new hook ran side by side, 3000
+steps, values matched exactly every step (355 grounded + many
+airborne). Browser: v176 load, walk+jump+land works.
+
+Limits (documented): relies on this cannon copy's function
+lookup (re-check on library upgrade); player must stay
+sphere-shaped.
+```
+v177: one shared debris greedy-collider function, integer keys
+…
+65bf93c
+```
+The 3 near-copies (piece creation x2, rebuildDebrisBody) are
+one function: debrisColliderBoxes. Integer-keyed bounding-box
+array replaces string keys + Map; per-column reach replaces
+consumedTo; working arrays reused between calls (grow-only),
+closure became a top-level function. Only remaining allocs are
+the CANNON.Box/Vec3 addShape needs anyway. -131 net lines.
+
+Verified: old code pulled from file vs new function side by
+side with a fake CANNON - every half-extent and offset
+identical in identical order across: single block, column,
+slab, L, T, 3x3x3 with hole, duplicates, inter-level gaps,
+negative coords, all with mixed materials too, plus 50,000
+random 7x7x7 pieces (564k boxes) and large-then-small reuse
+check. Browser v177: loads, no errors, walk physics normal.
+```
+v178: string-key churn removed from debrisFaceMask, splitDebrisIfNeed…
+…
+7877a05
+```
+…ed, shedPowder
+
+- debrisFaceMask: indexed loop, no closure, no Set.
+- splitDebrisIfNeeded: reused typed scratch buffers for the
+  group search; nothing splits = nothing allocated. Only real
+  splits build group/part arrays. Kept group, block order and
+  cut order (highest index first) identical.
+- shedPowder: array reads/writes only; shedKey is a number
+  from direction signs + lat.length.
+- Two reused scratch buffers (shedPowder cuts while it holds
+  its lookup, so it gets its own; the other two share).
+
+Verified: old vs new side by side on 20,000 random pieces
+(mixed materials, negatives, jitter, 8 shed directions
+incl. tilted/zero) - masks, cut sequences, parts, grain order
+and positions all matched, 0 mismatches (~14k splits, 13k
+sheds). One remaining split(',') is a once-per-break chart
+lookup, not hot.
+```
+v179: cutDebrisLat split is O(1) - move blocks instead of shifting st…
+…
+165e5c7
+```
+…orage
+
+Each piece owns its own storage, so the split re-homes the
+kept blocks instead of compacting a shared array; cached
+index users (shedPowder, splitDebrisIfNeeded) cut from the
+back, so swaps only touch slots they already passed; aim
+indices are recomputed each frame; raycast hits used
+immediately. Only visible difference: recentreDebris sums
+blocks in a different order - last-bits float rounding.
+
+Verified in browser: v179 loads, no errors, physics normal.
+```
+v180: falling grains - one InstancedMesh per material instead of one …
+…
+83ad691
+```
+…mesh per grain
+
+Grains are plain records; syncFallingGrains() repacks every
+material's instances after checkTerrainPowder each frame
+(spawned grains draw same frame). Instances past count aren't
+drawn - no ghost/scale-0 hiding needed. Layers grow 64->doubling
+with the debrisReserve pattern. Same shared fallingGrainGeo(m)
++ TERRAIN_FACE_MATS[m], culling off.
+
+LOD scale stays per grain (same look, different distances) but
+squared-distance comparison replaces sqrt + lodStepFor call.
+
+Also fixed a pre-existing save crash: g.from.toArray() on a
+three.js mesh (grain shed from debris, still airborne, then
+save) - now saves from:null, identical after reload.
+
+Verified: browser v180 loads, no errors, walk loop clean
+(syncFallingGrains runs with empty set). Check next sand
+collapse visually - grains should look identical.
+```
+v181: aim/tool code - no per-frame allocations
+…
+56e335b
+```
+- hammerAim: reused hammer.hit/hammer.debris/hammerWp objects
+  (was new Vector3 per frame).
+- shovelAim: reused hit/spot/debris incl. sky fallback;
+  duplicated debris-selection collapsed into setDebrisSel (also
+  replaces cellOf's per-call object); keeps this frame's hit in
+  shovelDHit.
+- creativeAim: no second ray - reuses shovelDHit (same ray,
+  same origin, nothing changed in between); skips recompute when
+  the shovel already picked that piece. Copies results into its
+  own objects so both tools on can't cross-contaminate.
+- debrisAim: keeps closest hit, pulls ray.far in, three's
+  per-block range check prunes before triangle tests (was full
+  test of every block of every piece); ties still go to earlier
+  hit; hit.piece unchanged. Hidden debris still hittable -
+  visible-only filtering would change behavior.
+
+Verified: browser v181 game mode - hammer aim shows selection
+highlight on terrain block, STRIKE fires cleanly, no JS
+errors.
+```
+Perf #51: collider streaming bookkeeping — per-frame keep-flag cleari…
+…
+eb147a3
+```
+…ng, request-on-chunk-change, queue compaction, shared unload test
+```
+Perf #52: hasHeadroom allocation-free — module-level scratch Vec3s, r…
+…
+513923d
+```
+…eused opts/callback (v183, final item)
+```
+Checklist: all 52 optimizations DONE
+41377fd
+Merge remote-tracking branch 'origin/master' into feat/keep-colliders…
+…
+eb474f6
+```
+…-for-physics
+```
+imebored
+approved these changes
+Oct 13, 2026
+View reviewed changes
+imebored
+merged commit 52ab1a7
+into
+master
+Oct 13, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

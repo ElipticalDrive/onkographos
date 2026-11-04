@@ -1,0 +1,2872 @@
+# cpu_voxel_raycaster
+Very barebones CPU Voxel Raycaster
+
+This is the basic raycaster I used to generate visualizations for my Out-Of-Core Sparse Voxel Octree Builder ([ooc_svo_builder repo](https://github.com/Forceflow/ooc_svo_builder)) publication. It is designed to work with the _.octree_ file format that is a result of that pipeline.
+
+The code was never published as part of the publication. People have been mailing me over the years for a tool to visualize the output of ooc_svo_builder, so here it is. Note that this code is +5 yrs old and has been unmaintained since, so it will require some work to get started, but can help you if you want to research the topic further.
+
+![vizualization_example](https://raw.githubusercontent.com/Forceflow/cpu_voxel_raycaster/master/img/viz_example.png)
+
+# Building & Requirements
+I'm trying to get the project in a workable state state again. Here are some build notes for other adventurers:
+ * Converted to VS2019 solution
+ * Requires **trimesh2**: My ready-made fork can be found [here](https://github.com/Forceflow/trimesh2))
+ * Requires **[GLFW](https://www.glfw.org/)**: Only very basic window creation / keyboard functionality / OpenGL context setup is used, so it _should_ be fine to use any recent version of GLFW.
+ * Requires **[glew](http://glew.sourceforge.net/)**: Again, only using this to grab OpenGL extensions. Any recent version should do.
+ 
+ # Controls
+ Behold my horrible control scheme
+ * Numpad 4-6: Camera left right, 8-5 up down, 7-9 forwards backwards
+ * i : save screenshot in PPM format
+ * p : toggle between renderers (Included are: Diffuse, Depthmap, Intersection Test counts, Normal Map, Octree levels)
+
+### src/AABox.h
+```
+/*
+ * Box.h
+ *
+ *  Created on: Feb 15, 2012
+ *      Author: jeroenb
+ */
+
+#ifndef BOX_H_
+#define BOX_H_
+
+#include <iostream>
+#include <algorithm>
+#include <TriMesh.h>
+#include "util.h"
+#include "string.h"
+
+using namespace trimesh;
+
+class AABox {
+public:
+	//variables
+	vec3 min;
+	vec3 max;
+
+	// functions
+	AABox();
+	AABox(vec3 min, vec3 max);
+	virtual ~AABox();
+};
+
+inline AABox::AABox() : min(vec3(0,0,0)), max(vec3(0.0,0.0,0.0)) {
+	// TODO Auto-generated constructor stub
+}
+
+inline AABox::AABox(vec3 min, vec3 max): min(min), max(max) {
+	if(len(min) > len(max)){
+		this->max = min;
+		this->min = max;
+	}
+}
+
+inline AABox::~AABox() {
+	// TODO Auto-generated destructor stub
+}
+
+#endif /* BOX_H_ */
+```
+
+### src/BaseOctreeRenderer.cpp
+```
+#include "BaseOctreeRenderer.h"
+
+using namespace std;
+
+BaseOctreeRenderer::BaseOctreeRenderer(void) : Renderer("base")
+{
+}
+
+void BaseOctreeRenderer::Render(const RenderContext& rc, const Octree const* tree, unsigned char* texture_array) const{
+	// Get the number of processors in this system
+	int iCPU = omp_get_num_procs();
+	omp_set_num_threads(iCPU);
+	// declare variables we use in loop
+	int x, index, partindex;
+	TreeTraverser t;
+	DataPoint* v;
+
+#pragma omp parallel for private(x,t,v,index)
+	for(int y = 0; y < rc.n_y; y++){
+		partindex = y*(rc.n_y*4);
+		for(x = 0; x < rc.n_y; x++) {
+			index = partindex + x*4; // index in char array computation (part 2)
+			t = TreeTraverser(tree,rc.getRayForPixel(x,y));
+			while((!t.isTerminated())){
+				if(t.getCurrentNode()->isLeaf()){
+					if(t.getCurrentNode()->hasData()){
+						texture_array[index] = (unsigned char) int(tree->data[t.getCurrentNode()->data].color[0] * 255.0f);
+						texture_array[index+1] = (unsigned char) int(tree->data[t.getCurrentNode()->data].color[1] * 255.0f);
+						texture_array[index+2] = (unsigned char) int(tree->data[t.getCurrentNode()->data].color[2] * 255.0f);
+						texture_array[index+3] = (unsigned char) 1;
+						break;
+					}
+				}
+				t.step();
+			}
+		}
+	}
+}
+
+BaseOctreeRenderer::~BaseOctreeRenderer(void)
+{
+}
+```
+
+### src/BaseOctreeRenderer.h
+```
+#ifndef BASEOCTREERENDERER_H_
+#define BASEOCTREERENDERER_H_
+#include "Renderer.h"
+#include "Octree.h"
+#include "TreeTraverser.h"
+#include "misc_math.h"
+
+class BaseOctreeRenderer : public Renderer
+{
+public:
+	BaseOctreeRenderer(void);
+	void Render(RenderContext const& rc, Octree const* tree, unsigned char* texture_array) const;
+	~BaseOctreeRenderer(void);
+};
+
+#endif /* BASEOCTREERENDERER_H_ */
+```
+
+### src/Camera.h
+```
+/*
+ * Camera.h
+ *
+ *  Created on: Feb 7, 2012
+ *      Author: jeroenb
+ */
+
+#ifndef CAMERA_H_
+#define CAMERA_H_
+
+#include <TriMesh.h>
+#include <iostream>
+#include "string.h"
+#include "util.h"
+
+using namespace trimesh;
+
+struct Camera {
+	vec3 e_,g_,t_,u_,v_,w_;
+
+	Camera() : e_(vec3(0, 0, 0)), g_(vec3(0, 0, -1)), t_(vec3(0, 1, 0)) {
+		this->computeUVW();
+	}
+
+	Camera(vec3 e, vec3 g, vec3 t) : e_(e), g_(g), t_(t) {
+		this->computeUVW();
+	}
+
+	void computeUVW(){
+		vec3 w = normalized(g_) * -1.0f;
+		vec3 u = normalized((vec3)(t_ CROSS w));
+		vec3 v = (w CROSS u);
+		w_ = w; u_ = u; v_ = v;
+	}
+
+};
+
+#endif /* CAMERA_H_ */
+```
+
+### src/DataPoint.h
+```
+/*
+ * DataPoint.h
+ *
+ *  Created on: Feb 20, 2012
+ *      Author: jeroenb
+ */
+
+#ifndef DATAPOINT_H_
+#define DATAPOINT_H_
+
+//#include "array_3d.h"
+#include "util.h"
+
+using namespace trimesh;
+
+class DataPoint {
+public:
+	float opacity;
+	vec3 color;
+	vec3 normal;
+
+	DataPoint();
+	DataPoint(float opacity, vec3 color);
+	DataPoint(float opacity, vec3 color, vec3 normal);
+	bool isEmpty();
+};
+
+inline DataPoint::DataPoint() : opacity(0.0f), color(vec3(0,0,0)), normal(vec3(0.0f,0.0f,0.0f)){
+}
+
+inline DataPoint::DataPoint(float opacity, vec3 color) : opacity(opacity), color(color){
+}
+
+inline DataPoint::DataPoint(float opacity, vec3 color, vec3 normal) : opacity(opacity), color(color), normal(normal){
+}
+
+inline bool DataPoint::isEmpty(){
+	return (opacity == 0.0f);
+}
+
+#endif /* DATAPOINT_H_ */
+```
+
+### src/DebugRenderer.cpp
+```
+#include "DebugRenderer.h"
+
+
+DebugRenderer::DebugRenderer(void) : Renderer ("debug")
+{
+}
+
+using namespace std;
+
+void DebugRenderer::Render(const RenderContext& rc, const Octree const* tree, unsigned char* texture_array) const{
+	// Get the number of processors in this system
+	int iCPU = omp_get_num_procs();
+	omp_set_num_threads(iCPU);
+	// declare variables we use in loop
+	int x, index, partindex;
+
+#pragma omp parallel for private(x,index)
+	for(int y = 0; y < rc.n_y; y++){
+		partindex = y*(rc.n_y*4);
+		for(x = 0; x < rc.n_y; x++) {
+			index = partindex + x*4; // index in char array computation (part 2)
+				texture_array[index] = (unsigned char) x;
+				texture_array[index+1] = (unsigned char) y;
+				texture_array[index+2] = (unsigned char) 0;
+		}
+	}
+}
+
+void DebugRenderer::RenderWork(const RenderContext& rc,const Octree const* tree, unsigned char* texture_array) const{
+	//
+}
+
+DebugRenderer::~DebugRenderer(void)
+{
+}
+```
+
+### src/DebugRenderer.h
+```
+#ifndef DEBUGRENDERER_H_
+#define DEBUGRENDERER_H_
+#include "Renderer.h"
+#include "Octree.h"
+#include "misc_math.h"
+
+class DebugRenderer : public Renderer
+{
+public:
+	DebugRenderer(void);
+	void Render(RenderContext const& rc,  Octree const* tree, unsigned char* texture_array) const;
+	void RenderWork(RenderContext const& rc,  Octree const* tree, unsigned char* texture_array) const;
+	~DebugRenderer(void);
+};
+
+#endif /* SIMPLEOCTREERENDERER_H_ */
+```
+
+### src/DepthRenderer.cpp
+```
+#include "DepthRenderer.h"
+
+using namespace std;
+
+DepthRenderer::DepthRenderer(void) : Renderer("depth")
+{
+}
+
+void DepthRenderer::Render(const RenderContext& rc, const Octree const* tree, unsigned char* texture_array) const{
+	// Get the number of processors in this system
+	int iCPU = omp_get_num_procs();
+	omp_set_num_threads(iCPU);
+	// declare variables we use in loop
+	int x, index, partindex;
+	vec3 to_light;
+	float factor;
+	TreeTraverser t;
+	DataPoint* v;
+
+#pragma omp parallel for private(x,t,v,index,factor,to_light)
+	for(int y = 0; y < rc.n_y; y++){
+		partindex = y*(rc.n_y*4);
+		for(x = 0; x < rc.n_y; x++) {
+			index = partindex + x*4; // index in char array computation (part 2)
+			t = TreeTraverser(tree,rc.getRayForPixel(x,y));
+			while((!t.isTerminated())){
+				if(t.getCurrentNode()->isLeaf()){
+					if(t.getCurrentNode()->hasData()){
+						
+						vec3 pos = t.getCurrentPosition();
+						float factor = abs(pos[2])/(abs(tree->max[2])-abs(tree->min[2]));
+						float r = 255-(255 * factor);
+						float g = 255-(255 * factor);
+						float b = 255-(255 * factor);
+
+						texture_array[index] = (unsigned char) r;
+						texture_array[index+1] = (unsigned char) g;
+						texture_array[index+2] = (unsigned char) b;
+						texture_array[index+3] = (unsigned char) 1;
+						break;
+					}
+				}
+				t.step();
+			}
+		}
+	}
+}
+
+DepthRenderer::~DepthRenderer(void)
+{
+}
+```
+
+### src/DepthRenderer.h
+```
+#ifndef DEPTHRENDERER_H_
+#define DEPTHRENDERER_H_
+#include "Renderer.h"
+#include "Octree.h"
+#include "TreeTraverser.h"
+#include "misc_math.h"
+
+class DepthRenderer : public Renderer
+{
+public:
+	DepthRenderer(void);
+	void Render(RenderContext const& rc, Octree const* tree, unsigned char* texture_array) const;
+	~DepthRenderer(void);
+};
+
+#endif /* DEPTHRENDERER_H_ */
+```
+
+### src/DiffuseOctreeRenderer.cpp
+```
+#include "DiffuseOctreeRenderer.h"
+
+using namespace std;
+
+DiffuseOctreeRenderer::DiffuseOctreeRenderer(void) : Renderer("diffuse")
+{
+}
+
+void DiffuseOctreeRenderer::Render(const RenderContext& rc, const Octree const* tree, unsigned char* texture_array) const{
+	// Get the number of processors in this system
+	int iCPU = omp_get_num_procs();
+	omp_set_num_threads(iCPU);
+	// declare variables we use in loop
+	int x, index, partindex;
+	vec3 to_light;
+	float diffuse_factor,r,g,b,distancecut;
+	TreeTraverser t;
+	DataPoint* v;
+
+#pragma omp parallel for private(x,t,v,index,diffuse_factor,to_light,r,g,b)
+	for(int y = 0; y < rc.n_y; y++){
+		partindex = y*(rc.n_y*4);
+		for(x = 0; x < rc.n_y; x++) {
+			index = partindex + x*4; // index in char array computation (part 2)
+			t = TreeTraverser(tree,rc.getRayForPixel(x,y)); // DO A BASIC BOUNDING BOX TEST FOR THE TEST FIRST
+			while((!t.isTerminated())){
+				if(t.getCurrentNode()->isLeaf() && t.getCurrentNode()->hasData()) {//&& t.stack.back().t0.max() >0){
+					
+					r=0.0f;
+					g=0.0f;
+					b=0.0f;
+					for(int i = 0; i<rc.lights.size(); i++){
+						if(rc.lights[i].active){
+							to_light = rc.lights[i].position - t.getCurrentPosition();
+							vec3 s = to_light + (rc.camera->e_ - t.getCurrentPosition());
+							s = normalized(s);
+
+							distancecut = 1.0f /(
+								rc.lights[i].CONSTANT_ATTENUATION +
+								rc.lights[i].LINEAR_ATTENUATION*len(to_light) +
+								rc.lights[i].QUADRATIC_ATTENUATION*len2(to_light));
+
+							to_light = normalized(to_light);
+
+							// Diffuse
+							diffuse_factor = tree->data[t.getCurrentNode()->data].normal DOT to_light;
+							r +=  std::max(0.0f,diffuse_factor) * distancecut * rc.lights[i].diffuse[0];
+							g +=  std::max(0.0f,diffuse_factor) * distancecut * rc.lights[i].diffuse[1];
+							b +=  std::max(0.0f,diffuse_factor) * distancecut * rc.lights[i].diffuse[2];
+
+							// Phong
+							float phong_factor = pow(to_light DOT tree->data[t.getCurrentNode()->data].normal, rc.lights[i].SHININESS);
+							r +=  std::max(0.0f,phong_factor) * distancecut * rc.lights[i].specular[0];
+							g +=  std::max(0.0f,phong_factor) * distancecut * rc.lights[i].specular[1];
+							b +=  std::max(0.0f,phong_factor) * distancecut * rc.lights[i].specular[2];
+
+						}
+					}
+					texture_array[index] = (unsigned char) clampf(255*(tree->data[t.getCurrentNode()->data].color[0] * (r +0.25)),0,255);
+					texture_array[index+1] = (unsigned char) clampf (255*(tree->data[t.getCurrentNode()->data].color[1] * (g +0.25)),0,255);
+					texture_array[index+2] = (unsigned char) clampf (255*(tree->data[t.getCurrentNode()->data].color[2] * (b +0.25)),0,255);
+					texture_array[index+3] = (unsigned char) 1;
+					break;
+				}
+				t.step();
+			}
+		}
+	}
+}
+
+DiffuseOctreeRenderer::~DiffuseOctreeRenderer(void)
+{
+}
+```
+
+### src/DiffuseOctreeRenderer.h
+```
+#ifndef DIFFUSEOCTREERENDERER_H_
+#define DIFFUSEOCTREERENDERER_H_
+#include "Renderer.h"
+#include "Octree.h"
+#include "TreeTraverser.h"
+#include "misc_math.h"
+
+class DiffuseOctreeRenderer : public Renderer
+{
+public:
+	DiffuseOctreeRenderer(void);
+	void Render(RenderContext const& rc, Octree const* tree, unsigned char* texture_array) const;
+	~DiffuseOctreeRenderer(void);
+};
+
+#endif /* DIFFUSEOCTREERENDERER_H_ */
+```
+
+### src/Frustrum.h
+```
+/*
+ * Frustrum.h
+ *
+ *  Created on: Feb 8, 2012
+ *      Author: jeroenb
+ */
+
+#ifndef FRUSTRUM_H_
+#define FRUSTRUM_H_
+
+#include <iostream>
+#include <cmath>
+
+class Frustrum {
+public:
+	float l,r,b,t,n,f;
+	Frustrum();
+	Frustrum(float l, float r, float b, float t, float n, float f);
+	Frustrum(float fov, float aspectratio, float front, float back);
+	virtual ~Frustrum();
+};
+
+inline Frustrum::Frustrum()
+	: l(-1), r(1), b(-1), t(1), n(1), f(100){
+}
+
+inline Frustrum::Frustrum(float l, float r, float b, float t, float n, float f)
+	: l(l), r(r), b(b), t(t), n(n), f(f){
+}
+
+inline Frustrum::Frustrum(float fov, float aspectratio, float front, float back){
+	// using fov, determine height and width
+	const float degree2radian = 3.14159265358979323846 / 180.0;
+	float tang = tan(fov*degree2radian);
+	float height = front * tang;
+	float width = height*aspectratio;
+	// put it in general frustrum coordinates
+	l = -width; r = width;
+	b = -height; t = height;
+	n = front; f = back;
+}
+
+inline Frustrum::~Frustrum() {
+	// TODO Auto-generated destructor stub
+}
+
+
+#endif /* FRUSTRUM_H_ */
+```
+
+### src/LevelRenderer.cpp
+```
+#include "LevelRenderer.h"
+
+using namespace std;
+
+LevelRenderer::LevelRenderer(void) : Renderer("level"), maxlevel(1)
+{
+}
+
+void LevelRenderer::Render(const RenderContext& rc, const Octree const* tree, unsigned char* texture_array) const{
+	// Get the number of processors in this system
+	int iCPU = omp_get_num_procs();
+	omp_set_num_threads(iCPU);
+	// declare variables we use in loop
+	int x, index, partindex;
+	vec3 to_light;
+	float diffuse_factor,r,g,b,distancecut;
+	TreeTraverser t;
+	DataPoint* v;
+
+#pragma omp parallel for private(x,t,v,index,diffuse_factor,to_light,r,g,b)
+	for(int y = 0; y < rc.n_y; y++){
+		partindex = y*(rc.n_y*4);
+		for(x = 0; x < rc.n_y; x++) {
+			index = partindex + x*4; // index in char array computation (part 2)
+			t = TreeTraverser(tree,rc.getRayForPixel(x,y));
+			while((!t.isTerminated())){
+				if(t.stack.size() >= maxlevel){
+
+					VoxelData* data = tree->data;
+
+					r=0.0f;
+					g=0.0f;
+					b=0.0f;
+					for(int i = 0; i<rc.lights.size(); i++){
+						if(rc.lights[i].active){
+							to_light = rc.lights[i].position - t.getCurrentPosition();
+							vec3 s = to_light + (rc.camera->e_ - t.getCurrentPosition());
+							s = normalized(s);
+
+							distancecut = 1.0f /(
+								rc.lights[i].CONSTANT_ATTENUATION +
+								rc.lights[i].LINEAR_ATTENUATION*len(to_light) +
+								rc.lights[i].QUADRATIC_ATTENUATION*len2(to_light));
+
+							to_light = normalized(to_light);
+
+							// Diffuse
+							diffuse_factor = data[t.getCurrentNode()->data].normal DOT to_light;
+							r +=  std::max(0.0f,diffuse_factor) * distancecut * rc.lights[i].diffuse[0];
+							g +=  std::max(0.0f,diffuse_factor) * distancecut * rc.lights[i].diffuse[1];
+							b +=  std::max(0.0f,diffuse_factor) * distancecut * rc.lights[i].diffuse[2];
+
+							// Phong
+							float phong_factor = pow(s DOT data[t.getCurrentNode()->data].normal, rc.lights[i].SHININESS);
+							r +=  std::max(0.0f,phong_factor) * distancecut * rc.lights[i].specular[0];
+							g +=  std::max(0.0f,phong_factor) * distancecut * rc.lights[i].specular[1];
+							b +=  std::max(0.0f,phong_factor) * distancecut * rc.lights[i].specular[2];
+
+						}
+					}
+					texture_array[index] = (unsigned char) clampf(255*(r),0,255);
+					texture_array[index+1] = (unsigned char) clampf (255*(g),0,255);
+					texture_array[index+2] = (unsigned char) clampf (255*(b),0,255);
+					texture_array[index+3] = (unsigned char) 1;
+
+					/*DataPoint* data = tree->nonleafdata;
+					if(t.getCurrentNode()->isLeaf()){
+						data = tree->leafdata;
+					}
+
+					texture_array[index] = (unsigned char) int(data[t.getCurrentNode()->data].color[0] * 255.0f);
+					texture_array[index+1] = (unsigned char) int(data[t.getCurrentNode()->data].color[1] * 255.0f);
+					texture_array[index+2] = (unsigned char) int(data[t.getCurrentNode()->data].color[2] * 255.0f);
+					texture_array[index+3] = (unsigned char) 1;*/
+
+
+					break; // we stop here, break the while loop
+				}
+				t.step();
+			}
+		}
+	}
+}
+
+LevelRenderer::~LevelRenderer(void)
+{
+}
+```
+
+### src/LevelRenderer.h
+```
+#ifndef LEVELRENDERER_H_
+#define LEVELRENDERER_H_
+#include "Renderer.h"
+#include "Octree.h"
+#include "TreeTraverser.h"
+#include "misc_math.h"
+
+class LevelRenderer : public Renderer
+{
+public:
+
+	int maxlevel;
+
+	LevelRenderer();
+	void Render(RenderContext const& rc, Octree const* tree, unsigned char* texture_array) const;
+	std::string getName() const;
+	~LevelRenderer(void);
+};
+
+#endif /* LEVELRENDERER_H_ */
+```
+
+### src/Light.h
+```
+#ifndef LIGHT_H_
+#define LIGHT_H_
+
+#include "util.h"
+
+using namespace trimesh;
+
+class Light {
+public:
+
+	bool active;
+	vec3 position;
+	vec3 diffuse;
+	vec3 specular;
+	
+	// light constants
+	float CONSTANT_ATTENUATION;
+	float LINEAR_ATTENUATION;
+	float QUADRATIC_ATTENUATION;
+
+	// other light constants
+	float SHININESS;
+
+	Light(vec3 position,vec3 diffuse, vec3 specular);
+	virtual ~Light();
+
+private:
+	void initLight();
+};
+
+inline Light::Light(vec3 position = vec3(0,0,0),vec3 diffuse =vec3(1.0f,1.0f,1.0f), vec3 specular = vec3 (1.0f, 1.0f, 1.0f))
+	: position(position), diffuse(diffuse), specular(specular) {
+		initLight();
+}
+
+inline Light::~Light() {
+	// TODO Auto-generated destructor stub
+}
+
+inline void Light::initLight(){
+	active = true;
+	this->CONSTANT_ATTENUATION = 1.0f;
+	this->LINEAR_ATTENUATION = 0.0f;
+	this->QUADRATIC_ATTENUATION = 0.0f;
+	this->SHININESS = 50.0f;
+}
+
+
+#endif /* LIGHTOCTREERENDERER_H_ */
+```
+
+### src/Node.h
+```
+#ifndef NODE_H_
+#define NODE_H_
+
+#pragma once
+
+#include "VoxelData.h"
+
+#define NOCHILD -1
+#define NODATA 0
+
+// This is how an array of a leaf node will look
+const char LEAF[] {NOCHILD, NOCHILD, NOCHILD, NOCHILD, NOCHILD, NOCHILD, NOCHILD, NOCHILD};
+
+// An SVO node. Only contains child pointers, extend this if you want parent pointers as well
+class Node
+{
+public:
+	size_t data;
+	size_t children_base;
+	char children_offset[8];
+
+	VoxelData data_cache; // only if you want to refine octree (clustering)
+
+	Node();
+	bool hasChild(unsigned int i) const;
+	size_t getChildPos(unsigned int i) const;
+	bool isLeaf() const;
+	bool hasData() const;
+	bool isNull() const;
+};
+
+// Default constructor
+inline Node::Node() : data(0), children_base(0), data_cache(VoxelData()){
+	memset(children_offset, (char) NOCHILD, 8);
+}
+
+// Check if this Node has a child at position i
+inline bool Node::hasChild(unsigned int i) const{
+	return !(children_offset[i] == NOCHILD);
+}
+
+// Get the full index of the child at position i
+inline size_t Node::getChildPos(unsigned int i) const{
+	if(children_offset[i] == NOCHILD){
+		return 0;
+	} else {
+		return children_base + children_offset[i];
+	}
+}
+
+// If this node doesn't have data and is a leaf node, it's a null node
+inline bool Node::isNull() const{
+	return isLeaf() && !hasData();
+}
+
+// If this node doesn;t have any children, it's a leaf node
+inline bool Node::isLeaf() const{
+	if (memcmp(children_offset, LEAF, 8 * sizeof(char)) == 0){
+		return true;
+	}
+	return false;
+}
+
+// If the data pointer is NODATA, there is no data
+inline bool Node::hasData() const{
+	return !(data == NODATA);
+}
+
+#endif /* NODE_H_ */
+```
+
+### src/NormalRenderer.cpp
+```
+#include "NormalRenderer.h"
+
+using namespace std;
+
+NormalRenderer::NormalRenderer(void) : Renderer("normal")
+{
+}
+
+void NormalRenderer::Render(const RenderContext& rc, const Octree const* tree, unsigned char* texture_array) const{
+	// Get the number of processors in this system
+	int iCPU = omp_get_num_procs();
+	omp_set_num_threads(iCPU);
+	// declare variables we use in loop
+	int x, index, partindex;
+	vec3 to_light;
+	float factor;
+	TreeTraverser t;
+	DataPoint* v;
+
+#pragma omp parallel for private(x,t,v,index,factor,to_light)
+	for(int y = 0; y < rc.n_y; y++){
+		partindex = y*(rc.n_y*4);
+		for(x = 0; x < rc.n_y; x++) {
+			index = partindex + x*4; // index in char array computation (part 2)
+			t = TreeTraverser(tree,rc.getRayForPixel(x,y));
+			while((!t.isTerminated())){
+				if(t.stack.back().t0.max()> 0.0f){
+					if(t.getCurrentNode()->isLeaf()){
+						if(t.getCurrentNode()->hasData()){
+							vec3 normal = tree->data[t.getCurrentNode()->data].normal;
+							normal = normalized(normal);
+							float r = 255 * ((normal[0]+1.0f)/2.0f);
+							float g = 255 * ((normal[1]+1.0f)/2.0f);
+							float b = 255 * ((normal[2]+1.0f)/2.0f);
+
+							texture_array[index] = (unsigned char) r;
+							texture_array[index+1] = (unsigned char) g;
+							texture_array[index+2] = (unsigned char) b;
+							texture_array[index+3] = (unsigned char) 1;
+							break;
+						}
+					}
+				}
+				t.step();
+			}
+		}
+	}
+}
+
+NormalRenderer::~NormalRenderer(void)
+{
+}
+```
+
+### src/NormalRenderer.h
+```
+#ifndef NORMALRENDERER_H_
+#define NORMALRENDERER_H_
+#include "Renderer.h"
+#include "Octree.h"
+#include "TreeTraverser.h"
+#include "misc_math.h"
+
+class NormalRenderer : public Renderer
+{
+public:
+	NormalRenderer(void);
+	void Render(RenderContext const& rc, Octree const* tree, unsigned char* texture_array) const;
+	~NormalRenderer(void);
+};
+
+#endif /* NORMALRENDERER_H_ */
+```
+
+### src/Octree.h
+```
+#ifndef OCTREE_H_
+#define OCTREE_H_
+#pragma once
+
+#include "Node.h"
+#include "DataPoint.h"
+#include <TriMesh.h>
+#include <vector>
+
+class Octree
+{
+public:
+	// Octree position/size
+	vec3 min;
+	vec3 max;
+	vec3 size;
+	size_t gridlength;
+
+	// Octree stats
+	size_t n_nodes;
+	size_t n_data;
+
+	// The data
+	VoxelData* data;
+
+	// The octree nodes
+	std::vector<Node> nodes;
+
+	Octree(vec3 min, vec3 max, size_t gridlength);
+	Octree();
+	size_t storeNode(Node n);
+	const Node* getNode(size_t index) const;
+	const Node* getRootNode() const;
+	Node* getNode(size_t index);
+	Node* getRootNode();
+	~Octree(void);
+};
+
+inline Octree::Octree(vec3 min, vec3 max, size_t gridlength)
+	: min(min), max(max), size(min + max), gridlength(gridlength){
+		nodes.push_back(Node()); // push back NULL node
+}
+
+inline Octree::Octree() : min(vec3(0,0,0)), max(vec3(1,1,1)), size(vec3(1,1,1)), gridlength(128){
+}
+
+inline Octree::~Octree(void){
+}
+
+inline size_t Octree::storeNode(Node n){
+	nodes.push_back(n);
+	return nodes.size()-1;
+}
+
+inline const Node* Octree::getNode(size_t index) const{
+	return &nodes[index];
+}
+
+inline const Node* Octree::getRootNode() const{
+	return &nodes.back();
+}
+
+inline Node* Octree::getNode(size_t index){
+	return &nodes[index];
+}
+
+inline Node* Octree::getRootNode(){
+	return &nodes.back();
+}
+
+#endif /* OCTREE_H_ */
+```
+
+### src/Ray.cpp
+```
+/*
+ * Ray.cpp
+ *
+ *  Created on: Feb 14, 2012
+ *      Author: jeroenb
+ */
+
+#include "Ray.h"
+
+
+Ray::Ray(): origin(vec3(0,0,0)), direction(vec3(0,0,-1)){
+}
+
+Ray::Ray(vec3 origin, vec3 direction) : origin(origin), direction(direction){
+}
+
+//std::ostream& operator<< (std::ostream& o, Ray const& ray){
+//	return o << "#RAY : " << std::endl
+//			<< "Origin : " << Vector2String(ray.origin) << std::endl
+//			<< "Direction    : " << Vector2String(ray.direction) << std:: endl;
+//}
+
+Ray::~Ray() {
+	// TODO Auto-generated destructor stub
+}
+```
+
+### src/Ray.h
+```
+/*
+ * Ray.h
+ *
+ *  Created on: Feb 14, 2012
+ *      Author: jeroenb
+ */
+
+#ifndef RAY_H_
+#define RAY_H_
+
+#include <iostream>
+#include <string>
+#include "util.h"
+
+using namespace trimesh;
+
+class Ray {
+public:
+
+	vec3 origin;
+	vec3 direction;
+
+	// methods
+	Ray();
+	Ray(vec3 origin,vec3 direction);
+	vec3 getRayPoint(float t) const;
+	friend std::ostream& operator<< (std::ostream& o, Ray const& ray);
+	virtual ~Ray();
+};
+
+inline vec3 Ray::getRayPoint(float t) const{
+	return origin + (t*direction);
+}
+
+#endif /* RAY_H_ */
+```
+
+### src/RenderContext.h
+```
+/*
+ * RenderContext.h
+ *
+ *  Created on: Feb 13, 2012
+ *      Author: jeroenb
+ */
+
+#ifndef RENDERCONTEXT_H_
+#define RENDERCONTEXT_H_
+
+#include "Frustrum.h"
+#include "Camera.h"
+#include "Ray.h"
+#include "Light.h"
+
+using namespace trimesh;
+
+class RenderContext {
+public:
+	// class attributes
+	Camera const* camera;
+	Frustrum const* frustrum;
+	std::vector<Light> lights;
+	int n_x;
+	int n_y;
+
+	// methods
+	RenderContext();
+	RenderContext(Camera const* c, Frustrum const* frustrum, int resolution_x, int resolution_y);
+	Ray getRayForPixel(int i, int j) const;
+	vec3 getPixelCoordinate(int i, int j) const;
+	virtual ~RenderContext();
+};
+
+inline RenderContext::RenderContext() : camera(NULL), frustrum(NULL), n_x(0), n_y(0){
+}
+
+inline RenderContext::RenderContext(Camera const* c, Frustrum const* f, int resolution_x, int resolution_y)
+: camera(c), frustrum(f), n_x(resolution_x), n_y(resolution_y) {
+}
+
+// Get the screenpoint s of the pixel on the frustrum (in world coordinates)
+// This is what a projection matrix normally does
+
+inline vec3 RenderContext::getPixelCoordinate(int i, int j) const{
+	// compute u,v,w
+	float u_s = frustrum->l + (frustrum->r - frustrum->l)*((i + 0.5f) / n_x);
+	float v_s = frustrum->b + (frustrum->t - frustrum->b)*((j + 0.5f) / n_y);
+	float w_s = frustrum->n;
+	// get screenpoint s in world coordinates
+	return camera->e_ + ((u_s*camera->u_) + (v_s*camera->v_) + (w_s*camera->w_));
+}
+
+inline RenderContext::~RenderContext() {
+	// TODO Auto-generated destructor stub
+}
+
+// Get the ray from the Rendercontext's camera to the given pixel
+inline Ray RenderContext::getRayForPixel(int i, int j) const {
+	vec3 s = this->getPixelCoordinate(i,j);
+	return Ray(camera->e_,(s - camera->e_));
+}
+
+#endif /* RENDERCONTEXT_H_ */
+```
+
+### src/Renderer.h
+```
+#ifndef RENDERER_H_
+#define RENDERER_H_
+
+#include <string>
+#include <iostream>
+#include <vector>
+#include <omp.h>
+#include "time.h"
+#include <TriMesh.h>
+#include "RenderContext.h"
+#include "DataPoint.h"
+#include "intersection.h"
+#include "Octree.h"
+
+class Renderer
+{
+public:
+	std::string name;
+	virtual void Render(RenderContext const& rc,  Octree const* tree, unsigned char* texture_array) const = 0;
+
+//protected constructors
+protected:
+	Renderer();
+	Renderer(std::string name);
+};
+
+inline Renderer::Renderer() : name(""){
+};
+
+inline Renderer::Renderer(std::string name) : name(name){
+};
+
+#endif /* RENDERER_H_ */
+```
+
+### src/RendererManager.h
+```
+#ifndef RENDERERMANAGER_H_
+#define RENDERERMANAGER_H_
+
+#include <string>
+#include <vector>
+#include "Renderer.h"
+
+class RendererManager
+{
+public:
+	RendererManager();
+	void addRenderer(Renderer* r);
+	Renderer* getCurrentRenderer();
+	Renderer* getRenderer(std::string name);
+	void switchRenderer();
+
+private:
+	std::vector<Renderer*> renderers;
+	int current_r;
+};
+
+inline RendererManager::RendererManager() : current_r(0){
+
+}
+
+inline Renderer* RendererManager::getCurrentRenderer(){
+	return renderers.at(current_r);
+}
+
+inline void RendererManager::switchRenderer(){
+	current_r = (current_r+1) % renderers.size();
+}
+
+inline void RendererManager::addRenderer(Renderer* r){
+	renderers.push_back(r);
+}
+
+inline Renderer* RendererManager::getRenderer(std::string name){
+	for(std::vector<Renderer*>::iterator it = renderers.begin() ; it != renderers.end(); ++it){
+		if((*it)->name == name){
+			return *it;
+		}
+	}
+	return NULL;
+}
+
+#endif
+```
+
+### src/TopLevelRenderer.cpp
+```
+#include "TopLevelRenderer.h"
+
+using namespace std;
+
+TopLevelRenderer::TopLevelRenderer(void) : Renderer("level"), maxlevel(1)
+{
+}
+
+void TopLevelRenderer::Render(const RenderContext& rc, const Octree const* tree, unsigned char* texture_array) const{
+	// Get the number of processors in this system
+	int iCPU = omp_get_num_procs();
+	omp_set_num_threads(iCPU);
+	// declare variables we use in loop
+	int x, index, partindex;
+	vec3 to_light;
+	float diffuse_factor,r,g,b,distancecut;
+	TreeTraverser t;
+	DataPoint* v;
+
+	// how many depths?
+	float depth = log2(tree->gridlength)+2;
+	float step = rc.n_y / depth;
+
+#pragma omp parallel for private(x,t,v,index,diffuse_factor,to_light,r,g,b)
+	for(int y = 0; y < rc.n_y; y++){
+		partindex = y*(rc.n_y*4);
+		for(x = 0; x < rc.n_x; x++) {
+			index = partindex + x*4; // index in char array computation (part 2)
+			t = TreeTraverser(tree,rc.getRayForPixel(x,y));
+			while((!t.isTerminated())){
+				if(t.stack.size() >= (y / step)){
+
+					VoxelData* data = tree->data;
+
+					r=0.0f;
+					g=0.0f;
+					b=0.0f;
+					for(int i = 0; i<rc.lights.size(); i++){
+						if(rc.lights[i].active){
+							to_light = rc.lights[i].position - t.getCurrentPosition();
+							vec3 s = to_light + (rc.camera->e_ - t.getCurrentPosition());
+							s = normalized(s);
+
+							distancecut = 1.0f /(
+								rc.lights[i].CONSTANT_ATTENUATION +
+								rc.lights[i].LINEAR_ATTENUATION*len(to_light) +
+								rc.lights[i].QUADRATIC_ATTENUATION*len2(to_light));
+
+							to_light = normalized(to_light);
+
+							// Diffuse
+							diffuse_factor = data[t.getCurrentNode()->data].normal DOT to_light;
+							r +=  std::max(0.0f,diffuse_factor) * distancecut * rc.lights[i].diffuse[0];
+							g +=  std::max(0.0f,diffuse_factor) * distancecut * rc.lights[i].diffuse[1];
+							b +=  std::max(0.0f,diffuse_factor) * distancecut * rc.lights[i].diffuse[2];
+
+							// Phong
+							float phong_factor = pow(s DOT data[t.getCurrentNode()->data].normal, rc.lights[i].SHININESS);
+							r +=  std::max(0.0f,phong_factor) * distancecut * rc.lights[i].specular[0];
+							g +=  std::max(0.0f,phong_factor) * distancecut * rc.lights[i].specular[1];
+							b +=  std::max(0.0f,phong_factor) * distancecut * rc.lights[i].specular[2];
+
+						}
+					}
+					texture_array[index] = (unsigned char) clampf(255*(r),0,255);
+					texture_array[index+1] = (unsigned char) clampf (255*(g),0,255);
+					texture_array[index+2] = (unsigned char) clampf (255*(b),0,255);
+					texture_array[index+3] = (unsigned char) 1;
+
+					/*DataPoint* data = tree->nonleafdata;
+					if(t.getCurrentNode()->isLeaf()){
+						data = tree->leafdata;
+					}
+
+					texture_array[index] = (unsigned char) int(data[t.getCurrentNode()->data].color[0] * 255.0f);
+					texture_array[index+1] = (unsigned char) int(data[t.getCurrentNode()->data].color[1] * 255.0f);
+					texture_array[index+2] = (unsigned char) int(data[t.getCurrentNode()->data].color[2] * 255.0f);
+					texture_array[index+3] = (unsigned char) 1;*/
+
+
+					break; // we stop here, break the while loop
+				}
+				t.step();
+			}
+		}
+	}
+}
+
+TopLevelRenderer::~TopLevelRenderer(void)
+{
+}
+```
+
+### src/TopLevelRenderer.h
+```
+#ifndef TOPLEVELRENDERER_H_
+#define TOPLEVELRENDERER_H_
+#include "Renderer.h"
+#include "Octree.h"
+#include "TreeTraverser.h"
+#include "misc_math.h"
+
+class TopLevelRenderer : public Renderer
+{
+public:
+
+	int maxlevel;
+
+	TopLevelRenderer();
+	void Render(RenderContext const& rc, Octree const* tree, unsigned char* texture_array) const;
+	std::string getName() const;
+	~TopLevelRenderer(void);
+};
+
+#endif /* TOPLEVELRENDERER_H_ */
+```
+
+### src/TreeTraverser.cpp
+```
+#include "TreeTraverser.h"
+
+using namespace std;
+
+int TreeTraverser::firstNode(float tx0, float ty0, float tz0, float txm, float tym, float tzm){
+	unsigned char answer = 0;	// initialize to 00000000
+	// select the entry plane and set bits
+	if(tx0 > ty0){
+		if(tx0 > tz0){ // PLANE YZ
+			if(tym < tx0) answer|=2;	// set bit at position 1
+			if(tzm < tx0) answer|=1;	// set bit at position 0
+			return (int) answer;
+		}
+	} else {
+		if(ty0 > tz0){ // PLANE XZ
+			if(txm < ty0) answer|=4;	// set bit at position 2
+			if(tzm < ty0) answer|=1;	// set bit at position 0
+			return (int) answer;
+		}
+	}
+	// PLANE XY
+	if(txm < tz0) answer|=4;	// set bit at position 2
+	if(tym < tz0) answer|=2;	// set bit at position 1
+	return (int) answer;
+}
+
+// perform PUSH, POP or ADVANCE
+void TreeTraverser::step(){
+	stepcount++;
+	// if the stack is empty, we're done
+	if(stack.empty()) return;
+
+	// define some aliases to make code readable
+	vec3& t0 = stack.back().t0; 
+	vec3& t1 = stack.back().t1; 
+	vec3& tm = stack.back().tm;
+
+	//POP
+	// if we're in a terminal node or if we visited all children of that node (next child = 8), 
+	// or if the t1 values have become negative, pop the current node from the stack
+	if(stack.back().nextchild == 8 || stack.back().node->isLeaf()){
+		stack.pop_back();
+		return;
+	}
+
+	// PUSH
+	// we haven't looked at any child in this voxel yet: pick the first and push down
+	if(stack.back().nextchild == -1){
+		// calculate midpoint and save it in stack
+		tm = 0.5f*(t0+t1);
+		// calculate first node
+		stack.back().nextchild = firstNode(t0[0],t0[1],t0[2],tm[0],tm[1],tm[2]);
+	}
+
+	// ADVANCE
+	// let's look at the next child in this voxel
+	switch (stack.back().nextchild)
+	{
+	case 0: { 
+		stack.back().nextchild = newNode(tm[0],4,tm[1],2,tm[2],1);
+		if(stack.back().node->hasChild(a)){
+			TraversalNodeInfo_ info = buildNodeInfo(t0[0],t0[1],t0[2],tm[0],tm[1],tm[2],octree->getNode(stack.back().node->getChildPos(a)));
+			stack.push_back(info);
+		} return;}
+	case 1: { 
+		stack.back().nextchild = newNode(tm[0],5,tm[1],3,t1[2],8);
+		if(stack.back().node->hasChild(1^a)){
+			TraversalNodeInfo_ info = buildNodeInfo(t0[0],t0[1],tm[2],tm[0],tm[1],t1[2],octree->getNode(stack.back().node->getChildPos(1^a)));
+			stack.push_back(info);
+		} return;}
+	case 2: { 
+		stack.back().nextchild = newNode(tm[0],6,t1[1],8,tm[2],3);
+		if(stack.back().node->hasChild(2^a)){
+			TraversalNodeInfo_ info = buildNodeInfo(t0[0],tm[1],t0[2],tm[0],t1[1],tm[2],octree->getNode(stack.back().node->getChildPos(2^a)));
+			stack.push_back(info);
+		} return;}
+	case 3: { 
+		stack.back().nextchild = newNode(tm[0],7,t1[1],8,t1[2],8);
+		if(stack.back().node->hasChild(3^a)){
+			TraversalNodeInfo_ info = buildNodeInfo(t0[0],tm[1],tm[2],tm[0],t1[1],t1[2],octree->getNode(stack.back().node->getChildPos(3^a)));
+			stack.push_back(info);
+		} return;}
+	case 4: { 
+		stack.back().nextchild = newNode(t1[0],8,tm[1],6,tm[2],5);
+		if(stack.back().node->hasChild(4^a)){
+			TraversalNodeInfo_ info = buildNodeInfo(tm[0],t0[1],t0[2],t1[0],tm[1],tm[2],octree->getNode(stack.back().node->getChildPos(4^a)));
+			stack.push_back(info);
+		} return;}
+	case 5: { 
+		stack.back().nextchild = newNode(t1[0],8,tm[1],7,t1[2],8);
+		if(stack.back().node->hasChild(5^a)){
+			TraversalNodeInfo_ info = buildNodeInfo(tm[0],t0[1],tm[2],t1[0],tm[1],t1[2],octree->getNode(stack.back().node->getChildPos(5^a)));
+			stack.push_back(info);
+		} return;}
+	case 6: { 
+		stack.back().nextchild = newNode(t1[0],8,t1[1],8,tm[2],7);
+		if(stack.back().node->hasChild(6^a)){
+			TraversalNodeInfo_ info = buildNodeInfo(tm[0],tm[1],t0[2],t1[0],t1[1],tm[2],octree->getNode(stack.back().node->getChildPos(6^a)));
+			stack.push_back(info);
+		} return;}
+	case 7: { 
+		stack.back().nextchild = 8;
+		if(stack.back().node->hasChild(7^a)){
+			TraversalNodeInfo_ info = buildNodeInfo(tm[0],tm[1],tm[2],t1[0],t1[1],t1[2],octree->getNode(stack.back().node->getChildPos(7^a)));
+			stack.push_back(info);
+		} return;}
+	}
+}
+
+void TreeTraverser::initTraversal(){
+	stepcount = 0;
+	a = 0;
+
+	original_ray = ray;
+
+	// fixes for rays with negative direction
+	if(ray.direction[0] < 0.0f){
+		ray.origin[0] = octree->size[0] - ray.origin[0];
+		ray.direction[0] = - ray.direction[0];
+		a |= 4 ; //bitwise OR (latest bits are XYZ)
+	}
+	if(ray.direction[1] < 0.0f){
+		ray.origin[1] = octree->size[1] - ray.origin[1];
+		ray.direction[1] = - ray.direction[1];
+		a |= 2 ; 
+	}
+	if(ray.direction[2] > 0.0f){
+		ray.origin[2] = octree->size[2] - ray.origin[2];
+		ray.direction[2] = - ray.direction[2];
+		a |= 1 ; 
+	}
+
+	float tx0 = (octree->min[0] - ray.origin[0]) * (1.0f / ray.direction[0]);
+	float tx1 = (octree->max[0] - ray.origin[0]) * (1.0f / ray.direction[0]);
+	float ty0 = (octree->min[1] - ray.origin[1]) * (1.0f / ray.direction[1]);
+	float ty1 = (octree->max[1] - ray.origin[1]) * (1.0f / ray.direction[1]);
+	float tz0 = (octree->min[2] - ray.origin[2]) * (1.0f / ray.direction[2]);
+	float tz1 = (octree->max[2] - ray.origin[2]) * (1.0f / ray.direction[2]);
+
+	if( max(max(tx0,ty0),tz0) < min(min(tx1,ty1),tz1) ){
+		// push root node on stack
+		stack.push_back(buildNodeInfo(tx0,ty0,tz0,tx1,ty1,tz1,octree->getRootNode()));
+		return;
+	}
+	// push nothing on the stack
+}
+
+TreeTraverser::~TreeTraverser(void)
+{
+}
+```
+
+### src/TreeTraverser.h
+```
+#ifndef TREETRAVERSER_H_
+#define TREETRAVERSER_H_
+
+#pragma once
+#include "Octree.h"
+#include <vector>
+#include "Ray.h"
+#include "util.h"
+#include <math.h>
+#include <iostream>
+
+// the struct we will use to communicate current traversal info
+struct TraversalNodeInfo_ {
+	const Node* node;
+	vec3 t0,t1,tm;
+	int nextchild;
+};
+
+class TreeTraverser
+{
+public:
+	unsigned char a;
+	Octree const* octree;
+	Ray ray;
+	Ray original_ray;
+	std::vector<TraversalNodeInfo_> stack;
+	int stepcount;
+
+	TreeTraverser(void);
+	TreeTraverser(Octree const* octree, Ray ray);
+	void step();
+	bool isTerminated() const;
+	const Node* getCurrentNode() const;
+	vec3 getCurrentPosition() const;
+	~TreeTraverser(void);
+
+private:
+	TraversalNodeInfo_ buildNodeInfo(float tx0, float ty0, float tz0, float tx1, float ty1, float tz1, const Node* node);
+	int newNode(float txm, int x, float tym, int y, float tzm, int z);
+	int firstNode(float tx0, float ty0, float tz0, float txm, float tym, float tzm);
+	void initTraversal();
+};
+
+inline TreeTraverser::TreeTraverser(void){
+}
+
+inline TreeTraverser::TreeTraverser(Octree const* octree, Ray ray): octree(octree), ray(ray){
+	initTraversal();
+}
+
+inline int TreeTraverser::newNode(float txm, int x, float tym, int y, float tzm, int z){
+	if(txm < tym){
+		if(txm < tzm){return x;}  // YZ plane
+	} else {
+		if(tym < tzm){return y;} // XZ plane
+	}
+	return z; // XY plane;
+}
+
+inline TraversalNodeInfo_ TreeTraverser::buildNodeInfo(float tx0, float ty0, float tz0, float tx1, float ty1, float tz1, const Node* node){
+	TraversalNodeInfo_ info;
+	info.node = node;
+	info.t0 = vec3(tx0,ty0,tz0);
+	info.t1 = vec3(tx1,ty1,tz1);
+	info.nextchild = -1;
+	return info;
+}
+
+inline bool TreeTraverser::isTerminated() const{
+	return (stack.empty());
+}
+
+inline vec3 TreeTraverser::getCurrentPosition() const{
+	float t = stack.back().t0.max();
+	// TODO: better implementation, use a.
+	vec3 answer = original_ray.getRayPoint(t);
+	answer[2] = -answer[2];
+	return answer;
+}
+
+inline const Node* TreeTraverser::getCurrentNode() const{
+	return stack.back().node;
+}
+
+#endif
+```
+
+### src/VoxelData.h
+```
+#ifndef VOXELDATA_H_
+#define VOXELDATA_H_
+
+#include <TriMesh.h>
+#include <stdint.h>
+
+using namespace trimesh;
+using namespace std;
+
+// sizeof(VoxelData would work too)
+const size_t VOXELDATA_SIZE = sizeof(uint64_t)+2 * (3 * sizeof(float));
+
+// This struct defines VoxelData for our voxelizer.
+// This is the main memory hogger: the less data you store here, the better.
+struct VoxelData{
+	uint64_t morton;
+	vec3 color;
+	vec3 normal;
+	
+	VoxelData() : morton(0), normal(vec3()), color(vec3()){}
+	VoxelData(uint64_t morton, vec3 normal, vec3 color) : morton(morton), normal(normal), color(color){}
+
+	bool operator >(VoxelData &a){
+		return morton > a.morton;
+	}
+
+	bool operator <(VoxelData &a){
+		return morton < a.morton;
+	}
+};
+
+#endif // VOXELDATA_H_
+```
+
+### src/VoxelGenerator.cpp
+```
+///*
+// * VoxelGenerator.cpp
+// *
+// *  Created on: Feb 21, 2012
+// *      Author: jeroenb
+// */
+//
+//#include "VoxelGenerator.h"
+//
+//using namespace std;
+//
+//VoxelData generateColorField(int x, int y, int z, double percent_sparse){
+//	VoxelData a = VoxelData(x,y,z);
+//	for(int i = 0; i < x; i++){
+//		for(int j = 0; j < y; j++){
+//			for(int k = 0; k < z; k++){
+//					double opacity = 1.0;
+//					double color_x = ((double)i/x)*255;
+//					double color_y = ((double)j/y)*255;
+//					double color_z = ((double)k/z)*255;
+//					(*a)[i][j][k] = DataPoint(opacity, RGBColor((float)color_x,(float)color_y,(float)color_z));
+//					//bool isempty = !(x % 20 == 0);
+//					bool isempty = (rand() % 1000) < percent_sparse*10;
+//					if(isempty) (*a)[i][j][k] = DataPoint();
+//				}
+//			}
+//		}
+//	return a;
+//}
+//
+//
+//GridData* generateRandomColorField(int x, int y, int z, double percent_sparse){
+//	GridData* a = new GridData(boost::extents[x][y][z]);
+//	//initialize random seed
+//	srand ((unsigned int) time(NULL));
+//	for(int i = 0; i < x; i++){
+//		for(int j = 0; j < y; j++){
+//			for(int k = 0; k < z; k++){
+//				bool isempty = (rand() % 1000) < percent_sparse*10;
+//				if(isempty){
+//					(*a)[i][j][k] = DataPoint(); // generate empty DataPoint
+//				} else {
+//					float opacity = ( rand() % 50 + 1.0 ) / 100.0;
+//					float r = (float) (rand() % 255) + 1;
+//					float g = (float) (rand() % 255) + 1;
+//					float b = (float) (rand() % 255) + 1;
+//					(*a)[i][j][k] = DataPoint(opacity, RGBColor(r,g,b));
+//				}
+//			}
+//		}
+//	}
+//	return a;
+//}
+//
+//GridData* generateSphere(int x, int y, int z, double percent_sparse){
+//	GridData* a = new GridData(boost::extents[x][y][z]);
+//	//initialize random seed
+//	srand ((unsigned int) time(NULL));
+//	for(int i = 0; i < x; i++){
+//		for(int j = 0; j < y; j++){
+//			for(int k = 0; k < z; k++){
+//				float xd = x / 2.0f;
+//				float yd = y / 2.0f;
+//				float zd = z / 2.0f;
+//				float distance = sqrt( ((i-xd)*(i-xd)) + ((j-yd)*(j-yd)) + ((k-zd)*(k-zd)) );
+//				if(distance > (xd)){
+//					(*a)[i][j][k] = DataPoint(); // generate empty DataPoint
+//				} else {
+//					if((rand() % 1000) < percent_sparse*10){
+//						(*a)[i][j][k] = DataPoint();
+//					}
+//					else{
+//						float opacity = ( rand() % 50 + 1.0 ) / 100.0;
+//						float intensecolor = 1 - ((xd-distance)/xd);
+//						float intensity_r = (float) intensecolor * 255;
+//						float intensity_g = (float) intensecolor * 255;
+//						float intensity_b = (float) intensecolor * 255;
+//						float r = (intensity_r);
+//						float g = (intensity_g);
+//						float b = (intensity_b);
+//						(*a)[i][j][k] = DataPoint(opacity, RGBColor(r,g,b));
+//					}
+//				}
+//			}
+//		}
+//	}
+//	return a;
+//}
+//
+//GridData generateSphere2(int x, int y, int z){
+//	GridData a = GridData(boost::extents[x][y][z]);
+//	//initialize random seed
+//	srand ((unsigned int) time(NULL));
+//	for(int i = 0; i < x; i++){
+//		for(int j = 0; j < y; j++){
+//			for(int k = 0; k < z; k++){
+//				float xd = x / 2.0;
+//				float yd = y / 2.0;
+//				float zd = z / 2.0;
+//				float distance = sqrt( ((i-xd)*(i-xd)) + ((j-yd)*(j-yd)) + ((k-zd)*(k-zd)) );
+//				if(distance > (xd)){
+//					a[i][j][k] = DataPoint(); // generate empty DataPoint
+//				} else {
+//					//use distance for probability of DataPoint
+//					float scale = (xd-distance)/xd;
+//					if((rand() % 100) > scale*scale*scale*scale*scale*100){
+//						a[i][j][k] = DataPoint();
+//					}
+//					else{
+//						float opacity = ( rand() % 50 + 1.0 ) / 100.0;
+//						float intensecolor = ((xd-distance)/xd);
+//						float intensity_r = (float) intensecolor * 255.0f;
+//						float intensity_g = (float) intensecolor * 255.0f;
+//						float intensity_b = (float) intensecolor * 255.0f;
+//						float r = (float) clampd((intensity_r + 100),0,255);
+//						float g = (intensity_g +10 );
+//						float b = (intensity_b +10);
+//						a[i][j][k] = DataPoint(opacity, RGBColor(r,g,b));
+//					}
+//				}
+//			}
+//		}
+//	}
+//	return a;
+//}
+//
+//GridData generateTorus(int x, int y, int z, int radius, int diameter){
+//	GridData a = GridData(boost::extents[x][y][z]);
+//	//initialize random seed
+//	srand ((unsigned int) time(NULL));
+//	for(int i = 0; i < x; i++){
+//		for(int j = 0; j < y; j++){
+//			for(int k = 0; k < z; k++){
+//				//centerblock
+//				//for tomorrow
+//				// todo
+//				if(abs(radius*radius - diameter) > 40){
+//					a[i][j][k] = DataPoint(); // generate empty DataPoint
+//				} else {
+//						float opacity = ( rand() % 50 + 1.0 ) / 100.0;
+//						float r = (float) 150 + (rand() & 5);
+//						float g = (float) 10+ (rand() & 15);
+//						float b = (float) 10+ (rand() & 15);
+//						a[i][j][k] = DataPoint(opacity, RGBColor(r,g,b));
+//					}
+//				}
+//			}
+//	}
+//	return a;
+//}
+//
+////not working yet ...
+//GridData generateRandomSinusField(int x, int y, int z, double percent_sparse){
+//	GridData a = GridData(boost::extents[x][y][z]);
+//	//initialize random seed
+//	srand ((unsigned int) time(NULL));
+//	for(int i = 0; i < x; i++){
+//		for(int j = 0; j < y; j++){
+//			for(int k = 0; k < z; k++){
+//				bool isempty = (rand() % 100) < percent_sparse;
+//				if(isempty){
+//					a[i][j][k] = DataPoint(); // generate empty DataPoint
+//				} else {
+//					double opacity = ( rand() % 50 + 1.0 ) / 100.0;
+//					const double degree2radian = 3.14159265358979323846 / 180.0;
+//					int r = (int) sin(float(i/x)*degree2radian);
+//					int g = (int) sin(float(j/y)*degree2radian);
+//					int b = (int) sin(float(k/z)*degree2radian);
+//					r = r % 255;
+//					g = g % 255;
+//					b = b % 255;
+//					a[i][j][k] = DataPoint(opacity, RGBColor(float(r),float(g),float(b)));
+//				}
+//			}
+//		}
+//	}
+//	return a;
+//}
+//
+//
+```
+
+### src/VoxelGenerator.h
+```
+///*
+// * VoxelGenerator.h
+// *
+// *  Created on: Feb 21, 2012
+// *      Author: jeroenb
+// */
+//
+//#ifndef VOXELGENERATOR_H_
+//#define VOXELGENERATOR_H_
+//
+//#include "DataPoint.h"
+//#include <stdlib.h>
+//#include "util.h"
+//#include "misc_math.h"
+//#include <time.h>
+//#include <cmath>
+//
+//VoxelData generateRandomColorField(int x, int y, int z, double percent_sparse);
+//VoxelData generateColorField(int x, int y, int z, double percent_sparse);
+//VoxelData generateSphere(int x, int y, int z, double percent_sparse);
+//VoxelData generateRandomSinusField(int x, int y, int z, double percent_sparse);
+//VoxelData generateSphere2(int x, int y, int z);
+//VoxelData generateTorus(int x, int y, int z, int radius,int diameter);
+//
+//
+//#endif /* VOXELGENERATOR_H_ */
+```
+
+### src/WorkOctreeRenderer.cpp
+```
+#include "WorkOctreeRenderer.h"
+
+using namespace std;
+
+WorkOctreeRenderer::WorkOctreeRenderer(void) : Renderer("work")
+{
+}
+
+void WorkOctreeRenderer::Render(const RenderContext& rc, const Octree const* tree, unsigned char* texture_array) const{
+
+	// Get the number of processors in this system
+	int iCPU = omp_get_num_procs();
+	omp_set_num_threads(iCPU);
+	// declare variables we use in loop
+	int x, index, partindex;
+	TreeTraverser t;
+	DataPoint v;
+	double size = tree->gridlength;
+
+#pragma omp parallel for private(x,t,v,index)
+	for(int y = 0; y < rc.n_y; y++){
+		partindex = y*(rc.n_y*4);
+		for(x = 0; x < rc.n_y; x++) {
+			index = partindex + x*4; // index in char array computation (part 2)
+			t = TreeTraverser(tree,rc.getRayForPixel(x,y));
+			while((!t.isTerminated())){
+				if(t.getCurrentNode()->isLeaf()){
+					if(t.getCurrentNode()->hasData()){
+						break;
+					}
+				}
+				t.step();
+			}
+			texture_array[index] = (unsigned char) int((float(t.stepcount)/(log2(size)))*255.0);
+			texture_array[index+3] = (unsigned char) 1;
+		}
+	}
+}
+
+WorkOctreeRenderer::~WorkOctreeRenderer(void)
+{
+}
+```
+
+### src/WorkOctreeRenderer.h
+```
+#ifndef WORKOCTREERENDERER_H_
+#define WORKOCTREERENDERER_H_
+#include "Renderer.h"
+#include "Octree.h"
+#include "TreeTraverser.h"
+#include "misc_math.h"
+
+class WorkOctreeRenderer : public Renderer
+{
+public:
+	WorkOctreeRenderer(void);
+	void Render(RenderContext const& rc, Octree const* tree, unsigned char* texture_array) const;
+	~WorkOctreeRenderer(void);
+};
+
+#endif /* WORKOCTREERENDERER_H_ */
+```
+
+### src/intersection.cpp
+```
+#include "intersection.h"
+
+/**
+* Ray - Axis Aligned box intersection, Kay/Kayjia 1986
+*/
+bool intersectRayAABox2(const Ray &ray, const AABox &box, float& tnear, float& tfar)
+{
+	vec3 T_1, T_2; // vectors to hold the T-values for every direction
+	float t_near = -FLT_MAX; // maximums defined in float.h // maxenter
+	float t_far = FLT_MAX; // min
+	double inv;
+	for (int i = 0; i < 3; i++){ //we test slabs in every direction (0=x, 1=y, 2=z)
+		if (ray.direction[i] == 0){ // ray parallel to planes in this direction
+			if ((ray.origin[i] < box.min[i]) || (ray.origin[i] > box.max[i])) {
+				return false; // parallel AND outside box : no intersection possible
+			}
+		} else { // ray not parallel to planes in this direction
+			inv = 1/ray.direction[i];
+			T_1[i] = (box.min[i] - ray.origin[i]) * inv;
+			T_2[i] = (box.max[i] - ray.origin[i]) * inv;
+
+			if(T_1[i] > T_2[i]) std::swap(T_1,T_2);
+			if (T_1[i] > t_near) t_near = T_1[i];
+			if (T_2[i] < t_far) t_far = T_2[i];
+
+			if( (t_near > t_far) || (t_far < 0) ) return false;
+		}
+	}
+	tnear = t_near; tfar = t_far; // put return values in place
+	return true; // if we made it here, there was an intersection - YAY
+}
+```
+
+### src/intersection.h
+```
+#ifndef INTERSECTION_H_
+#define INTERSECTION_H_
+
+#include "AABox.h"
+#include "Ray.h"
+#include <omp.h>
+
+// Ray Box intersection
+bool intersectRayAABox2(const Ray &r, const AABox &b, float& tnear, float& tfar);
+
+#endif /* INTERSECTION_H_ */
+```
+
+### src/misc_math.h
+```
+/*
+ * misc_math.h
+ *
+ *  Created on: Feb 14, 2012
+ *      Author: jeroenb
+ */
+#ifndef MISC_MATH_H_
+#define MISC_MATH_H_
+
+#include "float.h"
+#include <math.h>
+
+inline unsigned int log2(unsigned int val) {
+	unsigned int ret = -1;
+	while (val != 0) {
+		val >>= 1;
+		ret++;
+	}
+	return ret;
+}
+
+inline int isPowerOf2(unsigned int x){
+  return ((x != 0) && !(x & (x - 1)));
+}
+
+template <typename T> int sgn(T val) {
+	return (val > T(0)) - (val < T(0));
+}
+
+inline double sym_round(double r) {
+	return (r > 0.0) ? floor(r + 0.5) : ceil(r - 0.5);
+}
+
+inline double clampf(float d,float min, float max) {
+	if (d>max) d = max;
+	if (d<min) d = min;
+	return d;
+}
+
+inline int clamp(int d,int min, int max) {
+	if (d>max) d = max;
+	if (d<min) d = min;
+	return d;
+}
+
+inline bool IsNumber(double x) {
+	// This looks like it should always be true, 
+	// but it's false if x is a NaN.
+	return (x == x); 
+}
+
+inline bool isFiniteNumber(double x) 
+{
+	return (x <= DBL_MAX && x >= -DBL_MAX); 
+}
+
+#endif /* MISC_MATH_H_ */
+```
+
+### src/morton.cpp
+```
+#include "morton.h"
+
+using namespace std;
+
+uint64_t mortonEncode(uint64_t x, uint64_t y, uint64_t z){
+	uint64_t answer = 0;
+	for (uint64_t i = 0; i < (sizeof(uint64_t) * CHAR_BIT); ++i) {
+		answer |= ((x & ((uint64_t)1 << i)) << 2*i) | ((y & ((uint64_t)1 << i)) << (2*i + 1)) | ((z & ((uint64_t)1 << i)) << (2*i + 2));
+	}
+	return answer;
+}
+
+vector<uint64_t> mortonDecode(uint64_t morton){
+	vector<uint64_t> answer(3,(uint64_t) 0);
+
+	for (uint64_t i = 0; i < (sizeof(uint64_t) * CHAR_BIT)/3; ++i) {
+		answer[0] |= ((morton & (uint64_t( 1ull ) << uint64_t((3ull * i) + 0ull))) >> uint64_t(((3ull * i) + 0ull)-i));
+		answer[1] |= ((morton & (uint64_t( 1ull ) << uint64_t((3ull * i) + 1ull))) >> uint64_t(((3ull * i) + 1ull)-i));
+		answer[2] |= ((morton & (uint64_t( 1ull ) << uint64_t((3ull * i) + 2ull))) >> uint64_t(((3ull * i) + 2ull)-i));
+	}
+	return answer;
+}
+```
+
+### src/morton.h
+```
+#ifndef FILLHIERARCHYBUILDER_H_
+#define FILLHIERARCHYBUILDER_H_
+
+#include <iostream>
+#include <fstream>
+#include "math.h"
+#include <windows.h>
+#include <cstdint>
+#include <limits.h>
+#include <vector>
+
+uint64_t mortonEncode(uint64_t x, uint64_t y, uint64_t z);
+std::vector<uint64_t> mortonDecode(uint64_t const morton);
+
+bool readMoctreeFile(std::string const filename, size_t& _gridlength, bool** _morton_array);
+void writeMoctreeFile(std::string const filename, size_t gridlength, bool const *morton_array);
+
+#endif
+```
+
+### src/octree_build.cpp
+```
+#include "octree_build.h"
+
+using namespace std;
+
+void readOctreeData(OctreeInfo const &octree_info, VoxelData** data){
+	string filename = octree_info.base_filename+string(".octreedata");
+	FILE* file = fopen(filename.c_str(), "rb");
+
+	*data = new VoxelData[octree_info.n_data];
+
+	// read data
+	for(size_t i = 0; i< octree_info.n_data; i++){
+		(*data)[i] = VoxelData();
+		readVoxelData(file,(*data)[i]);
+	}
+	fclose(file);
+}
+
+void readOctreeNodes(OctreeInfo const &octree_info, std::vector<Node> &nodes){
+	string filename = octree_info.base_filename+string(".octreenodes");
+	FILE* file = fopen(filename.c_str(), "rb");
+
+	nodes.reserve(octree_info.n_nodes);
+
+	for(size_t i = 0; i< octree_info.n_nodes; i++){
+		Node n = Node();
+		readNode(file,n);
+		nodes.push_back(n);
+	}
+	fclose(file);
+}
+
+
+int readOctreeNodes(Octree* octree, std::string filename){
+	ifstream nodefile;
+	nodefile.open(filename.c_str(), ios::in | ios::binary);
+
+	for(size_t i = 0; i< octree->n_nodes; i++){
+		Node n = Node();
+		// read children
+		nodefile.read(reinterpret_cast<char*> (& (n.children_base)), sizeof(size_t));
+		nodefile.read(reinterpret_cast<char*> (& (n.children_offset[0])), sizeof(char));
+		nodefile.read(reinterpret_cast<char*> (& (n.children_offset[1])), sizeof(char));
+		nodefile.read(reinterpret_cast<char*> (& (n.children_offset[2])), sizeof(char));
+		nodefile.read(reinterpret_cast<char*> (& (n.children_offset[3])), sizeof(char));
+		nodefile.read(reinterpret_cast<char*> (& (n.children_offset[4])), sizeof(char));
+		nodefile.read(reinterpret_cast<char*> (& (n.children_offset[5])), sizeof(char));
+		nodefile.read(reinterpret_cast<char*> (& (n.children_offset[6])), sizeof(char));
+		nodefile.read(reinterpret_cast<char*> (& (n.children_offset[7])), sizeof(char));
+		// read data pointer
+		nodefile.read(reinterpret_cast<char*> (& (n.data)), sizeof(size_t));
+		// add node to octree
+		octree->nodes.push_back(n);
+	}
+
+	nodefile.close();
+	return 1;
+}
+
+int readOctreeHeader(Octree* octree, std::string filename){
+	cout << "  reading octree header from " << filename << " ... " << endl;
+	ifstream headerfile;
+	headerfile.open(filename.c_str(), ios::in);
+
+	string line; int version; bool done = false;
+	headerfile >> line >> version;
+	if (line.compare("#octreeheader") != 0) {cout << "    Error: first line reads [" << line << "] instead of [#octreeheader]" << endl; return 0;}
+	cout << "    headerfile version: " << version << endl;
+
+	while(headerfile.good() && !done) {
+		headerfile >> line;
+		if (line.compare("end") == 0) done = true; // when we encounter data keyword, we're at the end of the ASCII header
+		else if (line.compare("gridlength") == 0) {headerfile >> octree->gridlength;}
+		else if (line.compare("n_nodes") == 0) {headerfile >> octree->n_nodes;}
+		else if (line.compare("n_data") == 0) {headerfile >> octree->n_data;}
+		else { cout << "  unrecognized keyword [" << line << "], skipping" << endl;
+			char c; do { c = headerfile.get(); } while(headerfile.good() && (c != '\n'));
+		}
+	}
+
+	headerfile.close();
+	return 1;
+}
+
+int readOctree(std::string basefilename, Octree*& octree){
+	cout << "Reading octree from cache..." << endl;
+
+	// compute inputfile
+	size_t splitpoint = basefilename.find_last_of(".");
+	stringstream octreecachefile, nodefile, datafile;
+	octreecachefile << basefilename.substr(0,splitpoint) << ".octree";
+	nodefile << basefilename.substr(0,splitpoint) << ".octreenodes";
+	datafile << basefilename.substr(0,splitpoint) << ".octreedata";
+
+	OctreeInfo info;
+	parseOctreeHeader(basefilename, info);
+
+	// start reading octree
+	octree = new Octree(); // create empty octree
+	octree->gridlength = info.gridlength;
+	octree->n_data = info.n_data;
+	octree->n_nodes = info.n_nodes;
+	
+	// read header and print statistics
+	readOctreeNodes(info, octree->nodes);
+	readOctreeData(info, &(octree->data));
+
+	return 1;
+}
+```
+
+### src/octree_build.h
+```
+#ifndef OCTREE_BUILD_H_
+#define OCTREE_BUILD_H_
+#pragma once
+
+#include "Octree.h"
+#include "octree_io.h"
+#include <string>
+#include <fstream>
+#include <iostream>
+
+using namespace std;
+
+int readOctree(std::string basefilename, Octree*& octree);
+
+#endif /* OCTREE_H_ */
+```
+
+### src/octree_io.h
+```
+#ifndef OCTREE_IO_H_
+#define OCTREE_IO_H_
+
+#include <stdio.h>
+#include <fstream>
+#include "Node.h"
+#include "VoxelData.h"
+
+using namespace std;
+
+// File containing all the octree IO methods
+
+// Internal format to represent an octree
+struct OctreeInfo {
+	int version;
+	string base_filename;
+	size_t gridlength;
+	size_t n_nodes;
+	size_t n_data;
+
+	OctreeInfo() : version(1), base_filename(string("")), gridlength(1024), n_nodes(0), n_data(0) {}
+	OctreeInfo(int version, string base_filename, size_t gridlength, size_t n_nodes, size_t n_data) : version(version), base_filename(base_filename), gridlength(gridlength), n_nodes(n_nodes), n_data(n_data) {} 
+
+	void print() const{
+		cout << "  version: " << version << endl;
+		cout << "  base_filename: " << base_filename << endl;
+		cout << "  grid length: " << gridlength << endl;
+		cout << "  n_nodes: " << n_nodes << endl;
+		cout << "  n_data: " << n_data << endl;
+	}
+
+	//// check if all files required by Tri exist
+	//bool filesExist() const{
+	//	string header = base_filename + string(".octree");
+	//	string nodes = base_filename + string(".octreenodes");
+	//	string data = base_filename + string(".octreedata");
+	//	return (file_exists(header) && file_exists(nodes) && file_exists(data));
+	//}
+};
+
+size_t writeVoxelData(FILE* f, const VoxelData &v, size_t &b_data_pos);
+void readVoxelData(FILE* f, VoxelData &v);
+size_t writeNode(FILE* node_out, const Node &n, size_t &b_node_pos);
+inline void readNode(FILE* f, Node &n);
+
+void writeOctreeHeader(const std::string &filename, const OctreeInfo &i);
+int parseOctreeHeader(const std::string &filename, OctreeInfo &i);
+
+// Write a data point to file
+inline size_t writeVoxelData(FILE* f, const VoxelData &v, size_t &b_data_pos){
+	fwrite(&v.morton, VOXELDATA_SIZE, 1, f);
+	b_data_pos++;
+	return b_data_pos-1;
+}
+
+// Read a data point from a file
+inline void readVoxelData(FILE* f, VoxelData &v){
+	v.morton = 0;
+	fread(&v.morton, VOXELDATA_SIZE, 1, f);
+}
+
+// Write an octree node to file
+inline size_t writeNode(FILE* node_out, const Node &n, size_t &b_node_pos){
+	fwrite(& n.data, sizeof(size_t), 3, node_out);
+	b_node_pos++;
+	return b_node_pos-1;
+}
+
+// Read a Node from a file
+inline void readNode(FILE* f, Node &n){
+	fread(& n.data, sizeof(size_t), 3, f);
+}
+
+// Write an octree header to a file
+inline void writeOctreeHeader(const std::string &filename, const OctreeInfo &i){
+	ofstream outfile;
+	outfile.open(filename.c_str(), ios::out);
+	outfile << "#octreeheader 1" << endl;
+	outfile << "gridlength " << i.gridlength << endl;
+	outfile << "n_nodes " << i.n_nodes << endl;
+	outfile << "n_data " << i.n_data << endl;
+	outfile << "END" << endl;
+	outfile.close();
+}
+
+// Parse a given octree header, store info in OctreeInfo struct
+inline int parseOctreeHeader(const std::string &filename, OctreeInfo &i){
+	cout << "  reading octree header from " << filename << " ... " << endl;
+	ifstream headerfile;
+	headerfile.open(filename.c_str(), ios::in);
+
+	i.base_filename = filename.substr(0,filename.find_last_of("."));
+
+	string line; bool done = false;
+	headerfile >> line >> i.version;
+	if (line.compare("#octreeheader") != 0) {cout << "    Error: first line reads [" << line << "] instead of [#octreeheader]" << endl; return 0;}
+
+	while(headerfile.good() && !done) {
+		headerfile >> line;
+		if (line.compare("END") == 0) done = true; // when we encounter data keyword, we're at the end of the ASCII header
+		else if (line.compare("gridlength") == 0) {headerfile >> i.gridlength;}
+		else if (line.compare("n_nodes") == 0) {headerfile >> i.n_nodes;}
+		else if (line.compare("n_data") == 0) {headerfile >> i.n_data;}
+		else { cout << "  unrecognized keyword [" << line << "], skipping" << endl;
+		char c; do { c = headerfile.get(); } while(headerfile.good() && (c != '\n'));
+		}
+	}
+
+	headerfile.close();
+	return 1;
+}
+
+#endif
+```
+
+### src/perlin_noise.hpp
+```
+// -----------------------------------------------------------------------------
+// Perlin Noise
+// Copyright (C) 2010 Ares Lagae (ares.lagae@gmail.com)
+// -----------------------------------------------------------------------------
+
+#ifndef PERLIN_NOISE_HPP_INCLUDED
+#define PERLIN_NOISE_HPP_INCLUDED
+
+#include <cassert>
+#include <cmath>
+#include <cstddef>
+
+class rand_urng
+{
+public:
+  typedef unsigned int result_type;
+  static const result_type min() { return 0; }
+  static const result_type max() { return RAND_MAX; }
+  typedef unsigned int seed_type;
+  static const seed_type default_seed = 1;
+  rand_urng(seed_type s = default_seed) { seed(s); }
+  void seed(seed_type s = default_seed) { std::srand(s); }
+  result_type operator()()
+  {
+    result_type result = std::rand();
+    assert((min() <= result) && (result <= max()));
+    return result;
+  }
+};
+
+namespace perlin_noise {
+
+// -----------------------------------------------------------------------------
+
+class perlin_noise_permutation_table
+{
+public:
+  template <typename UniformRandomNumberGenerator>
+  perlin_noise_permutation_table(UniformRandomNumberGenerator& urng)
+    : data_(0)
+  {
+    data_ = new unsigned char[256];
+    randomize(urng);
+  }
+  ~perlin_noise_permutation_table() { delete [] data_; }
+  const unsigned char* data() const { return data_; }
+  template <typename UniformRandomNumberGenerator>
+  void randomize(UniformRandomNumberGenerator& urng)
+  {
+    for (unsigned i = 0; i < 256; ++i) {
+      data_[i] = i;
+    }
+    for (unsigned i = 0; i < 256 - 1; ++i) {
+      std::swap(data_[i], data_[i + (urng() % (256 - i))]);
+    }
+  }
+  const unsigned char& at(unsigned index) const
+  {
+    assert(index < 256);
+    return data_[index];
+  }
+  const unsigned char& operator[](unsigned index) const { return at(index); }
+private:
+  perlin_noise_permutation_table(const perlin_noise_permutation_table&);
+  perlin_noise_permutation_table& operator=(const perlin_noise_permutation_table&);
+  unsigned char* data_;
+};
+
+// -----------------------------------------------------------------------------
+
+class perlin_noise_2d
+{
+public:
+  template <typename UniformRandomNumberGenerator>
+  perlin_noise_2d(UniformRandomNumberGenerator& urng)
+    : permutation_table_(urng)
+  {}
+  template <typename UniformRandomNumberGenerator>
+  void randomize(UniformRandomNumberGenerator& urng) { permutation_table_.randomize(urng); }
+  float operator()(float x_0, float x_1) const { return noise(x_0, x_1); }
+  float noise(float x_0, float x_1) const
+  {
+    float x[2] = { x_0, x_1 };
+    float int_x[2] = { std::floor(x[0]), std::floor(x[1]) };
+    unsigned c[2] = { unsigned(int(int_x[0])) % 256u, unsigned(int(int_x[1])) % 256u };
+    float x_c[2] = { x[0] - int_x[0], x[1] - int_x[1] };
+    float w[2] = { ((((6.0f * x_c[0]) - 15.0f) * x_c[0]) + 10.0f) * (x_c[0] * x_c[0] * x_c[0]), ((((6.0f * x_c[1]) - 15.0f) * x_c[1]) + 10.0f) * (x_c[1] * x_c[1] * x_c[1]) };
+    float noise[2][2];
+    unsigned i[2];
+    for (i[1] = 0u; i[1] < 2u; ++i[1]) {
+      unsigned hash_1 = permutation_table_[(c[1] + i[1]) % 256u];
+      for (i[0] = 0u; i[0] < 2u; ++i[0]) {
+        unsigned hash_0 = permutation_table_[(hash_1 + (c[0] + i[0])) % 256u];
+        float v[2] = { x_c[0] - i[0], x_c[1] - i[1] };
+        noise[i[1]][i[0]] = grad(hash_0, v);
+      }
+    }
+    return mix(mix(noise[0][0], noise[0][1], w[0]),
+               mix(noise[1][0], noise[1][1], w[0]), w[1]);
+  }
+  const perlin_noise_permutation_table& permutation_table() const { return permutation_table_; }
+  float variance() const { return 0.0628; }
+private:
+  static float mix(float x, float y, float a) { return x + (a * (y - x)); }
+  static float grad(unsigned hash, const float x[2])
+  {
+    unsigned h = hash & 15u;                      
+    float u = (h < 8u) ? x[0] : x[1];
+    float v = (h < 4u) ? x[1] : (((h == 12u) || (h == 14u)) ? x[0] : 0.0);
+    return ((h & 1u) == 0u ? u : -u) + ((h & 2u) == 0u ? v : -v);
+  }
+  perlin_noise_permutation_table permutation_table_;
+};
+
+// -----------------------------------------------------------------------------
+
+class perlin_noise_3d
+{
+public:
+  template <typename UniformRandomNumberGenerator>
+  perlin_noise_3d(UniformRandomNumberGenerator& urng)
+    : permutation_table_(urng)
+  {}
+  template <typename UniformRandomNumberGenerator>
+  void randomize(UniformRandomNumberGenerator& urng) { permutation_table_.randomize(urng); }
+  float operator()(float x_0, float x_1, float x_2) const { return noise(x_0, x_1, x_2); }
+  float noise(float x_0, float x_1, float x_2) const
+  {
+    float x[3] = { x_0, x_1, x_2 };
+    float int_x[3] = { std::floor(x[0]), std::floor(x[1]), std::floor(x[2]) };
+    unsigned c[3] = { unsigned(int(int_x[0])) % 256u, unsigned(int(int_x[1])) % 256u, unsigned(int(int_x[2])) % 256u };
+    float x_c[3] = { x[0] - int_x[0], x[1] - int_x[1], x[2] - int_x[2] };
+    float w[3] = { ((((6.0f * x_c[0]) - 15.0f) * x_c[0]) + 10.0f) * (x_c[0] * x_c[0] * x_c[0]), ((((6.0f * x_c[1]) - 15.0f) * x_c[1]) + 10.0f) * (x_c[1] * x_c[1] * x_c[1]), ((((6.0f * x_c[2]) - 15.0f) * x_c[2]) + 10.0f) * (x_c[2] * x_c[2] * x_c[2]) };    
+    float noise[2][2][2];
+    unsigned i[2];
+    for (i[2] = 0u; i[2] < 2u; ++i[2]) {
+      unsigned hash_2 = permutation_table_[(c[2] + i[2]) % 256u];
+      for (i[1] = 0u; i[1] < 2u; ++i[1]) {
+        unsigned hash_1 = permutation_table_[(hash_2 + (c[1] + i[1])) % 256u];
+        for (i[0] = 0u; i[0] < 2u; ++i[0]) {
+          unsigned hash_0 = permutation_table_[(hash_1 + (c[0] + i[0])) % 256u];
+          float v[3] = { x_c[0] - i[0], x_c[1] - i[1], x_c[2] - i[2] };
+          noise[i[2]][i[1]][i[0]] = grad(hash_0, v);
+        }
+      }
+    }
+    return mix(mix(mix(noise[0][0][0], noise[0][0][1], w[0]),
+                   mix(noise[0][1][0], noise[0][1][1], w[0]), w[1]),
+               mix(mix(noise[1][0][0], noise[1][0][1], w[0]),
+                   mix(noise[1][1][0], noise[1][1][1], w[0]), w[1]), w[2]);
+  }
+  const perlin_noise_permutation_table& permutation_table() const { return permutation_table_; }
+  float variance() const { return 0.0754198; }  
+private:
+  static float mix(float x, float y, float a) { return x + (a * (y - x)); }
+  static float grad(unsigned hash, const float x[3])
+  {
+    unsigned h = hash & 15u;                      
+    float u = (h < 8u) ? x[0] : x[1];
+    float v = (h < 4u) ? x[1] : (((h == 12u) || (h == 14u)) ? x[0] : x[2]);
+    return ((h & 1u) == 0u ? u : -u) + ((h & 2u) == 0u ? v : -v);
+  }
+  perlin_noise_permutation_table permutation_table_;
+};
+
+// -----------------------------------------------------------------------------
+
+} // namespace perlin_noise
+
+#endif // PERLIN_NOISE_HPP_INCLUDED
+
+// -----------------------------------------------------------------------------
+```
+
+### src/util.cpp
+```
+/*
+ * util.cpp
+ *
+ *  Created on: Feb 15, 2012
+ *      Author: jeroenb
+ */
+
+#include "util.h"
+
+using namespace std; 
+
+
+std::string getTimeString(){
+	std::stringstream o;
+	o << time(NULL);
+	return o.str();
+}
+
+void writePPM(int w, int h, unsigned char* array, string name){
+	ofstream myfile;
+	string filename = name + ".ppm";
+	myfile.open(filename.c_str());
+	myfile << "P3" << std::endl << "#" << filename << endl;
+	myfile << w << " " << h << endl;
+	myfile << 255 << endl;
+
+	for(int x = h-1; x >= 0; x--) {
+		int partindex = x*(w*4); // index in char array computation (part 1)
+		for(int y = 0; y < h ; y++) {
+			int i = partindex + y*4;
+			myfile << int(array[i]) << " " <<  int(array[i+1])  << " " <<  int(array[i+2])  << "   ";
+		}
+	}
+	myfile.close();
+}
+```
+
+### src/util.h
+```
+/*
+ * util.h
+ *
+ *  Created on: Feb 14, 2012
+ *      Author: jeroenb
+ */
+#ifndef UTIL_H_
+#define UTIL_H_
+
+#define NULL 0
+
+#include <iostream>
+#include <sstream>
+#include "string.h"
+#include <fstream>
+#include <time.h>
+#include <TriMesh.h>
+
+enum FileFormat{OCTREE};
+//typedef Vec<3,int> RGBColor;
+
+std::string getTimeString();
+void writePPM(int w, int h, unsigned char* array, std::string name);
+
+struct CoordCounter{
+	size_t x;
+	size_t y;
+	size_t z;
+	size_t gridlength;
+	CoordCounter(size_t gridlength): x(0),y(0),z(0), gridlength(gridlength){}
+	void count(){
+		z++;
+		if(z >= gridlength){y++;z=0;}
+		if(y >= gridlength){x++;y=0;}
+		if(x >= gridlength){x=0;}
+	}
+};
+
+struct Timer {
+	clock_t Begin;
+	Timer(){
+		Begin = clock() * CLK_TCK;
+	}
+	void reset(){
+		Begin = clock() * CLK_TCK;
+	}
+	double getTimeMilliseconds(){
+		clock_t End = clock() * CLK_TCK;
+		return (End - Begin)/1000;
+	}
+};
+
+#endif /* UTIL_H_ */
+```
+
+### src/voxel_start.cpp
+```
+#include <GL\glew.h>
+#include <GLFW\glfw3.h>
+#include <TriMesh.h>
+
+#include <vector>
+#include <iostream>
+#include <limits>
+
+#include "RenderContext.h" 
+#include "util.h"
+#include "DiffuseOctreeRenderer.h"
+#include "BaseOctreeRenderer.h"
+#include "WorkOctreeRenderer.h"
+#include "DepthRenderer.h"
+#include "DebugRenderer.h"
+#include "NormalRenderer.h"
+#include "LevelRenderer.h"
+#include "TopLevelRenderer.h"
+#include "RendererManager.h"
+#include "octree_build.h"
+
+using namespace std;
+
+// viewpoint
+Camera camera;
+Frustrum frustrum;
+RenderContext render_context;
+
+// renderer
+RendererManager rmanager;
+string rendername;
+int current_r = 0;
+int lightselector = 0;
+
+Octree* octree = NULL;
+unsigned char* renderdata;
+
+// OpenGL
+GLuint texid;
+
+GLFWwindow* window;
+
+// Draw fullsize quad, regardless of camera standpoint
+void drawFullsizeQuad()
+{
+	glMatrixMode(GL_MODELVIEW);
+	glPushMatrix();
+	glLoadIdentity();
+	glMatrixMode(GL_PROJECTION);
+	glPushMatrix();
+	glLoadIdentity();
+	glBegin(GL_QUADS);
+		glTexCoord2f(0.0, 0.0);		glVertex3f(-1.0, -1.0, 0.0);
+		glTexCoord2f(1.0, 0.0);		glVertex3f(1.0, -1.0, 0.0);
+		glTexCoord2f(1.0, 1.0);		glVertex3f(1.0, 1.0, 0.0);
+		glTexCoord2f(0.0, 1.0);		glVertex3f(-1.0, 1.0, 0.0);
+	glEnd();
+	glPopMatrix();
+	glMatrixMode(GL_MODELVIEW);
+	glPopMatrix();
+}
+
+void generateTexture(){
+   glBindTexture(GL_TEXTURE_2D, texid);
+   glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,render_context.n_x,render_context.n_y,0,GL_RGBA,GL_UNSIGNED_BYTE, renderdata);
+   glEnable(GL_TEXTURE_2D);
+}
+
+void setupTexture(){
+   glClearColor (0.0, 0.0, 0.0, 0.0);
+   glShadeModel(GL_FLAT);
+   glGenTextures(1, &texid);
+   glBindTexture(GL_TEXTURE_2D, texid);
+   glTexEnvi(GL_TEXTURE_2D, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   generateTexture();
+}
+
+void display(void)
+{
+	float ratio;
+	int width, height;
+	glfwGetFramebufferSize(window, &width, &height);
+	ratio = width / (float)height;
+	glViewport(0, 0, width, height);
+	glClear(GL_COLOR_BUFFER_BIT);
+
+	Timer t = Timer();
+	rendername = rmanager.getCurrentRenderer()->name;
+	camera.computeUVW();
+
+	memset(renderdata,0,render_context.n_x*render_context.n_y*4);
+	rmanager.getCurrentRenderer()->Render(render_context,octree, renderdata);
+	generateTexture();
+	drawFullsizeQuad();
+
+	//TwDraw();
+	//glPopMatrix();
+
+	glfwSwapBuffers(window);
+
+	std::stringstream out;
+	out << "Voxelicious v0.2 | Rendertime: " << t.getTimeMilliseconds() << " ms | FPS: " << 1000/t.getTimeMilliseconds();
+	string s = out.str();
+	glfwSetWindowTitle(window,s.c_str());
+}
+
+//void reshape(int w, int h)
+//{
+//	// Set our viewport to the size of our window  
+//	glViewport(0, 0, (GLsizei)w, (GLsizei)h); 
+//	// Switch to the projection matrix so that we can manipulate how our scene is viewed  
+//	glMatrixMode(GL_PROJECTION); 
+//	// Reset the projection matrix to the identity matrix so that we don't get any artifacts (cleaning up)  
+//	glLoadIdentity(); 
+//	// Set the Field of view angle (in degrees), the aspect ratio of our window, and the new and far planes 
+//	// gluPerspective(60, (GLfloat)w / (GLfloat)h, 1.0, 100.0); 
+//	// Switch back to the model view matrix, so that we can start drawing shapes correctly 
+//	glMatrixMode(GL_MODELVIEW);  
+//	//TwWindowSize(w, h);
+//}
+
+void loadRenderers(){
+	rmanager = RendererManager();
+	rmanager.addRenderer(new DiffuseOctreeRenderer());
+	rmanager.addRenderer(new DebugRenderer());
+	//rmanager.addRenderer(new BaseOctreeRenderer());
+	//rmanager.addRenderer(new WorkOctreeRenderer());
+	//rmanager.addRenderer(new NormalRenderer());
+	rmanager.addRenderer(new DepthRenderer());
+	//rmanager.addRenderer(new LevelRenderer());
+	//rmanager.addRenderer(new TopLevelRenderer());
+	rendername = rmanager.getCurrentRenderer()->name;
+}
+
+// Keyboard
+void keyboardfunc(GLFWwindow* window, int key, int scancode, int action, int mods)
+{
+	//TwEventKeyboardGLUT(key,x,y);
+	switch (key) {
+		case GLFW_KEY_KP_0:
+			render_context.lights[lightselector].position = render_context.lights[lightselector].position + vec3(0,-0.1,0);
+			break;
+		case GLFW_KEY_KP_2:
+			render_context.lights[lightselector].position = render_context.lights[lightselector].position + vec3(0,0.1,0);
+			break;
+		case GLFW_KEY_KP_1:
+			render_context.lights[lightselector].position = render_context.lights[lightselector].position + vec3(-0.1,0,0);
+			break;
+		case GLFW_KEY_KP_3:
+			render_context.lights[lightselector].position = render_context.lights[lightselector].position + vec3(0.1,0,0);
+			break;
+		case GLFW_KEY_KP_9:
+			camera.e_ = camera.e_ + vec3(0,0,-0.2);
+			break;
+		case GLFW_KEY_KP_7:
+			camera.e_ = camera.e_ + vec3(0,0,0.2);
+			break;
+		case GLFW_KEY_KP_6:
+			camera.e_ = camera.e_ + vec3(0.2,0,0);
+			break;
+		case GLFW_KEY_KP_4:
+			camera.e_ = camera.e_ + vec3(-0.2,0,0);
+			break;
+		case GLFW_KEY_KP_8:
+			camera.e_ = camera.e_ + vec3(0,0.2,0);
+			break;
+		case GLFW_KEY_KP_5:
+			camera.e_ = camera.e_ + vec3(0,-0.2,0);
+			break;
+		case GLFW_KEY_W:
+			camera.g_ = camera.g_ + vec3(0.2,0,0);
+			break;
+		case GLFW_KEY_S:
+			camera.g_ = camera.g_ + vec3(-0.2,0,0);
+			break;
+		case GLFW_KEY_A:
+			camera.g_ = camera.g_ + vec3(0,0.2,0);
+			break;
+		case GLFW_KEY_D:
+			camera.g_ = camera.g_ + vec3(0,-0.2,0);
+			break;
+		case GLFW_KEY_R:
+			camera.g_ = camera.g_ + vec3(0,0,-0.2);
+			break;
+		case GLFW_KEY_F:
+			camera.g_ = camera.g_ + vec3(0,0,-0.2);
+			break;
+		case GLFW_KEY_N:
+			lightselector = (lightselector+1) % (render_context.lights.size());
+			cout << "light selector:" << lightselector << endl;
+			break;
+		case GLFW_KEY_P:
+			rmanager.switchRenderer();
+			break;
+		case GLFW_KEY_K:
+			{LevelRenderer* lr = dynamic_cast<LevelRenderer*>(rmanager.getRenderer("level"));
+			lr->maxlevel = (lr->maxlevel -1) % (int) (log2(octree->gridlength)+2);
+			cout << "Max level for Level renderer: " << lr->maxlevel << endl;}
+			break;
+		case GLFW_KEY_L:
+			{LevelRenderer* lr = dynamic_cast<LevelRenderer*>(rmanager.getRenderer("level"));
+			lr->maxlevel = (lr->maxlevel + 1) % (int) (log2(octree->gridlength) + 2);
+			cout << "Max level for Level renderer: " << lr->maxlevel << endl;}
+			break;
+		case GLFW_KEY_I:
+			{string filename = "image"+getTimeString()+"";
+			writePPM(render_context.n_x,render_context.n_y, renderdata, filename);
+			std::cout << "Image file written: " << filename << ".ppm" << std::endl;}
+			break;
+	}
+}
+
+void printInfo(){
+	std::cout << "Voxel Renderer Proof Of Concept" << std::endl;
+	std::cout << "Jeroen Baert - 2012" << std::endl;
+	std::cout << "" << std::endl;
+	std::cout << "jeroen.baert@cs.kuleuven.be" << std::endl;
+	std::cout << "" << std::endl;
+	std::cout << "I'll be using " << omp_get_num_procs() << " CPU cores for rendering" << std::endl << std::endl;
+}
+
+void printControls(){
+	std::cout << "Controls (on numeric keypad):" << std::endl;
+	std::cout << "-----------------------------" << std::endl;
+	std::cout << "4-6: Camera left-right" << std::endl;
+	std::cout << "8-5: Camera up-down" << std::endl;
+	std::cout << "7-9: Camera nearer-further" << std::endl;
+	std::cout << "i: save screenshot in .PPM format" << std::endl;
+	std::cout << "p: toggle work rendering" << std::endl;
+	std::cout << "-----------------------------" << std::endl;
+}
+
+void printInvalid(){
+	std::cout << "Not enough or invalid arguments, please try again.\n" << endl; 
+	std::cout << "At the bare minimum, I need a path to a data file (binvox/avox)" << endl; 
+	std::cout << "For Example: voxelraycaster.exe -f /home/jeroen/bunny256.avox" << endl;
+}
+
+void parseParameters(int argc, char **argv, string& file, FileFormat &inputformat, unsigned int& rendersize){
+	if(argc < 2){ printInvalid(); exit(0);}
+	for (int i = 1; i < argc; i++) {
+		if (string(argv[i]) == "-f") {
+			file = argv[i + 1]; 
+			size_t check_octree = file.find(".octree");
+			if(check_octree != string::npos){
+				inputformat = OCTREE;
+			} else{ 
+				cout << "Data filename does not end in .octree - I only support that file format" << endl; 
+				printInvalid();
+				exit(0);
+			}
+			i++;
+		} else if (string(argv[i]) == "-s") {
+			rendersize = atoi(argv[i + 1]); 
+			i++;
+		} else {printInvalid(); exit(0);}
+	}
+}
+
+//void generateLightTWBars(TwBar* bar){
+//	TwStructMember lightMembers[] = // array used to describe tweakable variables of the Light structure
+//	{
+//		{ "Active",    TW_TYPE_BOOL32, offsetof(Light, active),"" },
+//		{ "Position",    TW_TYPE_DIR3F, offsetof(Light, position),"" },  
+//		{ "Diffuse",     TW_TYPE_COLOR3F, offsetof(Light, diffuse),"" },       
+//		{ "Specular",    TW_TYPE_COLOR3F,   offsetof(Light, specular),"" },
+//		{ "Constant Attenuation", TW_TYPE_FLOAT, offsetof(Light, CONSTANT_ATTENUATION), "" },
+//		{ "Linear Attenuation", TW_TYPE_FLOAT, offsetof(Light, LINEAR_ATTENUATION), "" },
+//		{ "Quadratic Attenuation", TW_TYPE_FLOAT, offsetof(Light, QUADRATIC_ATTENUATION), "" },
+//		{ "Shininess", TW_TYPE_FLOAT, offsetof(Light, SHININESS), "" }
+//	};
+//	TwType lightType = TwDefineStruct("Light", lightMembers, 7, sizeof(Light), NULL, NULL);
+//
+//	for(int i = 0; i<render_context.lights.size(); i++){
+//		std::stringstream name;
+//		name << "Light " << i+1;
+//		TwAddVarRW(bar, name.str().c_str(), lightType, &render_context.lights[i], "group='Lights'"); // Add a lightType variable and group it into the 'Edit lights' group
+//		TwSetParam(bar, name.str().c_str(), "label", TW_PARAM_CSTRING, 1, name.str().c_str()); // Set label
+//	}
+//}
+
+void initRenderSystem(unsigned int render_x, unsigned int render_y){
+	camera = Camera(vec3(0,0,0),vec3(vec3(0,0,-1)),vec3(0,1,0));
+	float aspect_ratio = render_x/render_y;
+	frustrum = Frustrum(45,aspect_ratio,1,100); // THIS near and far SHOULD BE NEGATIVE
+	render_context = RenderContext(&camera,&frustrum,render_x,render_y);
+	Light mylight = Light(vec3(0,0,0), vec3(1.0,1.0,1.0));
+	mylight.SHININESS = 25.0f;
+	Light mylight2 = Light(vec3(4,0,-3.0f), vec3(0.0,0.0,0.8));
+	Light mylight3 = Light(vec3(0,0,-3.0f), vec3(0.0,0.8,0.0));
+	render_context.lights.push_back(mylight);
+	render_context.lights.push_back(mylight2);
+	render_context.lights.push_back(mylight3);
+}
+
+static void error_callback(int error, const char* description)
+{
+	fputs(description, stderr);
+}
+static void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
+{
+	if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
+		glfwSetWindowShouldClose(window, GL_TRUE);
+}
+
+int main(int argc, char **argv) {
+	printInfo();
+	printControls();
+
+	// Input argument validation
+	string datafile = "";
+	unsigned int rendersize = 640;
+	FileFormat inputformat;
+	parseParameters(argc,argv,datafile,inputformat,rendersize);
+
+	// Initialize render system
+	unsigned int render_x = rendersize;
+	unsigned int render_y = rendersize;
+	initRenderSystem(render_x,render_y);
+	loadRenderers();
+
+	if (inputformat == OCTREE) {readOctree(datafile, octree);} // read the octree from cache
+	
+	octree->min = vec3(0,0,2);
+	octree->max = vec3(2,2,0);
+	octree->size = vec3(2,2,2);
+
+	//cout << "Starting rendering ..." << endl;
+
+	const int rgba_amount = render_x*render_y*4;
+	renderdata = new unsigned char[rgba_amount]; // put this on heap, it's too big, captain
+
+	// Init GLFW system
+	if (!glfwInit()) exit(EXIT_FAILURE);
+	// Init window
+	window = glfwCreateWindow(render_x, render_y, "Voxel Ray Caster", NULL, NULL);
+	if (!window){glfwTerminate();exit(EXIT_FAILURE);}
+	glfwMakeContextCurrent(window);
+	glfwSwapInterval(1);
+	glfwSetKeyCallback(window, keyboardfunc);
+
+	setupTexture();
+
+	while (!glfwWindowShouldClose(window))
+	{
+		display();
+		glfwWaitEvents();
+	}
+	glfwDestroyWindow(window);
+	glfwTerminate();
+	exit(EXIT_SUCCESS);
+
+	//glutInit(&argc, argv);
+	//glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
+	//glutInitWindowSize(render_x, render_x);
+	//glutInitWindowPosition(100, 100);
+	//glutCreateWindow("Voxel Ray Caster");
+	//glutKeyboardFunc(keyboardfunc);
+	//glutReshapeFunc(reshape);
+	//glutDisplayFunc(display);
+
+
+	// TODO: reintroduce this
+
+	//TwInit(TW_OPENGL, NULL);
+	//glutMouseFunc((GLUTmousebuttonfun)TwEventMouseButtonGLUT);
+	//glutMotionFunc((GLUTmousemotionfun)TwEventMouseMotionGLUT);
+	//glutPassiveMotionFunc((GLUTmousemotionfun)TwEventMouseMotionGLUT);
+	//TwGLUTModifiersFunc(glutGetModifiers);
+	//TwBar *bar;
+	//bar = TwNewBar("VoxelRaycaster");
+	//TwDefine(" GLOBAL help='' "); // Message added to the help bar.
+	//TwDefine(" VoxelRaycaster size='200 200' color='150 150 150' iconified=true fontsize=1"); // change default tweak bar size and color
+	//TwAddVarRO(bar, "RendererName", TW_TYPE_STDSTRING, &rendername, 
+	//		   " label='Renderer Name' group=Renderer help='Current renderer' ");
+	//TwAddVarRW(bar, "Eye", TW_TYPE_DIR3F, &camera.e_, 
+	//		   " label='Eye' group=Camera help='Camera eye position' ");
+	//TwAddVarRW(bar, "Gaze", TW_TYPE_DIR3F, &camera.g_, 
+	//		   " label='Gaze' group=Camera help='Camera gaze direction' ");
+	//TwAddVarRW(bar, "Top", TW_TYPE_DIR3F, &camera.t_, 
+	//		   " label='Top' group=Camera help='Camera top direction' ");
+	//generateLightTWBars(bar);
+
+	
+}
+```

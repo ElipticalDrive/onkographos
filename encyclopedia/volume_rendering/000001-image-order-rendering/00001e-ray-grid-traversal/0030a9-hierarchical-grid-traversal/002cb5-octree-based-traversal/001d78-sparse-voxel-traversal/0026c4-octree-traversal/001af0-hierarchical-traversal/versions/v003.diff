@@ -1,0 +1,141 @@
+--- v002.md
++++ v003.md
+@@ -8,27 +8,32 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Ray origin $O$, direction $D$, and a hierarchical data structure (Octree, SVO, or BVH) representing the volume [S2, S4, unofficial].
+-*   **Output:** A sequence of visited nodes/voxels in front-to-back order, or a boolean indicating if an intersection exists within a threshold [S2, unofficial].
++*   **Input:** Ray origin $O$, direction $D$, a hierarchical data structure (Octree, SVO, or BVH), and a maximum traversal distance $t_{max}$ (typically 10000.0) [S2, unofficial].
++*   **Output:** A sequence of visited nodes/voxels in front-to-back order, or a boolean indicating if an intersection exists within $t_{max}$ [S2, unofficial].
+ 
+ **Data Structures:**
+ The layout depends on the hierarchy type:
+-1.  **Octree/SVO:** Nodes store pointers to 8 children or an activity flag. Level $k$ cells cover a $2^k \times 2^k$ area of level 0 [S1, unofficial].
+-2.  **BVH:** Nodes are stored in a buffer. A `BVHNode` struct contains: `center` (`f32[4]`), `radius` (`f32`), `left_child` (`u32`), `right_child` (`u32`), packed in 16-byte alignment [S2, unofficial]. Leaf nodes are identified by setting the high bit (`0x80000000`) of the child indices. If a leaf is the last element and has no sibling, `right_child` is set to `0` [S2, unofficial].
++1.  **Octree/SVO:** Nodes store pointers to 8 children or an activity flag [S1, S5, unofficial]. Level $k$ cells cover a $2^k \times 2^k$ area of level 0 [S1, unofficial].
++2.  **BVH:** Nodes are stored in a buffer. A `BVHNode` struct contains `center` (`f32[4]`), `radius` (`f32`), `left_child` (`u32`), and `right_child` (`u32`), packed in 16-byte alignment [S2, unofficial]. Leaf nodes are identified by setting the high bit (`0x80000000`) of the child indices; if a leaf is the last element and has no sibling, `right_child` is set to `0` [S2, unofficial].
+ 
+ **Algorithm Steps:**
+-The traversal uses a stack-based descent. At each node, the ray is tested against the bounding volume. If it intersects, the algorithm checks if the node is a leaf. If not, it computes intersection distances to both children, pushes the farther child onto the stack first, and descends into the closer child. This ensures front-to-back processing.
++The traversal uses a stack-based descent [S2, unofficial]. At each node, the ray is tested against the bounding volume [S2, S4, unofficial]. If it intersects, the algorithm checks if the node is a leaf [S2, unofficial]. If not, it computes intersection distances to both children, pushes the farther child onto the stack first, and descends into the closer child [S2, unofficial].
+ 
+ ```python
+-def traverse_hierarchy(ray_origin, ray_direction, hierarchy, max_t):
++def traverse_hierarchy(ray_origin, ray_direction, hierarchy, max_t=10000.0):
+     stack = [0]
+-    stack_ptr = 0
+     visited = []
+     
+-    while stack_ptr >= 0:
+-        node_idx = stack[stack_ptr]
+-        stack_ptr -= 1
++    while stack:
++        node_idx = stack.pop()
+         node = hierarchy.nodes[node_idx]
+         
+-        if not ray_box_intersect(node.bv_min, node.bv_max, ray_origin, ray_direction, max_t):
++        # Compute bounding box from center and radius
++        center = node.center[:3]
++        radius = node.radius
++        bv_min = [center[i] - radius for i in range(3)]
++        bv_max = [center[i] + radius for i in range(3)]
++        
++        t_min = ray_box_intersect(bv_min, bv_max, ray_origin, ray_direction, max_t)
++        if t_min == float('inf'):
+             continue
+             
+@@ -37,18 +42,43 @@
+             continue
+             
+-        left_t = ray_box_intersect(node.left_child.bv_min, node.left_child.bv_max, ray_origin, ray_direction, max_t)
+-        right_t = ray_box_intersect(node.right_child.bv_min, node.right_child.bv_max, ray_origin, ray_direction, max_t)
++        # Mask out high bit to get actual child indices
++        left_idx = node.left_child & 0x7FFFFFFF
++        right_idx = node.right_child & 0x7FFFFFFF
++        
++        left_node = hierarchy.nodes[left_idx]
++        right_node = hierarchy.nodes[right_idx]
++        
++        left_center = left_node.center[:3]
++        right_center = right_node.center[:3]
++        left_radius = left_node.radius
++        right_radius = right_node.radius
++        
++        left_t = ray_box_intersect(
++            [left_center[i] - left_radius for i in range(3)],
++            [left_center[i] + left_radius for i in range(3)],
++            ray_origin, ray_direction, max_t
++        )
++        right_t = ray_box_intersect(
++            [right_center[i] - right_radius for i in range(3)],
++            [right_center[i] + right_radius for i in range(3)],
++            ray_origin, ray_direction, max_t
++        )
+         
+         if left_t < max_t and right_t < max_t:
++            # Push farther child, descend into closer child
+             if left_t < right_t:
+-                stack_ptr += 1; stack[stack_ptr] = node.right_child
+-                stack_ptr += 1; stack[stack_ptr] = node.left_child
++                stack.append(right_idx)
++                node_idx = left_idx
+             else:
+-                stack_ptr += 1; stack[stack_ptr] = node.left_child
+-                stack_ptr += 1; stack[stack_ptr] = node.right_child
++                stack.append(left_idx)
++                node_idx = right_idx
++            continue
+         elif left_t < max_t:
+-            stack_ptr += 1; stack[stack_ptr] = node.left_child
++            node_idx = left_idx
++            continue
+         elif right_t < max_t:
+-            stack_ptr += 1; stack[stack_ptr] = node.right_child
++            node_idx = right_idx
++            continue
++        # If neither intersects, loop continues (node already popped)
+             
+     return visited
+@@ -73,6 +103,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Zero direction components must be handled with an epsilon guard to avoid division by zero [G].
+-*   **Leaf Identification:** Leaf nodes are identified by the high bit (`0x80000000`) of child indices. If a leaf is the last element and has no sibling, `right_child` is set to `0` [S2, unofficial].
++*   **Precision:** Zero direction components require an epsilon guard to avoid division by zero [G].
++*   **Leaf Identification:** Leaf nodes are identified by the high bit (`0x80000000`) of child indices [S2, unofficial].
+ *   **Boundary Voxels:** When a ray exits the grid bounds, `step_mask` logic must be applied to clamp traversal or return false [S2, unofficial].
+ 
+@@ -89,5 +119,5 @@
+ 
+ ### [Hierarchical Digital Differential Analyzer (HDDA)](1122-hierarchical-digital-differential-analyzer-hdda.md)
+-The Hierarchical Digital Differential Analyzer (HDDA) is a specialized ray-traversal algorithm for sparse voxel grids (specifically OpenVDB) that performs multi-resolution leapfrogging to efficiently determine voxels or tiles intersected by a ray. It leverages the compile-time fixed tree configuration of VDB to inline and collapse the hierarchical traversal, reducing the overhead of vertical tree navigation. Unlike generic BVH or KD-tree traversals, HDDA is tightly coupled to the B+tree structure of VDB, using DDA at each node level (InternalNode2, InternalNode1, Leaf) to skip non-intersected nodes and return leaf intersections in front-to-back order.
++The Hierarchical Digital Differential Analyzer (HDDA) is a specialized ray-traversal algorithm for sparse voxel grids that performs multi-resolution leapfrogging to efficiently determine voxels or tiles intersected by a ray. It leverages the compile-time fixed tree configuration of the underlying data structure to inline and collapse the hierarchical traversal, reducing the overhead of vertical tree navigation.
+ 
+ ### [Multi-Resolution Rendering with K-D Tree](1942-multi-resolution-rendering-with-k-d-tree.md)
+@@ -110,20 +140,20 @@
+ 
+ ### Surface Descendant Check
+-A recursive function to determine if a node or any of its descendants are marked as active or contain a surface [S3, unofficial]. If the cell is a Leaf, it returns whether it has a sign change. If it is a Branch, it recursively checks if any of its children have a surface descendant. If it is Empty or Full, it returns false [S3, unofficial].
++A recursive function to determine if a node or any of its descendants are marked as active or contain a surface [S3, unofficial]. If the cell is a Leaf, it returns whether it has a sign change [S3, unofficial]. If it is a Branch, it recursively checks if any of its children have a surface descendant [S3, unofficial]. If it is Empty or Full, it returns false [S3, unofficial].
+ 
+ ### Coarse Mesh Traversal via BVH
+-Uses a Bounding Volume Hierarchy (BVH) built over the coarse tetrahedral mesh to efficiently locate the coarse element containing a sample point [S6, unofficial]. The BVH is built by inserting four triangular faces facing outside for every coarse element. Rays are traced using hit/miss functions; the hit function returns the hit point and coarse tetrahedron ID. Unlike element marching, this allows skipping coarse elements and varying refinement levels [S6, unofficial].
++Uses a Bounding Volume Hierarchy (BVH) built over the coarse tetrahedral mesh to efficiently locate the coarse element containing a sample point [S6, unofficial]. The BVH is built by inserting four triangular faces facing outside for every coarse element [S6, unofficial]. Rays are traced using hit/miss functions; the hit function returns the hit point and coarse tetrahedron ID [S6, unofficial]. Unlike element marching, this allows skipping coarse elements and varying refinement levels [S6, unofficial].
+ 
+ ### Perspective-Correct AMR Patch Traversal
+-A hybrid CPU-GPU strategy where the CPU traverses a KD-tree of AMR patches back-to-front, and the GPU traverses cells within a patch. Sub-patches are generated to ensure perspective-correct sorting of cells relative to the observer. The vertex shader modifies indices based on the observer position to ensure proper cell ordering [S7].
++A hybrid CPU-GPU strategy where the CPU traverses a KD-tree of AMR patches back-to-front, and the GPU traverses cells within a patch [S7]. Sub-patches are generated to ensure perspective-correct sorting of cells relative to the observer [S7]. The vertex shader modifies indices based on the observer position to ensure proper cell ordering [S7].
+ 
+ ### Two-Pass Hierarchy Traversal
+-An optimization that splits traversal into two steps with a stopping depth in the first step. Step 1 traverses down to a specific depth relative to the leaves (e.g., depth=3). Step 2 traverses the remaining lower part for nodes identified in Step 1. At optimal stopping depth (3), it reduces time by 15% alone, and up to 30% with tile sharing. If stopping depth is 0, performance equals the direct implementation [S8].
++An optimization that splits traversal into two steps with a stopping depth in the first step [S8]. Step 1 traverses down to a specific depth relative to the leaves (e.g., depth=3) [S8]. Step 2 traverses the remaining lower part for nodes identified in Step 1 [S8]. At optimal stopping depth (3), it reduces time by 15% alone, and up to 30% with tile sharing [S8]. If stopping depth is 0, performance equals the direct implementation [S8].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Generally $O(\log N)$ for balanced hierarchies, where $N$ is the number of voxels/objects, compared to $O(N)$ for linear traversal [G].
+-*   **Memory Complexity:** Depends on the hierarchy. Octrees require storing node pointers. SVOs store only non-empty nodes, reducing memory usage significantly for sparse data [S1, unofficial].
++*   **Memory Complexity:** Depends on the hierarchy; Octrees require storing node pointers, while SVOs store only non-empty nodes, reducing memory usage significantly for sparse data [S1, unofficial].
+ *   **Performance:** Hierarchical SVO traversal took 5 steps to intersect an occupied voxel compared to 11 steps for non-hierarchical traversal in example grids [S1, unofficial].
+-*   **Strengths:** Efficiently skips empty space; supports multi-resolution rendering [S1, unofficial].
++*   **Strengths:** Efficiently skips empty space and supports multi-resolution rendering [S1, unofficial].
+ *   **Limitations:** Traversal overhead for very dense or small scenes may negate benefits [G].
+ 

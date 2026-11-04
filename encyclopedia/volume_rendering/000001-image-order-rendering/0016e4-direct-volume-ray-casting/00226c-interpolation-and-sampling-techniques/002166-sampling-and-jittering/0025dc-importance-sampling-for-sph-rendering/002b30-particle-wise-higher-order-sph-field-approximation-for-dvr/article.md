@@ -1,0 +1,450 @@
+# Particle-Wise Higher-Order SPH Field Approximation for DVR
+
+Also called: Higher-order SPH field approximation, Piecewise polynomial SPH approximation
+
+## Overview
+This method approximates Smoothed Particle Hydrodynamics (SPH) scalar fields along viewing rays using piecewise polynomial functions of higher order, rather than constant or linear approximations. It solves the problem of efficiently rendering SPH data, which consists of individual particle contributions with varying spatial resolution, by approximating each particle's contribution individually and summing the results. It sets itself apart from [Importance Sampling for SPH Rendering](3624-importance-sampling-for-sph-rendering.md) by focusing on the geometric accuracy of the field representation along rays via higher-order polynomials, and from [SPH Attribute Entropy for Importance Sampling](3626-sph-attribute-entropy-for-importance-sampling.md) by using a deterministic polynomial approximation strategy rather than entropy-based sampling.
+
+## How it works
+The method comprises three passes:
+1. For each particle, approximate its contribution to all relevant viewing rays.
+2. For each ray, sort the contribution data assigned to it with respect to the distance from the viewer.
+3. For each ray, accumulate the contributions along the ray, classify and composite the result.
+
+### Inputs and Outputs
+**Inputs:**
+*   SPH particle dataset: For each particle, position $\chi$, mass $\mu$, target field value $\alpha$, density $\rho$, and smoothing radius $\zeta$.
+*   Viewing rays: Defined by base point $b$ and unit direction vector $v$, parameterized as $x(t) = b + tv$.
+*   Approximation parameters: Maximum polynomial degree $D$ (order of approximation) and number $K$ of non-trivial polynomial pieces per particle.
+
+**Outputs:**
+*   Composite scalar field values along each viewing ray, ready for classification and compositing.
+
+### Data Structures
+**Lookup Table:**
+A precomputed table containing localized difference coefficients for order-$D$ approximations of the normalized particle contribution $B_\Lambda$ for many equidistant values of $\Lambda$. This allows quick access and generation of optimal approximations for any particle by translating and scaling.
+
+**Knot Representation:**
+A piecewise polynomial approximation of order $D$ is encoded as a sequence of knots:
+$$ (t_k, \hat{a}_{k0}, \dots, \hat{a}_{kD}), \quad k = 0, 1, \dots $$
+where $t_k$ is the ray parameter (knot position) and $\hat{a}_{kd}$ are localized difference coefficients representing the change in polynomial behavior at $t_k$.
+
+### Formulas and Definitions
+
+**SPH Kernel Function:**
+The cubic B-spline kernel is used [S1]:
+$$ w(r) = \frac{1}{4\pi} \begin{cases} (2-r)^3 - 4(1-r)^3, & 0 \leq r < 1 \\ (2-r)^3, & 1 \leq r < 2 \\ 0, & 2 \leq r. \end{cases} $$
+where $r$ is the normalized distance.
+
+**Particle Contribution:**
+A particle's contribution to a scalar field is expressed as [S1]:
+$$ \frac{\mu\alpha}{\rho\zeta^3} w\left(\frac{\|x - \chi\|}{\zeta}\right) $$
+where $\chi$ is particle position, $\mu$ is mass, $\alpha$ is target field value, $\rho$ is density, and $\zeta$ is smoothing radius.
+
+**Normalized Particle Contribution:**
+For a normalized particle (unit mass, density, field attribute, smoothing radius) and a line with base point $b$ closest to particle position, the contribution is [S1]:
+$$ B_\Lambda(t) = w\left(\sqrt{\Lambda^2 + t^2}\right) $$
+where $\Lambda$ is the distance between particle position and line.
+
+**Specific Particle Contribution on a Ray:**
+The contribution of a specific data particle on a ray is [S1]:
+$$ \frac{\mu\alpha}{\rho\zeta^3} B_\Lambda\left(\frac{t - t_\chi}{\zeta}\right) $$
+where $t_\chi$ is the parameter of the point on the ray closest to the particle position and $\Lambda = \frac{1}{\zeta} \|\chi - x(t_\chi)\|$.
+
+**Polynomial Representation:**
+A real polynomial function $A$ of order $D$ is represented by coefficients $a_d$ such that [S1]:
+$$ A(t) = \sum_{d=0}^D a_d t^d $$
+The $d^{th}$ derivative at $t=0$ is $d! a_d$.
+
+**Localized Coefficients:**
+Localized coefficients $a_d$ at $t_*$ are computed from standard coefficients $a_j$ as [S1]:
+$$ a_{d} = \sum_{j=d}^D \binom{j}{d} a_j t_*^{j-d} $$
+The function is expressed as [S1]:
+$$ A(t) = \sum_{d=0}^D a_{d} (t - t_*)^d $$
+
+**Localized Difference Coefficients:**
+The localized difference coefficients $\hat{a}_{kd}$ satisfy [S1]:
+$$ A_k(t) - A_{k-1}(t) = \sum_{d=0}^D \hat{a}_{kd} (t - t_k)^d $$
+where $A_k$ is the polynomial on the right of $t_k$ and $A_{k-1}$ is the polynomial on the left.
+
+**Coefficient Update Rule:**
+When processing sorted knots, the localized coefficients $a_{kd}$ for piece $k$ are updated from the previous piece $k-1$ using [S1]:
+$$ a_{kd} = \hat{a}_{kd} + \sum_{j=d}^D \binom{j}{d} a_{(k-1)j} (t_k - t_{k-1})^{j-d} $$
+for $d = 0, \dots, D$.
+
+**Optimality Criterion:**
+Optimality is defined by minimizing the $L^2$ distance error [S1]:
+$$ E_\Lambda(S) = \|S - B_\Lambda\|_2 = \left( \int_{\mathbb{R}} [S(t) - B_\Lambda(t)]^2 dt \right)^{\frac{1}{2}} $$
+
+### Parameters
+*   $D$: Maximum polynomial degree (order of approximation).
+*   $K$: Number of non-trivial polynomial pieces per particle.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+from typing import List, Tuple, Dict
+
+# Standard math operations assumed available
+# binom(n, k) computes binomial coefficient
+# sort() sorts a list of tuples
+
+def compute_binomial(n, k):
+    """Compute binomial coefficient n choose k."""
+    if k < 0 or k > n:
+        return 0
+    if k == 0 or k == n:
+        return 1
+    if k > n // 2:
+        k = n - k
+    
+    res = 1
+    for i in range(k):
+        res = res * (n - i) // (i + 1)
+    return res
+
+def cubic_b_spline(r):
+    """
+    Compute the cubic B-spline kernel value for normalized distance r.
+    """
+    if r < 0:
+        r = -r # Kernel is even
+    if r < 1:
+        return (1.0 / (4 * math.pi)) * ((2 - r)**3 - 4 * (1 - r)**3)
+    elif r < 2:
+        return (1.0 / (4 * math.pi)) * (2 - r)**3
+    else:
+        return 0.0
+
+def get_normalized_particle_contribution(t, Lambda):
+    """
+    Compute B_Lambda(t) = w(sqrt(Lambda^2 + t^2))
+    """
+    r = math.sqrt(Lambda**2 + t**2)
+    return cubic_b_spline(r)
+
+def precompute_lookup_table(D, K, Lambda_values, num_pieces_per_lambda=None):
+    """
+    Precompute localized difference coefficients for optimal approximations.
+    This is a placeholder for the optimization process described in the source.
+    The source states: "prepare a look-up table containing the localized difference 
+    coefficients of order-D approximations of B_Lambda for many equidistant values of Lambda."
+    
+    Returns:
+        lookup_table: Dict mapping Lambda to a list of knots.
+                      Each knot is (t_k, a_hat_k0, ..., a_hat_kD)
+    """
+    lookup_table = {}
+    
+    # Note: The actual optimization to find optimal piecewise polynomial S 
+    # minimizing E_Lambda(S) is not detailed in the provided text.
+    # This function represents the precomputation step.
+    
+    for Lambda in Lambda_values:
+        # Placeholder: In a real implementation, an optimization algorithm 
+        # would find the knots and coefficients for S that minimize the L2 error.
+        # Here we assume a dummy structure for the sake of completeness.
+        # The source mentions K non-trivial pieces.
+        
+        # Dummy knots: In reality, these are determined by the optimization.
+        # Let's assume we have K pieces, so K+1 knots (including boundaries).
+        # The source says "sequence of knots (t_k, a_hat_k0, ..., a_hat_kD)".
+        
+        knots = []
+        # Example: Equidistant knots over the support of the kernel.
+        # The support of B_Lambda is effectively [-2*Lambda, 2*Lambda] roughly, 
+        # but since it's normalized, the support of w is [0,2], so t in [-2, 2] for Lambda=0.
+        # For general Lambda, the support is where sqrt(Lambda^2 + t^2) < 2, 
+        # i.e., t^2 < 4 - Lambda^2. So t in [-sqrt(4-Lambda^2), sqrt(4-Lambda^2)].
+        
+        if Lambda >= 2:
+            # No contribution
+            lookup_table[Lambda] = []
+            continue
+            
+        support_half_width = math.sqrt(4 - Lambda**2)
+        num_knots = K + 1
+        t_step = (2 * support_half_width) / num_knots
+        
+        for k in range(num_knots):
+            t_k = -support_half_width + k * t_step
+            
+            # Dummy coefficients: In reality, these come from the optimization.
+            # a_hat_kd represents the change in polynomial behavior at t_k.
+            # For a single particle, the first piece might have non-zero coefficients,
+            # and subsequent pieces might be zero if the approximation is simple,
+            # but generally, they accumulate.
+            
+            a_hat = [0.0] * (D + 1)
+            
+            # This is a placeholder. The source does not give the algorithm for 
+            # finding the optimal S. It only defines the error metric and the 
+            # representation format.
+            # [G] In a real implementation, this would involve solving a minimization 
+            # problem for the L2 norm.
+            
+            knots.append((t_k, a_hat))
+            
+        lookup_table[Lambda] = knots
+        
+    return lookup_table
+
+def approximate_particle_contribution(particle, ray, D, K, lookup_table):
+    """
+    Approximate a single particle's contribution to a ray.
+    
+    Args:
+        particle: Dict with keys 'chi', 'mu', 'alpha', 'rho', 'zeta'
+        ray: Dict with keys 'b', 'v'
+        D: Order of approximation
+        K: Number of non-trivial pieces
+        lookup_table: Precomputed table of knots for normalized particles
+        
+    Returns:
+        List of knots for this particle's contribution on this ray.
+        Each knot is (t_k, a_k0, ..., a_kD) where a_kd are the LOCALIZED 
+        coefficients for the piece starting at t_k, not the difference coefficients.
+        Wait, the source says the encoding is (t_k, a_hat_k0, ..., a_hat_kD).
+        And the update rule uses a_hat to compute the actual coefficients a_kd.
+        
+        So this function should return the knots in the format (t_k, a_hat_k0, ..., a_hat_kD).
+    """
+    chi = particle['chi']
+    mu = particle['mu']
+    alpha = particle['alpha']
+    rho = particle['rho']
+    zeta = particle['zeta']
+    
+    b = ray['b']
+    v = ray['v']
+    
+    # Find t_chi: parameter of the point on the ray closest to chi
+    # x(t) = b + t*v
+    # We want to minimize ||b + t*v - chi||^2
+    # Derivative w.r.t t: 2*v . (b + t*v - chi) = 0
+    # v . (b - chi) + t * (v . v) = 0
+    # Since v is unit, v . v = 1
+    # t_chi = v . (chi - b)
+    
+    # Vector subtraction chi - b
+    dx = chi[0] - b[0]
+    dy = chi[1] - b[1]
+    dz = chi[2] - b[2]
+    
+    t_chi = v[0]*dx + v[1]*dy + v[2]*dz
+    
+    # Find Lambda: distance between particle position and line, normalized by zeta
+    # Lambda = (1/zeta) * ||chi - x(t_chi)||
+    
+    # x(t_chi)
+    x_chi_ray = [b[0] + t_chi*v[0], b[1] + t_chi*v[1], b[2] + t_chi*v[2]]
+    
+    # Distance vector chi - x(t_chi)
+    dist_vec = [chi[0] - x_chi_ray[0], chi[1] - x_chi_ray[1], chi[2] - x_chi_ray[2]]
+    dist_norm = math.sqrt(dist_vec[0]**2 + dist_vec[1]**2 + dist_vec[2]**2)
+    
+    Lambda = dist_norm / zeta
+    
+    # Scale factor for amplitude
+    amplitude = (mu * alpha) / (rho * zeta**3)
+    
+    # Get normalized approximation from lookup table
+    # The lookup table stores knots for B_Lambda.
+    # B_Lambda(t) = w(sqrt(Lambda^2 + t^2))
+    # The actual contribution is amplitude * B_Lambda((t - t_chi) / zeta)
+    
+    # The knots in the lookup table are for the variable t in B_Lambda(t).
+    # Let t_norm be the parameter in the normalized space.
+    # The actual parameter on the ray is t_ray.
+    # t_norm = (t_ray - t_chi) / zeta
+    # t_ray = t_chi + t_norm * zeta
+    
+    # The knots in the lookup table are (t_norm_k, a_hat_k0, ..., a_hat_kD)
+    # We need to transform these to the ray parameter space.
+    
+    knots_ray = []
+    
+    # Find the closest Lambda value in the lookup table
+    # The source says "many equidistant values of Lambda".
+    # We assume linear interpolation or nearest neighbor.
+    # For simplicity, we use nearest neighbor.
+    
+    Lambda_values = list(lookup_table.keys())
+    if not Lambda_values:
+        return []
+        
+    closest_Lambda = min(Lambda_values, key=lambda L: abs(L - Lambda))
+    
+    normalized_knots = lookup_table[closest_Lambda]
+    
+    for (t_norm_k, a_hat_norm) in normalized_knots:
+        # Transform knot position
+        t_ray_k = t_chi + t_norm_k * zeta
+        
+        # The coefficients a_hat are for the polynomial in t_norm.
+        # The polynomial is P(t_norm) = sum(a_hat_d * (t_norm - t_norm_k)^d)
+        # We want to express this in terms of t_ray.
+        # t_norm - t_norm_k = (t_ray - t_chi)/zeta - t_norm_k = (t_ray - (t_chi + t_norm_k*zeta))/zeta = (t_ray - t_ray_k)/zeta
+        
+        # So P(t_ray) = sum(a_hat_d * ((t_ray - t_ray_k)/zeta)^d)
+        #             = sum(a_hat_d * (1/zeta)^d * (t_ray - t_ray_k)^d)
+        
+        # The new localized difference coefficients a_hat_ray_d are:
+        # a_hat_ray_d = a_hat_d * (1/zeta)^d
+        
+        a_hat_ray = []
+        for d in range(D + 1):
+            a_hat_ray.append(a_hat_norm[d] * (1.0 / zeta)**d)
+            
+        # Scale the coefficients by the amplitude
+        # The contribution is amplitude * P(t_ray)
+        # So the coefficients are scaled by amplitude.
+        a_hat_ray = [c * amplitude for c in a_hat_ray]
+        
+        knots_ray.append((t_ray_k, a_hat_ray))
+        
+    return knots_ray
+
+def render_sph_field(particles, rays, D, K, lookup_table):
+    """
+    Main rendering function.
+    
+    Args:
+        particles: List of particle dicts
+        rays: List of ray dicts
+        D: Order of approximation
+        K: Number of non-trivial pieces
+        lookup_table: Precomputed table
+        
+    Returns:
+        For each ray, a list of knots representing the total field approximation.
+    """
+    
+    # Pass 1: For each particle, approximate its contribution to all relevant viewing rays.
+    # We collect all knots from all particles for each ray.
+    
+    ray_knots = {i: [] for i in range(len(rays))}
+    
+    for particle in particles:
+        for i, ray in enumerate(rays):
+            # Check if particle is relevant to ray (e.g., within bounding box)
+            # This is a placeholder for relevance check.
+            
+            knots = approximate_particle_contribution(particle, ray, D, K, lookup_table)
+            ray_knots[i].extend(knots)
+            
+    # Pass 2: For each ray, sort the contribution data assigned to it with respect to the distance from the viewer.
+    # The knots are (t_k, a_hat_k0, ..., a_hat_kD).
+    # Sort by t_k.
+    
+    sorted_ray_knots = {}
+    for i, knots in ray_knots.items():
+        # Sort by the first element of the tuple, t_k
+        sorted_knots = sorted(knots, key=lambda k: k[0])
+        sorted_ray_knots[i] = sorted_knots
+        
+    # Pass 3: For each ray, accumulate the contributions along the ray, classify and composite the result.
+    
+    results = {}
+    for i, knots in sorted_ray_knots.items():
+        if not knots:
+            results[i] = 0.0 # Or some default value
+            continue
+            
+        # Accumulate contributions
+        # The knots are encoded as localized difference coefficients.
+        # We need to compute the actual coefficients a_kd for each piece.
+        
+        # Initialize previous coefficients to zero
+        prev_a = [0.0] * (D + 1)
+        prev_t = None
+        
+        # We need to evaluate the field at specific points along the ray for compositing.
+        # The source mentions "accumulate the contributions along the ray, classify and composite".
+        # This typically involves stepping along the ray and evaluating the polynomial.
+        
+        # Let's assume we want to evaluate the field at the knot positions.
+        # Or more generally, we integrate/composite.
+        
+        # For simplicity, let's compute the field value at each knot position.
+        # The field value at t is given by the polynomial A_k(t) for the piece k containing t.
+        
+        # However, the knots are the boundaries.
+        # Piece k is defined on [t_k, t_{k+1}].
+        # The coefficients a_kd are for the polynomial at t_k.
+        
+        # To evaluate at a point t in [t_k, t_{k+1}], we use:
+        # A(t) = sum(a_kd * (t - t_k)^d)
+        
+        # But we need to update a_kd from a_{k-1}d.
+        
+        field_values = []
+        
+        for k, (t_k, a_hat_k) in enumerate(knots):
+            # Update coefficients
+            # a_kd = a_hat_kd + sum_{j=d}^D binom(j,d) * a_{(k-1)j} * (t_k - t_{k-1})^{j-d}
+            
+            curr_a = [0.0] * (D + 1)
+            for d in range(D + 1):
+                sum_term = 0.0
+                for j in range(d, D + 1):
+                    # binom(j, d)
+                    binom_val = compute_binomial(j, d)
+                    # (t_k - t_{k-1})^{j-d}
+                    if prev_t is not None:
+                        delta_t = t_k - prev_t
+                        power_term = delta_t**(j - d)
+                    else:
+                        # First piece, prev_t is None, so delta_t is effectively 0?
+                        # Or rather, the previous polynomial is 0.
+                        # If prev_t is None, it means we are at the first knot.
+                        # The previous polynomial is 0, so a_{(k-1)j} = 0.
+                        power_term = 0 # Since a_{(k-1)j} is 0
+                        
+                    sum_term += binom_val * prev_a[j] * power_term
+                    
+                curr_a[d] = a_hat_k[d] + sum_term
+            
+            # Evaluate the polynomial at t_k
+            # A(t_k) = sum(a_kd * (t_k - t_k)^d) = a_k0 * (0)^0 + ... = a_k0
+            # Since (t_k - t_k)^0 = 1 and (t_k - t_k)^d = 0 for d > 0.
+            value_at_t_k = curr_a[0]
+            
+            field_values.append((t_k, value_at_t_k))
+            
+            # Update previous
+            prev_a = curr_a
+            prev_t = t_k
+            
+        # Composite the result
+        # This step depends on the specific compositing algorithm (e.g., ray marching).
+        # The source does not specify the compositing details beyond "accumulate... classify and composite".
+        # [G] Typically, this involves integrating the field values along the ray and applying transfer functions.
+        
+        # For the purpose of this article, we return the field values at the knots.
+        results[i] = field_values
+        
+    return results
+```
+
+### Edge Cases and Pitfalls
+*   **Continuity and Compact Support:** The approximation candidates must be continuous, even functions with compact support. This is required because the target function $B_\Lambda$ also has these properties [S1].
+*   **Precision:** The update rule for coefficients involves powers of $(t_k - t_{k-1})$. For very small intervals, precision issues may arise.
+*   **Boundary Conditions:** The first piece of the polynomial approximation has no previous piece, so the update rule simplifies to $a_{kd} = \hat{a}_{kd}$ if we assume the previous polynomial is zero.
+
+## Operating characteristics
+*   **Time Complexity:** The summation of piecewise polynomials reduces to a sorting task. The update rule for coefficients has constant complexity per piece, irrespective of the number of particles contributing [S1].
+*   **Memory Complexity:** Depends on the number of particles, rays, and the size of the lookup table. The lookup table size depends on the number of equidistant $\Lambda$ values and the number of knots per approximation.
+*   **Strengths:** Higher-order approximation provides better accuracy than linear or constant approximations. The encoding allows efficient summation via sorting.
+*   **Limitations:** Requires precomputation of the lookup table. The optimization problem for finding optimal approximations is non-trivial.
+*   **When to use:** When high accuracy is required for SPH data rendering and the computational cost of higher-order approximation is acceptable.
+*   **When not to use:** When real-time performance is critical and lower-order approximations are sufficient.
+
+## Background
+Smoothed Particle Hydrodynamics (SPH) was introduced by Gingold and Monaghan (1977) and independently by Lucy (1977) [S1]. The method for approximating SPH scalar fields along viewing rays with piecewise polynomial functions of higher order was presented in the source [S1].
+
+## Sources
+[S1] Particle-Wise Higher-Order SPH Field Approximation for DVR, https://arxiv.org/abs/2401.02896v1, fetched 2026-10-26

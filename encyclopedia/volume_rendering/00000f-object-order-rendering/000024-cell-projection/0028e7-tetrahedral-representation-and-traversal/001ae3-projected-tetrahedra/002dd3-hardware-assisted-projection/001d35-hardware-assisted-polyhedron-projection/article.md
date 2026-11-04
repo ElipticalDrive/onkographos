@@ -1,0 +1,236 @@
+# Hardware-Assisted Polyhedron Projection
+
+Also called: Approximate Volume Rendering for Curvilinear and Unstructured Grids by Hardware-Assisted Polyhedron Projection, CP scheme, Cell-Projection Volume Rendering, Parallel Cell-Projection Volume Rendering
+
+## Overview
+Hardware-Assisted Polyhedron Projection is a volume rendering technique for unstructured grids that projects 3D convex polyhedral cells to 2D screen space, performs scan conversion to generate depth-sorted ray segments, and composites them using hardware acceleration [S1, S3, unofficial]. It differs from raycasting by operating in image space with object-order projection, allowing flexible data distribution on distributed-memory systems and leveraging standard polygon pipelines for scan conversion [S2][S3, unofficial]. Unlike [Projected Tetrahedra](877-projected-tetrahedra.md), which requires explicit triangle generation and sorting, this method projects cells directly as polygons and relies on hardware compositing or global sorting for depth ordering [S3, unofficial].
+
+## How it works
+The method consists of three main phases: Projection, Scan Conversion, and Composition [S1, unofficial]. It handles arbitrary convex polyhedral cells, including approximations for curvilinear cells [S3, unofficial].
+
+### Inputs and Outputs
+- **Input**: Unstructured grid data (nodes and cells). Nodes store 3D coordinates and a scalar value [S2]. Cells store indices of their constituent nodes [S2].
+- **Output**: A 2D rendered image with color and opacity per pixel [S1, unofficial].
+
+### Data Structures
+**Ray Segment**: A data structure used during scan conversion and composition, consisting of four parameters [S1, unofficial]:
+1.  $RGB$: Color contribution.
+2.  $\alpha$: Opacity contribution.
+3.  $z_{front}$: Depth of the front intersection point of the ray with the cell.
+4.  $z_{back}$: Depth of the back intersection point of the ray with the cell [S1, unofficial].
+
+**Cell Storage**: Each cell stores 4 node indices (16 bytes) [S2].
+**Node Storage**: Each node stores 3 coordinates and 1 scalar value (16 bytes) [S2].
+
+### Steps
+
+1.  **Projection Phase**:
+    For each 3D cell, project its vertices onto the 2D screen space to determine the projection area $R$ [S1, unofficial]. If the cell is curvilinear (faces are not planar), modifications are made to approximate it as a convex polyhedron with planar faces [S3, unofficial].
+
+2.  **Scan Conversion Phase**:
+    For each pixel $P(x, y)$ within the projection area $R$ of a cell:
+    - Calculate the ray corresponding to $P(x, y)$ [S1, unofficial].
+    - Determine the intersection of the ray with the cell to find $z_{front}$ and $z_{back}$ [S1, unofficial].
+    - Compute the cell's color ($RGB$) and opacity ($\alpha$) contribution at these intersections [S1, unofficial].
+    - Create a Ray Segment for this pixel.
+    
+    After processing all cells, for each pixel on the screen, gather all Ray Segments corresponding to that pixel and sort them by depth ($z_{front}$) to form a depth-sorted list [S1, unofficial].
+    
+    *Partial Composition*: During scan conversion, if two neighboring ray segments in a list are derived from neighboring cells that contact each other along the ray, they can be composed immediately [S1, unofficial]. The result is a single Ray Segment, reducing the list length [S1, unofficial].
+
+3.  **Composition Phase**:
+    For each pixel, composite the depth-sorted Ray Segment list from front to back using alpha blending with the Porter-Duff "over" operation to calculate the final pixel color [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hardware_assisted_polyhedron_projection(cells, nodes, view_matrix, proj_matrix, screen_width, screen_height):
+    """
+    Render unstructured grid using hardware-assisted polyhedron projection.
+    
+    Args:
+        cells: List of cells, each containing indices of nodes.
+        nodes: List of nodes, each with position (x,y,z) and scalar value.
+        view_matrix: 4x4 view transformation matrix.
+        proj_matrix: 4x4 projection transformation matrix.
+        screen_width: Width of the output image in pixels.
+        screen_height: Height of the output image in pixels.
+        
+    Returns:
+        image: 2D array of RGB values.
+    """
+    # Initialize image buffer with zeros
+    image = [[[0.0, 0.0, 0.0] for _ in range(screen_width)] for _ in range(screen_height)]
+    ray_segment_lists = {}
+
+    # Step 1 & 2: Projection and Scan Conversion
+    for cell in cells:
+        # Get 3D node positions
+        node_positions = [nodes[idx].position for idx in cell.node_indices]
+
+        # Project vertices to screen space (standard view-projection)
+        screen_vertices = []
+        for v in node_positions:
+            clip = proj_matrix @ (view_matrix @ v)
+            if clip.w != 0:
+                ndc = (clip.xyz / clip.w)
+                screen_vertices.append(((ndc.x + 1) * screen_width / 2, (ndc.y + 1) * screen_height / 2))
+
+        # Determine bounding box
+        min_x = min(v[0] for v in screen_vertices)
+        max_x = max(v[0] for v in screen_vertices)
+        min_y = min(v[1] for v in screen_vertices)
+        max_y = max(v[1] for v in screen_vertices)
+
+        # Scan conversion over projection area
+        for y in range(int(min_y), int(max_y) + 1):
+            for x in range(int(min_x), int(max_x) + 1):
+                # Point-in-polygon test (ray casting)
+                if not _point_in_polygon(x, y, screen_vertices):
+                    continue
+
+                # Generate camera ray for pixel (standard inverse projection)
+                ndc_x = (x + 0.5) * 2 / screen_width - 1
+                ndc_y = (y + 0.5) * 2 / screen_height - 1
+                ray_origin = view_matrix.inverse().transform_point((0, 0, 0))
+                ray_dir = view_matrix.inverse().transform_direction((ndc_x, ndc_y, -1))
+                ray_dir = ray_dir / ray_dir.length()
+
+                # Intersect ray with convex polyhedron faces
+                intersections = []
+                for i in range(len(node_positions)):
+                    p1 = node_positions[i]
+                    p2 = node_positions[(i + 1) % len(node_positions)]
+                    p3 = node_positions[(i + 2) % len(node_positions)]
+                    # Compute face normal
+                    normal = (p2 - p1).cross(p3 - p1).normalize()
+                    denom = ray_dir.dot(normal)
+                    if abs(denom) > 1e-6:
+                        t = normal.dot(p1 - ray_origin) / denom
+                        if t > 0:
+                            hit = ray_origin + ray_dir * t
+                            if _point_in_polygon_3d(hit, [p1, p2, p3], normal):
+                                intersections.append(t)
+
+                if len(intersections) >= 2:
+                    intersections.sort()
+                    z_front = intersections[0]
+                    z_back = intersections[-1]
+
+                    # Interpolate scalar values at intersection points (barycentric/trilinear)
+                    p_front = ray_origin + ray_dir * z_front
+                    p_back = ray_origin + ray_dir * z_back
+                    scalar_front = _interpolate_scalar(p_front, node_positions, [n.scalar for n in nodes])
+                    scalar_back = _interpolate_scalar(p_back, node_positions, [n.scalar for n in nodes])
+
+                    # Map scalars to color and opacity (standard transfer function)
+                    color, alpha = _map_scalar_to_color_opacity(scalar_front, scalar_back)
+
+                    segment = RaySegment(RGB=color, alpha=alpha, z_front=z_front, z_back=z_back)
+                    if (x, y) not in ray_segment_lists:
+                        ray_segment_lists[(x, y)] = []
+                    ray_segment_lists[(x, y)].append(segment)
+
+    # Step 3: Sorting and Composition
+    for (x, y), segments in ray_segment_lists.items():
+        segments.sort(key=lambda s: s.z_front)
+
+        # Partial Composition: merge adjacent segments from neighboring cells if available [G]
+        # (Requires adjacency graph not provided in basic CP scheme)
+        merged_segments = segments
+
+        accumulated_alpha = 0.0
+        accumulated_color = [0.0, 0.0, 0.0]
+
+        for segment in merged_segments:
+            c_seg = segment.RGB
+            a_seg = max(0.0, min(1.0, segment.alpha))
+
+            # Porter-Duff over operation
+            accumulated_color = [
+                c_seg[0] + accumulated_color[0] * (1.0 - a_seg),
+                c_seg[1] + accumulated_color[1] * (1.0 - a_seg),
+                c_seg[2] + accumulated_color[2] * (1.0 - a_seg)
+            ]
+            accumulated_alpha = a_seg + accumulated_alpha * (1.0 - a_seg)
+
+            if accumulated_alpha >= 1.0:
+                break
+
+        image[y][x] = accumulated_color
+
+    return image
+
+class RaySegment:
+    def __init__(self, RGB, alpha, z_front, z_back):
+        self.RGB = RGB
+        self.alpha = alpha
+        self.z_front = z_front
+        self.z_back = z_back
+
+def _point_in_polygon(x, y, vertices):
+    # Standard ray casting algorithm
+    inside = False
+    n = len(vertices)
+    for i in range(n):
+        x1, y1 = vertices[i]
+        x2, y2 = vertices[(i + 1) % n]
+        if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1) + x1):
+            inside = not inside
+    return inside
+
+def _point_in_polygon_3d(point, face_vertices, normal):
+    # Check if point is inside 3D triangle using barycentric coordinates
+    v0 = face_vertices[2] - face_vertices[0]
+    v1 = face_vertices[1] - face_vertices[0]
+    v2 = point - face_vertices[0]
+    dot00 = v0.dot(v0)
+    dot01 = v0.dot(v1)
+    dot02 = v0.dot(v2)
+    dot11 = v1.dot(v1)
+    dot12 = v1.dot(v2)
+    inv_denom = 1 / (dot00 * dot11 - dot01 * dot01)
+    u = (dot11 * dot02 - dot01 * dot12) * inv_denom
+    v = (dot00 * dot12 - dot01 * dot02) * inv_denom
+    return (u >= 0) and (v >= 0) and (u + v <= 1)
+
+def _interpolate_scalar(point, node_positions, node_scalars):
+    # Barycentric interpolation for tetrahedron/polyhedron approximation [G]
+    # In practice, uses cell-local basis functions or trilinear interpolation
+    return node_scalars[0]
+
+def _map_scalar_to_color_opacity(scalar_front, scalar_back):
+    # Standard transfer function lookup [G]
+    return (0.0, 0.0, 0.0), 0.0
+```
+
+### Parameters
+- **Cell Storage**: 16 bytes per cell (4 node indices) [S2].
+- **Node Storage**: 16 bytes per node (3 coordinates, 1 scalar) [S2].
+- **Typical Values**: Not given in the sources.
+
+### Edge Cases and Pitfalls
+- **Curvilinear Cells**: Faces may not be planar. Modifications are required to approximate them as convex polyhedra with planar faces [S3, unofficial].
+- **Load Imbalance**: Grouping connected cells together causes severe load imbalances during zoom-in viewing, as a few processors handle all calculations while others go idle [S2].
+- **Irregular Meshes**: Unstructured meshes have irregular cell sizes and shapes, making balanced load distribution difficult due to variations in projected image area and scan conversion costs [S2].
+- **Global Sorting**: The method requires global sorting for back-to-front compositing, which can be a bottleneck [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Dominated by scan conversion and sorting [S1, S3, unofficial].
+- **Memory Complexity**: Depends on the number of ray segments per pixel [S1, unofficial].
+- **Performance**: On an IBM SP2 with 128 processors, the algorithm achieved 2 frames per second for a 400x400-pixel image using a dataset with half a million tetrahedral cells [S2].
+- **Scalability**: The round-robin distribution of cells among processors provides good scalability and load balancing for large datasets [S2].
+- **Strengths**: Flexible data distribution, efficient on distributed-memory systems, leverages hardware polygon rendering [S2][S3, unofficial].
+- **Limitations**: Requires global sorting for compositing, sensitive to load imbalances if data is not distributed properly, approximations for curvilinear cells [S2][S3, unofficial].
+- **When to Use**: Large unstructured grids on distributed-memory systems where flexibility in data distribution is needed [S2].
+- **When Not to Use**: When high precision for curvilinear cells is required without approximation, or when global sorting is a bottleneck [S3, unofficial].
+
+## Background
+The method was introduced by Nelson Max, Peter L. Williams, and Cláudio T Silva in 2000 [S3, unofficial]. It is based on the Cell-Projection (CP) scheme [S1, unofficial]. The approach was developed to address the challenges of volume rendering on massively parallel distributed-memory supercomputers, providing a scalable alternative to raycasting [S2].
+
+## Sources
+[S1] PDF Cell-projection Parallel Volume Rendering With Early Ray Termination, http://www.tomitaken.org/project/papers/ReVolver/2004/VIIP.pdf, fetched 2026-10-27 (unofficial)
+[S2] PDF A Scalable Parallel Cell-Projection Volume Rendering Algorithm for ..., https://web.cs.ucdavis.edu/~ma/papers/PRS97.pdf, fetched 2026-10-27
+[S3] (PDF) Image-space visibility ordering for cell projection volume ..., https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,124 @@
+# Chunk Visibility Culling
+
+Also called: Frustum Culling for Chunk Visibility
+
+## Overview
+Chunk Visibility Culling determines which spatial chunks are visible to the camera by testing their bounding boxes against the view frustum, then sorting the visible set by distance [S1, unofficial]. It differs from the parent [Chunk Loading/Unloading Scanner](4404-chunk-loading-unloading-scanner.md) by focusing on geometric intersection with the camera’s view volume rather than offset-grid-based load/unload area determination.
+
+## How it works
+**Inputs and Outputs**
+- **Inputs**:
+  - `camera`: A `PerspectiveCamera` instance providing projection and world matrices [S1, unofficial].
+  - `renderRadius`: A number specifying the radius in chunk coordinates around the center chunk to check [S1, unofficial].
+  - Chunk grid data: Implicitly accessed via `camera.position` and `CHUNK_WORLD_SIZE` [S1, unofficial].
+- **Outputs**:
+  - A list of visible chunk coordinates, sorted by squared distance from the center chunk [S1, unofficial].
+
+**Data Structures**
+- **Frustum**: Represented by a frustum object derived from the projection matrix [S1, unofficial].
+- **Visible List**: A list of chunk coordinates (e.g., `[x, y, z]` tuples or vectors) [S1, unofficial].
+
+**Steps**
+1. **Calculate Center Chunk Coordinates**:
+   Determine the chunk containing the camera by dividing the camera’s world position by the chunk world size and flooring the result [S1, unofficial]:
+   $$
+   \text{center\_chunk\_coords} = \left( \left\lfloor \frac{\text{camera.position.x}}{\text{CHUNK\_WORLD\_SIZE}} \right\rfloor, \left\lfloor \frac{\text{camera.position.y}}{\text{CHUNK\_WORLD\_SIZE}} \right\rfloor, \left\lfloor \frac{\text{camera.position.z}}{\text{CHUNK\_WORLD\_SIZE}} \right\rfloor \right)
+   $$
+   [S1, unofficial]
+
+2. **Set Up Frustum**:
+   Compute the view-projection matrix and extract the six planes of the view frustum [S1, unofficial]:
+   $$
+   \text{projScreenMatrix} = \text{camera.projectionMatrix} \times \text{camera.matrixWorldInverse}
+   $$
+   $$
+   \text{frustum} = \text{Frustum.setFromProjectionMatrix}(\text{projScreenMatrix})
+   $$
+   [S1, unofficial]
+
+3. **Check Frustum Intersection**:
+   For each chunk within the `renderRadius` of the `center_chunk_coords`, construct its axis-aligned bounding box (AABB) [S1, unofficial]. Test if the frustum intersects this box [S1, unofficial]:
+   ```python
+   if frustum.intersectsBox(bounds):
+       add chunk.position to visible_list
+   ```
+   [S1, unofficial]
+
+4. **Sort Visible Chunks**:
+   Sort the `visible_list` by the squared Euclidean distance from each chunk’s position to the `center_chunk_coords` [S1, unofficial]. This prioritizes closer chunks for rendering or loading [S1, unofficial].
+
+**Parameters**
+- `camera`: `PerspectiveCamera` [S1, unofficial].
+- `renderRadius`: Number, radius in chunk coordinates [S1, unofficial].
+- `CHUNK_WORLD_SIZE`: Implicit constant defining the spatial extent of a chunk [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- **Precision**: Floating-point errors in `camera.position` or matrix multiplication may cause incorrect frustum extraction or intersection tests [G].
+- **Boundaries**: Chunks at the edge of the `renderRadius` must be correctly included or excluded based on the radius definition (inclusive/exclusive) [G].
+- **Degenerate Input**: If `camera` is invalid or matrices are singular, frustum extraction fails [G].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def chunk_visibility_culling(camera, render_radius, chunk_world_size):
+    # Step 1: Calculate center chunk coordinates
+    center_chunk_coords = [
+        floor(camera.position.x / chunk_world_size),
+        floor(camera.position.y / chunk_world_size),
+        floor(camera.position.z / chunk_world_size)
+    ]
+
+    # Step 2: Set up frustum
+    proj_screen_matrix = multiply_matrices(camera.projection_matrix, camera.matrix_world_inverse)
+    frustum = Frustum.set_from_projection_matrix(proj_screen_matrix)
+
+    visible_chunks = []
+
+    # Step 3: Check frustum intersection for chunks within render radius
+    for x in range(center_chunk_coords[0] - render_radius, center_chunk_coords[0] + render_radius + 1):
+        for y in range(center_chunk_coords[1] - render_radius, center_chunk_coords[1] + render_radius + 1):
+            for z in range(center_chunk_coords[2] - render_radius, center_chunk_coords[2] + render_radius + 1):
+                chunk_pos = [x, y, z]
+                # Construct bounding box for the chunk
+                bounds = create_chunk_bounds(chunk_pos, chunk_world_size)
+                
+                # Check intersection
+                if frustum.intersects_box(bounds):
+                    visible_chunks.append(chunk_pos)
+
+    # Step 4: Sort visible chunks by squared distance from center
+    def squared_distance(chunk_pos):
+        dx = chunk_pos[0] - center_chunk_coords[0]
+        dy = chunk_pos[1] - center_chunk_coords[1]
+        dz = chunk_pos[2] - center_chunk_coords[2]
+        return dx*dx + dy*dy + dz*dz
+
+    visible_chunks.sort(key=squared_distance)
+
+    return visible_chunks
+```
+[G] Helper functions `multiply_matrices`, `Frustum.set_from_projection_matrix`, `create_chunk_bounds`, and `frustum.intersects_box` are assumed to be standard graphics library operations or implemented as per standard definitions.
+
+## Subtopics
+
+### [Octree Frustum Culling & LOD Selection](5771-octree-frustum-culling-lod-selection.md)
+Recursively traverses an octree to cull chunks outside the camera frustum and select appropriate LOD levels based on distance to the camera.
+
+## Operating characteristics
+- **Time Complexity**: $O(R^3)$ where $R$ is the `renderRadius`, as it checks all chunks in a cubic volume around the center chunk [S1, unofficial]. Sorting takes $O(V \log V)$ where $V$ is the number of visible chunks [S1, unofficial].
+- **Memory Complexity**: $O(V)$ to store the list of visible chunks [S1, unofficial].
+- **Measured Performance**: Not given in the sources.
+- **Scaling**: Performance degrades linearly with the cube of the render radius [S1, unofficial].
+- **Strengths**: Simple to implement; effective for uniform chunk grids [S1, unofficial].
+- **Limitations**: Does not account for occlusion; checks all chunks in the radius even if far from the view frustum [G].
+- **When to Use**: Uniform chunk grids where frustum culling is sufficient [S1, unofficial].
+- **When Not to Use**: Highly occluded scenes or non-uniform chunk distributions where more sophisticated culling is needed [G].
+
+## Background
+Origin: Implemented in the `web_voxel_terrain` project by Andrew Bloese [S1, unofficial].
+History: Part of a web-based voxel terrain renderer, focusing on efficient chunk management for real-time rendering [S1, unofficial].
+Usage: Used in web-based voxel terrain applications to determine which chunks to render or load [S1, unofficial].
+
+## Sources
+[S1] web_voxel_terrain, https://github.com/andrewbloese-00/web_voxel_terrain, fetched 2026-10-27 (unofficial)

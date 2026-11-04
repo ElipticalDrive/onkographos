@@ -1,0 +1,111 @@
+# Subvolume Tracing
+
+Also called: Ray Marching Subvolume
+
+## Overview
+Subvolume Tracing renders a localized region of a volume by walking a fixed number of voxels deep along a ray and compositing the data from back to front [S1]. It differs from full volume ray casting by limiting the trace depth to a small, configurable fraction of the volume, making it suitable for interactive applications where rendering the entire volume is too expensive [S1]. It builds on [Alpha Compositing Ray Casting](922-alpha-compositing-ray-casting.md) by restricting the sampling range.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The position of the object in world space (`objPosStart`), the camera position in volume space (`cameraPosVolSpace`), and volume data accessible via `SampleVol` and `ShadeVol` functions.
+*   **Output:** A final color and alpha value for the pixel.
+
+**Data Structures:**
+*   `curColor`: A 4-component vector (RGBA) initialized to transparent black `(0, 0, 0, 0)` [S1].
+*   `curCoord`: A 3D coordinate in volume space representing the current sampling position [S1].
+*   `stepCoord`: A 3D vector representing the step size between samples [S1].
+
+**Parameters:**
+*   `maxDepth`: The depth in volume space to trace. Typical value is `0.15` [S1].
+*   `numLoops`: The number of sampling steps. Typical value is `10`, though it can be increased to `400` on high-end hardware [S1].
+
+**Algorithm Steps:**
+1.  **Coordinate Transformation:** Calculate the object's position in volume space using a `_WorldToVolume` matrix. Calculate the camera's position in volume space using the same matrix [S1].
+2.  **Boundary Calculation:** Determine the front and back coordinates of the subvolume segment.
+    *   `frontCoord` is the object's position in volume space.
+    *   `backCoord` is calculated as `frontCoord + (normalized camera direction * maxDepth)` [S1]. The camera direction is `normalize(cameraPosVolSpace - objPosStart)` [S1].
+3.  **Step Vector Calculation:** Compute the step vector:
+    $$stepCoord = \frac{frontCoord - backCoord}{numLoops}$$
+    [S1]
+4.  **Initialization:** Set `curCoord` to `backCoord` [S1].
+5.  **Aliasing Prevention:** Add a per-pixel random offset to `curCoord` to avoid layer aliasing. The offset is `stepCoord * RandomFromPositionFast(objPosStart)` [S1].
+6.  **Loop:** Iterate `numLoops` times:
+    *   Sample the volume at `curCoord` to get intensity.
+    *   Shade the intensity to get a `src` color/alpha pair.
+    *   Composite `src` into `curColor` using alpha blending.
+    *   Increment `curCoord` by `stepCoord` [S1].
+7.  **Return:** Return `curColor` [S1].
+
+**Alpha Blending Formula:**
+The blending operation combines the source color (`src`) and destination color (`dst`) as follows [S1]:
+$$res.rgb = (src.rgb \times src.a) + (dst.rgb - dst.rgb \times src.a)$$
+$$res.a = src.a + (dst.a - dst.a \times src.a)$$
+[ S1]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def subvolume_trace(obj_pos_start, camera_pos_vol_space, max_depth=0.15, num_loops=10):
+    # 1. Coordinate Transformation
+    # Assuming vol_space and camera_in_vol_space are pre-calculated in vertex shader
+    # vol_space = mul(_WorldToVolume, float4(obj_pos_start, 1))
+    # camera_in_vol_space = mul(_WorldToVolume, float4(camera_pos_vol_space, 1))
+    
+    front_coord = obj_pos_start
+    # Camera direction in volume space
+    cam_dir = normalize(camera_pos_vol_space - obj_pos_start)
+    back_coord = front_coord + (cam_dir * max_depth)
+    
+    # 3. Step Vector Calculation
+    step_coord = (front_coord - back_coord) / num_loops
+    
+    # 4. Initialization
+    cur_color = (0.0, 0.0, 0.0, 0.0)
+    cur_coord = back_coord
+    
+    # 5. Aliasing Prevention
+    # RandomFromPositionFast is a pseudo-random function based on position
+    random_offset = step_coord * random_from_position_fast(obj_pos_start)
+    cur_coord += random_offset
+    
+    # 6. Loop
+    for i in range(num_loops):
+        intensity = sample_vol(cur_coord)
+        shaded = shade_vol(intensity)
+        cur_color = alpha_blend(cur_color, shaded)
+        cur_coord += step_coord
+        
+    return cur_color
+
+def alpha_blend(dst, src):
+    # dst and src are (r, g, b, a) tuples
+    res_r = (src.r * src.a) + (dst.r - dst.r * src.a)
+    res_g = (src.g * src.a) + (dst.g - dst.g * src.a)
+    res_b = (src.b * src.a) + (dst.b - dst.b * src.a)
+    res_a = src.a + (dst.a - dst.a * src.a)
+    return (res_r, res_g, res_b, res_a)
+```
+[S1]
+
+## Subtopics
+
+### Whole Volume Rendering
+Extends subvolume tracing to render the entire volume by calculating the full path length through the volume cube [S1]. It differs by dynamically determining `numLoops` based on the distance through the volume rather than a fixed `maxDepth` [S1]. To choose this variant, use it when the entire volume must be visible. It sets `maxDepth` to `1.73` ($\sqrt{3}$), the maximum distance from a point on a unit cube to any other point [S1]. It trims front and back positions to be within the volume cube bounds [S1]. The number of loops is calculated as:
+$$distanceInVoxels = length(UnitVolumeToIntVolume(frontPos - backPos))$$
+$$numLoops = min(distanceInVoxels, maxSamples)$$
+[S1]
+where `maxSamples` is typically `400` to keep within bounds [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to `numLoops` [S1].
+*   **Memory Complexity:** Constant, storing only current color and coordinates [S1].
+*   **Performance:** Typical settings use `numLoops=10` for interactive performance, scalable to `400` on high-end PCs [S1].
+*   **Strengths:** Fast rendering of local details; avoids aliasing with random offset [S1].
+*   **Limitations:** Does not render the full volume; depth is fixed relative to object position [S1].
+
+## Background
+Originating from Microsoft's Mixed Reality development documentation, this method is designed for GPU-based volume rendering in shaders [S1]. It is used in mixed reality applications to render volume data efficiently [S1].
+
+## Sources
+[S1] Volume rendering - Mixed Reality | Microsoft Learn, https://learn.microsoft.com/en-us/windows/mixed-reality/develop/native/volume-rendering, fetched 2026-10-27

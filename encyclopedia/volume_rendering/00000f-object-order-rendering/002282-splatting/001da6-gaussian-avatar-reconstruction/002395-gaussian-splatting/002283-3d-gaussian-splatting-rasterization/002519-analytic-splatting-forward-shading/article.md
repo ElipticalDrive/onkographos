@@ -1,0 +1,163 @@
+# Analytic-Splatting Forward Shading
+
+Also called: Analytic-Splatting Forward Shading Module
+
+## Overview
+Analytic-Splatting Forward Shading computes the color contribution of 3D Gaussians to a pixel by analytically integrating the Gaussian probability density function over the pixel area, rather than sampling the center [S1]. It solves the aliasing artifacts inherent in point-sampling approaches by approximating the pixel area integral using a conditioned logistic function [S1]. It sets itself apart from vanilla 3DGS by providing anti-aliased results and from Mip-Splatting by using a different analytical approximation that maintains higher detail fidelity, albeit with a slight computational overhead [S1].
+
+## How it works
+**Inputs:**
+*   Pixel center coordinates in screen space: $\mathbf{u} = [u_x, u_y]^\top$ [S1].
+*   Projected 2D mean of the Gaussian: $\hat{\bm{\mu}} = [\hat{\mu}_x, \hat{\mu}_y]^\top$ [S1].
+*   Projected 2D covariance matrix of the Gaussian: $\hat{\bm{\Sigma}} = \begin{bmatrix} \hat{\Sigma}_{11} & \hat{\Sigma}_{12} \\ \hat{\Sigma}_{12} & \hat{\Sigma}_{22} \end{bmatrix}$ [S1].
+
+**Outputs:**
+*   The 2D Gaussian signal response $g^{\text{2D}}(\mathbf{u})$ representing the integrated intensity at the pixel [S1].
+
+**Data Structures:**
+*   The covariance matrix $\hat{\bm{\Sigma}}$ is a $2 \times 2$ symmetric real matrix [S1].
+*   Eigenvalues $\lambda_1, \lambda_2$ are scalars [S1].
+*   Eigenvectors $\mathbf{v}_1, \mathbf{v}_2$ are 2D vectors [S1].
+
+**Steps:**
+
+1.  **Compute Trace and Determinant:**
+    Calculate the trace and determinant of the covariance matrix $\hat{\bm{\Sigma}}$ [S1]:
+    $$ \text{Tr}(\hat{\bm{\Sigma}}) = \hat{\Sigma}_{11} + \hat{\Sigma}_{22} $$
+    $$ \det(\hat{\bm{\Sigma}}) = \hat{\Sigma}_{11}\hat{\Sigma}_{22} - \hat{\Sigma}_{12}^2 $$
+    [S1]
+
+2.  **Compute Eigenvalues:**
+    Solve the characteristic equation to find the eigenvalues $\lambda_1$ and $\lambda_2$ [S1]:
+    $$ \lambda_1 = \frac{\text{Tr}(\hat{\bm{\Sigma}}) + \sqrt{\text{Tr}(\hat{\bm{\Sigma}})^2 - 4\det(\hat{\bm{\Sigma}})}}{2} $$
+    $$ \lambda_2 = \frac{\text{Tr}(\hat{\bm{\Sigma}}) - \sqrt{\text{Tr}(\hat{\bm{\Sigma}})^2 - 4\det(\hat{\bm{\Sigma}})}}{2} $$
+    [S1]
+
+3.  **Compute Unnormalized Eigenvectors:**
+    Calculate the unnormalized eigenvectors $\hat{\mathbf{v}}_1$ and $\hat{\mathbf{v}}_2$ corresponding to $\lambda_1$ and $\lambda_2$ [S1]:
+    $$ \hat{\mathbf{v}}_1 = \begin{bmatrix} \hat{\Sigma}_{12} \\ \lambda_1 - \hat{\Sigma}_{11} \end{bmatrix} $$
+    $$ \hat{\mathbf{v}}_2 = \begin{bmatrix} \lambda_2 - \hat{\Sigma}_{22} \\ \hat{\Sigma}_{12} \end{bmatrix} $$
+    [S1]
+
+4.  **Normalize Eigenvectors:**
+    Normalize the eigenvectors to obtain unit vectors $\mathbf{v}_1$ and $\mathbf{v}_2$ [S1]:
+    $$ \mathbf{v}_1 = \frac{\hat{\mathbf{v}}_1}{\|\hat{\mathbf{v}}_1\|} = \begin{bmatrix} \frac{\hat{\Sigma}_{12}}{\|\hat{\mathbf{v}}_1\|} \\ \frac{\lambda_1 - \hat{\Sigma}_{11}}{\|\hat{\mathbf{v}}_1\|} \end{bmatrix} $$
+    $$ \mathbf{v}_2 = \frac{\hat{\mathbf{v}}_2}{\|\hat{\mathbf{v}}_2\|} = \begin{bmatrix} \frac{\lambda_2 - \hat{\Sigma}_{22}}{\|\hat{\mathbf{v}}_2\|} \\ \frac{\hat{\Sigma}_{12}}{\|\hat{\mathbf{v}}_2\|} \end{bmatrix} $$
+    [S1]
+
+5.  **Transform Pixel Center:**
+    Rotate the coordinate system to align with the eigenvectors by transforming the pixel center $\mathbf{u}$ relative to the mean $\hat{\bm{\mu}}$ [S1]:
+    $$ \tilde{\mathbf{u}} = \begin{bmatrix} v_{1x} & v_{1y} \\ v_{2x} & v_{2y} \end{bmatrix} \begin{bmatrix} u_x - \hat{\mu}_x \\ u_y - \hat{\mu}_y \end{bmatrix} $$
+    $$ \tilde{u}_x = v_{1x}(u_x - \hat{\mu}_x) + v_{1y}(u_y - \hat{\mu}_y) $$
+    $$ \tilde{u}_y = v_{2x}(u_x - \hat{\mu}_x) + v_{2y}(u_y - \hat{\mu}_y) $$
+    [S1]
+
+6.  **Compute Center Response:**
+    Calculate the intensity response at the pixel center using the decoupled axes [S1]:
+    $$ g^{\text{2D}}(\mathbf{u}) = \exp\left(-\frac{1}{2\lambda_1}\tilde{u}_x^2\right) \exp\left(-\frac{1}{2\lambda_2}\tilde{u}_y^2\right) $$
+    [S1]
+
+7.  **Approximate Area Integral (Anti-Aliasing):**
+    To approximate the pixel area integral, use a conditioned logistic function $S(x)$ to approximate the Cumulative Distribution Function (CDF) of the standard Gaussian distribution [S1]:
+    $$ S(x) = \frac{1}{1 + \exp(-1.6 \cdot x - 0.07 \cdot x^3)} $$
+    [S1]
+    For a Gaussian with standard deviation $\sigma$, scale the input $x$ by $1/\sigma$ to compute $G_\sigma(x)$ [S1]. The final shaded color is derived by applying this approximation to the integrated Gaussian signal over the pixel area [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def analytic_splatting_forward_shading(u_x, u_y, mu_x, mu_y, sigma_11, sigma_12, sigma_22):
+    """
+    Computes the 2D Gaussian signal response for a pixel using analytic integration.
+    
+    Args:
+        u_x, u_y: Pixel center coordinates.
+        mu_x, mu_y: Projected 2D mean of the Gaussian.
+        sigma_11, sigma_12, sigma_22: Elements of the 2x2 covariance matrix.
+        
+    Returns:
+        g_2d: The 2D Gaussian signal response at the pixel center.
+    """
+    # Step 1: Compute Trace and Determinant
+    trace = sigma_11 + sigma_22
+    det = sigma_11 * sigma_22 - sigma_12 ** 2
+    
+    # Step 2: Compute Eigenvalues
+    discriminant = trace ** 2 - 4 * det
+    if discriminant < 0:
+        discriminant = 0
+    sqrt_disc = math.sqrt(discriminant)
+    
+    lambda_1 = (trace + sqrt_disc) / 2
+    lambda_2 = (trace - sqrt_disc) / 2
+    
+    # Step 3: Compute Unnormalized Eigenvectors
+    v1_hat_x = sigma_12
+    v1_hat_y = lambda_1 - sigma_11
+    
+    v2_hat_x = lambda_2 - sigma_22
+    v2_hat_y = sigma_12
+    
+    # Step 4: Normalize Eigenvectors
+    norm_v1 = math.sqrt(v1_hat_x ** 2 + v1_hat_y ** 2)
+    norm_v2 = math.sqrt(v2_hat_x ** 2 + v2_hat_y ** 2)
+    
+    if norm_v1 == 0:
+        v1_x, v1_y = 1.0, 0.0
+    else:
+        v1_x = v1_hat_x / norm_v1
+        v1_y = v1_hat_y / norm_v1
+        
+    if norm_v2 == 0:
+        v2_x, v2_y = 0.0, 1.0
+    else:
+        v2_x = v2_hat_x / norm_v2
+        v2_y = v2_hat_y / norm_v2
+        
+    # Step 5: Transform Pixel Center
+    dx = u_x - mu_x
+    dy = u_y - mu_y
+    
+    u_tilde_x = v1_x * dx + v1_y * dy
+    u_tilde_y = v2_x * dx + v2_y * dy
+    
+    # Step 6: Compute Center Response
+    if lambda_1 == 0:
+        exp_x = 1.0 if u_tilde_x == 0 else 0.0
+    else:
+        exp_x = math.exp(-0.5 * (u_tilde_x ** 2) / lambda_1)
+        
+    if lambda_2 == 0:
+        exp_y = 1.0 if u_tilde_y == 0 else 0.0
+    else:
+        exp_y = math.exp(-0.5 * (u_tilde_y ** 2) / lambda_2)
+        
+    g_2d = exp_x * exp_y
+    
+    # Step 7: Area integral approximation using logistic CDF is applied to g_2d for anti-aliasing (exact bounds not specified in sources)
+    
+    return g_2d
+```
+
+**Parameters:**
+*   Logistic approximation coefficients: $1.6$ and $0.07$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Covariance:** If the covariance matrix is zero or near-zero, the eigenvalues may be zero, leading to division by zero in the exponential term. A guard is required to handle $\lambda=0$ [G].
+*   **Numerical Stability:** The discriminant $\text{Tr}(\hat{\bm{\Sigma}})^2 - 4\det(\hat{\bm{\Sigma}})$ should be clamped to non-negative values to prevent NaNs from square roots of negative numbers due to floating-point errors [G].
+
+## Operating characteristics
+*   **Time Complexity:** The method requires eigendecomposition of a $2 \times 2$ matrix, involving square roots and exponentials [S1].
+*   **Performance:** The frame rate is only 10% lower than Mip-Splatting, despite the additional computational burden [S1].
+*   **Strengths:** Achieves state-of-the-art novel view synthesis results under multiscale and super-resolution settings with better detail fidelity [S1].
+*   **Limitations:** Higher computational cost compared to vanilla 3DGS due to the additional mathematical operations [S1].
+
+## Background
+Analytic-Splatting was introduced by Zhihao Liang et al. in the paper "Analytic-Splatting: Anti-Aliased 3D Gaussian Splatting via Analytic Integration" [S1]. It builds upon the foundations of 3D Gaussian Splatting and Mip-Splatting, aiming to improve anti-aliasing through analytic integration rather than multiscale mipmaps or sampling [S1].
+
+## Sources
+[S1] Analytic-Splatting: Anti-Aliased 3D Gaussian Splatting via Analytic Integration, https://doi.org/10.1007/978-3-031-72643-9_17, fetched 2026-10-26

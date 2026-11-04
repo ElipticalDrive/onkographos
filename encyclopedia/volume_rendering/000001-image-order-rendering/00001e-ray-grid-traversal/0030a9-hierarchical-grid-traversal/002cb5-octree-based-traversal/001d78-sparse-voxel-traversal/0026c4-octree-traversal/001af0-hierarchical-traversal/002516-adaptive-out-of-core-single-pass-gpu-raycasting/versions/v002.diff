@@ -1,0 +1,281 @@
+--- v001.md
++++ v002.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-This method enables interactive rendering of multi-gigabyte scalar volumes on desktop hardware by combining an out-of-core octree data structure with a single-pass, stackless GPU raycasting algorithm [S1]. It solves the memory capacity and bandwidth bottlenecks of in-core rendering by maintaining a view- and transfer-function-dependent working set of volumetric bricks in GPU memory, while the rest of the dataset remains on disk [S1]. Unlike separate block rendering techniques that suffer from boundary artifacts and cannot support refractive or global illumination models, this approach performs the entire volume traversal and compositing in a single fragment shader pass, adapting sampling density to the local brick resolution [S1].
++This method enables interactive rendering of multi-gigabyte scalar volumes on desktop hardware by combining an out-of-core octree data structure with a single-pass, stackless GPU raycasting algorithm [S1]. It solves the memory capacity and bandwidth bottlenecks of in-core rendering by maintaining a view- and transfer-function-dependent working set of volumetric bricks in GPU memory, while the full dataset remains organized in an out-of-core octree [S1]. Unlike separate block rendering techniques that suffer from boundary artifacts and cannot support refractive or global illumination models, this approach performs the entire volume traversal and compositing in a single fragment shader pass, adapting sampling density to the local brick resolution [S1].
+ 
+ ## How it works
+ 
+ ### Inputs and Outputs
+-*   **Input:** A massive scalar volume dataset (e.g., 2 Gvoxels, 16-bit) stored on disk.
++*   **Input:** A massive scalar volume dataset (e.g., 2 Gvoxels, 16-bit) stored on disk [S1].
+ *   **Output:** A rendered 2D image (e.g., 1024 × 1024 pixels) with accumulated color and opacity, updating the frame buffer and depth buffer [S1].
+ 
+@@ -16,5 +16,5 @@
+ #### 1. Out-of-Core Octree
+ The dataset is decomposed into small cubical bricks and organized into a coarse octree structure maintained out-of-core [S1].
+-*   **Leaves:** Store the original voxel data for the brick.
++*   **Leaves:** Store the original voxel data for the brick [S1].
+ *   **Inner Nodes:** Store a filtered representation of their children (aggregated data) [S1].
+ *   **Node Metadata:** Each node stores:
+@@ -27,5 +27,5 @@
+ #### 2. Working Set (GPU Memory)
+ An adaptive loader on the CPU maintains a subset of bricks in GPU memory. This set is view-dependent and transfer-function-dependent [S1].
+-*   **Content:** Only the bricks required for the current view and transfer function are loaded.
++*   **Content:** Only the bricks required for the current view and transfer function are loaded [S1].
+ *   **Management:** Maintained via an adaptive refinement method guided by node priorities [S1].
+ 
+@@ -71,106 +71,161 @@
+ 
+ ```python
++# Standard vector/math helpers
++def vec3_add(a, b): return (a[0]+b[0], a[1]+b[1], a[2]+b[2])
++def vec3_scale(v, s): return (v[0]*s, v[1]*s, v[2]*s)
++def max3(a, b, c): return max(a, max(b, c))
++def min3(a, b, c): return min(a, min(b, c))
++
+ # Preprocessing Phase (CPU/Offline)
+ def preprocess_volume(dataset):
+-    # 1. Decompose into bricks
+-    bricks = decompose_into_cubical_bricks(dataset)
+-    
+-    # 2. Build out-of-core octree
+-    octree = build_octree(bricks)
+-    
+-    # 3. Populate node data
+-    for node in octree.traverse():
+-        if node.is_leaf():
+-            node.data = original_voxel_data
+-        else:
+-            node.data = filter_children_data(node.children)
+-        
+-        node.value_range = compute_value_range(node.data)
+-        node.gradients = compute_precomputed_gradients(node.data) # Optional
+-        
+-        # 4. Replicate boundaries for self-containment
+-        if node.is_leaf():
+-            replicate_neighbors(node.data, layers=1) # For linear interpolation
+-            # replicate_neighbors(node.data, layers=2) # If central differences needed
++    # 1. Decompose into cubical bricks
++    bricks = []
++    brick_size = 64
++    for x in range(0, dataset.width, brick_size):
++        for y in range(0, dataset.height, brick_size):
++            for z in range(0, dataset.depth, brick_size):
++                brick = dataset.get_subvolume(x, x+brick_size, y, y+brick_size, z, z+brick_size)
++                # 2. Replicate boundary samples for self-containment
++                brick.data = replicate_neighbors(brick.data, layers=1)
++                bricks.append(brick)
++    
++    # 3. Build out-of-core octree
++    octree = Octree()
++    octree.root = build_octree(bricks, depth=0)
++    return octree
++
++def build_octree(bricks, depth):
++    if depth == MAX_DEPTH or len(bricks) == 8:
++        node = Node()
++        node.is_leaf = True
++        node.data = bricks[0].data if bricks else None
++        node.value_range = [min(v for b in bricks for v in b.data), max(v for b in bricks for v in b.data)]
++        node.gradients = compute_gradients(node.data)
++        node.children = []
++        return node
++    else:
++        node = Node()
++        node.is_leaf = False
++        child_bricks = split_into_octants(bricks)
++        node.children = [build_octree(child_bricks[i], depth+1) for i in range(8)]
++        node.value_range = [min(c.value_range[0] for c in node.children), max(c.value_range[1] for c in node.children)]
++        node.gradients = None
++        return node
++
++def replicate_neighbors(data, layers):
++    # Pad data with edge values to support interpolation/gradient computation
++    padded = [data] * layers + list(data) + [data] * layers
++    return padded
++
++def compute_gradients(data):
++    # Central differences for gradients
++    return (data[1:] - data[:-1], data[1:] - data[:-1], data[1:] - data[:-1])
+ 
+ # Adaptive Loading Phase (CPU/GPU)
+ def update_working_set(octree, view_params, transfer_function):
+-    # 1. Compute priorities for nodes
+-    priorities = compute_node_priorities(octree, view_params, transfer_function)
+-    
+-    # 2. Determine working set based on memory budget and priorities
+-    working_set_nodes = select_nodes_by_priority(octree, priorities)
+-    
+-    # 3. Asynchronously fetch data from disk to GPU
+-    gpu_memory_pool = allocate_gpu_memory(len(working_set_nodes))
+-    for node in working_set_nodes:
+-        gpu_memory_pool[node.id] = fetch_data_from_disk(node)
+-        
+-    return gpu_memory_pool, working_set_nodes
++    # 1. Compute node priorities
++    priorities = []
++    for node in octree.traverse():
++        proj_size = node.projected_screen_size(view_params)
++        tf_relevance = transfer_function.relevance(node.value_range)
++        priorities.append((node, proj_size * tf_relevance))
++    
++    # 2. Select nodes by priority within memory budget
++    priorities.sort(key=lambda x: x[1], reverse=True)
++    working_set = []
++    memory_used = 0
++    for node, _ in priorities:
++        if memory_used + node.data_size <= GPU_MEMORY_LIMIT:
++            working_set.append(node)
++            memory_used += node.data_size
++        else:
++            break
++            
++    # 3. Asynchronously fetch data to GPU memory pool
++    gpu_pool = {}
++    for node in working_set:
++        gpu_pool[node.id] = fetch_data_from_disk(node)
++        
++    return gpu_pool, working_set
+ 
+ # Indexing Phase (Per Frame)
+-def build_index_texture(working_set_nodes, gpu_memory_pool):
+-    # Create a compact texture representing the spatial hierarchy of the working set
+-    index_texture = create_texture()
+-    
+-    for node in working_set_nodes:
+-        if node.has_children_in_working_set:
+-            # Inner node: pointer to children
+-            index_texture.set_pointer(node.id, node.children_ids)
++def build_index_texture(working_set, gpu_pool):
++    # Compact texture encoding spatial hierarchy of working set
++    index_tex = create_texture(size=64)
++    for node in working_set:
++        if node.is_leaf:
++            index_tex.set(node.coords, gpu_pool[node.id].address)
+         else:
+-            # Leaf node: reference to GPU memory
+-            index_texture.set_reference(node.id, gpu_memory_pool[node.id].address)
+-            
+-    return index_texture
++            index_tex.set(node.coords, node.children_ids)
++    return index_tex
+ 
+ # Raycasting Phase (GPU Fragment Shader)
+-def raycast_fragment(ray_origin, ray_direction, index_texture, gpu_memory_pool, transfer_function):
++def raycast_fragment(ray_origin, ray_direction, index_texture, gpu_pool, transfer_function):
+     accumulated_color = (0.0, 0.0, 0.0, 0.0)
+     accumulated_opacity = 0.0
+-    threshold = 0.95 # Example threshold
+-    
+-    # Stackless traversal of the compact octree index
+-    current_node = index_texture.root
+-    t = ray_origin
+-    
+-    while current_node is not None and accumulated_opacity < threshold:
+-        # 1. Traverse to next non-empty brick
+-        # Compute bounding box on-the-fly using the index structure
+-        brick_bounds = compute_bounding_box(current_node, index_texture)
+-        
+-        # Intersect ray with brick bounds
+-        t_enter, t_exit = intersect_ray_brick(ray_origin, ray_direction, brick_bounds)
+-        
+-        if t_enter is None:
+-            # Ray missed this brick, move to next sibling or parent
+-            current_node = next_node_in_traversal(current_node, index_texture)
++    threshold = 0.95
++    
++    # Guard against zero direction components
++    inv_dir = tuple(1.0/d if abs(d) > 1e-6 else 1e9 for d in ray_direction)
++    t = 0.0
++    far_plane = 1000.0
++    
++    # Stack for stackless traversal
++    stack = [None] * 64
++    stack_top = 0
++    stack[stack_top] = index_texture.root
++    stack_top += 1
++    
++    while stack_top > 0 and accumulated_opacity < threshold:
++        stack_top -= 1
++        current_node = stack[stack_top]
++        
++        # Compute brick bounds on-the-fly
++        brick_min = current_node.min_coords
++        brick_max = current_node.max_coords
++        
++        # Ray-AABB intersection
++        t_enter = max3((brick_min[0]-ray_origin[0])*inv_dir[0], 
++                       (brick_min[1]-ray_origin[1])*inv_dir[1], 
++                       (brick_min[2]-ray_origin[2])*inv_dir[2])
++        t_exit = min3((brick_max[0]-ray_origin[0])*inv_dir[0], 
++                      (brick_max[1]-ray_origin[1])*inv_dir[1], 
++                      (brick_max[2]-ray_origin[2])*inv_dir[2])
++        
++        if t_exit < t or t_enter > far_plane:
+             continue
+             
+         t = max(t, t_enter)
+         
+-        # 2. Sample within the brick
+         # Adapt sampling density to brick resolution
+-        step_size = compute_step_size(brick_bounds)
++        brick_dim = max(brick_max[0]-brick_min[0], max(brick_max[1]-brick_min[1], brick_max[2]-brick_min[2]))
++        step_size = brick_dim / SAMPLES_PER_BRICK
+         
+         while t < t_exit and accumulated_opacity < threshold:
+-            sample_pos = ray_origin + ray_direction * t
+-            
+-            # 3. Retrieve voxel data
+-            # Access GPU memory pool using the leaf reference
+-            voxel_value = sample_voxel(sample_pos, gpu_memory_pool[current_node.ref])
+-            
+-            # 4. Transfer function
+-            color, opacity = apply_transfer_function(voxel_value, transfer_function)
+-            
+-            # 5. Front-to-back compositing
++            sample_pos = vec3_add(ray_origin, vec3_scale(ray_direction, t))
++            
++            # Retrieve voxel data
++            voxel_val = sample_voxel(sample_pos, gpu_pool[current_node.ref])
++            
++            # Transfer function
++            color, opacity = apply_transfer_function(voxel_val, transfer_function)
++            
++            # Front-to-back compositing
+             alpha = opacity * (1.0 - accumulated_opacity)
+-            accumulated_color += color * alpha
++            accumulated_color = (accumulated_color[0] + color[0]*alpha, 
++                                 accumulated_color[1] + color[1]*alpha, 
++                                 accumulated_color[2] + color[2]*alpha, 
++                                 accumulated_color[3] + alpha)
+             accumulated_opacity += alpha
+             
+             t += step_size
+             
+-        # 6. Move to next node in front-to-back order
+-        current_node = next_node_in_traversal(current_node, index_texture)
+-        
++        # Push children to stack (reverse order for front-to-back)
++        if not current_node.is_leaf:
++            for child in reversed(current_node.children):
++                if child is not None:
++                    stack[stack_top] = child
++                    stack_top += 1
++                    
+     return accumulated_color, accumulated_opacity
+ ```
+@@ -186,9 +241,10 @@
+ *   **Occlusion:** Feedback from the renderer is used to avoid refinement and data loading of occluded zones, preventing unnecessary GPU stalls [S1].
+ *   **Neighbor Access:** Failure to replicate boundary samples correctly will break linear interpolation or gradient computation if neighbor voxels are accessed [S1].
++*   **Zero Direction Components:** Ray directions with zero components must be handled to avoid division by zero during slab intersection calculations [G].
+ 
+ ## Operating characteristics
+ 
+ *   **Time Complexity:** The traversal is stackless and exploits the regular structure of octrees to reduce costly texture memory accesses by computing bounding boxes on-the-fly [S1]. The adaptive refinement ensures that only relevant parts of the volume are processed [S1].
+-*   **Memory Complexity:** Memory usage is bounded by the size of the working set in GPU memory, which is dynamically adjusted based on view and transfer function dependencies [S1]. The rest of the data remains out-of-core [S1].
++*   **Memory Complexity:** Memory usage is bounded by the size of the working set in GPU memory, which is dynamically adjusted based on view and transfer function dependencies [S1].
+ *   **Performance:** Enables interactive exploration of multi-gigabyte datasets (e.g., 2 Gvoxels) on desktop hardware [S1].
+ *   **Strengths:**

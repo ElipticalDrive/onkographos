@@ -1,0 +1,186 @@
+# Discrete Ordinates Method
+
+Also called: Discrete Ordinates Method with Direction Bins, S-N method
+
+## Overview
+The Discrete Ordinates Method (DOM) solves the radiative transfer equation by discretizing the angular domain into a finite set of $M$ directions chosen for optimal Gaussian quadrature, approximating the directional intensity distribution $I(\mathbf{X}, \omega)$ [S1, unofficial][S2, unofficial]. It differs from the P-N method (which expands intensity in spherical harmonics) by using discrete rays, but Lathrop noted that modifications to avoid DOM's inherent "ray effects" result in equations mathematically equivalent to P-N [S1, unofficial][S2, unofficial]. Unlike standard single-scattering approximations, this method captures higher-order scattering by iterating flux transfer between direction bins [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A volume divided into $N = n^3$ cubical voxels; $M$ discrete directions $\omega_j$; scattering phase function $p(\omega_j, \omega_l)$; albedo $a$; extinction coefficients.
+- Output: Directional intensity $I(\mathbf{X}_i, \omega_j)$ for all voxels $i$ and directions $j$; final image via gathering pass.
+
+**Data Structures:**
+- **Voxel Grid:** $N$ voxels, indexed $i=1 \dots N$.
+- **Direction Bins:** $M$ directions. In the canonical implementation, bins are arranged on the 96 exterior faces of a $4 \times 4 \times 4$ block of cubes, containing unequal solid angles [S1, unofficial][S2, unofficial].
+- **Phase Function Matrix:** An $M \times M$ matrix approximating the scattering phase function $p(\omega_j, \omega_l)$, accounting for the unequal solid angles of the bins [S1, unofficial].
+- **Form Factors:** Coefficients $F_{klij}$ representing the effect of intensity $I(\mathbf{X}_i, \omega_j)$ at voxel $\mathbf{X}_i$ in direction $\omega_j$ on intensity $I(\mathbf{X}_k, \omega_l)$ at voxel $\mathbf{X}_k$ in direction $\omega_l$, accounting for extinction [S1, unofficial][S2, unofficial]. There are at least $N^2 M$ non-zero coefficients.
+- **Temporary Flux Array:** Stores received flux at each voxel before scattering [S1, unofficial][S2, unofficial].
+
+**Steps:**
+1. **Direction Discretization:** Select $M$ discrete directions $\omega_j$ to provide optimal Gaussian quadrature for integrals over the solid angle [S1, unofficial][S2, unofficial]. Arrange these directions as bins (e.g., on the faces of a $4 \times 4 \times 4$ cube grid) to mitigate ray effects [S1, unofficial][S2, unofficial].
+2. **Flux Propagation (Layer-wise):** For each shooting direction bin $\omega_j$:
+   - Propagate flux from all voxels $\mathbf{X}_i$ in a layer simultaneously.
+   - For each voxel, multiply the entering flux by the voxel's transparency.
+   - Distribute the attenuated flux to four adjacent voxels determined by the direction bin $\omega_j$ [S1, unofficial][S2, unofficial].
+   - This step effectively computes $N^2$ interactions in time $O(N \log N)$ [S1, unofficial][S2, unofficial].
+3. **Flux Accumulation:** Deposit the received flux into a temporary array at each voxel $\mathbf{X}_k$ [S1, unofficial][S2, unofficial].
+4. **Scattering:** When flux in direction bin $\omega_j$ from all layers is received at voxel $\mathbf{X}_k$, scatter it to the $M$ direction bins $\omega_l$. Use a row from the $M \times M$ phase function matrix $p(\omega_j, \omega_l)$ [S1, unofficial][S2, unofficial]. This step takes time $O(MN)$ [S1, unofficial][S2, unofficial].
+5. **Iteration:** Repeat steps 2–4 until convergence. This iterative approach is faster than precomputing all form factors $F_{klij}$ when the number of required iterations is small compared to $N$ [S1, unofficial][S2, unofficial].
+6. **Final Gathering:** Perform a final pass along viewing rays using the right-hand side of the radiative transfer equation to approximate the light flow distribution $I(\mathbf{X}, \omega)$ and apply one final directional scattering bounce [S1, unofficial][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def discrete_ordinates_method(voxels, directions, phase_matrix, albedo, max_iterations):
+    """
+    Solves radiative transfer using Discrete Ordinates Method with direction bins.
+    
+    Args:
+        voxels: List of voxel objects with properties: 
+                - center: (x, y, z)
+                - transparency: float (0.0 to 1.0)
+                - neighbors: list of 4 adjacent voxel indices for each direction bin
+        directions: List of M direction bin objects
+        phase_matrix: M x M matrix where phase_matrix[j][l] is p(omega_j, omega_l)
+        albedo: float, single scattering albedo
+        max_iterations: int, maximum number of scattering bounces
+        
+    Returns:
+        intensities: 2D array [N][M] of final intensities
+    """
+    N = len(voxels)
+    M = len(directions)
+    
+    # Initialize intensities. 
+    # In a full implementation, source terms would be added here.
+    # For multiple scattering iteration, we track flux contributions.
+    # Let flux[i][j] be the flux entering voxel i from direction j.
+    # Initialize with zero or source emission.
+    flux = [[0.0] * M for _ in range(N)]
+    
+    # Precompute layer ordering for efficient propagation
+    # Layers are defined by projection along each direction bin
+    layers = compute_layers(voxels, directions)
+    
+    for iteration in range(max_iterations):
+        new_flux = [[0.0] * M for _ in range(N)]
+        
+        # Step 2 & 3: Propagate and Accumulate Flux
+        for j in range(M): # For each shooting direction bin
+            direction_bin = directions[j]
+            
+            # Propagate flux from all voxels in a layer simultaneously
+            # This approximates the form factor effects by distributing 
+            # attenuated flux to 4 adjacent voxels determined by the bin
+            for layer in layers[j]:
+                for i in layer:
+                    voxel = voxels[i]
+                    current_flux = flux[i][j]
+                    
+                    # Multiply by voxel transparency
+                    attenuated_flux = current_flux * voxel.transparency
+                    
+                    # Distribute to 4 adjacent voxels determined by direction bin
+                    # Note: The specific neighbor indices depend on the grid geometry
+                    # and the direction bin's orientation.
+                    adjacent_indices = voxel.neighbors_for_direction(direction_bin)
+                    
+                    for k in adjacent_indices:
+                        # Deposit into temporary array (accumulated in new_flux)
+                        # The flux is received at voxel k
+                        new_flux[k][j] += attenuated_flux / len(adjacent_indices)
+        
+        # Step 4: Scatter Flux
+        # When flux in direction bin j from all layers is received at voxel k,
+        # scatter it to M direction bins l using the phase function matrix.
+        scattered_flux = [[0.0] * M for _ in range(N)]
+        for k in range(N):
+            for l in range(M):
+                # Sum contributions from all incoming directions j
+                total_received = new_flux[k][l] # Note: new_flux[k][l] holds flux arriving in direction l? 
+                # Correction: new_flux[k][j] holds flux arriving at k from direction j.
+                # We need to scatter the total flux received at k from all directions.
+                pass
+            
+            # Recalculate total received flux at voxel k from all directions
+            total_received_at_k = sum(new_flux[k][j] for j in range(M))
+            
+            # Scatter to each outgoing direction l
+            for l in range(M):
+                # Use row from M x M phase function matrix
+                scattering_coeff = phase_matrix[l][j] # Approximation: average over j?
+                # More precisely, scatter flux from each incoming j to outgoing l
+                for j in range(M):
+                    scattered_flux[k][l] += new_flux[k][j] * phase_matrix[l][j]
+        
+        # Update flux for next iteration
+        # The scattered flux becomes the new input flux for the next propagation step
+        # In a steady-state or iterative solver, we might add source terms here
+        flux = scattered_flux
+        
+        # Check convergence (e.g., change in total energy)
+        if check_convergence(flux, max_iterations):
+            break
+            
+    return flux
+
+def compute_layers(voxels, directions):
+    """
+    Groups voxels into layers based on projection along each direction bin.
+    This allows simultaneous propagation of flux from all voxels in a layer.
+    """
+    # Implementation detail: Sort voxels by depth along each direction
+    # Return list of lists, where each inner list is a layer for a specific direction
+    layers = []
+    for direction in directions:
+        # Sort voxels by their coordinate along the direction vector
+        sorted_voxels = sorted(voxels, key=lambda v: dot(v.center, direction.vector))
+        # Group into layers (implementation specific, e.g., by z-slice if direction is z)
+        # This is a placeholder for the actual layering logic
+        layers.append(sorted_voxels)
+    return layers
+
+def check_convergence(flux, max_iterations):
+    """
+    Simple convergence check based on iteration count.
+    In practice, compare norm of flux change between iterations.
+    """
+    # Placeholder for actual convergence criterion
+    return False
+```
+
+**Parameters:**
+- $M$: Number of discrete directions. In the canonical implementation, $M=96$ (faces of a $4 \times 4 \times 4$ cube) [S1, unofficial][S2, unofficial].
+- $N$: Number of voxels. Example: $24 \times 24 \times 18$ voxel cloud volume [S1, unofficial].
+- Albedo $a$: Example value $0.99$ [S1, unofficial].
+- Iterations: Example: 15 iterations for convergence [S1, unofficial][S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Ray Effects:** The standard discrete ordinates method produces "ray effects" because it is equivalent to shooting energy from an element in narrow beams along discrete directions, missing the regions between them [S1, unofficial][S2, unofficial]. Using direction bins (spreading intensity into a solid angle) reduces this effect [S1, unofficial][S2, unofficial].
+- **Precision:** The method involves computing integrals for transparency across $O(n)$ voxels along the line between voxel centers for each pair of voxels $\mathbf{X}_i$ and $\mathbf{X}_k$ [S1, unofficial]. Numerical stability in iterative convergence should be monitored.
+
+## Subtopics
+
+### [Direction Bin Method for Multiple Scattering](1690-direction-bin-method-for-multiple-scattering.md)
+The Direction Bin Method is a technique for computing higher-order (multiple) scattering in volume rendering by discretizing the sphere of directions into bins arranged on the exterior faces of a 3D grid of cubes, solving for flux transfer between these bins. It builds on the Discrete Ordinates Method by approximating the directional intensity distribution $I(\mathbf{X}, \omega)$ using a finite set of direction bins, allowing for the efficient calculation of multiple scattering events. Unlike standard single-scattering approximations, this method captures the brightness increase due to higher-order scattering by iterating flux transfer between direction bins.
+
+## Operating characteristics
+- **Time Complexity:**
+  - Computing all form factors $F_{klij}$ in advance costs $O(n^7 + n^6 M)$ time due to $O(N^2 M)$ non-zero coefficients [S1, unofficial].
+  - Using the layer-wise propagation approximation, one iteration through all $M$ shooting bins takes $O(MN \log N + M^2 N) = O(M n^3 \log n + M^2 n^3)$ time [S1, unofficial][S2, unofficial].
+  - Simultaneous layer propagation effectively computes $N^2$ interactions in time $O(N \log N)$ [S1, unofficial][S2, unofficial].
+- **Memory Complexity:** $O(NM)$ to store intensities for $N$ voxels and $M$ directions [S1, unofficial].
+- **Measured Performance:** In an implementation with albedo $a=0.99$, 15 iterations were needed for convergence on a $24 \times 24 \times 18$ voxel cloud volume. Each iteration took 15 minutes on an SGI Personal Iris 4D/35 with Mips 3000 processor. Final rendering at $512 \times 384$ resolution took 5 minutes [S1, unofficial].
+- **Strengths:** Captures higher-order scattering brightness; iterative approach is faster than precomputing all coefficients when iterations are small compared to $N$ [S1, unofficial][S2, unofficial].
+- **Limitations:** Produces ray effects if not using direction bins; computationally expensive for large $N$ and $M$ if precomputing coefficients; requires careful handling of direction bin geometry [S1, unofficial][S2, unofficial].
+- **When to Use:** Suitable for scenes where higher-order scattering is significant and computational resources allow for iterative solutions; particularly effective when the number of scattering bounces required for convergence is small [S1, unofficial][S2, unofficial].
+- **When Not to Use:** When real-time performance is required; when ray effects are unacceptable and P-N method is preferred; when the volume is very large and memory for $O(NM)$ intensities is prohibitive.
+
+## Background
+The Discrete Ordinates Method originates from neutron transport theory, where it is also known as the S-N method [S2, unofficial]. Lathrop [S1, unofficial][S2, unofficial] pointed out the ray effects associated with the method. Languénou et al. [S1, unofficial] and Max [S1, unofficial][S2, unofficial] applied the method to volume rendering of clouds. The work was performed under the auspices of the U.S. Department of Energy by Lawrence Livermore National Laboratory [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] Optical Models for Direct Volume Rendering, https://courses.cs.duke.edu/spring03/cps296.8/papers/max95opticalModelsForDirectVolumeRendering.pdf, fetched 2026-10-26 (unofficial)
+[S2] Mathematical models for volume rendering and neutron transport, https://digital.library.unt.edu/ark:/67531/metadc1274949/?q=volume%20rendering%20equation, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,1727 @@
+# A Marching Cubes implementation in CUDA
+
+## Description
+
+This project is an implementation of the marching cubes
+algorithm in 3D, 2D (marching squares), and 1D.
+The marching cubes algorithm is a simple algorithm for
+creating a triangle mesh from an implicit function.
+The process works as follows:
+
+- Divide the space into an arbitrary number of cubes.
+- Test the corners of every cube for whether they are
+inside the object defined by the function.
+- For every cube where some corners are inside and some
+corners are outside the object, the surface must pass 
+through that cube, intersecting the edges of the cube 
+in between corners of opposite classification.
+- Draw a surface within each cube connecting these 
+intersections.
+
+
+## Running the application
+
+Compile the program using the makefile provided:
+```
+make
+```
+
+Run "marchingCubes" with either of the commands:
+```
+./marchingCubes
+./marchingCubes N
+``` 
+where N is the number of points used in the algorithm.
+If N is not provided, it is default to 3.
+
+
+## Using the application
+
+When marchingCubes is run, it will render to the screen a
+surface defined by a built in function.
+The program provides a wide user interface:
+
+ - Algorithm options:
+	'm'     stops/starts the algorithm.
+	'f'     changes the function of the surface to render.
+	'1'-'3' changes the dimension of the algorithm.
+	'+','-' changes the number of points in the algorithm.
+	
+ - Rendering options:
+	'g' shows/hides the grid.
+	'p' shows/hides the points.
+	's' shows/hides the resulting surface.
+	
+ - Viewing options:
+	'ESC' and 'q' quits the program.
+	'Left click' rotates the figure.
+	'Right click' zooms in/out.
+
+
+There are three built-in function per dimension. These
+are:
+ - 1D: 1-dim sphere, a semi-line, two intervals.
+ - 2D: 2-dim sphere, a collage of geometric forms, the
+ 	   body of a fish.
+ - 3D: 3-dim sphere, a one-sheeted hyperboloid, a 
+       hyperbolic paraboloid. 
+
+Remark: For a nicer rendering, make sure to increase the
+number of points significantly, as well as turning off
+the grid and zooming out.
+
+
+## FAQs
+
+1. Why does GPU help here?
+
+	Because instead of running a version of the algorithm
+	where each point is tested for containment in the
+	surface sequentially, using the GPU we do this test
+	in parallel. This results in a significant speed-up.
+	This is an example of a parallelizable problem since
+	we have a large number of copies a simple structure -
+	either an interval (1D), square (2D) or cube (3D).
+
+
+2. What work does one thread do per kernel call? 
+
+	There are two kernels in this program:
+	- The first one handles the containment test. Each
+	thread takes care of one point in the algorithm,
+	and tests it for whether it is inside the object
+	defined by the function.
+	- The second kernel handles the connection between
+	intersections. Each thread takes care of one 
+	structure (interval, square or cube) in the grid
+	and connects the intersection points with the
+	object defined by the function.
+
+
+3. What sorts of considerations did you make regarding memory? 
+
+	This program uses mainly global and register memory
+	in its current implementation. I considered using
+	shared memory, but each threads need access to a 
+	particular cube in the grid, defined by eight vertices.
+	While it is true that adjacent threads need access to
+	four common vertices (among others), all vertices in a
+	block only share one vertex.
+	This made redundant the use of shared memory.
+
+### marchingCubes.cc
+```
+///////////////////////////////////////////////////////////////////////////////
+// MARCHING CUBES															 //
+///////////////////////////////////////////////////////////////////////////////
+// CS179 - SPRING 2014
+// Final project
+// Victor Ceballos Inza
+
+// This projects consists in an implementation of the marching cubes algorithm
+// in three different dimensions, using the GPU to accelerate the process.
+
+// This file contains the rendering functions.
+
+///////////////////////////////////////////////////////////////////////////////
+// Includes, system															 //
+///////////////////////////////////////////////////////////////////////////////
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+#include <time.h>
+#include <assert.h>
+
+#include "marchingCubes_cuda.cuh"
+
+#ifdef _WIN32
+#  define WINDOWS_LEAN_AND_MEAN
+#  define NOMINMAX
+#  include <windows.h>
+#endif
+
+#if defined (__APPLE__) || defined(MACOSX)
+#include <GLUT/glut.h>
+#else
+#include <GL/glut.h>
+#endif
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Declarations																 //
+///////////////////////////////////////////////////////////////////////////////
+
+// Window settings
+int width = 512;
+int height = 512;
+
+// Mouse controls
+int mouseLeftDown = 0;
+int mouseRightDown = 0;
+int mouseMiddleDown = 0;
+float mouseX = 0;
+float mouseY = 0;
+float cameraAngleX = 0.0f;
+float cameraAngleY = 0.0f;
+float cameraDistance = 20.0f;
+
+// Flags to toggle drawing
+int grid = 1;
+int pts = 1;
+int geom = 1;
+
+// OpenGL initialization
+GLvoid initCamera();
+GLvoid initLights();
+GLvoid initMaterial();
+GLvoid initTexture();
+GLvoid initColors();
+GLvoid initGL();
+
+// Rendering functions
+void drawOrigin();
+void drawGrid();
+void drawPoints();
+void drawGeom();
+
+// VBOs
+GLuint vbo[3];  // ID of VBO for vertex arrays - 0 is reserved
+				// glGenBuffers() will return non-zero id if success
+				// vbo[0] - grid
+				// vbo[1] - points
+				// vbo[2] - geometry
+
+// Call-backs
+void display();
+void reshape(int w, int h);
+void timer(int millisec);
+void keyboard(unsigned char key, int x, int y);
+void mouse(int button, int state, int x, int y);
+void motion(int x, int y);
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Display callback															 //
+///////////////////////////////////////////////////////////////////////////////
+void display()
+{
+	// Clear buffer
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
+	// User Interaction matrices.
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glTranslatef(0.0, 0.0, -cameraDistance);	// Zooming
+    glRotatef(cameraAngleX, 1.0, 0.0, 0.0);		// Rotations
+    glRotatef(cameraAngleY, 0.0, 1.0, 0.0);
+
+    // Draw grid/points/geometry
+	if(grid) { drawGrid();   }
+	if(pts)  { drawPoints(); }
+	if(geom) { drawGeom();   }
+
+	// Mark position of the origin
+	drawOrigin();
+
+    // User Interaction matrices.
+	glPopMatrix();
+
+	// Swap buffers.
+    glutSwapBuffers();
+    glutPostRedisplay();
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Rendering functions														 //
+///////////////////////////////////////////////////////////////////////////////
+void drawOrigin()
+{
+	glColor3f(1.0,1.0,0.0);
+	glBegin(GL_POINTS);
+	glVertex4f(0.0,0.0,0.0,1.0);
+	glEnd();
+	glColor3f(0.0,0.0,0.0);
+}
+
+void drawGrid()
+{
+    // Bind VBOs with IDs.
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+
+	// Enable vertex arrays.
+    glEnableClientState(GL_VERTEX_ARRAY);
+
+    // Specify pointer to vertex array.
+    glVertexPointer(4, GL_FLOAT, 0, 0);
+
+    // Set up the polygon mode.
+	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+
+	// Set up the color.
+	glColor3f(0.0,0.0,1.0);
+
+	// Switch on the dimension
+	int n = getNumPoints();
+	int size = 0;
+	switch( getDimension() ) {
+
+	case 1:
+		// Get the right size of the grid to render
+		size = (n-1)*2;
+		// Render to screen
+		glDrawArrays(GL_LINES, 0, size);
+		break;
+
+	case 2:
+		// Get the right size of the grid to render
+		size = (n-1)*(n-1)*4;
+		// Render to screen
+		glDrawArrays(GL_QUADS, 0, size);
+		break;
+
+	case 3:
+		// Get the right size of the grid to render
+		size = (n-1)*(n-1)*(n-1)*16;
+		// Render to screen
+		glDrawArrays(GL_QUADS, 0, size);
+		break;
+	}
+
+	// Set color to default.
+	glColor3f(0.0,0.0,0.0);
+
+    // Disable vertex arrays.
+    glDisableClientState(GL_VERTEX_ARRAY);
+
+    // Release VBOs with ID 0 after use.
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void drawPoints()
+{
+    // Bind VBOs with IDs.
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
+
+	// Enable vertex arrays.
+    glEnableClientState(GL_VERTEX_ARRAY);
+
+    // Specify pointer to vertex array.
+    glVertexPointer(4, GL_FLOAT, 0, 0);
+
+    // Set up the polygon mode.
+	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+
+	// Switch on the dimension
+	int n = getNumPoints();
+	int size = 0;
+	switch( getDimension() ) {
+
+	case 1:
+		// Get the right number of points to render
+		size = n;
+		break;
+
+	case 2:
+		// Get the right number of points to render
+		size = n*n;
+		break;
+
+	case 3:
+		// Get the right number of points to render
+		size = n*n*n;
+		break;
+	}
+
+    // Render to screen
+	glDrawArrays(GL_POINTS, 0, size);
+
+    // Disable vertex arrays.
+    glDisableClientState(GL_VERTEX_ARRAY);
+
+    // Release VBOs with ID 0 after use.
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+void drawGeom()
+{
+    // Bind VBOs with IDs.
+    glBindBuffer(GL_ARRAY_BUFFER, vbo[2]);
+
+	// Enable vertex arrays.
+    glEnableClientState(GL_VERTEX_ARRAY);
+
+    // Specify pointer to vertex array.
+    glVertexPointer(4, GL_FLOAT, 0, 0);
+
+	// Set up the color.
+	glColor3f(1.0,0.0,0.0);
+
+	// Switch on the dimension
+	int n = getNumPoints();
+	int size = 0;
+	switch( getDimension() ) {
+
+	case 1:
+		// Get the right dimension of the surface to render
+		size = (n-1);
+		// Set up the polygon mode.
+		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+		// Render to screen
+		glDrawArrays(GL_POINTS, 0, size);
+		break;
+
+	case 2:
+		// Get the right dimension of the surface to render
+		size = (n-1)*(n-1)*4;
+		// Set up the polygon mode.
+		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+		// Render to screen
+		glDrawArrays(GL_LINES, 0, size);
+		break;
+
+	case 3:
+		// Get the right dimension of the surface to render
+		size = (n-1)*(n-1)*(n-1)*15;
+		// Set up the polygon mode.
+		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+		// Render to screen
+		glDrawArrays(GL_TRIANGLES, 0, size);
+		// Set up the color.
+		glColor3f(0.0,1.0,0.0);
+		// Set up the polygon mode.
+		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+		// Render to screen
+		glDrawArrays(GL_TRIANGLES, 0, size);
+		break;
+	}
+
+	// Set color to default.
+	glColor3f(0.0,0.0,0.0);
+
+    // Disable vertex arrays.
+    glDisableClientState(GL_VERTEX_ARRAY);
+
+    // Release VBOs with ID 0 after use.
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+// GLUT call-back functions													 //
+///////////////////////////////////////////////////////////////////////////////
+
+// GLUT calls this function when the windows is resized
+void reshape(int w, int h)
+{
+	// Save new screen dimensions
+	width = (GLdouble) w;
+	height = (GLdouble) h;
+
+	// Ensuring our windows is a square
+    if (height == 0) { height = 1; };
+
+    if (width > height) { width = height; }
+    else { height = width; };
+
+	// Tell OpenGL to use the whole window for drawing
+	glViewport(0, 0, (GLsizei) width, (GLsizei) height);
+
+    // Tell GLUT to call the redrawing function
+    glutPostRedisplay();
+}
+
+// GLUT redraws every given milliseconds
+void timer(int millisec)
+{
+    glutTimerFunc(millisec, timer, millisec);
+    glutPostRedisplay();
+}
+
+// GLUT calls this function when a key is pressed
+void keyboard(unsigned char key, int x, int y)
+{
+
+	int n = getNumPoints();
+
+	switch(key)
+	{
+		// Quit when ESC or 'q' is pressed
+	    case 27:
+	    case 'q':
+	    case 'Q':
+	        exit(0);
+	        break;
+
+	    // Add a point when '+' is pressed
+	    case '+':
+	        n += 1;
+	        break;
+
+	    // Remove a point when '+' is pressed
+	    case '-':
+	        n -= 1;
+	        break;
+
+	    // Run/Stop the Marching Cubes algorithm when 'm' is pressed
+	    case 'm':
+	    case 'M':
+	    	setCUDA();
+	        break;
+
+	    // Change the surface to render when 'f' is pressed
+	    case 'f':
+	    case 'F':
+	    	changeFunction();
+	        break;
+
+	    // Run the 1D algorithm when '1' is pressed
+	    case '1':
+	    	setDimension(1);
+	    	break;
+
+	    // Run the 2D algorithm when '2' is pressed
+	    case '2':
+	    	setDimension(2);
+	    	break;
+
+		// Run the 3D algorithm when '3' is pressed
+		case '3':
+			setDimension(3);
+			break;
+
+		// Show/hide the grid when 'g' is pressed
+	    case 'g':
+	    case 'G':
+	    	grid = 1-grid;
+	    	break;
+
+		// Show/hide the points when 'g' is pressed
+	    case 'p':
+	    case 'P':
+	    	pts = 1-pts;
+	    	break;
+
+		// Show/hide the surface when 's' is pressed
+	    case 's':
+	    case 'S':
+	    	geom = 1-geom;
+	    	break;
+
+	    default:
+	        ;
+	}
+
+	if (n>1) { setNumPoints(n); }
+	deleteVBOs(vbo);
+	createVBOs(vbo);
+
+}
+
+// GLUT calls this function when a mouse button is pressed
+void mouse(int button, int state, int x, int y)
+{
+    mouseX = x;
+    mouseY = y;
+
+    if(button == GLUT_LEFT_BUTTON)
+    {
+        if(state == GLUT_DOWN)
+        {
+            mouseLeftDown = 1;
+        }
+        else if(state == GLUT_UP)
+            mouseLeftDown = 0;
+    }
+
+    else if(button == GLUT_RIGHT_BUTTON)
+    {
+        if(state == GLUT_DOWN)
+        {
+            mouseRightDown = 1;
+        }
+        else if(state == GLUT_UP)
+            mouseRightDown = 0;
+    }
+
+    else if(button == GLUT_MIDDLE_BUTTON)
+    {
+        if(state == GLUT_DOWN)
+        {
+            mouseMiddleDown = 1;
+        }
+        else if(state == GLUT_UP)
+            mouseMiddleDown = 0;
+    }
+}
+
+// GLUT calls this function when mouse is moved while a button is held down
+void motion(int x, int y)
+{
+    if(mouseLeftDown)
+    {
+        cameraAngleY += (x - mouseX);
+        cameraAngleX += (y - mouseY);
+        mouseX = x;
+        mouseY = y;
+    }
+    if(mouseRightDown)
+    {
+        cameraDistance -= (y - mouseY) * 0.2f;
+        mouseY = y;
+    }
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+// OpenGL initialization													 //
+///////////////////////////////////////////////////////////////////////////////
+
+// Sets up projection and modelview matrices.
+GLvoid initCamera()
+{
+    // Set up the perspective matrix.
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    // FOV, AspectRatio, NearClip, FarClip
+    gluPerspective(60.0f, (float)(width)/height, 1.0f, 1000.0f);
+
+    // Set up the camera matrices.
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+}
+
+// Sets up OpenGL lights.
+GLvoid initLights()
+{
+	// Define each color component.
+	GLfloat ambient[]  = {0.2f, 0.2f, 0.2f, 1.0f};
+	GLfloat diffuse[]  = {0.7f, 0.7f, 0.7f, 1.0f};
+	GLfloat specular[] = {1.0f, 1.0f, 1.0f, 1.0f};
+
+	// Set each color component.
+	glLightfv(GL_LIGHT0, GL_AMBIENT, ambient);
+	glLightfv(GL_LIGHT0, GL_DIFFUSE, diffuse);
+	glLightfv(GL_LIGHT0, GL_SPECULAR, specular);
+
+    // Define and set position.
+    float lightPos[4] = {0, 0, 20, 1};
+    glLightfv(GL_LIGHT0, GL_POSITION, lightPos);
+
+	// Turn on lighting.
+    glEnable(GL_LIGHT0);
+    glEnable(GL_LIGHTING);
+}
+
+// Sets the OpenGL material state.
+GLvoid initMaterial()
+{
+	glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+	glEnable(GL_COLOR_MATERIAL);
+}
+
+// Initialize OpenGL texture.
+GLvoid initTexture()
+{
+	glEnable(GL_TEXTURE_2D);
+}
+
+// Sets up OpenGL colors
+GLvoid initColors()
+{
+    glClearColor(1.0,1.0,1.0,1.0);
+    glColor3f(0.0,0.0,0.0);
+    glLineWidth(1.0);
+    glPointSize(5.0);
+}
+
+// Sets up OpenGL state.
+GLvoid initGL()
+{
+	// Shading method: GL_SMOOTH or GL_FLAT
+	glShadeModel(GL_SMOOTH);
+
+	// Enable depth-buffer test.
+	glEnable(GL_DEPTH_TEST);
+
+	// Set the type of depth test.
+	glDepthFunc(GL_LEQUAL);
+
+	// 0 is near, 1 is far
+	glClearDepth(1.0f);
+
+	// Set camera settings.
+	initCamera();
+
+	// Set texture settings.
+	initTexture();
+
+	// Set lighting settings.
+	initLights();
+
+	// Set material settings.
+	initMaterial();
+
+	// Set color settings.
+	initColors();
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Program main																 //
+///////////////////////////////////////////////////////////////////////////////
+int main(int argc, char** argv)
+{
+	// Check whether the number of points is given as an input.
+    if (argc == 2) {
+    	int n = atoi(argv[1]);
+    	if (n>1) { setNumPoints(n); }
+    }
+
+	// Print usage
+	printf("This is an implementation of the marching cubes algorithm in CUDA.\n"
+			"\nAlgorithm options:\n"
+			"\t'm'         stops/starts the algorithm.\n"
+			"\t'f'         changes the function of the surface to render.\n"
+			"\t'1','2','3' changes the dimension of the algorithm.\n"
+			"\t'+','-'     changes the number of points in the algorithm.\n"
+			"\nRendering options:\n"
+			"\t'g' shows/hides the grid.\n"
+			"\t'p' shows/hides the points.\n"
+			"\t's' shows/hides the resulting surface.\n"
+			"\nViewing options:\n"
+			"\t'ESC' and 'q' quits the program.\n"
+			"\t'Left click' rotates the figure.\n"
+			"\t'Right click' zooms in/out.\n\n");
+
+    // Initialize GLUT
+	glutInit(&argc, argv);
+
+	// Display mode
+	glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE | GLUT_ALPHA | GLUT_DEPTH | GLUT_STENCIL);
+
+	// Initialize the window settings.
+	glutInitWindowSize(width, height);
+    glutInitWindowPosition(800, 200);
+	glutCreateWindow("Display");
+
+	// Initialize the scene.
+	initGL();
+
+	// Initialize the data.
+	createVBOs(vbo);
+
+	// Set up GLUT call-backs.
+	glutDisplayFunc(display);
+	glutTimerFunc(33, timer, 33); // redraw only every given millisec
+	glutReshapeFunc(reshape);
+	glutKeyboardFunc(keyboard);
+	glutMouseFunc(mouse);
+	glutMotionFunc(motion);
+
+	// Start the GLUT main loop
+	glutMainLoop();
+
+	return 0;
+}
+```
+
+### marchingCubes_cuda.cu
+```
+///////////////////////////////////////////////////////////////////////////////
+// MARCHING CUBES															 //
+///////////////////////////////////////////////////////////////////////////////
+// CS179 - SPRING 2014
+// Final project
+// Victor Ceballos Inza
+
+// This file contains the CUDA kernels used in the algorithm, as well as the
+// functions that initialize and clean up the VBOs.
+
+///////////////////////////////////////////////////////////////////////////////
+// Includes																	 //
+///////////////////////////////////////////////////////////////////////////////
+#include "marchingCubes_cuda.cuh"
+#include <helper_math.h>
+#include <stdio.h>
+
+///////////////////////////////////////////////////////////////////////////////
+// Declarations																 //
+///////////////////////////////////////////////////////////////////////////////
+#define BLOCK_SIZE 512
+#define PI 3.141592654f
+
+#define gpuErrchk(ans) { gpuAssert((ans), (char*)__FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, char* file, int line,
+		bool abort = true) {
+	if (code != cudaSuccess) {
+		fprintf(stderr, "GPUassert: %s %s %d\n", cudaGetErrorString(code), file,
+				line);
+		if (abort)
+			exit(code);
+	}
+}
+
+// Rendering variables
+float xmax = 10.0f;
+float xmin = -10.0f;
+int numPoints = 3;
+int dim = 2;
+int func = 0;
+
+// Flag to toggle CUDA usage
+int cuda = 1;
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Marching cubes table data												 //
+///////////////////////////////////////////////////////////////////////////////
+
+__device__
+int pointTable[4][1] = {
+		{-1}, {0}, {0}, {-1},
+};
+
+__device__
+int lineTable[16][4] = {
+		{-1, -1, -1, -1},
+		{ 0,  3, -1, -1},
+		{ 0,  1, -1, -1},
+		{ 3,  1, -1, -1},
+		{ 1,  2, -1, -1},
+		{ 0,  1,  3,  2},
+		{ 0,  2, -1, -1},
+		{ 3,  2, -1, -1},
+		{ 3,  2, -1, -1},
+		{ 0,  2, -1, -1},
+		{ 0,  3,  1,  2},
+		{ 1,  2, -1, -1},
+		{ 3,  1, -1, -1},
+		{ 0,  1, -1, -1},
+		{ 0,  3, -1, -1},
+		{-1, -1, -1, -1},
+};
+
+__device__
+int triangleTable[256][15] = {
+	{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 8, 3, 9, 8, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 3, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{9, 2, 10, 0, 2, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{2, 8, 3, 2, 10, 8, 10, 9, 8, -1, -1, -1, -1, -1, -1},
+	{3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 11, 2, 8, 11, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 9, 0, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 11, 2, 1, 9, 11, 9, 8, 11, -1, -1, -1, -1, -1, -1},
+	{3, 10, 1, 11, 10, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 10, 1, 0, 8, 10, 8, 11, 10, -1, -1, -1, -1, -1, -1},
+	{3, 9, 0, 3, 11, 9, 11, 10, 9, -1, -1, -1, -1, -1, -1},
+	{9, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 3, 0, 7, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 1, 9, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 1, 9, 4, 7, 1, 7, 3, 1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 10, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{3, 4, 7, 3, 0, 4, 1, 2, 10, -1, -1, -1, -1, -1, -1},
+	{9, 2, 10, 9, 0, 2, 8, 4, 7, -1, -1, -1, -1, -1, -1},
+	{2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4, -1, -1, -1},
+	{8, 4, 7, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{11, 4, 7, 11, 2, 4, 2, 0, 4, -1, -1, -1, -1, -1, -1},
+	{9, 0, 1, 8, 4, 7, 2, 3, 11, -1, -1, -1, -1, -1, -1},
+	{4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1, -1, -1, -1},
+	{3, 10, 1, 3, 11, 10, 7, 8, 4, -1, -1, -1, -1, -1, -1},
+	{1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4, -1, -1, -1},
+	{4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3, -1, -1, -1},
+	{4, 7, 11, 4, 11, 9, 9, 11, 10, -1, -1, -1, -1, -1, -1},
+	{9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{9, 5, 4, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 5, 4, 1, 5, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{8, 5, 4, 8, 3, 5, 3, 1, 5, -1, -1, -1, -1, -1, -1},
+	{1, 2, 10, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{3, 0, 8, 1, 2, 10, 4, 9, 5, -1, -1, -1, -1, -1, -1},
+	{5, 2, 10, 5, 4, 2, 4, 0, 2, -1, -1, -1, -1, -1, -1},
+	{2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8, -1, -1, -1},
+	{9, 5, 4, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 11, 2, 0, 8, 11, 4, 9, 5, -1, -1, -1, -1, -1, -1},
+	{0, 5, 4, 0, 1, 5, 2, 3, 11, -1, -1, -1, -1, -1, -1},
+	{2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5, -1, -1, -1},
+	{10, 3, 11, 10, 1, 3, 9, 5, 4, -1, -1, -1, -1, -1, -1},
+	{4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10, -1, -1, -1},
+	{5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3, -1, -1, -1},
+	{5, 4, 8, 5, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1},
+	{9, 7, 8, 5, 7, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{9, 3, 0, 9, 5, 3, 5, 7, 3, -1, -1, -1, -1, -1, -1},
+	{0, 7, 8, 0, 1, 7, 1, 5, 7, -1, -1, -1, -1, -1, -1},
+	{1, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{9, 7, 8, 9, 5, 7, 10, 1, 2, -1, -1, -1, -1, -1, -1},
+	{10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3, -1, -1, -1},
+	{8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2, -1, -1, -1},
+	{2, 10, 5, 2, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1},
+	{7, 9, 5, 7, 8, 9, 3, 11, 2, -1, -1, -1, -1, -1, -1},
+	{9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11, -1, -1, -1},
+	{2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7, -1, -1, -1},
+	{11, 2, 1, 11, 1, 7, 7, 1, 5, -1, -1, -1, -1, -1, -1},
+	{9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11, -1, -1, -1},
+	{5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0},
+	{11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0},
+	{11, 10, 5, 7, 11, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 3, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{9, 0, 1, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 8, 3, 1, 9, 8, 5, 10, 6, -1, -1, -1, -1, -1, -1},
+	{1, 6, 5, 2, 6, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 6, 5, 1, 2, 6, 3, 0, 8, -1, -1, -1, -1, -1, -1},
+	{9, 6, 5, 9, 0, 6, 0, 2, 6, -1, -1, -1, -1, -1, -1},
+	{5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8, -1, -1, -1},
+	{2, 3, 11, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{11, 0, 8, 11, 2, 0, 10, 6, 5, -1, -1, -1, -1, -1, -1},
+	{0, 1, 9, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1, -1, -1},
+	{5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11, -1, -1, -1},
+	{6, 3, 11, 6, 5, 3, 5, 1, 3, -1, -1, -1, -1, -1, -1},
+	{0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6, -1, -1, -1},
+	{3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9, -1, -1, -1},
+	{6, 5, 9, 6, 9, 11, 11, 9, 8, -1, -1, -1, -1, -1, -1},
+	{5, 10, 6, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 3, 0, 4, 7, 3, 6, 5, 10, -1, -1, -1, -1, -1, -1},
+	{1, 9, 0, 5, 10, 6, 8, 4, 7, -1, -1, -1, -1, -1, -1},
+	{10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4, -1, -1, -1},
+	{6, 1, 2, 6, 5, 1, 4, 7, 8, -1, -1, -1, -1, -1, -1},
+	{1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7, -1, -1, -1},
+	{8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6, -1, -1, -1},
+	{7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9},
+	{3, 11, 2, 7, 8, 4, 10, 6, 5, -1, -1, -1, -1, -1, -1},
+	{5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11, -1, -1, -1},
+	{0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6, -1, -1, -1},
+	{9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6},
+	{8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6, -1, -1, -1},
+	{5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11},
+	{0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7},
+	{6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9, -1, -1, -1},
+	{10, 4, 9, 6, 4, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 10, 6, 4, 9, 10, 0, 8, 3, -1, -1, -1, -1, -1, -1},
+	{10, 0, 1, 10, 6, 0, 6, 4, 0, -1, -1, -1, -1, -1, -1},
+	{8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10, -1, -1, -1},
+	{1, 4, 9, 1, 2, 4, 2, 6, 4, -1, -1, -1, -1, -1, -1},
+	{3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4, -1, -1, -1},
+	{0, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{8, 3, 2, 8, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1},
+	{10, 4, 9, 10, 6, 4, 11, 2, 3, -1, -1, -1, -1, -1, -1},
+	{0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6, -1, -1, -1},
+	{3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10, -1, -1, -1},
+	{6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1},
+	{9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3, -1, -1, -1},
+	{8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1},
+	{3, 11, 6, 3, 6, 0, 0, 6, 4, -1, -1, -1, -1, -1, -1},
+	{6, 4, 8, 11, 6, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{7, 10, 6, 7, 8, 10, 8, 9, 10, -1, -1, -1, -1, -1, -1},
+	{0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10, -1, -1, -1},
+	{10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0, -1, -1, -1},
+	{10, 6, 7, 10, 7, 1, 1, 7, 3, -1, -1, -1, -1, -1, -1},
+	{1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7, -1, -1, -1},
+	{2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9},
+	{7, 8, 0, 7, 0, 6, 6, 0, 2, -1, -1, -1, -1, -1, -1},
+	{7, 3, 2, 6, 7, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7, -1, -1, -1},
+	{2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7},
+	{1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11},
+	{11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1, -1, -1, -1},
+	{8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6},
+	{0, 9, 1, 11, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0, -1, -1, -1},
+	{7, 11, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{3, 0, 8, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 1, 9, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{8, 1, 9, 8, 3, 1, 11, 7, 6, -1, -1, -1, -1, -1, -1},
+	{10, 1, 2, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 10, 3, 0, 8, 6, 11, 7, -1, -1, -1, -1, -1, -1},
+	{2, 9, 0, 2, 10, 9, 6, 11, 7, -1, -1, -1, -1, -1, -1},
+	{6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8, -1, -1, -1},
+	{7, 2, 3, 6, 2, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{7, 0, 8, 7, 6, 0, 6, 2, 0, -1, -1, -1, -1, -1, -1},
+	{2, 7, 6, 2, 3, 7, 0, 1, 9, -1, -1, -1, -1, -1, -1},
+	{1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6, -1, -1, -1},
+	{10, 7, 6, 10, 1, 7, 1, 3, 7, -1, -1, -1, -1, -1, -1},
+	{10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8, -1, -1, -1},
+	{0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7, -1, -1, -1},
+	{7, 6, 10, 7, 10, 8, 8, 10, 9, -1, -1, -1, -1, -1, -1},
+	{6, 8, 4, 11, 8, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{3, 6, 11, 3, 0, 6, 0, 4, 6, -1, -1, -1, -1, -1, -1},
+	{8, 6, 11, 8, 4, 6, 9, 0, 1, -1, -1, -1, -1, -1, -1},
+	{9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6, -1, -1, -1},
+	{6, 8, 4, 6, 11, 8, 2, 10, 1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6, -1, -1, -1},
+	{4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9, -1, -1, -1},
+	{10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3},
+	{8, 2, 3, 8, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1},
+	{0, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8, -1, -1, -1},
+	{1, 9, 4, 1, 4, 2, 2, 4, 6, -1, -1, -1, -1, -1, -1},
+	{8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1, -1, -1, -1},
+	{10, 1, 0, 10, 0, 6, 6, 0, 4, -1, -1, -1, -1, -1, -1},
+	{4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3},
+	{10, 9, 4, 6, 10, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 9, 5, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 3, 4, 9, 5, 11, 7, 6, -1, -1, -1, -1, -1, -1},
+	{5, 0, 1, 5, 4, 0, 7, 6, 11, -1, -1, -1, -1, -1, -1},
+	{11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5, -1, -1, -1},
+	{9, 5, 4, 10, 1, 2, 7, 6, 11, -1, -1, -1, -1, -1, -1},
+	{6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5, -1, -1, -1},
+	{7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2, -1, -1, -1},
+	{3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6},
+	{7, 2, 3, 7, 6, 2, 5, 4, 9, -1, -1, -1, -1, -1, -1},
+	{9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7, -1, -1, -1},
+	{3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0, -1, -1, -1},
+	{6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8},
+	{9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7, -1, -1, -1},
+	{1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4},
+	{4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10},
+	{7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10, -1, -1, -1},
+	{6, 9, 5, 6, 11, 9, 11, 8, 9, -1, -1, -1, -1, -1, -1},
+	{3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5, -1, -1, -1},
+	{0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11, -1, -1, -1},
+	{6, 11, 3, 6, 3, 5, 5, 3, 1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6, -1, -1, -1},
+	{0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10},
+	{11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5},
+	{6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3, -1, -1, -1},
+	{5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2, -1, -1, -1},
+	{9, 5, 6, 9, 6, 0, 0, 6, 2, -1, -1, -1, -1, -1, -1},
+	{1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8},
+	{1, 5, 6, 2, 1, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6},
+	{10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0, -1, -1, -1},
+	{0, 3, 8, 5, 6, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{10, 5, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{11, 5, 10, 7, 5, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{11, 5, 10, 11, 7, 5, 8, 3, 0, -1, -1, -1, -1, -1, -1},
+	{5, 11, 7, 5, 10, 11, 1, 9, 0, -1, -1, -1, -1, -1, -1},
+	{10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1, -1, -1, -1},
+	{11, 1, 2, 11, 7, 1, 7, 5, 1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11, -1, -1, -1},
+	{9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7, -1, -1, -1},
+	{7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2},
+	{2, 5, 10, 2, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1},
+	{8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5, -1, -1, -1},
+	{9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2, -1, -1, -1},
+	{9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2},
+	{1, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 8, 7, 0, 7, 1, 1, 7, 5, -1, -1, -1, -1, -1, -1},
+	{9, 0, 3, 9, 3, 5, 5, 3, 7, -1, -1, -1, -1, -1, -1},
+	{9, 8, 7, 5, 9, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{5, 8, 4, 5, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1},
+	{5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0, -1, -1, -1},
+	{0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5, -1, -1, -1},
+	{10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4},
+	{2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8, -1, -1, -1},
+	{0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11},
+	{0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5},
+	{9, 4, 5, 2, 11, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4, -1, -1, -1},
+	{5, 10, 2, 5, 2, 4, 4, 2, 0, -1, -1, -1, -1, -1, -1},
+	{3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9},
+	{5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2, -1, -1, -1},
+	{8, 4, 5, 8, 5, 3, 3, 5, 1, -1, -1, -1, -1, -1, -1},
+	{0, 4, 5, 1, 0, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5, -1, -1, -1},
+	{9, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 11, 7, 4, 9, 11, 9, 10, 11, -1, -1, -1, -1, -1, -1},
+	{0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11, -1, -1, -1},
+	{1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11, -1, -1, -1},
+	{3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4},
+	{4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2, -1, -1, -1},
+	{9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3},
+	{11, 7, 4, 11, 4, 2, 2, 4, 0, -1, -1, -1, -1, -1, -1},
+	{11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4, -1, -1, -1},
+	{2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9, -1, -1, -1},
+	{9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7},
+	{3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10},
+	{1, 10, 2, 8, 7, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 9, 1, 4, 1, 7, 7, 1, 3, -1, -1, -1, -1, -1, -1},
+	{4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1, -1, -1, -1},
+	{4, 0, 3, 7, 4, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{4, 8, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{9, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{3, 0, 9, 3, 9, 11, 11, 9, 10, -1, -1, -1, -1, -1, -1},
+	{0, 1, 10, 0, 10, 8, 8, 10, 11, -1, -1, -1, -1, -1, -1},
+	{3, 1, 10, 11, 3, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 2, 11, 1, 11, 9, 9, 11, 8, -1, -1, -1, -1, -1, -1},
+	{3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9, -1, -1, -1},
+	{0, 2, 11, 8, 0, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{3, 2, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{2, 3, 8, 2, 8, 10, 10, 8, 9, -1, -1, -1, -1, -1, -1},
+	{9, 10, 2, 0, 9, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8, -1, -1, -1},
+	{1, 10, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{1, 3, 8, 9, 1, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 9, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+	{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+};
+
+__device__
+int cube_edgeToVerts[12][2] = {
+	{0,1}, {1,2}, {2,3}, {3,0},
+	{4,5}, {5,6}, {6,7}, {7,4},
+	{0,4}, {1,5}, {2,6}, {3,7},
+};
+
+///////////////////////////////////////////////////////////////////////////////
+// Surface functions														 //
+///////////////////////////////////////////////////////////////////////////////
+
+// Surface to be rendered in 1D
+__device__ __host__
+int function1D(float4& point, int func)
+{
+	float fun; int flag;
+	switch (func) {
+
+	case 0:
+		fun = point.x * point.x;
+		flag = (fun < 9);
+		break;
+
+	case 1:
+		fun = point.x;
+		flag = (fun < 0) and (fun > -10);
+		break;
+
+	case 2:
+		fun = point.x;
+		flag = ( (fun > -9) and (fun < -8) ) or ( (fun > 3) and (fun < 7) );
+		break;
+	}
+
+	return flag;
+}
+
+// Surface to be rendered in 2D
+__device__ __host__
+int function2D(float4& point, int func)
+{
+	float fun; int flag;
+	float c1,c2,c3,c4,c5;
+	switch (func) {
+
+	case 0:
+		fun = point.x * point.x + point.y * point.y;
+		flag = (fun < 9);
+		break;
+
+	case 1:
+		c1 = (point.x+9)*(point.x+9) + (point.y-9)*(point.y-9);
+		c2 = (point.x-0)*(point.x-0) + (point.y-0)*(point.y-0);
+		c3 = (point.x+4)*(point.x+4) + (point.y-6)*(point.y-6);
+		c4 = (point.x-5)*(point.x-5) + (point.y-5)*(point.y-5);
+		c5 = (point.x+7)*(point.x+7) + (point.y+13)*(point.y+13);
+		flag = (c1 < 1) or (c2 < 2.25) or (c3 < 4) or (c4 < 25)
+			or (c5 < 64 and -10<point.x and -10<point.y)
+			or (2<point.x and point.x<4 and -5<point.y and point.y<-3)
+			or (point.y < point.x - 15.0 and point.x<10 and -10<point.y);
+		break;
+
+	case 2:
+		fun = log((double)point.x);
+		flag = abs(point.y) < abs(fun) and point.x > 0 and point.x < 10;
+		break;
+	}
+
+	return flag;
+}
+
+// Surface to be rendered in 3D
+__device__ __host__
+int function3D(float4& point, int func)
+{
+	float fun; int flag;
+	switch (func) {
+
+	case 0:
+		fun = point.x * point.x + point.y * point.y + point.z * point.z;
+		flag = (fun < 9);
+		break;
+
+	case 1:
+		fun = point.x * point.x / 5.0 + point.y * point.y / 3.0
+			- point.z * point.z / 7.0;
+		flag = (fun < 5);
+		break;
+
+	case 2:
+		fun = point.x * point.x / 10.0 - point.y * point.y / 3.0
+			- point.z / 2.0;
+		flag = (fun < 0);
+		break;
+	}
+
+	return flag;
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+// CUDA kernels																 //
+///////////////////////////////////////////////////////////////////////////////
+
+// This kernel checks whether each point lies within the desired surface.
+__global__
+void points_kernel(float4* points, int size, int dim, int func)
+{
+	// Get unique thread id
+	unsigned int globalID = blockIdx.x * blockDim.x + threadIdx.x;
+
+	// Check whether the point lies within.
+	// Fourth coordinate represent containment.
+	switch (dim) {
+
+	case 1:
+
+		for (int k = globalID; k < size; k += gridDim.x * blockDim.x) {
+			float4 pt = points[k];
+			points[k].w = function1D(pt, func);
+		}
+		break;
+
+	case 2:
+
+		for (int k = globalID; k < size * size; k += gridDim.x * blockDim.x) {
+			float4 pt = points[k];
+			points[k].w = function2D(pt, func);
+		}
+		break;
+
+	case 3:
+
+		for (int k = globalID; k < size * size * size;
+				k += gridDim.x * blockDim.x) {
+			float4 pt = points[k];
+			points[k].w = function3D(pt, func);
+		}
+		break;
+	}
+}
+
+// This kernel classifies each interval in the grid.
+__global__
+void kernel1D(float4* points, float4* geom, int size)
+{
+	// Get unique thread ID, this is the point ID
+	unsigned int globalID = blockIdx.x * blockDim.x + threadIdx.x;
+
+	for (int id = globalID; id < size; id += gridDim.x * blockDim.x) {
+
+		// Point ID equals interval ID
+		if (id < (size - 1) ) {
+
+			// Get the vertices of this interval
+			float4 verts[2];
+			verts[0] = points[id];
+			verts[1] = points[id + 1];
+
+			// Obtain the type of this interval
+			int type = 0;
+			for (int l = 0; l < 2; l++) {
+				type += verts[l].w * pow((double)2,(double)l);
+			}
+
+			// Get the configuration for this type of interval from the table
+			// and generate the points accordingly
+			int* config = pointTable[type];
+			int e = config[0];
+			if (e != -1) {
+				geom[id] = ( verts[e%2] + verts[(e+1)%2] ) * (0.5f);
+				geom[id].w = 1.0f;
+			}
+
+		}
+	}
+}
+
+// This kernel classifies each square in the grid.
+__global__
+void kernel2D(float4* points, float4* geom, int size)
+{
+	// Get unique thread ID, this is the point ID
+	unsigned int globalID = blockIdx.x * blockDim.x + threadIdx.x;
+
+	for (int id = globalID; id < size * size; id += gridDim.x * blockDim.x) {
+
+		// Transform point ID to square ID
+		int j = (int) floor((double) (id / size));
+		int idx = id - j;
+
+		if (idx < (size - 1) * (size - 1)) {
+
+			// Get the vertices of this square
+			float4 verts[4];
+			verts[0] = points[id];
+			verts[1] = points[id + 1];
+			verts[2] = points[id + size + 1];
+			verts[3] = points[id + size];
+
+			// Obtain the type of this square
+			int type = 0;
+			for (int l = 0; l < 4; l++) {
+				type += verts[l].w * pow((double)2,(double)l);
+			}
+
+			// Get the configuration for this type of square from the table
+			// and generate the lines accordingly
+			int* config = lineTable[type];
+			int e;
+			for (int l = 0; l < 4; l++) {
+				e = config[l];
+				if (e != -1) {
+					geom[4*idx + l] = ( verts[e%4] + verts[(e+1)%4] ) * (0.5f);
+					geom[4*idx + l].w = 1.0f;
+				} else { break; }
+			}
+
+		}
+	}
+}
+
+// This kernel classifies each cube in the grid.
+__global__
+void kernel3D(float4* points, float4* geom, int size)
+{
+	// Get unique thread ID, this is the point ID
+	unsigned int globalID = blockIdx.x * blockDim.x + threadIdx.x;
+
+	for (int id = globalID; id < size * size * size; id += gridDim.x * blockDim.x) {
+
+		// Transform point ID to cube ID
+		int j = (int) ( (int) floor((double) (id / size)) % size );
+		int k = (int) floor((double) (id / (size*size)));
+		int idx = id - j + k - 2 * k * size;
+
+		if (idx < (size - 1) * (size - 1) * (size - 1)) {
+
+			// Get the vertices of this cube
+			float4 verts[8];
+			verts[0] = points[id];
+			verts[1] = points[id + 1];
+			verts[2] = points[id + size + 1];
+			verts[3] = points[id + size];
+
+			verts[4] = points[id + size*size];
+			verts[5] = points[id + size*size + 1];
+			verts[6] = points[id + size*size + size + 1];
+			verts[7] = points[id + size*size + size];
+
+			// Obtain the type of this cube
+			int type = 0;
+			for (int l = 0; l < 8; l++) {
+				type += verts[l].w * pow((double)2,(double)l);
+			}
+
+			// Get the configuration for this type of cube from the table
+			// and generate the triangles accordingly
+			int* config = triangleTable[type];
+			int e, e0, e1;
+			for (int l = 0; l < 15; l++) {
+				e = config[l];
+				e0 = cube_edgeToVerts[e][0]; e1 = cube_edgeToVerts[e][1];
+				if (e != -1) {
+					geom[15*idx + l] = ( verts[e0] + verts[e1] ) * (0.5f);
+					geom[15*idx + l].w = 1.0f;
+				} else { break; }
+			}
+
+		}
+	}
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Run the CUDA part of the computation										 //
+///////////////////////////////////////////////////////////////////////////////
+void runCuda(GLuint *vbo)
+{
+	// Map OpenGL buffer object for writing from CUDA
+	float4* dev_points;
+	float4* dev_geometry;
+
+	// Map OpenGL buffers to CUDA
+	cudaGLMapBufferObject((void**) &dev_points, vbo[1]);
+	cudaGLMapBufferObject((void**) &dev_geometry, vbo[2]);
+
+	// Choose a block size and a grid size
+	const unsigned int threadsPerBlock = BLOCK_SIZE;
+	const unsigned int maxBlocks = 50;
+	unsigned int blocks;
+
+	// Execute CUDA kernels
+	switch (dim) {
+
+	case 1:
+
+		blocks = min(maxBlocks,
+				(int) ceil(numPoints / (float) threadsPerBlock));
+
+		// Check for containment of vertices
+		points_kernel<<<blocks, threadsPerBlock>>>
+				(dev_points, numPoints, dim, func);
+
+		// Obtain the edges from the data table
+		kernel1D<<<blocks, threadsPerBlock>>>
+				(dev_points, dev_geometry, numPoints);
+
+		break;
+
+	case 2:
+
+		blocks = min(maxBlocks,
+				(int) ceil(numPoints * numPoints / (float) threadsPerBlock));
+
+		// Check for containment of vertices
+		points_kernel<<<blocks, threadsPerBlock>>>
+				(dev_points, numPoints, dim, func);
+
+		// Obtain the edges from the data table
+		kernel2D<<<blocks, threadsPerBlock>>>
+				(dev_points, dev_geometry, numPoints);
+
+		break;
+
+	case 3:
+
+		blocks = min(maxBlocks,
+				(int) ceil(
+						numPoints * numPoints * numPoints
+								/ (float) threadsPerBlock));
+
+		// Check for containment of vertices
+		points_kernel<<<blocks, threadsPerBlock>>>
+				(dev_points, numPoints, dim, func);
+
+		// Obtain the triangles from the data table
+		kernel3D<<<blocks, threadsPerBlock>>>
+				(dev_points, dev_geometry, numPoints);
+
+		break;
+	}
+
+	// Unmap buffer objects from CUDA
+	cudaGLUnmapBufferObject(vbo[1]);
+	cudaGLUnmapBufferObject(vbo[2]);
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Vertex Buffer Objects													 //
+///////////////////////////////////////////////////////////////////////////////
+
+// Initialize 1D data
+void createData1D(float4* points, float4* grid, float4* geom)
+{
+	// Initialize points data.
+	float delta = (xmax - xmin) / (numPoints - 1);
+	for (int i = 0; i < numPoints; i++) {
+
+		// Set initial position data
+		points[i].x = xmin + delta * i;
+		points[i].y = 0.0f;
+		points[i].z = 0.0f;
+		points[i].w = 1.0f;
+	}
+
+	// Initialize grid data.
+	for (int i = 0; i < (numPoints - 1); i++) {
+
+		// Set initial position data
+		grid[2*i+0] = points[i];
+		grid[2*i+1] = points[i+1];
+	}
+
+	// Initialize geometry data.
+	float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+	for (int k = 0; k < (numPoints - 1); k++) {
+		geom[k] = zero;
+	}
+}
+
+// Initialize 2D data
+void createData2D(float4* points, float4* grid, float4* geom)
+{
+	// Initialize points data.
+	float delta = (xmax - xmin) / (numPoints - 1);
+	for (int i = 0; i < numPoints; i++) {
+		for (int j = 0; j < numPoints; j++) {
+
+			int idx = i + j * numPoints;
+
+			// Set initial position data
+			points[idx].x = xmin + delta * i;
+			points[idx].y = xmax - delta * j;
+			points[idx].z = 0.0f;
+			points[idx].w = 1.0f;
+		}
+	}
+
+	// Initialize grid data.
+	for (int i = 0; i < (numPoints - 1); i++) {
+		for (int j = 0; j < (numPoints - 1); j++) {
+
+			int idx_pt = i + j * numPoints;
+			int idx_sq = idx_pt - j;
+
+			// Set initial position data
+			grid[4 * idx_sq + 0] = points[idx_pt];
+			grid[4 * idx_sq + 1] = points[idx_pt + 1];
+			grid[4 * idx_sq + 2] = points[idx_pt + numPoints + 1];
+			grid[4 * idx_sq + 3] = points[idx_pt + numPoints];
+		}
+	}
+
+	// Initialize geometry data.
+	float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+	for (int k = 0; k < (numPoints - 1) * (numPoints - 1) * 4; k++) {
+		geom[k] = zero;
+	}
+}
+
+// Initialize 3D data
+void createData3D(float4* points, float4* grid, float4* geom)
+{
+	// Initialize points data.
+	float delta = (xmax - xmin) / (numPoints - 1);
+	for (int i = 0; i < numPoints; i++) {
+		for (int j = 0; j < numPoints; j++) {
+			for (int k = 0; k < numPoints; k++) {
+
+				int idx = i + j * numPoints + k * numPoints * numPoints;
+
+				// Set initial position data
+				points[idx].x = xmin + delta * i;
+				points[idx].y = xmax - delta * j;
+				points[idx].z = xmin + delta * k;
+				points[idx].w = 1.0f;
+			}
+		}
+	}
+
+	// Initialize grid data.
+	for (int i = 0; i < (numPoints - 1); i++) {
+		for (int j = 0; j < (numPoints - 1); j++) {
+			for (int k = 0; k < (numPoints - 1); k++) {
+
+				int idx_pt = i + j * numPoints + k * numPoints * numPoints;
+				int idx_sq = idx_pt - j + k - 2 * k * numPoints;
+
+				// Set initial position data
+				grid[16 * idx_sq + 0] = points[idx_pt];
+				grid[16 * idx_sq + 1] = points[idx_pt+1];
+				grid[16 * idx_sq + 2] = points[idx_pt+numPoints+1];
+				grid[16 * idx_sq + 3] = points[idx_pt+numPoints];
+
+				grid[16 * idx_sq + 4] = points[idx_pt+numPoints*numPoints];
+				grid[16 * idx_sq + 5] = points[idx_pt+numPoints*numPoints+1];
+				grid[16 * idx_sq + 6] = points[idx_pt+numPoints*numPoints+numPoints+1];
+				grid[16 * idx_sq + 7] = points[idx_pt+numPoints*numPoints+numPoints];
+
+				grid[16 * idx_sq + 8] = points[idx_pt];
+				grid[16 * idx_sq + 9] = points[idx_pt+1];
+				grid[16 * idx_sq + 10] = points[idx_pt+numPoints*numPoints+1];
+				grid[16 * idx_sq + 11] = points[idx_pt+numPoints*numPoints];
+
+				grid[16 * idx_sq + 12] = points[idx_pt+numPoints];
+				grid[16 * idx_sq + 13] = points[idx_pt+numPoints+1];
+				grid[16 * idx_sq + 14] = points[idx_pt+numPoints*numPoints+numPoints+1];
+				grid[16 * idx_sq + 15] = points[idx_pt+numPoints*numPoints+numPoints];
+
+			}
+		}
+	}
+
+	// Initialize geometry data.
+	float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+	for (int k = 0; k < (numPoints - 1) * (numPoints - 1) * (numPoints - 1) * 15; k++) {
+		geom[k] = zero;
+	}
+}
+
+// Create VBOs
+void createVBOs(GLuint* vbo)
+{
+	// Create VBOs.
+	glGenBuffers(3, vbo);
+
+	// Initialize points and grid
+	unsigned int points_size;
+	float4* points;
+	unsigned int grid_size;
+	float4* grid;
+	unsigned int geom_size;
+	float4* geom;
+
+	switch (dim) {
+
+	case 1:
+
+		// Allocate memory
+		points_size = numPoints * sizeof(float4);
+		points = (float4*) malloc(points_size);
+		grid_size = (numPoints - 1) * 2 * sizeof(float4);
+		grid = (float4*) malloc(grid_size);
+		geom_size = (numPoints - 1) * sizeof(float4);
+		geom = (float4*) malloc(geom_size);
+		// Initialize data
+		createData1D(points, grid, geom);
+		break;
+
+	case 2:
+
+		// Allocate memory
+		points_size = numPoints * numPoints * sizeof(float4);
+		points = (float4*) malloc(points_size);
+		grid_size = (numPoints - 1) * (numPoints - 1) * 4 * sizeof(float4);
+		grid = (float4*) malloc(grid_size);
+		geom_size = (numPoints - 1) * (numPoints - 1) * 4 * sizeof(float4);
+		geom = (float4*) malloc(geom_size);
+		// Initialize data
+		createData2D(points, grid, geom);
+		break;
+
+	case 3:
+
+		// Allocate memory
+		points_size = numPoints * numPoints * numPoints * sizeof(float4);
+		points = (float4*) malloc(points_size);
+		grid_size = (numPoints - 1) * (numPoints - 1) * (numPoints - 1) * 16
+				* sizeof(float4);
+		grid = (float4*) malloc(grid_size);
+		geom_size = (numPoints - 1) * (numPoints - 1) * (numPoints - 1) * 15
+				* sizeof(float4);
+		geom = (float4*) malloc(geom_size);
+		// Initialize data
+		createData3D(points, grid, geom);
+		break;
+	}
+
+	// Activate VBO id to use.
+	glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+
+	// Upload data to video card.
+	glBufferData(GL_ARRAY_BUFFER, grid_size, grid, GL_DYNAMIC_DRAW);
+
+	// Activate VBO id to use.
+	glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
+
+	// Upload data to video card.
+	glBufferData(GL_ARRAY_BUFFER, points_size, points, GL_DYNAMIC_DRAW);
+
+	// Register buffer objects with CUDA
+	gpuErrchk(cudaGLRegisterBufferObject(vbo[1]));
+
+	// Activate VBO id to use.
+	glBindBuffer(GL_ARRAY_BUFFER, vbo[2]);
+
+	// Upload data to video card.
+	glBufferData(GL_ARRAY_BUFFER, geom_size, geom, GL_DYNAMIC_DRAW);
+
+	// Register buffer objects with CUDA
+	gpuErrchk(cudaGLRegisterBufferObject(vbo[2]));
+
+	// Free temporary data
+	free(points); free(grid); free(geom);
+
+	// Release VBOs with ID 0 after use.
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+	// Execute the algorithm, if asked
+	if (cuda) { runCuda(vbo); }
+
+}
+
+// Delete VBOs
+void deleteVBOs(GLuint* vbo)
+{
+	// Delete VBOs
+	glBindBuffer(1, vbo[0]);
+	glDeleteBuffers(1, &vbo[0]);
+	glBindBuffer(1, vbo[1]);
+	glDeleteBuffers(1, &vbo[1]);
+	glBindBuffer(1, vbo[2]);
+	glDeleteBuffers(1, &vbo[2]);
+
+	// Unregister buffer objects with CUDA
+	gpuErrchk(cudaGLUnregisterBufferObject(vbo[1]));
+	gpuErrchk(cudaGLUnregisterBufferObject(vbo[2]));
+
+	// Free VBOs
+	*vbo = 0;
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Gets/sets the number of vertices											 //
+///////////////////////////////////////////////////////////////////////////////
+int getNumPoints()
+{
+	return numPoints;
+}
+void setNumPoints(int n)
+{
+	numPoints = n;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Gets/sets the dimension													 //
+///////////////////////////////////////////////////////////////////////////////
+int getDimension()
+{
+	return dim;
+}
+void setDimension(int n)
+{
+	dim = n;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Sets the GPU usage														 //
+///////////////////////////////////////////////////////////////////////////////
+void setCUDA()
+{
+	cuda = 1 - cuda;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Changes the function of the surface to render							 //
+///////////////////////////////////////////////////////////////////////////////
+void changeFunction()
+{
+	func = (func+1)%3;
+}
+```
+
+### marchingCubes_cuda.cuh
+```
+// -*- C++ -*-
+#ifndef MAIN1_CUDA_CUH
+#define MAIN1_CUDA_CUH
+
+#include <cuda_runtime.h>
+#ifndef GL_GLEXT_PROTOTYPES
+#define GL_GLEXT_PROTOTYPES
+#endif
+#include <cuda_gl_interop.h>
+
+// Create/delete data in VBOs
+void createVBOs(GLuint* vbo);
+void deleteVBOs(GLuint* vbo);
+
+// Handles global variables
+int getNumPoints();
+void setNumPoints(int n);
+int getDimension();
+void setDimension(int n);
+void setCUDA();
+void changeFunction();
+
+#endif // MAIN1_CUDA_CUH
+```

@@ -1,0 +1,440 @@
+# Sample Matching on Mitsuba 3.9
+
+Port of the **Sample Matching** differentiable volume rendering estimator
+(Yu et al., ACM TOG 2026) to **Mitsuba 3.9.0**, as a built-in AD integrator
+`prbvolpath_sm` (based on `prbvolpath`), plus the test/validation harness,
+pixel-batched training scripts, and results.
+
+The Mitsuba 3 source changes live on a branch of the fork:
+**https://github.com/AuroraRyan0301/mitsuba3/tree/sample-matching**
+(21 commits on top of `v3.9.0`: integrator, `Medium::get_albedo`, majorant
+supergrid DDA, C++ real-interaction walks, deferred two-stage adjoint,
+K=4 segment reservoir, correctness fixes).
+
+## Integrator variants (one plugin)
+
+| config | cost | description |
+|---|---|---|
+| `prbvolpath_sm` (quad) | O(n²) | probes + one radiance suffix per segment |
+| `+ linear_cost=True` (lin) | O(n) | one reservoir-picked suffix per path |
+| `+ segment_reservoir=4` (K4) | bounded | 4-slot striped reservoir, exact for ≤4 segments |
+
+Production defaults: `defer_probes=True` (two-stage adjoint; probes run in
+small dedicated kernels, not inside the OptiX megakernel) and
+`real_interaction_fused=True` (C++ walk fusing the majorant-supergrid DDA
+with accept-until-real null tracking; primal is faster than stock
+`prbvolpath` because null collisions never spin the fat kernel).
+
+## Environment
+
+- Linux, NVIDIA A40 (CUDA 12.8), OptiX via the NVIDIA driver
+- gcc 13.3.1, cmake 3.26.5
+  (cmake ≥ 4 breaks Mitsuba submodules — use 3.26.x with the flag below)
+- conda env: python 3.11, ninja, numpy, pytest, matplotlib
+  (`environment/mi39-dev.yml`)
+
+### Build
+
+```bash
+conda env create -f environment/mi39-dev.yml && conda activate mi39-dev
+git clone --recursive -b sample-matching https://github.com/AuroraRyan0301/mitsuba3.git
+cd mitsuba3 && mkdir build && cd build
+cmake -GNinja -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+      -DMI_DEFAULT_VARIANTS="scalar_rgb;llvm_ad_rgb;cuda_ad_rgb" ..
+ninja
+source setpath.sh
+```
+
+`environment/build_mi39.sh` scripts the same steps.
+CPU (`llvm_ad_rgb`) needs `DRJIT_LIBLLVM_PATH` pointed at a libLLVM shared library.
+In-tree `.py` edits need no rebuild, but note that `source setpath.sh` imports the
+*copies* under `build/python/mitsuba/python/ad/integrators/` — re-sync them after
+editing `src/python/python/ad/integrators/`.
+
+## Tests
+
+`tests/stress_sm.py <group> [variant]` — one structured `CELL` line per test,
+JSONL appended to `stress_results/`. Scripts assume the paths at their top
+(`ROOT = /path/to/SMmi39`) are adjusted to your checkout. Groups:
+
+| group | contents |
+|---|---|
+| `boundary` | box / sphere / non-convex torus medium boundaries, primal parity + σ gradients |
+| `emitter` | constant / envmap / area (outside + inside the medium) / point |
+| `media` | homogeneous, no-supergrid, gradient-ramp albedo, embedded surfaces |
+| `depthrr` | depth 16/64 × Russian roulette on/off |
+| `gradfull` | 3 boundaries × 5 emitters × {σ, albedo} × {quad, lin, K4} + prbvolpath control (shard with the `GF_BOUNDARY` env var) |
+| `gphase` | Henyey–Greenstein g = ±, primal + dL/dg |
+| `gones` | grid with exact-zero voxels, ⟨g,1⟩ vs **forward** FD (regression guard for empty-voxel gradient bugs; prbvolpath emitted as a documented-bias control) |
+| `lightsgrad`, `camera`, `speed` | emitter radiance grads, camera support status, primal/adjoint timing tables |
+
+Methodology: gradient cells compare the 48-seed adjoint ⟨g,dir⟩ against a
+finite-difference referee (stock `volpath`, spp 2048, correlated seeds).
+Two pitfalls the harness encodes (both cost us real debugging time):
+never central-difference across the σ ≥ 0 clamp (use `fd_forward=True`),
+and never rely only on ⟨g,σ⟩-weighted projections (blind to empty voxels).
+
+Final state: all groups pass (gradfull 120/120); `prbvolpath` itself is
+~1.7–2.3× biased in the ⟨g,1⟩ projection on dense–empty scenes (documented
+WARN control — the bias Sample Matching removes).
+
+## Training (pixel batching)
+
+`tests/inverse_bunny_formal.py <method> <fp>` — the paper's bunny-cloud
+recipe (8000 iters, batch 32768 pixels over 63 views, L1, coarse-to-fine).
+`fp1` = analytic AABB fast path (fast), `fp0` = OptiX.
+`pixel_batching/render_batch_mi39.py` is the ray-centric `render_batch`
+(pure Python `dr.CustomOp`; no kernel changes needed on mi39).
+
+| run | train PSNR | test PSNR | wall clock (A40) |
+|---|---|---|---|
+| SM linear, mi39, fp1 (analytic) | 37.94 dB | 35.56 dB | 6.7 h |
+| SM linear, mi39, fp0 (OptiX) | 37.97 dB | 35.67 dB | 19.0 h |
+| **prbvolpath, mi39 (stock, OptiX)** — primary baseline | 25.30 dB | 24.63 dB | ~20.7 h* |
+| prbvolpath, mi39 + analytic fast path (fp1, non-stock) | 25.30 dB | 24.63 dB | 8.3 h |
+| SM linear, original mi3 paper code | 37.23 dB | — | 3.6 h |
+
+fp0 vs fp1 is the ray-intersection path, orthogonal to the integrator.
+fp0 = OptiX, which is what stock Mitsuba always uses on CUDA variants;
+fp1 = our analytic-AABB scene fast path (single-box scenes only; present on
+the fork branch as an opt-in flag `use_bbox_fast_path`, default off, and not
+intended for the eventual upstream PR) that bypasses OptiX for both
+integrators. The stock-Mitsuba comparison is therefore the fp0 column. Measured per training step (batch 32768, primal spp 1024,
+adjoint spp 16, final 256^3 state):
+
+| step phase | SM lin, OptiX | **prbvolpath, stock OptiX** | SM lin, fast path | prbvolpath + fast path |
+|---|---|---|---|---|
+| primal | 4.68 s | 8.63 s | 1.93 s | 3.21 s |
+| adjoint | 0.90 s | 0.70 s | 0.55 s | 0.52 s |
+| step | **5.57 s** | **9.32 s** | 2.48 s | 3.72 s |
+
+The primary comparison is the two OptiX columns (stock Mitsuba runs OptiX on
+CUDA variants unconditionally): SM linear is 1.7x faster per training step.
+The fast-path columns apply our non-stock analytic-AABB scene flag to BOTH
+integrators and are shown for completeness.
+
+\* stock-OptiX prbvolpath wall clock = measured step time x 8000 iterations
+(full run in progress); PSNR from the same-recipe run — the intersection
+backend does not change the estimator.
+
+Adjoint cost is on par with prbvolpath in both modes; the wall-clock gaps are
+all primal-side (training renders 64x more primal than adjoint samples), where
+the fused C++ interaction walk wins — and wins more under OptiX, since fewer
+loop iterations mean fewer trace calls. The old-mi3 pipeline's remaining edge
+is primal-transport throughput of its box-specialized integrator (34.9 vs 17.4
+Msamples/s), not the SM adjoint.
+
+## Results
+
+- `results/sm_mi39_report.pdf` — full validation & stress-test report
+  (test matrix, bugs found + fixes, dI/dσ mean/variance slices vs the
+  original implementation, inverse-rendering comparison, per-kernel timing).
+  Page PNGs in `results/report_pages/`.
+- `results/stress_results/*.jsonl` — raw test records.
+- `results/*_history.json` — training curves for the table above.
+
+Large data (reference view renders, volume checkpoints, paper scenes) is
+not in this repo; scene XMLs and the small stress-test assets are under
+`scenes/`.
+
+### pixel_batching/render_batch_mi39.py
+```
+"""
+Pixel batching for Mitsuba 3.9.0 (nanobind kernel) — a faithful port of the
+unbiased-inverse-volume-rendering `batched.py::render_batch` to the modern API.
+
+Ray-centric alternative to mi.render: sample `batch_size` random (sensor, pixel)
+pairs across ALL sensors, render just those rays to a 1xN box-filter film, and
+support a decorrelated PRB backward pass. Pure Python; no kernel changes.
+
+Key mi3.0 -> mi3.9 API changes handled here:
+  * integrator.sample(mode, scene, sampler, ray, δL, state_in, active, **kwargs)
+    now returns a 4-tuple (L, valid, aovs, state)  [old: 3-tuple].
+  * splatting via ADIntegrator._splat_to_block(...) + block.put(pos, [r,g,b,w]+aovs).
+  * prbvolpath has no reparam; forward mode unsupported.
+  * scene.sensors_dr() -> DynamicBuffer[SensorPtr]; vectorized SensorPtr vcall.
+"""
+from __future__ import annotations
+import gc
+from typing import Any
+import drjit as dr
+import mitsuba as mi
+from mitsuba.ad.integrators.common import ADIntegrator
+
+
+def sample_batch_pixels(batch_size, spp, spp_grad, sensors, film_size, seed):
+    n_sensors = dr.width(sensors)
+    batch_samplers = []
+    for i, size in enumerate([batch_size, batch_size * spp, batch_size * spp_grad]):
+        s = mi.load_dict({'type': 'independent'})
+        s.seed(mi.sample_tea_32(seed, 17 * i + 5)[0], size)
+        batch_samplers.append(s)
+    sensor_idx = mi.UInt32(dr.minimum(n_sensors - 1,
+                           mi.UInt32(n_sensors * batch_samplers[0].next_1d())))
+    pixels = mi.Point2u(mi.Point2f(film_size) * batch_samplers[0].next_2d())
+    return sensor_idx, pixels, batch_samplers
+
+
+def sample_batch_rays(sampled_sensors, sampled_pixels, film_size, sampler, spp):
+    batch_size = dr.width(sampled_pixels)
+    repeat_idx = dr.arange(mi.UInt32, batch_size * spp) // spp
+    sensors = dr.gather(type(sampled_sensors), sampled_sensors, repeat_idx)
+    pos = dr.gather(type(sampled_pixels), sampled_pixels, repeat_idx)
+    offset = sampler.next_2d()
+    pos_f = mi.Vector2f(pos) + offset
+    pos_unit = dr.rcp(mi.ScalarVector2f(film_size)) * pos_f
+    wavelength_sample = sampler.next_1d() if mi.is_spectral else 0.0
+    rays, ray_weights = sensors.sample_ray_differential(
+        time=0.0, sample1=wavelength_sample, sample2=pos_unit, sample3=mi.Point2f(0.0))
+    return rays, ray_weights, pos
+
+
+def prepare_batch(rays, seed, spp, aovs, sampler=None):
+    """1xN box-filter hdrfilm; box filter is the only valid choice (wavefront
+    neighbourhood carries no image-space proximity)."""
+    wavefront_size = dr.width(rays)
+    assert wavefront_size % spp == 0
+    film = mi.load_dict({'type': 'hdrfilm', 'width': wavefront_size // spp, 'height': 1,
+                         'pixel_format': 'rgb', 'rfilter': {'type': 'box'}})
+    sampler = mi.load_dict({'type': 'independent'}) if sampler is None else sampler.clone()
+    sampler.set_sample_count(spp)
+    sampler.set_samples_per_wavefront(spp)
+    sampler.seed(seed, wavefront_size)
+    film.prepare(aovs)
+    return film, sampler, spp
+
+
+def _develop_primal(integrator, film, sampler, scene, rays, spp):
+    with dr.suspend_grad():
+        L, valid, aovs, state = integrator.sample(
+            dr.ADMode.Primal, scene, sampler, rays,
+            δL=None, δaovs=None, state_in=None, active=mi.Bool(True))
+        pos = mi.Point2f(0.5 + mi.Float(dr.arange(mi.UInt32, dr.width(rays)) // spp), 0.5)
+        block = film.create_block()
+        block.set_coalesce(block.coalesce() and spp >= 4)
+        alpha = dr.select(valid, mi.Float(1), mi.Float(0))
+        ADIntegrator._splat_to_block(block, film, pos, value=L, weight=mi.Float(1.0),
+                                     alpha=alpha, aovs=aovs, wavelengths=rays.wavelengths)
+        film.put_block(block)
+        return film.develop(), state
+
+
+def render_batch_backward(integrator, scene, grad_in, rays, seed, spp):
+    aovs = integrator.aov_names()
+    with dr.suspend_grad():
+        film, sampler, spp = prepare_batch(rays, seed, spp, aovs)
+        pos = mi.Point2f(0.5 + mi.Float(dr.arange(mi.UInt32, dr.width(rays)) // spp), 0.5)
+
+        # Recover δL by differentiating the splat+develop of a dummy radiance.
+        with dr.resume_grad():
+            L = dr.full(mi.Spectrum, 1.0, dr.width(rays)); dr.enable_grad(L)
+            block = film.create_block(); block.set_coalesce(block.coalesce() and spp >= 4)
+            ADIntegrator._splat_to_block(block, film, pos, value=L, weight=mi.Float(1.0),
+                                         alpha=mi.Float(1.0), aovs=[], wavelengths=rays.wavelengths)
+            film.put_block(block)
+            image = film.develop()
+            dr.set_grad(image, grad_in); dr.enqueue(dr.ADMode.Backward, image)
+            dr.traverse(dr.ADMode.Backward)
+            δL = dr.grad(L)
+        film.clear()
+
+        # (1) primal replay to recover state, (2) adjoint deposit into scene params
+        _, _, _, state = integrator.sample(dr.ADMode.Primal, scene, sampler.clone(), rays,
+                                           δL=None, δaovs=None, state_in=None, active=mi.Bool(True))
+        integrator.sample(dr.ADMode.Backward, scene, sampler, rays,
+                          δL=δL, δaovs=None, state_in=state, active=mi.Bool(True))
+        dr.eval()
+
+
+class _BatchedRenderOp(dr.CustomOp):
+    def eval(self, scene, sensors, sensors_idx, sampled_pixels, film_size,
+             batch_samplers, _, params, integrator, seed, spp):
+        # `_` is dict(params) (detached PyTree) so dr.custom detects attached
+        # inputs; `params` is the SceneParameters used by the backward pass.
+        self.scene, self.integrator = scene, integrator
+        self.sampled_sensors = dr.gather(mi.SensorPtr, sensors, sensors_idx)
+        self.sampled_pixels, self.film_size = sampled_pixels, film_size
+        self.batch_samplers, self.params = batch_samplers, params
+        self.seed, self.spp = seed, spp
+        with dr.suspend_grad():
+            rays, _, _ = sample_batch_rays(self.sampled_sensors, self.sampled_pixels,
+                                           film_size, batch_samplers[1], spp[0])
+            film, sampler, _ = prepare_batch(rays, seed[0], spp[0], integrator.aov_names())
+            image, _ = _develop_primal(integrator, film, sampler, scene, rays, spp[0])
+            return image
+
+    def backward(self):
+        rays, _, _ = sample_batch_rays(self.sampled_sensors, self.sampled_pixels,
+                                       self.film_size, self.batch_samplers[2], self.spp[1])
+        render_batch_backward(self.integrator, self.scene, self.grad_out(), rays,
+                              seed=self.seed[1], spp=self.spp[1])
+
+    def name(self):
+        return "BatchedRenderOp"
+
+
+def render_batch(batch_size, scene, film_size, params=None, integrator=None,
+                 seed=0, seed_grad=0, spp=4, spp_grad=0, sensors=None,
+                 return_coords=False):
+    if integrator is None:
+        integrator = scene.integrator()
+    if spp_grad == 0:
+        spp_grad = spp
+    if seed_grad == 0:
+        seed_grad = mi.sample_tea_32(seed, 1)[0]
+    if sensors is None:
+        sensors = scene.sensors_dr()
+    film_size = mi.ScalarVector2u(film_size)
+    sensors_idx, sampled_pixels, batch_samplers = sample_batch_pixels(
+        batch_size, spp, spp_grad, sensors, film_size, seed)
+    dict_params = dict(params) if params is not None else dict()
+    img = dr.custom(_BatchedRenderOp, scene, sensors, sensors_idx, sampled_pixels,
+                    film_size, batch_samplers, dict_params, params, integrator,
+                    (seed, seed_grad), (spp, spp_grad))
+    if return_coords:
+        return img, dr.detach(sensors_idx), dr.detach(sampled_pixels)
+    return img
+```
+
+### pixel_batching/test_pixel_batch.py
+```
+"""
+Empirically test the CORE pixel-batching primitives on mitsuba 3.9.0:
+  (1) Python-side dr.gather(mi.SensorPtr, scene.sensors_dr(), idx)
+  (2) vectorized sensors.sample_ray_differential(...) over a batch mixing MULTIPLE sensors
+  (3) render that arbitrary ray batch (ray-centric) and get radiance
+  (4) differentiability: backward through a scene param from the batched render
+This is exactly what render_batch/_BatchedRenderOp needs, and what reportedly broke in mi37.
+"""
+import drjit as dr
+import mitsuba as mi
+mi.set_variant('llvm_ad_rgb')
+
+# --- tiny scene: a volumetric sphere in a constant emitter, with 3 distinct sensors ---
+def make_sensor(origin):
+    return {
+        'type': 'perspective', 'fov': 45,
+        'to_world': mi.ScalarTransform4f().look_at(origin=origin, target=[0,0,0], up=[0,1,0]),
+        'film': {'type':'hdrfilm','width':16,'height':16,'rfilter':{'type':'box'},'pixel_format':'rgb'},
+    }
+
+scene = mi.load_dict({
+    'type':'scene',
+    'integrator':{'type':'prbvolpath','max_depth':8},
+    'light':{'type':'constant','radiance':1.0},
+    's0':make_sensor([3,0,0]),
+    's1':make_sensor([0,2,2]),
+    's2':make_sensor([0,0,3]),
+    'medium_box':{
+        'type':'cube',
+        'bsdf':{'type':'null'},
+        'interior':{'type':'homogeneous','sigma_t':2.0,'albedo':0.8},
+    },
+})
+
+print("== [1] scene.sensors_dr() exists and is a SensorPtr array ==")
+sensors = scene.sensors_dr()
+print("   type:", type(sensors).__name__, "| width:", dr.width(sensors))
+
+print("== [2] Python-side dr.gather(SensorPtr) mixing sensors + vectorized sample_ray_differential ==")
+BATCH, SPP = 12, 1
+# random (sensor, pixel) pairs — the essence of PIXEL batching (not sensor batching)
+samp = mi.load_dict({'type':'independent'}); samp.seed(0, BATCH)
+sensor_idx = mi.UInt32(dr.minimum(2, dr.floor(3*samp.next_1d()))) # 0,1,2 mixed within one batch
+pix = samp.next_2d()                                              # random pixel per sample
+gathered = dr.gather(mi.SensorPtr, sensors, sensor_idx)
+rays, weights = gathered.sample_ray_differential(
+    time=0.0, sample1=0.0, sample2=pix, sample3=mi.Point2f(0.0))
+dr.eval(rays.o, rays.d)
+print("   gathered SensorPtr width:", dr.width(gathered))
+print("   ray origins (should differ per-sample = different sensors):")
+import numpy as np
+o = np.array(rays.o).T if hasattr(np.array(rays.o),'T') else np.array(rays.o)
+print("  ", np.array(rays.o.x)[:6], "/", np.array(rays.o.y)[:6], "/", np.array(rays.o.z)[:6])
+print("   distinct origins in batch:", len(set(map(tuple, np.stack([np.array(rays.o.x),np.array(rays.o.y),np.array(rays.o.z)],1).round(3)))))
+
+print("== [3] ray-centric render of the arbitrary batch via integrator.sample ==")
+integrator = scene.integrator()
+L, valid, _, _ = integrator.sample(dr.ADMode.Primal, scene, samp.clone(), rays,
+                                   δL=None, δaovs=None, state_in=None, active=mi.Bool(True))
+dr.eval(L)
+print("   L width:", dr.width(L), "| per-channel batch mean:", np.array(L).mean(axis=1).round(4))
+
+print("== [4] differentiability via PRB two-pass (mirrors render_batch_backward) ==")
+params = mi.traverse(scene)
+key = [k for k in params.keys() if 'sigma_t' in k][0]
+print("   diff param key:", key)
+dr.enable_grad(params[key]); params.update()
+# Pass 1: primal (detached) -> recover path state L
+L_p, valid_p, aovs_p, state = integrator.sample(
+    dr.ADMode.Primal, scene, samp.clone(), rays,
+    δL=None, δaovs=None, state_in=None, active=mi.Bool(True))
+# Pass 2: adjoint replay with an adjoint radiance δL (pretend dLoss/dpixel = 1)
+integrator.sample(
+    dr.ADMode.Backward, scene, samp.clone(), rays,
+    δL=mi.Spectrum(1.0), δaovs=None, state_in=state, active=mi.Bool(True))
+g = dr.grad(params[key])
+gv = np.array(g).ravel()
+print("   d(batch radiance)/d(sigma_t) =", gv[:4], " -> nonzero:", bool((gv != 0).any()))
+print("\nALL PIXEL-BATCHING PRIMITIVES WORK ON mi39 (llvm_ad_rgb).")
+```
+
+### pixel_batching/test_render_batch.py
+```
+"""
+End-to-end landing verification of pixel batching on mi39:
+run a real inverse optimization THROUGH the render_batch CustomOp (forward+backward
++ Adam), recovering sigma_t of a homogeneous medium from a target batch brightness.
+Proves the full _BatchedRenderOp (not just raw primitives) drives an optimizer.
+"""
+import drjit as dr, mitsuba as mi
+mi.set_variant('llvm_ad_rgb')
+import numpy as np
+from render_batch_mi39 import render_batch
+
+def make_sensor(o, up=[0,1,0]):
+    return {'type':'perspective','fov':45,
+            'to_world':mi.ScalarTransform4f().look_at(o,[0,0,0],up),
+            'film':{'type':'hdrfilm','width':32,'height':32,'rfilter':{'type':'box'}}}
+
+def build(sigma_t):
+    return mi.load_dict({'type':'scene','integrator':{'type':'prbvolpath','max_depth':16},
+        'light':{'type':'constant','radiance':1.0},
+        's0':make_sensor([3,0,0]), 's1':make_sensor([0,2,2],up=[0,0,1]), 's2':make_sensor([0,0,3]),
+        'box':{'type':'cube','bsdf':{'type':'null'},
+               'interior':{'type':'homogeneous','sigma_t':sigma_t,'albedo':0.7}}})
+
+FILM=(32,32); BATCH=4096; SPP=4
+
+# --- target brightness = mean batch radiance of the GT scene (sigma_t=2.0) ---
+gt = build(2.0)
+tgt = float(np.array(render_batch(BATCH, gt, FILM, seed=999, spp=SPP)).mean())
+print(f"target mean batch radiance (sigma_t=2.0): {tgt:.4f}")
+
+# --- optimize sigma_t starting from 0.5 ---
+scene = build(0.5)
+params = mi.traverse(scene)
+key = [k for k in params.keys() if k.endswith('sigma_t.value.value')][0]
+print("optimizing:", key, "| init:", np.array(params[key]).ravel())
+
+opt = mi.ad.Adam(lr=0.1)
+opt[key] = params[key]
+params.update(opt)
+
+print("\n it |   sigma_t  |    loss")
+for it in range(30):
+    params.update(opt)
+    img = render_batch(BATCH, scene, FILM, params=params, integrator=scene.integrator(),
+                       seed=it, spp=SPP)
+    loss = dr.sqr(dr.mean(img, axis=None) - tgt)
+    dr.backward(loss)
+    opt.step()
+    opt[key] = dr.clip(opt[key], 0.01, 10.0)
+    if it % 5 == 0 or it == 29:
+        print(f" {it:2d} | {float(np.array(opt[key]).ravel()[0]):8.4f}   | {float(np.array(loss).ravel()[0]):.3e}")
+
+final = float(np.array(opt[key]).ravel()[0])
+print(f"\nrecovered sigma_t = {final:.3f}  (target 2.0)")
+print("PIXEL-BATCH INVERSE OPTIMIZATION THROUGH render_batch CustomOp WORKS"
+      if abs(final-2.0) < 0.4 else "converged but off target (check)")
+```

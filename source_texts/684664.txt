@@ -1,0 +1,891 @@
+Making it easier to work with shaders. Contribute to shader-slang/slang development by creating an account on GitHub.
+
+Lower RWTexture atomics to PTX sured on CUDA/PTX (#12636) by nv-slang-bot[bot] · Pull Request #12672 · shader-slang/slang · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+nv-slang-bot
+Bot
+commented
+Aug 21, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Motivation
+Consider this compute shader:
+```
+RWTexture2D<uint> outputTexture;
+[shader("compute")][numthreads(1,1,1)]
+void main() { InterlockedAdd(outputTexture[uint2(0,0)], 1u); }
+```
+On CUDA/PTX the compiler silently emitted invalid code:
+```
+uint _S1 = atomicAdd(globalParams_0->outputTexture_0[make_uint2(0U, 0U)], 1U);
+```
+outputTexture_0 is an opaque CUsurfObject, so NVRTC rejects it:
+```
+error : no operator "[]" matches these operands
+        operand types are: CUsurfObject [ uint2 ]
+```
+SPIR-V handles the same source correctly (OpImageTexelPointer + OpAtomicIAdd). This PR makes the atomic work on CUDA/PTX for the supported operation/type/shape combinations described below, and diagnoses the unsupported combinations it can identify — subject to the documented format-through-indirection limitation (see Known limitation / #12737). (#12636)
+Proposed solution
+CUDA has no C-level atomic on a CUsurfObject, but PTX has the sured
+(surface-reduction) instruction: an atomic read-modify-write against a surface
+texel with no result register. Slang now lowers the result-discarding
+InterlockedAdd / InterlockedMin / InterlockedMax / InterlockedAnd /
+InterlockedOr on a scalar (or single vector-component) integer texel of a
+1D/2D/3D RWTexture to sured, via a family of inline-PTX helpers in the CUDA
+prelude — for the supported operation/type combinations in the matrix below (in
+particular add/min/max at 32- and 64-bit, but and/or at 32-bit only).
+The operations sured cannot express keep the E41405 diagnostic (see Fallback
+below).
+This is the principled layer because the atomic-on-texel IR shape is canonical
+and correct — SPIR-V consumes exactly this shape, and slang-ir-validate.cpp's
+isValidAtomicDest accepts an IRImageSubscript atomic destination. The only
+gap was that the CUDA emitter had no lowering for it; we add that lowering rather
+than reshaping the IR.
+The sured matrix
+Empirically, ptxas accepts these sured.b.<op>.<geom>.<ctype> combinations
+(geom ∈ {1d, 2d, 3d}):
+op
+channel types
+notes
+add
+u32, u64
+sign-agnostic
+min/max
+u32, s32, u64, s64
+signedness matters
+and/or
+b32
+64-bit bitwise sured is rejected by ptxas
+xor has no native sured form; array and multisampled geometries have no
+sured form; the result-returning Interlocked*(..., out prev) overload cannot
+be lowered (no result register). All of these keep the diagnostic.
+Byte-addressed x coordinate
+Like the non-_convert sust/suld paths, sured's x coordinate is byte
+addressed. The emitter multiplies the texel x by the backing-element size, and,
+for a single component of a vector texel (rwTexture[coord].y), adds that
+channel's byte offset; y and z are texel-indexed, and 3D takes a dummy 4th
+coordinate operand (matching sust.p.3d). The backing-element size comes from an
+explicit [format(...)] decoration when present — validated for an exact
+representation match (isImageFormatCompatible), so a converting/packing format
+falls back to the diagnostic rather than computing a wrong offset — otherwise
+from the texel element type.
+Fallback
+The cases sured cannot express are diagnosed with E41405
+("this atomic operation, value type, or texture shape is not supported …"):
+xor, exchange/compare-exchange, the result-returning overload, array or
+multisampled textures, and any directly recoverable format/channel that is not a
+plain 32/64-bit integer matching the value width. A multisampled-texture atomic is
+caught before emission by a dedicated, always-run checkUnsupportedTextureAtomic
+pass, because the CUDA emitter cannot even name a multisample resource type (see
+the process report).
+Known limitation (shared with CUDA surf read/write) — reviewer decision point
+The byte stride is computed from the texture's backing format, recovered by
+findImageFormatDecoration. That helper cannot see a format across indirection
+— a function parameter, a call result, or a resource-array element — because CUDA
+does not specialize formatted resource parameters, so the concrete resource's
+[format(...)] stays at the call site. When the format is consistent with the
+element type (the common case, including the compiler default) the element-type
+stride is correct; it is wrong only for a contradictory declaration whose
+format width disagrees with the element type (e.g. [format("r32ui")] RWTexture2D<uint64_t>) reached through indirection. The existing surf2Dread /
+surf2Dwrite paths mis-stride that exact declaration identically — this is a
+pre-existing, systemic CUDA-surface limitation whose real fix is producer-side
+format recovery, tracked in #12737.
+This PR deliberately makes the atomic path behave exactly like the surface
+read/write paths (approach A): it diagnoses the mismatch it can prove at this
+layer — a directly recoverable incompatible format — and inherits the
+through-indirection limitation rather than papering over it in the atomic path
+alone. We considered a stricter alternative (C: walk the operand graph to
+recover the format context / reject any non-authoritative source), but rejected it
+as (1) the "context rediscovery by graph walking" anti-pattern the codebase
+methodology warns against, (2) a new behavioral divergence making atomics
+uniquely stricter than the read/write paths beside them, and (3) an over-reject
+risk for legitimate array/bindless uses. @jkwak-work — if you'd prefer C, or a
+producer-side fix folded in here, that's your call; A is implemented in this patch
+as the proposed consistent default.
+Validation status — please read before assuming CI-green
+The emit/diagnostic paths are covered by FileCheck and diagnostic tests, and the
+sured helpers are assembled to SASS by an offline nvcc -cubin fixture. What
+has and has not been exercised at runtime:
+Runtime COMPARE_COMPUTE on an L40S (sm_89) PASSED for unsigned 32-bit
+add/min/max/and/or and unsigned vector-component add. Those are
+the paths the runtime harness actually executes (all runtime textures are
+uint/uint4).
+Signed 32-bit min/max and all 64-bit forms are emitted and assemble to
+SASS offline (nvcc -arch=sm_89 -cubin, including the full emitted kernel), but
+are NOT runtime-tested — no COMPARE_COMPUTE exercises a signed or 64-bit
+texel, so their runtime correctness is unverified here and should be confirmed on
+GPU CI. They are covered statically by (a) FileCheck of the emitted sured
+opcode and (b) offline ptxas assembly of both the prelude helper and the full
+emitted kernel.
+No claim is made here about GPU-CI status or merge-readiness; those are for the
+maintainers/CI to confirm.
+Change summary
+File
+Change
+prelude/slang-cuda-prelude.h
+Add the __slang_surface_reduce_<op>_<ctype> inline-PTX helper family (1D/2D/3D), named per channel type so a 64-bit literal is never an ambiguous overload.
+source/slang/slang-emit-cuda.{cpp,h}
+Classify a texel atomic (classifyTextureAtomicForCuda) and either emit the matching sured helper with byte-addressed coordinates or diagnose E41405. Reuses isImageFormatCompatible/findImageFormatDecoration for exact backing-format validation.
+source/slang/slang-intrinsic-expand.{cpp,h}
+Promote findImageFormatDecoration / isImageFormatCompatible from file-static to shared (one source of truth for backing-format checks).
+source/slang/slang-ir-check-unsupported-inst.{cpp,h}
+Add checkUnsupportedTextureAtomic: diagnoses a multisampled-texture atomic on CUDA/PTX before emission.
+source/slang/slang-emit.cpp
+Schedule checkUnsupportedTextureAtomic unconditionally (independent of -minimum-slang-optimization).
+source/slang/slang-diagnostics.lua
+Reword E41405 to describe the operation/type/shape combination, since texture atomics are now partly supported.
+tests/hlsl-intrinsic/atomic/cuda-texture-atomic.slang
+Positive emit test: CUDA helper calls + PTX sured opcodes for every supported (op, ctype), including signed and 64-bit min/max.
+tests/diagnostics/cuda-texture-atomic-unsupported.slang
+Negative test: result-returning, xor, and array forms → E41405, at both optimization levels.
+tests/diagnostics/cuda-texture-atomic-multisample-unsupported.slang
+Negative test: multisampled/multisampled-array texel atomics → E41405 (diagnosed pre-emit), at both optimization levels.
+tests/hlsl-intrinsic/atomic/cuda-texture-atomic-through-param.slang
+Positive emit test: an ordinary 32- and 64-bit texel atomic reached through a function parameter still lowers to sured (documents the #12737 limitation is not made stricter here — there is no through-parameter rejection guard).
+tests/hlsl-intrinsic/atomic/cuda-texture-atomic-compute.slang
+GPU COMPARE_COMPUTE runtime coverage for unsigned 32-bit add/min/max/and/or and unsigned vector-component add.
+tests/cuda/cuda-texture-atomic-sured.cu
+Offline nvcc -cubin fixture assembling every supported (op, ctype) pair to SASS, with 1D/2D/3D coverage for add (NVRTC only emits PTX; this runs ptxas).
+docs/target-compatibility.md
+Document RWTexture atomic support and the sured matrix.
+Note for maintainers: the offline sured fixture
+(tests/cuda/cuda-texture-atomic-sured.cu) is not yet wired into CI. It is
+meant to be compiled on the full-GPU Windows tier alongside the existing
+cuda-prelude-vec1-make.cu step in .github/workflows/ci-slang-test.yml, e.g.
+nvcc -std=c++17 -arch=sm_89 -cubin tests/cuda/cuda-texture-atomic-sured.cu -I prelude -o <out>.cubin
+(-cubin runs ptxas — a real arch is required, not compute_80). This bot's
+GitHub App token lacks the workflows permission, so it cannot modify workflow
+files; a maintainer needs to add that one step (happy to provide the exact diff).
+Concepts and vocabulary
+sured — PTX surface-reduction instruction: an atomic RMW against a surface
+texel with no result register. sured.b.<op>.<geom>.<ctype>.
+CUsurfObject — the opaque CUDA surface handle an RWTexture lowers to; it
+has no operator[] and no C-level atomics, which is why the naive emit was
+uncompilable.
+IRImageSubscript — the pointer-like IR value for RWTexture[coord] used as
+an atomic destination. getRootAddr walks GEP/field chains but not through an
+IRImageSubscript, so an atomic rooted at one is precisely a texel atomic.
+byte-addressed x — the sured/sust/suld x coordinate is in bytes, not
+texels; the emitter scales by the backing-element size and adds a channel byte
+offset for a vector-component access.
+Process report
+sured lowering (slang-emit-cuda.cpp). The classifier
+classifyTextureAtomicForCuda is the single source of truth for the texture
+atomics that reach CUDA emission — both the sured path and the emit-point
+E41405 — so those two can never disagree (multisample atomics are the one case
+diagnosed earlier, by checkUnsupportedTextureAtomic, because their resource type
+is unrepresentable in emit; see below). It intercepts every atomic
+whose destination roots at an IRImageSubscript (tryEmitTextureAtomic, called
+from tryEmitInstStmtImpl before the opcode switch), and returns "supported"
+only for a result-discarding add/min/max/and/or on a 1D/2D/3D, non-array,
+non-multisample texture whose channel is a plain 32/64-bit integer matching the
+value width, with at most one constant vector-component index. Anything else is
+diagnosed. This is at the right layer because the input IR shape is the correct
+canonical one (the same shape SPIR-V lowers); we are adding the missing target
+lowering, not repairing a malformed shape.
+Per-ctype helper names (prelude/slang-cuda-prelude.h). The helpers are named
+__slang_surface_reduce_<op>_<ctype> (e.g. _add_u64) rather than being an
+overload set on the value type. The emitter renders a 64-bit literal as unsigned long long, which matches neither an int64_t nor a uint64_t overload exactly;
+an overload set is therefore ambiguous under offline nvcc (verified: the u64
+form failed to compile before this change). Encoding the channel type in the name
+removes overload resolution entirely, and the emitter appends the same <ctype>
+token it computed for the PTX suffix, keeping the C++ name and PTX opcode in
+lockstep.
+Exact backing-format validation (slang-emit-cuda.cpp + slang-intrinsic-expand.cpp).
+The x byte-stride depends on the backing element size. A channel-count- and
+total-size-only check (the previous logic) already rejects a format whose byte
+width disagrees (e.g. [format("rgba8ui")] RWTexture2D<uint4>: 4 bytes vs the 16
+the element type implies), but it accepts a same-size conversion whose
+scalar type differs — e.g. [format("r32f")] RWTexture2D<uint> (both 4 bytes, but
+a float channel accessed as uint), which would still address correctly by bytes
+yet reinterpret the value. We instead reuse the existing isImageFormatCompatible,
+which compares both channel count and scalar base type, so any converting format
+— same-size or not — falls back to the diagnostic. findImageFormatDecoration (also reused)
+recovers the decoration from the struct field when the resource lives in a
+global-parameter block — a direct findDecoration misses that. Both helpers were
+already present as file-static functions in slang-intrinsic-expand.cpp; this PR
+promotes them to shared declarations rather than duplicating the logic.
+Input-shape check for the format path: the shape we can act on soundly is a
+directly recoverable [format(...)], which is the resource's own canonical
+decoration — validating it here is correct-at-this-layer. The shape we
+deliberately do not try to repair here is a resource reached through
+indirection (parameter / call result / array element), where the concrete
+format is not recoverable at the access site. That is a producer-side
+representation gap (findImageFormatDecoration cannot see across indirection,
+and CUDA does not specialize formatted resource parameters), shared identically
+by the surf2Dread/surf2Dwrite paths. Per the methodology the proper fix
+belongs at the producer, not a consumer-side graph walk to rediscover the format
+context; that broader fix is not attempted here and is tracked in #12737. See
+the "Known limitation" section above for the reviewer decision point.
+Multisample atomics: a pre-existing ICE avoided with a pre-emission diagnostic
+(slang-ir-check-unsupported-inst.cpp + slang-emit.cpp). A multisampled
+texture atomic is a special case. (Note: this PR only intercepts the atomic
+case; the broader defect — that any declared multisample texture ICEs on CUDA,
+even unused — is pre-existing on master and out of scope here.) Investigating it revealed that any
+multisampled texture declared for a CUDA target aborts the compiler — even a
+declared-but-unused RWTexture2DMS<uint> with no atomic at all — because
+_calcCUDATextureTypeName returns SLANG_FAIL for a multisample texture, and the
+resulting null type-name handle trips SLANG_ASSERT(handle != kNullHandle) in
+slang-emit-cpp.cpp. This reproduces on master. The abort therefore happens at
+global-parameter type emission, before any function body — so the sured
+classifier's own multisample rejection never runs, and the abort occurs at every
+optimization level (so it cannot be caught by the -minimum-slang-optimization-gated
+checkUnsupportedInst). The scoped fix for #12636 is to diagnose the multisample
+atomic before emission: a new, always-scheduled checkUnsupportedTextureAtomic
+pass finds an atomic rooted at an IRImageSubscript whose image is a multisample
+texture and emits E41405. (The broader "any multisample texture ICEs on CUDA"
+defect is out of scope here — it is not about atomics — but is noted for a
+follow-up.) Because the emit-point classifier can no longer be reached for the
+multisample case, the redundant hasSampleCoord() guard there was removed; the
+geometry classifier still rejects multisample defensively.
+Input-shape check. For every branch that inspects an input shape — the texel
+element/channel type, the [format(...)] decoration, the component GEP, the
+multisample flag — the shape is the correct, intended one produced by the
+front-end and the standard image-subscript lowering (the same shapes SPIR-V and
+the existing sust/suld paths consume). We are not papering over an accidental
+representation; we are adding a target lowering and, where the hardware genuinely
+cannot express the operation, a diagnostic. The one place the producer is at fault
+(multisample type emission) is explicitly identified as a separate, pre-existing
+defect rather than worked around in this feature.
+Closes #12636.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+jhelferty-nv
+assigned
+jkwak-work
+Aug 21, 2026
+jhelferty-nv
+requested a review
+from jkwak-work
+August 21, 2026 02:25
+jhelferty-nv
+commented
+Aug 21, 2026
+Copy link
+Copy Markdown
+Contributor
+Automated notice (PR board sync) — do not reply to this comment.
+Auto-assigned @jkwak-work as shepherd for this Bot PR.
+FYI for maintainers: committer signal on the changed files is higher for expipiplus1 than for the auto-requested reviewer (jkwak-work). They were not auto-requested; a human may optionally add them as a reviewer.
+1 similar comment
+jhelferty-nv
+commented
+Aug 21, 2026
+Copy link
+Copy Markdown
+Contributor
+Automated notice (PR board sync) — do not reply to this comment.
+Auto-assigned @jkwak-work as shepherd for this Bot PR.
+FYI for maintainers: committer signal on the changed files is higher for expipiplus1 than for the auto-requested reviewer (jkwak-work). They were not auto-requested; a human may optionally add them as a reviewer.
+nv-slang-bot
+Bot
+force-pushed
+the
+fix/issue-12636
+branch
+from
+81f5953 to
+c083b06
+Compare
+August 21, 2026 02:25
+nv-slang-bot
+Bot
+added
+the
+pr: non-breaking
+PRs without breaking changes
+label
+Aug 21, 2026
+nv-slang-bot
+Bot
+temporarily deployed
+to
+falcor-ci
+August 21, 2026 02:26
+Inactive
+nv-slang-bot
+Bot
+mentioned this pull request
+Aug 21, 2026
+CUDA/PTX: no-result RWTexture2D<uint>.InterlockedAdd emits a pointer atomic on CUsurfObject
+#12636
+Open
+jkwak-work
+commented
+Aug 21, 2026
+Copy link
+Copy Markdown
+Collaborator
+This PR implements the "Phase 1" described in the issue #12636.
+But I think we should skip "Phase 1" and directly go for "Phase 2".
+jkwak-work
+commented
+Aug 25, 2026
+Copy link
+Copy Markdown
+Collaborator
+@nv-slang-bot , I thought you were going to repurpose this PR for the phase-2 but I don't see any changes.
+nv-slang-bot
+Bot
+commented
+Aug 25, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Apologies for the confusion, @jkwak-work — the Phase-2 work was implemented and building locally but a mid-task interruption meant I hadn't pushed it yet, so the PR still showed the old Phase-1 diff. Pushing the Phase-2 implementation now.
+What it does: InterlockedAdd/Min/Max/And/Or(rwTexture[coord], value) (no-result form) now lowers to the PTX sured surface reduction via new inline-PTX prelude helpers, instead of emitting atomicAdd(surfObj[...]). For example InterlockedAdd(tex[uint2(1,2)], 5u) now emits __slang_surface_reduce_add(tex, x*4, y, 5u) (byte-scaled X), which assembles cleanly through nvcc/ptxas on sm_89 (verified locally on the L40S). Cases sured genuinely cannot express — the result-returning overload, InterlockedXor (no native sured.xor in ptxas 12.6), and array/multisample textures — remain diagnosed (E41405).
+Refreshing the PR description with the full Phase-2 details shortly.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+Fix #12636: lower RWTexture atomics to PTX sured on CUDA
+…
+5ef0e46
+```
+The no-result InterlockedAdd/Min/Max/And/Or on an RWTexture texel
+previously emitted atomicAdd(surfObj[coord]) on an opaque CUsurfObject,
+which NVRTC rejects. Lower these to the PTX sured surface-reduction
+instruction via new inline-PTX prelude helpers (__slang_surface_reduce_*),
+emitted from a single texture-atomic classifier in the CUDA emitter that
+intercepts every atomic rooted at an IRImageSubscript. Supported set
+(verified against ptxas 12.6): add(u32,u64), min/max(u32,s32,u64,s64),
+and/or(b32), scalar or vector-component texel, 1D/2D/3D. Cases sured
+cannot express (result-returning overload, xor, exchange/compare-exchange,
+64-bit bitwise, array/multisample textures, unprovable backing formats)
+are diagnosed (E41405) at the same emit point. Classification runs at
+emit, not a pre-emit pass, so it observes post-DCE result liveness.
+```
+nv-slang-bot
+Bot
+force-pushed
+the
+fix/issue-12636
+branch
+from
+c083b06 to
+5ef0e46
+Compare
+August 25, 2026 01:16
+nv-slang-bot
+Bot
+mentioned this pull request
+Aug 25, 2026
+CUDA: wrong surface byte-stride when a formatted RWTexture is accessed through a function parameter
+#12737
+Closed
+Fix #12636: lower RWTexture atomics to PTX sured on CUDA
+…
+8079261
+```
+Address CODE_REVIEW round-16 findings and re-scope to Phase 2 (sured
+lowering) per maintainer direction: lower the result-discarding
+InterlockedAdd/Min/Max/And/Or on a scalar or single vector-component
+32/64-bit integer RWTexture texel to the PTX sured surface-reduction
+instruction, and diagnose (E41405) the cases sured cannot express.
+
+- prelude: per-ctype __slang_surface_reduce_<op>_<ctype> helpers (avoids
+  64-bit overload ambiguity under offline nvcc).
+- emit-cuda: classify texel atomics; reuse isImageFormatCompatible /
+  findImageFormatDecoration (promoted to shared) for exact backing-format
+  validation; diagnose directly-recoverable incompatible formats.
+- check-unsupported-inst: always-run checkUnsupportedTextureAtomic to
+  diagnose multisample-texture atomics before the (unrepresentable) CUDA
+  resource type is emitted.
+- tests + offline nvcc sured fixture + docs.
+
+Closes #12636.
+```
+nv-slang-bot
+Bot
+changed the title
+Diagnose atomic-on-texture as unsupported on CUDA/PTX (#12636)
+Lower RWTexture atomics to PTX sured on CUDA/PTX (#12636)
+Aug 25, 2026
+nv-slang-bot
+Bot
+had a problem deploying
+to
+falcor-ci
+August 25, 2026 15:34
+Error
+Fix #12636 review: restore RayDesc outside OptiX guard; document sure…
+…
+60bc38a
+```
+…d coord/DCE invariants
+
+Peer review (REQUEST_CHANGES) found a stale rebase hunk in the prior
+commit that moved struct RayDesc back inside #ifdef SLANG_CUDA_ENABLE_OPTIX,
+reverting #12670 and re-breaking non-OptiX CUDA/PTX programs that use
+RayDesc as a plain POD. Restore RayDesc and its 'always defined' comment
+outside the guard to match master.
+
+Also address two fragility flags with comments: the sured byte-addressed x
+coordinate shares the 32-bit sust/suld surface-coordinate convention, and
+the hasUses() result-liveness check is safe by construction (a live result
+is always rejected; running after DCE is about completeness, not safety).
+```
+nv-slang-bot
+Bot
+had a problem deploying
+to
+falcor-ci
+August 25, 2026 16:20
+Error
+jkwak-work
+commented
+Aug 25, 2026
+Copy link
+Copy Markdown
+Collaborator
+I will continue to review after the following related PR gets merged:
+https://github.com/shader-slang/slang/pull/12671/changes
+nv-slang-bot
+Bot
+commented
+Aug 25, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Sounds good, thanks — #12671 first makes sense. Heads-up on the overlap so the re-review is quick:
+#12671 adds a general MultisampledTextureNotSupportedOnTarget diagnostic on the kIROp_TextureType global inst, which subsumes the multisample handling in this PR's checkUnsupportedTextureAtomic. Once #12671 lands I'll rebase this PR onto it and reconcile:
+drop the multisample-specific part of checkUnsupportedTextureAtomic where Fix #12633: diagnose multisampled texture on CUDA target #12671's general check already covers it (avoiding a duplicate diagnostic / the merge conflict in slang-ir-check-unsupported-inst.cpp);
+one thing to confirm on your side: Fix #12633: diagnose multisampled texture on CUDA target #12671's check sits in the checkUnsupportedInst(module, …) path, which slang-emit.cpp runs only when !shouldPerformMinimumOptimizations(). The multisample-texture ICE also fires under -minimum-slang-optimization, so if Fix #12633: diagnose multisampled texture on CUDA target #12671 stays min-opt-gated I'll keep a minimal always-run guard for that case; if Fix #12633: diagnose multisampled texture on CUDA target #12671 makes it unconditional, I can remove mine entirely.
+The rest of this PR (the sured lowering) is independent of #12671 and unchanged. I'll hold the rebase until #12671 merges.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+nv-slang-bot Bot
+added a commit
+that referenced
+this pull request
+Aug 26, 2026
+Recover texture [format] across function parameters on CUDA (#12737)
+…
+07d13c4
+```
+Specialize functions taking writable-texture parameters on CUDA so the concrete
+global carrying the [format] decoration reaches the surface-access site. Without
+this, a formatted RWTexture passed through a function parameter emitted the wrong
+surface byte stride (element size instead of backing-format size) and skipped the
+_convert read/write path, because _findImageFormatDecoration cannot recover the
+format from an undecorated IRParam. This is the same producer-side mechanism
+Khronos/WGSL already use, and covers reads, writes, and distinct-format call sites
+that pass concrete globals.
+
+Extract the writable-texture-access test into a shared isWritableTextureType helper
+and reuse it in isIllegalGLSLParameterType.
+
+Partial fix (does not auto-close #12737): array-of-globals elements and
+runtime-selected texture arguments still cannot recover the format and are left
+unspecialized (never worse than before); a diagnostic backstop is a coordinated
+follow-up with #12672.
+
+Addresses #12737.
+```
+nv-slang-bot
+Bot
+mentioned this pull request
+Aug 26, 2026
+Recover texture [format] across function parameters on CUDA (#12737)
+#12766
+Merged
+jkwak-work
+commented
+Aug 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+The following PR is merged and I am rebasing now:
+#12671
+Merge branch 'master' into fix/issue-12636
+26b5420
+jkwak-work
+reviewed
+Aug 26, 2026
+View reviewed changes
+Comment thread
+source/slang/slang-ir-check-unsupported-inst.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Remove checkUnsupportedTextureAtomic pass for CUDA MS-texture atomics
+…
+f7097d5
+```
+The module-level checkUnsupportedInst check added in #12671 rejects
+multisampled textures (E55215) at the default optimization level, which
+subsumes the multisample-texture-atomic diagnosis this pass performed.
+Skipping the check under -minimum-slang-optimization is intentional, so
+the unconditionally-scheduled pass is no longer needed.
+
+Removes the pass, its declaration and scheduling call, and the redundant
+multisample diagnostic test; reconciles the comments in the CUDA emitter
+and the surviving diagnostic test to reference checkUnsupportedInst.
+```
+nv-slang-bot Bot
+added a commit
+that referenced
+this pull request
+Aug 31, 2026
+Recover texture [format] across function parameters on CUDA (#12737)
+…
+d8bbfe8
+```
+Specialize functions taking writable-texture parameters on CUDA so the concrete
+global carrying the [format] decoration reaches the surface-access site. Without
+this, a formatted RWTexture passed through a function parameter emitted the wrong
+surface byte stride (element size instead of backing-format size) and skipped the
+_convert read/write path, because _findImageFormatDecoration cannot recover the
+format from an undecorated IRParam. This is the same producer-side mechanism
+Khronos/WGSL already use, and covers reads, writes, and distinct-format call sites
+that pass concrete globals.
+
+Extract the writable-texture-access test into a shared isWritableTextureType helper
+and reuse it in isIllegalGLSLParameterType.
+
+Partial fix (does not auto-close #12737): array-of-globals elements and
+runtime-selected texture arguments still cannot recover the format and are left
+unspecialized (never worse than before); a diagnostic backstop is a coordinated
+follow-up with #12672.
+
+Addresses #12737.
+```
+jkiviluoto-nv
+pushed a commit
+to jkiviluoto-nv/slang
+that referenced
+this pull request
+Oct 2, 2026
+Recover texture [format] across function parameters on CUDA (shader-s…
+…
+feb2452
+```
+…lang#12737) (shader-slang#12766)
+
+## Motivation
+
+On the CUDA target, a formatted writable texture accessed **through a
+function parameter** emits a different (and wrong) surface access than
+the *same* texture accessed directly. The compiler fails to recover the
+`[format]` backing, so it emits the plain, non-converting intrinsic and
+computes the coordinate scale from the access element size instead of
+the backing format. Consider this shader (the type used by the committed
+regression test):
+
+```slang
+void writeThroughParam(RWTexture2D<float> t) { t[uint2(1, 0)] = 5.0f; }
+
+[format("r16f")]                 // 2-byte backing format, accessed as a 4-byte float
+RWTexture2D<float> tex;
+
+[shader("compute")][numthreads(1,1,1)]
+void computeMain()
+{
+    writeThroughParam(tex);      // through the parameter
+    tex[uint2(2, 0)] = 7.0f;     // direct access — the control
+}
+```
+
+`slangc repro.slang -target cuda -entry computeMain -stage compute`
+emitted, before this change:
+
+```cpp
+// through the parameter (WRONG): plain write, byte-scaled by the 4-byte element size, no _convert
+surf2Dwrite<float>((5.0f), (t_0), ((_S1)).x * 4, ((_S1)).y, SLANG_CUDA_BOUNDARY_MODE);
+// direct (correct): [format] recovered, converting write
+surf2Dwrite_convert<float>((7.0f), (globalParams_0->tex_0), ((_S2)).x * 1, ((_S2)).y, SLANG_CUDA_BOUNDARY_MODE);
+```
+
+CUDA surface access is byte-addressed on the x coordinate. A *plain*
+`surf2Dwrite<T>` therefore scales the coordinate by the backing element
+size, so when the backing format differs from the access type the
+correct plain stride would be the 2-byte `r16f` size, not the 4-byte
+`float` size — emitting `* 4` writes at the wrong texel and can corrupt
+adjacent memory. When a conversion *is* required (as here), the correct
+form is instead `surf2Dwrite_convert<T>` with an **unscaled** coordinate
+(`* 1`): the `_convert` helper handles the packing, so the emitter
+deliberately sets the stride multiplier to 1 for a converting write.
+Either way the through-parameter access is wrong because the format is
+not recovered — it emits the plain, unscaled-by-backing-size form with
+no `_convert`. No diagnostic is emitted.
+
+(The issue shader-slang#12737 reports this with a `[format("r32ui")]
+RWTexture2D<uint64_t>` example. That combination exposes the same
+format-recovery bug, but its converting intrinsic
+`surf2Dwrite_convert<ulonglong>` has no CUDA-prelude implementation, so
+even a *direct* access to it fails NVRTC independently of this bug — a
+separate prelude gap. This PR therefore demonstrates and tests the fix
+with `r16f`/`float`, whose converting intrinsics the prelude does
+define, so the fix is verifiable end-to-end.) The same format-recovery
+limitation would affect the `sured` atomic lowering proposed in shader-slang#12672.
+
+## Proposed solution
+
+The `[format("...")]` backing format is stored as an
+`IRFormatDecoration` on the **global** texture parameter. At the
+surface-access site the emitter recovers it with
+`_findImageFormatDecoration` (`slang-intrinsic-expand.cpp`), which reads
+the decoration off the resource instruction. When the texture is passed
+through a function, the access site sees only the callee's `IRParam` —
+which carries no decoration — so `_calcBackingElementSizeInBytes` falls
+back to the element-type size and the `$E` stride multiplier / `$C`
+`_convert` selection are computed from the wrong information.
+
+This is fundamentally the "smuggle a resource through a function"
+problem documented in the long `TODO(JS)/TimF` comment at
+`slang-intrinsic-expand.cpp:191-214`: from inside the callee you can
+only reach the `IRParam`, and distinct call sites may pass
+differently-formatted textures, so a single un-specialized callee cannot
+carry one correct format. That same comment notes the Vulkan back-end
+"gets away with this kind of coincidentally, since the legalization we
+have to do for resources means there wouldn't be a single `f()` function
+any more."
+
+The principled, producer-side fix is to give CUDA that same property for
+the affected case: **specialize functions that take a writable-texture
+parameter so the concrete global (carrying `[format]`) is referenced
+directly at the access site.** This is exactly the mechanism Khronos
+(SPIRV/GLSL) and WGSL already use — the resource-parameter
+specialization pass (`specializeResourceUsage`) already runs
+unconditionally for all targets (`slang-emit.cpp`); it is *not* gated
+behind `shouldLegalizeExistentialAndResourceTypes`. Only the
+per-parameter decision
+`ResourceParameterSpecializationCondition::doesParamWantSpecialization`
+returned `false` for CUDA. Adding a CUDA arm to that decision fixes
+surface read/write — and the pending `sured` atomic path, which shares
+`_calcBackingElementSizeInBytes` — uniformly, with no change to the
+emitter.
+
+Once the callee refers to the global directly,
+`_findImageFormatDecoration` finds the decoration,
+`_calcBackingElementSizeInBytes` returns the true backing size, and the
+through-parameter access emits identically to the direct access.
+
+**Scope.** This fixes the format-recovery defect the issue reports — a
+formatted writable texture passed through a function parameter where the
+*argument is a concrete global* — for both reads and writes wherever the
+target's converting helper exists, and handles distinct-format call
+sites via distinct specializations. Four residual cases still emit a
+possibly-wrong stride (all of them *no worse than the base compiler
+today* — see the Process report for the verification), so shader-slang#12737
+intentionally stays open to track them:
+- an **array-of-globals element** argument (`f(gTexArray[i])`) — which
+is a *separate, pre-existing* format-recovery gap, not the
+parameter-boundary bug (it reproduces with a direct access and no
+function parameter at all);
+- a **function-returned resource** (`getTex()[coord]`) — not foldable to
+a single global;
+- a **runtime-selected** argument (`f(cond ? gA : gB)`) — inherently
+unrecoverable, since the two textures may carry different formats;
+- a **mixed call** where one parameter's argument is foldable and
+another's is not — `canSpecializeCall` is all-or-nothing per call, so it
+leaves the foldable one unspecialized too.
+
+Closing these needs a separate format-recovery fix for array/returned
+resources and/or a capability diagnostic (the E41405-style approach
+being added in shader-slang#12672); that is deliberately left as a coordinated
+follow-up rather than raced against that PR. The predicate is scoped to
+*writable* textures for consistency with the existing Khronos/WGSL arm;
+specializing an unformatted writable texture is correctness-neutral (its
+stride is unchanged) at a bounded code-size cost.
+
+## Change summary
+
+| File | Change |
+| --- | --- |
+| `source/slang/slang-ir-specialize-resources.cpp` | Add a CUDA arm to
+`doesParamWantSpecialization` that requests specialization for
+writable-texture parameters. Extract the "writable texture access" test
+into a shared `isWritableTextureType` helper and reuse it in the
+existing `isIllegalGLSLParameterType` so the classification lives in one
+place. |
+| `tests/compute/texture-format-through-param.slang` | New
+`SIMPLE(filecheck=CUDA,READ,NEG)` regression test: a `[format("r16f")]
+RWTexture2D<float>` written and read through a function parameter (and
+written directly) must now emit the converting intrinsics
+(`surf2Dwrite_convert` with the unscaled `* 1` coordinate;
+`surf2Dread_convert` with the 2-byte backing scale), matching the direct
+access, with no plain non-converting form. Compiles end-to-end via NVRTC
+(`-target ptx`). |
+
+## Concepts and vocabulary
+
+- **`doesParamWantSpecialization`**
+(`ResourceParameterSpecializationCondition`) — the per-parameter
+predicate that decides whether a function taking this parameter should
+be specialized per concrete argument. It already returns `true` for
+`ConstantBuffer<T>` on all targets and for illegal buffer/image/texture
+parameter types on Khronos/WGSL; every other target previously fell
+through to `false`.
+- **`isParamSuitableForSpecialization` / `canSpecializeCall`**
+(`slang-ir-specialize-function-call.cpp`) — the companion predicate that
+decides whether a given *argument* can actually be folded. It accepts
+several shapes (global shader parameters, global values, user-pointer
+types, descriptor-handle casts, and index/load/field chains rooted at
+one of those); for the texture-resource path relevant to this PR that
+means the argument must resolve to a global (or an index into a global
+array). If a parameter *wants* specialization but the argument is not
+suitable, `canSpecializeCall` returns `false` and the whole call is left
+unspecialized — this all-or-nothing behavior is why the "mixed call"
+residual below exists.
+- **`$E` / `$C`** (`slang-intrinsic-expand.cpp`) — the surface-intrinsic
+template expansions: `$C` appends `_convert` to the intrinsic name when
+a format conversion is required; `$E` emits the coordinate scale factor
+— the backing-element byte size for a *plain* (non-converting) access,
+but `1` for a converting *write* (`_calcBackingElementSizeInBytes` is
+overridden to 1 there, since the `_convert` helper handles packing).
+Both read the recovered `IRFormatDecoration`.
+
+## Process report
+
+**The one behavioral change — a CUDA arm in
+`doesParamWantSpecialization`.** The bug's root cause is that the format
+decoration is unreachable across the parameter boundary; the fix makes
+it reachable by specializing the callee against the concrete global,
+rather than patching the emitter to guess a stride it cannot prove.
+Requesting specialization is scoped to `isWritableTextureType(type)` —
+`RWTexture`/`WTexture`/rasterizer-ordered views — because only
+writable-texture accesses go through the CUDA `surf*write`/`surf*read`
+size-scaling path; a sampled `Texture` (plain `READ`) lowers to a
+texture fetch and does not need it. It is gated by
+`isCUDATarget(targetRequest)` (matching the sibling
+`isKhronosTarget`/`isWGPUTarget` arms). CUDA is the only C-family target
+that reaches this path: `CUDASourceEmitter` inherits `CPPSourceEmitter`,
+but the surface intrinsics (`surf2Dwrite$C…$E`) are CUDA-only templates
+in `hlsl.meta.slang`, and the CPU/C++ path never emits them.
+
+**Input-shape check (is this the right layer?).** Yes. The `IRParam`
+reaching the access site is not a malformed shape to be repaired at
+emit; it is the correct IR for an un-specialized callee. The problem is
+that CUDA left the callee un-specialized where the format information
+only survives on the global. The producer-side fix — specialize so the
+global reaches the access site — is precisely how the other targets
+avoid the same bug, and it removes the need for any emit-time guess. The
+alternative of carrying the format on the `IRTextureType` and reading it
+at emit was rejected: it founders on the multi-call-site ambiguity in
+the `TODO` (one un-specialized callee cannot carry one correct format
+when call sites disagree), and it would introduce a second format
+representation (decoration vs. type operand) that every consumer would
+have to agree on, violating "one canonical representation per value."
+
+**What is fixed, and what is not (verified against the base compiler).**
+The fix recovers the format when the argument is a **concrete global**
+texture — `f(gTex)` — for both reads and writes, and when different call
+sites pass differently-formatted globals (each gets its own
+specialization). Four cases are *not* covered and remain exactly as they
+emit today (never worse — verified against base):
+- **Array-of-globals element** (`f(gTexArray[i])`): this is a *separate,
+pre-existing* bug, not the parameter-boundary bug. It reproduces with a
+**direct** access and no function parameter at all —
+`gTexArray[idx][coord] = v` already emits `surf2Dwrite<...> .x * 4` on
+the base compiler (verified identical on this branch). The call here
+*does* specialize (the suitability check traces `GetElement` to the
+global), but `_findImageFormatDecoration` does not recover the per-array
+`[format]` off the array-element access; fixing that lives in
+`_findImageFormatDecoration` (the same file shader-slang#12672 is editing),
+independent of this change.
+- **Function-returned resource** (`getTex()[coord]`): the argument is a
+call result, not foldable to a single global, so the callee is not
+specialized and the access emits `surf2Dwrite<...> .x * 4` (verified).
+- **Runtime-selected argument** (`f(cond ? gA : gB)`):
+`isParamSuitableForSpecialization` returns `false` for the resource path
+here, so `canSpecializeCall` bails for the whole call. This one is
+*inherently* unrecoverable by specialization — the two textures may
+carry different formats.
+- **Mixed call** (`f(gTex, cond ? gA : gB)`): `canSpecializeCall` is
+all-or-nothing per call, so one unfoldable argument leaves the foldable
+`gTex` unspecialized too.
+
+Closing these requires either recovering the format after array/GEP
+reconstruction, argument-level (vs call-level) specialization, or a
+capability diagnostic (the E41405-style approach being added in shader-slang#12672).
+That is deliberately left as a coordinated follow-up rather than raced
+against shader-slang#12672, which is why this PR **leaves shader-slang#12737 open**. The common
+concrete-global case the issue reports is fixed.
+
+**The refactor — `isWritableTextureType`.** The switch on
+`IRTextureType::getAccess()` for the writable access modes previously
+lived inline in `isIllegalGLSLParameterType`. Extracting it into a named
+helper and reusing it in both the GLSL-legality check and the new CUDA
+arm keeps the "which texture accesses are writable" classification in
+one place, so the two callers cannot drift. No behavior change to the
+GLSL path.
+
+## Tests
+
+- **New:** `tests/compute/texture-format-through-param.slang` — a
+`[format("r16f")] RWTexture2D<float>` written through a function
+parameter and directly, and read through a parameter. It uses one
+multi-prefix source-emission FileCheck directive (`SIMPLE -target cuda`,
+which runs `slangc` + FileCheck): `CUDA` asserts **two**
+`surf2Dwrite_convert` calls with stride `* 1` (the through-parameter
+write matches the direct one); `READ` asserts `surf2Dread_convert … .x *
+2` (the through-parameter read recovers the 2-byte backing size); and a
+`NEG` prefix forbids the plain `surf2Dwrite<` / `surf2Dread<` across the
+whole input. Fails before the fix (only the direct write converted; a
+plain `.x * 4` write and a plain read remained), passes after.
+`r16f`/`float` is used (not an integer format) both to force the
+size-mismatch conversion and because the CUDA prelude only defines the
+converting-read helper (`surf2Dread_convert`) for float element types.
+- **Real CUDA compile:** the emitted CUDA for the full test — reads
+*and* writes through parameters — compiles via NVRTC (`-target ptx`)
+rc=0 on an L40S with CUDA 12.6, confirming the specialization produces
+valid CUDA (not just textually-correct source) and does not trip an
+assert cloning an un-legalized texture global. (`float` reads use the
+defined `surf2Dread_convert<float>` overload; an *integer* converting
+read would hit a pre-existing prelude gap where only float overloads are
+defined — orthogonal to this fix.)
+- **Regression:** 779/779 across
+`tests/compute/{texture-subscript,rw-texture-simple,half-rw-texture-convert*}`,
+`tests/hlsl-intrinsic/texture/`, and `tests/diagnostics/` (GPU-only legs
+ignored); the GLSL predicate is behavior-identical after the refactor.
+
+Addresses shader-slang#12737 (fixes the common concrete-global case for reads and
+writes; the runtime-selected-argument residual and a follow-up
+diagnostic are noted above — this PR intentionally does not auto-close
+the issue).
+
+Co-authored-by: nv-slang-bot[bot] <274397474+nv-slang-bot[bot]@users.noreply.github.com>
+```
+nv-slang-bot
+Bot
+mentioned this pull request
+Oct 12, 2026
+CUDA: [format] of a writable texture is not recovered for array elements, returned textures, runtime-selected and mixed-call arguments (wrong surface stride)
+#13580
+Open
+This branch was successfully deployed
+No deployments
+falcor-ci
+—
+60bc38a0
+Deployed
+Aug 25, 2026 by
+nv-slang-bot[bot]
+via falcor-build-approval-gate #31377
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+pr: non-breaking
+PRs without breaking changes
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

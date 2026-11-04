@@ -1,0 +1,661 @@
+LayerGS: Decomposition and Inpainting of
+Layered 3D Human Avatars via 2D Gaussian
+Splatting
+arXiv:2601.05853v1 [cs.CV] 9 Jan 2026
+Yinghan Xu, John Dingliana
+Trinity College Dublin, Dublin, Ireland
+{yixu,john.dingliana}@tcd.ie
+Abstract. We propose a novel framework for decomposing arbitrarily
+posed humans into animatable multi-layered 3D human avatars, separating the body and garments. Conventional single-layer reconstruction
+methods lock clothing to one identity, while prior multi-layer approaches
+struggle with occluded regions. We overcome both limitations by encoding each layer as a set of 2D Gaussians for accurate geometry and photorealistic rendering, and inpainting hidden regions with a pretrained
+2D diffusion model via score-distillation sampling (SDS). Our threestage training strategy first reconstructs the coarse canonical garment via
+single-layer reconstruction, followed by multi-layer training to jointly recover the inner-layer body and outer-layer garment details. Experiments
+on two 3D human benchmark datasets (4D-Dress, Thuman2.0) show that
+our approach achieves better rendering quality and layer decomposition
+and recomposition than the previous state-of-the-art, enabling realistic
+virtual try-on under novel viewpoints and poses, and advancing practical creation of high-fidelity 3D human assets for immersive applications.
+Our code is available at https://github.com/RockyXu66/LayerGS.
+Keywords: 3D Human · Virtual Try-on · Gaussian Splatting.
+1
+Introduction
+Creating realistic digital representations of humans is essential in enhancing
+immersiveness of extended reality applications. One popular application is that
+of realistic 3D virtual try-on, which poses challenges due to limited availability of
+3D garment assets and difficulty in capturing suitable 3D human models. Several
+methods have been developed to reconstruct high-quality human figures using
+single image [24], monocular [8], multi-view [13], or RGBD video input [10].
+However, most existing works focus on single-layer representations and do not
+separate garments from the inner body, limiting their application in virtual tryon. Due to lack of information in the capture input, occluded body parts are
+neglected, while garments are challenging to model accurately due to nonlinear
+material properties and dynamic deformations. To address this without delving
+into garment modeling, Kim et al. introduced GALA [12], a framework that
+utilizes the general knowledge from 2D diffusion models as a prior for geometry
+2
+Y. Xu et al.
+Fig. 1: Given a 3D human scan or multi-view images of a static person, our
+framework decomposes and inpaints the subject into multiple canonical Gaussian
+layers for animation and 3D virtual try-on.
+and appearance in the context of multi-layer human inpainting and generation.
+Given a static, single-layer 3D human scan, GALA can train and extract multilayer models separating the body and garments. However, decomposition quality
+depends greatly on the original 3D scan. Although a 3D human model can be
+estimated from a single image [24], a high-quality scan may require over one
+hundred cameras [29], limiting the potential usage of their method.
+In this paper, we present a framework for creating a multi-layer human representation from multi-view RGB images in static pose. Unlike previous methods,
+our approach is not limited to reconstructing a multi-layer human solely from a
+3D scan, allowing realistic static human reconstruction from monocular video.
+Similar to GALA, we utilize a 2D diffusion model as a geometry and appearance
+prior, but in contrast to GALA’s vertex color and DMTet [27] representation, we
+use the rendering and modeling advantages of 2D Gaussian Splatting (2DGS)
+[9]. Experiments show that our method achieves improved image quality after
+decomposition and re-composition, enabling garment swapping between subjects
+and creating a realistic inner body and outer garment appearance for occluded
+parts of human individuals.
+In summary, our key contributions are as follows:
+– We propose a framework that decomposes a realistic 3D human into multiple
+3D layers, achieving better results than existing state-of-the-art methods.
+– Instead of relying on 3D scans, we utilize 2D Gaussian Splatting to reconstruct and inpaint the 3D human model only from multi-view RGB images.
+– Additionally, we explicitly model these decomposed layers with 3D meshes,
+making them suitable for 3D virtual try-on applications.
+LayerGS
+2
+Related Work
+2.1
+Single-layer Human Modeling
+3
+PIFu [24] reconstructs humans by training a 3D implicit field to capture geometry information from a single 2D image. A single-layer geometry is extracted
+by marching cubes, and vertex colors are predicted. SIFU [37] introduces 3D
+consistent texture refinement for high-quality 3D clothed human models. HumanSplat [20] generates a 3D Gaussian human from a single image with a 2D
+multi-view diffusion model and human structure prior. IP-Net [1] uses point
+clouds as input to generate a single-layer registered animatable avatar with
+clothes. Some methods [3] [16] [26] use a sequence of 3D scans of the human as
+input to generate single-layer pose-dependent clothing deformation. [16] focus
+on single-layer geometry reconstruction and representation, while X-Avatar [26]
+extend this to geometry with textures. However, all these methods treat the
+human avatar as a single layer, ignoring the geometry and texture information
+under the clothing. These approaches also limit the ability for virtual try-on
+applications and clothes swapping between different subjects.
+2.2
+Multi-layer Human Modeling
+Modeling humans with disentangled clothing layers is critical for editable avatars.
+SMPLicit [5] fits human cloth on top of SMPL [15] parameter models with a
+given 2D image but lacks texture generation. CaPhy [28] generates the human
+and garment template from a sequence of 3D scans while learning the physical properties of animatable garments. LayGA [14] use multi-view videos as
+input and model the body and garment separately. The garment properties are
+learned from the temporal observations. However, acquiring such dense video
+data is costly, and the method fail to accurately reconstruct the occluded inner body, leading to artifacts when the avatar wears shorter clothes than the
+original. DeClothH [18] reconstructs a multi-layer 3D clothed human from a single image using a specifically designed diffusion model but struggles to maintain
+high-fidelity 3D consistency. LayerAvatar [36] introduces a feed-forward diffusion
+model that generates disentangled clothed avatars using a layered UV feature
+plane representation. Despite its speed, LayerAvatar focuses on generating new
+identities from latent noise rather than editing existing avatars under specific
+user guidance.
+2.3
+Virtual Try-on
+Several studies address 2D image inpainting by utilizing the capabilities of largescale pre-trained text-to-image models, such as Stable Diffusion [23]. ControlNetInpainting [34] can generate realistic 2D human images based on description
+prompts or 2D human poses. To specifically enhance garment-related tasks, [31]
+[38] focus on virtual try-on and editing of garments in 2D. However, all remain
+limited to fixed viewpoints and lack immersive 3D support.
+4
+Y. Xu et al.
+Fig. 2: Overview. (Left) input multi-view RGB and segmentation masks. In
+Stage 1, we learn a single-layer canonical set of 2D Gaussians by integrating
+with a composition SDS loss and extract a coarse garment mesh by segmentation.
+In Stage 2, we decompose and optimize an inner Gaussian layer (body and inner
+garments) while keeping the outer layer fixed. In Stage 3, we refine the outer
+garment layer with the inner layer frozen. Both resulting Gaussian layers are
+attached to the mesh to enable high-fidelity 3D virtual try-on under novel poses.
+Researchers lift 2D inpainting into 3D by using a 2D diffusion model as a prior
+and combining it with 3D representations. For example, Instruct-NRF2NeRF [6]
+enables instruction-based editing of Neural Radiance Fields [17]. GaussianEditor [4] provides 3D editing capabilities for 3DGS assets, leveraging 2D diffusion
+models. VTON360 [7] reformulates 2D VTON as a multi-view 2D inpainting
+task. It projects the 3D human into 2D views, applies a diffusion-based inpainter
+conditioned on garment images, and then reconstructs the edited views back into
+3D using Gaussian Splatting. While effective for specific views, this editing-based
+pipeline lacks explicit layer decomposition, often leading to inconsistency.
+3
+Method
+We reconstruct Gaussian human avatar layers Gbody and Ggarment from captured
+2D images of a static human, enabling realistic rendering results from novel views
+and poses (Fig. 2), using a three-stage pipeline. In Stage 1, we train a singlelayer canonical human avatar for the coarse outer layer garment reconstruction
+and inpainting. In Stage 2, we freeze the outer layer garment from Stage 1 and
+optimize the canonical inner layer. In Stage 3, we freeze the canonical inner
+layer and train the refined outer layer to address the rendering artifacts caused
+LayerGS
+5
+by inter-layer overlaps. Finally, we extract a 3D mesh from each layer and attach
+the corresponding Gaussians to this mesh, enabling seamless 3D virtual try-on
+by recomposition of 3D assets under novel poses. Stages 1–3 are detailed in
+Sec 3.1, Sec 3.2, and Sec 3.3.
+3.1
+Single-layer Canonical Avatar Reconstruction and Inpainting
+Unlike GALA [12], which requires a static human associated with a 3D mesh,
+our approach only needs 2D multi-view images, which can be captured through
+a monocular video with a camera moving spherically around a human subject in
+a random posture, or rendered from spherical virtual camera viewpoints placed
+around a 3D human scan. The SMPL(-X) parameters are given or fitted. We
+sample 30k points from the canonical SMPL(-X) mesh surface and initialize 2D
+Gaussians. A 3D grid linear skinning weight (LBS) is pre-computed from SMPL(X) parameters and interpolated to compute skinning weights for 2D Gaussians.
+In this stage, the posed 2D Gaussian representation of a human is rendered
+as a single layer. The attributes of the 2D Gaussians Gwhole can be optimized
+using 2D ground-truth images. The RGB image loss function Lrgb is as follows:
+L1
+D-SSIM
+Lrgb
+whole = (1 − λc )Lwhole + λc Lwhole
+(1)
+D-SSIM
+where the losses LL1
+represents L1 loss and D-SSIM loss, rewhole and Lwhole
+spectively, for RGB images g((Gwhole ), P) rendered by the single layer, with
+the weight coefficient λc . P denotes the camera model.
+We apply two regularizations following the original 2DGS work to obtain
+more accurate geometries. Depth distortion loss Ld is applied to mitigate the
+spread of Gaussians along the intersections. Normal consistency loss Ln is applied
+to ensure intersected 2D splats share the same normal, which is aligned with the
+actual surface. Depth distortion loss is as follows:
+X
+Ldwhole =
+ωi ωj |zi − zj |
+(2)
+i,j
+where ωi is the blending weight of the i-th intersection and zi is the depth of
+the intersection points. Normal consistency loss is as follows:
+X
+Lnwhole =
+ωi (1 − nTi N)
+(3)
+i
+where ωi is the blending weights of the i-th intersection, ni represents the normal
+of the 2D splat, and N is the normal estimated by the gradient of the depth map.
+For a fair comparison with GALA, we use the same diffusion model, Stable
+Diffusion V1.5 [23], for score distillation sampling (SDS) loss [21]. The diffusion
+model is augmented with ControlNet [34] and OpenPose [2]. The SDS loss is
+applied to the rendered image, enabling inpainting of occluded areas in the single layer Gwhole . The SDS text prompt is specified manually for each subject
+(e.g., ""a photo of a man wearing a t-shirt""). Gaussians in occluded areas are
+6
+Y. Xu et al.
+optimized through densification and pruning, particularly in areas between the
+upper arm and the torso. The gradient of SDS guidance loss is as follows:
+∇Gwhole LSDS
+whole = Eϵ,t
+h
+wt ϵϕ (zwhole
+; ywhole , t) − ϵ
+t
+ ∂x
+whole
+i
+∂Gwhole
+(4)
+where xwhole represents the image rendered using the single layer parameters
+Gwhole . The variable zwhole
+refers to the corresponding noisy image. The text
+t
+embedding ywhole is derived from the text prompt describing the subject wearing
+the garment. The total loss in Stage 1 is the weighted sum of the four losses.
+After obtaining the whole single-layer canonical avatar, we use the same
+technique in 2DGS to extract the mesh. Specifically, depth maps of the training
+views are rendered and fused to a mesh by utilizing truncated signed distance
+fusion (TSDF). Then, we render multiple-view 2D images for this canonical
+mesh, following a 2D segmentation and 3D votes to get the segmented canonical
+garment mesh. Assuming 2D Gaussians are spread on the mesh surface, we get
+the coarse canonical outer layer garment by setting a closest distance threshold
+α = 0.015 from the center position of Gaussians to the mesh.
+3.2
+Inner Layer Canonical Avatar Reconstruction and Inpainting
+We initialize the canonical inner layer by sampling points from the SMPL(X) mesh surface. During training, we freeze the outer layer garment from the
+previous step. Apart from RGB image loss, normal consistency loss, and score
+distillation sampling (SDS) loss for the inner layer 2D Gaussians, we also apply
+a 2D segmentation loss for the body, garment, and background. The 2D segmentation labels M ∈ {0, 1}H×W are employed for each layer. We divide depth
+distortion loss into seen and occluded areas for the inner layer based on 2D segmentation labels. The seen area is computed as normal while we create a dummy
+SMPL(-X) 2D Gaussian set and render it together with the optimizable inner
+layer to guide the depth information for the occluded area. These segmentation
+and depth regularizations are essential for guiding the shape of the inner layer
+body from 2D observations, restricting the body shape from going beyond the
+garment, and fixing inaccurate intersections between the garment and body. The
+loss functions are as follows:
+Lseg =
+P
+k
+L1
+D-SSIM
+Lrgb
+body = (1 − λc )Lbody + λc Lbody
+(5)
+Mk ⊙ (S − Sgt
+k ) 1
+(6)
+Ldbody =
+X
+where k ∈ {body, garment, bg}
+ωis ωj |zis − zj | +
+is ,j
+∇Gbody LSDS
+body = Eϵ,t
+X
+ωio ωj |zio − zj |
+(7)
+io ,j
+h 
+
+i
+∂xbody
+body
+wt ϵϕ (zt ; ybody , t) − ϵ ∂Gbody
+(8)
+D-SSIM
+where the losses Ll1
+represents l1 loss and D-SSIM loss respecbody and Lbody
+tively for masked RGB images g((Gbody , Ggarment ), P) rendered by integrating
+LayerGS
+Method
+00122-Inner-Take8
+Method
+34.60
+31.70
+0.0257 0.9766
+0.0382 0.9684
+32.53
+31.44
+0.0321 0.9805
+0.0405 0.9715
+33.38
+31.74
+0.0268
+0.0381
+0.9873 35.40 0.0195 0.9880 35.93 0.0191 0.9869 35.91 0.0214
+00174-Inner-Take10
+00175-Inner-Take4
+00190-Inner-Take2
+SSIM↑ PSNR↑ LPIPS↓ SSIM↑ PSNR↑ LPIPS↓ SSIM↑ PSNR↑ LPIPS↓
+GALA w/ 3D scan 0.9801
+GALA w/o 3D scan 0.9718
+Ours w/o 3D scan
+00152-Inner-Take4
+SSIM↑ PSNR↑ LPIPS↓ SSIM↑ PSNR↑ LPIPS↓ SSIM↑ PSNR↑ LPIPS↓
+GALA w/ 3D scan 0.9801
+GALA w/o 3D scan 0.9697
+Ours w/o 3D scan
+00127-Inner-Take5
+7
+34.93
+30.91
+0.0340 0.9792
+0.0453 0.9674
+31.18
+28.88
+0.0292 0.9732
+0.0448 0.9628
+33.37
+31.25
+0.0250
+0.0346
+0.9866 36.09 0.0306 0.9882 36.67 0.0207 0.9857 35.02 0.0153
+Table 1: Quantitative recomposition evaluation on the 4D-Dress dataset.
+the body and garment layers. The target segmentation image Sgt is assigned a
+uniform color, represented as Sgt = v · 1H×W , where v is an arbitrary RGB
+value for different layers. Aside from RGB images, we render segmentation images S = g((G′body , G′garment ), P), where G′ = (µ, c′ , s, α, q). Here, the color for
+each 2D Gaussian is set to match the corresponding layer color, c′body = vbody ,
+c′garment = vgarment . For depth distortion loss Ldbody , we define masks for the
+i-th intersection: is denotes the seen region of the body, while io denotes the
+occluded region, obtained by masking with the garment and computed using the
+dummy body shape. The text prompt for SDS loss for the inner layer is given
+according to the user requirement (e.g., "a photo of a man wearing pants and
+a white tank top"). Similar to Stage 1, the Stage 2 total loss is computed as a
+weighted sum of the RGB reconstruction, normal consistency, depth distortion,
+and SDS guidance losses, with additional 2D segmentation losses for the inner
+layer, outer layer, and the background.
+3.3
+Outer Layer Refinement
+Since the outer layer is reconstructed and inpainted as a single layer in Stage 1,
+some artifacts may occur when combining the inner layer with the outer layer,
+especially in occluded area optimized using SDS. To mitigate this issue, we freeze
+2D Gaussians of the inner layer and only refine the outer layer. Initialization is
+peformed by sampling points from the coarse canonical outer layer generated
+from Sec 3.1. To further accelerate the training process, we employ a dummyguidance strategy similar to Sec 3.2, using the coarse outer layer mesh as the
+dummy layer. To reduce rendering artifacts caused by severe scaling deformation
+during virtual try-on, we apply a scaling constraint in densification: 2D Gaussians are split at a manually set scaling threshold of 0.01, and scaling values are
+clipped to 0.01 after splitting.
+The training losses include masked RGB image loss for the outer layer area,
+normal consistency loss, depth distortion loss, 2D segmentation losses, and com-
+8
+Y. Xu et al.
+position SDS loss with the same text prompt as in Stage 1. The normal consistency loss and depth distortion loss are applied to both (a) the composition
+of the inner and outer layers and (b) the composition of the dummy and outer
+layers. The Stage 3 total loss is the weighted sum of all these losses.
+3.4
+Mesh Extraction and Virtual Try-on
+We employ a mesh-driven approach for 3D virtual try-on applications. First, we
+extract 3D meshes for both the canonical body layer and the canonical garment
+layer from corresponding 2D Gaussians assets, respectively. Next, we attach 2D
+Gaussians to their nearest triangles on the canonical mesh. To accommodate
+novel poses, we apply linear blend skinning (LBS) for the canonical mesh transformation and Laplacian deformation to the outer layer to resolve potential
+penetration issues between inner and the outer layers. Finally, 2D Gaussians are
+transformed from the canonical mesh to the target mesh.
+4
+Experiments
+4.1
+Preprocessing
+To our knowledge, GALA is the only existing method that decomposes realistic
+3D humans into multiple layers with inpainting. For a fair comparison, we adopt
+a preprocessing pipeline analogous to GALA. To enhance adaptability to arbitrary multi-view image sets, we further estimate camera intrinsics and extrinsics
+jointly with human shape and pose parameters from scratch. Given multi-view
+RGB images of a static human, we calculate the camera extrinsics and intrinsics
+using COLMAP [25]. Next, we utilize an off-the-shelf 2D segmentation model [11]
+to generate annotation masks for both body and garment components. The body
+shape, represented as β ∈ R10 , and the body poses, denoted as θ ∈ R144 , for
+the subject are obtained by optimizing the SMPL(-X) parameters based on the
+multi-view images and the corresponding camera poses.
+4.2
+Datasets and Metrics
+4D-Dress [29] is a real-world dataset of clothed humans that captures 64 human
+outfits with motion sequences. Each frame features a high-quality 3D textured
+scan with vertex-level semantic labels, along with corresponding garment meshes
+and fitted SMPL(-X) body meshes. Thuman2.0 Dataset [33] contains 526 reconstructed clothed human scans. In evaluation, there are two types of training data.
+The first consists of 72 images captured from uniformly distributed virtual camera positions around the subject. The second includes a ground-truth 3D scan
+as used in GALA’s original pipeline, along with training data including normal
+images and segmentation masks rendered from random rotations and distances,
+as well as head and hand zoom-in views. Our method and VTON360 use only
+the first type of data, while GALA’s framework uses both. For evaluation, we
+LayerGS
+Method
+00122-Inner-Take8 00127-Inner-Take5 00152-Inner-Take4
+CLIP↑
+IR↑
+CLIP↑
+IR↑
+CLIP↑
+IR↑
+GALA w/ 3D scan 30.50
+GALA w/o 3D scan 30.08
+0.313
+0.175
+30.10
+29.34
+0.151
+0.138
+30.11
+29.90
+-0.513
+-0.638
+Ours w/o 3D scan
+0.534
+30.97
+0.217
+31.08
+-0.362
+Method
+9
+30.48
+00174-Inner-Take10 00175-Inner-Take4 00190-Inner-Take2
+CLIP↑
+IR↑
+CLIP↑
+IR↑
+CLIP↑
+IR↑
+GALA w/ 3D scan 31.27
+GALA w/o 3D scan 30.30
+1.715
+1.641
+32.21
+31.18
+1.783
+1.676
+31.30
+29.64
+0.689
+0.491
+Ours w/o 3D scan
+1.767
+33.26
+1.843
+33.34
+0.993
+31.82
+Table 2: Quantitative inpainting evaluation on the 4D-Dress dataset.
+render 72 test views per subject: for GALA, camera positions are uniformly distributed over the viewing sphere, while for VTON360 they are evenly spaced
+along a horizontal circle around the subject.
+Evaluation Metrics: To compare with GALA, we use SSIM [30], PSNR, and
+LPIPS [35] to evaluate reconstruction quality. CLIP [22] and ImageReward
+(IR) [32] scores are used to evaluate the inpainting quality. Similar to VTON360,
+we calculate the average DINO Similarity [19] score between the reference image
+and the rendered test-view images of the 3D virtual try-on.
+Experimental Settings: To compare with GALA, we select six subjects with
+diverse body shapes from the 4D-Dress dataset, each with a random pose sampled from its motion sequence. The garments in our study include t-shirts, longsleeve shirts, and sweaters. To compare with VTON360, we select six subjects
+from Thuman2.0 to serve as the basis for inner-body reconstruction. In this
+setup, our method combines the six reconstructed garments from the 4D-Dress
+dataset with these inner bodies. In contrast, VTON360 performs virtual try-on
+using the same Thuman2.0 subjects but takes only the front and back garment
+images from the corresponding 4D-Dress outfits as input. In all quantitative
+evaluations, we focus solely on upper-body garments for comparison purposes.
+4.3
+Comparisons with GALA
+Recomposition Results: Quantitative evaluations (Table 1) on the 4D-Dress
+dataset demonstrate that our method consistently surpasses GALA across multiple metrics, including SSIM, PSNR, and LPIPS. Specifically, our method can
+effectively reconstruct and inpaint the body and garment when the subject is
+wearing a tight garment or clothing with complex textures and patterns. In contrast, GALA relies heavily on the geometry of 3D scans and the fitted SMPL(-X)
+model. If the SMPL(-X) template is inaccurate, it can lead to flawed geometry
+reconstruction in GALA’s first stage, resulting in overlapping rendering during composition. GALA addresses this with an additional refinement step, but
+10
+Y. Xu et al.
+GALA
+w/
+scan
+GALA
+w/o
+scan
+Ours
+w/o
+scan
+Fig. 3: Qualitative comparison between GALA (with and without 3D scan)
+and our method (without 3D scan). The top row shows results from GALA trained
+with a 3D scan, the middle row from GALA trained without a 3D scan, and the bottom
+row from our approach, which also does not require a 3D scan. From left to right, each
+column shows: (1) the ground-truth image, (2) recomposed body and garment, (3)
+posed body, (4) posed garment, (5) canonical body, and (6) canonical garment.
+penetration artifacts remain. As the refinement code is not available, we report
+comparisons using their results before this step. Qualitative examples illustrating
+these differences are shown in Fig. 3.
+Inpainting Results: We render the canonical inpainted inner body under test
+views and average the scores with text prompt "a man/woman wearing pants
+and a white tank top with black background". Quantitative results in Fig. 2 show
+that our method has higher CLIP and ImageReward scores compared to GALA.
+As shown in Fig. 3, our approach generates more photorealistic and coherent
+inpainting results, due to the combination of 2DGS and the diffusion model.
+4.4
+Comparison with VTON360
+In the evaluation, VTON360 [7] needs to train 6 subjects with 6 upper-body
+garments separately, while our method reconstructs all 12 subjects once and
+then recomposes the inner and outer layers arbitrarily. The quantitative results
+for the average DINO similarity score are shown in Table 3. The qualitative
+comparisons in Fig. 4 show that our method preserves high-frequency details,
+such as text on a t-shirt and patterns on a sweater, whereas VTON360 produces
+blurred results. Unlike our method which decomposes layers once for universal
+use, VTON360 requires re-training or optimizing the reconstruction for each
+specific garment-person pair.
+LayerGS
+11
+Fig. 4: Qualitative comparison between VTON360 and our method. Top: original subject, front/back garment images, and edited 3DGS renderings from VTON360.
+Bottom: canonical body, canonical garment, and recomposed results from our method.
+Method
+DINOsim ↑
+VTON360
+Ours
+0.455
+0.506
+Table 3: Quantitative virtual try-on evaluation with VTON360 on the
+Thuman2.0/4D-Dress setup.
+4.5
+Custom Monocular Video Results
+An advantage of our method over GALA is its capability to decompose humans
+into multiple layers using only multi-view images without the requirement for
+explicit 3D information. To showcase this capability, we apply our system to
+custom data collected using a handheld monocular camera moved spherically
+around a static human subject in the scene. We extracted approximately 100
+images from the video, and applied the preprocessing (Sec 4.1) pipeline to these
+images. Our approach successfully reconstructs and inpaints layered 3D human
+avatars, as demonstrated in Fig. 5.
+4.6
+Ablation Study
+We conduct three ablation studies to evaluate the contributions of different components in our method. First, we compare Stage 2 and Stage 3. As illustrated in
+Fig. 6c, the refinement process removes inaccurately attached areas and densifies
+sparse outer-layer 2D Gaussians. Quantitative results in Table 4a demonstrate
+improvements in CLIP and ImageReward scores, computed from a prompt describing the canonical composition of both layers. Second, we evaluate the effect
+of dummy SMPL(-X) body guidance. Fig. 6a shows that, although the 2D Gaussian Splatting (2DGS) rendered outputs appear visually similar with or without
+dummy guidance, concave artifacts emerge in the mesh of the inpainted body
+12
+Y. Xu et al.
+Fig. 5: Custom monocular video demo for decompositions.
+(a)
+(b)
+(c)
+Fig. 6: Ablations. (a) Visualization of dummy shape guidance showing the rendered
+inner layer, mesh, and error heatmap. (b) Effect of the scaling constraint on virtual
+try-on results. (c) Comparison between Stage 2 and Stage 3.
+areas when dummy guidance is not applied. A heatmap of mesh-to-ground-truth
+SMPL(-X) discrepancies shows reduced errors (Table 4b) with dummy guidance,
+which improves geometric accuracy and prevents rendering overlap in virtual
+try-on. Finally, we evaluate our scaling-constraint strategy. The original 2DGS
+training strategy, designed for static scenes, tends to generate large Gaussians for
+low-frequency areas. Since 2D Gaussians are attached to the mesh, when applying virtual try-on simulation under severe deformation (e.g., extreme stretching,
+sharp folding), large Gaussians lead to visual artifacts. Constraining Gaussian
+size during training effectively mitigates these artifacts (Fig. 6a).
+5
+Discussion
+We present a novel method for generating layered 3D human avatars from multiview images of a statically posed subject. Leveraging 2D Gaussian Splatting
+guided by diffusion models, our approach enables the creation of photorealistic
+3D garment and human assets, well-suited for applications such as virtual try-on.
+Experiments show that our method outperforms state-of-the-art decomposition
+LayerGS
+Method CLIP↑ IR↑
+Method
+Stage 2 30.83 1.378
+Stage 3 30.96 1.388
+w/o guidance 0.021 0.012 0.091
+w/ guidance 0.015 0.006 0.048
+(a)
+(b)
+13
+Mean↓ Std↓ Max↓
+Table 4: Ablations. (a) Quantitative results for garment refinement. (b) Heatmap
+differences with and without guidance, showing error metrics in occluded areas.
+work in both reconstructing and inpainting, while also being compatible with
+easily captured custom data, enhancing the practicality of the virtual try-on.
+Limitations: Our framework requires multi-view images of a static human.
+The decomposition may fail with loose garments or garments exhibiting selfintersections due to the dependence on SMPL(-X) linear blend skinning. The
+virtual try-on may also produce penetration artifacts when the garment is significantly smaller than the body. Extending the method to model and decompose a human from a single image is a promising direction for future work.
+Physics-based simulation could further improve overall robustness, and achieving high-fidelity rendering of gaussian garments under physical simulation and
+static poses remains an important area for future research.
+Acknowledgements This work was conducted with the financial support of the
+Science Foundation Ireland Centre for Research Training in Digitally-Enhanced
+Reality (d-real) at Trinity College Dublin under Grant No. 18/CRT/6224. We
+also acknowledge the support from the Horizon Europe Framework Programme
+under Grant Agreement No. 101070109 (TRANSMIXR).
+References
+1. Bhatnagar, B.L., Sminchisescu, C., Theobalt, C., Pons-Moll, G.: Combining implicit function learning and parametric models for 3D human reconstruction. In:
+European Conference on Computer Vision (ECCV). pp. 511–529 (2020)
+2. Cao, Z., Hidalgo, G., Simon, T., Wei, S.E., Sheikh, Y.: OpenPose: Realtime multiperson 2D pose estimation using part affinity fields. IEEE Transactions on Pattern
+Analysis and Machine Intelligence (TPAMI) 43(1), 172–186 (2021)
+3. Chen, X., Zheng, Y., Black, M.J., Hilliges, O., Geiger, A.: SNARF: Differentiable
+forward skinning for animating non-rigid neural implicit shapes. In: IEEE/CVF
+International Conference on Computer Vision (ICCV). pp. 11574–11584 (2021)
+4. Chen, Y., Chen, Z., Zhang, C., Wang, F., Yang, X., Wang, Y., Cai, Z., Yang, L.,
+Liu, H., Lin, G.: GaussianEditor: Swift and controllable 3D editing with Gaussian
+splatting. In: IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR). pp. 21476–21485 (2024)
+5. Corona, E., Pumarola, A., Alenyà, G., Pons-Moll, G., Moreno-Noguer, F.: SMPLicit: Topology-aware generative model for clothed people. In: IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). pp. 11870–11880
+(2021)
+14
+Y. Xu et al.
+6. Haque, A., Tancik, M., Efros, A.A., Holynski, A., Kanazawa, A.: InstructNeRF2NeRF: Editing 3D scenes with instructions. In: IEEE/CVF International
+Conference on Computer Vision (ICCV). pp. 19683–19693 (2023)
+7. He, Z., Ning, Y., Qin, Y., Wang, W., Yang, S., Lin, L., Li, G.: VTON 360: Highfidelity virtual try-on from any viewing direction. In: IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR). pp. 26388–26398 (2025)
+8. Hu, L., Zhang, H., Zhang, Y., Zhou, B., Liu, B., Zhang, S., Nie, L.: GaussianAvatar: Towards realistic human avatar modeling from a single video via animatable
+3D Gaussians. In: IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). pp. 634–644 (2024)
+9. Huang, B., Yu, Z., Chen, A., Geiger, A., Gao, S.: 2D Gaussian splatting for geometrically accurate radiance fields. In: SIGGRAPH Conference Papers (2024)
+10. Jiang, B., Ren, X., Dou, M., Xue, X., Fu, Y., Zhang, Y.: LoRD: Local 4D implicit
+representation for high-fidelity dynamic human modeling. In: European Conference
+on Computer Vision (ECCV). pp. 307–326 (2022)
+11. Khirodkar, R., Bagautdinov, T., Martinez, J., Zhaoen, S., James, A., Selednik, P.,
+Anderson, S., Saito, S.: Sapiens: Foundation for human vision models. In: European
+Conference on Computer Vision (ECCV). pp. 206–228 (2024)
+12. Kim, T., Kim, B., Saito, S., Joo, H.: GALA: Generating animatable layered assets
+from a single scan. In: IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR). pp. 1535–1545 (2024)
+13. Li, Z., Zheng, Z., Wang, L., Liu, Y.: Animatable Gaussians: Learning posedependent Gaussian maps for high-fidelity human avatar modeling. In: IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR). pp. 19711–
+19722 (2024)
+14. Lin, S., Li, Z., Su, Z., Zheng, Z., Zhang, H., Liu, Y.: LayGA: Layered Gaussian
+avatars for animatable clothing transfer. In: SIGGRAPH Conference Papers (2024)
+15. Loper, M., Mahmood, N., Romero, J., Pons-Moll, G., Black, M.J.: SMPL: A
+skinned multi-person linear model. ACM Transactions on Graphics (TOG) 34(6),
+248:1–248:16 (2015)
+16. Ma, Q., Yang, J., Tang, S., Black, M.J.: The power of points for modeling humans
+in clothing. In: IEEE/CVF International Conference on Computer Vision (ICCV).
+pp. 10954–10964 (2021)
+17. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: NeRF: Representing scenes as neural radiance fields for view synthesis. In:
+European Conference on Computer Vision (ECCV). pp. 405–421 (2020)
+18. Nam, H., Kim, D., Oh, J., Lee, K.M.: DeClotH: Decomposable 3D cloth and human
+body reconstruction from a single image. In: IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR). pp. 5636–5645 (2025)
+19. Oquab, M., Darcet, T., Moutakanni, T., Vo, H.V., Szafraniec, M., Khalidov, V., et
+al.: DINOv2: Learning robust visual features without supervision. arXiv preprint
+arXiv:2304.07193 (2023)
+20. Pan, P., Su, Z., Lin, C., Fan, Z., Zhang, Y., Li, Z., Shen, T., Mu, Y., Liu, Y.:
+HumanSplat: Generalizable single-image human Gaussian splatting with structure
+priors. In: Advances in Neural Information Processing Systems (NeurIPS) (2024)
+21. Poole, B., Jain, A., Barron, J.T., Mildenhall, B.: DreamFusion: Text-to-3D using
+2D diffusion. In: International Conference on Learning Representations (ICLR)
+(2023)
+22. Radford, A., Kim, J.W., Hallacy, C., Ramesh, A., Goh, G., Agarwal, S., Sastry,
+G., et al.: Learning transferable visual models from natural language supervision.
+In: International Conference on Machine Learning (ICML). pp. 8748–8763 (2021)
+LayerGS
+15
+23. Rombach, R., Blattmann, A., Lorenz, D., Esser, P., Ommer, B.: High-resolution
+image synthesis with latent diffusion models. In: IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). pp. 10674–10685 (2022)
+24. Saito, S., Huang, Z., Natsume, R., Morishima, S., Li, H., Kanazawa, A.: PIFu:
+Pixel-aligned implicit function for high-resolution clothed human digitization. In:
+IEEE/CVF International Conference on Computer Vision (ICCV). pp. 2304–2314
+(2019)
+25. Schönberger, J.L., Frahm, J.M.: Structure-from-motion revisited. In: IEEE Conference on Computer Vision and Pattern Recognition (CVPR). pp. 4104–4113 (2016)
+26. Shen, K., Guo, C., Kaufmann, M., Zarate, J.J., Valentin, J., Song, J., Hilliges,
+O.: X-Avatar: Expressive human avatars. In: IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR). pp. 16911–16921 (2023)
+27. Shen, T., Gao, J., Yin, K., Liu, M.Y., Fidler, S.: Deep marching tetrahedra: A hybrid representation for high-resolution 3D shape synthesis. In: Advances in Neural
+Information Processing Systems (NeurIPS). vol. 34, pp. 6087–6101 (2021)
+28. Su, Z., Hu, L., Lin, S., Zhang, H., Zhang, S., Thies, J., Liu, Y.: CaPhy: Capturing
+physical properties for animatable human avatars. In: IEEE/CVF International
+Conference on Computer Vision (ICCV). pp. 14104–14114 (2023)
+29. Wang, W., Ho, H.I., Guo, C., Rong, B., Grigorev, A., Song, J., Zárate, J.J., Hilliges,
+O.: 4D-DRESS: A 4D dataset of real-world human clothing with semantic annotations. In: IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR). pp. 550–560 (2024)
+30. Wang, Z., Bovik, A.C., Sheikh, H.R., Simoncelli, E.P.: Image quality assessment:
+From error visibility to structural similarity. IEEE Transactions on Image Processing 13(4), 600–612 (2004)
+31. Xie, Z., Huang, Z., Dong, X., Zhao, F., Dong, H., Zhang, X., Zhu, F., Liang,
+X.: GP-VTON: Towards general purpose virtual try-on via collaborative localflow global-parsing learning. In: IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR). pp. 23550–23559 (2023)
+32. Xu, J., Liu, X., Wu, Y., Tong, Y., Li, Q., Ding, M., Tang, J., Dong, Y.: ImageReward: Learning and evaluating human preferences for text-to-image generation. In:
+Advances in Neural Information Processing Systems (NeurIPS). pp. 15903–15935
+(2023)
+33. Yu, T., Zheng, Z., Guo, K., Liu, P., Dai, Q., Liu, Y.: Function4D: Real-time human volumetric capture from very sparse consumer RGBD sensors. In: IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR). pp. 5742–5752
+34. Zhang, L., Rao, A., Agrawala, M.: Adding conditional control to text-to-image
+diffusion models. In: IEEE/CVF International Conference on Computer Vision
+(ICCV). pp. 3813–3824 (2023)
+35. Zhang, R., Isola, P., Efros, A.A., Shechtman, E., Wang, O.: The unreasonable
+effectiveness of deep features as a perceptual metric. In: IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR). pp. 586–595 (2018)
+36. Zhang, W., Yan, Y., Wu, S., Liao, M., Yang, X.: Disentangled clothed avatar
+generation with layered representation. In: IEEE/CVF International Conference
+on Computer Vision (ICCV). pp. 11327–11338 (2025)
+37. Zhang, Z., Yang, Z., Yang, Y.: SIFU: Side-view conditioned implicit function for
+real-world usable clothed human reconstruction. In: IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR). pp. 9936–9947 (2024)
+38. Zhu, L., Li, Y., Liu, N., Peng, H., Yang, D., Kemelmacher-Shlizerman, I.: M&M
+VTO: Multi-garment virtual try-on and editing. In: IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR). pp. 1346–1356 (2024)

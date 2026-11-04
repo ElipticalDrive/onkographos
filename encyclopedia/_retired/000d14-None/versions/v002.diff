@@ -1,0 +1,176 @@
+--- v001.md
++++ v002.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-The Two-Pass GPU Approach is an efficient ray-casting algorithm for tetrahedral meshes implemented on consumer graphics hardware using fragment programs, pre-integration, and multiple rendering passes [S1, S4, unofficial]. It projects tetrahedra into screen space, classifies their geometry, and renders them as triangle fans with interpolated colors and opacities, supporting both volume ray integral and isosurface rendering [S4, unofficial]. It sets itself apart from its parent [Projected Tetrahedra](877-projected-tetrahedra.md) by offloading the heavy projection, classification, and sorting logic to the GPU via a two-pass architecture, thereby reducing CPU-GPU data transfer and enabling interactive frame rates for mid-sized models [S3][S4, unofficial].
++The Two-Pass GPU Approach is an efficient ray-casting algorithm for tetrahedral meshes implemented on consumer graphics hardware using fragment programs, pre-integration, and multiple rendering passes [S1, S4, unofficial]. It projects tetrahedra into screen space, classifies their geometry, and renders them as triangle fans with interpolated colors and opacities, supporting both volume ray integral and isosurface rendering [S4, unofficial]. It sets itself apart from its parent [Projected Tetrahedra](877-projected-tetrahedra.md) by offloading the heavy projection, classification, and sorting logic to the GPU via a two-pass architecture, thereby reducing CPU–GPU data transfer and enabling interactive frame rates for mid-sized models [S3][S4, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A tetrahedral mesh (scalar field and gradient data), a transfer function (mapping scalars to color/opacity), and an optional isosurface level.
+-*   **Output:** A 2D image where each pixel contains the accumulated color and opacity of the ray passing through the tetrahedra.
++*   **Input:** A tetrahedral mesh (scalar field and gradient data), a transfer function (mapping scalars to color/opacity), and an optional isosurface level [S1, S4, unofficial].
++*   **Output:** A 2D image where each pixel contains the accumulated color and opacity of the ray passing through the tetrahedra [S4, unofficial].
+ 
+ **Data Structures:**
+@@ -16,5 +16,5 @@
+ 2.  **Vertex Texture:** A 32-bit RGBA texture. Each texel stores the 3D coordinates (RGB) and scalar value (A) of a single vertex [S4, unofficial].
+ 3.  **Gradient Texture:** A 32-bit RGB texture (3 components per texel). Each texel stores the gradient vector (normal) of a vertex [S3][S4, unofficial].
+-4.  **Classification Texture:** An 8-bit texture (or 32-bit in implementation details) storing a Ternary Truth Table. It maps the combination of four cross-product test results to a projection class (1–4) and vertex ordering [S4, unofficial].
++4.  **Classification Texture:** An 8-bit texture storing a Ternary Truth Table. It maps the combination of four cross-product test results to a projection class (1–4) and vertex ordering [S4, unofficial].
+ 
+ **Numbered Steps:**
+@@ -81,19 +81,59 @@
+ 
+ **Pseudocode:**
+-
+ ```python
++# Standard math helpers
++def dot(a, b): return a.x*b.x + a.y*b.y + a.z*b.z
++def cross(a, b): return vec3(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x)
++def length(a): return sqrt(dot(a, a))
++def normalize(a): return a / length(a)
++def sign(x): return 1 if x > 0 else (-1 if x < 0 else 0)
++def max(a, b): return a if a > b else b
++def min(a, b): return a if a < b else b
++def clamp(v, lo, hi): return max(lo, min(hi, v))
++
++# Texture sampling helpers
++def sample_1d_texture(tex, coord):
++    idx = int(clamp(coord, 0.0, 1.0) * (len(tex) - 1))
++    return tex[idx]
++
++def sample_2d_texture(tex, uv):
++    return tex[int(uv.y * (len(tex)-1))][int(uv.x * (len(tex[0])-1))]
++
++# Geometric helpers
++def project_to_screen(v):
++    # Applies view-projection matrix to vertex v
++    return v # Placeholder for standard projection math
++
++def centroid(verts):
++    return (verts[0] + verts[1] + verts[2] + verts[3]) / 4.0
++
++def ray_plane_intersection(ray_origin, ray_dir, plane_point, plane_normal):
++    denom = dot(ray_dir, plane_normal)
++    if abs(denom) < 1e-6: return None
++    t = dot(plane_point - ray_origin, plane_normal) / denom
++    return ray_origin + t * ray_dir
++
++def compute_ray_tet_intersection(ray_origin, ray_dir, verts):
++    # Simplified: finds entry and exit points by intersecting ray with tetrahedron faces
++    # Returns (entry_point, exit_point)
++    # In practice, uses slab method or face intersections [Garrity90]
++    return ray_origin, ray_origin + ray_dir # Placeholder for actual intersection logic
++
++def interpolate_scalar(point, verts):
++    # Barycentric interpolation of scalar values
++    return verts[0].s # Placeholder for actual barycentric math
++
++def interpolate_gradient(point, grads):
++    # Barycentric interpolation of gradient vectors
++    return grads[0] # Placeholder for actual barycentric math
++
+ # Pass 1: Fragment Shader (Per Tetrahedron)
+-def pass1_fragment_shader(tet_index):
+-    # Retrieve vertex indices from Tetrahedral Texture
++def pass1_fragment_shader(tet_index, ray_origin, ray_dir):
+     v_indices = TetrahedralTexture[tet_index]
+-    
+-    # Retrieve vertex data from Vertex and Gradient Textures
+-    verts = [VertexTexture[idx] for idx in v_indices] # Each is (x,y,z,s)
+-    grads = [GradientTexture[idx] for idx in v_indices] # Each is (gx,gy,gz)
+-    
+-    # Project vertices to screen space
++    verts = [VertexTexture[idx] for idx in v_indices]
++    grads = [GradientTexture[idx] for idx in v_indices]
++    
+     v_proj = [project_to_screen(v.xyz) for v in verts]
+     
+-    # Compute cross-product tests for classification
+     vec1 = v_proj[1] - v_proj[0]
+     vec2 = v_proj[2] - v_proj[0]
+@@ -107,5 +147,4 @@
+     t4 = sign(cross(vec4, vec5).z) + 1
+     
+-    # Determine class and handle degeneracy
+     ones_count = sum([t1==1, t2==1, t3==1, t4==1])
+     if ones_count >= 3:
+@@ -114,7 +153,5 @@
+     class_id = ClassificationTexture.lookup(t1, t2, t3, t4)
+     
+-    # Compute ray intersection properties
+-    # Find entry and exit points of the ray through the tetrahedron
+-    entry_point, exit_point = ray_plane_intersection(ray, verts)
++    entry_point, exit_point = compute_ray_tet_intersection(ray_origin, ray_dir, verts)
+     
+     s_f = interpolate_scalar(entry_point, verts)
+@@ -122,8 +159,7 @@
+     g_f = interpolate_gradient(entry_point, grads)
+     g_b = interpolate_gradient(exit_point, grads)
+-    l = distance(entry_point, exit_point)
++    l = length(exit_point - entry_point)
+     c_z = centroid(verts).z
+     
+-    # MRT Outputs
+     MRT1[tet_index] = (entry_point.x, entry_point.y, c_z, class_id)
+     MRT2[tet_index] = (s_f, s_b, l, triangle_count(class_id))
+@@ -134,35 +170,25 @@
+ 
+ # Pass 2: Fragment Shader (Per Fragment)
+-def pass2_fragment_shader(fan_indices, fan_count, s_f_interp, s_b_interp, l_interp, g_f_interp, g_b_interp):
+-    # Retrieve transfer function values
+-    tau_f = transfer_function_extinction(s_f_interp)
+-    tau_b = transfer_function_extinction(s_b_interp)
++def pass2_fragment_shader(fan_indices, fan_count, s_f_interp, s_b_interp, l_interp, g_f_interp, g_b_interp, isovalue, FramebufferColor):
++    tau_f = sample_1d_texture(ExtinctionTexture, s_f_interp)
++    tau_b = sample_1d_texture(ExtinctionTexture, s_b_interp)
+     tau_avg = (tau_f + tau_b) / 2.0
+     
+-    # Compute opacity using exponential lookup texture
+     u = tau_avg * l_interp
+-    alpha = 1.0 - ExponentialTexture[u]
+-    
+-    # Compute color
+-    # Option A: Average Scalar Method
+-    C_avg = transfer_function_color((s_f_interp + s_b_interp) / 2.0)
+-    
+-    # Option B: Partial Pre-Integration (using psi-table)
+-    # Cf = transfer_function_color(s_f_interp)
+-    # Cb = transfer_function_color(s_b_interp)
+-    # C = PsiTable.lookup(Cf, Cb, l_interp)
+-    
+-    # Composite with framebuffer
++    u_clamped = clamp(u, 0.0, 1.0)
++    alpha = 1.0 - sample_1d_texture(ExponentialTexture, u_clamped)
++    
++    C_avg = sample_1d_texture(ColorTexture, (s_f_interp + s_b_interp) / 2.0)
++    C = C_avg
++    
+     I_prev = FramebufferColor
+-    I_new = alpha * C_avg + (1.0 - alpha) * I_prev
+-    
+-    # Isosurface check
++    I_new = alpha * C + (1.0 - alpha) * I_prev
++    
+     if isovalue is not None and s_f_interp <= isovalue <= s_b_interp:
+-        # Phong shading
+-        N = g_f_interp # Interpolated gradient as normal
++        N = g_f_interp
+         LightDir = normalize(light_position - fragment_position)
+         Diffuse = max(dot(N, LightDir), 0.0)
+         Specular = pow(max(dot(reflect(-LightDir, N), view_dir), 0.0), shininess)
+-        I_new = Diffuse * C_avg + Specular * ambient
++        I_new = Diffuse * C + Specular * ambient
+         
+     FramebufferColor = I_new
+@@ -183,6 +209,6 @@
+ *   **Strengths:** Interactive frame rates, supports interactive transfer function editing and isosurface highlighting with Phong shading [S3][S4, unofficial].
+ *   **Limitations:** High memory consumption; transfer function updates (changing opacity levels) require recreating arrays, reducing interactivity but increasing FPS [S4, unofficial]. Convolution of a $128^3$ volume with a $6^3$ filter takes >30 seconds [S2].
+-*   **When to use:** When interactive visualization of tetrahedral meshes is required on consumer hardware and memory allows for the pre-computed data structures.
+-*   **When not to use:** For very large volumes ($>64^3$) without multi-pass strategies, or when memory is severely constrained.
++*   **When to use:** When interactive visualization of tetrahedral meshes is required on consumer hardware and memory allows for the pre-computed data structures [S1, unofficial].
++*   **When not to use:** For very large volumes ($>64^3$) without multi-pass strategies, or when memory is severely constrained [S2].
+ 
+ ## Background

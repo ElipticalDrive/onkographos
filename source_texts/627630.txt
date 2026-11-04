@@ -1,0 +1,238 @@
+Game Engine with Claude Code support. Contribute to MatthewLacerda2/rusty development by creating an account on GitHub.
+
+Per-object motion vectors: a velocity target from each draw's current and previous pose (#1435) by MatthewLacerda2 · Pull Request #1456 · MatthewLacerda2/rusty · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+MatthewLacerda2
+commented
+Oct 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+What changed
+Every view that runs motion blur now gets a per-object velocity buffer: an Rg16Float texture at full view resolution, written by the opaque forward pass as a second colour attachment. Each pixel holds ndc_now.xy - ndc_prev.xy for the surface under it, built from the drawing camera's last-frame view-projection and the entity's last-frame world matrix and joint palette. This is the groundwork #1436 (the blur that reads it) builds on.
+render::motion (new module): MotionVectors (the target, allocated only while active; lives in PostFx, so it is per view and render-texture cameras keep their own) and MotionHistory (each stacked camera's last view_proj, kept by the camera's entity, and each drawn entity's Pose { model, palette }; an entity with no opaque draw keeps none). A frame reads last frame's poses and records its own, swapped at the end of the stack, so every camera of a stack reprojects one entity from the same pose.
+Shaders. shader.wgsl gains vs_velocity / fs_velocity. The fragment body moved into fn surface_color(in) -> vec4 that both fs_main and fs_velocity call, so authored surface variants (whose blocks are spliced into that body) carry their look into the velocity pipeline. forward::bindings::vertex_to_world_prev skins with last frame's palette under last frame's matrix. CameraUniforms gains prev_view_proj. The two sky shaders write sky::motion::sky_velocity, the camera rotation alone (a direction reprojected, w = 0), into location 1. The new sky/motion.wgsl module holds that and the SkyTargets output struct.
+Instance data. InstanceData gains prev_model_matrix, prev_bone_base and a motion flag (+80 bytes). motion == 0 (InstanceData::IDENTITY, every mesh particle, any first draw) moves the vertex with the camera only, so a constructor that forgets the field can't produce garbage motion.
+Pipelines. The standard forward pipeline, each surface variant and both sky pipelines get a velocity twin. All are LazyPipelines listed in Renderer::lazy_pipelines, so headless tests compile them only when they draw them and a windowed renderer warms them. A surface module now needs vs_velocity / fs_velocity as it needs vs_main / fs_main: one without them is logged once and drawn with the standard pipeline (every bake of the forward shader has them).
+Stacks. Each camera writes velocity with its own matrices. The velocity attachment clears where the colour clears and loads where a DepthOnly camera composites, so the nearest camera's velocity wins the way its colour does. A viewmodel camera's gun, turning with its camera, writes ~0.
+Cuts. The history is keyed by HistoryKey::new(scene, base): (SceneId, base camera entity, play state). A scene load, a base-camera switch, Play or Stop (Stop restores the edit scene under the same SceneId, so the play state is what marks it) starts over, and so does a resize (PostFx::resize). Each camera's last matrix is kept by its entity, not its place in the stack, so a viewmodel camera swapped in at the same place (a weapon switch) has no last frame. A camera with no history uses its current matrix as last frame's. StackPass now carries entities (each camera's entity: ScreenStack::entities, None for the editor's free camera) and base_id (main_camera in either mode; a render texture's own camera id).
+Gating. motion::wanted = the stack's full_post_fx && postfx::params::motion_blur_enabled (the camera has motion blur on and the tier allows it). build_post_params now reads the same predicate. A view with a forward override (the Inspector shader preview) writes none. On any other frame the forward pass draws through the unchanged pipelines and the target is freed: Low pays nothing.
+Debug.Stats().velocity_passes: opaque passes that wrote velocity (one per stacked camera of each such view). Documented in docs/api/Debug.md; docs/api/Graphics.md gains a Motion vectors paragraph.
+Post-FX's existing camera-only motion blur now takes last frame's matrix from the same history, replacing PostFx::prev_view_proj.
+Why
+Motion blur is camera-only today. Anything that moves while the camera is still (an enemy sprinting past, a melee swing, a ragdoll) never blurs. And because post-FX runs once over the composited stack, a first-person viewmodel smears like world geometry whenever the player turns. Trepang2-class shooters keep the weapon crisp and blur the world and the enemies; a per-object velocity buffer is the standard way to get that.
+Effect
+No pixel change on any frame that does not run motion blur: fs_main returns the same surface_color body, and the sky shaders' colour output is unchanged. With motion blur on, two behaviours change (both fixes):
+The first frame of a view no longer reprojects through an identity matrix. prev_view_proj used to start as IDENTITY, which smeared the first blurred frame.
+A cut (scene load, camera switch, resize) no longer smears.
+Nothing reads the velocity target yet; Per-object motion blur: reconstruction filter (TileMax/NeighborMax) over the velocity buffer #1436 binds it.
+Decisions
+Teleports follow Unity: no distance heuristic. History resets only on a first draw, a scene load, Play or Stop (as Unity's scene reload), a camera cut (base-camera switch, a camera entity new to the stack), a resize, or an explicit MotionVectors::reset (Rust). The script-facing reset (Renderer.ResetMotionVectors-like) is left out because it would add to the API surface. File it when a game needs it.
+No history for entities that weren't drawn last frame (frustum-culled, hidden). An enemy stepping into view moves with the camera only for its first visible frame. Tracking every entity, drawn or not, would cost a world-matrix walk per mesh entity per frame.
+Mesh particles ride the opaque pass, so they write camera-only velocity. Sprite particles, ribbons, transparents, decals and UI write none (Unity's default).
+An orthographic camera's sky writes 0 (directions don't move under an ortho lens).
+A surface variant's velocity pipeline is built on first use, not warmed. Turning motion blur on mid-game compiles one per variant on screen (the standard and sky velocity pipelines are warmed).
+No compatibility shim for surface modules baked before this change (CLAUDE.md, No backward compatibility): the old empty-mask fallback left an opaque wall's pixels holding the velocity of whatever was drawn behind it. Such a module falls back to the standard shader until re-baked.
+Measurements
+Per-frame cost on lavapipe, release build, 640×360, 200 moving cubes plus sky, turning camera, 40 frames each:
+run 1
+run 2
+velocity on
+44.5 ms
+43.6 ms
+velocity off (local patch forcing it off)
+42.0 ms
+43.1 ms
+So it costs roughly 0.5–2.5 ms of ~43 ms on a software rasterizer, about the size of the run-to-run noise. Lavapipe has no timestamp queries, so the real-GPU number is a human item below.
+Tests
+render::motion::gpu_tests (lavapipe):
+A cube moving past a still camera writes its exact projected step, ±0.01 NDC; got 0.4023 vs 0.4024. The sky beside it writes 0.
+A still scene under a turning camera matches camera-only reprojection on the cube (−0.09491 vs −0.09489) and on a sky pixel (±0.005).
+No motion blur, or the Low tier: no target, velocity_passes == 0.
+render::motion::stack_gpu_tests (lavapipe):
+A skinned mesh with two boxes on two joints: the still bone writes 0; the moved bone writes its projected step (0.1016 vs 0.1017).
+Viewmodel: a world camera plus a DepthOnly overlay camera with a child cube, turned together. The gun writes ~2e-7 and the world −0.154; velocity_passes == 2.
+The first frame after a scene load (renew_id) writes no object motion.
+render::motion::cut_tests (adapter-free): Play and Stop are cuts though the SceneId is kept; a camera swapped in at another's stack place gets no last frame.
+render::camera_tests: ScreenStack::entities in play and edit mode.
+render::motion::tests (adapter-free): camera history and cuts, pose lifetime, track (last palette appended; a palette of another length keeps this frame's skin), the gate, and InstanceData's size.
+Gates
+On head bd129d9 (on main ab92eb0, #1437 merged; #1457 not merged, so motion::wanted keeps its predicate): make quick-gates, make clippy, make doc deny, and make test with RUSTY_REQUIRE_GPU=1 (2875 + 3281 passed) all ran green. The GPU tests ran on the container's lavapipe; no captures or snapshots were blessed. Windows isn't relevant (no path or process code).
+The review fixes (round 2) changed mechanism, so a scoped mutation run (mutants-on-request.yml, scope: diff) is dispatched again on this head; its report lands on this PR.
+Seam (for #1436)
+view.post_fx.motion.active_target() -> Option<&PfxTarget> is the velocity texture written this frame (TEXTURE_BINDING | COPY_SRC, motion::VELOCITY_FORMAT = Rg16Float, NDC units, now - prev). It returns None when the view runs no motion blur. target_view() returns its view.
+The target is written in each camera's scene pass, before run_post_fx, so post-FX can bind it.
+postfx::params::motion_blur_enabled(post, quality) is the one predicate for "this view blurs"; the target exists exactly when it holds (and full_post_fx, and no forward override).
+motion::HistoryKey::new(scene, base) is the one place a cut is defined; MotionVectors::reset() forces one.
+CameraCtx::base_prev_view_proj holds the base camera's last-frame matrix, reset on cuts. Camera-only reprojection (PostParams::prev_view_proj) already reads it.
+For a human
+On a real GPU (Metal), measure the velocity pass's cost: Debug.Stats() gpu_passes with the camera's motion blur on vs off, in a dense scene.
+Closes #1435
+https://claude.ai/code/session_01ScXHXkJadfWJX26wsaU5aH
+Generated by Claude Code
+MatthewLacerda2
+mentioned this pull request
+Oct 26, 2026
+Player graphics options: persisted per-effect switches that gate every camera, with project defaults
+#1438
+Closed
+claude
+added 2 commits
+October 26, 2026 06:07
+Per-object motion vectors: a velocity target from each draw's current…
+…
+7c9d7ba
+```
+… and previous pose (#1435)
+
+The opaque forward pass of a view running motion blur writes a second,
+Rg16Float attachment: each fragment's NDC motion since last frame, through
+the drawing camera's last-frame view-projection and the entity's last-frame
+world matrix and joint palette (render::motion). Each camera of a stack
+writes with its own matrices, so a viewmodel turning with its camera writes
+~0. The sky writes camera rotation; transparents, particles, decals and UI
+write none. A first draw, a scene load, a base-camera switch, a resize or a
+changed stack size has no history. Low, and every view without motion blur,
+draws exactly as before and frees the target. Debug.Stats reports
+velocity_passes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PhYwDVkcfxewvpoqBF7Qtf
+```
+Motion vectors: clippy's arity and length caps, the lazy-pipeline cou…
+…
+8c9bd80
+```
+…nt, the UV splice test (#1435)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PhYwDVkcfxewvpoqBF7Qtf
+```
+MatthewLacerda2
+force-pushed
+the
+1435-motion-vectors
+branch
+from
+87fc77d to
+8c9bd80
+Compare
+October 26, 2026 06:12
+MatthewLacerda2
+marked this pull request as ready for review
+October 26, 2026 06:13
+MatthewLacerda2
+marked this pull request as draft
+October 26, 2026 06:18
+MatthewLacerda2
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Independent review
+A fresh reviewer at medium level (renderer; no stored format or determinism). 8 findings, each checked against the code. All were sent back to the coder (re-brief on the issue):
+A compatibility shim for surface variants without velocity entries, which also writes stale velocity under an opaque wall.
+The Motion vectors doc says particles write no velocity; mesh particles do.
+Stop isn't treated as a cut: a one-frame smear on the first edit frame.
+base_id / HistoryKey::base docs describe None wrongly.
+Stale shader-function names in module docs.
+Per-camera history matched by stack index, so a viewmodel camera swap smears.
+Per-frame map regrowth and palette clones.
+Velocity pipelines of surface variants aren't warmed: noted in Decisions.
+Dropped: a stale velocity under a DepthOnly base camera (the bottom pass always clears); render-texture history every N frames (correct by design).
+MatthewLacerda2
+mentioned this pull request
+Oct 26, 2026
+Per-object motion vectors: a velocity buffer from each draw's current and previous transform (incl. skinned)
+#1435
+Closed
+claude
+added 2 commits
+October 26, 2026 06:27
+Motion vectors: review fixes — no velocity shim, Play/Stop cut, per-e…
+…
+6464cbf
+```
+…ntity camera history (#1435)
+
+Surface variants must carry vs_velocity/fs_velocity like vs_main/fs_main;
+the history key includes the play state; each camera's last-frame matrix
+is kept by entity; end() swaps maps; all-transparent entities keep no
+pose; docs corrected.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01ScXHXkJadfWJX26wsaU5aH
+```
+Motion vectors: has_opaque_run keeps solid_draw_items under clippy's …
+…
+bd129d9
+```
+…length cap (#1435)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01ScXHXkJadfWJX26wsaU5aH
+```
+MatthewLacerda2
+marked this pull request as ready for review
+October 26, 2026 06:49
+MatthewLacerda2
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Independent review, round 2: 6464cbfc / bd129d9f address all 8 findings (no velocity shim; mesh-particle doc; Play/Stop is a cut, tested in cut_tests.rs; per-camera history keyed by entity; mem::swap; stale names fixed). No second reviewer: direct fixes, not a rework.
+MatthewLacerda2
+added
+the
+queue
+Go-ahead: the merge queue may take this PR
+label
+Oct 26, 2026
+Hide details
+View details
+MatthewLacerda2
+merged commit ffa3949
+into
+main
+Oct 26, 2026
+19 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+MatthewLacerda2
+deleted the
+1435-motion-vectors
+branch
+October 26, 2026 07:00
+This was referenced Oct 26, 2026
+Player graphics options: persisted per-effect switches gating every camera (#1438)
+#1457
+Merged
+Per-object motion blur: reconstruction filter (TileMax/NeighborMax) over the velocity buffer
+#1436
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+queue
+Go-ahead: the merge queue may take this PR
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

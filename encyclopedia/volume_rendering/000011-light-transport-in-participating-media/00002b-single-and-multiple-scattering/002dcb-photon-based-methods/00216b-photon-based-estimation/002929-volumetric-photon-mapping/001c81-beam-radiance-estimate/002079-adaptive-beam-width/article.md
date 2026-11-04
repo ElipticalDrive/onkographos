@@ -1,0 +1,118 @@
+# Adaptive Beam Width
+
+Also called: Adaptive Beam Blur, Photon Beam Rendering with Adaptive Width, Photon Beams, Varying Kernel Beam Estimate, beam tracing for participating media, photon point beams
+
+## Overview
+Adaptive Beam Width is a radiance estimation technique for participating media that uses photon differentials to dynamically adjust the smoothing kernel width of photon beams [S1]. It solves the over-blurring and banding artifacts inherent in fixed-width beam estimates, particularly around sharp lighting features like volume caustics [S1]. Unlike fixed-width methods, it assigns small beam widths in focused regions and larger widths in sparse regions, enabling crisp reconstruction with significantly fewer photons [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Photon beams generated during the photon tracing stage, including photon differentials (Jacobian matrices of the photon path) at each beam's start point [S1].
+*   **Output:** Radiance estimate at a query point or along a camera ray [S1].
+
+**Data Structures:**
+*   **Photon Beam:** Extends the standard photon point representation [S1]. For heterogeneous media, it stores a 1D transmittance function along the beam's length, analogous to deep shadow maps, which can be significantly compressed for efficient storage [S1]. Exact field layouts, sizes, and bit packing are not given in the sources [S1].
+*   **Photon Differentials:** Stored at the start of each beam, representing the local mapping from the light source parameter space to spatial position, enabling local cross-section and width calculation [S1].
+
+**Parameters:**
+*   **Beam Width:** Determined adaptively by the photon differentials rather than a fixed scalar [S1]. Typical values are not given in the sources [S1].
+
+**Steps:**
+1.  **Photon Tracing:** Trace photons through the scene and store the resulting beams [S1]. Compute and store the photon differentials at each beam's start point [S1].
+2.  **Heterogeneous Transmittance (Optional):** If the medium is heterogeneous, compute and store a 1D transmittance function along each beam during the tracing stage [S1]. This enables accurate visibility calculations during rendering without ray marching [S1].
+3.  **Radiance Estimation (Beam x Beam Query):** For a query point or along a camera ray, identify all photon beams that contribute to the estimate [S1].
+4.  **Adaptive Width Calculation:** For each contributing beam, calculate its effective width using the photon differentials [S1]. The differentials define the local density and spread of the photon flux [S1].
+5.  **Cross-Section Calculation:** For secondary scattering events, compute the cross-section at the start of the child beam using the photon differentials' footprint [S1]. This induces a conical frustum shape and avoids division by zero [S1].
+6.  **Kernel Evaluation:** Use the adaptive width to define the smoothing kernel [S1]. The kernel width is small in focused regions (high density) and large in sparse regions [S1].
+7.  **Aggregation:** Sum the contributions of all contributing beams, weighted by their respective kernels and the stored transmittance if applicable [S1].
+
+**Formulas:**
+The radiance estimate at a query point $x$ is computed as:
+$$L(x) = \sum_{i} \frac{P_i \cdot T_i(x) \cdot K(\|x - c_i\|, w_i)}{A_i}$$
+where $L(x)$ is the estimated radiance, $P_i$ is the power of beam $i$, $T_i(x)$ is the transmittance along beam $i$ to point $x$, $K$ is the smoothing kernel, $\|x - c_i\|$ is the perpendicular distance from $x$ to the beam axis, $w_i$ is the adaptive beam width, and $A_i$ is the cross-section at the beam start [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class Vec3:
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+    def __add__(self, other): return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
+    def __mul__(self, scalar): return Vec3(self.x * scalar, self.y * scalar, self.z * scalar)
+    def dot(self, other): return self.x*other.x + self.y*other.y + self.z*other.z
+    def norm(self): return math.sqrt(self.dot(self))
+
+EPSILON = 1e-6
+
+def estimate_radiance_adaptive(query_point, photon_beams, heterogeneous=False):
+    """Estimate radiance at query_point using adaptive beam widths."""
+    radiance = Vec3(0.0, 0.0, 0.0)
+    for beam in photon_beams:
+        # Sources do not give the exact beam intersection test. [G] Typically checks if query point lies within the beam's conical frustum bounds.
+        if not _beam_contains_point(beam, query_point):
+            continue
+        width = _calculate_adaptive_width(beam.differentials)
+        cross_section = _calculate_cross_section(beam.differentials)
+        if cross_section < EPSILON:
+            cross_section = EPSILON
+        distance_to_axis = _distance_to_axis(beam, query_point)
+        kernel_weight = _kernel_function(distance_to_axis, width)
+        beam_energy = beam.power
+        transmittance = _get_transmittance(beam, query_point) if heterogeneous else 1.0
+        contribution = (beam_energy * transmittance * kernel_weight) / cross_section
+        radiance = radiance + contribution
+    return radiance
+
+def _beam_contains_point(beam, point):
+    # Sources do not give the exact beam intersection test. [G] Typically checks if query point lies within the beam's conical frustum bounds.
+    return point.norm() <= beam.max_length
+
+def _calculate_adaptive_width(differentials):
+    # Sources do not give the exact formula for width from differentials. [G] Typically derived from the Jacobian determinant or norm.
+    return math.sqrt(abs(differentials.determinant()))
+
+def _calculate_cross_section(differentials):
+    # Sources do not give the exact formula for cross-section from differentials. [G] Corresponds to the area element defined by the differential mapping at the beam start.
+    return abs(differentials.determinant())
+
+def _distance_to_axis(beam, point):
+    # Sources do not give the exact distance projection formula. [G] Projects query point onto beam axis and computes perpendicular distance.
+    return (point - beam.origin).norm()
+
+def _kernel_function(distance, width):
+    # Standard isotropic smoothing kernel (uniform disk)
+    if distance <= width:
+        return 1.0 / (math.pi * width * width)
+    return 0.0
+
+def _get_transmittance(beam, point):
+    # Sources do not give the exact transmittance lookup. [G] Interpolates the stored 1D transmittance function along the beam's depth.
+    depth = (point - beam.origin).dot(beam.direction)
+    return beam.transmittance_function.interpolate(depth)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** Fixed-width beams or beams with zero cross-section at the start can lead to division by zero [S1]. Using photon differentials to induce a conical frustum shape with a non-zero starting cross-section avoids this [S1].
+*   **Banding Artifacts:** Fixed-width beams result in over-blurring and banding artifacts, especially in focused regions of volume caustics [S1]. Adaptive widths mitigate this [S1].
+*   **Multiple Scattering:** While adaptive widths work well for single scattering and caustics, they were not as successful for multiple scattering in the reported implementation [S1].
+*   **Heterogeneous Media:** Handling heterogeneous transmittance along photon beams is more costly than homogeneous media [S1]. It requires storing and querying 1D transmittance functions [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The current implementation uses a BVH over all beams to accelerate Beam x Beam queries, though room for improvement exists via tailored data structures [S1].
+*   **Memory Complexity:** Storing photon beams with 1D transmittance functions for heterogeneous media increases memory usage compared to simple photon points, though these functions can be significantly compressed [S1].
+*   **Measured Performance:** In a volume caustic scene, photon beams converged to a crisp solution using 32k beams in 43 seconds, whereas 512k photons took almost twice the time and resulted in an over-blurred and noisy caustic [S1]. In the bumpy sphere scene, 90k photon beams reconstructed sharp features in about 100 seconds, whereas the same number of photon points suffered from over-blurring [S1].
+*   **Strengths:** Reduces bias and variance compared to photon points [S1]. Eliminates shadow rays by reusing visibility information from the photon tracing stage [S1]. Avoids VPL singularities by using finite cross-sections instead of clamping inverse-squared distance terms [S1]. Renders extremely sharp details with tens of thousands of beams, whereas previous methods required millions or billions of photons [S1].
+*   **Limitations:** Adaptive widths were not as successful for multiple scattering [S1]. Current BVH acceleration structure may not be optimal [S1]. Handling heterogeneous media adds computational and memory overhead [S1].
+*   **When to Use:** Use when rendering scenes with sharp lighting features like volume caustics, especially with area lights or multiple bounces, and when computational resources are limited compared to the requirements of photon point methods [S1].
+*   **When Not to Use:** Avoid for multiple scattering if the adaptive width implementation does not perform well, or if heterogeneous media handling is too costly for the application [S1].
+
+## Background
+*   **Origin:** Introduced by [S1] as part of a comprehensive theory of volumetric radiance estimation using photon points and beams.
+*   **History:** The method generalizes photon points to beams, allowing for area light sources and multiple specular and diffuse bounces [S1]. It builds on the concept of photon mapping and beam tracing [S1].
+*   **Usage:** Used in volumetric photon mapping for rendering participating media, particularly for efficient estimation of in-scattered radiance [S1].
+
+## Sources
+[S1] A comprehensive theory of volumetric radiance estimation using photon points and beams, https://doi.org/10.1145/1899404.1899409, fetched 2026-10-26

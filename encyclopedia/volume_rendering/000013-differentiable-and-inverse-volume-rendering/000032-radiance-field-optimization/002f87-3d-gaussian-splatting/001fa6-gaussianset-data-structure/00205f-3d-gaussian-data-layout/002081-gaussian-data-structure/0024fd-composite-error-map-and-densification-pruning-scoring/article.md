@@ -1,0 +1,268 @@
+# Composite Error Map and Densification/Pruning Scoring
+
+Also called: EffGS density control, Frequency-aware mask scoring
+
+## Overview
+This method provides a density control mechanism for 3D Gaussian Splatting (3DGS) that uses a frequency-aware mask and photometric loss to compute densification and pruning scores for Gaussian primitives [S1, unofficial]. It reduces redundancy and improves fidelity compared to vanilla 3DGS by replacing the original PUP 3D-GS pruning method, which requires storing a large Hessian matrix for every Gaussian, with a sensitivity-based metric that depends on the scalar projected Gaussian value [S1, S2]. This reparameterization reduces storage requirements by 36×, enabling pruning to occur directly within the training pipeline [S1, S2].
+
+## How it works
+**Inputs:**
+- Set of Gaussian primitives $\mathcal{G}_t$ at update step $t$.
+- $K$ distinct training views sampled uniformly without replacement.
+- Rendered images $I_{\text{rend}}^j$ and ground-truth images $I_{\text{gt}}^j$ for each sampled view $j$.
+- Frequency-aware mask $M_{\text{freq}}^j$ for each view $j$.
+- Parameters: $\tau \in (0, 1)$ (error threshold), $\tau_p \in [0, 1)$ (pruning score threshold), $\tau_d \ge 0$ (densification score threshold), $\tau_s > 0$ (scale threshold), $\rho \in [0, 1]$ (pruning sampling ratio), $\lambda_{\text{dssim}}$ (SSIM weight), $\omega(t)$ (densification schedule).
+
+**Outputs:**
+- Updated set of Gaussian primitives $\mathcal{G}_{t+1}$.
+- Removal set $\mathcal{R}_t$ and Densification set $\mathcal{D}_t$.
+
+**Data Structures:**
+- For each Gaussian $i$, store: opacity $o_i$, scale-modulation factor $\gamma_i$, unconstrained modulation parameter $\beta_i$ (where $\gamma_i = 2 \text{sigmoid}(\beta_i)$), position, covariance, spherical harmonics coefficients.
+- For each view $j$, store: pixel grid $\mathcal{P}_j$, frequency-aware mask $M_{\text{freq}}^j$, rendered image $I_{\text{rend}}^j$, ground-truth image $I_{\text{gt}}^j$.
+- For each Gaussian $i$ and view $j$, compute: projected radius $r_i^j$, set of contributing pixels $\Omega_i^j$.
+
+**Steps:**
+
+1. **Compute Active Primitives:**
+   For each Gaussian $i \in \mathcal{G}_t$:
+   - Determine projected radius $r_i^j$ for each sampled view $j \in \{1, \dots, K\}$.
+   - Define $\mathcal{V}_i = \{j : r_i^j > 0\}$. Let $|\mathcal{V}_i| = \sum_{j=1}^K \mathbb{I}[r_i^j > 0]$.
+   - Define active set $\mathcal{A}_t = \{i \in \mathcal{G}_t : |\mathcal{V}_i| > 0\}$.
+   - If $\mathcal{A}_t = \emptyset$, skip density control.
+
+2. **Compute Composite Error Map:**
+   For each sampled view $j$:
+   - Compute raw per-pixel RGB reconstruction error:
+     $$e^j(\mathbf{u}) = \frac{1}{3} \sum_{c=1}^3 \left| I_{\text{rend},c}^j(\mathbf{u}) - I_{\text{gt},c}^j(\mathbf{u}) \right|$$
+   - Normalize error over pixel grid $\mathcal{P}_j$:
+     $$\bar{e}^j = \mathcal{N}_{\mathcal{P}_j}[e^j]$$
+     where $\mathcal{N}_{\mathcal{P}_j}$ is min-max normalization over $\mathcal{P}_j$, mapping constant inputs to zero.
+   - Compute composite error mask:
+     $$M_{\text{err}}^j(\mathbf{u}) = \mathbb{I} \left[ \bar{e}^j(\mathbf{u}) > \tau \vee \left( M_{\text{freq}}^j(\mathbf{u}) = 1 \wedge \bar{e}^j(\mathbf{u}) > 0.5\tau \right) \right]$$
+
+3. **Compute Weighted Pixel Counts:**
+   For each Gaussian $i \in \mathcal{A}_t$ and view $j \in \mathcal{V}_i$:
+   - Compute weighted pixel count:
+     $$n_i^j = \sum_{\mathbf{u} \in \Omega_i^j} M_{\text{err}}^j(\mathbf{u})$$
+     where $\Omega_i^j$ is the set of pixels where Gaussian $i$ contributes during compositing in view $j$.
+
+4. **Compute Photometric Loss:**
+   For each sampled view $j$:
+   - Compute mean L1 error:
+     $$\mathcal{L}_1^j = \frac{1}{|\mathcal{P}_j|} \sum_{\mathbf{u} \in \mathcal{P}_j} e^j(\mathbf{u})$$
+   - Compute image-level photometric loss:
+     $$E_{\text{photo}}^j = (1 - \lambda_{\text{dssim}}) \mathcal{L}_1^j + \lambda_{\text{dssim}} \left( 1 - \text{SSIM}(I_{\text{rend}}^j, I_{\text{gt}}^j) \right)$$
+
+5. **Compute Pruning Scores:**
+   For each Gaussian $i \in \mathcal{A}_t$:
+   - Compute summed, loss-weighted count:
+     $$Q_i = \sum_{j \in \mathcal{V}_i} n_i^j E_{\text{photo}}^j$$
+   - Normalize pruning score over active set:
+     $$s_p^i = \mathcal{N}_{\mathcal{A}_t}[Q](i)$$
+
+6. **Compute Densification Scores:**
+   For each Gaussian $i \in \mathcal{A}_t$:
+   - Compute valid-view average count:
+     $$C_i = \frac{1}{|\mathcal{V}_i|} \sum_{j \in \mathcal{V}_i} n_i^j$$
+   - Compute densification score:
+     $$s_d^i(t) = \omega(t) C_i$$
+     where $\omega(t)$ is a positive, nondecreasing clipped-linear schedule over the densification interval.
+
+7. **Pruning:**
+   - Identify mandatory removals:
+     $$\mathcal{H}_t = \{i \in \mathcal{A}_t : o_i < 0.1 \vee \gamma_i < 0.01\}$$
+   - Identify candidates:
+     $$\mathcal{P}_t = \{i \in \mathcal{A}_t \setminus \mathcal{H}_t : s_p^i > \tau_p\}$$
+   - Sample $b_t = \lfloor \rho |\mathcal{P}_t| \rfloor$ candidates without replacement using weights proportional to $s_p^i$.
+   - Removal set: $\mathcal{R}_t = \mathcal{H}_t \cup \text{sampled candidates}$.
+
+8. **Densification:**
+   - Select surviving active primitives with $s_d^i(t) > \tau_d$.
+   - For each selected primitive $i$:
+     - If largest base-scale component $< \tau_s$: clone and shift along positional gradient.
+     - Otherwise: replace with two smaller Gaussians.
+     - New primitives inherit parent's unconstrained modulation parameter $\beta_i \in \mathbb{R}$, with $\gamma_i = 2 \text{sigmoid}(\beta_i) \in (0, 2)$.
+     - Remaining attributes follow clone/split updates.
+
+9. **Execution:**
+   - Apply pruning first if both pruning and densification coincide.
+   - New primitives are scored only at the next density update.
+   - Primitives outside $\mathcal{A}_t$ are unaffected.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def composite_error_map_and_density_control(G_t, K, views, tau, tau_p, tau_d, tau_s, rho, lambda_dssim, omega_t):
+    """
+    G_t: list of Gaussian primitives
+    K: number of sampled views
+    views: list of view objects with attributes: id, pixel_grid, freq_mask, rendered_img, gt_img
+    tau: error threshold
+    tau_p: pruning score threshold
+    tau_d: densification score threshold
+    tau_s: scale threshold
+    rho: pruning sampling ratio
+    lambda_dssim: SSIM weight
+    omega_t: densification schedule value at step t
+    """
+    # Step 1: Compute Active Primitives
+    A_t = []
+    V_i_map = {} # Map Gaussian index to set of view indices
+    r_i_j_map = {} # Map (Gaussian index, view index) to projected radius
+    
+    for i, gauss in enumerate(G_t):
+        valid_views = []
+        for j, view in enumerate(views):
+            r_ij = get_projected_radius(gauss, view)
+            r_i_j_map[(i, j)] = r_ij
+            if r_ij > 0:
+                valid_views.append(j)
+        V_i_map[i] = valid_views
+        if len(valid_views) > 0:
+            A_t.append(i)
+            
+    if not A_t:
+        return G_t, [], []
+        
+    # Step 2: Compute Composite Error Map
+    M_err_map = {} # Map view index to error mask
+    for j, view in enumerate(views):
+        e_j = compute_raw_error(view.rendered_img, view.gt_img)
+        e_j_norm = min_max_normalize(e_j, view.pixel_grid)
+        M_err = indicator_function(e_j_norm > tau | (view.freq_mask == 1 & e_j_norm > 0.5 * tau))
+        M_err_map[j] = M_err
+        
+    # Step 3: Compute Weighted Pixel Counts
+    n_i_j_map = {} # Map (Gaussian index, view index) to weighted count
+    for i in A_t:
+        for j in V_i_map[i]:
+            Omega_ij = get_contributing_pixels(G_t[i], views[j])
+            n_ij = sum(M_err_map[j][u] for u in Omega_ij)
+            n_i_j_map[(i, j)] = n_ij
+            
+    # Step 4: Compute Photometric Loss
+    E_photo_map = {} # Map view index to photometric loss
+    for j, view in enumerate(views):
+        L1_j = mean_l1_error(view.rendered_img, view.gt_img)
+        SSIM_j = compute_ssim(view.rendered_img, view.gt_img)
+        E_photo = (1 - lambda_dssim) * L1_j + lambda_dssim * (1 - SSIM_j)
+        E_photo_map[j] = E_photo
+        
+    # Step 5: Compute Pruning Scores
+    Q_i_map = {} # Map Gaussian index to Q_i
+    for i in A_t:
+        Q_i = sum(n_i_j_map[(i, j)] * E_photo_map[j] for j in V_i_map[i])
+        Q_i_map[i] = Q_i
+        
+    Q_values = [Q_i_map[i] for i in A_t]
+    Q_norm = min_max_normalize(Q_values, A_t)
+    s_p_map = {i: Q_norm[idx] for idx, i in enumerate(A_t)}
+    
+    # Step 6: Compute Densification Scores
+    C_i_map = {} # Map Gaussian index to C_i
+    for i in A_t:
+        C_i = sum(n_i_j_map[(i, j)] for j in V_i_map[i]) / len(V_i_map[i])
+        C_i_map[i] = C_i
+        
+    s_d_map = {i: omega_t * C_i_map[i] for i in A_t}
+    
+    # Step 7: Pruning
+    H_t = [i for i in A_t if G_t[i].opacity < 0.1 or G_t[i].gamma < 0.01]
+    P_t = [i for i in A_t if i not in H_t and s_p_map[i] > tau_p]
+    
+    b_t = floor(rho * len(P_t))
+    if b_t > 0:
+        sampled_candidates = sample_without_replacement(P_t, b_t, weights=[s_p_map[i] for i in P_t])
+    else:
+        sampled_candidates = []
+        
+    R_t = H_t + sampled_candidates
+    
+    # Step 8: Densification
+    D_t = [i for i in A_t if i not in R_t and s_d_map[i] > tau_d]
+    new_gaussians = []
+    for i in D_t:
+        if max_base_scale(G_t[i]) < tau_s:
+            new_g = clone_and_shift(G_t[i])
+        else:
+            new_g1, new_g2 = split(G_t[i])
+            new_gaussians.append(new_g1)
+            new_gaussians.append(new_g2)
+            continue
+        new_gaussians.append(new_g)
+        
+    # Step 9: Execution
+    # Remove primitives in R_t
+    G_new = [g for idx, g in enumerate(G_t) if idx not in R_t]
+    # Add new primitives
+    G_new.extend(new_gaussians)
+    
+    return G_new, R_t, D_t
+
+def get_projected_radius(gauss, view):
+    # Placeholder for rasterizer call
+    pass
+
+def get_contributing_pixels(gauss, view):
+    # Placeholder for compositing logic
+    pass
+
+def compute_raw_error(rendered_img, gt_img):
+    return (1/3) * sum(abs(rendered_img[u, c] - gt_img[u, c]) for u in rendered_img.shape for c in range(3))
+
+def min_max_normalize(data, indices):
+    min_val = min(data[i] for i in indices)
+    max_val = max(data[i] for i in indices)
+    if max_val == min_val:
+        return {i: 0 for i in indices}
+    return {i: (data[i] - min_val) / (max_val - min_val) for i in indices}
+
+def indicator_function(condition):
+    return 1 if condition else 0
+
+def mean_l1_error(rendered_img, gt_img):
+    return sum(compute_raw_error(rendered_img, gt_img)[u] for u in rendered_img.shape) / len(rendered_img.shape)
+
+def compute_ssim(rendered_img, gt_img):
+    # Placeholder for SSIM computation
+    pass
+
+def sample_without_replacement(population, k, weights):
+    # Placeholder for weighted sampling
+    pass
+
+def clone_and_shift(gauss):
+    # Placeholder for cloning logic
+    pass
+
+def split(gauss):
+    # Placeholder for splitting logic
+    pass
+
+def max_base_scale(gauss):
+    # Placeholder for scale extraction
+    pass
+```
+
+## Subtopics
+
+### [Efficient Pruning Score](3598-efficient-pruning-score.md)
+The Efficient Pruning Score is a sensitivity-based metric used to identify and remove redundant 3D Gaussian primitives during the training of 3D Gaussian Splatting (3DGS) models. It solves the problem of high memory overhead and inefficient gradient flow associated with the original PUP 3D-GS pruning method, which requires storing a large Hessian matrix for every Gaussian. By reparameterizing the sensitivity score to depend on the scalar projected Gaussian value rather than the full 3D spatial parameters, it reduces storage requirements by 36×, enabling pruning to occur directly within the training pipeline.
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of sampled views $K$, the number of primitives $|\mathcal{G}_t|$, and the resolution of the views. Computing the error map and masks is $O(K \cdot |\mathcal{P}_j|)$. Computing scores is $O(|\mathcal{A}_t| \cdot K)$. Pruning and densification are $O(|\mathcal{A}_t|)$.
+- **Memory Complexity:** Reduced by 36× compared to PUP 3D-GS due to the scalar projected Gaussian value dependency [S1, S2]. No Hessian matrix storage required.
+- **Performance:** Improves fidelity compared to vanilla 3DGS by reducing redundancy [S1, unofficial].
+- **Strengths:** Efficient memory usage, direct integration into training pipeline, improved fidelity.
+- **Limitations:** Requires sampling views and computing error maps, which adds computational overhead.
+- **When to use:** When memory is a constraint and high fidelity is required.
+- **When not to use:** When real-time performance is critical and memory is not a bottleneck.
+
+## Background
+Originated in EffGS: Efficient and High-Fidelity Gaussian Splatting [S1, unofficial]. It builds on [Gaussian Data Structure](2273-gaussian-data-structure.md) and is related to [Dynamic Buffer Management](3753-dynamic-buffer-management.md).
+
+## Sources
+[S1] EffGS: Efficient and High-Fidelity Gaussian Splatting, https://arxiv.org/abs/2609.39553, fetched 2026-10-29 (unofficial)

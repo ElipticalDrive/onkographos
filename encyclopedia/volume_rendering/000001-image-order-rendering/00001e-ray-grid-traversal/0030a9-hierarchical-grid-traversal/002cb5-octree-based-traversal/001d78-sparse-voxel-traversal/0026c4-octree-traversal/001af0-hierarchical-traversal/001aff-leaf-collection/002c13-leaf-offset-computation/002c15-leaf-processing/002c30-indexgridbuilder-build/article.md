@@ -1,0 +1,182 @@
+# IndexGridBuilder::build
+
+
+## Overview
+`IndexGridBuilder::build` populates a flat output data structure with voxel values from multiple OpenVDB grids (SDF, float, vector) and generates global coordinates for each active voxel, using parallel leaf traversal [S1, unofficial]. It differs from its parent [Leaf Processing](5189-leaf-processing.md) by aggregating data from *multiple* source grids into a single contiguous buffer and explicitly computing global coordinates, whereas Leaf Processing handles single-grid copying using precomputed offsets. It serves as the core data collection phase in hierarchical traversal pipelines, preparing dense flat arrays for subsequent rendering or analysis steps.
+
+## How it works
+**Inputs:**
+- A collection of OpenVDB grids: SDF grids, float grids, and vector grids.
+- A domain grid tree structure that defines the topology and leaf layout.
+- `m_leafOffsets`: A mapping from leaf index to base offset in the flat output array.
+- `m_numLeaves`: Total number of leaves in the domain grid.
+
+**Outputs:**
+- `m_outData`: A flat data structure containing:
+  - `pValues<T>(name)`: Returns a pointer to the value buffer for grid type `T` (float, vec3f, etc.).
+  - `pCoords()`: Returns a pointer to a `Coord` array storing global coordinates.
+  - `allocateCoords(totalVoxels)`: Allocates memory for global coordinates.
+
+**Data Structures:**
+- `LeafManager`: Manages iteration over leaves of the domain grid tree.
+- `TreeType::LeafNodeType::SIZE`: Constant integer representing the number of voxels per leaf node (e.g., $8^3 = 512$ for standard OpenVDB leaves).
+- `m_leafOffsets[i]`: Integer offset for leaf `i` in the flat output buffer.
+
+**Steps:**
+
+1. **Initialize LeafManager:** Create a `LeafManager` instance for the domain grid tree to enable parallel iteration over leaves [S1, unofficial].
+
+2. **Process SDF Grids:**
+   - For each SDF grid:
+     - Get the underlying float tree.
+     - Create a `LeafManager` for this grid's tree.
+     - Obtain the output pointer: `outPtr = m_outData->pValues<float>(name)`.
+     - Launch `tbb::parallel_for` over leaf indices $i \in [0, m\_numLeaves)$.
+     - For each leaf $i$:
+       - Get the leaf node from the SDF grid tree.
+       - Compute `leafBaseOffset = m_leafOffsets[i]`.
+       - Get `leafPos = leaf.origin()`.
+       - Probe the domain grid tree at `leafPos` using `probeConstLeaf` to verify existence.
+       - If the leaf exists in the SDF grid:
+         - Copy `TreeType::LeafNodeType::SIZE` floats from the SDF leaf to `outPtr + leafBaseOffset`.
+       - Else:
+         - Fill `outPtr + leafBaseOffset` with `1.0f` [S1, unofficial].
+
+3. **Process Float Grids:**
+   - For each float grid:
+     - Get the underlying float tree.
+     - Create a `LeafManager`.
+     - Obtain the output pointer: `outPtr = m_outData->pValues<float>(name)`.
+     - Launch `tbb::parallel_for` over leaf indices $i \in [0, m\_numLeaves)$.
+     - For each leaf $i$:
+       - Get the leaf node.
+       - Compute `leafBaseOffset = m_leafOffsets[i]`.
+       - Get `leafPos = leaf.origin()`.
+       - Probe the domain grid tree at `leafPos`.
+       - If the leaf exists in the float grid:
+         - Copy `TreeType::LeafNodeType::SIZE` floats from the float leaf to `outPtr + leafBaseOffset`.
+       - Else:
+         - Fill `outPtr + leafBaseOffset` with `0.0f` [S1, unofficial].
+
+4. **Process Vector Grids:**
+   - For each vector grid:
+     - Get the underlying vector tree.
+     - Create a `LeafManager`.
+     - Obtain the output pointer: `outPtr = m_outData->pValues<Vec3f>(name)`.
+     - Launch `tbb::parallel_for` over leaf indices $i \in [0, m\_numLeaves)$.
+     - For each leaf $i$:
+       - Get the leaf node.
+       - Compute `leafBaseOffset = m_leafOffsets[i]`.
+       - Get `leafPos = leaf.origin()`.
+       - Probe the domain grid tree at `leafPos`.
+       - If the leaf exists in the vector grid:
+         - Copy `TreeType::LeafNodeType::SIZE` `Vec3f` values from the vector leaf to `outPtr + leafBaseOffset`.
+       - Else:
+         - Fill `outPtr + leafBaseOffset` with `Vec3f(0.0f, 0.0f, 0.0f)` [S1, unofficial].
+
+5. **Compute Global Coordinates:**
+   - Launch `tbb::parallel_for` over leaf indices $i \in [0, m\_numLeaves)$.
+   - For each leaf $i$:
+     - Get the leaf node (from any grid, as topology is shared).
+     - Compute `leafBaseOffset = m_leafOffsets[i]`.
+     - Get `leafPos = leaf.origin()`.
+     - For each local index $j \in [0, \text{TreeType::LeafNodeType::SIZE})$:
+       - Compute global coordinate: $c = \text{leaf.offsetToGlobalCoord}(j)$.
+       - Compute output index: `outIdx = leafBaseOffset + j`.
+       - Store $c$ in `m_outData->pCoords()[outIdx]` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def IndexGridBuilder_build(domain_tree, sdf_grids, float_grids, vector_grids, m_leafOffsets, m_numLeaves, m_outData):
+    # Step 1: Initialize LeafManager for domain tree
+    domain_leaf_manager = LeafManager(domain_tree)
+
+    # Helper to process a grid type
+    def process_grid(grids, grid_type, fill_value, coord_func):
+        for grid in grids:
+            tree = grid.get_tree()
+            leaf_manager = LeafManager(tree)
+            out_ptr = m_outData.pValues(grid_type, grid.name)
+            
+            # Parallel loop over leaves
+            for i in parallel_range(m_numLeaves):
+                leaf = leaf_manager.get_leaf(i)
+                leaf_base_offset = m_leafOffsets[i]
+                leaf_pos = leaf.origin()
+                
+                # Probe domain tree to check if leaf exists in domain
+                domain_leaf = domain_tree.probe_const_leaf(leaf_pos)
+                
+                if domain_leaf is not None:
+                    # Check if leaf exists in source grid
+                    source_leaf = tree.probe_const_leaf(leaf_pos)
+                    if source_leaf is not None:
+                        # Copy voxel data
+                        for j in range(LeafNodeType.SIZE):
+                            out_ptr[leaf_base_offset + j] = source_leaf.get_voxel(j)
+                    else:
+                        # Fill with default value
+                        for j in range(LeafNodeType.SIZE):
+                            out_ptr[leaf_base_offset + j] = fill_value
+                else:
+                    # Domain leaf missing, fill with default
+                    for j in range(LeafNodeType.SIZE):
+                        out_ptr[leaf_base_offset + j] = fill_value
+
+    # Step 2: Process SDF grids (fill missing with 1.0f)
+    process_grid(sdf_grids, float, 1.0f, None)
+
+    # Step 3: Process Float grids (fill missing with 0.0f)
+    process_grid(float_grids, float, 0.0f, None)
+
+    # Step 4: Process Vector grids (fill missing with 0.0f)
+    process_grid(vector_grids, Vec3f, Vec3f(0.0, 0.0, 0.0), None)
+
+    # Step 5: Compute global coordinates
+    for i in parallel_range(m_numLeaves):
+        leaf = domain_leaf_manager.get_leaf(i)
+        leaf_base_offset = m_leafOffsets[i]
+        
+        for j in range(LeafNodeType.SIZE):
+            global_coord = leaf.offset_to_global_coord(j)
+            out_idx = leaf_base_offset + j
+            m_outData.pCoords()[out_idx] = global_coord
+```
+
+**Parameters:**
+- `m_leafOffsets`: Array mapping leaf index to flat buffer offset. Size: `m_numLeaves`.
+- `m_numLeaves`: Total number of leaves.
+- `LeafNodeType::SIZE`: Constant leaf voxel count (e.g., 512).
+
+**Edge Cases and Pitfalls:**
+- **Topology Mismatch:** The domain grid leaf structure must match all added grids' leaf structures for correct offset mapping. Mismatched topology causes incorrect data placement [S1, unofficial].
+- **Missing Leaves:** If a leaf exists in the domain grid but not in a source grid, it is filled with a default value (1.0f for SDF, 0.0f for float/vector). If a leaf exists in a source grid but not in the domain grid, it is ignored (not copied) [S1, unofficial].
+- **Precision:** Global coordinates are stored as `Coord` (typically integer). Ensure no overflow for large scenes.
+
+## Subtopics
+
+### IndexGridBuilder::writeIndexGrid
+Creates an OpenVDB grid from the flat output buffer by cloning the domain grid's topology and copying voxel data back into leaf nodes [S1, unofficial]. It differs from `build` by reconstructing a hierarchical OpenVDB grid structure from the flat buffer, rather than producing a flat array. Choose this when the output needs to be saved as or further processed as an OpenVDB grid. **Parameters:** `voxelSize` (float, linear transform scale factor for the output grid) [S1, unofficial]. **Pitfalls:** Topology cloning copies inactive voxels too; pruning/deactivation is commented out but available if needed [S1, unofficial]. **Steps:**
+1. Create new grid, set name and linear transform with `voxelSize`.
+2. Set grid class to `GRID_FOG_VOLUME` for `FloatGrid`, or `GRID_STAGGERED` with `VEC_CONTRAVARIANT_RELATIVE` for `VectorGrid`.
+3. Assert `m_totalVoxels` equals `m_outData->size()` to ensure consistency.
+4. Call `leafManager.foreach` with lambda: for each leaf and `leafIdx`, get `leafBaseOffset` from `m_leafOffsets[leafIdx]`, get `leafData` pointer, copy `LeafT::SIZE` values from `data + leafBaseOffset` to `leafData` [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the total number of active voxels across all leaves. Parallelized over leaves using TBB.
+- **Memory Complexity:** $O(N)$ for the flat output buffer (values and coordinates). Additional memory for `LeafManager` instances is minimal.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales linearly with the number of leaves and voxels per leaf. Parallelism is at the leaf level.
+- **Strengths:** Efficiently aggregates multiple grids into a flat buffer; parallelized; handles missing data with defaults.
+- **Limitations:** Requires matching topology across all grids; flat buffer may be large for high-resolution scenes.
+- **When to use:** When preparing data for image-order rendering or other algorithms requiring flat, contiguous voxel data with global coordinates.
+- **When not to use:** When memory is constrained and hierarchical access is preferred; when grids have different topologies.
+
+## Background
+Originated in the HNanoSolver project by ZephirFXEC [S1, unofficial]. Used in volume rendering pipelines that utilize sparse voxel octrees and hierarchical traversal.
+
+## Sources
+[S1] ZephirFXEC/HNanoSolver, https://github.com/ZephirFXEC/HNanoSolver, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,325 @@
+Contribute to prisma-rust/prisma-rev development by creating an account on GitHub.
+
+feat(render): every entity is a draw call — no culling, instancing or LOD · Issue #491 · prisma-rust/prisma-rev · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+feat(render): every entity is a draw call — no culling, instancing or LOD #491
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+feat(render): every entity is a draw call — no culling, instancing or LOD#491
+Copy link
+Labels
+area/renderVulkan 渲染、shader、swapchainVulkan 渲染、shader、swapchainenhancementNew feature or requestNew feature or requestneeds/triage等待人工 / agent 分诊等待人工 / agent 分诊
+Description
+Excurs1ons
+opened on Oct 29, 2026
+Issue body actions
+🤖 由 JasonGu 的 AI agent（DeepSeek V4.1 Flash / OpenCode）提交。
+现象
+渲染管线没有任何规模化手段：
+没有视锥剔除：scene_render_system_into 只按 Active 过滤，相机完全没参与；
+没有包围盒数据：DrawItem 里没有 bounds，网格管理层也不算 AABB —— 想剔除也没数据；
+没有实例化 / 合批：每个实体一次 cmd_draw_indexed(..., instanceCount = 1, ...)；
+没有 LOD（全仓库 grep -i lod 只命中 MaterialAsset::occlusion 之类无关词）。
+结果：场景里 1000 个箱子 = 2000 次 draw（主通道 + 阴影通道），
+每次还带一次 cmd_bind_vertex_buffers + 一次 cmd_push_constants + 一次
+cmd_bind_index_buffer；其中一半还在相机背后。
+证据
+（1）提取阶段不看相机。 crates/prism-engine/src/scene/systems/render.rs:53-81：
+```
+pub fn scene_render_system_into(world: &World, out: &mut Vec<DrawItem>) {
+    out.clear();
+    out.extend(
+        world
+            .query2::<LocalToWorld, MeshRef>()
+            .filter(|(e, _, _)| world.get::<Active>(*e).map(|a| a.0).unwrap_or(true))
+            .map(|(entity, wt, mr)| DrawItem { ... }),
+    );
+}
+```
+函数体里没有 view_proj、没有相机实体、没有任何距离/包围体判断。
+lights.rs / ui/render.rs 同理。
+（2）没有可用来剔除的数据。 crates/prism-render/src/render_graph.rs:351-372：
+```
+pub struct DrawItem {
+    pub mesh: MeshHandle,
+    pub model: [[f32; 4]; 4],
+    pub material: Option<u32>,
+    pub cast_shadow: bool,
+    pub visible_in_main_pass: bool,
+    pub cast_shadow_two_sided: bool,
+    pub state: DrawState,
+}
+```
+网格句柄只有 MeshHandle，而
+```
+$ grep -rni "aabb\|bounds\|min_extent\|max_extent" crates/prism-render/src/managers/*.rs crates/prism-render/src/mesh.rs
+（无输出）
+```
+也就是说导入的网格连 local AABB 都没算。（编辑器点选之所以能工作，是因为它拿
+单位立方体当代理 —— 见 #438。）
+（3）每个实体一次 draw，且带完整状态重设。 crates/prism-render/src/forward_pass.rs:1595-1652：
+```
+if item.state != bound_state { cmd_bind_pipeline(...); }        // 只在状态变时
+cmd_bind_vertex_buffers(ctx.cmd, 0, &vertex_buffers, &offsets); // 每个 item 都做，且是同一个 buffer
+cmd_push_constants(ctx.cmd, pipeline.layout, ..., &pc);         // 每个 item 一次
+cmd_bind_index_buffer(ctx.cmd, ib, 0, vk::IndexType::UINT32);
+cmd_draw_indexed(ctx.cmd, uploaded.index_count, 1, 0, 0, 0);    // instanceCount = 1
+```
+阴影通道同样逐项（crates/prism-render/src/shadow_map_pass.rs:494-496），
+所以一个实体一帧至少要 2 次 draw。
+全仓库 grep draw_indexed_indirect|instance_count|cmd_draw_indirect 在渲染侧
+只命中离线烘焙代码（bake_common.rs:70,321），运行期一次间接绘制都没有。
+对照
+Unity 里 LOD 是一等公民，有专门的编辑器与运行期切换：
+Editor/Mono/Inspector/LODGroupEditor.cs:20 [CustomEditor(typeof(LODGroup))]，
+:32-36 直接编辑 m_FadeMode / m_AnimateCrossFading / m_LODSize /
+m_GlobalIlluminationLOD。剔除与实例化在原生层（C# 侧只有 Renderer.isVisible
+这样的读写口），参考树里没有对应 C# 实现，所以这条只对比「有没有这个能力」。
+影响
+移动端最痛：Android 上典型的 tile-based GPU，一个 300 万面的 Sponza
+缩到手机上，prism-sponza 这种场景的 draw call 数会先撞上限；
+阴影通道把 draw 数翻倍，而阴影贴图通常只覆盖相机附近一小块区域；
+静止场景也每帧全量提交（editor-egui 声称「静止视口零 GPU 工作」只对编辑器成立，
+游戏里 Engine::update 每帧都重建绘制列表）；
+加一个物体性能就掉一截，没有「用更远的模型 / 更小的 LOD」这种调节手段。
+建议（按性价比排序）
+先补 AABB：网格导入时算 local AABB（managers 里 RenderMeshManager 存一份），
+DrawItem 加 bounds: [f32; 6]（或中心 + 半径）；这一步顺带让 bug(editor): selection proxies ignore rotation and box-select containment #438 的点选
+从「单位立方体」变成精确命中，也能给编辑器加「显示包围盒」；
+视锥剔除：scene_render_system_into 加相机参数（或改成
+scene_render_system_into(world, &CameraPlanes, out)），对 world AABB 做
+正/负顶点 测试；这条几十行代码，收益最大；
+实例化：同一 MeshHandle + material + DrawState 的连续项合并成一次
+cmd_draw_indexed(..., instance_count)，模型矩阵走 per-instance SSBO
+（push constant 只留材质槽 / debug_flags）；先做「相邻同类合并」就够，
+不必立刻上 VK_EXT_multi_draw_indirect；
+LODGroup 组件（prism-scene 新组件 + 提取阶段按屏幕占比选级），
+对齐 Unity 的 LODGroup；
+阴影通道只提交阴影相机视锥内的投射者，别用主相机列表。
+区域
+area/render；crates/prism-engine/src/scene/systems/render.rs、
+crates/prism-render/src/{render_graph.rs,forward_pass.rs,shadow_map_pass.rs,managers/}，
+新组件落在 crates/prism-scene/src/components.rs。
+Activity
+Next
+Excurs1ons
+added
+enhancementNew feature or requestNew feature or request
+area/renderVulkan 渲染、shader、swapchainVulkan 渲染、shader、swapchain
+needs/triage等待人工 / agent 分诊等待人工 / agent 分诊
+agent/working已有 agent 在做已有 agent 在做
+on Oct 29, 2026
+Excurs1ons commented on Oct 31, 2026
+Excurs1ons
+on Oct 31, 2026
+CollaboratorAuthor
+More actions
+🤖 Agent: claiming. 先做建议里性价比最高的前两项（局部 AABB + 主相机视锥剔除），实例化 / LODGroup / 阴影通道剔除留后续 PR。
+Excurs1ons
+added a commit that references this issue on Oct 31, 2026
+feat(render): cull meshes against the camera frustum (#491)
+...
+7e86f92
+Excurs1ons commented on Oct 31, 2026
+Excurs1ons
+on Oct 31, 2026
+CollaboratorAuthor
+More actions
+🤖 Agent: 建议里的前两项已合并（PR #638 → 7e86f92）。issue 保持 open，剩余部分说明如下。
+已实现
+网格局部 AABB：prism-render::culling::Aabb，MeshUploadInput::bounds() 用解析器已解出的顶点位置算包围盒；CPU 段（prepare_requests）在发请求前算好，句柄回来后写进 MeshBounds（MeshHandle → Aabb 的 World 资源）。同一个网格多实体复用只存一份。
+主相机视锥剔除：Frustum::from_view_proj（列主序、Vulkan 深度 [0,1]：近平面 row2、远平面 row3 - row2），scene_render_system_into_with_frustum 按世界 AABB 做保守相交测试（p-vertex），extract_frame_packet_into 每帧用 view_proj 建视锥。
+保守退化：没有包围盒（程序化网格 / 标定球 / gizmo / 未解析）、包围盒无效、模型矩阵非有限、view_proj 退化 → 不剔除。旧的 scene_render_system_into / SceneReadView::draw_items_into 行为不变（等价 frustum = None）。
+阴影通道与主通道共用一份 DrawItem 列表，所以相机外的投射者也不再进阴影贴图（Unity 同样是「只为可见物体渲阴影」）。
+没做 / 建议的下一步
+阴影通道按光源视锥剔除：需要 DrawItem 带世界 AABB 或让 shadow_map_pass 自己测；目前复用主相机剔除。
+实例化 / 合批：仍然每实体一次 cmd_draw_indexed(instanceCount = 1)，完整状态重设（bind vertex/index/push constants）。先做「相邻同 MeshHandle + material + DrawState 合并」即可，per-instance 模型矩阵走 SSBO。
+LODGroup 组件：prism-scene 新组件 + 提取阶段按屏幕占比选级；有了 AABB 之后屏幕占比只差一个投影半径计算。
+编辑器侧：包围盒数据已经可用 → 可以直接接 bug(editor): selection proxies ignore rotation and box-select containment #438 的精确点选、「显示包围盒」开关、以及视口统计里的「提交 / 剔除」计数。
+剔除目前只按主相机：正交相机、多相机（feat(engine): only one camera is rendered; extra cameras are ignored #461 的多相机合成）需要按相机分别剔除。
+验证与限制
+新增 22 个单测（数学层 15 + 网格包围盒 2 + 提取层 4 + 解析链路 1），覆盖相机前后 / 远近平面 / 侧向 / 跨平面 / 包含相机、平面单位化、退化矩阵、无效包围盒、模型变换、Active 过滤以及 frustum = None 与原行为一致。
+没有端到端画面验证：本机 3D 场景加载坏着（只有清屏灰，stash 本会话改动后依旧，怀疑是未提交的 loader.rs WIP），所以帧数/draw call 的实际下降没能实测。合并后建议在一台能正常加载的场景上抓一次 draw_items.len() 或 Render Graph 报告对比。
+（顺带：MeshBounds 只增不减，等做网格 unregister / 热重载时一并清理。）
+Excurs1ons
+removed
+agent/working已有 agent 在做已有 agent 在做
+on Oct 31, 2026
+Excurs1ons
+added a commit that references this issue on Oct 31, 2026
+feat(render): add FXAA post-process anti-aliasing (#494)
+...
+ca45a1f
+Excurs1ons commented on Nov 2, 2026
+Excurs1ons
+on Nov 2, 2026
+CollaboratorAuthor
+More actions
+🤖 Agent: claiming（DeepSeek V4.1 Flash / OpenCode）—— 接 #461 多相机合并后的缺口：当前提取只按主相机视锥剔除，第二台相机视野里的物体可能被误剔。先做「任一相机可见即保留」的并集剔除（静态网格 + 蒙皮），实例化 / LODGroup 仍留后续。
+Excurs1ons
+added
+agent/working已有 agent 在做已有 agent 在做
+on Nov 2, 2026
+Excurs1ons
+added 2 commits that reference this issue on Nov 2, 2026
+fix(engine): cull against every composited camera (#491)
+...
+134f798
+fix(engine): cull against every composited camera (#491) (#857)
+...
+845f57e
+Excurs1ons commented on Nov 2, 2026
+Excurs1ons
+on Nov 2, 2026
+CollaboratorAuthor
+More actions
+🤖 Agent: 多相机剔除已合并（#857 → 845f57e）。issue 保持 open（实例化 / 合批、LODGroup 仍未做）。
+本次交付
+#461 / #851 之后每台启用相机共用同一份 draw_items，但提取阶段只按主相机视锥剔除，导致只在第二台相机里可见的物体被提前丢掉。现在：
+scene_render_system_into_with_frustums：任意一台相机可见即保留，空集合 = 不剔除；
+SceneReadView::draw_items_with_frustums_into 暴露同一条路径；
+蒙皮走 append_skinned_draw_items_with_frustums（蒙皮后的包围盒逻辑不变）；
+所有相机矩阵退化时退回不剔除；
+2D 瓦片地图在多相机时保守地不裁剪（没有单一份视锥能代表所有层）；
+旧 *_with_frustum API 保留，等价于单元素集合。
+验证
+```
+cargo test -p prism-engine --lib
+test scene::systems::render::tests::a_mesh_visible_only_through_a_second_camera_is_kept ... ok
+test scene::systems::render::tests::an_empty_frustum_set_keeps_everything ... ok
+test render_system::tests::extraction_keeps_objects_visible_only_through_a_second_camera ... ok
+test result: ok. 475 passed; 0 failed; 1 ignored
+```
+仍未做（issue 保持 open 的原因）
+实例化 / 合批：仍然每个 DrawItem 一次 cmd_draw_indexed(instanceCount = 1)，每次重绑整条状态；需要 per-instance 模型矩阵 SSBO + 前向/阴影管线改造。
+LODGroup：需要多级网格与屏幕占比选择；现在 MeshRenderer 仍是单网格。
+编辑器侧：包围盒 / 剔除计数还没接到视口统计与「显示包围盒」开关。
+多相机剔除按「任意相机可见」做并集，不做逐层列表；对象可能在某一层被顶点阶段裁掉，但不会漏画。
+Excurs1ons
+removed
+agent/working已有 agent 在做已有 agent 在做
+on Nov 2, 2026
+9 remaining items
+Load more
+Excurs1ons commented on Nov 2, 2026
+Excurs1ons
+on Nov 2, 2026
+CollaboratorAuthor
+More actions
+🤖 Agent: 距离 LOD 已合并（#869 → 705da60）。LodGroup { distances } + 子实体顺序选级；运行时 LodHidden 只影响渲染，不改作者 Active / 编辑器 Hidden。测试覆盖 0/20/100 米、多相机取最近、禁用相机、删组清标记与退化输入。issue 仍 open：剩下 实例化 / 合批（以及屏幕占比式 LOD、LOD 编辑面板）没有做。
+Excurs1ons commented on Nov 2, 2026
+Excurs1ons
+on Nov 2, 2026
+CollaboratorAuthor
+More actions
+🤖 Agent: 继续接 #491 的屏幕占比式 LOD 切片（实例化 / 合批仍留后续）。LodGroup 增加可选的 screen_ratios（按 LOD0、LOD1……从大到小的屏幕高度占比阈值）和 bounds_radius（世界单位包围球半径）；非空时按相机投影选级，空时继续走现有的距离阈值。无相机 / 半径非法 / 阈值非法时保守回落到距离模式，不把整组藏掉。
+Excurs1ons commented on Nov 2, 2026
+Excurs1ons
+on Nov 2, 2026
+CollaboratorAuthor
+More actions
+🤖 Agent: 屏幕占比式 LOD 已开 PR #874。LodGroup 增加可选 screen_ratios（按 LOD0/1… 从大到小的视口高度占比）和 bounds_radius；透视按 radius * proj_y / distance、正交按 radius * proj_y 算占比，多相机取占比最大的一台；阈值或半径非法时回落到现有距离模式，旧场景靠 serde(default) 兼容。实例化 / 合批仍未做。
+Excurs1ons
+added a commit that references this issue on Nov 2, 2026
+feat(engine): add screen-ratio LOD selection (#491) (#874)
+...
+2b2f9d7
+Excurs1ons commented on Nov 2, 2026
+Excurs1ons
+on Nov 2, 2026
+CollaboratorAuthor
+More actions
+🤖 Agent: 屏幕占比式 LOD 已合入（PR #874 → 2b2f9d7）。LodGroup 新增可选 screen_ratios（按 LOD0/1… 从大到小的视口高度占比）和 bounds_radius；透视按 radius * proj_y / distance、正交按 radius * proj_y 算占比，多相机取占比最大的一台；无相机 / 半径非法 / 阈值非法时回落到距离模式，旧场景靠 serde(default) 兼容。测试覆盖阈值边界、实际投影选级、非法半径回落和 RSCN 往返。issue 仍 open：实例化 / 合批仍未做。
+Excurs1ons commented on Nov 2, 2026
+Excurs1ons
+on Nov 2, 2026
+CollaboratorAuthor
+More actions
+🤖 Agent: 接 #491 的最后一块——相同网格 / 材质的静态绘制实例化。做法是在前向通道按 (mesh, material, state, index range) 分组，同组一次 drawIndexed 用实例缓冲提交多个 model；SV_InstanceID + 新的 instanceModels SSBO 选矩阵，instance_count = 0 保持原来的 push-constant 单实例路径。蒙皮、透明队列、描边 / 线框仍逐条绘制，阴影通道暂不动；先覆盖主通道的 draw call 数量。
+Excurs1ons commented on Nov 2, 2026
+Excurs1ons
+on Nov 2, 2026
+Last edited by Excurs1ons
+CollaboratorAuthor
+More actions
+🤖 Agent: 静态实例化已开 PR #880。ForwardPass 按 (mesh, material, state, index range) 分组不透明静态绘制，同组一次 instanced draw；实例矩阵复用现有 bone SSBO（紧跟骨骼调色板之后），mesh_vert 用 SV_InstanceID + push._pad_92 选矩阵，push._padding.x 表示实例数，不新增 descriptor / binding。蒙皮 / 透明 / 描边 / 线框 / 粒子仍逐条绘制，阴影通道本轮未改。骨骼 + 实例共用 4096 mat4/帧，放不下的组自动回退。GPU 测试用两个不同平移的相同盒子验证两侧都出现，CPU 测试覆盖分组、透明 / 蒙皮单实例和容量回退。
+Excurs1ons
+added 2 commits that reference this issue on Nov 2, 2026
+feat(render): instance identical static draws (#491)
+...
+2526abf
+feat(render): instance identical static draws (#491) (#880)
+...
+229c753
+Excurs1ons commented on Nov 2, 2026
+Excurs1ons
+on Nov 2, 2026
+CollaboratorAuthor
+More actions
+🤖 Agent: 静态实例化已合入（PR #880 → 229c753）。ForwardPass 按 (mesh, material, state, index range) 分组不透明静态绘制，同组一次 instanced draw；实例矩阵复用 bone SSBO（紧跟骨骼调色板），SV_InstanceID + push._pad_92 选矩阵，push._padding.x 表示实例数，没有新增 descriptor / binding。骨骼 + 实例共用 4096 mat4/帧，放不下的组自动回退。蒙皮 / 透明 / 描边 / 线框 / 粒子仍逐条绘制，阴影通道仍逐 caster。
+#491 的三项核心能力现在都有了：视锥剔除（#863 / 既有 #526 提取剔除）、距离 + 屏幕占比 LOD（#869 / #874）、主通道静态实例化（#880）。剩余的是打磨项：阴影通道实例化、透明合批、编辑器 LOD 面板；这些可以单独开 issue 或留在这里由维护者决定。
+Excurs1ons commented on Nov 2, 2026
+Excurs1ons
+on Nov 2, 2026
+CollaboratorAuthor
+More actions
+🤖 Agent: 阴影通道实例化已开 PR #882。ShadowMapPass 按 (mesh, two_sided, index range) 分组静态 caster，同组一次 instanced draw；实例矩阵复用阴影通道的 bone SSBO（紧跟骨骼调色板），SV_InstanceID + push._pad.x 选矩阵，push._pad.y 表示实例数，不新增 descriptor / binding。所有静态阴影管线现在都带 set 0 骨骼布局并绑定该描述符集。视锥剔除仍逐 caster 统计，新增 last_shadow_draw_calls()；GPU 测试断言两个相同 caster 只发一次阴影 draw。蒙皮 caster 保持单实例。
+Excurs1ons
+added a commit that references this issue on Nov 2, 2026
+feat(render): instance identical static shadow casters (#491) (#882)
+...
+cc11d86
+Excurs1ons commented on Nov 2, 2026
+Excurs1ons
+on Nov 2, 2026
+CollaboratorAuthor
+More actions
+🤖 Agent: 阴影通道实例化已合入（PR #882 → cc11d86）。ShadowMapPass 按 (mesh, two_sided, index range) 分组静态 caster，同组一次 instanced draw；实例矩阵复用 bone SSBO，SV_InstanceID + push._pad.x 选矩阵，push._pad.y 表示实例数，不新增 descriptor / binding。所有静态阴影管线都带 set 0 骨骼布局并绑定该描述符集。视锥剔除仍逐 caster 精确统计，新增 last_shadow_draw_calls()；GPU 测试断言两个相同 caster 只发一次阴影 draw。蒙皮 caster 保持单实例。
+#491 的三项核心能力现在都已落地：
+能力
+PR
+视锥剔除（主通道提取 + 光源视锥第二道保护）
+#526 / #863
+距离 LOD
+#869
+屏幕占比 LOD
+#874
+主通道静态实例化
+#880
+阴影通道静态实例化
+#882
+issue 里「1000 个箱子 = 2000 次 draw」的主/阴影路径现在都能合并成一次 instanced draw（相同 mesh / material / state 时）。剩下的是打磨项：透明合批、编辑器 LOD 面板；不属于「没有剔除 / 实例化 / LOD」的核心缺失，若有需要可以单独开 issue。本 issue 先关闭。
+Excurs1ons
+closed this as completedon Nov 2, 2026
+Excurs1ons
+removed
+agent/working已有 agent 在做已有 agent 在做
+on Nov 2, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area/renderVulkan 渲染、shader、swapchainVulkan 渲染、shader、swapchainenhancementNew feature or requestNew feature or requestneeds/triage等待人工 / agent 分诊等待人工 / agent 分诊
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

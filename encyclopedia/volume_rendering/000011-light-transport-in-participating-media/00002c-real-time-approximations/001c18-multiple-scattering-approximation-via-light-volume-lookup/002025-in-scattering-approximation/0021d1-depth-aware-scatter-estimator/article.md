@@ -1,0 +1,200 @@
+# Depth-Aware Scatter Estimator
+
+
+## Overview
+The Depth-Aware Scatter Estimator is a neural network-based module designed to estimate primary transmission and depth-dependent scatter contributions along rays, primarily in the context of X-ray imaging simulations [S1, unofficial]. It computes Beer-Lambert primary transmission, accumulates a scatter source, mixes it with an ASPP-conditioned gate, and adds a bounded scatter contribution to the primary image [S1, unofficial]. It is a child of [In-Scattering Approximation](2215-in-scattering-approximation.md), which provides a cheap approximation for in-scattering using remapped exponential decay, whereas this method uses a learned convolutional architecture to refine scatter estimation based on depth context [S1, unofficial].
+
+## How it works
+The method implements a neural network that takes ray-based volumetric data as input and outputs a corrected image with primary transmission and estimated scatter.
+
+### Inputs and Outputs
+*   **Input**: Volumetric data along rays, typically represented as a tensor of shape $[B, C, D, H, W]$ or similar, where $B$ is batch size, $C$ is channels (e.g., attenuation coefficient $\mu$), $D$ is depth samples, $H$ is height, and $W$ is width. The specific input channels are not fully detailed beyond $\mu$ and $dz$ (step size) being used for transmission calculation [S1, unofficial].
+*   **Output**: A tensor of shape $[B, 1, H, W]$ representing the final pixel intensity $I_{out}$ [S1, unofficial].
+
+### Data Structures and Parameters
+The module consists of several initialized convolutional layers and modules:
+1.  **Depth Convolution (`depth_conv`)**: A causal 1D convolution with kernel size 5, padding 4, and dilation 2 [S1, unofficial].
+2.  **Encoder Convolution (`enc`)**: A 1x1 convolution mapping $2 \cdot in\_ch$ channels to $base\_ch$ channels [S1, unofficial].
+3.  **ASPP Module**: Atrous Spatial Pyramid Pooling module with $base\_ch$ input and output channels [S1, unofficial].
+4.  **Alpha Head (`alpha_head`)**: A convolution mapping $base\_ch$ to 1 channel, initialized with a bias of -3.0 to keep alpha near 0 at initialization [S1, unofficial].
+5.  **Scatter Convolution (`scatter_conv`)**: A convolution mapping $in\_ch + base\_ch$ channels to 1 channel with kernel size 3 [S1, unofficial].
+6.  **Parameter `alpha_max`**: Upper bound on the learned scatter gating weight. Default is 0.4 [S1, unofficial].
+
+### Steps and Formulas
+The algorithm proceeds as follows:
+
+1.  **Compute Cumulative Attenuation**: Calculate the cumulative attenuation $\tau_z$ along the ray dimension $D$ using the cumulative sum of the product of the attenuation coefficient $\mu$ and the step size $dz$:
+    $$ \tau_z = \text{cumsum}(\mu \cdot dz) $$
+    [S1, unofficial]
+
+2.  **Compute Per-Sample Transmission**: Calculate the transmission $I_z$ for each sample:
+    $$ I_z = \exp(-\tau_z) $$
+    [S1, unofficial]
+
+3.  **Extract Primary Transmission**: Extract the primary transmission $I_{primary}$ as the transmission at the last sample along the ray (index -1):
+    $$ I_{primary} = I_z[-1] $$
+    [S1, unofficial]
+
+4.  **Compute Scatter Source**: Calculate the scatter source $S_z$ per depth:
+    $$ S_z = \mu \cdot dz \cdot I_z $$
+    [S1, unofficial]
+
+5.  **Apply Depth-Aware Weighting**:
+    *   Permute $S_z$ to shape $[B \cdot H \cdot W, C, D]$.
+    *   Apply `depth_conv` (causal 1D convolution).
+    *   Reshape back to $[B, C, D, H, W]$ to get weighted scatter source $S_w$ [S1, unofficial].
+
+6.  **Sum Scatter Source**: Sum $S_w$ along the depth dimension $D$ to get total scatter $S$:
+    $$ S = \sum_{d=0}^{D-1} S_w[:, :, d, :, :] $$
+    [S1, unofficial]
+
+7.  **Extract Exit Attenuation**: Extract $\tau_{exit}$ from the last sample of $\tau_z$:
+    $$ \tau_{exit} = \tau_z[-1] $$
+    [S1, unofficial]
+
+8.  **Encode Conditioning Features**:
+    *   Concatenate $I_{primary}$ and $\tau_{exit}$ along the channel dimension.
+    *   Apply ReLU activation.
+    *   Apply `enc` convolution to get encoded features $F_{enc}$ [S1, unofficial].
+
+9.  **Compute Context Features**: Apply the ASPP module to $F_{enc}$ to get context features $F_{aspp}$:
+    $$ F_{aspp} = \text{ASPP}(F_{enc}) $$
+    [S1, unofficial]
+
+10. **Compute Scatter Map**:
+    *   Concatenate scatter $S$ and ASPP features $F_{aspp}$ along the channel dimension.
+    *   Apply ReLU activation.
+    *   Apply `scatter_conv` to get the scatter map $M_{scatter}$ [S1, unofficial].
+
+11. **Compute Alpha Gating Weight**:
+    *   Apply sigmoid to the output of `alpha_head` (applied to $F_{aspp}$).
+    *   Scale by `alpha_max` to get the gating weight $\alpha$:
+        $$ \alpha = \text{alpha\_max} \cdot \sigma(\text{alpha\_head}(F_{aspp})) $$
+        [S1, unofficial]
+
+12. **Compute Final Output**: Add the primary transmission to the product of alpha and the scatter map:
+    $$ I_{out} = I_{primary} + \alpha \cdot M_{scatter} $$
+    [S1, unofficial]
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DepthAwareScatterEstimator(nn.Module):
+    def __init__(self, in_ch, base_ch, alpha_max=0.4):
+        super().__init__()
+        # Initialize depth_conv: causal 1D conv, kernel=5, padding=4, dilation=2
+        self.depth_conv = nn.Conv1d(in_ch, in_ch, kernel_size=5, padding=4, dilation=2, groups=in_ch)
+        
+        # Initialize enc: 1x1 conv, 2*in_ch -> base_ch
+        self.enc = nn.Conv2d(2 * in_ch, base_ch, kernel_size=1)
+        
+        # Initialize ASPP module (placeholder for actual ASPP implementation)
+        self.aspp = ASPPModule(base_ch)
+        
+        # Initialize alpha_head: base_ch -> 1, bias=-3.0
+        self.alpha_head = nn.Conv2d(base_ch, 1, kernel_size=1, bias=True)
+        self.alpha_head.bias.data.fill_(-3.0)
+        
+        # Initialize scatter_conv: in_ch + base_ch -> 1, kernel=3
+        self.scatter_conv = nn.Conv2d(in_ch + base_ch, 1, kernel_size=3)
+        
+        self.alpha_max = alpha_max
+
+    def forward(self, mu, dz):
+        # mu: [B, C, D, H, W], dz: [B, 1, D, H, W] or broadcastable
+        # Step 1: Compute cumulative attenuation tau_z
+        # cumsum along depth dimension D (dim=2)
+        mu_dz = mu * dz
+        tau_z = torch.cumsum(mu_dz, dim=2)
+        
+        # Step 2: Compute per-sample transmission I_z
+        I_z = torch.exp(-tau_z)
+        
+        # Step 3: Extract primary transmission I_primary
+        I_primary = I_z[:, :, -1, :, :]  # [B, C, H, W]
+        
+        # Step 4: Compute scatter source S_z
+        S_z = mu * dz * I_z
+        
+        # Step 5: Apply depth-aware weighting
+        # Permute to [B*H*W, C, D]
+        B, C, D, H, W = S_z.shape
+        S_z_perm = S_z.permute(0, 3, 4, 1, 2).reshape(B * H * W, C, D)
+        
+        # Apply depth_conv
+        S_w_perm = self.depth_conv(S_z_perm)
+        
+        # Reshape back to [B, C, D, H, W]
+        S_w = S_w_perm.reshape(B, H, W, C, D).permute(0, 3, 4, 1, 2)
+        
+        # Step 6: Sum along depth dimension D
+        S = S_w.sum(dim=2)  # [B, C, H, W]
+        
+        # Step 7: Extract exit attenuation tau_exit
+        tau_exit = tau_z[:, :, -1, :, :]  # [B, C, H, W]
+        
+        # Step 8: Encode conditioning features
+        # Concatenate I_primary and tau_exit along channel dim
+        cond_features = torch.cat([I_primary, tau_exit], dim=1)  # [B, 2*C, H, W]
+        cond_features = F.relu(cond_features)
+        F_enc = self.enc(cond_features)  # [B, base_ch, H, W]
+        
+        # Step 9: Compute context features
+        F_aspp = self.aspp(F_enc)  # [B, base_ch, H, W]
+        
+        # Step 10: Compute scatter map
+        scatter_input = torch.cat([S, F_aspp], dim=1)  # [B, C + base_ch, H, W]
+        scatter_input = F.relu(scatter_input)
+        M_scatter = self.scatter_conv(scatter_input)  # [B, 1, H, W]
+        
+        # Step 11: Compute alpha gating weight
+        alpha_head_out = self.alpha_head(F_aspp)  # [B, 1, H, W]
+        alpha = self.alpha_max * torch.sigmoid(alpha_head_out)  # [B, 1, H, W]
+        
+        # Step 12: Compute final output
+        I_out = I_primary + alpha * M_scatter
+        
+        return I_out
+
+class ASPPModule(nn.Module):
+    def __init__(self, in_ch):
+        super().__init__()
+        # Placeholder for actual ASPP implementation
+        # Typically involves convolutions with different dilations
+        self.conv1 = nn.Conv2d(in_ch, in_ch, kernel_size=1)
+        self.conv2 = nn.Conv2d(in_ch, in_ch, kernel_size=3, padding=1, dilation=1)
+        self.conv3 = nn.Conv2d(in_ch, in_ch, kernel_size=3, padding=1, dilation=2)
+        self.conv4 = nn.Conv2d(in_ch, in_ch, kernel_size=3, padding=1, dilation=4)
+        self.conv5 = nn.Conv2d(in_ch, in_ch, kernel_size=1)
+        
+    def forward(self, x):
+        # Simplified ASPP: sum of convolutions
+        out = self.conv1(x) + self.conv2(x) + self.conv3(x) + self.conv4(x) + self.conv5(x)
+        return out
+```
+
+### Edge Cases and Pitfalls
+*   **Initialization**: The alpha head is initialized with a bias of -3.0 to ensure that the initial scatter contribution is near zero, preventing early training instability [S1, unofficial].
+*   **Causality**: The `depth_conv` is causal, meaning it only uses information from previous depth samples, which is critical for physically plausible scatter estimation along the ray [S1, unofficial].
+*   **Precision**: The use of `cumsum` for attenuation can accumulate floating-point errors for very long rays or high attenuation coefficients. Using `exp(-cumsum)` directly is standard but may suffer from underflow for large $\tau_z$.
+*   **Boundary Conditions**: The causal convolution with padding 4 and kernel 5 requires careful handling of the first few depth samples, which are influenced by the padding (assumed to be zero or reflected values depending on implementation) [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: The method involves several convolutions and element-wise operations. The complexity is dominated by the convolutions, which are $O(B \cdot H \cdot W \cdot D \cdot k)$ for the depth convolution and $O(B \cdot H \cdot W \cdot C_{in} \cdot C_{out})$ for the 2D convolutions, where $k$ is the kernel size.
+*   **Memory Complexity**: The method requires storing intermediate tensors for $I_z$, $S_z$, $S_w$, and feature maps. The memory usage is proportional to $B \cdot H \cdot W \cdot D \cdot C$.
+*   **Performance**: Specific performance metrics are not provided in the sources [S1, unofficial].
+*   **Strengths**: The method learns to estimate scatter based on depth context, potentially providing more accurate results than simple exponential decay approximations. The causal convolution ensures physical plausibility.
+*   **Limitations**: The method requires training data and a neural network inference step, which may be slower than analytical approximations. The performance depends on the quality of the training data and the architecture choices.
+*   **When to Use**: Use when a learned, depth-aware scatter estimation is needed and training data is available.
+*   **When Not to Use**: Use when real-time performance is critical and training data is not available, or when a simpler analytical approximation is sufficient.
+
+## Background
+The Depth-Aware Scatter Estimator is part of the FlashDRR project, which focuses on fast digital radiograph generation [S1, unofficial]. It was developed by pcarnah as a prototype module for estimating primary transmission and scatter contributions in X-ray imaging simulations [S1, unofficial]. The method builds on the principles of in-scattering approximation but introduces a neural network-based approach to refine the scatter estimation using depth context.
+
+## Sources
+[S1] pcarnah/flashdrr, https://github.com/pcarnah/flashdrr, fetched 2026-10-26 (unofficial)

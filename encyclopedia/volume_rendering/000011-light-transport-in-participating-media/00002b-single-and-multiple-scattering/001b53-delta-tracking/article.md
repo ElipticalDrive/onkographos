@@ -3,29 +3,29 @@
 Also called: Homogenization, Homogenized Free-Flight Sampling, Null-Scattering, Woodcock Tracking
 
 ## Overview
-Delta tracking is a Monte Carlo method for sampling free path lengths in heterogeneous participating media by converting the medium into a homogeneous one via "fake" particles (null-scattering) [S1, S2, S4]. It solves the problem of computing transmittance and scattering events in volumes where the extinction coefficient varies spatially, avoiding the implicit bias of equidistant ray marching [S3, S4]. It sets itself apart from [Homogeneous Medium Sampling](980-homogeneous-medium-sampling.md) by handling spatially varying density without subdivision, and from [Single-scattering homogeneous volume rendering](1135-single-scattering-homogeneous-volume-rendering.md) by providing an unbiased estimator at the cost of potentially high variance in sparse regions [S2, S4].
+Delta tracking is a Monte Carlo method for sampling free path lengths in heterogeneous participating media by converting the medium into a homogeneous one via "fake" particles (null-scattering) [S1][S2, S4, unofficial]. It solves the problem of computing transmittance and scattering events in volumes where the extinction coefficient varies spatially, avoiding the implicit bias of equidistant ray marching [S3, S4, unofficial]. It sets itself apart from [Homogeneous Medium Sampling](980-homogeneous-medium-sampling.md) by handling spatially varying density without subdivision, and from [Single-scattering homogeneous volume rendering](1135-single-scattering-homogeneous-volume-rendering.md) by providing an unbiased estimator at the cost of potentially high variance in sparse regions [S2, S4, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a volume dataset providing density $\rho(\mathbf{x})$ or extinction $\sigma_t(\mathbf{x})$ at any point; the majorant extinction coefficient $\sigma_t^{\max}$ (the global maximum of $\sigma_t$ in the volume) [S2, S4].
-*   **Output:** A sequence of interaction points and types (real collision, null collision, or surface hit) allowing the accumulation of radiance [S1, S4].
+*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a volume dataset providing density $\rho(\mathbf{x})$ or extinction $\sigma_t(\mathbf{x})$ at any point; the majorant extinction coefficient $\sigma_t^{\max}$ (the global maximum of $\sigma_t$ in the volume) [S2, S4, unofficial].
+*   **Output:** A sequence of interaction points and types (real collision, null collision, or surface hit) allowing the accumulation of radiance [S1][S4, unofficial].
 
 **Data Structures:**
-*   **Volume:** A sparse or dense grid (e.g., VDB) supporting point queries for density/extinction [S2].
-*   **Majorant:** A single scalar value $\sigma_t^{\max}$, computed by iterating through all voxels to find the maximum density and converting it to extinction using the medium's scattering and absorption coefficients [S2].
+*   **Volume:** A sparse or dense grid (e.g., VDB) supporting point queries for density/extinction [S2, unofficial].
+*   **Majorant:** A single scalar value $\sigma_t^{\max}$, computed by iterating through all voxels to find the maximum density and converting it to extinction using the medium's scattering and absorption coefficients [S2, unofficial].
 
 **Steps:**
 1.  **Initialize:** Set current position $\mathbf{p} = \mathbf{o}$ and distance traveled $t = 0$ [G].
 2.  **Sample Free Path:** Generate a uniform random number $\xi \in [0, 1]$ [G]. Sample the distance to the next candidate collision $d$ using the majorant extinction:
     $$ d = -\frac{\ln(\xi)}{\sigma_{t}^{\max}} $$
-    [S2]
+    [S2, unofficial]
 3.  **Advance:** Update position $\mathbf{p} \leftarrow \mathbf{p} + d \cdot \mathbf{d}$ and $t \leftarrow t + d$ [G].
-4.  **Check Boundary:** If $t \ge t_{\text{hit}}$ or $\mathbf{p}$ is outside the volume bounds, terminate the ray and return surface/background contribution [S1, S4].
-5.  **Evaluate Density:** Sample the actual extinction $\sigma_t(\mathbf{p})$, absorption $\sigma_a(\mathbf{p})$, and scattering $\sigma_s(\mathbf{p})$ coefficients at the new position $\mathbf{p}$ from the volume data [S2, S5].
+4.  **Check Boundary:** If $t \ge t_{\text{hit}}$ or $\mathbf{p}$ is outside the volume bounds, terminate the ray and return surface/background contribution [S1][S4, unofficial].
+5.  **Evaluate Density:** Sample the actual extinction $\sigma_t(\mathbf{p})$, absorption $\sigma_a(\mathbf{p})$, and scattering $\sigma_s(\mathbf{p})$ coefficients at the new position $\mathbf{p}$ from the volume data [S2, unofficial][S5].
 6.  **Event Selection:** Compute probabilities for absorption ($p_{\text{absorb}} = \sigma_a / \sigma_t^{\max}$), scattering ($p_{\text{scatter}} = \sigma_s / \sigma_t^{\max}$), and null collision ($p_{\text{null}} = \max(0, 1 - p_{\text{absorb}} - p_{\text{scatter}})$) [S5]. Select an event using a uniform random number [S5].
     *   If **absorption**, terminate the path and add emission to radiance [S5].
     *   If **scattering**, sample the phase function, update throughput, and continue with the new ray direction [S5].
-    *   If **null collision**, the ray continues in a straight line without scattering or absorption, and the path throughput remains unchanged [S1, S2]. Return to Step 2 from the current position $\mathbf{p}$.
+    *   If **null collision**, the ray continues in a straight line without scattering or absorption, and the path throughput remains unchanged [S1][S2, unofficial]. Return to Step 2 from the current position $\mathbf{p}$.
 
 **Formulas:**
 *   **Radiative Transfer Equation (RTE) for heterogeneous media (no emission):**
@@ -40,7 +40,7 @@ Delta tracking is a Monte Carlo method for sampling free path lengths in heterog
     where $\sigma_m$ is a constant total extinction coefficient chosen to be at least $\sigma_t^{\max}$ [S1].
 *   **Free Path Sampling:**
     $$ d = -\frac{\ln(\xi)}{\sigma_{t}^{\max}} $$
-    [S2]
+    [S2, unofficial]
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -112,12 +112,12 @@ def delta_tracking_step(ray_o, ray_d, t_hit, sample_extinction, sample_absorptio
 ```
 
 **Parameters:**
-*   $\sigma_t^{\max}$: The majorant extinction coefficient. Must be $\ge \sigma_t(\mathbf{x})$ for all $\mathbf{x}$ in the volume [S2]. Tighter majorants reduce null collisions [S4].
+*   $\sigma_t^{\max}$: The majorant extinction coefficient. Must be $\ge \sigma_t(\mathbf{x})$ for all $\mathbf{x}$ in the volume [S2, unofficial]. Tighter majorants reduce null collisions [S4, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Empty Space:** Volumes with large low-density regions cause many null collisions because $\sigma_t^{\max}$ remains high while $\sigma_t(\mathbf{p})$ is low, leading to $p_{\text{accept}} \approx 0$ [S2, S4].
-*   **Variance:** Binary transmittance estimation (accept/reject) introduces high variance. Ratio tracking mitigates this by attenuating contributions instead of terminating paths [S2].
-*   **Majorant Computation:** Finding $\sigma_t^{\max}$ requires a full scan of the volume data structure, which can be expensive for large sparse volumes [S2].
+*   **Empty Space:** Volumes with large low-density regions cause many null collisions because $\sigma_t^{\max}$ remains high while $\sigma_t(\mathbf{p})$ is low, leading to $p_{\text{accept}} \approx 0$ [S2, S4, unofficial].
+*   **Variance:** Binary transmittance estimation (accept/reject) introduces high variance. Ratio tracking mitigates this by attenuating contributions instead of terminating paths [S2, unofficial].
+*   **Majorant Computation:** Finding $\sigma_t^{\max}$ requires a full scan of the volume data structure, which can be expensive for large sparse volumes [S2, unofficial].
 
 ## Subtopics
 
@@ -131,21 +131,21 @@ Uses spatially varying majorants (e.g., via macrocells) to provide tighter bound
 A simplified Delta Tracking method that assumes a uniform majorant density of 1.0 and total extinction coefficient of 1.0 [S6, unofficial]. It samples the distance to the next interaction directly using the inverse CDF of the exponential distribution: $t \leftarrow t - \log(1 - u) / (\text{majorant} \times \sigma_t)$ [S6, unofficial]. It calculates the absolute ray position and checks bounds, returning true if within limits [S6, unofficial]. This method is inefficient for media with varying density or if the majorant is much larger than the actual extinction, leading to many rejected samples [S6, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of null collisions, which increases when the majorant is much larger than the actual extinction [S2, S4].
-*   **Memory Complexity:** Requires storage for the volume data and the majorant value [S2, S4].
+*   **Time Complexity:** Depends on the number of null collisions, which increases when the majorant is much larger than the actual extinction [S2, S4, unofficial].
+*   **Memory Complexity:** Requires storage for the volume data and the majorant value [S2, S4, unofficial].
 *   **Measured Performance:** Rendering a cloud with delta tracking and Next Event Estimation (10 samples per pixel) took 248 seconds on the tested hardware [S2, unofficial].
-*   **Strengths:** Unbiased; handles arbitrary heterogeneous media without subdivision; simple implementation [S2, S4].
-*   **Limitations:** High variance in sparse volumes; inefficient for large empty spaces; requires global majorant computation [S2, S4].
-*   **When to Use:** Highly detailed heterogeneous volumes where ray marching bias is unacceptable and subdivision is too costly [S2].
-*   **When Not to Use:** Volumes with significant empty space or large dynamic range in density without optimization (e.g., variable majorants) [S2, S4].
+*   **Strengths:** Unbiased; handles arbitrary heterogeneous media without subdivision; simple implementation [S2, S4, unofficial].
+*   **Limitations:** High variance in sparse volumes; inefficient for large empty spaces; requires global majorant computation [S2, S4, unofficial].
+*   **When to Use:** Highly detailed heterogeneous volumes where ray marching bias is unacceptable and subdivision is too costly [S2, unofficial].
+*   **When Not to Use:** Volumes with significant empty space or large dynamic range in density without optimization (e.g., variable majorants) [S2, S4, unofficial].
 
 ## Background
-Delta tracking, also known as Woodcock tracking, was introduced as a Monte Carlo method to simulate photon movement in heterogeneous media by sampling free path lengths instead of directly sampling data [S4]. It relies on the concept of fictitious particles to homogenize the density to an upper bound (majorant extinction) [S4]. The method avoids the implicit bias of ray marching by providing an unbiased estimate that converges with many rays [S3, S4]. It is widely used in volumetric path tracing for participating media like clouds and smoke [S2, S3].
+Delta tracking, also known as Woodcock tracking, was introduced as a Monte Carlo method to simulate photon movement in heterogeneous media by sampling free path lengths instead of directly sampling data [S4, unofficial]. It relies on the concept of fictitious particles to homogenize the density to an upper bound (majorant extinction) [S4, unofficial]. The method avoids the implicit bias of ray marching by providing an unbiased estimate that converges with many rays [S3, S4, unofficial]. It is widely used in volumetric path tracing for participating media like clouds and smoke [S2, S3, unofficial].
 
 ## Sources
 [S1] PDF Volumetric Path Tracing - University of California, San Diego, https://cseweb.ucsd.edu/~tzli/cse272/wi2023/homework2.pdf, fetched 2026-10-30
 [S2] Volumetric Rendering using Path Tracing, https://zydak.github.io/Clouds/index.html, fetched 2026-10-27 (unofficial)
-[S3] PDF Volumetric Path Tracing, https://jugoodma.github.io/docs/740-paper.pdf, fetched 2026-10-27
-[S4] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27
+[S3] PDF Volumetric Path Tracing, https://jugoodma.github.io/docs/740-paper.pdf, fetched 2026-10-27 (unofficial)
+[S4] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)
 [S5] 14.2 Volume Scattering Integrators, https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/Volume_Scattering_Integrators, fetched 2026-10-29
 [S6] GitHub - VIDILabs/open-volume-renderer: Open source modular multi ..., https://github.com/VIDILabs/open-volume-renderer, fetched 2026-10-29 (unofficial)

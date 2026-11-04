@@ -1,0 +1,154 @@
+JAX-native tree toolkit for fast hierarchical tree structures: radix and k-d trees today, extensible to octrees and other trees in the near future. - perf(tree): node depths by pointer doubling — the KD-tree traversal was dispatch-bound by TobiBu · Pull Request #71 · TobiBu/yggdrax
+
+perf(tree): node depths by pointer doubling — the KD-tree traversal was dispatch-bound by TobiBu · Pull Request #71 · TobiBu/yggdrax · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+TobiBu
+commented
+Sep 6, 2026
+Copy link
+Copy Markdown
+Owner
+The finding
+The KD-tree traversal was 80× the radix backend's at N = 10⁶ (the worst number in Yggdrax I), and it was not in the walk.
+The KD-tree's dual-tree walk runs the same number of wavefront generations as radix's — 16 against 16 at N = 10⁴, 22 against 24 at 10⁵ — at the same mean occupancy and the same wavefront capacity (138 150 against 140 634). On device it is faster: 61.6 ms against radix's 64.6 ms at N = 10⁵.
+All of the excess was get_node_levels, called on every traversal by _result_to_interactions. When a topology carries a node_level field it hands it back; when it does not, it fell back to a Python loop of num_nodes - 1 max-relaxation rounds. Radix and octree carry the field; the KD-tree's topology does not, so it was the only backend taking the fallback.
+That is O(num_nodes) eagerly dispatched primitives:
+N
+KD-tree nodes
+loop rounds
+get_node_levels
+per round
+10³
+31
+30
+46.9 ms
+1.56 ms
+10⁴
+511
+510
+799.0 ms
+1.57 ms
+10⁵
+4 095
+4 094
+6 385.3 ms
+1.56 ms
+cProfile of one warmed traversal at N = 10⁵: 32 896 dispatched primitives for the KD-tree against 134 for radix. Same disease as the octree build (d775f87), in a different place — not more work, just more launches.
+The change
+Depths now come from a device-side pointer-doubling lax.while_loop: each node keeps a shortcut into its ancestor chain and the distance covered, a round doubles every shortcut's reach, so the walk to the root converges in O(log depth) rounds inside one dispatched computation whatever the tree's size.
+_interactions_impl._compute_node_depths already did exactly this inside the jitted walk; it becomes a thin alias for the shared helper, so the walk's depths and the interaction list's levels have one implementation and cannot drift apart.
+Result
+bench/differentiability/scaling.py --sizes 1000 10000 100000 1000000, leaf 64, θ = 0.6, one A100, jax 0.9.0. Traversal, ms:
+N
+radix
+kdtree before
+after
+kdtree/radix
+speed-up
+10³
+26.11
+74.42
+26.22
+1.00×
+2.8×
+10⁴
+41.86
+851.62
+46.27
+1.11×
+18.4×
+10⁵
+82.77
+6 703.50
+80.74
+0.98×
+83.0×
+10⁶
+710.27
+107 471.15
+491.05
+0.69×
+219×
+At N = 10⁶ the KD-tree traversal is now the fastest of the three backends. That is not an artefact: it emits 3 320 390 far and 2 996 204 near entries against radix's 3 842 956 and 6 154 042 — barely half the near-field work, because median splits give tighter nodes.
+Nothing about the tree moved. Node counts, far-list lengths and near-list lengths are identical to the pre-change run at every N and for every backend.
+Correctness
+Equal to the relaxation it replaces element for element: heap-shaped trees, single chains (the worst case for depth) and random forests with unattached nodes, at 18 sizes from 1 to 257; and on all three backends' real topologies, where the radix and octree results also agree with those topologies' own node_level field. Pinned in tests/unit/test_node_levels.py (43 cases), which tests against the definition — distance to the root along the parent chain — not against either implementation.
+get_node_levels is also used by the level-major geometry path and by grouped_interactions, which get the same fix for free.
+Checks
+pytest tests/unit tests/applications — 689 passed on a single CPU device (what CI runs).
+On a pinned GPU, 688/689: test_svgd_pallas_nearfield.py::test_the_twin_is_chunk_invariant fails identically on main (same digit, 1.130039386627306e-16). It asserts exact float64 equality across a chunked reduction, so it cannot hold on a GPU as written — a tolerance is the fix, and it is not this PR's file.
+tests/unit/test_kd_tree_parity.py, test_backend_conformance.py, test_interactions_backend_parity.py — 21 passed.
+black, isort clean; basedpyright 0 errors on both touched files.
+Report: reports/YGGDRAX_kdtree_traversal_report.md in the programme repo.
+🤖 Generated with Claude Code
+perf(tree): node depths by pointer doubling -- the KD-tree traversal …
+…
+fb3db6f
+```
+…was dispatch-bound
+
+`get_node_levels` fell back to a Python loop of `num_nodes - 1` max-relaxation
+rounds whenever a topology carried no `node_level` field. The radix and octree
+topologies carry one; the KD-tree's does not, so it was the only backend taking
+that fallback -- and `_result_to_interactions` calls it on every traversal.
+
+Measured on an A100, N = 1e5, leaf 64, theta 0.6, mac dehnen: the fallback is
+6385 ms of the KD-tree's 6665 ms traversal, against 0.01 ms for radix's, and it
+costs a flat 1.56 ms per node at every size (46.9 ms / 30 nodes, 799 ms / 510,
+6385 ms / 4094). cProfile attributes 32 896 eagerly dispatched primitives to
+the KD-tree walk and 134 to radix's -- the same disease as the octree build.
+
+The walk itself was never the problem: it runs the same number of wavefront
+generations as radix's (16 vs 16 at N = 1e4, 22 vs 24 at 1e5) at the same mean
+occupancy, and the raw walk is *faster* for the KD-tree at N = 1e5 (61.6 ms
+against 64.6 ms).
+
+Depths now come from a device-side pointer-doubling `lax.while_loop`: one
+dispatched computation, O(log depth) rounds. `_compute_node_depths`, which
+already did this inside the jitted walk, becomes a thin alias so the walk's
+depths and the interaction list's levels have one implementation.
+
+Verified equal to the relaxation element for element on heaps, paths and
+forests with padded nodes at 18 sizes, and on all three backends -- where the
+radix and octree topologies also agree with their own `node_level` field.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+TobiBu
+mentioned this pull request
+Sep 6, 2026
+perf(kdtree): the leaf build under jit, and the bookkeeping that was never data-dependent
+#72
+Merged
+Hide details
+View details
+TobiBu
+merged commit cf2b464
+into
+main
+Sep 6, 2026
+10 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+TobiBu
+mentioned this pull request
+Nov 4, 2026
+perf(kdtree): re-land the leaf build under jit (#72 never reached main)
+#107
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

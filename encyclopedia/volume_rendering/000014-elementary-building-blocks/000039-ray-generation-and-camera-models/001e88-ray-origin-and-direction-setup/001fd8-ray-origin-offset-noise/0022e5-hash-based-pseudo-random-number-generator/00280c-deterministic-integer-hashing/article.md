@@ -1,0 +1,128 @@
+# Deterministic Integer Hashing
+
+Also called: hashCell, hashToFloat, lowbias32
+
+## Overview
+Deterministic integer hashing provides a platform-independent method for generating pseudo-random integers from integer coordinates, ensuring identical bit-exact results between CPU (TypeScript/C++) and GPU (GLSL) environments. It solves the reproducibility problem in procedural content generation where floating-point sine-based hashing drifts due to library implementation differences [S2, unofficial]. Unlike its sibling [Hash-based Pseudo-Random Number Generator](2896-hash-based-pseudo-random-number-generator.md) which relies on transcendental functions, this method uses only 32-bit bitwise operations and multiplication, guaranteeing consistent wrapping behavior for negative coordinates [S2, unofficial].
+
+## How it works
+The system consists of three components: a base 32-bit mixer (`uhash`), a 3D coordinate hasher (`hashCell`), and a float converter (`hashToFloat`).
+
+**Inputs and Outputs:**
+- `uhash`: Input `x` (32-bit unsigned integer), Output `h` (32-bit unsigned integer).
+- `hashCell`: Inputs `cx, cy, cz` (32-bit signed integers), Output `h` (32-bit unsigned integer).
+- `hashToFloat`: Input `h` (32-bit unsigned integer), Output `f` (32-bit float in $[0, 1)$).
+
+**Data Structures:**
+- All intermediate values are 32-bit unsigned integers (`uint32`).
+- Multiplication uses 32-bit wrapping semantics (modulo $2^{32}$).
+
+**Parameters:**
+- `uhash` multipliers: $M_{u1} = \text{0x7feb352d}$, $M_{u2} = \text{0x846ca68b}$ [S2, unofficial].
+- `hashCell` multipliers: $M_{cx} = \text{0x9e3779b9}$, $M_{cy} = \text{0x85ebca6b}$, $M_{cz} = \text{0xc2b2ae35}$ [S2, unofficial].
+- `compute_hash` (byte slice variant) constants: $M_0 = 2860486313\text{U}$, $M_1 = 3267000013\text{U}$ [S1, unofficial].
+
+**Steps:**
+
+1. **Base Mixer (`uhash`):**
+   Mix the input integer `x` using a sequence of XOR shifts and multiplications:
+   $$
+   \begin{aligned}
+   x &\leftarrow x \oplus (x \gg 16) \\
+   x &\leftarrow x \times M_{u1} \\
+   x &\leftarrow x \oplus (x \gg 15) \\
+   x &\leftarrow x \times M_{u2} \\
+   x &\leftarrow x \oplus (x \gg 16) \\
+   \text{return } x \gg 0
+   \end{aligned}
+   $$
+   Note: `>>> 0` or `x >> 0` ensures the result is treated as an unsigned 32-bit integer, masking out any sign extension if the language treats shifts differently on signed types [S2, unofficial].
+
+2. **3D Coordinate Hashing (`hashCell`):**
+   Combine three integer coordinates into a single hash:
+   $$
+   \begin{aligned}
+   h &\leftarrow \text{uhash}(cx \times M_{cx}) \\
+   h &\leftarrow \text{uhash}(h \oplus (cy \times M_{cy})) \\
+   h &\leftarrow \text{uhash}(h \oplus (cz \times M_{cz})) \\
+   \text{return } h \gg 0
+   \end{aligned}
+   $$
+   Negative coordinates are handled naturally because the multiplication and XOR operations on 32-bit integers wrap identically to GLSL's `uint(int)` cast [S2, unofficial].
+
+3. **Float Conversion (`hashToFloat`):**
+   Map the integer hash to a float in $[0, 1)$:
+   $$
+   f = \frac{h \gg 8}{16777216.0}
+   $$
+   Shifting right by 8 bits discards the lower 8 bits, leaving the top 24 bits. This ensures the value fits within the 24-bit mantissa of a 32-bit IEEE 754 float without precision loss during conversion [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def uhash(x: int) -> int:
+    # Ensure 32-bit unsigned interpretation
+    x = x & 0xFFFFFFFF
+    x ^= (x >> 16)
+    x = (x * 0x7feb352d) & 0xFFFFFFFF
+    x ^= (x >> 15)
+    x = (x * 0x846ca68b) & 0xFFFFFFFF
+    x ^= (x >> 16)
+    return x & 0xFFFFFFFF
+
+def hashCell(cx: int, cy: int, cz: int) -> int:
+    # Constants
+    M_CX = 0x9e3779b9
+    M_CY = 0x85ebca6b
+    M_CZ = 0xc2b2ae35
+    
+    # Mix coordinates
+    h = uhash(cx * M_CX)
+    h = uhash(h ^ (cy * M_CY))
+    h = uhash(h ^ (cz * M_CZ))
+    return h
+
+def hashToFloat(h: int) -> float:
+    # Shift top 24 bits down to 24-bit precision range
+    # 16777216 = 2^24
+    return ((h >> 8) & 0xFFFFFF) / 16777216.0
+
+def compute_hash_byte_slice(data: list) -> int:
+    """
+    Alternative hash for byte slices (e.g., from S1).
+    data: list of integers 0-255
+    """
+    M0 = 2860486313
+    M1 = 3267000013
+    h = M0
+    for b in data:
+        h = ((h ^ b) * M1) & 0xFFFFFFFF
+    return h
+```
+
+**Edge Cases and Pitfalls:**
+- **Negative Coordinates:** Unlike sine-based hashing, integer hashing handles negative inputs correctly because 32-bit two's complement arithmetic wraps consistently across platforms [S2, unofficial].
+- **Precision Loss:** Using the full 32-bit integer directly in a float conversion would lose precision because the mantissa only holds 24 bits. The `>> 8` shift is critical [S2, unofficial].
+- **Platform Drift:** Avoid `sin()` or `cos()` for hashing if CPU and GPU code share the same hash function, as math library implementations may differ slightly [S2, unofficial].
+
+## Subtopics
+
+### PCG Random Number Generator
+Wraps the PCG32 fast random number generator, providing seeded streams per job. It seeds the engine for a specific job `jid` using a hash of the global seed and job ID: `m_engine.seed(hash(m_seed, jid))`. It generates uniform floats in $[0, 1-\epsilon]$ via `val = engine()` and `return min(0x1.fffffep-1, val * 0x1p-32f)` [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for `uhash` and `hashCell`. $O(N)$ for `compute_hash` where $N$ is the number of bytes.
+- **Memory Complexity:** $O(1)$ auxiliary space.
+- **Performance:** Extremely fast due to simple bitwise operations and multiplication. No transcendental function calls.
+- **Strengths:** Bit-exact reproducibility across CPU/GPU boundaries; handles negative coordinates naturally; no precision loss in float conversion.
+- **Limitations:** Not a cryptographic hash; statistical properties depend on the specific mixer constants.
+
+## Background
+This method originates from the `neon-raymarcher` project, which required identical procedural generation on both a TypeScript CPU renderer and a GLSL GPU renderer [S2, unofficial]. The `compute_hash` variant is sourced from the `mc` project [S1, unofficial]. The use of specific constants like `0x9e3779b9` (related to the golden ratio) is common in hash functions to ensure good bit dispersion [S2, unofficial].
+
+## Sources
+[S1] nsf/mc, https://github.com/nsf/mc, fetched 2026-10-26 (unofficial)
+[S2] PIGJET/neon-raymarcher, https://github.com/PIGJET/neon-raymarcher, fetched 2026-10-27 (unofficial)
+[S3] Shibodd/volume_path_tracer, https://github.com/Shibodd/volume_path_tracer, fetched 2026-10-26 (unofficial)

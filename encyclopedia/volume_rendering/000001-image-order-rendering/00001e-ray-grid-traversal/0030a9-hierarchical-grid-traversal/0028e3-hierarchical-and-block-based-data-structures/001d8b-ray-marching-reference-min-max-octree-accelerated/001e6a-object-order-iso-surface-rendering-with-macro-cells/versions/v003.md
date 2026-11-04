@@ -1,0 +1,53 @@
+# Object-Order Iso-Surface Rendering with Macro-Cells
+Also called: Neubauer macro-cell octree
+
+## Overview
+An iso-surface rendering algorithm based on object-order ray casting that subdivides data into macro-cells to build a min/max octree, reducing traversal steps by rasterizing hexagonal footprints [S1, unofficial]. It builds on [Ray-marching reference (min-max octree accelerated)](1554-ray-marching-reference-min-max-octree-accelerated.md) by replacing per-pixel octree traversal with macro-cell rasterization to reuse traversal paths for multiple pixels [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Scalar volume dataset $V$ [S1, unofficial].
+- Macro-cell size parameter $m$ (integer, typically $4 \le m \le 10$) [S1, unofficial].
+- Image plane resolution and camera parameters (required for pixel iteration and projection) [G].
+- Iso-value threshold $T$ (implied by boundary cell checks) [G].
+
+**Outputs:**
+- Final image buffer with color and depth values for each pixel [G].
+
+**Data Structures:**
+1. **Min/Max Octree:** Hierarchical tree where each node stores the minimum and maximum scalar values of its sub-volume [S1, unofficial]. Leaf nodes correspond to macro-cells of size $m^3$ [S1, unofficial].
+2. **Boundary Cell Flag:** Boolean indicating if the iso-surface potentially intersects the sub-volume ($\min < T < \max$) [G].
+
+**Steps:**
+1. **Preprocessing:** Subdivide the entire dataset $V$ into macro-cells of size $m^3$ [S1, unofficial]. Build a min/max octree from these macro-cells [S1, unofficial].
+2. **Octree Traversal:** For each unprocessed pixel on the image plane, traverse the octree [S1, unofficial]. At each traversal step, check the min/max values to determine if boundary cells (cells possibly containing the iso-surface) are in the sub-tree [S1, unofficial].
+3. **Macro-Cell Rasterization:** At a leaf node, project the boundaries of the macro-cell onto the image plane, yielding a hexagonal footprint [S1, unofficial].
+4. **Local Ray Casting:** For each pixel within the hexagonal footprint, use local rays to traverse the macro-cell grid [S1, unofficial]. Use the Amanatides and Woo method for this traversal [S1, unofficial].
+5. **Intersection & Shading:** If a boundary cell is encountered during macro-cell traversal, perform an intersection test with the iso-surface [S1, unofficial]. If true, perform normal and shading calculations [S1, unofficial].
+
+**Parameters:**
+- Macro-cell size $m$: Usually between 4 and 10 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Floating-point precision in ray-voxel traversal may cause missed intersections. Use epsilon offsets for boundary checks [G].
+- **Degenerate Input:** If $T$ equals the min or max of a macro-cell, boundary flag logic must handle equality to avoid missing surfaces or including empty space [G].
+- **Hexagonal Projection:** Assumes perspective projection; orthogonal projection may yield different footprints [G].
+
+## Subtopics
+
+### [Object-Order Ray Casting with Min/Max Octrees](1814-object-order-ray-casting-with-min-max-octrees.md)
+A software-based volume rendering technique for regular grids that uses orthogonal projection and pre-computed min/max octrees to skip empty regions. It processes visible volume cells directly rather than pixels, distinguishing it from image-order methods. Choose this variant when working with regular grids and orthogonal cameras where pre-computed traversal acceleration is preferred over macro-cell rasterization.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Strengths:** Reduces traversal steps by rasterizing hexagonal footprints, reusing traversal paths for multiple pixels [S1, unofficial].
+- **Limitations:** Hexagonal footprint calculation and rasterization add complexity [S1, unofficial].
+- **When to Use:** Suitable for interactive visualization of large volume datasets where iso-surface extraction is required [S1, unofficial].
+- **When Not to Use:** Not given in the sources [S1, unofficial].
+
+## Background
+Proposed by Neubauer et al. [Neubauer02] as an alternative to image-order ray casting [S1, unofficial]. It builds on the min/max octree concept introduced by Wilhelms et al. [Wilhelms92] and uses the Amanatides and Woo voxel traversal algorithm [Amanatides87] [S1, unofficial].
+
+## Sources
+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)

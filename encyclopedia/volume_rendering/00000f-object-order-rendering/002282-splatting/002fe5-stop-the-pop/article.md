@@ -1,0 +1,117 @@
+# Stop-the-pop
+## Overview
+Stop-the-pop is a technique to mitigate popping artifacts in volume splatting that are caused by the sorting procedure of Gaussians along the ray [S1][S3, unofficial]. It uses hierarchical or pixel-resorting to remove popping artifacts without sacrificing speed [S2, unofficial]. It is distinct from methods that modify opacity compensation terms [S1][S3, unofficial] or use ray-tracing-style intersections for accurate depth [S2, unofficial].
+## How it works
+Inputs: A set of 3D Gaussians (position, covariance, color, opacity) and a camera view.
+Outputs: A rendered image with reduced popping artifacts.
+
+Data Structures:
+- Gaussian List: Array of Gaussian primitives.
+- Pixel Bucket: For each pixel, a list of Gaussians sorted by depth.
+- Hierarchical Structure: A tree or grid structure allowing fast re-sorting of Gaussians within a local region (pixel or tile) [S2, unofficial].
+
+Steps:
+1. Project all 3D Gaussians to 2D screen space to determine their footprint and depth [S10, unofficial].
+2. For each pixel (or tile), identify the Gaussians whose footprints cover it [S10, unofficial].
+3. Sort these Gaussians by depth (front-to-back) [S10, unofficial].
+4. Apply the Stop-the-pop algorithm:
+   - Detect potential popping events: These occur when the relative depth order of Gaussians changes significantly between frames or when a Gaussian enters/leaves the pixel's view, causing abrupt changes in the accumulated color/opacity [S1].
+   - Hierarchical/Pixel-resorting: Instead of a global sort, perform a localized sort or use a hierarchical structure to maintain a consistent depth ordering for Gaussians contributing to the same pixel or small region [S2, unofficial]. This ensures that the compositing order remains stable even if the exact depth values fluctuate slightly due to floating-point precision or camera movement [S2, unofficial].
+   - The specific implementation details of the hierarchical structure (e.g., k-d tree, grid) are not provided in the sources [S2, unofficial]. The core idea is to prevent the "pop" caused by the discrete nature of the sorting process [S1].
+5. Composite the sorted Gaussians using alpha blending [S10, unofficial].
+
+Parameters:
+- Sorting threshold: Not given in the sources.
+- Hierarchical level: Not given in the sources.
+
+Edge cases:
+- Degenerate input: If Gaussians have identical depths, the sort order may be unstable. The hierarchical approach helps mitigate this by maintaining a consistent local order [S2, unofficial].
+- Precision: Floating-point errors in depth calculation can cause sorting instability. The method aims to reduce the visual impact of these errors [S1].
+
+## Operating characteristics
+Time complexity: The hierarchical sorting reduces the complexity compared to a global sort, but the exact complexity is not given in the sources [S2, unofficial].
+Memory complexity: Additional memory is required for the hierarchical structure [S2, unofficial].
+Performance: It removes popping artifacts without sacrificing speed [S2, unofficial].
+Strengths: Reduces visual artifacts (popping) caused by sorting [S1][S3, unofficial].
+Limitations: Adds complexity to the sorting step [S2, unofficial].
+
+## Background
+Origin: Stop-the-pop (StopThePop) was introduced by Radl et al. at SIGGRAPH 2024 [S2, unofficial].
+History: It addresses issues in 3D Gaussian Splatting where the sorting procedure can cause popping artifacts [S1][S3, unofficial].
+Usage: It is used in 3D Gaussian Splatting pipelines to improve visual quality [S2, unofficial].
+
+## Subtopics
+
+### [EWA Splatting](1069-ewa-splatting.md)
+Uses elliptical weighted average for footprint calculation. Choose when anisotropic filtering is needed.
+
+### [Ray-Driven Splatting](1156-ray-driven-splatting.md)
+Sorts splats per ray. Choose when exact depth sorting is critical.
+
+### [Splatting Without the Blur](1157-splatting-without-the-blur.md)
+Uses box filters. Choose when sharp edges are preferred.
+
+### [Footprint Evaluation](1180-footprint-evaluation.md)
+Precise calculation of splat contribution. Choose for high accuracy.
+
+### [Rendering Pipelines and Passes](1411-rendering-pipelines-and-passes.md)
+General pipeline structure.
+
+### [SpotlessSplats](1476-spotlesssplats.md)
+Another method to reduce artifacts. Compare for artifact reduction strategies.
+
+### [Anti-Aliasing and Filtering](1574-anti-aliasing-and-filtering.md)
+General anti-aliasing techniques.
+
+### [Gaussian Avatar Reconstruction](1575-gaussian-avatar-reconstruction.md)
+Specific application to avatars.
+
+### [Splat Extent and Projection](1792-splat-extent-and-projection.md)
+How splat size is determined.
+
+### [CPU-Based Splat Sorting](2097-cpu-based-splat-sorting.md)
+Sorting on CPU.
+
+### [Slice-by-Slice (Sheet Buffer) Splatting](2110-slice-by-slice-sheet-buffer-splatting.md)
+Sheet-based compositing.
+
+### [Splat/Mesh Blending with Transition Smoothing](2145-splat-mesh-blending-with-transition-smoothing.md)
+Blending splats with meshes.
+
+### [Order Independent Transparency for Point-Based Models](2150-order-independent-transparency-for-point-based-models.md)
+OIT for splats.
+
+### [Line Capsule Primitive](3131-line-capsule-primitive.md)
+Alternative primitive.
+
+### [Ultrafast Spatial Texture-Atlas Splatting](3245-ultrafast-spatial-texture-atlas-splatting.md)
+Fast rendering technique.
+
+### [Lighting and Material Interaction](3851-lighting-and-material-interaction.md)
+Shading models.
+
+### [Anti-Aliasing for Splatting](4471-anti-aliasing-for-splatting.md)
+Specific AA for splats.
+
+### [Multi-View Splatting Pipeline with Fill-Rate Filtering](4689-multi-view-splatting-pipeline-with-fill-rate-filtering.md)
+Multi-view setup.
+
+### [EWA Splatting with kNN Covariance Estimation](4690-ewa-splatting-with-knn-covariance-estimation.md)
+EWA variant.
+
+### [3D Gaussian Splatting LOD methods](5439-3d-gaussian-splatting-lod-methods.md)
+Level of detail.
+
+### [Hierarchical and Multi-Resolution Splatting](5618-hierarchical-and-multi-resolution-splatting.md)
+Hierarchical structures.
+
+### [Mueller's Splatting Approach](5752-mueller-s-splatting-approach.md)
+Historical approach.
+
+### [Primitive Geometry](6264-primitive-geometry.md)
+Geometry of primitives.
+
+## Sources
+[S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
+[S2] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S3] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)

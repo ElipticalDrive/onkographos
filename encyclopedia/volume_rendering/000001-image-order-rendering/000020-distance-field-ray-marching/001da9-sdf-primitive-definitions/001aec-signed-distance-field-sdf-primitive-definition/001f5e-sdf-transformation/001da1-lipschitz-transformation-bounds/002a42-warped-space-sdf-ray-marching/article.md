@@ -1,0 +1,128 @@
+# Warped-Space SDF Ray Marching
+Also called: Road-space SDF, Sheared SDF
+
+## Overview
+Warped-Space SDF Ray Marching is a technique for rendering scenes with regularly spaced geometry (such as urban environments) by defining the scene in a sheared coordinate space ("road space") where buildings are axis-aligned, simplifying distance field computation [S1, unofficial]. It differs from standard Euclidean ray marching by applying a safety factor to the computed distances to compensate for the non-Euclidean metric introduced by the spatial transformation, preventing the ray from tunneling through walls [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Ray query point $p_{world}$ in world space [S1, unofficial].
+- Scene definition: A set of buildings, each defined by a center $c$ and half-extents $h$ in road space [S1, unofficial].
+- Road geometry function $roadX(z)$, which returns the lateral offset of the road center at longitudinal position $z$ [S1, unofficial].
+- Ground plane height $y_{ground}$ [S1, unofficial].
+- Safety factor $\alpha = 0.8$ [S1, unofficial].
+
+**Outputs:**
+- Marched distance $d_{out}$ and material ID [S1, unofficial].
+
+**Data Structures:**
+- Buildings are stored in a grid or hash map indexed by longitudinal cell [S1, unofficial].
+- Each building entry contains:
+  - `center`: vec3 $(c_x, c_y, c_z)$ in road space [S1, unofficial].
+  - `halfExt`: vec3 $(h_x, h_y, h_z)$ in road space [S1, unofficial].
+  - `materialID`: integer [S1, unofficial].
+
+**Steps:**
+1. **Transform to Road Space:** For a given world point $p$, compute its road space coordinate $q$:
+   $$ q = (p_x - roadX(p_z), p_y, p_z) $$
+   This transformation shears the world such that the road runs along the $z$-axis in road space [S1, unofficial].
+2. **Cell Identification:** Determine the longitudinal cell index for the current $z$-coordinate:
+   $$ baseC_z = \lfloor q_z / BLOCK\_DEPTH \rfloor $$
+   where $BLOCK\_DEPTH$ is the grid cell size in the $z$-direction [S1, unofficial].
+3. **Neighbor Iteration:** Iterate over 2 sides, $NROWS$ rows, and 3 $z$-neighbors ($dz \in \{-1, 0, 1\}$) [S1, unofficial].
+4. **Distance Computation:** For each present building, compute the signed distance to the axis-aligned box:
+   $$ d_{box} = sdBox(q - b.center, b.halfExt) $$
+   [S1, unofficial].
+5. **Take Minimum:** Track the minimum distance found across all buildings as $best$ [S1, unofficial].
+6. **Apply Safety Factor:** Multiply $best$ by $0.8$ [S1, unofficial].
+7. **Ground Comparison:** Compare $best$ with the ground plane distance; return the smaller distance and corresponding material ID [S1, unofficial].
+
+**Formulas:**
+- Coordinate transformation: $q = (p_x - roadX(p_z), p_y, p_z)$ [S1, unofficial].
+- Warped distance: $d_{warped} = d_{box}(q - b.center, b.halfExt) \times 0.8$ [S1, unofficial].
+
+**Parameters:**
+- $\alpha = 0.8$: Safety factor. Chosen because $|roadX'| \le \sim 0.52$, so the compression factor peaks at $\sim 1.13$. Since $0.8 < 1/1.13$, this ensures a valid Lipschitz lower bound, preventing tunneling [S1, unofficial].
+- $BLOCK\_DEPTH$: Grid cell size in $z$. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Tunneling:** Because the warped space is not Euclidean, the box distance is compressed by $|\nabla q_x| = \sqrt{1 + roadX'(z)^2}$ [S1, unofficial]. Without the $0.8$ factor, the marcher could step too far and pass through walls [S1, unofficial].
+- **Degenerate Input:** If $roadX'(z)$ is large, the compression factor increases [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+from math import floor, abs, max, inf
+
+GROUND_MATERIAL_ID = 0
+
+def ray_march_warped(p_world, roadX_func, buildings_grid, BLOCK_DEPTH, y_ground, alpha=0.8):
+    """
+    Performs a single distance query in warped space.
+    p_world: tuple/list of 3 floats (x, y, z) in world space.
+    roadX_func: callable returning lateral offset for a given z.
+    buildings_grid: dict mapping cell_z -> list of building dicts.
+    BLOCK_DEPTH: float, longitudinal cell size.
+    y_ground: float, ground plane height.
+    alpha: float, safety factor (default 0.8).
+    Returns: (distance, material_id)
+    """
+    # 1. Transform world point to road space
+    p_z = p_world[2]
+    road_offset = roadX_func(p_z)
+    q = (p_world[0] - road_offset, p_world[1], p_z)
+
+    # 2. Determine longitudinal cell index
+    base_cz = int(floor(q[2] / BLOCK_DEPTH))
+
+    best_dist = inf
+    best_mat_id = -1
+
+    # 3. Iterate over 3 z-neighbors (dz=-1 to 1)
+    # Source iterates over 2 sides, NROWS rows, and 3 z-neighbors;
+    # here we iterate over buildings in the relevant cells.
+    for dz in [-1, 0, 1]:
+        cell_z = base_cz + dz
+        cell_buildings = buildings_grid.get(cell_z, [])
+
+        for b in cell_buildings:
+            # 4. Compute box distance in road space
+            v = (q[0] - b.center[0], q[1] - b.center[1], q[2] - b.center[2])
+            dx = abs(v[0]) - b.halfExt[0]
+            dy = abs(v[1]) - b.halfExt[1]
+            dz_box = abs(v[2]) - b.halfExt[2]
+
+            # Standard AABB SDF
+            d_box = max(dx, max(dy, dz_box))
+
+            # 5. Take minimum distance
+            if d_box < best_dist:
+                best_dist = d_box
+                best_mat_id = b.material_id
+
+    # 6. Apply safety factor
+    best_dist *= alpha
+
+    # 7. Compare with ground plane distance
+    d_ground = p_world[1] - y_ground
+
+    if d_ground < best_dist:
+        return d_ground, GROUND_MATERIAL_ID
+    else:
+        return best_dist, best_mat_id
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of buildings in the current and adjacent longitudinal cells [S1, unofficial]. Typically small due to spatial partitioning [S1, unofficial].
+- **Memory Complexity:** $O(B)$ where $B$ is the total number of buildings, stored in a grid/hash structure [S1, unofficial].
+- **Strengths:** Simplifies building placement and SDF computation by aligning geometry with the coordinate axes in road space [S1, unofficial]. Efficient for dense, regular urban layouts [S1, unofficial].
+- **Limitations:** Only suitable for scenes with a dominant directional structure (e.g., roads) [S1, unofficial]. Requires careful tuning of the safety factor based on the maximum shear rate [S1, unofficial]. Not suitable for arbitrary curved paths without complex $roadX(z)$ definitions [S1, unofficial].
+- **When to use:** Urban environments, highways, or any scene with a strong linear or gently curving central axis [S1, unofficial].
+- **When not to use:** Scenes with no dominant direction, or where high precision is required without the overhead of dynamic safety factor calculation [S1, unofficial].
+
+## Background
+The technique is described in the context of a WebGL raymarcher implementation, specifically for rendering urban environments efficiently [S1, unofficial]. It leverages the concept of Lipschitz transformation bounds to ensure valid distance queries in non-Euclidean spaces [S1, unofficial].
+
+## Sources
+[S1] PIGJET/neon-raymarcher, https://github.com/PIGJET/neon-raymarcher, fetched 2026-10-27 (unofficial)

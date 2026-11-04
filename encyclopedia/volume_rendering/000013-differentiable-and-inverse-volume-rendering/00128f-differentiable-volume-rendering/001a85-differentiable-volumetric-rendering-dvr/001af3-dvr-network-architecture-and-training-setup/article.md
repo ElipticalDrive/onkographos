@@ -3,7 +3,7 @@
 Also called: DVR, DVR Implementation Details, DepthFunction, DepthModule, Differentiable Volumetric Rendering (Depth Estimation via Implicit Surface), Network Architecture and Training Configuration, Volume Rendering Integration
 
 ## Overview
-This article specifies the neural network architecture and training configuration for Differentiable Volumetric Rendering (DVR) [S1, S3]. It defines the implicit function network mapping 3D coordinates to occupancy logits and texture values, and details the hyperparameters, optimization strategy, and ray-sampling schedules required to train the model from single-view or multi-view inputs [S2, S3]. The method builds on [Differentiable Volumetric Rendering (DVR)](775-differentiable-volumetric-rendering-dvr.md) and relates to [DVR Training Losses](809-dvr-training-losses.md) and [Training Losses for Implicit Surface Learning](1526-training-losses-for-implicit-surface-learning.md).
+This article specifies the neural network architecture and training configuration for Differentiable Volumetric Rendering (DVR) [S1, unofficial][S3]. It defines the implicit function network mapping 3D coordinates to occupancy logits and texture values, and details the hyperparameters, optimization strategy, and ray-sampling schedules required to train the model from single-view or multi-view inputs [S2, unofficial][S3]. The method builds on [Differentiable Volumetric Rendering (DVR)](775-differentiable-volumetric-rendering-dvr.md) and relates to [DVR Training Losses](809-dvr-training-losses.md) and [Training Losses for Implicit Surface Learning](1526-training-losses-for-implicit-surface-learning.md).
 
 ## How it works
 
@@ -13,7 +13,7 @@ This article specifies the neural network architecture and training configuratio
 *   **Ray Direction ($\mathbf{d}$):** Normalized direction vector from camera origin through the pixel [G].
 *   **Decoder Network ($f_\theta$):** The implicit neural representation parameters $\theta$ [S3].
 *   **Context ($c$):** Latent code or conditioning vector (e.g., from an encoder network for single-view reconstruction) [S3].
-*   **Threshold ($\tau$):** Occupancy logit threshold for surface intersection (default 0.5) [S1].
+*   **Threshold ($\tau$):** Occupancy logit threshold for surface intersection (default 0.5) [S1, unofficial].
 *   **Depth Range:** Interval $[s_0, n\Delta s + s_0]$ covering the volume of interest [S3].
 
 **Outputs:**
@@ -23,40 +23,40 @@ This article specifies the neural network architecture and training configuratio
 ### Data Structures
 
 **Combined Network (Implicit Representation):**
-*   **Architecture:** 5 fully-connected ResNet blocks with ReLU activation [S2, S3].
+*   **Architecture:** 5 fully-connected ResNet blocks with ReLU activation [S2, unofficial][S3].
 *   **Input:** 3D coordinates $(x, y, z)$ concatenated with context $c$ (if applicable).
 *   **Output Layer:** Dimension 4.
-    *   Index 0: Occupancy probability/logit [S2, S3].
-    *   Indices 1-3: Texture (RGB) values [S2, S3].
+    *   Index 0: Occupancy probability/logit [S2, unofficial][S3].
+    *   Indices 1-3: Texture (RGB) values [S2, unofficial][S3].
 
 **Encoder Network (Single-View Reconstruction):**
-*   **Architecture:** ResNet-18 [S2, S3].
+*   **Architecture:** ResNet-18 [S2, unofficial][S3].
 *   **Input:** Single RGB image.
-*   **Output:** 256-dimensional latent code $z$ [S2, S3].
+*   **Output:** 256-dimensional latent code $z$ [S2, unofficial][S3].
 
 **DepthModule Parameters:**
-*   `tau` (float): Threshold for occupancy logits. Default: 0.5 [S1].
-*   `n_steps` (tuple): Number of evaluation steps for initial ray sampling. If `n_steps` is `None`, use `self.n_steps` [S1]. Default: `[128, 129]` [S1].
-*   `n_secant_steps` (int): Number of refinement steps for root-finding. Default: 8 [S1].
-*   `depth_range` (tuple): Range of possible depth values. Not relevant when unit cube intersection is used. Default: `[0., 2.4]` [S1].
-*   `method` (string): Refinement method. Options: 'secant' (default) [S1].
-*   `check_cube_intersection` (bool): Whether to intersect rays with the unit cube. Default: True [S1].
-*   `max_points` (int): Maximum number of points loaded to GPU memory. Default: 3,700,000 [S1].
-*   `schedule_ray_sampling` (bool): Whether to schedule ray sampling accuracy. Default: True [S1].
-*   `schedule_milestones` (list): Training iterations after which sampling accuracy doubles. Default: `[50000, 100000, 250000]` [S1].
-*   `init_resolution` (int): Initial resolution for ray sampling. Default: 16 [S1].
+*   `tau` (float): Threshold for occupancy logits. Default: 0.5 [S1, unofficial].
+*   `n_steps` (tuple): Number of evaluation steps for initial ray sampling. If `n_steps` is `None`, use `self.n_steps` [S1, unofficial]. Default: `[128, 129]` [S1, unofficial].
+*   `n_secant_steps` (int): Number of refinement steps for root-finding. Default: 8 [S1, unofficial].
+*   `depth_range` (tuple): Range of possible depth values. Not relevant when unit cube intersection is used. Default: `[0., 2.4]` [S1, unofficial].
+*   `method` (string): Refinement method. Options: 'secant' (default) [S1, unofficial].
+*   `check_cube_intersection` (bool): Whether to intersect rays with the unit cube. Default: True [S1, unofficial].
+*   `max_points` (int): Maximum number of points loaded to GPU memory. Default: 3,700,000 [S1, unofficial].
+*   `schedule_ray_sampling` (bool): Whether to schedule ray sampling accuracy. Default: True [S1, unofficial].
+*   `schedule_milestones` (list): Training iterations after which sampling accuracy doubles. Default: `[50000, 100000, 250000]` [S1, unofficial].
+*   `init_resolution` (int): Initial resolution for ray sampling. Default: 16 [S1, unofficial].
 
 ### Algorithm Steps
 
-1.  **Initialization:** Initialize `DepthModule` with parameters listed above [S1].
-2.  **Determine Sampling Steps:** If `n_steps` is `None`, use `self.n_steps` [S1]. If `schedule_ray_sampling` is `True` and current iteration `it` is provided, call `get_sampling_accuracy(it)` to determine the effective number of steps [S1].
+1.  **Initialization:** Initialize `DepthModule` with parameters listed above [S1, unofficial].
+2.  **Determine Sampling Steps:** If `n_steps` is `None`, use `self.n_steps` [S1, unofficial]. If `schedule_ray_sampling` is `True` and current iteration `it` is provided, call `get_sampling_accuracy(it)` to determine the effective number of steps [S1, unofficial].
 3.  **Ray Sampling:** Calculate step size $\Delta s$ based on the depth range and number of steps $n$ [S3]. Generate $n$ equally-spaced sample points along the ray:
     $$ \mathbf{p}_j^{\text{ray}} = \mathbf{r}_0 + (j\Delta s + s_0)\mathbf{d}, \quad j = 0, \dots, n-1 $$
     where $s_0$ determines the closest possible surface point [S3].
 4.  **Surface Detection:** Evaluate the decoder $f_\theta(\mathbf{p}_j^{\text{ray}}, c)$ for all samples [S3]. Find the smallest index $j$ such that the occupancy logit crosses the threshold $\tau$:
     $$ j = \operatorname{argmin}_{j'} \left( f_\theta(\mathbf{p}_{j'+1}^{\text{ray}}) \geq \tau > f_\theta(\mathbf{p}_{j'}^{\text{ray}}) \right) $$
     This identifies the interval $[j\Delta s + s_0, (j+1)\Delta s + s_0]$ containing the surface [S3].
-5.  **Refinement (Bisection Method):** Apply the bisection method within the identified interval to find the precise depth $\hat{d}$ [S3]. Iterate $n_{\text{secant\_steps}}$ times to refine the depth estimate [S1].
+5.  **Refinement (Bisection Method):** Apply the bisection method within the identified interval to find the precise depth $\hat{d}$ [S3]. Iterate $n_{\text{secant\_steps}}$ times to refine the depth estimate [S1, unofficial].
 6.  **Texture Sampling:** Compute surface point $\hat{\mathbf{p}} = \mathbf{r}_0 + \hat{d}\mathbf{d}$ [S3]. Query the decoder at $\hat{\mathbf{p}}$ to retrieve RGB values [S3].
 
 ### Pseudocode
@@ -150,36 +150,36 @@ def get_sampling_accuracy(it, schedule_milestones, init_resolution):
 ```
 
 ### Parameters and Typical Values
-*   **Batch Size:** 64 images [S2, S3].
-*   **Pixels per Image:** 1024 random pixels [S2, S3].
-*   **Optimizer:** Adam with learning rate $\gamma = 10^{-4}$ [S2, S3].
-*   **Learning Rate Schedule:** Decrease by factor of 5 after 750 and 1000 epochs [S2, S3].
-*   **Hardware:** Single NVIDIA V100 GPU [S2, S3].
-*   **Ray Sampling Schedule:** Start with $n=16$. Double $n$ after 50,000, 150,000, and 250,000 iterations, reaching $n=128$ [S2, S3].
+*   **Batch Size:** 64 images [S2, unofficial][S3].
+*   **Pixels per Image:** 1024 random pixels [S2, unofficial][S3].
+*   **Optimizer:** Adam with learning rate $\gamma = 10^{-4}$ [S2, unofficial][S3].
+*   **Learning Rate Schedule:** Decrease by factor of 5 after 750 and 1000 epochs [S2, unofficial][S3].
+*   **Hardware:** Single NVIDIA V100 GPU [S2, unofficial][S3].
+*   **Ray Sampling Schedule:** Start with $n=16$. Double $n$ after 50,000, 150,000, and 250,000 iterations, reaching $n=128$ [S2, unofficial][S3].
 
 ### Edge Cases and Pitfalls
-*   **No Surface Intersection:** If no crossing is found along the ray, the depth is set to infinity [S1].
-*   **Precision:** The bisection method refines the depth estimate, but precision depends on the number of refinement steps (default 8) and the initial sampling density [S1, S3].
-*   **Memory Management:** The `max_points` parameter caps the number of points evaluated per batch to manage GPU memory allocation [S1].
+*   **No Surface Intersection:** If no crossing is found along the ray, the depth is set to infinity [S1, unofficial].
+*   **Precision:** The bisection method refines the depth estimate, but precision depends on the number of refinement steps (default 8) and the initial sampling density [S1, unofficial][S3].
+*   **Memory Management:** The `max_points` parameter caps the number of points evaluated per batch to manage GPU memory allocation [S1, unofficial].
 
 ## Subtopics
 
 ### [NeRF Model Initialization](1868-nerf-model-initialization.md)
 
 ## Operating characteristics
-*   **Time Complexity:** The forward pass involves $N \times n$ evaluations of the decoder for initial sampling, where $N$ is the number of pixels and $n$ is the number of samples per ray [S1, S3]. The bisection refinement adds $N \times n_{\text{secant\_steps}}$ evaluations [S1].
-*   **Memory Complexity:** Memory usage is constrained by the `max_points` parameter, which limits the number of points loaded to GPU memory per batch [S1].
-*   **Performance:** Trained on a single NVIDIA V100 GPU with a batch size of 64 images and 1024 pixels each [S2, S3].
+*   **Time Complexity:** The forward pass involves $N \times n$ evaluations of the decoder for initial sampling, where $N$ is the number of pixels and $n$ is the number of samples per ray [S1, unofficial][S3]. The bisection refinement adds $N \times n_{\text{secant\_steps}}$ evaluations [S1, unofficial].
+*   **Memory Complexity:** Memory usage is constrained by the `max_points` parameter, which limits the number of points loaded to GPU memory per batch [S1, unofficial].
+*   **Performance:** Trained on a single NVIDIA V100 GPU with a batch size of 64 images and 1024 pixels each [S2, unofficial][S3].
 *   **Strengths:** Differentiable rendering allows for end-to-end training from single-view images without explicit 3D supervision [S3].
 *   **Limitations:** Not given in the sources.
 
 ## Background
-*   **Origin:** The DVR method was introduced by Mescheder et al. in "Occupancy Networks: Learning 3D Reconstruction in Function Space" (CVPR 2019) and extended by Niemeyer et al. in "Differentiable Volumetric Rendering: Learning Implicit 3D Representations without 3D Supervision" (CVPR 2020) [S1, S3].
-*   **History:** The method builds on the concept of occupancy networks, which represent 3D shapes as implicit functions [S1, S3]. The differentiable rendering component allows these implicit representations to be trained from 2D images [S1, S3].
+*   **Origin:** The DVR method was introduced by Mescheder et al. in "Occupancy Networks: Learning 3D Reconstruction in Function Space" (CVPR 2019) and extended by Niemeyer et al. in "Differentiable Volumetric Rendering: Learning Implicit 3D Representations without 3D Supervision" (CVPR 2020) [S1, unofficial][S3].
+*   **History:** The method builds on the concept of occupancy networks, which represent 3D shapes as implicit functions [S1, unofficial][S3]. The differentiable rendering component allows these implicit representations to be trained from 2D images [S1, unofficial][S3].
 *   **Usage:** DVR is used for 3D shape and texture reconstruction from single-view or multi-view images, particularly in scenarios where 3D supervision is unavailable [S3].
 
 ## Sources
 
-[S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 [S1, unofficial]
-[S2] Differentiable Volumetric Rendering: Learning Implicit 3D Representations without 3D Supervision, https://www.youtube.com/watch?v=lcub1KH-mmk, fetched 2026-10-27
+[S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)
+[S2] Differentiable Volumetric Rendering: Learning Implicit 3D Representations without 3D Supervision, https://www.youtube.com/watch?v=lcub1KH-mmk, fetched 2026-10-27 (unofficial)
 [S3] Differentiable Volumetric Rendering - CVF Open Access, https://openaccess.thecvf.com/content_CVPR_2020/html/Niemeyer_Differentiable_Volumetric_Rendering_Learning_Implicit_3D_Representations_Without_3D_Supervision_CVPR_2020_paper.html, fetched 2026-10-30

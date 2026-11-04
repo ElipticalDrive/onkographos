@@ -1,0 +1,173 @@
+# Multi-resolution Convex Contouring
+
+Also called: Multi-resolution Convex Contouring with Decision Trees
+
+## Overview
+Multi-resolution Convex Contouring is a view-dependent surface extraction method that accelerates rendering by contouring volumetric data at varying grid resolutions based on the viewer's distance [S1]. It extends Convex Contouring with Decision Trees by introducing transition cells to maintain topological consistency across resolution boundaries, significantly reducing triangle count and processing time while preserving visual detail [S1]. Unlike uniform contouring, it trades off some implementation complexity for performance gains, though its speed is still largely dominated by the processing of regular cells [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volumetric scalar field defined on a nested grid structure consisting of regular cells at multiple resolutions and transition cells at the boundaries between resolutions. The viewer position determines the resolution of each cell.
+*   **Output:** A triangle mesh representing the isosurface, with topological consistency preserved across all resolution boundaries.
+
+**Data Structures:**
+The method relies on pre-computed look-up tables (LUTs) for transition cells. The layout is defined by the cell geometry and sign configurations at corners.
+
+1.  **2D Transition Cell:**
+    *   Geometry: 5 corners, 5 edges.
+    *   LUT Size: Not explicitly defined as a power of 2 in the text for 2D, but treated similarly to regular cells for consistency.
+2.  **3D Transition Cells:**
+    *   **9-Corner Cell:** Adjacent to two fine cells on an edge.
+        *   Geometry: 9 corners, 6 faces.
+        *   LUT Size: $2^9 = 512$ entries. Each entry corresponds to a unique sign configuration at the 9 corners.
+    *   **13-Corner Cell:** Adjacent to four fine cells on a face.
+        *   Geometry: 13 corners, 9 faces.
+        *   LUT Size: $2^{13} = 8192$ entries. Each entry corresponds to a unique sign configuration at the 13 corners.
+    *   **LUT Content:** Each entry stores compact decision trees for patch triangulation. The decision trees determine the triangulation via successive 4-point tests on edge intersections.
+
+**Algorithm Steps:**
+
+1.  **Grid Construction:** Create a series of nested bounding boxes centered at the viewer. Assign grid resolutions to cells such that resolution decreases by a factor of 2 with increasing distance from the viewer [S1].
+2.  **Cell Classification:** Classify each cell in the grid as either a regular cell or a transition cell. Transition cells are coarse cells adjacent to cells at a finer resolution [S1].
+3.  **Regular Cell Contouring:** Apply standard Convex Contouring with Decision Trees to all regular cells [S1].
+4.  **Transition Cell Contouring:**
+    a.  **Face Tracing:** For each transition cell, compute the linear convex contour on each face. Since the linear convex contour is unique for a given sign configuration, the boundary of patches on the convex contour can be pre-computed using the face-tracing algorithm described in the parent method [S1].
+    b.  **LUT Lookup:** Determine the sign configuration at the cell's corners. Use this configuration to index into the appropriate LUT (9-corner or 13-corner) to retrieve the pre-computed decision trees for each patch [S1].
+    c.  **Perturbation (13-Corner Only):** If the cell is a 13-corner cell and the convex hull of the negative space degenerates onto a plane due to four co-planar faces, apply a small outward perturbation perpendicular to the plane containing those faces [S1]. This ensures the convex hull is non-degenerate for the decision tree tests.
+    d.  **Triangulation:** Apply the decision trees to determine the triangulation. The 4-point tests are performed on edge intersections computed from the (perturbed, if necessary) cell corners. The final triangulation is mapped back to the unperturbed geometry to preserve topological consistency with adjacent fine cells [S1].
+5.  **Assembly:** Combine the triangles from all regular and transition cells. The shared edges between coarse and fine cells will have identical contours, ensuring a crack-free surface [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_resolution_convex_contouring(volume_data, viewer_position, isovalue):
+    """
+    Performs multi-resolution convex contouring.
+    
+    Args:
+        volume_data: Scalar field data.
+        viewer_position: 3D vector representing the viewer's location.
+        isovalue: The scalar value for the isosurface.
+        
+    Returns:
+        List of triangles forming the isosurface.
+    """
+    # 1. Determine resolution for each cell based on viewer distance
+    # Create nested bounding boxes centered at viewer_position.
+    # Resolution decreases by factor of 2 with distance.
+    grid_cells = determine_cell_resolutions(volume_data, viewer_position)
+    
+    triangles = []
+    
+    # Pre-computed LUTs for transition cells
+    lut_9_corner = load_lut_9_corner() # 512 entries
+    lut_13_corner = load_lut_13_corner() # 8192 entries
+    
+    for cell in grid_cells:
+        # 2. Classify cell type
+        if cell.is_regular:
+            # 3. Contour regular cell using standard Convex Contouring
+            cell_triangles = convex_contouring_regular_cell(cell, isovalue)
+            triangles.extend(cell_triangles)
+            
+        elif cell.is_transition:
+            # 4. Contour transition cell
+            if cell.type == '9_corner':
+                luts = lut_9_corner
+                num_corners = 9
+            elif cell.type == '13_corner':
+                luts = lut_13_corner
+                num_corners = 13
+            else:
+                raise ValueError("Unknown transition cell type")
+            
+            # 4a. Compute sign configuration at corners
+            signs = []
+            for corner in cell.corners:
+                scalar = interpolate_scalar(volume_data, corner)
+                signs.append(1 if scalar > isovalue else -1)
+            
+            # 4b. Lookup decision trees
+            # Index is based on sign configuration
+            luts_entry = luts[sign_to_index(signs)]
+            
+            # 4c. Handle 13-corner degeneration
+            perturbed_corners = cell.corners
+            if cell.type == '13_corner' and is_degenerate(cell):
+                perturbed_corners = apply_perturbation(cell)
+            
+            # 4d. Triangulate using decision trees
+            # Decision trees use 4-point tests on edge intersections
+            # of the perturbed corners
+            cell_triangles = triangulate_transition_cell(
+                cell, 
+                perturbed_corners, 
+                luts_entry, 
+                isovalue
+            )
+            triangles.extend(cell_triangles)
+            
+    return triangles
+
+def is_degenerate(cell):
+    """
+    Checks if the convex hull of the negative space in a 13-corner cell
+    degenerates onto a plane due to co-planar faces.
+    [G] Implementation detail: Check if the four faces adjacent to the 
+    fine cells are co-planar.
+    """
+    # Not given in the sources. Assume a geometric check on face normals.
+    return False
+
+def apply_perturbation(cell):
+    """
+    Applies small outward perturbation perpendicular to the plane
+    containing the four co-planar faces.
+    [G] Implementation detail: Identify the co-planar faces, compute
+    their common normal, and shift the relevant corners slightly.
+    """
+    # Not given in the sources.
+    return cell.corners
+
+def triangulate_transition_cell(cell, corners, luts_entry, isovalue):
+    """
+    Triangulates a transition cell using pre-computed decision trees.
+    """
+    # Not given in the sources.
+    # This function applies the decision trees from luts_entry to the
+    # edge intersections of the corners to determine the triangulation.
+    # The final triangles are mapped to the unperturbed geometry if
+    # perturbation was applied.
+    return []
+```
+
+**Parameters:**
+*   **Maximum Decision Tree Depth:**
+    *   9-Corner Cell: 5 [S1].
+    *   13-Corner Cell: 14 [S1].
+*   **Average Tests per Patch:**
+    *   9-Corner Cell: 1.92 [S1].
+    *   13-Corner Cell: 4.76 [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Degeneracy in 13-Corner Cells:** Four co-planar faces in a 13-corner cell can cause the convex hull of the negative space to degenerate onto a plane. This requires perturbation of the cell corners to perform the 4-point tests correctly. The perturbation must be small and perpendicular to the plane to ensure the convex hull structure is preserved, and the final triangulation must be mapped back to the unperturbed geometry to maintain topological consistency [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The performance is dominated by the processing of regular cells, as the majority of cells in a multi-resolution grid are regular [S1]. Transition cells add overhead due to larger LUTs and more complex topology, but their count is relatively small.
+*   **Memory Complexity:** Requires storage for LUTs for 9-corner ($2^9$ entries) and 13-corner ($2^{13}$ entries) cells. The size of these LUTs is larger than those for regular cells, but they are pre-computed and static.
+*   **Measured Performance:** On a Dragon model at $256^3$ resolution:
+    *   Uniform grid: 219ms, 269,392 triangles [S1].
+    *   2-level grid: 109ms, 137,558 triangles [S1].
+    *   3-level grid: 47ms, 50,792 triangles [S1].
+*   **Strengths:** Significantly reduces triangle count and rendering time compared to uniform contouring while preserving visual details. It allows for interactive navigation if contours on uniform grids are pre-computed and only transition cells are processed in real-time [S1].
+*   **Limitations:** Performance is still dominated by uniform contouring, limiting the speedup for very high-resolution data. The implementation is more complex due to the need to handle transition cells and perturbations [S1].
+*   **When to Use:** When interactive rendering of large volumetric datasets is required and the viewer position changes frequently. It is suitable when visual detail can be sacrificed at a distance without noticeable quality loss.
+*   **When Not to Use:** When the viewer is always close to the object (where uniform resolution is needed) or when the overhead of managing transition cells outweighs the benefits (e.g., very small datasets).
+
+## Background
+Multi-resolution Convex Contouring was introduced by Jutao et al. in the paper "Convex contouring of volumetric data" [S1]. It builds upon the Convex Contouring with Decision Trees method to address the computational cost of rendering high-resolution volumetric data. The method leverages the view-dependent nature of rendering to adapt the grid resolution, providing a balance between performance and visual fidelity.
+
+## Sources
+[S1] Convex contouring of volumetric data, https://doi.org/10.1007/s00371-003-0216-0, fetched 2026-10-28

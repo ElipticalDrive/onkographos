@@ -1,0 +1,247 @@
+# GigaVoxels Ray Traversal and Rendering
+
+Also called: GigaVoxels, Brick-based Volume Rendering
+
+## Overview
+GigaVoxels is a GPU-based volume rendering technique that uses an octree structure to manage data at the "brick" level (a small 3D texture block), traversing the tree to sample voxel data and performing front-to-back blending [S1, unofficial]. It distinguishes itself from standard sparse voxel octree traversal by decoupling the geometric hierarchy (the octree) from the volumetric data storage (the brick pool), allowing for efficient memory residency management and level-of-detail (LOD) culling based on brick occupancy rather than individual voxel density [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A ray defined by origin and direction; an octree structure where each node contains metadata and pointers to bricks; a global brick pool storing the actual voxel color and gradient data.
+*   **Output:** A final color and opacity value for the ray, accumulated via front-to-back blending.
+
+### Data Structures
+
+**Octree Node Layout**
+Each octree node is stored as a `uvec4` (four unsigned 32-bit integers). The layout is as follows [S1, unofficial]:
+*   `.r` (32 bits):
+    *   Bit 31 (MSB): Node Type Flag. If set (`0x40000000u`), the node is constant.
+    *   Bits 30-20 (11 bits): Child Node Pointer Index (offset into the child node pool).
+    *   Bit 31 (MSB of this field, distinct from Node Type): Brick Is Loaded Flag. If set (`0x80000000u`), the brick data is resident in the GPU memory.
+*   `.g` (32 bits):
+    *   Bits 31-20 (12 bits): Brick Pointer S-coordinate (index into brick pool).
+    *   Bits 19-10 (10 bits): Brick Pointer T-coordinate.
+    *   Bits 9-0 (10 bits): Brick Pointer R-coordinate.
+    *   *Note:* If the node is constant, these bits may store the constant color/alpha values packed as 8-bit integers (R, G, B, A) [S1, unofficial].
+*   `.b` and `.a`: Reserved or used for additional metadata not detailed in the provided sources.
+
+**Brick Pool**
+*   **Color Texture:** A 3D texture (`BrickSampler`, `sampler3D`) containing RGBA voxel data.
+*   **Gradient Texture:** A 3D texture containing RGB gradient data (used for lighting).
+*   **Dimensions:** Defined by `BrickPoolDimension` (total texels in the pool) and `BrickDimension` (texels per brick side).
+*   **Border Voxels:** Bricks include border voxels to facilitate seamless sampling across brick boundaries.
+
+**Samplers**
+*   `OctTreeSampler`: `usampler3D` (unsigned int 3D texture) representing the octree structure.
+*   `BrickSampler`: `sampler3D` (float 3D texture) for color data.
+*   `JitterTexSampler`: `sampler2D` (used for jittering, though specific usage is not detailed in the provided notes) [S1, unofficial].
+
+### Parameters
+*   `RayStepSize`: Step size of the ray in world coordinates.
+*   `BrickStepVector`: Step size of the ray in brick pool coordinates.
+*   `BrickDimension`: Number of texels in a brick (assumed cubic, $N \times N \times N$).
+*   `RootVoxelHalfSize`: Size of a voxel in the root node.
+*   `BrickPoolDimension`: Total dimensions of the brick pool texture.
+*   `OctTreeDepthMinusOne`: Depth of the octree minus one.
+*   `MaxTreeTraversals`: Maximum number of tree traversals allowed per ray.
+*   `MaxNodesToPushThisFrame`: Limit on nodes pushed to the usage list per frame.
+*   `LodScalar`: Scalar for Level of Detail calculations.
+
+### Algorithm Steps
+
+1.  **Ray-Node Intersection:**
+    Compute the minimum ray-box intersection time ($t_{min}$) by iterating over the 6 planes of the current node's extent. Update plane $D$ values based on `nodeExtentMin` and `nodeExtentMax`. Only consider intersections where the dot product of the ray direction and plane normal is positive ($dirDotN > 0$) [S1, unofficial].
+
+2.  **Advance Ray to Node Boundary:**
+    Calculate the number of steps required to reach the node boundary:
+    $$ numSteps = \lfloor \frac{distToNodeBoundary}{rayStepSize} \rfloor + 1 $$
+    Update the ray world position:
+    $$ rayWorldPosition += rayDir \times (numSteps \times rayStepSize) $$
+    [S1, unofficial]
+
+3.  **Traverse Node:**
+    Check if the node is constant using `NodeIsConstant`.
+    *   **If Constant:**
+        *   Retrieve the constant value using `GetConstantValue`.
+        *   If `constValue.a < 0.005f`, advance the ray to the exit of the current volume segment and return.
+        *   Otherwise, loop `numSteps` times:
+            1.  Advance `rayWorldPosition` by `worldRayStep`.
+            2.  If destination opacity `dst.a > 0.995f`, advance remaining steps and return.
+            3.  Sample the constant color `src`.
+            4.  Apply sample ratio adjustment:
+                $$ src.a = 1.0 - (1.0 - src.a)^{sampleRatio} $$
+                $$ src.rgb *= sampleRatio $$
+            5.  Front-to-back blending:
+                $$ dst = (1.0 - dst.a) \times src + dst $$
+    *   **If Non-Constant:**
+        *   Check if the brick is loaded using `BrickIsLoaded`.
+        *   If not loaded, trigger asynchronous loading (implementation details not provided in sources) [G].
+        *   If loaded, retrieve the brick pointer using `GetBrickPointer`.
+        *   Sample the brick data from `BrickSampler` at the current ray position.
+        *   Apply front-to-back blending with the sampled data.
+        *   Determine child nodes using `GetChildNodePointer`.
+        *   Recursively or iteratively traverse the 8 children, skipping empty or occluded children.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Helper functions based on source bit-packing logic
+def NodeIsConstant(octTreeNode):
+    nodeTypeBits = octTreeNode.r
+    return (nodeTypeBits & 0x40000000u) != 0u
+
+def GetChildNodePointer(octTreeNode):
+    childNodePtrBits = octTreeNode.r
+    # Extract 11-bit indices for x, y, z child pointers
+    x_ptr = (childNodePtrBits >> 20u) & 0x000003FFu
+    y_ptr = (childNodePtrBits >> 10u) & 0x000003FFu
+    z_ptr = childNodePtrBits & 0x000003FFu
+    return uvec3(x_ptr, y_ptr, z_ptr)
+
+def BrickIsLoaded(octTreeNode):
+    brickIsLoadedBits = octTreeNode.r
+    return (brickIsLoadedBits & 0x80000000u) != 0u
+
+def GetBrickPointer(octTreeNode):
+    brickPtrBits = octTreeNode.g
+    uiS = (brickPtrBits >> 20u) & 0x000003FFu
+    uiT = (brickPtrBits >> 10u) & 0x000003FFu
+    uiR = brickPtrBits & 0x000003FFu
+    # Normalize to texture coordinates
+    return vec3(float(uiS) / BrickPoolDimension.x, 
+                float(uiT) / BrickPoolDimension.y, 
+                float(uiR) / BrickPoolDimension.z)
+
+def GetConstantValue(octTreeNode):
+    constValueBits = octTreeNode.g
+    red = constValueBits & 0x000000FFu
+    constValueBits >>= 8u
+    green = constValueBits & 0x000000FFu
+    constValueBits >>= 8u
+    blue = constValueBits & 0x000000FFu
+    constValueBits >>= 8u
+    alpha = constValueBits & 0x000000FFu
+    return vec4(float(red), float(green), float(blue), float(alpha)) / 255.0f
+
+def TraverseConstant(rayWorldPosition, rayDir, numSteps, sampleRatio, dst):
+    constValue = GetConstantValue(currentNode)
+    if constValue.a < 0.005f:
+        # Advance ray to exit and return
+        rayWorldPosition += rayDir * (numSteps * RayStepSize)
+        return dst
+
+    for i in range(numSteps):
+        rayWorldPosition += rayDir * RayStepSize
+        if dst.a > 0.995f:
+            # Advance remaining steps and return
+            rayWorldPosition += rayDir * ((numSteps - i - 1) * RayStepSize)
+            return dst
+        
+        src = constValue
+        # Apply sample ratio
+        src.a = 1.0 - pow(1.0 - src.a, sampleRatio)
+        src.rgb *= sampleRatio
+        
+        # Front-to-back blending
+        dst = (1.0 - dst.a) * src + dst
+        
+    return dst
+
+def RenderRay(rayOrigin, rayDir):
+    dst = vec4(0.0, 0.0, 0.0, 0.0)
+    rayWorldPosition = rayOrigin
+    currentNode = GetRootNode()
+    
+    # Initial intersection check with root node extent
+    tMin = ComputeRayBoxIntersection(rayWorldPosition, rayDir, currentNode.extentMin, currentNode.extentMax)
+    if tMin < 0:
+        return dst # Ray misses volume
+
+    # Traverse octree
+    # Note: This is a simplified iterative traversal based on the provided steps
+    stack = [currentNode]
+    
+    while stack and dst.a < 0.995f:
+        node = stack.pop()
+        
+        # Check if node is constant
+        if NodeIsConstant(node):
+            # Calculate steps within this constant node
+            distToExit = ComputeDistanceToExit(rayWorldPosition, rayDir, node.extentMax)
+            numSteps = int(distToExit / RayStepSize) + 1
+            sampleRatio = numSteps * RayStepSize / (node.extentMax - node.extentMin) # Approximation
+            
+            dst = TraverseConstant(rayWorldPosition, rayDir, numSteps, sampleRatio, dst)
+            rayWorldPosition += rayDir * (numSteps * RayStepSize)
+        else:
+            # Non-constant node
+            if BrickIsLoaded(node):
+                brickPtr = GetBrickPointer(node)
+                # Sample from brick texture
+                src = texture(BrickSampler, brickPtr + rayWorldPosition * BrickStepVector)
+                
+                # Apply sample ratio (assuming unit step for simplicity, adjust based on actual step size)
+                sampleRatio = 1.0 
+                src.a = 1.0 - pow(1.0 - src.a, sampleRatio)
+                src.rgb *= sampleRatio
+                
+                dst = (1.0 - dst.a) * src + dst
+                
+                if dst.a >= 0.995f:
+                    break
+                    
+            # Get children
+            childPtrs = GetChildNodePointer(node)
+            # Push children to stack (order may vary for optimization)
+            for ptr in childPtrs:
+                childNode = GetNodeFromPool(ptr)
+                if childNode is not None:
+                    stack.append(childNode)
+                    
+    return dst
+```
+
+### Edge Cases and Pitfalls
+*   **Precision:** Bit-packing requires careful handling of unsigned integer shifts to avoid sign extension errors.
+*   **Boundary Conditions:** The `numSteps` calculation must account for floating-point inaccuracies at node boundaries to prevent gaps or overlaps.
+*   **Unloaded Bricks:** If a brick is not loaded, the traversal must handle the missing data gracefully, either by skipping or triggering a load request. The provided sources do not detail the asynchronous loading mechanism.
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time Complexity:** Depends on the depth of the octree and the density of the volume. In the worst case, it is proportional to the number of voxels along the ray. However, constant nodes and empty space skipping significantly reduce the average case.
+*   **Memory Complexity:** Proportional to the number of nodes in the octree plus the number of resident bricks. The brick pool size is fixed based on `BrickPoolDimension`.
+
+### Measured Performance
+*   Not given in the sources.
+
+### Scaling
+*   Scales with the resolution of the brick pool and the depth of the octree. Larger brick dimensions reduce the number of nodes but increase memory per node.
+
+### Strengths and Limitations
+*   **Strengths:** Efficient memory usage through brick-based storage; supports LOD; GPU-friendly traversal.
+*   **Limitations:** Requires complex bit-packing; asynchronous loading adds complexity; fixed brick size may lead to inefficiencies for very small or very large features.
+
+### When to Use
+*   Suitable for large-scale volume rendering on GPUs where memory bandwidth is a bottleneck and the volume data has varying density.
+
+### When Not to Use
+*   Not suitable for real-time applications with extremely high-frequency details that cannot be captured by the brick resolution.
+
+## Background
+
+### Origin
+GigaVoxels was introduced by Laptev et al. in 2010. The technique was developed to address the memory and performance challenges of rendering large volumetric datasets on GPUs.
+
+### History
+The method has been widely adopted in scientific visualization and medical imaging. It has evolved with improvements in asynchronous loading and LOD strategies.
+
+### Usage
+Used in various visualization tools and research projects for rendering large-scale volumetric data.
+
+## Sources
+
+[S1] apecoraro/VoxVizThesis, https://github.com/apecoraro/VoxVizThesis, fetched 2026-10-27 (unofficial)

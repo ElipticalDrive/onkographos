@@ -1,0 +1,194 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-LinPrim Optimization is the parameter update phase of the LinPrim rendering pipeline, which adjusts the geometric and appearance features of linear primitives (triangles) to minimize a differentiable loss function [S1]. It differs from standard 3D Gaussian Splatting (3DGS) optimization by backpropagating gradients through a linear primitive rasterizer (MTIA) rather than a Gaussian splatting kernel, requiring specific handling of ray-space to world-space transformations and quaternion-based rotation updates [S1]. It builds on [LinPrim Gradient Computation](3038-linprim-gradient-computation.md) to compute the necessary gradients for intersection depths.
++LinPrim Optimization is the parameter update phase of the LinPrim rendering pipeline, which adjusts the geometric and appearance features of linear primitives (triangles) to minimize a differentiable loss function [S1]. It differs from standard 3D Gaussian Splatting (3DGS) optimization by backpropagating gradients through a linear primitive rasterizer (MTIA) rather than a Gaussian splatting kernel, requiring specific handling of ray-space to world-space transformations and quaternion-based rotation updates [S1]. It builds on [LinPrim Gradient Computation](3038-linprim-gradient-computation.md) to compute the necessary gradients for intersection depths [S1].
+ 
+ ## How it works
+@@ -10,27 +10,27 @@
+ 
+ **Inputs:**
+-*   Current primitive parameters: position $\mathbf{p}$, quaternion $\mathbf{q}$, scale/distance features $\mathbf{s}$, view-dependent color coefficients, and opacity $\alpha$.
+-*   Training views: camera poses and intrinsics.
+-*   Target images: ground truth RGB images.
+-*   Loss weights: $\lambda_{L1}$ and $\lambda_{SSIM}$ (standard 3DGS formulation) [S1].
++*   Current primitive parameters: position $\mathbf{p}$, quaternion $\mathbf{q}$, scale/distance features $\mathbf{s}$, view-dependent color coefficients, and opacity $\alpha$ [S1].
++*   Training views: camera poses and intrinsics [G].
++*   Target images: ground truth RGB images [G].
++*   Loss weights: $\lambda_{\text{L1}}$ and $\lambda_{\text{SSIM}}$ following the 3DGS formulation [S1].
+ 
+ **Outputs:**
+-*   Updated primitive parameters for the next optimization step.
++*   Updated primitive parameters for the next optimization step [S1].
+ 
+ **Data Structures:**
+ *   Primitives are stored as a list of objects containing:
+-    *   `center`: 3D position vector.
+-    *   `quaternion`: 4D unit quaternion for rotation.
+-    *   `distances`: 3D vector representing scale/extent features.
+-    *   `color`: View-dependent color coefficients.
+-    *   `opacity`: Scalar alpha value.
++    *   `center`: 3D position vector [S1].
++    *   `quaternion`: 4D unit quaternion for rotation [S1].
++    *   `distances`: 3D vector representing scale/extent features [S1].
++    *   `color`: View-dependent color coefficients [S1].
++    *   `opacity`: Scalar alpha value [S1].
+ 
+ **Steps:**
+ 
+-1.  **Forward Pass:** Render the scene using the LinPrim rasterizer to produce an image $I_{rendered}$ [S1].
+-2.  **Loss Computation:** Compute the total loss $\mathcal{L}$ as a weighted sum of L1 loss and SSIM loss between $I_{rendered}$ and the target image $I_{target}$, following the 3DGS formulation [S1].
++1.  **Forward Pass:** Render the scene using the LinPrim rasterizer to produce an image $I_{\text{rendered}}$ [S1].
++2.  **Loss Computation:** Compute the total loss $\mathcal{L}$ as a weighted sum of L1 loss and SSIM loss between $I_{\text{rendered}}$ and the target image $I_{\text{target}}$, following the 3DGS formulation [S1].
+ 3.  **Rasterization Backpropagation:**
+     *   Compute gradients of the loss with respect to the output alpha $\alpha$ and color $C$ of each primitive [S1].
+-    *   The gradient $\frac{\partial \mathcal{L}}{\partial \alpha}$ indicates the desired transparency change. If $\alpha$ needs to increase, intersections should move closer; if decrease, farther apart [S1].
++    *   The gradient $\frac{\partial \mathcal{L}}{\partial \alpha}$ indicates the desired transparency change [S1]. If $\alpha$ needs to increase, intersections should move closer; if decrease, farther apart [S1].
+     *   Propagate gradients from $\alpha$ to the intersection depths $d$ along the ray [S1].
+     *   Compute gradients of intersection depths with respect to the triangle corner positions in ray space, $\frac{\partial d}{\partial \mathbf{v}^{\text{ray}}}$, using the results from [LinPrim Gradient Computation](3038-linprim-gradient-computation.md) [S1].
+@@ -38,9 +38,9 @@
+ 4.  **Preprocessing Backpropagation (Ray Space to World Space):**
+     *   Reverse the view and projection transformations to convert ray-space gradients to world-space gradients [S1].
+-    *   Compute the final gradient with respect to the primitive center $\mathbf{p}$. This combines the propagated ray-space center gradients with the gradient arising from the impact of position on the ray-space approximation and view-dependent color [S1].
+-    *   Split the gradient flow with respect to the corners when undoing the rotation. The gradients are distributed to the quaternion $\mathbf{q}$ and the distance features $\mathbf{s}$ [S1].
++    *   Compute the final gradient with respect to the primitive center $\mathbf{p}$ [S1]. This combines the propagated ray-space center gradients with the gradient arising from the impact of position on the ray-space approximation and view-dependent color [S1].
++    *   Split the gradient flow with respect to the corners when undoing the rotation [S1]. The gradients are distributed to the quaternion $\mathbf{q}$ and the distance features $\mathbf{s}$ [S1].
+ 5.  **Learning Rate Adjustment:**
+-    *   Calculate the maximum distance $D_{max}$ between any two training cameras to approximate scene size [S1].
+-    *   Adjust learning rates for position and distance features based on $D_{max}$ to handle scale ambiguity [S1].
++    *   Calculate the maximum distance $D_{\text{max}}$ between any two training cameras to approximate scene size [S1].
++    *   Adjust learning rates for position and distance features based on $D_{\text{max}}$ to handle scale ambiguity [S1].
+ 6.  **Parameter Update:**
+     *   Apply the ADAM optimizer to update $\mathbf{p}$, $\mathbf{q}$, $\mathbf{s}$, color, and opacity using the computed gradients [S1].
+@@ -50,78 +50,38 @@
+ ```python
+ def optimize_linprim_step(primitives, training_views, target_images, optimizer, lambda_l1, lambda_ssim):
+-    """
+-    Performs one step of LinPrim optimization.
+-    
+-    Args:
+-        primitives: List of LinPrim objects with attributes:
+-            - center: torch.Tensor (N, 3)
+-            - quaternion: torch.Tensor (N, 4)
+-            - distances: torch.Tensor (N, 3)
+-            - color: torch.Tensor (N, C)
+-            - opacity: torch.Tensor (N, 1)
+-        training_views: List of camera parameters (poses, intrinsics)
+-        target_images: List of target RGB tensors
+-        optimizer: ADAM optimizer instance
+-        lambda_l1: Weight for L1 loss
+-        lambda_ssim: Weight for SSIM loss
+-        
+-    Returns:
+-        None (updates primitives in place via optimizer)
+-    """
+     optimizer.zero_grad()
+-    
+-    # 1. Forward Pass
+-    rendered_images = []
++    total_loss = 0.0
+     for view, target in zip(training_views, target_images):
+-        # Render using LinPrim rasterizer (MTIA)
+-        # This internally uses LinPrim Gradient Computation for differentiability
+-        img = linprim_rasterize(primitives, view)
+-        rendered_images.append(img)
+-        
+-    # 2. Loss Computation
+-    total_loss = 0.0
+-    for img, target in zip(rendered_images, target_images):
+-        l1_loss = lambda_l1 * l1_loss_function(img, target)
+-        ssim_loss = lambda_ssim * ssim_loss_function(img, target)
++        rendered_img = forward_rasterize(primitives, view)
++        l1_loss = lambda_l1 * mean_absolute_error(rendered_img, target)
++        ssim_loss = lambda_ssim * compute_ssim(rendered_img, target)
+         total_loss += l1_loss + ssim_loss
+-        
+-    total_loss = total_loss / len(training_views)
+-    
+-    # 3. Backpropagation
+-    # Gradients are automatically computed by the differentiable rasterizer
+-    # The rasterizer handles:
+-    # - Alpha/Color gradients -> Intersection depth gradients
+-    # - Intersection depth gradients -> Ray-space corner/center gradients
+-    # - Ray-space to World-space transformation
+-    # - Quaternion/Distance feature splitting
+-    
+-    # 4. Learning Rate Adjustment
+-    # Approximate scene size
++    total_loss /= len(training_views)
++    total_loss.backward()
+     max_cam_dist = 0.0
+-    for i, view1 in enumerate(training_views):
+-        for view2 in training_views[i+1:]:
+-            dist = torch.norm(view1.pose.position - view2.pose.position)
+-            if dist > max_cam_dist:
+-                max_cam_dist = dist
+-                
+-    # Adjust learning rates for position and distances based on max_cam_dist
+-    # [G] Specific formula for adjustment is not given in sources, 
+-    # but typically involves scaling lr_pos and lr_dist by 1/max_cam_dist or similar.
+-    # We assume the optimizer's param_groups are adjusted or the gradients are scaled.
+-    # For implementation, we scale the gradients for position and distance features.
+-    
+-    # Note: The sources state that learning rates are adjusted. 
+-    # In PyTorch, this is often done by modifying optimizer.param_groups 
+-    # or by scaling the gradients before the step.
+-    # Since the exact scaling factor is not provided, we note the requirement.
+-    
+-    # 5. Update
+-    total_loss.backward()
+-    
+-    # [G] Apply learning rate scaling for position and distances if not handled by optimizer groups
+-    # This is a placeholder for the specific scaling logic mentioned in [S1]
+-    # optimizer.step()
+-    
++    for i, v1 in enumerate(training_views):
++        for v2 in training_views[i+1:]:
++            d = vector_norm(v1.position - v2.position)
++            if d > max_cam_dist: max_cam_dist = d
++    # Scale gradients for position and distance features based on max_cam_dist
++    # [G] The sources state learning rates are adjusted based on max_cam_dist, but do not specify the exact scaling formula.
++    for prim in primitives:
++        prim.grad_position /= max_cam_dist
++        prim.grad_distances /= max_cam_dist
+     optimizer.step()
++
++def forward_rasterize(primitives, view):
++    # [G] Standard differentiable rasterization forward pass
++    return render_image(primitives, view)
++
++def mean_absolute_error(img1, img2):
++    return sum(abs(img1[i][j][k] - img2[i][j][k]) for i in range(H) for j in range(W) for k in range(3)) / (H * W * 3)
++
++def compute_ssim(img1, img2):
++    # [G] Standard SSIM computation
++    return ssim_metric(img1, img2)
++
++def vector_norm(v):
++    return sqrt(sum(v[j]**2 for j in range(3)))
+ ```
+ 
+@@ -143,14 +103,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the forward rasterization and backward pass through the differentiable renderer. ADAM optimization adds negligible overhead compared to the rendering cost.
+-*   **Memory Complexity:** Requires storing gradients for all primitive parameters (position, quaternion, distances, color, opacity) for each primitive.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** Empirically mirrors the behavior of 2D Mip filters, reducing visible aliasing [S1].
+-*   **Strengths:** Differentiable rendering allows end-to-end optimization of linear primitives. The use of L1 and SSIM losses provides robust convergence.
+-*   **Limitations:** Requires careful handling of scale ambiguity and quaternion updates. Population control (adding/removing primitives) is not part of this optimization step and requires separate mechanisms [S1].
+-*   **When to Use:** When optimizing linear primitives for differentiable volumetric rendering where aliasing reduction is important.
+-*   **When Not to Use:** When Gaussian primitives are sufficient or when computational resources are extremely limited, as linear primitives may have higher overhead.
++*   **Strengths:** Differentiable rendering allows end-to-end optimization of linear primitives [S1]. The use of L1 and SSIM losses provides robust convergence [G].
++*   **Limitations:** Requires careful handling of scale ambiguity and quaternion updates [S1]. Population control (adding/removing primitives) is not part of this optimization step and requires separate mechanisms [S1].
++*   **When to Use:** When optimizing linear primitives for differentiable volumetric rendering where aliasing reduction is important [G].
++*   **When Not to Use:** When Gaussian primitives are sufficient or when computational resources are extremely limited, as linear primitives may have higher overhead [G].
+ 
+ ## Background
+-LinPrim Optimization was introduced in the paper "LinPrim: Linear Primitives for Differentiable Volumetric Rendering" [S1]. It extends the differentiable rendering framework of 3D Gaussian Splatting [13] to linear primitives (triangles). The method uses the ADAM optimizer [15] and backpropagates through the entire rendering pipeline, including a custom rasterizer (MTIA) and preprocessing steps. The approach addresses visible aliasing by incorporating filtering mechanisms that mimic 2D Mip filters [S1].
++LinPrim Optimization was introduced in the paper "LinPrim: Linear Primitives for Differentiable Volumetric Rendering" [S1]. It extends the differentiable rendering framework of 3D Gaussian Splatting to linear primitives (triangles) [S1]. The method uses the ADAM optimizer and backpropagates through the entire rendering pipeline, including a custom rasterizer (MTIA) and preprocessing steps [S1]. The approach addresses visible aliasing by incorporating filtering mechanisms that mimic 2D Mip filters [S1].
+ 
+ ## Sources

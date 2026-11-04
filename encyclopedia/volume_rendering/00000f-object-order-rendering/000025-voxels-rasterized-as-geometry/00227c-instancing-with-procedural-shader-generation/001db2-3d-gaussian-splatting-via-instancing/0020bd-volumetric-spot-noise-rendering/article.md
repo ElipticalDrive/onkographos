@@ -1,0 +1,307 @@
+# Volumetric Spot Noise Rendering
+
+Also called: Hybrid Rendering Pipeline, Shell Spot Noise, Shell noise, Volumetric Shell Spot Noise, Volumetric Spot Noise Rendering Pipeline, Volumetric Spot Noise for Procedural 3D Shell Texture Synthesis, Volumetric fuzzy details synthesis
+
+## Overview
+Volumetric Spot Noise Rendering is an interactive method for synthesizing procedural 3D shell textures (volumetric surface details like hair, grass, or fur) by projecting random impulse distributions onto arbitrary surfaces and rendering them as sums of anisotropic Gaussian kernels [S1, S2, unofficial]. It solves the problem of efficiently rendering millions of semi-transparent, oriented primitives without the performance penalty of per-frame depth sorting or the aliasing artifacts of simple geometry instancing [S1, S2, unofficial]. It sets itself apart from its parent [3D Gaussian Splatting via Instancing](1586-3d-gaussian-splatting-via-instancing.md) by using a hybrid pipeline that combines geometry instancing for depth/opacity with EWA splatting and Order Independent Transparency (OIT) for color, specifically addressing the "popping" and "halo" artifacts common in pure OIT or sorting-based approaches [S1, S2, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   A 3D mesh surface.
+*   A set of impulses, each defined by position $\mathbf{M}$, orientation $\mathbf{R}$ (rotation matrix), scale $\mathbf{S}$, and color $\mathbf{C}$ [S2, unofficial].
+*   Kernel parameters: number of Gaussian components per kernel (typically up to 3) [S1, unofficial].
+*   Rendering resolution and camera matrices [S2, unofficial].
+
+**Outputs:**
+*   A final color buffer with anti-aliased, depth-corrected volumetric appearance [S1, S2, unofficial].
+
+### Data Structures
+**Impulse Texture:**
+A 2D texture of size $4046 \times 4046$ texels [S2, unofficial]. Each impulse occupies 6 consecutive texels [S2, unofficial].
+*   **Texel 0:** Position $\mathbf{M}$ (vec3, padded to vec4) [S2, unofficial].
+*   **Texel 1:** Rotation Column 0 $\mathbf{R}_0$ (vec3, padded to vec4) [S2, unofficial].
+*   **Texel 2:** Rotation Column 1 $\mathbf{R}_1$ (vec3, padded to vec4) [S2, unofficial].
+*   **Texel 3:** Rotation Column 2 $\mathbf{R}_2$ (vec3, padded to vec4) [S2, unofficial].
+*   **Texel 4:** Scale $\mathbf{S}$ (vec3, padded to vec4) [S2, unofficial].
+*   **Texel 5:** Color $\mathbf{C}$ (vec4, RGBA) [S2, unofficial].
+
+**Accumulation Framebuffer:**
+*   **Attachment 0 (Color):** `GL_RGBA32F` [S2, unofficial].
+*   **Attachment 1 (Count/Alpha):** `GL_R8` [S2, unofficial].
+*   **Depth:** `GL_DEPTH_COMPONENT32` [S2, unofficial].
+*   **Resolution:** $1024 \times 1024$ (or target screen resolution) [S2, unofficial].
+
+### Steps
+
+1.  **Impulse Generation (Optional/Pre-computation):**
+    If impulses are not pre-generated, they are placed on the surface. An octree partitions the space around the mesh. For each leaf node (voxel) colliding with the mesh, 15 impulses are generated at the collision point with slight displacements [S2, unofficial]. The position is projected onto a plane approximating the surface using the nearest face normal [S1, S2, unofficial]. Orientation is derived from the normal and random vectors [S2, unofficial]. Scale and color are sampled randomly [S2, unofficial].
+
+2.  **Geometry Instancing Pass (Depth/Opacity):**
+    Render the impulse primitives (e.g., quads or billboards) using geometry instancing to populate the depth buffer. This pass determines the closest kernel for each pixel, which is used later for the "Improved OIT" calculation [S1, S2, unofficial].
+    *   Enable depth writing.
+    *   Disable color writing (or write a dummy value).
+    *   Draw instanced primitives.
+
+3.  **EWA Splatting Pass (Color Accumulation):**
+    Render the impulses again, but this time accumulating color and coverage using EWA splatting and OIT [S1, S2, unofficial].
+    *   Disable depth writing.
+    *   Enable blending.
+    *   **Attachment 0 (Color):** Blend function `GL_ONE + GL_ONE` (additive) [S2, unofficial].
+    *   **Attachment 1 (Count):** Blend function `GL_ZERO + GL_ONE_MINUS_SRC_COLOR` (subtractive from 1.0, effectively counting hits/alpha) [S2, unofficial].
+    *   Clear Attachment 0 to black and Attachment 1 to white (1.0) [S2, unofficial].
+    *   Draw instanced primitives using the 'accum' shader.
+
+4.  **Compositing Pass:**
+    *   Bind the default framebuffer.
+    *   Clear color and depth.
+    *   Draw the solid mesh (black) to occlude volume behind it [S2, unofficial].
+    *   Disable depth testing.
+    *   Enable blending `GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA`.
+    *   Draw a full-screen quad using the 'composite' shader, sampling accumulated color from Attachment 0 and count/alpha from Attachment 1 [S2, unofficial].
+
+### Formulas
+
+**3D Gaussian Kernel:**
+The kernel for an impulse is defined as [S2, unofficial]:
+$$
+K(\mathbf{x}; \mathbf{x}_0) = \frac{\exp\left(-\frac{1}{2}(\mathbf{x}-\mathbf{x}_0)^T \Sigma^{-1} (\mathbf{x}-\mathbf{x}_0)\right)}{\sqrt{(2\pi)^3 |\Sigma|}}
+$$
+where $\mathbf{x}_0$ is the center, and $\Sigma = \mathbf{R} \mathbf{S} \mathbf{S}^T \mathbf{R}^T$ is the covariance matrix, with $\mathbf{R}$ being the orientation matrix and $\mathbf{S}$ the scale matrix (diagonal) [S2, unofficial].
+
+**Perspective Divide Approximation:**
+To handle the non-linearity of the perspective divide, an affine approximation using the Jacobian $J$ is used [S2, unofficial]:
+$$
+J = \frac{\partial m}{\partial \mathbf{x}} = \begin{bmatrix} 1/x_3 & 0 & -x_1/x_3^2 \\ 0 & 1/x_3 & -x_2/x_3^2 \\ x_1/|\mathbf{x}| & x_2/|\mathbf{x}| & x_3/|\mathbf{x}| \end{bmatrix}
+$$
+where $m$ maps camera space to screen space [S2, unofficial].
+
+**Transformed Covariance:**
+The covariance in screen space is approximated by [S2, unofficial]:
+$$
+\Sigma' = J \mathbf{W}_{3\times 3} \Sigma \mathbf{W}_{3\times 3}^T J^T
+$$
+where $\mathbf{W}_{3\times 3}$ is the rotational component of the world-to-camera transformation [S2, unofficial].
+
+**Screen-Space Variance and Filter:**
+The 2D variance matrix $\Sigma'_{2\times 2}$ is the top-left $2\times 2$ partition of $\Sigma'$ [S2, unofficial]. To avoid aliasing, a low-pass filter (identity matrix scaled by $\lambda$) is added [S2, unofficial]:
+$$
+Q = (\Sigma'_{2\times 2} + \lambda \mathbf{I})^{-1}
+$$
+The scale factor for the Gaussian is:
+$$
+\text{scalefactor} = \frac{1}{\sqrt{2\pi \det(Q)}}
+$$
+[S2, unofficial].
+
+**Per-Pixel Weight and Accumulation:**
+The distance $d$ in screen space is computed as $d = \mathbf{disp}^T Q \mathbf{disp}$, where $\mathbf{disp}$ is the displacement from the kernel center in NDC space scaled by 1024.0 [S2, unofficial]. The alpha contribution is:
+$$
+a_i = \min(1.0, \text{scalefactor} \cdot e^{-0.5 \cdot d})
+$$
+[S2, unofficial].
+
+The final weight $w$ for OIT combines color, alpha, and depth [S2, unofficial]:
+$$
+w = \max(\min(1.0, \max(c_r, c_g, c_b) \cdot a_i \cdot c_a), a_i \cdot c_a) \cdot \text{clamp}\left(\frac{0.03}{10^{-5} + (U_z/200.0)^4}, 10^{-2}, 3 \times 10^3\right)
+$$
+where $c$ is the spot color, $U_z$ is the camera-space depth, and $\alpha$ is implicitly handled by $a_i$ and $c_a$ [S2, unofficial].
+
+**Improved OIT Final Color:**
+To fix artifacts with opaque kernels, the closest kernel's contribution is maximized using the depth buffer from Step 2 [S1, unofficial]:
+$$
+L \approx \tilde{K}(\mathbf{d}, \mathbf{p}_f) \alpha_f + \left( \frac{\sum_{i=0}^{N-1} L_{\mathcal{C}_i}}{\sum_{i=0}^{N-1} \sum_{\mathbf{p}_j \in \mathcal{C}_i^*} T(\mathbf{p}_j)} \right) (1 - \alpha_f)
+$$
+where $\mathbf{p}_f$ is the closest impulse and $\alpha_f$ its transparency [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Vertex Shader: Accumulation Pass
+def vertex_shader_accumulation(instance_id, mvp_matrix, impulses_texture):
+    # Fetch impulse data from texture
+    # Each impulse is 6 texels. Texture width is 4046.
+    id_offset = instance_id * 6
+    tex_x = id_offset % 4046
+    tex_y = id_offset // 4046
+    
+    M = impulses_texture[tex_x, tex_y]          # Position (vec3)
+    R0 = impulses_texture[tex_x+1, tex_y]       # Rotation Col 0 (vec3)
+    R1 = impulses_texture[tex_x+2, tex_y]       # Rotation Col 1 (vec3)
+    R2 = impulses_texture[tex_x+3, tex_y]       # Rotation Col 2 (vec3)
+    S = impulses_texture[tex_x+4, tex_y]        # Scale (vec3)
+    C = impulses_texture[tex_x+5, tex_y]        # Color (vec4)
+    
+    R = mat3(R0, R1, R2)
+    Sigma = R * diag(S.x**2, S.y**2, S.z**2) * R.T
+    
+    # Transform position to camera space
+    M_cam = mvp_matrix * vec4(M, 1.0)
+    U = M_cam.xyz / M_cam.w # Perspective divide for position
+    
+    # Compute Jacobian J for perspective approximation
+    # J depends on U (camera space position before divide? No, U is usually post-divide in some derivations, 
+    # but here J is derived from camera space coordinates x1,x2,x3. 
+    # Let's use the source definition: J uses x1,x2,x3 from camera space.
+    # Note: The source code snippet uses U_z, U_x, U_y in J. 
+    # Assuming U here is the homogeneous clip space or camera space? 
+    # Source [S2, unofficial] says: "Transform position to camera space: U = mvp * vec4(M, 1.0)". 
+    # Then J uses U_x, U_y, U_z. This implies U is in clip space or similar? 
+    # Actually, standard EWA uses camera space. Let's follow the source formula strictly.
+    
+    x1, x2, x3 = U.x, U.y, U.z # Assuming U is the result of MVP, i.e., clip space? 
+    # Wait, MVP usually outputs clip space. Perspective divide happens in hardware.
+    # The source says "U = mvp * vec4(M, 1.0)". Then J uses U.
+    # Then it says "Project U to NDC".
+    # So U is Clip Space.
+    
+    norm_U = length(U)
+    J = mat3(
+        vec3(1.0/x3, 0.0, -x1/(x3**2)),
+        vec3(0.0, 1.0/x3, -x2/(x3**2)),
+        vec3(x1/norm_U, x2/norm_U, x3/norm_U)
+    )
+    
+    # Extract 3x3 rotation from MVP? Source says W_3x3 is rotational component of world-to-camera.
+    # MVP includes projection. The source code snippet uses mat3(mvp).
+    W_3x3 = mat3(mvp_matrix) 
+    
+    # Transformed Covariance
+    Sigma_prime = J * W_3x3 * Sigma * W_3x3.T * J.T
+    
+    # 2D Filter Matrix Q
+    Sigma_2x2 = Sigma_prime[0:2, 0:2]
+    Q = inverse(Sigma_2x2 + mat2(1.0)) # Lambda=1.0 implied by I in source snippet? 
+    # Source formula: Q = (V_2x2 + I)^-1. Snippet: Q = inverse(top-left 2x2 of V + I).
+    
+    scalefactor = 1.0 / sqrt(2.0 * pi * determinant(Q))
+    
+    # Project to NDC
+    ndc_pos = U.xyz / U.w
+    gl_Position = U # Or standard gl_Position = U
+    
+    # Pass to fragment
+    axis = vec2(0.0) # Placeholder for lighting axis if needed
+    light = 0.06 # Lighting multiplier
+    return axis, Q, U, C, scalefactor
+
+# Fragment Shader: Accumulation Pass
+def fragment_shader_accumulation(axis, Q, U, color, scalefactor):
+    # Compute displacement in screen space
+    # NDC is -1 to 1. Screen is 0 to 1024 (example).
+    # Source: disp = 1024.0 * (ndcPos - U_xy)
+    # U_xy is the projected center in NDC?
+    # U is clip space. ndcPos = U.xy / U.w.
+    
+    ndc_x = U.x / U.w
+    ndc_y = U.y / U.w
+    
+    # Assuming viewport size is 1024x1024 for the scalefactor calculation context
+    # But generally, we need screen coordinates.
+    # Let's assume gl_FragCoord is available.
+    # Source uses: disp = 1024.0 * (ndcPos - U_xy). 
+    # This implies U_xy is the center in NDC.
+    
+    disp = vec2(gl_FragCoord.x, gl_FragCoord.y) - vec2(ndc_x, ndc_y) * 1024.0 # Approximation
+    
+    # Distance d
+    d = dot(disp, Q * disp)
+    
+    # Alpha
+    a_i = min(1.0, scalefactor * exp(-0.5 * d))
+    
+    # Weight
+    max_c = max(color.r, max(color.g, color.b))
+    depth_factor = clamp(0.03 / (1e-5 + (U.w / 200.0)**4), 0.01, 3000.0) # U.w is clip space z? 
+    # Source uses U_z. In clip space, U.w is -Z_cam. 
+    # Let's assume U_z is the depth value used for weighting.
+    
+    w = max(min(1.0, max_c * a_i * color.a), a_i * color.a) * depth_factor
+    
+    # Output
+    accum_out = vec4(color.rgb * w, w) # RGB is lighted color, A is coverage
+    count_out = w
+    
+    return accum_out, count_out
+
+# Composite Shader
+def fragment_shader_composite(accum_color, count_alpha):
+    # accum_color: RGB from Attachment 0, A from Attachment 0? 
+    # Source: Attachment 0 is RGBA32F. Attachment 1 is R8.
+    # Let's assume we sample both.
+    
+    # C_f approx formula from McGuire
+    # C_f = (Sum w_i C_i) / (Sum w_i alpha_i) * [1 - Prod(1-alpha_i)] + C_0 * Prod(1-alpha_i)
+    
+    # In the accumulation pass, we added w * C to Color and w to Count?
+    # Source: Attachment 0 uses GL_ONE+GL_ONE. Attachment 1 uses GL_ZERO+GL_ONE_MINUS_SRC_COLOR.
+    # This implies:
+    # Color Buffer accumulates: w * C
+    # Count Buffer accumulates: 1.0 - w (if cleared to 1.0) or just w?
+    # Source says: "Clear Attachment 1 to white (1.0)". Blend: GL_ZERO + GL_ONE_MINUS_SRC_COLOR.
+    # So Count = 1.0 - w.
+    # This represents the remaining opacity (1-alpha).
+    
+    # Let Count = 1.0 - alpha_total.
+    # alpha_total = 1.0 - Count.
+    
+    alpha_total = 1.0 - count_alpha.r
+    
+    # The numerator for color is already accumulated in accum_color.rgb?
+    # No, we need to divide by the sum of weights.
+    # The formula is: (Sum w_i C_i) / (Sum w_i alpha_i) ...
+    # But we stored w * C. We need Sum w_i alpha_i.
+    # If w includes alpha, then w = alpha * weight_factor.
+    # This gets complex. The source simplifies by using the OIT weight directly.
+    
+    # Simplified Composite based on Source [S2, unofficial] description:
+    # "Draw a full-screen quad using the 'composite' shader, sampling the accumulated color from Attachment 0 and the count/alpha buffer from Attachment 1."
+    
+    # Let's assume the accumulation pass handled the weighting correctly for the final blend.
+    # Standard OIT composite:
+    # Final Color = Accumulated Color / Accumulated Weight?
+    
+    # Given the complexity and specific blend funcs, the exact composite shader logic 
+    # depends on the specific McGuire weight implementation details not fully expanded in pseudocode.
+    # However, the key is the "Improved OIT" using the depth buffer from Pass 1.
+    
+    # For the purpose of this article, the composite step applies the final alpha blend 
+    # using the accumulated buffers and the depth-tested closest kernel contribution.
+    pass
+```
+
+### Parameters
+*   **Impulse Texture Resolution:** $4046 \times 4046$ [S2, unofficial].
+*   **Texels per Impulse:** 6 [S2, unofficial].
+*   **Octree Radius Threshold:** 0.2 (for impulse generation) [S2, unofficial].
+*   **Impulses per Collision:** 15 [S2, unofficial].
+*   **Viewport Scaling Factor:** 1024.0 (for NDC conversion) [S2, unofficial].
+*   **Depth Falloff Clamp:** $[10^{-2}, 3 \times 10^3]$ [S2, unofficial].
+*   **Lighting Multiplier:** 0.06 [S2, unofficial].
+*   **Slices ($N_s$):** Controls precision of kernel evaluation for semi-transparent kernels (5-60+ fps depending on density) [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Aliasing:** The perspective divide is non-linear. Using the Jacobian approximation prevents the kernel from losing its Gaussian shape [S2, unofficial].
+*   **Popping Artifacts:** Avoided by using depth-weighted OIT instead of per-frame sorting [S2, unofficial].
+*   **Halos:** Lighter bands around objects due to excessive blending in OIT. Mitigated by adjusting the weight function [S2, unofficial].
+*   **Z-Fighting:** Geometry instancing alone causes z-fighting for small kernels. The hybrid approach mitigates this by using EWA splatting for color [S1, unofficial].
+*   **Triangle Sampling:** Barycentric coordinates must be clamped to keep points within triangles during impulse generation [S2, unofficial].
+*   **Texture Wrapping:** Instance IDs must be correctly mapped to texture coordinates using modulo 4046. Exceeding texture capacity causes incorrect wrapping [S2, unofficial].
+*   **Division by Zero:** Jacobian calculation requires $U_z > 0$ (camera-space depth) [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Interactive. Performance depends on kernel density and viewpoint. Flat kernels: 5-60+ fps. Semi-transparent volumetric kernels: 55 fps (2.5k kernels) to 1.5 fps (300k kernels) [S1, unofficial].
+*   **Memory Complexity:** Extremely low. Memory footprint depends on kernel definition (few kilobytes), not the number of impulses [S1, unofficial].
+*   **Strengths:** Handles millions of kernels interactively; parameterization-free surface projection; avoids sorting overhead; reduces aliasing compared to instancing [S1, S2, unofficial].
+*   **Limitations:** OIT can introduce halos; complex semi-transparent structures require more slices ($N_s$), reducing FPS; depth precision issues with very small kernels [S1, S2, unofficial].
+*   **When to Use:** Procedural hair, grass, fur, and fuzzy surface details where performance and visual quality (anti-aliasing) are critical [S1, S2, unofficial].
+*   **When Not to Use:** Scenes requiring exact depth peeling or where simple opaque instancing suffices [S1, unofficial].
+
+## Background
+Volumetric Spot Noise Rendering was introduced by Nicolas Pavie et al. in the paper "Volumetric Spot Noise for Procedural 3D Shell Texture Synthesis" [S1, S2, unofficial]. It extends Locally Controlled Spot Noise (LCSN) to model volumetric surface details using 3D kernels [S1, unofficial]. The method builds on EWA volume splatting [ZPvBG01] and Depth Weighted Order Independent Transparency by McGuire and Bavoil [S2, unofficial]. It is used for rendering hair and grass textures [S2, unofficial].
+
+## Sources
+[S1] Volumetric Spot Noise for Procedural 3D Shell Texture Synthesis, https://hal.science/hal-02413269v1, fetched 2026-10-26 (unofficial)
+[S2] bottledspace/volumetric-spot-noise, https://github.com/bottledspace/volumetric-spot-noise, fetched 2026-10-27 (unofficial)

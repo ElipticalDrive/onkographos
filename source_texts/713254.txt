@@ -1,0 +1,249 @@
+A LiDAR odometry pipeline that just works. Contribute to PRBonn/kiss-icp development by creating an account on GitHub.
+
+Add draft visualization for the voxels of the VoxelHashMap by nachovizzo · Pull Request #383 · PRBonn/kiss-icp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+nachovizzo
+commented
+Aug 5, 2024
+Copy link
+Copy Markdown
+Collaborator
+WIP
+This is a new idea to visualize the internal map representation of kiss icp besides the pointcloud stored in the hash table.
+@l00p3 do you think something like this would be possible with the new visualizer?
+The current Open3D API for VoxelGrid is not that rich, and it makes rendering a bit slow when the grid is requested, so I'd be more than happy to migrate so something better.
+Add draft visualization for the voxels of the VoxelHashMap
+232275a
+nachovizzo
+requested a review
+from l00p3
+August 5, 2024 14:53
+nachovizzo
+added 2 commits
+August 5, 2024 17:34
+Hack voxel size around visualizer for debugging
+4dddcd2
+We can't rotate the voxels to a local view because of Open3D
+…
+3468864
+```
+This feature is missing, and also a bit hard to implement in terms of
+rendering, etc. As open3d, and also we, assume the voxel grid is always
+aligned with the origin
+```
+nachovizzo
+commented
+Aug 5, 2024
+Copy link
+Copy Markdown
+Collaborator
+Author
+Well, it turns out that #354 was much more than a simple bugfix. ...
+By taking this branch and applying a "revert patch," we can see that a nice bug has been in the pipeline since the beginning. The following map renders are the same dataset at the same timestamp. Do you see any difference? I used voxel size of 10 meters to make the error 100% visible.
+main branch today
+Before #354
+Please pay attention to all the points that are part of the map but are not associated with the proper voxel, as it's not being rendered. Also, please pay attention to this only happens 100% of the cases. We have a rounding error on the negative quadrants (the center of the screen is the origin, X positive looking right)
+What happened?
+It turns out that we were computing the wrong voxel for some points, associating voxel blocks with points outside the voxel's range.
+How to test
+```
+diff --git a/cpp/kiss_icp/core/VoxelHashMap.cpp b/cpp/kiss_icp/core/VoxelHashMap.cpp
+index a5cb6ef..14f0eb9 100644
+--- a/cpp/kiss_icp/core/VoxelHashMap.cpp
++++ b/cpp/kiss_icp/core/VoxelHashMap.cpp
+@@ -84,7 +84,7 @@ void VoxelHashMap::Update(const std::vector<Eigen::Vector3d> &points, const Soph
+ void VoxelHashMap::AddPoints(const std::vector<Eigen::Vector3d> &points) {
+     const double map_resolution = std::sqrt(voxel_size_ * voxel_size_ / max_points_per_voxel_);
+     std::for_each(points.cbegin(), points.cend(), [&](const auto &point) {
+-        auto voxel = PointToVoxel(point, voxel_size_);
++        auto voxel = Voxel((point / voxel_size_).template cast<int>());
+         auto search = map_.find(voxel);
+         if (search != map_.end()) {
+             auto &voxel_points = search.value();
+diff --git a/cpp/kiss_icp/core/VoxelUtils.hpp b/cpp/kiss_icp/core/VoxelUtils.hpp
+index 580a252..cd38077 100644
+--- a/cpp/kiss_icp/core/VoxelUtils.hpp
++++ b/cpp/kiss_icp/core/VoxelUtils.hpp
+@@ -31,9 +31,9 @@ namespace kiss_icp {
+ 
+ using Voxel = Eigen::Vector3i;
+ inline Voxel PointToVoxel(const Eigen::Vector3d &point, const double voxel_size) {
+-    return Voxel(static_cast<int>(std::floor(point.x() / voxel_size)),
+-                 static_cast<int>(std::floor(point.y() / voxel_size)),
+-                 static_cast<int>(std::floor(point.z() / voxel_size)));
++    return Voxel(static_cast<int>(point.x() / voxel_size),
++                 static_cast<int>(point.y() / voxel_size),
++                 static_cast<int>(point.z() / voxel_size));
+ }
+ 
+ /// Voxelize a point cloud keeping the original coordinates
+diff --git a/python/kiss_icp/config/config.py b/python/kiss_icp/config/config.py
+index cbb9753..ded83e3 100644
+--- a/python/kiss_icp/config/config.py
++++ b/python/kiss_icp/config/config.py
+@@ -32,7 +32,7 @@ class DataConfig(BaseModel):
+ 
+ 
+ class MappingConfig(BaseModel):
+-    voxel_size: Optional[float] = None  # default: take it from data
++    voxel_size: Optional[float] = 10.0  # default: take it from data
+     max_points_per_voxel: int = 20
+```
+Further sanity checks
+I also added this silly code to the VoxelHashMap::AddPoints method:
+```
+      // Sanity check that the point correspond to the voxel
+        const double min_x = (voxel_size_ * voxel.x());
+        const double max_x = (voxel_size_ * (voxel.x() + 1));
+
+        const double min_y = (voxel_size_ * voxel.y());
+        const double max_y = (voxel_size_ * (voxel.y() + 1));
+
+        const double min_z = (voxel_size_ * voxel.z());
+        const double max_z = (voxel_size_ * (voxel.z() + 1));
+
+        if (point.x() > max_x || point.x() < min_x || point.y() > max_y || point.y() < min_y ||
+            point.z() > max_z || point.z() < min_z
+
+        ) {
+            std::cerr << "[ERROR] \n"
+                      << "point = " << point.transpose() << std::endl
+                      << "voxel = " << voxel.transpose() << std::endl
+                      << "min_x: " << min_x << ", max_x: " << max_x << std::endl
+                      << "min_y: " << min_y << ", max_y: " << max_y << std::endl
+                      << "min_z: " << min_z << ", max_z: " << max_z << std::endl;
+        }
+```
+Mainly to double-check this situation, and indeed, if you try this with the code from before #354, you get lots of errors of points that fell under the wrong voxel and thus, got inserted in the VoxelHashMap but being accessed wrongly (actually not at all)
+Example:
+```
+[ERROR] point= -59.7119 -30.1762  2.86053, voxel = -5 -3  0
+point = -49.4642 -57.2834  3.04068, voxel = -1 -1  0
+-5488, point =  -78.4972 -0.613767  -1.41267
+voxel = -2  0  0
+min_x: -60, max_x: -30
+min_y: 0, max_y: 30
+min_z: 0, max_z: 30
+```
+What was the impact of this bug we had:
+I don't think it is that severe, but keep in mind that when doing std::vector<Voxel> GetAdjacentVoxels(const Voxel &voxel, int adjacent_voxels), the voxel we are querying, it contains points that are far away from the bounds of the voxel, and thus (if the adaptive the admits for the case) will introduce wrong data associations in the system
+I think it is not to freak out, as we fixed, but it is interesting learning to share with the KISS team
+CC @benemer , @tizianoGuadagnino , @saurabh1002 . Please do share your thoughts just to confirm I'm not 100% crazy
+PS: This shows the need of having the ability to plot the internal voxel hash map structure. We would have discovered this issue much before if we had a way to visualize how those points from the map were stored in our data structure. Cheers
+nachovizzo
+added
+the
+voxelization
+All the topic related to voxelization utilities
+label
+Aug 5, 2024
+l00p3
+commented
+Aug 6, 2024
+Copy link
+Copy Markdown
+Contributor
+Regarding the visualization, I think the same can be achieved in some way with Polyscope. Probably it will require some massage, but should be faster than the Open3D implementation (I hope). I'll update you as soon as I can.
+l00p3
+requested changes
+Aug 6, 2024
+View reviewed changes
+Comment thread
+cpp/kiss_icp/core/VoxelHashMap.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+nachovizzo
+commented
+Aug 6, 2024
+Copy link
+Copy Markdown
+Collaborator
+Author
+Regarding the visualization, I think the same can be achieved in some way with Polyscope. Probably it will require some massage, but should be faster than the Open3D implementation (I hope). I'll update you as soon as I can.
+No rush, thanks for checking!
+nachovizzo
+and others
+added 2 commits
+August 6, 2024 11:26
+Update cpp/kiss_icp/core/VoxelHashMap.cpp
+…
+d7ab6c4
+```
+Co-authored-by: Luca Lobefaro <luca.lobefaro95@gmail.com>
+```
+fix wrong commit
+0d08b5b
+benemer
+reviewed
+Aug 8, 2024
+View reviewed changes
+Comment thread
+python/kiss_icp/tools/visualizer.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+benemer
+commented
+Aug 8, 2024
+Copy link
+Copy Markdown
+Member
+This is what I think is happening:
+The points without voxels that you see are just visualization issues; our internal voxelization and nearest-neighbor search we working properly. Here is why:
+Going back to the "wrong" voxelization using static_cast<int> without the std::floor operation has the following effect assuming a voxel size of 10m: Points with an x coordinate in the interval -10m to 10m will be assigned to an x index of 0 (for that coordinate), whereas the points outside this will be correctly mapped (-20m to -10m is mapped to index -1, 10m to 20m is mapped to index 1 and so on). This leads to a voxel grid that has two different voxel sizes: 20m along the coordinate axes and 10m everywhere else; see Gupta's visualization here: #354 (comment)
+How can we explain the points with missing voxels from your visualization? When you ask for our internal map for the occupied voxels, you only return the indices. In the above 1D example, we would return indices -1, 0, and 1. In open3d, you specify that our voxel grid has a fixed voxel size of, for example, 10m so that we will visualize the points in three voxels, each 10m wide, spanning 30m in that direction. This does not reflect that we have larger voxels close to the center, meaning that our voxels actually span 10m+20m+10m=40m in that direction.
+That's why it looks like the points are outside a voxel. Internally, they still are, but the voxel grid is shifted in the visualization.
+I tried to visualize what I meant:
+So internally, we did not have points in completely wrong voxels. But as discussed in #354, the wrong voxelization leads to larger voxels close to the coordinate axes, therefore considering more "volume" when searching for nearest neighbors in that area.
+Let me know what you think.
+nachovizzo
+commented
+Aug 8, 2024
+Copy link
+Copy Markdown
+Collaborator
+Author
+This is what I think is happening:
+The points without voxels that you see are just visualization issues; our internal voxelization and nearest-neighbor search we working properly. Here is why:
+Going back to the "wrong" voxelization using static_cast<int> without the std::floor operation has the following effect assuming a voxel size of 10m: Points with an x coordinate in the interval -10m to 10m will be assigned to an x index of 0 (for that coordinate), whereas the points outside this will be correctly mapped (-20m to -10m is mapped to index -1, 10m to 20m is mapped to index 1 and so on). This leads to a voxel grid that has two different voxel sizes: 20m along the coordinate axes and 10m everywhere else; see Gupta's visualization here: #354 (comment)
+How can we explain the points with missing voxels from your visualization? When you ask for our internal map for the occupied voxels, you only return the indices. In the above 1D example, we would return indices -1, 0, and 1. In open3d, you specify that our voxel grid has a fixed voxel size of, for example, 10m so that we will visualize the points in three voxels, each 10m wide, spanning 30m in that direction. This does not reflect that we have larger voxels close to the center, meaning that our voxels actually span 10m+20m+10m=40m in that direction.
+That's why it looks like the points are outside a voxel. Internally, they still are, but the voxel grid is shifted in the visualization.
+I tried to visualize what I meant:
+So internally, we did not have points in completely wrong voxels. But as discussed in #354, the wrong voxelization leads to larger voxels close to the coordinate axes, therefore considering more "volume" when searching for nearest neighbors in that area.
+Let me know what you think.
+@benemer, thanks for the excellent explanation; I think it makes sense. Ultimately, it led to more volumetric space to search, which was not the intended behavior. Thanks for clarifying the visualization; I also agree that my reasoning was slightly misled by the fact that I baked the voxels in a completely different module than the internal map, and thus, it looks like this.
+l00p3
+mentioned this pull request
+Aug 8, 2024
+Kissualizer Update: Inspection Mode and more Keybindings
+#390
+Closed
+nachovizzo
+commented
+Aug 9, 2024
+Copy link
+Copy Markdown
+Collaborator
+Author
+Closing this in favor of #390 as it got replaced by the new shinny visualizer
+nachovizzo
+closed this
+Aug 9, 2024
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+voxelization
+All the topic related to voxelization utilities
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

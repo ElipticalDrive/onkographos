@@ -1,0 +1,92 @@
+# Volume Normalization
+
+Also called: Min-Max Normalization, Range Normalization
+
+## Overview
+Volume Normalization is a preprocessing method that scales a volume tensor to the range $[0, 1]$ while ensuring that constant positive masks are preserved as full foreground ($1.0$) [S1, unofficial]. It differs from general value compression by focusing on range mapping rather than bit-depth reduction, and from sparse structures by operating on dense data layouts [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A volume tensor $V$ of arbitrary shape and numeric type.
+- Output: A normalized volume tensor $V_{norm}$ of the same shape, with values in $[0, 1]$.
+
+**Data Structures:**
+- The input and output are stored as contiguous arrays of floating-point values. No additional metadata structures are required.
+
+**Steps:**
+1. Compute the global minimum and maximum of the input volume:
+   $$v_{min} = \min(V)$$
+   $$v_{max} = \max(V)$$
+2. Check for constant volumes. If the range $v_{max} - v_{min} \le \epsilon$ (where $\epsilon = 10^{-8}$), the volume is treated as constant:
+   - If $v_{max} > 0.0$, set all elements of $V_{norm}$ to $1.0$.
+   - Otherwise, set all elements of $V_{norm}$ to $0.0$.
+3. For non-constant volumes, apply the linear transformation to each voxel $v \in V$:
+   $$v_{norm} = \frac{v - v_{min}}{v_{max} - v_{min}}$$
+
+**Pitfalls:**
+- **Constant Volumes:** If the range is near zero, division by zero occurs. The threshold $\epsilon = 10^{-8}$ is used to detect this case [S1, unofficial].
+- **Positive Mask Preservation:** Constant positive volumes must map to $1.0$, not $0.0$ or NaN [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_normalization(volume: list[list[list[float]]], epsilon: float = 1e-8) -> list[list[list[float]]]:
+    """
+    Normalize a 3D volume tensor to [0, 1].
+    Constant positive volumes are mapped to 1.0.
+    """
+    # Step 1: Compute min and max
+    vol_min = float('inf')
+    vol_max = float('-inf')
+    
+    # Flatten iteration to find min/max
+    for x in volume:
+        for y in x:
+            for z in y:
+                if z < vol_min:
+                    vol_min = z
+                if z > vol_max:
+                    vol_max = z
+
+    # Step 2: Handle constant volumes
+    if vol_max - vol_min <= epsilon:
+        # Initialize output with zeros
+        normalized_volume = [[[0.0 for _ in row] for row in plane] for plane in volume]
+        if vol_max > 0.0:
+            # Fill with 1.0 if positive
+            for x in range(len(normalized_volume)):
+                for y in range(len(normalized_volume[x])):
+                    for z in range(len(normalized_volume[x][y])):
+                        normalized_volume[x][y][z] = 1.0
+        return normalized_volume
+
+    # Step 3: Normalize non-constant volumes
+    range_val = vol_max - vol_min
+    normalized_volume = [[[0.0 for _ in row] for row in plane] for plane in volume]
+    
+    for x in range(len(volume)):
+        for y in range(len(volume[x])):
+            for z in range(len(volume[x][y])):
+                v = volume[x][y][z]
+                normalized_volume[x][y][z] = (v - vol_min) / range_val
+                
+    return normalized_volume
+```
+
+## Subtopics
+
+### [Scalar Field Normalization](1842-scalar-field-normalization.md)
+Scales scalar field data to the range $[0, 1]$ based on the global minimum and maximum values.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the number of voxels, as it requires two passes (one for min/max, one for normalization).
+- **Memory Complexity:** $O(N)$ for the output tensor.
+- **Strengths:** Simple, fast, and preserves relative differences in non-constant regions.
+- **Limitations:** Sensitive to outliers; a single extreme value can compress the dynamic range of the majority of the data.
+
+## Background
+Volume Normalization is a standard preprocessing step in volume rendering pipelines, particularly when preparing data for neural rendering or visualization tools that expect normalized inputs [S1, unofficial]. It is often used in conjunction with other compression techniques to ensure consistent data ranges.
+
+## Sources
+[S1] ValentinKraft/vgs, https://github.com/ValentinKraft/vgs, fetched 2026-10-27 (unofficial)

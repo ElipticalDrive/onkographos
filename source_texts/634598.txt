@@ -1,0 +1,336 @@
+Materials saved in the .vox format are not processed.
+
+No material support · Issue #3 · RichysHub/MagicaVoxel-VOX-importer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+No material support #3
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+No material support#3
+Copy link
+Labels
+Format specification
+Description
+RichysHub
+opened on Oct 16, 2017
+Issue body actions
+Materials saved in the .vox format are not processed.
+Activity
+RichysHub
+added
+enhancement
+Format specification
+and removed
+enhancement
+on Oct 16, 2017
+wizardgsz commented on Sep 30, 2019
+wizardgsz
+on Sep 30, 2019
+Last edited by wizardgsz
+Contributor
+More actions
+About the material support, we could add a new "Matter" class to parse MATT chunk properties according to prop_bits:
+Plastic
+Roughness
+Specular
+IOR
+Attenuation
+Power
+Glow
+isTotalPower (I have to further investigate about it)
+Just to debug informations to Console:
+```
+            elif name == 'MATT':
+                # material
+                matt_id, mat_type, weight = struct.unpack('<iif', vox.read(12))
+
+                prop_bits, = struct.unpack('<i', vox.read(4))
+                binary = bin(prop_bits)
+
+                types = ["diffuse", "metal", "glass", "emissive"]
+                print("\tid", matt_id, binary)
+                print("\tmat_type", mat_type, types[mat_type])
+                print("\t", types[mat_type], "weight", weight)
+                Plastic = 0.0
+                Roughness = 0.0
+                Specular = 0.0
+                IOR = 0.0
+                Attenuation = 0.0
+                Power = 0.0
+                Glow = 0.0
+                if prop_bits & 1:
+                    Plastic, = struct.unpack('<f', vox.read(4))
+                    print("\tPlastic", Plastic)
+                if prop_bits & 2:
+                    Roughness, = struct.unpack('<f', vox.read(4))
+                    print("\tRoughness", Roughness)
+                if prop_bits & 4:
+                    Specular, = struct.unpack('<f', vox.read(4))
+                    print("\tSpecular", Specular)
+                if prop_bits & 8:
+                    IOR, = struct.unpack('<f', vox.read(4))
+                    print("\tIOR", IOR)
+                if prop_bits & 16:
+                    Attenuation, = struct.unpack('<f', vox.read(4))
+                    print("\tAttenuation", Attenuation)
+                if prop_bits & 32:
+                    Power, = struct.unpack('<f', vox.read(4))
+                    print("\tPower", Power)
+                if prop_bits & 64:
+                    Glow, = struct.unpack('<f', vox.read(4))
+                    print("\tGlow", Glow)
+                if prop_bits & 128:
+                    struct.unpack('<f', vox.read(4))
+                    print("\tisTotalPower = True")
+                matt[matt_id] = types[mat_type] + " weight: " + str(weight) +\
+                                "Plastic: ", str(Plastic) +\
+                                "Roughness: ", str(Roughness) +\
+                                "Specular: ", str(Specular) +\
+                                "IOR: ", str(IOR) +\
+                                "Attenuation: ", str(Attenuation) +\
+                                "Power: ", str(Power) +\
+                                "Glow: " + str(Glow)
+
+                # Need to read property values, but this gets fiddly
+                # TODO: finish implementation
+                #vox.seek(_offset + 12 + s_self, 0)
+                # We have read 16 bytes of this chunk so far, ignoring remainder
+                #vox.read(s_self - 16)
+```
+Starting from this code snippet, I am testing how to setup the material nodes for:
+matt_type=0 i.e. "diffuse": Add ShaderNodeBsdfDiffuse for example
+matt_type=1 i.e. "metal": Add ShaderNodeBsdfGlossy
+matt_type=2 i.e. "glass": Add ShaderNodeBsdfGlass
+matt_type=3 i.e. "emissive": Add ShaderNodeEmission
+use_shadeless: Add ShaderNodeEmission (as we did already)
+The following script changes the shader for selected objects (it is just an example).
+material_diffuse_to_shader(mat, shader_type) function, instead of shader_type parameter (an Integer), should accept our new Matter class object.
+You can test it in Blender 2.80 changing the second parameter of material_diffuse_to_shader(...) to 0/1/2/3
+```
+import bpy, os
+
+
+def dump_node(node):
+        print ("Node '%s'" % node.name)
+        print ("Inputs:")
+        for n in node.inputs:
+            print ("	", n)
+        print ("Outputs:")
+        for n in node.outputs:
+            print ("	", n)
+
+
+def replace_with_shader(node, node_tree, shader_type):
+    new_node = node_tree.nodes.new(shader_type)
+    connected_sockets_out = []
+    sock = node.inputs[0]
+    if len(sock.links)>0:
+        color_link = sock.links[0].from_socket
+    else:
+        color_link=None
+    defaults_in = sock.default_value[:]
+
+    for sock in node.outputs:
+        if len(sock.links)>0:
+            connected_sockets_out.append( sock.links[0].to_socket)
+        else:
+            connected_sockets_out.append(None)
+
+    #print( defaults_in )
+
+    new_node.location = (node.location.x, node.location.y)
+
+    if color_link is not None:
+        node_tree.links.new(new_node.inputs[0], color_link)
+    new_node.inputs[0].default_value = defaults_in
+
+    if connected_sockets_out[0] is not None:
+        node_tree.links.new(connected_sockets_out[0], new_node.outputs[0])
+        
+    return new_node
+
+
+def material_diffuse_to_shader(mat, shader_type):
+
+    doomed=[]
+
+    # Enable 'Use nodes':
+    # TODO: here or elsewhere?
+    mat.use_nodes = True
+
+    if mat.use_nodes == True:
+        for node in mat.node_tree.nodes:
+            dump_node(node)
+            if node.type=='BSDF_DIFFUSE' or node.type=='BSDF_PRINCIPLED':
+                if shader_type == 0:
+                    new_node = replace_with_shader(node, mat.node_tree, 'ShaderNodeBsdfDiffuse')
+                elif shader_type == 1:
+                    new_node = replace_with_shader(node, mat.node_tree, 'ShaderNodeBsdfGlossy')
+                    new_node.inputs["Roughness"].default_value = 0.12345
+                elif shader_type == 2:
+                    new_node = replace_with_shader(node, mat.node_tree, 'ShaderNodeBsdfGlass')
+                    new_node.inputs["Roughness"].default_value = 0.12345
+                    new_node.inputs["IOR"].default_value = 1.12345
+                elif shader_type == 3:
+                    new_node = replace_with_shader(node, mat.node_tree, 'ShaderNodeEmission')
+                doomed.append(node)
+            else:
+                print("Skipping node '%s':" % node.name, node.type)
+
+        # wait until we are done iterating and adding before we start wrecking things
+        for node in doomed:
+            mat.node_tree.nodes.remove(node)
+
+
+def replace_on_selected_objects():
+    mats = set()
+    for obj in bpy.context.selected_objects:
+        if obj.select_set:
+            print("Selected Object:", obj.name)
+            for slot in obj.material_slots:
+                mats.add(slot.material)
+
+    for mat in mats:
+        material_diffuse_to_shader(mat, 2)
+
+def replace_in_all_materials():
+    for mat in bpy.data.materials:
+        material_diffuse_to_shader(mat, 3)
+
+
+
+        
+os.system("cls")
+
+replace_on_selected_objects()
+```
+RichysHub commented on Oct 1, 2019
+RichysHub
+on Oct 1, 2019
+OwnerAuthor
+More actions
+Okay, my thoughts on this are thus:
+I am happy to incorporate changes to handle the MATT chunk, and will certainly pitch in review and help where needed. What you've presented here is already leagues above what I did.
+I want to ensure you're aware that the MATT chunk was deprecated in newer .vox, in favor of the MATL chunk. Though, its inclusion is obviously important if we are to support files created in older versions of MagicaVoxel.
+I really do want to update this repo to handle newer .vox files (preferible in a catch-all style), but progress on that hasn't gotten off of note paper for several reasons. In this rewrite, I envisage a cleaner Object Oriented style, and proper separation of tasks, to allow a proper test suit.
+I would be keen on hearing your intentions with this MATTER class object.
+wizardgsz commented on Oct 1, 2019
+wizardgsz
+on Oct 1, 2019
+Last edited by wizardgsz
+Contributor
+More actions
+The idea is to parse materials properties (whether as new MATL or old MATT chunks), to make them available using a Matter class to advanced users. We can just implement "basic" shaders to draw diffuse/metal/glass/emissive materials.
+Nothing more that is beyond the importer purpose IMHO.
+After a quick read, the most important differences in latest VOX file format:
+no more limits to material types (the above diffuse/metal/glass/emissive types), but the freedom to define new properties in future MagicaVoxel releases and new types of materials in ephtracy's editor
+no more 255 materials limit (you have now int32 instead of single byte to identify the material_id)
+no more "optional" properties driven by property_bits field (the 4 * N floats defined in MATT), but a (key, value) DICT structure to list them all
+In concrete terms, the new "Principled BSDF" shader should be enough; for the class instead, I would say that we should follow the same philosophy of the new VOX specs using a list of material properties i.e. (key, value) pairs.
+ps. about Principled BSDF
+basic options
+advanced usage
+wizardgsz commented on Oct 1, 2019
+wizardgsz
+on Oct 1, 2019
+Last edited by wizardgsz
+Contributor
+More actions
+Btw, I read you already parsed MATT chunk in "Materials" branch...
+RichysHub commented on Oct 2, 2019
+RichysHub
+on Oct 2, 2019
+OwnerAuthor
+More actions
+Heh, I completely forgot I had started on a new branch for it.
+When you lay things out like that, yeah, seems fairly easy to get implemented.
+Aside from MATL changes, there is the scene graph stuff. Unsure if ignoring that would actually affect the end result at all.
+Thanks for the Principled BSDF breakdown, very helpful to have everything listed out like that 👍
+I am still unsure what "make them available using a Matter class to advanced users" implies. If users want to tweak away from the imported materials, they would do so in Blender, and given the materials are shared, this'd work just fine.
+wizardgsz commented on Oct 2, 2019
+wizardgsz
+on Oct 2, 2019
+Last edited by wizardgsz
+Contributor
+More actions
+I found it yesterday: I was looking for Forks/Branches. We could just start from MATT/MATL parsers, the "simplest" part, and implement more chunks then.
+This is not the right thread to talk about newest chunks (except for materials), but I found undocumented rOBJ new chunk in MagicaVoxel 0.99
+Sorry but I forgot to add the reference for the useful screenshots:
+How to Use Blender's new ULTIMATE Shader: Principled
+Disney Ubershader now in master! (i.e. "Principled BSDF" shader)
+Principled BSDF — Blender Manual
+wizardgsz commented on Oct 2, 2019
+wizardgsz
+on Oct 2, 2019
+Last edited by wizardgsz
+Contributor
+More actions
+Debugging latest MATL chunk to Console (unsure about ascii or utf-8 encoding anyhow):
+```
+            elif name == 'MATL':
+                # material
+                matt_id, = struct.unpack('<I', vox.read(4))
+                print("MATL({}):".format(matt_id))
+                num_of_key_value_pairs, = struct.unpack('<I', vox.read(4))
+                print("\tkeys:", num_of_key_value_pairs)
+
+                for i in range(num_of_key_value_pairs):
+
+                    len1, = struct.unpack('<I', vox.read(4))
+                    str1 = vox.read(len1)
+                    str1 = str1.decode('utf-8')
+
+                    len2, = struct.unpack('<I', vox.read(4))
+                    str2 = vox.read(len2)
+                    str2 = str2.decode('utf-8')
+
+                    print("\tkey-value: ('{}', '{}')".format(str1, str2))
+```
+To read:
+```
+Reading at dec: 2892 hex: B4C
+Parsing chunk 'MATL':
+MATL(0):
+        keys: 5
+        key-value: ('_type', '_diffuse')
+        key-value: ('_weight', '1')
+        key-value: ('_rough', '0.1')
+        key-value: ('_spec', '0.5')
+        key-value: ('_ior', '0.3')
+Reading at dec: 2997 hex: BB5
+Parsing chunk 'MATL':
+MATL(1):
+        keys: 5
+        key-value: ('_type', '_diffuse')
+        key-value: ('_weight', '1')
+        key-value: ('_rough', '0.1')
+        key-value: ('_spec', '0.5')
+        key-value: ('_ior', '0.3')
+
+ and so on...
+```
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+Format specification
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

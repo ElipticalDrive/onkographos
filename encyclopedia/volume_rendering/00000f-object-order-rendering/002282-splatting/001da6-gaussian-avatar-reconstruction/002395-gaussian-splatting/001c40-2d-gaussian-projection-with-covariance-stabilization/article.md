@@ -3,12 +3,12 @@
 Also called: 2D Gaussian Projection, EWA Projection, Elliptical Weighted Average projection, 2D Covariance Projection, Covariance Projection, Screen-space Gaussian Projection, EWA Splatting Projection, Perspective Projection of 3D Gaussians, Perspective-correct covariance projection
 
 ## Overview
-This method projects a 3D Gaussian primitive, defined by its mean and covariance in world space, onto the 2D image plane to produce a screen-space Gaussian ellipse (splat) for rasterization [S3]. It solves the problem of rendering anisotropic, perspective-distorted 3D distributions efficiently by approximating the non-linear perspective projection with a local affine transformation, thereby preserving the Gaussian form in 2D [S1, unofficial, S3].
+This method projects a 3D Gaussian primitive, defined by its mean and covariance in world space, onto the 2D image plane to produce a screen-space Gaussian ellipse (splat) for rasterization [S3, unofficial]. It solves the problem of rendering anisotropic, perspective-distorted 3D distributions efficiently by approximating the non-linear perspective projection with a local affine transformation, thereby preserving the Gaussian form in 2D [S1, S3, unofficial].
 
 ## How it works
 **Inputs:**
 - 3D Gaussian parameters: mean $\mu \in \mathbb{R}^3$ (world space), rotation quaternion $q$, scale vector $s$, opacity $\alpha$, and spherical harmonic coefficients $h$ for color [S6, unofficial].
-- Camera parameters: View matrix $V$, Projection matrix $P$, image width $W$, height $H$, focal lengths $f_x, f_y$, principal point $(c_x, c_y)$ [S1, unofficial, S6, unofficial].
+- Camera parameters: View matrix $V$, Projection matrix $P$, image width $W$, height $H$, focal lengths $f_x, f_y$, principal point $(c_x, c_y)$ [S1, S6, unofficial].
 
 **Outputs:**
 - Screen-space mean $\mu_{2D} \in \mathbb{R}^2$ [S1, unofficial].
@@ -48,10 +48,10 @@ The projected Gaussian is stored with the following fields [S2, unofficial]:
 4. **Project Covariance to 2D:**
    Compute the unnormalized 2D covariance:
    $$ \Sigma'_{2D} = J_{2\times3} \Sigma_{cam} J_{2\times3}^\top $$
-   where $J_{2\times3}$ is the top two rows of $J$ [S1, unofficial, S3].
+   where $J_{2\times3}$ is the top two rows of $J$ [S1, S3, unofficial].
 
 5. **Covariance Stabilization (Low-Pass Filter):**
-   Add a small epsilon $\epsilon_{2d}$ to the diagonal elements to ensure positive definiteness and prevent singularities or infinitely small Gaussians [S2, unofficial, S4, unofficial]:
+   Add a small epsilon $\epsilon_{2d}$ to the diagonal elements to ensure positive definiteness and prevent singularities or infinitely small Gaussians [S2, S4, unofficial]:
    $$ \Sigma_{2D} = \Sigma'_{2D} + \begin{bmatrix} \epsilon_{2d} & 0 \\ 0 & \epsilon_{2d} \end{bmatrix} $$
    Typical value: $\epsilon_{2d} = 0.3$ [S2, unofficial]. This guarantees invertibility because $x^T (A^T A + \lambda I) x = \|Ax\|^2 + \lambda \|x\|^2 > 0$ for $\lambda > 0$ [S2, unofficial].
 
@@ -208,17 +208,17 @@ Renders each Gaussian as a single pixel at its projected mean, ignoring shape an
 ## Operating characteristics
 - **Time Complexity:** Not given in the sources.
 - **Memory Complexity:** Not given in the sources.
-- **Performance:** Enables real-time rendering of millions of Gaussians (e.g., 134 fps on Mip-NeRF360) by avoiding ray marching [S3].
-- **Strengths:** Closed-form projection allows differentiability and fast GPU/CPU rasterization. The method sacrifices negligible global geometric accuracy to enable real-time rendering [S3].
-- **Limitations:** The linearization error increases for large splats or extreme perspective, potentially causing geometric inaccuracies [S3]. Singularities are handled by stabilization but may introduce slight blurring if $\epsilon_{2d}$ is too large [S2, unofficial].
+- **Performance:** Enables real-time rendering of millions of Gaussians (e.g., 134 fps on Mip-NeRF360) by avoiding ray marching [S3, unofficial].
+- **Strengths:** Closed-form projection allows differentiability and fast GPU/CPU rasterization. The method sacrifices negligible global geometric accuracy to enable real-time rendering [S3, unofficial].
+- **Limitations:** The linearization error increases for large splats or extreme perspective, potentially causing geometric inaccuracies [S3, unofficial]. Singularities are handled by stabilization but may introduce slight blurring if $\epsilon_{2d}$ is too large [S2, unofficial].
 
 ## Background
-The method originates from Elliptical Weighted Average (EWA) splatting, described by Zwicker et al. in 2002 for anti-aliased volume rendering [S3]. It was adapted by Kerbl et al. (2023) for 3D Gaussian Splatting, where it projects 3D Gaussians to 2D ellipses for real-time rasterization [S3]. The stabilization term $\epsilon_{2d}$ is a practical addition to ensure numerical robustness in the inverse covariance computation [S2, unofficial].
+The method originates from Elliptical Weighted Average (EWA) splatting, described by Zwicker et al. in 2002 for anti-aliased volume rendering [S3, unofficial]. It was adapted by Kerbl et al. (2023) for 3D Gaussian Splatting, where it projects 3D Gaussians to 2D ellipses for real-time rasterization [S3, unofficial]. The stabilization term $\epsilon_{2d}$ is a practical addition to ensure numerical robustness in the inverse covariance computation [S2, unofficial].
 
 ## Sources
 [S1] 3D Gaussian Splatting in a Weekend, https://bfeldman.me/3dgs-weekend/, fetched 2026-10-26 (unofficial)
 [S2] Tsplat – Run Gaussian splatting in your terminal, https://github.com/darshanmakwana412/tsplat, fetched 2026-10-26 (unofficial)
-[S3] An Architectural Review of the 3D Gaussian Splatting Rendering Pipeline, https://doi.org/10.5281/zenodo.21739653, fetched 2026-10-26
+[S3] An Architectural Review of the 3D Gaussian Splatting Rendering Pipeline, https://doi.org/10.5281/zenodo.21739653, fetched 2026-10-26 (unofficial)
 [S4] thomasantony/splat, https://github.com/thomasantony/splat, fetched 2026-10-27 (unofficial)
 [S5] metin-yat/mini-splat, https://github.com/metin-yat/mini-splat, fetched 2026-10-28 (unofficial)
 [S6] 驚くほどキレイな三次元シーン復元、「3D Gaussian Splatting」を徹底的に解説する, https://qiita.com/scomup/items/d5790da25a846e645de1, fetched 2026-10-29 (unofficial)

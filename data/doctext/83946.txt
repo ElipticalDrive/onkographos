@@ -1,0 +1,3217 @@
+# Real-Time Volumetric Cloud Renderer
+<img src="res/readme/logo.gif">
+
+This project introduces an efficient and effective method to render animated, lifelike clouds in real-time. Our clouds dynamically react to other world-parameters like the position of the camera or the sun. Our clouds are also conveniently parameterized to allow for flexible customization of its density, position, sizes, etc.
+
+## Results
+<img src="res/readme/r1.gif" width=50%><img src="res/readme/r2.gif" width=50%>
+
+## Method and Features
+* Interactive real-time smoke rendering
+* Spherical voxelization of a 3D texture using billboards
+* Voxel cone tracing
+
+## Development Details
+_[Devlog](http://www.jaafersheriff.com/search/label/clouds)_
+
+_[Final implementation paper](paper/senior-project.pdf)_
+
+## Libraries Used
+* [GLFW](http://www.glfw.org/)
+* [GLM](https://glm.g-truc.net/0.9.8/index.html)
+* [glad](https://github.com/Dav1dde/glad)
+* [ImGui](https://github.com/ocornut/imgui)
+* [stb_image.h](https://github.com/nothings/stb)
+
+## References
+* Sam Freed. "Tessellated Voxelization for Global Illumination using Voxel Cone Tracing." Master's Thesis 2018. California Polytechnic State University, San Luis Obispo Digital Commons. 
+* Robert Larsson. "Interactive Real-Time Smoke Rendering." Master's Thesis 2010. Chalmers University of Technology. 
+* Cyril Crassin, Fabrice Neyret, Miguel Sainz, Simon Green, Elmar Eisemann. Interactive Indirect Illumination Using Voxel Cone Tracing. NVIDIA Research 2011.
+
+### res/billboard_vert.glsl
+```
+#version 330 core
+
+layout(location = 0) in vec3 vertPos;
+layout(location = 1) in vec3 vertNor;
+
+uniform mat4 P;
+uniform mat4 M;
+uniform mat3 N;
+uniform mat4 V;
+uniform mat4 Vi;
+
+out vec3 fragPos;
+out vec3 fragNor;
+out vec2 fragTex;
+
+void main() {
+    vec4 worldPos = M * Vi * vec4(vertPos, 1.0);
+    gl_Position = P * V * worldPos;
+    fragPos = worldPos.xyz;
+    fragNor = N * vertNor; 
+    fragTex = (vertPos.xy + 1) / 2.f;
+}
+```
+
+### res/billboard_vert_instanced.glsl
+```
+#version 330 core
+
+layout(location = 0) in vec3 vertPos;
+layout(location = 1) in vec3 vertNor;
+layout(location = 2) in vec3 boardPosition;
+layout(location = 3) in float boardScale;
+
+uniform mat4 P;
+uniform mat4 V;
+uniform mat4 Vi;
+
+uniform vec3 volumePosition;
+
+out vec3 fragPos;
+out vec3 fragNor;
+out vec2 fragTex;
+flat out vec3 center;
+flat out float scale;
+
+void main() {
+    vec3 finalPos = volumePosition + boardPosition;
+    mat4 M = mat4(1.f);
+    M[0][0] = boardScale; 
+    M[1][1] = boardScale; 
+    M[2][2] = boardScale; 
+    M[3][0] = finalPos.x;
+    M[3][1] = finalPos.y;
+    M[3][2] = finalPos.z;
+    M[3][3] = 1.f;
+
+    vec4 worldPos = M * Vi * vec4(vertPos, 1.0);
+    gl_Position = P * V * worldPos;
+    fragPos = worldPos.xyz;
+    fragNor = mat3(transpose(inverse(M * Vi))) * vertNor;
+    fragTex = (vertPos.xy + 1) / 2.f;
+    center = finalPos;
+    scale = boardScale;
+}
+```
+
+### res/conetrace_frag.glsl
+```
+#version 440 core
+
+#define PI 3.14159265359f
+
+in vec3 fragPos;
+in vec3 fragNor;
+in vec2 fragTex;
+flat in vec3 center;
+flat in float scale;
+
+uniform mat4 V;
+uniform vec3 lightPos;
+
+uniform bool showQuad;
+
+uniform int voxelDim;
+uniform vec2 xBounds;
+uniform vec2 yBounds;
+uniform vec2 zBounds;
+uniform sampler3D volumeTexture;
+
+uniform bool doConeTrace;
+uniform int vctSteps;
+uniform float vctConeAngle;
+uniform float vctConeInitialHeight;
+uniform float vctLodOffset;
+uniform float vctDownScaling;
+
+uniform bool doNoise;
+uniform sampler3D noiseMap;
+uniform vec3 octaveOffsets;
+uniform float stepSize;
+uniform float noiseOpacity;
+uniform int numOctaves;
+uniform float freqStep;
+uniform float persStep;
+
+uniform float adjustSize;
+uniform int minNoiseSteps;
+uniform int maxNoiseSteps;
+uniform float minNoiseColor;
+uniform float noiseColorScale;
+
+out vec4 color;
+
+/* Linear map from aribtray box(?) in world space to 3D volume 
+ * Voxel indices: [0, dimension - 1] */
+vec3 calculateVoxelLerp(vec3 pos) {
+    float rangeX = xBounds.y - xBounds.x;
+    float rangeY = yBounds.y - yBounds.x;
+    float rangeZ = zBounds.y - zBounds.x;
+
+    float x = voxelDim * ((pos.x - xBounds.x) / rangeX);
+    float y = voxelDim * ((pos.y - yBounds.x) / rangeY);
+    float z = voxelDim * ((pos.z - zBounds.x) / rangeZ);
+
+    return vec3(x, y, z);
+}
+
+ivec3 calculateVoxelIndex(vec3 pos) {
+    return ivec3(calculateVoxelLerp(pos));
+}
+
+float traceCone(sampler3D voxelTexture, vec3 position, vec3 direction, int steps, float coneAngle, float coneHeight) {
+    direction = normalize(direction);
+    direction /= voxelDim;
+    position /= voxelDim;
+
+    float color = 0.f;
+    for (int i = 1; i <= steps; i++) {
+        float coneRadius = coneHeight * tan(coneAngle / 2.f);
+        float lod = log2(max(1.f, 2.f * coneRadius));
+        vec4 sampleColor = textureLod(voxelTexture, position + coneHeight * direction, lod + vctLodOffset);
+        color += sampleColor.r * float(i)/(steps*vctDownScaling); // TODO : linear scaling
+        coneHeight += coneRadius;
+    }
+
+    return color;
+}
+
+float saturate(float x) {
+    return clamp(x, 0, 1);
+}
+
+#define DIST_BIAS 0.01
+bool raySphereIntersect(vec3 rO, vec3 rD, vec3 sO, float sR, inout float tnear, inout float tfar) {
+    vec3 delta = rO - sO;
+    float A = dot(rD, rD);
+    float B = 2 * dot(delta, rD);
+    float C = dot(delta, delta) - sR*sR;
+    float disc = B*B - 4.0*A*C;
+    if (disc < DIST_BIAS) {
+        return false;
+    }
+    else {
+        float sqrtDisc = sqrt(disc);
+        tnear = (-B - sqrtDisc) / (2 * A);
+        tfar = (-B + sqrtDisc) / (2 * A);
+        return true;
+    }
+}
+
+vec4 noise3D(vec3 uv, int octaves) {
+    vec4 noiseVal = vec4(0, 0, 0, 0);
+    vec4 octaveVal = vec4(0, 0, 0, 0);
+    vec3 uvOffset;
+    float freq = 1;
+    float pers = 1;
+    for (int i = 0; i < octaves; i++) {
+        uvOffset = uv + octaveOffsets[i];
+        octaveVal = texture(noiseMap, uvOffset*freq);
+        noiseVal += pers * octaveVal;
+        freq *= freqStep;
+        pers *= persStep;
+    }
+
+    noiseVal.a = abs(noiseVal.a);
+
+    return noiseVal;
+}
+
+void main() {
+    float radius = scale;
+    if (showQuad) {
+        /* Spherical distance - 1 at center of billboard, 0 at edges */
+        float sphereContrib = (distance(center, fragPos)/radius);
+        sphereContrib = sqrt(max(0, 1 - sphereContrib * sphereContrib));
+        color = vec4(sphereContrib);
+        if (fragTex.x < 0.01f || fragTex.y < 0.01f ||
+            fragTex.x > 0.99f || fragTex.y > 0.99f) {
+            color = vec4(1);
+        }
+        return;
+    }
+
+    /* Sample noise texture */
+    if (doNoise) {
+        vec3 viewRay = normalize(vec3(V[0][2], V[1][2], V[2][2]));
+        float tnear, tfar;
+        if (!raySphereIntersect(fragPos, viewRay, center, radius, tnear, tfar)) {
+        	discard;
+        }
+        vec3 worldNear = fragPos + viewRay*tnear;
+        vec3 worldFar = fragPos + viewRay*tfar;
+        vec4 viewNear = vec4(worldNear, 1)* V;
+        vec4 viewFar = vec4(worldFar, 1)* V;
+        float currentDepth = viewNear.z/ viewNear.w;
+        float farDepth = viewFar.z / viewFar.w;
+        vec3 unitTex = (worldNear - center) / radius;
+        float fNoiseSizeAdjust = 1 / adjustSize;
+        vec3 localTexNear = worldNear * fNoiseSizeAdjust;
+        vec3 localTexFar = worldFar * fNoiseSizeAdjust;
+        float iSteps = length(localTexFar - localTexNear) / stepSize;
+        iSteps = min(iSteps, maxNoiseSteps - minNoiseSteps) + minNoiseSteps;
+        vec3 currentTex = localTexNear;
+        vec3 localTexDelta = (localTexFar - localTexNear) / (iSteps - 1);
+        float opacityAdjust = noiseOpacity / (iSteps - 1);
+        float lightAdjust = 1.0 / (iSteps - 1);
+        float runningOpacity = 0;
+        float runningLight = 0;
+        for (int i = 0; i < iSteps; i++) {
+            vec4 noiseCell = noise3D(currentTex, numOctaves);
+            noiseCell.xyz += normalize(unitTex);
+            runningOpacity += noiseCell.a* (1.0 - dot(unitTex, unitTex));
+            runningLight += saturate(dot(noiseCell.xyz, vec3(0, 1, 0))*0.5 + 0.5);
+            currentTex += localTexDelta;
+            unitTex += localTexDelta;
+        }
+
+        float col = minNoiseColor + (noiseColorScale * runningLight * lightAdjust);
+        float alpha = 1 - length(fragTex - vec2(0.5)) * 2;
+        runningOpacity = saturate(runningOpacity*opacityAdjust);
+        color = vec4(vec3(col), runningOpacity*alpha);
+    }
+
+    if (doConeTrace) {
+        /* Spherical distance - 1 at center of billboard, 0 at edges */
+        float sphereContrib = (distance(center, fragPos)/radius);
+        sphereContrib = sqrt(max(0, 1 - sphereContrib * sphereContrib));
+        if (sphereContrib < DIST_BIAS) {
+            discard;
+        }
+
+        /* Start at voxel closest to camera */
+        vec3 billboardNormal = normalize(fragNor);
+        vec3 pos = fragPos + billboardNormal * radius * sphereContrib;
+ 
+        /* Cone trace */
+        vec3 voxelPosition = calculateVoxelLerp(pos);
+        vec3 dir = lightPos - pos;
+        float indirect = traceCone(volumeTexture, voxelPosition, dir, vctSteps, vctConeAngle, vctConeInitialHeight);
+
+        /* Output */
+        if (doNoise) {
+            color.rgb *= indirect; 
+        }
+        else {
+            color = vec4(indirect);
+        }
+    }
+}
+```
+
+### res/debug_frag.glsl
+```
+#version 330 core
+
+in vec3 fragPos;
+in vec2 fragTex;
+
+uniform sampler2D positionMap;
+
+out vec4 color;
+
+void main() {
+    color = texture(positionMap, fragTex);
+}
+```
+
+### res/first_voxelize.glsl
+```
+#version 440 core
+
+in vec3 fragPos;
+in vec3 fragNor;
+
+flat in vec3 center;
+flat in float scale;
+
+uniform vec3 lightNearPlane;
+uniform float clipDistance;
+
+layout(binding=0, r8) uniform image3D volume;
+uniform int voxelDim;
+uniform vec2 xBounds;
+uniform vec2 yBounds;
+uniform vec2 zBounds;
+uniform float stepSize;
+
+out vec4 color;
+
+/* Linear map from aribtray box(?) in world space to 3D volume 
+ * Voxel indices: [0, dimension - 1] */
+vec3 calculateVoxelLerp(vec3 pos) {
+    float rangeX = xBounds.y - xBounds.x;
+    float rangeY = yBounds.y - yBounds.x;
+    float rangeZ = zBounds.y - zBounds.x;
+
+    float x = voxelDim * ((pos.x - xBounds.x) / rangeX);
+    float y = voxelDim * ((pos.y - yBounds.x) / rangeY);
+    float z = voxelDim * ((pos.z - zBounds.x) / rangeZ);
+
+	return vec3(x, y, z);
+}
+
+ivec3 calculateVoxelIndex(vec3 pos) {
+	return ivec3(calculateVoxelLerp(pos));
+}
+
+void main() {
+    float radius = scale;
+
+    /* Spherical distance - 1 at center of billboard, 0 at edges */
+    float sphereContrib = (distance(center, fragPos)/radius);
+    sphereContrib = sqrt(max(0, 1 - sphereContrib * sphereContrib));
+
+    if (sphereContrib < 0.01f) {
+        discard;
+    }
+
+    /* Write to volume in spherical shape from billboard to light source */
+    vec3 dir = normalize(fragNor); 
+    float dist = radius * sphereContrib;
+    vec3 start = fragPos - dir * dist;
+    // for(float i = 0; i < 2*dist; i += stepSize) {
+    //     vec3 worldPos = start + dir * i;
+    //     ivec3 voxelIndex = calculateVoxelIndex(worldPos);
+    //     imageStore(volume, voxelIndex, ivec4(0, 0, 0, 1));
+    // }
+
+    /* Write nearest voxel position to position FBO */
+    vec3 worldPos = fragPos + dir * dist;
+    color = vec4(worldPos, 1);
+    gl_FragDepth = distance(lightNearPlane, worldPos) / clipDistance;
+}
+```
+
+### res/second_voxelize.glsl
+```
+#version 440 core
+
+in vec3 fragPos;
+
+layout(binding=0, r8) uniform image3D volume;
+uniform int voxelDim;
+uniform vec2 xBounds;
+uniform vec2 yBounds;
+uniform vec2 zBounds;
+uniform float stepSize;
+
+layout(binding=1, rgba32f) uniform image2D positionMap;
+
+out vec4 color;
+
+/* Linear map from aribtray box(?) in world space to 3D volume 
+ * Voxel indices: [0, dimension - 1] */
+vec3 calculateVoxelLerp(vec3 pos) {
+    float rangeX = xBounds.y - xBounds.x;
+    float rangeY = yBounds.y - yBounds.x;
+    float rangeZ = zBounds.y - zBounds.x;
+
+    float x = voxelDim * ((pos.x - xBounds.x) / rangeX);
+    float y = voxelDim * ((pos.y - yBounds.x) / rangeY);
+    float z = voxelDim * ((pos.z - zBounds.x) / rangeZ);
+
+	return vec3(x, y, z);
+}
+
+ivec3 calculateVoxelIndex(vec3 pos) {
+	return ivec3(calculateVoxelLerp(pos));
+}
+
+void main() {
+    /* Read from position map */
+    vec4 worldPos = imageLoad(positionMap, ivec2(gl_FragCoord.xy));
+    /* If this voxel is active (is already either black or white)
+     * Set it to white */
+    if (worldPos.a > 0) {
+        vec4 col = vec4(1);
+        imageStore(volume, calculateVoxelIndex(worldPos.xyz), col);
+        imageStore(volume, calculateVoxelIndex(worldPos.xyz + stepSize * normalize(vec3( 1,  1,  1))), col);
+        imageStore(volume, calculateVoxelIndex(worldPos.xyz + stepSize * normalize(vec3( 1,  1, -1))), col);
+        imageStore(volume, calculateVoxelIndex(worldPos.xyz + stepSize * normalize(vec3( 1, -1,  1))), col);
+        imageStore(volume, calculateVoxelIndex(worldPos.xyz + stepSize * normalize(vec3( 1, -1, -1))), col);
+        imageStore(volume, calculateVoxelIndex(worldPos.xyz + stepSize * normalize(vec3(-1,  1,  1))), col);
+        imageStore(volume, calculateVoxelIndex(worldPos.xyz + stepSize * normalize(vec3(-1,  1, -1))), col);
+        imageStore(volume, calculateVoxelIndex(worldPos.xyz + stepSize * normalize(vec3(-1, -1,  1))), col);
+        imageStore(volume, calculateVoxelIndex(worldPos.xyz + stepSize * normalize(vec3(-1, -1, -1))), col);
+    }
+}
+```
+
+### res/sun_frag.glsl
+```
+#version 330 core
+
+in vec3 fragPos;
+
+uniform vec3 center;
+
+uniform vec3 innerColor;
+uniform vec3 outerColor;
+uniform float innerRadius;
+uniform float outerRadius;
+
+out vec4 color;
+
+void main() {
+    float dist = distance(center, fragPos);
+
+    /* Inner circle */
+    if (dist < innerRadius) {
+        color = vec4(innerColor, 1.0);
+    }
+    /* Outer circle */
+    else {
+        float scale = (dist - innerRadius) / (outerRadius - innerRadius);
+        if (scale > 0.99f) {
+            discard;
+        }
+        color = vec4(outerColor * scale + innerColor * (1 - scale), 1 - scale);
+    }
+}
+```
+
+### res/voxel_frag.glsl
+```
+#version 330 core
+
+in float voxData;
+
+uniform bool isOutline;
+uniform float alpha;
+
+out vec4 color;
+
+void main() {
+    if (isOutline) {
+        color = vec4(0.5, 0.5, 0.5, 1);
+        return;
+    }
+
+    color.rgb = vec3(voxData);
+    color.a = alpha;
+}
+```
+
+### res/voxel_vert.glsl
+```
+#version 330 core
+
+layout(location = 0) in vec3 vertPos;
+layout(location = 1) in vec3 vertNor;
+layout(location = 2) in vec3 voxelPosition;
+layout(location = 3) in float voxelData;
+
+uniform mat4 P;
+uniform mat4 V;
+
+uniform vec3 voxelSize;
+
+out float voxData;
+
+void main() {
+    mat4 M = mat4(1.f);
+    M[0][0] = voxelSize.x;
+    M[1][1] = voxelSize.y;
+    M[2][2] = voxelSize.z;
+    M[3][3] = 1.f;
+    M[3][0] = voxelPosition.x;
+    M[3][1] = voxelPosition.y;
+    M[3][2] = voxelPosition.z;
+    gl_Position = P * V * M * vec4(vertPos, 1.f);
+    voxData = voxelData;
+}
+```
+
+### src/Camera.cpp
+```
+#include "Camera.hpp"
+
+#include "IO/Window.hpp"
+#include "Util.hpp"
+
+#include "glm/gtc/matrix_transform.hpp"
+
+double Camera::phi, Camera::theta;
+glm::mat4 Camera::P, Camera::V;
+glm::vec3 Camera::position, Camera::lookAt, Camera::u, Camera::v, Camera::w;
+
+void Camera::update() {
+    /* Update view angles */
+    if (Mouse::isDown(0)) {
+        theta += Mouse::dx * LOOK_SPEED;
+        phi -= Mouse::dy * LOOK_SPEED;
+    }
+
+    /* Upate view basis vectors */
+    w = glm::normalize(lookAt - position);
+    u = glm::normalize(glm::cross(w, glm::vec3(0, 1, 0)));
+    v = glm::normalize(glm::cross(u, w));
+
+    /* Update look at */
+    glm::vec3 sphere(
+            glm::cos(phi)*glm::cos(theta),
+            glm::sin(phi),
+            glm::cos(phi)*glm::cos((Util::PI/2.f)-theta));
+    lookAt = position + glm::normalize(sphere);
+
+    /* Get move speed */
+    float moveSpeed = MOVE_SPEED;
+    if (Keyboard::isKeyPressed(GLFW_KEY_LEFT_SHIFT) || Keyboard::isKeyPressed(GLFW_KEY_RIGHT_SHIFT)) {
+        moveSpeed *= 2.f;
+    }
+
+    /* Update position*/
+    if (Keyboard::isKeyPressed(GLFW_KEY_W)) {
+        moveForward(moveSpeed);
+    }
+    if (Keyboard::isKeyPressed(GLFW_KEY_S)) {
+        moveBackward(moveSpeed);
+    }
+    if (Keyboard::isKeyPressed(GLFW_KEY_A)) {
+        moveLeft(moveSpeed);
+    }
+    if (Keyboard::isKeyPressed(GLFW_KEY_D)) {
+        moveRight(moveSpeed);
+    }
+    if (Keyboard::isKeyPressed(GLFW_KEY_R)) {
+        moveUp(moveSpeed);
+    }
+    if (Keyboard::isKeyPressed(GLFW_KEY_E)) {
+        moveDown(moveSpeed);
+    }   
+
+    /* Update matrices */
+    // TODO : only update if necessary
+    P = glm::perspective(45.f, (float) (Window::width / Window::height), 0.01f, 2500.f);
+    V = glm::lookAt(position, lookAt, glm::vec3(0, 1, 0));
+}
+
+/* All movement is based on UVW basis-vectors */
+void Camera::moveForward(const float moveSpeed) { 
+    position += w * moveSpeed;
+    lookAt += w * moveSpeed;
+}
+
+void Camera::moveBackward(const float moveSpeed) { 
+    position -= w * moveSpeed;
+    lookAt -= w * moveSpeed;
+}
+
+void Camera::moveRight(const float moveSpeed) { 
+    position += u * moveSpeed;
+    lookAt += u * moveSpeed;
+}
+
+void Camera::moveLeft(const float moveSpeed) { 
+    position -= u * moveSpeed;
+    lookAt -= u * moveSpeed;
+}
+
+void Camera::moveUp(const float moveSpeed) { 
+    position += v * moveSpeed;
+    lookAt += v * moveSpeed;
+}
+
+void Camera::moveDown(const float moveSpeed) { 
+    position -= v * moveSpeed;
+    lookAt -= v * moveSpeed;
+}
+```
+
+### src/Camera.hpp
+```
+/* Parent Camera class
+ * This camera can be used as a floating camera with no bounds */
+#pragma once
+#ifndef _CAMERA_HPP_
+#define _CAMERA_HPP_
+
+#include "glm/glm.hpp"
+
+#define LOOK_SPEED 0.004f
+#define MOVE_SPEED 0.25f
+
+class Camera {
+    public:
+        /* Update */
+        static void update();
+
+        /* Move according to UVW */
+        static void moveForward(const float);
+        static void moveBackward(const float);
+        static void moveLeft(const float);
+        static void moveRight(const float);
+        static void moveUp(const float);
+        static void moveDown(const float);
+
+        static glm::mat4 & getP() { return P; }
+        static glm::mat4 & getV() { return V; }
+
+        static glm::vec3 getPosition() { return position; }
+        static glm::vec3 getLookAt() { return lookAt; }
+
+    protected:
+        /* Used for look at calculation */
+        static double phi;
+        static double theta;
+
+        /* UVW basis vectors */
+        static glm::vec3 u, v, w;
+
+        /* Matrices */
+        static glm::mat4 P;
+        static glm::mat4 V;
+
+        /* Positions */
+        static glm::vec3 position;
+        static glm::vec3 lookAt;
+};
+
+#endif
+```
+
+### src/CloudVolume.cpp
+```
+#include "CloudVolume.hpp"
+
+#include "Library.hpp"
+#include "Util.hpp"
+#include "Shaders/GLSL.hpp"
+
+CloudVolume::CloudVolume(int dim, glm::vec2 bounds, glm::vec3 position, int mips) {
+    this->dimension = dim;
+    this->position = position;
+    this->xBounds = bounds;
+    this->yBounds = bounds;
+    this->zBounds = bounds;
+    this->levels = mips;
+
+    /* Init volume */
+    CHECK_GL_CALL(glGenTextures(1, &volId));
+    CHECK_GL_CALL(glBindTexture(GL_TEXTURE_3D, volId));
+    CHECK_GL_CALL(glTexStorage3D(GL_TEXTURE_3D, mips, GL_R8, dimension, dimension, dimension)); // immutable
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR));
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE));
+    clearGPU();
+    CHECK_GL_CALL(glBindTexture(GL_TEXTURE_3D, 0));
+
+    /* Init instanced quad */
+    int numVoxels = dim * dim * dim;
+    this->instancedQuad = Library::createQuad();
+    CHECK_GL_CALL(glBindVertexArray(instancedQuad->vaoId));
+    CHECK_GL_CALL(glGenBuffers(1, &instancedQuadPosVBO));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, instancedQuadPosVBO));
+    CHECK_GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(glm::vec3) * numVoxels, nullptr, GL_DYNAMIC_DRAW));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0)); 
+    CHECK_GL_CALL(glEnableVertexAttribArray(2));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, instancedQuadPosVBO));
+    CHECK_GL_CALL(glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0));	
+    CHECK_GL_CALL(glVertexAttribDivisor(2, 1)); 
+    CHECK_GL_CALL(glGenBuffers(1, &instancedQuadScaleVBO));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, instancedQuadScaleVBO));
+    CHECK_GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(float) * numVoxels, nullptr, GL_DYNAMIC_DRAW));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0)); 
+    CHECK_GL_CALL(glEnableVertexAttribArray(3));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, instancedQuadScaleVBO));
+    CHECK_GL_CALL(glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(float), (void*)0));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0));	
+    CHECK_GL_CALL(glVertexAttribDivisor(3, 1));
+
+    range = glm::vec3(
+        xBounds.y - xBounds.x,
+        yBounds.y - yBounds.x,
+        zBounds.y - zBounds.x);
+    voxelSize = range / (float)dimension;
+}
+
+/* Add a billboard */
+void CloudVolume::addCloudBoard(glm::vec3 &pos, float &scale) {
+    billboards.count++;
+    billboards.positions.push_back(pos);
+    billboards.scales.push_back(scale);
+}
+
+/* Sort billboards by distance to a point */
+void CloudVolume::sortBoards(glm::vec3 point) {
+    for (unsigned int i = 0; i < billboards.count; i++) {
+        int minIdx = i;
+        for (unsigned int j = i + 1; j < billboards.count; j++) {
+            if (glm::distance(this->position + billboards.positions[minIdx], point) < glm::distance(this->position + billboards.positions[j], point)) {
+                minIdx = j;
+            }
+        }
+        if (i != minIdx) {
+            glm::vec3 tmpPos = billboards.positions[i];
+            billboards.positions[i] = billboards.positions[minIdx];
+            billboards.positions[minIdx] = tmpPos;
+            float tmpScale = billboards.scales[i];
+            billboards.scales[i] = billboards.scales[minIdx];
+            billboards.scales[minIdx] = tmpScale;
+        }
+    }
+}
+
+void CloudVolume::update() {
+    /* Reupload billboard positions and scales */
+    uploadBillboards();
+
+    range = glm::vec3(
+        xBounds.y - xBounds.x,
+        yBounds.y - yBounds.x,
+        zBounds.y - zBounds.x);
+    voxelSize = range / (float)dimension;
+}
+
+/* Reset GPU volume */
+void CloudVolume::clearGPU() {
+    for (int i = 0; i < levels; i++) {
+        CHECK_GL_CALL(glClearTexImage(volId, i, GL_RED, GL_FLOAT, nullptr));
+    }
+}
+
+// Assume 4 bytes per voxel
+glm::ivec3 CloudVolume::get3DIndices(const int index) const {
+	int line = dimension;
+	int slice = dimension  * line;
+	int z = index / slice;
+	int y = (index - z * slice) / line;
+	int x = (index - z * slice - y * line);
+	return glm::ivec3(x, y, z);
+}
+
+glm::vec3 CloudVolume::reverseVoxelIndex(const glm::ivec3 &voxelIndex) const {
+    float x = float(voxelIndex.x) * range.x / dimension + xBounds.x;
+    float y = float(voxelIndex.y) * range.y / dimension + yBounds.x;
+    float z = float(voxelIndex.z) * range.z / dimension + zBounds.x;
+
+    return glm::vec3(x, y, z);
+}
+
+void CloudVolume::regenerateBillboards(int count, glm::vec3 minOffset, glm::vec3 maxOffset, float minScale, float maxScale) {
+    billboards.minOffset = minOffset;
+    billboards.maxOffset = maxOffset;
+    billboards.minScale = minScale;
+    billboards.maxScale = maxScale;
+    billboards.positions.clear();
+    billboards.scales.clear();
+    billboards.count = 0;
+    for (int i = 0; i < count; i++) {
+        glm::vec3 position = Util::genRandomVec3(minOffset.x, maxOffset.x, minOffset.y, maxOffset.y, minOffset.z, maxOffset.z);
+        float scale = Util::genRandom(minScale, maxScale);
+        addCloudBoard(position, scale);
+    }
+}
+
+void CloudVolume::resetBillboards() {
+    regenerateBillboards(billboards.count, billboards.minOffset, billboards.maxOffset, billboards.minScale, billboards.maxScale);
+}
+
+void CloudVolume::uploadBillboards() {
+    if (!billboards.count) {
+        return;
+    }
+    
+    CHECK_GL_CALL(glBindVertexArray(instancedQuad->vaoId));
+
+    /* Reupload billboard positions */
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, instancedQuadPosVBO));
+    CHECK_GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(glm::vec3) * billboards.positions.size(), &billboards.positions[0], GL_DYNAMIC_DRAW));
+
+    /* Reupload billboard scales */
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, instancedQuadScaleVBO));
+    std::vector<float> scales;
+    if (fluffiness != 1.f) {
+        for (float scale : billboards.scales) {
+            scales.push_back(scale * fluffiness);
+        }
+    }
+    else {
+        scales = billboards.scales;
+    }
+    CHECK_GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(float) * scales.size(), &scales[0], GL_DYNAMIC_DRAW));
+
+    CHECK_GL_CALL(glBindVertexArray(0));
+}
+```
+
+### src/CloudVolume.hpp
+```
+#pragma once
+#ifndef _CLOUD_VOLUME_HPP_
+#define _CLOUD_VOLUME_HPP_
+
+#include <glad/glad.h>
+
+#include "glm/glm.hpp"
+
+#include <vector>
+
+class Mesh;
+class CloudVolume {
+    public:
+        struct Billboards {
+            std::vector<glm::vec3> positions;
+            std::vector<float> scales;
+
+            int count = 0;
+            glm::vec3 minOffset = glm::vec3(-1.f);
+            glm::vec3 maxOffset = glm::vec3(1.f);
+            float minScale = 1.f;
+            float maxScale = 1.f;
+        };
+
+        CloudVolume(int, glm::vec2, glm::vec3, int);
+
+        void update();
+        void clearGPU();
+
+        void addCloudBoard(glm::vec3 &, float &);
+        void sortBoards(glm::vec3);
+
+        glm::vec3 position;     // cloud object position
+
+        glm::vec2 xBounds;      // Min and max x-mapping in world-space
+        glm::vec2 yBounds;      // Min and max y-mapping in world-space
+        glm::vec2 zBounds;      // Min and max z-mapping in world-space
+        int dimension;          // Voxels per dimension 
+        glm::vec3 range;
+        glm::vec3 voxelSize;    // World-size of individual voxels
+        int levels;             // Mipmap levels
+
+        Mesh * instancedQuad;
+        GLuint instancedQuadPosVBO;
+        GLuint instancedQuadScaleVBO;
+        Billboards billboards;
+        void uploadBillboards();
+        void regenerateBillboards(int, glm::vec3, glm::vec3, float, float);
+        void resetBillboards();
+        float fluffiness = 1.f;
+
+        GLuint volId;
+        glm::ivec3 get3DIndices(int) const;
+        glm::vec3 reverseVoxelIndex(const glm::ivec3 &) const;
+};
+
+#endif
+```
+
+### src/Library.hpp
+```
+#pragma once
+#ifndef _LIBRARY_HPP_
+#define _LIBRARY_HPP_
+
+#include "Model/Mesh.hpp"
+#include "Model/Texture.hpp"
+
+#include <map>
+
+class Library {
+public:
+    static Mesh * quad;
+    static std::map<std::string, Mesh *> meshes;
+    static std::map<std::string, Texture *> textures;
+
+    static void init() {
+        /* Create quads */
+        quad = createQuad();
+    }
+
+    static void addTexture(std::string res, std::string fileName) {
+        Texture *texture = new Texture(res + fileName);
+        if (texture->textureId) {
+            textures[fileName] = texture;
+        }
+        else {
+            delete texture;
+        }
+    }
+
+    static Mesh * createCube() {
+        Mesh *m = new Mesh;
+        m->vertBuf = {
+            -0.5f, -0.5f, -0.5f,
+             0.5f,  0.5f, -0.5f,
+             0.5f, -0.5f, -0.5f,
+            -0.5f,  0.5f, -0.5f,
+            -0.5f, -0.5f, -0.5f,
+            -0.5f,  0.5f,  0.5f,
+            -0.5f,  0.5f, -0.5f,
+            -0.5f, -0.5f,  0.5f,
+            -0.5f,  0.5f, -0.5f,
+             0.5f,  0.5f,  0.5f,
+             0.5f,  0.5f, -0.5f,
+            -0.5f,  0.5f,  0.5f,
+             0.5f, -0.5f, -0.5f,
+             0.5f,  0.5f, -0.5f,
+             0.5f,  0.5f,  0.5f,
+             0.5f, -0.5f,  0.5f,
+            -0.5f, -0.5f, -0.5f,
+             0.5f, -0.5f, -0.5f,
+             0.5f, -0.5f,  0.5f,
+            -0.5f, -0.5f,  0.5f,
+            -0.5f, -0.5f,  0.5f,
+             0.5f, -0.5f,  0.5f,
+             0.5f,  0.5f,  0.5f,
+            -0.5f,  0.5f,  0.5f
+        };
+        m->norBuf = {
+             0,  0, -1,
+             0,  0, -1,
+             0,  0, -1,
+             0,  0, -1,
+            -1,  0,  0,
+            -1,  0,  0,
+            -1,  0,  0,
+            -1,  0,  0,
+             0,  1,  0,
+             0,  1,  0,
+             0,  1,  0,
+             0,  1,  0,
+             1,  0,  0,
+             1,  0,  0,
+             1,  0,  0,
+             1,  0,  0,
+             0, -1,  0,
+             0, -1,  0,
+             0, -1,  0,
+             0, -1,  0,
+             0,  0,  1,
+             0,  0,  1,
+             0,  0,  1,
+             0,  0,  1,
+        };
+        m->eleBuf = {
+             0,  1,  2,
+             0,  3,  1,
+             4,  5,  6,
+             4,  7,  5,
+             8,  9, 10,
+             8, 11,  9,
+            12, 13, 14,
+            12, 14, 15,
+            16, 17, 18,
+            16, 18, 19,
+            20, 21, 22,
+            20, 22, 23,
+        };
+        m->init();
+        return m;
+    }
+
+    static Mesh * createQuad() {
+        Mesh *m = new Mesh;
+        m->vertBuf = {
+            -1.f, -1.f,  0.f,
+             1.f, -1.f,  0.f,
+            -1.f,  1.f,  0.f,
+             1.f,  1.f,  0.f
+        };
+        m->norBuf = {
+            0.f, 0.f, 1.f,
+            0.f, 0.f, 1.f,
+            0.f, 0.f, 1.f,
+            0.f, 0.f, 1.f
+        };
+        m->init();
+        return m;
+    }
+};
+
+#endif
+```
+
+### src/Sun.hpp
+```
+#pragma once
+#ifndef _SUN_HPP_
+#define _SUN_HPP_
+
+#include "IO/Window.hpp"
+#include "CloudVolume.hpp"
+
+#include "glm/gtc/matrix_transform.hpp"
+
+class Sun {
+    public: 
+        static glm::vec3 position;
+
+        static glm::mat4 P;
+        static glm::mat4 V;
+
+        static glm::vec3 nearPlane;
+        static glm::vec3 farPlane;
+        static float clipDistance;
+
+        static glm::vec3 innerColor;
+        static glm::vec3 outerColor;
+        static float innerRadius;
+        static float outerRadius;
+
+        static void update(CloudVolume *vol) {
+            glm::vec3 min = glm::vec3(vol->xBounds.x, vol->yBounds.x, vol->zBounds.x);
+            glm::vec3 max = glm::vec3(vol->xBounds.y, vol->yBounds.y, vol->zBounds.y);
+
+            glm::vec3 lookDir = glm::normalize(vol->position - position);
+            float minLen = glm::length(min);
+            float maxLen = glm::length(max);
+            glm::vec3 lookPos = vol->position - lookDir * glm::max(minLen, maxLen);
+            V = glm::lookAt(lookPos, vol->position, glm::vec3(0, 1, 0));
+
+            float minmin = 2.f * glm::min(min.x, glm::min(min.y, min.z));
+            float maxmax = 2.f * glm::max(max.x, glm::max(max.y, max.z));
+
+            nearPlane = lookPos + lookDir * 0.01f;
+            farPlane = lookPos + lookDir * 2.f * glm::max(minLen, maxLen);
+            clipDistance = glm::distance(nearPlane, farPlane);
+            P = glm::ortho(minmin, maxmax, minmin, maxmax, 0.01f, 0.01f + clipDistance);
+        }
+};
+
+#endif
+```
+
+### src/Util.hpp
+```
+#pragma once
+#ifndef _UTIL_HPP_
+#define _UTIL_HPP_
+
+#include "glm/glm.hpp"
+#include "glm/gtc/matrix_transform.hpp"
+
+#include <iostream>
+#include <algorithm>
+
+class Util {
+    public:
+        static constexpr float PI = 3.14159265359f;
+
+        //////////////////////////////////////////////
+        //                  RANDOM                  //
+        //////////////////////////////////////////////
+        /* Generate a random float [-1, 1] */
+        static inline float genRandom() {
+            return (rand() / (float) RAND_MAX - 0.5f) * 2.f;
+        }
+        /* Generate a random float [0, 1] */
+        static inline float genPosRandom() {
+            return rand() / (float) RAND_MAX;
+        }
+        /* Generate a scaled random value */
+        static inline float genRandom(const float val) {
+            return genRandom() * val;
+        }
+        /* Generate a random value in a range [min, max] */
+        static inline float genRandom(const float min, const float max) {
+            return genPosRandom() * (max - min) + min;
+        }
+        /* Generate a random vec3 with values [-1, 1] */
+        static inline glm::vec3 genRandomVec3() {
+            return glm::vec3(genRandom(), genRandom(), genRandom());
+        }
+        /* Generate random vec3 with values [min, max] */
+        static inline glm::vec3 genRandomVec3(const float min, const float max) {
+            return glm::vec3(genRandom(min, max), genRandom(min, max), genRandom(min, max));
+        }
+        /* Generate random vec3 with component values [min, max] */
+        static inline glm::vec3 genRandomVec3(const float xmin, const float xmax, const float ymin, const float ymax, const float zmin, const float zmax) {
+            return glm::vec3(genRandom(xmin, xmax), genRandom(ymin, ymax), genRandom(zmin, zmax));
+        }
+
+        //////////////////////////////////////////////
+        //                 PRINTING                 //
+        //////////////////////////////////////////////
+        // static inline void printVec3(std::string label, glm::vec3 vec) {
+        //     std::cout << label << ": <" <<
+        //         vec.x << ", " << vec.y << ", " << vec.z
+        //         << ">" << std::endl;
+        // }
+};
+
+#endif
+```
+
+### src/main.cpp
+```
+#include "IO/Window.hpp"
+#include "Camera.hpp"
+#include "Util.hpp"
+#include "Library.hpp"
+
+#include "Sun.hpp"
+#include "CloudVolume.hpp"
+
+#include "Shaders/GLSL.hpp"
+#include "Shaders/SunShader.hpp"
+#include "Shaders/VoxelizeShader.hpp"
+#include "Shaders/VoxelShader.hpp"
+#include "Shaders/ConeTraceShader.hpp"
+
+#include "ThirdParty/imgui/imgui.h"
+
+#include <functional>
+#include <time.h>
+
+/* Initial values */
+#define IMGUI_FONT_SIZE 13.f
+bool lightVoxelize = true;
+bool lightView = false;
+bool showVoxels = false;
+int Window::width = 1280;
+int Window::height = 720;
+
+/* Volume */
+const int I_VOLUME_BOARDS = 200;
+const glm::vec3 I_VOLUME_POSITION = glm::vec3(25.f, 0.f, 0.f);
+const glm::vec2 I_VOLUME_BOUNDS = glm::vec2(-5.f, 5.f);
+const int I_VOLUME_DIMENSION = 32;
+const int I_VOLUME_MIPS = 4;
+CloudVolume *volume;
+
+/* Sun */
+glm::vec3 Sun::position = glm::vec3(5.f, 20.f, -5.f);
+glm::mat4 Sun::P = glm::mat4(1.f);
+glm::mat4 Sun::V = glm::mat4(1.f);
+glm::vec3 Sun::innerColor = glm::vec3(1.f);
+glm::vec3 Sun::outerColor = glm::vec3(1.f, 1.f, 0.f);
+float Sun::innerRadius = 1.f;
+float Sun::outerRadius = 2.f;
+glm::vec3 Sun::nearPlane;
+glm::vec3 Sun::farPlane;
+float Sun::clipDistance;
+
+/* Library things */
+const std::string RESOURCE_DIR("res/");
+Mesh * Library::quad;
+std::map<std::string, Texture *> Library::textures;
+
+/* Shaders */
+SunShader * sunShader;
+VoxelizeShader * voxelizeShader;
+VoxelShader * voxelShader;
+ConeTraceShader * coneShader;
+Shader * debugShader;
+
+/* ImGui functions */
+void runImGuiPanes();
+
+void exitError(std::string st) {
+    std::cerr << st << std::endl;
+    std::cin.get();
+    exit(EXIT_FAILURE);
+}
+
+int main() {
+    srand((unsigned int)(time(0)));  
+
+    /* Init window, keyboard, and mouse wrappers */
+    if (Window::init("Clouds", IMGUI_FONT_SIZE)) {
+        exitError("Error initializing window");
+    }
+
+    /* Init library */
+    Library::init();
+
+    /* Create volume */
+    volume = new CloudVolume(I_VOLUME_DIMENSION, I_VOLUME_BOUNDS, I_VOLUME_POSITION, I_VOLUME_MIPS);
+    volume->regenerateBillboards(I_VOLUME_BOARDS, glm::vec3(-2.5f), glm::vec3(2.5f), 1.f, 2.5);
+
+    /* Create shaders */
+    sunShader = new SunShader(RESOURCE_DIR, "billboard_vert.glsl", "sun_frag.glsl");
+    voxelShader = new VoxelShader(volume->dimension, RESOURCE_DIR, "voxel_vert.glsl", "voxel_frag.glsl");
+    voxelizeShader = new VoxelizeShader(RESOURCE_DIR, "billboard_vert_instanced.glsl", "billboard_vert.glsl", "first_voxelize.glsl", "second_voxelize.glsl");
+    coneShader = new ConeTraceShader(RESOURCE_DIR, "billboard_vert_instanced.glsl", "conetrace_frag.glsl");
+    debugShader = new Shader(RESOURCE_DIR, "billboard_vert.glsl", "debug_frag.glsl");
+
+    /* Init rendering state */
+    GLSL::checkVersion();
+    CHECK_GL_CALL(glEnable(GL_DEPTH_TEST));
+    CHECK_GL_CALL(glEnable(GL_BLEND));
+    CHECK_GL_CALL(glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    Camera::update();
+
+    while (!Window::shouldClose()) {
+        /* Update context */
+        Window::update();
+
+        /* Update camera */
+        Camera::update();
+
+        /* Update light */
+        Sun::update(volume);
+
+        /* Update volume */
+        volume->update();
+
+        /* Cloud render! */
+        CHECK_GL_CALL(glClearColor(0.2f, 0.3f, 0.5f, 1.f));
+        CHECK_GL_CALL(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+
+        /* Render sun */
+        sunShader->render();
+
+        /* Voxelize from the light's perspective */
+        if (lightVoxelize) {
+            voxelizeShader->voxelize(volume);
+        }
+        /* Cone trace from the camera's perspective */
+        coneShader->coneTrace(volume);
+
+        /* Render Optional */
+        glm::mat4 P = lightView ? Sun::P : Camera::getP();
+        glm::mat4 V = lightView ? Sun::V : Camera::getV();
+        /* Draw voxels to the screen */
+        if (showVoxels) {
+            voxelShader->bind();
+            voxelShader->render(volume, P, V);
+            voxelShader->unbind();
+        }
+
+        /* IMGUI */
+        if (Window::isImGuiEnabled()) {
+            runImGuiPanes();
+            ImGui::Render();
+        }
+    }
+}
+
+void runImGuiPanes() {
+    ImGui::Begin("Stats");
+    {
+        ImGui::Text("FPS:       %d", Window::FPS);
+        ImGui::Text("Avg FPS:   %0.4f", (float)Window::totalFrames / Window::runTime);
+        ImGui::Text("dt:        %0.4f", Window::timeStep);
+        glm::vec3 pos = Camera::getPosition();
+        ImGui::Text("CamPos:    (%0.2f, %0.2f, %0.2f)", pos.x, pos.y, pos.z);
+        if (ImGui::Button("Vsync")) {
+            Window::toggleVsync();
+        }
+    }
+    ImGui::End();
+
+    static bool showFullMap = false;
+    static bool showSmallMap = false;
+    ImGui::Begin("Sun");
+    {
+        ImGui::SliderFloat3("Position", glm::value_ptr(Sun::position), -100.f, 100.f);
+        ImGui::SliderFloat3("Inner Color", glm::value_ptr(Sun::innerColor), 0.f, 1.f);
+        ImGui::SliderFloat3("Outer Color", glm::value_ptr(Sun::outerColor), 0.f, 1.f);
+        ImGui::SliderFloat("Inner Radius", &Sun::innerRadius, 0.f, 10.f);
+        ImGui::SliderFloat("Outer Radius", &Sun::outerRadius, 0.f, 10.f);
+        ImGui::Checkbox("Show full map", &showFullMap);
+        ImGui::Checkbox("Show small map", &showSmallMap);
+    }
+    ImGui::End();
+
+    /* Render full-screen map */
+    if (showFullMap) {
+        const Texture *posMap = voxelizeShader->positionMap;
+        CHECK_GL_CALL(glClearColor(0.2f, 0.3f, 0.5f, 1.f));
+        CHECK_GL_CALL(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+        debugShader->bind();
+        CHECK_GL_CALL(glActiveTexture(GL_TEXTURE0 + posMap->textureId));
+        CHECK_GL_CALL(glBindTexture(GL_TEXTURE_2D, posMap->textureId));
+        debugShader->loadInt(debugShader->getUniform("positionMap"), posMap->textureId);
+        CHECK_GL_CALL(glBindVertexArray(Library::quad->vaoId));
+        glm::mat4 M = glm::mat4(1.f);
+        debugShader->loadMatrix(debugShader->getUniform("P"), &M);
+        debugShader->loadMatrix(debugShader->getUniform("V"), &M);
+        debugShader->loadMatrix(debugShader->getUniform("Vi"), &M);
+        debugShader->loadMatrix(debugShader->getUniform("N"), &M);
+        debugShader->loadMatrix(debugShader->getUniform("M"), &M);
+        CHECK_GL_CALL(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
+        CHECK_GL_CALL(glBindVertexArray(0));
+        CHECK_GL_CALL(glActiveTexture(GL_TEXTURE0));
+        debugShader->unbind();
+    }
+    if (showSmallMap) {
+        ImGui::Begin("Position Map");
+        static float mapSize = 0.2f;
+        ImGui::SliderFloat("Map Size", &mapSize, 0.1f, 1.f);
+        ImGui::Image((ImTextureID)voxelizeShader->positionMap->textureId, ImVec2(voxelizeShader->positionMap->width*mapSize, voxelizeShader->positionMap->height*mapSize));
+        ImGui::End();
+    }
+
+    ImGui::Begin("Billboards");
+    {
+        ImGui::Checkbox("Show", &coneShader->showQuad);
+        static glm::vec3 newPos(0.f);
+        static float scale = 1.f;
+        ImGui::SliderFloat3("Offset", glm::value_ptr(newPos), -10.f, 10.f);
+        ImGui::SliderFloat("Scale", &scale, 0.1f, 10.f);
+        if (ImGui::Button("Add Billboard")) {
+            volume->addCloudBoard(newPos, scale);
+        }
+        static glm::vec3 minOff = glm::vec3(-3.f);
+        static glm::vec3 maxOff = glm::vec3( 3.f);
+        static glm::vec2 ranScale = glm::vec2(1.f, 3.f);
+        static int numBoards = I_VOLUME_BOARDS;
+        bool changing = false;
+        changing |= ImGui::SliderFloat3("Random Min Offset", glm::value_ptr(minOff), volume->xBounds.x, volume->xBounds.y);
+        changing |= ImGui::SliderFloat3("Random Max Offset", glm::value_ptr(maxOff), volume->xBounds.x, volume->xBounds.y);
+        changing |= ImGui::SliderFloat2("Random Scale", glm::value_ptr(ranScale), 0.f, volume->xBounds.y);
+        changing |= ImGui::SliderInt("Number billboards", &numBoards, 0, I_VOLUME_BOARDS);
+        if (ImGui::Button("Regenerate billboards") || changing) {
+            volume->regenerateBillboards(numBoards, minOff, maxOff, ranScale.x, ranScale.y);
+        }
+        if (volume->billboards.count) {
+            static int currBoard = 0;
+            ImGui::SliderInt("Curr board", &currBoard, 0, volume->billboards.positions.size() - 1);
+            glm::vec3 *currPos = &volume->billboards.positions[currBoard];
+            float *currScale = &volume->billboards.scales[currBoard];
+            ImGui::SliderFloat3("Position", glm::value_ptr(*currPos), -10.f, 10.f);
+            ImGui::SliderFloat("Cscale", currScale, 1.f, 10.f);
+            if (ImGui::Button("Delete") && volume->billboards.positions.size()) {
+                volume->billboards.positions.erase(volume->billboards.positions.begin() + currBoard);
+                volume->billboards.scales.erase(volume->billboards.scales.begin() + currBoard);
+                volume->billboards.count--;
+                currBoard = glm::max(0, currBoard - 1);
+            }
+        }
+    }
+    ImGui::End();
+
+    ImGui::Begin("Volume");
+    {
+        ImGui::SliderFloat3("Position", glm::value_ptr(volume->position), -20.f, 20.f);
+        float minBounds[2] = { -10.f,-0.1f };
+        float maxBounds[2] = { 0.1f, 10.f };
+        ImGui::SliderFloat2("XBounds", glm::value_ptr(volume->xBounds), minBounds, maxBounds);
+        ImGui::SliderFloat2("YBounds", glm::value_ptr(volume->yBounds), minBounds, maxBounds);
+        ImGui::SliderFloat2("ZBounds", glm::value_ptr(volume->zBounds), minBounds, maxBounds);
+        static float scale = 10.f;
+        if (ImGui::SliderFloat("Scale", &scale, 0.f, 20.f)) {
+            volume->xBounds.x = -scale;
+            volume->xBounds.y =  scale;
+            volume->yBounds.x = -scale;
+            volume->yBounds.y =  scale;
+            volume->zBounds.x = -scale;
+            volume->zBounds.y =  scale;
+            volume->resetBillboards();
+        }
+        ImGui::SliderFloat("Fluffiness", &volume->fluffiness, 0.f, 1.f);
+    }
+    ImGui::End();
+
+    ImGui::Begin("Voxels");
+    {
+        ImGui::Checkbox("Light Voxelize", &lightVoxelize);
+        ImGui::Text("Voxels in scene : %d", voxelShader->activeVoxels);
+        ImGui::Checkbox("Light view", &lightView);
+        if (ImGui::Checkbox("Render voxels", &showVoxels)) {
+            voxelShader->disableWhite = false;
+        }
+        ImGui::Checkbox("Disable bounds", &voxelShader->disableBounds);
+        ImGui::Checkbox("Disable white", &voxelShader->disableWhite);
+        ImGui::Checkbox("Voxel outlines", &voxelShader->useOutline);
+        ImGui::SliderFloat("Voxel alpha", &voxelShader->alpha, 0.f, 1.f);
+    }
+    ImGui::End();
+
+    ImGui::Begin("VXGI");
+    {
+        ImGui::Checkbox("Cone trace", &coneShader->doConeTrace);
+        ImGui::SliderInt("Steps", &coneShader->vctSteps, 1, 30);
+        ImGui::SliderFloat("Angle", &coneShader->vctConeAngle, 0.f, 3.14f);
+        ImGui::SliderFloat("Height", &coneShader->vctConeInitialHeight, 0.0f, 1.f);
+        ImGui::SliderFloat("LOD Offset", &coneShader->vctLodOffset, 0.f, 5.f);
+        ImGui::SliderFloat("Down Scaling", &coneShader->vctDownScaling, 0.f, 10.f);
+    }
+    ImGui::End();
+
+    ImGui::Begin("Noise");
+    {
+        ImGui::Checkbox("Noise sample", &coneShader->doNoiseSample);
+        ImGui::SliderFloat("Step size", &coneShader->stepSize, 0.001f, 1.f);
+        ImGui::SliderFloat("Noise opacity", &coneShader->noiseOpacity, 0.1f, 40.f);
+        ImGui::SliderInt("Octaves", &coneShader->numOctaves, 1, 10);
+        ImGui::SliderFloat("Frequency", &coneShader->freqStep, 0.01f, 10.f);
+        ImGui::SliderFloat("Persistence", &coneShader->persStep, 0.01f, 1.f);
+        ImGui::SliderFloat3("Wind Dir", glm::value_ptr(coneShader->windVel), -0.05f, 0.05f);
+        ImGui::SliderFloat("adjustSize", &coneShader->adjustSize, 0.f, 200.f);
+        ImGui::SliderInt("minNoiseSteps", &coneShader->minNoiseSteps, 1, 5);
+        ImGui::SliderInt("maxNoiseSteps", &coneShader->maxNoiseSteps, 2, 15);
+        ImGui::SliderFloat("minColor", &coneShader->minNoiseColor, 0.0f, 1.f);
+        ImGui::SliderFloat("maxColor", &coneShader->noiseColorScale, 0.f, 1.f);
+    }
+    ImGui::End();
+
+}
+```
+
+### src/IO/Keyboard.cpp
+```
+#include "Keyboard.hpp"
+
+#include "GLFW/glfw3.h"
+
+int Keyboard::keyStatus[NUM_KEYS] = { GLFW_RELEASE };
+
+bool Keyboard::isKeyPressed(int key) {
+    return keyStatus[key] >= GLFW_PRESS;
+}
+
+void Keyboard::setKeyStatus(int key, int action) {
+    keyStatus[key] = action;
+}
+```
+
+### src/IO/Keyboard.hpp
+```
+/* Keyboard class
+* Contains method to know if a key is pressed */
+#pragma once
+#ifndef _KEYBOARD_HPP_
+#define _KEYBOARD_HPP_
+
+#define NUM_KEYS 1024
+
+class Keyboard {
+public:
+    /* Denotes whether a key is pressed */
+    static bool isKeyPressed(int);
+
+    static void setKeyStatus(int, int);
+private:
+    static int keyStatus[NUM_KEYS];
+};
+
+#endif
+```
+
+### src/IO/Mouse.cpp
+```
+#include "Mouse.hpp"
+
+double Mouse::x = 0.0;
+double Mouse::y = 0.0;
+double Mouse::dx = 0.0;
+double Mouse::dy = 0.0;
+int Mouse::mouseButtons[GLFW_MOUSE_BUTTON_LAST] = { GLFW_RELEASE };
+
+void Mouse::update(double newX, double newY) {
+    /* Calculate x-y speed */
+    dx = newX - x;
+    dy = newY - y;
+
+    /* Set new positions */
+    // TODO: if newX > 0 and newY > 0
+    x = newX;
+    y = newY;
+
+    // TODO : dw = scroll whell
+}
+
+bool Mouse::isDown(int button) {
+    return mouseButtons[button] >= GLFW_PRESS;
+}
+
+bool Mouse::isUp(int button) {
+    return mouseButtons[button] == GLFW_RELEASE;
+}
+
+void Mouse::setButtonStatus(int button, int action) {
+    mouseButtons[button] = action;
+}
+```
+
+### src/IO/Mouse.hpp
+```
+/* Mouse class
+* Maintains mouse movement inside GLFW window */
+#pragma once
+#ifndef _MOUSE_HPP_
+#define _MOUSE_HPP_
+
+#include <GLFW/glfw3.h>
+
+class Mouse {
+public:
+    /* x-y position and speed */
+    static double x, y;
+    static double dx, dy;
+
+    static void update(double, double);
+
+    /* Denotes if mouse buttons are pressed */
+    static void setButtonStatus(int, int);
+    static bool isDown(int);
+    static bool isUp(int);
+private:
+    static int mouseButtons[GLFW_MOUSE_BUTTON_LAST];
+};
+
+#endif
+```
+
+### src/IO/Window.cpp
+```
+#include "Window.hpp"
+
+#include "ThirdParty/imgui/imgui.h"
+#include "ThirdParty/imgui/imgui_impl_glfw_gl3.h"
+
+#include <iostream> /* cout, cerr */
+
+GLFWwindow *Window::window;
+
+float Window::timeStep = 0.f;
+int Window::FPS = 0;
+double Window::lastFpsTime = 0.0;
+double Window::lastFrameTime = 0.0;
+double Window::runTime = 0.0;
+int Window::nFrames = 0;
+int Window::totalFrames = 0;
+
+float Window::imGuiTimer = 1.f;
+bool Window::imGuiEnabled = false;
+
+bool Window::vsyncEnabled = true;
+
+void Window::errorCallback(int error, const char *desc) {
+    std::cerr << "Error " << error << ": " << desc << std::endl;
+}
+
+void Window::keyCallback(GLFWwindow *window, int key, int scancode, int action, int mode) {
+    if (key == GLFW_KEY_ESCAPE && action >= GLFW_PRESS && !ImGui::IsMouseHoveringAnyWindow()) {
+        glfwSetWindowShouldClose(window, true);
+    }
+
+    Keyboard::setKeyStatus(key, action);
+
+    if (isImGuiEnabled() && (ImGui::IsWindowFocused() || ImGui::IsMouseHoveringAnyWindow())) {
+        ImGui_ImplGlfwGL3_KeyCallback(window, key, scancode, action, mode);
+    }
+}
+
+void Window::mouseButtonCallback(GLFWwindow *window, int button, int action, int mods) {
+    if (isImGuiEnabled() && (ImGui::IsWindowFocused() || ImGui::IsMouseHoveringAnyWindow())) {
+        ImGui_ImplGlfwGL3_MouseButtonCallback(window, button, action, mods);
+    }
+    else {
+        Mouse::setButtonStatus(button, action);
+    }
+}
+
+void Window::characterCallback(GLFWwindow *window, unsigned int c) {
+    if (isImGuiEnabled() && (ImGui::IsWindowFocused() || ImGui::IsMouseHoveringAnyWindow())) {
+        ImGui_ImplGlfwGL3_CharCallback(window, c);
+    }
+}
+
+int Window::init(std::string name, float fontSize = 15.f) {
+    /* Set error callback */
+    glfwSetErrorCallback(errorCallback);
+
+    /* Init GLFW */
+    if (!glfwInit()) {
+        std::cerr << "Error initializing GLFW" << std::endl;
+        return 1;
+    }
+
+    /* Request version 4.4 of OpenGL */
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 4);
+
+    /* Create GLFW window */
+    window = glfwCreateWindow(width, height, name.c_str(), NULL, NULL);
+    if (!window) {
+        std::cerr << "Failed to create window" << std::endl;
+        glfwTerminate();
+        return 1;
+    }
+    glfwMakeContextCurrent(window);
+
+    /* Init ImGui */
+    ImGui_ImplGlfwGL3_Init(window, false);
+
+    /* Set callbacks */
+    glfwSetKeyCallback(window, keyCallback);
+    glfwSetMouseButtonCallback(window, mouseButtonCallback);
+    glfwSetCharCallback(window, characterCallback);
+
+    /* Init GLAD */
+	if (!gladLoadGL())
+	{
+		std::cerr << "Failed to initialize GLAD" << std::endl;
+		return false;
+	}
+
+	std::cout << "OpenGL version: " << glGetString(GL_VERSION) << std::endl;
+	std::cout << "Renderer: " << glGetString(GL_RENDERER) << std::endl;
+	std::cout << "GLSL version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << std::endl;
+
+    /* Vsync */
+    glfwSwapInterval(1);
+
+    /* More init */
+    ImGui_ImplGlfwGL3_NewFrame(true, fontSize);
+    update();
+
+    return 0;
+}
+
+void Window::setTitle(const char *name) {
+    glfwSetWindowTitle(window, name);
+}
+
+void Window::update() {
+    /* Set viewport to window size */
+    glfwGetFramebufferSize(window, &width, &height);
+    glViewport(0, 0, width, height);
+
+    /* Don't update display if window is minimized */
+    if (!width && !height) {
+        return;
+    }
+
+    /* Update mouse */
+    double x, y;
+    glfwGetCursorPos(window, &x, &y);
+    Mouse::update(x, y);
+
+    /* Update timing */
+    runTime = (float)glfwGetTime();
+    timeStep = (float) (runTime - lastFrameTime);
+    lastFrameTime = runTime;
+    nFrames++;
+    if (runTime - lastFpsTime >= 1.0) {
+        FPS = nFrames;
+        nFrames = 0;
+        lastFpsTime = runTime;
+    }
+    totalFrames++;
+ 
+    /* Update ImGui */
+    imGuiTimer += timeStep;
+    if (Keyboard::isKeyPressed(GLFW_KEY_GRAVE_ACCENT) 
+        && (Keyboard::isKeyPressed(GLFW_KEY_LEFT_SHIFT) || Keyboard::isKeyPressed(GLFW_KEY_RIGHT_SHIFT)) 
+        && imGuiTimer > 0.3f) {
+        toggleImgui();
+        imGuiTimer = 0.f;
+    }
+    if (isImGuiEnabled()) {
+        ImGui_ImplGlfwGL3_NewFrame(true);
+    }
+
+    glfwSwapBuffers(window);
+    glfwPollEvents();
+}
+
+int Window::shouldClose() {
+    return glfwWindowShouldClose(window);
+}
+
+double Window::getTime() {
+    return glfwGetTime();
+}
+
+void Window::shutDown() {
+    /* Clean up GLFW */
+    glfwDestroyWindow(window);
+    glfwTerminate();
+}
+
+void Window::toggleImgui() {
+    imGuiEnabled = !imGuiEnabled;
+}
+
+bool Window::isImGuiEnabled() {
+    return imGuiEnabled;
+}
+
+void Window::toggleVsync() {
+    vsyncEnabled = !vsyncEnabled;
+    glfwSwapInterval(vsyncEnabled);
+}
+```
+
+### src/IO/Window.hpp
+```
+/* GLFW Handler
+* Maintains GLFW window, mouse, and keyboard*/
+#pragma once
+#ifndef _GLFW_HANDLER_HPP_
+#define _GLFW_HANDLER_HPP_
+
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+
+#include "Mouse.hpp"
+#include "Keyboard.hpp"
+
+#include <string>
+
+class Window {
+public:
+    /* Window size */
+    static int width;
+    static int height;
+
+    /* Init */
+    static int init(std::string, float);
+
+    /* Set window title */
+    void setTitle(const char *);
+
+    /* Update */
+    static void update();
+
+    /* Return if window should close */
+    static int shouldClose();
+
+    /* Return running time */
+    static double getTime();
+
+    /* Shut down */
+    void shutDown();
+
+    /* Timing */
+    static double runTime;
+    static float timeStep;
+    static int FPS;
+    static int totalFrames;
+
+    /* ImGui */
+    static void toggleImgui();
+    static bool isImGuiEnabled();
+
+    /* Vsync */
+    static void toggleVsync();
+
+    // TODO : messaging
+    static bool resize;
+
+private:
+    /* Reference to GLFW window, mouse, keyboard */
+    static GLFWwindow *window;
+
+    /* Callback functions */
+    static void errorCallback(int, const char *);
+    static void keyCallback(GLFWwindow *, int, int, int, int);
+    static void mouseButtonCallback(GLFWwindow *, int, int, int);
+    static void characterCallback(GLFWwindow *, unsigned int);
+
+    /* Timing */
+    static double lastFpsTime;
+    static double lastFrameTime;
+    static int nFrames;
+
+    /* ImGui */
+    static bool imGuiEnabled;
+    static float imGuiTimer;
+
+    /* Vsync */
+    static bool vsyncEnabled;
+};
+
+#endif
+```
+
+### src/Model/Mesh.cpp
+```
+#include "Mesh.hpp"
+#include "Shaders/GLSL.hpp"
+
+#include <glad/glad.h>
+#include <cassert>
+
+/* Constructor */
+Mesh::Mesh() :
+    vaoId(0),
+    vertBufId(0),
+    norBufId(0),
+    texBufId(0),
+    eleBufId(0)
+{
+}
+
+void Mesh::init() {
+
+    /* Initialize VAO */
+    CHECK_GL_CALL(glGenVertexArrays(1, &vaoId));
+    CHECK_GL_CALL(glBindVertexArray(vaoId));
+
+    /* Copy vertex array */
+    CHECK_GL_CALL(glGenBuffers(1, &vertBufId));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, vertBufId));
+    CHECK_GL_CALL(glBufferData(GL_ARRAY_BUFFER, vertBuf.size() * sizeof(float), &vertBuf[0], GL_DYNAMIC_DRAW));
+    CHECK_GL_CALL(glEnableVertexAttribArray(0));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, vertBufId));
+    CHECK_GL_CALL(glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr));
+
+    /* Copy normal array if it exists */
+    if (!norBuf.empty()) {
+        CHECK_GL_CALL(glGenBuffers(1, &norBufId));
+        CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, norBufId));
+        CHECK_GL_CALL(glBufferData(GL_ARRAY_BUFFER, norBuf.size() * sizeof(float), &norBuf[0], GL_DYNAMIC_DRAW));
+        CHECK_GL_CALL(glEnableVertexAttribArray(1));
+        CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, norBufId));
+        CHECK_GL_CALL(glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, nullptr));
+    }
+
+    /* Copy texture array if it exists */
+    if (!texBuf.empty()) {
+        CHECK_GL_CALL(glGenBuffers(1, &texBufId));
+        CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, texBufId));
+        CHECK_GL_CALL(glBufferData(GL_ARRAY_BUFFER, texBuf.size() * sizeof(float), &texBuf[0], GL_DYNAMIC_DRAW));
+        CHECK_GL_CALL(glEnableVertexAttribArray(2));
+        CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, texBufId));
+        CHECK_GL_CALL(glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 0, nullptr));
+    }
+
+    /* Copy element array if it exists */
+    if (!eleBuf.empty()) {
+        CHECK_GL_CALL(glGenBuffers(1, &eleBufId));
+        CHECK_GL_CALL(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, eleBufId));
+        CHECK_GL_CALL(glBufferData(GL_ELEMENT_ARRAY_BUFFER, eleBuf.size() * sizeof(unsigned int), &eleBuf[0], GL_DYNAMIC_DRAW));
+    }
+
+    /* Unbind  */
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0));
+    CHECK_GL_CALL(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
+    CHECK_GL_CALL(glBindVertexArray(0));
+}
+```
+
+### src/Model/Mesh.hpp
+```
+/* Mesh class
+* Contains geometry for a singular mesh */
+#pragma once
+#ifndef _MESH_HPP_
+#define _MESH_HPP_
+
+#include <vector>   /* vector */
+
+class Mesh {
+public:
+    /* Constructor */
+    Mesh();
+
+    /* Copy data buffers to GPU */
+    void init();
+
+    /* Data buffers */
+    std::vector<float> vertBuf;
+    std::vector<float> norBuf;
+    std::vector<float> texBuf;
+    std::vector<unsigned int> eleBuf;
+
+    /* VAO ID */
+    unsigned int vaoId;
+
+    /* VBO IDs */
+    unsigned int vertBufId;
+    unsigned int norBufId;
+    unsigned int texBufId;
+    unsigned int eleBufId;
+};
+
+#endif
+```
+
+### src/Model/Texture.cpp
+```
+#include "Texture.hpp"
+
+#include "Shaders/GLSL.hpp"
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "ThirdParty/stb_image.h"
+#include <iostream>
+
+Texture::Texture(std::string fileName) {
+    /* Get texture data */
+    uint8_t *data = loadImageData(fileName);
+
+    /* Copy to gpu */
+    if (data) {
+        copyToGPU(data);
+        std::cout << "Loaded texture (" << width << ", " << height << "): " << fileName << std::endl;
+    }
+    else {
+        std::cerr << "Could not find texture file " << fileName << std::endl;
+    }
+
+    stbi_image_free(data);
+}
+
+uint8_t* Texture::loadImageData(const std::string fileName) {
+    stbi_set_flip_vertically_on_load(true);
+    return stbi_load(fileName.c_str(), &width, &height, &components, STBI_rgb_alpha);
+}
+
+void Texture::copyToGPU(const uint8_t *data) {
+    /* Set active texture unit 0 */
+    CHECK_GL_CALL(glActiveTexture(GL_TEXTURE0));
+
+    /* Generate texture buffer object */
+    CHECK_GL_CALL(glGenTextures(1, &textureId));
+
+    /* Bind new texture buffer object to active texture */
+    CHECK_GL_CALL(glBindTexture(GL_TEXTURE_2D, textureId));
+
+    /* Load texture data to GPU */
+    CHECK_GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, this->width, this->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data));
+
+    /* Generate image pyramid */
+    CHECK_GL_CALL(glGenerateMipmap(GL_TEXTURE_2D));
+    
+    /* Set filtering mode for magnification and minimification */
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR));
+
+    /* Set wrap mode */
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT));
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT));
+
+    /* LOD */
+    CHECK_GL_CALL(glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, -1.5f)); 
+
+    /* Unbind */
+    CHECK_GL_CALL(glBindTexture(GL_TEXTURE_2D, 0));
+}
+```
+
+### src/Model/Texture.hpp
+```
+/* Texture class
+ * Contains GL texture ID */
+#pragma once
+#ifndef _TEXTURE_HPP_
+#define _TEXTURE_HPP_
+
+#include <glad/glad.h>
+
+#include <string>
+#include <cstdint>
+
+class Texture {
+    public:
+        /* GL texture ID */
+        GLuint textureId = 0;
+
+        Texture(std::string);
+        Texture() {};
+
+        int width = 0;
+        int height = 0;
+        int components = 0;
+
+    private:
+        uint8_t* loadImageData(const std::string);
+        void copyToGPU(const uint8_t *);
+};
+
+#endif
+```
+
+### src/Shaders/ConeTraceShader.cpp
+```
+#include "ConeTraceShader.hpp"
+
+#include "Camera.hpp"
+#include "Sun.hpp"
+#include "Library.hpp"
+#include "Util.hpp"
+
+ConeTraceShader::ConeTraceShader(const std::string &r, const std::string &v, const std::string &f) :
+    Shader(r, v, f) {
+
+    /* Create noise map */
+    initNoiseMap(32);
+}
+
+void ConeTraceShader::coneTrace(CloudVolume *volume) {
+    if (!doConeTrace && !doNoiseSample && !showQuad) {
+        return;
+    }
+
+    volume->sortBoards(Camera::getPosition());
+
+    CHECK_GL_CALL(glDisable(GL_DEPTH_TEST));
+    bind();
+    bindVolume(volume);
+
+    loadVector(getUniform("lightPos"), Sun::position);
+    loadBool(getUniform("showQuad"), showQuad);
+    loadVector(getUniform("volumePosition"), volume->position);
+
+    /* Bind cone tracing params */
+    loadBool(getUniform("doConeTrace"), doConeTrace);
+    loadInt(getUniform("vctSteps"), vctSteps);
+    loadFloat(getUniform("vctConeAngle"), vctConeAngle);
+    loadFloat(getUniform("vctConeInitialHeight"), vctConeInitialHeight);
+    loadFloat(getUniform("vctLodOffset"), vctLodOffset);
+    loadFloat(getUniform("vctDownScaling"), vctDownScaling);
+
+    /* Bind noise map and params */
+    loadBool(getUniform("doNoise"), doNoiseSample);
+    CHECK_GL_CALL(glActiveTexture(GL_TEXTURE0 + noiseMapId));
+    CHECK_GL_CALL(glBindTexture(GL_TEXTURE_3D, noiseMapId));
+    loadInt(getUniform("noiseMap"), noiseMapId);
+    loadFloat(getUniform("stepSize"), stepSize);
+    loadFloat(getUniform("noiseOpacity"), noiseOpacity);
+    loadInt(getUniform("numOctaves"), numOctaves);
+    loadFloat(getUniform("freqStep"), freqStep);
+    loadFloat(getUniform("persStep"), persStep);
+    loadFloat(getUniform("adjustSize"), adjustSize);
+    loadInt(getUniform("minNoiseSteps"), minNoiseSteps);
+    loadInt(getUniform("maxNoiseSteps"), maxNoiseSteps);
+    loadFloat(getUniform("minNoiseColor"), minNoiseColor);
+    loadFloat(getUniform("noiseColorScale"), noiseColorScale);
+
+    /* Per-octave sampling offset */
+    std::vector<glm::vec3> octaveOffsets(numOctaves, glm::vec3(0.f));
+    for (int i = 0; i < numOctaves; i++) {
+        octaveOffsets[i].x = windVel.x * Window::runTime;
+        octaveOffsets[i].y = windVel.y * Window::runTime;
+        octaveOffsets[i].z = windVel.z * Window::runTime;
+    }
+    loadVector(getUniform("octaveOffsets"), octaveOffsets.data()[0]);
+
+    /* Bind P V Vi*/
+    loadMatrix(getUniform("P"), &Camera::getP());
+    loadMatrix(getUniform("V"), &Camera::getV());
+    glm::mat4 Vi = Camera::getV();
+    Vi[3][0] = Vi[3][1] = Vi[3][2] = 0.f;
+    Vi = glm::transpose(Vi);
+    loadMatrix(getUniform("Vi"), &Vi);
+
+    /* Bind quad */
+    CHECK_GL_CALL(glBindVertexArray(volume->instancedQuad->vaoId));
+
+    /* Draw */
+    CHECK_GL_CALL(glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, volume->billboards.count));
+
+    /* Wrap up */
+    CHECK_GL_CALL(glBindVertexArray(0));
+    unbindVolume();
+    unbind();
+    CHECK_GL_CALL(glEnable(GL_DEPTH_TEST));
+}
+
+void ConeTraceShader::bindVolume(CloudVolume *volume) {
+    CHECK_GL_CALL(glActiveTexture(GL_TEXTURE0 + volume->volId));
+    CHECK_GL_CALL(glBindTexture(GL_TEXTURE_3D, volume->volId));
+    loadInt(getUniform("volumeTexture"), volume->volId);
+
+    loadVector(getUniform("xBounds"), volume->position.x + volume->xBounds);
+    loadVector(getUniform("yBounds"), volume->position.y + volume->yBounds);
+    loadVector(getUniform("zBounds"), volume->position.z + volume->zBounds);
+    loadInt(getUniform("voxelDim"), volume->dimension);
+}
+
+void ConeTraceShader::unbindVolume() {
+    CHECK_GL_CALL(glActiveTexture(GL_TEXTURE0));
+    CHECK_GL_CALL(glBindTexture(GL_TEXTURE_3D, 0));
+}
+
+int getIndex(int x, int y, int z, int dim) {
+    if (x < 0)
+        x += dim;
+    if (y < 0)
+        y += dim;
+    if (z < 0)
+        z += dim;
+
+    x = x % dim;
+    y = y % dim;
+    z = z % dim;
+
+    return x + y * dim + z * dim * dim;
+}
+
+struct CHAR4 { char r, g, b, a; };
+
+float getDensity(int index, CHAR4* pTexels) {
+    return (float)pTexels[index].a / 128.0f;
+}
+
+void setNormal(glm::vec3 normal, int index, CHAR4* pTexels) {
+    pTexels[index].r = (char)(normal.r * 128.0f);
+    pTexels[index].g = (char)(normal.g * 128.0f);
+    pTexels[index].b = (char)(normal.b * 128.0f);
+}
+
+void ConeTraceShader::initNoiseMap(int dimension) {
+    CHAR4* pData = new CHAR4[dimension*dimension*dimension];
+
+    /* Populate data */
+    for (int i = 0; i < dimension*dimension*dimension; i++) {
+        pData[i].a = Util::genRandom(-128.f, 128.f);
+    }
+
+    // Generate normals from the density gradient
+    float heightAdjust = 0.5f;
+    glm::vec3 normal;
+    glm::vec3 densityGradient;
+    for (int z = 0; z < dimension; z++) {
+        for (int y = 0; y < dimension; y++) {
+            for (int x = 0; x < dimension; x++) {
+                densityGradient.x = getDensity(getIndex(x + 1, y, z, dimension), pData) - getDensity(getIndex(x - 1, y, z, dimension), pData) / heightAdjust;
+                densityGradient.y = getDensity(getIndex(x, y + 1, z, dimension), pData) - getDensity(getIndex(x, y - 1, z, dimension), pData) / heightAdjust;
+                densityGradient.z = getDensity(getIndex(x, y, z + 1, dimension), pData) - getDensity(getIndex(x, y, z - 1, dimension), pData) / heightAdjust;
+                normal = glm::normalize(densityGradient);
+                setNormal(normal, getIndex(x, y, z, dimension), pData);
+            }
+        }
+    }
+
+    CHECK_GL_CALL(glGenTextures(1, &noiseMapId));
+    CHECK_GL_CALL(glBindTexture(GL_TEXTURE_3D, noiseMapId));
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT));
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT));
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT));
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+    CHECK_GL_CALL(glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8_SNORM, dimension, dimension, dimension, 0, GL_RGBA, GL_BYTE, pData));
+}
+```
+
+### src/Shaders/ConeTraceShader.hpp
+```
+#pragma once
+#ifndef _CONE_TRACE_SHADER_HPP_
+#define _CONE_TRACE_SHADER_HPP_
+
+#include "Shader.hpp"
+#include "CloudVolume.hpp"
+
+class ConeTraceShader : public Shader {
+    public:
+        ConeTraceShader(const std::string &r, const std::string &v, const std::string &f);
+
+        void coneTrace(CloudVolume *);
+
+        /* Noise map parameters */
+        float stepSize = 0.01f;
+        float noiseOpacity = 4.0;
+        int numOctaves = 4;
+        float freqStep = 3.f;
+        float persStep = 0.5f;
+        float adjustSize = 40.f;
+        int minNoiseSteps = 2;
+        int maxNoiseSteps = 8;
+        float minNoiseColor = 0.2f;
+        float noiseColorScale = 0.45f;
+        glm::vec3 windVel = glm::vec3(0.01f, 0, 0);
+
+        /* Cone trace parameters */
+        int vctSteps = 16;
+        float vctConeAngle = 0.9f;
+        float vctConeInitialHeight = 0.1f;
+        float vctLodOffset = 0.f;
+        float vctDownScaling = 1.f;
+
+        bool showQuad = false;
+        bool doConeTrace = true;
+        bool doNoiseSample = true;
+
+    private:
+        void bindVolume(CloudVolume *);
+        void unbindVolume();
+
+        void initNoiseMap(int);
+        GLuint noiseMapId;
+        float totalTime = 0.f;
+};
+
+#endif
+```
+
+### src/Shaders/GLSL.cpp
+```
+//
+//    Many useful helper functions for GLSL shaders - gleaned from various sources including orange book
+//    Created by zwood on 2/21/10.
+//    Modified by sueda 10/15/15.
+//
+
+#include "GLSL.hpp"
+#include <stdio.h>
+#include <stdlib.h>
+#include <iostream>
+#include <cstring>
+#include <cassert>
+
+namespace GLSL {
+
+const char * errorString(GLenum err)
+{
+	switch(err) {
+	case GL_NO_ERROR:
+		return "No error";
+	case GL_INVALID_ENUM:
+		return "Invalid enum";
+	case GL_INVALID_VALUE:
+		return "Invalid value";
+	case GL_INVALID_OPERATION:
+		return "Invalid operation";
+	case GL_STACK_OVERFLOW:
+		return "Stack overflow";
+	case GL_STACK_UNDERFLOW:
+		return "Stack underflow";
+	case GL_OUT_OF_MEMORY:
+		return "Out of memory";
+	default:
+		return "No error";
+	}
+}
+
+void checkError(const char *str)
+{
+	GLenum glErr = glGetError();
+	if(glErr != GL_NO_ERROR) {
+		if(str) {
+			printf("%s: ", str);
+		}
+		printf("GL_ERROR = %s.\n", errorString(glErr));
+		assert(false);
+	}
+}
+
+void printOpenGLErrors(const char *const Function, const char * const File, int const Line)
+{
+	GLenum Error = glGetError();
+	if (Error != GL_NO_ERROR)
+	{
+		const char *const ErrorString = errorString(Error);
+		printf("OpenGL error in file '%s' at line %d calling function '%s': '%s' '%d 0x%X'\n", File, Line, Function, ErrorString, Error, Error);
+	}
+}
+
+void printShaderInfoLog(GLuint shader)
+{
+	GLint infologLength = 0;
+	GLint charsWritten  = 0;
+	GLchar *infoLog;
+	
+	checkError(GET_FILE_LINE);
+	glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &infologLength);
+	checkError(GET_FILE_LINE);
+	
+	if(infologLength > 0) {
+		infoLog = (GLchar *)malloc(infologLength);
+		if(infoLog == NULL) {
+			puts("ERROR: Could not allocate InfoLog buffer");
+			exit(1);
+		}
+		glGetShaderInfoLog(shader, infologLength, &charsWritten, infoLog);
+		printf("Shader InfoLog:\n%s\n\n", infoLog);
+		free(infoLog);
+	}
+	checkError(GET_FILE_LINE);
+}
+
+void printProgramInfoLog(GLuint program)
+{
+	GLint infologLength = 0;
+	GLint charsWritten  = 0;
+	GLchar *infoLog;
+	
+	checkError(GET_FILE_LINE);
+	glGetProgramiv(program, GL_INFO_LOG_LENGTH, &infologLength);
+	checkError(GET_FILE_LINE);
+	
+	if(infologLength > 0) {
+		infoLog = (GLchar *)malloc(infologLength);
+		if(infoLog == NULL) {
+			puts("ERROR: Could not allocate InfoLog buffer");
+			exit(1);
+		}
+		glGetProgramInfoLog(program, infologLength, &charsWritten, infoLog);
+		printf("Program InfoLog:\n%s\n\n", infoLog);
+		free(infoLog);
+	}
+	checkError(GET_FILE_LINE);
+}
+
+void checkVersion()
+{
+	int major, minor;
+	major = minor = 0;
+	const char *verstr = (const char *)glGetString(GL_VERSION);
+	
+	if((verstr == NULL) || (sscanf(verstr, "%d.%d", &major, &minor) != 2)) {
+		printf("Invalid GL_VERSION format %d.%d\n", major, minor);
+	}
+	if(major < 2) {
+		printf("This shader example will not work due to the installed Opengl version, which is %d.%d.\n", major, minor);
+		exit(0);
+	}
+}
+
+char *textFileRead(const char *fn)
+{
+	FILE *fp;
+	char *content = NULL;
+	int count = 0;
+	if(fn != NULL) {
+		fp = fopen(fn,"rt");
+		if(fp != NULL) {
+			fseek(fp, 0, SEEK_END);
+			count = (int)ftell(fp);
+			rewind(fp);
+			if(count > 0) {
+				content = (char *)malloc(sizeof(char) * (count+1));
+				count = (int)fread(content,sizeof(char),count,fp);
+				content[count] = '\0';
+			}
+			fclose(fp);
+		} else {
+			printf("error loading %s\n", fn);
+		}
+	}
+	return content;
+}
+
+int textFileWrite(const char *fn, char *s)
+{
+	FILE *fp;
+	int status = 0;
+	if(fn != NULL) {
+		fp = fopen(fn,"w");
+		if(fp != NULL) {
+			if(fwrite(s,sizeof(char),strlen(s),fp) == strlen(s)) {
+				status = 1;
+			}
+			fclose(fp);
+		}
+	}
+	return(status);
+}
+}
+
+GLuint GLSL::createShader(std::string name, GLenum type) {
+    GLint rc;
+    GLuint shaderId = glCreateShader(type);
+
+    const char *shader = textFileRead(name.c_str());
+    glShaderSource(shaderId , 1, &shader, NULL);
+
+    // Compile shader
+    glCompileShader(shaderId);
+    glGetShaderiv(shaderId, GL_COMPILE_STATUS, &rc);
+    if (!rc) {
+        printShaderInfoLog(shaderId);
+        std::cerr << "Error compiling " << name << std::endl;
+        return -1;
+    }
+
+    return shaderId;
+}
+```
+
+### src/Shaders/GLSL.hpp
+```
+//
+//    Many useful helper functions for GLSL shaders - gleaned from various sources including orange book
+//    Created by zwood on 2/21/10.
+//    Modified by sueda 10/15/15.
+//
+
+#pragma once
+#ifndef __GLSL__
+#define __GLSL__
+
+#include <glad/glad.h>
+
+///////////////////////////////////////////////////////////////////////////////
+// For printing out the current file and line number                         //
+///////////////////////////////////////////////////////////////////////////////
+#include <sstream>
+
+template <typename T>
+std::string NumberToString(T x)
+{
+	std::ostringstream ss;
+	ss << x;
+	return ss.str();
+}
+
+#define GET_FILE_LINE (std::string(__FILE__) + ":" + NumberToString(__LINE__)).c_str()
+///////////////////////////////////////////////////////////////////////////////
+
+namespace GLSL {
+
+    void printOpenGLErrors(char const * const Function, char const * const File, int const Line);
+	void printProgramInfoLog(GLuint program);
+	void printShaderInfoLog(GLuint shader);
+	void checkVersion();
+	int textFileWrite(const char *filename, char *s);
+	char *textFileRead(const char *filename);
+    GLuint createShader(std::string name, GLenum type);
+}
+
+#ifdef OPENGL_ERROR_CHECKS
+#define CHECK_GL_CALL(x) do { GLSL::printOpenGLErrors("{{BEFORE}} "#x, __FILE__, __LINE__); (x); GLSL::printOpenGLErrors(#x, __FILE__, __LINE__); } while (0)
+#else
+#define CHECK_GL_CALL(x) (x)
+#endif
+
+#endif
+```
+
+### src/Shaders/Shader.cpp
+```
+#include "Shader.hpp"
+
+#include <fstream>
+#include <vector>
+
+Shader::Shader(const std::string &res, const std::string &v, const std::string &f) :
+    Shader(res, v, f, "")
+{ }
+
+Shader::Shader(const std::string &res, const std::string &vName, const std::string &fName, const std::string &gName) {
+	pid = glCreateProgram();
+    if (vName.size() && (vShaderId = compileShader(GL_VERTEX_SHADER, res, vName))) {
+	    CHECK_GL_CALL(glAttachShader(pid, vShaderId));
+    }
+    if (fName.size() && (fShaderId = compileShader(GL_FRAGMENT_SHADER, res, fName))) {
+        CHECK_GL_CALL(glAttachShader(pid, fShaderId));
+    }
+    if (gName.size() && (gShaderId = compileShader(GL_GEOMETRY_SHADER, res, gName))) {
+	    CHECK_GL_CALL(glAttachShader(pid, gShaderId));
+    }
+	CHECK_GL_CALL(glLinkProgram(pid));
+
+    // See whether link was successful
+    GLint linkSuccess;
+	CHECK_GL_CALL(glGetProgramiv(pid, GL_LINK_STATUS, &linkSuccess));
+	if (!linkSuccess) {
+        GLSL::printProgramInfoLog(pid);
+        std::cout << "Error linking shaders " << vName << " and " << fName;
+        if (gShaderId) {
+            std::cout << " and " << gName << std::endl;
+        }
+        else {
+            std::cout << std::endl;
+        }
+        std::cin.get();
+        exit(EXIT_FAILURE);
+	}
+
+    if (vShaderId) {
+        findAttributesAndUniforms(res, vName);
+    }
+    if (fShaderId) {
+        findAttributesAndUniforms(res, fName);
+    }
+    if (gShaderId) {
+        findAttributesAndUniforms(res, gName);
+    }
+}
+
+GLuint Shader::compileShader(GLenum shaderType, const std::string &res, const std::string &shaderName) {
+    // Read the shader source file into a string
+    char *shaderString = GLSL::textFileRead((res + shaderName).c_str());
+    // Stop if there was an error reading the shader source file
+    if (shaderString == NULL) return 0;
+    
+    // Create the shader, assign source code, and compile it
+    GLuint shader = glCreateShader(shaderType);
+    CHECK_GL_CALL(glShaderSource(shader, 1, &shaderString, NULL));
+    CHECK_GL_CALL(glCompileShader(shader));
+
+    // See whether compile was successful
+    GLint compileSuccess;
+    CHECK_GL_CALL(glGetShaderiv(shader, GL_COMPILE_STATUS, &compileSuccess));
+    if (!compileSuccess) {
+        GLSL::printShaderInfoLog(shader);
+        std::cout << "Error compiling shader: " << res << shaderName << std::endl;
+        std::cin.get();
+        exit(EXIT_FAILURE);
+    }
+    
+    // Free the memory
+    free(shaderString);
+    
+    return shader;
+}
+
+void Shader::findAttributesAndUniforms(const std::string &res, const std::string &shaderName) {
+    char *fileText = GLSL::textFileRead((res + shaderName).c_str());
+    char *token;
+    char *lastToken = nullptr;
+    
+    std::vector<char *> lines;
+    
+    // Read the first line
+    token = strtok(fileText, ";\n");
+    lines.push_back(token);
+    // Read all subsequent lines
+    while((token = strtok(NULL, ";\n")) != NULL) {
+        lines.push_back(token);
+    }
+    
+    // Look for keywords per line
+    for (char *line : lines) {
+        token = strtok(line, " (\n");
+        if (token == NULL) {
+            continue;
+        }
+        if (!strcmp(token, "uniform")) {
+            // Handle lines with multiple variables separated by commas
+            char *lineEnding = line + strlen(line) + 1;
+            int lastDelimiter = -1;
+            int lineEndingLength = strlen(lineEnding);
+            for (int i = 0; i < lineEndingLength; i++) {
+                if (lineEnding[i] == ',') {
+                    lineEnding[i] = '\0';
+                    addUniform(lineEnding + (lastDelimiter + 1));
+                    lastDelimiter = i;
+                } else if (lineEnding[i] == ' ' || lineEnding[i] == '\t') {
+                    lastDelimiter = i;
+                }
+            }
+            addUniform(lineEnding + (lastDelimiter + 1));
+        } 
+        else if (!strcmp(token, "layout")) {
+            while((token = strtok(NULL, " ")) != NULL) {
+                lastToken = token;
+            }
+            if (lastToken) {
+                addAttribute(lastToken);
+            }
+        } 
+        else {
+            continue;
+        }
+    }
+    
+    // Free the memory
+    free(fileText);
+}
+
+void Shader::bind() {
+    CHECK_GL_CALL(glUseProgram(pid));
+}
+
+void Shader::unbind() {
+    CHECK_GL_CALL(glUseProgram(0));
+}
+
+void Shader::addAttribute(const std::string &name) {
+    GLint r = glGetAttribLocation(pid, name.c_str());
+    if (r < 0) {
+        std::cerr << "WARN: " << name << " cannot be bound (it either doesn't exist or has been optimized away). safe_glAttrib calls will silently ignore it\n" << std::endl;
+    }
+    attributes[name] = r;
+}
+
+void Shader::addUniform(const std::string &name) {
+    GLint r = glGetUniformLocation(pid, name.c_str());
+    if (r < 0) {
+        std::cerr << "WARN: " << name << " cannot be bound (it either doesn't exist or has been optimized away). safe_glAttrib calls will silently ignore it\n" << std::endl;
+    }  
+    uniforms[name] = r;
+}
+
+GLint Shader::getAttribute(const std::string &name) { 
+    std::map<std::string, GLint>::const_iterator attribute = attributes.find(name.c_str());
+    if (attribute == attributes.end()) {
+        std::cerr << name << " is not an attribute variable" << std::endl;
+        return -1;
+    }
+    return attribute->second;
+}
+
+GLint Shader::getUniform(const std::string &name) { 
+    std::map<std::string, GLint>::const_iterator uniform = uniforms.find(name.c_str());
+    if (uniform == uniforms.end()) {
+        std::cerr << name << " is not an uniform variable" << std::endl;
+        return -1;
+    }
+    return uniform->second;
+}
+
+void Shader::cleanUp() {
+    unbind();
+    CHECK_GL_CALL(glDetachShader(pid, vShaderId));
+    CHECK_GL_CALL(glDetachShader(pid, fShaderId));
+    CHECK_GL_CALL(glDetachShader(pid, gShaderId));
+    CHECK_GL_CALL(glDeleteShader(vShaderId));
+    CHECK_GL_CALL(glDeleteShader(fShaderId));
+    CHECK_GL_CALL(glDeleteShader(gShaderId));
+    CHECK_GL_CALL(glDeleteProgram(pid));
+}
+
+void Shader::loadBool(const int location, const bool b) const {
+    CHECK_GL_CALL(glUniform1i(location, b));
+}
+
+void Shader::loadInt(const int location, const int i) const {
+    CHECK_GL_CALL(glUniform1i(location, i));
+}
+
+void Shader::loadFloat(const int location, const float f) const { 
+    CHECK_GL_CALL(glUniform1f(location, f));
+}
+
+void Shader::loadVector(const int location, const glm::vec2 & v) const { 
+    CHECK_GL_CALL(glUniform2f(location, v.x, v.y));
+}
+
+void Shader::loadVector(const int location, const glm::vec3 & v) const { 
+    CHECK_GL_CALL(glUniform3f(location, v.x, v.y, v.z));
+}
+
+void Shader::loadVector(const int location, const glm::vec4 & v) const { 
+    CHECK_GL_CALL(glUniform4f(location, v.r, v.g, v.b, v.a));
+}
+
+void Shader::loadMatrix(const int location, const glm::mat4 *m) const { 
+    CHECK_GL_CALL(glUniformMatrix4fv(location, 1, GL_FALSE, glm::value_ptr(*m)));
+}
+
+void Shader::loadMatrix(const int location, const glm::mat3 *m) const { 
+    CHECK_GL_CALL(glUniformMatrix3fv(location, 1, GL_FALSE, glm::value_ptr(*m)));
+}
+```
+
+### src/Shaders/Shader.hpp
+```
+/* Abstract parent Shader class 
+ * Every feature will have its own derived shader */
+#pragma once
+#ifndef _SHADER_HPP_
+#define _SHADER_HPP_
+
+#include "GLSL.hpp"
+
+#include <glad/glad.h>
+#include "glm/glm.hpp"
+#include "glm/gtc/type_ptr.hpp"
+
+#include <map>
+#include <string>
+#include <iostream>
+
+class Shader {
+    public:
+        Shader(const std::string &, const std::string &, const std::string &, const std::string &);
+        Shader(const std::string &, const std::string &, const std::string &);
+
+        /* Utility functions */
+        void bind();
+        void unbind();
+        void cleanUp();
+        void addAttribute(const std::string &);
+        void addUniform(const std::string &);
+
+        /* Parent load functions */
+        void loadBool(const int, const bool) const;
+        void loadInt(const int, const int) const;
+        void loadFloat(const int, const float) const;
+        void loadVector(const int, const glm::vec2 &) const;
+        void loadVector(const int, const glm::vec3 &) const;
+        void loadVector(const int, const glm::vec4 &) const;
+        void loadMatrix(const int, const glm::mat4*) const;
+        void loadMatrix(const int, const glm::mat3*) const;
+
+        /* Get shader location */
+        GLint getAttribute(const std::string &);
+        GLint getUniform(const std::string &);
+
+    private:    
+        /* GLSL shader attributes */
+        GLuint pid = 0;
+        GLint vShaderId;
+        GLint fShaderId;
+        GLint gShaderId;
+        std::map<std::string, GLint> attributes;
+        std::map<std::string, GLint> uniforms;
+
+        GLuint compileShader(GLenum, const std::string &, const std::string &);
+        void findAttributesAndUniforms(const std::string &, const std::string &);
+};
+
+#endif
+```
+
+### src/Shaders/SunShader.cpp
+```
+#include "SunShader.hpp"
+
+#include "Sun.hpp"
+#include "Camera.hpp"
+#include "Library.hpp"
+
+void SunShader::render() {
+    /* Bind shader */
+    bind();
+
+    /* Bind sun params */
+    loadVector(getUniform("center"), Sun::position);
+    loadVector(getUniform("innerColor"), Sun::innerColor);
+    loadFloat(getUniform("innerRadius"), Sun::innerRadius);
+    loadVector(getUniform("outerColor"), Sun::outerColor);
+    loadFloat(getUniform("outerRadius"), Sun::outerRadius);
+    
+    /* Bind projeciton, view, inverse view matrices */
+    loadMatrix(getUniform("P"), &Camera::getP());
+    loadMatrix(getUniform("V"), &Camera::getV());
+    glm::mat4 Vi = Camera::getV();
+    Vi[3][0] = Vi[3][1] = Vi[3][2] = 0.f;
+    Vi = glm::transpose(Vi);
+    loadMatrix(getUniform("Vi"), &Vi);
+
+    /* Bind mesh */
+    /* VAO */
+    CHECK_GL_CALL(glBindVertexArray(Library::quad->vaoId));
+
+    /* M */
+    glm::mat4 M = glm::mat4(1.f);
+    M *= glm::translate(glm::mat4(1.f), Sun::position);
+    M *= glm::scale(glm::mat4(1.f), glm::vec3(Sun::outerRadius));
+    loadMatrix(getUniform("M"), &M);
+
+    /* Draw */
+    CHECK_GL_CALL(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
+
+    /* Clean up */
+    CHECK_GL_CALL(glBindVertexArray(0));
+    unbind();
+}
+```
+
+### src/Shaders/SunShader.hpp
+```
+#pragma once
+#ifndef _SUN_SHADER_HPP_
+#define _SUN_SHADER_HPP_
+
+#include "Shader.hpp"
+
+class SunShader : public Shader {
+    public:
+        SunShader(const std::string &r, const std::string &v, const std::string &f) :
+            Shader(r, v, f) 
+        {}
+
+        void render();
+};
+
+#endif
+```
+
+### src/Shaders/VoxelShader.cpp
+```
+#include "VoxelShader.hpp"
+
+#include "Library.hpp"
+#include "Camera.hpp"
+#include "Model/Mesh.hpp"
+
+#include "glm/gtc/matrix_transform.hpp"
+
+VoxelShader::VoxelShader(int dimension, const std::string &r, const std::string &v, const std::string &f) :
+    Shader(r, v, f) {
+    int numVoxels = dimension * dimension * dimension;
+
+    /* Init voxel CPU vectors 
+     * Extra position for bounds */
+    this->voxelPositions.resize(numVoxels + 1);
+    this->voxelData.resize(numVoxels);
+
+    /* Create instanced cube mesh */
+    this->cube = Library::createCube();
+
+    /* Voxel positions vbo */
+    CHECK_GL_CALL(glBindVertexArray(cube->vaoId));
+    CHECK_GL_CALL(glGenBuffers(1, &cubePositionVBO));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, cubePositionVBO));
+    CHECK_GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(glm::vec3) * voxelPositions.size(), nullptr, GL_DYNAMIC_DRAW));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0)); 
+    CHECK_GL_CALL(glEnableVertexAttribArray(2));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, cubePositionVBO));
+    CHECK_GL_CALL(glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0));	
+    CHECK_GL_CALL(glVertexAttribDivisor(2, 1)); 
+
+    /* Voxel data vbo */
+    CHECK_GL_CALL(glGenBuffers(1, &cubeDataVBO));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, cubeDataVBO));
+    CHECK_GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(float) * voxelData.size(), nullptr, GL_DYNAMIC_DRAW));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0));
+    CHECK_GL_CALL(glEnableVertexAttribArray(3));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, cubeDataVBO));
+    CHECK_GL_CALL(glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(float), (void*)0));
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0));	
+    CHECK_GL_CALL(glVertexAttribDivisor(3, 1));
+
+    CHECK_GL_CALL(glBindVertexArray(0));
+}
+
+/* Visualize voxels */
+void VoxelShader::render(const CloudVolume *volume, const glm::mat4 &P, const glm::mat4 &V) {
+    updateVoxelData(volume);
+
+    /* Bind projeciton, view matrices */
+    loadMatrix(getUniform("P"), &P);
+    loadMatrix(getUniform("V"), &V);
+
+    /* Bind mesh */
+    CHECK_GL_CALL(glBindVertexArray(cube->vaoId));
+    CHECK_GL_CALL(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, cube->eleBufId));
+
+    /* Reupload voxel positions */
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, cubePositionVBO));
+    CHECK_GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(glm::vec3) * voxelPositions.size(), &voxelPositions[0], GL_DYNAMIC_DRAW));
+
+    /* Reupload voxel data */
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, cubeDataVBO));
+    CHECK_GL_CALL(glBufferData(GL_ARRAY_BUFFER, sizeof(float) * voxelData.size(), &voxelData[0], GL_DYNAMIC_DRAW));
+
+    /* Individual voxels */
+    loadFloat(getUniform("alpha"), alpha);
+    loadVector(getUniform("voxelSize"), volume->voxelSize);
+
+    /* Render voxels */
+    if (!disableWhite) {
+        loadBool(getUniform("isOutline"), false);
+        CHECK_GL_CALL(glDrawElementsInstanced(GL_TRIANGLES, (int)cube->eleBuf.size(), GL_UNSIGNED_INT, 0, voxelPositions.size()));
+    }
+
+    /* Render voxel outlines and bounds */
+    loadBool(getUniform("isOutline"), true);
+    CHECK_GL_CALL(glPolygonMode(GL_FRONT_AND_BACK, GL_LINE));
+ 
+    /* Individual voxels */
+    if (!disableWhite && useOutline) {
+       CHECK_GL_CALL(glDrawElementsInstanced(GL_TRIANGLES, (int)cube->eleBuf.size(), GL_UNSIGNED_INT, 0, voxelPositions.size()));
+    }
+
+    /* Bounds */
+    if (!disableBounds) {
+        glm::vec3 min(volume->xBounds.x, volume->yBounds.x, volume->zBounds.x);
+        glm::vec3 max(volume->xBounds.y, volume->yBounds.y, volume->zBounds.y);
+        loadVector(getUniform("voxelSize"), max - min);
+        CHECK_GL_CALL(glDrawElementsInstancedBaseInstance(GL_TRIANGLES, (int)cube->eleBuf.size(), GL_UNSIGNED_INT, 0, 1, voxelPositions.size() - 1));
+    }
+
+    CHECK_GL_CALL(glPolygonMode(GL_FRONT_AND_BACK, GL_FILL));
+
+    /* Clean up */
+    CHECK_GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0));
+    CHECK_GL_CALL(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
+    CHECK_GL_CALL(glBindVertexArray(0));
+}
+
+void VoxelShader::updateVoxelData(const CloudVolume *volume) {
+    /* Pull volume data out of GPU */
+    std::vector<float> buffer(voxelData.size());
+    CHECK_GL_CALL(glBindTexture(GL_TEXTURE_3D, volume->volId));
+    CHECK_GL_CALL(glGetTexImage(GL_TEXTURE_3D, 0, GL_RED, GL_FLOAT, buffer.data()));
+    CHECK_GL_CALL(glBindTexture(GL_TEXTURE_3D, 0));
+
+    /* Size of voxels in world-space */
+    activeVoxels = 0;
+    for (unsigned int i = 0; i < voxelData.size(); i++) {
+        /* Update voxel data if data exists */
+        float r = buffer[i];
+        if (r) {
+            activeVoxels++;
+            glm::ivec3 voxelIndex = volume->get3DIndices(i);
+            voxelPositions[i] = volume->position + volume->reverseVoxelIndex(voxelIndex);
+            voxelData[i] = r;
+        }
+        /* Otherwise reset data */
+        else {
+            voxelPositions[i].x = 0.f;
+            voxelPositions[i].y = 1000000.f; // ensures instanced voxels won't be rendered
+            voxelPositions[i].z = 0.f;
+            voxelData[i] = 0.f;
+        }
+    }
+
+    /* Update bounds position */
+    glm::vec3 min(volume->xBounds.x, volume->yBounds.x, volume->zBounds.x);
+    glm::vec3 max(volume->xBounds.y, volume->yBounds.y, volume->zBounds.y);
+    voxelPositions.back() = volume->position + (max + min) / 2.f;
+}
+```
+
+### src/Shaders/VoxelShader.hpp
+```
+#pragma once
+#ifndef _VOXEL_SHADER_HPP_
+#define _VOXEL_SHADER_HPP_
+
+#include "Shader.hpp"
+#include "CloudVolume.hpp"
+
+#include <vector>
+
+class Mesh;
+class VoxelShader : public Shader {
+    public:
+        VoxelShader(int count, const std::string &r, const std::string &v, const std::string &f);
+
+        void render(const CloudVolume *, const glm::mat4 &, const glm::mat4 &);
+
+        int activeVoxels = 0;
+        bool useOutline = true;
+        bool disableBounds = false;
+        bool disableWhite = false;
+        float alpha = 1.f;
+
+    private:
+        /* Instanced cube mesh data */
+        Mesh * cube;
+        GLuint cubePositionVBO;
+        GLuint cubeDataVBO;
+
+        /* Voxels */
+        void updateVoxelData(const CloudVolume *);
+        std::vector<glm::vec3> voxelPositions;
+        std::vector<float> voxelData;
+};
+
+#endif
+```
+
+### src/Shaders/VoxelizeShader.cpp
+```
+#include "VoxelizeShader.hpp"
+
+#include "Library.hpp"
+
+#include "Camera.hpp"
+#include "Sun.hpp"
+#include "IO/Window.hpp"
+
+VoxelizeShader::VoxelizeShader(const std::string &r, const std::string &v1, const std::string &v2, const std::string &f1, const std::string &f2) {
+    /* Initialize shaders */
+    firstVoxelizer  = new Shader(r, v1, f1); // instanced billboard voxelization
+    secondVoxelizer = new Shader(r, v2, f2); // full-screen position map voxelization
+
+    /* Create position map */
+    initPositionFBO(Window::width, Window::height);
+}
+
+void VoxelizeShader::voxelize(CloudVolume *volume) {
+    /* Resize position map if window was resized */
+    if (Window::width != positionMap->width || Window::height != positionMap->height) {
+        resizePositionFBO(Window::width, Window::height);
+    }
+
+    /* Reset volume and position map */
+    volume->clearGPU();
+    clearPositionMap();
+
+    /* Voxelize */
+    firstVoxelize(volume);
+    secondVoxelize(volume);
+}
+
+/* First voxelize pass 
+ * Render all billboards and initialize black voxels
+ * Write out nearest voxel positions to position FBO */
+void VoxelizeShader::firstVoxelize(CloudVolume *volume) {
+    /* Bind position FBO */
+    CHECK_GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, positionFBO));
+    CHECK_GL_CALL(glClearColor(0.f, 0.f, 0.f, 0.f));
+    CHECK_GL_CALL(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+
+    firstVoxelizer->bind();
+
+    /* Bind volume */
+    bindVolume(firstVoxelizer, volume);
+
+    /* Bind light's perspective */
+    firstVoxelizer->loadMatrix(firstVoxelizer->getUniform("P"), &Sun::P);
+    firstVoxelizer->loadMatrix(firstVoxelizer->getUniform("V"), &Sun::V);
+    glm::mat4 Vi = Sun::V;
+    Vi[3][0] = Vi[3][1] = Vi[3][2] = 0.f;
+    Vi = glm::transpose(Vi);
+    firstVoxelizer->loadMatrix(firstVoxelizer->getUniform("Vi"), &Vi);
+
+    firstVoxelizer->loadVector(firstVoxelizer->getUniform("lightNearPlane"), Sun::nearPlane);
+    firstVoxelizer->loadFloat(firstVoxelizer->getUniform("clipDistance"), Sun::clipDistance);
+    firstVoxelizer->loadVector(firstVoxelizer->getUniform("volumePosition"), volume->position);
+
+    /* Bind instanced quad */
+    CHECK_GL_CALL(glBindVertexArray(volume->instancedQuad->vaoId));
+
+    /* Draw all billboards */
+    CHECK_GL_CALL(glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, volume->billboards.count));
+
+    /* Wrap up */
+    CHECK_GL_CALL(glBindVertexArray(0));
+    unbindVolume();
+    firstVoxelizer->unbind();
+    CHECK_GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+}
+
+/* Second voxelize pass 
+ * Render position map 
+ * Highlight voxels nearest to light */
+void VoxelizeShader::secondVoxelize(CloudVolume *volume) {
+    /* Disable quad visualization */
+    CHECK_GL_CALL(glDisable(GL_DEPTH_TEST));
+    CHECK_GL_CALL(glDisable(GL_CULL_FACE));
+    CHECK_GL_CALL(glDepthMask(GL_FALSE));
+    CHECK_GL_CALL(glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE));
+
+    secondVoxelizer->bind();
+
+    /* Bind volume */
+    bindVolume(secondVoxelizer, volume);
+
+    /* Bind position FBO */
+    CHECK_GL_CALL(glBindImageTexture(1, positionMap->textureId, 0, GL_TRUE, 0, GL_READ_WRITE, GL_RGBA32F));
+
+    /* Bind quad */
+    CHECK_GL_CALL(glBindVertexArray(Library::quad->vaoId));
+
+    /* Bind empty matrices to render full screen quad */
+    glm::mat4 M = glm::mat4(1.f);
+    secondVoxelizer->loadMatrix(secondVoxelizer->getUniform("P"), &M);
+    secondVoxelizer->loadMatrix(secondVoxelizer->getUniform("V"), &M);
+    secondVoxelizer->loadMatrix(secondVoxelizer->getUniform("Vi"), &M);
+    secondVoxelizer->loadMatrix(secondVoxelizer->getUniform("N"), &M);
+    secondVoxelizer->loadMatrix(secondVoxelizer->getUniform("M"), &M);
+    
+    /* Draw full screen quad */
+    CHECK_GL_CALL(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
+
+    /* Generate volume mips now that it is done being updated */
+    CHECK_GL_CALL(glGenerateMipmap(GL_TEXTURE_3D));
+
+    /* Wrap up shader*/
+    CHECK_GL_CALL(glBindVertexArray(0));
+    CHECK_GL_CALL(glBindImageTexture(1, 0, 0, GL_TRUE, 0, GL_READ_WRITE, GL_RGBA32F));
+    unbindVolume();
+    secondVoxelizer->unbind();
+
+    /* Reset state */
+    CHECK_GL_CALL(glEnable(GL_DEPTH_TEST));
+    CHECK_GL_CALL(glEnable(GL_CULL_FACE));
+    CHECK_GL_CALL(glDepthMask(GL_TRUE));
+    CHECK_GL_CALL(glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE));
+}
+
+void VoxelizeShader::bindVolume(Shader *shader, CloudVolume *volume) {
+    CHECK_GL_CALL(glActiveTexture(GL_TEXTURE0 + volume->volId));
+    CHECK_GL_CALL(glBindImageTexture(0, volume->volId, 0, GL_TRUE, 0, GL_READ_WRITE, GL_R8));
+  
+    shader->loadVector(shader->getUniform("xBounds"), volume->position.x + volume->xBounds);
+    shader->loadVector(shader->getUniform("yBounds"), volume->position.y + volume->yBounds);
+    shader->loadVector(shader->getUniform("zBounds"), volume->position.z + volume->zBounds);
+    shader->loadInt(shader->getUniform("voxelDim"), volume->dimension);
+    shader->loadFloat(shader->getUniform("stepSize"), glm::min(volume->voxelSize.x, glm::min(volume->voxelSize.y, volume->voxelSize.z)));
+}
+
+void VoxelizeShader::unbindVolume() {
+    CHECK_GL_CALL(glBindImageTexture(0, 0, 0, GL_TRUE, 0, GL_READ_WRITE, GL_R8));
+    CHECK_GL_CALL(glActiveTexture(GL_TEXTURE0));
+}
+
+void VoxelizeShader::initPositionFBO(const int width, const int height) {
+    /* Generate FBO */
+    CHECK_GL_CALL(glGenFramebuffers(1, &positionFBO));
+    CHECK_GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, positionFBO));
+
+    /* Generate color attachment texture */
+    positionMap = new Texture();
+    positionMap->width = width;
+    positionMap->height = height;
+    CHECK_GL_CALL(glGenTextures(1, &positionMap->textureId));
+    CHECK_GL_CALL(glBindTexture(GL_TEXTURE_2D, positionMap->textureId));
+    CHECK_GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, positionMap->width, positionMap->height, 0, GL_RGBA, GL_FLOAT, NULL));
+    CHECK_GL_CALL(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, positionMap->textureId, 0));
+
+    /* Texture params */
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+    CHECK_GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+
+    /* Generate depth attachment texture */
+    depthMap = new Texture();
+    depthMap->width = width;
+    depthMap->height = height;
+    CHECK_GL_CALL(glGenRenderbuffers(1, &depthMap->textureId));
+    CHECK_GL_CALL(glBindRenderbuffer(GL_RENDERBUFFER, depthMap->textureId));
+    CHECK_GL_CALL(glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, depthMap->width, depthMap->height));
+    CHECK_GL_CALL(glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthMap->textureId));
+
+    /* Clean up */
+    CHECK_GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+}
+
+void VoxelizeShader::resizePositionFBO(const int width, const int height) {
+    /* Resize color attachment */
+    positionMap->width = width;
+    positionMap->height = height;
+    CHECK_GL_CALL(glBindTexture(GL_TEXTURE_2D, positionMap->textureId));
+    CHECK_GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, positionMap->width, positionMap->height, 0, GL_RGBA, GL_FLOAT, NULL));
+    CHECK_GL_CALL(glBindTexture(GL_TEXTURE_2D, 0));
+
+    /* Resize depth attachment */
+    depthMap->width = width;
+    depthMap->height = height;
+    CHECK_GL_CALL(glBindRenderbuffer(GL_RENDERBUFFER, depthMap->textureId));
+    CHECK_GL_CALL(glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, depthMap->width, depthMap->height));
+    CHECK_GL_CALL(glBindRenderbuffer(GL_RENDERBUFFER, 0));
+}
+
+void VoxelizeShader::clearPositionMap() {
+    CHECK_GL_CALL(glClearTexImage(positionMap->textureId, 0, GL_RGBA, GL_FLOAT, nullptr));
+}
+```
+
+### src/Shaders/VoxelizeShader.hpp
+```
+#pragma once
+#ifndef _VOXELIZE_SHADER_HPP_
+#define _VOXELIZE_SHADER_HPP_
+
+#include "Shader.hpp"
+
+#include "Model/Texture.hpp"
+#include "CloudVolume.hpp"
+
+class VoxelizeShader {
+    public:
+        VoxelizeShader(const std::string &, const std::string &, const std::string &, const std::string &, const std::string &);
+
+        Shader * firstVoxelizer;
+        Shader * secondVoxelizer;
+
+        /* Generate 3D volume */
+        void voxelize(CloudVolume *);
+
+        /* 2D position FBO */
+        GLuint positionFBO;
+        Texture * positionMap;
+        Texture * depthMap;
+        void clearPositionMap();
+
+    private:
+        void firstVoxelize(CloudVolume *);
+        void secondVoxelize(CloudVolume *);
+        
+        void bindVolume(Shader *, CloudVolume *);
+        void unbindVolume();
+
+        void initPositionFBO(const int, const int);
+        void resizePositionFBO(const int, const int);
+};
+
+#endif
+```

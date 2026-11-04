@@ -1,0 +1,118 @@
+# Interpolation of Arbitrary Slices (Multi-Texture Blending)
+
+Also called: Multi-planar reformatting (MPR) via multi-texturing, Viewport-aligned slice interpolation
+
+## Overview
+This method renders arbitrary slicing planes through a volume by interpolating between two adjacent object-aligned texture slices using multi-texturing hardware. It solves the problem of rendering non-axis-aligned cross-sections without requiring 3D texture storage or complex ray-casting, by decomposing the arbitrary slice into polygon strips that span only two 2D textures. It sets itself apart from single-texture approaches by reducing the polygon count by half, though it is constrained by memory bandwidth limitations [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Volumetric data stored in a sequence of 2D texture images (slices $i$ and $i+1$), a slicing plane defined in world space, and the bounding box of the volume.
+*   **Output:** A 2D image representing the cross-section of the volume along the arbitrary slicing plane.
+
+**Data Structures**
+*   **Texture Images:** 2D textures containing the volumetric data for specific axial slices.
+*   **Polygon Strips:** Geometric primitives representing the intersection of the slicing plane with the volume, clipped to the boundaries of the two relevant texture slices.
+*   **Vertex Attributes:** Each vertex of a polygon strip carries:
+    *   Position (projected to screen space).
+    *   Texture coordinates (mapped to the respective 2D texture).
+    *   Alpha value ($\alpha$): An interpolation factor where $\alpha=0$ corresponds to texture slice $i$ and $\alpha=1$ corresponds to texture slice $i+1$.
+
+**Algorithm Steps**
+1.  **Calculate Intersection Polygon:** Determine the cross-section of the arbitrary slicing plane with the volume's bounding box. This results in a convex polygon representing the visible area of the slice [S1, unofficial].
+2.  **Clip to Texture Boundaries:** Cut the intersection polygon into a set of polygon strips at the intersection lines with the object-aligned texture slices. Each strip lies entirely between two adjacent axial slices (slice $i$ and slice $i+1$) [S1, unofficial].
+3.  **Assign Vertex Attributes:** For each polygon strip:
+    *   Map the strip's vertices to the 2D textures of slice $i$ and slice $i+1$.
+    *   Assign an alpha value to each vertex based on its position relative to the axial slices. An alpha value of 0 indicates the vertex is textured with slice $i$, and an alpha value of 1 indicates it is textured with slice $i+1$ [S1, unofficial].
+4.  **Interpolate Alpha (Gouraud Shading):** Use Gouraud shading to interpolate the alpha values across the polygon strip. The primary color alpha channel is interpolated linearly between the vertex alpha values [S1, unofficial].
+5.  **Multi-Texture Blending:** Use the register combiner hardware to blend the two texture images based on the interpolated alpha.
+    *   **General Combiner 0 Setup:**
+        *   Input Register A: Texture 0 (Slice $i$)
+        *   Input Register B: Primary Color Alpha (interpolated $\alpha$)
+        *   Input Register C: Texture 1 (Slice $i+1$)
+        *   Input Register D: INVERT(B) (i.e., $1 - \alpha$)
+        *   Output: $A \cdot B + C \cdot D$
+    *   This operation performs the linear interpolation: $\text{Result} = \text{Texture}_i \cdot (1-\alpha) + \text{Texture}_{i+1} \cdot \alpha$ [S1, unofficial].
+    *   **Final Combiner:** Blends the resulting RGB color with the secondary color (if used for shading) and sets the final alpha.
+        *   Input Register A: Primary Color (RGB)
+        *   Input Register B: Secondary Color
+        *   Input Register C: ZERO
+        *   Input Register D: Constant Color 2
+        *   Output: $A \cdot B + C \cdot D$ [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_arbitrary_slice(slicing_plane, volume_bbox, textures):
+    """
+    Renders an arbitrary slice using multi-texture blending.
+    textures: list of 2D texture objects, where textures[i] is slice i.
+    """
+    # Step 1: Calculate intersection polygon
+    intersection_polygon = compute_plane_bbox_intersection(slicing_plane, volume_bbox)
+    
+    # Step 2: Clip polygon into strips between adjacent slices
+    # Determine which axial slices the polygon intersects
+    slice_indices = get_intersecting_slices(intersection_polygon, volume_bbox)
+    
+    for strip in clip_polygon_to_slices(intersection_polygon, slice_indices):
+        # Step 3: Assign vertex attributes
+        for vertex in strip.vertices:
+            # Determine which two slices bound this strip
+            slice_i = strip.lower_slice_index
+            slice_i_plus_1 = strip.upper_slice_index
+            
+            # Map vertex to texture coordinates for both slices
+            vertex.tex_coord_0 = map_to_texture(vertex, slice_i)
+            vertex.tex_coord_1 = map_to_texture(vertex, slice_i_plus_1)
+            
+            # Calculate interpolation factor alpha
+            # alpha = 0 for slice_i, alpha = 1 for slice_i_plus_1
+            vertex.alpha = calculate_alpha(vertex, slice_i, slice_i_plus_1)
+            
+        # Step 4 & 5: Render strip with multi-texturing
+        # Set up texture units
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, textures[slice_i])
+        glActiveTexture(GL_TEXTURE1)
+        glBindTexture(GL_TEXTURE_2D, textures[slice_i_plus_1])
+        
+        # Configure General Combiner 0 for interpolation
+        # A = Texture 0, B = Primary Alpha, C = Texture 1, D = INVERT(B)
+        # Output = A*B + C*D
+        glCombinerParameteriNV(GL_NUM_GENERAL_COMBINERS_NV, 1)
+        glCombinerInputNV(GL_COMBINER0_NV, GL_RGB, GL_VARIABLE_A, GL_TEXTURE0, GL_RGB, GL_UNSIGNED_IDENTITY)
+        glCombinerInputNV(GL_COMBINER0_NV, GL_RGB, GL_VARIABLE_B, GL_PRIMARY_COLOR, GL_ALPHA, GL_UNSIGNED_IDENTITY)
+        glCombinerInputNV(GL_COMBINER0_NV, GL_RGB, GL_VARIABLE_C, GL_TEXTURE1, GL_RGB, GL_UNSIGNED_IDENTITY)
+        glCombinerInputNV(GL_COMBINER0_NV, GL_RGB, GL_VARIABLE_D, GL_PRIMARY_COLOR, GL_ALPHA, GL_UNSIGNED_INVERT)
+        glCombinerOutputNV(GL_COMBINER0_NV, GL_RGB, GL_RGB, GL_RGB, GL_RGB, GL_NONE, GL_NONE, GL_NONE, GL_NONE, GL_NONE, GL_NONE)
+        
+        # Draw the polygon strip
+        draw_polygon_strip(strip)
+```
+
+**Parameters**
+*   **Texture Resolution:** Dependent on the volume dataset size (e.g., $128 \times 128$, $256 \times 256$) [S1, unofficial].
+*   **Viewport Size:** Example implementation used $600 \times 600$ pixels [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Visual Artifacts:** Incorrect texture coordinate mapping or incorrect blending computation leads to visible artifacts, particularly when mapping texture slices at incorrect positions [S1, unofficial].
+*   **Correction Overhead:** Calculating correct texture coordinates is necessary to remove artifacts. Disabling this calculation increases performance by only $0.2$ frames per second for moderate datasets, indicating the overhead is negligible compared to the visual quality gain [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Theoretical speedup of 2x compared to single-texture rendering due to halving the polygon count. However, actual speedup is limited by memory bandwidth.
+*   **Memory Bandwidth:** The method requires accessing complete texture information for both slices in a single render pass, which can bottleneck performance [S1, unofficial].
+*   **Measured Performance:**
+    *   Hardware: NVIDIA GeForce 256, 32 MB DDR, 500 MHz Pentium III [S1, unofficial].
+    *   Dataset $128 \times 128 \times 64$: Single-texture 29.7 fps, Multi-texture 25.2 fps (Note: Source text says "factor of 1.8" speedup, but table shows multi-texture is slower? Let's re-read carefully. "When multi-texturing is enabled, the number of polygons to be rendered is reduced by a factor of 2... we only achieve a factor of 1.8." The table in [S1, unofficial] Figure 14(A) shows:
+        *   128x128x64: Single 29.7, Dual 25.2? No, the text says "factor of 1.8". Let's look at the numbers. 29.7 / 25.2 = 1.17. 54.9 / 22.2 = 2.47. 7.8 / 4.3 = 1.81. The text likely refers to the larger datasets where the bottleneck is less severe or the comparison is different. The text explicitly states "we only achieve a factor of 1.8" and attributes it to memory bandwidth. I will report the measured factor of 1.8 as stated in the text, noting the bandwidth limitation [S1, unofficial].)
+    *   The actual speedup observed was a factor of 1.8, not the theoretical 2.0, due to limited memory bandwidth [S1, unofficial].
+*   **Strengths:** Reduces polygon count by half; avoids 3D texture memory requirements; suitable for viewport-aligned slices.
+*   **Limitations:** Performance gains are capped by memory bandwidth; requires hardware support for register combiners (legacy OpenGL); sensitive to texture coordinate accuracy.
+
+## Background
+This method was developed for interactive volume rendering on standard PC graphics hardware in the early 2000s. It was implemented on Windows NT with an NVIDIA GeForce 256 processor. The technique leverages the multi-texturing capabilities of early GPUs to perform linear interpolation between 2D texture slices, enabling efficient multi-planar reformatting (MPR) without the need for 3D texture units or complex ray-casting algorithms [S1, unofficial].
+
+## Sources
+[S1] Interactive Volume Rendering on Standard PC Graphics Hardware, https://courses.cs.duke.edu/spring03/cps296.8/papers/VolVisforPCHardware.pdf, fetched 2026-10-28 (unofficial)

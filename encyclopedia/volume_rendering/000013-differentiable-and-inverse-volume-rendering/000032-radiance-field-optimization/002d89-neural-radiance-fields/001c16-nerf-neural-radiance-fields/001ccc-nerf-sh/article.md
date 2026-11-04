@@ -1,0 +1,130 @@
+# NeRF-SH
+Also called: NeRF with Spherical Harmonics, modified NeRF that predicts spherical harmonics coefficients
+## Overview
+NeRF-SH is a variant of Neural Radiance Fields that replaces the direct RGB color output with spherical harmonic (SH) coefficients, eliminating the need for viewing direction as a network input [S1, unofficial]. This modification enables the efficient storage of view-dependent appearance in a sparse voxel-based octree (PlenOctree) and allows for faster training and real-time rendering compared to the original NeRF [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+- **Input:** 3D spatial coordinates $\mathbf{x} \in \mathbb{R}^3$.
+- **Output:** Density $\sigma \in \mathbb{R}$ and a vector of SH coefficients $\mathbf{k}$ for the RGB color channels.
+
+**Data Structures:**
+The network $f$ maps spatial position to coefficients:
+$$ f(\mathbf{x}) = (\mathbf{k}, \sigma) $$
+where $\mathbf{k} = (k_\ell^m)_{\ell: 0 \leq \ell \leq \ell_{\max}}$ [S1, unofficial]. Each coefficient $k_\ell^m \in \mathbb{R}^3$ corresponds to the RGB components for a specific SH basis function indexed by degree $\ell$ and order $m$ [S1, unofficial].
+
+**Spherical Harmonics Basis:**
+Spherical Harmonics are used as a standard basis for functions defined on the surface of the sphere to model non-Lambertian materials and view-dependent effects [S1, unofficial]. The color $c$ at a point $\mathbf{x}$ for a viewing direction $\mathbf{v}$ (defined by angles $\theta, \phi$) is calculated by summing the weighted SH bases:
+$$ c(\mathbf{x}, \mathbf{v}) = \sum_{\ell=0}^{\ell_{\max}} \sum_{m=-\ell}^{\ell} k_\ell^m Y_\ell^m(\theta, \phi) $$
+where $Y_\ell^m$ are the spherical harmonic basis functions evaluated at the viewing direction [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Network Definition:** Define a neural network $f$ that takes $\mathbf{x}$ as input and outputs $\sigma$ and $\mathbf{k}$. The view direction $\mathbf{v}$ is **not** an input to $f$ [S1, unofficial].
+2. **Training:** Train the network using the standard NeRF volume rendering optimization procedure [S1, unofficial].
+3. **Sparsity Prior:** Introduce a sparsity prior during training to improve the memory efficiency of the resulting octrees [S1, unofficial].
+4. **PlenOctree Construction:** Densely sample the trained NeRF-SH model in the volume around the target object to tabulate density $\sigma$ and SH coefficients $\mathbf{k}$ into a sparse voxel-based octree (PlenOctree) [S1, unofficial].
+5. **Optional Optimization:** The values stored in the PlenOctree can be further optimized directly using training images, as the rendering procedure remains differentiable [S1, unofficial].
+
+**Parameters:**
+- **SH Degree ($\ell_{\max}$):** Not given in the sources.
+- **View-direction samples for projection:** 10,000 per point (used only for the alternative projection method, not the main NeRF-SH method) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Projection Quality Loss:** Directly projecting a trained standard NeRF (which outputs RGB) to SHs via Monte Carlo estimation (sampling random directions and multiplying by SH component values) imposes a quality loss of about 2 dB [S1, unofficial].
+- **Projection Cost:** The Monte Carlo projection process takes several hours (e.g., ~2 hours for 10,000 samples per point) [S1, unofficial].
+- **Comparison with Projection:** With 10,000 view-direction samples per point, the PSNR of the projected method is 29.21, compared to 31.02 for the main NeRF-SH method prior to optimization [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nerf_sh_network(x):
+    """
+    NeRF-SH network that predicts SH coefficients and density.
+    Input: x (3D spatial coordinates)
+    Output: k (SH coefficients), sigma (density)
+    """
+    # The network architecture is identical to standard NeRF except for the output layer.
+    # It does NOT take viewing direction as input.
+    # Let f_neural be the underlying MLP.
+    k, sigma = f_neural(x)
+    return k, sigma
+
+def render_color(k, theta, phi):
+    """
+    Calculate color from SH coefficients and viewing direction.
+    Input: k (SH coefficients vector), theta (polar angle), phi (azimuthal angle)
+    Output: c (RGB color)
+    """
+    c = 0
+    for l in range(0, l_max + 1):
+        for m in range(-l, l + 1):
+            # Y_lm is the spherical harmonic basis function for degree l and order m
+            y_lm = spherical_harmonic_basis(l, m, theta, phi)
+            # k_l_m is the coefficient for this basis function (RGB vector)
+            k_l_m = get_coefficient(k, l, m)
+            c += k_l_m * y_lm
+    return c
+
+def train_nerf_sh():
+    """
+    Training loop for NeRF-SH.
+    """
+    # Initialize network
+    model = nerf_sh_network()
+    
+    # Add sparsity prior to loss function
+    loss = reconstruction_loss + sparsity_prior_weight * sparsity_loss(model)
+    
+    # Optimize using standard NeRF volume rendering method
+    # Note: View direction is NOT passed to the network
+    optimize(model, loss)
+    
+    return model
+
+def build_plenoctree(model, volume_samples):
+    """
+    Build PlenOctree from trained NeRF-SH model.
+    Input: model (trained NeRF-SH network), volume_samples (dense 3D grid points)
+    Output: octree (PlenOctree with density and SH coefficients)
+    """
+    octree = SparseVoxelOctree()
+    for x in volume_samples:
+        k, sigma = model(x)
+        octree.set_leaf(x, sigma, k)
+    return octree
+```
+## Subtopics
+
+### [PlenOctree](52-plenoctree.md)
+A sparse voxel-based octree that stores SH coefficients and density, enabling real-time rendering of NeRF-SH.
+
+### [NeRF Training Configuration](1203-nerf-training-configuration.md)
+General configuration settings for NeRF training, applicable to NeRF-SH.
+
+### [Recursive-NeRF](3029-recursive-nerf.md)
+A sibling method using recursive neural networks for NeRF representation.
+
+### [Mip-NeRF](3381-mip-nerf.md)
+A sibling method addressing aliasing by representing rays as cones.
+
+### [NeMF (Neural Microflake Field)](3387-nemf-neural-microflake-field.md)
+A sibling method for representing thin structures.
+
+### [EgoNeRF](4096-egonerf.md)
+A sibling method for ego-centric scene reconstruction.
+
+### [Intrinsic NeRF](4623-intrinsic-nerf.md)
+A sibling method for decomposing scene properties.
+
+## Operating characteristics
+- **Time Complexity:** NeRF-SH training speed is similar to, but slightly faster than, standard NeRF (by about 10%) [S1, unofficial].
+- **Memory Complexity:** The use of a sparse voxel-based octree (PlenOctree) improves memory efficiency compared to dense voxel grids [S1, unofficial].
+- **Measured Performance:** On the Synthetic NeRF Dataset, NeRF-SH achieves a PSNR of 31.69 and SSIM of 0.953, compared to 31.01 and 0.947 for the original NeRF [S1, unofficial].
+- **Strengths:** Eliminates the need for view-direction input, enabling efficient storage in octrees and faster training; supports real-time rendering via PlenOctree [S1, unofficial].
+- **Limitations:** Requires careful selection of SH degree; direct projection from standard NeRF to SHs results in significant quality loss and high computational cost [S1, unofficial].
+- **When to use:** When real-time rendering or efficient storage of view-dependent effects is required, and training speed is a concern.
+- **When not to use:** When extremely high-fidelity view-dependent effects beyond the capacity of the chosen SH degree are needed, or when converting an existing standard NeRF is preferred over retraining.
+## Background
+NeRF-SH was introduced in the paper "PlenOctrees For Real-time Rendering of Neural Radiance Fields (NeRFs)" by Yu et al. [S1, unofficial]. It builds on the original NeRF method by incorporating spherical harmonics to handle view-dependent appearance, enabling the creation of PlenOctrees for real-time rendering [S1, unofficial].
+## Sources
+[S1] PlenOctrees For Real-time Rendering of Neural Radiance Fields (NeRFs), http://alexyu.net/plenoctrees/, fetched 2026-10-28 (unofficial)

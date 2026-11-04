@@ -1,0 +1,165 @@
+--- v001.md
++++ v002.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-This method renders a 3D volume texture by executing a geometry shader (or pre-pass) to generate ray entry/exit bounds and a fragment shader to perform front-to-back ray marching and compositing [S1, S2, unofficial]. It solves the problem of determining ray intersection points and marching distances for volume rendering without performing expensive ray-cube intersection calculations in the final rendering pass [S2, S3, unofficial]. It differs from [Bounding Box Raymarching](2071-bounding-box-raymarching.md) by explicitly storing ray entry coordinates and traversal distances in a dedicated "RayData" texture (or separate front/back position textures) during a pre-pass, allowing the final pass to simply sample these values rather than computing them from geometry [S2, S3, unofficial].
++This method renders a 3D volume texture by executing a pre-pass to generate ray entry/exit bounds and a fragment shader to perform front-to-back ray marching and compositing [S1, S2, unofficial]. It solves the problem of determining ray intersection points and marching distances for volume rendering without performing expensive ray-cube intersection calculations in the final rendering pass [S2, S3, unofficial]. It differs from [Bounding Box Raymarching](2071-bounding-box-raymarching.md) by explicitly storing ray entry coordinates and traversal distances in a dedicated "RayData" texture (or separate front/back position textures) during a pre-pass, allowing the final pass to simply sample these values rather than computing them from geometry [S2, S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D texture containing scalar volume data (normalized to [0,1]) [S3, unofficial]. A camera view matrix and projection matrix [S1, S3, unofficial].
++*   **Input:** A 3D texture containing scalar volume data normalized to $[0,1]$ [S3, unofficial]. Camera view and projection matrices [S1, S3, unofficial].
+ *   **Output:** A 2D render target containing the final composited color and opacity [S1, unofficial].
+ 
+@@ -20,20 +20,14 @@
+ 
+ **Algorithm Steps:**
+-
+-1.  **Volume Loading:** Load scalar data into a 3D texture. Fit a bounding box/cube from $[0,0,0]$ to $[1,1,1]$ to the volume space [S3, unofficial].
+-
++1.  **Volume Loading:** Load scalar data into a 3D texture [S3, unofficial]. Fit a bounding box/cube from $[0,0,0]$ to $[1,1,1]$ to the volume space [S3, unofficial].
+ 2.  **Pre-pass (Ray Data Generation):**
+     *   *Variant A (RayData Texture [S2, unofficial]):*
+-        1.  Clear `mFarNearTex` to zero.
+-        2.  Draw back faces of the simulation volume (six quads) with a shader. Output the distance from the eye to the fragment (view space) into the Alpha channel [S2, unofficial].
+-        3.  Draw front faces with a shader. Output texture-space coordinates into the RGB channel. Use **subtractive blending** to compute depth:
+-            $$OutputColor.rgb = SourceColor.rgb$$
+-            $$OutputColor.a = DestinationColor.a - SourceColor.a$$
+-            This results in the Alpha channel storing the distance between front and back faces (marching distance) [S2, unofficial].
++        1.  Clear `mFarNearTex` to zero [S2, unofficial].
++        2.  Draw back faces of the simulation volume (six quads) with a shader [S2, unofficial]. Output the distance from the eye to the fragment (view space) into the Alpha channel [S2, unofficial].
++        3.  Draw front faces with a shader [S2, unofficial]. Output texture-space coordinates into the RGB channel [S2, unofficial]. Use subtractive blending to compute depth [S2, unofficial].
+     *   *Variant B (Front/Back Textures [S3, unofficial]):*
+-        1.  Clear `mFront` to Black.
++        1.  Clear `mFront` to Black [S3, unofficial].
+         2.  Draw front-facing triangles of the cube to `mFront`, storing pixel positions [S3, unofficial].
+         3.  Draw back-facing triangles of the cube to `mBack`, storing pixel positions [S3, unofficial].
+-
+ 3.  **Rendering Pass (Ray Marching):**
+     1.  Bind the volume texture sampler (`m_pGenSampler`) with trilinear filtering and clamped addressing [S1, unofficial].
+@@ -41,48 +35,72 @@
+     3.  Bind the RayData texture (or `mFront`/`mBack`) and the Volume Texture as shader resources [S1, S3, unofficial].
+     4.  Execute a single draw call (e.g., `Draw(1, 0)` for a full-screen quad or geometry) [S1, unofficial].
++    5.  Unbind all PS and GS shader resources [S1, unofficial].
++4.  **Cleanup:** Unbind all PS and GS shader resources [S1, unofficial].
+ 
+-    **Pixel Shader Logic (per pixel):**
+-    1.  **Retrieve Ray Info:**
+-        *   *Variant A:* Sample `RayData` texture. Entry point $P_{entry}$ is in RGB. Marching distance $L$ is in A [S2, unofficial].
+-        *   *Variant B:* Calculate projective texture coordinates from input position:
+-            $$texC.x = 0.5 \times \frac{input.pos.x}{input.pos.w} + 0.5$$
+-            $$texC.y = -0.5 \times \frac{input.pos.y}{input.pos.w} + 0.5$$
+-            Sample `mFront` and `mBack` using $texC$ to get $P_{front}$ and $P_{back}$ [S3, unofficial].
+-    2.  **Calculate Ray Direction:**
+-        *   *Variant A:* $Dir = normalize(P_{entry} - Eye)$ (both in texture space) [S2, unofficial].
+-        *   *Variant B:* $Dir = normalize(P_{back} - P_{front})$ [S3, unofficial].
+-    3.  **Initialize:**
+-        *   Current position $Pos = P_{entry}$ (or $P_{front}$) [S2, S3, unofficial].
+-        *   Destination color $Dst = (0, 0, 0, 0)$ [S3, unofficial].
+-        *   Step size $StepSize$ (typically half a voxel) [S2, unofficial].
+-        *   Step vector $Step = Dir \times StepSize$ [S3, unofficial].
+-    4.  **Marching Loop:**
+-        For $i = 0$ to $Iterations$:
+-        1.  Sample volume scalar value $V$ at $Pos$ using `tex3Dlod` [S3, unofficial].
+-        2.  Map scalar to source color/alpha. Example: $Src.a = V \times 0.5$ (for transparency), $Src.rgb = V$ [S3, unofficial].
+-        3.  **Front-to-Back Blending:**
+-            $$Src.rgb \times= Src.a$$
+-            $$Dst = (1.0 - Dst.a) \times Src + Dst$$
+-            $$Dst.a += Src.a \times (1.0 - Dst.a)$$
+-        4.  **Early Termination:** If $Dst.a \ge 0.95$ (or $0.99$), break loop [S2, S3, unofficial].
+-        5.  **Advance Position:** $Pos.xyz += Step$ [S3, unofficial].
+-        6.  **Boundary Check:** If $Pos.x > 1.0$ OR $Pos.y > 1.0$ OR $Pos.z > 1.0$, break loop [S3, unofficial].
+-
+-4.  **Cleanup:** Unbind shader resources [S1, unofficial].
++**Formulas:**
++*   **Subtractive Blending (Pre-pass Depth):** $OutputColor.rgb = SourceColor.rgb$ and $OutputColor.a = DestinationColor.a - SourceColor.a$ [S2, unofficial].
++*   **Projective Texture Coordinates (Variant B):** $texC.x = 0.5 \times \frac{input.pos.x}{input.pos.w} + 0.5$ and $texC.y = -0.5 \times \frac{input.pos.y}{input.pos.w} + 0.5$ [S3, unofficial].
++*   **Front-to-Back Blending (Marching):** $FinalColor.rgb += SampleColor.rgb \times SampleColor.a \times (1 - FinalColor.a)$ and $FinalColor.a += SampleColor.a \times (1 - FinalColor.a)$ [S2, unofficial].
+ 
+ **Parameters:**
+ *   **Step Size:** Equal to half a voxel [S2, unofficial].
+-*   **Iterations:** Proportional to marching distance. Not explicitly defined as a constant in [S3, unofficial], but loop condition is `i < Iterations` [S3, unofficial].
++*   **Iterations:** Proportional to marching distance [S2, unofficial]. Not explicitly defined as a constant in [S3, unofficial], but loop condition is `i < Iterations` [S3, unofficial].
+ *   **Opacity Threshold:** 0.95 [S3, unofficial] or 0.99 [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Camera Inside Volume:** If the camera is inside the fluid, the near plane clips front faces, leading to incorrect entry points [S2, unofficial].
+-    *   *Fix:* Mark pixels where back faces were rendered but front faces were not (by writing negative green channel during back-face pass). In the shader, if green < 0, initialize $Pos$ to the near plane position and subtract the near plane distance from the depth [S2, unofficial].
++    *   *Fix:* Mark pixels where back faces were rendered but front faces were not (by writing negative green channel during back-face pass) [S2, unofficial]. In the shader, if green < 0, initialize $Pos$ to the near plane position and subtract the near plane distance from the depth [S2, unofficial].
+ *   **Scene Occlusion:** Rays may march through volume parts occluded by scene geometry [S2, unofficial].
+-    *   *Fix:* Compare front-face distance to scene depth. If front-face distance > scene distance, output a large negative red value in the RayData pre-pass to ensure no samples are taken [S2, unofficial].
++    *   *Fix:* Compare front-face distance to scene depth [S2, unofficial]. If front-face distance > scene distance, output a large negative red value in the RayData pre-pass to ensure no samples are taken [S2, unofficial].
+ *   **Banding:** Integral number of equally spaced samples causes banding artifacts [S2, unofficial].
+-    *   *Fix:* Take one additional sample. Weight its contribution by $d / sampleWidth$, where $d$ is the difference between scene distance and total distance traveled, and $sampleWidth$ is the step size [S2, unofficial].
++    *   *Fix:* Take one additional sample beyond the calculated number [S2, unofficial]. Weight its contribution by $d / sampleWidth$, where $d$ is the difference between scene distance and total distance traveled, and $sampleWidth$ is the step size [S2, unofficial].
+ *   **Hardware Requirements:** Requires Shader Model 3.0 and support for RGBA16F textures [S3, unofficial].
+-*   **Compiler Warnings:** Older DirectX SDK fxc compilers may return error exit codes on warnings (X4121). Fix by checking only for "error" string in exit code logic [S3, unofficial].
++*   **Compiler Warnings:** Older DirectX SDK fxc compilers may return error exit codes on warnings (X4121) [S3, unofficial]. Fix by checking only for "error" string in exit code logic [S3, unofficial].
++
++**Pseudocode:**
++```python
++def ray_cast(volume_tex, ray_data_tex, view_matrix, proj_matrix, step_size=0.5):
++    # Pre-pass: Generate RayData texture (Variant A from [S2, unofficial])
++    ray_data_tex.clear(0.0)
++    draw_back_faces(ray_data_tex, alpha=output_view_distance)
++    draw_front_faces(ray_data_tex, rgb=output_texture_coords, blend_mode=SUBTRACTIVE)
++    # Subtractive blend: Out.rgb = Src.rgb, Out.a = Dst.a - Src.a
++
++    # Rendering pass: Full-screen quad
++    for each pixel (screen_x, screen_y):
++        # Sample RayData
++        entry_point = ray_data_tex.sample(screen_x, screen_y).rgb
++        marching_dist = ray_data_tex.sample(screen_x, screen_y).a
++
++        # Calculate ray direction (texture space)
++        eye_pos = view_matrix.inverse().transform(float4(0,0,0,1))
++        ray_dir = normalize(entry_point - eye_pos)
++
++        # Initialize
++        pos = entry_point
++        dst_color = float4(0, 0, 0, 0)
++        step_vec = ray_dir * step_size
++        num_samples = int(marching_dist / step_size)
++
++        for i in range(num_samples):
++            # Sample volume
++            scalar = volume_tex.sample(pos).r
++            src = float4(scalar, scalar, scalar, scalar * 0.5)
++
++            # Front-to-back blending
++            src.rgb *= src.a
++            dst_color = (1.0 - dst_color.a) * src + dst_color
++
++            # Early termination
++            if dst_color.a >= 0.99:
++                break
++
++            # Advance
++            pos += step_vec
++            if pos.x > 1.0 or pos.y > 1.0 or pos.z > 1.0:
++                break
++
++        return dst_color
++```
+ 
+ ## Subtopics
+@@ -95,5 +113,8 @@
+ 
+ ### Banding Suppression via Weighted Sampling
+-Suppresses banding artifacts caused by integral numbers of equally spaced samples, especially with rapidly changing depth values [S2, unofficial]. It takes one additional sample beyond the calculated number. The additional sample's contribution is weighted by $d / sampleWidth$, where $d$ is the difference between the scene distance and the total distance traveled by the ray at the last sample, and $sampleWidth$ is the typical step size [S2, unofficial]. Pitfall: Banding may remain with high-frequency density variations; solutions include jittering or higher-order filters [S2, unofficial]. Hellgate: London used trilinear jittered sampling at twice per voxel [S2, unofficial].
++Suppresses banding artifacts caused by integral numbers of equally spaced samples, especially with rapidly changing depth values [S2, unofficial]. It takes one additional sample beyond the calculated number [S2, unofficial]. The additional sample's contribution is weighted by $d / sampleWidth$, where $d$ is the difference between the scene distance and the total distance traveled by the ray at the last sample, and $sampleWidth$ is the typical step size [S2, unofficial]. Pitfall: Banding may remain with high-frequency density variations; solutions include jittering or higher-order filters [S2, unofficial]. Hellgate: London used trilinear jittered sampling at twice per voxel [S2, unofficial].
++
++### Off-Screen Ray Marching with Edge Detection
++Rendering fluid into a smaller off-screen render target to save performance when simulation grid resolution is low compared to screen resolution, then compositing into the final image [S2, unofficial]. It renders pixels in detected problematic areas at screen resolution, while rendering most smoke at low resolution [S2, unofficial]. Pitfall: Artifacts appear near sharp depth discontinuities in scene geometry and where the camera clips the fluid volume [S2, unofficial].
+ 
+ ## Operating characteristics
+@@ -102,6 +123,6 @@
+ *   **Performance:** Fast due to pre-computed ray bounds and early termination [S2, unofficial]. Requires Shader Model 3.0 hardware [S3, unofficial].
+ *   **Strengths:** Simple implementation; efficient early termination; handles occlusion and near-plane clipping with extensions [S2, unofficial].
+-*   **Limitations:** Banding artifacts; requires high-precision render targets (RGBA16F) [S2, S3, unofficial]; performance degrades with thick volumes or high opacity [S2, unofficial].
+-*   **When to use:** Real-time fluid rendering where performance is critical and volume density is relatively uniform [S2, unofficial].
++*   **Limitations:** Banding artifacts; requires high-precision render targets (RGBA16F) [S2, S3, unofficial]; performance scales linearly with marching distance and opacity threshold [S2, S3, unofficial].
++*   **When to use:** Real-time fluid rendering where deferred shading buffers are available [S2, unofficial].
+ *   **When not to use:** High-frequency density variations requiring high sampling rates; hardware lacking RGBA16F support [S2, S3, unofficial].
+ 

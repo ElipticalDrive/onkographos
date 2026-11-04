@@ -1,0 +1,431 @@
+## Voxelize an AutoCAD solid
+
+To load:
+﻿netload "Voxelize\bin\x64\Debug\net8.0-windows\Voxelize.dll"
+
+ To use:
+ Command is "VoxelizeSolid"
+ It will ask you to pick an AutoCAD solid, then ask you for a suggested voxel size (length of one edge).
+
+ The suggested voxel size is only a suggestion.
+ This suggestion is used to create the actual voxel edge length.
+ The suggestion is adjusted so that the voxels evenly fill the longest axis of the solid3d extents.
+
+### Commands.cs
+```
+﻿using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
+using Autodesk.AutoCAD.Runtime;
+using Voxelize.ExtensionMethods;
+using AcadApp = Autodesk.AutoCAD.ApplicationServices.Core.Application;
+
+[assembly: CommandClass(typeof(Voxelize.Commands))]
+
+namespace Voxelize;
+
+public static class Commands
+{
+	public static Document CurrentDocument => AcadApp.DocumentManager.MdiActiveDocument;
+	public static Database CurrentDatabase => CurrentDocument.Database;
+	public static Editor CurrentEditor => CurrentDocument.Editor;
+
+	[CommandMethod(nameof(VoxelizeSolid))]
+	public static void VoxelizeSolid()
+	{
+		// Prompt the user to select a solid
+		var options = new PromptEntityOptions("\nSelect a 3D solid: ");
+		options.SetRejectMessage("\nOnly 3D solids are allowed.");
+		options.AddAllowedClass(typeof(Solid3d), true);
+
+		PromptEntityResult result = CurrentEditor.GetEntity(options);
+		if (result.Status != PromptStatus.OK) return;
+
+		var voxelSizeOptions = new PromptDoubleOptions("\nVoxel size estimate: ")
+		{
+			DefaultValue = 1.0,
+			AllowNegative = false,
+			AllowZero = false,
+			AllowNone = false
+		};
+
+		PromptDoubleResult voxelSizeResult = CurrentEditor.GetDouble(voxelSizeOptions);
+		if (voxelSizeResult.Status != PromptStatus.OK) return;
+
+		VoxelizeSolid(result.ObjectId, voxelSizeResult.Value);
+	}
+
+	private static void VoxelizeSolid(ObjectId solidId, double voxelSize)
+	{
+		using Transaction tr = CurrentDocument.Database.TransactionManager.StartTransaction();
+		var modelSpaceBtr = tr.GetModelSpace(CurrentDatabase);
+		if (modelSpaceBtr is null) return;
+
+		using Solid3d? solid = tr.GetObject(solidId, OpenMode.ForRead) as Solid3d;
+		if (solid == null) return;
+
+		VoxelizeSolid(solid, voxelSize, tr, modelSpaceBtr);
+
+		tr.Commit();
+	}
+
+	private static void VoxelizeSolid(Solid3d solid, double voxelSize, Transaction tr, BlockTableRecord modelSpaceBtr)
+	{
+		var voxelModel = Voxelize.VoxelizeSolid(solid, voxelSize);
+		if (voxelModel is null) return;
+
+		foreach (var voxel in voxelModel.AllVoxels)
+		{
+			if (voxel.Intersects == false)
+			{
+				continue;
+			}
+
+			Solid3d boxel = voxel.Extents.CreateBox();
+
+			modelSpaceBtr.AppendEntity(boxel);
+			tr.AddNewlyCreatedDBObject(boxel, true);
+		}
+	}
+
+}
+```
+
+### PluginExtension.cs
+```
+﻿using Autodesk.AutoCAD.Runtime;
+
+namespace Voxelize;
+
+public class PluginExtension : IExtensionApplication
+{
+	public void Initialize()
+	{
+		// Add your initialization code here
+	}
+
+	public void Terminate()
+	{
+		// Add your termination code here
+	}
+}
+```
+
+### Voxelize.cs
+```
+﻿using Autodesk.AutoCAD.BoundaryRepresentation;
+using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.Geometry;
+using Voxelize.ExtensionMethods;
+using Voxelize.Model;
+
+namespace Voxelize;
+
+public static class Voxelize
+{
+	public static VoxelModel? VoxelizeSolid(Solid3d solid, double recommendedVoxelSize)
+	{
+		if (solid.Bounds is Extents3d bounds == false)
+		{
+			return null;
+		}
+
+		// Get the best fit edge length using the suggested voxel size.
+		GetOptimalVoxelEdgeLength(bounds, recommendedVoxelSize, out int voxelEdgeCount, out double voxelEdgeLength);
+		Extents3d voxelExtents = GetVoxelExtents(bounds, voxelEdgeCount, voxelEdgeLength);
+
+		var vm = new VoxelModel(voxelExtents, voxelEdgeCount, voxelEdgeLength);
+
+		using Brep brep = new Brep(solid);
+		vm.DetermineInside(brep);
+
+		return vm;
+	}
+
+	// Get the best fit edge length using the suggested voxel size.
+	public static void GetOptimalVoxelEdgeLength(Extents3d solidBounds, double recommendedVoxelSize, out int edgeCount, out double edgeLength)
+	{
+		double longestEdge = solidBounds.GetLongestEdge();
+
+		edgeCount = (int)Math.Ceiling(longestEdge / recommendedVoxelSize);
+		edgeLength = longestEdge / edgeCount;
+	}
+
+	public static Extents3d GetVoxelExtents(Extents3d solidBounds, int voxelEdgeCount, double voxelEdgeLength)
+	{
+		double halfEdgeLength = voxelEdgeCount * voxelEdgeLength / 2.0;
+		var centeredBoxMid = solidBounds.CenterPoint();
+
+		var centeredBoxMinPoint = new Point3d(centeredBoxMid.X - halfEdgeLength, centeredBoxMid.Y - halfEdgeLength, centeredBoxMid.Z - halfEdgeLength);
+		var centeredBoxMaxPoint = new Point3d(centeredBoxMid.X + halfEdgeLength, centeredBoxMid.Y + halfEdgeLength, centeredBoxMid.Z + halfEdgeLength);
+
+		Extents3d centeredBox = new Extents3d(centeredBoxMinPoint, centeredBoxMaxPoint);
+
+		return centeredBox;
+	}
+
+}
+```
+
+### ExtensionMethods/ArrayExtensions.cs
+```
+﻿namespace Voxelize.ExtensionMethods;
+
+public static class ArrayExtensions
+{
+	public static IEnumerable<T> Enumerate3d<T>(this T[,,] array)
+	{
+		int xiCount = array.GetLength(0);
+		int yiCount = array.GetLength(1);
+		int ziCount = array.GetLength(2);
+
+		for (int xi = 0; xi < xiCount; xi++)
+		{
+			for (int yi = 0; yi < yiCount; yi++)
+			{
+				for (int zi = 0; zi < ziCount; zi++)
+				{
+					yield return array[xi, yi, zi];
+				}
+			}
+		}
+	}
+}
+```
+
+### ExtensionMethods/Extents3dExtensions.cs
+```
+﻿using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.Geometry;
+
+namespace Voxelize.ExtensionMethods;
+
+public static class Extents3dExtensions
+{
+	public static Point3d CenterPoint(this Extents3d exts) => exts.MinPoint + (exts.MaxPoint - exts.MinPoint) / 2.0;
+
+	public static double GetLengthX(this Extents3d extents) => extents.MaxPoint.X - extents.MinPoint.X;
+	public static double GetLengthY(this Extents3d extents) => extents.MaxPoint.Y - extents.MinPoint.Y;
+	public static double GetLengthZ(this Extents3d extents) => extents.MaxPoint.Z - extents.MinPoint.Z;
+
+	public static double GetLongestEdge(this Extents3d extents3d) => Math.Max(Math.Max(extents3d.GetLengthX(), extents3d.GetLengthY()), Math.Max(extents3d.GetLengthY(), extents3d.GetLengthZ()));
+
+	public static Solid3d CreateBox(this Extents3d extents)
+	{
+		Solid3d box = new();
+		box.CreateBox(extents.GetLengthX(), extents.GetLengthY(), extents.GetLengthZ());
+		box.TransformBy(Matrix3d.Displacement(Point3d.Origin.GetVectorTo(extents.CenterPoint())));
+		return box;
+	}
+}
+```
+
+### ExtensionMethods/TransactionsExtensions.cs
+```
+﻿using Autodesk.AutoCAD.DatabaseServices;
+
+namespace Voxelize.ExtensionMethods;
+
+public static class TransactionsExtensions
+{
+	public static BlockTableRecord? GetModelSpace(this Transaction tr, Database db)
+	{
+		var acBlkTbl = tr.GetObject(db.BlockTableId, OpenMode.ForRead) as BlockTable;
+		if (acBlkTbl == null)
+		{
+			return null;
+		}
+
+		var acBlkTblRec = tr.GetObject(acBlkTbl[BlockTableRecord.ModelSpace], OpenMode.ForWrite) as BlockTableRecord;
+		return acBlkTblRec;
+	}
+
+}
+```
+
+### Model/Vertex.cs
+```
+﻿using Autodesk.AutoCAD.BoundaryRepresentation;
+using Autodesk.AutoCAD.Geometry;
+
+namespace Voxelize.Model;
+
+public class Vertex
+{
+	public readonly Point3d Point;
+	public readonly int Xi;
+	public readonly int Yi;
+	public readonly int Zi;
+
+	public bool IsInside { get; private set; }
+
+	public Vertex(Point3d point, int xi, int yi, int zi)
+	{
+		Point = point;
+		Xi = xi;
+		Yi = yi;
+		Zi = zi;
+	}
+
+	public void DetermineInside(Brep brep)
+	{
+		brep.GetPointContainment(Point, out var containment);
+		IsInside = containment != PointContainment.Outside;
+	}
+}
+```
+
+### Model/Voxel.cs
+```
+﻿using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.Geometry;
+
+namespace Voxelize.Model;
+
+public class Voxel
+{
+	public readonly int Xi;
+	public readonly int Yi;
+	public readonly int Zi;
+	public readonly Extents3d Extents;
+	public bool Intersects { get; private set; }
+
+	public Vertex V000;
+	public Vertex V001;
+	public Vertex V101;
+	public Vertex V100;
+	public Vertex V010;
+	public Vertex V011;
+	public Vertex V111;
+	public Vertex V110;
+
+	public IEnumerable<Vertex> Vertices
+	{
+		get
+		{
+			yield return V000;
+			yield return V001;
+			yield return V101;
+			yield return V100;
+			yield return V010;
+			yield return V011;
+			yield return V111;
+			yield return V110;
+		}
+	}
+
+	public Point3d MinPoint => V000.Point;
+	public Point3d MaxPoint => V111.Point;
+
+	public Voxel(VoxelModel vm, int xi, int yi, int zi)
+	{
+		Xi = xi;
+		Yi = yi;
+		Zi = zi;
+		V000 = vm.Vertices[xi, yi, zi];
+		V001 = vm.Vertices[xi, yi, zi + 1];
+		V101 = vm.Vertices[xi + 1, yi, zi + 1];
+		V100 = vm.Vertices[xi + 1, yi, zi];
+		V010 = vm.Vertices[xi, yi + 1, zi];
+		V011 = vm.Vertices[xi, yi + 1, zi + 1];
+		V111 = vm.Vertices[xi + 1, yi + 1, zi + 1];
+		V110 = vm.Vertices[xi + 1, yi + 1, zi];
+
+		Extents = new Extents3d(V000.Point, V111.Point);
+	}
+
+	public void DetermineInside()
+	{
+		Intersects = Vertices.Any(v => v.IsInside);
+	}
+}
+```
+
+### Model/VoxelModel.cs
+```
+﻿using Autodesk.AutoCAD.BoundaryRepresentation;
+using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.Geometry;
+using Voxelize.ExtensionMethods;
+
+namespace Voxelize.Model;
+
+public class VoxelModel
+{
+	public readonly Extents3d VoxelExtents;
+	public readonly int VoxelEdgeCount;
+	public readonly double EdgeLength;
+
+	public Vertex[,,] Vertices { get; }
+	public IEnumerable<Vertex> AllVertices => Vertices.Enumerate3d();
+
+	public Voxel[,,] Voxels { get; }
+	public IEnumerable<Voxel> AllVoxels => Voxels.Enumerate3d();
+
+	public VoxelModel(Extents3d voxelExtents, int voxelEdgeCount, double edgeLength)
+	{
+		VoxelExtents = voxelExtents;
+		VoxelEdgeCount = voxelEdgeCount;
+		EdgeLength = edgeLength;
+
+		Vertices = CreateVertices();
+		Voxels = CreateVoxels();
+	}
+
+	private Vertex[,,] CreateVertices()
+	{
+		Vertex[,,] vertices = new Vertex[VoxelEdgeCount + 1, VoxelEdgeCount + 1, VoxelEdgeCount + 1];
+
+		int xi, yi, zi;
+		double x, y, z;
+
+		for (xi = 0, x = VoxelExtents.MinPoint.X; xi <= VoxelEdgeCount; xi++, x += EdgeLength)
+		{
+			for (yi = 0, y = VoxelExtents.MinPoint.Y; yi <= VoxelEdgeCount; yi++, y += EdgeLength)
+			{
+				for (zi = 0, z = VoxelExtents.MinPoint.Z; zi <= VoxelEdgeCount; zi++, z += EdgeLength)
+				{
+					Point3d pt = new Point3d(x, y, z);
+					Vertex vertex = new Vertex(pt, xi, yi, zi);
+					vertices[xi, yi, zi] = vertex;
+				}
+			}
+		}
+
+		return vertices;
+	}
+
+	private Voxel[,,] CreateVoxels()
+	{
+		Voxel[,,] voxels = new Voxel[VoxelEdgeCount, VoxelEdgeCount, VoxelEdgeCount];
+
+		for (int xi = 0; xi < VoxelEdgeCount; xi++)
+		{
+			for (int yi = 0; yi < VoxelEdgeCount; yi++)
+			{
+				for (int zi = 0; zi < VoxelEdgeCount; zi++)
+				{
+					Voxel voxel = new Voxel(this, xi, yi, zi);
+					voxels[xi, yi, zi] = voxel;
+				}
+			}
+		}
+
+		return voxels;
+	}
+
+	public void DetermineInside(Brep brep)
+	{
+		foreach (var vertex in AllVertices)
+		{
+			vertex.DetermineInside(brep);
+		}
+
+		foreach (var voxel in AllVoxels)
+		{
+			voxel.DetermineInside();
+		}
+
+	}
+}
+```

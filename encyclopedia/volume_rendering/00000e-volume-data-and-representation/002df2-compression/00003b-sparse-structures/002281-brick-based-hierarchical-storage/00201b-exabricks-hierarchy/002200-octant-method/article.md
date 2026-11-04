@@ -1,0 +1,129 @@
+# Octant Method
+
+Also called: BS-AMR reconstruction strategy
+
+## Overview
+The Octant Method is a reconstruction strategy for cell-centered Block-Structured Adaptive Mesh Refinement (BS-AMR) data that maps a sample point $p=(x,y,z)$ to a scalar value $F(p)$ by decomposing the domain into non-overlapping rectilinear octants [S1, unofficial]. It solves the problem of discontinuous interpolation at level boundaries in AMR grids, which standard interpolants (nearest neighbor, linear, basis functions) fail to handle due to topology changes [S1, unofficial]. Unlike dual cell methods that require stitching unstructured meshes and may cross level boundaries, the Octant Method uses octants that do not extend beyond parent cell bounds, tile the domain without gaps or overlap, and remain rectilinear [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A sample point $P=(x,y,z)$ in 3D space.
+*   **Output:** A scalar value $F(P)$.
+*   **Data Structures:**
+    *   **Bricks:** Grids of cells, typically $16 \times 16 \times 16$, containing cell-centered data values associated with a refinement level $L$ [S1, unofficial].
+    *   **Cell ($C$):** A logical cell in the AMR hierarchy.
+    *   **Octant ($O$):** One of eight sub-volumes of $C$, defined by the direction from $C$'s center ($\pm \hat{X}, \pm \hat{Y}, \pm \hat{Z}$) [S1, unofficial].
+    *   **Dual Cell ($D$):** A logical cell centered at the same location as $C$, used to determine neighbor values [S1, unofficial].
+    *   **Refinement Factor ($R$):** Each coarser cell is covered by exactly $R \times R \times R$ finer cells [S1, unofficial].
+
+**Vertex Naming Convention:**
+Each octant has 8 vertices. Vertices are named based on the direction from the cell center $C(0)$:
+*   $O(0)$: Coincides with the cell center $C$.
+*   $O(X), O(Y), O(Z)$: Face vertices, lying on the cell faces.
+*   $O(XY), O(YZ), O(XZ)$: Edge vertices, lying on the cell edges.
+*   $O(XYZ)$: Corner vertex, lying on the cell corner [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Find Leaf Octant:** Locate the leaf cell $C$ and the specific octant $O$ containing point $P$. Identify the corresponding dual cell $D$ for level $L$ of $C$ [S1, unofficial].
+2.  **Center Vertex:** Set the value of the center vertex $O(0)$ to the cell center value $C.v$ [S1, unofficial].
+3.  **Compute Boundary Vertices:** For each boundary vertex (face, edge, corner), determine if it lies on a level boundary.
+    *   **Non-Boundary Case:** If all required dual cell corners (e.g., $D(0), D(X)$ for vertex $O(X)$) are at the same level as $C$, compute the value using averaging rules [S1, unofficial].
+    *   **Fine-Side Boundary Case:** If at least one input dual corner lies on a coarser level than $C$, the vertex is on the fine side. Set its value by recursively calling the sample function for the vertex position minutely moved along the direction away from the cell center (towards the coarse side) [S1, unofficial].
+    *   **Coarse-Side Boundary Case:** If the vertex is on the coarse side (inputs are inner nodes or coarser), determine the interpolant locally using one of the coarser side interpolant options [S1, unofficial].
+4.  **Trilinear Interpolation:** Once all 8 vertex values of octant $O$ are set, perform trilinear interpolation within $O$ to find $F(P)$ [S1, unofficial].
+
+**Non-Boundary Averaging Rules:**
+Let $D(v)$ denote the dual cell vertex value.
+1.  $O(0).v = C.v$ [S1, unofficial].
+2.  Face Vertex: $O(X).v = \frac{1}{2} (D(0).v + D(X).v)$ [S1, unofficial].
+3.  Edge Vertex: $O(XY).v$ is the average of the values of the four cells spanning the face: $C(0), C(X), C(Y), C(XY)$. In terms of dual vertices, this corresponds to the average of the four relevant dual vertices defining that face [S1, unofficial].
+4.  Corner Vertex: $O(XYZ).v$ is the average of the eight vertices of the dual cell $D$ [S1, unofficial].
+
+**Coarser Side Interpolant Options:**
+When computing the value for a vertex on the coarse side (or the shifted position on the fine side), four options exist [S1, unofficial]:
+1.  **Coarsest-Level Lerp:** Perform trilinear interpolation on the coarsest level involved for any of the inputs.
+2.  **Current-Level Lerp:** Perform trilinear interpolation on the current level $L$.
+3.  **Basis Function:** Use a specific basis function interpolation.
+4.  **Finest-Level Lerp:** Perform trilinear interpolation on the finest level involved [S1, unofficial].
+
+**Parameters:**
+*   **eps:** A small epsilon value used to minutely shift the vertex position away from the cell center to find the coarsest level neighbor [S1, unofficial].
+
+**Pitfalls:**
+*   **Accuracy Sacrifice:** Setting fine-side vertex values based on the coarse-side interpolant ensures continuity but sacrifices some accuracy at the boundary [S1, unofficial].
+*   **Precision:** The epsilon shift must be small enough to remain within the same logical cell but large enough to cross the level boundary numerically [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def octant(P):
+    # 1. Find the leaf cell C and octant O containing P
+    oct = find_leaf_octant(P)
+    C = oct.cell
+    D = find_dual_cell(oct)
+    
+    # 2. Set center vertex value
+    oct.vertices[0].v = C.value
+    
+    # 3. Compute Face Vertices (e.g., O(X))
+    # Symmetric logic applies to O(Y), O(Z)
+    l_0 = D.vertices[0].level
+    l_X = D.vertices[X].level
+    
+    l_min = min(l_0, l_X)
+    l_max = max(l_0, l_X)
+    
+    if l_min == l_max:
+        # Non-boundary: average of dual vertices
+        oct.vertices[X].v = (D.vertices[0].v + D.vertices[X].v) / 2.0
+    elif l_min < oct.level:
+        # Fine side: fill FROM coarse side
+        # Shift vertex position away from cell center towards coarse side
+        shift_dir = oct.direction_vector[X] # Unit vector pointing to vertex X
+        shifted_P = oct.vertices[X].position + eps * shift_dir
+        oct.vertices[X].v = octant(shifted_P)
+    else:
+        # Coarse side: compute locally
+        oct.vertices[X].v = compute_coarser_side_vertex(D.vertices[0], D.vertices[X], oct.level)
+
+    # 4. Compute Edge Vertices (e.g., O(XY))
+    # Symmetric logic applies to O(YZ), O(XZ)
+    # Requires checking levels of D[0], D[X], D[Y], D[XY]
+    # If all same level: average of 4 cells/dual vertices
+    # If boundary: recursive call or coarse side computation
+    
+    # 5. Compute Corner Vertex (O(XYZ))
+    # Symmetric logic applies
+    # If all same level: average of 8 dual vertices
+    # If boundary: recursive call or coarse side computation
+
+    # 6. Trilinear Interpolation within Octant O
+    return trilinear_interpolate(oct, P)
+
+def compute_coarser_side_vertex(v1, v2, level):
+    # Implements one of the four coarser side interpolant options
+    # e.g., coarsest-level lerp, current-level lerp, etc.
+    # Not given in the sources. [G]
+    pass
+```
+
+## Subtopics
+
+### [Optimized Octant Generation](3412-optimized-octant-generation.md)
+An optimization for isosurface extraction on AMR data that reduces redundant computation by merging 'inner' octants into dual cells, while preserving crack-free continuity at level boundaries. Choose this when performance is critical and the scene allows for pre-processing or specific traversal patterns.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. The recursive nature for boundary vertices suggests potential overhead, but the rectilinear nature allows for efficient traversal.
+*   **Memory Complexity:** Not given in the sources. Depends on the storage of bricks and the recursion depth for boundary resolution.
+*   **Performance:** The method yields better rendering quality and performance compared to sample-based isosurface methods in OSPRay, which suffer from poor quality and performance on AMR data [S1, unofficial].
+*   **Strengths:** Continuous interpolation across level boundaries; rectilinear octants simplify ray-triangle intersection tests; no need for unstructured mesh stitching; adaptive to refinement levels.
+*   **Limitations:** Sacrifices accuracy at boundaries to maintain continuity; requires careful handling of epsilon shifts; implementation complexity in managing level boundaries.
+*   **When to use:** When continuous, high-quality isosurface rendering of BS-AMR data is required, particularly for ray tracing.
+*   **When not to use:** When maximum accuracy at level boundaries is prioritized over continuity, or when the overhead of recursive boundary resolution is prohibitive.
+
+## Background
+The Octant Method was introduced in a paper by Feng et al. (2018) titled "CPU Isosurface Ray Tracing of Adaptive Mesh Refinement Data" [S1, unofficial]. It addresses the limitations of existing interpolation methods (nearest neighbor, linear, basis functions) when applied to Block-Structured Adaptive Mesh Refinement (BS-AMR) data, which exhibit topology changes at level boundaries [S1, unofficial]. The method builds on the concept of dual cells but reformulates the problem in terms of octants to ensure rectilinear tiling and continuity [S1, unofficial].
+
+## Sources
+[S1] CPU Isosurface Ray Tracing of Adaptive Mesh Refinement Data, https://www.sci.utah.edu/~feng/assets/papers/Fen-AMR-VIS18.pdf, fetched 2026-10-26 (unofficial)

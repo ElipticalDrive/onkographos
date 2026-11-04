@@ -1,0 +1,73 @@
+# Min-Max Octree Rendering
+
+Also called: Unclassified Volume Rendering, Unclassified Volume Rendering with Min-Max Octree, vpRenderRawVolume algorithm
+
+## Overview
+Min-Max Octree Rendering is an acceleration technique for ray-casting unclassified scalar volumes, designed for scenarios where classification parameters (transfer functions) change frequently [S1]. It differs from pre-classified rendering by storing raw voxel data and using a hierarchical min-max structure to prune empty space and skip nodes that do not contain the target isovalue range, avoiding the costly recomputation of classification tables [S1]. It builds on [Octree Traversal with Min/Max Pruning](1739-octree-traversal-with-min-max-pruning.md).
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Unclassified volume data (scalar field), classification function (transfer function), view and shading parameters.
+*   **Output:** Rendered image.
+*   **Auxiliary Input:** Precomputed Min-Max Octree.
+
+**Data Structures:**
+The core structure is the Min-Max Octree. Each node in the octree stores the minimum and maximum scalar values found within its corresponding voxel sub-volume [S1]. The leaf nodes correspond to the base node size in voxels [S1].
+
+**Parameters:**
+*   `base_node_size`: The side length in voxels of the smallest node in the octree. Smaller values provide better pruning resolution at the expense of increased memory usage. Typical value: 4 [S1].
+*   `range`: A range of table indices for a parameter considered 'small'. This defines the tolerance for opacity variation. Choosing a value too small or too large may reduce performance benefit. Not given in the sources for a specific formula, but implies a threshold for skipping nodes where the min/max values fall within a narrow opacity range [S1].
+
+**Steps:**
+1.  **Define Volume:** Initialize the unclassified volume using `vpSetVolumeSize()`, `vpSetVoxelSize()`, `vpSetVoxelField()`, and `vpSetRawVoxels()`. Initialize the volume data array [S1].
+2.  **Configure Thresholds:** For each classification table parameter, call `vpMinMaxOctreeThreshold(param_num, range)` to define the "small" range for that parameter [S1].
+3.  **Build Octree:** Call `vpCreateMinMaxOctree(root_node_size, base_node_size)` to compute the min-max octree from the raw volume data and store it in the rendering context [S1].
+4.  **Render Loop:**
+    a. Choose the classification function (transfer function) [S1].
+    b. Set view and shading parameters [S1].
+    c. Render the volume using `vpRenderRawVolume()` [S1]. The octree is used automatically during this call [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+volume = define_unclassified_volume(size, voxel_size, field, raw_data)
+# Initialize volume data...
+
+# Configure pruning thresholds for each parameter in the transfer function
+for param_num in parameters:
+    vpMinMaxOctreeThreshold(param_num, range)
+
+# Build the acceleration structure
+vpCreateMinMaxOctree(root_node_size=unused, base_node_size=4)
+
+# Rendering Loop
+while rendering_needed:
+    set_classification_function(transfer_function)
+    set_view_and_shading_parameters(view_matrix, projection_matrix, shading_model)
+    vpRenderRawVolume()
+    
+    # If volume data changes, the octree must be rebuilt
+    if volume_data_changed:
+        vpCreateMinMaxOctree(root_node_size=unused, base_node_size=4)
+```
+
+**Edge Cases and Pitfalls:**
+*   If the volume data is modified, `vpCreateMinMaxOctree()` must be called again; otherwise, renderings will be incorrect [S1].
+*   The `root_node_size` parameter in `vpCreateMinMaxOctree` is currently not used but is reserved for future use [S1].
+*   The `range` parameter requires experimentation; suboptimal values reduce performance benefits but do not break correctness [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Precomputation is $O(N)$ where $N$ is the number of voxels, as it scans the volume once [S1]. Rendering time depends on the efficiency of the min-max pruning; it is faster than raw ray-casting when significant empty space or uniform regions exist, but slower than pre-classified rendering if the classification function changes infrequently [S1].
+*   **Memory Complexity:** Requires additional memory for the min-max octree. The size increases as `base_node_size` decreases [S1].
+*   **Strengths:** Ideal for interactive applications where classification (transfer function) is adjusted frequently, as it avoids recomputing the classified volume [S1].
+*   **Limitations:** Slower than pre-classified rendering for static classification scenarios. Requires precomputation step [S1].
+*   **When to use:** When many renderings are made from the same volume with varying classification functions [S1].
+*   **When not to use:** When only a single rendering is needed (use raw ray-casting) or when classification is static (use pre-classified rendering) [S1].
+
+## Background
+Min-Max Octree Rendering is part of the VolPack library, developed by Stanford University [S1]. It is specifically designed to accelerate the rendering of unclassified volumes by leveraging hierarchical min-max bounds to skip irrelevant regions during ray casting [S1].
+
+## Sources
+[S1] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28

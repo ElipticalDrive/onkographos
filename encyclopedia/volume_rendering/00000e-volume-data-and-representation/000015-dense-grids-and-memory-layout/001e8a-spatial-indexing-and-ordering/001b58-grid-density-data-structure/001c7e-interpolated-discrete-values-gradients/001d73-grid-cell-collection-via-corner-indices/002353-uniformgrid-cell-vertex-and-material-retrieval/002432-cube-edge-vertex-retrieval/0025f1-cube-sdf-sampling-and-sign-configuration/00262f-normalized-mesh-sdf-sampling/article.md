@@ -1,0 +1,162 @@
+# Normalized Mesh SDF Sampling
+
+Also called: 1D Array SDF Sampling, Clamped SDF Lookup
+
+## Overview
+This method samples a 3D signed distance field (SDF) stored in a contiguous 1D array, mapping normalized coordinates in the range $[-1, 1]$ to grid indices while applying specific boundary handling [S1, unofficial]. It builds on [Cube SDF Sampling and Sign Configuration](3639-cube-sdf-sampling-and-sign-configuration.md) by providing the underlying data retrieval and interpolation logic for the cube's vertices [G]. Unlike raw grid lookups, it explicitly handles out-of-bounds queries by approximating the distance to the bounding box, preventing false positives from interpolation artifacts near the volume edges [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `pNormalized`: A 3D vector of normalized coordinates, expected to be in the range $[-1, 1]^3$ [S1, unofficial].
+- `res`: The uniform grid resolution along the X, Y, and Z axes (integer) [S1, unofficial].
+- `volume.samples`: A contiguous 1D array of floats storing SDF values in row-major order [S1, unofficial].
+
+**Outputs:**
+- `sampledDist`: The interpolated signed distance value at the query point [S1, unofficial].
+
+**Data Structures:**
+- `volume.samples`: A 1D array of size $res^3$. The index for a grid coordinate $(x, y, z)$ is calculated as:
+  $$ \text{index} = x + res \cdot y + res^2 \cdot z $$
+  where $x, y, z \in [0, res-1]$ [S1, unofficial].
+
+**Parameters:**
+- `res`: Grid resolution along X, Y, Z axes. Used to compute `voxelSize = 2.0 / res` [S1, unofficial].
+- `conservativeMargin`: A constant offset subtracted from the final distance to account for interpolation errors outside the grid. Calculated as $0.5 \cdot \sqrt{3.0} \cdot \text{voxelSize}$ [S1, unofficial].
+
+**Steps:**
+1. **Clamp Input:** Clamp `pNormalized` to the range $[-1, 1]$ for each component [S1, unofficial].
+2. **Compute Outside Vector:** For each component $i \in \{0, 1, 2\}$, compute the distance outside the box:
+   $$ \text{outside}[i] = \max(|\text{pNormalized}[i]| - 1.0, 0.0) $$
+   [S1, unofficial]
+3. **Compute Outside Length:** Calculate the Euclidean distance from the clamped point to the original point (distance to the box boundary):
+   $$ \text{outsideLength} = \sqrt{\sum_{i=0}^{2} \text{outside}[i]^2} $$
+   [S1, unofficial]
+4. **Map to Grid Indices:** Convert clamped normalized coordinates to grid indices. For each component $i$:
+   $$ \text{gridCoord}[i] = \text{clamp}\left( (\text{pNormalized}[i] \cdot 0.5 + 0.5) \cdot res, 0, res - 1 \right) $$
+   [S1, unofficial]
+   Note: The source uses `clamp` on the final float result to integer bounds, effectively flooring or clamping to the nearest valid index range [S1, unofficial].
+5. **Compute Corner Indices:**
+   - $x_0 = \lfloor \text{gridCoord}[0] \rfloor$, clamped to $[0, res-1]$ [S1, unofficial].
+   - $y_0 = \lfloor \text{gridCoord}[1] \rfloor$, clamped to $[0, res-1]$ [S1, unofficial].
+   - $z_0 = \lfloor \text{gridCoord}[2] \rfloor$, clamped to $[0, res-1]$ [S1, unofficial].
+   - $x_1 = \min(x_0 + 1, res - 1)$ [S1, unofficial].
+   - $y_1 = \min(y_0 + 1, res - 1)$ [S1, unofficial].
+   - $z_1 = \min(z_0 + 1, res - 1)$ [S1, unofficial].
+6. **Compute Fractional Weights:**
+   - $t_x = \text{clamp}(\text{gridCoord}[0] - \lfloor \text{gridCoord}[0] \rfloor, 0, 1)$ [S1, unofficial].
+   - $t_y = \text{clamp}(\text{gridCoord}[1] - \lfloor \text{gridCoord}[1] \rfloor, 0, 1)$ [S1, unofficial].
+   - $t_z = \text{clamp}(\text{gridCoord}[2] - \lfloor \text{gridCoord}[2] \rfloor, 0, 1)$ [S1, unofficial].
+7. **Sample 8 Corners:** Retrieve SDF values from `volume.samples` using the 8 corner indices $(x_i, y_j, z_k)$ where $i,j,k \in \{0,1\}$ [S1, unofficial].
+   - $c_{000} = \text{volume.samples}[x_0 + res \cdot y_0 + res^2 \cdot z_0]$ [S1, unofficial].
+   - $c_{100} = \text{volume.samples}[x_1 + res \cdot y_0 + res^2 \cdot z_0]$ [S1, unofficial].
+   - $c_{010} = \text{volume.samples}[x_0 + res \cdot y_1 + res^2 \cdot z_0]$ [S1, unofficial].
+   - $c_{110} = \text{volume.samples}[x_1 + res \cdot y_1 + res^2 \cdot z_0]$ [S1, unofficial].
+   - $c_{001} = \text{volume.samples}[x_0 + res \cdot y_0 + res^2 \cdot z_1]$ [S1, unofficial].
+   - $c_{101} = \text{volume.samples}[x_1 + res \cdot y_0 + res^2 \cdot z_1]$ [S1, unofficial].
+   - $c_{011} = \text{volume.samples}[x_0 + res \cdot y_1 + res^2 \cdot z_1]$ [S1, unofficial].
+   - $c_{111} = \text{volume.samples}[x_1 + res \cdot y_1 + res^2 \cdot z_1]$ [S1, unofficial].
+8. **Trilinear Interpolation:**
+   - $c_{00} = \text{lerp}(c_{000}, c_{100}, t_x)$ [S1, unofficial].
+   - $c_{10} = \text{lerp}(c_{010}, c_{110}, t_x)$ [S1, unofficial].
+   - $c_{01} = \text{lerp}(c_{001}, c_{101}, t_x)$ [S1, unofficial].
+   - $c_{11} = \text{lerp}(c_{011}, c_{111}, t_x)$ [S1, unofficial].
+   - $c_0 = \text{lerp}(c_{00}, c_{10}, t_y)$ [S1, unofficial].
+   - $c_1 = \text{lerp}(c_{01}, c_{11}, t_y)$ [S1, unofficial].
+   - $\text{sampled} = \text{lerp}(c_0, c_1, t_z)$ [S1, unofficial].
+9. **Compute Voxel Size:**
+   $$ \text{voxelSize} = \frac{2.0}{res} $$
+   [S1, unofficial]
+10. **Compute Conservative Margin:**
+    $$ \text{conservativeMargin} = 0.5 \cdot \sqrt{3.0} \cdot \text{voxelSize} $$
+    [S1, unofficial]
+11. **Return Result:**
+    $$ \text{sampledDist} = \text{sampled} + \text{outsideLength} - \text{conservativeMargin} $$
+    [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def normalized_mesh_sdf_sampling(p_normalized, res, volume_samples):
+    def clamp(v, lo, hi):
+        return max(lo, min(hi, v))
+    def lerp(a, b, t):
+        return a + t * (b - a)
+    import math
+
+    # 1. Clamp input
+    p_clamped = [clamp(p_normalized[i], -1.0, 1.0) for i in range(3)]
+    
+    # 2. Compute outside vector
+    abs_p = [abs(p_clamped[i]) for i in range(3)]
+    outside = [max(abs_p[i] - 1.0, 0.0) for i in range(3)]
+    
+    # 3. Compute outside length
+    outside_length = math.sqrt(sum(o**2 for o in outside))
+    
+    # 4. Map clamped coords to grid
+    grid_coords = [clamp((p_clamped[i] * 0.5 + 0.5) * res, 0.0, float(res - 1)) for i in range(3)]
+    
+    # 5. Compute integer grid coords
+    x0 = clamp(math.floor(grid_coords[0]), 0, res - 1)
+    y0 = clamp(math.floor(grid_coords[1]), 0, res - 1)
+    z0 = clamp(math.floor(grid_coords[2]), 0, res - 1)
+    
+    # 6. Compute x1, y1, z1
+    x1 = min(x0 + 1, res - 1)
+    y1 = min(y0 + 1, res - 1)
+    z1 = min(z0 + 1, res - 1)
+    
+    # 7. Compute fractional weights
+    tx = clamp(grid_coords[0] - math.floor(grid_coords[0]), 0.0, 1.0)
+    ty = clamp(grid_coords[1] - math.floor(grid_coords[1]), 0.0, 1.0)
+    tz = clamp(grid_coords[2] - math.floor(grid_coords[2]), 0.0, 1.0)
+    
+    # 8. Sample 8 corners
+    def get_sdf(x, y, z):
+        idx = x + res * y + res * res * z
+        return volume_samples[idx]
+        
+    c000 = get_sdf(x0, y0, z0)
+    c100 = get_sdf(x1, y0, z0)
+    c010 = get_sdf(x0, y1, z0)
+    c110 = get_sdf(x1, y1, z0)
+    c001 = get_sdf(x0, y0, z1)
+    c101 = get_sdf(x1, y0, z1)
+    c011 = get_sdf(x0, y1, z1)
+    c111 = get_sdf(x1, y1, z1)
+    
+    # 9. Trilinear interpolation
+    c00 = lerp(c000, c100, tx)
+    c10 = lerp(c010, c110, tx)
+    c01 = lerp(c001, c101, tx)
+    c11 = lerp(c011, c111, tx)
+    
+    c0 = lerp(c00, c10, ty)
+    c1 = lerp(c01, c11, ty)
+    
+    sampled = lerp(c0, c1, tz)
+    
+    # 10. Compute voxel size
+    voxel_size = 2.0 / res
+    
+    # 11. Compute conservative margin
+    conservative_margin = 0.5 * math.sqrt(3.0) * voxel_size
+    
+    # 12. Return result
+    return sampled + outside_length - conservative_margin
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per query. It involves a fixed number of arithmetic operations and 8 memory accesses [G].
+- **Memory Complexity:** $O(1)$ auxiliary space. The memory usage is dominated by the input array `volume.samples` which is $O(res^3)$ [G].
+- **Strengths:** Simple to implement; handles out-of-bounds queries gracefully without requiring separate ray-box intersection logic for the SDF volume itself [G].
+- **Limitations:** The boundary approximation is conservative and may introduce small errors near the edges of the bounding box [G].
+- **When to use:** When a dense, uniform grid SDF is available and queries are frequent [G].
+- **When not to use:** When the SDF is sparse or non-uniform, or when high precision at the exact boundary of the bounding box is critical [G].
+
+## Background
+This method is derived from implementations of ray marching with signed distance fields, specifically those found in open-source ray marching tools [S1, unofficial]. It represents a standard approach for sampling uniform grid-based SDFs in normalized space [G].
+
+## Sources
+[S1] TeoGrajqevci/RayMarching_tool, https://github.com/TeoGrajqevci/RayMarching_tool, fetched 2026-10-26 (unofficial)

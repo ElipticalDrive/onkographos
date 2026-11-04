@@ -1,0 +1,96 @@
+# Gradient-Based Surface Shading
+
+Also called: Gradient Shading, Gradient-based Volume Shading
+
+## Overview
+Gradient-based surface shading approximates the surface normal of a volume at a given point by computing the normalized gradient of the scalar field value at that location [S1, book]. This method is primarily used to enhance the perception of shape and boundaries between materials in volume-rendered images [S1, book]. It differs from direct lighting models by deriving illumination cues from the data's intrinsic spatial variation rather than external light sources, though it is computationally more expensive than simple dot-product shading due to gradient evaluation [S1, book].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A scalar field $V(\mathbf{x})$ defined over a 3D domain, where $\mathbf{x} = (x, y, z)$ is the spatial coordinate. The field values are typically obtained via trilinear interpolation of voxel data.
+*   **Output:** A surface normal vector $\mathbf{n}$ at $\mathbf{x}$, used for shading calculations (e.g., diffuse reflection).
+
+**Data Structures**
+The scalar field is stored as a dense 3D grid. To compute the gradient, the method requires access to neighboring voxel values. If the field is stored as a 1D array of size $N_x \times N_y \times N_z$, the value at index $(i, j, k)$ is accessed as $V[i][j][k]$.
+
+**Algorithm Steps**
+1.  **Evaluate Field Value:** Determine the scalar value $V(\mathbf{x})$ at the query point $\mathbf{x}$ using trilinear interpolation from the surrounding 8 voxels [G].
+2.  **Compute Gradient Components:** Calculate the partial derivatives $\frac{\partial V}{\partial x}$, $\frac{\partial V}{\partial y}$, and $\frac{\partial V}{\partial z}$ using central finite differences. For a grid with uniform spacing $\Delta$, the gradient $\nabla V$ at $\mathbf{x}$ is:
+    $$
+    \nabla V(\mathbf{x}) = \begin{bmatrix} \frac{V(x+\Delta, y, z) - V(x-\Delta, y, z)}{2\Delta} \\ \frac{V(x, y+\Delta, z) - V(x, y-\Delta, z)}{2\Delta} \\ \frac{V(x, y, z+\Delta) - V(x, y, z-\Delta)}{2\Delta} \end{bmatrix}
+    $$
+    If $\mathbf{x}$ lies on a boundary where neighbors are missing, use one-sided differences or clamp to the boundary value [G].
+3.  **Normalize:** Compute the surface normal $\mathbf{n}$ by normalizing the gradient vector:
+    $$
+    \mathbf{n} = \frac{\nabla V(\mathbf{x})}{\|\nabla V(\mathbf{x})\|}
+    $$
+4.  **Shade:** Use $\mathbf{n}$ in a standard lighting model (e.g., Phong or Blinn-Phong) to compute the final color.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_gradient_shading(field, x, y, z, delta):
+    """
+    Computes the surface normal for gradient-based shading.
+    field: 3D array (Nx, Ny, Nz) of voxel values.
+    x, y, z: Continuous coordinates in grid space.
+    delta: Grid spacing (assumed uniform).
+    """
+    # 1. Interpolate scalar value at (x, y, z)
+    # Note: Trilinear interpolation is required for V(x,y,z)
+    # but for gradient, we sample neighbors.
+    
+    # Helper to get clamped voxel value
+    def get_voxel(ix, iy, iz):
+        ix = max(0, min(ix, field.shape[0] - 1))
+        iy = max(0, min(iy, field.shape[1] - 1))
+        iz = max(0, min(iz, field.shape[2] - 1))
+        return field[ix, iy, iz]
+
+    # 2. Compute partial derivatives using central differences
+    # Sample neighbors in grid indices. Assuming integer coordinates for simplicity
+    # or mapping continuous x,y,z to nearest grid indices for derivative estimation.
+    # In practice, x,y,z are often fragment coordinates.
+    
+    # Map continuous coordinates to integer grid indices for neighbor access
+    ix, iy, iz = int(x), int(y), int(z)
+    
+    # Central differences
+    dx = (get_voxel(ix + 1, iy, iz) - get_voxel(ix - 1, iy, iz)) / (2 * delta)
+    dy = (get_voxel(ix, iy + 1, iz) - get_voxel(ix, iy - 1, iz)) / (2 * delta)
+    dz = (get_voxel(ix, iy, iz + 1) - get_voxel(ix, iy, iz - 1)) / (2 * delta)
+    
+    # 3. Normalize
+    grad_norm = sqrt(dx*dx + dy*dy + dz*dz)
+    
+    if grad_norm < 1e-6:
+        # Degenerate case: homogeneous region
+        return [0, 0, 1] # Default normal, e.g., up
+        
+    return [dx / grad_norm, dy / grad_norm, dz / grad_norm]
+```
+
+**Parameters**
+*   **Delta ($\Delta$):** The physical or logical spacing between voxels. Typical value: 1.0 if using grid indices, or the physical resolution of the CT/MRI scan.
+*   **Lighting Model:** Standard diffuse/specular coefficients are applied to the resulting normal.
+
+**Edge Cases and Pitfalls**
+*   **Homogeneous Regions:** In areas where the gradient magnitude is very low or zero (e.g., uniform tissue in CT data), the normal is undefined or noisy [S1, book]. The method is not robust here.
+*   **Noise Sensitivity:** Finite differences amplify high-frequency noise in the scalar field, leading to speckled shading artifacts [S1, book].
+*   **Multivariate Fields:** This method is unsuitable for multivariate fields. While the eigenvector $e_1$ (direction of greatest change) can be derived from the tensor $G$, it represents only orientation, not absolute direction. The sign of $e_1$ can flip in neighboring regions, causing interpolation issues and making it a poor choice for surface normals [S1, book].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per fragment/pixel, but involves 6 additional texture fetches (or memory accesses) for central differences and a normalization step. It is significantly slower than simple dot-product shading with pre-computed normals, being much as three times slower than evaluating dot products for a limited number of light sources in the fragment shader stage [S1, book].
+*   **Memory Complexity:** $O(1)$ additional memory per sample, as no extra data structures are required beyond the scalar field itself.
+*   **Strengths:** Provides intuitive shape cues for boundaries between materials without requiring explicit isosurface extraction [S1, book].
+*   **Limitations:** Fails in homogeneous regions and is sensitive to noise. Not applicable to multivariate data [S1, book].
+*   **When to use:** When visualizing boundaries in scalar volumes and explicit surface extraction is too expensive or unnecessary.
+*   **When not to use:** For multivariate volumes, noisy data, or homogeneous regions where shadows or other techniques are preferred [S1, book].
+
+## Background
+Gradient-based surface shading was published by Hohne and Bernstein in 1986, utilizing the gray-level gradient to perform shading of surfaces rendered from 3D CT data [S2, unofficial]. This approach was part of early efforts in medical visualization to extract and visualize 3D hard and soft tissue surfaces [S2, unofficial]. It preceded the widespread adoption of Marching Cubes (1987) and volume raycasting (1988) [S2, unofficial].
+
+## Sources
+[S1] PDF 9 Multi-Dimensional Transfer Functions for Volume Rendering, https://people.cs.uchicago.edu/~glk/pubs/pdf/Kniss-MultidimensionalTransferFunctions-VH-2005.pdf, fetched 2026-10-27 (book)
+[S2] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)

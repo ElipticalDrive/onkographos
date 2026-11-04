@@ -1,0 +1,117 @@
+# Gaussian Transfer Function
+
+Also called: 3-Gaussian Transfer Function, TransferFunctionWidget3
+
+## Overview
+The Gaussian Transfer Function constructs a 4-channel RGBA lookup table (LUT) using three Gaussian bumps to map scalar values to color and opacity [S1, unofficial]. It differs from sibling methods like [Cosine Palette Color Mapping](3359-cosine-palette-color-mapping.md) by using parametric Gaussian distributions centered at specific scalar positions rather than a fixed palette, allowing for localized highlighting of specific data ranges [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Three sets of parameters for levels ($L$), opacities ($O$), and widths ($W$), each containing three floats.
+*   **Outputs:** A numpy array `rgba` of shape $(1024, 4)$, where index $i$ corresponds to scalar position $p = i / 1023.0$. Channels 0-2 are RGB, channel 3 is opacity [S1, unofficial].
+
+**Data Structures:**
+*   `levels`: List of 3 floats $[L_1, L_2, L_3]$, centers in $[0, 1]$. Default: $[0.1, 0.5, 0.8]$ [S1, unofficial].
+*   `opacities`: List of 3 floats $[O_1, O_2, O_3]$, max opacity contributions. Default: $[0.4, 0.1, 0.1]$ [S1, unofficial].
+*   `widths`: List of 3 floats $[W_1, W_2, W_3]$, standard deviations. Default: $[0.1, 0.1, 0.1]$ [S1, unofficial].
+*   `colors`: Fixed mapping of Gaussian index $j$ to RGB: $j=0 \to [1, 0, 0]$, $j=1 \to [0, 1, 0]$, $j=2 \to [0, 0, 1]$ [S1, unofficial].
+
+**Formulas:**
+For each texel $i$ and position $p = i / 1023.0$:
+1.  Calculate intensity for each Gaussian $j \in \{0, 1, 2\}$:
+    $$ I_j = \exp\left(-\left(\frac{p - L_j}{W_j}\right)^2\right) $$
+2.  Accumulate color and opacity:
+    $$ C_{rgb} = \sum_{j=0}^{2} \text{Color}_j \cdot O_j \cdot I_j $$
+    $$ A = \sum_{j=0}^{2} O_j \cdot I_j $$
+3.  Normalize RGB to prevent overflow and balance intensity:
+    $$ \text{max\_c} = \max(C_{rgb}) $$
+    $$ C_{rgb} = \begin{cases} C_{rgb} / \text{max\_c} & \text{if } \text{max\_c} > 0 \\ 0 & \text{otherwise} \end{cases} $$
+4.  Clamp final RGBA to $[0, 1]$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def gaussian_transfer_function(levels, opacities, widths):
+    """
+    Generate a 1024x4 RGBA transfer function using 3 Gaussians.
+    
+    Args:
+        levels: list of 3 floats [L1, L2, L3]
+        opacities: list of 3 floats [O1, O2, O3]
+        widths: list of 3 floats [W1, W2, W3]
+        
+    Returns:
+        numpy array of shape (1024, 4)
+    """
+    N = 1024
+    rgba = np.zeros((N, 4))
+    
+    # Fixed color mapping: Red, Green, Blue
+    colors = np.array([
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0]
+    ])
+    
+    for i in range(N):
+        position = i / 1023.0
+        intensity_sum_rgb = np.zeros(3)
+        opacity_sum = 0.0
+        
+        for j in range(3):
+            # Calculate Gaussian intensity
+            # Note: Division by zero in width is not handled in source; 
+            # assume width > 0 as per default values [S1, unofficial]
+            diff = position - levels[j]
+            intensity = np.exp(-(diff / widths[j]) ** 2)
+            
+            # Accumulate color contribution
+            intensity_sum_rgb += colors[j] * opacities[j] * intensity
+            
+            # Accumulate opacity contribution
+            opacity_sum += opacities[j] * intensity
+            
+        # Normalize RGB channels
+        max_c = np.max(intensity_sum_rgb)
+        if max_c > 0:
+            intensity_sum_rgb /= max_c
+        else:
+            # Avoid division by zero; keep RGB as 0 [S1, unofficial]
+            pass
+            
+        rgba[i, 0:3] = intensity_sum_rgb
+        rgba[i, 3] = opacity_sum
+        
+    # Clamp values to [0, 1]
+    rgba = np.clip(rgba, 0, 1)
+    
+    return rgba
+```
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** If `rgba[i, 0:3].max()` is 0 (no Gaussian contributes color), division results in NaN. The source code handles this by skipping division if max is 0, leaving RGB as 0 [S1, unofficial].
+*   **Width Zero:** If any $W_j = 0$, division by zero occurs in the exponent calculation. The source assumes positive widths [S1, unofficial].
+
+## Subtopics
+
+### TransferFunctionJsBumps
+Uses a JavaScript-based model with separate lists for levels/opacities/widths. Differs from this method which computes the RGBA texture in Python using fixed matplotlib colors [S1, unofficial].
+
+### TransferFunctionWidgetJs3
+Similar to this method but implemented in JavaScript with individual float traits for each parameter. This method is the Python equivalent [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N=1024$ is the LUT size. The loop runs 1024 times with 3 Gaussian evaluations each.
+*   **Memory Complexity:** $O(N)$ for the output array.
+*   **Strengths:** Simple to implement; provides intuitive control over specific scalar ranges via Gaussian centers and widths [S1, unofficial].
+*   **Limitations:** Fixed color mapping (Red/Green/Blue) limits aesthetic flexibility compared to palette-based methods [S1, unofficial].
+*   **When to use:** When quick, parametric control over opacity and color for specific data ranges is needed in a Python-based visualization pipeline [S1, unofficial].
+
+## Background
+The method originates from the `ipyvolume` library's `transferfunction` module, specifically the `TransferFunctionWidget3` class [S1, unofficial]. It was designed to provide a simple, widget-driven interface for defining transfer functions in interactive 3D volume rendering within Jupyter notebooks [S1, unofficial].
+
+## Sources
+[S1] https://github.com/maartenbreddels/ipyvolume/blob/master/ipyvolume/transferfunction.py, https://github.com/maartenbreddels/ipyvolume/blob/master/ipyvolume/transferfunction.py, fetched 2026-10-29 (unofficial)

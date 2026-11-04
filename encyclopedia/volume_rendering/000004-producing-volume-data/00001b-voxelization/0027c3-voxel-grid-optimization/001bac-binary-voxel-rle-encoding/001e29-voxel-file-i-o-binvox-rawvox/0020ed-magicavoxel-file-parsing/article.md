@@ -1,0 +1,206 @@
+# MagicaVoxel File Parsing
+
+Also called: .VOX File Parsing, Magica Voxel format loader, MagicaVoxel .vox Loader, vox loader, vox model.vox
+
+## Overview
+A loader for MagicaVoxel `.vox` files (versions 150 and 200) that parses models, palette, MATL materials, and the nTRN/nGRP/nSHP scene graph, converting visible faces into quads within a BVH [S1, unofficial]. It structures data into chunks containing tags, sizes, and child chunks [S2, unofficial]. Unlike raw voxel grids, this method extracts surface geometry (quads) for ray tracing while supporting complex scene hierarchies and coordinate transformations [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A binary `.vox` file stream.
+- Output: A scene graph of quads organized in a BVH, a color palette, and material definitions.
+
+**Data Structures:**
+The file is a tree of chunks. Each chunk header consists of:
+1. `tag`: 4 ASCII bytes identifying the chunk type.
+2. `size`: 4 bytes (little-endian uint32), size of the chunk's data in bytes.
+3. `child_size`: 4 bytes (little-endian uint32), size of child chunks in bytes.
+4. `data`: `size` bytes of payload.
+5. Children: Recursively parsed chunks occupying `child_size` bytes.
+
+**Supported Chunks:**
+- `MAIN`: Root chunk. No data payload.
+- `PACK`: Contains a single 4-byte uint32 indicating the count of `XYZI` chunks (models) [S2, unofficial].
+- `SIZE`: Contains 3 4-byte uint32s defining the dimensions $(W, H, D)$ of the following `XYZI` chunk [S2, unofficial].
+- `XYZI`: Represents a single model. Contains a list of voxels. Each voxel is 4 bytes: 3 bytes for coordinates $(x, y, z)$ and 1 byte for a color index [S2, unofficial].
+- `RGBA`: The color palette. Contains up to 256 colors. Each color is 4 bytes (RGBA, 8-bit per channel) [S2, unofficial].
+- `nTRN`: Transform node. Contains translation and rotation data. Child is `nGRP` or `nSHP` [S2, unofficial].
+- `nGRP`: Group node. Children are `nTRN` nodes [S2, unofficial].
+- `nSHP`: Shape node. Leaf node containing a reference to a model (index into `XYZI` list) [S2, unofficial].
+
+**Numbered Steps:**
+1. **Parse Header:** Read the `MAIN` chunk.
+2. **Parse Palette:** Locate the `RGBA` chunk. Read up to 256 colors into a lookup table. The first color is always $(0,0,0,0)$ representing transparency [S2, unofficial].
+3. **Parse Models:** Locate the `PACK` chunk to get the number of models. For each model:
+   a. Read the `SIZE` chunk to get dimensions $(W, H, D)$.
+   b. Read the `XYZI` chunk. Iterate through the voxel list. Each entry is $(x, y, z, c)$ where $x,y,z \in [0, 255]$ and $c$ is the palette index [S2, unofficial].
+   c. Store the voxel list and dimensions.
+4. **Parse Scene Graph:** Recursively parse the tree starting from `MAIN` children.
+   a. If node is `nTRN`, read transform (translation/rotation). Recurse into child.
+   b. If node is `nGRP`, recurse into children (must be `nTRN`).
+   c. If node is `nSHP`, read model index. Create a leaf node referencing the model data.
+5. **Convert to Geometry:** For each model in the scene graph:
+   a. Iterate through all voxels $(x, y, z, c)$.
+   b. Determine visible faces. A face is visible if the adjacent voxel in that direction is empty or transparent.
+   c. Generate quad primitives for each visible face.
+6. **Transform Coordinates:** MagicaVoxel uses a Z-up coordinate system. Convert to the renderer's Y-up system by swapping axes (e.g., $x \to x, z \to y, y \to -z$) and applying instance transforms from `nTRN` nodes [S1, unofficial].
+7. **Merge Glass:** Identify voxels with glass material properties. Merge these into a single volume representation for efficient ray marching or volume rendering [S1, unofficial].
+8. **Mark Lights:** Identify emissive voxels. Mark them as light sources in the scene graph [S1, unofficial].
+9. **Build BVH:** Insert all generated quads into a Bounding Volume Hierarchy (BVH) for ray intersection testing [S1, unofficial].
+
+**Formulas:**
+- Coordinate Limit: Standard `.vox` files limit coordinates to 0-255 per axis because each coordinate component uses 1 byte. This restricts the space to:
+  $$ \{(x_1, x_2, x_3) \in \mathbb{N}^3 \mid 0 \le x_i < 256, i = 1 \dots 3\} $$
+  [S2, unofficial]
+
+**Parameters:**
+- Palette Size: Up to 256 colors [S2, unofficial].
+- Coordinate Range: 0-255 per axis [S2, unofficial].
+- File Versions: 150 and 200 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Coordinate Limit:** The 1-byte coordinate limit restricts single model size to $256^3$ voxels. Scenes overcome this by using multiple models and transforms (nTRN/nGRP/nSHP) [S2, unofficial].
+- **Transparency:** The first palette entry is always $(0,0,0,0)$. Implementers must handle this as fully transparent [S2, unofficial].
+- **Depth:** The scene graph is a tree. Recursion depth is limited by file size and memory, but no specific depth limit is defined in the format [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def parse_vox(file_stream):
+    # Read MAIN chunk
+    main_chunk = read_chunk(file_stream, "MAIN")
+    
+    # Parse Palette
+    palette = []
+    rgba_chunk = find_chunk(main_chunk, "RGBA")
+    if rgba_chunk:
+        data = rgba_chunk.data
+        # Each color is 4 bytes RGBA
+        for i in range(0, len(data), 4):
+            r, g, b, a = data[i], data[i+1], data[i+2], data[i+3]
+            palette.append((r, g, b, a))
+    
+    # Parse Models
+    models = []
+    pack_chunk = find_chunk(main_chunk, "PACK")
+    if pack_chunk:
+        num_models = struct.unpack('<I', pack_chunk.data[:4])[0]
+        for _ in range(num_models):
+            size_chunk = find_child_chunk(main_chunk, "SIZE")
+            xyz_chunk = find_child_chunk(main_chunk, "XYZI")
+            if size_chunk and xyz_chunk:
+                dims = struct.unpack('<III', size_chunk.data[:12])
+                voxels = []
+                for i in range(0, len(xyz_chunk.data), 4):
+                    x, y, z, c = xyz_chunk.data[i], xyz_chunk.data[i+1], xyz_chunk.data[i+2], xyz_chunk.data[i+3]
+                    voxels.append((x, y, z, c))
+                models.append({'dims': dims, 'voxels': voxels})
+    
+    # Parse Scene Graph and Build Geometry
+    quads = []
+    lights = []
+    glass_volume = []
+    
+    def traverse_node(node, parent_transform):
+        if node.tag == "nTRN":
+            # Read transform (translation/rotation)
+            transform = parse_transform(node.data)
+            new_transform = multiply_transforms(parent_transform, transform)
+            traverse_node(node.children[0], new_transform)
+        elif node.tag == "nGRP":
+            for child in node.children:
+                traverse_node(child, parent_transform)
+        elif node.tag == "nSHP":
+            # Read model index
+            model_idx = struct.unpack('<I', node.data[:4])[0]
+            model = models[model_idx]
+            # Convert voxels to quads
+            model_quads = voxels_to_quads(model['voxels'], model['dims'], palette)
+            # Apply transform (Z-up to Y-up)
+            for quad in model_quads:
+                transformed_quad = apply_transform(quad, parent_transform)
+                quads.append(transformed_quad)
+            # Check for glass/emissive
+            for v in model['voxels']:
+                c = palette[v[3]]
+                if is_glass(c):
+                    glass_volume.append(v)
+                if is_emissive(c):
+                    lights.append(v)
+
+    # Start traversal from MAIN's children
+    for child in main_chunk.children:
+        traverse_node(child, identity_transform())
+    
+    # Build BVH from quads
+    bvh = build_bvh(quads)
+    
+    return {
+        'bvh': bvh,
+        'lights': lights,
+        'glass_volume': glass_volume,
+        'palette': palette
+    }
+
+def voxels_to_quads(voxels, dims, palette):
+    quads = []
+    voxel_set = set(voxels)
+    # Directions: +X, -X, +Y, -Y, +Z, -Z
+    directions = [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]
+    
+    for x, y, z, c in voxels:
+        color = palette[c]
+        # Skip transparent
+        if color[3] == 0:
+            continue
+            
+        for dx, dy, dz in directions:
+            nx, ny, nz = x + dx, y + dy, z + dz
+            # Check if neighbor is out of bounds or empty
+            if not (0 <= nx < dims[0] and 0 <= ny < dims[1] and 0 <= nz < dims[2]):
+                # Neighbor is outside, face is visible
+                quad = create_quad(x, y, z, dx, dy, dz, color)
+                quads.append(quad)
+            elif (nx, ny, nz, 0) not in voxel_set: # Assuming 0 index for empty if not present
+                # Neighbor is empty, face is visible
+                quad = create_quad(x, y, z, dx, dy, dz, color)
+                quads.append(quad)
+    return quads
+
+def apply_transform(quad, transform):
+    # MagicaVoxel is Z-up, Renderer is Y-up
+    # Swap Y and Z, negate new Z (or similar depending on renderer)
+    # Example: x' = x, y' = z, z' = -y
+    x, y, z = quad.center
+    new_x, new_y, new_z = x, z, -y
+    quad.center = (new_x, new_y, new_z)
+    # Apply rotation matrix from transform
+    return quad
+```
+
+## Subtopics
+
+### [MagicaVoxel File Output](1752-magicavoxel-file-output.md)
+Writes .vox files. Use when exporting.
+
+### [PLY File Parsing](2781-ply-file-parsing.md)
+Parses PLY meshes. Use for polygonal meshes.
+
+### [Voxel File I/O](2786-voxel-file-i-o.md)
+General voxel I/O. Use for abstracting file formats.
+
+## Operating characteristics
+- **Time Complexity:** Parsing is linear with respect to file size. Converting voxels to quads is $O(N)$ where $N$ is the number of voxels. Building the BVH is $O(N \log N)$ or $O(N)$ depending on the algorithm.
+- **Memory Complexity:** $O(N)$ to store voxels and quads. Palette is constant size (256 colors).
+- **Strengths:** Supports complex scenes with transforms and groups. Efficient surface extraction for ray tracing.
+- **Limitations:** Single model coordinate limit of $256^3$. No explicit compression for voxel data (XYZI is raw).
+- **When to Use:** When loading models created in MagicaVoxel for ray-traced rendering.
+- **When Not to Use:** For large-scale voxel worlds without scene hierarchy, or when memory is extremely constrained and raw voxel grids are preferred.
+
+## Background
+The `.vox` format was developed for the software Magica Voxel [Eph19]. It structures data into chunks to describe voxelized models and scenes [S2, unofficial]. The format supports versions 150 and 200 [S1, unofficial].
+
+## Sources
+[S1] Milestone 13: MagicaVoxel look (.vox, DDA voxel grid, sun/sky, bloom, style voxel), https://github.com/adriendjn/mypbr/pull/10, fetched 2026-10-25 (unofficial)
+[S2] Estudio de la compresión y la eficiencia del Sparse Voxel Octree en el cálculo de la Iluminación Global, https://hdl.handle.net/2117/445971, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,785 @@
+# Point Cloud Voxelization Project
+
+## Overview
+This repository contains a **voxel grid down‑sampling** implementation for 3D point clouds. Two versions are provided:
+- **Sequential (CPU) version** – `benchmark_sequential.exe`
+- **Parallel (CUDA/GPU) version** – `benchmark_parallel.exe`
+
+The goal of the project is to compare the performance and correctness of the CPU and GPU implementations on large LiDAR datasets (for this project nuScenes). The code is written in modern C++ 17 with CUDA 12.x support and compiled via CMake.
+
+---
+
+## Repository Layout
+```
+parallel-project/
+├─ CMakeLists.txt                # Build configuration (C++ + CUDA)
+├─ data_loader.{h,cpp}      # Binary .bin loader and coordinate conversion
+├─ sequential_downsample.{h,cpp}
+├─ parallel_downsample.{h,cu}
+├─ main.cpp                 # Benchmark driver
+└─ README.md                    # THIS FILE
+```
+
+---
+
+## Prerequisites
+| Requirement | Reason |
+|---|---|
+| **Windows 10/11** (PowerShell) | OS used for development |
+| **Visual Studio 2022** (C++ workload) | Provides MSVC compiler compatible with CMake |
+| **CUDA Toolkit 12.x** | Required for the GPU implementation |
+| **CMake ≥ 3.20** | Generates Visual Studio solution |
+| **Git** (optional) | For cloning the repository |
+
+Make sure the CUDA toolkit version matches the installed Visual Studio version. The project was tested with **CUDA 12.6** and **MSVC 19.40**.
+
+---
+
+## Building the Project
+Open a **Developer PowerShell** (or regular PowerShell) and execute the following from the repository root:
+```powershell
+# 1. Create a build directory
+mkdir build
+cd build
+
+# 2. Configure with CMake (Release configuration)
+cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+# 3. Build the executables
+cmake --build . --config Release
+```
+The binaries will be placed in `build/Release/`:
+- `benchmark_sequential.exe`
+- `benchmark_parallel.exe`
+
+---
+
+## Running the Benchmarks
+Both executables share the same command‑line interface:
+```
+benchmark_<mode>.exe <path-to-bin-or-directory> <leaf_size> [target_point_count]
+```
+- **`<path>`** – Either a single `*.bin` file or a folder containing many nuScenes LiDAR scans.
+- **`<leaf_size>`** – Voxel side length in metres (e.g., `0.1`).
+- **`[target_point_count]`** – Optional maximum number of points to load (useful for scaling tests).
+
+### Example: Sequential (CPU)
+```powershell
+# 50 k points
+build\Release\benchmark_sequential.exe "C:\path\to\nuscenes-mini\samples\LIDAR_TOP" 0.1 50000
+
+```
+### Example: Parallel (GPU)
+```powershell
+# 50 k points (GPU)
+build\Release\benchmark_parallel.exe "C:\path\to\nuscenes-mini\samples\LIDAR_TOP" 0.1 50000
+```
+Each run produces:
+- **`benchmark_results.csv`** – Appended row containing:
+  `Algorithm,LeafSize,OriginalPoints,DownsampledPoints,ExecutionTime_ms,MemoryTransferTime_ms`
+- **`.pcd` files** – Original, CPU‑down‑sampled and GPU‑down‑sampled point clouds (ASCII format)
+
+
+## Important Notes
+- The **warm‑up kernel** (`warmupGPU()`) is called before timing to eliminate the one‑time CUDA context‑initialisation overhead.
+- All timing measurements use `std::chrono::high_resolution_clock` on the host side; GPU kernels are synchronised with `cudaDeviceSynchronize()` before stopping the timer.
+- The project deliberately keeps the sequential implementation unchanged, so the comparison isolates the effect of parallelisation only.
+
+### data_loader.cpp
+```
+#include "data_loader.h"
+#include <fstream>
+#include <stdexcept>
+
+std::vector<Point> DataLoader::loadLidarBin(const std::string& filepath) {
+    std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open file: " + filepath);
+    }
+
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    // A single point consists of 5 float32 values (x, y, z, intensity, ring)
+    const int numFloatsPerPoint = 5;
+    const int bytesPerPoint = numFloatsPerPoint * sizeof(float);
+
+    if (size % bytesPerPoint != 0) {
+        throw std::runtime_error("File size is not a multiple of point size (20 bytes). Corrupted file?");
+    }
+
+    size_t numPoints = size / bytesPerPoint;
+    std::vector<Point> points(numPoints);
+
+    if (file.read(reinterpret_cast<char*>(points.data()), size)) {
+        // Convert from nuScenes (x=right, y=forward, z=up) 
+        // to classic KITTI/ROS (x=forward, y=left, z=up)
+        for (auto& p : points) {
+            float nusc_x = p.x;
+            float nusc_y = p.y;
+            p.x = nusc_y;
+            p.y = -nusc_x;
+            // z remains the same
+        }
+        return points;
+    } else {
+        throw std::runtime_error("Error reading file: " + filepath);
+    }
+}
+
+#include <filesystem>
+#include <iostream>
+
+std::vector<Point> DataLoader::loadLidarFromDirectory(const std::string& directory_path, size_t target_points) {
+    std::vector<Point> accumulated_points;
+    
+    for (const auto& entry : std::filesystem::directory_iterator(directory_path)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".bin") {
+            try {
+                std::vector<Point> file_points = loadLidarBin(entry.path().string());
+                accumulated_points.insert(accumulated_points.end(), file_points.begin(), file_points.end());
+                
+                std::cout << "Loaded " << file_points.size() << " points from " << entry.path().filename() 
+                          << " (Total: " << accumulated_points.size() << ")" << std::endl;
+                          
+                if (target_points > 0 && accumulated_points.size() >= target_points) {
+                    // Truncate to exact target size if needed, or just break (breaking gives roughly the target size)
+                    break;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: " << e.what() << std::endl;
+            }
+        }
+    }
+    
+    return accumulated_points;
+}
+```
+
+### data_loader.h
+```
+#ifndef DATA_LOADER_H
+#define DATA_LOADER_H
+
+#include <vector>
+#include <string>
+
+// nuScenes point format: x, y, z, intensity, ring (all float32)
+struct Point {
+    float x;
+    float y;
+    float z;
+    float intensity;
+    float ring;
+};
+
+class DataLoader {
+public:
+    /**
+     * @brief Load a nuScenes LiDAR .bin file
+     * 
+     * @param filepath The path to the .bin file
+     * @return std::vector<Point> The loaded point cloud
+     */
+    static std::vector<Point> loadLidarBin(const std::string& filepath);
+
+    /**
+     * @brief Load multiple nuScenes LiDAR .bin files from a directory until target point count is reached
+     * 
+     * @param directory_path The path to the directory containing .bin files (e.g. samples/LIDAR_TOP)
+     * @param target_points Target number of points to accumulate. 0 means load all files.
+     * @return std::vector<Point> The accumulated point cloud
+     */
+    static std::vector<Point> loadLidarFromDirectory(const std::string& directory_path, size_t target_points = 0);
+};
+
+#endif // DATA_LOADER_H
+```
+
+### log_to_wandb.py
+```
+import pandas as pd
+import wandb
+import os
+import glob
+
+def main():
+    # Find all generated benchmark CSVs (searching recursively in case they are in build/Release)
+    csv_pattern = r"**\*benchmark_seq_*.csv"
+    csv_files = glob.glob(csv_pattern, recursive=True)
+    
+    if not csv_files:
+        print(f"Error: No CSV files found matching {csv_pattern}. Run the C++ benchmark first.")
+        return
+
+    # Combine all individual run CSVs into one master dataframe
+    df_list = []
+    for f in csv_files:
+        df_list.append(pd.read_csv(f))
+    master_df = pd.concat(df_list, ignore_index=True)
+    
+    # Initialize wandb
+    wandb.init(
+        project="voxel-grid-downsampling",
+        name="Run1_Sequential_CPU_Benchmark",
+        entity="reyyantemel1-gazi-university",
+        config={
+            "algorithm": "sequential"
+        }
+    )
+
+    # Log each run from the combined dataframe
+    for index, row in master_df.iterrows():
+        wandb.log({
+            "algorithm": row["Algorithm"],
+            "leaf_size": row["LeafSize"],
+            "original_points": row["OriginalPoints"],
+            "downsampled_points": row["DownsampledPoints"],
+            "execution_time_ms": row["ExecutionTime_ms"],
+            "memory_transfer_ms": row["MemoryTransferTime_ms"]
+        })
+
+    # Optional: Log the whole dataframe as a table
+    table = wandb.Table(dataframe=master_df)
+    wandb.log({"benchmark_summary_table": table})
+
+    print("Successfully logged data to Weights & Biases!")
+    wandb.finish()
+
+if __name__ == "__main__":
+    main()
+```
+
+### main.cpp
+```
+#include <iostream>
+#include <fstream>
+#include <chrono>
+#include <string>
+#include <sstream>
+#include <iomanip>
+#include <filesystem>
+#include "data_loader.h"
+#include "sequential_downsample.h"
+#include "parallel_downsample.h"
+
+// Helper function to save point cloud to a standard .pcd file for 3D visualization
+void saveToPCD(const std::string& filename, const std::vector<Point>& cloud) {
+    std::ofstream file(filename);
+    if (!file.is_open()) return;
+
+    file << "# .PCD v0.7 - Point Cloud Data file format\n"
+         << "VERSION 0.7\n"
+         << "FIELDS x y z intensity\n"
+         << "SIZE 4 4 4 4\n"
+         << "TYPE F F F F\n"
+         << "COUNT 1 1 1 1\n"
+         << "WIDTH " << cloud.size() << "\n"
+         << "HEIGHT 1\n"
+         << "VIEWPOINT 0 0 0 1 0 0 0\n"
+         << "POINTS " << cloud.size() << "\n"
+         << "DATA ascii\n";
+
+    for (const auto& p : cloud) {
+        file << p.x << " " << p.y << " " << p.z << " " << p.intensity << "\n";
+    }
+    file.close();
+    std::cout << "Saved 3D point cloud to " << filename << std::endl;
+}
+
+int main(int argc, char** argv) {
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <path_to_lidar_bin_file_or_dir> <leaf_size> [target_point_count]\n";
+        return 1;
+    }
+
+    std::string path = argv[1];
+    float leaf_size = std::stof(argv[2]);
+    size_t target_points = 0;
+    
+    if (argc >= 4) {
+        target_points = std::stoull(argv[3]);
+    }
+
+    std::cout << "Loading point cloud(s) from: " << path << std::endl;
+    std::cout << "Leaf size: " << leaf_size << " meters" << std::endl;
+    if (target_points > 0) {
+        std::cout << "Target point count: " << target_points << std::endl;
+    }
+
+    std::vector<Point> original_cloud;
+    try {
+        // Simple check if path ends with .bin or if it's a directory
+        if (path.length() >= 4 && path.substr(path.length() - 4) == ".bin") {
+            original_cloud = DataLoader::loadLidarBin(path);
+        } else {
+            original_cloud = DataLoader::loadLidarFromDirectory(path, target_points);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error loading data: " << e.what() << std::endl;
+        return 1;
+    }
+
+    std::cout << "Original point cloud size: " << original_cloud.size() << " points." << std::endl;
+
+    // Benchmarking sequential algorithm
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    std::vector<Point> downsampled_cloud = SequentialDownsample::downsample(original_cloud, leaf_size);
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    
+    // Calculate execution time
+    std::chrono::duration<double, std::milli> duration_ms = end_time - start_time;
+
+    std::cout << "Downsampled point cloud size: " << downsampled_cloud.size() << " points." << std::endl;
+    std::cout << "Sequential Execution Time: " << duration_ms.count() << " ms" << std::endl;
+
+    std::cout << "\nWarming up GPU context (allocating initial resources)..." << std::endl;
+    ParallelDownsample::warmupGPU();
+
+    // Benchmarking parallel algorithm
+    double mem_transfer_ms = 0.0;
+    auto start_time_par = std::chrono::high_resolution_clock::now();
+
+    std::vector<Point> parallel_cloud = ParallelDownsample::downsample(original_cloud, leaf_size, mem_transfer_ms);
+
+    auto end_time_par = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> duration_par_ms = end_time_par - start_time_par;
+
+    std::cout << "Parallel Downsampled cloud size: " << parallel_cloud.size() << " points." << std::endl;
+    std::cout << "Parallel Execution Time: " << duration_par_ms.count() << " ms (Transfer: " << mem_transfer_ms << " ms, Compute: " << (duration_par_ms.count() - mem_transfer_ms) << " ms)" << std::endl;
+
+    // Create a unique suffix based on parameters
+    std::ostringstream ss;
+    ss << "leaf" << std::fixed << std::setprecision(2) << leaf_size << "_pts" << original_cloud.size();
+    std::string run_suffix = ss.str();
+
+    // Define output directory assuming we execute from build/Release/
+    // This places parallel-temp directly in the root of parallel-project
+    std::string out_dir = "../../parallel-temp/";
+    std::filesystem::create_directories(out_dir);
+
+    std::string csv_filename = out_dir + "benchmark_seq_" + run_suffix + ".csv";
+    std::string pcd_filename_orig = out_dir + "original_" + run_suffix + ".pcd";
+    std::string pcd_filename_down = out_dir + "downsampled_" + run_suffix + ".pcd";
+    std::string pcd_filename_par = out_dir + "downsampled_parallel_" + run_suffix + ".pcd";
+
+    // Log results to unique CSV for Weights & Biases
+    std::ofstream csv_file(csv_filename);
+    if (csv_file.is_open()) {
+        csv_file << "Algorithm,LeafSize,OriginalPoints,DownsampledPoints,ExecutionTime_ms,MemoryTransferTime_ms\n";
+        csv_file << "SequentialCPU," 
+                 << leaf_size << "," 
+                 << original_cloud.size() << "," 
+                 << downsampled_cloud.size() << "," 
+                 << duration_ms.count() << ","
+                 << 0.0 << "\n";
+        csv_file << "ParallelCUDA," 
+                 << leaf_size << "," 
+                 << original_cloud.size() << "," 
+                 << parallel_cloud.size() << "," 
+                 << duration_par_ms.count() << ","
+                 << mem_transfer_ms << "\n";
+        csv_file.close();
+        std::cout << "Results logged to " << csv_filename << std::endl;
+    }
+
+    // Save outputs to unique visual .pcd files
+    saveToPCD(pcd_filename_orig, original_cloud);
+    saveToPCD(pcd_filename_down, downsampled_cloud);
+    saveToPCD(pcd_filename_par, parallel_cloud);
+
+    return 0;
+}
+```
+
+### parallel_downsample.cu
+```
+#include "parallel_downsample.h"
+#include <cuda_runtime.h>
+#include <iostream>
+#include <cmath>
+#include <algorithm>
+#include <limits>
+#include <chrono>
+
+struct VoxelGPU {
+    float sum_x;
+    float sum_y;
+    float sum_z;
+    float sum_intensity;
+    float sum_ring;
+    int count;
+};
+
+#define CACHE_SIZE 256
+
+// CUDA Kernel to map points to their respective voxels (with Shared Memory Optimization)
+__global__ void mapPointsToVoxelsKernel(const Point* d_points, size_t num_points, 
+                                        VoxelGPU* d_grid, 
+                                        float min_x, float min_y, float min_z, 
+                                        int64_t dim_x, int64_t dim_y, int64_t dim_z, 
+                                        float leaf_size) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    // Allocate Shared Memory for block-level reduction
+    __shared__ unsigned long long int smem_voxel_idx[CACHE_SIZE];
+    __shared__ VoxelGPU smem_voxel_data[CACHE_SIZE];
+    
+    // Initialize shared memory cache
+    if (threadIdx.x < CACHE_SIZE) {
+        smem_voxel_idx[threadIdx.x] = -1ULL; // -1 indicates empty
+        smem_voxel_data[threadIdx.x].sum_x = 0;
+        smem_voxel_data[threadIdx.x].sum_y = 0;
+        smem_voxel_data[threadIdx.x].sum_z = 0;
+        smem_voxel_data[threadIdx.x].sum_intensity = 0;
+        smem_voxel_data[threadIdx.x].sum_ring = 0;
+        smem_voxel_data[threadIdx.x].count = 0;
+    }
+    __syncthreads();
+    
+    if (idx < num_points) {
+        Point p = d_points[idx];
+        
+        int64_t idx_x = floorf((p.x - min_x) / leaf_size);
+        int64_t idx_y = floorf((p.y - min_y) / leaf_size);
+        int64_t idx_z = floorf((p.z - min_z) / leaf_size);
+
+        // Clamp
+        if (idx_x < 0) idx_x = 0; if (idx_x >= dim_x) idx_x = dim_x - 1;
+        if (idx_y < 0) idx_y = 0; if (idx_y >= dim_y) idx_y = dim_y - 1;
+        if (idx_z < 0) idx_z = 0; if (idx_z >= dim_z) idx_z = dim_z - 1;
+
+        unsigned long long int voxel_idx = (unsigned long long int)(idx_x + idx_y * dim_x + idx_z * dim_x * dim_y);
+
+        // Hash to find a slot in shared memory
+        int cache_idx = voxel_idx % CACHE_SIZE;
+        
+        bool cached = false;
+        unsigned long long int expected = -1ULL;
+        
+        // Attempt to claim the slot or check if it's already ours
+        unsigned long long int old = atomicCAS(&smem_voxel_idx[cache_idx], expected, voxel_idx);
+        
+        if (old == expected || old == voxel_idx) {
+            // Successfully claimed or already claimed by our voxel! Perform fast shared memory reduction
+            atomicAdd(&(smem_voxel_data[cache_idx].sum_x), p.x);
+            atomicAdd(&(smem_voxel_data[cache_idx].sum_y), p.y);
+            atomicAdd(&(smem_voxel_data[cache_idx].sum_z), p.z);
+            atomicAdd(&(smem_voxel_data[cache_idx].sum_intensity), p.intensity);
+            atomicAdd(&(smem_voxel_data[cache_idx].sum_ring), p.ring);
+            atomicAdd(&(smem_voxel_data[cache_idx].count), 1);
+            cached = true;
+        }
+        
+        if (!cached) {
+            // Collision! Another voxel took this slot. Fallback to global memory.
+            atomicAdd(&(d_grid[voxel_idx].sum_x), p.x);
+            atomicAdd(&(d_grid[voxel_idx].sum_y), p.y);
+            atomicAdd(&(d_grid[voxel_idx].sum_z), p.z);
+            atomicAdd(&(d_grid[voxel_idx].sum_intensity), p.intensity);
+            atomicAdd(&(d_grid[voxel_idx].sum_ring), p.ring);
+            atomicAdd(&(d_grid[voxel_idx].count), 1);
+        }
+    }
+    
+    __syncthreads();
+    
+    // Write the block-level aggregated results from shared memory back to global memory
+    if (threadIdx.x < CACHE_SIZE) {
+        unsigned long long int v_idx = smem_voxel_idx[threadIdx.x];
+        if (v_idx != -1ULL && smem_voxel_data[threadIdx.x].count > 0) {
+            atomicAdd(&(d_grid[v_idx].sum_x), smem_voxel_data[threadIdx.x].sum_x);
+            atomicAdd(&(d_grid[v_idx].sum_y), smem_voxel_data[threadIdx.x].sum_y);
+            atomicAdd(&(d_grid[v_idx].sum_z), smem_voxel_data[threadIdx.x].sum_z);
+            atomicAdd(&(d_grid[v_idx].sum_intensity), smem_voxel_data[threadIdx.x].sum_intensity);
+            atomicAdd(&(d_grid[v_idx].sum_ring), smem_voxel_data[threadIdx.x].sum_ring);
+            atomicAdd(&(d_grid[v_idx].count), smem_voxel_data[threadIdx.x].count);
+        }
+    }
+}
+
+// Optimization: Second kernel to compact the dense grid on GPU
+__global__ void compactVoxelsKernel(const VoxelGPU* d_grid, int64_t total_voxels, Point* d_out_points, int* d_out_count) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total_voxels) {
+        if (d_grid[idx].count > 0) {
+            // Get a unique index in the output array
+            int out_idx = atomicAdd(d_out_count, 1);
+            
+            Point p;
+            p.x = d_grid[idx].sum_x / d_grid[idx].count;
+            p.y = d_grid[idx].sum_y / d_grid[idx].count;
+            p.z = d_grid[idx].sum_z / d_grid[idx].count;
+            p.intensity = d_grid[idx].sum_intensity / d_grid[idx].count;
+            p.ring = d_grid[idx].sum_ring / d_grid[idx].count;
+            
+            d_out_points[out_idx] = p;
+        }
+    }
+}
+
+// Check CUDA Errors
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << " code=" << err << " \"" << cudaGetErrorString(err) << "\"" << std::endl; \
+            exit(EXIT_FAILURE); \
+        } \
+    } while (0)
+
+
+void ParallelDownsample::warmupGPU() {
+    cudaFree(0);
+}
+
+std::vector<Point> ParallelDownsample::downsample(const std::vector<Point>& input_points, float leaf_size, double& out_mem_transfer_ms) {
+    out_mem_transfer_ms = 0.0;
+
+    if (input_points.empty() || leaf_size <= 0.0f) {
+        return {};
+    }
+
+    size_t num_points = input_points.size();
+
+    // 1. Find bounding box (CPU side for simplicity as discussed)
+    float min_x = std::numeric_limits<float>::max();
+    float min_y = std::numeric_limits<float>::max();
+    float min_z = std::numeric_limits<float>::max();
+
+    float max_x = std::numeric_limits<float>::lowest();
+    float max_y = std::numeric_limits<float>::lowest();
+    float max_z = std::numeric_limits<float>::lowest();
+
+    for (const auto& p : input_points) {
+        if (p.x < min_x) min_x = p.x;
+        if (p.y < min_y) min_y = p.y;
+        if (p.z < min_z) min_z = p.z;
+
+        if (p.x > max_x) max_x = p.x;
+        if (p.y > max_y) max_y = p.y;
+        if (p.z > max_z) max_z = p.z;
+    }
+
+    // 2. Compute grid dimensions
+    int64_t dim_x = static_cast<int64_t>(std::ceil((max_x - min_x) / leaf_size));
+    int64_t dim_y = static_cast<int64_t>(std::ceil((max_y - min_y) / leaf_size));
+    int64_t dim_z = static_cast<int64_t>(std::ceil((max_z - min_z) / leaf_size));
+
+    dim_x = std::max(int64_t(1), dim_x);
+    dim_y = std::max(int64_t(1), dim_y);
+    dim_z = std::max(int64_t(1), dim_z);
+
+    int64_t total_voxels = dim_x * dim_y * dim_z;
+    
+    // Basic memory safety check: print info
+    // std::cout << "Grid dimensions: " << dim_x << "x" << dim_y << "x" << dim_z 
+    //           << " = " << total_voxels << " voxels.\n";
+
+    // GPU Memory Allocation
+    Point* d_points;
+    VoxelGPU* d_grid;
+
+    auto mem_start = std::chrono::high_resolution_clock::now();
+    
+    CUDA_CHECK(cudaMalloc(&d_points, num_points * sizeof(Point)));
+    CUDA_CHECK(cudaMalloc(&d_grid, total_voxels * sizeof(VoxelGPU)));
+
+    // Initialize grid to 0
+    CUDA_CHECK(cudaMemset(d_grid, 0, total_voxels * sizeof(VoxelGPU)));
+
+    // Copy points to device
+    CUDA_CHECK(cudaMemcpy(d_points, input_points.data(), num_points * sizeof(Point), cudaMemcpyHostToDevice));
+    
+    auto mem_end = std::chrono::high_resolution_clock::now();
+    out_mem_transfer_ms += std::chrono::duration<double, std::milli>(mem_end - mem_start).count();
+
+    // Launch Kernel
+    int blockSize = 256;
+    int gridSize = (num_points + blockSize - 1) / blockSize;
+
+    mapPointsToVoxelsKernel<<<gridSize, blockSize>>>(d_points, num_points, d_grid, min_x, min_y, min_z, dim_x, dim_y, dim_z, leaf_size);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // --- OPTIMIZATION: Compact valid voxels on GPU ---
+    int* d_out_count;
+    Point* d_out_points;
+    CUDA_CHECK(cudaMalloc(&d_out_count, sizeof(int)));
+    CUDA_CHECK(cudaMemset(d_out_count, 0, sizeof(int)));
+    // In worst case, every original point maps to a unique voxel, so max output points = num_points
+    CUDA_CHECK(cudaMalloc(&d_out_points, num_points * sizeof(Point)));
+
+    int compactBlockSize = 256;
+    int compactGridSize = (total_voxels + compactBlockSize - 1) / compactBlockSize;
+    compactVoxelsKernel<<<compactGridSize, compactBlockSize>>>(d_grid, total_voxels, d_out_points, d_out_count);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Now copy only the compacted output back
+    mem_start = std::chrono::high_resolution_clock::now();
+    
+    int h_out_count = 0;
+    CUDA_CHECK(cudaMemcpy(&h_out_count, d_out_count, sizeof(int), cudaMemcpyDeviceToHost));
+    
+    std::vector<Point> output_points(h_out_count);
+    if (h_out_count > 0) {
+        CUDA_CHECK(cudaMemcpy(output_points.data(), d_out_points, h_out_count * sizeof(Point), cudaMemcpyDeviceToHost));
+    }
+    
+    // Free GPU memory
+    CUDA_CHECK(cudaFree(d_points));
+    CUDA_CHECK(cudaFree(d_grid));
+    CUDA_CHECK(cudaFree(d_out_count));
+    CUDA_CHECK(cudaFree(d_out_points));
+
+    mem_end = std::chrono::high_resolution_clock::now();
+    out_mem_transfer_ms += std::chrono::duration<double, std::milli>(mem_end - mem_start).count();
+
+    return output_points;
+}
+```
+
+### parallel_downsample.h
+```
+#ifndef PARALLEL_DOWNSAMPLE_H
+#define PARALLEL_DOWNSAMPLE_H
+
+#include "data_loader.h"
+#include <vector>
+
+class ParallelDownsample {
+public:
+    static void warmupGPU();
+    
+    /**
+     * @brief Perform Voxel Grid Downsampling in parallel on the GPU
+     * 
+     * @param input_points The original point cloud
+     * @param leaf_size The size of the voxel
+     * @param out_mem_transfer_ms Output parameter for memory transfer duration
+     * @return std::vector<Point> The downsampled point cloud
+     */
+    static std::vector<Point> downsample(const std::vector<Point>& input_points, float leaf_size, double& out_mem_transfer_ms);
+};
+
+#endif // PARALLEL_DOWNSAMPLE_H
+```
+
+### sequential_downsample.cpp
+```
+#include "sequential_downsample.h"
+#include <unordered_map>
+#include <cmath>
+#include <algorithm>
+#include <limits>
+#include <cstdint>
+
+struct Voxel {
+    float sum_x = 0;
+    float sum_y = 0;
+    float sum_z = 0;
+    float sum_intensity = 0;
+    float sum_ring = 0;
+    int count = 0;
+};
+
+std::vector<Point> SequentialDownsample::downsample(const std::vector<Point>& input_points, float leaf_size) {
+    if (input_points.empty() || leaf_size <= 0.0f) {
+        return {};
+    }
+
+    // 1. Find bounding box
+    float min_x = std::numeric_limits<float>::max();
+    float min_y = std::numeric_limits<float>::max();
+    float min_z = std::numeric_limits<float>::max();
+
+    float max_x = std::numeric_limits<float>::lowest();
+    float max_y = std::numeric_limits<float>::lowest();
+    float max_z = std::numeric_limits<float>::lowest();
+
+    for (const auto& p : input_points) {
+        if (p.x < min_x) min_x = p.x;
+        if (p.y < min_y) min_y = p.y;
+        if (p.z < min_z) min_z = p.z;
+
+        if (p.x > max_x) max_x = p.x;
+        if (p.y > max_y) max_y = p.y;
+        if (p.z > max_z) max_z = p.z;
+    }
+
+    // 2. Compute grid dimensions
+    int64_t dim_x = static_cast<int64_t>(std::ceil((max_x - min_x) / leaf_size));
+    int64_t dim_y = static_cast<int64_t>(std::ceil((max_y - min_y) / leaf_size));
+    int64_t dim_z = static_cast<int64_t>(std::ceil((max_z - min_z) / leaf_size));
+
+    // Ensure dimensions are at least 1
+    dim_x = std::max(int64_t(1), dim_x);
+    dim_y = std::max(int64_t(1), dim_y);
+    dim_z = std::max(int64_t(1), dim_z);
+
+    // 3. Map points to voxels
+    std::unordered_map<int64_t, Voxel> voxel_grid;
+
+    for (const auto& p : input_points) {
+        int64_t idx_x = static_cast<int64_t>(std::floor((p.x - min_x) / leaf_size));
+        int64_t idx_y = static_cast<int64_t>(std::floor((p.y - min_y) / leaf_size));
+        int64_t idx_z = static_cast<int64_t>(std::floor((p.z - min_z) / leaf_size));
+
+        // Clamp to prevent out-of-bounds
+        idx_x = std::max(int64_t(0), std::min(idx_x, dim_x - 1));
+        idx_y = std::max(int64_t(0), std::min(idx_y, dim_y - 1));
+        idx_z = std::max(int64_t(0), std::min(idx_z, dim_z - 1));
+
+        int64_t voxel_idx = idx_x + idx_y * dim_x + idx_z * dim_x * dim_y;
+
+        auto& v = voxel_grid[voxel_idx];
+        v.sum_x += p.x;
+        v.sum_y += p.y;
+        v.sum_z += p.z;
+        v.sum_intensity += p.intensity;
+        v.sum_ring += p.ring;
+        v.count++;
+    }
+
+    // 4. Generate output point cloud
+    std::vector<Point> output_points;
+    output_points.reserve(voxel_grid.size());
+
+    for (const auto& pair : voxel_grid) {
+        const auto& v = pair.second;
+        Point p;
+        p.x = v.sum_x / v.count;
+        p.y = v.sum_y / v.count;
+        p.z = v.sum_z / v.count;
+        p.intensity = v.sum_intensity / v.count;
+        p.ring = v.sum_ring / v.count;
+        output_points.push_back(p);
+    }
+
+    return output_points;
+}
+```
+
+### sequential_downsample.h
+```
+#ifndef SEQUENTIAL_DOWNSAMPLE_H
+#define SEQUENTIAL_DOWNSAMPLE_H
+
+#include "data_loader.h"
+#include <vector>
+
+class SequentialDownsample {
+public:
+    /**
+     * @brief Perform Voxel Grid Downsampling sequentially on the CPU
+     * 
+     * @param input_points The original point cloud
+     * @param leaf_size The size of the voxel in x, y, and z dimensions (cubic voxels)
+     * @return std::vector<Point> The downsampled point cloud
+     */
+    static std::vector<Point> downsample(const std::vector<Point>& input_points, float leaf_size);
+};
+
+#endif // SEQUENTIAL_DOWNSAMPLE_H
+```

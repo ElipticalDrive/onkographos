@@ -1,0 +1,164 @@
+# Extended Marching Cubes Lookup Table
+
+Also called: 3-label Marching Cubes, Extended MC Lookup Table
+
+## Overview
+The Extended Marching Cubes Lookup Table is a surface extraction method that eliminates degenerate, zero-area triangles by distinguishing scalar values equal to the isovalue from those strictly greater than it [S1, unofficial]. Unlike standard Marching Cubes, which treats equal and greater values identically, this method uses a 3-label system ('+', '-', '=') to ensure robust triangle generation without post-processing [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: A 3D scalar field sampled on a regular grid, an isovalue $\sigma$, and a grid cube $\Phi$ (a convex polyhedron, typically a unit cube) with 8 vertices.
+- **Output**: A set of triangles forming the isosurface patch for the cube.
+
+**Data Structures**
+- **Vertex Labels**: Each vertex $v_i$ of the cube is assigned a label $L_i \in \{+, -, =\}$ based on its scalar value $f(v_i)$ relative to $\sigma$:
+  - $L_i = '+'$ if $f(v_i) > \sigma$
+  - $L_i = '-'$ if $f(v_i) < \sigma$
+  - $L_i = '='$ if $f(v_i) = \sigma$
+- **Lookup Table**: A table with $3^8 = 6561$ entries, indexed by the 8-tuple of vertex labels $(L_1, \dots, L_8)$ [S1, unofficial].
+
+**Algorithm Steps**
+For each cube $\Phi$:
+1. **Label Assignment**: Determine the label for each of the 8 vertices of $\Phi$ based on the scalar field values and the isovalue [S1, unofficial].
+2. **Table Lookup**: Retrieve the precomputed isosurface patch from the extended lookup table using the cube's label configuration [S1, unofficial].
+3. **Patch Construction (Convex Hull Method)**: If the lookup table entry is generated dynamically or needs verification, the patch is constructed as follows [S1, unofficial]:
+   - Define a set $W_\Phi$ containing:
+     - The midpoints of all **bipolar edges** of $\Phi$. An edge is bipolar if one endpoint has label '+' and the other has label '-' [S1, unofficial].
+     - All vertices of $\Phi$ labeled '+' or '=' [S1, unofficial].
+   - Compute the convex hull $CH = \text{conv}(W_\Phi)$ [S1, unofficial].
+   - **Case 1: 3D Convex Hull**: If $CH$ is three-dimensional:
+     - Triangulate the boundary $\partial CH$ [S1, unofficial].
+     - Return all triangles in this triangulation that do **not** lie on the boundary of the cube $\Phi$ [S1, unofficial].
+   - **Case 2: Planar Convex Hull**: If $CH$ is a subset of some facet (face) of $\Phi$:
+     - Return a triangulation of $CH$ [S1, unofficial].
+   - **Case 3: Otherwise**: If $CH$ is 1D or 2D but not contained in a facet of $\Phi$, return the empty set [S1, unofficial].
+
+**Parameters**
+- **Label Set**: $\{+, -, =\}$ [S1, unofficial].
+- **Table Size**: 6561 entries [S1, unofficial].
+
+**Pitfalls**
+- **Degenerate Triangles**: Standard Marching Cubes creates degenerate triangles when multiple isosurface vertices are mapped to the same grid vertex (e.g., when one vertex is '+' and others are '-', the single '+' vertex causes all triangle vertices to collapse to that point) [S1, unofficial]. The extended table avoids this by treating '=' vertices differently from '+' vertices [S1, unofficial].
+- **Precision**: Exact equality $f(v_i) = \sigma$ is rare in floating-point arithmetic. In practice, a tolerance or specific handling for near-equality may be required, though the source defines strict equality [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def extended_marching_cubes_patch(cube_vertices, scalar_values, isovalue):
+    """
+    Computes the isosurface patch for a single cube using the extended Marching Cubes logic.
+    
+    Args:
+        cube_vertices: List of 8 3D points (vertices of the cube).
+        scalar_values: List of 8 floats (scalar field values at vertices).
+        isovalue: The threshold scalar value.
+        
+    Returns:
+        List of triangles, where each triangle is a tuple of 3 3D points.
+    """
+    # Step 1: Assign labels
+    labels = []
+    for val in scalar_values:
+        if val > isovalue:
+            labels.append('+')
+        elif val < isovalue:
+            labels.append('-')
+        else:
+            labels.append('=')
+            
+    # Step 2: Identify bipolar edges and relevant vertices
+    # Bipolar edges: one endpoint '+', one endpoint '-'
+    bipolar_midpoints = []
+    edge_indices = [
+        (0,1), (1,2), (2,3), (3,0), # Bottom face
+        (4,5), (5,6), (6,7), (7,4), # Top face
+        (0,4), (1,5), (2,6), (3,7)  # Vertical edges
+    ]
+    
+    for i, j in edge_indices:
+        if (labels[i] == '+' and labels[j] == '-') or (labels[i] == '-' and labels[j] == '+'):
+            # Midpoint of bipolar edge
+            mid = [(cube_vertices[i][k] + cube_vertices[j][k]) / 2.0 for k in range(3)]
+            bipolar_midpoints.append(mid)
+            
+    # Vertices labeled '+' or '='
+    plus_equal_vertices = []
+    for i, label in enumerate(labels):
+        if label in ('+', '='):
+            plus_equal_vertices.append(cube_vertices[i])
+            
+    # Step 3: Construct set W_phi
+    W_phi = bipolar_midpoints + plus_equal_vertices
+    
+    if not W_phi:
+        return []
+        
+    # Step 4: Compute Convex Hull
+    # Note: A robust convex hull implementation is required.
+    # This is a placeholder for the geometric operation.
+    try:
+        ch = compute_convex_hull(W_phi)
+    except Exception:
+        return []
+        
+    # Step 5: Determine output based on dimensionality and containment
+    # Check if the convex hull is 3D
+    if ch.is_3d():
+        # Triangulate boundary of convex hull
+        boundary_triangulation = ch.triangulate_boundary()
+        # Return triangles not lying on the boundary of the cube Phi
+        result = []
+        for tri in boundary_triangulation:
+            if not is_on_cube_boundary(tri, cube_vertices):
+                result.append(tri)
+        return result
+        
+    # Check if the convex hull is contained in a facet of the cube
+    elif ch.is_subset_of_facet(cube_vertices):
+        # Return a triangulation of the convex hull itself
+        return ch.triangulate()
+        
+    else:
+        # Otherwise, return empty set
+        return []
+
+def is_on_cube_boundary(triangle, cube_vertices):
+    """
+    Checks if a triangle lies entirely on one of the 6 faces of the cube.
+    This is a simplified check; robust implementation requires plane intersection tests.
+    """
+    # Placeholder for geometric containment logic
+    # In the source, triangles "contained in a facet of Phi" are removed.
+    return False # Implementation detail not fully specified in source
+```
+
+## Subtopics
+
+### [Extended Marching Cubes with No Degenerate Triangles](2186-extended-marching-cubes-with-no-degenerate-triangles.md)
+Variant focusing specifically on eliminating degenerate triangles via post-processing or alternative logic.
+
+### [Contouring Discrete Indicator Functions](4087-contouring-discrete-indicator-functions.md)
+Method for contouring discrete data, often using similar topological considerations.
+
+### [2D Reduction for 3D DIF Contouring](4301-2d-reduction-for-3d-dif-contouring.md)
+Optimization technique for discrete indicator functions.
+
+### [Marching Cubes with Topological Correction (Case 6c)](4349-marching-cubes-with-topological-correction-case-6c.md)
+Addresses topological ambiguities in standard MC.
+
+### [Marching Cubes 33](5986-marching-cubes-33.md)
+Uses 33 lookup table entries to resolve ambiguities.
+
+## Operating characteristics
+- **Time Complexity**: The lookup table access is $O(1)$. The convex hull construction for each cube is constant time (8 points), but the overhead is higher than standard MC due to the larger table and geometric computations.
+- **Memory Complexity**: The lookup table requires $3^8 = 6561$ entries, significantly larger than the standard $2^8 = 256$ entries [S1, unofficial].
+- **Strengths**: Guarantees no degenerate (zero-area) triangles [S1, unofficial]. Avoids small area, edges, or angles often produced by standard MC [S1, unofficial].
+- **Limitations**: Larger lookup table size. Requires handling of the '=' label, which may be sensitive to floating-point precision [S1, unofficial].
+- **When to use**: When mesh quality is critical and degenerate triangles are unacceptable, and the scalar field allows for exact or well-defined equality checks.
+
+## Background
+The method was introduced by S. Raman and R. Wenger in 2008 [S1, unofficial]. It builds on convex hull-based algorithms for generating isosurface lookup tables by Lachaud and Montanvert [LM00] and Bhaniramka et al. [BWC00, BWC04]. The work addresses the limitation of standard Marching Cubes, which can produce degenerate triangles when scalar values equal the isovalue [S1, unofficial].
+
+## Sources
+[S1] Extended Marching Cubes, http://www.cse.ohio-state.edu/~wenger/publications/isomesh.pdf, fetched 2026-10-29 (unofficial)

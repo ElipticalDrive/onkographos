@@ -1,0 +1,128 @@
+# Emission-Absorption Model
+Also called: Absorption and Emission Model, Volume Rendering Integral, Volumetric Rendering Integral, Attenuated emission model
+
+## Overview
+The Emission-Absorption Model is the most widely used optical rendering model for direct volume rendering, calculating the final radiance reaching a camera from a participating medium by accounting for both light emission (glow) and absorption (attenuation) [S2, S3, unofficial]. It solves the problem of simulating realistic media like clouds or smoke without the computational cost of multiple scattering, distinguishing it from the Absorption-only model (which lacks glow) and the Single Scattering Model (which adds directional scattering) [S2, S3, unofficial][S4, book].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A viewing ray $\mathcal{R}$ parameterized by distance $t$ from the viewpoint, extending from start position $s_0$ (volume entry) to end position $D$ (volume exit or eye) [S2, unofficial][S4, book].
+*   **Input:** Extinction coefficient (density) function $\tau(t)$ or $k(t)$ [S2, S5, unofficial].
+*   **Input:** Emissive source term function $g(t)$ or $q(t)$ [S2, S5, unofficial].
+*   **Input:** Background radiance $I_0$ at $s_0$ [S2, unofficial][S4, book].
+*   **Output:** Final radiance $I(D)$ at the camera [S2, unofficial][S4, book].
+
+**Data Structures:**
+The method operates on scalar values along a 1D ray segment [S3, unofficial]. For implementation, the ray is discretized into $n$ segments of length $\Delta t = (D-s_0)/n$ [S2, S3, unofficial].
+
+**Formulas:**
+The continuous differential equation for intensity $I$ along the ray is:
+$$ \frac{dI}{ds} = g(s) - \tau(s)I(s) $$
+where $g(s)$ is the added intensity (emission) and $\tau(s)$ is the extinction coefficient [S5, unofficial]. Alternatively, using density $\rho$ and glow per unit projected area $C$:
+$$ \frac{dI}{ds} = C(s)\rho(s)A - \rho(s)AI(s) $$
+where $A$ is area [S4, book].
+
+The exact solution is the Volume Rendering Integral:
+$$ I(D) = I_0 e^{-\int_{s_0}^D \tau(t) \, dt} + \int_{s_0}^D g(s) e^{-\int_s^D \tau(t) \, dt} \, ds $$
+where $I_0$ is the background radiance, the first term is the attenuated background, and the second term is the emitted light attenuated by the medium between the emission point and the eye [S2, unofficial][S4, book][S5, unofficial].
+
+**Discretization and Compositing Steps:**
+The integral is approximated by dividing the ray into $n$ equal segments [S2, S3, unofficial]. The standard iterative approach uses front-to-back alpha compositing [S3, unofficial]:
+1. Initialize accumulated color $\hat{C}_{acc} = 0$ and accumulated opacity $\alpha_{acc} = 0$ [S3, unofficial].
+2. For each segment $i$ from $0$ to $n-1$:
+   a. Evaluate extinction $k_i = k(s_0 + i\Delta t)$ and emission $q_i = q(s_0 + i\Delta t)$ [S2, S3, unofficial].
+   b. Calculate segment transmittance $T_i = e^{-k_i \Delta t}$ [S2, unofficial][S4, book][S5, unofficial].
+   c. Calculate segment opacity $\alpha_i = 1 - T_i$ [S2, unofficial][S4, book][S5, unofficial].
+   d. Calculate segment pre-multiplied color $\hat{C}_i = q_i \Delta t$ [S3, unofficial].
+   e. Update accumulators using the previous opacity: $\hat{C}_{acc} = \hat{C}_{acc} + (1 - \alpha_{acc}) \hat{C}_i$ and $\alpha_{acc} = \alpha_{acc} + (1 - \alpha_{acc}) \alpha_i$ [S3, unofficial].
+3. Composite the background: $I(D) = \hat{C}_{acc} + I_0 (1 - \alpha_{acc})$ [S3, unofficial].
+
+An alternative back-to-front formulation computes the Riemann sum directly [S4, book]:
+$$ I(D) \approx I_0 \prod_{i=0}^{n-1} T_i + \sum_{i=0}^{n-1} (q_i \Delta t) \prod_{j=i+1}^{n-1} T_j $$
+where the products represent accumulated transmittance from the segment to the eye [S2, S3, unofficial].
+
+**Sabella's Density Emitter Model (Simplified):**
+If the emissive term is proportional to the extinction coefficient ($g(s) = \kappa \tau(s)$), where $\kappa$ is the constant color of the volume cloud, the integral simplifies [S4, book][S5, unofficial]:
+$$ I = I_0 T(D) + \kappa (1 - T(D)) $$
+where $T(D) = e^{-\int_{s_0}^D \tau(t) dt}$ is the total transmittance [S4, book][S5, unofficial]. This represents compositing color $\kappa$ over background $I_0$ using opacity $1 - T(D)$ [S4, book][S5, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def emission_absorption_model(s0, D, num_samples, background_radiance, extinction_func, emission_func):
+    """
+    Computes the final radiance using the Emission-Absorption model via front-to-back compositing.
+    
+    Args:
+        s0: Start position along the ray.
+        D: End position along the ray.
+        num_samples: Number of segments n.
+        background_radiance: I0, the radiance behind the volume.
+        extinction_func: Function k(t) returning extinction coefficient at t.
+        emission_func: Function q(t) returning emitted light intensity per unit length at t.
+        
+    Returns:
+        final_radiance: The computed radiance I(D).
+    """
+    if num_samples <= 0:
+        return background_radiance
+        
+    delta_t = (D - s0) / num_samples
+    acc_color = 0.0
+    acc_alpha = 0.0
+    
+    for i in range(num_samples):
+        t_pos = s0 + i * delta_t
+        
+        k = extinction_func(t_pos)
+        q = emission_func(t_pos)
+        
+        # Calculate segment transmittance and opacity
+        T_i = math.exp(-k * delta_t)
+        alpha_i = 1.0 - T_i
+        
+        # Pre-multiplied color contribution for this segment
+        C_seg = q * delta_t
+        
+        # Update accumulators using the OLD alpha for color blending
+        acc_color = acc_color + (1.0 - acc_alpha) * C_seg
+        acc_alpha = acc_alpha + (1.0 - acc_alpha) * alpha_i
+        
+    # Composite background
+    final_radiance = acc_color + background_radiance * (1.0 - acc_alpha)
+    return final_radiance
+```
+
+**Edge Cases and Pitfalls:**
+*   **Ordering:** Compositing requires strict ordering (back-to-front or front-to-back) because the equations are not commutative [S4, book].
+*   **Scattering:** The model does not explicitly consider light scattering (refraction), only attenuation and emission [S1].
+*   **Precision:** High intensities in emission-only models can produce unrealistic imagery; absorption is necessary for realism [S4, book].
+*   **Constant Emissivity:** If $C$ is constant, the simplified formula $I(D) = I_0 e^{-\int \rho A} + \mathbf{c}(1 - e^{-\int \rho A})$ can be used [S4, book].
+
+## Subtopics
+
+### Absorption Term Restriction
+An optical model restriction to the absorption term of the volume density model [S6]. It requires a 3D texture map containing the integral of the absorption coefficient along the viewing ray segment [S6]. Used for hardware-based view-independent cell projection where lookup tables replace per-ray integration [S6].
+
+## Operating characteristics
+*   **Time Complexity:** $O(n)$ per ray, where $n$ is the number of samples [S2, S3, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary memory per ray if marching in place, or $O(n)$ if storing voxel data [S3, unofficial].
+*   **Performance:** Computationally less expensive than Single Scattering or Multiple Scattering models, making it suitable for real-time rendering on CPUs and GPUs, although high-resolution datasets remain challenging [S2, unofficial].
+*   **Strengths:** Tractable for interactive rendering; widely used for direct volume rendering [S2, S3, unofficial][S4, book].
+*   **Limitations:** No multiple scattering; no explicit refraction; requires careful handling of opacity and color compositing [S1][S3, unofficial].
+*   **When to use:** Direct volume rendering of participating media where scattering is negligible or approximated by attenuation [S3, unofficial].
+*   **When not to use:** When realistic light transport involving multiple bounces or refraction is required [S1].
+
+## Background
+The Emission-Absorption Model is derived from the physical model of light transport in participating media [S3, unofficial]. It is based on the volume rendering equation, first formalized by Max [S1]. The specific simplification where emission is proportional to density (Sabella's density emitter model) was introduced by Sabella [S4, book][S5, unofficial]. It is considered "Low Albedo Volume Rendering" because it assumes low reflectivity (albedo), ignoring multiple scattering events [S4, book]. It is the standard model for Direct Volume Rendering (DVR) [S3, unofficial].
+
+## Sources
+[S1] Does 3D Gaussian Splatting Need Accurate Volumetric Rendering?, https://doi.org/10.1111/cgf.70032, fetched 2026-10-26
+[S2] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
+[S3] Volume Rendering with WebGL, https://www.willusher.io/webgl/2019/01/13/volume-rendering-with-webgl, fetched 2026-10-26 (unofficial)
+[S4] PDF Direct Volume Rendering, https://www.sci.utah.edu/~stevec/classes/cs5630/dvr.pdf, fetched 2026-10-27 (book)
+[S5] Mathematical models for volume rendering and neutron transport, https://digital.library.unt.edu/ark:/67531/metadc1274949/?q=volume rendering equation, fetched 2026-10-28 (unofficial)
+[S6] Hardware-based view-independent cell projection, https://www.semanticscholar.org/paper/Hardware-based-view-independent-cell-projection-Weiler-Kraus/36615d19709bce724437ec3257e43a1916f7de26, fetched 2026-10-29

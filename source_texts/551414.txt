@@ -1,0 +1,173 @@
+Is there any subsequent plan to support f16 (half-precision) floating-point value compression? At this point, we can only select -f for single- and -d for double-precision compression.
+
+Half-precision (16-bit) floating-point compression · Issue #23 · llnl/zfp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Half-precision (16-bit) floating-point compression #23
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Half-precision (16-bit) floating-point compression#23
+Copy link
+Labels
+enhancement
+Description
+yunhua-deng
+opened on Oct 31, 2018
+Issue body actions
+Is there any subsequent plan to support f16 (half-precision) floating-point value compression? At this point, we can only select -f for single- and -d for double-precision compression.
+👍React with 👍2Reacted by Michael Tedder and Jianshu Wang
+Activity
+yunhua-deng
+changed the title [-]Half-precision (f16) support[/-] [+]Half-precision (16-bit) floating-point compression[/+] on Oct 31, 2018
+lindstro commented on Oct 31, 2018
+lindstro
+on Oct 31, 2018
+Member
+More actions
+There are no immediate plans to support half precision, although parts of zfp have been designed to eventually accommodate both half and quad precision. Currently the best workaround is to convert half precision values to single precision before compressing.
+We might prioritize half precision support if we get enough requests. Would you mind telling us more about your use case and how zfp would be useful for compressing half precision data?
+yunhua-deng commented on Nov 1, 2018
+yunhua-deng
+on Nov 1, 2018
+Last edited by yunhua-deng
+Author
+More actions
+Thanks. If I understood it correctly, the complete workaround is: f16 <convert to> f32 -> compression -> decompression -> f32 <convert to> f16, right?
+We are working on compressing the tensor data being exchanged between different traning servers in a distributed Tensorflow setting. The tensor data could be in single or half precision.
+zfp, compared to others like lz4 or zstd, is much more powerful in terms of compressing floating-point values, especially in the lossy form (accuracy-mode), althought the speed may be slower than theirs. In my experiments, by setting the -a to 1e-3 or larger, compression ratio is usually much greater than 3x, while zstd can only achieve 1.1x or smaller ratios. However, the speed for zfp is somewhere around 100MB/s for those data in a single-thread setting.
+lindstro commented on Nov 1, 2018
+lindstro
+on Nov 1, 2018
+Member
+More actions
+Yes, that's currently the best workaround.
+Thanks for describing your problem. I'm surprised you're getting only 100 MB/s throughput using zfp. I assume this is for single precision and low-dimensional data? Have you experimented with zfp's OpenMP or CUDA implementations? We're seeing about 100-150 GB/s throughput on an NVIDIA V100.
+yunhua-deng commented on Nov 5, 2018
+yunhua-deng
+on Nov 5, 2018
+Last edited by yunhua-deng
+Author
+More actions
+It's 4-d array of single-precision (float32) values (1MB in byte size), please find the attached sample data file for doing measurements. I chose to treat it as 1-d data instead of 4-d data for compression, since doing so I got better compression (don't know why). Below is the very simple compression test done in my Windows 64-bit laptop with Intel i7 CPUs. The ctime and dtime are for compression time and decompression time, respectively, excluding the file input/output latency. I tried with OpenMP but nearly no help in terms of speedup. I am not considering using GPUs for compression/decompression in may current case. The GPUs are mainly for training, while CPUs are for compression and network transmission.
+```
+zfp -i sample_f32_256x1x1x1024.data -z sample_f32_256x1x1x1024.data.z -o sample_f32_256x1x1x1024.data.o -f -1 262144 -a 1e-3 -s
+ctime=0.011s cspeed=91MB/s
+dtime=0.009s dspeed=111MB/s
+type=float nx=262144 ny=1 nz=1 nw=1 raw=1048576 zfp=213864 ratio=4.9 rate=6.527 rmse=0.0001652 nrmse=0.00788 maxe=0.000666 psnr=36.05
+```
+sample_f32_256x1x1x1024.zip
+lindstro commented on Nov 6, 2018
+lindstro
+on Nov 6, 2018
+Member
+More actions
+@yunhua-deng, thanks for sharing your data. It appears to be uncorrelated (random) in space, making it not a great candidate for zfp compression. zfp was designed for data that varies "smoothly" along each dimension.
+If you still want to use zfp, then I would suggest treating the data as multidimensional, as for uncorrelated data there's no penalty in doing so, but some potential benefits. You should, for instance, gain both in throughput and compression ratio while reducing the error:
+```
+% zfp -f -1 262144 -a 1e-3 -i sample_f32_256x1x1x1024.data -s
+type=float nx=262144 ny=1 nz=1 raw=1048576 zfp=213864 **ratio=4.9** rate=6.527 **rmse=0.0001652** nrmse=0.00788 maxe=0.000666 psnr=36.05
+%  zfp -f -2 4 65536 -a 1e-3 -i sample_f32_256x1x1x1024.data -s
+type=float nx=4 ny=65536 nz=1 raw=1048576 zfp=200152 **ratio=5.24** rate=6.108 **rmse=8.402e-05** nrmse=0.004006 maxe=0.0004132 psnr=41.92
+% zfp -f -3 4 4 16384 -a 1e-3 -i sample_f32_256x1x1x1024.data -s
+type=float nx=4 ny=4 nz=16384 raw=1048576 zfp=230568 **ratio=4.55** rate=7.036 **rmse=4.26e-05** nrmse=0.002031 maxe=0.000248 psnr=47.82
+```
+So going from 1D to 2D to 3D, the compression ratio is very roughly the same but the error halves each time you increase the dimensionality. Again, this is a bit like compressing text documents with JPEG--not what you'd want to do--but with the data exhibiting limited dynamic range, zfp should at least do better than storing the data uncompressed.
+yunhua-deng commented on Nov 6, 2018
+yunhua-deng
+on Nov 6, 2018
+Last edited by yunhua-deng
+Author
+More actions
+Thanks for clearifying and showcasing the usage of dimensionality information for compressing with zfp. I am surprised to see the benefits on error reduction when treating the data as multidimensional array with some specified size on each dimension.
+This kind of data is very hard to compress using traditional lossless compressors like lz77 codecs. Going to float16 instead of float32 or using lossy compressors like zfp seems to be the only choice. I am also looking for some other floating-point compressors, such as TurboPFor. Its working logic sounds like:
+pad the trailing mantissa bits with zeros (preconditioning or preprocessing)
+transpose or shuffle the bits to make it better for lz77 compression (preconditioning or preprocessing)
+use lz4 or zstd to do the actual compression
+The decompression works with the reverse steps.
+lindstro commented on Nov 6, 2018
+lindstro
+on Nov 6, 2018
+Member
+More actions
+Part of the reason for the error reduction is that, for a fixed tolerance, zfp increases the precision with dimensionality to meet that tolerance. Part of the reason why storage does not increase much in spite of higher precision is that the common exponent within each block of 4^d values is amortized over more values in higher dimensions, d. With the data being more or less random, no true compression is possible, so you're mostly seeing benefits of reduced storage due to quantization and exponent amortization.
+My understanding of TurboPFor is that it uses DFCM on floating-point data, which likewise won't work well on data that is not autocorrelated. Bit shuffling should help some if combined with byte oriented compression. You might also try our fpzip compressor, which supports both lossless and lossy compression.
+falken42 commented on Dec 17, 2018
+falken42
+on Dec 17, 2018
+More actions
+I'd like to chime in as someone else who would enjoy having direct half-precision float support in zfp.
+We're currently working on a project where we stream 2D disparity/depth maps from a RGBD camera and need to transfer the data in realtime over a cellular network, so compression is a must. As depth maps arrive from the camera in float16 format, we first need to convert them to float32 before passing it to zfp.
+While doing the conversion is definitely not an issue at all, being able to pass a float16 buffer and letting zfp work directly on that data would avoid the need for the conversion and help lower CPU usage.
+lindstro commented on Dec 17, 2018
+lindstro
+on Dec 17, 2018
+Member
+More actions
+@falken42 Thanks for your feedback. I'm thinking we could initially add support for half precision to the high-level interface only (not to the C++ compressed arrays). What complicates full support is that half precision is not a standard C type, so we'd either have to rely on a third-party library (which we try to avoid), limit support to, say, gcc's __fp16, or write our own implementation. The latter is not a big deal if we're only talking about the initial conversion between half and zfp's block floating-point representation. Full support for arithmetic, as required for the compressed arrays, would be a much larger effort.
+Another current issue is that float and double compression have their separate implementations (based on 32- and 64-bit integer arithmetic), and half precision would add another one if implemented using 16-bit arithmetic. We've been contemplating moving toward a single, unified zfp representation based on 64-bit integers, with the API serving only to convert between this single zfp representation and other types, including half, bfloat16, posits, etc. In my opinion, this would be the right way to support half precision, as it requires only implementing conversion between that scalar type and 64-bit block-floating point. This would, however, entail a larger change to the API and underlying compressed format, which likely won't happen until fall 2019 or later.
+I'll see if I can come up with a near-term solution to supporting half precision that could be rolled out with the March release.
+👍React with 👍1Reacted by Michael Tedder
+markcmiller86 commented on Oct 6, 2019
+markcmiller86
+on Oct 6, 2019
+Member
+More actions
+Just an FYI...at the 2019 Smokey Mountain Conference (SMC) just this August, I saw several presentations focused on using half precision; either IEEE compliant variants or homegrown pseudo-equivalents. Have a look at the first half of Aug 28th agenda
+lindstro commented on Oct 7, 2019
+lindstro
+on Oct 7, 2019
+Member
+More actions
+Thanks for the pointer. Some of these talks are from colleagues working on LLNL's Variable Precision Computingproject. I myself am involved in development and standardization efforts of some of these new number types (other than zfp).
+Although IEEE half precision is gaining popularity for certain mixed-precision computations, it's not a very suitable number format for such computations. Posits and our own universal codes tend to significantly outperform IEEE half in accuracy. The next major update to the zfp library will have support for converting many different types to and from zfp, including the various IEEE types, posits, and others.
+lindstro
+added
+enhancement
+on Nov 7, 2019
+aras-p commented on Aug 27, 2021
+aras-p
+on Aug 27, 2021
+More actions
+As part of trying out ZFP compression for OpenEXR images (blog post), I did a quick hack of trying to add half-precision FP16 data support to ZFP.
+Here's the commit: aras-p@c8e60c00a
+Only did it for 2D case so far,
+Seems to work fine, at least in the reversible compression mode,
+My frexp and ldexp functions for FP16 might very well be "wrong" or at least suboptimal,
+One possible issue is with the "metadata" encoding used by ZFP. Currently it only uses two bits to store the data type, but if you want to add more data types (e.g. half), it would need to be bumped to three bits in metadata. Which means possible backwards compatibility breaking change with existing data.
+lindstro commented on Aug 27, 2021
+lindstro
+on Aug 27, 2021
+Member
+More actions
+@aras-p Thanks for sharing. We have not tackled fp16 yet for several reasons. First, the way zfp is currently structured, each new data type requires a separate code path for numerous backends (serial, OpenMP, CUDA, HIP, SYCL, ...), languages (C, C++, Python Fortran), APIs (high-level C, low-level C, low-level C++, C++ compressed arrays, cfp), and array dimensionalities (1D-4D), including thousands of new tests and documentation. Second, as you point out, there are compatibility issues to deal with. Third, fp16 is not a widely supported type, so additional work is needed to portably support it across different languages, etc.
+We sometimes provide experimental branches for unsupported features, and I'd be happy to create one that you can submit a PR to. It would be nice to have a somewhat more complete implementation than only 2D reversible compression via the high-level C API, but perhaps others can later add to what you have now.
+Long term, our thinking is to support fp16 (and bfloats, posits, quad precision, int8, int16, ...) through a single zfp compressed data type and a single uncompressed interchange format (based on block floating point), which one supplies conversion functions for. So, to support a new type, all you need to do is write two functions that convert between that type and the interchange format.
+Finally, zfp's reversible mode is an afterthought and not a highly optimized approach to lossless compression. If you're interested in losslessly compressing fp16 images, it might make sense to adapt fpzip instead. And you'll probably want to apply color channel decorrelation, e.g., via a transform to YCoCg. I assume you compressed R, G, and B independently in your experiments, taking care not to transpose the image dimensions (zfp assumes Fortran order).
+👍React with 👍2Reacted by Aras Pranckevičius and King.Zevin
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancement
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

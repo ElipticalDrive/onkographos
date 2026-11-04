@@ -1,0 +1,140 @@
+--- v001.md
++++ v002.md
+@@ -1,4 +1,3 @@
+ # R-Buffer
+-
+ Also called: Wittenbrink's R-Buffer, Recirculating Fragment Buffer
+ 
+@@ -7,5 +6,5 @@
+ 
+ ## How it works
+-The R-buffer implements a fragment-level sorting and compositing mechanism. While originally proposed as dedicated hardware [S1], it is often simulated or approximated in software using Multiple Render Targets (MRT) to store k-buffer entries [S2, unofficial]. The method replaces per-primitive sorting with per-pixel sorting to handle high depth complexity [S3, unofficial].
++The R-Buffer implements a fragment-level sorting and compositing mechanism [S3, unofficial]. While originally proposed as dedicated hardware [S1], it is often simulated or approximated in software using Multiple Render Targets (MRT) to store k-buffer entries [S2, unofficial]. The method replaces per-primitive sorting with per-pixel sorting to handle high depth complexity [S3, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -28,26 +27,26 @@
+ *   In GPU implementations (e.g., using ATI MRT extensions), the R-buffer logic is approximated using a fixed-size "k-buffer" per pixel [S2, unofficial].
+ *   **Layout:** Each entry consists of a scalar data value $v$ and distance $d$ from the eye [S2, unofficial].
+-*   **Capacity:** Stores $k$ entries. In the example implementation, $k=3$, allowing the sorting of up to 7 fragments (3 entries + 3 remaining from previous passes + 1 incoming) in a single pass [S2, unofficial].
++*   **Capacity:** Stores $k$ entries. In the cited implementation, $k=3$, allowing the sorting of up to seven fragments in a single pass (six entries from the k-buffer plus the incoming fragment) [S2, unofficial].
+ *   **Tags:** Holes (concavities) can be handled by storing tags as the signs of $v$ and $d$ (internal/external classification) [S2, unofficial].
+ 
+ ### Algorithm Steps
+ 
+-The process involves a single geometry pass followed by multiple recirculation passes until all fragments are composited or discarded.
++The process involves a single geometry pass followed by multiple recirculation passes until all fragments are composited or discarded [S3, unofficial].
+ 
+-1.  **Rasterization:** Scan-convert all polygons only once. Fragments are generated with their view-space depth $d$ (calculated in the vertex program and passed to the fragment shader) [S1][S2, unofficial].
++1.  **Rasterization:** Scan-convert all polygons only once [S1]. Fragments are generated with their view-space depth $d$ (calculated in the vertex program and passed to the fragment shader) [S2, unofficial].
+ 2.  **Initial Classification:**
+-    *   If a fragment is opaque and closer than the current framebuffer depth, it replaces the framebuffer content.
+-    *   If a fragment is transparent, it is compared against the framebuffer. If it is the closest transparent fragment, it may be stored in the framebuffer (if no opaque exists) or sent to the R-buffer [S3, unofficial].
++    *   If a fragment is opaque and closer than the current framebuffer depth, it replaces the framebuffer content [S3, unofficial].
++    *   If a fragment is transparent, it is compared against the framebuffer [S3, unofficial].
+     *   Fragments not stored in the framebuffer are sent to the R-buffer [S3, unofficial].
+ 3.  **Recirculation Pass (Per Pixel):**
+-    *   Fetch current entries from the R-buffer (or k-buffer).
++    *   Fetch current entries from the R-buffer (or k-buffer) [S2, unofficial].
+     *   Find the two closest fragments to the eye by sorting entries based on stored distance $d$ [S2, unofficial].
+-    *   Compute the ray segment defined by these two entries.
++    *   Compute the ray segment defined by these two entries [S2, unofficial].
+     *   Look up color and opacity from a 3D pre-integrated texture using the scalar values ($v_1, v_2$) and distance difference ($\Delta d = d_2 - d_1$) of the two closest entries [S2, unofficial].
+     *   Composite the resulting color and opacity with the color and opacity from the framebuffer (Porter and Duff compositing) [S2, unofficial][S3, unofficial].
+-    *   Discard the closest fragment (it has been composited).
++    *   Discard the closest fragment (it has been composited) [S2, unofficial].
+     *   Write the remaining entries back into the R-buffer (or k-buffer) for the next pass [S2, unofficial][S3, unofficial].
+ 4.  **Termination:**
+-    *   The process repeats in successive passes.
++    *   The process repeats in successive passes [S3, unofficial].
+     *   Termination occurs when the framebuffer opacity exceeds a threshold (early ray termination) or when the R-buffer is empty [S2, unofficial][S3, unofficial].
+ 
+@@ -55,49 +54,44 @@
+ 
+ ```python
+-# Inputs:
+-#   f_new: Incoming fragment with depth d_new, scalar v_new, color c_new
+-#   k_buffer: Array of 3 entries, each with depth d, scalar v, color c
+-#   fb: Framebuffer entry with depth d_fb, color c_fb, opacity alpha_fb
++def k_buffer_pass(f_new, k_buffer, framebuffer):
++    # Stage 1: Read Framebuffer
++    c1 = framebuffer.color
++    if c1.is_opaque:
++        return framebuffer  # Early termination, opaque fragment occludes all others
+ 
+-# Stage 1: Read Framebuffer
+-c1 = ReadColorFromFramebuffer()
+-if c1.is_opaque:
+-    RETURN # Early termination, opaque fragment occludes all others
++    # Stage 2: Fetch K-Buffer Entries
++    f1, f2, f3 = k_buffer
++    all_fragments = [f_new, f1, f2, f3]
+ 
+-# Stage 2: Fetch K-Buffer Entries
+-f1, f2, f3 = ReadFromKBuffer()
++    # Find the closest fragment to the eye (minimum depth)
++    n1 = min(all_fragments, key=lambda f: f.depth)
++    remaining = [f for f in all_fragments if f is not n1]
+ 
+-# Combine incoming fragment with k-buffer entries
+-all_fragments = [f_new, f1, f2, f3]
++    # Find the second closest fragment from the remaining
++    n2 = min(remaining, key=lambda f: f.depth)
++    r1, r2, r3 = remaining  # The rest are written back
+ 
+-# Find the closest fragment to the eye (minimum depth)
+-n1 = FindClosest(all_fragments)
+-remaining = RemoveFromList(all_fragments, n1)
++    # Stage 3: Lookup and Composite
++    d1 = n1.depth
++    d2 = n2.depth
++    v1 = n1.scalar
++    v2 = n2.scalar
++    delta_d = d2 - d1
+ 
+-# Find the second closest fragment from the remaining
+-n2 = FindClosest(remaining)
+-r1, r2, r3 = remaining # The rest are written back
++    # Look up color/opacity for the segment between n1 and n2
++    # from a pre-integrated 3D texture
++    c2 = read_pre_integrated_texture(v1, v2, delta_d)
+ 
+-# Stage 3: Lookup and Composite
+-d1 = n1.depth
+-d2 = n2.depth
+-v1 = n1.scalar
+-v2 = n2.scalar
++    # Composite the segment color c2 with the accumulated framebuffer color c1
++    # Standard front-to-back compositing for unassociated color:
++    alpha2 = c2.alpha
++    c1_out = c1.color * (1.0 - alpha2) + c2.color * alpha2
++    alpha1_out = c1.alpha + alpha2 * (1.0 - c1.alpha)
++    framebuffer.color = c1_out
++    framebuffer.alpha = alpha1_out
+ 
+-delta_d = d2 - d1
+-
+-# Look up color/opacity for the segment between n1 and n2
+-# from a pre-integrated 3D texture
+-c2 = ReadFromPreIntegratedTexture(v1, v2, delta_d)
+-
+-# Composite the segment color c2 with the accumulated framebuffer color c1
+-# Assuming standard front-to-back compositing:
+-# c_out = c1 * (1 - alpha2) + c2 * alpha2
+-# alpha_out = alpha1 + alpha2 * (1 - alpha1)
+-# (Exact formula depends on color representation, e.g., associated vs unassociated)
+-Composite(c1, c2) into Framebuffer
+-
+-# Stage 4: Write Back
+-WriteToKBuffer(r1, r2, r3)
++    # Stage 4: Write Back
++    k_buffer = (r1, r2, r3)
++    return framebuffer
+ ```
+ 
+@@ -108,5 +102,5 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Holes/Concavities:** Properly handling holes requires dynamic tagging of vertices as boundary/internal and k-buffer entries as internal/external. Ray segments with both vertices on the boundary should have zero color/opacity. However, the logic to update these tags dynamically exceeds current hardware instruction limits in the cited implementation. Consequently, the implementation uses only a single tag for initialization and does not handle holes properly [S2, unofficial].
++*   **Holes/Concavities:** Properly handling holes requires dynamic tagging of vertices as boundary/internal and k-buffer entries as internal/external [S2, unofficial]. Ray segments with both vertices on the boundary should have zero color/opacity [S2, unofficial]. However, the logic to update these tags dynamically exceeds current hardware instruction limits in the cited implementation [S2, unofficial]. Consequently, the implementation uses only a single tag for initialization and does not handle holes properly [S2, unofficial].
+ *   **Hardware Status:** The original R-buffer hardware does not exist; implementations are software simulations or GPU shader approximations [S1].
+ *   **Performance:** The software version does more work than incremental sorting algorithms (like Wilhelms et al.) because sorts are repeated from scratch independently at each pixel [S1].

@@ -1,0 +1,208 @@
+# Virtual Voxel
+
+
+## Overview
+Virtual Voxel is a rasterization-based voxel renderer designed for the real-time visualization and modification of large-scale voxel scenes (e.g., $4^{12}$ resolution) by combining virtual texture and virtual geometry concepts [S1]. It streams appropriate levels of detail into GPU memory using a two-level data structure, storing data linearly to enable efficient real-time editing (Union/Subtraction) [S1]. Unlike previous graph-based voxel visualization methods, it employs a rasterization rendering pipeline, resulting in highly efficient modification of large scenes [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A pre-generated Sparse Voxel Octree (STree) representing the scene geometry; camera position and orientation; user interaction commands (Union/Subtraction via screen pick).
+*   **Output:** A 64-bit framebuffer containing position and albedo for opaque voxels; a modified STree and voxel pool reflecting real-time changes.
+
+**Data Structures:**
+1.  **STree (Streaming Tree):** A two-level structure.
+    *   **High-level:** A 2D uniform grid of chunks.
+    *   **Low-level:** A sparse octree within each chunk. Each node (called a "cell") represents a $64 \times 64 \times 64$ resolution voxel data block [S1].
+    *   **Storage:** Only existence flags are recorded for each cell to efficiently store sparse data [S1].
+2.  **GPU Voxel Pool:**
+    *   Allocates a new page for each streamed cell [S1].
+    *   Each page accommodates 16,384 ($128 \times 128$) voxels [S1].
+3.  **Visibility Buffer:**
+    *   64-bit buffer per pixel [S1].
+    *   Layout: `depth_bits << 32 | cell_id << 12 | voxel_id` [S1].
+4.  **Framebuffer:**
+    *   64-bit buffer per pixel [S1].
+    *   Layout: `depth_bits << 32 | albedo` [S1].
+
+**Parameters:**
+*   **LOD_factor:** Scalar multiplier for cell size in LOD error calculation. Typical value: 8 (for Berlin Data Set) [S1].
+
+**Algorithm Steps:**
+
+1.  **Streaming (CPU-GPU Handoff):**
+    1.  The CPU traverses the STree from the root cell to determine the suitable Level of Detail (LOD) using a distance-based error metric [S1].
+    2.  Calculate LOD error:
+        $$LOD\_error = \|CellCenterPos - CamPos\| - (LOD\_factor \times CellSize)$$
+        where $CellCenterPos$ is the center of the current cell, $CamPos$ is the camera position, and $CellSize$ is the side length of the cell [S1].
+    3.  If $LOD\_error > 0$, the CPU evaluates child cells (current cell does not meet LOD metric) [S1].
+    4.  If $LOD\_error \le 0$ or the cell is a leaf, send a cell-building request to the GPU [S1].
+
+2.  **Cell Voxelization (GPU):**
+    1.  Upon receiving a request, allocate a page in the Voxel Pool for the cell [S1].
+    2.  Voxelize the cell at $64^3$ resolution using the method from Crassin and Green [2012] [S1].
+    3.  Write the voxelization result into a $64^3$ size buffer [S1].
+    4.  Atomically append the result to the allocated page in the Voxel Pool [S1].
+
+3.  **Rendering Pass 1 (Visibility Buffer):**
+    1.  Render voxels as points to the 64-bit visibility buffer [S1].
+    2.  Use frustum culling to discard invisible cells [S1].
+    3.  Each compute thread renders 64 voxels of a cell [S1].
+
+4.  **Rendering Pass 2 (Reconstruction and Final Framebuffer):**
+    1.  Reconstruct voxels from the visibility buffer using a method similar to Nanite [S1].
+    2.  Each compute thread reads one pixel from the visibility buffer [S1].
+    3.  Reconstruct the voxel as a geometry cube with 12 triangles [S1].
+    4.  Render the cube; the result contains position and albedo [S1].
+    5.  Write the result to the 64-bit framebuffer using an `AtomicMin` operation on the depth component [S1].
+
+5.  **Real-Time Modification (Union/Subtraction):**
+    1.  **Screen Pick:** Retrieve the depth value from the framebuffer at the mouse click position $P$ [S1].
+    2.  **World Position:** Determine world position $wP$ of $P$ using the inverted camera matrix [S1].
+    3.  **AABB Computation:** Compute an Axis-Aligned Bounding Box (AABB) around $wP$ [S1].
+    4.  **Cell Identification:** Identify all STree cells intersecting the AABB [S1].
+    5.  **Re-voxelization:**
+        *   Execute a voxelization shader to re-voxelize the identified cells [S1].
+        *   **Subtraction:** Use a buffer containing subtraction cube positions and scales. During voxelization, eliminate voxels residing within these subtraction cubes [S1].
+        *   **Union:** Execute a compute shader for the Union operation using union cube inputs. Merge the union result with the regular voxelization result [S1].
+    6.  **Update Pool:** Atomically append the combined voxelization result to the allocated voxel page [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+CELL_RESOLUTION = 64
+CELL_SIZE = 64.0  # Assuming unit world space per voxel for simplicity, scaled by LOD_factor
+LOD_FACTOR = 8.0
+PAGE_CAPACITY = 16384
+
+def calculate_lod_error(cell_center, camera_pos, cell_size):
+    """
+    Calculates the LOD error for a cell.
+    Returns positive if child cells should be evaluated.
+    """
+    distance = vector_length(cell_center - camera_pos)
+    threshold = LOD_FACTOR * cell_size
+    return distance - threshold
+
+def stream_cells(stree_root, camera_pos):
+    """
+    CPU-side traversal to find cells to stream to GPU.
+    """
+    queue = [stree_root]
+    while queue:
+        cell = queue.pop(0)
+        error = calculate_lod_error(cell.center, camera_pos, CELL_SIZE)
+        
+        if error > 0 and not cell.is_leaf:
+            # Evaluate children
+            queue.extend(cell.children)
+        else:
+            # Send request to GPU
+            gpu_request_cell(cell.id)
+
+def gpu_voxelize_cell(cell_id, geometry_data):
+    """
+    GPU-side: Voxelize a cell and store in Voxel Pool.
+    """
+    # Allocate page in Voxel Pool
+    page_id = voxel_pool.allocate_page()
+    
+    # Voxelize using Crassin and Green method [S1]
+    # Result is a 64^3 buffer
+    voxel_buffer = crassin_green_voxelize(geometry_data, resolution=64)
+    
+    # Atomically append to page
+    voxel_pool.append(page_id, voxel_buffer)
+    return page_id
+
+def render_visibility_buffer(cells, camera):
+    """
+    Pass 1: Render voxels as points to visibility buffer.
+    """
+    # Frustum cull cells
+    visible_cells = frustum_cull(cells, camera)
+    
+    for cell in visible_cells:
+        # Each compute thread renders 64 voxels
+        voxels = cell.get_voxels()
+        for i in range(0, len(voxels), 64):
+            batch = voxels[i : i+64]
+            render_points_to_visibility(batch, camera)
+
+def render_final_framebuffer(camera):
+    """
+    Pass 2: Reconstruct and render voxels as cubes.
+    """
+    # Read visibility buffer
+    visibility_data = read_visibility_buffer()
+    
+    for pixel in visibility_data:
+        if pixel.valid:
+            # Reconstruct voxel geometry (12 triangles)
+            voxel_geom = reconstruct_voxel_from_visibility(pixel)
+            
+            # Render cube
+            depth, albedo = render_cube(voxel_geom, camera)
+            
+            # AtomicMin on depth, store albedo
+            framebuffer.atomic_min_depth(pixel.coord, depth)
+            framebuffer.set_albedo(pixel.coord, albedo)
+
+def modify_scene(mouse_pos, framebuffer, stree, camera):
+    """
+    Handle Union/Subtraction modifications.
+    """
+    # 1. Screen pick
+    depth = framebuffer.get_depth(mouse_pos)
+    
+    # 2. World position
+    world_p = invert_camera_matrix(camera) * screen_to_world(mouse_pos, depth)
+    
+    # 3. AABB and Cell ID
+    aabb = compute_aabb_around(world_p)
+    affected_cells = stree.find_intersecting_cells(aabb)
+    
+    # 4. Re-voxelize
+    for cell in affected_cells:
+        # Get modification data (subtraction cubes or union cubes)
+        mod_data = get_modification_data_for_cell(cell, world_p)
+        
+        # Re-voxelize
+        new_voxels = voxelize_cell_with_modifications(cell, mod_data)
+        
+        # Append to pool
+        voxel_pool.append(cell.page_id, new_voxels)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Transparent Rendering:** Unachievable because the `AtomicMin` operation (used for depth/visibility) cannot blend color values [S1].
+*   **Precision:** The visibility buffer uses a 64-bit layout. Care must be taken to pack `cell_id` and `voxel_id` correctly to avoid overflow or misinterpretation [S1].
+*   **Boundary Conditions:** Frustum culling must be robust to avoid rendering cells that are partially visible but incorrectly culled [S1].
+
+## Subtopics
+
+### Streaming LOD
+Uses a distance-based error metric to determine which cells to stream. Sets itself apart by using a simple scalar multiplier (`LOD_factor`) rather than complex geometric error metrics. Choose when memory bandwidth is a bottleneck and scene scale is massive. [Link to [Streaming LOD](link)].
+
+### Visibility Buffer Rendering
+Uses a 64-bit visibility buffer to decouple geometry reconstruction from shading. Sets itself apart by enabling efficient reconstruction of voxel cubes from point data. Choose when rendering large numbers of small primitives efficiently. [Link to [Visibility Buffer Rendering](link)].
+
+### Real-Time Voxel Modification
+Supports Union and Subtraction via screen picking and re-voxelization. Sets itself apart by allowing direct modification of the sparse voxel structure in real-time. Choose when interactive editing of voxel scenes is required. [Link to [Real-Time Voxel Modification](link)].
+
+## Operating characteristics
+*   **Time Complexity:** Streaming is logarithmic with respect to scene depth (octree traversal). Voxelization is linear with respect to the number of voxels in a cell ($64^3$). Rendering is linear with respect to the number of visible voxels.
+*   **Memory Complexity:** Linear with respect to the number of streamed cells. Each cell consumes a page of 16,384 voxels in the Voxel Pool.
+*   **Measured Performance:** Average frame time of 6.0459 ms at 4K resolution on a Windows 10 desktop with AMD Threadripper 2950X and RTX4090, measured during a camera fly-through of a 16x16 chunk test scene ($4^{12}$ resolution) [S1].
+*   **Strengths:** Real-time rendering of large-scale scenes ($4^{12}$); efficient real-time modification (Union/Subtraction); linear storage allows efficient streaming.
+*   **Limitations:** Only supports opaque objects; transparent rendering is unachievable due to atomic operations [S1].
+*   **When to Use:** Large-scale urban or environmental visualization where real-time editing is needed.
+*   **When Not to Use:** Scenes requiring transparency or complex lighting effects that require blending.
+
+## Background
+Virtual Voxel was introduced by Jinyuan Yang and Abraham G. Campbell in 2023 [S1]. It builds on the concepts of Virtual Texture and Virtual Geometry, adapting them for voxel data. The voxelization method used is based on Crassin and Green [2012] [S1]. The visibility buffer approach references Burns and Hunt [2013] [S1], and the reconstruction method references Nanite (Karis et al. [2021]) [S1]. The method was evaluated using the Berlin Data Set [S1].
+
+## Sources
+[S1] VirtualVoxel: Real-Time Large Scale Scene Visualization and Modification, https://doi.org/10.1145/3588028.3603664, fetched 2026-10-30

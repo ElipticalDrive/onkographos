@@ -1,0 +1,199 @@
+I discovered a problem when voxelizing complex geometries (nasal_cavity.ply.zip). The problem is visible in the following comparison of the original geometry (shown in red) and the voxelized geometry shown translucently in gray: Apparent...
+
+Bug in Trimesh.voxelized · Issue #200 · mikedh/trimesh · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Bug in Trimesh.voxelized #200
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Bug in Trimesh.voxelized#200
+Copy link
+Labels
+bug
+Description
+david-zwicker
+opened on Aug 2, 2018
+Issue body actions
+I discovered a problem when voxelizing complex geometries (nasal_cavity.ply.zip). The problem is visible in the following comparison of the original geometry (shown in red) and the voxelized geometry shown translucently in gray:
+Apparently, the voxelization adds vertical bands that are not present in the original geometry. The code I used to generate the voxelization is
+```
+mesh = trimesh.load('nasal_cavity.ply')
+print(mesh.is_watertight)
+mesh_discretized = mesh.voxelized(pitch=1, max_iter=None)
+voxels = mesh_discretized.marching_cubes
+voxels.export('nasal_cavity_voxels.ply')
+```
+I also tried different values for pitch and I used method='ray', but I observed similar effects for all settings. Is there any hope to achieve a proper voxelization of this geometry?
+Activity
+mikedh commented on Aug 2, 2018
+mikedh
+on Aug 2, 2018
+Owner
+More actions
+Hey David- I'm pretty unhappy with the state of the voxel module, but unfortunately I don't have cycles to make it better. PR's are always welcome!
+In this case- could you split by connectivity before voxelizing? Or perhaps use the surface voxelization rather than the filled one? The surface one shouldn't have those artifacts, right?
+Two functions in trimesh that didn't exist when I wrote voxels originally are mesh.section_multiplane and path.rasterize that might be a way to get decent filled voxelizations of complex models. IE take a bunch of slices, make sure the 2D curves are alright, rasterize which uses PIL and comes out as a numpy array, then use np.nonzero and the to_3D transform in the path:
+```
+In [1]: import trimesh
+
+In [2]: m = trimesh.primitives.Box()
+
+In [3]: m.bounds
+Out[3]: 
+array([[-0.5, -0.5, -0.5],
+       [ 0.5,  0.5,  0.5]])
+
+In [4]: m.multiplane?
+Object `m.multiplane` not found.
+
+In [5]: m.section_multiplane?
+Signature: m.section_multiplane(plane_origin, plane_normal, heights)
+Docstring:
+Return multiple parallel cross sections of the current
+mesh in 2D.
+
+Parameters
+---------
+plane_normal: (3) vector for plane normal
+   Normal vector of section plane
+plane_origin : (3,) float
+   Point on the cross section plane
+heights : (n,) float
+   Each section is offset by height along
+   the plane normal.
+
+Returns
+---------
+paths : (n,) Path2D or None
+    2D cross sections at specified heights.
+    path.metadata['to_3D'] contains transform
+    to return 2D section back into 3D space.
+File:      /media/psf/Home/Dropbox (Personal)/robotics/trimesh/trimesh/base.py
+Type:      method
+
+
+In [7]: import numpy as np
+
+In [8]: paths = m.section_multiplane(m.bounds[0], [0,0,1], heights=n
+   ...: p.arange(m.extents[2], step=.1))
+
+In [9]: paths
+Out[9]: 
+[<trimesh.path.path.Path2D at 0x7fd769071f60>,
+ <trimesh.path.path.Path2D at 0x7fd74c06be10>,
+ <trimesh.path.path.Path2D at 0x7fd769071e80>,
+ <trimesh.path.path.Path2D at 0x7fd74c064080>,
+ <trimesh.path.path.Path2D at 0x7fd74c0640b8>,
+ <trimesh.path.path.Path2D at 0x7fd74c064048>,
+ <trimesh.path.path.Path2D at 0x7fd74c0640f0>,
+ <trimesh.path.path.Path2D at 0x7fd74c064198>,
+ <trimesh.path.path.Path2D at 0x7fd74c064240>,
+ <trimesh.path.path.Path2D at 0x7fd74c0642e8>]
+
+In [10]: p = paths[0]
+
+In [11]: p.metadata
+Out[11]: 
+{'to_3D': array([[ 1. ,  0. ,  0. , -0.5],
+        [ 0. ,  1. ,  0. , -0.5],
+        [ 0. ,  0. ,  1. , -0.5],
+        [ 0. ,  0. ,  0. ,  1. ]])}
+
+In [12]: p.rasterize?
+Signature: p.rasterize(pitch, origin, resolution=None, fill=True, width=None, **kwargs)
+Docstring:
+Rasterize a Path2D object into a boolean image ("mode 1").
+
+Parameters
+------------
+pitch:      float, length in model space of a pixel edge
+origin:     (2,) float, origin position in model space
+resolution: (2,) int, resolution in pixel space
+fill:       bool, if True will return closed regions as filled
+width:      int, if not None will draw outline this wide (pixels)
+
+Returns
+------------
+raster: PIL.Image object, mode 1
+```
+david-zwicker commented on Aug 3, 2018
+david-zwicker
+on Aug 3, 2018
+Author
+More actions
+I found an alternative solution using scipy.ndimage, which solves my particular problem. However, I'm not sure whether the solution is general enough to be included in trimesh. What I ended up doing was using the matrix associated with the sparse_surface and filled in the solid part using morphological operations available in scipy:
+```
+import trimesh
+from trimesh.voxel import matrix_to_marching_cubes, sparse_to_matrix
+from scipy import ndimage
+
+mesh = trimesh.load('nasal_cavity.ply')
+
+# get discretized surface 
+mesh_discretized = mesh.voxelized(pitch=0.5)
+matrix_surface = sparse_to_matrix(mesh_discretized.sparse_surface)
+
+# fill the volume
+matrix_full = ndimage.morphology.binary_fill_holes(matrix_surface)
+
+# export using marching cubes
+meshed = matrix_to_marching_cubes(matrix=matrix_full, pitch=mesh_discretized.pitch, origin=mesh_discretized.origin)
+meshed.export('nasal_cavity_voxels.ply')
+```
+This procedure seems to be more robust than the available fill_voxelization, but it might fail miserably when the actual surface voxelization is not closed. One improvement could be to use only a nearest-neighbor connectivity in binary_fill_holes:
+```
+kernel = ndimage.morphology.generate_binary_structure(3, 1)
+matrix_full = ndimage.morphology.binary_fill_holes(matrix_surface, kernel)
+```
+mikedh
+added
+bug
+on Aug 18, 2018
+mikedh commented on Jan 16, 2019
+mikedh
+on Jan 16, 2019
+Owner
+More actions
+Oh cool good idea, I'll play around with ndimage.morphology.binary_fill_holes. Closing for now, though feel free to re-open.
+mikedh
+closed this as completedon Jan 16, 2019
+x17wang commented on Oct 9, 2019
+x17wang
+on Oct 9, 2019
+More actions
+Hi,
+I'm looking for a method in trimesh to save a mesh into a 3D image (using nifti format). It seems that sparse_to_matrix is no longer available in trimesh (I use trimesh 3.1.11).
+Any idea to convert a mesh to a 3D array?
+Thanks
+tianyilt commented on Nov 20, 2022
+tianyilt
+on Nov 20, 2022
+More actions
+Hi,
+I'm looking for a method in trimesh to save a mesh into a 3D image (using nifti format). It seems that sparse_to_matrix is no longer available in trimesh (I use trimesh 3.1.11). Any idea to convert a mesh to a 3D array? Thanks
+update to 3.16 and use trimesh.voxel.ops.sparse_to_matrix
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bug
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

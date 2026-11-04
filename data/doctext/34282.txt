@@ -1,0 +1,2502 @@
+This repository is Part 1 of Vercidium's [Free Friday](https://www.patreon.com/posts/100857028) series.
+
+You can get access to the full Vercidium Engine source code by joining [my Patreon](https://www.patreon.com/vercidium) or sponsoring me on [GitHub sponsors](https://github.com/vercidium-patreon).
+
+---
+
+This is a standlone voxel renderer that uses greedy meshing to generate a simplified mesh of a voxel world.
+
+This project uses Silk.NET so it *should* be cross-platform, but I've only tested it on Windows.
+
+Key files:
+- `ChunkMeshActual.cs` contains the greedy meshing algorithm
+- `Program.cs` contains the main entry point
+- `Client.cs` contains the render loop
+
+![image](https://github.com/vercidium-patreon/meshing/assets/12014138/125ca9d5-14bf-4e8c-9fbd-76f4ef6d64b9)
+
+### Allocator.cs
+```
+﻿namespace meshing;
+
+public static unsafe class Allocator
+{
+    public static void* Alloc(int byteCount) => NativeMemory.Alloc((nuint)byteCount);
+
+    public static void* AllocZeroed(int byteCount) => NativeMemory.AllocZeroed((nuint)byteCount);
+
+    public static void Free<T>(ref T* data, ref int bytes) where T : unmanaged
+    {
+        // Free if not already freed
+        if (data != null)
+        {
+            bytes = 0;
+            NativeMemory.Free(data);
+        }
+
+        data = null;
+    }
+
+    public static void Free<T>(ref T* data) where T : unmanaged
+    {
+        if (data != null)
+            NativeMemory.Free(data);
+
+        data = null;
+    }
+}
+```
+
+### Chunk.cs
+```
+﻿namespace meshing;
+
+public unsafe partial struct Chunk
+{
+    // Client
+    public void Reset(int cx, int cy, int cz, bool fake)
+    {
+        // Ensure we were disposed properly before being re-allocated
+        Assert(!Allocated);
+
+
+        // Store the world position of this chunk
+        chunkPosX = (byte)cx;
+        chunkPosY = (byte)cy;
+        chunkPosZ = (byte)cz;
+
+
+        // Allocate voxel data
+        bytes_voxels = Constants.BYTES_PER_CHUNK;
+        voxels = (Voxel*)Allocator.AllocZeroed(bytes_voxels);
+        SetDirty();
+
+
+        // Two fake chunks are allocated, one that's completely empty and one that's full
+        // The empty chunk is used for raytracing, and full chunk is used to prevent meshing the outside of the map
+        this.fake = fake;
+
+
+        // To speed up meshing, each chunk stores two heightmaps, which contain the min and max altitude of each column in the chunk.
+        //  This saves looping over the whole chunk when meshing
+        bytes_maxAltitude = bytes_minAltitude = Constants.ChunkSizeSquared;
+        minAltitude = (byte*)Allocator.AllocZeroed(bytes_minAltitude);
+        maxAltitude = (byte*)Allocator.AllocZeroed(bytes_maxAltitude);
+
+
+        // Prepare the min heightmap
+        var ptr = minAltitude;
+        for (int i = Constants.ChunkSizeSquared; i > 0; i--)
+            *ptr++ = Constants.ChunkSize;
+    }
+
+    public void SetVoxel(int x, int y, int z, byte index)
+    {
+        var i = WorldToLocal(x);
+        var j = WorldToLocal(y);
+        var k = WorldToLocal(z);
+
+
+        // Update the voxel
+        var b = voxels + GetAccessLocal(i, j, k);
+        b->Reset(index);
+
+
+        // Update the client-side min+max heightmap for faster meshing
+        if (index > 0)
+            OnVoxelAdded(i, j, k);
+        else
+            OnVoxelRemoved(i, j, k);
+
+
+        SetDirty();
+    }
+
+
+    // Shortcut functions
+    public void SetDirty() => dirty = true;
+    public void UnsetDirty() => dirty = false;
+    public bool IsDirty() => dirty;
+
+    public static int WorldToLocal(int a) => a & Constants.ChunkMask;
+    public static int GetHeightmapAccess(int i, int k) => i | (k * Constants.ChunkSize);
+
+    public static int GetAccessLocal(int i, int j, int k)
+    {
+        Assert(i >= 0);
+        Assert(j >= 0);
+        Assert(k >= 0);
+
+        Assert(i < Constants.ChunkSize);
+        Assert(j < Constants.ChunkSize);
+        Assert(k < Constants.ChunkSize);
+
+        return j | (i * Constants.ChunkSize) | (k * Constants.ChunkSizeSquared);
+    }
+}
+```
+
+### ChunkHeightmap.cs
+```
+﻿namespace meshing;
+
+
+public unsafe partial struct Chunk
+{
+    public void OnVoxelAdded(int i, int j, int k)
+    {
+        int access = GetHeightmapAccess(i, k);
+
+        if (j < *(minAltitude + access))
+            *(minAltitude + access) = (byte)j;
+
+        var max = maxAltitude + access;
+        if (j >= *max)
+            *max = (byte)j;
+    }
+
+    public void OnVoxelRemoved(int i, int j, int k)
+    {
+        // Precalculate 1D array accesses
+        var hAccess = GetHeightmapAccess(i, k);
+        var xzAccess = i * Constants.ChunkSize + k * Constants.ChunkSizeSquared;
+        var access = xzAccess + j;
+
+        // Update the min
+        UpdateMinHeightmap(j, hAccess, access, xzAccess);
+
+        // Update the max
+        UpdateMaxHeightmap(j, hAccess, access, xzAccess);
+    }
+
+    void UpdateMinHeightmap(int j, int hAccess, int access, int xzAccess)
+    {
+        var min = minAltitude + hAccess;
+
+
+        // Bail if we didn't remove the lowest voxel
+        if (*min != j && *min != (byte)Constants.ChunkSize)
+            return;
+
+
+        // Calculate how far up to search
+        var chunkTop = xzAccess + Constants.ChunkSize;
+        var amount = chunkTop - access;
+        var ptr = voxels + access;
+
+
+        // Search up until we find a voxel
+        for (; amount > 0; amount--)
+        {
+            if (ptr++->index == 0)
+                continue;
+
+            // Store the Y part of the access in the heightmap
+            *min = (byte)(access & Constants.ChunkMask);
+            return;
+        }
+
+
+        // If no voxel was found
+        *min = (byte)Constants.ChunkSize;
+    }
+
+    void UpdateMaxHeightmap(int j, int hAccess, int access, int xzAccess)
+    {
+        var max = maxAltitude + hAccess;
+
+
+        // Bail if we didn't remove the highest voxel
+        if (*max != j && *max != 0)
+            return;
+
+
+        // Calculate how far down to search
+        var chunkBottom = xzAccess;
+        var amount = access - chunkBottom;
+        var ptr = voxels + access;
+
+
+        // Search down until we find a voxel
+        for (; amount > 0; amount--)
+        {
+            if (ptr--->index == 0)
+                continue;
+
+            // Store the Y part of the access in the heightmap
+            *max = (byte)(access & Constants.ChunkMask);
+            return;
+        }
+
+
+        // If no voxel was found
+        *max = 0;
+    }
+}
+```
+
+### ChunkMesh.cs
+```
+﻿namespace meshing;
+
+public unsafe partial class ChunkMesh
+{
+    public Map m;
+
+    // Store a reference to the linked chunk and its neighbours
+    public Chunk* chunk;
+    Chunk* chunkXN, chunkXP, chunkYN, chunkYP, chunkZN, chunkZP;
+
+    public MeshVisiter meshVisiter;
+    public TempMeshData<VoxelVertex> tempMeshData;
+
+    public VoxelVertexBuffer voxelBuffer;
+
+
+    // Shortcuts
+    int chunkPosX => chunk->chunkPosX;
+    int chunkPosY => chunk->chunkPosY;
+    int chunkPosZ => chunk->chunkPosZ;
+
+    public Vector3 WorldPos;
+
+
+    public ChunkMesh(Map m, Chunk* c)
+    {
+        Assert(c != null);
+        Assert(c->Allocated);
+
+        this.m = m;
+        chunk = c;
+
+        WorldPos = new(chunkPosX * Constants.ChunkSize, chunkPosY * Constants.ChunkSize, chunkPosZ * Constants.ChunkSize);
+
+        GetNeighbourReferences();
+    }
+
+    public void GetNeighbourReferences()
+    {
+        var chunkAccess = m.GetAccessLocal(chunkPosX, chunkPosY, chunkPosZ);
+        var exteriorChunk = m.ShouldMeshExterior ? Map.EMPTY_CHUNK : Map.FULL_CHUNK;
+
+        chunkXN = chunkPosX > 0 ? m.chunks + chunkAccess - CHUNK_STEP_X : exteriorChunk;
+        chunkXP = chunkPosX < m.ChunkAmountXM1 ? m.chunks + chunkAccess + CHUNK_STEP_X : exteriorChunk;
+
+        chunkYN = chunkPosY > 0 ? m.chunks + chunkAccess - CHUNK_STEP_Y : exteriorChunk;
+        chunkYP = chunkPosY < m.ChunkAmountYM1 ? m.chunks + chunkAccess + CHUNK_STEP_Y : exteriorChunk;
+
+        chunkZN = chunkPosZ > 0 ? m.chunks + chunkAccess - CHUNK_STEP_Z : exteriorChunk;
+        chunkZP = chunkPosZ < m.ChunkAmountZM1 ? m.chunks + chunkAccess + CHUNK_STEP_Z : exteriorChunk;
+    }
+
+    const int CHUNK_STEP_Y = 1;
+    const int CHUNK_STEP_X = Constants.MaxChunkAmount;
+    const int CHUNK_STEP_Z = Constants.MaxChunkAmountSquared;
+}
+```
+
+### ChunkMeshActual.cs
+```
+﻿namespace meshing;
+
+public unsafe partial class ChunkMesh
+{
+    const int ACCESS_STEP_Y = 1;
+    const int ACCESS_STEP_X = Constants.ChunkSize;
+    const int ACCESS_STEP_Z = Constants.ChunkSizeSquared;
+
+
+    public unsafe void GenerateMesh()
+    {
+        // Ensure this chunk exists
+        Assert(chunk->Allocated);
+        Assert(!chunk->fake);
+
+
+        meshVisiter = MeshVisiterAllocator.Get();
+
+
+        // Allocate temp storage for this meshing run. Then we copy from this temp storage to the large vertex buffer
+        tempMeshData = TempStorageAllocator<VoxelVertex>.Get();
+        tempMeshData.PreMeshing();
+
+
+        // Precalculate Z voxel access
+        var zAccess = 0;
+
+
+        // Get heightmap pointers that we can modify
+        var maxYPointer = chunk->maxAltitude;
+        var minYPointer = chunk->minAltitude;
+
+
+        for (int k = 0; k < Constants.ChunkSize; k++)
+        {
+            // Precalculate X voxel access
+            var xAccess = 0;
+
+            for (int i = 0; i < Constants.ChunkSize; i++)
+            {
+                // Get the min and max bounds for this column
+                int j = *minYPointer++;
+                int maxJ = *maxYPointer++;
+
+
+                // Precalculate voxel access
+                var access = zAccess + xAccess + j;
+                var voxel = chunk->voxels + access;
+
+
+                // Mesh from the bottom to the top of this column
+                for (; j <= maxJ; j++, access++, voxel++)
+                    if (voxel->index > 0)
+                        CreateRuns(voxel, i, j, k, access, xAccess, zAccess);
+                    
+
+                // Update voxel access
+                xAccess += Constants.ChunkSize;
+            }
+
+
+            // Update voxel access
+            zAccess += Constants.ChunkSizeSquared;
+        }
+    }
+
+
+    protected unsafe void CreateRuns(Voxel* voxel, int i, int j, int k, int access, int xAccess, int zAccess)
+    {
+        Assert(meshVisiter != null);
+
+        // Check if we're on the edge of this chunk
+        var minX = i == 0;
+        var maxX = i == Constants.ChunkSizeM1;
+
+        var minZ = k == 0;
+        var maxZ = k == Constants.ChunkSizeM1;
+
+        var minY = j == 0;
+        var maxY = j == Constants.ChunkSizeM1;
+
+
+        // Precalculate mesh visiters for each face
+        int* visitXN, visitXP, visitYN, visitYP, visitZN, visitZP;
+
+        visitXN = meshVisiter.visitXN + access;
+        visitXP = meshVisiter.visitXP + access;
+        visitYN = meshVisiter.visitYN + access;
+        visitYP = meshVisiter.visitYP + access;
+        visitZN = meshVisiter.visitZN + access;
+        visitZP = meshVisiter.visitZP + access;
+
+
+        // Precalculate
+        var data = chunk->voxels;
+        var index = voxel->index;
+        var comparison = meshVisiter.Comparison;
+        var textureID = index;
+        var i1 = i + 1;
+        var j1 = j + 1;
+
+
+        // 'a' refers to the first axis we combine faces along
+        // 'b' refers to the second axis we combine faces along
+        //      e.g. for Y+ faces, we merge along the X axis, then along the A axis
+        //           for X- faces, we merge up along the Y axis, then along the Z axis
+        int end_a;
+        int length_b;
+
+
+        // Left (X-)
+        if (*visitXN != comparison && DrawFaceXN(j, voxel, minX, zAccess, index))
+        {
+            var originalXN = visitXN;
+
+
+            // Remember we've meshed this face
+            *visitXN = comparison;
+            visitXN += ACCESS_STEP_Y;
+
+
+            // Combine faces upwards along the Y axis
+            var voxelPointer = data + access + ACCESS_STEP_Y;
+            var yAccess = j1;
+
+            for (end_a = j1; end_a < Constants.ChunkSize; end_a++)
+            {
+                if (voxelPointer->index != index ||                              // It's a different kind of voxel
+                    !DrawFaceXN(yAccess, voxelPointer, minX, zAccess, index) ||  // This voxel face is covered by another voxel
+                    *visitXN == comparison)                                      // We've already meshed this voxel face
+                    break;
+
+                // Step upwards
+                voxelPointer++;
+                yAccess++;
+
+                // Remember we've meshed this face
+                *visitXN = comparison;
+                visitXN += ACCESS_STEP_Y;
+            }
+
+
+            // Calculate how many voxels we combined along the Y axis
+            var length_a = end_a - j1 + 1;
+
+
+            // Combine faces along the Z axis
+            length_b = 1;
+
+            var max_length_b = Constants.ChunkSize - k;
+            var netZAccess = zAccess;
+
+            for (int g = 1; g < max_length_b; g++)
+            {
+                // Go back to where we started, then move g units along the Z axis
+                voxelPointer = data + access;
+                voxelPointer += ACCESS_STEP_Z * g;
+                yAccess = j;
+
+
+                // Check if the entire row next to us is also the same index and not covered by another block
+                bool adjacentRowIsIdentical = true;
+
+                for (var test_a = j; test_a < end_a; test_a++)
+                {
+                    // No need to check the meshVisiter here as we're combining on this axis for the first time
+                    if (voxelPointer->index != index || !DrawFaceXN(yAccess, voxelPointer, minX, netZAccess, index))
+                    {
+                        adjacentRowIsIdentical = false;
+                        break;
+                    }
+
+                    voxelPointer++;
+                    yAccess++;
+                }
+
+                if (!adjacentRowIsIdentical)
+                    break;
+
+
+                // We found a whole row that's valid!
+                length_b++;
+
+
+                // Remember we've meshed these faces
+                var tempXN = originalXN;
+                tempXN += ACCESS_STEP_Z * g;
+
+                for (int h = 0; h < length_a; h++)
+                {
+                    *tempXN = comparison;
+                    tempXN += ACCESS_STEP_Y;
+                }
+            }
+
+
+            tempMeshData.write++->Reset(i, j, k, -1, 0, 0, 0, 0, textureID);
+            tempMeshData.write++->Reset(i, j, k + length_b, -1, 0, 0, 0, 1, textureID);
+            tempMeshData.write++->Reset(i, j + length_a, k, -1, 0, 0, 1, 0, textureID);
+
+            tempMeshData.write++->Reset(i, j + length_a, k, -1, 0, 0, 0, 0, textureID);
+            tempMeshData.write++->Reset(i, j, k + length_b, -1, 0, 0, 0, 1, textureID);
+            tempMeshData.write++->Reset(i, j + length_a, k + length_b, -1, 0, 0, 1, 0, textureID);
+        }
+
+        // Right (X+)
+        if (*visitXP != comparison && DrawFaceXP(j, voxel, maxX, zAccess, index))
+        {
+            var originalXP = visitXP;
+
+
+            // Remember we've meshed this face
+            *visitXP = comparison;
+            visitXP += ACCESS_STEP_Y;
+
+
+            // Combine faces along the Y axis
+            var voxelPointer = data + access + ACCESS_STEP_Y;
+            var yAccess = j1;
+
+            for (end_a = j1; end_a < Constants.ChunkSize; end_a++)
+            {
+                if (voxelPointer->index != index || !DrawFaceXP(yAccess, voxelPointer, maxX, zAccess, index) || *visitXP == comparison)
+                    break;
+
+                voxelPointer++;
+                yAccess++;
+
+                // Remember we've meshed this face
+                *visitXP = comparison;
+                visitXP += ACCESS_STEP_Y;
+            }
+
+
+            // Calculate how many voxels we combined along the Y axis
+            var length_a = end_a - j1 + 1;
+
+
+            // Combine faces along the Z axis
+            length_b = 1;
+
+            var max_length_b = Constants.ChunkSize - k;
+            var netZAccess = zAccess;
+
+            for (int g = 1; g < max_length_b; g++)
+            {
+                // Go back to where we started, then move g units on the Z axis
+                voxelPointer = data + access;
+                voxelPointer += ACCESS_STEP_Z * g;
+                yAccess = j;
+
+
+                // Check if the entire row next to us is also the same index and not covered by another block
+                bool adjacentRowIsIdentical = true;
+
+                for (var test_a = j; test_a < end_a; test_a++)
+                {
+                    // No need to check *yp here as we're combining on this axis for the first time
+                    if (voxelPointer->index != index || !DrawFaceXP(yAccess, voxelPointer, maxX, netZAccess, index))
+                    {
+                        adjacentRowIsIdentical = false;
+                        break;
+                    }
+
+                    voxelPointer++;
+                    yAccess++;
+                }
+
+                if (!adjacentRowIsIdentical)
+                    break;
+
+
+                // We found a whole row that's valid!
+                length_b++;
+
+
+                // Remember we've meshed these faces
+                var tempXP = originalXP;
+                tempXP += ACCESS_STEP_Z * g;
+
+                for (int h = 0; h < length_a; h++)
+                {
+                    *tempXP = comparison;
+                    tempXP += ACCESS_STEP_Y;
+                }
+            }
+
+            tempMeshData.write++->Reset(i + 1, j, k, 1, 0, 0, 0, 0, textureID);
+            tempMeshData.write++->Reset(i + 1, j + length_a, k, 1, 0, 0, 0, 1, textureID);
+            tempMeshData.write++->Reset(i + 1, j, k + length_b, 1, 0, 0, 1, 0, textureID);
+
+            tempMeshData.write++->Reset(i + 1, j, k + length_b, 1, 0, 0, 0, 0, textureID);
+            tempMeshData.write++->Reset(i + 1, j + length_a, k, 1, 0, 0, 0, 1, textureID);
+            tempMeshData.write++->Reset(i + 1, j + length_a, k + length_b, 1, 0, 0, 1, 0, textureID);
+        }
+
+        // Back (Z-)
+        if (*visitZN != comparison && DrawFaceZN(j, voxel, minZ, xAccess, index))
+        {
+            var originalZN = visitZN;
+
+            // Remember we've meshed this face
+            *visitZN = comparison;
+            visitZN += ACCESS_STEP_Y;
+
+
+            // Combine faces along the Y axis
+            var voxelPointer = data + access + ACCESS_STEP_Y;
+            var yAccess = j1;
+
+            for (end_a = j1; end_a < Constants.ChunkSize; end_a++)
+            {
+                if (voxelPointer->index != index || !DrawFaceZN(yAccess, voxelPointer, minZ, xAccess, index) || *visitZN == comparison)
+                    break;
+
+                voxelPointer++;
+                yAccess++;
+
+                // Remember we've meshed this face
+                *visitZN = comparison;
+                visitZN += ACCESS_STEP_Y;
+            }
+
+
+            // Calculate how many voxels we combined along the Y axis
+            var length_a = end_a - j1 + 1;
+
+
+            // Combine faces along the X axis
+            length_b = 1;
+
+            var max_length_b = Constants.ChunkSize - i;
+            var netXAccess = xAccess;
+
+            for (int g = 1; g < max_length_b; g++)
+            {
+                // Go back to where we started, then move g units on the X axis
+                voxelPointer = data + access;
+                voxelPointer += ACCESS_STEP_X * g;
+                yAccess = j;
+
+
+                // Check if the entire row next to us is also the same index and not covered by another block
+                bool adjacentRowIsIdentical = true;
+
+                for (var test_a = j; test_a < end_a; test_a++)
+                {
+                    // No need to check *yp here as we're combining on this axis for the first time
+                    if (voxelPointer->index != index || !DrawFaceZN(yAccess, voxelPointer, minZ, netXAccess, index))
+                    {
+                        adjacentRowIsIdentical = false;
+                        break;
+                    }
+
+                    voxelPointer++;
+                    yAccess++;
+                }
+
+                if (!adjacentRowIsIdentical)
+                    break;
+
+
+                // We found a whole row that's valid!
+                length_b++;
+
+
+                // Remember we've meshed these faces
+                var tempZN = originalZN;
+                tempZN += ACCESS_STEP_X * g;
+
+                for (int h = 0; h < length_a; h++)
+                {
+                    *tempZN = comparison;
+                    tempZN += ACCESS_STEP_Y;
+                }
+            }
+
+
+            tempMeshData.write++->Reset(i, j, k, 0, 0, -1, 0, 0, textureID);
+            tempMeshData.write++->Reset(i, j + length_a, k, 0, 0, -1, 0, 1, textureID);
+            tempMeshData.write++->Reset(i + length_b, j, k, 0, 0, -1, 1, 0, textureID);
+
+            tempMeshData.write++->Reset(i + length_b, j, k, 0, 0, -1, 0, 0, textureID);
+            tempMeshData.write++->Reset(i, j + length_a, k, 0, 0, -1, 0, 1, textureID);
+            tempMeshData.write++->Reset(i + length_b, j + length_a, k, 0, 0, -1, 1, 0, textureID);
+        }
+
+        // Front (Z+)
+        if (*visitZP != comparison && DrawFaceZP(j, voxel, maxZ, xAccess, index))
+        {
+            var originalZP = visitZP;
+
+
+            // Remember we've meshed this face
+            *visitZP = comparison;
+            visitZP += ACCESS_STEP_Y;
+
+
+            // Combine faces along the Y axis
+            var voxelPointer = data + access + ACCESS_STEP_Y;
+            var yAccess = j1;
+
+            for (end_a = j1; end_a < Constants.ChunkSize; end_a++)
+            {
+                if (voxelPointer->index != index || !DrawFaceZP(yAccess, voxelPointer, maxZ, xAccess, index) || *visitZP == comparison)
+                    break;
+
+                voxelPointer++;
+                yAccess++;
+
+                // Remember we've meshed this face
+                *visitZP = comparison;
+                visitZP += ACCESS_STEP_Y;
+            }
+
+
+            // Calculate how many voxels we combined along the Y axis
+            var length_a = end_a - j1 + 1;
+
+
+            // Combine faces along the X axis
+            length_b = 1;
+
+            var max_length_b = Constants.ChunkSize - i;
+            var netXAccess = xAccess;
+
+            for (int g = 1; g < max_length_b; g++)
+            {
+                // Go back to where we started, then move g units on the X axis
+                voxelPointer = data + access;
+                voxelPointer += ACCESS_STEP_X * g;
+                yAccess = j;
+
+
+                // Check if the entire row next to us is also the same index and not covered by another block
+                bool adjacentRowIsIdentical = true;
+
+                for (var test_a = j; test_a < end_a; test_a++)
+                {
+                    // No need to check *yp here as we're combining on this axis for the first time
+                    if (voxelPointer->index != index || !DrawFaceZP(yAccess, voxelPointer, maxZ, netXAccess, index))
+                    {
+                        adjacentRowIsIdentical = false;
+                        break;
+                    }
+
+                    voxelPointer++;
+                    yAccess++;
+                }
+
+                if (!adjacentRowIsIdentical)
+                    break;
+
+
+                // We found a whole row that's valid!
+                length_b++;
+
+
+                // Remember we've meshed these faces
+                var tempZP = originalZP;
+                tempZP += ACCESS_STEP_X * g;
+
+                for (int h = 0; h < length_a; h++)
+                {
+                    *tempZP = comparison;
+                    tempZP += ACCESS_STEP_Y;
+                }
+            }
+
+
+            tempMeshData.write++->Reset(i, j, k + 1, 0, 0, 1, 0, 0, textureID);
+            tempMeshData.write++->Reset(i + length_b, j, k + 1, 0, 0, 1, 0, 1, textureID);
+            tempMeshData.write++->Reset(i, j + length_a, k + 1, 0, 0, 1, 1, 0, textureID);
+
+            tempMeshData.write++->Reset(i, j + length_a, k + 1, 0, 0, 1, 0, 0, textureID);
+            tempMeshData.write++->Reset(i + length_b, j, k + 1, 0, 0, 1, 0, 1, textureID);
+            tempMeshData.write++->Reset(i + length_b, j + length_a, k + 1, 0, 0, 1, 1, 0, textureID);
+        }
+
+        // Bottom (Y-)
+        if (*visitYN != comparison && DrawFaceYN(voxel, minY, xAccess, zAccess, index))
+        {
+            var originalYN = visitYN;
+
+            // Remember we've meshed this face
+            *visitYN = comparison;
+            visitYN += ACCESS_STEP_X;
+
+
+            // Combine faces along the X axis
+            var voxelPointer = data + access + ACCESS_STEP_X;
+            var netXAccess = xAccess + ACCESS_STEP_X;
+
+            for (end_a = i1; end_a < Constants.ChunkSize; end_a++)
+            {
+                if (voxelPointer->index != index || !DrawFaceYN(voxelPointer, minY, netXAccess, zAccess, index) || *visitYN == comparison)
+                    break;
+
+                // Remember we've meshed this face
+                *visitYN = comparison;
+                visitYN += ACCESS_STEP_X;
+
+                // Move 1 unit on the X axis
+                voxelPointer += ACCESS_STEP_X;
+                netXAccess += ACCESS_STEP_X;
+            }
+
+
+            // Calculate how many voxels we combined along the X axis
+            var length_a = end_a - i1 + 1;
+
+
+            // Combine faces along the Z axis
+            length_b = 1;
+
+            var max_length_b = Constants.ChunkSize - k;
+
+            for (int g = 1; g < max_length_b; g++)
+            {
+                // Go back to where we started, then move g units on the Z axis
+                voxelPointer = data + access;
+                voxelPointer += ACCESS_STEP_Z * g;
+                netXAccess = xAccess;
+
+
+                // Check if the entire row next to us is also the same index and not covered by another block
+                bool adjacentRowIsIdentical = true;
+
+                for (var test_a = i; test_a < end_a; test_a++)
+                {
+                    // No need to check *yp here as we're combining on this axis for the first time
+                    if (voxelPointer->index != index || !DrawFaceYN(voxelPointer, minY, netXAccess, zAccess, index))
+                    {
+                        adjacentRowIsIdentical = false;
+                        break;
+                    }
+
+                    voxelPointer += ACCESS_STEP_X;
+                    netXAccess += ACCESS_STEP_X;
+                }
+
+                if (!adjacentRowIsIdentical)
+                    break;
+
+
+                // We found a whole row that's valid!
+                length_b++;
+
+
+                // Remember we've meshed these faces
+                var tempYN = originalYN;
+                tempYN += ACCESS_STEP_Z * g;
+
+                for (int h = 0; h < length_a; h++)
+                {
+                    *tempYN = comparison;
+                    tempYN += ACCESS_STEP_X;
+                }
+            }
+
+            tempMeshData.write++->Reset(i, j, k, 0, -1, 0, 0, 0, textureID);
+            tempMeshData.write++->Reset(i + length_a, j, k, 0, -1, 0, 0, 1, textureID);
+            tempMeshData.write++->Reset(i, j, k + length_b, 0, -1, 0, 1, 0, textureID);
+
+            tempMeshData.write++->Reset(i, j, k + length_b, 0, -1, 0, 0, 0, textureID);
+            tempMeshData.write++->Reset(i + length_a, j, k, 0, -1, 0, 0, 1, textureID);
+            tempMeshData.write++->Reset(i + length_a, j, k + length_b, 0, -1, 0, 1, 0, textureID);
+        }
+
+
+        // Top (Y+)
+        if (*visitYP != comparison && DrawFaceYP(voxel, maxY, xAccess, zAccess, index))
+        {
+            var originalYP = visitYP;
+
+            // Remember we've meshed this face
+            *visitYP = comparison;
+            visitYP += ACCESS_STEP_X;
+
+
+            // Combine faces along the X axis
+            var voxelPointer = data + access + ACCESS_STEP_X;
+            var netXAccess = xAccess + ACCESS_STEP_X;
+
+            for (end_a = i1; end_a < Constants.ChunkSize; end_a++)
+            {
+                if (voxelPointer->index != index || !DrawFaceYP(voxelPointer, maxY, netXAccess, zAccess, index) || *visitYP == comparison)
+                    break;
+
+                // Remember we've meshed this face
+                *visitYP = comparison;
+                visitYP += ACCESS_STEP_X;
+
+                // Move 1 unit on the X axis
+                voxelPointer += ACCESS_STEP_X;
+                netXAccess += ACCESS_STEP_X;
+            }
+
+
+            // Calculate how many voxels we combined along the X axis
+            var length_a = end_a - i1 + 1;
+
+
+            // Combine faces along the Z axis
+            length_b = 1;
+
+            var max_length_b = Constants.ChunkSize - k;
+
+            for (int g = 1; g < max_length_b; g++)
+            {
+                // Go back to where we started, then move g units on the Z axis
+                voxelPointer = data + access;
+                voxelPointer += ACCESS_STEP_Z * g;
+                netXAccess = xAccess;
+
+
+                // Check if the entire row next to us is also the same index and not covered by another block
+                bool adjacentRowIsIdentical = true;
+
+                for (var test_a = i; test_a < end_a; test_a++)
+                {
+                    // No need to check *yp here as we're combining on this axis for the first time
+                    if (voxelPointer->index != index || !DrawFaceYP(voxelPointer, maxY, netXAccess, zAccess, index))
+                    {
+                        adjacentRowIsIdentical = false;
+                        break;
+                    }
+
+                    voxelPointer += ACCESS_STEP_X;
+                    netXAccess += ACCESS_STEP_X;
+                }
+
+                if (!adjacentRowIsIdentical)
+                    break;
+
+
+                // We found a whole row that's valid!
+                length_b++;
+
+
+                // Remember we've meshed these faces
+                var tempYP = originalYP;
+                tempYP += ACCESS_STEP_Z * g;
+
+                for (int h = 0; h < length_a; h++)
+                {
+                    *tempYP = comparison;
+                    tempYP += ACCESS_STEP_X;
+                }
+            }
+
+            tempMeshData.write++->Reset(i, j + 1, k, 0, 1, 0, 0, 0, textureID);
+            tempMeshData.write++->Reset(i, j + 1, k + length_b, 0, 1, 0, 0, 1, textureID);
+            tempMeshData.write++->Reset(i + length_a, j + 1, k, 0, 1, 0, 1, 0, textureID);
+
+            tempMeshData.write++->Reset(i + length_a, j + 1, k, 0, 1, 0, 0, 0, textureID);
+            tempMeshData.write++->Reset(i, j + 1, k + length_b, 0, 1, 0, 0, 1, textureID);
+            tempMeshData.write++->Reset(i + length_a, j + 1, k + length_b, 0, 1, 0, 1, 0, textureID);
+        }
+    }
+
+
+    protected unsafe bool DrawFaceCommon(Voxel* nextPtr, byte index)
+    {
+        if (nextPtr->index == 0)
+            return true;
+
+        return false;
+    }
+
+
+    protected unsafe bool DrawFaceXN(int j, Voxel* bPointer, bool min, int kCS2, byte index)
+    {
+        // If it is outside this chunk, get the voxel from the neighbouring chunk
+        if (min)
+        {
+            if (m.ShouldMeshBetweenChunks)
+                return true;
+
+            if (!chunkXN->Allocated)
+                return true;
+
+            return DrawFaceCommon(chunkXN->voxels + (Constants.ChunkSize - 1) * Constants.ChunkSize + j + kCS2, index);
+        }
+
+        return DrawFaceCommon(bPointer - Constants.ChunkSize, index);
+    }
+
+
+    protected unsafe bool DrawFaceXP(int j, Voxel* bPointer, bool max, int kCS2, byte index)
+    {
+        if (max)
+        {
+            if (m.ShouldMeshBetweenChunks)
+                return true;
+
+            // If no chunk next to us, render
+            if (!chunkXP->Allocated)
+                return true;
+
+            return DrawFaceCommon(chunkXP->voxels + j + kCS2, index);
+        }
+
+        return DrawFaceCommon(bPointer + Constants.ChunkSize, index);
+    }
+
+
+    protected unsafe bool DrawFaceYN(Voxel* bPointer, bool min, int iCS, int kCS2, byte index)
+    {
+        if (min)
+        {
+            if (chunkPosY == 0)
+            {
+
+            }
+            if (m.ShouldMeshBetweenChunks)
+                return true;
+
+            // If there's no chunk below us, render the face
+            if (!chunkYN->Allocated)
+                return true;
+
+            return DrawFaceCommon(chunkYN->voxels + iCS + (Constants.ChunkSize - 1) + kCS2, index);
+        }
+
+        return DrawFaceCommon(bPointer - ACCESS_STEP_Y, index);
+    }
+
+
+    protected unsafe bool DrawFaceYP(Voxel* voxelPointer, bool max, int xAccess, int zAccess, byte index)
+    {
+        if (max)
+        {
+            if (m.ShouldMeshBetweenChunks)
+                return true;
+
+            // If there's no chunk above us, render
+            if (!chunkYP->Allocated)
+                return true;
+
+            // Check if there's a block in the bottom layer of the chunk above us
+            return DrawFaceCommon(chunkYP->voxels + xAccess + zAccess, index);
+        }
+
+        // Check if the block above us is the same index
+        return DrawFaceCommon(voxelPointer + ACCESS_STEP_Y, index);
+    }
+
+
+    protected unsafe bool DrawFaceZN(int j, Voxel* bPointer, bool min, int iCS, byte index)
+    {
+        if (min)
+        {
+            if (m.ShouldMeshBetweenChunks)
+                return true;
+
+            // if there's no chunk next to us, render
+            if (!chunkZN->Allocated)
+                return true;
+
+            return DrawFaceCommon(chunkZN->voxels + iCS + j + (Constants.ChunkSize - 1) * Constants.ChunkSizeSquared, index);
+        }
+
+        return DrawFaceCommon(bPointer - Constants.ChunkSizeSquared, index);
+    }
+
+
+    protected unsafe bool DrawFaceZP(int j, Voxel* bPointer, bool max, int iCS, byte index)
+    {
+        if (max)
+        {
+            if (m.ShouldMeshBetweenChunks)
+                return true;
+
+            // If no chunk next to us, render
+            if (!chunkZP->Allocated)
+                return true;
+
+            return DrawFaceCommon(chunkZP->voxels + iCS + j, index);
+        }
+
+        return DrawFaceCommon(bPointer + Constants.ChunkSizeSquared, index);
+    }
+}
+```
+
+### ChunkMeshComparison.cs
+```
+﻿namespace meshing;
+
+public unsafe partial class ChunkMesh
+{
+    protected unsafe bool DrawFaceCommon(Voxel* ptr) => ptr->index == 0;
+
+    protected unsafe bool DrawFaceXN(int j, Voxel* voxelData, bool min, int kCS2)
+    {
+        // If it is outside this chunk, get the voxel from the neighbouring chunk
+        if (min)
+        {
+            // If no chunk next to us, render
+            if (!chunkXN->Allocated)
+                return true;
+
+            return DrawFaceCommon(chunkXN->voxels + Constants.ChunkSizeM1 * Constants.ChunkSize + j + kCS2);
+        }
+
+        return DrawFaceCommon(voxelData - Constants.ChunkSize);
+    }
+
+
+    protected unsafe bool DrawFaceXP(int j, Voxel* voxelData, bool max, int kCS2)
+    {
+        if (max)
+        {
+            // If no chunk next to us, render
+            if (!chunkXP->Allocated)
+                return true;
+
+            return DrawFaceCommon(chunkXP->voxels + j + kCS2);
+        }
+
+        return DrawFaceCommon(voxelData + Constants.ChunkSize);
+    }
+
+
+    protected unsafe bool DrawFaceYN(Voxel* voxelData, bool min, int iCS, int kCS2)
+    {
+        if (min)
+        {
+            // If there's no chunk below us, render
+            if (!chunkYN->Allocated)
+                return true;
+
+            return DrawFaceCommon(chunkYN->voxels + iCS + Constants.ChunkSizeM1 + kCS2);
+        }
+
+        return DrawFaceCommon(voxelData - 1);
+    }
+
+
+    protected unsafe bool DrawFaceYP(Voxel* voxelData, bool max, int iCS, int kCS2)
+    {
+        if (max)
+        {
+            // If there's no chunk above us, render
+            if (!chunkYP->Allocated)
+                return true;
+
+            return DrawFaceCommon(chunkYP->voxels + iCS + kCS2);
+        }
+
+        return DrawFaceCommon(voxelData + 1);
+    }
+
+
+    protected unsafe bool DrawFaceZN(int j, Voxel* voxelData, bool min, int iCS)
+    {
+        if (min)
+        {
+            // if there's no chunk next to us, render
+            if (!chunkZN->Allocated)
+                return true;
+
+            return DrawFaceCommon(chunkZN->voxels + iCS + j + Constants.ChunkSizeM1 * Constants.ChunkSizeSquared);
+        }
+
+        return DrawFaceCommon(voxelData - Constants.ChunkSizeSquared);
+    }
+
+
+    protected unsafe bool DrawFaceZP(int j, Voxel* voxelData, bool max, int iCS)
+    {
+        if (max)
+        {
+            // If no chunk next to us, render
+            if (!chunkZP->Allocated)
+                return true;
+
+            return DrawFaceCommon(chunkZP->voxels + iCS + j);
+        }
+
+        return DrawFaceCommon(voxelData + Constants.ChunkSizeSquared);
+    }
+}
+```
+
+### ChunkMeshSetup.cs
+```
+﻿namespace meshing;
+
+public unsafe partial class ChunkMesh
+{
+    public void PreMeshing()
+    {
+        Assert(chunk->voxels != null);
+        Assert(chunk->dirty);
+        Assert(voxelBuffer == null);
+
+        chunk->UnsetDirty();
+    }
+
+    public void PostMeshing()
+    {
+        // Create a buffer if we meshed any faces
+        var size = tempMeshData.Length;
+
+        if (size > 0)
+        {
+            voxelBuffer = new();
+            voxelBuffer.BufferData(size, tempMeshData.data);
+        }
+
+
+        MeshVisiterAllocator.Recycle(ref meshVisiter);
+        TempStorageAllocator<VoxelVertex>.Recycle(ref tempMeshData);
+    }
+}
+```
+
+### ChunkVariables.cs
+```
+﻿namespace meshing;
+
+public unsafe partial struct Chunk
+{
+    // Voxel data
+    public Voxel* voxels;
+    public int bytes_voxels;
+
+    public bool Allocated => voxels != null && minAltitude != null && maxAltitude != null;
+
+    public bool dirty;
+    public bool fake;
+
+    public byte chunkPosX;
+    public byte chunkPosY;
+    public byte chunkPosZ;
+
+    // Min and max heightmap for faster meshing
+    public byte* maxAltitude;
+    public byte* minAltitude;
+    int bytes_maxAltitude;
+    int bytes_minAltitude;
+}
+```
+
+### Client.cs
+```
+﻿using Silk.NET.Input;
+using Silk.NET.Windowing;
+
+namespace meshing;
+
+public unsafe partial class Client
+{
+    public Client()
+    {
+        // Create a Silk.NET window
+        var options = WindowOptions.Default;
+        options.API = new GraphicsAPI(ContextAPI.OpenGL, new APIVersion(3, 3));
+        options.Position = new(200, 200);
+        options.PreferredDepthBufferBits = 32;
+
+        window = Window.Create(options);
+
+        // Callback when the window is created
+        window.Load += () =>
+        {
+            // Create an OpenGL Context
+            Gl = window.CreateOpenGL();
+            OnDidCreateOpenGLContext();
+
+
+            // Precalculate input stuff
+            inputContext = window.CreateInput();
+            keyboard = inputContext.Keyboards[0];
+            mouse = inputContext.Mice[0];
+            mouse.DoubleClickTime = 1;
+        };
+
+        window.Render += (_) => Render();
+
+        window.Size = new(1920, 1080);
+        window.FramesPerSecond = 144;
+        window.UpdatesPerSecond = 144;
+        window.VSync = false;
+
+        // Initialise OpenGL and input context
+        window.Initialize();
+    }
+
+
+    public void Run()
+    {
+        // Run forever
+        window.Run();
+    }
+
+
+    void OnDidCreateOpenGLContext()
+    {
+        var major = Gl.GetInteger(GetPName.MajorVersion);
+        var minor = Gl.GetInteger(GetPName.MinorVersion);
+
+        var version = major * 10 + minor;
+        Console.WriteLine($"OpenGL Version: {version}");
+
+        mapRenderer = new();
+
+
+#if DEBUG
+        // Set up the OpenGL debug message callback (NVIDIA only)
+        debugDelegate = DebugCallback;
+
+        Gl.Enable(EnableCap.DebugOutput);
+        Gl.Enable(EnableCap.DebugOutputSynchronous);
+        Gl.DebugMessageCallback(debugDelegate, null);
+#endif
+    }
+
+    void Render()
+    {
+        if (firstRender)
+        {
+            cameraPos = new Vector3(0, 18, 0) - Helper.FromPitchYaw(cameraPitch, cameraYaw) * 32;
+            lastMouse = mouse.Position;
+            firstRender = false;
+        }
+
+
+        // Mouse movement
+        var diff = lastMouse - mouse.Position;
+
+        cameraYaw -= diff.X * 0.003f;
+        cameraPitch += diff.Y * 0.003f;
+
+        lastMouse = mouse.Position;
+
+
+        // Fly camera movement
+        float movementSpeed = 0.15f;
+
+        if (keyboard.IsKeyPressed(Key.W))
+            cameraPos += Helper.FromPitchYaw(cameraPitch, cameraYaw) * movementSpeed;
+        else if (keyboard.IsKeyPressed(Key.S))
+            cameraPos -= Helper.FromPitchYaw(cameraPitch, cameraYaw) * movementSpeed;
+
+        if (keyboard.IsKeyPressed(Key.A))
+            cameraPos += Helper.FromPitchYaw(0, cameraYaw - MathF.PI / 2) * movementSpeed;
+        else if (keyboard.IsKeyPressed(Key.D))
+            cameraPos += Helper.FromPitchYaw(0, cameraYaw + MathF.PI / 2) * movementSpeed;
+
+        if (keyboard.IsKeyPressed(Key.E))
+            cameraPos += Helper.FromPitchYaw(MathF.PI / 2, 0) * movementSpeed;
+        else if (keyboard.IsKeyPressed(Key.Q))
+            cameraPos += Helper.FromPitchYaw(-MathF.PI / 2, 0) * movementSpeed;
+
+        
+
+        // Prepare OpenGL
+        PreRenderSetup();
+
+
+        // Prepare the shader
+        VoxelShader.UseProgram();
+        VoxelShader.mvp.Set(GetViewProjection());
+        VoxelShader.showWireframe.Set(keyboard.IsKeyPressed(Key.Space));
+
+
+        // Render the map
+        mapRenderer.cameraPitch = cameraPitch;
+        mapRenderer.cameraYaw = cameraYaw;
+
+        mapRenderer.Render();
+    }
+
+    public void PreRenderSetup()
+    {
+        // Prepare rendering
+        Gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+        Gl.Enable(EnableCap.DepthTest);
+        Gl.Disable(EnableCap.Blend);
+        Gl.Disable(EnableCap.StencilTest);
+        Gl.Enable(EnableCap.CullFace);
+        Gl.FrontFace(FrontFaceDirection.CW);
+
+
+        // Clear everything
+        Gl.ClearDepth(1.0f);
+        Gl.DepthFunc(DepthFunction.Less);
+
+        Gl.ColorMask(true, true, true, true);
+        Gl.DepthMask(true);
+
+        Gl.ClearColor(0, 0, 0, 0);
+        Gl.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit | ClearBufferMask.StencilBufferBit);
+
+
+        // Set the viewport to the window size
+        Gl.Viewport(0, 0, (uint)window.Size.X, (uint)window.Size.Y);
+    }
+
+    protected Matrix4x4 GetViewProjection()
+    {
+        var view = Helper.CreateFPSView(cameraPos, cameraPitch, cameraYaw);
+        var proj = Matrix4x4.CreatePerspectiveFieldOfView(FieldOfView, Aspect, NearPlane, FarPlane);
+
+        return view * proj;
+    }
+
+
+#if DEBUG
+    static DebugProc debugDelegate;
+
+    static unsafe void DebugCallback(GLEnum source, GLEnum type, int id, GLEnum severity, int length, nint messageInt, nint userParam)
+    {
+        // TODO
+        var message = Marshal.PtrToStringAnsi(messageInt);
+
+        if (message == "Pixel-path performance warning: Pixel transfer is synchronized with 3D rendering.")
+        {
+            // TODO: Use proper id for this
+            return;
+        }
+
+        // Skip our own notifications
+        if (severity == GLEnum.DebugSeverityNotification)
+            return;
+
+        // Buffer detailed info
+        if (id == 131185)
+            return;
+
+        // "Program/shader state performance warning: Vertex shader in program 69 is being recompiled based on GL state."
+        if (id == 131218)
+            return;
+
+        // "Buffer performance warning: Buffer object 15 (bound to NONE, usage hint is GL_DYNAMIC_DRAW) is being copied/moved from VIDEO memory to HOST memory."
+        if (id == 131186)
+            return;
+
+        AssertFalse();
+        Console.WriteLine(message);
+    }
+#endif
+
+
+
+    // Silk
+    IWindow window;
+    IMouse mouse;
+    IKeyboard keyboard;
+    IInputContext inputContext;
+
+
+    // Camera
+    Vector2 lastMouse;
+    Vector3 cameraPos;
+    float cameraPitch = -MathF.PI / 6;
+    float cameraYaw = MathF.PI / 4;
+
+
+    // Rendering
+    bool firstRender = true;
+
+    float FieldOfView = 50.0f / 180.0f * MathF.PI;
+    float Aspect => window.Size.X / (float)window.Size.Y;
+    float NearPlane = 1.0f;
+    float FarPlane = 256.0f;
+
+    // Voxel data
+    MapRenderer mapRenderer;
+}
+```
+
+### Constants.cs
+```
+﻿namespace meshing;
+
+public static class Constants
+{
+    public const int ChunkSize = 32;
+    public const int ChunkSizeSquared = ChunkSize * ChunkSize;
+    public const int ChunkSizeCubed = ChunkSize * ChunkSize * ChunkSize;
+    public const int ChunkSizeM1 = ChunkSize - 1; // M1 = 'Minus 1'
+
+
+    public const int MaxChunkAmount = 32;
+    public const int MaxChunkAmountSquared = MaxChunkAmount * MaxChunkAmount;
+    public const int MaxChunkAmountCubed = MaxChunkAmount * MaxChunkAmount * MaxChunkAmount;
+
+    public const int ChunkMask = 0x1f;
+    public const int ChunkShift = 5;
+
+    public const int VOXELS_PER_CHUNK = ChunkSizeCubed;
+    public const int BYTES_PER_VOXEL = sizeof(byte);
+    public const int BYTES_PER_CHUNK = VOXELS_PER_CHUNK * BYTES_PER_VOXEL;
+}
+
+public enum FaceType : byte
+{
+    yp = 0,
+    yn,
+    xp,
+    xn,
+    zp,
+    zn,
+}
+```
+
+### Helper.cs
+```
+﻿namespace meshing;
+
+public static class Helper
+{
+    public static Vector3 FromPitchYaw(float pitch, float yaw)
+    {
+        var cosPitch = MathF.Cos(pitch);
+        return new Vector3(cosPitch * MathF.Sin(yaw), MathF.Sin(pitch), cosPitch * MathF.Cos(yaw));
+    }
+
+    public static Matrix4x4 CreateFPSView(Vector3 eye, float pitch, float yaw)
+    {
+        // Magic stuff
+        eye.X = -eye.X;
+        eye.Y = -eye.Y;
+
+        var cosPitch = MathF.Cos(pitch);
+        var sinPitch = MathF.Sin(pitch);
+        var cosYaw = MathF.Cos(-yaw);
+        var sinYaw = MathF.Sin(-yaw);
+
+        var xAxis = new Vector3(cosYaw, 0, -sinYaw);
+        var yAxis = new Vector3(sinYaw * sinPitch, cosPitch, cosYaw * sinPitch);
+        var zAxis = new Vector3(sinYaw * cosPitch, -sinPitch, cosPitch * cosYaw);
+
+        return new Matrix4x4(xAxis.X, yAxis.X, zAxis.X, 0,
+                              xAxis.Y, yAxis.Y, zAxis.Y, 0,
+                             -xAxis.Z, -yAxis.Z, -zAxis.Z, 0,
+                             Vector3.Dot(xAxis, eye), Vector3.Dot(yAxis, eye), Vector3.Dot(zAxis, eye), 1);
+    }
+}
+```
+
+### Map.cs
+```
+﻿namespace meshing;
+
+public unsafe partial class Map
+{
+    public Map(int mx, int my, int mz)
+    {
+        // Always allocate 32x32x32 chunks, even though we don't use them all
+        bytes_chunks = Marshal.SizeOf<Chunk>() * Constants.MaxChunkAmountCubed;
+        chunks = (Chunk*)Allocator.AllocZeroed(bytes_chunks);
+
+        // Ensure map size is divisible by 32
+        Assert(mx % Constants.ChunkSize == 0);
+        Assert(my % Constants.ChunkSize == 0);
+        Assert(mz % Constants.ChunkSize == 0);
+
+        MapSizeX = mx;
+        MapSizeY = my;
+        MapSizeZ = mz;
+
+        ChunkAmountX = MapSizeX / Constants.ChunkSize;
+        ChunkAmountY = MapSizeY / Constants.ChunkSize;
+        ChunkAmountZ = MapSizeZ / Constants.ChunkSize;
+        ChunkAmountXM1 = ChunkAmountX - 1;
+        ChunkAmountYM1 = ChunkAmountY - 1;
+        ChunkAmountZM1 = ChunkAmountZ - 1;
+    }
+
+    public bool OutOfBounds(int x, int y, int z) => (uint)x >= MapSizeX || (uint)y >= MapSizeY || (uint)z >= MapSizeZ;
+
+    public int GetAccess(int x, int y, int z) => GetAccessLocal(x >> Constants.ChunkShift, y >> Constants.ChunkShift, z >> Constants.ChunkShift);
+    public int GetAccessLocal(int f, int g, int h)
+    {
+        if ((uint)f >= ChunkAmountX || (uint)g >= ChunkAmountY || (uint)h >= ChunkAmountZ)
+        {
+            AssertFalse();
+            return -1;
+        }
+
+        var y0 = g;
+        var x0 = f * Constants.MaxChunkAmount;
+        var z0 = h * Constants.MaxChunkAmountSquared;
+
+        return y0 | x0 | z0;
+    }
+
+    public void AddVoxel(int x, int y, int z, byte index)
+    {
+        if (OutOfBounds(x, y, z))
+            return;
+
+
+        // Get and initialise (if null) the chunk
+        var c = InitChunk(x, y, z);
+
+
+        // Add a voxel to the chunk
+        c->SetVoxel(x, y, z, index);
+    }
+
+    public Chunk* InitChunk(int x, int y, int z)
+    {
+        // i, j, k are voxel positions within a chunk
+        // f, g, h are chunk positions
+        // x, y, z are global voxel positions
+        var f = x >> Constants.ChunkShift;
+        var g = y >> Constants.ChunkShift;
+        var h = z >> Constants.ChunkShift;
+
+
+        // Precalculate
+        var chunkAccess = GetAccessLocal(f, g, h);
+        var c = chunks + chunkAccess;
+
+
+        // If already initialised, return it
+        if (c->Allocated)
+        {
+            Assert(meshChunks[chunkAccess] != null);
+            return c;
+        }
+
+
+        // Ensure we're not trying to initialise the empty or full chunk
+        Assert(!c->fake);
+
+
+        // Initialise it and return it
+        c->Reset(f, g, h, false);
+        Assert(c->Allocated);
+
+        // Create a meshing wrapper for this chunk
+        meshChunks[chunkAccess] = new ChunkMesh(this, c);
+
+        Assert(c->voxels != null);
+
+        return c;
+    }
+
+
+    // Meshing data
+    public ChunkMesh[] meshChunks = new ChunkMesh[Constants.MaxChunkAmountCubed];
+
+    public long meshingTime;
+    public int meshSize;
+    public int meshedChunkCount;
+
+
+    // Map dimensions
+    public int MapSizeX;
+    public int MapSizeY;
+    public int MapSizeZ;
+    public int ChunkAmountX;
+    public int ChunkAmountY;
+    public int ChunkAmountZ;
+
+
+    // Precalculated values. M1 = 'Minus One'
+    public int ChunkAmountXM1;
+    public int ChunkAmountYM1;
+    public int ChunkAmountZM1;
+
+
+    // Chunk data
+    public int bytes_chunks;
+    public Chunk* chunks;
+
+
+    // Meshing settings
+    public bool ShouldMeshExterior = true;
+    public bool ShouldMeshBetweenChunks;
+
+}
+```
+
+### MapRenderer.cs
+```
+﻿namespace meshing;
+
+public unsafe partial class MapRenderer
+{
+    public Map m;
+
+    public float cameraPitch;
+    public float cameraYaw;
+
+    public MapRenderer()
+    {
+        m = new Map(64, 64, 64);
+
+
+        // Create hills
+        for (int x = 0; x < 64; x++)
+            for (int z = 0; z < 64; z++)
+            {
+                var height = 1 + (int)((MathF.Sin(x / 8.0f) + 1) * 4) + (int)((MathF.Sin(z / 4.0f) + 1) * 4);
+
+                for (int y = 0; y < height; y++)
+                    m.AddVoxel(z, y, x, 1);
+            }
+    }
+
+    public void Render()
+    { 
+        // Determine chunk rendering order for best front-to-back rendering on the GPU
+        int startX, endX, xStep, startZ, endZ, zStep;
+        int xAccessStep, zAccessStep;
+        var lookAt = Helper.FromPitchYaw(cameraPitch, cameraYaw);
+
+        if (lookAt.X > 0)
+        {
+            startX = 0;
+            endX = m.ChunkAmountX;
+            xStep = 1;
+            xAccessStep = Constants.ChunkSize;
+        }
+        else
+        {
+            startX = Math.Max(0, m.ChunkAmountX - 1);
+            endX = -1;
+            xStep = -1;
+            xAccessStep = -Constants.ChunkSize;
+        }
+
+        if (lookAt.Z > 0)
+        {
+            startZ = 0;
+            endZ = m.ChunkAmountZ;
+            zStep = 1;
+            zAccessStep = Constants.ChunkSizeSquared;
+        }
+        else
+        {
+            startZ = Math.Max(0, m.ChunkAmountZ - 1);
+            endZ = -1;
+            zStep = -1;
+            zAccessStep = -Constants.ChunkSizeSquared;
+        }
+
+
+
+        // Loop over every chunk in the current range
+        //  To avoid excessive multiplications in the inner-mode loop, chunkAccessX and chunkAccessZ are precalculated in the outer loops
+        //  These access variables are needed because m.meshChunks is a 1-dimensional array
+        var chunkAccessZ = startZ * Constants.ChunkSizeSquared;
+
+        for (int k = startZ; k != endZ; k += zStep, chunkAccessZ += zAccessStep)
+        {
+            var chunkAccessX = startX * Constants.ChunkSize;
+
+            for (int i = startX; i != endX; i += xStep, chunkAccessX += xAccessStep)
+            {
+                var chunkAccess = chunkAccessZ + chunkAccessX;
+
+                for (int j = 0; j < m.ChunkAmountY; j++)
+                {
+                    var c = m.meshChunks[chunkAccess++];
+
+
+                    // Ignore empty chunks
+                    if (c == null)
+                        continue;
+
+
+                    // Mesh the chunk (if it's dirty)
+                    MeshChunk(c);
+
+
+                    // Render the chunk (if meshed successfully)
+                    if (c.voxelBuffer != null)
+                    {
+                        VoxelShader.worldPosition.Set3(c.WorldPos);
+                        c.voxelBuffer.BindAndDraw();
+                    }
+                }
+            }
+        }
+    }
+
+    protected void MeshChunk(ChunkMesh c)
+    {
+        // If not dirty, don't mesh
+        if (!c.chunk->IsDirty())
+            return;
+
+
+        // Ensure we're a valid chunk
+        Assert(!c.chunk->fake);
+
+
+        // Mesh it
+        c.PreMeshing();
+        c.GenerateMesh();
+        c.PostMeshing();
+    }
+}
+```
+
+### MapStatic.cs
+```
+﻿namespace meshing;
+
+public unsafe partial class Map
+{
+    public static Chunk* EMPTY_CHUNK; // Helper chunk for raytracing through a null chunk
+    public static Chunk* FULL_CHUNK;  // Helper chunk to prevent meshing the outside of a map
+
+    static Map()
+    {
+        // Allocate an empty and a full chunk
+        EMPTY_CHUNK = (Chunk*)Allocator.AllocZeroed(Marshal.SizeOf<Chunk>());
+        EMPTY_CHUNK->Reset(0, 0, 0, true);
+
+        FULL_CHUNK = (Chunk*)Allocator.AllocZeroed(Marshal.SizeOf<Chunk>());
+        FULL_CHUNK->Reset(0, 0, 0, true);
+
+
+        // Fill the chunk with solid voxels
+        var start = FULL_CHUNK->voxels;
+        var end = FULL_CHUNK->voxels + Constants.ChunkSizeCubed;
+
+        for (; start < end; start++)
+            start->index = 1;
+    }
+}
+```
+
+### MeshVisiter.cs
+```
+﻿namespace meshing;
+
+public unsafe class MeshVisiter
+{
+    const int BYTES = sizeof(int) * Constants.VOXELS_PER_CHUNK;
+
+    public int Comparison = 1;
+    public int* visitXN;
+    public int* visitXP;
+    public int* visitZN;
+    public int* visitZP;
+    public int* visitYN;
+    public int* visitYP;
+
+    public MeshVisiter()
+    {
+        visitXN = (int*)Allocator.AllocZeroed(BYTES);
+        visitXP = (int*)Allocator.AllocZeroed(BYTES);
+        visitZN = (int*)Allocator.AllocZeroed(BYTES);
+        visitZP = (int*)Allocator.AllocZeroed(BYTES);
+        visitYN = (int*)Allocator.AllocZeroed(BYTES);
+        visitYP = (int*)Allocator.AllocZeroed(BYTES);
+    }
+
+    public void Dispose()
+    {
+        Allocator.Free(ref visitXN);
+        Allocator.Free(ref visitXP);
+        Allocator.Free(ref visitZN);
+        Allocator.Free(ref visitZP);
+        Allocator.Free(ref visitYN);
+        Allocator.Free(ref visitYP);
+    }
+}
+```
+
+### MeshVisiterAllocator.cs
+```
+﻿using System.Collections.Concurrent;
+
+namespace meshing;
+
+public static class MeshVisiterAllocator
+{
+    static BlockingCollection<MeshVisiter> chunks = new();
+
+    // Have 32 visiters active but allow higher bursts for when meshing the entire map at once
+    const int BURST_THRESHOLD = 32;
+
+    public static MeshVisiter Get()
+    {
+        // Reuse
+        if (chunks.TryTake(out var visiter))
+            return visiter;
+
+        // Burst
+        return new();
+    }
+
+
+    public static void Recycle(ref MeshVisiter visiter)
+    {
+        if (visiter == null)
+        {
+            AssertFalse();
+            return;
+        }
+
+        // Dispose burst chunks rather than keeping them around forever
+        if (chunks.Count >= BURST_THRESHOLD)
+        {
+            visiter.Dispose();
+            return;
+        }
+
+        visiter.Comparison++;
+        chunks.Add(visiter);
+        visiter = null;
+    }
+}
+```
+
+### Program.cs
+```
+﻿global using static meshing.Globals;
+global using System;
+global using System.Numerics;
+global using System.Runtime.InteropServices;
+global using Silk.NET.OpenGL;
+using System.Diagnostics;
+
+namespace meshing;
+
+
+// This allows every file to call Gl.DoStuff()
+public static class Globals
+{
+    public static GL Gl;
+
+    public static void Assert(bool condition) => Debug.Assert(condition);
+    public static void AssertFalse() => Debug.Assert(false);
+}
+
+
+internal class Program
+{
+    static void Main(string[] args)
+    {
+        new Client().Run();
+    }
+}
+```
+
+### Shader.cs
+```
+﻿namespace meshing;
+
+public class Shader
+{
+    public Shader(ShaderType type, string source)
+    {
+        // Create and compile a shader
+        shaderHandle = Gl.CreateShader(type);
+        Gl.ShaderSource(shaderHandle, source);
+        Gl.CompileShader(shaderHandle);
+
+
+        // Check the log
+        Gl.GetShader(shaderHandle, ShaderParameterName.InfoLogLength, out var logLen);
+
+        if (logLen > 0)
+        {
+            Gl.GetShaderInfoLog(shaderHandle, (uint)logLen, out _, out string log);
+
+            if (!string.IsNullOrEmpty(log))
+                Console.WriteLine($"Shader compile log:\n{log}");
+        }
+
+
+        // Check it compiled successfully
+        Gl.GetShader(shaderHandle, ShaderParameterName.CompileStatus, out var status);
+
+        if (status == (int)GLEnum.True)
+            return;
+
+
+
+        // Delete it
+        Gl.DeleteShader(shaderHandle);
+        shaderHandle = 0;
+
+        AssertFalse();
+    }
+
+    public void Dispose()
+    {
+        // Already disposed
+        if (shaderHandle == 0)
+        {
+            AssertFalse();
+            return;
+        }
+
+        Gl.DeleteShader(shaderHandle);
+        shaderHandle = 0;
+    }
+
+    public uint shaderHandle;
+}
+```
+
+### ShaderProgram.cs
+```
+﻿namespace meshing;
+
+public unsafe class ShaderProgram
+{
+    public static string VERSION = "#version 330\n";
+
+    public ShaderProgram(string vertexShaderSource, string fragmentShaderSource)
+    {
+        Initialise(vertexShaderSource, fragmentShaderSource);
+    }
+
+    void Initialise(string vertexShaderSource, string fragmentShaderSource)
+    {
+        try
+        {
+            vertexShader = new Shader(ShaderType.VertexShader, VERSION + vertexShaderSource);
+            fragmentShader = new Shader(ShaderType.FragmentShader, VERSION + fragmentShaderSource);
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine(e);
+            Dispose();
+            throw;
+        }
+
+        // Create shader program.
+        programHandle = Gl.CreateProgram();
+
+
+        // Attach shaders to the program
+        Gl.AttachShader(programHandle, vertexShader.shaderHandle);
+        Gl.AttachShader(programHandle, fragmentShader.shaderHandle);
+        Gl.LinkProgram(programHandle);
+
+
+        // Get the log
+        Gl.GetProgram(programHandle, ProgramPropertyARB.InfoLogLength, out int logLen);
+
+        if (logLen > 0)
+        {
+            Gl.GetProgramInfoLog(programHandle, (uint)logLen, out _, out string log);
+
+            if (!string.IsNullOrEmpty(log))
+                Console.WriteLine($"Program link log:\n{log}");
+        }
+
+
+        // Clean up
+        Gl.DetachShader(programHandle, vertexShader.shaderHandle);
+        Gl.DetachShader(programHandle, fragmentShader.shaderHandle);
+
+
+        // Ensure the shaders were linked correctly
+        Gl.GetProgram(programHandle, ProgramPropertyARB.LinkStatus, out int status);
+
+        if (status == 0)
+        {
+            Console.WriteLine($"Shader link failed. Status: {status}");
+            AssertFalse();
+        }
+
+        Unbind();
+    }
+
+    public virtual void UseProgram()
+    {
+        // Already current, all good
+        if (Active)
+            return;
+
+        Gl.UseProgram(programHandle);
+        CurrentHandle = programHandle;
+    }
+
+
+    public static void Unbind()
+    {
+        Gl.UseProgram(0);
+        CurrentHandle = 0;
+    }
+
+    public int GetUniformLocation(string name) => Gl.GetUniformLocation(programHandle, name);
+
+    public void Dispose()
+    {
+        if (vertexShader != null)
+        {
+            vertexShader.Dispose();
+            vertexShader = null;
+        }
+
+        if (fragmentShader != null)
+        {
+            fragmentShader.Dispose();
+            fragmentShader = null;
+        }
+
+        if (programHandle != 0)
+        {
+            Gl.DeleteProgram(programHandle);
+            programHandle = 0;
+        }
+    }
+
+
+    // Remember which is the current shader program
+    static uint CurrentHandle;
+    public bool Active => CurrentHandle == programHandle;
+
+    Shader vertexShader;
+    Shader fragmentShader;
+    protected uint programHandle;
+
+}
+```
+
+### ShaderValue.cs
+```
+﻿namespace meshing;
+
+public unsafe class ShaderValue
+{
+    public int location;
+
+    public ShaderValue(ShaderProgram shader, string name)
+    {
+        location = shader.GetUniformLocation(name);
+
+        if (location < 0)
+            Console.WriteLine($"The {name} uniform is not used in the shader");
+    }
+
+
+    // Boolean
+    public void Set(bool v)
+    {
+        Gl.Uniform1(location, v ? 1 : 0);
+    }
+
+
+    // Matrix4
+    Matrix4x4* cache_matrix_single = (Matrix4x4*)Allocator.AllocZeroed(Marshal.SizeOf<Matrix4x4>());
+    public void Set(Matrix4x4 v)
+    {
+        *cache_matrix_single = v;
+        Gl.UniformMatrix4(location, 1, false, (float*)cache_matrix_single);
+    }
+
+
+    // Vector3
+    public void Set3(Vector3 v)
+    {
+        Gl.Uniform3(location, v.X, v.Y, v.Z);
+    }
+}
+```
+
+### TempMeshData.cs
+```
+﻿namespace meshing;
+
+public unsafe class TempMeshData<T> where T : unmanaged
+{
+    const int MAX_SIZE = Constants.ChunkSizeCubed * 6 * 6; // 6 faces, 6 vertices
+
+    public T* data;
+    public T* write;
+
+    public int Length => (int)(write - data);
+
+    public TempMeshData()
+    {
+        data = (T*)Allocator.Alloc(sizeof(T) * MAX_SIZE);
+    }
+
+    public void PreMeshing()
+    {
+        write = data;
+    }
+
+    public void Dispose()
+    {
+        Allocator.Free(ref data);
+        write = null;
+    }
+}
+```
+
+### TempStorageAllocator.cs
+```
+﻿using System.Collections.Concurrent;
+
+namespace meshing;
+
+public static unsafe class TempStorageAllocator<T> where T : unmanaged
+{
+    // Have 32 visiters active but allow higher bursts for when meshing the entire map at once
+    const int BURST_THRESHOLD = 32;
+
+    static BlockingCollection<TempMeshData<T>> storage = new();
+
+    public static TempMeshData<T> Get()
+    {
+        // Reuse
+        if (storage.TryTake(out var data))
+            return data;
+        
+        // Burst
+        return new();
+    }
+
+    public static void Recycle(ref TempMeshData<T> data)
+    {
+        if (data == null)
+        {
+            AssertFalse();
+            return;
+        }
+
+        // Dispose burst data rather than keeping them around forever
+        if (storage.Count >= BURST_THRESHOLD)
+        {
+            data.Dispose();
+            data = null;
+            return;
+        }
+
+        storage.Add(data);
+        data = null;
+    }
+}
+```
+
+### VertexBuffer.cs
+```
+﻿namespace meshing;
+
+public unsafe abstract class VertexBuffer<T> where T : unmanaged
+{
+    public VertexBuffer(uint vertexSize)
+    {
+        this.vertexSize = vertexSize;
+
+        // Create a VAO
+        vaoHandle = Gl.GenVertexArray();
+        Gl.BindVertexArray(vaoHandle);
+
+
+        // Create a VBO
+        vboHandle = Gl.GenBuffer();
+        Gl.BindBuffer(BufferTargetARB.ArrayBuffer, vboHandle);
+
+
+        // Set up attribs
+        SetupVAO();
+
+
+        // Clean up
+        UnbindVAO();
+        UnbindVBO();
+    }
+
+    public void BindAndDraw()
+    {
+        BindVAO();
+        Gl.DrawArrays(primitiveType, 0, (uint)size);
+        UnbindVAO();
+    }
+
+    public void BufferData(int size, T* data)
+    {
+        this.size = size;
+
+        BindVBO();
+        Gl.BufferData(BufferTargetARB.ArrayBuffer, (uint)(size * vertexSize), data, BufferUsageARB.StaticDraw);
+        UnbindVBO();
+    }
+
+
+    // GPU data
+    public int size;
+    protected uint vertexSize;
+
+
+    // Rendering settings
+    public PrimitiveType primitiveType = PrimitiveType.Triangles;
+
+
+    // Buffer handles
+    uint vaoHandle;
+    uint vboHandle;
+
+
+    // Abstracts
+    protected abstract void SetupVAO();
+
+
+    // Shortcut functions
+    public void BindVAO() => Gl.BindVertexArray(vaoHandle);
+    public void BindVBO() => Gl.BindBuffer(BufferTargetARB.ArrayBuffer, vboHandle);
+
+    public static void UnbindVAO() => Gl.BindVertexArray(0);
+    public static void UnbindVBO() => Gl.BindBuffer(BufferTargetARB.ArrayBuffer, 0);
+}
+```
+
+### Voxel.cs
+```
+﻿namespace meshing;
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public unsafe partial struct Voxel
+{
+    public byte index;
+
+    public void Reset(byte i)
+    {
+        index = i;
+    }
+}
+```
+
+### VoxelShader.cs
+```
+﻿namespace meshing;
+
+public static class VoxelShader
+{
+    public static ShaderProgram shader;
+    public static bool Active => shader?.Active ?? false;
+
+    public static void Initialise()
+    {
+        shader = new(VertexShader, FragmentShader);
+
+        mvp = new(shader, "mvp");
+        worldPosition = new(shader, "worldPosition");
+        showWireframe = new(shader, "showWireframe");
+    }
+
+
+    public static void UseProgram()
+    {
+        if (shader == null)
+            Initialise();
+
+        shader.UseProgram();
+    }
+
+    public static ShaderValue mvp;
+    public static ShaderValue worldPosition;
+    public static ShaderValue showWireframe;
+
+    public static string FragmentShader = @"
+out vec4 gColor;
+
+in vec2 vUV;
+in vec2 vBary;
+flat in float vBrightness;
+
+uniform bool showWireframe;
+
+float barycentric(vec2 vBC, float width)
+{
+    vec3 bary = vec3(vBC.x, vBC.y, 1.0 - vBC.x - vBC.y);
+    vec3 d = fwidth(bary);
+    vec3 a3 = smoothstep(d * (width - 0.5), d * (width + 0.5), bary);
+    return min(min(a3.x, a3.y), a3.z);
+}
+
+
+void main()
+{
+    // Grid pattern
+    bool gridX = mod(vUV.x, 1.0) > 0.5;
+    bool gridY = mod(vUV.y, 1.0) > 0.5;
+
+    float grid = gridX != gridY ? 1.0 : 0.7;
+
+    gColor = vec4(vBrightness * grid);
+
+    if (showWireframe)
+    {
+        gColor.rgb *= 0.25;
+        gColor.rgb += vec3(1.0 - barycentric(vBary, 1.0));
+    }
+}
+";
+
+    public static string VertexShader = @$"
+
+layout (location = 0) in vec3 aPosition;
+layout (location = 1) in vec3 aNormal;
+layout (location = 2) in vec2 aBary;
+layout (location = 3) in int aTextureID;
+
+out vec2 vUV;
+out vec2 vBary;
+flat out float vBrightness;
+
+uniform mat4 mvp;
+uniform vec3 worldPosition;
+
+void main()
+{{
+    vec3 vPosition = aPosition + worldPosition;
+    vBary = aBary;
+
+    int face;
+
+    if (aNormal.y >= 0.5)
+    {{
+        face = {(int)FaceType.yp};
+        vBrightness = 1.0;
+        vUV = vPosition.xz;
+    }}
+    else if (aNormal.y <= -0.5)
+    {{
+        face = {(int)FaceType.yn};
+        vBrightness = 0.25;
+        vUV = vPosition.xz;
+    }}
+    else if (aNormal.x >= 0.5)
+    {{
+        face = {(int)FaceType.xp};
+        vBrightness = 0.75;
+        vUV = vPosition.zy;
+    }}
+    else if (aNormal.x <= -0.5)
+    {{
+        face = {(int)FaceType.xn};
+        vBrightness = 0.75;
+        vUV = vPosition.zy;
+    }}
+    else if (aNormal.z >= 0.5)
+    {{
+        face = {(int)FaceType.zp};
+        vBrightness = 0.5;
+        vUV = vPosition.xy;
+    }}
+    else
+    {{
+        face = {(int)FaceType.zn};
+        vBrightness = 0.5;
+        vUV = vPosition.xy;
+    }}
+
+    vUV *= 2.0;
+
+
+    // World to screen pos
+    gl_Position = mvp * vec4(vPosition, 1.0);
+}}
+";
+}
+```
+
+### VoxelVertex.cs
+```
+﻿namespace meshing;
+
+public struct VoxelVertex
+{
+    public void Reset(float pX, float pY, float pZ, float nX, float nY, float nZ, float bX, float bY, int tID)
+    {
+        position = new(pX, pY, pZ);
+        normal = new(nX, nY, nZ);
+        bary = new(bX, bY);
+        textureID = tID;
+    }
+
+    public Vector3 position;
+    public Vector3 normal;
+    public Vector2 bary;
+    public int textureID;
+}
+
+public unsafe class VoxelVertexBuffer : VertexBuffer<VoxelVertex>
+{
+    public VoxelVertexBuffer() : base(36) { }
+
+    protected override void SetupVAO()
+    {
+        Gl.EnableVertexAttribArray(0);
+        Gl.EnableVertexAttribArray(1);
+        Gl.EnableVertexAttribArray(2);
+        Gl.EnableVertexAttribArray(3);
+
+        Gl.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, vertexSize, null);
+        Gl.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, vertexSize, (void*)12);
+        Gl.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, vertexSize, (void*)24);
+        Gl.VertexAttribIPointer(3, 1, VertexAttribIType.Int, vertexSize, (void*)32);
+    }
+}
+```

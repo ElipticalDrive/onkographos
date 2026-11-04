@@ -1,0 +1,83 @@
+# Scanline Interleaving
+
+Also called: Image partitioning strategy, Scanline Interleaving Image Partitioning
+
+## Overview
+Scanline Interleaving is an image-space partitioning strategy that distributes pixels across processors in a striped, round-robin pattern to balance the computational load of ray-merging operations [S1, unofficial][S2]. It addresses variations in depth complexity caused by local variations in cell sizes by dispersing ray-merging computations evenly across the screen [S2].
+
+## How it works
+**Inputs:**
+- Image height $H$ (number of scanlines).
+- Number of processors $P$.
+
+**Outputs:**
+- Processor ID $p$ assigned to each pixel.
+- Per-pixel data structure: A linked list of ray segments maintained at each pixel location, which are merged to form the final pixel value [S2].
+
+**Data Structures:**
+- Per-pixel linked list of ray segments [S2].
+
+**Algorithm:**
+1. Partition the image space such that rows (scanlines) are distributed cyclically among processors [S1, unofficial].
+2. For each scanline $y$ from $0$ to $H-1$:
+3.   Calculate the processor ID $p$ using the formula:
+       $$ p = y \mod P $$
+4.   Assign all pixels in scanline $y$ to processor $p$.
+5.   Initialize the linked list at each pixel $(x, y)$ to empty [G].
+
+**Parameters:**
+- $P$: Number of processors.
+- $H$: Vertical resolution.
+
+**Edge Cases and Pitfalls:**
+- **Vertical Resolution Constraint:** Performance degrades if the vertical resolution $H$ is not several times larger than the number of processors $P$ [S2].
+- **Fine-Grained Interleave:** For scenarios with many processors ($P > H$), a finer-grained pixel interleave is conjectured to be advantageous, though not detailed in the primary sources [S2].
+- **Cell Size Variations:** The method is specifically designed to handle variations in depth complexity caused by local variations in cell sizes [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def assign_scanline_interleaving(height, num_processors):
+    """
+    Assigns pixels to processors using scanline interleaving.
+    
+    Args:
+        height (int): Image height in pixels (number of scanlines).
+        num_processors (int): Number of available processors.
+        
+    Returns:
+        dict: A mapping of y coordinates to processor IDs.
+    """
+    assignments = {}
+    
+    # Iterate over each scanline (row)
+    for y in range(height):
+        # Determine processor ID for this scanline using round-robin
+        processor_id = y % num_processors
+        
+        # Assign all pixels in this scanline to the same processor
+        assignments[y] = processor_id
+        
+    return assignments
+```
+
+## Subtopics
+
+### Load-Balanced Cell Assignment
+Assigns cells to processors based on estimated workload rather than image space. Choose when cell complexity varies significantly more than image-space depth complexity. See [Load-Balanced Cell Assignment](4194-load-balanced-cell-assignment.md).
+
+## Operating characteristics
+- **Performance:** Effective when $H \gg P$. Performance degrades if $H$ is not several times larger than $P$ [S2].
+- **Strengths:** Simple to implement; disperses merging operations evenly [S1, unofficial][S2].
+- **Limitations:** Coarse granularity when $P$ is large relative to $H$ [S2].
+- **When to Use:** When vertical resolution is high relative to the number of processors and cell sizes vary locally, causing depth complexity variations [S2].
+- **When Not to Use:** When the number of processors exceeds the vertical resolution significantly [S2].
+- **Time and Memory Complexity:** Not given in the sources.
+
+## Background
+Scanline Interleaving was introduced as part of a scalable parallel cell-projection volume rendering algorithm for three-dimensional unstructured data [S1, unofficial][S2]. The method was developed to address the challenges of rendering unstructured grids where cell sizes vary, leading to unpredictable depth complexity in image space [S2]. It is used in conjunction with a cell-projection rendering algorithm, where processors scan-convert local cells into ray segments that are routed to their final destinations for merging [S1, unofficial][S2]. The approach complements a round-robin data distribution scheme for volume cells, which disperses nearby cells widely among processors [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA329328: A Scalable Parallel Cell-Projection Volume Rendering Algorithm for Three-Dimensional Unstructured Data, https://archive.org/details/DTIC_ADA329328, fetched 2026-10-26 (unofficial)
+[S2] PDF A Scalable Parallel Cell-Projection Volume Rendering Algorithm for ..., https://web.cs.ucdavis.edu/~ma/papers/PRS97.pdf, fetched 2026-10-27

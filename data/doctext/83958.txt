@@ -1,0 +1,1692 @@
+# Volumetric Cloud Renderer
+
+Real-time procedural clouds in C++17 and OpenGL 4.5. A fragment shader ray-marches a spherical cloud layer built from tileable 3D Perlin-Worley noise, lights it with a multiple-scattering approximation, and a temporal pass reprojects each frame against the last one so the march can run at half or quarter resolution without visible noise.
+
+It runs interactively through GLFW, or headless through surfaceless EGL on Linux, which is how the images below and the CI render are produced (on Mesa's CPU rasterizer, no GPU needed).
+
+![from below](docs/below.png)
+![from above the layer](docs/above.png)
+![sunset](docs/sunset.png)
+
+## What's in it
+
+**Cloud model.** A 128³ shape texture (Perlin fbm dilated by Worley, plus three Worley octaves) and a 32³ Worley detail texture, both generated on the GPU by compute shaders at startup and tileable so the layer extends to the horizon. A 512² weather map gives coverage and cloud type per region. Cloud type picks a vertical density profile (stratus, cumulus, cumulonimbus), and the detail texture erodes the edges of the base shape, with less erosion where coverage is high so solid decks stay solid. Wind scrolls the noise over time with a little shear by height.
+
+**Lighting.** Each march step takes six samples toward the sun to get optical depth, then evaluates a four-octave multiple-scattering approximation (attenuated extinction, contribution and phase eccentricity per octave, after Wrenninge and Hillaire) with a two-lobe Henyey-Greenstein phase function. A powder term darkens back-lit edges, and an ambient term fades from blue at the top of the layer to grey at the bottom. In-scattering is integrated analytically over each step so the result does not depend on step size. The sun and sky colour shift warm as the sun nears the horizon.
+
+**Marching.** Rays intersect a spherical shell around the planet, so the layer curves away at the horizon and the camera can be below, inside or above it. Step size is derived from the ray's span through the layer. Steps are jittered per pixel with interleaved gradient noise that changes each frame, and the march stops once transmittance drops below 0.5%. The pass writes radiance, transmittance and a transmittance-weighted mean depth.
+
+**Temporal reprojection.** The cloud pass renders at a reduced resolution with a sub-pixel jitter from a Halton sequence. A resolve pass reconstructs the world position of each full-resolution pixel from the cloud depth, projects it through the previous frame's view-projection matrix, and blends the history sample in at 92%. The history is clamped to the 3×3 neighbourhood of the current sample so disocclusions and lighting changes do not ghost. The jitter means the half-resolution samples land on different sub-pixel positions each frame, so they converge to a full-resolution result over roughly a dozen frames.
+
+**Tooling.** Per-pass GPU timings with timer queries (shown in the window title), a `--bench` mode that times several configurations, `--headless` rendering to PNG, F5 shader hot-reload, and a debug view of the noise textures.
+
+## Performance
+
+`--bench` times each pass over a window of frames. These numbers are from Mesa llvmpipe (a CPU rasterizer) at 640×360, so the absolute values are meaningless. The ratios are the point: half-resolution with reprojection costs 29% of the full-resolution march for a result that converges to the same image.
+
+| configuration | cloud pass | resolve | composite | total |
+|---|---|---|---|---|
+| full-res, 128 steps, no temporal | 899 ms | 13 ms | 15 ms | 927 ms |
+| full-res, 64 steps, no temporal | 468 ms | 8 ms | 15 ms | 490 ms |
+| half-res, 128 steps, temporal | 221 ms | 27 ms | 18 ms | 266 ms |
+| quarter-res, 128 steps, temporal | 81 ms | 30 ms | 13 ms | 124 ms |
+
+Run `clouds --bench --size 1920x1080` on a GPU for real numbers.
+
+## Build
+
+Needs CMake 3.20+, a C++17 compiler, GLFW 3.3 and an OpenGL 4.5 driver. Headless mode also needs Mesa's EGL (`libegl1-mesa-dev`, `libgl1-mesa-dri`).
+
+```bash
+# Linux
+sudo apt install cmake libglfw3-dev libegl1-mesa-dev libgl1-mesa-dev libgl1-mesa-dri
+cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+./build/clouds                       # interactive
+./build/clouds --headless --out clouds.png
+./build/clouds --bench
+```
+
+```powershell
+# Windows (GLFW via vcpkg)
+vcpkg install glfw3
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%/scripts/buildsystems/vcpkg.cmake
+cmake --build build --config Release
+build\Release\clouds.exe
+```
+
+Shaders are read at runtime from `./shaders`, or wherever `--shaders` points.
+
+## Controls
+
+| key | |
+|---|---|
+| mouse, W A S D, Q E | look, move, down/up (Shift to move faster) |
+| Z / X | coverage |
+| C / V | density |
+| B / N | cloud type (stratus to cumulonimbus) |
+| O / P, K / L | sun azimuth, sun elevation |
+| 1 / 2 / 3 | cloud pass at full / half / quarter resolution |
+| T | toggle temporal reprojection |
+| H | show the noise textures |
+| Space | pause the wind |
+| R | reset weather |
+| F5 | reload shaders |
+| F12 | save screenshot.png |
+
+Headless options: `--size WxH`, `--frames N` (frames to accumulate before saving), `--cam X,Y,Z --yaw --pitch`, `--move X,Y,Z` (per-frame camera motion, for testing reprojection), and the weather flags `--coverage --density --type --sun-el --sun-az`. `--help` lists everything.
+
+## Layout
+
+| path | |
+|---|---|
+| `shaders/clouds.frag` | density model, lighting, ray march |
+| `shaders/resolve.frag` | temporal reprojection and neighbourhood clamp |
+| `shaders/composite.frag` | sky, sun, ground, tone mapping |
+| `shaders/noise_*.comp`, `weather.comp` | noise texture generation |
+| `src/renderer.cpp` | passes, render targets, timer queries |
+| `src/context.cpp` | GLFW window or surfaceless EGL context |
+| `src/gl.h` | the GL function loader |
+
+## Limitations
+
+- One cloud layer. No cirrus, no separate high layer.
+- Sky is an analytic gradient, not an atmosphere model, so the sun's colour at low elevation is hand-tuned.
+- The multiple-scattering octaves are an approximation; the lit side of thick clouds is somewhat flatter than in a path-traced reference.
+- Reprojection uses the mean cloud depth per pixel. Where a thin near cloud overlaps a far one, that depth is a compromise and the history clamp does the rest.
+
+## References
+
+- Schneider and Vos, *The Real-time Volumetric Cloudscapes of Horizon: Zero Dawn*, SIGGRAPH 2015
+- Hillaire, *Physically Based Sky, Atmosphere and Cloud Rendering in Frostbite*, SIGGRAPH 2016
+- Wrenninge, Kulla and Lundqvist, *Oz: The Great and Volumetric*, SIGGRAPH 2013 talks
+- Högfeldt, *Convincing Cloud Rendering*, 2016
+
+### shaders/clouds.frag
+```
+// Ray-marches the cloud layer. Writes scattered radiance + transmittance
+// to one target and a transmittance-weighted mean depth to another, which
+// the temporal pass uses to reproject against the previous frame.
+in vec2 vUv;
+layout(location = 0) out vec4 outColor;   // rgb: in-scattered radiance, a: transmittance
+layout(location = 1) out float outDepth;  // metres along the ray, 0 if no cloud
+
+uniform sampler3D uShape;
+uniform sampler3D uDetail;
+uniform sampler2D uWeather;
+
+uniform mat4 uInvViewProj;
+uniform vec3 uCamPos;
+uniform vec3 uSunDir;
+uniform float uTime;
+uniform uint uFrame;
+uniform int uMaxSteps;
+
+uniform float uCoverage;
+uniform float uDensity;
+uniform float uCloudType;
+uniform float uBaseHeight;
+uniform float uThickness;
+uniform vec2 uWind;
+uniform float uAnisotropy;
+uniform float uSunIntensity;
+uniform float uExtinction;
+uniform float uAmbient;
+uniform float uErosion;
+
+const float EARTH_RADIUS = 6371000.0;
+const float SHAPE_SCALE = 1.0 / 9000.0;     // metres per noise tile
+const float DETAIL_SCALE = 1.0 / 900.0;
+const float WEATHER_SCALE = 1.0 / 48000.0;
+const vec3 AMBIENT_TOP = vec3(0.62, 0.74, 0.95);
+const vec3 AMBIENT_BOTTOM = vec3(0.36, 0.42, 0.52);
+
+// Entry/exit distances of a ray through the spherical shell [rInner, rOuter],
+// for a camera below, inside or above the layer.
+bool shellIntersect(vec3 ro, vec3 rd, float rInner, float rOuter, out float t0, out float t1) {
+    vec3 oc = ro - vec3(0.0, -EARTH_RADIUS, 0.0);
+    float rCam = length(oc);
+    float b = dot(oc, rd);
+    float c = dot(oc, oc);
+    float hOuter = b * b - (c - rOuter * rOuter);
+    if (hOuter < 0.0) return false;
+    float sOuter = sqrt(hOuter);
+    float tOuterNear = -b - sOuter, tOuterFar = -b + sOuter;
+    float hInner = b * b - (c - rInner * rInner);
+    float sInner = hInner > 0.0 ? sqrt(hInner) : 0.0;
+    float tInnerNear = -b - sInner, tInnerFar = -b + sInner;
+    bool hitsInnerAhead = hInner > 0.0 && tInnerNear > 0.0;
+
+    if (rCam < rInner) {               // below: start where we leave the inner sphere
+        t0 = tInnerFar; t1 = tOuterFar;
+    } else if (rCam > rOuter) {        // above: start at the outer sphere, stop at the inner one
+        if (tOuterNear < 0.0) return false;
+        t0 = tOuterNear; t1 = hitsInnerAhead ? tInnerNear : tOuterFar;
+    } else {                           // inside the layer
+        t0 = 0.0; t1 = hitsInnerAhead ? tInnerNear : tOuterFar;
+    }
+    t0 = max(t0, 0.0);
+    return t1 > t0;
+}
+
+float heightFraction(vec3 p) {
+    float r = length(p - vec3(0.0, -EARTH_RADIUS, 0.0)) - EARTH_RADIUS;
+    return clamp((r - uBaseHeight) / uThickness, 0.0, 1.0);
+}
+
+// Vertical density profile per cloud type: stratus are flat and low,
+// cumulus are taller with a rounded top, cumulonimbus fill the layer.
+float heightGradient(float h, float type) {
+    float stratus = remap(h, 0.0, 0.08, 0.0, 1.0) * remap(h, 0.15, 0.3, 1.0, 0.0);
+    float cumulus = remap(h, 0.0, 0.15, 0.0, 1.0) * remap(h, 0.45, 0.8, 1.0, 0.0);
+    float cumulonimbus = remap(h, 0.0, 0.1, 0.0, 1.0) * remap(h, 0.75, 1.0, 1.0, 0.0);
+    float a = clamp(type * 2.0, 0.0, 1.0);
+    float b = clamp(type * 2.0 - 1.0, 0.0, 1.0);
+    return mix(mix(stratus, cumulus, a), cumulonimbus, b);
+}
+
+// cheap=true skips the detail erosion; used while searching for the cloud surface.
+float sampleDensity(vec3 p, bool cheap) {
+    float h = heightFraction(p);
+    vec3 wind = vec3(uWind.x, 0.0, uWind.y) * uTime;
+    vec3 sp = p + wind + vec3(0.0, 0.0, 0.0);
+    sp.xz += h * 300.0;   // slight shear with height
+
+    vec4 weather = texture(uWeather, (p.xz + wind.xz * 0.3) * WEATHER_SCALE);
+    float coverage = clamp(weather.r + (uCoverage - 0.5) * 1.6, 0.0, 1.0);
+    float type = clamp(weather.g + (uCloudType - 0.5), 0.0, 1.0);
+    if (coverage <= 0.001) return 0.0;
+
+    vec4 shape = texture(uShape, sp * SHAPE_SCALE);
+    float lowFreq = shape.g * 0.625 + shape.b * 0.25 + shape.a * 0.125;
+    float base = remap(shape.r, lowFreq - 1.0, 1.0, 0.0, 1.0);
+    base *= heightGradient(h, type);
+    base = remap(base, 1.0 - coverage, 1.0, 0.0, 1.0) * coverage;
+    if (cheap || base <= 0.0) return max(base, 0.0) * uDensity;
+
+    vec3 detail = texture(uDetail, (sp + vec3(0.0, uTime * 3.0, 0.0)) * DETAIL_SCALE).rgb;
+    float detailFbm = detail.r * 0.625 + detail.g * 0.25 + detail.b * 0.125;
+    // Wispy at the bottom, billowy at the top.
+    float detailMod = mix(detailFbm, 1.0 - detailFbm, clamp(h * 4.0, 0.0, 1.0));
+    // Less erosion where coverage is high so solid decks stay solid.
+    base = remap(base, detailMod * uErosion * exp(-coverage * 0.75), 1.0, 0.0, 1.0);
+    return max(base, 0.0) * uDensity;
+}
+
+// Optical depth toward the sun, six samples with growing spacing.
+float lightOpticalDepth(vec3 p, vec3 sunDir, float jitter) {
+    float od = 0.0;
+    float step = uThickness * 0.06;
+    float t = step * (0.5 + jitter * 0.5);
+    for (int i = 0; i < 6; ++i) {
+        vec3 lp = p + sunDir * t;
+        od += sampleDensity(lp, i > 2) * step;
+        t += step;
+        step *= 1.35;
+    }
+    return od;
+}
+
+// Multiple-scattering approximation: octaves with attenuated extinction,
+// contribution and phase eccentricity (Wrenninge 2013, Hillaire 2016).
+vec3 scatteredLight(float opticalDepth, float cosTheta, float h) {
+    float sigma = uExtinction;
+    float sun = 0.0;
+    float a = 1.0, b = 1.0, c = 1.0;
+    for (int k = 0; k < 4; ++k) {
+        float phase = 0.65 * phaseHG(cosTheta, uAnisotropy * c) + 0.35 * phaseHG(cosTheta, -0.3 * c);
+        sun += a * exp(-opticalDepth * sigma * b) * phase;
+        a *= 0.55; b *= 0.45; c *= 0.6;
+    }
+    // Powder: darken thin, back-lit regions where little in-scattering happens.
+    float powder = 1.0 - exp(-opticalDepth * sigma * 2.0);
+    sun *= mix(1.0, powder, clamp(cosTheta * 0.5 + 0.5, 0.0, 1.0) * 0.5);
+    vec3 ambient = mix(AMBIENT_BOTTOM, AMBIENT_TOP, h) * uAmbient;
+    float ambientTerm = exp(-opticalDepth * sigma * 0.2) * 0.7 + 0.1;
+    // Warm the sun and dim the ambient as it approaches the horizon.
+    float sunset = 1.0 - smoothstep(0.0, 0.35, uSunDir.y);
+    vec3 sunColor = mix(vec3(1.0, 0.96, 0.9), vec3(1.0, 0.62, 0.38), sunset);
+    ambient *= mix(1.0, 0.6, sunset);
+    return sunColor * uSunIntensity * sun + ambient * ambientTerm * (1.0 / PI);
+}
+
+void main() {
+    vec2 ndc = vUv * 2.0 - 1.0;
+    vec4 pNear = uInvViewProj * vec4(ndc, -1.0, 1.0);
+    vec4 pFar = uInvViewProj * vec4(ndc, 1.0, 1.0);
+    vec3 ro = uCamPos;
+    vec3 rd = normalize(pFar.xyz / pFar.w - pNear.xyz / pNear.w);
+
+    float t0, t1;
+    float rInner = EARTH_RADIUS + uBaseHeight;
+    float rOuter = rInner + uThickness;
+    outColor = vec4(0.0, 0.0, 0.0, 1.0);
+    outDepth = 0.0;
+    if (!shellIntersect(ro, rd, rInner, rOuter, t0, t1)) return;
+    // Nothing to see through the ground, and cap the march near the horizon.
+    t1 = min(t1, t0 + 60000.0);
+
+    float jitter = ign(gl_FragCoord.xy, uFrame);
+    float cosTheta = dot(rd, uSunDir);
+    float stepSize = max((t1 - t0) / float(uMaxSteps), 24.0);
+    float sigma = uExtinction;
+
+    float t = t0 + jitter * stepSize;
+    float trans = 1.0;
+    vec3 radiance = vec3(0.0);
+    float depthAcc = 0.0, depthWeight = 0.0;
+
+    for (int i = 0; i < uMaxSteps && t < t1; ++i, t += stepSize) {
+        vec3 p = ro + rd * t;
+        float dens = sampleDensity(p, false);
+        if (dens <= 0.0) continue;
+        float h = heightFraction(p);
+        float od = lightOpticalDepth(p, uSunDir, jitter);
+        vec3 light = scatteredLight(od, cosTheta, h);
+        float stepTrans = exp(-dens * sigma * stepSize);
+        // Energy-conserving integration of in-scattering over the step (Hillaire).
+        vec3 integ = (light - light * stepTrans) / max(dens * sigma, 1e-6);
+        radiance += trans * integ * dens * sigma;
+        float w = trans * (1.0 - stepTrans);
+        depthAcc += t * w;
+        depthWeight += w;
+        trans *= stepTrans;
+        if (trans < 0.005) { trans = 0.0; break; }
+    }
+
+    // Fade distant clouds into the sky so the horizon doesn't end abruptly.
+    float depth = depthWeight > 0.0 ? depthAcc / depthWeight : 0.0;
+    float fade = exp(-max(depth - 20000.0, 0.0) / 45000.0);
+    radiance *= fade;
+    trans = mix(1.0, trans, fade);
+    outColor = vec4(radiance, trans);
+    outDepth = depth;
+}
+```
+
+### shaders/common.glsl
+```
+// Shared helpers, prepended to every shader after its #version line.
+
+const float PI = 3.14159265359;
+
+float remap(float v, float lo, float hi, float nlo, float nhi) {
+    return nlo + (clamp(v, lo, hi) - lo) / max(hi - lo, 1e-5) * (nhi - nlo);
+}
+
+// Henyey-Greenstein phase function.
+float phaseHG(float cosTheta, float g) {
+    float gg = g * g;
+    return (1.0 - gg) / (4.0 * PI * pow(1.0 + gg - 2.0 * g * cosTheta, 1.5));
+}
+
+// ---- hashing -------------------------------------------------------------
+
+uvec3 pcg3d(uvec3 v) {
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+}
+
+vec3 hash3(ivec3 cell, int period) {
+    ivec3 c = ((cell % period) + period) % period;
+    uvec3 h = pcg3d(uvec3(c) + uvec3(17u, 59u, 131u) * uint(period));
+    return vec3(h) * (1.0 / 4294967295.0);
+}
+
+// ---- tileable 3D Perlin and Worley -------------------------------------
+
+float perlin3(vec3 p, int period) {
+    vec3 i = floor(p);
+    vec3 f = p - i;
+    vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float r = 0.0;
+    float n[8];
+    for (int k = 0; k < 8; ++k) {
+        ivec3 o = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+        vec3 g = normalize(hash3(ivec3(i) + o, period) * 2.0 - 1.0);
+        n[k] = dot(g, f - vec3(o));
+    }
+    float x0 = mix(n[0], n[1], u.x), x1 = mix(n[2], n[3], u.x);
+    float x2 = mix(n[4], n[5], u.x), x3 = mix(n[6], n[7], u.x);
+    float y0 = mix(x0, x1, u.y), y1 = mix(x2, x3, u.y);
+    r = mix(y0, y1, u.z);
+    return r * 0.5 + 0.5;
+}
+
+float perlinFbm3(vec3 p, int period, int octaves) {
+    float a = 0.0, amp = 0.5, norm = 0.0;
+    for (int o = 0; o < octaves; ++o) {
+        a += perlin3(p, period) * amp;
+        norm += amp;
+        p *= 2.0; period *= 2; amp *= 0.5;
+    }
+    return a / norm;
+}
+
+// Inverted Worley: 1 at cell centres, 0 at cell edges.
+float worley3(vec3 p, int period) {
+    vec3 i = floor(p);
+    vec3 f = p - i;
+    float d = 1.0;
+    for (int z = -1; z <= 1; ++z)
+    for (int y = -1; y <= 1; ++y)
+    for (int x = -1; x <= 1; ++x) {
+        vec3 o = vec3(x, y, z);
+        vec3 c = o + hash3(ivec3(i) + ivec3(o), period);
+        vec3 r = c - f;
+        d = min(d, dot(r, r));
+    }
+    return 1.0 - sqrt(d);
+}
+
+float worleyFbm3(vec3 p, int period) {
+    return worley3(p, period) * 0.625 + worley3(p * 2.0, period * 2) * 0.25 + worley3(p * 4.0, period * 4) * 0.125;
+}
+
+// ---- 2D ------------------------------------------------------------------
+
+float perlin2(vec2 p, int period) {
+    return perlin3(vec3(p, 0.37), period);
+}
+
+// Interleaved gradient noise, cheap per-pixel dither that decorrelates over frames.
+float ign(vec2 px, uint frame) {
+    px += float(frame % 64u) * 5.588238;
+    return fract(52.9829189 * fract(0.06711056 * px.x + 0.00583715 * px.y));
+}
+```
+
+### shaders/composite.frag
+```
+// Sky, sun, ground and clouds combined, then tone-mapped.
+in vec2 vUv;
+layout(location = 0) out vec4 outColor;
+
+uniform sampler2D uClouds;      // resolved cloud radiance + transmittance
+uniform sampler2D uCloudDepth;
+uniform sampler3D uShape;       // only for the debug noise view
+uniform mat4 uInvViewProj;
+uniform vec3 uCamPos;
+uniform vec3 uSunDir;
+uniform int uShowNoise;
+
+vec3 skyColor(vec3 rd) {
+    float up = clamp(rd.y, 0.0, 1.0);
+    float sunset = 1.0 - smoothstep(0.0, 0.35, uSunDir.y);
+    vec3 zenith = mix(vec3(0.18, 0.36, 0.78), vec3(0.16, 0.24, 0.50), sunset);
+    vec3 horizon = mix(vec3(0.62, 0.74, 0.90), vec3(0.95, 0.66, 0.48), sunset);
+    vec3 sky = mix(horizon, zenith, pow(up, 0.55));
+    float sunAmount = max(dot(rd, uSunDir), 0.0);
+    // Mie-ish glow around the sun plus the disc itself.
+    sky += mix(vec3(1.0, 0.85, 0.6), vec3(1.0, 0.5, 0.25), sunset) * pow(sunAmount, 8.0) * (0.25 + 0.5 * sunset);
+    sky += vec3(1.0, 0.95, 0.85) * smoothstep(0.9993, 0.9997, sunAmount) * 12.0;
+    return sky;
+}
+
+vec3 groundColor(vec3 ro, vec3 rd) {
+    float t = -ro.y / rd.y;
+    vec3 p = ro + rd * t;
+    float checker = step(0.5, fract(p.x * 0.0005)) == step(0.5, fract(p.z * 0.0005)) ? 1.0 : 0.85;
+    vec3 ground = vec3(0.22, 0.27, 0.18) * checker;
+    float sunLit = max(uSunDir.y, 0.0) * 0.8 + 0.2;
+    ground *= sunLit;
+    float fog = 1.0 - exp(-t / 45000.0);
+    return mix(ground, skyColor(vec3(rd.x, 0.0, rd.z)), fog);
+}
+
+vec3 aces(vec3 x) {
+    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+
+void main() {
+    if (uShowNoise != 0) {
+        // Debug: slice through the shape texture.
+        vec4 n = texture(uShape, vec3(vUv, fract(uCamPos.x * 0.0001)));
+        outColor = vec4(vUv.x < 0.5 ? n.rrr : n.gba, 1.0);
+        return;
+    }
+    vec2 ndc = vUv * 2.0 - 1.0;
+    vec4 pNear = uInvViewProj * vec4(ndc, -1.0, 1.0);
+    vec4 pFar = uInvViewProj * vec4(ndc, 1.0, 1.0);
+    vec3 rd = normalize(pFar.xyz / pFar.w - pNear.xyz / pNear.w);
+
+    vec3 background = rd.y < 0.0 && uCamPos.y > 0.0 ? groundColor(uCamPos, rd) : skyColor(rd);
+    vec4 clouds = texture(uClouds, vUv);
+    vec3 color = background * clouds.a + clouds.rgb;
+    color = aces(color * 0.9);
+    outColor = vec4(pow(color, vec3(1.0 / 2.2)), 1.0);
+}
+```
+
+### shaders/fullscreen.vert
+```
+out vec2 vUv;
+void main() {
+    // One oversized triangle covers the viewport without a vertex buffer.
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2) * 2.0 - 1.0;
+    vUv = p * 0.5 + 0.5;
+    gl_Position = vec4(p, 0.0, 1.0);
+}
+```
+
+### shaders/noise_detail.comp
+```
+// High-frequency detail, 32^3 RGBA8, tileable: Worley fbm at three scales
+// used to erode the edges of the base shape.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+layout(rgba8, binding = 0) uniform writeonly image3D outTex;
+
+void main() {
+    ivec3 id = ivec3(gl_GlobalInvocationID);
+    ivec3 size = imageSize(outTex);
+    if (any(greaterThanEqual(id, size))) return;
+    vec3 p = (vec3(id) + 0.5) / vec3(size);
+    float a = worleyFbm3(p * 2.0, 2);
+    float b = worleyFbm3(p * 4.0, 4);
+    float c = worleyFbm3(p * 8.0, 8);
+    imageStore(outTex, id, vec4(a, b, c, 1.0));
+}
+```
+
+### shaders/noise_shape.comp
+```
+// Base cloud shape, 128^3 RGBA8, tileable.
+//   R: Perlin-Worley (Perlin fbm eroded by Worley) - the overall billow shape
+//   G,B,A: Worley fbm at increasing frequency, used to erode R
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+layout(rgba8, binding = 0) uniform writeonly image3D outTex;
+
+void main() {
+    ivec3 id = ivec3(gl_GlobalInvocationID);
+    ivec3 size = imageSize(outTex);
+    if (any(greaterThanEqual(id, size))) return;
+    vec3 p = (vec3(id) + 0.5) / vec3(size);
+
+    float perlin = perlinFbm3(p * 4.0, 4, 6);
+    float w0 = worleyFbm3(p * 4.0, 4);
+    float w1 = worleyFbm3(p * 8.0, 8);
+    float w2 = worleyFbm3(p * 16.0, 16);
+    // Dilate Perlin with Worley so billows get sharp edges (Schneider 2015).
+    float perlinWorley = remap(perlin, 0.0, 1.0, w0, 1.0);
+    imageStore(outTex, id, vec4(perlinWorley, w0, w1, w2));
+}
+```
+
+### shaders/resolve.frag
+```
+// Temporal resolve. Takes the (usually half-resolution, jittered) cloud pass
+// and blends it into a full-resolution history buffer, reprojecting each
+// pixel through the previous frame's view-projection using the cloud depth.
+in vec2 vUv;
+layout(location = 0) out vec4 outColor;
+
+uniform sampler2D uCurrent;     // this frame's cloud pass
+uniform sampler2D uCurrentDepth;
+uniform sampler2D uHistory;     // last frame's resolved output
+uniform mat4 uInvViewProj;      // unjittered, this frame
+uniform mat4 uPrevViewProj;     // unjittered, last frame
+uniform vec3 uCamPos;
+uniform int uHistoryValid;
+uniform float uBlend;           // weight of the new sample when history is usable
+
+void main() {
+    vec4 cur = texture(uCurrent, vUv);
+    if (uHistoryValid == 0) { outColor = cur; return; }
+
+    // World position of what this pixel sees, from the cloud pass depth.
+    vec2 ndc = vUv * 2.0 - 1.0;
+    vec4 pNear = uInvViewProj * vec4(ndc, -1.0, 1.0);
+    vec4 pFar = uInvViewProj * vec4(ndc, 1.0, 1.0);
+    vec3 rd = normalize(pFar.xyz / pFar.w - pNear.xyz / pNear.w);
+    float depth = texture(uCurrentDepth, vUv).r;
+    // Pixels with no cloud reproject at a far distance so parallax is ~zero.
+    vec3 worldPos = uCamPos + rd * (depth > 0.0 ? depth : 200000.0);
+
+    vec4 prevClip = uPrevViewProj * vec4(worldPos, 1.0);
+    vec2 prevUv = (prevClip.xy / prevClip.w) * 0.5 + 0.5;
+    bool onScreen = prevClip.w > 0.0 && all(greaterThanEqual(prevUv, vec2(0.0))) && all(lessThanEqual(prevUv, vec2(1.0)));
+    if (!onScreen) { outColor = cur; return; }
+
+    // Clamp the history sample to the neighbourhood of the current sample so
+    // stale data (disocclusion, lighting changes) can't ghost.
+    vec2 texel = 1.0 / vec2(textureSize(uCurrent, 0));
+    vec4 lo = cur, hi = cur;
+    for (int y = -1; y <= 1; ++y)
+    for (int x = -1; x <= 1; ++x) {
+        vec4 s = texture(uCurrent, vUv + vec2(x, y) * texel);
+        lo = min(lo, s); hi = max(hi, s);
+    }
+    // Loosen the box slightly: the current pass is noisy by design.
+    vec4 pad = (hi - lo) * 0.25 + 0.002;
+    lo -= pad; hi += pad;
+
+    vec4 hist = clamp(texture(uHistory, prevUv), lo, hi);
+    outColor = mix(hist, cur, uBlend);
+}
+```
+
+### shaders/weather.comp
+```
+// Weather map, 512^2 RGBA8, tileable over the weather extent.
+//   R: coverage   G: cloud type (0 stratus .. 1 cumulonimbus)   B: unused
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(rgba8, binding = 0) uniform writeonly image2D outTex;
+uniform float uSeed;
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outTex);
+    if (any(greaterThanEqual(id, size))) return;
+    vec2 p = (vec2(id) + 0.5) / vec2(size);
+
+    float cov = perlinFbm3(vec3(p * 6.0, uSeed), 6, 5);
+    cov = remap(cov, 0.28, 0.72, 0.0, 1.0);
+    float type = perlinFbm3(vec3(p * 3.0 + 7.3, uSeed + 2.0), 3, 3);
+    type = remap(type, 0.35, 0.7, 0.0, 1.0);
+    imageStore(outTex, id, vec4(cov, type, 0.0, 1.0));
+}
+```
+
+### src/context.cpp
+```
+#include "context.h"
+#include "gl.h"
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <unordered_map>
+
+#include <GLFW/glfw3.h>
+
+namespace {
+
+double nowSeconds() {
+    using namespace std::chrono;
+    static auto start = steady_clock::now();
+    return duration<double>(steady_clock::now() - start).count();
+}
+
+struct WindowContext : Context {
+    GLFWwindow* win = nullptr;
+    std::unordered_map<int, bool> prev;
+    double lastX = 0, lastY = 0;
+    bool firstMouse = true;
+
+    ~WindowContext() override {
+        if (win) glfwDestroyWindow(win);
+        glfwTerminate();
+    }
+    bool shouldClose() override { return glfwWindowShouldClose(win); }
+    void pollEvents() override { glfwPollEvents(); }
+    void swap() override { glfwSwapBuffers(win); }
+    bool keyDown(int k) override { return glfwGetKey(win, k) == GLFW_PRESS; }
+    bool keyPressed(int k) override {
+        bool now = keyDown(k);
+        bool was = prev[k];
+        prev[k] = now;
+        return now && !was;
+    }
+    void mouseDelta(float& dx, float& dy) override {
+        double x, y;
+        glfwGetCursorPos(win, &x, &y);
+        if (firstMouse) { lastX = x; lastY = y; firstMouse = false; }
+        dx = (float)(x - lastX);
+        dy = (float)(y - lastY);
+        lastX = x; lastY = y;
+    }
+    void setTitle(const std::string& t) override { glfwSetWindowTitle(win, t.c_str()); }
+    void framebufferSize(int& w, int& h) override { glfwGetFramebufferSize(win, &w, &h); }
+    double time() override { return glfwGetTime(); }
+};
+
+Context* createWindow(const ContextDesc& d) {
+    if (!glfwInit()) {
+        fprintf(stderr, "glfwInit failed (no display?). Use --headless for offscreen rendering.\n");
+        return nullptr;
+    }
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+    GLFWwindow* win = glfwCreateWindow(d.width, d.height, d.title.c_str(), nullptr, nullptr);
+    if (!win) {
+        fprintf(stderr, "glfwCreateWindow failed: this GPU/driver does not offer OpenGL 4.5 core\n");
+        glfwTerminate();
+        return nullptr;
+    }
+    glfwMakeContextCurrent(win);
+    glfwSwapInterval(0);
+    glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    if (!vcrLoadGL((VcrGetProc)glfwGetProcAddress)) return nullptr;
+    auto* c = new WindowContext();
+    c->win = win;
+    return c;
+}
+
+}  // namespace
+
+#if defined(__linux__)
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+
+namespace {
+
+struct HeadlessContext : Context {
+    EGLDisplay dpy = EGL_NO_DISPLAY;
+    EGLContext ctx = EGL_NO_CONTEXT;
+    int w = 0, h = 0;
+
+    ~HeadlessContext() override {
+        if (dpy != EGL_NO_DISPLAY) {
+            eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            if (ctx != EGL_NO_CONTEXT) eglDestroyContext(dpy, ctx);
+            eglTerminate(dpy);
+        }
+    }
+    bool shouldClose() override { return false; }
+    void pollEvents() override {}
+    void swap() override { glFinish(); }
+    bool keyDown(int) override { return false; }
+    bool keyPressed(int) override { return false; }
+    void mouseDelta(float& dx, float& dy) override { dx = dy = 0; }
+    void setTitle(const std::string&) override {}
+    void framebufferSize(int& ow, int& oh) override { ow = w; oh = h; }
+    double time() override { return nowSeconds(); }
+};
+
+Context* createHeadless(const ContextDesc& d) {
+    auto getPlatformDisplay =
+        (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
+    EGLDisplay dpy = EGL_NO_DISPLAY;
+    if (getPlatformDisplay)
+        dpy = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+    if (dpy == EGL_NO_DISPLAY) dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (dpy == EGL_NO_DISPLAY || !eglInitialize(dpy, nullptr, nullptr)) {
+        fprintf(stderr, "EGL: no display. Install Mesa (libegl1, libgl1-mesa-dri) for headless rendering.\n");
+        return nullptr;
+    }
+    eglBindAPI(EGL_OPENGL_API);
+    const EGLint cfgAttrs[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
+        EGL_NONE};
+    EGLConfig cfg;
+    EGLint n = 0;
+    if (!eglChooseConfig(dpy, cfgAttrs, &cfg, 1, &n) || n == 0) {
+        fprintf(stderr, "EGL: no config\n");
+        return nullptr;
+    }
+    const EGLint ctxAttrs[] = {
+        EGL_CONTEXT_MAJOR_VERSION, 4,
+        EGL_CONTEXT_MINOR_VERSION, 5,
+        EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+        EGL_NONE};
+    EGLContext ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctxAttrs);
+    if (ctx == EGL_NO_CONTEXT) {
+        fprintf(stderr, "EGL: could not create a GL 4.5 core context\n");
+        return nullptr;
+    }
+    if (!eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) {
+        fprintf(stderr, "EGL: surfaceless make-current failed\n");
+        return nullptr;
+    }
+    if (!vcrLoadGL((VcrGetProc)eglGetProcAddress)) return nullptr;
+    auto* c = new HeadlessContext();
+    c->dpy = dpy;
+    c->ctx = ctx;
+    c->w = d.width;
+    c->h = d.height;
+    return c;
+}
+
+}  // namespace
+#endif
+
+Context* createContext(const ContextDesc& d) {
+    if (d.headless) {
+#if defined(__linux__)
+        return createHeadless(d);
+#else
+        fprintf(stderr, "headless mode is only implemented on Linux (EGL surfaceless)\n");
+        return nullptr;
+#endif
+    }
+    return createWindow(d);
+}
+```
+
+### src/context.h
+```
+// Two ways to get a GL 4.5 context: a GLFW window for interactive use, or a
+// surfaceless EGL context (Linux) for headless rendering in CI and benchmarks.
+#pragma once
+#include <functional>
+#include <string>
+
+struct ContextDesc {
+    int width = 1280;
+    int height = 720;
+    bool headless = false;
+    std::string title = "Volumetric Clouds";
+};
+
+struct Context {
+    virtual ~Context() = default;
+    virtual bool shouldClose() = 0;
+    virtual void pollEvents() = 0;
+    virtual void swap() = 0;
+    virtual bool keyDown(int glfwKey) = 0;
+    virtual bool keyPressed(int glfwKey) = 0;   // edge-triggered
+    virtual void mouseDelta(float& dx, float& dy) = 0;
+    virtual void setTitle(const std::string& t) = 0;
+    virtual void framebufferSize(int& w, int& h) = 0;
+    virtual double time() = 0;
+};
+
+// Creates the context and loads GL. Returns nullptr with a message on stderr
+// if no suitable context is available.
+Context* createContext(const ContextDesc& desc);
+```
+
+### src/gl.cpp
+```
+#include "gl.h"
+#include <cstdio>
+
+#define VCR_DEF(type, name) type vcr_##name = nullptr;
+VCR_GL_FUNCS(VCR_DEF)
+#undef VCR_DEF
+
+bool vcrLoadGL(VcrGetProc getProc) {
+    bool ok = true;
+#define VCR_LOAD(type, name) \
+    vcr_##name = (type)getProc(#name); \
+    if (!vcr_##name) { fprintf(stderr, "missing GL function: %s\n", #name); ok = false; }
+    VCR_GL_FUNCS(VCR_LOAD)
+#undef VCR_LOAD
+    return ok;
+}
+```
+
+### src/gl.h
+```
+// Minimal OpenGL 4.5 core loader. Function pointers are resolved through
+// whatever the context provides (glfwGetProcAddress or eglGetProcAddress),
+// so the renderer never links against a platform GL library directly.
+#pragma once
+#include "../third_party/glcorearb.h"
+
+#define VCR_GL_FUNCS(X) \
+    X(PFNGLGETSTRINGPROC, glGetString) \
+    X(PFNGLGETINTEGERVPROC, glGetIntegerv) \
+    X(PFNGLENABLEPROC, glEnable) \
+    X(PFNGLDISABLEPROC, glDisable) \
+    X(PFNGLVIEWPORTPROC, glViewport) \
+    X(PFNGLCLEARCOLORPROC, glClearColor) \
+    X(PFNGLCLEARPROC, glClear) \
+    X(PFNGLFINISHPROC, glFinish) \
+    X(PFNGLPIXELSTOREIPROC, glPixelStorei) \
+    X(PFNGLREADPIXELSPROC, glReadPixels) \
+    X(PFNGLGENTEXTURESPROC, glGenTextures) \
+    X(PFNGLDELETETEXTURESPROC, glDeleteTextures) \
+    X(PFNGLBINDTEXTUREPROC, glBindTexture) \
+    X(PFNGLACTIVETEXTUREPROC, glActiveTexture) \
+    X(PFNGLTEXSTORAGE2DPROC, glTexStorage2D) \
+    X(PFNGLTEXSTORAGE3DPROC, glTexStorage3D) \
+    X(PFNGLTEXPARAMETERIPROC, glTexParameteri) \
+    X(PFNGLGENERATEMIPMAPPROC, glGenerateMipmap) \
+    X(PFNGLBINDIMAGETEXTUREPROC, glBindImageTexture) \
+    X(PFNGLCREATESHADERPROC, glCreateShader) \
+    X(PFNGLSHADERSOURCEPROC, glShaderSource) \
+    X(PFNGLCOMPILESHADERPROC, glCompileShader) \
+    X(PFNGLGETSHADERIVPROC, glGetShaderiv) \
+    X(PFNGLGETSHADERINFOLOGPROC, glGetShaderInfoLog) \
+    X(PFNGLDELETESHADERPROC, glDeleteShader) \
+    X(PFNGLCREATEPROGRAMPROC, glCreateProgram) \
+    X(PFNGLATTACHSHADERPROC, glAttachShader) \
+    X(PFNGLLINKPROGRAMPROC, glLinkProgram) \
+    X(PFNGLGETPROGRAMIVPROC, glGetProgramiv) \
+    X(PFNGLGETPROGRAMINFOLOGPROC, glGetProgramInfoLog) \
+    X(PFNGLUSEPROGRAMPROC, glUseProgram) \
+    X(PFNGLDELETEPROGRAMPROC, glDeleteProgram) \
+    X(PFNGLGETUNIFORMLOCATIONPROC, glGetUniformLocation) \
+    X(PFNGLUNIFORM1IPROC, glUniform1i) \
+    X(PFNGLUNIFORM1FPROC, glUniform1f) \
+    X(PFNGLUNIFORM2FPROC, glUniform2f) \
+    X(PFNGLUNIFORM3FPROC, glUniform3f) \
+    X(PFNGLUNIFORM4FPROC, glUniform4f) \
+    X(PFNGLUNIFORMMATRIX4FVPROC, glUniformMatrix4fv) \
+    X(PFNGLDISPATCHCOMPUTEPROC, glDispatchCompute) \
+    X(PFNGLMEMORYBARRIERPROC, glMemoryBarrier) \
+    X(PFNGLGENFRAMEBUFFERSPROC, glGenFramebuffers) \
+    X(PFNGLDELETEFRAMEBUFFERSPROC, glDeleteFramebuffers) \
+    X(PFNGLBINDFRAMEBUFFERPROC, glBindFramebuffer) \
+    X(PFNGLFRAMEBUFFERTEXTURE2DPROC, glFramebufferTexture2D) \
+    X(PFNGLCHECKFRAMEBUFFERSTATUSPROC, glCheckFramebufferStatus) \
+    X(PFNGLDRAWBUFFERSPROC, glDrawBuffers) \
+    X(PFNGLGENVERTEXARRAYSPROC, glGenVertexArrays) \
+    X(PFNGLBINDVERTEXARRAYPROC, glBindVertexArray) \
+    X(PFNGLDRAWARRAYSPROC, glDrawArrays) \
+    X(PFNGLGENQUERIESPROC, glGenQueries) \
+    X(PFNGLQUERYCOUNTERPROC, glQueryCounter) \
+    X(PFNGLGETQUERYOBJECTUI64VPROC, glGetQueryObjectui64v)
+
+#define VCR_DECL(type, name) extern type vcr_##name;
+VCR_GL_FUNCS(VCR_DECL)
+#undef VCR_DECL
+
+#define glGetString vcr_glGetString
+#define glGetIntegerv vcr_glGetIntegerv
+#define glEnable vcr_glEnable
+#define glDisable vcr_glDisable
+#define glViewport vcr_glViewport
+#define glClearColor vcr_glClearColor
+#define glClear vcr_glClear
+#define glFinish vcr_glFinish
+#define glPixelStorei vcr_glPixelStorei
+#define glReadPixels vcr_glReadPixels
+#define glGenTextures vcr_glGenTextures
+#define glDeleteTextures vcr_glDeleteTextures
+#define glBindTexture vcr_glBindTexture
+#define glActiveTexture vcr_glActiveTexture
+#define glTexStorage2D vcr_glTexStorage2D
+#define glTexStorage3D vcr_glTexStorage3D
+#define glTexParameteri vcr_glTexParameteri
+#define glGenerateMipmap vcr_glGenerateMipmap
+#define glBindImageTexture vcr_glBindImageTexture
+#define glCreateShader vcr_glCreateShader
+#define glShaderSource vcr_glShaderSource
+#define glCompileShader vcr_glCompileShader
+#define glGetShaderiv vcr_glGetShaderiv
+#define glGetShaderInfoLog vcr_glGetShaderInfoLog
+#define glDeleteShader vcr_glDeleteShader
+#define glCreateProgram vcr_glCreateProgram
+#define glAttachShader vcr_glAttachShader
+#define glLinkProgram vcr_glLinkProgram
+#define glGetProgramiv vcr_glGetProgramiv
+#define glGetProgramInfoLog vcr_glGetProgramInfoLog
+#define glUseProgram vcr_glUseProgram
+#define glDeleteProgram vcr_glDeleteProgram
+#define glGetUniformLocation vcr_glGetUniformLocation
+#define glUniform1i vcr_glUniform1i
+#define glUniform1f vcr_glUniform1f
+#define glUniform2f vcr_glUniform2f
+#define glUniform3f vcr_glUniform3f
+#define glUniform4f vcr_glUniform4f
+#define glUniformMatrix4fv vcr_glUniformMatrix4fv
+#define glDispatchCompute vcr_glDispatchCompute
+#define glMemoryBarrier vcr_glMemoryBarrier
+#define glGenFramebuffers vcr_glGenFramebuffers
+#define glDeleteFramebuffers vcr_glDeleteFramebuffers
+#define glBindFramebuffer vcr_glBindFramebuffer
+#define glFramebufferTexture2D vcr_glFramebufferTexture2D
+#define glCheckFramebufferStatus vcr_glCheckFramebufferStatus
+#define glDrawBuffers vcr_glDrawBuffers
+#define glGenVertexArrays vcr_glGenVertexArrays
+#define glBindVertexArray vcr_glBindVertexArray
+#define glDrawArrays vcr_glDrawArrays
+#define glGenQueries vcr_glGenQueries
+#define glQueryCounter vcr_glQueryCounter
+#define glGetQueryObjectui64v vcr_glGetQueryObjectui64v
+
+typedef void* (*VcrGetProc)(const char* name);
+
+// Resolves every function above. Returns false and prints the first missing
+// symbol if the context does not expose GL 4.3+ (compute, texture storage).
+bool vcrLoadGL(VcrGetProc getProc);
+```
+
+### src/main.cpp
+```
+// Volumetric cloud renderer. Interactive by default; --headless renders to a
+// PNG without a display, --bench prints per-pass GPU timings for a few
+// configurations.
+#include "context.h"
+#include "gl.h"
+#include "renderer.h"
+
+#include <GLFW/glfw3.h>
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "../third_party/stb_image_write.h"
+
+namespace {
+
+struct Options {
+    bool headless = false;
+    bool bench = false;
+    int width = 1280, height = 720;
+    int frames = 48;
+    std::string out = "clouds.png";
+    Vec3 move;   // camera translation per frame in headless mode
+    std::string shaderDir = "shaders";
+    RenderSettings settings;
+    Weather weather;
+    Camera camera;
+};
+
+void usage() {
+    printf(
+        "usage: clouds [options]\n"
+        "  --headless            render offscreen (Linux, Mesa EGL) and write --out\n"
+        "  --out FILE            PNG path for headless mode (default clouds.png)\n"
+        "  --frames N            frames to accumulate before writing (default 48)\n"
+        "  --size WxH            output resolution (default 1280x720)\n"
+        "  --scale F             cloud pass resolution scale (default 0.5)\n"
+        "  --steps N             max march steps (default 128)\n"
+        "  --no-temporal         disable reprojection/accumulation\n"
+        "  --coverage F --density F --type F --sun-el F --sun-az F\n"
+        "  --sun-intensity F --extinction F --ambient F --erosion F   look tuning\n"
+        "  --cam X,Y,Z --yaw F --pitch F\n"
+        "  --move X,Y,Z          headless: move the camera this much every frame\n"
+        "  --bench               time each pass for several configurations and exit\n"
+        "  --shaders DIR         shader directory (default ./shaders)\n");
+}
+
+bool parse(int argc, char** argv, Options& o) {
+    auto next = [&](int& i) -> const char* {
+        if (i + 1 >= argc) { usage(); exit(1); }
+        return argv[++i];
+    };
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--headless") o.headless = true;
+        else if (a == "--bench") {
+            o.bench = true;
+#if defined(__linux__)
+            o.headless = true;   // no display needed
+#endif
+        }
+        else if (a == "--out") o.out = next(i);
+        else if (a == "--frames") o.frames = atoi(next(i));
+        else if (a == "--size") sscanf(next(i), "%dx%d", &o.width, &o.height);
+        else if (a == "--scale") o.settings.scale = (float)atof(next(i));
+        else if (a == "--steps") o.settings.maxSteps = atoi(next(i));
+        else if (a == "--no-temporal") o.settings.temporal = false;
+        else if (a == "--coverage") o.weather.coverage = (float)atof(next(i));
+        else if (a == "--density") o.weather.density = (float)atof(next(i));
+        else if (a == "--type") o.weather.cloudType = (float)atof(next(i));
+        else if (a == "--sun-el") o.weather.sunElevation = (float)atof(next(i));
+        else if (a == "--sun-az") o.weather.sunAzimuth = (float)atof(next(i));
+        else if (a == "--sun-intensity") o.weather.sunIntensity = (float)atof(next(i));
+        else if (a == "--extinction") o.weather.extinction = (float)atof(next(i));
+        else if (a == "--ambient") o.weather.ambient = (float)atof(next(i));
+        else if (a == "--move") sscanf(next(i), "%f,%f,%f", &o.move.x, &o.move.y, &o.move.z);
+        else if (a == "--erosion") o.weather.erosion = (float)atof(next(i));
+        else if (a == "--cam") sscanf(next(i), "%f,%f,%f", &o.camera.pos.x, &o.camera.pos.y, &o.camera.pos.z);
+        else if (a == "--yaw") o.camera.yaw = (float)atof(next(i));
+        else if (a == "--pitch") o.camera.pitch = (float)atof(next(i));
+        else if (a == "--shaders") o.shaderDir = next(i);
+        else if (a == "--help" || a == "-h") { usage(); exit(0); }
+        else { fprintf(stderr, "unknown option %s\n", argv[i]); usage(); return false; }
+    }
+    return true;
+}
+
+bool writePng(const std::string& path, Renderer& r) {
+    int w, h;
+    auto px = r.readback(w, h);
+    if (!stbi_write_png(path.c_str(), w, h, 3, px.data(), w * 3)) {
+        fprintf(stderr, "failed to write %s\n", path.c_str());
+        return false;
+    }
+    printf("wrote %s (%dx%d)\n", path.c_str(), w, h);
+    return true;
+}
+
+int runHeadless(Options& o, Context& ctx, Renderer& r) {
+    for (int i = 0; i < o.frames; ++i) {
+        r.render(o.camera, o.weather, o.settings, i / 60.0f);
+        ctx.swap();
+        o.camera.pos += o.move;
+    }
+    auto t = r.timings();
+    printf("last frame: clouds %.2f ms, resolve %.2f ms, composite %.2f ms, total %.2f ms\n",
+           t.cloudMs, t.resolveMs, t.compositeMs, t.totalMs);
+    return writePng(o.out, r) ? 0 : 1;
+}
+
+// Average GPU time per pass over a window of frames for one configuration.
+FrameTimings timeConfig(Renderer& r, Context& ctx, const Options& o, const RenderSettings& s, int frames) {
+    r.resetHistory();
+    FrameTimings acc;
+    for (int i = 0; i < frames + 8; ++i) {
+        r.render(o.camera, o.weather, s, 0.0f);
+        ctx.swap();
+        if (i >= 8) {
+            auto t = r.timings();
+            acc.cloudMs += t.cloudMs; acc.resolveMs += t.resolveMs;
+            acc.compositeMs += t.compositeMs; acc.totalMs += t.totalMs;
+        }
+    }
+    acc.cloudMs /= frames; acc.resolveMs /= frames; acc.compositeMs /= frames; acc.totalMs /= frames;
+    return acc;
+}
+
+int runBench(Options& o, Context& ctx, Renderer& r) {
+    struct Cfg { const char* name; float scale; bool temporal; int steps; };
+    const Cfg cfgs[] = {
+        {"full-res, 128 steps, no temporal", 1.0f, false, 128},
+        {"full-res, 64 steps, no temporal", 1.0f, false, 64},
+        {"half-res, 128 steps, temporal", 0.5f, true, 128},
+        {"quarter-res, 128 steps, temporal", 0.25f, true, 128},
+    };
+    printf("%dx%d, %s\n", o.width, o.height, (const char*)glGetString(GL_RENDERER));
+    printf("%-38s %10s %10s %10s %10s\n", "configuration", "clouds ms", "resolve", "composite", "total");
+    for (const Cfg& c : cfgs) {
+        RenderSettings s = o.settings;
+        s.scale = c.scale; s.temporal = c.temporal; s.maxSteps = c.steps;
+        FrameTimings t = timeConfig(r, ctx, o, s, o.frames);
+        printf("%-38s %10.2f %10.2f %10.2f %10.2f\n", c.name, t.cloudMs, t.resolveMs, t.compositeMs, t.totalMs);
+    }
+    return 0;
+}
+
+int runInteractive(Options& o, Context& ctx, Renderer& r) {
+    double last = ctx.time();
+    double fpsAccum = 0;
+    int fpsFrames = 0;
+    bool paused = false;
+    float simTime = 0.f;
+    while (!ctx.shouldClose()) {
+        ctx.pollEvents();
+        double now = ctx.time();
+        float dt = (float)(now - last);
+        last = now;
+        if (!paused) simTime += dt;
+
+        int w, h;
+        ctx.framebufferSize(w, h);
+        if (w != o.width || h != o.height) { o.width = w; o.height = h; r.resize(w, h); }
+
+        float dx, dy;
+        ctx.mouseDelta(dx, dy);
+        o.camera.yaw += dx * 0.0025f;
+        o.camera.pitch = std::max(-1.5f, std::min(1.5f, o.camera.pitch - dy * 0.0025f));
+
+        float speed = (ctx.keyDown(GLFW_KEY_LEFT_SHIFT) ? 2000.f : 400.f) * dt;
+        Vec3 fwd = o.camera.forward();
+        Vec3 right = normalize(cross(fwd, Vec3(0, 1, 0)));
+        if (ctx.keyDown(GLFW_KEY_W)) o.camera.pos += fwd * speed;
+        if (ctx.keyDown(GLFW_KEY_S)) o.camera.pos += fwd * -speed;
+        if (ctx.keyDown(GLFW_KEY_A)) o.camera.pos += right * -speed;
+        if (ctx.keyDown(GLFW_KEY_D)) o.camera.pos += right * speed;
+        if (ctx.keyDown(GLFW_KEY_Q)) o.camera.pos.y -= speed;
+        if (ctx.keyDown(GLFW_KEY_E)) o.camera.pos.y += speed;
+
+        float k = dt * 0.4f;
+        if (ctx.keyDown(GLFW_KEY_Z)) o.weather.coverage = std::max(0.f, o.weather.coverage - k);
+        if (ctx.keyDown(GLFW_KEY_X)) o.weather.coverage = std::min(1.f, o.weather.coverage + k);
+        if (ctx.keyDown(GLFW_KEY_C)) o.weather.density = std::max(0.1f, o.weather.density - k);
+        if (ctx.keyDown(GLFW_KEY_V)) o.weather.density = std::min(3.f, o.weather.density + k);
+        if (ctx.keyDown(GLFW_KEY_B)) o.weather.cloudType = std::max(0.f, o.weather.cloudType - k);
+        if (ctx.keyDown(GLFW_KEY_N)) o.weather.cloudType = std::min(1.f, o.weather.cloudType + k);
+        if (ctx.keyDown(GLFW_KEY_O)) o.weather.sunAzimuth -= k;
+        if (ctx.keyDown(GLFW_KEY_P)) o.weather.sunAzimuth += k;
+        if (ctx.keyDown(GLFW_KEY_K)) o.weather.sunElevation = std::max(-0.1f, o.weather.sunElevation - k * 0.5f);
+        if (ctx.keyDown(GLFW_KEY_L)) o.weather.sunElevation = std::min(1.5f, o.weather.sunElevation + k * 0.5f);
+        if (ctx.keyPressed(GLFW_KEY_T)) { o.settings.temporal = !o.settings.temporal; r.resetHistory(); }
+        if (ctx.keyPressed(GLFW_KEY_1)) o.settings.scale = 1.0f;
+        if (ctx.keyPressed(GLFW_KEY_2)) o.settings.scale = 0.5f;
+        if (ctx.keyPressed(GLFW_KEY_3)) o.settings.scale = 0.25f;
+        if (ctx.keyPressed(GLFW_KEY_SPACE)) paused = !paused;
+        if (ctx.keyPressed(GLFW_KEY_H)) o.settings.showNoise = !o.settings.showNoise;
+        if (ctx.keyPressed(GLFW_KEY_R)) o.weather = Weather();
+        if (ctx.keyPressed(GLFW_KEY_F5)) { if (r.reloadShaders()) printf("shaders reloaded\n"); }
+        if (ctx.keyPressed(GLFW_KEY_F12)) writePng("screenshot.png", r);
+        if (ctx.keyDown(GLFW_KEY_ESCAPE)) break;
+
+        r.render(o.camera, o.weather, o.settings, simTime);
+        ctx.swap();
+
+        fpsAccum += dt;
+        if (++fpsFrames >= 30) {
+            auto t = r.timings();
+            char title[256];
+            snprintf(title, sizeof title,
+                     "Volumetric Clouds  %.1f fps | clouds %.2f ms resolve %.2f ms | scale %.2f %s | cov %.2f dens %.2f type %.2f",
+                     fpsFrames / fpsAccum, t.cloudMs, t.resolveMs, o.settings.scale,
+                     o.settings.temporal ? "temporal" : "no-temporal",
+                     o.weather.coverage, o.weather.density, o.weather.cloudType);
+            ctx.setTitle(title);
+            fpsAccum = 0;
+            fpsFrames = 0;
+        }
+    }
+    return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    Options o;
+    if (!parse(argc, argv, o)) return 1;
+
+    ContextDesc d;
+    d.width = o.width;
+    d.height = o.height;
+    d.headless = o.headless;
+    Context* ctx = createContext(d);
+    if (!ctx) return 1;
+
+    Renderer r;
+    if (!r.init(o.shaderDir, o.width, o.height, o.headless)) return 1;
+
+    int rc;
+    if (o.bench) rc = runBench(o, *ctx, r);
+    else if (o.headless) rc = runHeadless(o, *ctx, r);
+    else rc = runInteractive(o, *ctx, r);
+    delete ctx;
+    return rc;
+}
+```
+
+### src/math.h
+```
+// Just enough vector math for a camera. Column-major, matches GLSL.
+#pragma once
+#include <cmath>
+
+struct Vec3 {
+    float x = 0, y = 0, z = 0;
+    Vec3() = default;
+    Vec3(float a, float b, float c) : x(a), y(b), z(c) {}
+    Vec3 operator+(const Vec3& o) const { return {x + o.x, y + o.y, z + o.z}; }
+    Vec3 operator-(const Vec3& o) const { return {x - o.x, y - o.y, z - o.z}; }
+    Vec3 operator*(float s) const { return {x * s, y * s, z * s}; }
+    Vec3& operator+=(const Vec3& o) { x += o.x; y += o.y; z += o.z; return *this; }
+};
+
+inline float dot(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+inline Vec3 cross(const Vec3& a, const Vec3& b) {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+inline float length(const Vec3& v) { return std::sqrt(dot(v, v)); }
+inline Vec3 normalize(const Vec3& v) { float l = length(v); return l > 0 ? v * (1.0f / l) : v; }
+
+struct Mat4 {
+    float m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    float& at(int col, int row) { return m[col * 4 + row]; }
+    float at(int col, int row) const { return m[col * 4 + row]; }
+};
+
+inline Mat4 mul(const Mat4& a, const Mat4& b) {
+    Mat4 r;
+    for (int c = 0; c < 4; ++c)
+        for (int rI = 0; rI < 4; ++rI) {
+            float s = 0;
+            for (int k = 0; k < 4; ++k) s += a.at(k, rI) * b.at(c, k);
+            r.at(c, rI) = s;
+        }
+    return r;
+}
+
+// Right-handed look-at, camera looks down -Z in view space.
+inline Mat4 lookAt(const Vec3& eye, const Vec3& dir, const Vec3& up) {
+    Vec3 f = normalize(dir);
+    Vec3 s = normalize(cross(f, up));
+    Vec3 u = cross(s, f);
+    Mat4 r;
+    r.at(0, 0) = s.x; r.at(1, 0) = s.y; r.at(2, 0) = s.z;
+    r.at(0, 1) = u.x; r.at(1, 1) = u.y; r.at(2, 1) = u.z;
+    r.at(0, 2) = -f.x; r.at(1, 2) = -f.y; r.at(2, 2) = -f.z;
+    r.at(3, 0) = -dot(s, eye);
+    r.at(3, 1) = -dot(u, eye);
+    r.at(3, 2) = dot(f, eye);
+    return r;
+}
+
+inline Mat4 perspective(float fovyRad, float aspect, float zn, float zf) {
+    float t = 1.0f / std::tan(fovyRad * 0.5f);
+    Mat4 r;
+    r.m[0] = t / aspect; r.m[5] = t;
+    r.m[10] = (zf + zn) / (zn - zf); r.m[11] = -1.0f;
+    r.m[14] = (2.0f * zf * zn) / (zn - zf); r.m[15] = 0.0f;
+    return r;
+}
+
+// Sub-pixel offset in NDC applied to the projection, used for TAA jitter.
+inline Mat4 jitterProjection(Mat4 p, float dx, float dy) {
+    p.at(2, 0) += dx;
+    p.at(2, 1) += dy;
+    return p;
+}
+
+// General 4x4 inverse (camera matrices only, so numerical care is not needed).
+inline Mat4 inverse(const Mat4& a) {
+    const float* m = a.m;
+    float inv[16];
+    inv[0] = m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+    inv[4] = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+    inv[8] = m[4]*m[9]*m[15] - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+    inv[12] = -m[4]*m[9]*m[14] + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+    inv[1] = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+    inv[5] = m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+    inv[9] = -m[0]*m[9]*m[15] + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+    inv[13] = m[0]*m[9]*m[14] - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+    inv[2] = m[1]*m[6]*m[15] - m[1]*m[7]*m[14] - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7] - m[13]*m[3]*m[6];
+    inv[6] = -m[0]*m[6]*m[15] + m[0]*m[7]*m[14] + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7] + m[12]*m[3]*m[6];
+    inv[10] = m[0]*m[5]*m[15] - m[0]*m[7]*m[13] - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7] - m[12]*m[3]*m[5];
+    inv[14] = -m[0]*m[5]*m[14] + m[0]*m[6]*m[13] + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6] + m[12]*m[2]*m[5];
+    inv[3] = -m[1]*m[6]*m[11] + m[1]*m[7]*m[10] + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7] + m[9]*m[3]*m[6];
+    inv[7] = m[0]*m[6]*m[11] - m[0]*m[7]*m[10] - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7] - m[8]*m[3]*m[6];
+    inv[11] = -m[0]*m[5]*m[11] + m[0]*m[7]*m[9] + m[4]*m[1]*m[11] - m[4]*m[3]*m[9] - m[8]*m[1]*m[7] + m[8]*m[3]*m[5];
+    inv[15] = m[0]*m[5]*m[10] - m[0]*m[6]*m[9] - m[4]*m[1]*m[10] + m[4]*m[2]*m[9] + m[8]*m[1]*m[6] - m[8]*m[2]*m[5];
+    float det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+    Mat4 r;
+    if (det == 0) return r;
+    det = 1.0f / det;
+    for (int i = 0; i < 16; ++i) r.m[i] = inv[i] * det;
+    return r;
+}
+
+inline float halton(unsigned index, unsigned base) {
+    float f = 1.0f, r = 0.0f;
+    while (index > 0) { f /= (float)base; r += f * (index % base); index /= base; }
+    return r;
+}
+```
+
+### src/renderer.cpp
+```
+#include "renderer.h"
+#include "gl.h"
+#include <algorithm>
+#include <cstdio>
+#include <fstream>
+#include <sstream>
+
+namespace {
+
+const int SHAPE_RES = 128;
+const int DETAIL_RES = 32;
+const int WEATHER_RES = 512;
+
+void texParams(GLenum target, GLenum wrap, GLenum filter) {
+    glTexParameteri(target, GL_TEXTURE_WRAP_S, wrap);
+    glTexParameteri(target, GL_TEXTURE_WRAP_T, wrap);
+    if (target == GL_TEXTURE_3D) glTexParameteri(target, GL_TEXTURE_WRAP_R, wrap);
+    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, filter);
+    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, filter);
+}
+
+unsigned makeTexture2D(GLenum format, int w, int h, GLenum filter) {
+    unsigned t;
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexStorage2D(GL_TEXTURE_2D, 1, format, w, h);
+    texParams(GL_TEXTURE_2D, GL_CLAMP_TO_EDGE, filter);
+    return t;
+}
+
+void bindTex(unsigned unit, GLenum target, unsigned tex, unsigned prog, const char* name) {
+    glActiveTexture(GL_TEXTURE0 + unit);
+    glBindTexture(target, tex);
+    glUniform1i(glGetUniformLocation(prog, name), (int)unit);
+}
+
+void setMat(unsigned prog, const char* name, const Mat4& m) {
+    glUniformMatrix4fv(glGetUniformLocation(prog, name), 1, GL_FALSE, m.m);
+}
+
+}  // namespace
+
+std::string Renderer::load(const std::string& file) {
+    std::ifstream in(shaderDir_ + "/" + file);
+    if (!in) {
+        fprintf(stderr, "cannot open shader %s/%s\n", shaderDir_.c_str(), file.c_str());
+        return "";
+    }
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+unsigned Renderer::compile(unsigned type, const std::string& body, const char* name) {
+    static std::string common;
+    if (common.empty()) common = load("common.glsl");
+    std::string src = "#version 450 core\n" + common + "\n#line 1\n" + body;
+    unsigned s = glCreateShader(type);
+    const char* p = src.c_str();
+    glShaderSource(s, 1, &p, nullptr);
+    glCompileShader(s);
+    int ok = 0;
+    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[4096];
+        glGetShaderInfoLog(s, sizeof log, nullptr, log);
+        fprintf(stderr, "%s: compile error:\n%s\n", name, log);
+        glDeleteShader(s);
+        return 0;
+    }
+    return s;
+}
+
+unsigned Renderer::link(const std::vector<unsigned>& shaders, const char* name) {
+    for (unsigned s : shaders) if (!s) return 0;
+    unsigned p = glCreateProgram();
+    for (unsigned s : shaders) glAttachShader(p, s);
+    glLinkProgram(p);
+    for (unsigned s : shaders) glDeleteShader(s);
+    int ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[4096];
+        glGetProgramInfoLog(p, sizeof log, nullptr, log);
+        fprintf(stderr, "%s: link error:\n%s\n", name, log);
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+bool Renderer::buildPrograms() {
+    Program ns{link({compile(GL_COMPUTE_SHADER, load("noise_shape.comp"), "noise_shape")}, "noise_shape")};
+    Program nd{link({compile(GL_COMPUTE_SHADER, load("noise_detail.comp"), "noise_detail")}, "noise_detail")};
+    Program we{link({compile(GL_COMPUTE_SHADER, load("weather.comp"), "weather")}, "weather")};
+    std::string vs = load("fullscreen.vert");
+    Program cl{link({compile(GL_VERTEX_SHADER, vs, "fullscreen"), compile(GL_FRAGMENT_SHADER, load("clouds.frag"), "clouds")}, "clouds")};
+    Program re{link({compile(GL_VERTEX_SHADER, vs, "fullscreen"), compile(GL_FRAGMENT_SHADER, load("resolve.frag"), "resolve")}, "resolve")};
+    Program co{link({compile(GL_VERTEX_SHADER, vs, "fullscreen"), compile(GL_FRAGMENT_SHADER, load("composite.frag"), "composite")}, "composite")};
+    if (!ns.id || !nd.id || !we.id || !cl.id || !re.id || !co.id) return false;
+    for (Program* p : {&noiseShape_, &noiseDetail_, &weatherProg_, &cloudProg_, &resolveProg_, &compositeProg_})
+        if (p->id) glDeleteProgram(p->id);
+    noiseShape_ = ns; noiseDetail_ = nd; weatherProg_ = we;
+    cloudProg_ = cl; resolveProg_ = re; compositeProg_ = co;
+    return true;
+}
+
+bool Renderer::reloadShaders() {
+    if (!buildPrograms()) return false;
+    generateNoise();
+    historyValid_ = false;
+    return true;
+}
+
+void Renderer::generateNoise() {
+    if (!shapeTex_) {
+        glGenTextures(1, &shapeTex_);
+        glBindTexture(GL_TEXTURE_3D, shapeTex_);
+        glTexStorage3D(GL_TEXTURE_3D, 1, GL_RGBA8, SHAPE_RES, SHAPE_RES, SHAPE_RES);
+        texParams(GL_TEXTURE_3D, GL_REPEAT, GL_LINEAR);
+        glGenTextures(1, &detailTex_);
+        glBindTexture(GL_TEXTURE_3D, detailTex_);
+        glTexStorage3D(GL_TEXTURE_3D, 1, GL_RGBA8, DETAIL_RES, DETAIL_RES, DETAIL_RES);
+        texParams(GL_TEXTURE_3D, GL_REPEAT, GL_LINEAR);
+        glGenTextures(1, &weatherTex_);
+        glBindTexture(GL_TEXTURE_2D, weatherTex_);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, WEATHER_RES, WEATHER_RES);
+        texParams(GL_TEXTURE_2D, GL_REPEAT, GL_LINEAR);
+    }
+    glUseProgram(noiseShape_.id);
+    glBindImageTexture(0, shapeTex_, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA8);
+    glDispatchCompute(SHAPE_RES / 8, SHAPE_RES / 8, SHAPE_RES / 8);
+    glUseProgram(noiseDetail_.id);
+    glBindImageTexture(0, detailTex_, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA8);
+    glDispatchCompute(DETAIL_RES / 8, DETAIL_RES / 8, DETAIL_RES / 8);
+    glUseProgram(weatherProg_.id);
+    glUniform1f(glGetUniformLocation(weatherProg_.id, "uSeed"), 0.0f);
+    glBindImageTexture(0, weatherTex_, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
+    glDispatchCompute(WEATHER_RES / 16, WEATHER_RES / 16, 1);
+    glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+}
+
+void Renderer::makeTargets() {
+    unsigned old[] = {cloudColor_, cloudDepth_, resolveColor_[0], resolveColor_[1]};
+    glDeleteTextures(4, old);
+    unsigned oldFbo[] = {cloudFbo_, resolveFbo_[0], resolveFbo_[1]};
+    glDeleteFramebuffers(3, oldFbo);
+
+    cloudColor_ = makeTexture2D(GL_RGBA16F, cloudW_, cloudH_, GL_LINEAR);
+    cloudDepth_ = makeTexture2D(GL_R32F, cloudW_, cloudH_, GL_LINEAR);
+    glGenFramebuffers(1, &cloudFbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER, cloudFbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, cloudColor_, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, cloudDepth_, 0);
+    const GLenum bufs[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+    glDrawBuffers(2, bufs);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        fprintf(stderr, "cloud framebuffer incomplete\n");
+
+    for (int i = 0; i < 2; ++i) {
+        resolveColor_[i] = makeTexture2D(GL_RGBA16F, width_, height_, GL_LINEAR);
+        glGenFramebuffers(1, &resolveFbo_[i]);
+        glBindFramebuffer(GL_FRAMEBUFFER, resolveFbo_[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, resolveColor_[i], 0);
+        glDrawBuffers(1, bufs);
+    }
+    if (offscreen_) {
+        glDeleteTextures(1, &outputTex_);
+        glDeleteFramebuffers(1, &outputFbo_);
+        outputTex_ = makeTexture2D(GL_RGBA8, width_, height_, GL_NEAREST);
+        glGenFramebuffers(1, &outputFbo_);
+        glBindFramebuffer(GL_FRAMEBUFFER, outputFbo_);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, outputTex_, 0);
+        glDrawBuffers(1, bufs);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    historyValid_ = false;
+}
+
+bool Renderer::init(const std::string& shaderDir, int width, int height, bool offscreen) {
+    shaderDir_ = shaderDir;
+    offscreen_ = offscreen;
+    fprintf(stderr, "GL %s on %s\n", (const char*)glGetString(GL_VERSION), (const char*)glGetString(GL_RENDERER));
+    glGenVertexArrays(1, &vao_);
+    glBindVertexArray(vao_);
+    glGenQueries(4, queries_);
+    if (!buildPrograms()) return false;
+    generateNoise();
+    resize(width, height);
+    return true;
+}
+
+void Renderer::resize(int width, int height) {
+    width_ = width;
+    height_ = height;
+    lastScale_ = 0.f;  // forces target rebuild on next render
+}
+
+void Renderer::render(const Camera& cam, const Weather& w, const RenderSettings& s, float timeSec) {
+    if (s.scale != lastScale_) {
+        lastScale_ = s.scale;
+        cloudW_ = std::max(1, (int)(width_ * s.scale));
+        cloudH_ = std::max(1, (int)(height_ * s.scale));
+        makeTargets();
+    }
+    float aspect = (float)width_ / (float)height_;
+    Mat4 view = lookAt(cam.pos, cam.forward(), Vec3(0, 1, 0));
+    Mat4 proj = perspective(cam.fovY, aspect, 1.0f, 100000.0f);
+    Mat4 viewProj = mul(proj, view);
+    float jx = 0.f, jy = 0.f;
+    if (s.temporal) {
+        jx = (halton(frame_ % 16 + 1, 2) - 0.5f) * 2.0f / (float)cloudW_;
+        jy = (halton(frame_ % 16 + 1, 3) - 0.5f) * 2.0f / (float)cloudH_;
+    }
+    Mat4 jitteredVP = mul(jitterProjection(proj, jx, jy), view);
+    Mat4 invJitteredVP = inverse(jitteredVP);
+    Mat4 invVP = inverse(viewProj);
+    Vec3 sun = normalize(Vec3(std::cos(w.sunElevation) * std::cos(w.sunAzimuth), std::sin(w.sunElevation),
+                              std::cos(w.sunElevation) * std::sin(w.sunAzimuth)));
+
+    glQueryCounter(queries_[0], GL_TIMESTAMP);
+
+    // 1. Cloud pass at reduced resolution.
+    glBindFramebuffer(GL_FRAMEBUFFER, cloudFbo_);
+    glViewport(0, 0, cloudW_, cloudH_);
+    unsigned p = cloudProg_.id;
+    glUseProgram(p);
+    bindTex(0, GL_TEXTURE_3D, shapeTex_, p, "uShape");
+    bindTex(1, GL_TEXTURE_3D, detailTex_, p, "uDetail");
+    bindTex(2, GL_TEXTURE_2D, weatherTex_, p, "uWeather");
+    setMat(p, "uInvViewProj", invJitteredVP);
+    glUniform3f(glGetUniformLocation(p, "uCamPos"), cam.pos.x, cam.pos.y, cam.pos.z);
+    glUniform3f(glGetUniformLocation(p, "uSunDir"), sun.x, sun.y, sun.z);
+    glUniform1f(glGetUniformLocation(p, "uTime"), timeSec);
+    glUniform1i(glGetUniformLocation(p, "uFrame"), (int)frame_);
+    glUniform1i(glGetUniformLocation(p, "uMaxSteps"), s.maxSteps);
+    glUniform1f(glGetUniformLocation(p, "uCoverage"), w.coverage);
+    glUniform1f(glGetUniformLocation(p, "uDensity"), w.density);
+    glUniform1f(glGetUniformLocation(p, "uCloudType"), w.cloudType);
+    glUniform1f(glGetUniformLocation(p, "uBaseHeight"), w.baseHeight);
+    glUniform1f(glGetUniformLocation(p, "uThickness"), w.thickness);
+    glUniform2f(glGetUniformLocation(p, "uWind"), w.windX, w.windZ);
+    glUniform1f(glGetUniformLocation(p, "uAnisotropy"), w.anisotropy);
+    glUniform1f(glGetUniformLocation(p, "uSunIntensity"), w.sunIntensity);
+    glUniform1f(glGetUniformLocation(p, "uExtinction"), w.extinction);
+    glUniform1f(glGetUniformLocation(p, "uAmbient"), w.ambient);
+    glUniform1f(glGetUniformLocation(p, "uErosion"), w.erosion);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glQueryCounter(queries_[1], GL_TIMESTAMP);
+
+    // 2. Temporal resolve into the other history buffer.
+    int write = historyIndex_ ^ 1;
+    glBindFramebuffer(GL_FRAMEBUFFER, resolveFbo_[write]);
+    glViewport(0, 0, width_, height_);
+    p = resolveProg_.id;
+    glUseProgram(p);
+    bindTex(0, GL_TEXTURE_2D, cloudColor_, p, "uCurrent");
+    bindTex(1, GL_TEXTURE_2D, cloudDepth_, p, "uCurrentDepth");
+    bindTex(2, GL_TEXTURE_2D, resolveColor_[historyIndex_], p, "uHistory");
+    setMat(p, "uInvViewProj", invVP);
+    setMat(p, "uPrevViewProj", prevViewProj_);
+    glUniform3f(glGetUniformLocation(p, "uCamPos"), cam.pos.x, cam.pos.y, cam.pos.z);
+    glUniform1i(glGetUniformLocation(p, "uHistoryValid"), (s.temporal && historyValid_) ? 1 : 0);
+    glUniform1f(glGetUniformLocation(p, "uBlend"), 0.08f);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glQueryCounter(queries_[2], GL_TIMESTAMP);
+
+    // 3. Composite with sky and ground to the output.
+    glBindFramebuffer(GL_FRAMEBUFFER, outputFbo_);
+    glViewport(0, 0, width_, height_);
+    p = compositeProg_.id;
+    glUseProgram(p);
+    bindTex(0, GL_TEXTURE_2D, resolveColor_[write], p, "uClouds");
+    bindTex(1, GL_TEXTURE_2D, cloudDepth_, p, "uCloudDepth");
+    bindTex(2, GL_TEXTURE_3D, shapeTex_, p, "uShape");
+    setMat(p, "uInvViewProj", invVP);
+    glUniform3f(glGetUniformLocation(p, "uCamPos"), cam.pos.x, cam.pos.y, cam.pos.z);
+    glUniform3f(glGetUniformLocation(p, "uSunDir"), sun.x, sun.y, sun.z);
+    glUniform1i(glGetUniformLocation(p, "uShowNoise"), s.showNoise ? 1 : 0);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glQueryCounter(queries_[3], GL_TIMESTAMP);
+
+    historyIndex_ = write;
+    historyValid_ = s.temporal;
+    prevViewProj_ = viewProj;
+    frame_++;
+
+    GLuint64 ts[4];
+    for (int i = 0; i < 4; ++i) glGetQueryObjectui64v(queries_[i], GL_QUERY_RESULT, &ts[i]);
+    lastTimings_.cloudMs = (ts[1] - ts[0]) * 1e-6;
+    lastTimings_.resolveMs = (ts[2] - ts[1]) * 1e-6;
+    lastTimings_.compositeMs = (ts[3] - ts[2]) * 1e-6;
+    lastTimings_.totalMs = (ts[3] - ts[0]) * 1e-6;
+}
+
+std::vector<unsigned char> Renderer::readback(int& w, int& h) {
+    w = width_;
+    h = height_;
+    std::vector<unsigned char> px((size_t)w * h * 3), out(px.size());
+    glBindFramebuffer(GL_FRAMEBUFFER, outputFbo_);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+    for (int y = 0; y < h; ++y)
+        std::copy(px.begin() + (size_t)y * w * 3, px.begin() + (size_t)(y + 1) * w * 3,
+                  out.begin() + (size_t)(h - 1 - y) * w * 3);
+    return out;
+}
+```
+
+### src/renderer.h
+```
+#pragma once
+#include "math.h"
+#include <string>
+#include <vector>
+
+struct Weather {
+    float coverage = 0.5f;    // 0..1, shifts the weather map's coverage
+    float density = 1.0f;     // extinction multiplier
+    float cloudType = 0.55f;  // 0 stratus .. 1 cumulonimbus
+    float baseHeight = 1500.f;
+    float thickness = 2500.f;
+    float windX = 12.f, windZ = 4.f;
+    float sunAzimuth = 0.9f;   // radians
+    float sunElevation = 0.4f;
+    float anisotropy = 0.6f;   // forward HG lobe g
+    float sunIntensity = 10.f;
+    float extinction = 0.012f; // per metre at density 1
+    float ambient = 1.0f;
+    float erosion = 0.45f;     // how much the detail noise eats into cloud edges
+};
+
+struct RenderSettings {
+    float scale = 0.5f;        // cloud pass resolution relative to output
+    bool temporal = true;      // reprojection + accumulation
+    int maxSteps = 128;
+    bool showNoise = false;
+};
+
+struct Camera {
+    Vec3 pos{0, 400, 0};
+    float yaw = 0.3f, pitch = 0.4f;
+    float fovY = 60.f * 3.14159265f / 180.f;
+    Vec3 forward() const {
+        return normalize(Vec3(std::cos(pitch) * std::sin(yaw), std::sin(pitch), -std::cos(pitch) * std::cos(yaw)));
+    }
+};
+
+struct FrameTimings {
+    double cloudMs = 0, resolveMs = 0, compositeMs = 0, totalMs = 0;
+};
+
+class Renderer {
+public:
+    // offscreen=true renders the final image into an internal framebuffer
+    // (needed under surfaceless EGL, which has no default framebuffer).
+    bool init(const std::string& shaderDir, int width, int height, bool offscreen);
+    void resize(int width, int height);
+    // Renders one frame into the default framebuffer (or fbo 0 for headless).
+    void render(const Camera& cam, const Weather& w, const RenderSettings& s, float timeSec);
+    // Reads the last frame back as RGB8, bottom-up rows flipped to top-down.
+    std::vector<unsigned char> readback(int& w, int& h);
+    FrameTimings timings() const { return lastTimings_; }
+    void resetHistory() { historyValid_ = false; }
+    bool reloadShaders();
+
+private:
+    struct Program { unsigned id = 0; };
+    bool buildPrograms();
+    unsigned compile(unsigned type, const std::string& src, const char* name);
+    unsigned link(const std::vector<unsigned>& shaders, const char* name);
+    std::string load(const std::string& file);
+    void makeTargets();
+    void generateNoise();
+
+    std::string shaderDir_;
+    int width_ = 0, height_ = 0, cloudW_ = 0, cloudH_ = 0;
+    float lastScale_ = 0.f;
+    unsigned vao_ = 0;
+    Program noiseShape_, noiseDetail_, weatherProg_, cloudProg_, resolveProg_, compositeProg_;
+    unsigned shapeTex_ = 0, detailTex_ = 0, weatherTex_ = 0;
+    unsigned cloudFbo_ = 0, cloudColor_ = 0, cloudDepth_ = 0;
+    unsigned resolveFbo_[2] = {0, 0}, resolveColor_[2] = {0, 0}, resolveDepth_[2] = {0, 0};
+    unsigned outputFbo_ = 0, outputTex_ = 0;
+    bool offscreen_ = false;
+    int historyIndex_ = 0;
+    bool historyValid_ = false;
+    Mat4 prevViewProj_;
+    unsigned frame_ = 0;
+    unsigned queries_[4] = {0, 0, 0, 0};
+    FrameTimings lastTimings_;
+};
+```

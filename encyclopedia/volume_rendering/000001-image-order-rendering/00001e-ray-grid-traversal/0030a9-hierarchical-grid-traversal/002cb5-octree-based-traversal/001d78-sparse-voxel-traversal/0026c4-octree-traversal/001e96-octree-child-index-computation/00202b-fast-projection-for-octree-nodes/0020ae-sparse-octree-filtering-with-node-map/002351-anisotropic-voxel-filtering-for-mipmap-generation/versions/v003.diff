@@ -1,0 +1,85 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method filters lighting data at the leaf nodes of an octree anisotropically along the positive and negative XYZ directions to prepare for cone tracing [S1, unofficial]. It stores six directional values per voxel to preserve directional information [S1, unofficial]. It builds on the node map structure of [Sparse Octree Filtering with Node Map](2337-sparse-octree-filtering-with-node-map.md) to reduce thread launch overhead.
++This method filters lighting data at the leaf nodes of an octree anisotropically along the positive and negative XYZ directions to prepare for cone tracing [S1, unofficial]. It stores six directional values per voxel to preserve directional information [S1, unofficial].
+ 
+ ## How it works
+@@ -11,23 +11,31 @@
+ 
+ **Data Structures:**
+-*   **Lower Mip Level:** A 3D texture containing leaf node voxels. For a 2D explanation, a node tile is $5 \times 5$ voxels [S1, unofficial].
+-*   **Upper Mip Level:** A 3D texture containing filtered voxels. For a 2D explanation, a node tile is $3 \times 3$ voxels [S1, unofficial].
+-*   **Anisotropic Storage:** Each voxel in the upper mip level stores 6 directional values (positive/negative X, Y, Z) [S1, unofficial].
++*   **Lower Mip Level:** A 3D texture containing leaf node voxels; for the 2D explanation, a node tile is $5 \times 5$ voxels [S1, unofficial].
++*   **Upper Mip Level:** A 3D texture containing filtered voxels; for the 2D explanation, a node tile is $3 \times 3$ voxels [S1, unofficial].
++*   **Anisotropic Storage:** Each voxel in the upper mip level stores 6 directional values corresponding to positive and negative X, Y, and Z directions [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Group Definition:** To filter a center voxel (e.g., texel E) in the upper mip level along the +X direction, consider the 9 texels in the lower level that influence it (e.g., texels g, h, i, l, m, n, q, r, s in a 2D projection). Divide these 9 texels into 4 groups based on their Y and Z positions relative to the center [S1, unofficial].
+-2.  **Intra-Group Filtering:** For each of the 4 groups, filter along the +X direction. This involves alpha blending the values in the +X direction within the group, then averaging the results to obtain a single group value [S1, unofficial].
++1.  **Group Definition:** To filter a center voxel (e.g., texel E) in the upper mip level along the +X direction, consider the 9 texels in the lower level that influence it (e.g., texels g, h, i, l, m, n, q, r, s in a 2D projection) [S1, unofficial]. Divide these 9 texels into 4 groups based on their Y and Z positions relative to the center [S1, unofficial].
++2.  **Intra-Group Filtering:** For each of the 4 groups, filter along the +X direction by alpha blending the values in the +X direction within the group, then averaging the results to obtain a single group value [S1, unofficial].
+ 3.  **Inter-Group Filtering:** Compute the final filtered center voxel value by repeating the filtering process for the 4 group values [S1, unofficial].
+-4.  **Boundary Handling (Corner Cases):** For corner values in a node tile (e.g., texels a, b, f, g), not all 9 influencing texels are available within the same node tile; some reside in neighbor tiles. Partially compute group values and store them in the 3D texture. Rely on the transfer step (from the cone tracing paper) to complete the calculation. During transfer, some filtered values are computed by alpha blending neighbor group values followed by averaging, while others are computed by averaging first followed by alpha blending. Although these operations are not commutative, this approach reduces the number of dispatch passes with a similar result [S1, unofficial].
++4.  **Boundary Handling (Corner Cases):** For corner values in a node tile (e.g., texels a, b, f, g), not all 9 influencing texels are available within the same node tile; some reside in neighbor tiles [S1, unofficial]. Partially compute group values and store them in the 3D texture [S1, unofficial]. Rely on the transfer step (from the cone tracing paper) to complete the calculation [S1, unofficial]. During transfer, some filtered values are computed by alpha blending neighbor group values followed by averaging, while others are computed by averaging first followed by alpha blending [S1, unofficial]. Although these operations are not commutative, this approach reduces the number of dispatch passes with a similar result [S1, unofficial].
+ 5.  **Sampling:** To sample the anisotropic filtered voxel for a specific direction, use a method similar to ambient cube sampling, requiring 3 texture reads [S1, unofficial].
++
++**Formulas:**
++The sampling function computes the output color $\mathbf{C}$ for a direction $\mathbf{d} = (d_x, d_y, d_z)$ using squared direction components $\mathbf{n}^2 = (d_x^2, d_y^2, d_z^2)$ and six stored directional vectors $\mathbf{V}_{\pm x}, \mathbf{V}_{\pm y}, \mathbf{V}_{\pm z}$ [S1, unofficial]:
++$$
++\mathbf{C} = n_x^2 \cdot \mathbf{V}_{\text{dir}(d_x)} + n_y^2 \cdot \mathbf{V}_{\text{dir}(d_y)} + n_z^2 \cdot \mathbf{V}_{\text{dir}(d_z)}
++$$
++where $\text{dir}(d_i)$ selects the positive or negative vector based on the sign of $d_i$ [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def sample_anisotropic(direction: tuple[float, float, float], brick_values: tuple[float, float, float, float, float, float]) -> tuple[float, float, float]:
++def sample_anisotropic(direction, brick_values):
+     """
+     Samples the anisotropic filtered voxel for a given direction.
+-    brick_values layout: (neg_x, pos_x, neg_y, pos_y, neg_z, pos_z)
++    brick_values is a list of 6 tuples (float, float, float) representing:
++    [neg_x, pos_x, neg_y, pos_y, neg_z, pos_z]
+     """
+     n_squared = (direction[0]**2, direction[1]**2, direction[2]**2)
+@@ -35,22 +43,19 @@
+                    1 if direction[1] < 0.0 else 0,
+                    1 if direction[2] < 0.0 else 0)
+-
+     val_x = brick_values[is_negative[0]]
+     val_y = brick_values[is_negative[1] + 2]
+     val_z = brick_values[is_negative[2] + 4]
+-
+-    filtered_color = (n_squared[0] * val_x,
+-                      n_squared[1] * val_y,
+-                      n_squared[2] * val_z)
+-    return filtered_color
++    return (n_squared[0] * val_x[0] + n_squared[1] * val_y[0] + n_squared[2] * val_z[0],
++            n_squared[0] * val_x[1] + n_squared[1] * val_y[1] + n_squared[2] * val_z[1],
++            n_squared[0] * val_x[2] + n_squared[1] * val_y[2] + n_squared[2] * val_z[2])
+ ```
+ 
+ **Parameters:**
+-*   **Tile Size:** The example uses a $5 \times 5$ lower level to $3 \times 3$ upper level reduction in 2D. The 3D case is described as "very similar" but exact dimensions are not specified [S1, unofficial].
++*   **Tile Size:** The example uses a $5 \times 5$ lower level to $3 \times 3$ upper level reduction in 2D; the 3D case is described as "very similar" but exact dimensions are not specified [S1, unofficial].
+ *   **Directional Weights:** The sampling function uses the squared direction components ($n^2$) as weights [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Boundary Access:** Corner voxels cannot access all 9 influencing texels locally. Partial computation and reliance on the transfer step are required [S1, unofficial].
+-*   **Non-Commutativity:** The order of alpha blending and averaging matters. The method uses a specific order to reduce dispatch passes, which may introduce slight inaccuracies compared to a fully commutative approach [S1, unofficial].
++*   **Boundary Access:** Corner voxels cannot access all 9 influencing texels locally; partial computation and reliance on the transfer step are required [S1, unofficial].
++*   **Non-Commutativity:** The order of alpha blending and averaging matters; the method uses a specific order to reduce dispatch passes, which may introduce slight inaccuracies compared to a fully commutative approach [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -62,5 +67,5 @@
+ 
+ ## Background
+-This method is part of the Voxel Cone Tracing pipeline. It was introduced in the context of implementing voxel cone tracing for global illumination. The filtering pass is a prerequisite for the cone tracing step, ensuring that lighting data is appropriately blurred anisotropically to match the cone tracing kernel [S1, unofficial].
++This method is part of the Voxel Cone Tracing pipeline [S1, unofficial]. It was introduced in the context of implementing voxel cone tracing for global illumination [S1, unofficial]. The filtering pass is a prerequisite for the cone tracing step, ensuring that lighting data is appropriately blurred anisotropically to match the cone tracing kernel [S1, unofficial].
+ 
+ ## Sources

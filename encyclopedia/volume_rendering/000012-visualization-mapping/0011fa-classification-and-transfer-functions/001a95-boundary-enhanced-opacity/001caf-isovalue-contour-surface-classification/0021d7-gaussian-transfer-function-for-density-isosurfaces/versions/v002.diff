@@ -1,0 +1,159 @@
+--- v001.md
++++ v002.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-This method classifies volumetric density data to render specific isosurfaces by mapping density values to color and opacity using a Gaussian function in logarithmic space. It solves the problem of visualizing power-law density distributions (such as astrophysical gas) where linear scaling fails to provide smooth transitions. It differs from linear transfer functions by operating on $\log_{10} n$, ensuring that the width of the rendered shell is constant in logarithmic density space rather than linear density space.
++This method classifies volumetric density data to render specific isosurfaces by mapping density values to color and opacity using a Gaussian function in logarithmic space [S1]. It addresses the challenge of visualizing power-law density distributions, such as astrophysical gas, where working in $\log_{10} n$ yields smoother results than linear scaling [S1]. It differs from linear transfer functions by maintaining a constant width in logarithmic density space rather than linear density space [S1].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** Scalar density field $n(x,y,z)$, typically representing number density or mass density.
+-*   **Output:** RGBA color values for each voxel or ray sample.
++*   **Input:** Scalar density field $n(x,y,z)$, ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, step size $\Delta s$, and isosurface parameters.
++*   **Output:** Accumulated RGBA color and opacity per pixel.
+ 
+ **Data Structures**
+ The method requires parameters for each target isosurface $k$:
+-*   $n_{0,k}$: Target density center (linear).
++*   $\log_{10} n_{0,k}$: Target density center in log-space.
+ *   $\sigma_k$: Width parameter in log-space.
+ *   $h_k = (h_R, h_G, h_B, h_\alpha)$: Amplitude vector for color and opacity channels.
+@@ -19,85 +19,74 @@
+ 
+ **Formulas**
+-The transfer function $T(n)$ maps a density value $n$ to an intensity value (which is then applied to the RGB and $\alpha$ channels via amplitudes $h$). The core formula is [S1]:
+-
+-$$
+-T(n) = \frac{h}{w} \exp \left[ -0.5 \left( \frac{\log_{10} n - \log_{10} n_0}{\sigma} \right)^2 \right]
+-$$
+-
+-Where:
+-*   $n$: Current density value.
+-*   $n_0$: Target density for the isosurface.
+-*   $\sigma$: Controls the width of the Gaussian in log-space.
+-*   $w$: Normalization constant, chosen such that the integration over the Gaussian results in the desired color intensity.
+-*   $h$: Amplitude vector $(h_R, h_G, h_B, h_\alpha)$.
++The transfer function $T(n)$ maps a density value $n$ to an intensity contribution [S1]:
++$$T(n) = \frac{h}{w} \exp \left[ -0.5 \left( \frac{\log_{10} n - \log_{10} n_0}{\sigma} \right)^2 \right]$$
++During ray marching, the per-step color and opacity contribution is computed as $\Delta \mathbf{C} = T(n) \Delta s \cdot h$ and $\Delta \alpha = T(n) \Delta s$ [S1]. These are accumulated using front-to-back compositing: $\mathbf{C}_{out} = \mathbf{C}_{in} + (1 - \alpha_{in}) \Delta \mathbf{C}$ and $\alpha_{out} = \alpha_{in} + (1 - \alpha_{in}) \Delta \alpha$ [G].
+ 
+ **Parameters and Typical Values**
+ Based on the source implementation [S1]:
+-*   **Normalization ($w$):** $2.5 \times 10^{16}$ cm. This value is of the order of the grid cell size and must be tuned experimentally to scale the integration correctly.
+-*   **Isosurface 1:**
+-    *   $\log_{10} n_0 = 3.5$
+-    *   $\sigma = 0.05$
+-    *   $h = (0.4, 0.4, 0.8, 0.001)$ (Purple, low opacity)
+-*   **Isosurface 2:**
+-    *   $\log_{10} n_0 = 4.0$
+-    *   $\sigma = 0.1$
+-    *   $h = (0.89, 0.47, 0.06, 0.001)$ (Ochre, low opacity)
++*   **Normalization ($w$):** $2.5 \times 10^{16}$ cm, of the order of the grid cell size, chosen to scale the integration over the Gaussian to the desired color intensity [S1].
++*   **Isosurface 1:** $\log_{10} n_0 = 3.5$, $\sigma = 0.05$, $h = (0.4, 0.4, 0.8, 0.001)$ (purple with almost no absorption) [S1].
++*   **Isosurface 2:** $\log_{10} n_0 = 4.0$, $\sigma = 0.1$, $h = (0.89, 0.47, 0.06, 0.001)$ (ochre) [S1].
+ 
+ **Pseudocode**
+-The following Python-like pseudocode implements the transfer function evaluation for a single density value $n$ and a set of isosurface definitions.
++The following Python-like pseudocode implements the complete ray-marching integration using the transfer function. It assumes a `sample_density` function is provided to query the scalar field.
+ 
+ ```python
+ import math
+ 
+-def gaussian_log_transfer(n, isosurfaces, w):
++def render_ray(origin, direction, step_size, isosurfaces, w, sample_density, bounds):
+     """
+-    Compute the transfer function value for a given density n.
++    Render a single ray using the Gaussian log-transfer function.
+     
+     Args:
+-        n: Scalar density value. Must be > 0.
+-        isosurfaces: List of dicts, each containing:
+-            - 'log_n0': float, log10 of target density.
+-            - 'sigma': float, width in log-space.
+-            - 'h': tuple/list of 4 floats (R, G, B, Alpha).
++        origin: (x, y, z) ray origin.
++        direction: (dx, dy, dz) normalized ray direction.
++        step_size: float, distance between samples.
++        isosurfaces: list of dicts with keys 'log_n0', 'sigma', 'h'.
+         w: float, normalization constant.
++        sample_density: callable returning density n at (x,y,z).
++        bounds: object with method contains(pos) returning bool.
+         
+     Returns:
+-        tuple: (R, G, B, Alpha) intensity contributions.
++        tuple: (R, G, B, Alpha) accumulated values.
+     """
+-    if n <= 0:
+-        return (0.0, 0.0, 0.0, 0.0)
+-
+-    log_n = math.log10(n)
++    r_acc, g_acc, b_acc, a_acc = 0.0, 0.0, 0.0, 0.0
++    dx, dy, dz = direction
++    t = 0.0
+     
+-    r_acc = 0.0
+-    g_acc = 0.0
+-    b_acc = 0.0
+-    a_acc = 0.0
+-
+-    for surf in isosurfaces:
+-        log_n0 = surf['log_n0']
+-        sigma = surf['sigma']
+-        h = surf['h']
++    while True:
++        pos = (origin[0] + t * dx, origin[1] + t * dy, origin[2] + t * dz)
++        if not bounds.contains(pos):
++            break
++            
++        n = sample_density(pos)
++        if n > 0:
++            log_n = math.log10(n)
++            for surf in isosurfaces:
++                log_n0 = surf['log_n0']
++                sigma = surf['sigma']
++                h = surf['h']
++                
++                diff = log_n - log_n0
++                exponent = -0.5 * (diff / sigma) ** 2
++                
++                # Compute transfer function value T(n)
++                # Guard against underflow for very negative exponents
++                if exponent < -700:
++                    t_val = 0.0
++                else:
++                    t_val = math.exp(exponent) / w
++                
++                # Per-step contribution
++                alpha_step = t_val * step_size
++                if alpha_step > 0:
++                    # Front-to-back compositing
++                    r_acc += (1.0 - a_acc) * alpha_step * h[0]
++                    g_acc += (1.0 - a_acc) * alpha_step * h[1]
++                    b_acc += (1.0 - a_acc) * alpha_step * h[2]
++                    a_acc += (1.0 - a_acc) * alpha_step
++                    
++        t += step_size
+         
+-        # Calculate Gaussian exponent
+-        diff = log_n - log_n0
+-        exponent = -0.5 * (diff / sigma) ** 2
+-        
+-        # Calculate base transfer value T_base = exp(exponent) / w
+-        # Note: h is applied as a multiplier to this base value
+-        # T(n) = (h / w) * exp(...)
+-        # We compute (exp(...) / w) * h
+-        
+-        if exponent < -700: # Avoid underflow to zero in exp
+-            t_base = 0.0
+-        else:
+-            t_base = math.exp(exponent) / w
+-            
+-        # Accumulate contributions for each channel
+-        r_acc += t_base * h[0]
+-        g_acc += t_base * h[1]
+-        b_acc += t_base * h[2]
+-        a_acc += t_base * h[3]
+-
+     return (r_acc, g_acc, b_acc, a_acc)
+ ```

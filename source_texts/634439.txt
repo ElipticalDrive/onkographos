@@ -1,0 +1,93 @@
+Summary engine-math has no rotation-level look-at: the only look-at in the math package is Matrix.lookAt (packages/math/src/Matrix.ts:483), which produces a view matrix. Consumers that can only depend on engine-math have to rebuild the b...
+
+[math] Add a rotation-level look-at so engine-math and Transform.lookAt share one implementation · Issue #3116 · galacean/engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[math] Add a rotation-level look-at so engine-math and Transform.lookAt share one implementation #3116
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+[math] Add a rotation-level look-at so engine-math and Transform.lookAt share one implementation#3116
+Copy link
+Description
+luzhuang
+opened on Sep 11, 2026
+Issue body actions
+Summary
+engine-math has no rotation-level look-at: the only look-at in the math package is Matrix.lookAt (packages/math/src/Matrix.ts:483), which produces a view matrix. Consumers that can only depend on engine-math have to rebuild the basis → quaternion conversion themselves. engine-core does exactly that — Transform.lookAt (packages/core/src/Transform.ts:528) builds the basis by hand — so the family currently ships two implementations of the same math, and the Transform one silently no-ops on degenerate input.
+Proposal: add a rotation-level look-at to engine-math with an explicit degenerate contract, and let Transform.lookAt reuse it.
+Current state
+Matrix.lookAt(eye, target, up, out) is the only look-at in engine-math. Quaternion has rotationEuler / rotationYawPitchRoll / rotationAxisAngle / rotationX|Y|Z, but no look-at.
+Transform.lookAt(targetPosition, worldUp?) does not reuse it: it builds zAxis / xAxis / yAxis by hand and calls rotMat.getRotation(this._worldRotationQuaternion).
+Degenerate input is a silent no-op, and the source already carries the TODO:
+```
+if (axisLen <= MathUtil.zeroTolerance) {
+  // The current position and the target position are almost the same.
+  return;                                  // ① eye coincides with target
+}
+...
+if (axisLen <= MathUtil.zeroTolerance) {
+  // @todo:
+  // 1.worldUp is（0,0,0）
+  // 2.worldUp is parallel to zAxis
+  return;                                  // ② zero up / up parallel to the view direction
+}
+```
+The worldUp-less fallback degenerates too: xAxis.set(zAxis.z, 0, -zAxis.x) is (0,0,0) whenever the view direction is ±Y, so a target directly above/below also lands in ②. Measured with the current pinned @galacean/engine-math@2.0.0-alpha.43: zAxis = (0, ±1, 0) → fallback xAxis length 0.
+Transform.lookAt has no dedicated test — it is only called incidentally in tests/src/core/MeshRenderer.test.ts and tests/src/core/Trail.test.ts. Matrix.lookAt is covered in tests/src/math/Matrix.test.ts:157.
+Why it matters
+A public authoring tool cannot treat "silently keep the old rotation" as success. Editor's camera.lookAt (galacean/editor#3931) must work in headless/CLI, where no Engine instance exists (instantiation needs a canvas/WebGL context), and the domain layer may only depend on engine-math. It currently assembles Matrix.lookAt → Matrix.invert → Matrix.getRotation and adds its own degenerate handling; every engine-math-only consumer is in the same position.
+Proposed API
+```
+/**
+ * Calculate the rotation of an object at `eye` looking at `target`, with `up` as the world up.
+ * Returns false when the direction is degenerate (eye coincides with target, `up` is zero,
+ * or `up` is parallel to the view direction), leaving `out` untouched.
+ */
+static lookAt(eye: Vector3, target: Vector3, up: Vector3, out: Quaternion): boolean;
+```
+Same parameters as Matrix.lookAt, so consumers keep one coordinate convention; the result is the object's world rotation (its -Z faces target).
+Matrix.decompose(...): boolean is the existing precedent for a boolean "degenerate" contract.
+Alternative naming: Quaternion.lookRotation(forward, up, out) (Unity-style, forward = the direction the object's -Z should face). Either shape is fine — the point is that there is exactly one, with documented semantics.
+Implementation notes
+Reuse the basis flow already proven in Transform.lookAt (zAxis = normalize(eye - target); xAxis = normalize(cross(up, zAxis)); yAxis = cross(zAxis, xAxis); build the matrix; getRotation(out)), replacing both silent returns with return false. Internal temporaries should follow the Matrix._tempVec30..32 numbering convention (Quaternion currently only has _tempVector3 / _tempQuat1).
+Compatibility
+Pure addition; no behavior change unless Transform.lookAt starts delegating. Two decisions for that delegation:
+The worldUp-less fallback degenerates for vertical directions (point 4). Keep the current silent no-op, or replace the fallback with a documented default (up = (0,1,0)), which is a behavior change and needs its own evaluation.
+Transform.lookAt returns void today; delegating can keep that (ignore the boolean) or return boolean (API change).
+Local verification (prototype, 20k random cases)
+Quaternion.lookAt vs the existing Matrix.lookAt → invert → getRotation path: max angle difference 2.80e-2° (both are float32, different rounding order), unit-length error 2.88e-8.
+Degenerate inputs (eye == target, up = 0, up ∥ view): all return false; today those paths leave the rotation unchanged.
+Vertical view with up = (0,0,1): works. Non-orthogonal up (e.g. (0.3, 0.9, 0.1)): orthogonalized, identical to Matrix.lookAt.
+Test plan
+Extend tests/src/math/Quaternion.test.ts: equivalence with Matrix.lookAt (fixed cases plus randomized comparison with tolerance), the three degenerate inputs returning false with out untouched, non-orthogonal up, and unit-length output.
+Downstream
+After a release, galacean/editor can collapse its three-step conversion into a single call and delete the duplicated basis logic; its remaining domain-side responsibilities (hierarchy traversal, float32 representability checks) stay in the domain layer where they belong.
+Activity
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

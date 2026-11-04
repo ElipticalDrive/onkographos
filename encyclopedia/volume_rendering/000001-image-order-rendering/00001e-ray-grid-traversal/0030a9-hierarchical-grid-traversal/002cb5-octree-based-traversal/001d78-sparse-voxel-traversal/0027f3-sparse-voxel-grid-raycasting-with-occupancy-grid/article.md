@@ -1,0 +1,221 @@
+# Sparse Voxel Grid Raycasting with Occupancy Grid
+
+Also called: Occupancy Grid Culling, empty block skipping
+
+## Overview
+A volume rendering estimator that accelerates ray traversal and sampling by using a hierarchical sparse voxel grid (often implemented via VDB/NanoVDB structures) to skip empty space along rays, returning only sample locations within occupied cells [S1, S2, unofficial]. It differs from standard [Voxel Grid Raycasting](2218-voxel-grid-raycasting.md) by replacing dense texture lookups with a hierarchical occupancy check that reduces texture reads by a factor of 3 [S3, unofficial], and from [Octree Traversal](1587-octree-traversal.md) by using a fixed-resolution sparse grid with hierarchical levels rather than a dynamic tree structure for the primary traversal logic [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `rays_o`: Ray origins tensor of shape $(N, 3)$.
+- `rays_d`: Normalized ray directions tensor of shape $(N, 3)$.
+- `estimator`: An `OccGridEstimator` object containing:
+  - `binaries`: Boolean tensor of shape $(L, R_x, R_y, R_z)$ storing occupancy masks for each level $L$. Must be contiguous on CPU before transfer to GPU [S1, unofficial].
+  - `aabbs`: Tensor of shape $(L, 6)$ storing the Axis-Aligned Bounding Box (AABB) for each level, where level $i$ is enlarged by $2^i$ relative to the base [S1, unofficial].
+  - `resolution`: 3D resolution $(R_x, R_y, R_z)$, default 128 [S1, unofficial].
+  - `levels`: Number of hierarchical levels $L$ [S1, unofficial].
+- `near_plane`, `far_plane`: Scalar distances, defaults 0.0 and $10^{10}$ [S1, unofficial].
+- `render_step_size`: Step size for marching, default $10^{-3}$ [S1, unofficial].
+- `cone_angle`: Cone angle for linearly-increased step size, default 0.0 [S1, unofficial].
+- `alpha_thre`: Alpha threshold for skipping empty space, default 0.0 [S1, unofficial].
+- `early_stop_eps`: Early stop threshold, default $10^{-4}$ [S1, unofficial].
+- `sigma_fn` or `alpha_fn`: Optional callables taking $(t_{starts}, t_{ends}, ray\_indices)$ and returning density or opacity values, used to skip invisible space. Only one should be provided [S1, unofficial].
+- `render_bkgd`: Background color tensor [S1, unofficial].
+- `timestamps`: Optional tensor for dynamic scenes [S1, unofficial].
+
+**Outputs:**
+- `rgb`: Rendered RGB image.
+- `opacity`: Accumulated opacity.
+- `depth`: Accumulated depth.
+- `n_rendering_samples`: Number of samples used.
+
+**Data Structures:**
+- `DensityGrid` (or `OccGridEstimator`): Manages the VDB/NanoVDB structure.
+  - `tree`: The underlying VDB grid object [S1, unofficial].
+  - `binaries`: The occupancy mask [S1, unofficial].
+  - `grid_coords`: Integer coordinates for voxels [S1, unofficial].
+  - `grid_indices`: Indices for voxels [S1, unofficial].
+
+**Steps:**
+
+1. **Initialization**:
+   - Create `near_planes` and `far_planes` tensors of shape $(N)$ filled with `near_plane` and `far_plane` respectively [S1, unofficial].
+   - If `t_min` is provided, clamp `near_planes` to $\max(t_{min}, near\_plane)$ [S1, unofficial].
+   - If `t_max` is provided, clamp `far_planes` to $\min(t_{max}, far\_plane)$ [S1, unofficial].
+   - If `stratified` is True, add uniform random noise in $[0, render\_step\_size)$ to `near_planes` [S1, unofficial].
+   - Update `alpha_thre` to $\min(alpha\_thre, mean\_occupancy)$ if visibility skipping is enabled [S1, unofficial].
+
+2. **Ray-AABB Intersection**:
+   - Compute intersections for all rays against all level AABBs:
+     $$ t_{mins}, t_{maxs}, hits = \text{ray\_aabb\_intersect}(rays\_o, rays\_d, aabbs) $$
+   - If $L > 1$, concatenate $t_{mins}$ and $t_{maxs}$ along the last dimension and sort them to get $t_{sorted}$ and $t_{indices}$ [S1, unofficial].
+   - If $L = 1$, use unsorted concatenation and identity indices to maintain kernel compatibility [S1, unofficial].
+
+3. **Iterative Ray Marching**:
+   - Initialize `ray_mask` as a boolean tensor of shape $(N)$ with all True [S2, unofficial].
+   - Initialize `opacity`, `depth`, and `rgb` tensors of shape $(N, 1)$ and $(N, 3)$ with zeros [S2, unofficial].
+   - Loop while `iter_samples < max_samples` and `ray_mask.sum() > 0`:
+     a. Calculate `n_alive = ray_mask.sum()` [S2, unofficial].
+     b. Determine samples per alive ray:
+        $$ n_{samples} = \max\left(\min\left(\frac{N}{n_{alive}}, 64\right), min\_samples\right) $$
+        where $min\_samples = 1$ if $cone\_angle == 0$ else 4 [S2, unofficial].
+     c. Call `traverse_grids` CUDA kernel with rays, `binaries`, `aabbs`, bounds, `render_step_size`, `cone_angle`, `n_samples`, `ray_mask`, and pre-computed $t_{sorted}/t_{indices}/hits$ [S2, unofficial]. This returns `intervals`, `samples`, and `termination_planes` [S2, unofficial].
+        - The kernel traverses the sparse VDB structure, skipping empty blocks [S3, unofficial].
+     d. Extract sample intervals:
+        $$ t_{starts} = intervals.vals[intervals.is\_left] $$
+        $$ t_{ends} = intervals.vals[intervals.is\_right] $$
+     e. Extract valid ray indices:
+        $$ ray\_indices = samples.ray\_indices[samples.is\_valid] $$
+     f. **Visibility Skipping** (if `sigma_fn` or `alpha_fn` is provided and `alpha_thre > 0` or `early_stop_eps > 0`):
+        - If `sigma_fn` is provided, compute sigmas:
+          $$ positions = rays\_o[ray\_indices] + rays\_d[ray\_indices] \times \frac{t_{starts} + t_{ends}}{2} $$
+          $$ sigmas = \sigma\_fn(t_{starts}, t_{ends}, ray\_indices) $$
+          (Handle dynamic scenes with `timestamps` if present) [S1, unofficial].
+        - If `alpha_fn` is provided (and `sigma_fn` is not), compute alphas similarly [S1, unofficial].
+        - Compute masks using `render_visibility_from_density` or `render_visibility_from_alpha` with `packed_info` (stacked `chunk_indices` and `chunk_counts`) and thresholds [S1, unofficial].
+        - Filter `ray_indices`, `t_starts`, `t_ends` using the masks [S1, unofficial].
+     g. Query radiance field for RGB and sigma:
+        $$ rgbs, sigmas = \text{rgb\_sigma\_fn}(t_{starts}, t_{ends}, ray\_indices) $$
+        (Handle dynamic scenes with `timestamps` if present) [S2, unofficial].
+     h. Compute rendering weights:
+        $$ prefix\_trans = 1 - opacity[ray\_indices].squeeze(-1) $$
+        $$ weights = \text{render\_weight\_from\_density}(sigmas, prefix\_trans) $$
+     i. Accumulate results:
+        $$ rgb = rgb + weights \times rgbs $$
+        $$ opacity = opacity + weights $$
+        $$ depth = depth + weights \times \frac{t_{starts} + t_{ends}}{2} $$
+     j. Update `iter_samples` by adding `n_samples` [S2, unofficial].
+
+4. **Finalization**:
+   - Add background color:
+     $$ rgb = rgb + render\_bkgd \times (1.0 - opacity) $$
+   - Compute final depth:
+     $$ depth = \frac{depth}{\max(opacity, \epsilon)} $$
+     where $\epsilon$ is machine epsilon [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_sparse_voxel_grid(rays_o, rays_d, estimator, sigma_fn=None, alpha_fn=None,
+                             near_plane=0.0, far_plane=1e10, render_step_size=1e-3,
+                             render_bkgd=None, cone_angle=0.0, alpha_thre=0.0,
+                             early_stop_eps=1e-4, timestamps=None):
+    num_rays = rays_o.shape[0]
+    device = rays_o.device
+    
+    # 1. Initialization
+    near_planes = torch.full((num_rays,), near_plane, device=device)
+    far_planes = torch.full((num_rays,), far_plane, device=device)
+    
+    # Clamp near/far planes if needed (omitted t_min/t_max for brevity)
+    
+    # Update alpha_thre with mean occupancy if visibility skipping is active
+    if (alpha_thre > 0.0 or early_stop_eps > 0.0) and (sigma_fn is not None or alpha_fn is not None):
+        alpha_thre = min(alpha_thre, estimator.binaries.float().mean().item())
+        
+    min_samples = 1 if cone_angle == 0 else 4
+    
+    # 2. Ray-AABB Intersection
+    t_mins, t_maxs, hits = ray_aabb_intersect(rays_o, rays_d, estimator.aabbs)
+    n_grids = estimator.binaries.size(0)
+    
+    if n_grids > 1:
+        t_sorted, t_indices = torch.sort(torch.cat([t_mins, t_maxs], -1), -1)
+    else:
+        t_sorted = torch.cat([t_mins, t_maxs], -1)
+        t_indices = torch.arange(0, n_grids * 2, device=device, dtype=torch.int64).expand(num_rays, n_grids * 2)
+        
+    # 3. Iterative Marching
+    ray_mask = torch.ones(num_rays, device=device).bool()
+    opacity = torch.zeros(num_rays, 1, device=device)
+    depth = torch.zeros(num_rays, 1, device=device)
+    rgb = torch.zeros(num_rays, 3, device=device)
+    iter_samples = 0
+    max_samples = 10000 # Example limit
+    
+    while iter_samples < max_samples:
+        n_alive = ray_mask.sum().item()
+        if n_alive == 0:
+            break
+            
+        n_samples = max(min(num_rays // n_alive, 64), min_samples)
+        iter_samples += n_samples
+        
+        # Traverse sparse grid
+        intervals, samples, termination_planes = traverse_grids(
+            rays_o, rays_d,
+            estimator.binaries, estimator.aabbs,
+            near_planes, far_planes,
+            render_step_size, cone_angle,
+            n_samples, ray_mask,
+            t_sorted, t_indices, hits
+        )
+        
+        t_starts = intervals.vals[intervals.is_left]
+        t_ends = intervals.vals[intervals.is_right]
+        ray_indices = samples.ray_indices[samples.is_valid]
+        
+        # Visibility Skipping
+        if (alpha_thre > 0.0 or early_stop_eps > 0.0) and (sigma_fn is not None or alpha_fn is not None):
+            if t_starts.shape[0] == 0:
+                continue
+                
+            if sigma_fn is not None:
+                sigmas = sigma_fn(t_starts, t_ends, ray_indices)
+                masks = render_visibility_from_density(t_starts, t_ends, sigmas, 
+                                                       torch.stack([intervals.chunk_indices, intervals.chunk_counts], -1),
+                                                       early_stop_eps, alpha_thre)
+            elif alpha_fn is not None:
+                alphas = alpha_fn(t_starts, t_ends, ray_indices)
+                masks = render_visibility_from_alpha(alphas, 
+                                                     torch.stack([intervals.chunk_indices, intervals.chunk_counts], -1),
+                                                     early_stop_eps, alpha_thre)
+            ray_indices = ray_indices[masks]
+            t_starts = t_starts[masks]
+            t_ends = t_ends[masks]
+            
+        if ray_indices.numel() == 0:
+            continue
+            
+        # Query Radiance Field
+        rgbs, sigmas = rgb_sigma_fn(t_starts, t_ends, ray_indices, rays_o, rays_d, timestamps)
+        
+        # Accumulate
+        prefix_trans = 1.0 - opacity[ray_indices].squeeze(-1)
+        weights = render_weight_from_density(sigmas, prefix_trans)
+        
+        rgb = rgb + weights[:, None] * rgbs
+        opacity = opacity + weights[:, None]
+        depth = depth + weights[:, None] * (t_starts + t_ends)[:, None] / 2.0
+        
+    # 4. Finalization
+    if render_bkgd is not None:
+        rgb = rgb + render_bkgd * (1.0 - opacity)
+    depth = depth / torch.clamp_min(opacity, torch.finfo(rgbs.dtype).eps)
+    
+    return rgb, opacity, depth, iter_samples
+```
+
+## Subtopics
+
+### [Two-pass chunked ray traversal for occupancy grids](5034-two-pass-chunked-ray-traversal-for-occupancy-grids.md)
+Accelerates the method by decoupling counting of occupied steps from sample generation, solving variable-length buffer issues in batched CUDA kernels.
+
+## Operating characteristics
+- **Time Complexity**: Depends on the sparsity of the grid and the number of occupied intervals. The hierarchical traversal reduces the number of texture reads significantly compared to dense grids.
+- **Memory Complexity**: Requires storing the `binaries` tensor of shape $(L, R_x, R_y, R_z)$ and the VDB structure overhead. For $L=4, R=128$, this is manageable on modern GPUs.
+- **Performance**: Reduces texture reads by a factor of 3 [S3, unofficial]. In a specific implementation (lava-lamp), texture reads dropped from 17.6M to 5.9M per frame at 1080p in a default view, and from 138M to 46M in a full-screen lamp view [S3, unofficial].
+- **Strengths**: Efficiently skips empty space; compatible with hierarchical grids; reduces memory bandwidth pressure.
+- **Limitations**: Requires pre-computation of occupancy grid; sorting of intersection times adds overhead for multi-level grids; precision issues may arise with very small step sizes or large bounding boxes.
+- **When to use**: When the scene has large empty regions and the occupancy grid can be pre-computed or updated efficiently.
+- **When not to use**: When the scene is fully dense, or when the overhead of maintaining the occupancy grid outweighs the traversal savings.
+
+## Background
+The method originates from the use of hierarchical VDB (OpenVDB/NanoVDB) grids for volume rendering, specifically adapted for GPU acceleration [S1, unofficial]. It is widely used in neural radiance field (NeRF) rendering pipelines, such as those in the `nerfacc` library [S2, unofficial] and unofficial implementations like `faster-occgrid` [S1, unofficial]. The concept of using an occupancy grid to cull empty blocks is also found in traditional volume rendering, such as in the lava-lamp simulation [S3, unofficial].
+
+## Sources
+[S1] Yosshi999/faster-occgrid, https://github.com/Yosshi999/faster-occgrid, fetched 2026-10-24 (unofficial)
+[S2] nerfstudio-project/nerfacc, https://github.com/nerfstudio-project/nerfacc, fetched 2026-10-26 (unofficial)
+[S3] Étape 4 : surface de cire raymarchée et liquide volumique, https://github.com/nathanddrl/lava-lamp/pull/4, fetched 2026-10-27 (unofficial)

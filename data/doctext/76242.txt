@@ -1,0 +1,5582 @@
+# Discrete k-d Tree Hierarchy for Isosurface Extraction
+
+![](./imgs/dragon.jpg)
+
+*This work is a failed siggraph asia 2019 submit paper, when I submit it I'm just a undergraduate doing my graduation project, I made this without a proper academic mentoring, but why not have a try, right?*
+
+*Now I upload the [paper](paper.pdf) draft, please note that the writtings is not very good, but can still explain the idea of this work.*
+
+This repository is the origin implementation of  *[Discrete k-d Tree Hierarchy for Isosurface Extraction](paper.pdf)*. The picture above shows three reconstructed results of stanford dragon using uniform grid, octree and k-d tree under an error threshold of 1e0. 
+
+The triangle counts for those results are shown below. 
+
+| uniform grid | octree | k-d tree |
+| ------------ | ------ | -------- |
+| 309,962      | 35,836 | 22,608   |
+
+It's a classical test that shows the isosurface extracted from k-d tree obtains almost half the triangles of the one extracted from octree.
+
+Octree-based method is based on works of Schaefer et al. (Manifold dual contouring).
+
+### Project Dependency
+
+* glm 0.9.9
+* glew 2.1.0
+* glfw 3.2.1
+
+### Build and run OpenGL viewer
+
+```bash
+mkdir build
+cd build
+cmake .. && make
+bin/opengl_viewer [options]
+```
+
+After a few seconds, you should be able to see a CSG defined geometry shaded with color and wireframe. Try drag and scroll mouse to view the extraction result.
+
+![352 Triangles](./imgs/viewer.png)
+
+**Triangle count: 352**
+
+The argument "—strucrture" allows you to compare the extraction result of octree and k-d tree.
+
+```bas
+bin/opengl_viewer -s oct
+```
+
+![2384 Triangles](imgs/viewer-kd.png)
+
+**Triangle count: 2384**
+
+For more CSG result, edit src/examples/main.cpp and recompile the project
+
+### License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+### src/KdtreeISO/include/AxisAlignedLine.h
+```
+//
+// Created by Danielhu on 2018/5/2.
+//
+
+#ifndef VOXELWORLD_AXISALIGNEDLINE_H
+#define VOXELWORLD_AXISALIGNEDLINE_H
+
+#include <glm/glm.hpp>
+#include "Utils.h"
+
+struct AALine {
+  PositionCode point;
+  int dir;
+  bool operator==(const AALine &other) {
+    return point[(dir + 1) % 3] == other.point[(dir + 1) % 3] && point[(dir + 2) % 3] == other.point[(dir + 2) % 3];
+  }
+  AALine(const PositionCode &axes, int dotPlane) : point(axes), dir(dotPlane) {}
+  AALine() = default;
+};
+
+#endif //VOXELWORLD_AXISALIGNEDLINE_H
+```
+
+### src/KdtreeISO/include/Indicators.h
+```
+//
+// Created by Danielhu on 2018/4/20.
+//
+
+#ifndef VOXELWORLD_INDICATORS_H
+#define VOXELWORLD_INDICATORS_H
+
+#include "Utils.h"
+
+using glm::fvec2;
+using glm::fvec3;
+using glm::ivec3;
+
+inline int encodeCell(ivec3 code) {
+  return code.x * 4 + code.y * 2 + code.z;
+}
+
+inline const fvec3 &min_offset_subdivision(int i) {
+  static const fvec3 offsets[8] = {
+    fvec3(0.f, 0.f, 0.f),
+    fvec3(0.f, 0.f, 1.f),
+    fvec3(0.f, 1.f, 0.f),
+    fvec3(0.f, 1.f, 1.f),
+    fvec3(1.f, 0.f, 0.f),
+    fvec3(1.f, 0.f, 1.f),
+    fvec3(1.f, 1.f, 0.f),
+    fvec3(1.f, 1.f, 1.f),
+  };
+  assert(i >= 0 && i < 8);
+  return offsets[i];
+};
+
+inline const PositionCode &decodeCell(int i) {
+  static const PositionCode offsets[8] = {
+    PositionCode(0, 0, 0),
+    PositionCode(0, 0, 1),
+    PositionCode(0, 1, 0),
+    PositionCode(0, 1, 1),
+    PositionCode(1, 0, 0),
+    PositionCode(1, 0, 1),
+    PositionCode(1, 1, 0),
+    PositionCode(1, 1, 1),
+  };
+  assert(i >= 0 && i < 8);
+  return offsets[i];
+};
+
+inline const fvec3 &directionMap(int i) {
+  static const fvec3 offsets[3] = {
+    fvec3(1.f, 0.f, 0.f),
+    fvec3(0.f, 1.f, 0.f),
+    fvec3(0.f, 0.f, 1.f),
+  };
+  assert(i >= 0 && i < 3);
+  return offsets[i];
+}
+
+// from original dc implementation
+
+const int edge_map[12][2] = {
+  {0, 4}, {1, 5}, {2, 6}, {3, 7}, // x-axis
+  {0, 2},
+  {1, 3},
+  {4, 6},
+  {5, 7}, // y-axis
+  {0, 1},
+  {2, 3},
+  {4, 5},
+  {6, 7} // z-axis
+};
+
+const int cellProcFaceMask[12][3] =
+  {{0, 4, 0}, {1, 5, 0}, {2, 6, 0}, {3, 7, 0}, {0, 2, 1}, {4, 6, 1}, {1, 3, 1}, {5, 7, 1}, {0, 1, 2}, {2, 3, 2}, {4, 5, 2}, {6, 7, 2}};
+
+const int cellProcEdgeMask[6][5] =
+  {{0, 2, 1, 3, 0}, {4, 6, 5, 7, 0}, {0, 1, 4, 5, 1}, {2, 3, 6, 7, 1}, {0, 4, 2, 6, 2}, {1, 5, 3, 7, 2}};
+
+const int faceProcFaceMask[3][4][3] = {
+  {{4, 0, 0}, {5, 1, 0}, {6, 2, 0}, {7, 3, 0}},
+  {{2, 0, 1}, {6, 4, 1}, {3, 1, 1}, {7, 5, 1}},
+  {{1, 0, 2}, {3, 2, 2}, {5, 4, 2}, {7, 6, 2}}};
+
+const int edgeTestNodeOrder[4][2] = {{0, 1}, {3, 2}, {1, 2}, {0, 3}};
+
+inline const fvec3 &faceSubDivision(int dir, int i) {
+  static const fvec3 offsets[3][4] = {
+    {
+      fvec3(0.f, 0.f, 0.f),
+      fvec3(0.f, 0.f, 1.f),
+      fvec3(0.f, 1.f, 0.f),
+      fvec3(0.f, 1.f, 1.f),
+    },
+    {
+      fvec3(0.f, 0.f, 0.f),
+      fvec3(1.f, 0.f, 0.f),
+      fvec3(0.f, 0.f, 1.f),
+      fvec3(1.f, 0.f, 1.f),
+    },
+    {
+      fvec3(0.f, 0.f, 0.f),
+      fvec3(0.f, 1.f, 0.f),
+      fvec3(1.f, 0.f, 0.f),
+      fvec3(1.f, 1.f, 0.f),
+    },
+  };
+  assert(i >= 0 && i < 4);
+  return offsets[dir][i];
+};
+
+const int faceNodeOrder[4] = {0, 0, 1, 1};
+
+const int faceProcEdgeMask[3][4][6] = {
+  {{1, 4, 5, 0, 1, 1}, {1, 6, 7, 2, 3, 1}, {0, 4, 6, 0, 2, 2}, {0, 5, 7, 1, 3, 2}},
+  {{0, 2, 3, 0, 1, 0}, {0, 6, 7, 4, 5, 0}, {1, 2, 6, 0, 4, 2}, {1, 3, 7, 1, 5, 2}},
+  {{1, 1, 3, 0, 2, 0}, {1, 5, 7, 4, 6, 0}, {0, 1, 5, 0, 4, 1}, {0, 3, 7, 2, 6, 1}}};
+
+inline const fvec3 &edgeProcDir(int i, int j) {
+  const static fvec3 dirs[3][4] = {
+    {
+      fvec3(0.f, -1.f, -1.f),
+      fvec3(0.f, -1.f, 1.f),
+      fvec3(0.f, 1.f, 1.f),
+      fvec3(0.f, 1.f, -1.f),
+    },
+    {
+      fvec3(-1.f, 0.f, -1.f),
+      fvec3(-1.f, 0.f, 1.f),
+      fvec3(1.f, 0.f, 1.f),
+      fvec3(1.f, 0.f, -1.f),
+    },
+    {
+      fvec3(-1.f, -1.f, 0.f),
+      fvec3(1.f, -1.f, 0.f),
+      fvec3(1.f, 1.f, 0.f),
+      fvec3(-1.f, 1.f, 0.f),
+    },
+  };
+  assert(i >= 0 && i < 3 && i >= 0 && i < 4);
+  return dirs[i][j];
+};
+
+const int edgeProcEdgeMask[3][2][4] = {
+  {{3, 1, 2, 0}, {7, 5, 6, 4}},
+  {{5, 4, 1, 0}, {7, 6, 3, 2}},
+  {{6, 2, 4, 0}, {7, 3, 5, 1}},
+};
+
+const int planeSpreadingDir[3][2][4] = {
+  {{0, 2, 3, 1}, {4, 6, 7, 5}},
+  {{0, 1, 5, 4}, {2, 3, 7, 6}},
+  {{0, 4, 6, 2}, {1, 5, 7, 2}},
+};
+
+const int intergralOrder[8] = {
+  0, 1, 2, 4, 3, 5, 6, 7};
+//
+//const int planeSpreadingMask[8][8] = {
+//    {0, 1, 2, 4, 3, 5, 6, 7},
+//    {1, 0, 3, 5, 2, 4, 7, 6},
+//    {2, 0, 3, 6, 1, 4, 7, 5},
+//    {3, 1, 2, 7, 0, 5, 6, 4},
+//    {4, 0, 5, 6, 1, 2, 7, 3},
+//    {5, 1, 4, 7, 0, 3, 6, 2},
+//    {6, 2, 4, 7, 0, 3, 5, 1},
+//    {7, 3, 5, 6, 1, 2, 4, 0},
+//};
+//
+//const int adjacentNodes[8][8] = {
+//    {0, 1, 1, 0, 1, 0, 0, 0,},
+//    {1, 0, 0, 1, 0, 1, 0, 0,},
+//    {1, 0, 0, 1, 0, 0, 1, 0,},
+//    {0, 1, 1, 0, 0, 0, 0, 1,},
+//    {1, 0, 0, 0, 0, 1, 1, 0,},
+//    {0, 1, 0, 0, 1, 0, 0, 1,},
+//    {0, 0, 1, 0, 1, 0, 0, 1,},
+//    {0, 0, 0, 1, 0, 1, 1, 0,},
+//};
+
+const int dirRelatedEdge[8][8][3] = {
+  {
+    {-1, -1, -1},
+    {-1, 2, 6},
+    {-1, 1, 10},
+    {-1, -1, 0},
+    {-1, 5, 9},
+    {-1, -1, 4},
+    {-1, -1, 8},
+    {0, 4, 8},
+  },
+  {
+    {-1, 3, 11},
+    {-1, -1, -1},
+    {-1, -1, 1},
+    {-1, 0, 10},
+    {-1, -1, 5},
+    {-1, 4, 9},
+    {1, 5, 8},
+    {-1, -1, 8},
+  },
+  {
+    {-1, 11, 3},
+    {-1, -1, 2},
+    {-1, -1, -1},
+    {-1, 0, 6},
+    {-1, -1, 9},
+    {2, 4, 9},
+    {-1, 5, 8},
+    {-1, -1, 4},
+  },
+  {
+    {-1, -1, 3},
+    {-1, 2, 11},
+    {-1, 1, 7},
+    {-1, -1, -1},
+    {3, 5, 9},
+    {-1, -1, 9},
+    {-1, -1, 5},
+    {-1, 4, 8},
+  },
+  {
+    {-1, 7, 11},
+    {-1, -1, 5},
+    {-1, -1, 10},
+    {0, 6, 10},
+    {-1, -1, -1},
+    {-1, 2, 4},
+    {-1, 1, 8},
+    {-1, -1, 0},
+  },
+  {{-1, -1, 7}, {-1, 0, 11}, {1, 7, 10}, {-1, -1, 10}, {-1, 3, 5}, {-1, -1, -1}, {-1, -1, 1}, {-1, 1, 8}},
+  {
+    {-1, -1, 11},
+    {2, 6, 11},
+    {-1, 7, 10},
+    {-1, -1, 6},
+    {-1, 3, 9},
+    {-1, -1, 2},
+    {-1, -1, -1},
+    {-1, 1, 4},
+  },
+  {
+    {3, 7, 11},
+    {-1, -1, 11},
+    {-1, -1, 7},
+    {-1, 6, 10},
+    {-1, -1, 3},
+    {-1, 2, 9},
+    {-1, 1, 5},
+    {-1, -1, -1},
+  }};
+
+const int processEdgeMask[3][4] = {{3, 2, 1, 0}, {7, 5, 6, 4}, {11, 10, 9, 8}};
+
+constexpr int oppositeQuadIndex(int i) {
+  return (i / 2) * 2 + 1 - i % 2;
+}
+
+constexpr int symmetryQuadIndex(int i) {
+  return (1 - i / 2) * 2 + 1 - i % 2;
+}
+
+inline void quadIndex(int quadDir1, int quadDir2, int i, int &p1, int &p2) {
+  ivec3 code(0);
+  code[quadDir1] = i % 2;
+  code[quadDir2] = i / 2;
+  p1 = encodeCell(code);
+  code[3 - quadDir1 - quadDir2] = 1;
+  p2 = encodeCell(code);
+}
+
+//const int triangleIndices[6] = {0, 1, 2, 0, 2, 3};
+//const int triangleIndicesFlip[6] = {0, 3, 2, 0, 2, 1};
+
+#endif //VOXELWORLD_INDICATORS_H
+```
+
+### src/KdtreeISO/include/Kdtree.h
+```
+//
+// Created by Danielhu on 2018/4/19.
+//
+
+#ifndef VOXELWORLD_KDTREE_H
+#define VOXELWORLD_KDTREE_H
+
+#include <vector>
+#include <array>
+#include "Utils.h"
+#include "Qef.h"
+#include "RectilinearGrid.h"
+#include "Mesh.h"
+#include "AxisAlignedLine.h"
+
+struct Octree;
+
+struct Kdtree {
+  typedef std::array<Kdtree *, 2> FaceKd;
+  typedef std::array<Kdtree *, 4> EdgeKd;
+  RectilinearGrid grid;
+  int planeDir;
+  int depth;
+  bool clusterable{true};
+  Kdtree *children[2]{nullptr, nullptr};
+  Kdtree(QefSolver sum,
+         const PositionCode &minCode,
+         const PositionCode &maxCode,
+         int dir,
+         int depth)
+    : grid(minCode, maxCode, sum),
+      planeDir(dir),
+      depth(depth) {}
+  inline bool isContouringLeaf(float threshold) const {
+    if (!children[0] && !children[1]) {
+      return true;
+    }
+    //    if (grid.error > threshold) {
+    //      return false;
+    //    }
+    for (auto &v : grid.vertices) {
+      if (v.error > threshold) {
+        return false;
+      }
+    }
+    return clusterable;
+  }
+  inline bool isLeaf() const {
+    return !children[0] && !children[1];
+  }
+  inline int axis() {
+    assert(!isLeaf());
+    if (children[0]) {
+      return children[0]->grid.maxCode[planeDir];
+    }
+    return children[1]->grid.minCode[planeDir];
+  }
+  inline Kdtree *getChild(int i, float threshold) {
+    if (grid.approximate.error < threshold) {
+      return this;
+    }
+    return children[i];
+  }
+  ~Kdtree() {
+    delete children[0];
+    delete children[1];
+  }
+  void combineQef();
+  void calClusterability(ScalarField *t);
+  static void generateVertexIndices(Kdtree *root, Mesh *mesh, ScalarField *t, float threshold);
+  static void contourCell(Kdtree *node, Mesh *mesh, ScalarField *t, float threshold);
+  static void contourFace(FaceKd &nodes,
+                          int dir,
+                          int axis,
+                          Mesh *mesh,
+                          ScalarField *t,
+                          float threshold);
+  static void detectQuad(EdgeKd &nodes, AALine line, float threshold);
+  static void contourEdge(EdgeKd &nodes,
+                          const AALine &line,
+                          int quadDir1,
+                          ScalarField *t,
+                          float threshold,
+                          Mesh *mesh);
+  static void generateQuad(EdgeKd &nodes,
+                           int quadDir1,
+                           int quadDir2,
+                           Mesh *mesh,
+                           ScalarField *t,
+                           float threshold);
+  static int chooseAxisDir(QefSolver &qef, const PositionCode &minCode, const PositionCode &maxCode);
+  static Kdtree *buildFromOctree(Octree *octree,
+                                 const PositionCode &minCode,
+                                 const PositionCode &maxCode,
+                                 ScalarField *t,
+                                 int depth);
+  static void drawKdtree(Kdtree *root, Mesh *mesh, float threshold);
+  static Mesh *extractMesh(Kdtree *root, ScalarField *t, float threshold);
+};
+
+#endif //VOXELWORLD_KDTREE_H
+```
+
+### src/KdtreeISO/include/Mesh.h
+```
+//
+// Created by Danielhu on 2017/12/25.
+//
+
+#ifndef VOXELWORLD_MESH_H
+#define VOXELWORLD_MESH_H
+
+#include <vector>
+#include <glm/glm.hpp>
+#include "Topology.h"
+#include "Vertex.h"
+
+struct Mesh {
+  std::vector<unsigned int> indices;
+  std::vector<glm::fvec3> positions;
+  std::vector<glm::fvec3> normals;
+  void addTriangle(Vertex **vertices, ScalarField *g);
+  void addVertex(Vertex *v, ScalarField *g);
+  void drawAABBDebug(glm::fvec3 min, glm::fvec3 max);
+  void generateFlatNormals();
+};
+
+#endif //VOXELWORLD_MESH_H
+```
+
+### src/KdtreeISO/include/Octree.h
+```
+//
+// Created by Danielhu on 2018/1/14.
+//
+
+#ifndef VOXELWORLD_OCTREE_H
+#define VOXELWORLD_OCTREE_H
+
+#include <glm/glm.hpp>
+#include <vector>
+#include <unordered_set>
+#include <unordered_map>
+#include <set>
+#include <tuple>
+#include <memory>
+#include "Topology.h"
+#include "VolumeData.h"
+#include "Vertex.h"
+#include "Qef.h"
+#include "Utils.h"
+#include "Mesh.h"
+#include "Kdtree.h"
+
+typedef std::unordered_set<std::set<Vertex *>, ContainerHasher<std::set<Vertex *>>> EdgePolygonSet;
+
+struct Octree {
+  public:
+  static Octree *buildWithScalarField(const PositionCode &minCode, int depth, ScalarField *scalarField, bool as_mipmap);
+  static void getSum(Octree *root, const PositionCode &minPos, const PositionCode &maxPos, QefSolver &out);
+  static void simplify(Octree *root, float threshold);
+  static void calClusterbility(Octree *root, ScalarField *s);
+
+  static Mesh *extractMesh(Octree *root,
+                           ScalarField *geometry,
+                           int &intersectionPreservingVerticesCount,
+                           bool intersectionFree = true);
+  static void drawOctrees(Octree *root, Mesh *mesh);
+  void combineComponents(ScalarField *s);
+  Octree(const PositionCode &minCode, const PositionCode &maxCode, int depth) : grid(minCode, maxCode),
+                                                                                childIndex(-1),
+                                                                                isLeaf(false),
+                                                                                depth(depth){};
+  ~Octree() = default;
+
+  protected:
+  static void contourCell(Octree *root,
+                          Mesh *mesh,
+                          ScalarField *geometry,
+                          int &intersectionPreservingVerticesCount,
+                          EdgePolygonSet &edgePolygonSet,
+                          bool intersectionFree,
+                          float threshold);
+  static void contourFace(Octree *nodes[2],
+                          int dir,
+                          Mesh *mesh,
+                          ScalarField *geometry,
+                          int &intersectionPreservingVerticesCount,
+                          EdgePolygonSet &edgePolygonSet,
+                          bool intersectionFree,
+                          float threshold);
+  static void contourEdge(Octree **nodes,
+                          int dir,
+                          int quadDir2,
+                          ScalarField *geometry,
+                          int &intersectionPreservingVerticesCount,
+                          EdgePolygonSet &edgePolygonSet,
+                          bool intersectionFree,
+                          Mesh *mesh,
+                          float threshold);
+  static void generateVertexIndices(Octree *node,
+                                    Mesh *mesh,
+                                    ScalarField *geometry,
+                                    std::unordered_set<Vertex *> &indexed);
+  static void generateQuad(Octree **nodes,
+                           int dir,
+                           int quadDir2,
+                           ScalarField *g,
+                           int &intersectionPreservingVerticesCount,
+                           EdgePolygonSet &edgePolygonSet,
+                           bool intersectionFree,
+                           Mesh *mesh,
+                           float threshold);
+
+  public:
+  RectilinearGrid grid;
+  Octree *children[8]{nullptr};
+  int childIndex;
+  bool isLeaf;
+  bool clusterable{true};
+  int depth;
+};
+
+#endif //VOXELWORLD_OCTREE_H
+```
+
+### src/KdtreeISO/include/Qef.h
+```
+//
+// Created by Danielhu on 2018/1/16.
+//
+
+#ifndef VOXELWORLD_QEF_H
+#define VOXELWORLD_QEF_H
+
+#include <glm/glm.hpp>
+
+struct QefSolver {
+  glm::mat3x3 ATA;
+  glm::fvec3 ATb;
+  glm::fvec3 diag_ATc;
+  float btb;
+  glm::fvec3 diag_ctc;
+  glm::fvec3 massPointSum;
+  glm::fvec3 averageNormalSum;
+  float roughness;
+  int pointCount;
+
+  void reset();
+  void set(const QefSolver &other);
+  void combine(const QefSolver &other);
+  void separate(const QefSolver &other);
+  void add(const glm::fvec3 &p, const glm::fvec3 &n);
+  void solve(glm::fvec3 &hermiteP, float &error);
+  void calRoughness();
+  float getError(const glm::fvec3 &p);
+  float getError();
+  glm::fvec3 getVariance(const glm::fvec3 &p);
+  QefSolver()
+    : ATA(glm::mat4(0.0)),
+      ATb(glm::fvec3(0.0)),
+      diag_ATc(0.0),
+      btb(0.f),
+      diag_ctc(glm::fvec3(0.f)),
+      massPointSum(glm::fvec3(0.f)),
+      averageNormalSum(glm::fvec3(0.f)),
+      roughness(0.f),
+      pointCount(0) {}
+};
+
+#endif //VOXELWORLD_QEF_H
+```
+
+### src/KdtreeISO/include/RectilinearGrid.h
+```
+﻿//
+// Created by Danielhu on 2018/5/9.
+//
+
+#ifndef VOXELWORLD_RECTILINEARGRID_H
+#define VOXELWORLD_RECTILINEARGRID_H
+
+#include <vector>
+#include <map>
+#include <set>
+#include "Qef.h"
+#include "Mesh.h"
+#include "Topology.h"
+#include "Utils.h"
+#include "Vertex.h"
+#include "Indicators.h"
+#include "AxisAlignedLine.h"
+
+struct RectilinearGrid {
+  PositionCode minCode;
+  PositionCode maxCode;
+  QefSolver allQef;
+  std::vector<QefSolver> components;
+  std::vector<Vertex> vertices;
+  Vertex approximate;
+  uint8_t cornerSigns[8]{0};
+  int8_t componentIndices[8]{0};
+  bool isSigned = false;
+  std::map<RectilinearGrid *, Vertex *> faceVertices;
+
+  explicit RectilinearGrid(PositionCode minCode = PositionCode(0, 0, 0),
+                           PositionCode maxCode = PositionCode(0, 0, 0),
+                           QefSolver sum = QefSolver())
+    : minCode(minCode), maxCode(maxCode), allQef(sum) {
+    solve(allQef, approximate);
+  }
+
+  void solveComponent(int i);
+  void solve(QefSolver &qef, Vertex &v);
+  void assignSign(ScalarField *t);
+  void calCornerComponents();
+  bool sampleQef(ScalarField *t, bool all);
+  void draw(Mesh *mesh);
+  inline glm::fvec3 cornerPos(int i) {
+    return min_offset_subdivision(i) * codeToPos(maxCode - minCode, RectilinearGrid::getUnitSize()) + codeToPos(minCode, RectilinearGrid::getUnitSize());
+  }
+
+  inline int edgeComponentIndex(int corner1, int corner2) {
+    //    assert(cornerSigns[corner1] != cornerSigns[corner2]);
+    if (cornerSigns[corner1] != 0) {
+      return componentIndices[corner1];
+    }
+    return componentIndices[corner2];
+  }
+  inline int faceComponentIndex(int faceDir, int edgeDir, int faceSide, int edgeSide) {
+    int component = -1;
+    int dir = 3 - faceDir - edgeDir;
+    for (int i = 0; i < 2; ++i) {
+      ivec3 code;
+      code[faceDir] = faceSide;
+      code[edgeDir] = edgeSide;
+      code[dir] = i;
+      int corner = encodeCell(code);
+      if (cornerSigns[corner] > 0) {
+        component = componentIndices[corner];
+      }
+    }
+    if (component != -1) {
+      return component;
+    }
+    for (int i = 0; i < 2; ++i) {
+      ivec3 code;
+      code[faceDir] = faceSide;
+      code[edgeDir] = 1 - edgeSide;
+      code[dir] = i;
+      int corner = encodeCell(code);
+      if (cornerSigns[corner] > 0) {
+        component = componentIndices[corner];
+      }
+    }
+    return component;
+  }
+  static void setUnitSize(float size);
+  static float getUnitSize();
+  static bool calClusterability(RectilinearGrid *left,
+                                RectilinearGrid *right,
+                                int dir,
+                                const PositionCode &minCode,
+                                const PositionCode &maxCode,
+                                ScalarField *s);
+  static void combineAAGrid(RectilinearGrid *left,
+                            RectilinearGrid *right,
+                            int dir,
+                            RectilinearGrid *out);
+  static bool isInterFreeCondition2Faild(const std::vector<Vertex *> &polygons,
+                                         const glm::fvec3 &p1,
+                                         const glm::fvec3 &p2);
+  template <class GridHolder>
+  static bool checkSign(const std::array<GridHolder *, 4> &nodes,
+                        int quadDir1,
+                        int quadDir2,
+                        ScalarField *s,
+                        int &side,
+                        PositionCode &minEnd,
+                        PositionCode &maxEnd);
+  template <class GridHolder>
+  static void generateQuad(const std::array<GridHolder, 4> &nodes,
+                           int quadDir1,
+                           int quadDir2,
+                           Mesh *mesh,
+                           ScalarField *t,
+                           float threshold);
+
+  private:
+  static float unitSize;
+};
+
+template <class GridHolder>
+bool RectilinearGrid::checkSign(const std::array<GridHolder *, 4> &nodes,
+                                int quadDir1,
+                                int quadDir2,
+                                ScalarField *s,
+                                int &side,
+                                PositionCode &minEnd,
+                                PositionCode &maxEnd) {
+  int dir = 3 - quadDir1 - quadDir2;
+  if (nodes[0] != nodes[1]) {
+    maxEnd = minEnd = nodes[0]->grid.maxCode;
+  }
+  else {
+    maxEnd = minEnd = nodes[3]->grid.minCode;
+  }
+  maxEnd[dir] = std::min(
+    std::min(nodes[0]->grid.maxCode[dir], nodes[1]->grid.maxCode[dir]),
+    std::min(nodes[2]->grid.maxCode[dir], nodes[3]->grid.maxCode[dir]));
+  minEnd[dir] = std::max(
+    std::max(nodes[0]->grid.minCode[dir], nodes[1]->grid.minCode[dir]),
+    std::max(nodes[2]->grid.minCode[dir], nodes[3]->grid.minCode[dir]));
+  if (minEnd[dir] >= maxEnd[dir]) {
+    return false;
+  }
+  float v1 = s->index(minEnd);
+  float v2 = s->index(maxEnd);
+  if ((v1 >= 0 && v2 >= 0) || (v1 < 0 && v2 < 0)) {
+    return false;
+  }
+
+  if (v2 >= 0 && v1 <= 0) {
+    side = 0;
+  }
+  else {
+    side = 1;
+  }
+
+  //  for (int i = 0; i < 4; ++i) {
+  //    if (nodes[i] != nodes[oppositeQuadIndex(i)]) {
+  //      minEnd[dir] = nodes[i]->grid.minEnd[dir];
+  //      maxEnd[dir] = nodes[i]->grid.maxEnd[dir];
+  //      v1 = s->index(minEnd);
+  //      v2 = s->index(maxEnd);
+  //      if ((v1 > 0 && v2 > 0) || (v1 < 0 && v2 < 0)) {
+  //        return false;
+  //      }
+  //    }
+  //  }
+  return true;
+}
+
+template <class GridHolder>
+void RectilinearGrid::generateQuad(const std::array<GridHolder, 4> &nodes,
+                                   int quadDir1,
+                                   int quadDir2,
+                                   Mesh *mesh,
+                                   ScalarField *t,
+                                   float) {
+  int edgeSide;
+  PositionCode minEnd, maxEnd;
+  if (!RectilinearGrid::checkSign(nodes, quadDir1, quadDir2, t, edgeSide, minEnd, maxEnd)) {
+    return;
+  }
+  std::vector<Vertex *> polygons;
+  int lineDir = 3 - quadDir1 - quadDir2;
+  int componentIndices[4];
+  for (int i = 0; i < 4; ++i) {
+    if (nodes[i] != nodes[oppositeQuadIndex(i)]) {
+      int c1, c2;
+      quadIndex(quadDir1, quadDir2, symmetryQuadIndex(i), c1, c2);
+      componentIndices[i] = nodes[i]->grid.edgeComponentIndex(c1, c2);
+    }
+    else {
+      componentIndices[i] = nodes[i]->grid.faceComponentIndex(quadDir2, lineDir, 1 - i / 2, edgeSide);
+    }
+    if (componentIndices[i] == -1) {
+      return;
+    }
+  }
+  polygons.push_back(&nodes[0]->grid.vertices.at(componentIndices[0]));
+  if (nodes[0] != nodes[1]) {
+    polygons.push_back(&nodes[1]->grid.vertices.at(componentIndices[1]));
+  }
+  polygons.push_back(&nodes[3]->grid.vertices.at(componentIndices[3]));
+  if (nodes[2] != nodes[3]) {
+    polygons.push_back(&nodes[2]->grid.vertices.at(componentIndices[2]));
+  }
+  std::set<Vertex *> identicals;
+  for (auto v : polygons) {
+    identicals.insert(v);
+  }
+  if (identicals.size() < 3) {
+    return;
+  }
+
+  bool condition1Failed = false;
+  int firstConcaveFaceVertex = 0;
+  if (false) {
+    int sameCellIndex[2] = {2, 3};
+    for (int i = 0; i < 4; ++i) {
+      int testDir = (lineDir + i / 2 + 1) % 3;
+      int edgeAdjacentCellIndexA = edgeTestNodeOrder[i][0];
+      int edgeAdjacentCellIndexB = edgeTestNodeOrder[i][1];
+      RectilinearGrid *a = &nodes[edgeAdjacentCellIndexA]->grid;
+      RectilinearGrid *b = &nodes[edgeAdjacentCellIndexB]->grid;
+      if (a != b) {
+        if (a->faceVertices.find(b) != a->faceVertices.end()) {
+          firstConcaveFaceVertex = i;
+          condition1Failed = true;
+          continue;
+        }
+        fvec3 faceMinA = fvec3(std::numeric_limits<float>::max());
+        fvec3 faceMinB = faceMinA;
+        fvec3 faceMaxA = -fvec3(std::numeric_limits<float>::max());
+        fvec3 faceMaxB = faceMaxA;
+        for (int j = 0; j < 4; ++j) {
+          int subIndexA = faceProcFaceMask[testDir][j][0];
+          int subIndexB = faceProcFaceMask[testDir][j][1];
+          fvec3 cornerA = a->cornerPos(subIndexA);
+          fvec3 cornerB = b->cornerPos(subIndexB);
+          faceMinA = glm::min(cornerA, faceMinA);
+          faceMinB = glm::min(cornerB, faceMinB);
+          faceMaxA = glm::max(cornerA, faceMaxA);
+          faceMaxB = glm::max(cornerB, faceMaxB);
+        }
+        fvec3 faceMin = glm::max(faceMinA, faceMinB);
+        fvec3 faceMax = glm::min(faceMaxA, faceMaxB);
+        if (!segmentFaceIntersection(a->vertices[componentIndices[edgeAdjacentCellIndexA]].hermiteP,
+                                     b->vertices[componentIndices[edgeAdjacentCellIndexB]].hermiteP,
+                                     faceMin,
+                                     faceMax,
+                                     testDir)) {
+          fvec3 minEndDir = faceMin + directionMap(lineDir) * (faceMax - faceMin);
+          fvec3 maxEndDir = faceMax - directionMap(lineDir) * (faceMax - faceMin);
+          glm::fvec3 points[4] = {faceMin, minEndDir, faceMax, maxEndDir};
+          fvec3 massPointSum(0.f);
+          int pointCount = 0;
+          for (int k = 0; k < 4; ++k) {
+            float v1 = t->value(points[k]);
+            float v2 = t->value(points[(k + 1) % 4]);
+            if ((v1 >= 0 && v2 < 0) || (v1 < 0 && v2 >= 0)) {
+              fvec3 x;
+              t->solve(points[k], points[(k + 1) % 4], x);
+              massPointSum += x;
+              pointCount++;
+            }
+          }
+          if (pointCount > 0) {
+            firstConcaveFaceVertex = i;
+            auto faceV = new Vertex(massPointSum / (float)pointCount);
+            mesh->addVertex(faceV, t);
+            a->faceVertices[b] = faceV;
+            b->faceVertices[a] = faceV;
+            condition1Failed = true;
+          }
+        }
+      }
+      else {
+        sameCellIndex[0] = edgeAdjacentCellIndexA;
+        sameCellIndex[1] = edgeAdjacentCellIndexB;
+      }
+    }
+
+    int minCellIndex = 0;
+    for (int i = 0; i < 4; ++i) {
+      int edgeAdjacentCellIndexA = edgeTestNodeOrder[i][0];
+      int edgeAdjacentCellIndexB = edgeTestNodeOrder[i][1];
+      if (edgeAdjacentCellIndexA != sameCellIndex[0] && edgeAdjacentCellIndexA != sameCellIndex[1] && edgeAdjacentCellIndexB != sameCellIndex[0] && edgeAdjacentCellIndexB != sameCellIndex[1]) {
+        minCellIndex = edgeAdjacentCellIndexA;
+      }
+    }
+  }
+
+  fvec3 p1 = codeToPos(minEnd, RectilinearGrid::getUnitSize());
+  fvec3 p2 = codeToPos(maxEnd, RectilinearGrid::getUnitSize());
+
+  bool condition2Failed = isInterFreeCondition2Faild(polygons, p1, p2);
+  if (polygons.size() > 3) {
+    std::vector<Vertex *> reversePolygons = {polygons[1], polygons[2], polygons[3], polygons[0]};
+    bool reverseCondition2Failed = isInterFreeCondition2Faild(reversePolygons, p1, p2);
+    if (!reverseCondition2Failed) {
+      /// NOTE: the swap here happens whether intersection-free or not
+      polygons.swap(reversePolygons);
+    }
+    condition2Failed = condition2Failed && reverseCondition2Failed;
+  }
+#ifdef INTERSECTION_FREE
+  if (condition1Failed || condition2Failed) {
+    GridHolder circle[4] = {nodes[0], nodes[1], nodes[3], nodes[2]};
+    polygons.clear();
+    if (!condition2Failed) {
+      std::vector<int> concaveFlags;
+      std::vector<Vertex *> convexPart;
+      int concaveCount = 0;
+      for (int i = 0; i < 4; ++i) {
+        int index = (i + firstConcaveFaceVertex) % 4;
+        auto faceIter = circle[index]->grid.faceVertices.find(&circle[(index + 1) % 4]->grid);
+        auto cellVertex = &(circle[(index + 1) % 4]->grid.vertices[componentIndices[(index + 1) % 4]]);
+        if (faceIter != circle[index]->grid.faceVertices.end()) {
+          polygons.push_back(faceIter->second);
+          concaveFlags.push_back(1);
+          convexPart.push_back(faceIter->second);
+          concaveCount++;
+        }
+        polygons.push_back(cellVertex);
+        concaveFlags.push_back(0);
+      }
+      for (int i = 0; i < polygons.size() - 2; ++i) {
+        Vertex *triangle[3] = {
+          polygons[0], polygons[i + 1], polygons[i + 2]};
+        mesh->addTriangle(triangle, t);
+      }
+    }
+    else {
+      Vertex edgeVertex;
+      t->solve(p1, p2, edgeVertex.hermiteP);
+      mesh->addVertex(&edgeVertex, t);
+      for (int i = 0; i < 4; ++i) {
+        RectilinearGrid *a = &circle[i]->grid;
+        RectilinearGrid *b = &circle[(i + 1) % 4]->grid;
+        if (a != b) {
+          polygons.push_back(&a->vertices[componentIndices[i]]);
+          auto faceVIter = a->faceVertices.find(b);
+          if (faceVIter != a->faceVertices.end()) {
+            polygons.push_back(faceVIter->second);
+            polygons.push_back(faceVIter->second);
+          }
+          polygons.push_back(&b->vertices[componentIndices[(i + 1) % 4]]);
+        }
+      }
+      for (int i = 0; i < polygons.size() / 2; ++i) {
+        Vertex *triangle[3] = {
+          &edgeVertex, polygons[i * 2], polygons[i * 2 + 1]};
+        mesh->addTriangle(triangle, t);
+      }
+    }
+  }
+  else {
+#endif
+    for (int i = 2; i < polygons.size(); ++i) {
+      Vertex *triangle[3] = {
+        polygons[0], polygons[i - 1], polygons[i]};
+      mesh->addTriangle(triangle, t);
+    }
+#ifdef INTERSECTION_FREE
+  }
+#endif
+}
+
+#endif //VOXELWORLD_RECTILINEARGRID_H
+```
+
+### src/KdtreeISO/include/ScalarField.h
+```
+﻿//
+// Created by Danielhu on 2018/5/29.
+//
+
+#ifndef VOXELWORLD_SCALARFIELD_H
+#define VOXELWORLD_SCALARFIELD_H
+
+#include <cstdint>
+#include <glm/glm.hpp>
+#include "Utils.h"
+
+class ScalarField {
+  protected:
+  uint8_t materialID;
+
+  public:
+  virtual float value(const glm::fvec3 &p) = 0;
+  virtual float index(const PositionCode &code) = 0;
+  virtual bool solve(const glm::fvec3 &p1, const glm::fvec3 &p2, glm::fvec3 &out) = 0;
+  virtual float gradientOffset() = 0;
+  virtual void normal(const glm::fvec3 &p, glm::fvec3 &out);
+  virtual fvec3 normal_f1(const glm::fvec3 &p);
+  virtual glm::fvec3 gradient(const glm::fvec3 &p);
+  uint8_t getMaterialID() { return materialID; }
+  ScalarField() : materialID(1) {}
+  virtual ~ScalarField(){};
+};
+
+#endif //VOXELWORLD_SCALARFIELD_H
+```
+
+### src/KdtreeISO/include/Topology.h
+```
+//
+// Created by Danielhu on 2018/1/13.
+//
+
+#ifndef VOXELWORLD_GENERATORS_H
+#define VOXELWORLD_GENERATORS_H
+
+#include <iostream>
+#include <algorithm>
+#include <vector>
+#include <glm/glm.hpp>
+#include <limits>
+#include "ScalarField.h"
+
+class Topology : public ScalarField {
+  public:
+  bool solve(const glm::fvec3 &p1, const glm::fvec3 &p2, glm::fvec3 &out) override;
+  virtual float index(const PositionCode &code) override;
+  float laplaceOperator(const glm::fvec3 &p);
+  float gradientOffset() override { return 0.01f; }
+  virtual ~Topology() = default;
+};
+
+class Union : public Topology {
+  Topology *l;
+  Topology *r;
+
+  public:
+  Union(Topology *l, Topology *r) : l(l), r(r) {}
+  float value(const glm::fvec3 &p) override { return std::min(l->value(p), r->value(p)); }
+  ~Union() override {
+    delete l;
+    delete r;
+  }
+};
+
+class UnionList : public Topology {
+  std::vector<Topology *> _list;
+
+  public:
+  UnionList(std::vector<Topology *> list) : _list(std::move(list)) {}
+  float value(const glm::fvec3 &p) override {
+    float d = std::numeric_limits<float>::max();
+    for (auto t : _list) {
+      d = std::min(t->value(p), d);
+    }
+    return d;
+  }
+  ~UnionList() override {
+    for (auto p : _list) {
+      delete p;
+    }
+  }
+};
+
+class ExpUnion : public Topology {
+  Topology *l;
+  Topology *r;
+  float k;
+
+  public:
+  ExpUnion(Topology *l, Topology *r, float k = 32.f) : l(l), r(r), k(k) {}
+  float value(const glm::fvec3 &p) override {
+    float res = exp(-k * l->value(p)) + exp(-k * r->value(p));
+    return -log(std::max(0.0001f, res)) / k;
+  }
+  ~ExpUnion() override {
+    delete l;
+    delete r;
+  }
+};
+
+class Difference : public Topology {
+  Topology *l;
+  Topology *r;
+
+  public:
+  Difference(Topology *l, Topology *r) : l(l), r(r) {}
+  float value(const glm::fvec3 &p) override { return std::max(l->value(p), -r->value(p)); }
+  ~Difference() override {
+    delete l;
+    delete r;
+  }
+};
+
+class Intersection : public Topology {
+  Topology *l;
+  Topology *r;
+
+  public:
+  Intersection(Topology *l, Topology *r) : l(l), r(r) {}
+  float value(const glm::fvec3 &p) override { return std::max(l->value(p), r->value(p)); }
+  ~Intersection() override {
+    delete l;
+    delete r;
+  }
+};
+
+class Transform : public Topology {
+  glm::mat4 trans_;
+  Topology *inner_;
+
+  public:
+  Transform(const glm::mat4 &trans, Topology *inner) : trans_(trans), inner_(inner) {}
+  ~Transform() override { delete inner_; }
+  float value(const glm::fvec3 &root) override;
+};
+
+class Sphere : public Topology {
+  float radius;
+  fvec3 center;
+
+  public:
+  explicit Sphere(float radius, glm::fvec3 center = glm::fvec3(0)) : radius(radius), center(center) {}
+  ~Sphere() override {}
+  float value(const glm::fvec3 &p) override;
+  // bool solve(const glm::fvec3 &p1, const glm::fvec3 &p2, glm::fvec3 &out) override;
+};
+
+class AABB : public Topology {
+  glm::fvec3 min_;
+  glm::fvec3 max_;
+
+  public:
+  float value(const glm::fvec3 &p) override;
+  AABB(glm::fvec3 min_, glm::fvec3 max_) : min_(min_), max_(max_){};
+  ~AABB() override {}
+};
+
+class Torus : public Topology {
+  float r1;
+  float r2;
+
+  public:
+  Torus(float r1, float r2) : r1(r1), r2(r2) {}
+  float value(const glm::fvec3 &p) override {
+    glm::vec2 q = glm::vec2(glm::length(glm::vec2(p.x, p.z)) - r1, p.y);
+    return length(q) - r2;
+  }
+};
+
+class Cylinder : public Topology {
+  glm::fvec3 c;
+
+  public:
+  explicit Cylinder(const glm::fvec3 &c) : c(c) {}
+  float value(const glm::fvec3 &p) override { return glm::length(glm::vec2(p.x, p.z) - glm::vec2(c.x, c.y)) - c.z; }
+};
+
+class Capsule : public Topology {
+  glm::fvec3 a;
+  glm::fvec3 b;
+  float r;
+
+  public:
+  Capsule(const glm::fvec3 &a, const glm::fvec3 &b, float r) : a(a), b(b), r(r) {}
+  float value(const glm::fvec3 &p) override {
+    glm::fvec3 pa = p - a, ba = b - a;
+    float h = glm::clamp(dot(pa, ba) / dot(ba, ba), 0.f, 1.f);
+    return length(pa - ba * h) - r;
+  }
+};
+
+class Heart : public Topology {
+  float scale;
+  glm::fvec3 center;
+
+  public:
+  explicit Heart(float scale, glm::fvec3 center = glm::fvec3(0)) : scale(scale), center(center) {}
+  ~Heart() override {}
+  float value(const glm::fvec3 &p) override;
+};
+
+#endif //VOXELWORLD_GENERATORS_H
+```
+
+### src/KdtreeISO/include/Utils.h
+```
+//
+// Created by Danielhu on 2018/4/2.
+//
+
+#ifndef VOXELWORLD_UTILS_H
+#define VOXELWORLD_UTILS_H
+
+#define GLM_FORCE_EXPLICIT_CTOR
+
+#include <glm/glm.hpp>
+#include <cmath>
+#include <iostream>
+
+using glm::fvec3;
+
+using PositionCode = glm::ivec3;
+
+#ifndef NDEBUG
+#define LOGV(v) \
+  std::cout << #v << " " << v.x << " " << v.y << " " << v.z << " " << std::endl;
+
+#define LOGF(v) \
+  std::cout << #v << " " << v << std::endl;
+
+#define LOGV4(v) \
+  std::cout << #v << " " << v.x << " " << v.y << " " << v.z << " " << v.w << std::endl;
+
+#else
+#define LOGV(v)
+#define LOGV4(v)
+#define LOGF(v)
+#endif
+
+inline bool segmentFaceIntersection(const fvec3 &va, const fvec3 &vb, const fvec3 &min, const fvec3 &max, int dir) {
+  float l = (vb - va)[dir];
+  fvec3 p = (min - va)[dir] / l * vb + (vb - min)[dir] / l * va;
+  for (int i = 0; i < 3; ++i) {
+    if (dir != i) {
+      if (p[i] < min[i] || p[i] > max[i]) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+template <class T>
+inline void hash_combine(std::size_t &seed, const T &v) {
+  std::hash<T> hasher;
+  seed ^= hasher(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+}
+
+template <typename C>
+struct ContainerHasher {
+  typedef typename C::value_type value_type;
+  inline size_t operator()(const C &c) const {
+    size_t seed = 0;
+    for (typename C::const_iterator it = c.begin(), end = c.end(); it != end; ++it) {
+      hash_combine<value_type>(seed, *it);
+    }
+    return seed;
+  }
+};
+
+inline fvec3 codeToPos(const PositionCode &code, float cellSize) {
+  // LOGV(code)
+  auto result = fvec3(static_cast<float>(code.x) * cellSize, static_cast<float>(code.y) * cellSize, static_cast<float>(code.z) * cellSize);
+  return result;
+}
+
+inline PositionCode posToCode(const glm::fvec3 &pos, float cellSize) {
+  return PositionCode(std::round(pos.x / cellSize), std::round(pos.y / cellSize), std::round(pos.z / cellSize));
+}
+
+inline PositionCode posToCodeFloor(const glm::fvec3 &pos, float cellSize) {
+  return PositionCode(pos.x / cellSize, pos.y / cellSize, pos.z / cellSize);
+}
+
+#endif //VOXELWORLD_UTILS_H
+```
+
+### src/KdtreeISO/include/Vertex.h
+```
+//
+// Created by Danielhu on 2018/5/1.
+//
+
+#ifndef VOXELWORLD_VERTEX_H
+#define VOXELWORLD_VERTEX_H
+
+#include <glm/glm.hpp>
+
+struct Vertex {
+  Vertex *parent;
+  unsigned int vertexIndex;
+  float error;
+  glm::fvec3 hermiteP;
+  glm::fvec3 hermiteN;
+  explicit Vertex(glm::fvec3 hermiteP)
+    : parent(nullptr), vertexIndex(0), error(-1.f), hermiteP(hermiteP), hermiteN(glm::fvec3(0)) {}
+  Vertex() = default;
+};
+
+#endif //VOXELWORLD_VERTEX_H
+```
+
+### src/KdtreeISO/include/VolumeData.h
+```
+﻿//
+// Created by Danielhu on 2018/5/29.
+//
+
+#ifndef VOXELWORLD_VOLUME_DATA_H
+#define VOXELWORLD_VOLUME_DATA_H
+
+extern "C" {
+#include "tiffio.h"
+}
+#include <cstdint>
+#include <cstdlib>
+#include <string>
+#include <sstream>
+#include <iomanip>
+#include <utility>
+#include "ScalarField.h"
+#include "RectilinearGrid.h"
+#include "Utils.h"
+
+class VolumeData : public ScalarField {
+  float isovalue = 31.5f;
+  std::string pathToTiffs;
+  int levels;
+  int width = 0;
+  int height = 0;
+  std::vector<uint8_t> data;
+  PositionCode minCode;
+  PositionCode scale;
+  float index(const PositionCode &code) override;
+
+  public:
+  VolumeData(const std::string &pathToTiffs, int levels, const PositionCode &minCode, const PositionCode &scale)
+    : pathToTiffs(pathToTiffs),
+      levels(levels),
+      minCode(minCode),
+      scale(scale) {}
+  inline int codeToOffset(const PositionCode &code) {
+    return code.z * width * height + code.y * width + code.x;
+  }
+  float value(const glm::fvec3 &p) override;
+  float gradientOffset() override { return RectilinearGrid::getUnitSize(); }
+  bool solve(const glm::fvec3 &p1, const glm::fvec3 &p2, glm::fvec3 &out) override;
+  void readTIFF();
+};
+
+#endif //VOXELWORLD_VOLUME_DATA_H
+```
+
+### src/KdtreeISO/lib/Kdtree.cpp
+```
+﻿//
+// Created by Danielhu on 2018/4/22.
+//
+
+#define GLM_FORCE_CTOR_INIT
+
+#include <set>
+#include <map>
+#include "Kdtree.h"
+#include "Octree.h"
+#include "Indicators.h"
+#include "Mesh.h"
+#include "AxisAlignedLine.h"
+
+using glm::max;
+using glm::min;
+
+void Kdtree::calClusterability(ScalarField *t) {
+  bool selfClusterable = RectilinearGrid::calClusterability(
+    children[0] ? &children[0]->grid : nullptr,
+    children[1] ? &children[1]->grid : nullptr,
+    planeDir, grid.minCode, grid.maxCode, t);
+  if (!selfClusterable) {
+    clusterable = false;
+    return;
+  }
+  for (auto child : children) {
+    if (child && !child->clusterable) {
+      clusterable = false;
+      return;
+    }
+  }
+  clusterable = true;
+  return;
+}
+
+void Kdtree::combineQef() {
+  if (!clusterable || isLeaf()) {
+    return;
+  }
+  RectilinearGrid::combineAAGrid(children[0] ? &children[0]->grid : nullptr,
+                                 children[1] ? &children[1]->grid : nullptr,
+                                 planeDir,
+                                 &grid);
+}
+
+Kdtree *Kdtree::buildFromOctree(Octree *octree, const PositionCode &minCode, const PositionCode &maxCode, ScalarField *t, int depth) {
+  if (glm::any(glm::greaterThanEqual(minCode, maxCode))) {
+    return nullptr;
+  }
+  QefSolver sum;
+  Octree::getSum(octree, minCode, maxCode, sum);
+  if (sum.pointCount == 0) {
+    return nullptr;
+  }
+
+  int strategy = 1;
+  PositionCode bestRightMinCode = maxCode, bestLeftMaxCode = minCode;
+  int dir = chooseAxisDir(sum, minCode, maxCode);
+  int minAxis = minCode[dir];
+  int maxAxis = maxCode[dir];
+  if (strategy == 0) {
+    float error;
+    glm::fvec3 approximate;
+    sum.solve(approximate, error);
+    int plane = static_cast<int>(std::round(approximate[dir] / RectilinearGrid::getUnitSize()));
+    if (maxCode[dir] - minCode[dir] > 1) {
+      plane = std::min(maxCode[dir] - 1, std::max(minCode[dir] + 1, plane));
+      bestLeftMaxCode = maxCode;
+      bestRightMinCode = minCode;
+      bestLeftMaxCode[dir] = bestRightMinCode[dir] = plane;
+    }
+  }
+  else {
+    QefSolver leftSum, rightSum;
+    float minError = std::numeric_limits<float>::max();
+    while (maxAxis - minAxis > 1) {
+      int mid = (maxAxis + minAxis) / 2;
+      PositionCode rightMinCode = minCode;
+      rightMinCode[dir] = mid;
+      PositionCode leftMaxCode = maxCode;
+      leftMaxCode[dir] = mid;
+      glm::fvec3 leftApproximate, rightApproximate;
+      leftSum.reset();
+      rightSum.reset();
+      Octree::getSum(octree, minCode, leftMaxCode, leftSum);
+      Octree::getSum(octree, rightMinCode, maxCode, rightSum);
+      float leftError = 0.f;
+      float rightError = 0.f;
+      leftSum.solve(leftApproximate, leftError);
+      rightSum.solve(rightApproximate, rightError);
+      if (abs(leftError - rightError) < minError) {
+        minError = abs(leftError - rightError);
+        bestLeftMaxCode = leftMaxCode;
+        bestRightMinCode = rightMinCode;
+      }
+      if (leftError > rightError) {
+        maxAxis = mid;
+      }
+      else if (leftError < rightError) {
+        minAxis = mid;
+      }
+      else {
+        break;
+      }
+    }
+  }
+  auto kd = new Kdtree(sum, minCode, maxCode, dir, depth);
+  kd->children[0] = buildFromOctree(octree, minCode, bestLeftMaxCode, t, depth + 1);
+  kd->children[1] = buildFromOctree(octree, bestRightMinCode, maxCode, t, depth + 1);
+  if (kd->isLeaf()) {
+    kd->grid.assignSign(t);
+    kd->grid.sampleQef(t, false);
+  }
+  else {
+    kd->grid.assignSign(t);
+    kd->calClusterability(t);
+    kd->combineQef();
+  }
+  if (kd->clusterable) {
+    for (int i = 0; i < kd->grid.components.size(); ++i) {
+      kd->grid.solveComponent(i);
+    }
+  }
+  return kd;
+}
+
+int Kdtree::chooseAxisDir(QefSolver &qef, const PositionCode &minCode, const PositionCode &maxCode) {
+  // naive approach
+  int dir = 0;
+  int strategy = 1;
+  auto size = maxCode - minCode;
+  if (strategy == 0) {
+    int maxDir = 0, minDir = 1;
+    if (size[1] > size[0]) {
+      maxDir = 1;
+      minDir = 0;
+    }
+    if (size[2] > size[maxDir]) {
+      maxDir = 2;
+    }
+    if (size[minDir] > size[2]) {
+      minDir = 2;
+    }
+    dir = maxDir;
+  }
+  else {
+    // variance approach
+    glm::fvec3 approximate;
+    float error;
+    qef.solve(approximate, error);
+    auto variance = qef.getVariance(approximate);
+    variance[0] *= size[0];
+    variance[1] *= size[1];
+    variance[2] *= size[2];
+    int maxVarDir = 0, minVarDir = 1;
+    if (variance[1] > variance[0]) {
+      maxVarDir = 1;
+      minVarDir = 0;
+    }
+    if (variance[2] > variance[maxVarDir]) {
+      maxVarDir = 2;
+    }
+    if (variance[minVarDir] > variance[2]) {
+      minVarDir = 2;
+    }
+    dir = maxVarDir;
+    if (size[maxVarDir] < 2) {
+      dir = 3 - maxVarDir - minVarDir;
+      if (size[3 - maxVarDir - minVarDir] < 2) {
+        dir = minVarDir;
+      }
+    }
+  }
+  return dir;
+}
+
+void Kdtree::drawKdtree(Kdtree *root, Mesh *mesh, float threshold) {
+  if (!root) {
+    return;
+  }
+  if (root->isContouringLeaf(threshold)) {
+    root->grid.draw(mesh);
+    return;
+  }
+  drawKdtree(root->children[0], mesh, threshold);
+  drawKdtree(root->children[1], mesh, threshold);
+}
+
+Mesh *Kdtree::extractMesh(Kdtree *root, ScalarField *t, float threshold) {
+  Mesh *mesh = new Mesh;
+  generateVertexIndices(root, mesh, t, threshold);
+  contourCell(root, mesh, t, threshold);
+  return mesh;
+}
+
+void Kdtree::generateVertexIndices(Kdtree *root, Mesh *mesh, ScalarField *t, float threshold) {
+  if (!root) {
+    return;
+  }
+  //  mesh->addVertex(&root->grid.approximate, t);
+  for (int i = 0; i < root->grid.vertices.size(); ++i) {
+    auto &v = root->grid.vertices[i];
+    mesh->addVertex(&v, t);
+    //    v.hermiteN = glm::normalize(root->grid.components[i].averageNormalSum);
+  }
+  generateVertexIndices(root->children[0], mesh, t, threshold);
+  generateVertexIndices(root->children[1], mesh, t, threshold);
+}
+
+AALine constructLine(const Kdtree::FaceKd &faceNodes, int side, int originFaceDir, int axis, float
+#ifndef NDEBUG
+                                                                                               threshold
+#endif
+) {
+  AALine line;
+  line.point[originFaceDir] = axis;
+  assert(!faceNodes[side]->isContouringLeaf(threshold));
+  line.dir = 3 - originFaceDir - faceNodes[side]->planeDir;
+  line.point[faceNodes[side]->planeDir] = faceNodes[side]->axis();
+  return line;
+}
+
+void Kdtree::contourCell(Kdtree *node, Mesh *mesh, ScalarField *t, float threshold) {
+  if (!node || node->isContouringLeaf(threshold)) {
+    return;
+  }
+  FaceKd faceNodes = {node->children[0], node->children[1]};
+  contourFace(faceNodes, node->planeDir, node->axis(), mesh, t, threshold);
+  contourCell(node->children[0], mesh, t, threshold);
+  contourCell(node->children[1], mesh, t, threshold);
+}
+
+bool checkMinialFace(const Kdtree::FaceKd &nodes, int dir, PositionCode &faceMin, PositionCode &faceMax) {
+  faceMax = min(nodes[0]->grid.maxCode, nodes[1]->grid.maxCode);
+  faceMin = max(nodes[0]->grid.minCode, nodes[1]->grid.minCode);
+  auto offset = faceMax - faceMin;
+  return offset[(dir + 1) % 3] > 0 && offset[(dir + 2) % 3] > 0;
+}
+
+void Kdtree::contourFace(FaceKd &nodes,
+                         const int dir,
+                         const int axis,
+                         Mesh *mesh,
+                         ScalarField *t,
+                         float threshold) {
+  if (!nodes[0] || !nodes[1]) {
+    return;
+  }
+  if (nodes[0]->isContouringLeaf(threshold) && nodes[1]->isContouringLeaf(threshold)) {
+    return;
+  }
+
+  PositionCode faceMin, faceMax;
+  if (!checkMinialFace(nodes, dir, faceMin, faceMax)) {
+    return;
+  }
+
+  for (int i = 0; i < 2; ++i) {
+    while (!nodes[i]->isContouringLeaf(threshold) && nodes[i]->planeDir == dir) {
+      nodes[i] = nodes[i]->children[1 - i];
+      if (!nodes[i]) {
+        return;
+      }
+    }
+  }
+
+  for (int i = 0; i < 2; ++i) {
+    if (!nodes[i]->isContouringLeaf(threshold)) {
+      for (int j = 0; j < 2; ++j) {
+        FaceKd nextFace = nodes;
+        nextFace[i] = nodes[i]->children[j];
+        contourFace(nextFace, dir, axis, mesh, t, threshold);
+      }
+      if (nodes[i]->axis() > faceMin[nodes[i]->planeDir] && nodes[i]->axis() < faceMax[nodes[i]->planeDir]) {
+        EdgeKd edgeNodes = {nodes[0], nodes[0], nodes[1], nodes[1]};
+        edgeNodes[i * 2] = nodes[i]->children[0];
+        edgeNodes[i * 2 + 1] = nodes[i]->children[1];
+        AALine line = constructLine(nodes, i, dir, axis, threshold);
+        contourEdge(edgeNodes, line, nodes[i]->planeDir, t, threshold, mesh);
+      }
+      return;
+    }
+  }
+}
+
+bool checkMinialEdge(const Kdtree::EdgeKd &nodes, const AALine &line, PositionCode &minEnd, PositionCode &maxEnd) {
+  minEnd = maxEnd = line.point;
+  int dir = line.dir;
+  minEnd[dir] = max(max(nodes[0]->grid.minCode, nodes[1]->grid.minCode),
+                    max(nodes[2]->grid.minCode, nodes[3]->grid.minCode))[dir];
+  maxEnd[dir] = min(min(nodes[0]->grid.maxCode, nodes[1]->grid.maxCode),
+                    min(nodes[2]->grid.maxCode, nodes[3]->grid.maxCode))[dir];
+  return minEnd[dir] < maxEnd[dir];
+}
+
+int nextQuadIndex(int dir1, int dir2, int planeDir, int i) {
+  PositionCode pos;
+  pos[dir1] = 1 - i % 2;
+  pos[dir2] = 1 - i / 2;
+  return pos[planeDir];
+}
+
+void Kdtree::detectQuad(EdgeKd &nodes, AALine line, float threshold) {
+  for (int i = 0; i < 2; ++i) {
+    while (
+      nodes[i * 2] && nodes[i * 2 + 1] && !nodes[i * 2]->isContouringLeaf(threshold) && nodes[2 * i] == nodes[2 * i + 1] && nodes[i * 2]->planeDir != line.dir) {
+      auto commonNode = nodes[i * 2];
+      if (nodes[i * 2]->axis() == line.point[nodes[i * 2]->planeDir]) {
+        nodes[i * 2] = commonNode->children[0];
+        nodes[i * 2 + 1] = commonNode->children[1];
+      }
+      else if (nodes[i * 2]->axis() > line.point[nodes[i * 2]->planeDir]) {
+        nodes[i * 2] = commonNode->children[0];
+        nodes[i * 2 + 1] = commonNode->children[0];
+      }
+      else {
+        nodes[i * 2] = commonNode->children[1];
+        nodes[i * 2 + 1] = commonNode->children[1];
+      }
+    }
+  }
+}
+
+void setQuadNode(Kdtree::EdgeKd &nodes, int i, Kdtree *p) {
+  if (nodes[oppositeQuadIndex(i)] == nodes[i]) {
+    nodes[oppositeQuadIndex(i)] = p;
+  }
+  nodes[i] = p;
+}
+
+void Kdtree::contourEdge(EdgeKd &nodes,
+                         const AALine &line,
+                         const int quadDir1,
+                         ScalarField *t,
+                         float threshold,
+                         Mesh *mesh) {
+  detectQuad(nodes, line, threshold);
+  for (auto n : nodes) {
+    if (!n) {
+      return;
+    }
+  }
+  assert(quadDir1 >= 0 && quadDir1 < 3);
+  const int quadDir2 = 3 - quadDir1 - line.dir;
+  PositionCode minEndCode, maxEndCode;
+  if (!checkMinialEdge(nodes, line, minEndCode, maxEndCode)) {
+    return;
+  }
+  glm::fvec3 minEnd = codeToPos(minEndCode, RectilinearGrid::getUnitSize());
+  glm::fvec3 maxEnd = codeToPos(maxEndCode, RectilinearGrid::getUnitSize());
+  for (int i = 0; i < 4; ++i) {
+    if (nodes[i] != nodes[oppositeQuadIndex(i)]) {
+      while (!nodes[i]->isContouringLeaf(threshold) && nodes[i]->planeDir != line.dir) {
+        nodes[i] = nodes[i]->children[nextQuadIndex(quadDir1, quadDir2, nodes[i]->planeDir, i)];
+        if (!nodes[i]) {
+          return;
+        }
+      }
+    }
+  }
+  //  assert(nodes[0]->grid.minCode[quadDir1] <= nodes[1]->grid.minCode[quadDir1]);
+  //  assert(nodes[2]->grid.minCode[quadDir1] <= nodes[3]->grid.minCode[quadDir1]);
+  //  assert(nodes[0]->grid.minCode[quadDir2] <= nodes[2]->grid.minCode[quadDir2]);
+  //  assert(nodes[1]->grid.minCode[quadDir2] <= nodes[3]->grid.minCode[quadDir2]);
+
+  //  if ((maxEndCode - minEndCode)[0] == 1) {
+  //    mesh->drawAABBDebug(codeToPos(minEndCode, RectilinearGrid::getUnitSize()), codeToPos(maxEndCode, RectilinearGrid::getUnitSize()));
+  //  }
+
+  if (nodes[0]->isContouringLeaf(threshold) && nodes[1]->isContouringLeaf(threshold) && nodes[2]->isContouringLeaf(threshold) && nodes[3]->isContouringLeaf(threshold)) {
+    // only for debug
+    if ((t->value(minEnd) >= 0 && t->value(maxEnd) >= 0) || (t->value(minEnd) < 0 && t->value(maxEnd) < 0)) {
+      //      return;
+    }
+    generateQuad(nodes, quadDir1, quadDir2, mesh, t, threshold);
+    return;
+  }
+  for (int i = 0; i < 4; ++i) {
+    EdgeKd nextNodes = nodes;
+    if (!nodes[i]->isContouringLeaf(threshold) && nodes[i]->planeDir == line.dir) {
+      setQuadNode(nextNodes, i, nodes[i]->children[0]);
+      contourEdge(nextNodes, line, quadDir1, t, threshold, mesh);
+      nextNodes = nodes;
+      setQuadNode(nextNodes, i, nodes[i]->children[1]);
+      contourEdge(nextNodes, line, quadDir1, t, threshold, mesh);
+      return;
+    }
+  }
+}
+
+void Kdtree::generateQuad(EdgeKd &nodes,
+                          int quadDir1,
+                          int quadDir2,
+                          Mesh *mesh,
+                          ScalarField *t,
+                          float threshold) {
+  //  for (auto n : nodes) {
+  //    n->grid.vertices[0].hermiteP = codeToPos(n->grid.minCode + n->grid.maxCode, RectilinearGrid::getUnitSize()) / 2.f;
+  //    // mesh->drawAABBDebug(codeToPos(n->grid.minCode, RectilinearGrid::getUnitSize()), codeToPos(n->grid.maxCode, RectilinearGrid::getUnitSize()));
+  //  }
+
+  // return;
+
+  //  assert(glm::all(glm::greaterThanEqual(nodes[1]->grid.minCode, nodes[0]->grid.minCode)));
+  //  assert(glm::all(glm::greaterThanEqual(nodes[3]->grid.minCode, nodes[2]->grid.minCode)));
+  //  assert(glm::all(glm::greaterThanEqual(nodes[3]->grid.minCode, nodes[0]->grid.minCode)));
+  //  assert(glm::all(glm::greaterThanEqual(nodes[3]->grid.minCode, nodes[1]->grid.minCode)));
+
+  //  for (auto &n : nodes) {
+  //    assert(n->clusterable);
+  //    for (auto c : n->grid.vertices) {
+  //      assert(c.vertexIndex);
+  //    }
+  //  }
+
+  RectilinearGrid::generateQuad(nodes, quadDir1, quadDir2, mesh, t, threshold);
+}
+```
+
+### src/KdtreeISO/lib/Mesh.cpp
+```
+//
+// Created by Danielhu on 2018/1/22.
+//
+
+#include "Mesh.h"
+#include "Indicators.h"
+
+void Mesh::generateFlatNormals() {
+  normals.resize(positions.size());
+  std::vector<glm::fvec3> flat_positions;
+  std::vector<glm::fvec3> flat_normals;
+  std::vector<unsigned int> flat_indices;
+  for (unsigned int i = 0; i < indices.size() / 3; ++i) {
+    glm::fvec3 normal =
+      normals[indices[i * 3 + 0]] +
+      normals[indices[i * 3 + 1]] +
+      normals[indices[i * 3 + 2]];
+
+    glm::vec3 c1 = glm::normalize(positions[indices[i * 3 + 0]] - positions[indices[i * 3 + 1]]);
+    glm::vec3 c2 = glm::normalize(positions[indices[i * 3 + 0]] - positions[indices[i * 3 + 2]]);
+
+    c1 -= glm::dot(c1, c2) * c2;
+    c1 = glm::normalize(c1);
+    //    float d = glm::dot(c1, c2);
+    normal -= glm::dot(normal, c1) * c1;
+    normal -= glm::dot(normal, c2) * c2;
+    if (normal == glm::fvec3(0.f)) {
+      continue;
+    }
+
+    normal = glm::normalize(normal);
+    for (unsigned int j = 0; j < 3; ++j) {
+      flat_normals.push_back(normal);
+      flat_positions.push_back(positions[indices[i * 3 + j]]);
+      flat_indices.push_back(3 * i + j);
+    }
+  }
+  positions = flat_positions;
+  normals = flat_normals;
+  indices = flat_indices;
+}
+
+void Mesh::addVertex(Vertex *v, ScalarField *g) {
+  g->normal(v->hermiteP, v->hermiteN);
+  v->vertexIndex = static_cast<unsigned int>(positions.size());
+  positions.push_back(v->hermiteP);
+  normals.push_back(v->hermiteN);
+}
+
+void Mesh::addTriangle(Vertex **vertices, ScalarField *g) {
+  for (int j = 0; j < 3; ++j) {
+    auto targetVert = vertices[j];
+    Vertex *adjacentVerts[2] = {vertices[(j + 1) % 3], vertices[(j + 2) % 3]};
+    glm::fvec3 offset =
+      adjacentVerts[1]->hermiteP - targetVert->hermiteP +
+      adjacentVerts[0]->hermiteP - targetVert->hermiteP;
+    offset *= 0.05f;
+    glm::fvec3 normal;
+    g->normal(targetVert->hermiteP + offset, normal);
+    if (glm::dot(normal, targetVert->hermiteN) < std::cos(glm::radians(15.f))) {
+      indices.push_back(static_cast<unsigned int>(positions.size()));
+      positions.push_back(targetVert->hermiteP);
+      normals.push_back(normal);
+    }
+    else {
+      indices.push_back(targetVert->vertexIndex);
+    }
+  }
+}
+void Mesh::drawAABBDebug(glm::fvec3 min, glm::fvec3 max) {
+  auto offset = max - min;
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 2; ++j) {
+      fvec3 quad[4];
+      for (int k = 0; k < 4; ++k) {
+        quad[k] = min + offset * min_offset_subdivision(cellProcFaceMask[i * 4 + k][j]);
+      }
+      int quadIndices[] = {0, 1, 2, 1, 2, 3};
+      for (auto quadIndex : quadIndices) {
+        positions.push_back(quad[quadIndex]);
+        normals.push_back(glm::normalize(quad[quadIndex] - (min + max) / 2.f));
+        indices.push_back(static_cast<unsigned int &&>(indices.size()));
+      }
+    }
+  }
+}
+```
+
+### src/KdtreeISO/lib/Octree.cpp
+```
+﻿//
+// Created by Danielhu on 2018/1/20.
+//
+
+#define GLM_ENABLE_EXPERIMENTAL
+#define GLM_FORCE_CTOR_INIT
+
+#include <unordered_map>
+#include <unordered_set>
+#include <numeric>
+#include <set>
+#include <glm/glm.hpp>
+#include <glm/gtx/intersect.hpp>
+#include <glm/gtx/fast_square_root.hpp>
+#include "Octree.h"
+#include "Mesh.h"
+#include "Utils.h"
+#include "Indicators.h"
+
+Octree *Octree::buildWithScalarField(const PositionCode &minCode, int depth, ScalarField *scalarField, bool as_mipmap) {
+  PositionCode sizeCode = PositionCode(1 << (depth - 1));
+  auto root = new Octree(minCode, minCode + sizeCode, depth);
+  assert(depth > 0);
+  root->grid.assignSign(scalarField);
+  bool noChildren = true;
+  if (depth == 1) {
+    if (!root->grid.isSigned) {
+      delete root;
+      return nullptr;
+    }
+    root->grid.sampleQef(scalarField, true);
+    root->isLeaf = true;
+  }
+  else {
+    PositionCode subSizeCode = PositionCode(static_cast<uint16_t>(1 << (depth - 2)));
+    for (int i = 0; i < 8; ++i) {
+      PositionCode subMinCode = minCode + subSizeCode * decodeCell(i);
+      root->children[i] =
+        buildWithScalarField(subMinCode, depth - 1, scalarField, as_mipmap);
+      if (root->children[i]) {
+        noChildren = false;
+        root->children[i]->childIndex = static_cast<int8_t>(i);
+        root->grid.allQef.combine(root->children[i]->grid.allQef);
+      }
+    }
+    if (noChildren) {
+      delete root;
+      return nullptr;
+    }
+    calClusterbility(root, scalarField);
+    if (root->clusterable && !as_mipmap) {
+      root->combineComponents(scalarField);
+    }
+    root->isLeaf = false;
+  }
+  assert(root->grid.allQef.pointCount);
+  assert(!isnan(root->grid.allQef.btb));
+  if (!as_mipmap) {
+    for (int i = 0; i < root->grid.components.size(); ++i) {
+      root->grid.solveComponent(i);
+    }
+  }
+  root->grid.solve(root->grid.allQef, root->grid.approximate);
+  //  assert(root->grid.error >= -0.001f);
+  return root;
+}
+
+void Octree::getSum(Octree *root, const PositionCode &minPos, const PositionCode &maxPos, QefSolver &out) {
+  if (!root) {
+    return;
+  }
+  if (glm::any(glm::greaterThanEqual(minPos, maxPos))) {
+    return;
+  }
+  if (glm::any(glm::greaterThanEqual(minPos, root->grid.maxCode)) || glm::any(glm::lessThanEqual(maxPos, root->grid.minCode))) {
+    return;
+  }
+  auto minPosBound = glm::max(root->grid.minCode, minPos);
+  auto maxPosBound = glm::min(root->grid.maxCode, maxPos);
+  if (minPosBound == root->grid.minCode && maxPosBound == root->grid.maxCode) {
+    out.combine(root->grid.allQef);
+    return;
+  }
+  for (int i = 0; i < 8; ++i) {
+    getSum(root->children[i], minPosBound, maxPosBound, out);
+  }
+}
+
+void Octree::simplify(Octree *root, float threshold) {
+  if (!root) {
+    return;
+  }
+  if (root->isLeaf) {
+    return;
+  }
+  for (int i = 0; i < 8; ++i) {
+    simplify(root->children[i], threshold);
+  }
+  if (root->clusterable && root->grid.approximate.error < threshold) {
+    for (auto &child : root->children) {
+      child = nullptr;
+    }
+    root->isLeaf = true;
+  }
+}
+
+Mesh *Octree::extractMesh(Octree *root,
+                          ScalarField *geometry,
+                          int &intersectionPreservingVerticesCount,
+                          bool intersectionFree) {
+  assert(root);
+  auto *mesh = new Mesh();
+  std::unordered_set<Vertex *> indexed;
+  EdgePolygonSet edgePolygonSet;
+  generateVertexIndices(root, mesh, geometry, indexed);
+  contourCell(root, mesh, geometry, intersectionPreservingVerticesCount, edgePolygonSet, intersectionFree, 0);
+  return mesh;
+}
+
+void Octree::generateVertexIndices(Octree *node,
+                                   Mesh *mesh,
+                                   ScalarField *geometry,
+                                   std::unordered_set<Vertex *> &indexed) {
+  if (!node) {
+    return;
+  }
+  for (int i = 0; i < 8; ++i) {
+    generateVertexIndices(node->children[i], mesh, geometry, indexed);
+  }
+  if (node->isLeaf) {
+    for (auto &v : node->grid.vertices) {
+      mesh->addVertex(&v, geometry);
+    }
+  }
+}
+
+void Octree::contourCell(Octree *root,
+                         Mesh *mesh,
+                         ScalarField *geometry,
+                         int &intersectionPreservingVerticesCount,
+                         EdgePolygonSet &edgePolygonSet,
+                         bool intersectionFree,
+                         float threshold) {
+  if (!root || root->isLeaf) {
+    return;
+  }
+  for (int i = 0; i < 8; ++i) {
+    contourCell(root->children[i],
+                mesh,
+                geometry,
+                intersectionPreservingVerticesCount,
+                edgePolygonSet,
+                intersectionFree,
+                threshold);
+  }
+  for (int i = 0; i < 12; ++i) {
+    Octree *nodes[2] = {
+      root->children[cellProcFaceMask[i][0]],
+      root->children[cellProcFaceMask[i][1]],
+    };
+    contourFace(nodes,
+                cellProcFaceMask[i][2],
+                mesh,
+                geometry,
+                intersectionPreservingVerticesCount,
+                edgePolygonSet,
+                intersectionFree,
+                threshold);
+  }
+  for (int i = 0; i < 6; ++i) {
+    Octree *nodes[4];
+    for (int j = 0; j < 4; ++j) {
+      nodes[j] = root->children[cellProcEdgeMask[i][j]];
+    }
+    contourEdge(nodes,
+                cellProcEdgeMask[i][4],
+                (cellProcEdgeMask[i][4] + 2) % 3,
+                geometry,
+                intersectionPreservingVerticesCount,
+                edgePolygonSet,
+                intersectionFree,
+                mesh,
+                threshold);
+  }
+}
+
+void Octree::contourFace(Octree *nodes[2],
+                         int dir,
+                         Mesh *mesh,
+                         ScalarField *geometry,
+                         int &intersectionPreservingVerticesCount,
+                         EdgePolygonSet &edgePolygonSet,
+                         bool intersectionFree,
+                         float threshold) {
+  if (!nodes[0] || !nodes[1]) {
+    return;
+  }
+  if (nodes[0]->isLeaf && nodes[1]->isLeaf) {
+    return;
+  }
+  // the subdivision of a face resulting 4 child faces;
+  for (int i = 0; i < 4; ++i) {
+    Octree *subdivision_face[2] = {nodes[0], nodes[1]};
+    for (int j = 0; j < 2; ++j) {
+      if (!subdivision_face[j]->isLeaf) {
+        subdivision_face[j] = subdivision_face[j]->children[faceProcFaceMask[dir][i][j]];
+      }
+    }
+    contourFace(subdivision_face,
+                faceProcFaceMask[dir][i][2],
+                mesh,
+                geometry,
+                intersectionPreservingVerticesCount,
+                edgePolygonSet,
+                intersectionFree,
+                threshold);
+  }
+  for (int i = 0; i < 4; ++i) {
+    Octree *edge_nodes[4];
+    const int c[4] =
+      {
+        faceProcEdgeMask[dir][i][1],
+        faceProcEdgeMask[dir][i][2],
+        faceProcEdgeMask[dir][i][3],
+        faceProcEdgeMask[dir][i][4],
+      };
+    for (int j = 0; j < 4; ++j) {
+      const int order = faceNodeOrder[j];
+      if (nodes[order]->isLeaf) {
+        edge_nodes[j] = nodes[order];
+      }
+      else {
+        edge_nodes[j] = nodes[order]->children[c[j]];
+      }
+    }
+    if (dir == 0 && faceProcEdgeMask[dir][i][5] == 2) {
+      ;
+    }
+    contourEdge(edge_nodes,
+                faceProcEdgeMask[dir][i][5],
+                dir,
+                geometry,
+                intersectionPreservingVerticesCount,
+                edgePolygonSet,
+                intersectionFree,
+                mesh,
+                threshold);
+  }
+}
+
+void Octree::contourEdge(Octree **nodes,
+                         int dir,
+                         int quadDir2,
+                         ScalarField *geometry,
+                         int &intersectionPreservingVerticesCount,
+                         EdgePolygonSet &edgePolygonSet,
+                         bool intersectionFree,
+                         Mesh *mesh,
+                         float threshold) {
+  if (!nodes[0] || !nodes[1] || !nodes[2] || !nodes[3]) {
+    return;
+  }
+
+  if (nodes[0]->isLeaf && nodes[1]->isLeaf && nodes[2]->isLeaf && nodes[3]->isLeaf) {
+    generateQuad(nodes,
+                 dir,
+                 quadDir2,
+                 geometry,
+                 intersectionPreservingVerticesCount,
+                 edgePolygonSet,
+                 intersectionFree,
+                 mesh,
+                 threshold);
+    return;
+  }
+  int quadDir1 = 3 - dir - quadDir2;
+  // the subdivision of a edge resulting 2 child edges;
+  for (int i = 0; i < 2; ++i) {
+    Octree *subdivision_edge[4];
+    for (int j = 0; j < 4; ++j) {
+      if (!nodes[j]->isLeaf) {
+
+        PositionCode code;
+        code[dir] = i;
+        code[quadDir1] = (3 - j) % 2;
+        code[quadDir2] = (3 - j) / 2;
+
+        subdivision_edge[j] = nodes[j]->children[encodeCell(code)];
+      }
+      else {
+        subdivision_edge[j] = nodes[j];
+      }
+    }
+    contourEdge(subdivision_edge,
+                dir,
+                quadDir2,
+                geometry,
+                intersectionPreservingVerticesCount,
+                edgePolygonSet,
+                intersectionFree,
+                mesh,
+                threshold);
+  }
+}
+
+void Octree::generateQuad(Octree **nodes,
+                          int dir,
+                          int quadDir2,
+                          ScalarField *t,
+                          int &,
+                          EdgePolygonSet &,
+                          bool,
+                          Mesh *mesh,
+                          float threshold) {
+  std::array<Octree *, 4> array = {{nodes[0], nodes[1], nodes[2], nodes[3]}};
+  RectilinearGrid::generateQuad(array, 3 - quadDir2 - dir, quadDir2, mesh, t, threshold);
+}
+
+void Octree::drawOctrees(Octree *root, Mesh *mesh) {
+  if (!root) {
+    return;
+  }
+  if (root->isLeaf) {
+    root->grid.draw(mesh);
+    return;
+  }
+  for (int i = 0; i < 8; ++i) {
+    drawOctrees(root->children[i], mesh);
+  }
+}
+
+void Octree::calClusterbility(Octree *root, ScalarField *s) {
+  if (!root || root->isLeaf) {
+    return;
+  }
+  for (int i = 0; i < 8; ++i) {
+    if (root->children[i] && !root->children[i]->clusterable) {
+      root->clusterable = false;
+      return;
+    }
+  }
+  for (int i = 0; i < 12; ++i) {
+    int leftIndex = cellProcFaceMask[i][0];
+    int rightIndex = cellProcFaceMask[i][1];
+    auto left = root->children[leftIndex] ? &root->children[leftIndex]->grid : nullptr;
+    auto right = root->children[rightIndex] ? &root->children[rightIndex]->grid : nullptr;
+    ;
+    auto dir = cellProcFaceMask[i][2];
+    auto halfSize = (root->grid.maxCode - root->grid.minCode) / 2;
+    auto minCode = root->grid.minCode + decodeCell(leftIndex) * halfSize;
+    auto maxCode = root->grid.minCode + halfSize + decodeCell(rightIndex) * halfSize;
+    bool clusterable = RectilinearGrid::calClusterability(left, right, dir, minCode, maxCode, s);
+    if (!clusterable) {
+      root->clusterable = false;
+      return;
+    }
+  }
+  root->clusterable = true;
+}
+void Octree::combineComponents(ScalarField *s) {
+  assert(grid.components.empty());
+  auto halfSize = (grid.maxCode - grid.minCode) / 2;
+  RectilinearGrid xgridPool[2], ygridPool[4];
+  RectilinearGrid *xgrids[2];
+  for (int x = 0; x < 2; ++x) {
+    auto yMinCode = PositionCode(x, 0, 0) * halfSize + grid.minCode;
+    auto yMaxCode = PositionCode(x, 1, 1) * halfSize + halfSize + grid.minCode;
+    RectilinearGrid *ygrids[2];
+    for (int y = 0; y < 2; ++y) {
+      auto zMinCode = PositionCode(x, y, 0) * halfSize + grid.minCode;
+      auto zMaxCode = PositionCode(x, y, 1) * halfSize + halfSize + grid.minCode;
+      auto l =
+        children[encodeCell(PositionCode(x, y, 0))] ? &children[encodeCell(PositionCode(x, y, 0))]->grid : nullptr;
+      auto r =
+        children[encodeCell(PositionCode(x, y, 1))] ? &children[encodeCell(PositionCode(x, y, 1))]->grid : nullptr;
+      if (!l && !r) {
+        ygrids[y] = nullptr;
+      }
+      else {
+        ygrids[y] = &ygridPool[x * 2 + y];
+        ygrids[y]->minCode = zMinCode;
+        ygrids[y]->maxCode = zMaxCode;
+        ygrids[y]->assignSign(s);
+        if (l)
+          ygrids[y]->allQef.combine(l->allQef);
+        if (r)
+          ygrids[y]->allQef.combine(r->allQef);
+        RectilinearGrid::combineAAGrid(l, r, 2, ygrids[y]);
+      }
+    }
+    if (!ygrids[0] && !ygrids[1]) {
+      xgrids[x] = nullptr;
+    }
+    else {
+      xgrids[x] = &xgridPool[x];
+      xgrids[x]->minCode = yMinCode;
+      xgrids[x]->maxCode = yMaxCode;
+      xgrids[x]->assignSign(s);
+      if (ygrids[0])
+        xgrids[x]->allQef.combine(ygrids[0]->allQef);
+      if (ygrids[1])
+        xgrids[x]->allQef.combine(ygrids[1]->allQef);
+      RectilinearGrid::combineAAGrid(ygrids[0], ygrids[1], 1, xgrids[x]);
+    }
+  }
+  RectilinearGrid::combineAAGrid(xgrids[0], xgrids[1], 0, &grid);
+  std::set<Vertex *> coarserVertices;
+  for (auto &v : grid.vertices) {
+    coarserVertices.insert(&v);
+  }
+
+  for (auto child : children) {
+    if (child) {
+      for (Vertex &v : child->grid.vertices) {
+        if (v.parent) {
+          while (v.parent->parent) {
+            v.parent = v.parent->parent;
+          }
+        }
+        if (coarserVertices.find(v.parent) == coarserVertices.end()) {
+          v.parent = nullptr;
+        }
+      }
+    }
+  }
+
+  // to avoid a specific MC case
+  int count = 0;
+  for (auto c : grid.components) {
+    count += c.pointCount;
+  }
+  if (count != grid.allQef.pointCount) {
+    clusterable = false;
+    for (auto child : children) {
+      if (child) {
+        for (Vertex &v : child->grid.vertices) {
+          v.parent = nullptr;
+        }
+      }
+    }
+  }
+}
+```
+
+### src/KdtreeISO/lib/Qef.cpp
+```
+﻿//
+// Created by Danielhu on 2018/1/16.
+//
+
+#define GLM_FORCE_CTOR_INIT
+
+#include <glm/glm.hpp>
+#include "Qef.h"
+
+#define SVD_NUM_SWEEPS 5
+
+const float Tiny_Number = 1.e-4f;
+// const float Tiny_Number_Erroring = 1.e-8;
+
+glm::fvec3 diag_of_mul(const glm::fvec3 &v1T, const glm::fvec3 v2) {
+  return v1T * v2;
+}
+
+glm::fvec3 diag(const glm::mat3 &m) {
+  return glm::fvec3(m[0][0], m[1][1], m[2][2]);
+}
+
+glm::fvec3 svd_vmul_sym(const glm::mat3x3 &a, const glm::fvec3 &v) {
+  return glm::fvec3(
+    (a[0][0] * v.x) + (a[0][1] * v.y) + (a[0][2] * v.z),
+    (a[0][1] * v.x) + (a[1][1] * v.y) + (a[1][2] * v.z),
+    (a[0][2] * v.x) + (a[1][2] * v.y) + (a[2][2] * v.z));
+}
+
+float qef_calc_error(const glm::mat3x3 &ATA, const glm::fvec3 &x, const glm::fvec3 &ATb, const float btb) {
+  glm::fvec3 atax = svd_vmul_sym(ATA, x);
+  return glm::dot(x, atax) - 2 * glm::dot(x, ATb) + btb;
+}
+
+glm::fvec3 qef_calc_co_variance(const glm::mat3x3 &ATA, const glm::fvec3 &x, const glm::fvec3 &diag_ATc, const glm::fvec3 &diag_ctc) {
+  return x * diag(ATA) * x - 2.f * (x * diag_ATc) + diag_ctc;
+}
+
+void svd_rotate_xy(float &x, float &y, float c, float s) {
+  float u = x;
+  float v = y;
+  x = c * u - s * v;
+  y = s * u + c * v;
+}
+
+void svd_rotateq_xy(float &x, float &y, float a, float c, float s) {
+  float cc = c * c;
+  float ss = s * s;
+  float mx = 2.0f * c * s * a;
+  float u = x;
+  float v = y;
+  x = cc * u - mx + ss * v;
+  y = ss * u + mx + cc * v;
+}
+
+float svd_invdet(float x, float tol) {
+  return (std::abs(x) < tol || std::abs(1.0f / x) < tol) ? 0.0f : 1.0f / x;
+}
+
+void svd_pseudoinverse(glm::mat3x3 &o, const glm::fvec3 &sigma, const glm::mat3x3 &v) {
+  float d0 = svd_invdet(sigma[0], Tiny_Number);
+  float d1 = svd_invdet(sigma[1], Tiny_Number);
+  float d2 = svd_invdet(sigma[2], Tiny_Number);
+  o = glm::mat3(v[0][0] * d0 * v[0][0] + v[0][1] * d1 * v[0][1] + v[0][2] * d2 * v[0][2],
+                v[0][0] * d0 * v[1][0] + v[0][1] * d1 * v[1][1] + v[0][2] * d2 * v[1][2],
+                v[0][0] * d0 * v[2][0] + v[0][1] * d1 * v[2][1] + v[0][2] * d2 * v[2][2],
+                v[1][0] * d0 * v[0][0] + v[1][1] * d1 * v[0][1] + v[1][2] * d2 * v[0][2],
+                v[1][0] * d0 * v[1][0] + v[1][1] * d1 * v[1][1] + v[1][2] * d2 * v[1][2],
+                v[1][0] * d0 * v[2][0] + v[1][1] * d1 * v[2][1] + v[1][2] * d2 * v[2][2],
+                v[2][0] * d0 * v[0][0] + v[2][1] * d1 * v[0][1] + v[2][2] * d2 * v[0][2],
+                v[2][0] * d0 * v[1][0] + v[2][1] * d1 * v[1][1] + v[2][2] * d2 * v[1][2],
+                v[2][0] * d0 * v[2][0] + v[2][1] * d1 * v[2][1] + v[2][2] * d2 * v[2][2]);
+}
+
+void givens_coeffs_sym(float a_pp, float a_pq, float a_qq, float &c, float &s) {
+  if (a_pq == 0.0f) {
+    c = 1.0f;
+    s = 0.0f;
+    return;
+  }
+  float tau = (a_qq - a_pp) / (2.0f * a_pq);
+  float stt = sqrt(1.0f + tau * tau);
+  float tan = 1.0f / (tau >= 0.0f ? tau + stt : tau - stt);
+  c = 1.0f / sqrt(1.0f + tan * tan);
+  s = tan * c;
+}
+
+void svd_rotate(glm::mat3x3 &vtav, glm::mat3x3 &v, int a, int b) {
+  if (vtav[a][b] == 0.0)
+    return;
+
+  float c = 0.f, s = 0.f;
+  givens_coeffs_sym(vtav[a][a], vtav[a][b], vtav[b][b], c, s);
+
+  float x, y;
+  x = vtav[a][a];
+  y = vtav[b][b];
+  svd_rotateq_xy(x, y, vtav[a][b], c, s);
+  vtav[a][a] = x;
+  vtav[b][b] = y;
+
+  x = vtav[0][3 - b];
+  y = vtav[1 - a][2];
+  svd_rotate_xy(x, y, c, s);
+  vtav[0][3 - b] = x;
+  vtav[1 - a][2] = y;
+
+  vtav[a][b] = 0.0f;
+
+  x = v[0][a];
+  y = v[0][b];
+  svd_rotate_xy(x, y, c, s);
+  v[0][a] = x;
+  v[0][b] = y;
+
+  x = v[1][a];
+  y = v[1][b];
+  svd_rotate_xy(x, y, c, s);
+  v[1][a] = x;
+  v[1][b] = y;
+
+  x = v[2][a];
+  y = v[2][b];
+  svd_rotate_xy(x, y, c, s);
+  v[2][a] = x;
+  v[2][b] = y;
+}
+
+void svd_solve_sym(glm::mat3x3 vtav, glm::fvec3 &sigma, glm::mat3x3 &v) {
+  // assuming that A is symmetric: can optimize all operations for
+  // the upper right triagonal
+  // assuming V is identity: you can also pass a matrix the rotations
+  // should be applied to
+  // U is not computed
+  for (int i = 0; i < SVD_NUM_SWEEPS; ++i) {
+    svd_rotate(vtav, v, 0, 1);
+    svd_rotate(vtav, v, 0, 2);
+    svd_rotate(vtav, v, 1, 2);
+  }
+  sigma = glm::fvec3(vtav[0][0], vtav[1][1], vtav[2][2]);
+}
+
+glm::fvec3 svd_solve_ATA_ATb(const glm::mat3x3 &ATA, const glm::fvec3 &ATb) {
+  glm::mat3x3 V;
+  glm::fvec3 sigma;
+  svd_solve_sym(ATA, sigma, V);
+
+  // A = UEV^T; U = A / (E*V^T)
+  glm::mat3x3 Vinv;
+  svd_pseudoinverse(Vinv, sigma, V);
+  glm::fvec3 x = Vinv * ATb;
+  return x;
+}
+
+void QefSolver::reset() {
+  ATA = glm::mat4(0.f);
+  ATb = glm::fvec3(0.f);
+  btb = 0.f;
+  massPointSum = glm::fvec3(0.f);
+  averageNormalSum = glm::fvec3(0.f);
+  pointCount = 0;
+}
+
+void QefSolver::set(const QefSolver &other) {
+  ATA[0][0] = other.ATA[0][0];
+  ATA[1][1] = other.ATA[1][1];
+  ATA[2][2] = other.ATA[2][2];
+
+  ATA[0][1] = other.ATA[0][1];
+  ATA[0][2] = other.ATA[0][2];
+  ATA[1][2] = other.ATA[1][2];
+
+  ATb = other.ATb;
+  btb = other.btb;
+  massPointSum = other.massPointSum;
+  averageNormalSum = other.averageNormalSum;
+  pointCount = other.pointCount;
+  calRoughness();
+}
+
+void QefSolver::combine(const QefSolver &other) {
+  ATA[0][0] += other.ATA[0][0];
+  ATA[1][1] += other.ATA[1][1];
+  ATA[2][2] += other.ATA[2][2];
+
+  ATA[0][1] += other.ATA[0][1];
+  ATA[0][2] += other.ATA[0][2];
+  ATA[1][2] += other.ATA[1][2];
+
+  ATb += other.ATb;
+  diag_ATc += other.diag_ATc;
+  btb += other.btb;
+  diag_ctc += other.diag_ctc;
+  massPointSum += other.massPointSum;
+  pointCount += other.pointCount;
+  averageNormalSum += other.averageNormalSum;
+  calRoughness();
+}
+
+void QefSolver::separate(const QefSolver &other) {
+  ATA[0][0] -= other.ATA[0][0];
+  ATA[1][1] -= other.ATA[1][1];
+  ATA[2][2] -= other.ATA[2][2];
+
+  ATA[0][1] -= other.ATA[0][1];
+  ATA[0][2] -= other.ATA[0][2];
+  ATA[1][2] -= other.ATA[1][2];
+
+  ATb -= other.ATb;
+  btb -= other.btb;
+  massPointSum -= other.massPointSum;
+  pointCount -= other.pointCount;
+  averageNormalSum -= other.averageNormalSum;
+  calRoughness();
+}
+
+void QefSolver::add(const glm::fvec3 &p, const glm::fvec3 &n) {
+  ATA[0][0] += n.x * n.x;
+  ATA[0][1] += n.x * n.y;
+  ATA[0][2] += n.x * n.z;
+  ATA[1][1] += n.y * n.y;
+  ATA[1][2] += n.y * n.z;
+  ATA[2][2] += n.z * n.z;
+  float dotp = glm::dot(p, n);
+  glm::fvec3 c = p * n;
+  ATb += n * dotp;
+  diag_ATc += n * c;
+  btb += dotp * dotp;
+  diag_ctc += c * c;
+  pointCount++;
+  massPointSum += p;
+  averageNormalSum += n;
+}
+
+void QefSolver::calRoughness() {
+  roughness = 1.f - glm::length(averageNormalSum) / (float)pointCount;
+}
+
+float QefSolver::getError(const glm::fvec3 &p) {
+  return qef_calc_error(ATA, p, ATb, btb);
+}
+
+float QefSolver::getError() {
+  return qef_calc_error(ATA, ATb, ATb, btb);
+}
+
+glm::fvec3 QefSolver::getVariance(const glm::fvec3 &p) {
+  auto v = qef_calc_co_variance(ATA, p, diag_ATc, diag_ctc);
+  return v;
+}
+
+void QefSolver::solve(glm::fvec3 &hermiteP, float &error) {
+  if (pointCount > 0) {
+    calRoughness();
+    glm::fvec3 massPoint = massPointSum / (float)pointCount;
+    glm::fvec3 _ATb = ATb - svd_vmul_sym(ATA, massPoint);
+    hermiteP = svd_solve_ATA_ATb(ATA, _ATb);
+    hermiteP += massPoint;
+    error = qef_calc_error(ATA, hermiteP, ATb, btb);
+    assert(!isnan(hermiteP.x));
+  }
+}
+```
+
+### src/KdtreeISO/lib/RectilinearGrid.cpp
+```
+//
+// Created by Danielhu on 2018/5/10.
+//
+
+#define GLM_ENABLE_EXPERIMENTAL
+#define GLM_FORCE_CTOR_INIT
+#define GLM_FORCE_EXPLICIT_CTOR
+
+#include <set>
+#include <Mesh.h>
+#include <map>
+#include <glm/ext.hpp>
+#include <glm/gtx/intersect.hpp>
+#include "Indicators.h"
+#include "RectilinearGrid.h"
+
+float RectilinearGrid::unitSize = 0.5f;
+
+void RectilinearGrid::setUnitSize(float size) {
+  unitSize = size;
+}
+float RectilinearGrid::getUnitSize() {
+  return unitSize;
+}
+
+void RectilinearGrid::solveComponent(int i) {
+  solve(components[i], vertices[i]);
+}
+
+void RectilinearGrid::solve(QefSolver &qef, Vertex &v) {
+  auto &p = v.hermiteP;
+  qef.solve(p, v.error);
+  auto extends = codeToPos(maxCode - minCode, RectilinearGrid::getUnitSize()) * 0.5f;
+  const auto min = codeToPos(minCode, RectilinearGrid::getUnitSize()) - extends;
+  const auto max = codeToPos(maxCode, RectilinearGrid::getUnitSize()) + extends;
+  if (p.x < min.x || p.x > max.x ||
+      p.y < min.y || p.y > max.y ||
+      p.z < min.z || p.z > max.z) {
+    p = qef.massPointSum / (float)qef.pointCount;
+  }
+}
+
+void RectilinearGrid::assignSign(ScalarField *t) {
+  auto sizeCode = PositionCode(
+    maxCode.x - minCode.x,
+    maxCode.y - minCode.y,
+    maxCode.z - minCode.z);
+  int8_t mtlID = t->getMaterialID();
+  for (int i = 0; i < 8; ++i) {
+    PositionCode code = decodeCell(i);
+    float val = t->index(minCode + sizeCode * code);
+    cornerSigns[i] = (uint8_t)(val >= 0. ? 0 : mtlID);
+  }
+  isSigned = !((cornerSigns[0] == cornerSigns[1]) &&
+               (cornerSigns[1] == cornerSigns[2]) &&
+               (cornerSigns[2] == cornerSigns[3]) &&
+               (cornerSigns[3] == cornerSigns[4]) &&
+               (cornerSigns[4] == cornerSigns[5]) &&
+               (cornerSigns[5] == cornerSigns[6]) &&
+               (cornerSigns[6] == cornerSigns[7]));
+}
+
+void RectilinearGrid::calCornerComponents() {
+  assert(components.empty());
+  std::set<int> clusters[8];
+  for (int i = 0; i < 8; ++i) {
+    if (cornerSigns[i] != 0) {
+      clusters[i].insert({i});
+      componentIndices[i] = static_cast<uint8_t>(i);
+    }
+  }
+  for (int i = 0; i < 12; ++i) {
+    int c1 = cellProcFaceMask[i][0];
+    int c2 = cellProcFaceMask[i][1];
+    if (cornerSigns[c1] == cornerSigns[c2] && cornerSigns[c2] != 0) {
+      int co1 = componentIndices[c1];
+      int co2 = componentIndices[c2];
+      auto &c2Components = clusters[co2];
+      for (auto comp : c2Components) {
+        clusters[co1].insert(comp);
+      }
+      for (auto comp : clusters[co1]) {
+        componentIndices[comp] = static_cast<uint8_t>(co1);
+      }
+    }
+  }
+  int reorderMap[8]{0};
+  for (int i = 0; i < 8; ++i) {
+    reorderMap[i] = -1;
+  }
+  int new_order = 0;
+  for (int i = 0; i < 8; ++i) {
+    if (reorderMap[componentIndices[i]] == -1 && cornerSigns[i] != 0) {
+      reorderMap[componentIndices[i]] = new_order++;
+    }
+  }
+  for (int i = 0; i < 8; ++i) {
+    componentIndices[i] = static_cast<uint8_t>(reorderMap[componentIndices[i]]);
+  }
+  vertices.resize(static_cast<unsigned long>(new_order));
+  components.resize(static_cast<unsigned long>(new_order));
+}
+
+bool RectilinearGrid::sampleQef(ScalarField *t, bool all) {
+  calCornerComponents();
+  const auto min = codeToPos(minCode, RectilinearGrid::getUnitSize());
+
+  // auto minX = codeToPos(minCode, RectilinearGrid::getUnitSize()).x;
+  // assert(!isinf(minX));
+  auto isize = maxCode - minCode;
+  auto size = codeToPos(isize, RectilinearGrid::getUnitSize());
+  assert(!isnan(size.x));
+  // size = codeToPos(isize, RectilinearGrid::getUnitSize());
+
+  fvec3 cornerPositions[8];
+  for (int i = 0; i < 8; ++i) {
+    cornerPositions[i] = min + size * min_offset_subdivision(i);
+  }
+  for (int i = 0; i < 12; ++i) {
+    fvec3 p1 = cornerPositions[edge_map[i][0]];
+    fvec3 p2 = cornerPositions[edge_map[i][1]];
+    if (cornerSigns[edge_map[i][0]] != cornerSigns[edge_map[i][1]]) {
+      fvec3 p, n;
+      if (t->solve(p1, p2, p)) {
+        t->normal(p, n);
+        int qefIndex = edgeComponentIndex(edge_map[i][0], edge_map[i][1]);
+        components.at(static_cast<unsigned long>(qefIndex)).add(p, n);
+        if (all) {
+          allQef.add(p, n);
+        }
+      }
+    }
+  }
+  for (int i = 0; i < components.size(); ++i) {
+    if (components[i].pointCount == 0 || components[i].pointCount >= 12) {
+      return false;
+    }
+    t->normal(vertices[i].hermiteP, vertices[i].hermiteN);
+  }
+  return allQef.pointCount > 0;
+}
+
+void RectilinearGrid::draw(Mesh *mesh) {
+  fvec3 size = codeToPos(maxCode - minCode, RectilinearGrid::getUnitSize());
+  fvec3 min = codeToPos(minCode, RectilinearGrid::getUnitSize());
+  for (int i = 0; i < 12; ++i) {
+    auto a = min_offset_subdivision(cellProcFaceMask[i][0]) * size + min;
+    auto b = min_offset_subdivision(cellProcFaceMask[i][1]) * size + min;
+    auto na = normalize(min_offset_subdivision(cellProcFaceMask[i][0]) - fvec3(0.5f));
+    auto nb = normalize(min_offset_subdivision(cellProcFaceMask[i][1]) - fvec3(0.5f));
+    mesh->positions.push_back(a);
+    mesh->positions.push_back(a);
+    mesh->positions.push_back(b);
+    mesh->normals.push_back(na);
+    mesh->normals.push_back(na);
+    mesh->normals.push_back(nb);
+    mesh->indices.push_back(static_cast<unsigned int &&>(mesh->indices.size()));
+    mesh->indices.push_back(static_cast<unsigned int &&>(mesh->indices.size()));
+    mesh->indices.push_back(static_cast<unsigned int &&>(mesh->indices.size()));
+  }
+}
+bool RectilinearGrid::isInterFreeCondition2Faild(const std::vector<Vertex *> &polygons,
+                                                 const glm::fvec3 &p1,
+                                                 const glm::fvec3 &p2) {
+  int anotherV = 3;
+  bool interSupportingEdge = false;
+
+  for (int i = 2; i < polygons.size(); ++i) {
+    fvec2 baryPos;
+    float distance;
+    bool isInter = glm::intersectRayTriangle(p1,
+                                             p2 - p1,
+                                             polygons[0]->hermiteP,
+                                             polygons[i - 1]->hermiteP,
+                                             polygons[i]->hermiteP,
+                                             baryPos,
+                                             distance);
+    isInter = isInter && (distance > 0.f && distance < 1.f);
+    if (isInter) {
+      interSupportingEdge = true;
+      anotherV = i % 3 + 1;
+    }
+  }
+  if (polygons.size() == 3) {
+    return !interSupportingEdge;
+  }
+  else {
+    fvec2 baryPos;
+    float distance;
+    bool interTetrahedron = glm::intersectRayTriangle(polygons[0]->hermiteP,
+                                                      polygons[2]->hermiteP - polygons[0]->hermiteP,
+                                                      p1,
+                                                      p2,
+                                                      polygons[anotherV]->hermiteP,
+                                                      baryPos,
+                                                      distance);
+    interTetrahedron = interTetrahedron && (distance > 0.f && distance < 1.f);
+    return !(interTetrahedron && interSupportingEdge);
+  }
+}
+bool RectilinearGrid::calClusterability(RectilinearGrid *left,
+                                        RectilinearGrid *right,
+                                        int dir,
+                                        const PositionCode &minCode,
+                                        const PositionCode &maxCode,
+                                        ScalarField *s) {
+  if (!left && !right) {
+    return true;
+  }
+  int clusterCornerSigns[8];
+  for (int i = 0; i < 8; ++i) {
+    clusterCornerSigns[i] = s->index(minCode + (maxCode - minCode) * decodeCell(i)) >= 0 ? 0 : s->getMaterialID();
+  }
+  bool homogeneous = true;
+  for (int i = 1; i < 8; ++i) {
+    if (clusterCornerSigns[i] != clusterCornerSigns[0]) {
+      homogeneous = false;
+    }
+  }
+  if (homogeneous) {
+    return false;
+  }
+
+  if (!(left && right)) {
+    return true;
+  }
+
+  RectilinearGrid *params[2] = {left, right};
+
+  for (int i = 0; i < 4; ++i) {
+    int edgeMinIndex = cellProcFaceMask[dir * 4 + i][0];
+    int edgeMaxIndex = cellProcFaceMask[dir * 4 + i][1];
+    int signChanges = 0;
+    for (int j = 0; j < 2; ++j) {
+      if (params[j]->cornerSigns[edgeMinIndex] != params[j]->cornerSigns[edgeMaxIndex]) {
+        signChanges++;
+      }
+    }
+    if (signChanges > 1) {
+      return false;
+    }
+  }
+  return true;
+}
+void RectilinearGrid::combineAAGrid(RectilinearGrid *left,
+                                    RectilinearGrid *right,
+                                    int dir,
+                                    RectilinearGrid *out) {
+  out->calCornerComponents();
+  if (!left && !right) {
+    return;
+  }
+  std::map<int, int> combineMaps[2];
+  RectilinearGrid *grids[2] = {left, right};
+  for (int i = 0; i < 4; ++i) {
+    int c = -1;
+    for (int j = 0; j < 2; ++j) {
+      if (out->cornerSigns[cellProcFaceMask[dir * 4 + i][j]] != 0) {
+        c = out->componentIndices[cellProcFaceMask[dir * 4 + i][j]];
+        break;
+      }
+    }
+    if (c == -1) {
+      continue;
+    }
+    for (int j = 0; j < 2; ++j) {
+      auto child = grids[j];
+      if (child) {
+        for (int k = 0; k < 2; ++k) {
+          if (child->cornerSigns[cellProcFaceMask[dir * 4 + i][k]] != 0) {
+            int childC = child->componentIndices[cellProcFaceMask[dir * 4 + i][k]];
+            assert(child->components[childC].pointCount > 0);
+            combineMaps[j][c] = childC;
+            break;
+          }
+        }
+      }
+    }
+  }
+  for (int i = 0; i < 2; ++i) {
+    for (auto p : combineMaps[i]) {
+      out->components.at(p.first).combine(grids[i]->components.at(p.second));
+      grids[i]->vertices.at(p.second).parent = &out->vertices.at(p.first);
+    }
+  }
+  int count = 0;
+  for (auto c : out->components) {
+    count += c.pointCount;
+  }
+}
+```
+
+### src/KdtreeISO/lib/ScalarField.cpp
+```
+//
+// Created by Danielhu on 2018/5/30.
+//
+
+#include <glm/glm.hpp>
+
+#include "RectilinearGrid.h"
+#include "ScalarField.h"
+
+fvec3 ScalarField::normal_f1(const fvec3 &p) {
+  float nx = value(p + fvec3(gradientOffset(), 0.f, 0.f)) - value(p - fvec3(gradientOffset(), 0.f, 0.f));
+  float ny = value(p + fvec3(0.f, gradientOffset(), 0.f)) - value(p - fvec3(0.f, gradientOffset(), 0.f));
+  float nz = value(p + fvec3(0.f, 0.f, gradientOffset())) - value(p - fvec3(0.f, 0.f, gradientOffset()));
+
+  // auto g = fvec3(nx, ny, nz) / gradientOffset() / 2.f;
+  if (nx == 0.f && ny == 0.f && nz == 0.f) {
+    return glm::normalize(fvec3(1));
+  }
+  return glm::normalize(fvec3(nx, ny, nz));
+}
+
+void ScalarField::normal(const fvec3 &p, fvec3 &out) {
+  float nx = value(p + fvec3(gradientOffset(), 0.f, 0.f)) - value(p - fvec3(gradientOffset(), 0.f, 0.f));
+  float ny = value(p + fvec3(0.f, gradientOffset(), 0.f)) - value(p - fvec3(0.f, gradientOffset(), 0.f));
+  float nz = value(p + fvec3(0.f, 0.f, gradientOffset())) - value(p - fvec3(0.f, 0.f, gradientOffset()));
+
+  // auto g = fvec3(nx, ny, nz) / gradientOffset() / 2.f;
+  if (nx == 0.f && ny == 0.f && nz == 0.f) {
+    out = glm::normalize(fvec3(1));
+    return;
+  }
+  out = glm::normalize(fvec3(nx, ny, nz));
+
+  //  constexpr int filterSize = 5;
+  //  float l = gradientOffset();
+  //  for (int x = 0; x < filterSize; ++x) {
+  //    for (int y = 0; y < filterSize; ++y) {
+  //      for (int z = 0; z < filterSize; ++z) {
+  //        out += p + fvec3((x - filterSize / 2) * l, (y - filterSize / 2) * l, (z - filterSize / 2) * l);
+  //      }
+  //    }
+  //  }
+  //  if (out.x == 0.f && out.y == 0.f && out.z == 0.f) {
+  //    out = glm::normalize(fvec3(1));
+  //  }
+  //  out = glm::normalize(out);
+  assert(!isnan(out.x));
+}
+glm::fvec3 ScalarField::gradient(const glm::fvec3 &p) {
+  float nx = value(p + fvec3(gradientOffset(), 0.f, 0.f)) - value(p - fvec3(gradientOffset(), 0.f, 0.f));
+  float ny = value(p + fvec3(0.f, gradientOffset(), 0.f)) - value(p - fvec3(0.f, gradientOffset(), 0.f));
+  float nz = value(p + fvec3(0.f, 0.f, gradientOffset())) - value(p - fvec3(0.f, 0.f, gradientOffset()));
+
+  // auto g = fvec3(nx, ny, nz) / gradientOffset() / 2.f;
+  return fvec3(nx, ny, nz) / gradientOffset() / 2.f;
+}
+```
+
+### src/KdtreeISO/lib/Topology.cpp
+```
+//
+// Created by Danielhu on 2018/1/13.
+//
+#include <glm/glm.hpp>
+#include <algorithm>
+#include <iostream>
+#include <RectilinearGrid.h>
+#include "Topology.h"
+#include "Utils.h"
+
+using glm::dot;
+using glm::fvec3;
+using glm::fvec4;
+using glm::max;
+using glm::min;
+
+float gradient_offset = 0.01f;
+float divergence_offset = 0.01f;
+
+float Topology::index(const PositionCode &code) {
+  return value(codeToPos(code, RectilinearGrid::getUnitSize()));
+}
+
+bool Topology::solve(const fvec3 &p1, const fvec3 &p2, fvec3 &out) {
+  auto offset = p2 - p1;
+  float min = 0.f;
+  float max = 1.f;
+  float mid = (min + max) / 2.f;
+
+  for (int i = 0; i < 16; ++i) {
+    float l = value(p1 + offset * min);
+    mid = (min + max) / 2.f;
+    float midsign = value(p1 + offset * mid);
+    if ((l >= 0 && midsign < 0) || (l < 0 && midsign >= 0)) {
+      max = mid;
+    }
+    else {
+      min = mid;
+    }
+  }
+  out = p1 + offset * mid;
+  return true;
+}
+
+float Topology::laplaceOperator(const fvec3 &p) {
+  float lx = gradient(p + fvec3(divergence_offset, 0.f, 0.f)).x - gradient(p - fvec3(divergence_offset, 0.f, 0.f)).x;
+  float ly = gradient(p + fvec3(0.f, divergence_offset, 0.f)).y - gradient(p - fvec3(0.f, divergence_offset, 0.f)).y;
+  float lz = gradient(p + fvec3(0.f, 0.f, divergence_offset)).z - gradient(p - fvec3(0.f, 0.f, divergence_offset)).z;
+  return (lx + ly + lz) / divergence_offset;
+}
+
+float Transform::value(const fvec3 &p) {
+  fvec3 t = fvec4(p, 1.0) * trans_;
+  return inner_->value(t);
+}
+
+float Sphere::value(const fvec3 &p) {
+  fvec3 off = fvec3(p.x - center.x, p.y - center.y, p.z - center.z);
+  float l = glm::length(off);
+  auto d = l - radius;
+  return d;
+}
+
+// bool Sphere::solve(const fvec3 &p1, const fvec3 &p2, fvec3 &out) {
+//   fvec3 p1p2 = p1 - p2;
+//   float a = dot(p1p2, p1p2);
+//   float b = 2 * dot(p2 - center, p1 - p2);
+//   fvec3 p2c = p2 - center;
+//   float c = dot(p2c, p2c) - dot(radius, radius);
+//   float delta = b * b - 4.f * a * c;
+//   if (delta < 0) {
+//     return false;
+//   }
+//   float sqrt_delta = sqrt(delta);
+//   float t1 = (-b + sqrt_delta) / (2 * a);
+//   float t2 = (-b - sqrt_delta) / (2 * a);
+//   if (t1 >= 0.f && t1 <= 1.f) {
+//     out = t1 * p1p2 + p2;
+//     return true;
+//   }
+//   if (t2 >= 0.f && t2 <= 1.f) {
+//     out = t2 * p1p2 + p2;
+//     return true;
+//   }
+//   return false;
+// }
+
+float AABB::value(const fvec3 &p) {
+  fvec3 offset = glm::abs(p - (min_ + max_) / 2.f);
+  offset -= (max_ - min_) / 2.f;
+  return min(length(offset), max(offset.x, max(offset.y, offset.z)));
+}
+
+float Heart::value(const fvec3 &p) {
+  fvec3 offset = (p - center) / scale;
+
+  float x = offset.x, y = offset.z, z = offset.y;
+  float a = x * x + 9.0f / 4.0f * y * y + z * z - 1;
+  return a * a * a - x * x * z * z * z - 9.0f / 80.0f * y * y * z * z * z;
+}
+```
+
+### src/KdtreeISO/lib/VolumeData.cpp
+```
+﻿//
+// Created by Danielhu on 2018/5/29.
+//
+
+#include "VolumeData.h"
+#include "Indicators.h"
+#include "RectilinearGrid.h"
+#include <glm/gtc/type_precision.hpp>
+
+void VolumeData::readTIFF() {
+  TIFF *firstFile = TIFFOpen((pathToTiffs + "001.tif").c_str(), "r");
+  if (!firstFile)
+    throw "no .tif file found";
+  TIFFGetField(firstFile, TIFFTAG_IMAGEWIDTH, &width);
+  TIFFGetField(firstFile, TIFFTAG_IMAGELENGTH, &height);
+  data.resize(width * height * levels);
+  uint8_t *p = data.data();
+  for (int i = 0; i < levels; ++i) {
+    std::stringstream namess;
+    namess << std::setfill('0') << std::setw(3) << i + 1;
+    auto name = (pathToTiffs + namess.str() + ".tif");
+    if (TIFF *file = TIFFOpen(name.c_str(), "r")) {
+      for (int h = 0; h < height; ++h) {
+        TIFFReadScanline(file, p, h);
+        p += width;
+      }
+      TIFFClose(file);
+    }
+  }
+}
+
+float VolumeData::index(const PositionCode &code) {
+  auto offset = codeToOffset((code - minCode) * scale);
+  if (offset >= width * height * levels || offset < 0) {
+    return isovalue;
+  }
+
+  // return ISO_VAL - (float)data[codeToOffset((code - minCode) * scale)];
+
+  float result = 0;
+  for (int x = 0; x < scale.x; ++x)
+    for (int y = 0; y < scale.y; ++y)
+      for (int z = 0; z < scale.z; ++z) {
+        result += (float)data[codeToOffset((code - minCode) * scale + PositionCode(x, y, z))];
+      }
+  return result / (scale.x * scale.y * scale.z) - isovalue;
+}
+
+float VolumeData::value(const glm::fvec3 &p) {
+  float l = RectilinearGrid::getUnitSize();
+  return index(posToCode(p, l));
+  /* PositionCode samples[8];
+  float values[8];
+  for (int i = 0; i < 8; ++i) {
+    samples[i] = posToCodeFloor(p + l * min_offset_subdivision(i), l);
+    values[i] = index(samples[i]);
+  }
+  fvec3 d = (p - codeToPos(samples[0], l)) / l;
+  d = glm::max(fvec3(0), glm::min(fvec3(1), d));
+  float c00 = values[0b000] * (1 - d.x) + values[0b100] * d.x;
+  float c01 = values[0b001] * (1 - d.x) + values[0b101] * d.x;
+  float c10 = values[0b010] * (1 - d.x) + values[0b110] * d.x;
+  float c11 = values[0b011] * (1 - d.x) + values[0b111] * d.x;
+  float c0 = c00 * (1 - d.y) + c10 * d.y;
+  float c1 = c01 * (1 - d.y) + c11 * d.y;
+  float c = c0 * (1 - d.z) + c1 * d.z;
+  return c;*/
+}
+
+bool VolumeData::solve(const glm::fvec3 &p1, const glm::fvec3 &p2,
+                       glm::fvec3 &out) {
+  float v1 = value(p1);
+  float v2 = value(p2);
+  if (v2 - v1 == 0.f) {
+    out = (p1 + p2) / 2.f;
+  }
+  else {
+    out = p1 - (p2 - p1) * v1 / (v2 - v1);
+  }
+  return true;
+}
+```
+
+### src/examples/opengl/cxxopts.hpp
+```
+/*
+
+Copyright (c) 2014, 2015, 2016, 2017 Jarryd Beck
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+*/
+
+#ifndef CXXOPTS_HPP_INCLUDED
+#define CXXOPTS_HPP_INCLUDED
+
+#include <cstring>
+#include <cctype>
+#include <exception>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <regex>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#ifdef __cpp_lib_optional
+#include <optional>
+#define CXXOPTS_HAS_OPTIONAL
+#endif
+
+#define CXXOPTS__VERSION_MAJOR 2
+#define CXXOPTS__VERSION_MINOR 2
+#define CXXOPTS__VERSION_PATCH 0
+
+namespace cxxopts {
+static constexpr struct {
+  uint8_t major, minor, patch;
+} version = {
+  CXXOPTS__VERSION_MAJOR,
+  CXXOPTS__VERSION_MINOR,
+  CXXOPTS__VERSION_PATCH};
+} // namespace cxxopts
+
+//when we ask cxxopts to use Unicode, help strings are processed using ICU,
+//which results in the correct lengths being computed for strings when they
+//are formatted for the help output
+//it is necessary to make sure that <unicode/unistr.h> can be found by the
+//compiler, and that icu-uc is linked in to the binary.
+
+#ifdef CXXOPTS_USE_UNICODE
+#include <unicode/unistr.h>
+
+namespace cxxopts {
+typedef icu::UnicodeString String;
+
+inline String
+toLocalString(std::string s) {
+  return icu::UnicodeString::fromUTF8(std::move(s));
+}
+
+class UnicodeStringIterator : public std::iterator<std::forward_iterator_tag, int32_t> {
+  public:
+  UnicodeStringIterator(const icu::UnicodeString *string, int32_t pos)
+    : s(string), i(pos) {
+  }
+
+  value_type
+  operator*() const {
+    return s->char32At(i);
+  }
+
+  bool
+  operator==(const UnicodeStringIterator &rhs) const {
+    return s == rhs.s && i == rhs.i;
+  }
+
+  bool
+  operator!=(const UnicodeStringIterator &rhs) const {
+    return !(*this == rhs);
+  }
+
+  UnicodeStringIterator &
+  operator++() {
+    ++i;
+    return *this;
+  }
+
+  UnicodeStringIterator
+  operator+(int32_t v) {
+    return UnicodeStringIterator(s, i + v);
+  }
+
+  private:
+  const icu::UnicodeString *s;
+  int32_t i;
+};
+
+inline String &
+stringAppend(String &s, String a) {
+  return s.append(std::move(a));
+}
+
+inline String &
+stringAppend(String &s, int n, UChar32 c) {
+  for (int i = 0; i != n; ++i) {
+    s.append(c);
+  }
+
+  return s;
+}
+
+template <typename Iterator>
+String &
+stringAppend(String &s, Iterator begin, Iterator end) {
+  while (begin != end) {
+    s.append(*begin);
+    ++begin;
+  }
+
+  return s;
+}
+
+inline size_t
+stringLength(const String &s) {
+  return s.length();
+}
+
+inline std::string
+toUTF8String(const String &s) {
+  std::string result;
+  s.toUTF8String(result);
+
+  return result;
+}
+
+inline bool
+empty(const String &s) {
+  return s.isEmpty();
+}
+} // namespace cxxopts
+
+namespace std {
+inline cxxopts::UnicodeStringIterator
+begin(const icu::UnicodeString &s) {
+  return cxxopts::UnicodeStringIterator(&s, 0);
+}
+
+inline cxxopts::UnicodeStringIterator
+end(const icu::UnicodeString &s) {
+  return cxxopts::UnicodeStringIterator(&s, s.length());
+}
+} // namespace std
+
+//ifdef CXXOPTS_USE_UNICODE
+#else
+
+namespace cxxopts {
+typedef std::string String;
+
+template <typename T>
+T toLocalString(T &&t) {
+  return std::forward<T>(t);
+}
+
+inline size_t
+stringLength(const String &s) {
+  return s.length();
+}
+
+inline String &
+stringAppend(String &s, String a) {
+  return s.append(std::move(a));
+}
+
+inline String &
+stringAppend(String &s, size_t n, char c) {
+  return s.append(n, c);
+}
+
+template <typename Iterator>
+String &
+stringAppend(String &s, Iterator begin, Iterator end) {
+  return s.append(begin, end);
+}
+
+template <typename T>
+std::string
+toUTF8String(T &&t) {
+  return std::forward<T>(t);
+}
+
+inline bool
+empty(const std::string &s) {
+  return s.empty();
+}
+} // namespace cxxopts
+
+//ifdef CXXOPTS_USE_UNICODE
+#endif
+
+namespace cxxopts {
+namespace {
+#ifdef _WIN32
+const std::string LQUOTE("\'");
+const std::string RQUOTE("\'");
+#else
+const std::string LQUOTE("\'");
+const std::string RQUOTE("\'");
+#endif
+} // namespace
+
+class Value : public std::enable_shared_from_this<Value> {
+  public:
+  virtual ~Value() = default;
+
+  virtual std::shared_ptr<Value>
+  clone() const = 0;
+
+  virtual void
+  parse(const std::string &text) const = 0;
+
+  virtual void
+  parse() const = 0;
+
+  virtual bool
+  has_default() const = 0;
+
+  virtual bool
+  is_container() const = 0;
+
+  virtual bool
+  has_implicit() const = 0;
+
+  virtual std::string
+  get_default_value() const = 0;
+
+  virtual std::string
+  get_implicit_value() const = 0;
+
+  virtual std::shared_ptr<Value>
+  default_value(const std::string &value) = 0;
+
+  virtual std::shared_ptr<Value>
+  implicit_value(const std::string &value) = 0;
+
+  virtual bool
+  is_boolean() const = 0;
+};
+
+class OptionException : public std::exception {
+  public:
+  OptionException(const std::string &message)
+    : m_message(message) {
+  }
+
+  virtual const char *
+  what() const noexcept {
+    return m_message.c_str();
+  }
+
+  private:
+  std::string m_message;
+};
+
+class OptionSpecException : public OptionException {
+  public:
+  OptionSpecException(const std::string &message)
+    : OptionException(message) {
+  }
+};
+
+class OptionParseException : public OptionException {
+  public:
+  OptionParseException(const std::string &message)
+    : OptionException(message) {
+  }
+};
+
+class option_exists_error : public OptionSpecException {
+  public:
+  option_exists_error(const std::string &option)
+    : OptionSpecException(u8"Option " + LQUOTE + option + RQUOTE + u8" already exists") {
+  }
+};
+
+class invalid_option_format_error : public OptionSpecException {
+  public:
+  invalid_option_format_error(const std::string &format)
+    : OptionSpecException(u8"Invalid option format " + LQUOTE + format + RQUOTE) {
+  }
+};
+
+class option_syntax_exception : public OptionParseException {
+  public:
+  option_syntax_exception(const std::string &text)
+    : OptionParseException(u8"Argument " + LQUOTE + text + RQUOTE +
+                           u8" starts with a - but has incorrect syntax") {
+  }
+};
+
+class option_not_exists_exception : public OptionParseException {
+  public:
+  option_not_exists_exception(const std::string &option)
+    : OptionParseException(u8"Option " + LQUOTE + option + RQUOTE + u8" does not exist") {
+  }
+};
+
+class missing_argument_exception : public OptionParseException {
+  public:
+  missing_argument_exception(const std::string &option)
+    : OptionParseException(
+        u8"Option " + LQUOTE + option + RQUOTE + u8" is missing an argument") {
+  }
+};
+
+class option_requires_argument_exception : public OptionParseException {
+  public:
+  option_requires_argument_exception(const std::string &option)
+    : OptionParseException(
+        u8"Option " + LQUOTE + option + RQUOTE + u8" requires an argument") {
+  }
+};
+
+class option_not_has_argument_exception : public OptionParseException {
+  public:
+  option_not_has_argument_exception(
+    const std::string &option,
+    const std::string &arg)
+    : OptionParseException(
+        u8"Option " + LQUOTE + option + RQUOTE +
+        u8" does not take an argument, but argument " +
+        LQUOTE + arg + RQUOTE + " given") {
+  }
+};
+
+class option_not_present_exception : public OptionParseException {
+  public:
+  option_not_present_exception(const std::string &option)
+    : OptionParseException(u8"Option " + LQUOTE + option + RQUOTE + u8" not present") {
+  }
+};
+
+class argument_incorrect_type : public OptionParseException {
+  public:
+  argument_incorrect_type(
+    const std::string &arg)
+    : OptionParseException(
+        u8"Argument " + LQUOTE + arg + RQUOTE + u8" failed to parse") {
+  }
+};
+
+class option_required_exception : public OptionParseException {
+  public:
+  option_required_exception(const std::string &option)
+    : OptionParseException(
+        u8"Option " + LQUOTE + option + RQUOTE + u8" is required but not present") {
+  }
+};
+
+namespace values {
+namespace {
+std::basic_regex<char> integer_pattern("(-)?(0x)?([0-9a-zA-Z]+)|((0x)?0)");
+std::basic_regex<char> truthy_pattern("(t|T)(rue)?");
+std::basic_regex<char> falsy_pattern("((f|F)(alse)?)?");
+} // namespace
+
+namespace detail {
+template <typename T, bool B>
+struct SignedCheck;
+
+template <typename T>
+struct SignedCheck<T, true> {
+  template <typename U>
+  void
+  operator()(bool negative, U u, const std::string &text) {
+    if (negative) {
+      if (u > static_cast<U>(-(std::numeric_limits<T>::min)())) {
+        throw argument_incorrect_type(text);
+      }
+    }
+    else {
+      if (u > static_cast<U>((std::numeric_limits<T>::max)())) {
+        throw argument_incorrect_type(text);
+      }
+    }
+  }
+};
+
+template <typename T>
+struct SignedCheck<T, false> {
+  template <typename U>
+  void
+  operator()(bool, U, const std::string &) {}
+};
+
+template <typename T, typename U>
+void check_signed_range(bool negative, U value, const std::string &text) {
+  SignedCheck<T, std::numeric_limits<T>::is_signed>()(negative, value, text);
+}
+} // namespace detail
+
+template <typename R, typename T>
+R checked_negate(T &&t, const std::string &, std::true_type) {
+  // if we got to here, then `t` is a positive number that fits into
+  // `R`. So to avoid MSVC C4146, we first cast it to `R`.
+  // See https://github.com/jarro2783/cxxopts/issues/62 for more details.
+  return -static_cast<R>(t);
+}
+
+template <typename R, typename T>
+T checked_negate(T &&, const std::string &text, std::false_type) {
+  throw argument_incorrect_type(text);
+}
+
+template <typename T>
+void integer_parser(const std::string &text, T &value) {
+  std::smatch match;
+  std::regex_match(text, match, integer_pattern);
+
+  if (match.length() == 0) {
+    throw argument_incorrect_type(text);
+  }
+
+  if (match.length(4) > 0) {
+    value = 0;
+    return;
+  }
+
+  using US = typename std::make_unsigned<T>::type;
+
+  constexpr auto umax = (std::numeric_limits<US>::max)();
+  constexpr bool is_signed = std::numeric_limits<T>::is_signed;
+  const bool negative = match.length(1) > 0;
+  const uint8_t base = match.length(2) > 0 ? 16 : 10;
+
+  auto value_match = match[3];
+
+  US result = 0;
+
+  for (auto iter = value_match.first; iter != value_match.second; ++iter) {
+    US digit = 0;
+
+    if (*iter >= '0' && *iter <= '9') {
+      digit = *iter - '0';
+    }
+    else if (base == 16 && *iter >= 'a' && *iter <= 'f') {
+      digit = *iter - 'a' + 10;
+    }
+    else if (base == 16 && *iter >= 'A' && *iter <= 'F') {
+      digit = *iter - 'A' + 10;
+    }
+    else {
+      throw argument_incorrect_type(text);
+    }
+
+    if (umax - digit < result * base) {
+      throw argument_incorrect_type(text);
+    }
+
+    result = result * base + digit;
+  }
+
+  detail::check_signed_range<T>(negative, result, text);
+
+  if (negative) {
+    value = checked_negate<T>(result,
+                              text,
+                              std::integral_constant<bool, is_signed>());
+  }
+  else {
+    value = result;
+  }
+}
+
+template <typename T>
+void stringstream_parser(const std::string &text, T &value) {
+  std::stringstream in(text);
+  in >> value;
+  if (!in) {
+    throw argument_incorrect_type(text);
+  }
+}
+
+inline void
+parse_value(const std::string &text, uint8_t &value) {
+  integer_parser(text, value);
+}
+
+inline void
+parse_value(const std::string &text, int8_t &value) {
+  integer_parser(text, value);
+}
+
+inline void
+parse_value(const std::string &text, uint16_t &value) {
+  integer_parser(text, value);
+}
+
+inline void
+parse_value(const std::string &text, int16_t &value) {
+  integer_parser(text, value);
+}
+
+inline void
+parse_value(const std::string &text, uint32_t &value) {
+  integer_parser(text, value);
+}
+
+inline void
+parse_value(const std::string &text, int32_t &value) {
+  integer_parser(text, value);
+}
+
+inline void
+parse_value(const std::string &text, uint64_t &value) {
+  integer_parser(text, value);
+}
+
+inline void
+parse_value(const std::string &text, int64_t &value) {
+  integer_parser(text, value);
+}
+
+inline void
+parse_value(const std::string &text, bool &value) {
+  std::smatch result;
+  std::regex_match(text, result, truthy_pattern);
+
+  if (!result.empty()) {
+    value = true;
+    return;
+  }
+
+  std::regex_match(text, result, falsy_pattern);
+  if (!result.empty()) {
+    value = false;
+    return;
+  }
+
+  throw argument_incorrect_type(text);
+}
+
+inline void
+parse_value(const std::string &text, std::string &value) {
+  value = text;
+}
+
+// The fallback parser. It uses the stringstream parser to parse all types
+// that have not been overloaded explicitly.  It has to be placed in the
+// source code before all other more specialized templates.
+template <typename T>
+void parse_value(const std::string &text, T &value) {
+  stringstream_parser(text, value);
+}
+
+template <typename T>
+void parse_value(const std::string &text, std::vector<T> &value) {
+  T v;
+  parse_value(text, v);
+  value.push_back(v);
+}
+
+#ifdef CXXOPTS_HAS_OPTIONAL
+template <typename T>
+void parse_value(const std::string &text, std::optional<T> &value) {
+  T result;
+  parse_value(text, result);
+  value = std::move(result);
+}
+#endif
+
+template <typename T>
+struct type_is_container {
+  static constexpr bool value = false;
+};
+
+template <typename T>
+struct type_is_container<std::vector<T>> {
+  static constexpr bool value = true;
+};
+
+template <typename T>
+class abstract_value : public Value {
+  using Self = abstract_value<T>;
+
+  public:
+  abstract_value()
+    : m_result(std::make_shared<T>()), m_store(m_result.get()) {
+  }
+
+  abstract_value(T *t)
+    : m_store(t) {
+  }
+
+  virtual ~abstract_value() = default;
+
+  abstract_value(const abstract_value &rhs) {
+    if (rhs.m_result) {
+      m_result = std::make_shared<T>();
+      m_store = m_result.get();
+    }
+    else {
+      m_store = rhs.m_store;
+    }
+
+    m_default = rhs.m_default;
+    m_implicit = rhs.m_implicit;
+    m_default_value = rhs.m_default_value;
+    m_implicit_value = rhs.m_implicit_value;
+  }
+
+  void
+  parse(const std::string &text) const {
+    parse_value(text, *m_store);
+  }
+
+  bool
+  is_container() const {
+    return type_is_container<T>::value;
+  }
+
+  void
+  parse() const {
+    parse_value(m_default_value, *m_store);
+  }
+
+  bool
+  has_default() const {
+    return m_default;
+  }
+
+  bool
+  has_implicit() const {
+    return m_implicit;
+  }
+
+  std::shared_ptr<Value>
+  default_value(const std::string &value) {
+    m_default = true;
+    m_default_value = value;
+    return shared_from_this();
+  }
+
+  std::shared_ptr<Value>
+  implicit_value(const std::string &value) {
+    m_implicit = true;
+    m_implicit_value = value;
+    return shared_from_this();
+  }
+
+  std::string
+  get_default_value() const {
+    return m_default_value;
+  }
+
+  std::string
+  get_implicit_value() const {
+    return m_implicit_value;
+  }
+
+  bool
+  is_boolean() const {
+    return std::is_same<T, bool>::value;
+  }
+
+  const T &
+  get() const {
+    if (m_store == nullptr) {
+      return *m_result;
+    }
+    else {
+      return *m_store;
+    }
+  }
+
+  protected:
+  std::shared_ptr<T> m_result;
+  T *m_store;
+
+  bool m_default = false;
+  bool m_implicit = false;
+
+  std::string m_default_value;
+  std::string m_implicit_value;
+};
+
+template <typename T>
+class standard_value : public abstract_value<T> {
+  public:
+  using abstract_value<T>::abstract_value;
+
+  std::shared_ptr<Value>
+  clone() const {
+    return std::make_shared<standard_value<T>>(*this);
+  }
+};
+
+template <>
+class standard_value<bool> : public abstract_value<bool> {
+  public:
+  ~standard_value() = default;
+
+  standard_value() {
+    set_default_and_implicit();
+  }
+
+  standard_value(bool *b)
+    : abstract_value(b) {
+    set_default_and_implicit();
+  }
+
+  std::shared_ptr<Value>
+  clone() const {
+    return std::make_shared<standard_value<bool>>(*this);
+  }
+
+  private:
+  void
+  set_default_and_implicit() {
+    m_default = true;
+    m_default_value = "false";
+    m_implicit = true;
+    m_implicit_value = "true";
+  }
+};
+} // namespace values
+
+template <typename T>
+std::shared_ptr<Value>
+value() {
+  return std::make_shared<values::standard_value<T>>();
+}
+
+template <typename T>
+std::shared_ptr<Value>
+value(T &t) {
+  return std::make_shared<values::standard_value<T>>(&t);
+}
+
+class OptionAdder;
+
+class OptionDetails {
+  public:
+  OptionDetails(
+    const std::string &short_,
+    const std::string &long_,
+    const String &desc,
+    std::shared_ptr<const Value> val)
+    : m_short(short_), m_long(long_), m_desc(desc), m_value(val), m_count(0) {
+  }
+
+  OptionDetails(const OptionDetails &rhs)
+    : m_desc(rhs.m_desc), m_count(rhs.m_count) {
+    m_value = rhs.m_value->clone();
+  }
+
+  OptionDetails(OptionDetails &&rhs) = default;
+
+  const String &
+  description() const {
+    return m_desc;
+  }
+
+  const Value &value() const {
+    return *m_value;
+  }
+
+  std::shared_ptr<Value>
+  make_storage() const {
+    return m_value->clone();
+  }
+
+  const std::string &
+  short_name() const {
+    return m_short;
+  }
+
+  const std::string &
+  long_name() const {
+    return m_long;
+  }
+
+  private:
+  std::string m_short;
+  std::string m_long;
+  String m_desc;
+  std::shared_ptr<const Value> m_value;
+  int m_count;
+};
+
+struct HelpOptionDetails {
+  std::string s;
+  std::string l;
+  String desc;
+  bool has_default;
+  std::string default_value;
+  bool has_implicit;
+  std::string implicit_value;
+  std::string arg_help;
+  bool is_container;
+  bool is_boolean;
+};
+
+struct HelpGroupDetails {
+  std::string name;
+  std::string description;
+  std::vector<HelpOptionDetails> options;
+};
+
+class OptionValue {
+  public:
+  void
+  parse(
+    std::shared_ptr<const OptionDetails> details,
+    const std::string &text) {
+    ensure_value(details);
+    ++m_count;
+    m_value->parse(text);
+  }
+
+  void
+  parse_default(std::shared_ptr<const OptionDetails> details) {
+    ensure_value(details);
+    m_value->parse();
+  }
+
+  size_t
+  count() const {
+    return m_count;
+  }
+
+  template <typename T>
+  const T &
+  as() const {
+    if (m_value == nullptr) {
+      throw std::domain_error("No value");
+    }
+
+#ifdef CXXOPTS_NO_RTTI
+    return static_cast<const values::standard_value<T> &>(*m_value).get();
+#else
+    return dynamic_cast<const values::standard_value<T> &>(*m_value).get();
+#endif
+  }
+
+  private:
+  void
+  ensure_value(std::shared_ptr<const OptionDetails> details) {
+    if (m_value == nullptr) {
+      m_value = details->make_storage();
+    }
+  }
+
+  std::shared_ptr<Value> m_value;
+  size_t m_count = 0;
+};
+
+class KeyValue {
+  public:
+  KeyValue(std::string key_, std::string value_)
+    : m_key(std::move(key_)), m_value(std::move(value_)) {
+  }
+
+  const std::string &
+  key() const {
+    return m_key;
+  }
+
+  const std::string &
+  value() const {
+    return m_value;
+  }
+
+  template <typename T>
+  T as() const {
+    T result;
+    values::parse_value(m_value, result);
+    return result;
+  }
+
+  private:
+  std::string m_key;
+  std::string m_value;
+};
+
+class ParseResult {
+  public:
+  ParseResult(
+    const std::shared_ptr<
+      std::unordered_map<std::string, std::shared_ptr<OptionDetails>>>,
+    std::vector<std::string>,
+    bool allow_unrecognised,
+    int &, char **&);
+
+  size_t
+  count(const std::string &o) const {
+    auto iter = m_options->find(o);
+    if (iter == m_options->end()) {
+      return 0;
+    }
+
+    auto riter = m_results.find(iter->second);
+
+    return riter->second.count();
+  }
+
+  const OptionValue &
+  operator[](const std::string &option) const {
+    auto iter = m_options->find(option);
+
+    if (iter == m_options->end()) {
+      throw option_not_present_exception(option);
+    }
+
+    auto riter = m_results.find(iter->second);
+
+    return riter->second;
+  }
+
+  const std::vector<KeyValue> &
+  arguments() const {
+    return m_sequential;
+  }
+
+  private:
+  void
+  parse(int &argc, char **&argv);
+
+  void
+  add_to_option(const std::string &option, const std::string &arg);
+
+  bool
+  consume_positional(std::string a);
+
+  void
+  parse_option(
+    std::shared_ptr<OptionDetails> value,
+    const std::string &name,
+    const std::string &arg = "");
+
+  void
+  parse_default(std::shared_ptr<OptionDetails> details);
+
+  void
+  checked_parse_arg(
+    int argc,
+    char *argv[],
+    int &current,
+    std::shared_ptr<OptionDetails> value,
+    const std::string &name);
+
+  const std::shared_ptr<
+    std::unordered_map<std::string, std::shared_ptr<OptionDetails>>>
+    m_options;
+  std::vector<std::string> m_positional;
+  std::vector<std::string>::iterator m_next_positional;
+  std::unordered_set<std::string> m_positional_set;
+  std::unordered_map<std::shared_ptr<OptionDetails>, OptionValue> m_results;
+
+  bool m_allow_unrecognised;
+
+  std::vector<KeyValue> m_sequential;
+};
+
+class Options {
+  typedef std::unordered_map<std::string, std::shared_ptr<OptionDetails>>
+    OptionMap;
+
+  public:
+  Options(std::string program, std::string help_string = "")
+    : m_program(std::move(program)), m_help_string(toLocalString(std::move(help_string))), m_custom_help("[OPTION...]"), m_positional_help("positional parameters"), m_show_positional(false), m_allow_unrecognised(false), m_options(std::make_shared<OptionMap>()), m_next_positional(m_positional.end()) {
+  }
+
+  Options &
+  positional_help(std::string help_text) {
+    m_positional_help = std::move(help_text);
+    return *this;
+  }
+
+  Options &
+  custom_help(std::string help_text) {
+    m_custom_help = std::move(help_text);
+    return *this;
+  }
+
+  Options &
+  show_positional_help() {
+    m_show_positional = true;
+    return *this;
+  }
+
+  Options &
+  allow_unrecognised_options() {
+    m_allow_unrecognised = true;
+    return *this;
+  }
+
+  ParseResult
+  parse(int &argc, char **&argv);
+
+  OptionAdder
+  add_options(std::string group = "");
+
+  void
+  add_option(
+    const std::string &group,
+    const std::string &s,
+    const std::string &l,
+    std::string desc,
+    std::shared_ptr<const Value> value,
+    std::string arg_help);
+
+  //parse positional arguments into the given option
+  void
+  parse_positional(std::string option);
+
+  void
+  parse_positional(std::vector<std::string> options);
+
+  void
+  parse_positional(std::initializer_list<std::string> options);
+
+  template <typename Iterator>
+  void
+  parse_positional(Iterator begin, Iterator end) {
+    parse_positional(std::vector<std::string>{begin, end});
+  }
+
+  std::string
+  help(const std::vector<std::string> &groups = {}) const;
+
+  const std::vector<std::string>
+  groups() const;
+
+  const HelpGroupDetails &
+  group_help(const std::string &group) const;
+
+  private:
+  void
+  add_one_option(
+    const std::string &option,
+    std::shared_ptr<OptionDetails> details);
+
+  String
+  help_one_group(const std::string &group) const;
+
+  void
+  generate_group_help(
+    String &result,
+    const std::vector<std::string> &groups) const;
+
+  void
+  generate_all_groups_help(String &result) const;
+
+  std::string m_program;
+  String m_help_string;
+  std::string m_custom_help;
+  std::string m_positional_help;
+  bool m_show_positional;
+  bool m_allow_unrecognised;
+
+  std::shared_ptr<OptionMap> m_options;
+  std::vector<std::string> m_positional;
+  std::vector<std::string>::iterator m_next_positional;
+  std::unordered_set<std::string> m_positional_set;
+
+  //mapping from groups to help options
+  std::map<std::string, HelpGroupDetails> m_help;
+};
+
+class OptionAdder {
+  public:
+  OptionAdder(Options &options, std::string group)
+    : m_options(options), m_group(std::move(group)) {
+  }
+
+  OptionAdder &
+  operator()(
+    const std::string &opts,
+    const std::string &desc,
+    std::shared_ptr<const Value> value = ::cxxopts::value<bool>(),
+    std::string arg_help = "");
+
+  private:
+  Options &m_options;
+  std::string m_group;
+};
+
+namespace {
+constexpr int OPTION_LONGEST = 30;
+constexpr int OPTION_DESC_GAP = 2;
+
+std::basic_regex<char> option_matcher("--([[:alnum:]][-_[:alnum:]]+)(=(.*))?|-([[:alnum:]]+)");
+
+std::basic_regex<char> option_specifier("(([[:alnum:]]),)?[ ]*([[:alnum:]][-_[:alnum:]]*)?");
+
+String
+format_option(
+  const HelpOptionDetails &o) {
+  auto &s = o.s;
+  auto &l = o.l;
+
+  String result = "  ";
+
+  if (s.size() > 0) {
+    result += "-" + toLocalString(s) + ",";
+  }
+  else {
+    result += "   ";
+  }
+
+  if (l.size() > 0) {
+    result += " --" + toLocalString(l);
+  }
+
+  auto arg = o.arg_help.size() > 0 ? toLocalString(o.arg_help) : "arg";
+
+  if (!o.is_boolean) {
+    if (o.has_implicit) {
+      result += " [=" + arg + "(=" + toLocalString(o.implicit_value) + ")]";
+    }
+    else {
+      result += " " + arg;
+    }
+  }
+
+  return result;
+}
+
+String
+format_description(
+  const HelpOptionDetails &o,
+  size_t start,
+  size_t width) {
+  auto desc = o.desc;
+
+  if (o.has_default && (!o.is_boolean || o.default_value != "false")) {
+    desc += toLocalString(" (default: " + o.default_value + ")");
+  }
+
+  String result;
+
+  auto current = std::begin(desc);
+  auto startLine = current;
+  auto lastSpace = current;
+
+  auto size = size_t{};
+
+  while (current != std::end(desc)) {
+    if (*current == ' ') {
+      lastSpace = current;
+    }
+
+    if (*current == '\n') {
+      startLine = current + 1;
+      lastSpace = startLine;
+    }
+    else if (size > width) {
+      if (lastSpace == startLine) {
+        stringAppend(result, startLine, current + 1);
+        stringAppend(result, "\n");
+        stringAppend(result, start, ' ');
+        startLine = current + 1;
+        lastSpace = startLine;
+      }
+      else {
+        stringAppend(result, startLine, lastSpace);
+        stringAppend(result, "\n");
+        stringAppend(result, start, ' ');
+        startLine = lastSpace + 1;
+      }
+      size = 0;
+    }
+    else {
+      ++size;
+    }
+
+    ++current;
+  }
+
+  //append whatever is left
+  stringAppend(result, startLine, current);
+
+  return result;
+}
+} // namespace
+
+inline ParseResult::ParseResult(
+  const std::shared_ptr<
+    std::unordered_map<std::string, std::shared_ptr<OptionDetails>>>
+    options,
+  std::vector<std::string> positional,
+  bool allow_unrecognised,
+  int &argc, char **&argv)
+  : m_options(options), m_positional(std::move(positional)), m_next_positional(m_positional.begin()), m_allow_unrecognised(allow_unrecognised) {
+  parse(argc, argv);
+}
+
+inline OptionAdder
+Options::add_options(std::string group) {
+  return OptionAdder(*this, std::move(group));
+}
+
+inline OptionAdder &
+OptionAdder::operator()(
+  const std::string &opts,
+  const std::string &desc,
+  std::shared_ptr<const Value> value,
+  std::string arg_help) {
+  std::match_results<const char *> result;
+  std::regex_match(opts.c_str(), result, option_specifier);
+
+  if (result.empty()) {
+    throw invalid_option_format_error(opts);
+  }
+
+  const auto &short_match = result[2];
+  const auto &long_match = result[3];
+
+  if (!short_match.length() && !long_match.length()) {
+    throw invalid_option_format_error(opts);
+  }
+  else if (long_match.length() == 1 && short_match.length()) {
+    throw invalid_option_format_error(opts);
+  }
+
+  auto option_names = [](
+                        const std::sub_match<const char *> &short_,
+                        const std::sub_match<const char *> &long_) {
+    if (long_.length() == 1) {
+      return std::make_tuple(long_.str(), short_.str());
+    }
+    else {
+      return std::make_tuple(short_.str(), long_.str());
+    }
+  }(short_match, long_match);
+
+  m_options.add_option(
+    m_group,
+    std::get<0>(option_names),
+    std::get<1>(option_names),
+    desc,
+    value,
+    std::move(arg_help));
+
+  return *this;
+}
+
+inline void
+ParseResult::parse_default(std::shared_ptr<OptionDetails> details) {
+  m_results[details].parse_default(details);
+}
+
+inline void
+ParseResult::parse_option(
+  std::shared_ptr<OptionDetails> value,
+  const std::string & /*name*/,
+  const std::string &arg) {
+  auto &result = m_results[value];
+  result.parse(value, arg);
+
+  m_sequential.emplace_back(value->long_name(), arg);
+}
+
+inline void
+ParseResult::checked_parse_arg(
+  int argc,
+  char *argv[],
+  int &current,
+  std::shared_ptr<OptionDetails> value,
+  const std::string &name) {
+  if (current + 1 >= argc) {
+    if (value->value().has_implicit()) {
+      parse_option(value, name, value->value().get_implicit_value());
+    }
+    else {
+      throw missing_argument_exception(name);
+    }
+  }
+  else {
+    if (value->value().has_implicit()) {
+      parse_option(value, name, value->value().get_implicit_value());
+    }
+    else {
+      parse_option(value, name, argv[current + 1]);
+      ++current;
+    }
+  }
+}
+
+inline void
+ParseResult::add_to_option(const std::string &option, const std::string &arg) {
+  auto iter = m_options->find(option);
+
+  if (iter == m_options->end()) {
+    throw option_not_exists_exception(option);
+  }
+
+  parse_option(iter->second, option, arg);
+}
+
+inline bool
+ParseResult::consume_positional(std::string a) {
+  while (m_next_positional != m_positional.end()) {
+    auto iter = m_options->find(*m_next_positional);
+    if (iter != m_options->end()) {
+      auto &result = m_results[iter->second];
+      if (!iter->second->value().is_container()) {
+        if (result.count() == 0) {
+          add_to_option(*m_next_positional, a);
+          ++m_next_positional;
+          return true;
+        }
+        else {
+          ++m_next_positional;
+          continue;
+        }
+      }
+      else {
+        add_to_option(*m_next_positional, a);
+        return true;
+      }
+    }
+    ++m_next_positional;
+  }
+
+  return false;
+}
+
+inline void
+Options::parse_positional(std::string option) {
+  parse_positional(std::vector<std::string>{std::move(option)});
+}
+
+inline void
+Options::parse_positional(std::vector<std::string> options) {
+  m_positional = std::move(options);
+  m_next_positional = m_positional.begin();
+
+  m_positional_set.insert(m_positional.begin(), m_positional.end());
+}
+
+inline void
+Options::parse_positional(std::initializer_list<std::string> options) {
+  parse_positional(std::vector<std::string>(std::move(options)));
+}
+
+inline ParseResult
+Options::parse(int &argc, char **&argv) {
+  ParseResult result(m_options, m_positional, m_allow_unrecognised, argc, argv);
+  return result;
+}
+
+inline void
+ParseResult::parse(int &argc, char **&argv) {
+  int current = 1;
+
+  int nextKeep = 1;
+
+  bool consume_remaining = false;
+
+  while (current != argc) {
+    if (strcmp(argv[current], "--") == 0) {
+      consume_remaining = true;
+      ++current;
+      break;
+    }
+
+    std::match_results<const char *> result;
+    std::regex_match(argv[current], result, option_matcher);
+
+    if (result.empty()) {
+      //not a flag
+
+      // but if it starts with a `-`, then it's an error
+      if (argv[current][0] == '-' && argv[current][1] != '\0') {
+        throw option_syntax_exception(argv[current]);
+      }
+
+      //if true is returned here then it was consumed, otherwise it is
+      //ignored
+      if (consume_positional(argv[current])) {
+      }
+      else {
+        argv[nextKeep] = argv[current];
+        ++nextKeep;
+      }
+      //if we return from here then it was parsed successfully, so continue
+    }
+    else {
+      //short or long option?
+      if (result[4].length() != 0) {
+        const std::string &s = result[4];
+
+        for (std::size_t i = 0; i != s.size(); ++i) {
+          std::string name(1, s[i]);
+          auto iter = m_options->find(name);
+
+          if (iter == m_options->end()) {
+            if (m_allow_unrecognised) {
+              continue;
+            }
+            else {
+              //error
+              throw option_not_exists_exception(name);
+            }
+          }
+
+          auto value = iter->second;
+
+          if (i + 1 == s.size()) {
+            //it must be the last argument
+            checked_parse_arg(argc, argv, current, value, name);
+          }
+          else if (value->value().has_implicit()) {
+            parse_option(value, name, value->value().get_implicit_value());
+          }
+          else {
+            //error
+            throw option_requires_argument_exception(name);
+          }
+        }
+      }
+      else if (result[1].length() != 0) {
+        const std::string &name = result[1];
+
+        auto iter = m_options->find(name);
+
+        if (iter == m_options->end()) {
+          if (m_allow_unrecognised) {
+            // keep unrecognised options in argument list, skip to next argument
+            argv[nextKeep] = argv[current];
+            ++nextKeep;
+            ++current;
+            continue;
+          }
+          else {
+            //error
+            throw option_not_exists_exception(name);
+          }
+        }
+
+        auto opt = iter->second;
+
+        //equals provided for long option?
+        if (result[2].length() != 0) {
+          //parse the option given
+
+          parse_option(opt, name, result[3]);
+        }
+        else {
+          //parse the next argument
+          checked_parse_arg(argc, argv, current, opt, name);
+        }
+      }
+    }
+
+    ++current;
+  }
+
+  for (auto &opt : *m_options) {
+    auto &detail = opt.second;
+    auto &value = detail->value();
+
+    auto &store = m_results[detail];
+
+    if (!store.count() && value.has_default()) {
+      parse_default(detail);
+    }
+  }
+
+  if (consume_remaining) {
+    while (current < argc) {
+      if (!consume_positional(argv[current])) {
+        break;
+      }
+      ++current;
+    }
+
+    //adjust argv for any that couldn't be swallowed
+    while (current != argc) {
+      argv[nextKeep] = argv[current];
+      ++nextKeep;
+      ++current;
+    }
+  }
+
+  argc = nextKeep;
+}
+
+inline void
+Options::add_option(
+  const std::string &group,
+  const std::string &s,
+  const std::string &l,
+  std::string desc,
+  std::shared_ptr<const Value> value,
+  std::string arg_help) {
+  auto stringDesc = toLocalString(std::move(desc));
+  auto option = std::make_shared<OptionDetails>(s, l, stringDesc, value);
+
+  if (s.size() > 0) {
+    add_one_option(s, option);
+  }
+
+  if (l.size() > 0) {
+    add_one_option(l, option);
+  }
+
+  //add the help details
+  auto &options = m_help[group];
+
+  options.options.emplace_back(HelpOptionDetails{s, l, stringDesc,
+                                                 value->has_default(), value->get_default_value(),
+                                                 value->has_implicit(), value->get_implicit_value(),
+                                                 std::move(arg_help),
+                                                 value->is_container(),
+                                                 value->is_boolean()});
+}
+
+inline void
+Options::add_one_option(
+  const std::string &option,
+  std::shared_ptr<OptionDetails> details) {
+  auto in = m_options->emplace(option, details);
+
+  if (!in.second) {
+    throw option_exists_error(option);
+  }
+}
+
+inline String
+Options::help_one_group(const std::string &g) const {
+  typedef std::vector<std::pair<String, String>> OptionHelp;
+
+  auto group = m_help.find(g);
+  if (group == m_help.end()) {
+    return "";
+  }
+
+  OptionHelp format;
+
+  size_t longest = 0;
+
+  String result;
+
+  if (!g.empty()) {
+    result += toLocalString(" " + g + " options:\n");
+  }
+
+  for (const auto &o : group->second.options) {
+    if (o.is_container &&
+        m_positional_set.find(o.l) != m_positional_set.end() &&
+        !m_show_positional) {
+      continue;
+    }
+
+    auto s = format_option(o);
+    longest = (std::max)(longest, stringLength(s));
+    format.push_back(std::make_pair(s, String()));
+  }
+
+  longest = (std::min)(longest, static_cast<size_t>(OPTION_LONGEST));
+
+  //widest allowed description
+  auto allowed = size_t{76} - longest - OPTION_DESC_GAP;
+
+  auto fiter = format.begin();
+  for (const auto &o : group->second.options) {
+    if (o.is_container &&
+        m_positional_set.find(o.l) != m_positional_set.end() &&
+        !m_show_positional) {
+      continue;
+    }
+
+    auto d = format_description(o, longest + OPTION_DESC_GAP, allowed);
+
+    result += fiter->first;
+    if (stringLength(fiter->first) > longest) {
+      result += '\n';
+      result += toLocalString(std::string(longest + OPTION_DESC_GAP, ' '));
+    }
+    else {
+      result += toLocalString(std::string(longest + OPTION_DESC_GAP -
+                                            stringLength(fiter->first),
+                                          ' '));
+    }
+    result += d;
+    result += '\n';
+
+    ++fiter;
+  }
+
+  return result;
+}
+
+inline void
+Options::generate_group_help(
+  String &result,
+  const std::vector<std::string> &print_groups) const {
+  for (size_t i = 0; i != print_groups.size(); ++i) {
+    const String &group_help_text = help_one_group(print_groups[i]);
+    if (empty(group_help_text)) {
+      continue;
+    }
+    result += group_help_text;
+    if (i < print_groups.size() - 1) {
+      result += '\n';
+    }
+  }
+}
+
+inline void
+Options::generate_all_groups_help(String &result) const {
+  std::vector<std::string> all_groups;
+  all_groups.reserve(m_help.size());
+
+  for (auto &group : m_help) {
+    all_groups.push_back(group.first);
+  }
+
+  generate_group_help(result, all_groups);
+}
+
+inline std::string
+Options::help(const std::vector<std::string> &help_groups) const {
+  String result = m_help_string + "\nUsage:\n  " +
+                  toLocalString(m_program) + " " + toLocalString(m_custom_help);
+
+  if (m_positional.size() > 0 && m_positional_help.size() > 0) {
+    result += " " + toLocalString(m_positional_help);
+  }
+
+  result += "\n\n";
+
+  if (help_groups.size() == 0) {
+    generate_all_groups_help(result);
+  }
+  else {
+    generate_group_help(result, help_groups);
+  }
+
+  return toUTF8String(result);
+}
+
+inline const std::vector<std::string>
+Options::groups() const {
+  std::vector<std::string> g;
+
+  std::transform(
+    m_help.begin(),
+    m_help.end(),
+    std::back_inserter(g),
+    [](const std::map<std::string, HelpGroupDetails>::value_type &pair) {
+      return pair.first;
+    });
+
+  return g;
+}
+
+inline const HelpGroupDetails &
+Options::group_help(const std::string &group) const {
+  return m_help.at(group);
+}
+
+} // namespace cxxopts
+
+#endif //CXXOPTS_HPP_INCLUDED
+```
+
+### src/examples/opengl/main.cpp
+```
+﻿//
+// Created by Danielhu on 2018/1/16.
+//
+
+#define GLM_FORCE_CTOR_INIT
+
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+#include <cmath>
+#include <ctime>
+#include <glm/glm.hpp>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <unordered_set>
+
+#include "Mesh.h"
+#include "Octree.h"
+#include "Topology.h"
+#include "Utils.h"
+#include "VolumeData.h"
+#include "cxxopts.hpp"
+#include "program.h"
+#include "svpng.inc"
+
+using glm::fvec3;
+using glm::mat4;
+using glm::normalize;
+using glm::radians;
+
+using namespace std;
+
+const char *vert = "#version 330 core\n"
+                   "layout(location = 0) in vec3 position;\n"
+                   "layout(location = 1) in vec3 normal;\n"
+                   "\n"
+                   "uniform mat4 mvp;\n"
+                   "uniform mat4 m;\n"
+                   "smooth out vec3 fragNormal;\n"
+                   "\n"
+                   "void main() {\n"
+                   "    fragNormal = (m * vec4(normal, 1.0)).xyz;\n"
+                   "    gl_Position = mvp * vec4(position, 1.0);\n"
+                   "}";
+
+const char *frag = "#version 330 core\n"
+                   "out vec3 color;\n"
+                   "\n"
+                   "smooth in vec3 fragNormal;\n"
+                   "\n"
+                   "uniform float flag;"
+                   "uniform vec3 lightDir;\n"
+                   "uniform vec3 albedo;\n"
+                   "uniform float specular;\n"
+                   "\n"
+                   "void main() {\n"
+                   "    vec3 normal = normalize(fragNormal);"
+                   "    vec3 h = normalize(lightDir + vec3(0, 0, 1));"
+                   "    if(flag > 0.5) {\n"
+                   "       color = albedo * mix(max(abs(dot(normal, "
+                   "lightDir)), 0.0f) , pow(dot(normal, h), 64.f), specular);\n"
+                   "       // color = albedo;\n"
+                   "    } else {\n"
+                   "       color = vec3(0.0);\n"
+                   "    }\n"
+                   "    // color = (1.0 - albedo) * (step(dot(normal,vec3(0, "
+                   "0, -1)), 0.0) * 0.8 + 0.2);\n"
+                   "}";
+
+static float cameraOffset = 15.f;
+static double previousCursorX = 0.f;
+static double previousCursorY = 0.f;
+constexpr unsigned width = 512;
+constexpr unsigned height = 512;
+static float rotateX = 0.f;
+static float rotateY = 0.f;
+static bool pressing = false;
+static bool inited = false;
+
+struct MeshBuffer {
+  GLuint positions;
+  GLuint normals;
+  GLuint indices;
+  MeshBuffer() {
+    glGenBuffers(1, &positions);
+    glGenBuffers(1, &normals);
+    glGenBuffers(1, &indices);
+  }
+  ~MeshBuffer() {
+    glDeleteBuffers(1, &positions);
+    glDeleteBuffers(1, &normals);
+    glDeleteBuffers(1, &indices);
+  }
+};
+
+void addMesh(Mesh *mesh, const MeshBuffer &buffer) {
+  glBindBuffer(GL_ARRAY_BUFFER, buffer.positions);
+  glBufferData(GL_ARRAY_BUFFER, mesh->positions.size() * sizeof(fvec3),
+               mesh->positions.data(), GL_STATIC_DRAW);
+
+  glBindBuffer(GL_ARRAY_BUFFER, buffer.normals);
+  glBufferData(GL_ARRAY_BUFFER, mesh->normals.size() * sizeof(fvec3),
+               mesh->normals.data(), GL_STATIC_DRAW);
+
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffer.indices);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+               mesh->indices.size() * sizeof(unsigned int), mesh->indices.data(),
+               GL_STATIC_DRAW);
+}
+
+void drawMesh(Mesh *mesh, const MeshBuffer &buffer, Program &p, bool shaded,
+              bool wireframe) {
+  glEnableVertexAttribArray(0);
+  glBindBuffer(GL_ARRAY_BUFFER, buffer.positions);
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+
+  glEnableVertexAttribArray(1);
+  glBindBuffer(GL_ARRAY_BUFFER, buffer.normals);
+  glVertexAttribPointer(1, 3, GL_FLOAT, GL_TRUE, 0, nullptr);
+
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffer.indices);
+
+  if (wireframe) {
+    p.setVec3("albedo", fvec3(0, 0, 0));
+    p.setFloat("flag", 0);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+    glDrawElements(GL_TRIANGLES, (GLsizei)mesh->indices.size(), GL_UNSIGNED_INT,
+                   nullptr);
+  }
+
+  if (shaded) {
+    p.setVec3("albedo", fvec3(1.0, 0.4, 0));
+    p.setFloat("flag", 1);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glDrawElements(GL_TRIANGLES, (GLsizei)mesh->indices.size(), GL_UNSIGNED_INT,
+                   nullptr);
+  }
+
+  glDisableVertexAttribArray(0);
+  glDisableVertexAttribArray(1);
+}
+
+void setUniforms(Program &program) {
+  mat4 p = glm::perspective(radians(70.f), float(width) / float(height), 0.1f,
+                            1000.f);
+  mat4 m = glm::rotate(mat4(), rotateX, fvec3(0, 1, 0));
+  m = glm::rotate(m, rotateY, fvec3(1, 0, 0));
+  mat4 v =
+    glm::lookAt(fvec3(0, 0, cameraOffset), fvec3(0, 0, -1), fvec3(0, 1, 0));
+  program.setMat4("m", m);
+  program.setMat4("mvp", p * v * m);
+  program.setVec3("albedo", fvec3(1.f, 1.f, 1.f));
+  program.setFloat("specular", 0.f);
+  program.setVec3("lightDir", normalize(fvec3(0.f, 0.f, 1.f)));
+}
+
+void error(int error, const char *description) {
+  cerr << error << ": " << description << endl;
+}
+
+void mouseInput(GLFWwindow *, double x, double y) {
+  if (pressing) {
+    rotateX += 0.01f * static_cast<float>(x - previousCursorX);
+    rotateY += 0.01f * static_cast<float>(y - previousCursorY);
+    previousCursorX = x;
+    previousCursorY = y;
+  }
+}
+
+void scroll(GLFWwindow *, double, double dy) {
+  cameraOffset -= 0.01f * cameraOffset * (float)dy;
+  pressing = true;
+}
+
+void press(GLFWwindow *window, int button, int action, int) {
+  if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+    pressing = true;
+    glfwGetCursorPos(window, &previousCursorX, &previousCursorY);
+  }
+  if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_RELEASE) {
+    pressing = false;
+  }
+}
+
+void dumpObj(Mesh *mesh, string name);
+
+int main(int argc, char *argv[]) {
+
+  cxxopts::Options options("opengl_viewer",
+                           "An opengl viewer for paper: Discrete k-d Tree "
+                           "Hierarchy for Isosurface Extraction");
+  options.add_options()                                                                                                       //
+    ("e,error", "Error threshold.", cxxopts::value<float>()->default_value("1e-7"))                                           //
+    ("s,structure", "oct/kd, extracting iso-surface using oct/kd tree.", cxxopts::value<std::string>()->default_value("oct")) //
+    ("rotateX", "Camera eular angle x.", cxxopts::value<float>()->default_value("0"))                                         //
+    ("rotateY", "Camera eular angle y.", cxxopts::value<float>()->default_value("0"))                                         //
+    ("v,volume", "Volume source (tiff file)", cxxopts::value<std::string>()->default_value(""))                               //
+    ("c, capture", "Capture first frame to a file.", cxxopts::value<std::string>()->default_value("null"))                    //
+    ("o, output", "Output obj file", cxxopts::value<std::string>()->default_value("./result.obj"))                            //
+    ("h,help", "Print help and exit.");
+
+  auto parameters = options.parse(argc, argv);
+  rotateX = parameters["rotateX"].as<float>();
+  rotateY = parameters["rotateY"].as<float>();
+  stringstream errorss;
+  errorss.setf(ios::scientific);
+  errorss << parameters["e"].as<float>();
+  string windowName = parameters["s"].as<std::string>() + " " + errorss.str();
+
+  if (parameters.count("help")) {
+    cout << options.help() << std::endl;
+    return 0;
+  }
+
+  if (parameters["s"].as<std::string>() != "oct" &&
+      parameters["s"].as<std::string>() != "kd") {
+    cout << options.help() << std::endl;
+    return 0;
+  }
+
+  if (!glfwInit()) {
+    return -1;
+  }
+  glfwWindowHint(GLFW_SAMPLES, 4);
+  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+  glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+
+  GLFWwindow *window =
+    glfwCreateWindow(width, height, windowName.c_str(), nullptr, nullptr);
+  if (!window) {
+    glfwTerminate();
+    return -1;
+  }
+
+  glfwMakeContextCurrent(window);
+
+  //   Initialize GLEW
+  glewExperimental = GL_TRUE; // Needed for core profile
+  if (glewInit() != GLEW_OK) {
+    fprintf(stderr, "Failed to initialize GLEW\n");
+    getchar();
+    glfwTerminate();
+    return -1;
+  }
+
+  cout << "OpenGL Version: " + string((const char *)glGetString(GL_VERSION))
+       << endl;
+
+  glfwSetErrorCallback(error);
+  glfwSetCursorPosCallback(window, mouseInput);
+  glfwSetScrollCallback(window, scroll);
+  glfwSetMouseButtonCallback(window, press);
+
+  GLuint VertexArrayID;
+  glGenVertexArrays(1, &VertexArrayID);
+  glBindVertexArray(VertexArrayID);
+
+  MeshBuffer meshBuffers[4];
+
+  std::unique_ptr<ScalarField> scalarField = std::make_unique<Transform>(
+    mat4(1.0),
+    // new Difference(
+    //   new AABB(fvec3(-4), fvec3(4)),
+    //   new Sphere(5.5, fvec3(0)))
+    // new Difference(
+    // new AABB(fvec3(-4), fvec3(4)),
+    //          new Union(
+    //          new Union(
+    //              new Cylinder(fvec3(0.f, 0.f, 4.1f))
+    //              new Transform(glm::rotate(mat4(), glm::radians(90.f),
+    //              fvec3(1, 0, 0)),
+    //                            new Cylinder(fvec3(0.f, 0.f, 3.7f)))
+    //          )
+    // new Transform(glm::rotate(mat4(), glm::radians(90.f), fvec3(1, 0, 0)),
+    new Intersection(
+      new Difference(
+        new Cylinder(fvec3(0.f, 0.f, 4.f)),
+        new Cylinder(fvec3(0.f, 0.f, 3.2f))),
+      new AABB(fvec3(-4), fvec3(4)))
+
+    // )
+    //  new Difference(
+    //      new Union(
+    //          new AABB(fvec3(-4, -4, -0.4f), fvec3(4, 4, -0.2f)),
+    //          new AABB(fvec3(-4, -4, 0.2f), fvec3(4, 4, 0.4f))
+    //      )
+    //  new Intersection(
+    //      new Sphere(5)
+    //      new AABB(fvec3(-5), fvec3(5, 5, 0))
+    //      )
+    //      new Sphere(5.2f)
+    //  )
+    //      new Difference(
+    //          new Heart(5),
+    //          new Difference(
+    //              new Cylinder(fvec3(0.f, 0.f, 3.7f)),
+    //              new Cylinder(fvec3(0.f, 0.f, 3.f))
+    //          )
+    //      )
+
+    //      new Intersection(
+    //          new AABB(fvec3(-4), fvec3(4))
+    //          new ExpUnion(
+    //              new Sphere(6, fvec3(4.5, 4.5, 0)),
+    //              new Sphere(6, fvec3(-4.5, -4.5, 0)),
+    //              1
+    //          )
+    //      )
+    //  new Intersection(
+    //      new AABB(fvec3(-4.3), fvec3(4.3)),
+    //      new Difference(
+    //          new Transform(glm::rotate(mat4(), glm::radians(90.f), fvec3(1,
+    //          0, 0)),
+    //                        new Cylinder(fvec3(0.f, 0.f, 4.3f))),
+    //          new Transform(glm::rotate(mat4(), glm::radians(90.f), fvec3(1,
+    //          0, 0)),
+    //                        new Cylinder(fvec3(0.f, 0.f, 3.8f)))
+    //      )
+    //  )
+    //      new Union(
+    //          new Intersection(
+    //              new Cylinder(fvec3(0, 0, 0.5)),
+    //              new AABB(fvec3(-6), fvec3(6.5))
+    //          ),
+    //          new Intersection(
+    //              new Cylinder(fvec3(0, 0, 5)),
+    //              new UnionList({
+    //                                new AABB(fvec3(-5, -5, -5), fvec3(5,
+    //                                -4.5, 5)), new AABB(fvec3(-5, -2.5, -5),
+    //                                fvec3(5, -2, 5)), new AABB(fvec3(-5, 0,
+    //                                -5), fvec3(5, 0.5, 5)), new
+    //                                AABB(fvec3(-5, 2.5, -5), fvec3(5, 3,
+    //                                5)), new AABB(fvec3(-5, 5, -5),
+    //                                fvec3(5, 5.5, 5))
+    //                            })
+    //          )
+    //      )
+    //      new AABB(fvec3(-5), fvec3(5))
+    //      new Union(
+    //      new Union(
+    //      new Intersection(
+    //          new AABB(fvec3(-5, -5.5, -5), fvec3(5, -5, 5)),
+    //          new Cylinder(fvec3(0, 0, 5))
+    //      ),
+    // static_cast<Topology *>(new Sphere(3.0, fvec3(0)))
+    //      )
+    //        new AABB(fvec3(-4, -4, 1), fvec3(4, 4, 4))
+    //      new Union(
+    //          new Union(
+    //              new Sphere(1),
+    //              new Sphere(1, fvec3(4, 4, 0))
+    //          ),
+    //          new Union(
+    //              new Sphere(1, fvec3(4, 0, 4)),
+    //              new Sphere(1, fvec3(0, 4, 4))
+    //          )
+    //      )
+  );
+
+  constexpr int octDepth = 8;
+  constexpr int octSize = 16;
+
+  cameraOffset = octSize * 2;
+
+  RectilinearGrid::setUnitSize((float)(octSize / std::pow(octDepth, 2)));
+  PositionCode sizeCode = PositionCode(1 << (octDepth - 1));
+  float threshold = parameters["e"].as<float>();
+
+  if (parameters.count("volume")) {
+    auto volumeData = new VolumeData(parameters["volume"].as<std::string>(), 256,
+                                     -sizeCode / 2, PositionCode(2));
+    volumeData->readTIFF();
+    scalarField.reset(volumeData);
+    cout << "vulome read" << endl;
+  }
+
+  clock_t begin = clock();
+
+  Octree *octree =
+    Octree::buildWithScalarField(-sizeCode / 2, octDepth, scalarField.get(),
+                                 parameters["s"].as<std::string>() == "kd");
+  if (!octree) {
+    std::cout << "no sign change found!, program exited." << std::endl;
+    exit(0);
+  }
+  clock_t oct_build = clock();
+  cout << "oct build time:" << (double)(oct_build - begin) / CLOCKS_PER_SEC
+       << endl;
+  Kdtree *kdtree = nullptr;
+  auto *kdtreeVisual = new Mesh();
+
+  int intersectionPreservingVerticesCount = 0;
+  bool intersectionFree = false;
+  Mesh *mesh(nullptr);
+  if ((parameters["s"].as<std::string>()) == "kd") {
+    cout << "extract using kdtree" << endl;
+    kdtree = Kdtree::buildFromOctree(octree, -sizeCode / 2, sizeCode / 2,
+                                     scalarField.get(), 0);
+    clock_t kdbuild = clock();
+    Kdtree::drawKdtree(kdtree, kdtreeVisual, threshold);
+    kdbuild = clock();
+    cout << "kd build time:" << (double)(kdbuild - oct_build) / CLOCKS_PER_SEC
+         << endl;
+    mesh = Kdtree::extractMesh(kdtree, scalarField.get(), threshold);
+    clock_t kdextract = clock();
+    cout << "kd extract time:" << (double)(kdextract - kdbuild) / CLOCKS_PER_SEC
+         << endl;
+  }
+  else if ((parameters["s"].as<std::string>()) == "oct") {
+    cout << "extract using octree" << endl;
+    Octree::simplify(octree, threshold);
+    mesh = Octree::extractMesh(octree, scalarField.get(),
+                               intersectionPreservingVerticesCount,
+                               intersectionFree);
+    clock_t octextract = clock();
+    cout << "oct extract time:"
+         << (double)(octextract - oct_build) / CLOCKS_PER_SEC << endl;
+  }
+
+  auto *octreeVisual = new Mesh();
+  Octree::drawOctrees(octree, octreeVisual);
+
+  cout << "intersectionFree: " << (intersectionFree ? "true" : "false") << endl;
+  cout << "triangle count: " << mesh->indices.size() / 3 << endl;
+  //  cout << "vertex count: " << mesh->positions.size() << endl;
+  cout << "intersection contours: " << intersectionPreservingVerticesCount
+       << endl;
+  mesh->generateFlatNormals();
+
+  // dump mesh
+  if (parameters.count("output")) {
+    dumpObj(mesh, parameters["output"].as<std::string>());
+  }
+
+  //
+  Program program;
+  if (!program.init(vert, frag)) {
+    cerr << "glsl error" << endl;
+    return -1;
+  }
+
+  addMesh(mesh, meshBuffers[0]);
+  addMesh(octreeVisual, meshBuffers[1]);
+  addMesh(kdtreeVisual, meshBuffers[2]);
+
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_LESS);
+  glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+
+  while (!glfwWindowShouldClose(window)) {
+    glfwPollEvents();
+    if (pressing || !inited) {
+      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+      program.use();
+      setUniforms(program);
+      drawMesh(mesh, meshBuffers[0], program, true, false);
+      //      drawMesh(octreeVisual, meshBuffers[1], program, false, true);
+      //      drawMesh(kdtreeVisual, meshBuffers[2], program, false, true);
+      glfwSwapBuffers(window);
+      if (!inited) {
+        stringstream outss;
+        outss << parameters["c"].as<std::string>()
+              << parameters["e"].as<float>() << "_"
+              << parameters["s"].as<std::string>() << "_t"
+              << mesh->indices.size() / 3;
+        if (parameters["c"].as<std::string>() != "null") {
+          unsigned char image[width * height * 3];
+          //          unsigned char *p = image;
+          //          glPixelStorei(GL_PACK_ALIGNMENT, 0);
+          //          glPixelStorei(GL_PACK_ROW_LENGTH, );
+          //          glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+          //          glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+          glReadPixels(width * 1 / 2, height * 1 / 2, width, height, GL_RGB,
+                       GL_UNSIGNED_BYTE, image);
+          FILE *fp = fopen((outss.str() + ".png").c_str(), "wb");
+          svpng(fp, width, height, (unsigned char *)image, 0);
+          fclose(fp);
+          break;
+        }
+      }
+      inited = true;
+    }
+  }
+
+  delete mesh;
+  delete octreeVisual;
+  glfwTerminate();
+  return 0;
+}
+
+void dumpObj(Mesh *mesh, string path) {
+
+  bool vtEnable = false;
+  string spaceString = " ";
+
+  ofstream writeSteam(path);
+  if (!writeSteam) {
+    cout << "open file failed";
+    return;
+  }
+
+  auto vertexCount = mesh->positions.size();
+  auto vertexNormalCount = mesh->normals.size();
+  auto trignleCount = mesh->indices.size() / 3;
+
+  assert(vertexCount == vertexNormalCount);
+
+  writeSteam << "# vertex count" << vertexCount << endl;
+  writeSteam << "# triangle count" << trignleCount << endl;
+
+  writeSteam << "# vertex - v" << endl;
+  for (auto i = 0; i < vertexCount; i++) {
+    writeSteam << "v" << spaceString << mesh->positions[i].x << spaceString << mesh->positions[i].y << spaceString << mesh->positions[i].z << endl;
+  }
+
+  if (vtEnable) {
+    writeSteam << endl
+               << endl
+               << endl
+               << "# texture - vt" << endl;
+    writeSteam << "vt" << spaceString << 0 << spaceString << 0 << endl;
+  }
+
+  writeSteam << endl
+             << endl
+             << endl
+             << "# normal - vn" << endl;
+  for (auto i = 0; i < vertexNormalCount; i++) {
+    writeSteam << "vn" << spaceString << mesh->normals[i].x << spaceString << mesh->normals[i].y << spaceString << mesh->normals[i].z << endl;
+  }
+
+  writeSteam << endl
+             << endl
+             << endl
+             << "# face (triangle) - f" << endl;
+  for (auto i = 0; i < trignleCount; i++) {
+    int offset = 1;
+    int index = 3 * i + 0;
+    if (vtEnable) {
+      writeSteam << "f" << spaceString
+                 << mesh->indices[index + 0] + offset << "/" << 1 << "/" << mesh->indices[index + 0] + offset << spaceString
+                 << mesh->indices[index + 1] + offset << "/" << 1 << "/" << mesh->indices[index + 1] + offset << spaceString
+                 << mesh->indices[index + 2] + offset << "/" << 1 << "/" << mesh->indices[index + 2] + offset << endl;
+    }
+    else {
+      writeSteam << "f" << spaceString
+                 << mesh->indices[index + 0] + offset << "//" << mesh->indices[index + 0] + offset << spaceString
+                 << mesh->indices[index + 1] + offset << "//" << mesh->indices[index + 1] + offset << spaceString
+                 << mesh->indices[index + 2] + offset << "//" << mesh->indices[index + 2] + offset << endl;
+    }
+  }
+  std::cout << "dump obj to " << path << std::endl;
+  writeSteam.close();
+}
+```
+
+### src/examples/opengl/program.cpp
+```
+#define GLM_FORCE_CTOR_INIT
+
+#include "program.h"
+#include <fstream>
+#include <sstream>
+#include <iostream>
+
+// ----------------------------------------------------------------------------
+
+Program::Program()
+  : id(0) {
+}
+
+// ----------------------------------------------------------------------------
+
+Program::~Program() {
+  if (id > 0) {
+    glDeleteProgram(id);
+  }
+}
+
+// ----------------------------------------------------------------------------
+
+bool Program::init(const char *vert, const char *frag) {
+  id = glCreateProgram();
+  return compile(GL_VERTEX_SHADER, vert) && compile(GL_FRAGMENT_SHADER, frag) && link();
+}
+
+void Program::use() {
+  glUseProgram(id);
+}
+
+// ----------------------------------------------------------------------------
+
+void Program::printShaderInfo(GLuint shader) const {
+  int maxLength = 0;
+  glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &maxLength);
+
+  static char buffer[2048];
+  int length = 0;
+  glGetShaderInfoLog(shader, maxLength, &length, buffer);
+
+  printf("%s\n", buffer);
+}
+
+// ----------------------------------------------------------------------------
+
+void Program::printProgramInfo(GLuint program) const {
+  int maxLength = 0;
+  glGetProgramiv(program, GL_INFO_LOG_LENGTH, &maxLength);
+
+  static char buffer[2048];
+  int length = 0;
+  glGetProgramInfoLog(program, maxLength, &length, buffer);
+
+  printf("%s\n", buffer);
+}
+
+bool Program::compile(GLenum type, const char *src) {
+
+  const GLuint shader = glCreateShader(type);
+  glShaderSource(shader, 1, &src, nullptr);
+  glCompileShader(shader);
+
+  GLint status = 0;
+  glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+  if (status == GL_FALSE) {
+    printShaderInfo(shader);
+    return false;
+  }
+
+  glAttachShader(id, shader);
+  shaders.push_back(shader);
+
+  return true;
+}
+
+// ----------------------------------------------------------------------------
+
+bool Program::link() {
+  if (shaders.empty()) {
+    return false;
+  }
+
+  glLinkProgram(id);
+  printProgramInfo(id);
+  GLenum err = glGetError();
+  if (err != GL_NO_ERROR) {
+    return false;
+  }
+
+  GLint status = 0;
+  glGetProgramiv(id, GL_LINK_STATUS, &status);
+  if (status == GL_FALSE) {
+    return false;
+  }
+
+  for (unsigned int shader : shaders) {
+    glDetachShader(id, shader);
+    glDeleteShader(shader);
+  }
+
+  shaders.clear();
+
+  return true;
+}
+
+const GLint Program::getUniformLocation(const char *name) {
+  if (locations.find(name) == locations.end()) {
+    const GLint location = glGetUniformLocation(id, name);
+    locations.insert({std::string(name), (int)location});
+  }
+
+  return locations[name];
+}
+
+bool Program::setMat4(const char *name, const glm::mat4 &uniform) {
+  const GLint location = getUniformLocation(name);
+  if (location == -1) {
+    return false;
+  }
+
+  glUniformMatrix4fv(location, 1, GL_FALSE, glm::value_ptr(uniform));
+  return true;
+}
+
+bool Program::setVec3(const char *name, const glm::fvec3 &uniform) {
+  const GLint location = getUniformLocation(name);
+  if (location == -1) {
+    return false;
+  }
+
+  glUniform3fv(location, 1, glm::value_ptr(uniform));
+  return true;
+}
+
+bool Program::setFloat(const char *name, float uniform) {
+  const GLint location = getUniformLocation(name);
+  if (location == -1) {
+    return false;
+  }
+
+  glUniform1f(location, uniform);
+  return true;
+}
+```
+
+### src/examples/opengl/program.h
+```
+#ifndef HAS_GLSL_PROGRAM_H_BEEN_INCLUDED
+#define HAS_GLSL_PROGRAM_H_BEEN_INCLUDED
+
+#define GL_SILENCE_DEPRECATION
+
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+#include <vector>
+#include <glm/glm.hpp>
+#include <glm/ext.hpp>
+#include <map>
+
+class Program {
+  public:
+  Program();
+  ~Program();
+
+  bool init(const char *vert, const char *frag);
+  void use();
+  bool setMat4(const char *name, const glm::mat4 &uniform);
+  bool setVec3(const char *name, const glm::fvec3 &uniform);
+  bool setFloat(const char *name, float uniform);
+
+  private:
+  void printShaderInfo(GLuint shader) const;
+  void printProgramInfo(GLuint program) const;
+  bool compile(GLenum type, const char *src);
+  bool link();
+
+  GLuint id;
+  std::vector<GLuint> shaders;
+  std::map<std::string, int> locations;
+  const GLint getUniformLocation(const char *name);
+};
+
+#endif //	HAS_GLSL_PROGRAM_H_BEEN_INCLUDED
+```

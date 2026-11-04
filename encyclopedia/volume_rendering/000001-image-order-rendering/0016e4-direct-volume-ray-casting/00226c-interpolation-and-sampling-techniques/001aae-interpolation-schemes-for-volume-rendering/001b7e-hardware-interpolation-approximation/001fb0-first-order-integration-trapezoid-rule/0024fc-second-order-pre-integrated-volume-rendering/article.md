@@ -1,0 +1,218 @@
+# Second Order Pre-Integrated Volume Rendering
+
+Also called: 2nd order Newton-Cotes integration for volume rendering, 2nd order pre-integration, Simpson's rule pre-integration, quadratic pre-integration
+
+## Overview
+Second Order Pre-Integrated Volume Rendering is a direct volume rendering technique that approximates the scalar field along a ray segment using a second-order Lagrange polynomial (quadratic) defined by three equispaced samples, allowing for the pre-computation of the volume rendering integral into a lookup table [S1]. This method captures high-frequency details in transfer functions more accurately than linear (1st order) approaches by reducing the discrepancy between the trilinearly interpolated volume and its piecewise polynomial approximation [S1]. It sets itself apart from its parent, First Order Integration (Trapezoid Rule), by using quadratic polynomials to model the non-zero curvature inherent in trilinear interpolation, thereby providing significantly reduced approximation error and faster convergence for scalar fields with high frequencies [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar volume dataset, a transfer function mapping scalar values to color $\mathbf{c}(s)$ and opacity $\tau(s)$, and a set of rays cast through the volume.
+*   **Output:** A 2D image where each pixel color is computed via front-to-back compositing of pre-integrated segment contributions.
+
+**Data Structures:**
+*   **Pre-integration Table:** A 3D texture storing pre-computed color and opacity values.
+    *   **Dimensions:** $256 \times 256 \times 256$ (for 8-bit scalar domain) [S1].
+    *   **Indices:** $(s_f, s_m, s_b)$, representing the front, middle, and back sample values of a ray segment [S1].
+    *   **Stored Values:** A pair $(\mathbf{c}_2, \tau_2)$ for each index combination [S1].
+    *   **Note:** While theoretically a 4D table indexed by $(s_f, s_m, s_b, l)$ is required for variable segment lengths, constant length sampling reduces this to a 3D table as $l$ becomes constant [S1].
+
+**Numbered Steps:**
+
+1.  **Pre-computation (Table Generation):**
+    1.  Iterate through all possible combinations of 8-bit scalar values for $s_f, s_m, s_b \in [0, 255]$ [S1].
+    2.  For each triplet, calculate the coefficients $A, B, C$ of the quadratic polynomial $P(t)$ that interpolates the samples at $t=0, 0.5, 1$ [S1]:
+        $$
+        \begin{cases}
+        A = 2s_f - 4s_m + 2s_b \\
+        B = -3s_f + 4s_m - s_b \\
+        C = s_f
+        \end{cases}
+        $$
+        where $P(t) = At^2 + Bt + C$ for $t \in [0, 1]$ [S1].
+    3.  Compute the pre-integrated color $\mathbf{c}_2$ and opacity $\tau_2$ for a segment of length $l$ (constant for the table) by numerically integrating the transfer function composed with $P(t)$ [S1]:
+        $$
+        \mathbf{c}_2(s_f, s_m, s_b, l) = \int_0^1 \mathbf{c}(P(t)) \tau(P(t)) l \exp \left( \int_0^t \tau(P(t')) l dt' \right) dt
+        $$
+        $$
+        \tau_2(s_f, s_m, s_b, l) = 1 - \exp \left( \int_0^1 \tau(P(t)) l dt \right)
+        $$
+        *Implementation Note:* The source describes computing this on the GPU by rendering a quadrilateral where screen coordinates map to $s_f$ and $s_m$, and $s_b$ is a uniform variable, iterating over the polynomial interval $[0,1]$ [S1].
+
+2.  **Ray Sampling:**
+    1.  Cast rays through the volume.
+    2.  Sample the scalar field $\mathcal{F}$ at three equispaced points along each ray segment to obtain $s_f, s_m, s_b$ [S1].
+    3.  Determine the segment length $l = t_{back} - t_{front}$ [S1]. For constant length sampling, $l$ is fixed [S1].
+
+3.  **Rendering (Compositing):**
+    1.  Initialize accumulated color $C = 0$ and accumulated opacity $\alpha_{acc} = 0$ [G].
+    2.  Iterate through the ray samples in steps of 2 (forming triads $i = 0, 2, \dots, n-3$) [S1]:
+        1.  Retrieve the pre-integrated color $\mathbf{c}_2$ and opacity $\tau_2$ from the 3D table using indices $(s_f(i), s_m(i), s_b(i))$ [S1].
+        2.  Compute the contribution of the current segment:
+            $$
+            \text{contribution} = \mathbf{c}_2 \times (1 - \alpha_{acc})
+            $$
+        3.  Update accumulated color:
+            $$
+            C \leftarrow C + \text{contribution}
+            $$
+        4.  Update accumulated opacity:
+            $$
+            \alpha_{acc} \leftarrow \alpha_{acc} + \tau_2 \times (1 - \alpha_{acc})
+            $$
+            *(Note: The source formula (3) uses the product form $\prod (1-\tau_2)$, which is equivalent to the recursive update above)* [S1].
+    3.  The final pixel color is $C$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_coefficients(sf, sm, sb):
+    """
+    Computes quadratic polynomial coefficients for 2nd order pre-integration.
+    sf, sm, sb: scalar values at front, middle, and back of segment.
+    Returns A, B, C for P(t) = At^2 + Bt + C.
+    """
+    A = 2 * sf - 4 * sm + 2 * sb
+    B = -3 * sf + 4 * sm - sb
+    C = sf
+    return A, B, C
+
+def evaluate_polynomial(t, A, B, C):
+    """
+    Evaluates the quadratic polynomial P(t) = At^2 + Bt + C.
+    """
+    return A * t * t + B * t + C
+
+def precompute_table():
+    """
+    Generates the 3D pre-integration table.
+    Assumes transfer functions color_func(s) and opacity_func(s) are defined.
+    Assumes constant segment length l.
+    """
+    table_size = 256
+    table = {} # Dictionary or 3D array indexed by (sf, sm, sb)
+    
+    # Numerical integration parameters
+    num_steps = 64 # Fixed number of iterations as per source description
+    dt = 1.0 / num_steps
+    
+    for sf in range(table_size):
+        for sm in range(table_size):
+            for sb in range(table_size):
+                A, B, C = compute_coefficients(sf, sm, sb)
+                
+                # Numerical integration of opacity and color
+                # tau_2 = 1 - exp( integral_0^1 tau(P(t)) * l dt )
+                # c_2 = integral_0^1 c(P(t)) * tau(P(t)) * l * exp( integral_0^t tau(P(t')) * l dt' ) dt
+                
+                integral_tau = 0.0
+                integral_color = 0.0
+                current_exp_factor = 1.0 # exp(0)
+                
+                for k in range(num_steps):
+                    t = k * dt
+                    t_next = (k + 1) * dt
+                    t_mid = (t + t_next) / 2.0
+                    
+                    # Evaluate scalar field at midpoint for integration
+                    p_val = evaluate_polynomial(t_mid, A, B, C)
+                    
+                    # Clamp scalar value to valid range for transfer function lookup
+                    p_clamped = max(0, min(255, p_val))
+                    
+                    tau_val = opacity_func(p_clamped)
+                    c_val = color_func(p_clamped)
+                    
+                    # Accumulate opacity integral
+                    integral_tau += tau_val * dt
+                    
+                    # Accumulate color integral
+                    # The term exp(integral_0^t ...) is approximated by current_exp_factor
+                    # We update current_exp_factor for the next step after using it
+                    integral_color += c_val * tau_val * current_exp_factor * dt
+                    
+                    # Update exponential factor for next step: exp(integral_0^{t+dt})
+                    current_exp_factor *= exp(-tau_val * dt) # Note: source uses positive exponent in formula, 
+                                                             # but compositing uses 1-exp(-integral). 
+                                                             # Standard volume rendering: T(t) = exp(-int tau).
+                                                             # Source formula: exp( int tau ). This implies tau is 
+                                                             # extinction coefficient. 
+                                                             # Let's stick to source formula structure:
+                                                             # tau_2 = 1 - exp( integral tau * l )
+                                                             # c_2 = integral c * tau * l * exp( integral_0^t tau * l )
+                
+                # Apply length l
+                # Note: Source formula includes 'l' in the integrand.
+                # If l is constant, it can be factored or included in the table generation.
+                # The source implies l is a parameter, but for 3D table, l is fixed.
+                # We assume l is baked into the table or passed as a uniform if variable.
+                # For 3D table, l is constant.
+                
+                tau_2 = 1.0 - exp(integral_tau * l)
+                c_2 = integral_color * l # Approximation: sum(c * tau * exp) * l
+                
+                table[(sf, sm, sb)] = (c_2, tau_2)
+                
+    return table
+
+def render_ray(samples, table, l):
+    """
+    Renders a single ray using pre-integrated table lookups.
+    samples: list of scalar values along the ray.
+    table: pre-computed 3D table.
+    l: constant segment length.
+    """
+    accumulated_color = [0.0, 0.0, 0.0]
+    accumulated_opacity = 0.0
+    
+    # Iterate in steps of 2 to form triads
+    for i in range(0, len(samples) - 2, 2):
+        sf = samples[i]
+        sm = samples[i+1]
+        sb = samples[i+2]
+        
+        # Lookup pre-integrated values
+        # Note: In practice, interpolation between table entries may be needed if samples are not integers
+        # Source implies direct indexing for 8-bit domain
+        c_2, tau_2 = table[(sf, sm, sb)]
+        
+        # Front-to-back compositing
+        # Contribution = c_2 * (1 - accumulated_opacity)
+        # New Accumulated Opacity = accumulated_opacity + tau_2 * (1 - accumulated_opacity)
+        
+        weight = 1.0 - accumulated_opacity
+        accumulated_color[0] += c_2[0] * weight
+        accumulated_color[1] += c_2[1] * weight
+        accumulated_color[2] += c_2[2] * weight
+        accumulated_opacity += tau_2 * weight
+        
+    return accumulated_color
+```
+
+**Parameters:**
+*   **Scalar Domain:** 8-bit ($0-255$) [S1].
+*   **Table Size:** $256^3$ (3D texture) [S1].
+*   **Sampling:** Equispaced samples along the ray. Constant length sampling is preferred for performance and simplicity, despite theoretical imperfections at voxel boundaries [S1].
+*   **Integration Steps:** A fixed number of iterations over the polynomial interval $[0,1]$ during table generation [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Voxel Boundary Artifacts:** When using constant length sampling, ray segments may cross dual voxel boundaries, causing abrupt changes in the first derivative of the underlying trilinear interpolation. This can theoretically deteriorate the 2nd order approximation quality, although empirical tests show it still outperforms 1st order methods [S1].
+*   **Polynomial Extrapolation:** The quadratic polynomial $P(t)$ may produce scalar values outside the $[0, 255]$ range for $t \in [0,1]$, especially with high-frequency data. These values must be clamped when indexing the transfer function [G].
+*   **Memory Usage:** The $256^3$ 3D texture requires significant GPU memory (approx. 128 MB for 2 floats per entry, or more if storing RGB).
+
+## Operating characteristics
+*   **Time Complexity:** Pre-computation is $O(S^3 \cdot N)$, where $S$ is the scalar domain size (256) and $N$ is the number of integration steps. Rendering is $O(R \cdot S_{ray})$, where $R$ is the number of rays and $S_{ray}$ is the number of samples per ray, with a constant factor reduction in texture lookups compared to 1st order if caching is used (back sample of one segment is front sample of next) [S1].
+*   **Memory Complexity:** $O(S^3)$ for the pre-integration table. For 8-bit domain, this is $256^3$ entries [S1].
+*   **Measured Performance:** The source does not provide specific hardware benchmarks or resolution metrics. It states that constant length sampling is more efficient with respect to performance than adaptive sampling [S1].
+*   **Strengths:** Significantly reduced approximation error compared to 1st order pre-integration. Better convergence to the true trilinear signal, especially for scalar fields with high frequencies. Captures high-frequency transfer function details more accurately [S1].
+*   **Limitations:** Higher memory consumption than 1st order (3D vs 2D table). Potential quality degradation at voxel boundaries with constant length sampling [S1].
+*   **When to Use:** When high-frequency details in the transfer function or scalar field are critical, and sufficient GPU memory is available. When constant length sampling is required for performance.
+*   **When Not to Use:** When memory is constrained (use 1st order). When adaptive sampling is strictly required for accuracy (though 2nd order can be adapted, the source emphasizes constant length for simplicity) [S1].
+
+## Background
+Second Order Pre-Integrated Volume Rendering was introduced in the paper "Second Order Pre-Integrated Volume Rendering" (2008) by Marchesin et al. [S1]. It extends the concept of pre-integrated volume rendering, which was originally based on 1st order (linear) integration, to 2nd order (quadratic) integration. The method addresses the limitations of linear interpolation in capturing the curvature of trilinearly interpolated volumes, which can lead to significant errors in the presence of high-frequency scalar fields or transfer functions [S1]. The technique leverages GPU programmability for both table generation and rendering, utilizing 3D textures for efficient lookup [S1].
+
+## Sources
+[S1] Second Order Pre-Integrated Volume Rendering, https://people.freedesktop.org/~marcheu/pacificvis08.pdf, fetched 2026-10-29

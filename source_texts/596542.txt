@@ -1,0 +1,72 @@
+Summary The voxel collision kernels recover a grid's integer shape from VoxelData.params using a truncating wp.int32() cast. VoxelData stores the shape as a float32 ratio (dims / voxel_size). When a VoxelGrid is authored by cuRobo's own ...
+
+Voxel collision kernels truncate float32 grid dims → skewed ESDF queries (phantom hits + invisible obstacles) · Issue #699 · NVlabs/curobo · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Voxel collision kernels truncate float32 grid dims → skewed ESDF queries (phantom hits + invisible obstacles) #699
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Voxel collision kernels truncate float32 grid dims → skewed ESDF queries (phantom hits + invisible obstacles)#699
+Copy link
+Description
+aleksantari
+opened on Jul 15, 2026
+Issue body actions
+Summary
+The voxel collision kernels recover a grid's integer shape from VoxelData.params using a truncating wp.int32() cast. VoxelData stores the shape as a float32 ratio (dims / voxel_size). When a VoxelGrid is authored by cuRobo's own ESDF Mapper, the dims are products of a float32 voxel size, so the ratio can land just below the true integer (e.g. 119.99999). Truncation then yields 119 instead of 120, which corrupts the kernel's flat-index strides — every sphere-vs-voxel query beyond the first x-slab of the grid silently samples a skewed memory location.
+The failure is silent and severe: free space can read as in collision (phantom hits) and real obstacles can read as free (invisible to planning). It is deterministic and unaffected by seeds, activation distances, or any solver setting, which makes it very misleading to debug.
+Notably this breaks the first-party pipeline: Mapper.compute_esdf() → MotionPlanner.update_world(WorldConfig(voxel=[grid])) → plan_grasp. A VoxelGrid authored by hand in float64 (e.g. dims = [120 * 0.01, ...]) usually lands above the integer (120.000007 → 120) and works — so tests built on hand-authored grids can pass while the Mapper path is broken.
+Affected version: observed on the V2 source build at ec2bfa9; the code is unchanged on current main.
+Reproduction (arithmetic core, no GPU needed)
+```
+import numpy as np
+k, v = 120, 0.01
+mapper_dims = np.float32(k) * np.float32(v)      # 1.1999999   (get_voxel_grid)
+ratio       = np.float32(mapper_dims) / np.float32(v)  # 119.99999   (VoxelData load)
+int(ratio)                                       # 119         (wp.int32 in kernel)  <-- BUG
+```
+Full-system reproduction (observed on a 120x120x100 @ 1 cm head-depth ESDF):
+Fuse a depth frame with Mapper, compute_esdf(), load via MotionPlanner.update_world(WorldConfig(voxel=[grid])).
+scene_collision_checker.data.voxels.params reads [119.99999, 119.99999, 100.0, 0.00999...].
+Query at a point whose grid cell provably holds a large positive (free) ESDF value → the kernel returns a positive collision cost (phantom hit), while a point inside a real fused obstacle can return 0 (free).
+Overwrite params[..., :3] = [120, 120, 100] in place → every query immediately returns the correct answer. (Decisive confirmation.)
+Root cause (three code locations)
+Dims authored in float32 — curobo/_src/perception/mapper/integrator_esdf.py, get_voxel_grid: dims = [nx * voxel_size, ...] where voxel_size is the float32 representation of e.g. 0.01 (0.00999999977), so 120 * it = 1.1999999....
+Shape stored as a float ratio — curobo/_src/geom/data/data_voxel.py, create_cache / load_batch: grid_t = dims_t / size_t in float32.
+Truncating recovery in the kernel — curobo/_src/geom/data/data_voxel.py, compute_local_sdf and compute_local_sdf_with_grad: dims_x = wp.int32(obs_set.params[flat_idx, 0]) — C-style truncation, 119.9999995 → 119. The wrong dims drive both the trilinear sample coordinates and, fatally, the flat-index strides used to read the feature buffer, whose true layout is 120 * 100.
+Suggested fix
+Round instead of truncate in the kernel — the ratio is integral by construction, so rounding is always exact and never changes a correctly-authored grid:
+```
+dims_x = wp.int32(wp.round(obs_set.params[flat_idx, 0]))
+```
+at both call sites. This matches the existing wp.int32(wp.round(...)) idiom already used in builder_esdf.py.
+I've opened a PR with this fix.
+Activity
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,2402 @@
+# Geometry Calibration in Tomography with a Differentiable Ray-Based Model
+
+Companion code for the paper:
+
+> Y. Haouchat, A. Boquet-Pujadas, S. Kashani, P. Thévenaz, M. Unser,
+> **"Geometry Calibration in Tomography with a Differentiable Ray-Based Model"**,
+> [arXiv:2606.21405](https://arxiv.org/abs/2606.21405)
+
+An X-ray transform with a matched adjoint and — the contribution of the paper —
+**ray-traced gradients with respect to the acquisition geometry**: per-ray
+derivatives of the projections with respect to the ray anchors `s`
+(`xrt_ad_t_*`) and directions `θ` (`xrt_ad_n_*`), computed by DDA passes of the
+same structure and cost as the forward operator (Algorithms 1–2 of the paper;
+one gradient entry ≈ 1.07× the forward runtime, memory `O(rays)` instead of the
+`O(rays × voxels)` of native autodiff). The volume is represented by B-spline
+basis functions (`order` 0 = voxels, 1–2 = B-splines), which makes the forward
+model continuously differentiable in the geometry and the calibration landscape
+smooth — see the demo. Built on the [Dr.Jit](https://github.com/mitsuba-renderer/drjit)
+JIT compiler (CUDA), and on top of the
+[XRT Toolkit](https://github.com/SepandKashani/xrt_toolkit) of Sepand Kashani,
+from which the forward/adjoint X-ray transform this work differentiates is
+derived (see [Acknowledgements](#acknowledgements)).
+
+## Getting started
+
+```bash
+pip install -r requirements.txt      # numpy, matplotlib, drjit>=1.0, cupy
+jupyter notebook tutorial.ipynb
+```
+
+A CUDA GPU is required. **Use the AD array types** (`drjit.cuda.ad`) for rays and
+coefficients — the gradient passes need them.
+
+* [`tutorial.ipynb`](tutorial.ipynb) — the operator, finite-difference
+  verification of both geometry gradients, and a full **joint reconstruction +
+  calibration** example (per-view detector jitter, σ = 4 elements): uncalibrated
+  vs calibrated reconstructions, recovered vs true geometry.
+* [`demo.ipynb`](demo.ipynb) — why B-splines beat voxels for calibration
+  (Fig. 9 of the paper): the voxel loss landscape is a **staircase** (zero
+  gradient on every plateau) while the B-spline landscape is smooth; calibrating
+  the same data with both bases (6× lower geometry error with B-splines here).
+
+## Package
+
+```python
+import drjit as dr
+from drjit.cuda.ad import Float, Array2f
+import differentiable_xrt as dx
+
+ks = dx.UniformSpec(start=(0.5, 0.5), step=(1, 1), num=(N, N))
+y  = dx.xrt_apply((t, n), ks, order, x)          # forward
+bp = dx.xrt_adjoint((t, n), ks, order, y)        # matched adjoint
+gs = dx.xrt_ad_t_x((t, n), ks, order, x)         # per-ray dP/ds_x  (same for _y/_z)
+gn = dx.xrt_ad_n_x((t, n), ks, order, x)         # per-ray dP/dθ_x  (same for _y/_z)
+
+# or, wired into Dr.Jit autodiff as an explicit VJP (Fig. 4 of the paper):
+y = dr.custom(dx.XRT, t, n, ks, order, x, want_x, want_t, want_n)
+```
+
+| file | content |
+|---|---|
+| `differentiable_xrt/ray_xrt.py` | forward / adjoint / geometry-gradient DDA passes (2D orders 0–2; 3D voxel closed forms, Algorithms 3–4; 3D spline forward via a learned basis footprint) |
+| `differentiable_xrt/operator.py` | `XRT`: `dr.CustomOp` exposing the passes as a vector-Jacobian product |
+| `differentiable_xrt/dda.py`, `bbox.py`, `box_spline.py`, `util.py` | traversal, intersection, projected-basis primitives, lattice descriptor |
+
+## Practical notes
+
+* **Work in knot units** (`step = 1`): the single-precision gradient kernels
+  lose accuracy when the knot step is small in physical units.
+* Gradient accuracy (finite-difference check, quadratic B-splines): `xrt_ad_t_*`
+  and `xrt_ad_n_*` agree to well below 1% along generic rays. For voxels
+  (`order=0`) the θ-gradient is kink-limited — the loss itself is piecewise
+  constant in typical calibration parameters, which is precisely the argument
+  for B-splines made in the paper.
+* Separate learning rates for image and geometry, and a warm start of the image,
+  make the joint optimization robust (both notebooks do this).
+
+## Acknowledgements
+
+This package builds on **[XRT Toolkit](https://github.com/SepandKashani/xrt_toolkit)**
+(XTK) by Sepand Kashani, which is released under the MIT License
+(Copyright (c) 2024 Sepand KASHANI). The X-ray transform that this work makes
+differentiable with respect to the acquisition geometry comes from that project:
+
+* `differentiable_xrt/ray_xrt.py` — `xrt_apply` / `xrt_adjoint` (the forward and
+  matched-adjoint DDA passes, their API and their box-spline basis handling) are
+  adapted from XTK's ray-traced X-ray transform. The geometry-gradient passes
+  (`xrt_ad_t_*`, `xrt_ad_n_*`) are the contribution of this work and follow the
+  same structure.
+* `differentiable_xrt/util.py` — `UniformSpec` and the Dr.Jit type helpers are
+  vendored from XTK.
+* `differentiable_xrt/bbox.py` — the ray/bounding-box intersection primitives are
+  adapted from XTK.
+
+If you use this code, please also credit XRT Toolkit:
+
+```bibtex
+@software{kashani_xrt_toolkit,
+  author = {Kashani, Sepand},
+  title  = {XRT Toolkit},
+  url    = {https://github.com/SepandKashani/xrt_toolkit},
+  note   = {MIT License}
+}
+```
+
+## Citation
+
+```bibtex
+@article{haouchat2026calibration,
+  title   = {Geometry Calibration in Tomography with a Differentiable Ray-Based Model},
+  author  = {Haouchat, Youssef and Boquet-Pujadas, Aleix and Kashani, Sepand and
+             Th\'evenaz, Philippe and Unser, Michael},
+  year    = {2026},
+  eprint  = {2606.21405},
+  archivePrefix = {arXiv}
+}
+```
+
+### differentiable_xrt/__init__.py
+```
+"""differentiable_xrt: an X-ray transform with ray-traced geometry gradients.
+
+Reference: Y. Haouchat, A. Boquet-Pujadas, S. Kashani, P. Thevenaz, M. Unser,
+"Geometry Calibration in Tomography with a Differentiable Ray-Based Model",
+arXiv:2606.21405.
+"""
+from .util import UniformSpec as UniformSpec
+from .ray_xrt import (
+    xrt_apply as xrt_apply,
+    xrt_adjoint as xrt_adjoint,
+    xrt_ad_t_x as xrt_ad_t_x,
+    xrt_ad_t_y as xrt_ad_t_y,
+    xrt_ad_t_z as xrt_ad_t_z,
+    xrt_ad_n_x as xrt_ad_n_x,
+    xrt_ad_n_y as xrt_ad_n_y,
+    xrt_ad_n_z as xrt_ad_n_z,
+)
+from .operator import XRT as XRT
+```
+
+### differentiable_xrt/bbox.py
+```
+import typing as typ
+
+import drjit as dr
+
+BoolT = typ.TypeVar("BoolT", bound=dr.AnyArray)
+ArrayNfT = typ.TypeVar("ArrayNfT", bound=dr.AnyArray)
+FloatT = typ.TypeVar("FloatT", bound=dr.AnyArray)
+
+
+def bbox_contains(bbox_ll: ArrayNfT, bbox_ur: ArrayNfT, x: ArrayNfT) -> BoolT:
+    """
+    Is `x` inside a bbox?
+
+    Parameters
+    ----------
+    bbox_[ll,ur]: ArrayNf
+        (D,) bbox (lower-left, upper-right) coordinate.
+    x: ArrayNf
+        (D,) point.
+
+    Returns
+    -------
+    active: Bool
+        True if within bbox.
+    """
+    active = dr.all((bbox_ll <= x) & (x <= bbox_ur))
+    return active
+
+
+def ray_bbox_intersect(
+    bbox_ll: ArrayNfT,
+    bbox_ur: ArrayNfT,
+    ray_o: ArrayNfT,
+    ray_d: ArrayNfT,
+) -> tuple[BoolT, FloatT, FloatT]:
+    """
+    Compute ray/bbox intersection parameters.
+
+    Parameters
+    ----------
+    bbox_[ll,ur]: ArrayNf
+        (D,) bbox (lower-left, upper-right) coordinate.
+    ray_[o, d]: ArrayNf
+        (D,) ray (anchor, direction).
+
+    Returns
+    -------
+    active: Bool
+        True if intersection occurs.
+    mint, maxt: Float
+        Scale factor ``t`` such that ``ray_o + t * ray_d`` intersects the bbox.
+        The value only makes sense if `active` is enabled.
+    """
+
+    # Ensure
+    # - ray has a nonzero slope on each axis; or
+    # - ray origin on a 0-valued axis is within the bbox bounds.
+    active = dr.all((ray_d != 0) | (bbox_ll < ray_o) | (ray_o < bbox_ur))
+
+    # Compute intersection intervals for each axis
+    d_rcp = dr.rcp(ray_d)
+    t1 = (bbox_ll - ray_o) * d_rcp
+    t2 = (bbox_ur - ray_o) * d_rcp
+
+    # Ensure proper ordering
+    t1p = dr.minimum(t1, t2)
+    t2p = dr.maximum(t1, t2)
+
+    # Intersect intervals
+    mint = dr.max(t1p)
+    maxt = dr.min(t2p)
+    active &= mint <= maxt
+
+    return active, mint, maxt
+```
+
+### differentiable_xrt/box_spline.py
+```
+import typing as typ
+
+import drjit as dr
+import numpy as np
+
+from . import util as xrtu
+
+ArrayNfT = typ.TypeVar("ArrayNfT", bound=dr.AnyArray)
+ArrayNiT = typ.TypeVar("ArrayNiT", bound=dr.AnyArray)
+ArrayNbT = typ.TypeVar("ArrayNbT", bound=dr.AnyArray)
+FloatT = typ.TypeVar("FloatT", bound=dr.AnyArray)
+IntT = typ.TypeVar("IntT", bound=dr.AnyArray)
+BoolT = typ.TypeVar("BoolT", bound=dr.AnyArray)
+
+
+def box_spline_1d_np(
+    E: np.ndarray,
+    x: np.ndarray,
+) -> np.ndarray:
+    r"""
+    NumPy implementation to compute 1D box-splines :math:`\psi(x; \bbE \in \bR^{N})`.
+
+    Parameters
+    ----------
+    E: NDArray
+        (N,) box-spline directions :math:`\bbE`, assumed non-negative.
+    x: NDArray
+        (Q,) evaluation points :math:`x \in \bR`.
+
+    Returns
+    -------
+    y: NDArray
+        (Q,) box-spline values :math:`\psi(x; \bbE)`.
+    """
+    assert E.shape == (E.size,)
+    assert x.shape == (x.size,)
+
+    def factorial(n: int) -> int:
+        assert n >= 0
+        if n == 0:
+            return 1
+        else:
+            return np.arange(1, n + 1).prod()
+
+    def A(n: int) -> np.ndarray:
+        assert n >= 1
+
+        A_prev = np.c_[1.0, -1].T  # (2, 1)
+        if n == 1:
+            A = A_prev
+        else:
+            for i in range(2, n + 1):
+                A = np.zeros((2**i, i))
+                A[:, 0] = np.kron([1, -1], np.ones(2 ** (i - 1)))
+                A[:, 1:] = np.kron(np.c_[1, 1].T, A_prev)
+                A_prev = A
+
+        return A  # (2**n, n)
+
+    def B(E_mask: np.ndarray) -> np.ndarray:
+        n = E_mask.size
+        assert E_mask.shape == (n,)
+
+        B = np.r_[1.0]  # (1,)
+        for i in range(n):
+            if E_mask[i]:
+                b = np.r_[1, -1]
+            else:
+                b = np.r_[1, 0]
+            B = np.kron(B, b)
+
+        return B  # (2**n,)
+
+    E_mask = abs(E) >= 1e-3
+    N_tot = len(E_mask)
+    N_nz = E_mask.sum().item()
+
+    if N_nz == 1:
+        y = np.where(abs(x) <= E.sum() / 2, 1.0, 0)
+    else:
+        lhs = (x.reshape(-1, 1) + (0.5 * A(N_tot) @ E)).clip(0, None) ** (N_nz - 1)
+        rhs = B(E_mask)
+        y = lhs @ rhs
+    y /= factorial(N_nz - 1) * (E + (1 - E_mask)).prod()
+
+    return y
+
+
+def box_spline_1d_dr(
+    E: ArrayNfT,
+    E_mask: ArrayNiT,
+    x: FloatT,
+) -> FloatT:
+    r"""
+    DrJit implementation to compute 1D box-splines :math:`\psi(x; \bbE \in \bR^{N})`.
+
+    Parameters
+    ----------
+    E: ArrayNfT
+        (N,) box-spline directions :math:`\bbE`, assumed non-negative.
+    E_mask: ArrayNiT
+        (N,) mask with non-zero entries in :math:`\bbE`. (Integer-valued, not binary.)
+    x: FloatT
+        Evaluation points :math:`x \in \bR`.
+
+    Returns
+    -------
+    y: FloatT
+        Box-spline values :math:`\psi(x; \bbE)`.
+
+    Notes
+    -----
+    This implementation follows closely that of ``box_spline_1d_np()``.
+    """
+
+    ArrayNf = type(E)
+    ArrayNi = dr.int_array_t(ArrayNf)
+    Float = dr.value_t(ArrayNf)
+    Int = dr.value_t(ArrayNi)
+
+    # type checking ---------------------------------------
+    assert type(E_mask) is ArrayNi
+    assert type(x) is Float
+    # -----------------------------------------------------
+
+    def factorial(n: IntT) -> IntT:
+        return dr.gather(
+            Int,
+            Int(1, 1, 2, 6, 24),  # don't need larger factorials here
+            n,
+        )
+
+    def bs_E1(E: ArrayNfT, E_mask: ArrayNiT, x: FloatT) -> FloatT:
+        y = dr.select(
+            dr.abs(x) <= 0.5 * dr.sum(E),
+            Float(1),
+            Float(0),
+        )
+        return y
+
+    def bs_Ek(E: ArrayNfT, E_mask: ArrayNiT, x: FloatT) -> FloatT:
+        N_tot = dr.size_v(ArrayNf)
+        assert 2 <= N_tot <= 4
+
+        y = dr.zeros(Float, dr.shape(x))
+        N_nz = dr.sum(E_mask)
+        lhs_expr = lambda sign: dr.maximum(0, x + 0.5 * sign @ E) ** (N_nz - 1)
+        if N_tot == 2:
+            lhs = lhs_expr(ArrayNf(+1, +1))
+            rhs = 1 * 1
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(+1, -1))
+            rhs = 1 * (-E_mask[1])
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(-1, +1))
+            rhs = (-E_mask[0]) * 1
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(-1, -1))
+            rhs = (-E_mask[0]) * (-E_mask[1])
+            y += lhs * rhs
+        elif N_tot == 3:
+            lhs = lhs_expr(ArrayNf(+1, +1, +1))
+            rhs = 1 * 1 * 1
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(+1, +1, -1))
+            rhs = 1 * 1 * (-E_mask[2])
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(+1, -1, +1))
+            rhs = 1 * (-E_mask[1]) * 1
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(+1, -1, -1))
+            rhs = 1 * (-E_mask[1]) * (-E_mask[2])
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(-1, +1, +1))
+            rhs = (-E_mask[0]) * 1 * 1
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(-1, +1, -1))
+            rhs = (-E_mask[0]) * 1 * (-E_mask[2])
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(-1, -1, +1))
+            rhs = (-E_mask[0]) * (-E_mask[1]) * 1
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(-1, -1, -1))
+            rhs = (-E_mask[0]) * (-E_mask[1]) * (-E_mask[2])
+            y += lhs * rhs
+        elif N_tot == 4:
+            lhs = lhs_expr(ArrayNf(+1, +1, +1, +1))
+            rhs = 1 * 1 * 1 * 1
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(+1, +1, +1, -1))
+            rhs = 1 * 1 * 1 * (-E_mask[3])
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(+1, +1, -1, +1))
+            rhs = 1 * 1 * (-E_mask[2]) * 1
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(+1, +1, -1, -1))
+            rhs = 1 * 1 * (-E_mask[2]) * (-E_mask[3])
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(+1, -1, +1, +1))
+            rhs = 1 * (-E_mask[1]) * 1 * 1
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(+1, -1, +1, -1))
+            rhs = 1 * (-E_mask[1]) * 1 * (-E_mask[3])
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(+1, -1, -1, +1))
+            rhs = 1 * (-E_mask[1]) * (-E_mask[2]) * 1
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(+1, -1, -1, -1))
+            rhs = 1 * (-E_mask[1]) * (-E_mask[2]) * (-E_mask[3])
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(-1, +1, +1, +1))
+            rhs = (-E_mask[0]) * 1 * 1 * 1
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(-1, +1, +1, -1))
+            rhs = (-E_mask[0]) * 1 * 1 * (-E_mask[3])
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(-1, +1, -1, +1))
+            rhs = (-E_mask[0]) * 1 * (-E_mask[2]) * 1
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(-1, +1, -1, -1))
+            rhs = (-E_mask[0]) * 1 * (-E_mask[2]) * (-E_mask[3])
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(-1, -1, +1, +1))
+            rhs = (-E_mask[0]) * (-E_mask[1]) * 1 * 1
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(-1, -1, +1, -1))
+            rhs = (-E_mask[0]) * (-E_mask[1]) * 1 * (-E_mask[3])
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(-1, -1, -1, +1))
+            rhs = (-E_mask[0]) * (-E_mask[1]) * (-E_mask[2]) * 1
+            y += lhs * rhs
+
+            lhs = lhs_expr(ArrayNf(-1, -1, -1, -1))
+            rhs = (-E_mask[0]) * (-E_mask[1]) * (-E_mask[2]) * (-E_mask[3])
+            y += lhs * rhs
+
+        return y
+
+    N_nz = dr.sum(E_mask)
+    y = dr.if_stmt(
+        args=(E, E_mask, x),
+        cond=N_nz == 1,
+        true_fn=bs_E1,
+        false_fn=bs_Ek,
+    )
+    y *= dr.rcp(factorial(N_nz - 1) * dr.prod(E + 1 - E_mask))
+
+    return y
+
+# neural network for fast closed form evaluation of 3D spline projections
+# import torch
+# import torch.nn as nn
+
+# class SplineNN(nn.Module):
+#     def __init__(self, input_dim=4, output_dim=1):
+#         super().__init__()
+#         self.fc1 = nn.Linear(input_dim, 16)
+#         self.fc2 = nn.Linear(16, 16)
+#         self.fc3 = nn.Linear(16, 16)
+#         self.fc4 = nn.Linear(16, 16)
+#         self.fc5 = nn.Linear(16, output_dim)
+#     def forward(self, x):
+#         x = torch.relu(self.fc1(x))
+#         x = torch.relu(self.fc2(x))
+#         x = torch.relu(self.fc3(x))
+#         x = torch.relu(self.fc4(x))
+#         return self.fc5(x)
+    
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# model = SplineNN(input_dim=4, output_dim=1).to(device)
+# model.load_state_dict(torch.load('3D_boxsplines_model.pth', map_location=device))
+# model.eval()
+
+# @dr.wrap(source='drjit', target='torch')
+# @torch.compile
+# def nn_project(x, z, n):
+#     x_th = torch.asarray(x).to(device)
+#     z_th = torch.asarray(z).to(device)
+#     cos_theta = torch.asarray(n[0,:]).to(device)
+#     sin_theta = torch.asarray(n[1,:]).to(device)
+#     input_tensor = torch.stack((x_th, z_th, cos_theta, sin_theta), dim=1)
+#     with torch.no_grad():
+#         output = model(input_tensor).squeeze()
+
+#     return output.reshape(x.shape)
+
+from drjit import nn as dnn
+from pathlib import Path
+from drjit.cuda.ad import Float32 , Float16 , TensorXf16
+
+@dr.syntax
+def nn_project(net, x: FloatT, z: FloatT, n: ArrayNfT) -> FloatT:
+    Float = type(x)
+
+    cos_theta = n.x # if hasattr(n, "x") else n[0]
+    sin_theta = n.y # if hasattr(n, "y") else n[1]
+
+    features = dnn.CoopVec(
+        Float16(x),
+        Float16(z),
+        Float16(cos_theta),
+        Float16(sin_theta),
+    )
+    (prediction,) = net(features)
+    return Float(prediction)
+
+def spline_3d_dr(net, x: FloatT, z: FloatT, n: ArrayNfT) -> FloatT:
+    r"""
+    DrJit implementation to compute cubic spline :math:`\phi(x)`.
+
+    Parameters
+    ----------
+    x: FloatT
+        Evaluation points :math:`x \in \bR`.
+
+    Returns
+    -------
+    y: FloatT
+        Spline values :math:`\phi(x)`.
+    """
+    Float = type(x)
+
+    # y = dr.detach(nn_project(x, z, n), preserve_type=False) # 1) Embedding pytorch needs evaluated mode according to documentation 2) output when wrapping is automatically a cuda.ad array, so we detach it to get a Float array
+    y = nn_project(net, x, z, n)  # drjit native neural network inference
+
+    return Float(y)
+
+def box_spline_1d_E(
+    order: int,
+    scale: ArrayNfT,
+    proj_dir: ArrayNfT = None,
+):
+    r"""
+    Compute 1D box-spline parameters `\bbE \in \bR^{N}` given 2D projection directions.
+
+    Parameters
+    ----------
+    order: 0 | 1 | 2
+        Data interpolation order.
+        (See :py:func:`~xrt_toolkit.drjit.ray_xrt.xrt_apply`.)
+    scale: ArrayNfT
+        (2,) axial scaling vector applied to :math:`\bbE`.
+        (This can be assimilated to `knot_spec.step` from :py:func:`~xrt_toolkit.drjit.ray_xrt.xrt_apply`.)
+    proj_dir: ArrayNfT, None
+        (2,) projection direction, not necessarily normalized.
+
+    Returns
+    -------
+    - If `proj_dir` is unspecified:
+
+    E: TensorfT
+        (2, order+2) 2D box-spline generator.
+
+    - If `proj_dir` is given:
+
+    E: ArrayNfT
+        1D box-spline direction vectors :math:`\bbE`.
+    E_mask: ArrayNiT
+        0/1-mask of non-zero E entries.
+    """
+    assert order in (0, 1, 2)
+
+    ArrayNf = type(scale)
+    assert dr.size_v(scale) == 2
+    assert dr.shape(scale)[1] == 1, "scale must be shared across dimensions."
+    Float = dr.value_t(ArrayNf)
+
+    if proj_dir is None:
+        Tensor = dr.tensor_t(Float)
+        E = Tensor(
+            [
+                [1, 0, 1, 1],
+                [0, 1, 1, -1],
+            ]
+        ) * Tensor(scale)
+        return E[:, : order + 2]
+    else:
+        assert type(proj_dir) is ArrayNf
+        Array4f = xrtu.float_array_t(Float, 4)
+
+        n = dr.normalize(proj_dir)
+        to_1d = lambda _: dr.abs_dot(n, scale * _)
+        E = Array4f(
+            to_1d(ArrayNf(+1, +0)),
+            to_1d(ArrayNf(+0, +1)),
+            to_1d(ArrayNf(+1, +1)),
+            to_1d(ArrayNf(+1, -1)),
+        )[: order + 2]
+
+        E_mask_t = dr.int_array_t(E)
+        E_mask = dr.select(E <= 1e-3, E_mask_t(0), E_mask_t(1))
+
+        return E, E_mask
+```
+
+### differentiable_xrt/dda.py
+```
+import collections.abc as cabc
+import typing as typ
+
+import drjit as dr
+from drjit.cuda.ad import UInt32
+
+ArrayNfT = typ.TypeVar("ArrayNfT", bound=dr.AnyArray)
+ArrayNuT = typ.TypeVar("ArrayNuT", bound=dr.AnyArray)
+ArrayNiT = typ.TypeVar("ArrayNiT", bound=dr.AnyArray)
+BoolT = typ.TypeVar("BoolT", bound=dr.ArrayBase | bool)
+FloatT = typ.TypeVar("FloatT", bound=dr.AnyArray)
+BoolT = typ.TypeVar("BoolT", bound=dr.AnyArray)
+TensorXfT = typ.TypeVar("TensorXfT", bound=dr.AnyArray)
+StateT = typ.TypeVar("StateT")
+
+from drjit.auto import Bool, UInt
+
+def dda(
+    ray_o: ArrayNfT,
+    ray_d: ArrayNfT,
+    ray_max: object,
+    grid_res: ArrayNuT,
+    grid_min: ArrayNfT,
+    grid_max: ArrayNfT,
+    func: cabc.Callable[
+        [StateT, ArrayNuT, ArrayNfT, ArrayNfT, BoolT],
+        tuple[StateT, BoolT],
+    ],
+    state: StateT,
+    active: BoolT,
+    mode: typ.Literal["scalar", "symbolic", "evaluated", None] = None,
+    max_iterations: typ.Optional[int] = None,
+) -> StateT:
+    r"""
+    N-dimensional digital differential analyzer (DDA).
+
+    This function traverses the intersection of a Cartesian coordinate grid and
+    a specified ray or ray segment.  The following snippet shows how to use it
+    to enumerate the intersection of a grid with a single ray.
+
+    .. code-block:: python
+
+       from drjit.scalar import Array3f, Array3u, Float, Bool
+
+       def dda_fun(state: list, index: Array3u,
+                   pt_in: Array3f, pt_out: Array3f,
+                   active: Bool) -> tuple[list, bool]:
+           # Entered a grid cell, stash it in the 'state' variable
+           state.append(index)
+           return state, Bool(True)
+
+       result = dda(
+            ray_o    = Array3f(-.1),
+            ray_d    = Array3f(.1, .2, .3),
+            ray_max  = Float(float('inf')),
+            grid_res = Array3u(10),
+            grid_min = Array3f(0),
+            grid_max = Array3f(1),
+            func     = dda_fun,
+            state    = [],
+            active   = Bool(True)
+       )
+
+       print(result)
+
+    Since all input elements are Dr.Jit arrays, everything works analogously
+    when processing ``N`` rays and ``N`` potentially different grid
+    configurations. The entire process can be captured symbolically.
+
+    The function takes the following arguments. Note that many of them are
+    generic `type variables
+    <https://mypy.readthedocs.io/en/stable/generics.html>`__ (signaled by ending
+    with a capital ``T``). To support different dimensions and precisions, the
+    implementation must be able to deal with various input types, which is
+    communicated by these type variables.
+
+    Parameters
+    ----------
+    ray_o: ArrayNfT
+        Ray origin, where the ``ArrayNfT`` type variable refers to an
+        n-dimensional scalar or Jit-compiled floating point array.
+
+    ray_d: ArrayNfT
+        Ray direction. Does not need to be normalized.
+
+    ray_max: object
+        Maximum extent along the ray, which is permitted to be infinite. The
+        value is specfied as a multiple of the norm of ``ray_d``, which is not
+        necessarily unit-length. Must be of type :py:func:`dr.value_t(ArrayNfT)
+        <drjit.value_t>`.
+
+    grid_res: ArrayNuT
+        Grid resolution, where the ``ArrayNuT`` type variable refers to a
+        matched 32-bit unsigned integer array (i.e., :py:func:`ArrayNuT =
+        dr.uint32_array_t(ArrayNfT) <drjit.uint32_array_t>`).
+
+    grid_min: ArrayNfT
+        Bottom-left corner of the grid bounding box.
+
+    grid_max: ArrayNfT
+        Upper-right corner of the grid bounding box.
+
+    func: Callable[[StateT, ArrayNuT, ArrayNfT, ArrayNfT, BoolT], tuple[StateT, BoolT]]
+        Callback invoked when the DDA traverses a grid cell. It must take the
+        following five positional arguments:
+
+        1. ``arg0: StateT``: Arbitrary state value.
+
+        2. ``arg1: ArrayNuT``: Integer array specifying the cell index along
+           each dimension.
+
+        3. ``arg2: ArrayNfT``: Fractional position (:math:`\in [0, 1]^n`) where
+           the ray *enters* the current cell.
+
+        4. ``arg3: ArrayNfT``: Fractional position (:math:`\in [0, 1]^n`) where
+           the ray *leaves* the current cell.
+
+        5. ``arg4: BoolT``: Boolean array specifying which elements are active.
+
+        The callback should then return a tuple of type ``tuple[StateT, BoolT]``
+        containing
+
+        1. An updated state value.
+
+        2. A boolean array that can be used to exit the loop prematurely for
+           some or all rays. The iteration stops if the associated entry of the
+           return value equals ``False``.
+
+    state: StateT
+        Arbitrary *initial* state that will be passed to the callback.
+
+    active: BoolT
+        Array specifying which elements of the input are active, where the
+        ``BoolT`` type variable refers to a matched boolean array (i.e.,
+        :py:func:`BoolT = dr.mask_t(ray_o.x) <drjit.mask_t>`).
+
+    mode: str | None
+        The operation can operate in scalar, symbolic, or evaluated modes ---
+        see the ``mode`` argument and the documentation of
+        :py:func:`drjit.while_loop` for details.
+
+    max_iterations: int | None
+        Bound on the iteration count that is needed for reverse-mode
+        differentiation. Forwarded to the ``max_iterations`` parameter of
+        :py:func:`drjit.while_loop`.
+
+    Returns
+    -------
+    StateT
+        Final state value of the callback upon termination.
+
+    .. note::
+
+       Unlike Dr.Jit's built-in :py:func:`drjit.dda.dda`, all coordinates are
+       provided in ``(X, Y, Z)`` order.
+    """
+
+    ArrayNf = type(ray_o)
+    ArrayNi = dr.int32_array_t(ArrayNf)
+    ArrayNu = dr.uint32_array_t(ArrayNf)
+    Float = dr.value_t(ArrayNf)
+    Bool = dr.mask_t(Float)
+
+    assert type(ray_d) is ArrayNf
+    assert type(ray_max) is Float
+    assert type(grid_res) is ArrayNu
+    assert type(grid_min) is ArrayNf
+    assert type(grid_max) is ArrayNf
+    assert type(active) is Bool
+
+    # Linear map to grid coordinates (likely optimized away if
+    # 'grid_*' are literal constants)
+    grid_res_f = ArrayNf(grid_res)
+    grid_scale = grid_res_f / (grid_max - grid_min)
+    grid_offset = -grid_min * grid_scale
+
+    # Transform the ray into the grid coordinate system
+    ray_o = dr.fma(ray_o, grid_scale, grid_offset)
+    ray_d[active] = ray_d * grid_scale
+    rcp_d = dr.rcp(ray_d)
+    inf_t = ray_d == 0
+
+    # Per-axis intersection of the ray with the grid bounds
+    t_min_v = -ray_o * rcp_d
+    t_max_v = (grid_res_f - ray_o) * rcp_d
+    t_min_v2 = dr.minimum(t_min_v, t_max_v)
+    t_max_v2 = dr.maximum(t_min_v, t_max_v)
+
+    # Disable extent computation for dims where the ray direction is zero
+    t_max_v2[inf_t] = dr.inf
+    t_min_v2[inf_t] = -dr.inf
+
+    # Reduce constraints to a single ray interval
+    t_min = dr.maximum(dr.max(t_min_v2), 0)
+    t_max = dr.minimum(dr.min(t_max_v2), ray_max)
+
+    # Only run the DDA algorithm if the interval is nonempty
+    active = active & (t_max > t_min) & dr.isfinite(t_max)  # type: ignore
+
+    # Deactivate rays that have zero direction along any axis
+    # and whose origin along that axis is outside the grid bounds
+    active = active & dr.all(~inf_t | ((0 <= ray_o) & (ray_o <= grid_res_f)))
+
+    # Advance the ray to the start of the interval
+    ray_o = dr.fma(ray_d, t_min, ray_o)
+    t_min, t_max = 0, t_max - t_min  # type: ignore
+
+    # Compute the integer step direction
+    step = ArrayNi(dr.select(ray_d >= 0, 1, -1))
+    abs_rcp_d = abs(rcp_d)
+
+    # Integer grid coordinates
+    pi = dr.clip(ArrayNi(ray_o), 0, ArrayNi(grid_res - 1))
+
+    # Fractional entry position
+    p0 = ray_o - ArrayNf(pi)
+
+    # Step size to next interaction
+    dt_v = dr.select(ray_d >= 0, dr.fma(-p0, rcp_d, rcp_d), -p0 * rcp_d)
+    dt_v[inf_t] = dr.inf
+    
+    def body_fn(
+        active: BoolT,
+        state: StateT,
+        dt_v: ArrayNfT,
+        p0: ArrayNfT,
+        pi: ArrayNiT,
+        t_rem: typ.Any,
+    ) -> tuple[BoolT, StateT, ArrayNfT, ArrayNfT, ArrayNiT, typ.Any]:
+        # Select the smallest step. It's possible that dt == 0 when starting
+        # directly on a grid line.
+
+        dt = dr.minimum(dr.min(dt_v), t_rem)
+        mask = dt_v == dt
+
+        # Compute an updated position
+        ray_d2 = ray_d#dr.gather(ArrayNf, ray_d, dr.arange(UInt32, dr.width(ray_d)), shape=(3,))
+        p1 = dr.fma(ray_d2, dt, p0)
+
+        # Invoke the user-provided callback
+        state, cont = func(state, ArrayNu(pi), p0, p1, active & (dt > 0))  # type: ignore
+
+        # Advance
+        abs_rcp_d2 = abs_rcp_d#dr.gather(ArrayNf, abs_rcp_d, dr.arange(UInt32, dr.width(abs_rcp_d)), shape=(3,))
+
+        dt_v[active] = dr.select(mask, abs_rcp_d2, dt_v - dt)
+
+        p0[active] = dr.fma(ray_d2, dt, p0)
+        p0[mask & active] = dr.select(ray_d2 >= 0, Float(0), Float(1))
+
+        pi[mask & active] += step
+        t_rem[active] = t_rem - dt
+
+        active[active] &= dr.all((pi >= 0) & (pi < ArrayNi(grid_res))) & (t_rem > 0) & cont
+
+        return active, state, dt_v, p0, pi, t_rem
+        
+    return dr.while_loop(
+        state=(active, state, dt_v, p0, pi, t_max),
+        body=body_fn,
+        cond=lambda *args: args[0],
+        mode=mode,
+        labels=("active", "state", "dt_v", "p1", "pi", "t_rem"),
+        max_iterations=-1,
+    )[1]
+```
+
+### differentiable_xrt/operator.py
+```
+"""Differentiable X-ray operator: dr.custom wrapper wiring the ray-traced
+gradient passes (Algorithms 1-2 of the paper) into Dr.Jit's AD as an explicit
+vector-Jacobian product (Fig. 4 of the paper)."""
+import drjit as dr
+
+from . import ray_xrt as rx
+
+
+class XRT(dr.CustomOp):
+    """y = P(t, n) x with a matched adjoint for x and ray-traced geometry
+    gradients for the ray anchors t and directions n.
+
+    Usage:
+        y = dr.custom(XRT, t, n, knot_spec, order, x[, want_x, want_t, want_n])
+
+    (t, n): Array2f/Array3f ray anchors and directions (grad-enabled as needed);
+    x: Float, flattened coefficients. The want_* flags skip unneeded gradient
+    passes (each costs roughly one forward traversal).
+    """
+
+    def eval(self, t_spec, n_spec, knot_spec, order, x,
+             want_x=True, want_t=True, want_n=True):
+        self.t_spec, self.n_spec = t_spec, n_spec
+        self.knot_spec, self.order, self.x = knot_spec, order, x
+        self.want_x, self.want_t, self.want_n = want_x, want_t, want_n
+        return rx.xrt_apply((t_spec, n_spec), knot_spec, order, x)
+
+    def forward(self):
+        raise RuntimeError("forward-mode differentiation not implemented")
+
+    def backward(self):
+        g = self.grad_out()
+        rs = (self.t_spec, self.n_spec)
+        ArrayNf = type(self.t_spec)
+        D = dr.size_v(ArrayNf)
+        if self.want_x:
+            self.set_grad_in("x", rx.xrt_adjoint(rs, self.knot_spec, self.order, g))
+        if self.want_t:
+            gt = dr.zeros(ArrayNf, self.t_spec.shape)
+            gt[0] = g * rx.xrt_ad_t_x(rs, self.knot_spec, self.order, self.x)
+            gt[1] = g * rx.xrt_ad_t_y(rs, self.knot_spec, self.order, self.x)
+            if D == 3:
+                gt[2] = g * rx.xrt_ad_t_z(rs, self.knot_spec, self.order, self.x)
+            self.set_grad_in("t_spec", gt)
+        if self.want_n:
+            gn = dr.zeros(ArrayNf, self.n_spec.shape)
+            gn[0] = g * rx.xrt_ad_n_x(rs, self.knot_spec, self.order, self.x)
+            gn[1] = g * rx.xrt_ad_n_y(rs, self.knot_spec, self.order, self.x)
+            if D == 3:
+                gn[2] = g * rx.xrt_ad_n_z(rs, self.knot_spec, self.order, self.x)
+            self.set_grad_in("n_spec", gn)
+
+    def name(self):
+        return "xrt"
+```
+
+### differentiable_xrt/ray_xrt.py
+```
+import math
+import typing as typ
+
+import drjit as dr
+
+from . import util as xrtu
+
+from .bbox import bbox_contains, ray_bbox_intersect
+from .box_spline import box_spline_1d_dr, box_spline_1d_E, spline_3d_dr
+from .dda import dda
+
+BoolT = typ.TypeVar("BoolT", bound=dr.AnyArray)
+ArrayNfT = typ.TypeVar("ArrayNfT", bound=dr.AnyArray)
+ArrayNiT = typ.TypeVar("ArrayNiT", bound=dr.AnyArray)
+ArrayNuT = typ.TypeVar("ArrayNuT", bound=dr.AnyArray)
+FloatT = typ.TypeVar("FloatT", bound=dr.AnyArray)
+RaySpecT = tuple[ArrayNfT, ArrayNfT]
+
+# Neural network for 3D spline projection
+from drjit import nn as dnn
+from pathlib import Path
+from drjit.cuda.ad import Float32, Float16, TensorXf16
+import numpy as np
+
+rng_net = dr.rng(seed=0)
+net = dnn.Sequential(
+    dnn.Linear(4, 16),
+    dnn.ReLU(),
+    dnn.Linear(16, 16),
+    dnn.ReLU(),
+    dnn.Linear(16, 16),
+    dnn.ReLU(),
+    dnn.Linear(16, 16),
+    dnn.ReLU(),
+    dnn.Linear(16, 1),
+)
+net = net.alloc(dtype=TensorXf16, size=4, rng=rng_net)
+weights, net = dnn.pack(net, layout='training')
+
+weights_path = Path(__file__).parent / 'spline_weights.npz'
+
+saved = np.load(weights_path)['weights']
+weights[:] = Float16(saved)
+dr.print(f"Loaded weights from {weights_path.name}.")
+
+eps = 1e-5
+
+
+def xrt_apply(
+    ray_spec: RaySpecT,
+    knot_spec: xrtu.UniformSpec,
+    order: int,
+    data: FloatT,
+    buffer: FloatT = None,
+    mode: str = "symbolic",
+) -> FloatT:
+    r"""
+    Compute 2D/3D projections.
+
+    Let :math:`f: \bR^{D} \to \bR` such that
+
+    .. math::
+
+       f(\bbx)
+       =
+       \sum_{\bbq \in \discreteRange{\bbZero, \bbQ-1}}
+       f_{\bbq} \psi_(\bbx - \bbx_{\bbq}),
+
+    with
+
+    .. math::
+
+       f_{\bbq} \in \bR,
+       \bbx_{q} = \bbx_{0} + \bbq \odot \bbDelta,
+           \bbx_{0} \in \bR^{D},
+           \bbDelta \in \bR_{+}^{D},
+       \psi(\bbx; \bbE \in \bR^{D \times N}) =
+           box-spline with direction vectors
+           \{ \bbe_{l} \in \bR^{D} \}_{l=1..N}
+
+    Then ``xrt_apply()`` computes samples of
+
+    .. math::
+
+       \xrt[f](\bbn, \bbt) = \int_{\bR} f(\bbt + \alpha \bbn) d\alpha
+
+    Parameters
+    ----------
+    ray_spec: tuple[ArrayNfT, ArrayNfT]
+        (L,) ray anchors :math:`\bbt \in \bR^{D}` and directions :math:`\bbn \in \bR^{D}`.
+    knot_spec: UniformSpec
+        Volume properties :math:`(\bbx_{0}, \bbDelta, \bbQ)`.
+    order: 0 | 1 | 2
+        Data interpolation order.
+
+        This parameter sets which :math:`\psi` is used to interpolate data values:
+
+        * order = 0 (2D, 3D):
+
+          .. math::
+
+             \bbE = \diag(\bbDelta)
+
+        * order = 1 (2D):
+
+          .. math::
+
+             \bbE = [\bbDelta_{1}           0  \bbDelta_{1}
+                               0  \bbDelta_{2} \bbDelta_{2}]
+
+        * order = 2 (2D):
+
+          .. math::
+
+             \bbE = [\bbDelta_{1}           0  \bbDelta_{1}  \bbDelta_{1}
+                               0  \bbDelta_{2} \bbDelta_{2} -\bbDelta_{2}]
+
+        The support of :math:`\psi` and its projections can be viewed using :func:`~xrt_toolkit.drjit.diagnostics.plot_2d_basis`.
+
+    data: FloatT
+        (Q1,...,QD) flattened C-ordered volume weights :math:`f_{\bbq} \in \bR`.
+    buffer: FloatT
+        (L,) buffer in which to accumulate projections.
+
+    Returns
+    -------
+    proj: FloatT
+        (L,) projections :math:`\xrt[f] \in \bR`.
+    """
+    ray_t, ray_n = ray_spec
+
+    ArrayNf = type(ray_t)
+    ArrayNi = dr.int32_array_t(ArrayNf)
+    ArrayNu = dr.uint32_array_t(ArrayNf)
+    Float = dr.value_t(ArrayNf)
+    Bool = dr.mask_t(Float)
+
+    D = dr.size_v(ArrayNf)
+    assert (ray_t.ndim == 2) and (D in (2, 3))
+    assert type(ray_n) is ArrayNf
+    assert knot_spec.ndim == D
+    assert order in (0, 1, 2)
+    assert type(data) is Float
+    assert len(data) == math.prod(knot_spec.num)
+
+    L = max(ray_t.shape[1], ray_n.shape[1])
+    if buffer is None:
+        buffer = dr.zeros(Float, L)
+    else:
+        assert type(buffer) is Float
+        assert len(buffer) == L
+
+    knot_start = ArrayNf(*knot_spec.start)
+    knot_step = ArrayNf(*knot_spec.step)
+    knot_num = ArrayNu(*knot_spec.num)
+    bbox_ll = knot_start - (knot_step / 2)
+    bbox_ur = knot_start - (knot_step / 2) + (knot_num * knot_step)
+    if D == 2:
+        stride = ArrayNu(knot_num.y, 1)
+    elif D == 3:
+        stride = ArrayNu(knot_num.y * knot_num.z, knot_num.z, 1)
+
+    if order == 0:
+        state = (buffer,)
+
+        def project(
+            state: tuple[FloatT],
+            index: ArrayNuT,
+            p_a: ArrayNfT,
+            p_b: ArrayNfT,
+            active: BoolT,
+        ) -> tuple[tuple[FloatT], BoolT]:
+            (accum,) = state
+            offset = dr.dot(index, stride)
+            fq = dr.gather(Float, data, offset, active)
+            L = dr.norm((p_b - p_a) * knot_step) * dr.rcp(dr.prod(knot_step))
+            accum += fq * L
+            return (accum,), Bool(True)
+
+    elif D == 2:
+        index_prev = ArrayNi(-1)
+        state = (buffer, index_prev)
+
+        n_perp = dr.normalize(ArrayNf(-ray_n.y, ray_n.x))
+        E, E_mask = box_spline_1d_E(order, knot_step, n_perp)
+
+        direction = ray_n * dr.rcp(knot_step)
+        look_lr = dr.abs(direction.x) >= dr.abs(direction.y)
+        mv_dir = dr.select(look_lr, ArrayNi(+1, 0), ArrayNi(0, +1))
+        shift_l = dr.reverse(-mv_dir)
+        shift_m = ArrayNi(0, 0)
+        shift_r = dr.reverse(+mv_dir)
+
+        def project(
+            state: tuple[FloatT, ArrayNiT],
+            index: ArrayNuT,
+            p_a: ArrayNfT,
+            p_b: ArrayNfT,
+            active: BoolT,
+        ) -> tuple[tuple[FloatT, ArrayNiT], BoolT]:
+            (accum, index_prev) = state
+
+            def process_shift(shift: ArrayNiT) -> tuple[ArrayNfT, ArrayNfT]:
+                index_s = index + shift
+                offset = dr.dot(index_s, stride)
+                active = dr.all((0 <= index_s) & (index_s < knot_num))
+                fq = dr.gather(Float, data, offset, active)
+                cell_center = ArrayNf(0.5, 0.5) + shift
+                x = dr.dot(n_perp, knot_step * (cell_center - p_a))
+                L = box_spline_1d_dr(E, E_mask, x)
+                return fq, L
+
+            fq_l, L_l = process_shift(shift_l)
+            fq_m, L_m = process_shift(shift_m)
+            fq_r, L_r = process_shift(shift_r)
+
+            Array3f = xrtu.float_array_t(Float, 3)
+            displacement = ArrayNi(index) - index_prev
+            fq_lmr = dr.if_stmt(
+                (fq_l, fq_m, fq_r),
+                dr.dot(displacement, mv_dir) != 0,
+                lambda l, m, r: Array3f(l, m, r),
+                lambda l, m, r: dr.select(
+                    dr.dot(displacement, dr.reverse(mv_dir)) == -1,
+                    Array3f(l, 0, 0),
+                    Array3f(0, 0, r),
+                ),
+            )
+            accum += dr.dot(fq_lmr, Array3f(L_l, L_m, L_r))
+            return (accum, ArrayNi(index)), Bool(True)
+
+    elif (D == 3) and (order > 0):
+        # TODO case where ray touches an edge : conditions are stricter
+
+        n = dr.normalize(ray_n)
+        index_prev = ArrayNi(-1)
+        state = (buffer, index_prev)
+        direction = dr.abs(ray_n * dr.rcp(knot_step))
+
+        dominant_axis = dr.floor(direction / dr.max(direction) + 1e-6)
+        shift_x = ArrayNf(dominant_axis.y, dominant_axis.z, dominant_axis.x)
+        shift_y = dr.cross(dominant_axis, shift_x)
+
+        n_perp_x = dr.normalize(shift_x - dr.dot(shift_x, n) * n)
+        n_perp_y = dr.cross(n, n_perp_x)
+
+        shift_m = ArrayNi(0, 0, 0)
+
+        def project(
+            state: tuple[FloatT, ArrayNiT],
+            index: ArrayNuT,
+            p_a: ArrayNfT,
+            p_b: ArrayNfT,
+            active: BoolT,
+        ) -> tuple[tuple[FloatT, ArrayNiT], BoolT]:
+            (accum, index_prev) = state
+
+            def process_shift(shift: ArrayNiT) -> tuple[ArrayNfT, ArrayNfT]:
+                index_s = index + shift
+                offset = dr.dot(index_s, stride)
+                active = dr.all((0 <= index_s) & (index_s < knot_num))
+                fq = dr.gather(Float, data, offset, active)
+                cell_center = ArrayNf(0.5, 0.5, 0.5) + shift
+                x = dr.dot(n_perp_y, knot_step * (cell_center - p_a))
+                y = dr.dot(n_perp_x, knot_step * (cell_center - p_a))
+                L = spline_3d_dr(net, x, y, n)
+                return fq, L
+
+            fq_mlr, L_mlr = process_shift(shift_m)
+            fq_mud, L_mud = process_shift(shift_m)
+            fq_l, L_l = process_shift(shift_x)
+            fq_r, L_r = process_shift(-shift_x)
+            fq_d, L_d = process_shift(shift_y)
+            fq_u, L_u = process_shift(-shift_y)
+            fq_ll, L_ll = process_shift(shift_x + shift_y)
+            fq_rr, L_rr = process_shift(-shift_x - shift_y)
+            fq_lr, L_lr = process_shift(shift_x - shift_y)
+            fq_rl, L_rl = process_shift(-shift_x + shift_y)
+
+            Array3f = xrtu.float_array_t(Float, 3)
+            displacement = ArrayNi(index) - index_prev
+
+            fq_lmr = dr.if_stmt(
+                (fq_l, fq_mlr, fq_r),
+                dr.dot(displacement, shift_x) != 0,
+                lambda l, m, r: dr.select(
+                    dr.dot(displacement, shift_x) == -1,
+                    Array3f(0, 0, r),
+                    Array3f(l, 0, 0),
+                ),
+                lambda l, m, r: Array3f(l, m, r),
+            )
+            L_mlr = dr.select(dr.dot(displacement, shift_x) == 0, 0, L_mlr)
+            L_l = dr.select(dr.dot(displacement, shift_y) != 0, 0, L_l)
+            L_r = dr.select(dr.dot(displacement, shift_y) != 0, 0, L_r)
+            L_lmr = Array3f(L_l, L_mlr, L_r)
+
+            fq_dmu = dr.if_stmt(
+                (fq_d, fq_mud, fq_u),
+                dr.dot(displacement, shift_y) != 0,
+                lambda d, m, u: dr.select(
+                    dr.dot(displacement, shift_y) == -1,
+                    Array3f(0, 0, u),
+                    Array3f(d, 0, 0),
+                ),
+                lambda d, m, u: Array3f(d, m, u),
+            )
+            L_mud = L_mud - L_mlr
+            L_d = dr.select(dr.dot(displacement, shift_x) != 0, 0, L_d)
+            L_u = dr.select(dr.dot(displacement, shift_x) != 0, 0, L_u)
+            L_dmu = Array3f(L_d, L_mud, L_u)
+
+            accum += dr.dot(fq_dmu, L_dmu)
+            accum += dr.dot(fq_lmr, L_lmr)
+
+            fq_ll = dr.select(dr.dot(displacement, shift_y) != 0, 0, fq_ll)
+            fq_ll = dr.select(dr.dot(displacement, shift_x) != 0, 0, fq_ll)
+            fq_rr = dr.select(dr.dot(displacement, shift_y) != 0, 0, fq_rr)
+            fq_rr = dr.select(dr.dot(displacement, shift_x) != 0, 0, fq_rr)
+            fq_lr = dr.select(dr.dot(displacement, shift_y) != 0, 0, fq_lr)
+            fq_lr = dr.select(dr.dot(displacement, shift_x) != 0, 0, fq_lr)
+            fq_rl = dr.select(dr.dot(displacement, shift_y) != 0, 0, fq_rl)
+            fq_rl = dr.select(dr.dot(displacement, shift_x) != 0, 0, fq_rl)
+
+            accum += fq_ll * L_ll
+            accum += fq_rr * L_rr
+            accum += fq_lr * L_lr
+            accum += fq_rl * L_rl
+
+            return (accum, ArrayNi(index)), Bool(True)
+
+    active, t1, t2 = ray_bbox_intersect(bbox_ll, bbox_ur, ray_t, ray_n)
+    t_min = dr.minimum(t1, t2)
+    ray_t = dr.select(
+        active & bbox_contains(bbox_ll, bbox_ur, ray_t),
+        ray_t + (t_min - 1) * ray_n,
+        ray_t,
+    )
+    dda(
+        ray_o=ray_t, ray_d=ray_n, ray_max=Float(dr.inf),
+        grid_res=knot_num, grid_min=bbox_ll, grid_max=bbox_ur,
+        func=project, state=state, active=active, mode=mode, max_iterations=-1,
+    )
+    return buffer
+
+
+def xrt_adjoint(
+    ray_spec: RaySpecT,
+    knot_spec: xrtu.UniformSpec,
+    order: int,
+    data: FloatT,
+    buffer: FloatT = None,
+    mode: str = "symbolic",
+) -> FloatT:
+    r"""
+    Compute 2D/3D back-projections.
+
+    Adjoint of ``xrt_apply()``: maps projection weights to volume expansion coefficients.
+
+    Parameters
+    ----------
+    ray_spec: tuple[ArrayNfT, ArrayNfT]
+        (L,) ray anchors :math:`\bbt \in \bR^{D}` and directions :math:`\bbn \in \bR^{D}`.
+    knot_spec: UniformSpec
+        Volume properties :math:`(\bbx_{0}, \bbDelta, \bbQ)`.
+    order: 0 | 1 | 2
+        Data interpolation order.
+
+        This parameter sets which :math:`\psi` is used to interpolate data values.
+        The support of :math:`\psi` and its projections can be viewed using :func:`~xrt_toolkit.drjit.diagnostics.plot_2d_basis`.
+    data: FloatT
+        (L,) projections :math:`g_{l} \in \bR`.
+    buffer: FloatT
+        (Q1,...,QD) flattened buffer in which to accumulate back-projected weights :math:`f_{\bbq} \in \bR`.
+
+    Returns
+    -------
+    b_proj: FloatT
+        (Q1,...,QD) flattened C-ordered back-projected weights :math:`f_{\bbq} \in \bR`.
+    """
+    ray_t, ray_n = ray_spec
+
+    ArrayNf = type(ray_t)
+    ArrayNi = dr.int32_array_t(ArrayNf)
+    ArrayNu = dr.uint32_array_t(ArrayNf)
+    Float = dr.value_t(ArrayNf)
+    Bool = dr.mask_t(Float)
+
+    D = dr.size_v(ArrayNf)
+    assert (ray_t.ndim == 2) and (D in (2, 3))
+    assert type(ray_n) is ArrayNf
+    assert knot_spec.ndim == D
+    assert order in (0, 1, 2)
+
+    L = max(ray_t.shape[1], ray_n.shape[1])
+    assert type(data) is Float
+    assert len(data) == L
+
+    if buffer is None:
+        buffer = dr.zeros(Float, math.prod(knot_spec.num))
+    else:
+        assert type(buffer) is Float
+        assert len(buffer) == math.prod(knot_spec.num)
+
+    knot_start = ArrayNf(*knot_spec.start)
+    knot_step = ArrayNf(*knot_spec.step)
+    knot_num = ArrayNu(*knot_spec.num)
+    bbox_ll = knot_start - (knot_step / 2)
+    bbox_ur = knot_start - (knot_step / 2) + (knot_num * knot_step)
+    if D == 2:
+        stride = ArrayNu(knot_num.y, 1)
+    elif D == 3:
+        stride = ArrayNu(knot_num.y * knot_num.z, knot_num.z, 1)
+
+    if order == 0:
+        state = (buffer,)
+
+        def back_project(
+            state: tuple[FloatT],
+            index: ArrayNuT,
+            p_a: ArrayNfT,
+            p_b: ArrayNfT,
+            active: BoolT,
+        ) -> tuple[tuple[FloatT], BoolT]:
+            (accum,) = state
+            offset = dr.dot(index, stride)
+            L = dr.norm((p_b - p_a) * knot_step) * dr.rcp(dr.prod(knot_step))
+            dr.scatter_add(accum, L * data, offset, active)
+            return (accum,), Bool(True)
+
+    elif D == 2:
+        index_prev = ArrayNi(-1)
+        state = (buffer, index_prev)
+
+        n_perp = dr.normalize(ArrayNf(-ray_n.y, ray_n.x))
+        E, E_mask = box_spline_1d_E(order, knot_step, n_perp)
+
+        direction = ray_n * dr.rcp(knot_step)
+        look_lr = dr.abs(direction.x) >= dr.abs(direction.y)
+        mv_dir = dr.select(look_lr, ArrayNi(+1, 0), ArrayNi(0, +1))
+        shift_l = dr.reverse(-mv_dir)
+        shift_m = ArrayNi(0, 0)
+        shift_r = dr.reverse(+mv_dir)
+
+        def back_project(
+            state: tuple[FloatT, ArrayNiT],
+            index: ArrayNuT,
+            p_a: ArrayNfT,
+            p_b: ArrayNfT,
+            active: BoolT,
+        ) -> tuple[tuple[FloatT, ArrayNiT], BoolT]:
+            (accum, index_prev) = state
+
+            def process_shift(shift: ArrayNiT) -> tuple[ArrayNfT, ArrayNuT, BoolT]:
+                index_s = index + shift
+                offset = dr.dot(index_s, stride)
+                active = dr.all((0 <= index_s) & (index_s < knot_num))
+                cell_center = ArrayNf(0.5, 0.5) + shift
+                x = dr.dot(n_perp, knot_step * (cell_center - p_a))
+                L = box_spline_1d_dr(E, E_mask, x)
+                return L, offset, active
+
+            L_l, offset_l, active_l = process_shift(shift_l)
+            L_m, offset_m, active_m = process_shift(shift_m)
+            L_r, offset_r, active_r = process_shift(shift_r)
+
+            Array3b = dr.mask_t(xrtu.float_array_t(Float, 3))
+            displacement = ArrayNi(index) - index_prev
+            active_lmr = dr.if_stmt(
+                (active_l, active_m, active_r),
+                dr.dot(displacement, mv_dir) != 0,
+                lambda l, m, r: Array3b(l, m, r),
+                lambda l, m, r: dr.select(
+                    dr.dot(displacement, dr.reverse(mv_dir)) == -1,
+                    Array3b(l, False, False),
+                    Array3b(False, False, r),
+                ),
+            )
+            dr.scatter_add(accum, L_l * data, offset_l, active_lmr.x)
+            dr.scatter_add(accum, L_m * data, offset_m, active_lmr.y)
+            dr.scatter_add(accum, L_r * data, offset_r, active_lmr.z)
+            return (accum, ArrayNi(index)), Bool(True)
+
+    elif (D == 3) and (order > 0):
+        # TODO case where ray touches an edge : conditions are stricter
+
+        n = dr.normalize(ray_n)
+        index_prev = ArrayNi(-1)
+        state = (buffer, index_prev)
+        direction = dr.abs(ray_n * dr.rcp(knot_step))
+
+        dominant_axis = dr.floor(direction / dr.max(direction) + 1e-6)
+        shift_x = ArrayNf(dominant_axis.y, dominant_axis.z, dominant_axis.x)
+        shift_y = dr.cross(dominant_axis, shift_x)
+
+        n_perp_x = dr.normalize(shift_x - dr.dot(shift_x, n) * n)
+        n_perp_y = dr.cross(n, n_perp_x)
+
+        shift_m = ArrayNi(0, 0, 0)
+
+        def back_project(
+            state: tuple[FloatT, ArrayNiT],
+            index: ArrayNuT,
+            p_a: ArrayNfT,
+            p_b: ArrayNfT,
+            active: BoolT,
+        ) -> tuple[tuple[FloatT, ArrayNiT], BoolT]:
+            (accum, index_prev) = state
+
+            def process_shift(shift: ArrayNiT) -> tuple[ArrayNfT, ArrayNuT, BoolT]:
+                index_s = index + shift
+                offset = dr.dot(index_s, stride)
+                active = dr.all((0 <= index_s) & (index_s < knot_num))
+                cell_center = ArrayNf(0.5, 0.5, 0.5) + shift
+                x = dr.dot(n_perp_y, knot_step * (cell_center - p_a))
+                y = dr.dot(n_perp_x, knot_step * (cell_center - p_a))
+                L = spline_3d_dr(net, x, y, n)
+                return L, offset, active
+
+            L_mlr, offset_mlr, active_mlr = process_shift(shift_m)
+            L_mud, offset_mud, active_mud = process_shift(shift_m)
+            L_l, offset_l, active_l = process_shift(shift_x)
+            L_r, offset_r, active_r = process_shift(-shift_x)
+            L_d, offset_d, active_d = process_shift(shift_y)
+            L_u, offset_u, active_u = process_shift(-shift_y)
+            L_ll, offset_ll, active_ll = process_shift(shift_x + shift_y)
+            L_rr, offset_rr, active_rr = process_shift(-shift_x - shift_y)
+            L_lr, offset_lr, active_lr = process_shift(shift_x - shift_y)
+            L_rl, offset_rl, active_rl = process_shift(-shift_x + shift_y)
+
+            Array3b = dr.mask_t(xrtu.float_array_t(Float, 3))
+            displacement = ArrayNi(index) - index_prev
+
+            active_lmr = dr.if_stmt(
+                (active_l, active_mlr, active_r),
+                dr.dot(displacement, shift_x) != 0,
+                lambda l, m, r: dr.select(
+                    dr.dot(displacement, shift_x) == -1,
+                    Array3b(False, False, r),
+                    Array3b(l, False, False),
+                ),
+                lambda l, m, r: Array3b(l, m, r),
+            )
+            active_mlr = dr.select(dr.dot(displacement, shift_x) == 0, False, active_mlr)
+            active_l = dr.select(dr.dot(displacement, shift_y) != 0, False, active_l)
+            active_r = dr.select(dr.dot(displacement, shift_y) != 0, False, active_r)
+
+            dr.scatter_add(accum, L_l * data, offset_l, active_lmr.x & active_l)
+            dr.scatter_add(accum, L_mlr * data, offset_mlr, active_lmr.y & active_mlr)
+            dr.scatter_add(accum, L_r * data, offset_r, active_lmr.z & active_r)
+
+            active_dmu = dr.if_stmt(
+                (active_d, active_mud, active_u),
+                dr.dot(displacement, shift_y) != 0,
+                lambda d, m, u: dr.select(
+                    dr.dot(displacement, shift_y) == -1,
+                    Array3b(False, False, u),
+                    Array3b(d, False, False),
+                ),
+                lambda d, m, u: Array3b(d, m, u),
+            )
+            active_mud = active_mud & ~active_mlr
+            active_d = dr.select(dr.dot(displacement, shift_x) != 0, False, active_d)
+            active_u = dr.select(dr.dot(displacement, shift_x) != 0, False, active_u)
+
+            dr.scatter_add(accum, L_d * data, offset_d, active_dmu.x & active_d)
+            dr.scatter_add(accum, L_mud * data, offset_mud, active_dmu.y & active_mud)
+            dr.scatter_add(accum, L_u * data, offset_u, active_dmu.z & active_u)
+
+            active_ll = dr.select(dr.dot(displacement, shift_y) != 0, False, active_ll)
+            active_ll = dr.select(dr.dot(displacement, shift_x) != 0, False, active_ll)
+            active_rr = dr.select(dr.dot(displacement, shift_y) != 0, False, active_rr)
+            active_rr = dr.select(dr.dot(displacement, shift_x) != 0, False, active_rr)
+            active_lr = dr.select(dr.dot(displacement, shift_y) != 0, False, active_lr)
+            active_lr = dr.select(dr.dot(displacement, shift_x) != 0, False, active_lr)
+            active_rl = dr.select(dr.dot(displacement, shift_y) != 0, False, active_rl)
+            active_rl = dr.select(dr.dot(displacement, shift_x) != 0, False, active_rl)
+
+            dr.scatter_add(accum, L_ll * data, offset_ll, active_ll)
+            dr.scatter_add(accum, L_rr * data, offset_rr, active_rr)
+            dr.scatter_add(accum, L_lr * data, offset_lr, active_lr)
+            dr.scatter_add(accum, L_rl * data, offset_rl, active_rl)
+
+            return (accum, ArrayNi(index)), Bool(True)
+
+    active, t1, t2 = ray_bbox_intersect(bbox_ll, bbox_ur, ray_t, ray_n)
+    t_min = dr.minimum(t1, t2)
+    ray_t = dr.select(
+        active & bbox_contains(bbox_ll, bbox_ur, ray_t),
+        ray_t + (t_min - 1) * ray_n,
+        ray_t,
+    )
+    dda(
+        ray_o=ray_t, ray_d=ray_n, ray_max=Float(dr.inf),
+        grid_res=knot_num, grid_min=bbox_ll, grid_max=bbox_ur,
+        func=back_project, state=state, active=active, mode=mode, max_iterations=-1,
+    )
+    return buffer
+
+
+# ---------------------------------------------------------------------------
+# Geometry gradients (2D only)
+# ---------------------------------------------------------------------------
+# Both xrt_ad_t_x/y and xrt_ad_n_x/y share the same DDA structure.
+# The only per-component difference is which gradient of the projection weight
+# L = box_spline_1d_dr(...) is extracted after a drjit backward pass.
+#
+# _xrt_ad_t(idx): ∂P/∂t_{idx}  where t is the ray anchor (offset)
+#   grad = p_a.grad[idx]
+#
+# _xrt_ad_n(idx): ∂P/∂n_{idx}  where n is the ray direction
+#   grad = ray_n.grad[idx] + fac_t * p_a.grad[idx]
+#   (fac_t accounts for the implicit dependence of the entry point p_a on n)
+# ---------------------------------------------------------------------------
+
+def _xrt_ad_t(
+    ray_spec: RaySpecT,
+    knot_spec: xrtu.UniformSpec,
+    order: int,
+    data: FloatT,
+    buffer: FloatT,
+    mode: str,
+    idx: int,
+) -> FloatT:
+    ray_t, ray_n = ray_spec
+
+    ArrayNf = type(ray_t)
+    ArrayNi = dr.int32_array_t(ArrayNf)
+    ArrayNu = dr.uint32_array_t(ArrayNf)
+    Float = dr.value_t(ArrayNf)
+    Bool = dr.mask_t(Float)
+
+    D = dr.size_v(ArrayNf)
+    assert (ray_t.ndim == 2) and (D == 2 or (D == 3 and order == 0))
+    assert type(ray_n) is ArrayNf
+    assert knot_spec.ndim == D
+    assert order in (0, 1, 2)
+    assert type(data) is Float
+    assert len(data) == math.prod(knot_spec.num)
+
+    L_size = max(ray_t.shape[1], ray_n.shape[1])
+    if buffer is None:
+        buffer = dr.zeros(Float, L_size)
+    else:
+        assert type(buffer) is Float
+        assert len(buffer) == L_size
+
+    knot_start = ArrayNf(*knot_spec.start)
+    knot_step = ArrayNf(*knot_spec.step)
+    knot_num = ArrayNu(*knot_spec.num)
+    bbox_ll = knot_start - (knot_step / 2)
+    bbox_ur = knot_start - (knot_step / 2) + (knot_num * knot_step)
+    if D == 2:
+        stride = ArrayNu(knot_num.y, 1)
+    elif D == 3:
+        stride = ArrayNu(knot_num.y * knot_num.z, knot_num.z, 1)
+
+    if D == 3 and order == 0:
+        # 3D voxel case: closed-form gradient (paper Algorithm vox1).
+        # sigma[idx] = (p_in on left face) + (p_out on left face)
+        #            - (p_in on right face) - (p_out on right face)
+        # g_s[idx]  = sigma[idx] / |d[idx]|
+        state = (buffer,)
+
+        def project(
+            state: tuple[FloatT],
+            index: ArrayNuT,
+            p_a: ArrayNfT,
+            p_b: ArrayNfT,
+            active: BoolT,
+        ) -> tuple[tuple[FloatT], BoolT]:
+            (accum,) = state
+            offset = dr.dot(index, stride)
+            fq = dr.gather(Float, data, offset, active)
+
+            sigma = (
+                dr.select(p_a[idx] < eps, Float(1), Float(0))
+                + dr.select(p_b[idx] < eps, Float(1), Float(0))
+                - dr.select(p_a[idx] > 1.0 - eps, Float(1), Float(0))
+                - dr.select(p_b[idx] > 1.0 - eps, Float(1), Float(0))
+            )
+            n_abs = dr.abs(ray_n[idx])
+            # When n[idx]=0 the ray never crosses idx-faces; sigma=0 too → return 0
+            g = dr.select(n_abs > eps, sigma / n_abs, Float(0))
+            accum += fq * g
+            return (accum,), Bool(True)
+
+    else:
+        # 2D (any order): use drjit AD on the box-spline projection weight.
+        index_prev = ArrayNi(-1)
+        state = (buffer, index_prev)
+
+        direction = ray_n * dr.rcp(knot_step)
+        look_lr = dr.abs(direction.x) >= dr.abs(direction.y)
+        mv_dir = dr.select(look_lr, ArrayNi(+1, 0), ArrayNi(0, +1))
+        shift_l = dr.reverse(-mv_dir)
+        shift_m = ArrayNi(0, 0)
+        shift_r = dr.reverse(+mv_dir)
+
+        def project(
+            state: tuple[FloatT, ArrayNiT],
+            index: ArrayNuT,
+            p_a: ArrayNfT,
+            p_b: ArrayNfT,
+            active: BoolT,
+        ) -> tuple[tuple[FloatT, ArrayNiT], BoolT]:
+            (accum, index_prev) = state
+
+            def process_shift(shift: ArrayNiT) -> tuple[ArrayNfT, ArrayNfT]:
+                index_s = index + shift
+                offset = dr.dot(index_s, stride)
+                in_bounds = dr.all((0 <= index_s) & (index_s < knot_num))
+                fq = dr.gather(Float, data, offset, in_bounds)
+
+                cell_center = ArrayNf(0.5, 0.5) + shift
+                p_local = ArrayNf(p_a)
+                dr.enable_grad(p_local)
+                def contribution(p_a_, ray_n_):
+                    n_perp = dr.normalize(ArrayNf(-ray_n_.y, ray_n_.x))
+                    E, E_mask = box_spline_1d_E(order, knot_step, n_perp)
+                    x = dr.dot(n_perp, knot_step * (cell_center - p_a_))
+                    return box_spline_1d_dr(E, E_mask, x)
+                dr.backward(contribution(p_local, ray_n),
+                            flags=dr.ADFlag.Default | dr.ADFlag.AllowNoGrad)
+                g = p_local.grad[idx]
+                dr.disable_grad(p_local)
+                return fq, g
+
+            fq_l, L_l = process_shift(shift_l)
+            fq_m, L_m = process_shift(shift_m)
+            fq_r, L_r = process_shift(shift_r)
+
+            Array3f = xrtu.float_array_t(Float, 3)
+            displacement = ArrayNi(index) - index_prev
+            fq_lmr = dr.if_stmt(
+                (fq_l, fq_m, fq_r),
+                dr.dot(displacement, mv_dir) != 0,
+                lambda l, m, r: Array3f(l, m, r),
+                lambda l, m, r: dr.select(
+                    dr.dot(displacement, dr.reverse(mv_dir)) == -1,
+                    Array3f(l, 0, 0),
+                    Array3f(0, 0, r),
+                ),
+            )
+            accum += dr.dot(fq_lmr, Array3f(L_l, L_m, L_r))
+            return (accum, ArrayNi(index)), Bool(True)
+
+    active, t1, t2 = ray_bbox_intersect(bbox_ll, bbox_ur, ray_t, ray_n)
+    t_min = dr.minimum(t1, t2)
+    ray_t = dr.select(
+        active & bbox_contains(bbox_ll, bbox_ur, ray_t),
+        ray_t + (t_min - 1) * ray_n,
+        ray_t,
+    )
+    dda(
+        ray_o=ray_t, ray_d=ray_n, ray_max=Float(dr.inf),
+        grid_res=knot_num, grid_min=bbox_ll, grid_max=bbox_ur,
+        func=project, state=state, active=active, mode=mode, max_iterations=-1,
+    )
+    return buffer
+
+
+def _xrt_ad_n(
+    ray_spec: RaySpecT,
+    knot_spec: xrtu.UniformSpec,
+    order: int,
+    data: FloatT,
+    buffer: FloatT,
+    mode: str,
+    idx: int,
+) -> FloatT:
+    ray_t, ray_n = ray_spec
+    ray_t_init = dr.copy(ray_t)
+
+    ArrayNf = type(ray_t)
+    ArrayNi = dr.int32_array_t(ArrayNf)
+    ArrayNu = dr.uint32_array_t(ArrayNf)
+    Float = dr.value_t(ArrayNf)
+    Bool = dr.mask_t(Float)
+
+    D = dr.size_v(ArrayNf)
+    assert (ray_t.ndim == 2) and (D == 2 or (D == 3 and order == 0))
+    assert type(ray_n) is ArrayNf
+    assert knot_spec.ndim == D
+    assert order in (0, 1, 2)
+    assert type(data) is Float
+    assert len(data) == math.prod(knot_spec.num)
+
+    L_size = max(ray_t.shape[1], ray_n.shape[1])
+    if buffer is None:
+        buffer = dr.zeros(Float, L_size)
+    else:
+        assert type(buffer) is Float
+        assert len(buffer) == L_size
+
+    knot_start = ArrayNf(*knot_spec.start)
+    knot_step = ArrayNf(*knot_spec.step)
+    knot_num = ArrayNu(*knot_spec.num)
+    bbox_ll = knot_start - (knot_step / 2)
+    bbox_ur = knot_start - (knot_step / 2) + (knot_num * knot_step)
+    if D == 2:
+        stride = ArrayNu(knot_num.y, 1)
+    elif D == 3:
+        stride = ArrayNu(knot_num.y * knot_num.z, knot_num.z, 1)
+
+    if D == 3 and order == 0:
+        # 3D voxel case: closed-form gradient (paper Algorithm vox2).
+        # g_s[i]       = sigma[i] / |d[i]|          (same as Algorithm vox1)
+        # sigma_out[i] = indicator of exit face for component i
+        # local_g_d[i] = L_fw * sigma_out[i] / |d[i]|
+        # g[i]         = local_g_d[i] + fac_t * g_s[i]
+        state = (buffer,)
+
+        def project(
+            state: tuple[FloatT],
+            index: ArrayNuT,
+            p_a: ArrayNfT,
+            p_b: ArrayNfT,
+            active: BoolT,
+        ) -> tuple[tuple[FloatT], BoolT]:
+            (accum,) = state
+            offset = dr.dot(index, stride)
+            fq = dr.gather(Float, data, offset, active)
+            L_fw = dr.norm((p_b - p_a) * knot_step) * dr.rcp(dr.prod(knot_step))
+            sigma = (
+                dr.select(p_a[idx] < eps, Float(1), Float(0))
+                + dr.select(p_b[idx] < eps, Float(1), Float(0))
+                - dr.select(p_a[idx] > 1.0 - eps, Float(1), Float(0))
+                - dr.select(p_b[idx] > 1.0 - eps, Float(1), Float(0))
+            )
+            sigma_out = (
+                dr.select(p_b[idx] < eps, Float(1), Float(0))
+                - dr.select(p_b[idx] > 1.0 - eps, Float(1), Float(0))
+            )
+            n_abs = dr.abs(ray_n[idx])
+            # When n[idx]=0 the ray never crosses idx-faces; sigma=0 too → return 0
+            g_s       = dr.select(n_abs > eps, sigma     / n_abs, Float(0))
+            local_g_d = dr.select(n_abs > eps, L_fw * sigma_out / n_abs, Float(0))
+            p_a_phys = bbox_ll + (ArrayNf(index) + p_a) * knot_step
+            # Dot product is robust for any direction (including axis-aligned).
+            # For unit ray_n: fac_t = (p_a_phys - t_init) · n  (ray parameter at p_a).
+            n_norm_sq = dr.squared_norm(ray_n)
+            fac_t = dr.select(
+                n_norm_sq > eps * eps,
+                dr.dot(p_a_phys - ray_t_init, ray_n) / n_norm_sq,
+                Float(0),
+            )
+            g = local_g_d + fac_t * g_s
+            accum += fq * g
+            return (accum,), Bool(True)
+
+    else:
+        index_prev = ArrayNi(-1)
+        state = (buffer, index_prev)
+
+        direction = ray_n * dr.rcp(knot_step)
+        look_lr = dr.abs(direction.x) >= dr.abs(direction.y)
+        mv_dir = dr.select(look_lr, ArrayNi(+1, 0), ArrayNi(0, +1))
+        shift_l = dr.reverse(-mv_dir)
+        shift_m = ArrayNi(0, 0)
+        shift_r = dr.reverse(+mv_dir)
+
+        def project(
+            state: tuple[FloatT, ArrayNiT],
+            index: ArrayNuT,
+            p_a: ArrayNfT,
+            p_b: ArrayNfT,
+            active: BoolT,
+        ) -> tuple[tuple[FloatT, ArrayNiT], BoolT]:
+            (accum, index_prev) = state
+
+            def process_shift(shift: ArrayNiT) -> tuple[ArrayNfT, ArrayNfT]:
+                index_s = index + shift
+                offset = dr.dot(index_s, stride)
+                in_bounds = dr.all((0 <= index_s) & (index_s < knot_num))
+                fq = dr.gather(Float, data, offset, in_bounds)
+
+                cell_center = ArrayNf(0.5, 0.5) + shift
+                # ray parameter of the cell entry point (robust for any direction)
+                p_a_phys = bbox_ll + (ArrayNf(index) + p_a) * knot_step
+                n_norm_sq = dr.squared_norm(ray_n)
+                fac_t = dr.select(
+                    n_norm_sq > eps * eps,
+                    dr.dot(p_a_phys - ray_t_init, ray_n) / n_norm_sq,
+                    Float(0),
+                )
+
+                # differentiate LOCAL copies: enabling grad on the captured
+                # loop-external ray_n breaks symbolic tracing
+                n_local = ArrayNf(ray_n)
+                p_local = ArrayNf(p_a)
+                dr.enable_grad(n_local, p_local)
+                def contribution(p_a_, ray_n_):
+                    n_perp = dr.normalize(ArrayNf(-ray_n_.y, ray_n_.x))
+                    E, E_mask = box_spline_1d_E(order, knot_step, n_perp)
+                    x = dr.dot(n_perp, knot_step * (cell_center - p_a_))
+                    return box_spline_1d_dr(E, E_mask, x)
+                dr.backward(contribution(p_local, n_local),
+                            flags=dr.ADFlag.Default | dr.ADFlag.AllowNoGrad)
+                g = n_local.grad[idx] + fac_t * p_local.grad[idx]
+                dr.disable_grad(n_local, p_local)
+                return fq, g
+
+            fq_l, L_l = process_shift(shift_l)
+            fq_m, L_m = process_shift(shift_m)
+            fq_r, L_r = process_shift(shift_r)
+
+            Array3f = xrtu.float_array_t(Float, 3)
+            displacement = ArrayNi(index) - index_prev
+            fq_lmr = dr.if_stmt(
+                (fq_l, fq_m, fq_r),
+                dr.dot(displacement, mv_dir) != 0,
+                lambda l, m, r: Array3f(l, m, r),
+                lambda l, m, r: dr.select(
+                    dr.dot(displacement, dr.reverse(mv_dir)) == -1,
+                    Array3f(l, 0, 0),
+                    Array3f(0, 0, r),
+                ),
+            )
+            accum += dr.dot(fq_lmr, Array3f(L_l, L_m, L_r))
+            return (accum, ArrayNi(index)), Bool(True)
+
+    active, t1, t2 = ray_bbox_intersect(bbox_ll, bbox_ur, ray_t, ray_n)
+    t_min = dr.minimum(t1, t2)
+    ray_t = dr.select(
+        active & bbox_contains(bbox_ll, bbox_ur, ray_t),
+        ray_t + (t_min - 1) * ray_n,
+        ray_t,
+    )
+    dda(
+        ray_o=ray_t, ray_d=ray_n, ray_max=Float(dr.inf),
+        grid_res=knot_num, grid_min=bbox_ll, grid_max=bbox_ur,
+        func=project, state=state, active=active, mode=mode, max_iterations=-1,
+    )
+    return buffer
+
+
+def xrt_ad_t_x(
+    ray_spec: RaySpecT,
+    knot_spec: xrtu.UniformSpec,
+    order: int,
+    data: FloatT,
+    buffer: FloatT = None,
+    mode: str = "symbolic",
+) -> FloatT:
+    r"""
+    Compute per-ray :math:`\partial \mathcal{P} / \partial t_x` for 2D projections.
+
+    Parameters
+    ----------
+    ray_spec: tuple[ArrayNfT, ArrayNfT]
+        (L,) ray anchors :math:`\bbt` and directions :math:`\bbn`.
+    knot_spec: UniformSpec
+        Volume properties :math:`(\bbx_{0}, \bbDelta, \bbQ)`.
+    order: 0 | 1 | 2
+        Data interpolation order.
+    data: FloatT
+        (Q1, Q2) flattened volume weights.
+    buffer: FloatT
+        (L,) output buffer.
+
+    Returns
+    -------
+    FloatT
+        (L,) values of :math:`\partial \mathcal{P} / \partial t_x`.
+    """
+    return _xrt_ad_t(ray_spec, knot_spec, order, data, buffer, mode, idx=0)
+
+
+def xrt_ad_t_y(
+    ray_spec: RaySpecT,
+    knot_spec: xrtu.UniformSpec,
+    order: int,
+    data: FloatT,
+    buffer: FloatT = None,
+    mode: str = "symbolic",
+) -> FloatT:
+    r"""
+    Compute per-ray :math:`\partial \mathcal{P} / \partial t_y` for 2D projections.
+
+    Parameters
+    ----------
+    ray_spec: tuple[ArrayNfT, ArrayNfT]
+        (L,) ray anchors :math:`\bbt` and directions :math:`\bbn`.
+    knot_spec: UniformSpec
+        Volume properties :math:`(\bbx_{0}, \bbDelta, \bbQ)`.
+    order: 0 | 1 | 2
+        Data interpolation order.
+    data: FloatT
+        (Q1, Q2) flattened volume weights.
+    buffer: FloatT
+        (L,) output buffer.
+
+    Returns
+    -------
+    FloatT
+        (L,) values of :math:`\partial \mathcal{P} / \partial t_y`.
+    """
+    return _xrt_ad_t(ray_spec, knot_spec, order, data, buffer, mode, idx=1)
+
+
+def xrt_ad_n_x(
+    ray_spec: RaySpecT,
+    knot_spec: xrtu.UniformSpec,
+    order: int,
+    data: FloatT,
+    buffer: FloatT = None,
+    mode: str = "symbolic",
+) -> FloatT:
+    r"""
+    Compute per-ray :math:`\partial \mathcal{P} / \partial n_x` for 2D projections.
+
+    Parameters
+    ----------
+    ray_spec: tuple[ArrayNfT, ArrayNfT]
+        (L,) ray anchors :math:`\bbt` and directions :math:`\bbn`.
+    knot_spec: UniformSpec
+        Volume properties :math:`(\bbx_{0}, \bbDelta, \bbQ)`.
+    order: 0 | 1 | 2
+        Data interpolation order.
+    data: FloatT
+        (Q1, Q2) flattened volume weights.
+    buffer: FloatT
+        (L,) output buffer.
+
+    Returns
+    -------
+    FloatT
+        (L,) values of :math:`\partial \mathcal{P} / \partial n_x`.
+    """
+    return _xrt_ad_n(ray_spec, knot_spec, order, data, buffer, mode, idx=0)
+
+
+def xrt_ad_n_y(
+    ray_spec: RaySpecT,
+    knot_spec: xrtu.UniformSpec,
+    order: int,
+    data: FloatT,
+    buffer: FloatT = None,
+    mode: str = "symbolic",
+) -> FloatT:
+    r"""
+    Compute per-ray :math:`\partial \mathcal{P} / \partial n_y` for 2D projections.
+
+    Parameters
+    ----------
+    ray_spec: tuple[ArrayNfT, ArrayNfT]
+        (L,) ray anchors :math:`\bbt` and directions :math:`\bbn`.
+    knot_spec: UniformSpec
+        Volume properties :math:`(\bbx_{0}, \bbDelta, \bbQ)`.
+    order: 0 | 1 | 2
+        Data interpolation order.
+    data: FloatT
+        (Q1, Q2) flattened volume weights.
+    buffer: FloatT
+        (L,) output buffer.
+
+    Returns
+    -------
+    FloatT
+        (L,) values of :math:`\partial \mathcal{P} / \partial n_y`.
+    """
+    return _xrt_ad_n(ray_spec, knot_spec, order, data, buffer, mode, idx=1)
+
+
+def xrt_ad_t_z(
+    ray_spec: RaySpecT,
+    knot_spec: xrtu.UniformSpec,
+    order: int,
+    data: FloatT,
+    buffer: FloatT = None,
+    mode: str = "symbolic",
+) -> FloatT:
+    r"""
+    Compute per-ray :math:`\partial \mathcal{P} / \partial t_z` for 3D projections (order=0 only).
+
+    Parameters
+    ----------
+    ray_spec: tuple[ArrayNfT, ArrayNfT]
+        (L,) ray anchors :math:`\bbt` and directions :math:`\bbn`.
+    knot_spec: UniformSpec
+        Volume properties :math:`(\bbx_{0}, \bbDelta, \bbQ)`.
+    order: 0
+        Data interpolation order (only 0 supported for 3D).
+    data: FloatT
+        (Q1, Q2, Q3) flattened volume weights.
+    buffer: FloatT
+        (L,) output buffer.
+
+    Returns
+    -------
+    FloatT
+        (L,) values of :math:`\partial \mathcal{P} / \partial t_z`.
+    """
+    return _xrt_ad_t(ray_spec, knot_spec, order, data, buffer, mode, idx=2)
+
+
+def xrt_ad_n_z(
+    ray_spec: RaySpecT,
+    knot_spec: xrtu.UniformSpec,
+    order: int,
+    data: FloatT,
+    buffer: FloatT = None,
+    mode: str = "symbolic",
+) -> FloatT:
+    r"""
+    Compute per-ray :math:`\partial \mathcal{P} / \partial n_z` for 3D projections (order=0 only).
+
+    Parameters
+    ----------
+    ray_spec: tuple[ArrayNfT, ArrayNfT]
+        (L,) ray anchors :math:`\bbt` and directions :math:`\bbn`.
+    knot_spec: UniformSpec
+        Volume properties :math:`(\bbx_{0}, \bbDelta, \bbQ)`.
+    order: 0
+        Data interpolation order (only 0 supported for 3D).
+    data: FloatT
+        (Q1, Q2, Q3) flattened volume weights.
+    buffer: FloatT
+        (L,) output buffer.
+
+    Returns
+    -------
+    FloatT
+        (L,) values of :math:`\partial \mathcal{P} / \partial n_z`.
+    """
+    return _xrt_ad_n(ray_spec, knot_spec, order, data, buffer, mode, idx=2)
+```
+
+### differentiable_xrt/util.py
+```
+"""Minimal utilities vendored from xrt_toolkit: UniformSpec + drjit type helpers."""
+
+import importlib
+import inspect
+import typing as typ
+
+import drjit as dr
+
+IntT = typ.TypeVar("IntT", bound=dr.AnyArray)
+UIntT = typ.TypeVar("UIntT", bound=dr.AnyArray)
+FloatT = typ.TypeVar("FloatT", bound=dr.AnyArray)
+ArrayNiT = typ.TypeVar("ArrayNiT", bound=dr.AnyArray)
+ArrayNuT = typ.TypeVar("ArrayNuT", bound=dr.AnyArray)
+ArrayNfT = typ.TypeVar("ArrayNfT", bound=dr.AnyArray)
+MatrixNfT = typ.TypeVar("MatrixNfT", bound=dr.AnyArray)
+
+
+def float_array_t(arg: FloatT, size_v: int) -> ArrayNfT:
+    """
+    Converts a Dr.Jit floating-point base type into a vector type with the same precision.
+
+    Parameters
+    ----------
+    arg: FloatT
+        (N,) FP array, or an FP type.
+
+    Returns
+    -------
+    type_t: ArrayNfT
+    """
+    assert dr.is_float_v(arg)
+    assert size_v in (2, 3, 4)
+
+    Float = arg if inspect.isclass(arg) else type(arg)
+    nbytes = dr.itemsize_v(Float)
+    assert nbytes in (2, 4, 8)
+    if nbytes == 4:
+        suffix = ""
+    else:
+        suffix = str(nbytes * 8)
+
+    drb = importlib.import_module(arg.__module__)
+    type_t = getattr(drb, f"Array{size_v}f{suffix}")
+    return type_t
+
+
+def float_matrix_t(arg: FloatT, size_v: int) -> ArrayNfT:
+    """
+    Converts a Dr.Jit floating-point base type into a square matrix type with the same precision.
+
+    Parameters
+    ----------
+    arg: FloatT
+        (N,) FP array, or an FP type.
+
+    Returns
+    -------
+    type_t: MatrixNfT
+    """
+    assert dr.is_float_v(arg)
+    assert size_v in (2, 3, 4)
+
+    Float = arg if inspect.isclass(arg) else type(arg)
+    nbytes = dr.itemsize_v(Float)
+    assert nbytes in (2, 4, 8)
+    if nbytes == 4:
+        suffix = ""
+    else:
+        suffix = str(nbytes * 8)
+
+    drb = importlib.import_module(arg.__module__)
+    type_t = getattr(drb, f"Matrix{size_v}f{suffix}")
+    return type_t
+
+
+def int_array_t(arg: IntT, size_v: int) -> ArrayNiT:
+    """
+    Converts a Dr.Jit signed-integer base type into a vector type with the same precision.
+
+    Parameters
+    ----------
+    arg: IntT
+        (N,) signed-int array, or a signed-int type.
+
+    Returns
+    -------
+    type_t: ArrayNiT
+    """
+    assert dr.is_integral_v(arg) and dr.is_signed_v(arg)
+    assert size_v in (2, 3, 4)
+
+    Int = arg if inspect.isclass(arg) else type(arg)
+    nbytes = dr.itemsize_v(Int)
+    assert nbytes in (4, 8)
+    if nbytes == 4:
+        suffix = ""
+    else:
+        suffix = str(nbytes * 8)
+
+    drb = importlib.import_module(arg.__module__)
+    type_t = getattr(drb, f"Array{size_v}i{suffix}")
+    return type_t
+
+
+def uint_array_t(arg: UIntT, size_v: int) -> ArrayNuT:
+    """
+    Converts a Dr.Jit unsigned-integer base type into a vector type with the same precision.
+
+    Parameters
+    ----------
+    arg: UIntT
+        (N,) unsigned-int array, or an unsigned-int type.
+
+    Returns
+    -------
+    type_t: ArrayNuT
+    """
+    assert dr.is_integral_v(arg) and dr.is_unsigned_v(arg)
+    assert size_v in (2, 3, 4)
+
+    UInt = arg if inspect.isclass(arg) else type(arg)
+    nbytes = dr.itemsize_v(UInt)
+    assert nbytes in (4, 8)
+    if nbytes == 4:
+        suffix = ""
+    else:
+        suffix = str(nbytes * 8)
+
+    drb = importlib.import_module(arg.__module__)
+    type_t = getattr(drb, f"Array{size_v}u{suffix}")
+    return type_t
+
+
+import collections.abc as cabc
+from dataclasses import dataclass
+
+# broadcast_seq (from xrt_toolkit.util.misc)
+def broadcast_seq(
+    x,
+    N: int = None,
+    cast: callable = None,
+) -> tuple:
+    """
+    Broadcast `x` to a tuple of length `N`.
+
+    If `N` is omitted, then no broadcasting takes place, only tupling.
+    """
+    if isinstance(x, cabc.Iterable):
+        y = tuple(x)
+    else:
+        y = (x,)
+
+    if N is not None:
+        if len(y) == 1:
+            y *= N  # broadcast
+        assert len(y) == N
+
+    if cast is not None:
+        y = tuple(map(cast, y))
+
+    return y
+
+
+
+@dataclass
+class UniformSpec:
+    r"""
+    Multi-dimensional uniform mesh specifier.
+
+    Defines points :math:`\bbx_{m} \in \bR^{D}` where each point lies on the
+    regular lattice
+
+    .. math::
+
+       \bbx_{\bbm} = \bbx_{0} + \Delta_{\bbx} \odot \bbm,
+       \qquad
+       [\bbm]_{d} \in \{0,\ldots,M_{d}-1\}
+
+    """
+
+    start: tuple[float]
+    step: tuple[float]
+    num: tuple[int]
+
+    def __init__(self, start, step, num):
+        r"""
+        Parameters
+        ----------
+        start: tuple[float]
+            \bbx_{0} \in \bR^{D}
+        step: tuple[float]
+            \Delta_{\bbx} \in \bR_{+}^{D}
+        num: tuple[int]
+            (M1,...,MD) lattice size
+
+        Scalars are broadcast to all dimensions.
+        """
+        start = broadcast_seq(start, None, float)
+
+        step = broadcast_seq(step, None, float)
+        assert all(s > 0 for s in step)
+
+        num = broadcast_seq(num, None, int)
+        assert all(n > 0 for n in num)
+
+        D = max(map(len, [start, step, num]))
+
+        self.start = broadcast_seq(start, D)
+        self.step = broadcast_seq(step, D)
+        self.num = broadcast_seq(num, D)
+
+    @property
+    def ndim(self) -> int:
+        D = len(self.start)
+        return D
+
+    def __iter__(self) -> cabc.Iterator:
+        for d in range(self.ndim):
+            yield (self.start[d], self.step[d], self.num[d])
+
+    @classmethod
+    def centered(cls, step, num) -> "UniformSpec":
+        r"""
+        Initialize a UniformSpec centered at the origin.
+
+        Parameters
+        ----------
+        step: tuple[float]
+            \Delta_{\bbx} \in \bR_{+}^{D}
+        num: tuple[int]
+            (M1,...,MD) lattice size
+
+        Scalars are broadcast to all dimensions.
+
+        Returns
+        -------
+        u_spec: UniformSpec
+        """
+        offset_spec = cls(start=0, step=step, num=num)
+
+        ll = tuple(
+            -step * (num - 1) / 2
+            for (step, num) in zip(offset_spec.step, offset_spec.num)
+        )
+        u_spec = cls(
+            start=ll,
+            step=offset_spec.step,
+            num=offset_spec.num,
+        )
+        return u_spec
+
+
+@dataclass
+class DetectorSpec:
+    r"""
+    Physical dimensions of a 1D/2D pixelized detector.
+
+    `DetectorSpec` does not encode the detector's position in space.
+    """
+
+    size: tuple[float]
+    num_cell: tuple[int]
+
+    def __init__(self, size, num_cell):
+        r"""
+        Parameters
+        ----------
+        size: tuple[float]
+            Detector span (unitless) \in \bR_{+}^{D}
+
+            A 1D size denotes detector width.
+            A 2D size denotes detector (width, height).
+        num_cell: tuple[int]
+            (M1,...,MD) cell count per dimension
+
+        Scalars are broadcast to all dimensions.
+        """
+        size = broadcast_seq(size, None, float)
+        assert all(s > 0 for s in size)
+
+        num_cell = broadcast_seq(num_cell, None, int)
+        assert all(n > 0 for n in num_cell)
+
+        D = max(map(len, [size, num_cell]))
+        assert D in (1, 2)
+
+        self.size = broadcast_seq(size, D)
+        self.num_cell = broadcast_seq(num_cell, D)
+
+    @property
+    def cell_size(self) -> tuple[float]:
+        c_size = tuple(self.size[d] / self.num_cell[d] for d in range(self.ndim))
+        return c_size
+
+    @property
+    def ndim(self) -> int:
+        D = len(self.size)
+        return D
+
+    def __iter__(self) -> cabc.Iterator:
+        for d in range(self.ndim):
+            yield (self.size[d], self.num_cell[d])
+```

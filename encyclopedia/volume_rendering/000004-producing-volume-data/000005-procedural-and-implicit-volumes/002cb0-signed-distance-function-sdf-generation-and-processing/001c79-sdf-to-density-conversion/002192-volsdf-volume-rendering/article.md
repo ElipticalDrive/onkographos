@@ -1,0 +1,165 @@
+# VolSDF Volume Rendering
+
+Also called: VolumeSDFRenderer
+
+## Overview
+VolSDF Volume Rendering is a volume rendering technique that synthesizes images from a neural implicit surface representation by converting Signed Distance Function (SDF) values into volumetric density. It solves the problem of rendering continuous 3D surfaces without explicit mesh extraction by treating the zero-level set of the SDF as a volumetric boundary. It sets itself apart from its parent [SDF to Density Conversion](1282-sdf-to-density-conversion.md) by providing the complete rendering pipeline (sampling, transmittance, aggregation) rather than just the conversion function, and from its sibling [Volume SDF Rendering](1344-volume-sdf-rendering.md) by using a differentiable neural SDF with stratified sampling and alpha-compositing rather than discrete voxel rasterization [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs:**
+- `ray_bundle`: Contains sample points along rays (shape $N \times \text{ppr} \times 3$) and sample lengths (shape $N \times \text{ppr} \times 1$).
+- `implicit_fn`: A neural network or function capable of returning the signed distance and color at a given 3D point.
+- `alpha`, `beta`: Parameters for the SDF-to-density conversion function.
+- `white_background`: Boolean flag determining if the background is white (1.0) or black (0.0).
+
+**Outputs:**
+- `final_color`: Rendered image with shape $(N, 3)$.
+
+**Data Structures:**
+- `density`: Tensor of shape $(N, \text{ppr}, 1)$ representing volumetric density at each sample point.
+- `color`: Tensor of shape $(N, \text{ppr}, 3)$ representing the color at each sample point.
+- `deltas`: Tensor of shape $(N, \text{ppr}, 1)$ representing the distance between adjacent sample points.
+- `T`: Tensor of shape $(N, \text{ppr}, 1)$ representing transmittance.
+- `W`: Tensor of shape $(N, \text{ppr}, 1)$ representing the rendering weight for each sample.
+
+**Steps:**
+1.  **Sampling:** Get the number of points per ray (`ppr`) from the sampler. Sample points along the rays using a stratified sampler (e.g., `StratifiedRaysampler`) to obtain `ray_bundle.sample_points` and `ray_bundle.sample_lengths`.
+2.  **Implicit Query:** Query the implicit surface function for distance and color at all sample points:
+    $$ \text{distance}, \text{color} = \text{implicit\_fn.get\_distance\_color}(\text{ray\_bundle.sample\_points}) $$
+    Shapes are $(N \times \text{ppr}, 1)$ and $(N \times \text{ppr}, 3)$ respectively.
+3.  **SDF to Density Conversion:** Convert the signed distance values to density using the parent method [SDF to Density Conversion](1282-sdf-to-density-conversion.md):
+    $$ \text{density} = \text{sdf\_to\_density}(\text{distance}, \alpha, \beta) $$
+    Reshape density to $(N, \text{ppr}, 1)$.
+4.  **Delta Calculation:** Extract the depth from `ray_bundle.sample_lengths[..., 0]`. Compute the distances between adjacent samples (`deltas`) using `get_deltas_from_depth(depth)`. Shape is $(N, \text{ppr}, 1)$.
+5.  **Transmittance Calculation:** Compute transmittance $T$ from `deltas` and `density`. The transmittance represents the probability of light passing through the volume up to a certain point.
+    $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \text{density}_j \cdot \text{deltas}_j\right) $$
+    (Note: The exact implementation of `compute_transmittance` accumulates the optical depth). Shape is $(N, \text{ppr}, 1)$.
+6.  **Weight Calculation:** Compute the weight $W$ for each sample, which determines its contribution to the final color. A small epsilon ($10^{-10}$) is added for numerical stability.
+    $$ W_i = T_i \times (1.0 - \exp(-\text{density}_i \times \text{deltas}_i + 10^{-10})) $$
+    Shape is $(N, \text{ppr}, 1)$.
+7.  **Color Aggregation:** Reshape the queried color to $(N, \text{ppr}, \text{color\_channels})$. Aggregate the color using the weights:
+    $$ \text{final\_color} = \sum_{i=1}^{\text{ppr}} W_i \times \text{color}_i $$
+    If `white_background` is true, add the remaining transmittance multiplied by the background color (1.0) to the final color.
+    $$ \text{final\_color} = \text{final\_color} + T_{\text{last}} \times \text{background\_color} $$
+    Result shape is $(N, 3)$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volsdf_render(ray_bundle, implicit_fn, alpha, beta, white_background=False):
+    # 1. Sampling
+    # ray_bundle.sample_points: (N, ppr, 3)
+    # ray_bundle.sample_lengths: (N, ppr, 1)
+    ppr = ray_bundle.sample_points.shape[1]
+    
+    # 2. Implicit Query
+    # Flatten for batch processing if implicit_fn expects it, or handle batched
+    points = ray_bundle.sample_points.reshape(-1, 3)
+    distances, colors = implicit_fn.get_distance_color(points)
+    # distances: (N*ppr, 1), colors: (N*ppr, 3)
+    
+    # Reshape back to (N, ppr, 1) and (N, ppr, 3)
+    distances = distances.reshape(-1, ppr, 1)
+    colors = colors.reshape(-1, ppr, colors.shape[-1])
+    
+    # 3. SDF to Density Conversion
+    # sdf_to_density is defined in [SDF to Density Conversion](1282-sdf-to-density-conversion.md)
+    densities = sdf_to_density(distances, alpha, beta)
+    
+    # 4. Delta Calculation
+    # Extract depth (start of ray or cumulative depth depending on implementation)
+    # Assuming sample_lengths contains the interval lengths or depths
+    # get_deltas_from_depth typically computes differences between adjacent sample depths
+    depths = ray_bundle.sample_lengths[..., 0] # (N, ppr, 1)
+    deltas = get_deltas_from_depth(depths) # (N, ppr, 1)
+    
+    # 5. Transmittance Calculation
+    # T[i] = exp(-sum(density[j] * delta[j] for j < i))
+    # Compute optical depth
+    optical_depth = torch.cumsum(densities * deltas, dim=1) # (N, ppr, 1)
+    # Transmittance: T[i] = exp(-optical_depth[i-1])
+    # Shift optical depth to align with samples
+    # T[0] = 1.0 (assuming start of ray is transparent or handled by background)
+    # Standard volume rendering: T_i = exp(-sum_{j=0}^{i-1} sigma_j * delta_j)
+    shifted_optical_depth = torch.cat([torch.zeros_like(optical_depth[:, 0:1, :]), optical_depth[:, :-1, :]], dim=1)
+    T = torch.exp(-shifted_optical_depth) # (N, ppr, 1)
+    
+    # 6. Weight Calculation
+    # W_i = T_i * (1 - exp(-density_i * delta_i))
+    alpha_val = 1.0 - torch.exp(-(densities * deltas + 1e-10))
+    W = T * alpha_val # (N, ppr, 1)
+    
+    # 7. Color Aggregation
+    # final_color = sum(W_i * color_i)
+    final_color = torch.sum(W * colors, dim=1) # (N, 3)
+    
+    # Background
+    if white_background:
+        # T_last is the transmittance after the last sample
+        T_last = torch.exp(-optical_depth[:, -1, :]) # (N, 1)
+        final_color = final_color + T_last * 1.0 # Add white background
+        
+    return final_color
+```
+
+**Parameters:**
+- `alpha`: Parameter for SDF-to-density conversion. Typical value from `cfg.alpha`.
+- `beta`: Parameter for SDF-to-density conversion. Typical value from `cfg.beta`.
+- `white_background`: Boolean flag for background color. Default `False`.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** A small epsilon ($10^{-10}$) is added to the exponent in the weight calculation to prevent numerical instability when density or delta is zero [S1, unofficial].
+- **Boundaries:** The transmittance calculation assumes the ray starts outside the volume or handles the initial segment correctly. If `sample_lengths` represents intervals, `deltas` must be computed carefully to avoid zero-length intervals causing division by zero or NaNs in other contexts (though here it's used in exponent).
+- **Degenerate Input:** If `implicit_fn` returns NaNs or Infs, the rendering will fail. Input validation or clamping may be required in practice [G].
+
+## Subtopics
+
+### [NeuS Weight Function](3238-neus-weight-function.md)
+The NeuS weight function is a method for volume rendering that derives an unbiased, occlusion-aware weighting scheme from a Signed Distance Function (SDF) to reconstruct surfaces from multi-view images without explicit 3D supervision. It solves the problem that naive volume density derived directly from SDF values produces biased surface reconstructions, while simple normalization of SDF values fails to handle occlusions correctly. It sets itself apart from its parent [VolSDF Volume Rendering](2551-volsdf-volume-rendering.md) by explicitly deriving an "opaque density" $\rho(t)$ that ensures the weight function peaks exactly at the zero-level set of the SDF, and from its sibling [U-density Function](3695-u-density-function.md) by using signed distances and a specific derivative-based opacity formulation rather than unsigned distances and monotonic decay.
+
+### [U-density Function](3695-u-density-function.md)
+The U-density function is a rendering weight function designed for Unsigned Distance Fields (UDF) to ensure globally unbiased volume rendering. It solves the "volume-surface gap" inherent in naive extensions of Signed Distance Field (SDF) techniques to UDFs, specifically preventing redundant floating faces and irregular noises caused by improper weight distribution. Unlike the NeuS weight function, which violates the unbiased property for UDFs by allowing weight leakage to invisible surfaces, the U-density function concentrates rendering weight near the first surface intersection, ensuring the final color is derived solely from the visible surface geometry.
+
+### SDF-based Voxel Rendering
+SDF-based Voxel Rendering determines voxel visibility by evaluating a Signed Distance Function (SDF) at each voxel center; draws voxel if SDF <= 0 [S2, unofficial].
+**Steps:**
+1.  Evaluate SDF for given shape at point $p$ [S2, unofficial].
+2.  If SDF result $\le 0.0f$, call `voxie_drawvox(vf, p.x, p.y, p.z, 0x00ff00);` [S2, unofficial].
+**Formula:**
+Voxel emission condition: $SDF(p) \le 0$ [S2, unofficial].
+
+### Adaptive Surfaceness Finetuning
+Adaptive Surfaceness Finetuning is a method to improve SDF correctness by spatially adapting the $\beta$ parameter in the SDF-to-density conversion.
+**Steps:**
+1.  Collect per-sample triplets $(\mathbf{x}, \eta, w)$ rendered during the finetuning process [S3].
+2.  Accumulate these triplets over multiple training iterations (5,000) [S3].
+3.  Partition the accumulated triplets across the voxels of the surfaceness grid. Let $\Lambda_v$ be the subset associated with voxel $v$ corresponding to $\beta_v$ [S3].
+4.  Increase $\beta_v$ by a fixed increment (100) if the weighted average Eikonal loss for samples in voxel $v$ is below threshold $\bar{\gamma}$ [S3].
+**Formula:**
+Increase $\beta_v$ if:
+$$ \frac{\sum_{(\mathbf{x}, \boldsymbol{\eta}, w) \in \Lambda_{v}} w \eta (\|\nabla f(\mathbf{x})\| - 1)^2}{\sum_{(\dots, w) \in \Lambda_{v}} w} < \bar{\gamma} $$
+[S3]
+**Parameters:**
+- $\bar{\gamma} = 0.25$ is the predefined threshold for increasing surfaceness [S3].
+- The fixed increment for $\beta_v$ is 100 [S3].
+**Pitfall:**
+Directly optimizing $\beta(\mathbf{x})$ via gradient descent overly relaxes the SDF correctness constraint, causing $f(\mathbf{x})$ to predict arbitrary density values like original NeRF. Instead, Eikonal loss is used as an indicator to only increase surfaceness where the model fails to reconstruct via SDF [S3].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of rays $N$ and points per ray $\text{ppr}$. The dominant cost is the neural network inference for `implicit_fn` and the accumulation of transmittance/weights.
+- **Memory Complexity:** Linear with respect to $N \times \text{ppr}$ for storing distances, colors, densities, and transmittance.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales with batch size $N$ and sampling density $\text{ppr}$. Higher $\text{ppr}$ improves quality but increases memory and compute.
+- **Strengths:** Differentiable, supports gradient-based optimization for training implicit surfaces, handles complex geometries via neural SDFs.
+- **Limitations:** Computationally expensive due to neural network queries per sample. Sensitive to $\alpha$ and $\beta$ parameters.
+- **When to use:** When training neural implicit surfaces from multi-view images and needing differentiable rendering.
+- **When not to use:** When real-time rendering of static meshes is required, or when memory is severely constrained.
+
+## Background
+VolSDF Volume Rendering is based on the Neural-Volume-Rendering-and-Surface-Rendering repository [S1, unofficial]. It builds on the principles of VolSDF (Volume SDF) [S1, unofficial], which uses SDFs for volume rendering. The method is also related to HybridNeRF, which introduces adaptive surfaceness finetuning [S3]. SDF-based voxel rendering is a simpler, non-differentiable approach demonstrated in holographic_fractals [S2, unofficial].
+
+## Sources
+[S1] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)
+[S2] jtomori/holographic_fractals, https://github.com/jtomori/holographic_fractals, fetched 2026-10-26 (unofficial)
+[S3] HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces, https://doi.org/10.1109/cvpr52733.2024.01858, fetched 2026-10-26

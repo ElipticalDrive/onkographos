@@ -1,0 +1,206 @@
+# Ray Marching with Neural SDF
+
+Also called: DeepSDF Rendering, Neural SDF Ray Marching
+
+## Overview
+Ray Marching with Neural SDF approximates the Space Distance Field (SDF) using a deep neural network to render images by marching rays along the estimated distance field [S1, unofficial]. Unlike traditional sphere tracing which relies on analytical primitive definitions, this method uses a learned implicit representation, allowing for the rendering of complex, non-analytic geometries defined by the network's latent code [S1, unofficial]. It builds on [Distance-field ray marching](21-distance-field-ray-marching.md) by replacing the analytical $d(p)$ function with a neural network evaluation.
+
+## How it works
+The method renders a scene by initializing rays from a camera, querying a trained neural network for distance estimates, and advancing the ray position iteratively until convergence or maximum distance is reached.
+
+**Inputs:**
+- Camera parameters: position, width, height, field of view (fov), aspect ratio.
+- Neural SDF model: A neural network (e.g., a Multi-Layer Perceptron) trained to output the signed distance to the surface given a 3D coordinate and a latent code.
+- Rendering parameters: `max_steps` (default 30-40), `epsilon` (default $10^{-3}$), `max_dist` (default 10.0).
+- Lighting: Directional light vector.
+
+**Outputs:**
+- A 2D image (height $\times$ width) representing the rendered scene.
+
+**Data Structures:**
+- **Camera**: Stores `width`, `height`, `fov` (default $\pi/3$), `position` (3D vector), and `aspect_ratio` ($width/height$) [S1, unofficial].
+- **Ray Directions**: A tensor of shape $(width \times height, 3)$ containing normalized direction vectors for each pixel [S1, unofficial].
+- **Distances**: A tensor of shape $(width \times height, 1)$ initialized to zeros, tracking the remaining distance to the surface for each ray [S1, unofficial].
+- **Positions**: A tensor of shape $(width \times height, 3)$ tracking the current 3D position of each ray [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization**:
+    - Create ray directions by sampling a grid over the image plane and normalizing them [S1, unofficial].
+    - Initialize `distances` tensor to zeros with shape $[width \times height, 1]$ on the GPU [S1, unofficial].
+    - Calculate initial ray positions: $p = ro + distances \cdot v$. Since distances are 0, $p = ro$ [S1, unofficial].
+
+2.  **Ray Marching Loop**:
+    - Iterate up to `max_steps` times [S1, unofficial].
+    - **Query SDF**: Evaluate the neural SDF at the current positions $p$. The network takes the concatenation of the latent code and the 3D coordinates as input [S1, unofficial]. Let the output be $d$ (shape $[width \times height, 1]$).
+    - **Convergence Check**: If all elements in `distances` are less than `epsilon` (e.g., $10^{-3}$), break the loop [S1, unofficial].
+    - **Update**: Update `distances` by adding the sampled SDF value $d$: $distances \leftarrow distances + d$ [S1, unofficial].
+    - **Recalculate Positions**: Update positions: $p \leftarrow ro + distances \cdot v$ [S1, unofficial].
+    - **Max Distance Check**: If all rays have either converged ($distances < epsilon$) or exceeded `max_dist`, break the loop [S1, unofficial].
+
+3.  **Normal Estimation**:
+    - Estimate normals at the final positions using central finite differences with step size $e = 10^{-3}$ [S1, unofficial].
+    - For each position $p$, compute:
+      $$ n_x = SDF(p + [e, 0, 0]) - SDF(p - [e, 0, 0]) $$
+      $$ n_y = SDF(p + [0, e, 0]) - SDF(p - [0, e, 0]) $$
+      $$ n_z = SDF(p + [0, 0, e]) - SDF(p - [0, 0, e]) $$
+      $$ n = [n_x, n_y, n_z] $$
+    - Normalize $n$ to get the surface normal [S1, unofficial].
+
+4.  **Shading**:
+    - Calculate brightness using a single directional light. Clamp the dot product of the normal $n$ and light direction $l$ to $[0, 1]$: $brightness = \max(0, \min(1, n \cdot l))$ [S1, unofficial].
+    - Set brightness to 0 for pixels where the final accumulated distance exceeds `max_dist` [S1, unofficial].
+
+5.  **Output**:
+    - Reshape brightness to height $\times$ width [S1, unofficial].
+    - Convert to numpy, scale by 255, and cast to uint8 for the final image [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+
+def render_neural_sdf(camera, neural_sdf, latent_code, max_steps=30, epsilon=1e-3, max_dist=10.0, light_dir=None):
+    """
+    Renders an image using ray marching with a neural SDF.
+    
+    Args:
+        camera: Camera object with width, height, fov, position, and get_directions() method.
+        neural_sdf: Neural network function/model that takes (latent_code, coords) and returns SDF values.
+        latent_code: Tensor of shape (1, latent_dim) representing the object shape.
+        max_steps: Maximum number of ray marching iterations.
+        epsilon: Convergence threshold.
+        max_dist: Maximum distance a ray can travel.
+        light_dir: Normalized light direction vector.
+        
+    Returns:
+        numpy array: Rendered image (uint8).
+    """
+    device = camera.position.device
+    dtype = camera.position.dtype
+    
+    # 1. Initialize Rays
+    # Get ray directions for all pixels: shape (width * height, 3)
+    directions = camera.get_directions() # Assumes this returns normalized directions
+    num_rays = directions.shape[0]
+    
+    # Initialize distances tensor: shape (num_rays, 1)
+    distances = torch.zeros((num_rays, 1), device=device, dtype=dtype)
+    
+    # Initial positions: p = ro + distances * v. Since distances=0, p = ro
+    ray_origins = camera.position.expand(num_rays, -1) # Shape (num_rays, 3)
+    positions = ray_origins.clone()
+    
+    # 2. Ray Marching Loop
+    for step in range(max_steps):
+        # Query Neural SDF: input is latent_code concatenated with positions
+        # latent_code shape: (1, latent_dim), positions shape: (num_rays, 3)
+        # Expand latent_code to match batch size
+        expanded_latent = latent_code.expand(num_rays, -1)
+        
+        # Concatenate: [latent_code, coords] -> shape (num_rays, latent_dim + 3)
+        input_coords = torch.cat([expanded_latent, positions], dim=-1)
+        
+        # Evaluate SDF: returns shape (num_rays, 1)
+        sdf_values = neural_sdf(input_coords)
+        
+        # Check convergence: if all distances < epsilon
+        if torch.all(distances < epsilon):
+            break
+            
+        # Update distances: distances += sdf_values
+        distances = distances + sdf_values
+        
+        # Recalculate positions: p = ro + distances * v
+        # distances is (num_rays, 1), directions is (num_rays, 3)
+        # Broadcast multiplication
+        positions = ray_origins + distances * directions
+        
+        # Check max_dist: if all rays have converged or exceeded max_dist
+        converged = torch.all(distances < epsilon)
+        exceeded_max = torch.all(distances > max_dist)
+        if converged or exceeded_max:
+            break
+            
+    # 3. Normal Estimation
+    # Estimate normals at final positions using central finite differences
+    e = 1e-3
+    dx = torch.tensor([e, 0, 0], device=device, dtype=dtype).expand(num_rays, -1)
+    dy = torch.tensor([0, e, 0], device=device, dtype=dtype).expand(num_rays, -1)
+    dz = torch.tensor([0, 0, e], device=device, dtype=dtype).expand(num_rays, -1)
+    
+    # Compute SDF at perturbed positions
+    # Note: This assumes the neural_sdf function can handle batched inputs
+    sdf_pos_dx = neural_sdf(torch.cat([expanded_latent, positions + dx], dim=-1))
+    sdf_neg_dx = neural_sdf(torch.cat([expanded_latent, positions - dx], dim=-1))
+    
+    sdf_pos_dy = neural_sdf(torch.cat([expanded_latent, positions + dy], dim=-1))
+    sdf_neg_dy = neural_sdf(torch.cat([expanded_latent, positions - dy], dim=-1))
+    
+    sdf_pos_dz = neural_sdf(torch.cat([expanded_latent, positions + dz], dim=-1))
+    sdf_neg_dz = neural_sdf(torch.cat([expanded_latent, positions - dz], dim=-1))
+    
+    # Calculate normal components
+    nx = sdf_pos_dx - sdf_neg_dx
+    ny = sdf_pos_dy - sdf_neg_dy
+    nz = sdf_pos_dz - sdf_neg_dz
+    
+    normals = torch.stack([nx, ny, nz], dim=-1)
+    
+    # Normalize normals
+    norms = torch.norm(normals, dim=-1, keepdim=True)
+    # Avoid division by zero
+    norms = torch.clamp(norms, min=1e-8)
+    normals = normals / norms
+    
+    # 4. Shading
+    brightness = torch.zeros((num_rays, 1), device=device, dtype=dtype)
+    
+    if light_dir is not None:
+        # Ensure light_dir is broadcastable
+        light_dir_expanded = light_dir.expand(num_rays, -1)
+        # Dot product: normals (num_rays, 3) . light_dir (num_rays, 3) -> (num_rays, 1)
+        dot_product = torch.sum(normals * light_dir_expanded, dim=-1, keepdim=True)
+        # Clamp to [0, 1]
+        brightness = torch.clamp(dot_product, 0.0, 1.0)
+        
+    # Set brightness to 0 for rays that exceeded max_dist
+    brightness = torch.where(distances > max_dist, torch.zeros_like(brightness), brightness)
+    
+    # 5. Output
+    # Reshape to height x width
+    brightness_2d = brightness.reshape(camera.height, camera.width)
+    
+    # Convert to numpy, scale by 255, cast to uint8
+    image = (brightness_2d.cpu().numpy() * 255).astype(np.uint8)
+    
+    return image
+```
+
+**Parameters:**
+- `max_steps`: Maximum number of ray marching iterations. Default value is 30 in `render_to_file.py` and 40 in `rederer.py` [S1, unofficial].
+- `epsilon` (precision): The convergence threshold for ray marching. If the remaining distance is less than epsilon, the ray is considered to have hit the surface. Default value is $10^{-3}$ [S1, unofficial].
+- `max_dist`: The maximum distance a ray can travel before being clipped. Default value is 10.0 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- The normal estimation implementation in the reference code contains a bug where it only uses the first object (`objects[0]`) even if multiple objects are passed, and the index is hardcoded [S1, unofficial].
+- The PyGame screen initialization in the reference code is hardcoded to 1280x720 [S1, unofficial].
+- Precision issues may arise if `epsilon` is too small relative to the network's output scale or if the step size `e` for finite differences is not chosen carefully [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Dominated by the neural network inference per ray per step. Total complexity is $O(W \cdot H \cdot S \cdot C)$, where $W, H$ are image dimensions, $S$ is `max_steps`, and $C$ is the cost of a neural network forward pass.
+- **Memory Complexity**: $O(W \cdot H)$ for storing ray positions, distances, and normals. The neural network weights are stored separately.
+- **Performance**: Performance depends heavily on the neural network architecture and hardware acceleration (GPU). The reference implementation uses PyTorch on CUDA [S1, unofficial].
+- **Strengths**: Can represent complex, non-analytic geometries. No need for explicit mesh or voxel storage.
+- **Limitations**: Requires training data and training time. Normal estimation via finite differences is computationally expensive (6 extra network queries per pixel). Harder to optimize with traditional acceleration structures like BVHs compared to explicit meshes.
+- **When to use**: When the geometry is complex and defined implicitly by a neural network, or when learning a shape from data.
+- **When not to use**: For simple analytical primitives where analytical SDFs are faster and more accurate.
+
+## Background
+This method is based on the concept of DeepSDF, which approximates the Space Distance Field (SDF) using a deep neural network [S1, unofficial]. The specific implementation described in the sources is from a research project exploring the possibility of approximating the SDF using deep machine learning for image rendering [S1, unofficial]. The project uses Python 3.13 and PyTorch [S1, unofficial].
+
+## Sources
+[S1] Kulakov-Nikita/RayMarchingAI, https://github.com/Kulakov-Nikita/RayMarchingAI, fetched 2026-10-26 (unofficial)

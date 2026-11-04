@@ -122,7 +122,7 @@ A GPU-parallel rasterization method that divides the image into tiles (default 3
 Renders 3D Gaussian splats as screen-space quads using a pre-sorted order buffer and view-space projection data, handling transparency via alpha blending and discarding fragments behind the camera or with negligible alpha [2075-gaussian-splat-rendering-screen-space-quad.md]. It is a variant of the instanced approach that may use different sorting mechanisms or quad generation strategies [2075-gaussian-splat-rendering-screen-space-quad.md].
 
 ### Depth-First Splat Sorting
-Sorts the list of staged splats by depth *before* creating per-tile fragments, unlike 3DGS which sorts fragments after splitting [S4, unofficial]. This reduces sorting costs because the number of fragments is 1.5 to 4x higher than visible splats [S4, unofficial]. It uses a 32-bit radix sort with depth as the key, whereas standard 3DGS uses a 48-bit key (tile ID + depth) [S4, unofficial].
+Sorts the list of staged splats by depth *before* creating per-tile fragments, unlike 3DGS which sorts fragments after splitting [S4]. This reduces sorting costs because the number of fragments is 1.5 to 4x higher than visible splats [S4]. It uses a 32-bit radix sort with depth as the key, whereas standard 3DGS uses a 48-bit key (tile ID + depth) [S4].
 
 ## Operating characteristics
 - **Time Complexity:** $O(M \log M)$ for CPU sorting, where $M$ is the number of Gaussians [S1, unofficial]. Rendering is $O(M \cdot A)$ where $A$ is the average area of a splat in pixels, but effectively $O(W \cdot H)$ due to fragment shader execution per pixel covered by splats [G].
@@ -138,4 +138,4 @@ This method is based on the paper "3D Gaussian Splatting for Real-Time Radiance 
 [S1] 3D Gaussian Splatting in a Weekend, https://bfeldman.me/3dgs-weekend/, fetched 2026-10-26 (unofficial)
 [S2] akbartus/Gaussian-Splatting-WebViewers, https://github.com/akbartus/Gaussian-Splatting-WebViewers, fetched 2026-10-27 (unofficial)
 [S3] sascha-kirch/splaty, https://github.com/sascha-kirch/splaty, fetched 2026-10-27 (unofficial)
-[S4] Splatshop: Efficiently Editing Large Gaussian Splat Models, https://doi.org/10.1111/cgf.70214, fetched 2026-10-31 (unofficial)
+[S4] Splatshop: Efficiently Editing Large Gaussian Splat Models, https://doi.org/10.1111/cgf.70214, fetched 2026-10-31

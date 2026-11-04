@@ -1,0 +1,185 @@
+# Spherical Gaussian Shading
+
+Also called: SG Shading, Shading Rendering of Spherical Gaussians, Specular BRDF Approximation
+
+## Overview
+Spherical Gaussian (SG) Shading approximates complex lighting environments and specular reflections by decomposing incident radiance into a set of Spherical Gaussians, which are then rendered as discrete point lights or integrated into microfacet BRDF models. It solves the problem of real-time, view-dependent specular shading in volume rendering and neural radiance fields (NeRFs) by replacing expensive environment map lookups or high-order spherical harmonic integrations with efficient, analytically tractable approximations. It differs from [Phong Shading with SDF Normals](1977-phong-shading-with-sdf-normals.md) by supporting continuous, view-dependent specular lobes rather than discrete specular highlights, and from [Blinn-Phong Shading in Volume Rendering](2809-blinn-phong-shading-in-volume-rendering.md) by offering a more flexible parameterization of the specular lobe width and shape via Gaussian parameters.
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Surface position $\mathbf{r}$ and normal $\mathbf{N}(\mathbf{r})$.
+*   View direction $\mathbf{v}$.
+*   A set of $k$ Spherical Gaussians representing the lighting environment. Each SG $k$ is defined by its center direction $\mathbf{c}_k$, sharpness $\sigma_k$, and intensity $I_k$.
+*   Optional: Light positions $\mathbf{p}_i$ and intensities $\mathbf{I}_i$ if using the point-light decomposition method.
+
+**Outputs:**
+*   Outgoing radiance $L_o(\mathbf{v})$ or shading color $\mathbf{S}_{SG}(\mathbf{r})$.
+
+### Data Structures
+The lighting environment is stored as a list of Spherical Gaussians. Each SG $k$ contains:
+*   `center`: 3D unit vector $\mathbf{c}_k$ representing the dominant direction of the light source.
+*   `sharpness`: Scalar $\sigma_k > 0$ controlling the width of the lobe.
+*   `intensity`: Scalar or vector $I_k$ representing the magnitude of the radiance.
+
+For the point-light decomposition variant, each SG is expanded into 5 point lights:
+*   `center_light`: Position at $\mathbf{p}_k$, intensity $I_{k,0}$.
+*   `sample_lights`: 4 positions sampled around $\mathbf{c}_k$, intensities $I_{k,1} \dots I_{k,4}$ diminishing according to Gaussian probabilities.
+
+### Formulas
+
+**1. Point Light Decomposition Method**
+To render a single SG as 5 point lights, the first light is placed at the SG center, and the remaining four are sampled around the center with intensities diminishing according to Gaussian probabilities [S2]. For HDR environments, SGs are placed far from the scene to assume distant lighting [S2].
+
+The shading contribution $\mathbf{S}_{SG}(\mathbf{r})$ from $k$ point lights is calculated as [S2]:
+
+$$
+\mathbf{S}_{SG}(\mathbf{r}) = \sum_{i=1}^k \frac{\mathbf{N}(\mathbf{r}) \cdot \mathbf{L}_i(\mathbf{r})}{|\mathbf{N}(\mathbf{r})| |\mathbf{L}_i(\mathbf{r})|} * \frac{\mathbf{I}_i}{\gamma \cdot \mathbf{Dis}_i(\mathbf{r})^2}
+$$
+
+Where:
+*   $\mathbf{L}_i(\mathbf{r})$ is the direction from the $i$-th light source to the target point $\mathbf{r}$.
+*   $\mathbf{I}_i$ is the intensity of the $i$-th light.
+*   $\mathbf{Dis}_i(\mathbf{r})$ is the Euclidean distance between the light and the surface point.
+*   $\gamma$ is a hyperparameter controlling luminance [S2].
+
+**2. Microfacet BRDF Approximation Method**
+For specular response approximation, the outgoing radiance is modeled as [S1, unofficial]:
+
+$$
+L_o(\mathbf{v}) = \sum_k \left[ M(\mathbf{l}_k, \mathbf{v})(\mathbf{n} \cdot \mathbf{l}_k)^+ + \int_{\mathbf{l} \in \Omega} D(\mathbf{l}, \mathbf{v})L_k(\mathbf{l})d\mathbf{l} \right]
+$$
+
+Where:
+*   $M(\mathbf{l}_k, \mathbf{v})$ combines Fresnel and mask-shadowing functions.
+*   $D(\mathbf{l}, \mathbf{v})$ is the normal distribution function, modeled using an anisotropic Spherical Gaussian [S1, unofficial].
+*   $L_k(\mathbf{l})$ is the $k$-th Spherical Gaussian representing incident radiance [S1, unofficial].
+*   $(\mathbf{n} \cdot \mathbf{l}_k)^+$ denotes the positive part of the dot product (clamped to 0).
+
+### Parameters
+*   $\gamma$: Hyperparameter used to control the luminance of the light. Typical values are not specified in the sources, but it acts as a scaling factor for inverse-square decay [S2].
+*   Number of lights per SG: 5 [S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def spherical_gaussian_shading_point_light(r, N, lights, gamma):
+    """
+    Renders shading using the point-light decomposition of Spherical Gaussians.
+    
+    Args:
+        r: 3D position of the surface point.
+        N: 3D normal vector at r.
+        lights: List of light objects, each with 'pos' (3D vector), 'intensity' (3D vector).
+        gamma: Luminance control hyperparameter.
+        
+    Returns:
+        Shading color vector.
+    """
+    shading = [0.0, 0.0, 0.0]
+    N_norm = length(N)
+    
+    for light in lights:
+        # Calculate direction from light to surface
+        L_vec = light.pos - r
+        Dis = length(L_vec)
+        
+        # Avoid division by zero
+        if Dis < 1e-6:
+            continue
+            
+        L_dir = L_vec / Dis
+        N_dir = N / N_norm
+        
+        # Diffuse term: N . L
+        dot_nl = dot(N_dir, L_dir)
+        
+        # Only contribute if light is in front of surface
+        if dot_nl > 0:
+            # Inverse square decay with gamma scaling
+            # Formula: (N . L) * I / (gamma * Dis^2)
+            attenuation = light.intensity / (gamma * Dis * Dis)
+            shading += dot_nl * attenuation
+            
+    return shading
+
+def spherical_gaussian_shading_brdf_approx(r, N, v, sg_list):
+    """
+    Approximates specular response using SG-based microfacet BRDF.
+    Note: This is a high-level representation. The integral term requires
+    specific implementation of the anisotropic SG normal distribution D(l,v).
+    
+    Args:
+        r: 3D position.
+        N: 3D normal.
+        v: View direction.
+        sg_list: List of Spherical Gaussians (center, sharpness, intensity).
+        
+    Returns:
+        Outgoing radiance.
+    """
+    N_norm = length(N)
+    N_dir = N / N_norm
+    radiance = [0.0, 0.0, 0.0]
+    
+    for sg in sg_list:
+        # l_k is the center direction of the SG
+        l_k = sg.center
+        
+        # Term 1: Masking/Shadowing and Fresnel approximation
+        # M(l_k, v) is a factor combining fresnel and mask-shadowing.
+        # For simplicity, assume a basic Fresnel approximation or precomputed M.
+        # (n . l_k)^+
+        dot_nl = dot(N_dir, l_k)
+        if dot_nl > 0:
+            # Placeholder for M(l_k, v) calculation [S1, unofficial]
+            # M depends on material properties and view angle.
+            M = compute_fresnel_masking(N_dir, l_k, v) 
+            radiance += M * dot_nl * sg.intensity
+            
+        # Term 2: Integral of D(l,v) * L_k(l)
+        # This integral is approximated by the SG properties.
+        # D(l,v) is modeled through anisotropic spherical Gaussian [S1, unofficial].
+        # The integral of a Gaussian times a Gaussian is another Gaussian.
+        # This term captures the specular highlight.
+        # Specific implementation of the anisotropic SG integral is required.
+        specular_contribution = compute_sg_specular_integral(sg, N_dir, v)
+        radiance += specular_contribution
+        
+    return radiance
+```
+
+### Edge Cases and Pitfalls
+*   **Precision and Order:** The SG approximation is not precise enough even with 3rd order spherical Gaussians. It requires a much higher number of coefficients to achieve high fidelity, making it potentially unusable in real-time scenarios if high accuracy is required [S1, unofficial].
+*   **HDR Lighting:** If the lighting environment is High Dynamic Range (HDR), SGs should be placed far from the scene to assume distant lighting, preventing incorrect intensity scaling [S2].
+*   **Spatial Variation:** When lights are placed at 3D positions in the scene (spatially variant), their directions vary from ray to ray. The distance decay must be calculated per-ray to respect real-world lighting effects [S2].
+
+## Subtopics
+
+### Variance Shadow Mapping for SGs
+A shadow rendering method fitting NeRFs that uses variance shadow mapping ideas to render cast shadows efficiently by comparing depth inconsistencies from light and camera views, providing soft shadows with visibility in [0, 1] [S2].
+
+### Localized Environment Maps
+An approach where incoming radiance is represented through sparsely distributed environment maps. This results in a loss of spatial precision for increased angular resolution, often used in conjunction with SG approximations [S1, unofficial].
+
+## Operating characteristics
+
+*   **Time Complexity**: $O(k)$ per pixel, where $k$ is the number of Spherical Gaussians or point lights. The point-light decomposition increases the constant factor by 5x per SG.
+*   **Memory Complexity**: $O(k)$ to store the SG parameters.
+*   **Performance**: The method is designed for real-time or near-real-time performance, but [S1, unofficial] notes that high-precision requirements can make it unusable in real-time scenarios due to the need for many coefficients.
+*   **Strengths**: Efficient approximation of view-dependent specular effects; supports spatially variant lighting; compatible with NeRFs and volume rendering.
+*   **Limitations**: Lower precision compared to higher-order methods; requires careful tuning of $\gamma$ and SG placement for HDR scenes.
+*   **When to use**: When real-time specular shading is needed in neural radiance fields or volume rendering, and high-fidelity global illumination is not critical.
+*   **When not to use**: When high-precision specular reflections are required and computational budget allows for more expensive methods.
+
+## Background
+
+Spherical Gaussian Shading originated from techniques to approximate complex lighting environments for real-time rendering. The point-light decomposition method was proposed for relighting scenes with object insertions in Neural Radiance Fields (NeRFs) [S2]. The BRDF approximation approach, using SGs to model the normal distribution function in microfacet models, was developed by Xu et al. as part of localized environment map techniques [S1, unofficial].
+
+## Sources
+
+[S1] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)
+[S2] Relighting Scenes With Object Insertions in Neural Radiance Fields, https://doi.org/10.1109/TCSVT.2025.3535599, fetched 2026-10-29

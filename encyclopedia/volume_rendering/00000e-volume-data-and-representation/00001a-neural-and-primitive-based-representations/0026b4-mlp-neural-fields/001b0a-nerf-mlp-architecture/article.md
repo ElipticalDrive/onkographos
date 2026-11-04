@@ -14,11 +14,11 @@ The method implements the scene function $F_\Theta: (\mathbf{x}, \mathbf{d}) \ri
 ### Data Structures and Layout
 The network is a single fully-connected deep network where the input 3D coordinate $\mathbf{x}$ is processed through 8 fully-connected layers to output density and a feature vector [S1]. This feature vector is then concatenated with the viewing direction and passed to an additional fully-connected layer to output color [S1].
 
-1.  **Positional Encoding**: Inputs $\mathbf{x}$ and $\mathbf{d}$ are transformed using a positional encoding function $\gamma(\cdot)$ [S1, S5].
+1.  **Positional Encoding**: Inputs $\mathbf{x}$ and $\mathbf{d}$ are transformed using a positional encoding function $\gamma(\cdot)$ [S1][S5, unofficial].
     *   For a coordinate $v \in \{x, y, z\}$ or direction component, the encoding is:
         $$ \gamma(v) = [\sin(2^0 v), \cos(2^0 v), \dots, \sin(2^{L-1} v), \cos(2^{L-1} v)] $$
-    *   The total input dimension for position is $3 \times 2 \times L$ [S5].
-    *   The total input dimension for direction is $3 \times 2 \times L_{dir}$ [S5].
+    *   The total input dimension for position is $3 \times 2 \times L$ [S5, unofficial].
+    *   The total input dimension for direction is $3 \times 2 \times L_{dir}$ [S5, unofficial].
 2.  **Position Network**:
     *   Takes $\gamma(\mathbf{x})$ as input.
     *   Consists of 8 fully-connected (linear) layers [S1].
@@ -31,7 +31,7 @@ The network is a single fully-connected deep network where the input 3D coordina
         *   Feature vector $\mathbf{f}$: A 256-dimensional vector [S1].
     *   $\sigma$ is passed through a ReLU activation to ensure non-negativity [S1].
 4.  **Directional Encoding**:
-    *   The viewing direction $\mathbf{d}$ is encoded using $\gamma(\mathbf{d})$ with $L_{dir}$ frequency bands [S1, S5].
+    *   The viewing direction $\mathbf{d}$ is encoded using $\gamma(\mathbf{d})$ with $L_{dir}$ frequency bands [S1][S5, unofficial].
 5.  **Color Network**:
     *   Takes the concatenation of the feature vector $\mathbf{f}$ and the encoded direction $\gamma(\mathbf{d})$ as input [S1].
     *   Consists of 1 fully-connected layer with 128 channels and ReLU activation [S1].
@@ -54,12 +54,12 @@ The network is a single fully-connected deep network where the input 3D coordina
 
 ### Formulas and Definitions
 *   **Scene Function**: $F_\Theta(\mathbf{x}, \mathbf{d}) = (\sigma, \mathbf{c})$ [S1].
-*   **Positional Encoding**: $\gamma(v) = [\sin(2^0 v), \cos(2^0 v), \dots, \sin(2^{L-1} v), \cos(2^{L-1} v)]$ [S5].
-*   **Weight Initialization**: Weights $w \sim \text{Uniform}(-1/\sqrt{\text{out\_features}}, 1/\sqrt{\text{out\_features}})$, biases $b = 0$ [S5].
+*   **Positional Encoding**: $\gamma(v) = [\sin(2^0 v), \cos(2^0 v), \dots, \sin(2^{L-1} v), \cos(2^{L-1} v)]$ [S5, unofficial].
+*   **Weight Initialization**: Weights $w \sim \text{Uniform}(-1/\sqrt{\text{out\_features}}, 1/\sqrt{\text{out\_features}})$, biases $b = 0$ [S5, unofficial].
 
 ### Parameters and Typical Values
-*   **Position Encoding Length ($L$)**: 10 [S1, S5]. Input dimension: $3 \times 2 \times 10 = 60$ [S5].
-*   **Direction Encoding Length ($L_{dir}$)**: 6 [S1, S5]. Directional encoding input dimension: $3 \times 2 \times 6 = 36$ [S5].
+*   **Position Encoding Length ($L$)**: 10 [S1][S5, unofficial]. Input dimension: $3 \times 2 \times 10 = 60$ [S5, unofficial].
+*   **Direction Encoding Length ($L_{dir}$)**: 6 [S1][S5, unofficial]. Directional encoding input dimension: $3 \times 2 \times 6 = 36$ [S5, unofficial].
 *   **Hidden Dimension (Position)**: 256 channels [S1].
 *   **Hidden Dimension (Color)**: 128 channels [S1].
 *   **Network Size**: Approximately 5 MB for weights [S1].
@@ -162,10 +162,10 @@ Adapts the mip-NeRF 360 parameterization to warp unbounded 360-degree scenes int
 A neural field that maps a 3D point to a color and a density using a coordinate MLP with Fourier encoding and skip connections. It is position-only (no view-dependent effects) to keep the model small.
 
 ### Tiny NeRF
-A compact neural network architecture for NeRF, consisting of three linear layers with ReLU activations, designed to reduce model size compared to the standard NeRF [S7].
-*   **Layout**: `model_tinyNeRF` contains three layers: `l1` (Linear, input 39, output 128), `l2` (Linear, input 128, output 128), `l3` (Linear, input 128, output 4) [S7].
-*   **Forward Pass**: Input `gamma` is passed through `l1`. The output is passed through `l2`. The result is passed through `l3` to produce the final output for the Tiny NeRF variant [S7].
-*   **Input Dimension**: 39, corresponding to 3 (position) + 3 * 2 * 6 (positional encoding, assuming dim_encode=6) [S7].
+A compact neural network architecture for NeRF, consisting of three linear layers with ReLU activations, designed to reduce model size compared to the standard NeRF [S7, unofficial].
+*   **Layout**: `model_tinyNeRF` contains three layers: `l1` (Linear, input 39, output 128), `l2` (Linear, input 128, output 128), `l3` (Linear, input 128, output 4) [S7, unofficial].
+*   **Forward Pass**: Input `gamma` is passed through `l1`. The output is passed through `l2`. The result is passed through `l3` to produce the final output for the Tiny NeRF variant [S7, unofficial].
+*   **Input Dimension**: 39, corresponding to 3 (position) + 3 * 2 * 6 (positional encoding, assuming dim_encode=6) [S7, unofficial].
 
 ## Operating characteristics
 *   **Memory Complexity**: The network weights require only 5 MB, which is a 3000× compression compared to LLFF and less memory than the input images alone for a single scene [S1].

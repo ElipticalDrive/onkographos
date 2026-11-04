@@ -1,0 +1,114 @@
+--- v001.md
++++ v002.md
+@@ -9,5 +9,5 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   **Volume Data:** A 3D grid of scalar values (density/intensity).
++*   **Volume Data:** A 3D grid of scalar values (density/intensity) [S1, S2, unofficial].
+ *   **Transfer Functions:** Two 1D lookup tables mapping scalar values to RGBA color and opacity [S1, S2, unofficial].
+ *   **Camera Parameters:** Position, orientation (Euler angles or quaternion), and field of view [S1, S2, unofficial].
+@@ -120,5 +120,5 @@
+ ### Pseudocode
+ ```python
+-def cpu_volume_ray_casting(volume, transfer_func, camera, light, width, height):
++def cpu_volume_ray_casting(volume, transfer_func, camera, light, width, height, use_lighting):
+     # Initialize output buffer
+     pixels = [0] * (width * height * 3)
+@@ -142,5 +142,5 @@
+             task = lambda sx, ex, sy, ey: render_tile(
+                 volume, transfer_func, camera, light, 
+-                sx, ex, sy, ey, width, height, pixels, rot_matrix
++                sx, ex, sy, ey, width, height, pixels, rot_matrix, use_lighting
+             )
+             threads.append(task(start_x, end_x, start_y, end_y))
+@@ -152,5 +152,5 @@
+     return pixels
+ 
+-def render_tile(volume, transfer_func, camera, light, start_x, end_x, start_y, end_y, width, height, pixels, rot_matrix):
++def render_tile(volume, transfer_func, camera, light, start_x, end_x, start_y, end_y, width, height, pixels, rot_matrix, use_lighting):
+     for j in range(start_y, end_y):
+         for i in range(start_x, end_x):
+@@ -240,4 +240,56 @@
+     result = abc * (1-dz) + def_val * dz
+     return result
++
++def euler_to_rotation_matrix(roll, pitch, yaw):
++    c1, s1 = cos(yaw/2), sin(yaw/2)
++    c2, s2 = cos(pitch/2), sin(pitch/2)
++    c3, s3 = cos(roll/2), sin(roll/2)
++    q0 = c1*c2*c3 - s1*s2*s3
++    q1 = c1*c2*s3 + s1*s2*c3
++    q2 = s1*c2*c3 + c1*s2*s3
++    q3 = c1*s2*c3 - s1*c2*s3
++    M = [[0]*3 for _ in range(3)]
++    M[0][0] = 2*(q0*q0 + q1*q1) - 1; M[0][1] = 2*(q1*q2 - q0*q3); M[0][2] = 2*(q1*q3 + q0*q2)
++    M[1][0] = 2*(q1*q2 + q0*q3); M[1][1] = 2*(q0*q0 + q2*q2) - 1; M[1][2] = 2*(q2*q3 - q0*q1)
++    M[2][0] = 2*(q1*q3 - q0*q2); M[2][1] = 2*(q2*q3 + q0*q1); M[2][2] = 2*(q0*q0 + q3*q3) - 1
++    return M
++
++def get_ray_for_pixel(i, j, camera, width, height):
++    # Standard pinhole camera ray generation [G]
++    # Assuming camera at origin looking down -Z, with FOV and aspect ratio
++    aspect = width / height
++    fov = camera.fov
++    ndc_x = (2.0 * (i + 0.5) / width) - 1.0
++    ndc_y = 1.0 - (2.0 * (j + 0.5) / height)
++    ray_dir = Vector3(ndc_x * aspect * tan(fov/2), ndc_y * tan(fov/2), -1.0)
++    ray_dir = normalize(ray_dir)
++    return camera.position, ray_dir
++
++def intersect_sphere(origin, direction, sphere):
++    # Ray-sphere intersection [G]
++    oc = origin - sphere.center
++    a = dot(direction, direction)
++    b = 2.0 * dot(oc, direction)
++    c = dot(oc, oc) - sphere.radius * sphere.radius
++    disc = b*b - 4*a*c
++    if disc < 0:
++        return None, None
++    sqrt_disc = sqrt(disc)
++    t0 = (-b - sqrt_disc) / (2*a)
++    t1 = (-b + sqrt_disc) / (2*a)
++    if t0 < 0:
++        t0 = t1
++    return t0, t1
++
++def normalize(v):
++    l = sqrt(v.x*v.x + v.y*v.y + v.z*v.z)
++    if l == 0: return Vector3(0,0,0)
++    return Vector3(v.x/l, v.y/l, v.z/l)
++
++def dot(v1, v2):
++    return v1.x*v2.x + v1.y*v2.y + v1.z*v2.z
++
++def tan(x):
++    return sin(x)/cos(x)
+ ```
+ 
+@@ -255,18 +307,19 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot M \cdot S)$, where $N$ is the number of pixels, $M$ is the number of samples per ray (determined by volume depth and step size), and $S$ is the cost of sampling/compositing per sample. Multithreading reduces wall-clock time proportionally to the number of cores [S1, unofficial].
+-*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels. Transfer functions and pixel buffers add $O(1)$ and $O(P)$ overhead respectively [S1, S2, unofficial].
+-*   **Performance:** Performance is limited by CPU memory bandwidth and cache efficiency due to the random access pattern of ray marching through the voxel grid [S1, S2, unofficial].
+-*   **Strengths:** Full control over rendering pipeline on CPU; supports complex transfer functions and lighting models without GPU shader constraints; suitable for interactive systems where GPU resources are unavailable or insufficient [S1, S2, unofficial].
+-*   **Limitations:** Slower than GPU-based raycasting for high-resolution volumes; prone to aliasing if step size is large or interpolation is poor; no built-in acceleration structures (like BVH) in the basic implementations described, leading to uniform sampling [S1, S2, unofficial].
++*   **Time Complexity:** $O(N \cdot M \cdot S)$, where $N$ is the number of pixels, $M$ is the number of samples per ray (determined by volume depth and step size), and $S$ is the cost of sampling/compositing per sample [G].
++*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels [G].
++*   **Measured Performance:** Not given in the sources.
++*   **Scaling:** Not given in the sources.
++*   **Strengths:** Full control over rendering pipeline on CPU; supports complex transfer functions and Phong lighting without GPU shader constraints; suitable for interactive systems where GPU resources are unavailable or insufficient [S1, S2, unofficial].
++*   **Limitations:** Prone to aliasing if step size is large or interpolation is poor; no built-in acceleration structures (like BVH) in the basic implementations described, leading to uniform sampling [S2, unofficial].
+ *   **When to Use:** Interactive direct volume rendering on CPU-only systems; educational implementations; scenarios requiring custom lighting or transfer function logic not easily expressible in shaders [S1, S2, unofficial].
+ *   **When Not to Use:** High-performance real-time rendering of large volumes; scenes requiring complex light transport (e.g., full in-scattering) without approximation [S2, unofficial].
+ 
+ ## Background
+-CPU Volume Raycasting originated as a foundational technique in Direct Volume Rendering (DVR), allowing visualization of 3D scalar fields on standard hardware before GPU compute shaders became prevalent. The specific implementations cited here represent independent open-source projects:
++CPU Volume Raycasting originated as a foundational technique in Direct Volume Rendering (DVR), allowing visualization of 3D scalar fields on standard hardware before GPU compute shaders became prevalent [G]. The specific implementations cited here represent independent open-source projects:
+ *   **Pure CPU Direct Volume Rendering:** Developed by Tomasz Hachaj, this implementation emphasizes a pure CPU approach with quaternion-based rotation and Phong lighting, explicitly avoiding 3rd party libraries and GPU acceleration [S1, unofficial].
+ *   **Interactive DVR System:** Developed by Manishaa1704, this system focuses on multithreaded pixel processing and trilinear interpolation for smoother visuals, serving as an educational example of CPU-based DVR [S2, unofficial].
+ 
+-These methods build upon the theoretical framework of the Volume Rendering Integral discretization [831-volume-raycasting-discretization.md], applying it via explicit ray marching loops on the CPU.
++These methods build upon the theoretical framework of the Volume Rendering Integral discretization [831-volume-raycasting-discretization.md], applying it via explicit ray marching loops on the CPU [S1, unofficial].
+ 
+ ## Sources

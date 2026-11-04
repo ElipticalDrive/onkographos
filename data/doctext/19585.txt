@@ -1,0 +1,3522 @@
+# Binary greedy mesher demo
+A voxel engine project highlighting a 🔥 blazingly 🔥 fast binary greedy mesher.
+Written with Rust utilizing [bevy game engine](https://github.com/bevyengine/bevy).
+
+![](screenshot.png)
+
+## benchmarks
+There are various benchmarks implemented, but only 2 are enabled. (A simple culled mesher VS the binary greedy mesher).
+
+The project utilize the criterion library for benchmarking and it generates html report target/criterion/report.
+
+## resources I used to build this:
+
+(video) [Greedy Meshing Voxels Fast - Optimism in Design Handmade Seattle 2022](https://youtu.be/4xs66m1Of4A?si=EwYbvf75zd38hfjp) - Helped me understand Binary greedy meshing algorithm
+
+(repo) [Binary Greedy Meshing](https://github.com/cgerikj/binary-greedy-meshing) - Helped me understand binary face culling
+
+## License
+binary_greedy_mesher_demo is free and open source! All code in this repository is dual-licensed under either:
+
+* MIT License ([LICENSE-MIT](docs/LICENSE-MIT) or [http://opensource.org/licenses/MIT](http://opensource.org/licenses/MIT))
+* Apache License, Version 2.0 ([LICENSE-APACHE](docs/LICENSE-APACHE) or [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any
+additional terms or conditions.
+
+### benches/chunk.rs
+```
+use bevy::prelude::*;
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use new_voxel_testing::chunk::ChunkData;
+
+fn bench_chunk(world_pos: IVec3) {
+    let _chunk = ChunkData::generate(world_pos);
+}
+
+fn criterion_benchmark(c: &mut Criterion) {
+    c.bench_function("build chunk data", |b| {
+        b.iter_with_setup(
+            || {
+                use rand::Rng;
+                let mut rng = rand::thread_rng();
+                let b = 100;
+                let y = 20;
+                black_box(IVec3::new(
+                    rng.gen_range(-b..b),
+                    rng.gen_range(-y..y),
+                    rng.gen_range(-b..b),
+                ))
+            },
+            |i| bench_chunk(i),
+        )
+    });
+}
+
+criterion_group!(benches, criterion_benchmark);
+criterion_main!(benches);
+```
+
+### benches/chunks_refs.rs
+```
+use bevy::math::{ivec3, IVec3};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use new_voxel_testing::{
+    chunks_refs::ChunksRefs,
+    constants::{CHUNK_SIZE, CHUNK_SIZE_I32, CHUNK_SIZE_P},
+    utils::vec3_to_index,
+    voxel::{BlockData, BlockType},
+};
+
+fn iter_chunkrefs_padding(chunks_refs: ChunksRefs) {
+    for x in 0..CHUNK_SIZE_P {
+        for z in 0..CHUNK_SIZE_P {
+            for y in 0..CHUNK_SIZE_P {
+                let pos = ivec3(x as i32, y as i32, z as i32) - IVec3::ONE;
+                let _b = chunks_refs.get_block(pos);
+            }
+        }
+    }
+}
+
+fn iter_chunkrefs(chunks_refs: ChunksRefs) {
+    for x in 0..CHUNK_SIZE {
+        for z in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_SIZE {
+                let pos = ivec3(x as i32, y as i32, z as i32);
+                let _b = chunks_refs.get_block(pos);
+            }
+        }
+    }
+}
+
+fn iter_vec(data: Vec<BlockData>) {
+    for y in 0..CHUNK_SIZE {
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let pos = ivec3(x as i32, y as i32, z as i32);
+                let index = vec3_to_index(pos, 32);
+                let _b = black_box(data[index]);
+            }
+        }
+    }
+}
+
+fn criterion_benchmark(c: &mut Criterion) {
+    c.bench_function("iter chunk_refs ", |b| {
+        b.iter_with_setup(
+            || ChunksRefs::make_dummy_chunk_refs(0),
+            |i| iter_chunkrefs(i),
+        )
+    });
+    c.bench_function("iter chunk_refs padding ", |b| {
+        b.iter_with_setup(
+            || ChunksRefs::make_dummy_chunk_refs(0),
+            |i| iter_chunkrefs_padding(i),
+        )
+    });
+    c.bench_function("iter vec", |b| {
+        b.iter_with_setup(
+            || {
+                let mut d = vec![];
+                for _ in 0..CHUNK_SIZE_I32 * CHUNK_SIZE_I32 * CHUNK_SIZE_I32 {
+                    d.push(BlockData {
+                        block_type: BlockType::Air,
+                    });
+                }
+                d
+            },
+            |i| iter_vec(i),
+        )
+    });
+}
+
+criterion_group!(benches, criterion_benchmark);
+criterion_main!(benches);
+```
+
+### benches/meshing.rs
+```
+use std::{sync::Arc, time::Instant};
+
+use bevy::{math::IVec3, utils::HashMap};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use new_voxel_testing::{
+    chunk::ChunkData,
+    chunks_refs::ChunksRefs,
+    culled_mesher, culled_mesher_optimized, greedy_mesher, greedy_mesher_optimized,
+    lod::Lod,
+    utils::{index_to_ivec3, index_to_ivec3_bounds},
+    voxel::{BlockData, BlockType},
+};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+
+fn bench_mesh(chunks_refs: ChunksRefs) {
+    greedy_mesher::build_chunk_mesh(chunks_refs, Lod::L32);
+}
+
+fn bench_mesh_no_ao(chunks_refs: ChunksRefs) {
+    greedy_mesher::build_chunk_mesh_no_ao(chunks_refs, Lod::L32);
+}
+
+fn binary_mesh_optimized(chunks_refs: ChunksRefs) {
+    let m = greedy_mesher_optimized::build_chunk_mesh(&chunks_refs, Lod::L32);
+}
+
+fn culled_mesh_ao(chunks_refs: ChunksRefs) {
+    culled_mesher::build_chunk_mesh_ao(&chunks_refs, Lod::L32);
+}
+
+// helper for incrementing and constructing chunksrefs
+fn make_chunks_refs(s: &mut u64) -> ChunksRefs {
+    *s += 1;
+    ChunksRefs::make_dummy_chunk_refs(*s)
+}
+
+fn make_empty() -> ChunksRefs {
+    let mut chunks = vec![];
+    for _i in 0..3 * 3 * 3 {
+        chunks.push(Arc::new(ChunkData {
+            voxels: vec![BlockData {
+                block_type: BlockType::Air,
+            }],
+        }));
+    }
+    ChunksRefs { chunks }
+}
+
+fn make_filled() -> ChunksRefs {
+    let mut chunks = vec![];
+    for _i in 0..3 * 3 * 3 {
+        chunks.push(Arc::new(ChunkData {
+            voxels: vec![BlockData {
+                block_type: BlockType::Grass,
+            }],
+        }));
+    }
+    ChunksRefs { chunks }
+}
+
+fn slicer(data: [u32; 32]) {
+    greedy_mesher_optimized::greedy_mesh_binary_plane(data, 32);
+}
+
+fn criterion_benchmark(c: &mut Criterion) {
+    // c.bench_function("greedy slicer, 1 plane", |b| {
+    //     b.iter_with_setup(
+    //         || {
+    //             let mut data = [0u32; 32];
+    //             let mut rng = rand::thread_rng();
+    //             for y in 0..32 {
+    //                 for x in 0..32 {
+    //                     if rng.gen_range(0..=1) == 0 {
+    //                         data[x] |= 1 << y;
+    //                     }
+    //                 }
+    //             }
+    //             data
+    //         },
+    //         |i| slicer(i),
+    //     )
+    // });
+    // c.bench_function("greedy slicer, filled 0", |b| {
+    //     b.iter_with_setup(|| [0u32; 32], |i| slicer(i))
+    // });
+    // c.bench_function("greedy slicer, filled 1", |b| {
+    //     b.iter_with_setup(|| [1u32; 32], |i| slicer(i))
+    // });
+    c.bench_function("CULLED meshing: 1 chunk [ao]", |b| {
+        let mut s = 0;
+        b.iter_with_setup(|| make_chunks_refs(&mut s), |i| culled_mesh_ao(i))
+    });
+
+    c.bench_function("GREEDY meshing OPTIMIZED: 1 chunk [ao]", |b| {
+        let mut s = 0;
+        b.iter_with_setup(|| make_chunks_refs(&mut s), |i| binary_mesh_optimized(i))
+    });
+    // c.bench_function("GREEDY meshing OPTIMIZED: 1 chunk [ao] FILLED", |b| {
+    //     b.iter_with_setup(|| make_filled(), |i| binary_mesh_optimized(i))
+    // });
+    // c.bench_function("GREEDY meshing OPTIMIZED: 1 chunk [ao] EMPTY", |b| {
+    //     b.iter_with_setup(|| make_empty(), |i| binary_mesh_optimized(i))
+    // });
+
+    // let group = c.benchmark_group("yes");
+}
+
+criterion_group!(benches, criterion_benchmark);
+criterion_main!(benches);
+```
+
+### src/chunk.rs
+```
+use bevy::prelude::*;
+use bracket_noise::prelude::*;
+
+use crate::{
+    utils::index_to_ivec3,
+    voxel::{BlockData, BlockType},
+};
+
+#[derive(Clone)]
+pub struct ChunkData {
+    pub voxels: Vec<BlockData>,
+}
+
+impl ChunkData {
+    #[inline]
+    pub fn get_block(&self, index: usize) -> &BlockData {
+        if self.voxels.len() == 1 {
+            &self.voxels[0]
+        } else {
+            &self.voxels[index]
+        }
+    }
+
+    // returns the block type if all voxels are the same
+    #[inline]
+    pub fn get_block_if_filled(&self) -> Option<&BlockData> {
+        if self.voxels.len() == 1 {
+            Some(&self.voxels[0])
+        } else {
+            None
+        }
+    }
+
+    ///! shape our voxel data based on the chunk_pos
+    pub fn generate(chunk_pos: IVec3) -> Self {
+        // hardcoded extremity check
+        if chunk_pos.y * 32 + 32 > 21 + 32 {
+            return Self {
+                voxels: vec![BlockData {
+                    block_type: BlockType::Air,
+                }],
+            };
+        }
+        // hardcoded extremity check
+        if chunk_pos.y * 32 < -21 - 32 {
+            return Self {
+                voxels: vec![BlockData {
+                    block_type: BlockType::Grass,
+                }],
+            };
+        }
+        let mut voxels = vec![];
+        let mut fast_noise = FastNoise::new();
+        fast_noise.set_frequency(0.0254);
+        for i in 0..32 * 32 * 32 {
+            let voxel_pos = (chunk_pos * 32) + index_to_ivec3(i);
+            let scale = 1.0;
+            fast_noise.set_frequency(0.0254);
+            let overhang = fast_noise.get_noise3d(
+                voxel_pos.x as f32 * scale,
+                voxel_pos.y as f32,
+                voxel_pos.z as f32 * scale,
+            ) * 55.0;
+            fast_noise.set_frequency(0.002591);
+            let noise_2 =
+                fast_noise.get_noise(voxel_pos.x as f32 + overhang, voxel_pos.z as f32 * scale);
+            let h = noise_2 * 30.0;
+            let solid = h > voxel_pos.y as f32;
+
+            let block_type = match solid {
+                true => match (h - voxel_pos.y as f32) > 1.0 {
+                    true => BlockType::Dirt,
+                    false => BlockType::Grass,
+                },
+                false => BlockType::Air,
+            };
+            voxels.push(BlockData { block_type });
+        }
+
+        Self { voxels }
+    }
+}
+```
+
+### src/chunk_mesh.rs
+```
+///! gpu ready mesh payload
+#[derive(Default)]
+pub struct ChunkMesh {
+    pub indices: Vec<u32>,
+    pub vertices: Vec<u32>,
+}
+```
+
+### src/chunks_refs.rs
+```
+use std::sync::Arc;
+
+use bevy::{
+    math::{ivec3, IVec3},
+    utils::HashMap,
+};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+
+use crate::{
+    chunk::ChunkData,
+    quad::Direction,
+    utils::{index_to_ivec3_bounds, vec3_to_index},
+    voxel::BlockData,
+};
+
+// pointers to chunk data, a middle one with all their neighbours
+#[derive(Clone)]
+pub struct ChunksRefs {
+    pub chunks: Vec<Arc<ChunkData>>,
+}
+
+impl ChunksRefs {
+    ///! construct a ChunkRefs at middle_chunk position
+    ///! safety: panics if ChunkData doesn't exist in input world_data
+    pub fn try_new(
+        world_data: &HashMap<IVec3, Arc<ChunkData>>,
+        middle_chunk: IVec3,
+    ) -> Option<Self> {
+        let mut chunks = vec![];
+        for i in 0..3 * 3 * 3 {
+            let offset = index_to_ivec3_bounds(i, 3) + IVec3::splat(-1);
+            chunks.push(Arc::clone(
+                world_data.get(&(middle_chunk + offset)).unwrap(),
+            ))
+        }
+        Some(Self { chunks })
+    }
+    // returns if all the voxels are the same
+    // this is an incredibly fast approximation (1 sample per chunk) all = voxels[0]
+    // so may be inacurate, but the odds are incredibly low
+    pub fn is_all_voxels_same(&self) -> bool {
+        let first_block = self.chunks[0].get_block_if_filled();
+        let Some(block) = first_block else {
+            return false;
+        };
+        for chunk in self.chunks[1..].iter() {
+            let option = chunk.get_block_if_filled();
+            if let Some(v) = option {
+                if block.block_type != v.block_type {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    ///! only use for testing purposes
+    pub fn make_dummy_chunk_refs(seed: u64) -> ChunksRefs {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut chunks = vec![];
+        let pos = IVec3::new(
+            rng.gen_range(-20..20),
+            rng.gen_range(-5..5),
+            rng.gen_range(-20..20),
+        );
+        for i in 0..3 * 3 * 3 {
+            let offset = index_to_ivec3_bounds(i, 3) + IVec3::NEG_ONE;
+            chunks.push(Arc::new(ChunkData::generate(pos + offset)));
+        }
+        ChunksRefs { chunks }
+    }
+
+    ///! helper function to get block data that may exceed the bounds of the middle chunk
+    ///! input position is local pos to middle chunk
+    pub fn get_block(&self, pos: IVec3) -> &BlockData {
+        let x = (pos.x + 32) as u32;
+        let y = (pos.y + 32) as u32;
+        let z = (pos.z + 32) as u32;
+        let (x_chunk, x) = ((x / 32) as i32, (x % 32) as i32);
+        let (y_chunk, y) = ((y / 32) as i32, (y % 32) as i32);
+        let (z_chunk, z) = ((z / 32) as i32, (z % 32) as i32);
+
+        let chunk_index = vec3_to_index(IVec3::new(x_chunk, y_chunk, z_chunk), 3);
+        let chunk_data = &self.chunks[chunk_index];
+        let i = vec3_to_index(IVec3::new(x, y, z), 32);
+        chunk_data.get_block(i)
+    }
+
+    ///! helper function to get voxels
+    ///! panics if the local pos is outside the middle chunk
+    pub fn get_block_no_neighbour(&self, pos: IVec3) -> &BlockData {
+        let chunk_data = &self.chunks[13];
+        let i = vec3_to_index(pos, 32);
+        chunk_data.get_block(i)
+    }
+
+    ///! helper function to sample adjacent(back,left,down) voxels
+    pub fn get_adjacent_blocks(
+        &self,
+        pos: IVec3,
+        // current back, left, down
+    ) -> (&BlockData, &BlockData, &BlockData, &BlockData) {
+        let current = self.get_block(pos);
+        let back = self.get_block(pos + ivec3(0, 0, -1));
+        let left = self.get_block(pos + ivec3(-1, 0, 0));
+        let down = self.get_block(pos + ivec3(0, -1, 0));
+        (current, back, left, down)
+    }
+
+    ///! helper function to sample adjacent voxels, von neuman include all facing planes
+    pub fn get_von_neumann(&self, pos: IVec3) -> Option<Vec<(Direction, &BlockData)>> {
+        let mut result = vec![];
+        result.push((Direction::Back, self.get_block(pos + ivec3(0, 0, -1))));
+        result.push((Direction::Forward, self.get_block(pos + ivec3(0, 0, 1))));
+        result.push((Direction::Down, self.get_block(pos + ivec3(0, -1, 0))));
+        result.push((Direction::Up, self.get_block(pos + ivec3(0, 1, 0))));
+        result.push((Direction::Left, self.get_block(pos + ivec3(-1, 0, 0))));
+        result.push((Direction::Right, self.get_block(pos + ivec3(1, 0, 0))));
+        Some(result)
+    }
+
+    pub fn get_2(&self, pos: IVec3, offset: IVec3) -> (&BlockData, &BlockData) {
+        let first = self.get_block(pos);
+        let second = self.get_block(pos + offset);
+        (first, second)
+    }
+}
+```
+
+### src/constants.rs
+```
+use bevy::{
+    math::{ivec2, IVec2},
+    prelude::IVec3,
+};
+
+pub const CHUNK_SIZE: usize = 32;
+pub const CHUNK_SIZE_I32: i32 = CHUNK_SIZE as i32;
+pub const CHUNK_SIZE_P: usize = CHUNK_SIZE + 2;
+pub const CHUNK_SIZE_P2: usize = CHUNK_SIZE_P * CHUNK_SIZE_P;
+pub const CHUNK_SIZE_P3: usize = CHUNK_SIZE_P * CHUNK_SIZE_P * CHUNK_SIZE_P;
+pub const CHUNK_SIZE2: usize = CHUNK_SIZE * CHUNK_SIZE;
+pub const CHUNK_SIZE2_I32: i32 = CHUNK_SIZE2 as i32;
+pub const CHUNK_SIZE3: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
+
+pub const ADJACENT_CHUNK_DIRECTIONS: [IVec3; 27] = [
+    IVec3 { x: 0, y: 0, z: 0 },
+    // moore neighbours in the negative direction
+    IVec3 { x: 0, y: -1, z: -1 },
+    IVec3 { x: -1, y: 0, z: -1 },
+    IVec3 { x: -1, y: 0, z: 1 },
+    IVec3 { x: -1, y: -1, z: 0 },
+    IVec3 {
+        x: -1,
+        y: -1,
+        z: -1,
+    },
+    IVec3 { x: -1, y: 1, z: -1 },
+    IVec3 { x: -1, y: -1, z: 1 },
+    IVec3 { x: -1, y: 1, z: 1 },
+    IVec3 { x: 1, y: 0, z: -1 },
+    IVec3 { x: 1, y: -1, z: -1 },
+    IVec3 { x: 0, y: 1, z: -1 },
+    IVec3 { x: 1, y: 1, z: 1 },
+    IVec3 { x: 1, y: -1, z: 1 },
+    IVec3 { x: 1, y: 1, z: -1 },
+    IVec3 { x: 1, y: 1, z: 0 },
+    IVec3 { x: 0, y: 1, z: 1 },
+    IVec3 { x: 1, y: -1, z: 0 },
+    IVec3 { x: 0, y: -1, z: 1 },
+    IVec3 { x: 1, y: 0, z: 1 },
+    IVec3 { x: -1, y: 1, z: 0 },
+    // von neumann neighbour
+    IVec3 { x: -1, y: 0, z: 0 },
+    IVec3 { x: 1, y: 0, z: 0 },
+    IVec3 { x: 0, y: -1, z: 0 },
+    IVec3 { x: 0, y: 1, z: 0 },
+    IVec3 { x: 0, y: 0, z: -1 },
+    IVec3 { x: 0, y: 0, z: 1 },
+];
+
+pub const ADJACENT_AO_DIRS: [IVec2; 9] = [
+    ivec2(-1, -1),
+    ivec2(-1, 0),
+    ivec2(-1, 1),
+    ivec2(0, -1),
+    ivec2(0, 0),
+    ivec2(0, 1),
+    ivec2(1, -1),
+    ivec2(1, 0),
+    ivec2(1, 1),
+];
+```
+
+### src/culled_mesher.rs
+```
+use bevy::{math::ivec3, prelude::*};
+
+use crate::{
+    chunk_mesh::ChunkMesh,
+    chunks_refs::ChunksRefs,
+    lod::Lod,
+    quad::{Direction, Quad},
+    utils::{generate_indices, index_to_ivec3, make_vertex_u32},
+};
+
+fn push_face(mesh: &mut ChunkMesh, dir: Direction, vpos: IVec3, color: Color, block_type: u32) {
+    let quad = Quad::from_direction(dir, vpos, color);
+    for corner in quad.corners.into_iter() {
+        mesh.vertices.push(make_vertex_u32(
+            IVec3::from_array(corner),
+            0,
+            dir.get_normal() as u32,
+            block_type,
+        ));
+    }
+}
+
+pub fn build_chunk_mesh_no_ao(chunks_refs: ChunksRefs, _lod: Lod) -> Option<ChunkMesh> {
+    let mut mesh = ChunkMesh::default();
+    for i in 0..32 * 32 * 32 {
+        let local = index_to_ivec3(i);
+        let (current, back, left, down) = chunks_refs.get_adjacent_blocks(local);
+        match current.block_type.is_solid() {
+            true => {
+                if !left.block_type.is_solid() {
+                    push_face(
+                        &mut mesh,
+                        Direction::Left,
+                        local,
+                        Color::GREEN,
+                        current.block_type as u32,
+                    );
+                }
+                if !back.block_type.is_solid() {
+                    push_face(
+                        &mut mesh,
+                        Direction::Back,
+                        local,
+                        Color::GREEN,
+                        current.block_type as u32,
+                    );
+                }
+                if !down.block_type.is_solid() {
+                    push_face(
+                        &mut mesh,
+                        Direction::Down,
+                        local,
+                        Color::GREEN,
+                        current.block_type as u32,
+                    );
+                }
+            }
+            false => {
+                if left.block_type.is_solid() {
+                    push_face(
+                        &mut mesh,
+                        Direction::Right,
+                        local,
+                        Color::GREEN,
+                        left.block_type as u32,
+                    );
+                }
+                if back.block_type.is_solid() {
+                    push_face(
+                        &mut mesh,
+                        Direction::Forward,
+                        local,
+                        Color::GREEN,
+                        back.block_type as u32,
+                    );
+                }
+                if down.block_type.is_solid() {
+                    push_face(
+                        &mut mesh,
+                        Direction::Up,
+                        local,
+                        Color::GREEN,
+                        down.block_type as u32,
+                    );
+                }
+            }
+        }
+    }
+    if mesh.vertices.is_empty() {
+        None
+    } else {
+        mesh.indices = generate_indices(mesh.vertices.len());
+        Some(mesh)
+    }
+}
+
+///! helper for fetching voxels that will contribute to the current voxels ao value
+pub fn ambient_corner_voxels(
+    chunks_refs: &ChunksRefs,
+    direction: Direction,
+    local_pos: IVec3,
+) -> [bool; 8] {
+    #[rustfmt::skip]
+    let mut positions = match direction {
+        Direction::Left => [ivec3(-1,0,-1),ivec3(-1,-1,-1),ivec3(-1,-1,0),ivec3(-1,-1,1),ivec3(-1,0,1),ivec3(-1,1,1),ivec3(-1, 1, 0),ivec3(-1,1,-1),],
+        Direction::Down => [ivec3(-1, -1, 0),ivec3(-1, -1, -1),ivec3(0, -1, -1), ivec3(1,-1,-1),ivec3(1,-1,0),ivec3(1, -1, 1),ivec3(0,-1,1),ivec3(-1,-1,1),],
+        Direction::Back => [ivec3(0,-1,-1),ivec3(-1,-1,-1),ivec3(-1,0,-1),ivec3(-1,1,-1), ivec3(0,1,-1), ivec3(1,1,-1),ivec3(1,0,-1), ivec3(1,-1,-1)],
+
+        Direction::Right => [ivec3(0,0,-1), ivec3(0,1,-1), ivec3(0,1,0), ivec3(0,1,1),ivec3(0,0,1),ivec3(0,-1,1),ivec3(0,-1,0),ivec3(0,-1,-1)],
+        Direction::Up => [ivec3(-1,0,0),ivec3(-1,0,1),ivec3(0,0,1),ivec3(1,0,1),ivec3(1,0,0),ivec3(1,0,-1),ivec3(0,0,-1),ivec3(-1,0,-1),],
+        Direction::Forward => [ivec3(0,-1,0),ivec3(1,-1,0),ivec3(1,0,0),ivec3(1,1,0),ivec3(0,1,0),ivec3(-1,1,0),ivec3(-1,0,0),ivec3(-1,-1,0),],
+    };
+
+    positions.iter_mut().for_each(|p| *p = local_pos + *p);
+
+    let mut result = [false; 8];
+    for i in 0..8 {
+        result[i] = chunks_refs.get_block(positions[i]).block_type.is_solid();
+    }
+    result
+}
+pub fn ambient_corner_voxels_cloned(
+    chunks_refs: &ChunksRefs,
+    direction: Direction,
+    local_pos: IVec3,
+) -> Option<[bool; 8]> {
+    #[rustfmt::skip]
+    let mut positions = match direction {
+        Direction::Left => [ivec3(-1,0,-1),ivec3(-1,-1,-1),ivec3(-1,-1,0),ivec3(-1,-1,1),ivec3(-1,0,1),ivec3(-1,1,1),ivec3(-1, 1, 0),ivec3(-1,1,-1),],
+        Direction::Down => [ivec3(-1, -1, 0),ivec3(-1, -1, -1),ivec3(0, -1, -1), ivec3(1,-1,-1),ivec3(1,-1,0),ivec3(1, -1, 1),ivec3(0,-1,1),ivec3(-1,-1,1),],
+        Direction::Back => [ivec3(0,-1,-1),ivec3(-1,-1,-1),ivec3(-1,0,-1),ivec3(-1,1,-1), ivec3(0,1,-1), ivec3(1,1,-1),ivec3(1,0,-1), ivec3(1,-1,-1)],
+
+        Direction::Right => [ivec3(0,0,-1), ivec3(0,1,-1), ivec3(0,1,0), ivec3(0,1,1),ivec3(0,0,1),ivec3(0,-1,1),ivec3(0,-1,0),ivec3(0,-1,-1)],
+        Direction::Up => [ivec3(-1,0,0),ivec3(-1,0,1),ivec3(0,0,1),ivec3(1,0,1),ivec3(1,0,0),ivec3(1,0,-1),ivec3(0,0,-1),ivec3(-1,0,-1),],
+        Direction::Forward => [ivec3(0,-1,0),ivec3(1,-1,0),ivec3(1,0,0),ivec3(1,1,0),ivec3(0,1,0),ivec3(-1,1,0),ivec3(-1,0,0),ivec3(-1,-1,0),],
+    };
+
+    positions.iter_mut().for_each(|p| *p = local_pos + *p);
+
+    let mut result = [false; 8];
+    for i in 0..8 {
+        result[i] = chunks_refs.get_block(positions[i]).block_type.is_solid();
+    }
+    Some(result)
+}
+
+pub fn build_chunk_mesh_ao(chunks_refs: &ChunksRefs, _lod: Lod) -> Option<ChunkMesh> {
+    let mut mesh = ChunkMesh::default();
+    for i in 0..32 * 32 * 32 {
+        let local = index_to_ivec3(i);
+        let (current, back, left, down) = chunks_refs.get_adjacent_blocks(local);
+        match current.block_type.is_solid() {
+            true => {
+                if !left.block_type.is_solid() {
+                    push_face_ao(
+                        chunks_refs,
+                        &mut mesh,
+                        Direction::Left,
+                        local,
+                        Color::GREEN,
+                        current.block_type as u32,
+                    );
+                }
+                if !back.block_type.is_solid() {
+                    push_face_ao(
+                        chunks_refs,
+                        &mut mesh,
+                        Direction::Back,
+                        local,
+                        Color::GREEN,
+                        current.block_type as u32,
+                    );
+                }
+                if !down.block_type.is_solid() {
+                    push_face_ao(
+                        chunks_refs,
+                        &mut mesh,
+                        Direction::Down,
+                        local,
+                        Color::GREEN,
+                        current.block_type as u32,
+                    );
+                }
+            }
+            false => {
+                if left.block_type.is_solid() {
+                    push_face_ao(
+                        chunks_refs,
+                        &mut mesh,
+                        Direction::Right,
+                        local,
+                        Color::GREEN,
+                        left.block_type as u32,
+                    );
+                }
+                if back.block_type.is_solid() {
+                    push_face_ao(
+                        chunks_refs,
+                        &mut mesh,
+                        Direction::Forward,
+                        local,
+                        Color::GREEN,
+                        back.block_type as u32,
+                    );
+                }
+                if down.block_type.is_solid() {
+                    push_face_ao(
+                        chunks_refs,
+                        &mut mesh,
+                        Direction::Up,
+                        local,
+                        Color::GREEN,
+                        down.block_type as u32,
+                    );
+                }
+            }
+        }
+    }
+    if mesh.vertices.is_empty() {
+        None
+    } else {
+        mesh.indices = generate_indices(mesh.vertices.len());
+        Some(mesh)
+    }
+}
+
+fn push_face_ao(
+    chunks_refs: &ChunksRefs,
+    mesh: &mut ChunkMesh,
+    dir: Direction,
+    vpos: IVec3,
+    color: Color,
+    block_type: u32,
+) {
+    let ambient_corners = ambient_corner_voxels(&chunks_refs, dir, vpos);
+    let quad = Quad::from_direction(dir, vpos, color);
+    for (i, corner) in quad.corners.into_iter().enumerate() {
+        let index = i * 2;
+
+        let side_1 = ambient_corners[index] as u32;
+        let side_2 = ambient_corners[(index + 2) % 8] as u32;
+        let side_corner = ambient_corners[(index + 1) % 8] as u32;
+        let mut ao_count = side_1 + side_2 + side_corner;
+        // fully ambient occluded if both
+        if side_1 == 1 && side_2 == 1 {
+            ao_count = 3;
+        }
+
+        mesh.vertices.push(make_vertex_u32(
+            IVec3::from_array(corner),
+            ao_count,
+            dir.get_normal() as u32,
+            block_type,
+        ));
+    }
+}
+```
+
+### src/culled_mesher_optimized.rs
+```
+// IMPORTANT: THIS MESHER IS NOT FULLY IMPLEMENTED
+// it doesn't work ;)
+// It started as an idea to reduce big amount of sampling we are doing
+// we estimate if a chunk is mostly air or solid.
+// if it's mostly air, we only care for blocks that are solid, vice versa
+// the problem arrise when adjacent chunks use different estimated solids.
+
+use std::collections::VecDeque;
+
+use bevy::{math::ivec3, prelude::*};
+
+use crate::{
+    chunk_mesh::ChunkMesh,
+    chunks_refs::ChunksRefs,
+    lod::Lod,
+    quad::{Direction, Quad},
+    utils::{generate_indices, index_to_ivec3, is_on_edge, make_vertex_u32},
+};
+
+// construct vertices for a face in provided direciton
+fn push_face(
+    mesh: &mut ChunkMesh,
+    dir: Direction,
+    pos: IVec3,
+    color: Color,
+    block_type: u32,
+    flip_winding_order: bool,
+) {
+    let quad = Quad::from_direction(dir, pos, color);
+
+    let mut corners = VecDeque::from(quad.corners);
+    let flip_winding_order = !flip_winding_order;
+    if flip_winding_order {
+        // keep first index, but reverse the rest
+        let o = corners.split_off(1);
+        o.into_iter().rev().for_each(|i| corners.push_back(i));
+    }
+
+    let normal = match flip_winding_order {
+        true => dir.get_opposite().get_normal() as u32,
+        false => dir.get_normal() as u32,
+    };
+
+    for corner in corners.into_iter() {
+        mesh.vertices.push(make_vertex_u32(
+            IVec3::from_array(corner),
+            0,
+            normal,
+            block_type,
+        ));
+    }
+}
+
+pub fn build_chunk_mesh(chunks_refs: ChunksRefs, lod: Lod) -> Option<ChunkMesh> {
+    let mut mesh = ChunkMesh::default();
+    // estimate if chunk is mostly solid or air
+    let most_solid = chunks_refs
+        .get_block(IVec3::splat(16))
+        .block_type
+        .is_solid();
+    // let most_solid = true;
+
+    for i in 0..32 * 32 * 32 {
+        let local = index_to_ivec3(i);
+        let current = chunks_refs.get_block(local);
+        if match most_solid {
+            true => current.block_type.is_solid(),
+            false => current.block_type.is_air(),
+        } {
+            continue;
+        }
+
+        let Some(neighbours) = chunks_refs.get_von_neumann(local) else {
+            panic!();
+        };
+
+        for (dir, block) in neighbours.iter() {
+            let con = match most_solid {
+                true => block.block_type.is_solid(),
+                false => block.block_type.is_air(),
+            };
+            let block = match most_solid {
+                false => current.block_type,
+                true => block.block_type,
+            };
+            if con {
+                let flip_winding_order = !most_solid;
+                push_face(
+                    &mut mesh,
+                    *dir,
+                    local,
+                    Color::GREEN,
+                    block as u32,
+                    flip_winding_order,
+                );
+            }
+        }
+    }
+    if mesh.vertices.is_empty() {
+        None
+    } else {
+        mesh.indices = generate_indices(mesh.vertices.len());
+        Some(mesh)
+    }
+}
+```
+
+### src/face_direction.rs
+```
+use crate::lod::Lod;
+use bevy::math::{ivec3, IVec3};
+
+// helper for transforming translations based dir or "axis"
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum FaceDir {
+    Up,
+    Down,
+    Left,
+    Right,
+    Forward,
+    Back,
+}
+
+impl FaceDir {
+    ///! normal data is packed in the shader
+    pub fn normal_index(&self) -> u32 {
+        match self {
+            FaceDir::Left => 0u32,
+            FaceDir::Right => 1u32,
+            FaceDir::Down => 2u32,
+            FaceDir::Up => 3u32,
+            FaceDir::Forward => 4u32,
+            FaceDir::Back => 5u32,
+        }
+    }
+
+    ///! direction to sample face culling
+    pub fn air_sample_dir(&self) -> IVec3 {
+        match self {
+            FaceDir::Up => IVec3::Y,
+            FaceDir::Down => IVec3::NEG_Y,
+            FaceDir::Left => IVec3::NEG_X,
+            FaceDir::Right => IVec3::X,
+            FaceDir::Forward => IVec3::NEG_Z,
+            FaceDir::Back => IVec3::Z,
+        }
+    }
+
+    ///! offset input position with this face direction
+    pub fn world_to_sample(&self, axis: i32, x: i32, y: i32, _lod: &Lod) -> IVec3 {
+        match self {
+            FaceDir::Up => ivec3(x, axis + 1, y),
+            FaceDir::Down => ivec3(x, axis, y),
+            FaceDir::Left => ivec3(axis, y, x),
+            FaceDir::Right => ivec3(axis + 1, y, x),
+            FaceDir::Forward => ivec3(x, y, axis),
+            FaceDir::Back => ivec3(x, y, axis + 1),
+        }
+    }
+
+    ///! returns true if vertices should be reverse.
+    ///! (needed because indices are always same)  
+    pub fn reverse_order(&self) -> bool {
+        match self {
+            FaceDir::Up => true,      //+1
+            FaceDir::Down => false,   //-1
+            FaceDir::Left => false,   //-1
+            FaceDir::Right => true,   //+1
+            FaceDir::Forward => true, //-1
+            FaceDir::Back => false,   //+1
+        }
+    }
+
+    ///! get delta for traversing the previous axis pos
+    pub fn negate_axis(&self) -> i32 {
+        match self {
+            FaceDir::Up => -1,     //+1
+            FaceDir::Down => 0,    //-1
+            FaceDir::Left => 0,    //-1
+            FaceDir::Right => -1,  //+1
+            FaceDir::Forward => 0, //-1
+            FaceDir::Back => 1,    //+1
+        }
+    }
+}
+```
+
+### src/greedy_mesher.rs
+```
+use std::{collections::VecDeque, sync::Arc, time::Instant};
+
+use bevy::{prelude::*, utils::HashMap};
+use rand::Rng;
+
+use crate::{
+    chunk::ChunkData,
+    chunk_mesh::ChunkMesh,
+    chunks_refs::ChunksRefs,
+    face_direction::FaceDir,
+    lod::Lod,
+    utils::{generate_indices, make_vertex_u32},
+    voxel::MESHABLE_BLOCK_TYPES,
+};
+
+pub fn build_chunk_mesh(chunks_refs: ChunksRefs, lod: Lod) -> Option<ChunkMesh> {
+    let mut mesh = ChunkMesh::default();
+    let mut quads = vec![];
+    quads.extend(vertices_from_face(FaceDir::Up, &chunks_refs, &lod));
+    quads.extend(vertices_from_face(FaceDir::Left, &chunks_refs, &lod));
+    // quads.extend(vertices_from_face(FaceDir::Right, &chunks_refs, &lod));
+    // quads.extend(vertices_from_face(FaceDir::Down, &chunks_refs, &lod));
+    quads.extend(vertices_from_face(FaceDir::Forward, &chunks_refs, &lod));
+    // quads.extend(vertices_from_face(FaceDir::Back, &chunks_refs, &lod));
+    mesh.vertices.extend(quads);
+    if mesh.vertices.is_empty() {
+        None
+    } else {
+        mesh.indices = generate_indices(mesh.vertices.len());
+        Some(mesh)
+    }
+}
+
+pub fn build_chunk_mesh_no_ao(chunks_refs: ChunksRefs, lod: Lod) -> Option<ChunkMesh> {
+    let mut mesh = ChunkMesh::default();
+    let mut quads = vec![];
+    quads.extend(vertices_from_face_no_ao(FaceDir::Up, &chunks_refs, &lod));
+    quads.extend(vertices_from_face_no_ao(FaceDir::Left, &chunks_refs, &lod));
+    quads.extend(vertices_from_face_no_ao(FaceDir::Right, &chunks_refs, &lod));
+    quads.extend(vertices_from_face_no_ao(FaceDir::Down, &chunks_refs, &lod));
+    quads.extend(vertices_from_face_no_ao(
+        FaceDir::Forward,
+        &chunks_refs,
+        &lod,
+    ));
+    quads.extend(vertices_from_face_no_ao(FaceDir::Back, &chunks_refs, &lod));
+    mesh.vertices.extend(quads);
+    if mesh.vertices.is_empty() {
+        None
+    } else {
+        mesh.indices = generate_indices(mesh.vertices.len());
+        Some(mesh)
+    }
+}
+
+///! generate vertices for the facing direction, all planes of a chunk
+pub fn vertices_from_face(face_dir: FaceDir, chunks_refs: &ChunksRefs, lod: &Lod) -> Vec<u32> {
+    // generate -x plane
+    let mut vertices = vec![];
+    let size = lod.size();
+    for axis in 0..size {
+        // not optimal... save ambient occlusion data
+        let mut ao_data = [[0; 34]; 34];
+        for y in -1..33 {
+            for x in -1..33 {
+                let pos = face_dir.world_to_sample(axis, x, y, lod);
+                let pos = pos * lod.jump_index();
+                let is_solid = chunks_refs
+                    .get_block(pos + face_dir.air_sample_dir() * lod.jump_index())
+                    .block_type
+                    .is_solid();
+                ao_data[(x + 1) as usize][(y + 1) as usize] = is_solid as u32;
+            }
+        }
+
+        // key: ao + color's
+        let mut x_data = HashMap::<u32, [u32; 32]>::new();
+        for i in 0..size * size {
+            let x = i % size;
+            let y = (i / size) as i32;
+            let pos = face_dir.world_to_sample(axis, x, y, lod);
+            let pos = pos * lod.jump_index();
+            let (current, neg_z_block) =
+                chunks_refs.get_2(pos, face_dir.air_sample_dir() * lod.jump_index());
+            let x = x as usize;
+            let y = y as usize;
+            let ao_index = ao_data[x + 0][y + 0]
+                | (ao_data[x + 0][y + 1] << 1)
+                | (ao_data[x + 0][y + 2] << 2)
+                | (ao_data[x + 1][y + 0] << 3)
+                | (ao_data[x + 1][y + 1] << 4)
+                | (ao_data[x + 1][y + 2] << 5)
+                | (ao_data[x + 2][y + 0] << 6)
+                | (ao_data[x + 2][y + 1] << 7)
+                | (ao_data[x + 2][y + 2] << 8);
+            let is_solid = current.block_type.is_solid() && !neg_z_block.block_type.is_solid();
+            // can merge with ao?
+            let p_index = ao_index | ((current.block_type as u32) << 9);
+            let data = match x_data.get_mut(&p_index) {
+                Some(d) => d,
+                None => {
+                    x_data.insert(p_index, [0u32; 32]);
+                    x_data.get_mut(&p_index).unwrap()
+                }
+            };
+
+            // set bit to 1 or 0 depending if solid
+            data[x as usize] |= (1 << y) * is_solid as u32;
+        } // axis type loop
+        for (p_index, data) in x_data.into_iter() {
+            let quads_from_axis = greedy_mesh_binary_plane(data, lod.size() as u32);
+            let ao = p_index & 0b111111111;
+            let block_type = p_index >> 9;
+
+            quads_from_axis.into_iter().for_each(|q| {
+                q.append_vertices(&mut vertices, face_dir, axis as u32, lod, ao, block_type)
+            });
+        }
+    }
+    vertices
+}
+
+pub fn vertices_from_face_no_ao(
+    face_dir: FaceDir,
+    chunks_refs: &ChunksRefs,
+    lod: &Lod,
+) -> Vec<u32> {
+    // generate -x plane
+    let mut vertices = vec![];
+    let size = lod.size();
+    for axis in 0..size {
+        for block_type in MESHABLE_BLOCK_TYPES.iter() {
+            let mut x_data = [0u32; 32];
+            for i in 0..size * size {
+                let row = i % size;
+                let column = (i / size) as i32;
+                let pos = face_dir.world_to_sample(axis, row, column, lod);
+                let pos = pos * lod.jump_index();
+                let (current, neg_z_block) =
+                    chunks_refs.get_2(pos, face_dir.air_sample_dir() * lod.jump_index());
+                // don't merge different block types
+                if &current.block_type != block_type {
+                    continue;
+                }
+                let is_solid = current.block_type.is_solid() && !neg_z_block.block_type.is_solid();
+                // set bit to 1 or 0 depending if solid
+                x_data[row as usize] = ((1 << column) * is_solid as u32) | x_data[row as usize];
+            }
+            let quads_from_axis = greedy_mesh_binary_plane(x_data, lod.size() as u32);
+            quads_from_axis
+                .into_iter()
+                .for_each(|q| q.append_vertices(&mut vertices, face_dir, axis as u32, lod, 0, 0));
+        } // block type loop
+    }
+    vertices
+}
+
+///! todo: compress further?
+#[derive(Debug)]
+pub struct GreedyQuad {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl GreedyQuad {
+    ///! compress this quad data into the input vertices vec
+    pub fn append_vertices(
+        &self,
+        vertices: &mut Vec<u32>,
+        face_dir: FaceDir,
+        axis: u32,
+        lod: &Lod,
+        ao: u32,
+        block_type: u32,
+    ) {
+        let negate_axis = face_dir.negate_axis();
+        let axis = axis as i32 + negate_axis;
+        let jump = lod.jump_index();
+
+        // pack ambient occlusion strength into vertex
+        let v1ao = ((ao >> 0) & 1) + ((ao >> 1) & 1) + ((ao >> 3) & 1);
+        let v2ao = ((ao >> 3) & 1) + ((ao >> 6) & 1) + ((ao >> 7) & 1);
+        let v3ao = ((ao >> 5) & 1) + ((ao >> 8) & 1) + ((ao >> 7) & 1);
+        let v4ao = ((ao >> 1) & 1) + ((ao >> 2) & 1) + ((ao >> 5) & 1);
+
+        let v1 = make_vertex_u32(
+            face_dir.world_to_sample(axis as i32, self.x as i32, self.y as i32, &lod) * jump,
+            v1ao,
+            face_dir.normal_index(),
+            block_type,
+        );
+        let v2 = make_vertex_u32(
+            face_dir.world_to_sample(
+                axis as i32,
+                self.x as i32 + self.w as i32,
+                self.y as i32,
+                &lod,
+            ) * jump,
+            v2ao,
+            face_dir.normal_index(),
+            block_type,
+        );
+        let v3 = make_vertex_u32(
+            face_dir.world_to_sample(
+                axis as i32,
+                self.x as i32 + self.w as i32,
+                self.y as i32 + self.h as i32,
+                &lod,
+            ) * jump,
+            v3ao,
+            face_dir.normal_index(),
+            block_type,
+        );
+        let v4 = make_vertex_u32(
+            face_dir.world_to_sample(
+                axis as i32,
+                self.x as i32,
+                self.y as i32 + self.h as i32,
+                &lod,
+            ) * jump,
+            v4ao,
+            face_dir.normal_index(),
+            block_type,
+        );
+
+        // the quad vertices to be added
+        let mut new_vertices = VecDeque::from([v1, v2, v3, v4]);
+
+        // triangle rendering order is different depending on the facing direction
+        if face_dir.reverse_order() {
+            // keep first index, but reverse the rest
+            let o = new_vertices.split_off(1);
+            o.into_iter().rev().for_each(|i| new_vertices.push_back(i));
+        }
+
+        // anisotropy flip
+        if (v1ao > 0) ^ (v3ao > 0) {
+            // right shift array, to swap triangle intersection angle
+            let f = new_vertices.pop_front().unwrap();
+            new_vertices.push_back(f);
+        }
+
+        vertices.extend(new_vertices);
+    }
+}
+
+///! generate quads of a binary slice
+///! lod not implemented yet
+pub fn greedy_mesh_binary_plane(mut data: [u32; 32], lod_size: u32) -> Vec<GreedyQuad> {
+    let mut greedy_quads = vec![];
+    for row in 0..data.len() {
+        let mut y = 0;
+        while y < lod_size {
+            // find first solid, "air/zero's" could be first so skip
+            y += (data[row] >> y).trailing_zeros();
+            if y >= lod_size {
+                // reached top
+                continue;
+            }
+            let h = (data[row] >> y).trailing_ones();
+
+            // convert height 'num' to positive bits repeated 'num' times aka:
+            // 1 = 0b1, 2 = 0b11, 4 = 0b1111
+            let h_as_mask = u32::checked_shl(1, h).map_or(!0, |v| v - 1);
+            // offset the mask to the correct y pos
+            let mask = h_as_mask << y;
+
+            // grow horizontally
+            let mut w = 1;
+            while row + w < lod_size as usize {
+                // fetch bits spanning height, in the next row
+                let next_row_h = (data[row + w] >> y) & h_as_mask;
+                if next_row_h != h_as_mask {
+                    break; // can no longer expand
+                }
+
+                // nuke the bits we expanded into
+                data[row + w] = data[row + w] & !mask;
+
+                w += 1;
+            }
+            greedy_quads.push(GreedyQuad {
+                y,
+                w: w as u32,
+                h,
+                x: row as u32,
+            });
+            y += h;
+        }
+    }
+    greedy_quads
+}
+```
+
+### src/greedy_mesher_optimized.rs
+```
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
+
+use bevy::{math::ivec3, prelude::*, utils::HashMap};
+
+use crate::{
+    chunk_mesh::ChunkMesh,
+    chunks_refs::ChunksRefs,
+    constants::{ADJACENT_AO_DIRS, CHUNK_SIZE, CHUNK_SIZE_P, CHUNK_SIZE_P2, CHUNK_SIZE_P3},
+    face_direction::FaceDir,
+    lod::Lod,
+    utils::{generate_indices, make_vertex_u32, vec3_to_index},
+};
+
+pub fn build_chunk_mesh(chunks_refs: &ChunksRefs, lod: Lod) -> Option<ChunkMesh> {
+    // early exit, if all faces are culled
+    if chunks_refs.is_all_voxels_same() {
+        return None;
+    }
+    let mut mesh = ChunkMesh::default();
+
+    // solid binary for each x,y,z axis (3)
+    let mut axis_cols = [[[0u64; CHUNK_SIZE_P]; CHUNK_SIZE_P]; 3];
+
+    // the cull mask to perform greedy slicing, based on solids on previous axis_cols
+    let mut col_face_masks = [[[0u64; CHUNK_SIZE_P]; CHUNK_SIZE_P]; 6];
+
+    #[inline]
+    fn add_voxel_to_axis_cols(
+        b: &crate::voxel::BlockData,
+        x: usize,
+        y: usize,
+        z: usize,
+        axis_cols: &mut [[[u64; 34]; 34]; 3],
+    ) {
+        if b.block_type.is_solid() {
+            // x,z - y axis
+            axis_cols[0][z][x] |= 1u64 << y as u64;
+            // z,y - x axis
+            axis_cols[1][y][z] |= 1u64 << x as u64;
+            // x,y - z axis
+            axis_cols[2][y][x] |= 1u64 << z as u64;
+        }
+    }
+
+    // inner chunk voxels.
+    let chunk = &*chunks_refs.chunks[vec3_to_index(IVec3::new(1, 1, 1), 3)];
+    assert!(chunk.voxels.len() == CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE || chunk.voxels.len() == 1);
+    for z in 0..CHUNK_SIZE {
+        for y in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let i = match chunk.voxels.len() {
+                    1 => 0,
+                    _ => (z * CHUNK_SIZE + y) * CHUNK_SIZE + x,
+                };
+                add_voxel_to_axis_cols(&chunk.voxels[i], x + 1, y + 1, z + 1, &mut axis_cols)
+            }
+        }
+    }
+
+    // neighbor chunk voxels.
+    // note(leddoo): couldn't be bothered to optimize these.
+    //  might be worth it though. together, they take
+    //  almost as long as the entire "inner chunk" loop.
+    for z in [0, CHUNK_SIZE_P - 1] {
+        for y in 0..CHUNK_SIZE_P {
+            for x in 0..CHUNK_SIZE_P {
+                let pos = ivec3(x as i32, y as i32, z as i32) - IVec3::ONE;
+                add_voxel_to_axis_cols(chunks_refs.get_block(pos), x, y, z, &mut axis_cols);
+            }
+        }
+    }
+    for z in 0..CHUNK_SIZE_P {
+        for y in [0, CHUNK_SIZE_P - 1] {
+            for x in 0..CHUNK_SIZE_P {
+                let pos = ivec3(x as i32, y as i32, z as i32) - IVec3::ONE;
+                add_voxel_to_axis_cols(chunks_refs.get_block(pos), x, y, z, &mut axis_cols);
+            }
+        }
+    }
+    for z in 0..CHUNK_SIZE_P {
+        for x in [0, CHUNK_SIZE_P - 1] {
+            for y in 0..CHUNK_SIZE_P {
+                let pos = ivec3(x as i32, y as i32, z as i32) - IVec3::ONE;
+                add_voxel_to_axis_cols(chunks_refs.get_block(pos), x, y, z, &mut axis_cols);
+            }
+        }
+    }
+
+    // face culling
+    for axis in 0..3 {
+        for z in 0..CHUNK_SIZE_P {
+            for x in 0..CHUNK_SIZE_P {
+                // set if current is solid, and next is air
+                let col = axis_cols[axis][z][x];
+
+                // sample descending axis, and set true when air meets solid
+                col_face_masks[2 * axis + 0][z][x] = col & !(col << 1);
+                // sample ascending axis, and set true when air meets solid
+                col_face_masks[2 * axis + 1][z][x] = col & !(col >> 1);
+            }
+        }
+    }
+
+    // greedy meshing planes for every axis (6)
+    // key(block + ao) -> HashMap<axis(0-32), binary_plane>
+    // note(leddoo): don't ask me how this isn't a massive blottleneck.
+    //  might become an issue in the future, when there are more block types.
+    //  consider using a single hashmap with key (axis, block_hash, y).
+    let mut data: [HashMap<u32, HashMap<u32, [u32; 32]>>; 6];
+    data = [
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    ];
+
+    // find faces and build binary planes based on the voxel block+ao etc...
+    for axis in 0..6 {
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                // skip padded by adding 1(for x padding) and (z+1) for (z padding)
+                let mut col = col_face_masks[axis][z + 1][x + 1];
+
+                // removes the right most padding value, because it's invalid
+                col >>= 1;
+                // removes the left most padding value, because it's invalid
+                col &= !(1 << CHUNK_SIZE as u64);
+
+                while col != 0 {
+                    let y = col.trailing_zeros();
+                    // clear least significant set bit
+                    col &= col - 1;
+
+                    // get the voxel position based on axis
+                    let voxel_pos = match axis {
+                        0 | 1 => ivec3(x as i32, y as i32, z as i32), // down,up
+                        2 | 3 => ivec3(y as i32, z as i32, x as i32), // left, right
+                        _ => ivec3(x as i32, z as i32, y as i32),     // forward, back
+                    };
+
+                    // calculate ambient occlusion
+                    let mut ao_index = 0;
+                    for (ao_i, ao_offset) in ADJACENT_AO_DIRS.iter().enumerate() {
+                        // ambient occlusion is sampled based on axis(ascent or descent)
+                        let ao_sample_offset = match axis {
+                            0 => ivec3(ao_offset.x, -1, ao_offset.y), // down
+                            1 => ivec3(ao_offset.x, 1, ao_offset.y),  // up
+                            2 => ivec3(-1, ao_offset.y, ao_offset.x), // left
+                            3 => ivec3(1, ao_offset.y, ao_offset.x),  // right
+                            4 => ivec3(ao_offset.x, ao_offset.y, -1), // forward
+                            _ => ivec3(ao_offset.x, ao_offset.y, 1),  // back
+                        };
+                        let ao_voxel_pos = voxel_pos + ao_sample_offset;
+                        let ao_block = chunks_refs.get_block(ao_voxel_pos);
+                        if ao_block.block_type.is_solid() {
+                            ao_index |= 1u32 << ao_i;
+                        }
+                    }
+
+                    let current_voxel = chunks_refs.get_block_no_neighbour(voxel_pos);
+                    // let current_voxel = chunks_refs.get_block(voxel_pos);
+                    // we can only greedy mesh same block types + same ambient occlusion
+                    let block_hash = ao_index | ((current_voxel.block_type as u32) << 9);
+                    let data = data[axis]
+                        .entry(block_hash)
+                        .or_default()
+                        .entry(y)
+                        .or_default();
+                    data[x as usize] |= 1u32 << z as u32;
+                }
+            }
+        }
+    }
+
+    let mut vertices = vec![];
+    for (axis, block_ao_data) in data.into_iter().enumerate() {
+        let facedir = match axis {
+            0 => FaceDir::Down,
+            1 => FaceDir::Up,
+            2 => FaceDir::Left,
+            3 => FaceDir::Right,
+            4 => FaceDir::Forward,
+            _ => FaceDir::Back,
+        };
+        for (block_ao, axis_plane) in block_ao_data.into_iter() {
+            let ao = block_ao & 0b111111111;
+            let block_type = block_ao >> 9;
+            for (axis_pos, plane) in axis_plane.into_iter() {
+                let quads_from_axis = greedy_mesh_binary_plane(plane, lod.size() as u32);
+
+                quads_from_axis.into_iter().for_each(|q| {
+                    q.append_vertices(&mut vertices, facedir, axis_pos, &Lod::L32, ao, block_type)
+                });
+            }
+        }
+    }
+
+    mesh.vertices.extend(vertices);
+    if mesh.vertices.is_empty() {
+        None
+    } else {
+        mesh.indices = generate_indices(mesh.vertices.len());
+        Some(mesh)
+    }
+}
+
+// todo: compress further?
+#[derive(Debug)]
+pub struct GreedyQuad {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl GreedyQuad {
+    ///! compress this quad data into the input vertices vec
+    pub fn append_vertices(
+        &self,
+        vertices: &mut Vec<u32>,
+        face_dir: FaceDir,
+        axis: u32,
+        lod: &Lod,
+        ao: u32,
+        block_type: u32,
+    ) {
+        // let negate_axis = face_dir.negate_axis();
+        // let axis = axis as i32 + negate_axis;
+        let axis = axis as i32;
+        let jump = lod.jump_index();
+
+        // pack ambient occlusion strength into vertex
+        let v1ao = ((ao >> 0) & 1) + ((ao >> 1) & 1) + ((ao >> 3) & 1);
+        let v2ao = ((ao >> 3) & 1) + ((ao >> 6) & 1) + ((ao >> 7) & 1);
+        let v3ao = ((ao >> 5) & 1) + ((ao >> 8) & 1) + ((ao >> 7) & 1);
+        let v4ao = ((ao >> 1) & 1) + ((ao >> 2) & 1) + ((ao >> 5) & 1);
+
+        let v1 = make_vertex_u32(
+            face_dir.world_to_sample(axis as i32, self.x as i32, self.y as i32, &lod) * jump,
+            v1ao,
+            face_dir.normal_index(),
+            block_type,
+        );
+        let v2 = make_vertex_u32(
+            face_dir.world_to_sample(
+                axis as i32,
+                self.x as i32 + self.w as i32,
+                self.y as i32,
+                &lod,
+            ) * jump,
+            v2ao,
+            face_dir.normal_index(),
+            block_type,
+        );
+        let v3 = make_vertex_u32(
+            face_dir.world_to_sample(
+                axis as i32,
+                self.x as i32 + self.w as i32,
+                self.y as i32 + self.h as i32,
+                &lod,
+            ) * jump,
+            v3ao,
+            face_dir.normal_index(),
+            block_type,
+        );
+        let v4 = make_vertex_u32(
+            face_dir.world_to_sample(
+                axis as i32,
+                self.x as i32,
+                self.y as i32 + self.h as i32,
+                &lod,
+            ) * jump,
+            v4ao,
+            face_dir.normal_index(),
+            block_type,
+        );
+
+        // the quad vertices to be added
+        let mut new_vertices = VecDeque::from([v1, v2, v3, v4]);
+
+        // triangle vertex order is different depending on the facing direction
+        // due to indices always being the same
+        if face_dir.reverse_order() {
+            // keep first index, but reverse the rest
+            let o = new_vertices.split_off(1);
+            o.into_iter().rev().for_each(|i| new_vertices.push_back(i));
+        }
+
+        // anisotropy flip
+        if (v1ao > 0) ^ (v3ao > 0) {
+            // right shift array, to swap triangle intersection angle
+            let f = new_vertices.pop_front().unwrap();
+            new_vertices.push_back(f);
+        }
+
+        vertices.extend(new_vertices);
+    }
+}
+
+///! generate quads of a binary slice
+///! lod not implemented atm
+pub fn greedy_mesh_binary_plane(mut data: [u32; 32], lod_size: u32) -> Vec<GreedyQuad> {
+    let mut greedy_quads = vec![];
+    for row in 0..data.len() {
+        let mut y = 0;
+        while y < lod_size {
+            // find first solid, "air/zero's" could be first so skip
+            y += (data[row] >> y).trailing_zeros();
+            if y >= lod_size {
+                // reached top
+                continue;
+            }
+            let h = (data[row] >> y).trailing_ones();
+            // convert height 'num' to positive bits repeated 'num' times aka:
+            // 1 = 0b1, 2 = 0b11, 4 = 0b1111
+            let h_as_mask = u32::checked_shl(1, h).map_or(!0, |v| v - 1);
+            let mask = h_as_mask << y;
+            // grow horizontally
+            let mut w = 1;
+            while row + w < lod_size as usize {
+                // fetch bits spanning height, in the next row
+                let next_row_h = (data[row + w] >> y) & h_as_mask;
+                if next_row_h != h_as_mask {
+                    break; // can no longer expand horizontally
+                }
+
+                // nuke the bits we expanded into
+                data[row + w] = data[row + w] & !mask;
+
+                w += 1;
+            }
+            greedy_quads.push(GreedyQuad {
+                y,
+                w: w as u32,
+                h,
+                x: row as u32,
+            });
+            y += h;
+        }
+    }
+    greedy_quads
+}
+```
+
+### src/lib.rs
+```
+pub mod chunk;
+pub mod chunk_mesh;
+pub mod chunks_refs;
+pub mod constants;
+pub mod culled_mesher;
+pub mod culled_mesher_optimized;
+pub mod face_direction;
+pub mod greedy_mesher;
+pub mod greedy_mesher_optimized;
+pub mod lod;
+pub mod quad;
+pub mod rendering;
+pub mod scanner;
+pub mod sun;
+pub mod utils;
+pub mod voxel;
+pub mod voxel_engine;
+```
+
+### src/lod.rs
+```
+///! level of detail
+#[derive(Copy, Clone)]
+pub enum Lod {
+    L32,
+    L16,
+    L8,
+    L4,
+    L2,
+}
+
+impl Lod {
+    ///! the amount of voxels per axis
+    pub fn size(&self) -> i32 {
+        match self {
+            Lod::L32 => 32,
+            Lod::L16 => 16,
+            Lod::L8 => 8,
+            Lod::L4 => 4,
+            Lod::L2 => 2,
+        }
+    }
+
+    ///! how much to multiply to reach next voxel
+    ///! lower lod gives higher jump
+    pub fn jump_index(&self) -> i32 {
+        match self {
+            Lod::L32 => 1,
+            Lod::L16 => 2,
+            Lod::L8 => 4,
+            Lod::L4 => 8,
+            Lod::L2 => 16,
+        }
+    }
+}
+```
+
+### src/main.rs
+```
+use std::f32::consts::PI;
+
+use bevy::{
+    core::TaskPoolThreadAssignmentPolicy,
+    math::{ivec3, vec3},
+    pbr::{wireframe::WireframePlugin, CascadeShadowConfigBuilder, ShadowFilteringMethod},
+    prelude::*,
+    render::{
+        settings::{RenderCreation, WgpuFeatures, WgpuSettings},
+        RenderPlugin,
+    },
+};
+
+use bevy_inspector_egui::quick::{AssetInspectorPlugin, WorldInspectorPlugin};
+use bevy_screen_diagnostics::{
+    ScreenDiagnosticsPlugin, ScreenEntityDiagnosticsPlugin, ScreenFrameDiagnosticsPlugin,
+};
+
+use new_voxel_testing::{
+    rendering::{
+        ChunkMaterial, ChunkMaterialWireframe, GlobalChunkMaterial, GlobalChunkWireframeMaterial,
+        RenderingPlugin,
+    },
+    scanner::{Scanner, ScannerPlugin},
+    sun::{Sun, SunPlugin},
+    utils::world_to_chunk,
+    voxel::*,
+    voxel_engine::{ChunkModification, VoxelEngine, VoxelEnginePlugin},
+};
+
+use bevy_flycam::prelude::*;
+use rand::Rng;
+
+fn main() {
+    App::new()
+        .add_plugins((DefaultPlugins
+            .set(RenderPlugin {
+                render_creation: RenderCreation::Automatic(WgpuSettings {
+                    // WARN this is a native only feature. It will not work with webgl or webgpu
+                    features: WgpuFeatures::POLYGON_MODE_LINE,
+                    ..default()
+                }),
+                ..default()
+            })
+            .set(TaskPoolPlugin {
+                task_pool_options: TaskPoolOptions {
+                    async_compute: TaskPoolThreadAssignmentPolicy {
+                        min_threads: 1,
+                        max_threads: 8,
+                        percent: 0.75,
+                    },
+                    ..default()
+                },
+            }),))
+        .add_plugins(WorldInspectorPlugin::new())
+        .add_plugins(AssetInspectorPlugin::<ChunkMaterial>::default())
+        .add_plugins(VoxelEnginePlugin)
+        .add_plugins(SunPlugin)
+        .add_plugins(ScannerPlugin)
+        .add_systems(Startup, setup)
+        // camera plugin
+        .add_plugins(NoCameraPlayerPlugin)
+        .add_plugins(RenderingPlugin)
+        .add_plugins((
+            ScreenDiagnosticsPlugin::default(),
+            ScreenFrameDiagnosticsPlugin,
+            ScreenEntityDiagnosticsPlugin,
+        ))
+        .insert_resource(MovementSettings {
+            sensitivity: 0.00015, // default: 0.00012
+            speed: 64.0 * 2.0,    // default: 12.0
+                                  // speed: 32.0 * 12.0,   // default: 12.0
+        })
+        .add_systems(Update, modify_current_terrain)
+        .run();
+}
+
+pub fn modify_current_terrain(
+    query: Query<&Transform, With<Camera>>,
+    key: Res<ButtonInput<KeyCode>>,
+    mut voxel_engine: ResMut<VoxelEngine>,
+) {
+    if !key.pressed(KeyCode::KeyN) {
+        return;
+    }
+    let cam_transform = query.single();
+    let cam_chunk = world_to_chunk(cam_transform.translation + (cam_transform.forward() * 64.0));
+
+    let mut rng = rand::thread_rng();
+    let mut mods = vec![];
+    for _i in 0..32 * 32 {
+        let pos = ivec3(
+            rng.gen_range(0..32),
+            rng.gen_range(0..32),
+            rng.gen_range(0..32),
+        );
+        mods.push(ChunkModification(pos, BlockType::Air));
+    }
+    voxel_engine.chunk_modifications.insert(cam_chunk, mods);
+}
+
+pub fn setup(
+    mut commands: Commands,
+    mut chunk_materials: ResMut<Assets<ChunkMaterial>>,
+    mut chunk_materials_wireframe: ResMut<Assets<ChunkMaterialWireframe>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    commands.spawn((
+        Name::new("directional light light"),
+        Sun,
+        DirectionalLightBundle {
+            directional_light: DirectionalLight {
+                illuminance: 10000.0,
+                shadows_enabled: true,
+                ..default()
+            },
+            transform: Transform::from_rotation(Quat::from_euler(
+                EulerRot::ZYX,
+                0.0,
+                PI / 2.,
+                -PI / 4.,
+            )),
+            cascade_shadow_config: CascadeShadowConfigBuilder {
+                num_cascades: 1,
+                maximum_distance: 32.0 * 20.0,
+                ..default()
+            }
+            .into(),
+            ..default()
+        },
+    ));
+    // uncomment for scanner at origin position
+    // commands.spawn((
+    //     TransformBundle::from_transform(Transform::from_translation(Vec3::ZERO)),
+    // Scanner::new(10),
+    // ));
+
+    commands
+        .spawn((
+            Scanner::new(12),
+            Camera3dBundle {
+                transform: Transform::from_xyz(0.0, 2.0, 0.5),
+                ..default()
+            },
+        ))
+        .insert(FlyCam);
+
+    commands.insert_resource(GlobalChunkMaterial(chunk_materials.add(ChunkMaterial {
+        reflectance: 0.5,
+        perceptual_roughness: 1.0,
+        metallic: 0.01,
+    })));
+    commands.insert_resource(GlobalChunkWireframeMaterial(chunk_materials_wireframe.add(
+        ChunkMaterialWireframe {
+            reflectance: 0.5,
+            perceptual_roughness: 1.0,
+            metallic: 0.01,
+        },
+    )));
+
+    // circular base in origin
+    commands.spawn(PbrBundle {
+        mesh: meshes.add(shape::Circle::new(22.0)),
+        material: materials.add(Color::GREEN),
+        transform: Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+        ..default()
+    });
+}
+```
+
+### src/quad.rs
+```
+use bevy::prelude::*;
+
+// helper
+#[derive(Copy, Clone)]
+pub enum Direction {
+    Left,
+    Right,
+    Down,
+    Up,
+    Back,
+    Forward,
+}
+
+impl Direction {
+    ///! normal data is packed in the shader
+    pub fn get_normal(&self) -> i32 {
+        match self {
+            Direction::Left => 0i32,
+            Direction::Right => 1i32,
+            Direction::Down => 2i32,
+            Direction::Up => 3i32,
+            Direction::Back => 4i32,
+            Direction::Forward => 5i32,
+        }
+    }
+
+    pub fn get_opposite(self) -> Self {
+        match self {
+            Direction::Left => Direction::Right,
+            Direction::Right => Direction::Left,
+            Direction::Down => Direction::Up,
+            Direction::Up => Direction::Down,
+            Direction::Back => Direction::Forward,
+            Direction::Forward => Direction::Back,
+        }
+    }
+}
+
+///! plane data with 4 vertices
+pub struct Quad {
+    pub color: Color,
+    pub direction: Direction,
+    pub corners: [[i32; 3]; 4],
+}
+
+impl Quad {
+    // the input position is assumed to be a voxel's (0,0,0) pos
+    // therefore right / up / forward are offset by 1
+    #[inline]
+    pub fn from_direction(direction: Direction, pos: IVec3, color: Color) -> Self {
+        let corners = match direction {
+            Direction::Left => [
+                [pos.x, pos.y, pos.z],
+                [pos.x, pos.y, pos.z + 1],
+                [pos.x, pos.y + 1, pos.z + 1],
+                [pos.x, pos.y + 1, pos.z],
+            ],
+            Direction::Right => [
+                [pos.x, pos.y + 1, pos.z],
+                [pos.x, pos.y + 1, pos.z + 1],
+                [pos.x, pos.y, pos.z + 1],
+                [pos.x, pos.y, pos.z],
+            ],
+            Direction::Down => [
+                [pos.x, pos.y, pos.z],
+                [pos.x + 1, pos.y, pos.z],
+                [pos.x + 1, pos.y, pos.z + 1],
+                [pos.x, pos.y, pos.z + 1],
+            ],
+            Direction::Up => [
+                [pos.x, pos.y, pos.z + 1],
+                [pos.x + 1, pos.y, pos.z + 1],
+                [pos.x + 1, pos.y, pos.z],
+                [pos.x, pos.y, pos.z],
+            ],
+            Direction::Back => [
+                [pos.x, pos.y, pos.z],
+                [pos.x, pos.y + 1, pos.z],
+                [pos.x + 1, pos.y + 1, pos.z],
+                [pos.x + 1, pos.y, pos.z],
+            ],
+            Direction::Forward => [
+                [pos.x + 1, pos.y, pos.z],
+                [pos.x + 1, pos.y + 1, pos.z],
+                [pos.x, pos.y + 1, pos.z],
+                [pos.x, pos.y, pos.z],
+            ],
+        };
+
+        Self {
+            corners,
+            color,
+            direction,
+        }
+    }
+}
+```
+
+### src/rendering.rs
+```
+use bevy::{
+    pbr::{MaterialPipeline, MaterialPipelineKey},
+    prelude::*,
+    render::{
+        mesh::{MeshVertexAttribute, MeshVertexBufferLayout},
+        render_resource::{
+            AsBindGroup, PolygonMode, RenderPipelineDescriptor, ShaderRef,
+            SpecializedMeshPipelineError, VertexFormat,
+        },
+    },
+};
+
+#[derive(Resource)]
+pub enum ChunkMaterialWireframeMode {
+    On,
+    Off,
+}
+
+pub struct RenderingPlugin;
+
+impl Plugin for RenderingPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(MaterialPlugin::<ChunkMaterial>::default());
+        app.add_plugins(MaterialPlugin::<ChunkMaterialWireframe>::default());
+        app.insert_resource(ChunkMaterialWireframeMode::Off);
+        app.add_systems(Update, apply_chunk_material);
+    }
+}
+
+fn apply_chunk_material(
+    no_wireframe: Query<Entity, With<Handle<ChunkMaterial>>>,
+    wireframe: Query<Entity, With<Handle<ChunkMaterialWireframe>>>,
+    input: Res<ButtonInput<KeyCode>>,
+    mut mode: ResMut<ChunkMaterialWireframeMode>,
+    mut commands: Commands,
+    chunk_mat: Res<GlobalChunkMaterial>,
+    chunk_mat_wireframe: Res<GlobalChunkWireframeMaterial>,
+) {
+    if !input.just_pressed(KeyCode::KeyT) {
+        return;
+    }
+    use ChunkMaterialWireframeMode as F;
+    *mode = match *mode {
+        F::On => F::Off,
+        F::Off => F::On,
+    };
+    match *mode {
+        F::On => {
+            for entity in no_wireframe.iter() {
+                commands
+                    .entity(entity)
+                    .insert(chunk_mat_wireframe.0.clone())
+                    .remove::<Handle<ChunkMaterial>>();
+            }
+        }
+        F::Off => {
+            for entity in wireframe.iter() {
+                commands
+                    .entity(entity)
+                    .insert(chunk_mat.0.clone())
+                    .remove::<Handle<ChunkMaterialWireframe>>();
+            }
+        }
+    }
+}
+
+#[derive(Resource, Reflect)]
+pub struct GlobalChunkMaterial(pub Handle<ChunkMaterial>);
+#[derive(Resource, Reflect)]
+pub struct GlobalChunkWireframeMaterial(pub Handle<ChunkMaterialWireframe>);
+
+// A "high" random id should be used for custom attributes to ensure consistent sorting and avoid collisions with other attributes.
+// See the MeshVertexAttribute docs for more info.
+pub const ATTRIBUTE_VOXEL: MeshVertexAttribute =
+    MeshVertexAttribute::new("Voxel", 988540919, VertexFormat::Uint32);
+
+// This is the struct that will be passed to your shader
+#[derive(Asset, Reflect, AsBindGroup, Debug, Clone)]
+pub struct ChunkMaterial {
+    #[uniform(0)]
+    pub reflectance: f32,
+    #[uniform(0)]
+    pub perceptual_roughness: f32,
+    #[uniform(0)]
+    pub metallic: f32,
+}
+
+impl Material for ChunkMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "shaders/chunk.wgsl".into()
+    }
+    fn fragment_shader() -> ShaderRef {
+        "shaders/chunk.wgsl".into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Opaque
+    }
+
+    fn specialize(
+        _pipeline: &MaterialPipeline<Self>,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayout,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        let vertex_layout = layout.get_layout(&[ATTRIBUTE_VOXEL.at_shader_location(0)])?;
+        descriptor.vertex.buffers = vec![vertex_layout];
+        Ok(())
+    }
+
+    fn prepass_vertex_shader() -> ShaderRef {
+        "shaders/chunk_prepass.wgsl".into()
+    }
+
+    fn prepass_fragment_shader() -> ShaderRef {
+        "shaders/chunk_prepass.wgsl".into()
+    }
+}
+// copy of chunk material pipeline but with wireframe
+#[derive(Asset, Reflect, AsBindGroup, Debug, Clone)]
+pub struct ChunkMaterialWireframe {
+    #[uniform(0)]
+    pub reflectance: f32,
+    #[uniform(0)]
+    pub perceptual_roughness: f32,
+    #[uniform(0)]
+    pub metallic: f32,
+}
+
+impl Material for ChunkMaterialWireframe {
+    fn vertex_shader() -> ShaderRef {
+        "shaders/chunk.wgsl".into()
+    }
+    fn fragment_shader() -> ShaderRef {
+        "shaders/chunk.wgsl".into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Opaque
+    }
+
+    fn specialize(
+        _pipeline: &MaterialPipeline<Self>,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayout,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        let vertex_layout = layout.get_layout(&[ATTRIBUTE_VOXEL.at_shader_location(0)])?;
+        descriptor.primitive.polygon_mode = PolygonMode::Line;
+        descriptor.vertex.buffers = vec![vertex_layout];
+        Ok(())
+    }
+
+    fn prepass_vertex_shader() -> ShaderRef {
+        "shaders/chunk_prepass.wgsl".into()
+    }
+
+    fn prepass_fragment_shader() -> ShaderRef {
+        "shaders/chunk_prepass.wgsl".into()
+    }
+}
+```
+
+### src/scanner.rs
+```
+use std::collections::VecDeque;
+
+use bevy::{prelude::*, utils::HashSet};
+
+use crate::{
+    constants::ADJACENT_CHUNK_DIRECTIONS, utils::index_to_ivec3_bounds, voxel_engine::VoxelEngine,
+};
+
+pub const MAX_DATA_TASKS: usize = 9;
+pub const MAX_MESH_TASKS: usize = 3;
+
+pub const MAX_SCANS: usize = 26000;
+
+pub struct ScannerPlugin;
+
+impl Plugin for ScannerPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            PreUpdate,
+            (
+                detect_move,
+                scan_data,
+                scan_data_unload,
+                scan_mesh_unload,
+                scan_mesh,
+            ),
+        );
+    }
+}
+
+///! scanner is responsible for identifying what chunks needs to be loaded (mesh/data)
+///! the current implementation is exellent for low render distances, 1-15
+///! but anything above that might induce some frame lag, due to how the load/unload data is calculated.  
+///! scanner::new() can also be very slow on high render distances, giving an initial slow execution time.
+#[derive(Component)]
+pub struct Scanner {
+    pub prev_chunk_pos: IVec3,
+    ///! how many chunks we visit
+    pub checks_per_frame: usize,
+    ///! offset grid sampling over frames
+    pub data_offset: usize,
+    ///! offset grid sampling over frames
+    pub mesh_offset: usize,
+
+    // chunk positions we are yet to check we need need to load
+    pub unresolved_data_load: Vec<IVec3>,
+    pub unresolved_mesh_load: Vec<IVec3>,
+
+    // chunk positions we are yet to check we need need tounload
+    pub unresolved_data_unload: VecDeque<IVec3>,
+    pub unresolved_mesh_unload: VecDeque<IVec3>,
+
+    // on detecting a scanner move, these offsets are used to
+    // identify the location of what chunks need to be checked
+    pub data_sampling_offsets: Vec<IVec3>,
+    pub mesh_sampling_offsets: Vec<IVec3>,
+}
+
+impl Scanner {
+    ///! construct scanner, chunk offsets are based on distance
+    ///! warning: slow execution time on distances above 15-20,
+    pub fn new(distance: i32) -> Self {
+        let data_distance = distance + 1;
+        let mesh_distance = distance;
+        let data_sampling_offsets = make_offset_vec(data_distance);
+        let mesh_sampling_offsets = make_offset_vec(mesh_distance);
+        Self {
+            checks_per_frame: 32 * 32 * 32,
+            data_offset: 0,
+            data_sampling_offsets,
+            mesh_sampling_offsets,
+            mesh_offset: 0,
+            unresolved_data_load: Vec::default(),
+            prev_chunk_pos: IVec3::new(777,777,777),
+            unresolved_mesh_load: Vec::default(),
+            unresolved_data_unload: VecDeque::default(),
+            unresolved_mesh_unload: VecDeque::default(),
+        }
+    }
+}
+
+///! on scanner chunk change, enqueue chunks to load/unload
+fn detect_move(
+    mut scanners: Query<(&mut Scanner, &GlobalTransform)>,
+    mut voxel_engine: ResMut<VoxelEngine>,
+) {
+    for (mut scanner, g_transform) in scanners.iter_mut() {
+        let chunk_pos = ((g_transform.translation() - Vec3::splat(16.0)) * (1.0 / 32.0)).as_ivec3();
+        let previous_chunk_pos = scanner.prev_chunk_pos;
+        let chunk_pos_changed = chunk_pos != scanner.prev_chunk_pos;
+        scanner.prev_chunk_pos = chunk_pos;
+        if !chunk_pos_changed {
+            return;
+        }
+        let load_data_area = scanner
+            .data_sampling_offsets
+            .iter()
+            .map(|offset| chunk_pos + *offset)
+            .collect::<HashSet<IVec3>>();
+
+        let unload_data_area = scanner
+            .data_sampling_offsets
+            .iter()
+            .map(|offset| previous_chunk_pos + *offset)
+            .collect::<HashSet<IVec3>>();
+
+        let load_mesh_area = scanner
+            .mesh_sampling_offsets
+            .iter()
+            .map(|offset| chunk_pos + *offset)
+            .collect::<HashSet<IVec3>>();
+
+        let unload_mesh_area = scanner
+            .mesh_sampling_offsets
+            .iter()
+            .map(|offset| previous_chunk_pos + *offset)
+            .collect::<HashSet<IVec3>>();
+
+        let data_load = load_data_area.difference(&unload_data_area);
+        let data_unload = unload_data_area.difference(&load_data_area);
+        let mesh_load = load_mesh_area.difference(&unload_mesh_area);
+        let mesh_unload = unload_mesh_area.difference(&load_mesh_area);
+
+        scanner.unresolved_data_load.extend(data_load);
+        scanner.unresolved_data_unload.extend(data_unload);
+        scanner.unresolved_mesh_unload.extend(mesh_unload);
+        scanner.unresolved_mesh_load.extend(mesh_load);
+
+        // deconstruct scanner mutable references because rust :P
+        let Scanner {
+            unresolved_data_load,
+            unresolved_mesh_load,
+            unresolved_data_unload,
+            unresolved_mesh_unload,
+            ..
+        } = scanner.as_mut();
+
+        for p in unresolved_mesh_unload.iter() {
+            if let Some((i, _)) = voxel_engine
+                .load_mesh_queue
+                .iter()
+                .enumerate()
+                .find(|(_i, k)| *k == p)
+            {
+                voxel_engine.load_mesh_queue.remove(i);
+            }
+        }
+        for p in unresolved_data_unload.iter() {
+            if let Some((i, _)) = voxel_engine
+                .load_data_queue
+                .iter()
+                .enumerate()
+                .find(|(_i, k)| *k == p)
+            {
+                voxel_engine.load_data_queue.remove(i);
+            }
+        }
+
+        // remove the unloads from load
+        unresolved_mesh_load.retain(|p| {
+            let want_unload = unresolved_mesh_unload.contains(p);
+            !want_unload
+        });
+        // remove the unloads from load
+        unresolved_data_load.retain(|p| {
+            let want_unload = unresolved_data_unload.contains(p);
+            !want_unload
+        });
+
+        scanner.unresolved_mesh_load.sort_by(|a, b| {
+            a.distance_squared(chunk_pos)
+                .cmp(&b.distance_squared(chunk_pos))
+        });
+        scanner.unresolved_data_load.sort_by(|a, b| {
+            a.distance_squared(chunk_pos)
+                .cmp(&b.distance_squared(chunk_pos))
+        });
+    }
+}
+
+///! constructs spherical positions with the provided chunk radius
+fn make_offset_vec(half: i32) -> Vec<IVec3> {
+    let k = (half * 2) + 1;
+    let mut sampling_offsets = vec![];
+    for i in 0..k * k * k {
+        let mut pos = index_to_ivec3_bounds(i, k);
+        pos -= IVec3::splat((k as f32 * 0.5) as i32);
+
+        sampling_offsets.push(pos);
+    }
+    sampling_offsets.sort_by(|a, b| {
+        a.distance_squared(IVec3::ZERO)
+            .cmp(&b.distance_squared(IVec3::ZERO))
+    });
+    sampling_offsets
+}
+
+pub fn scan_data(
+    mut scanners: Query<(&mut Scanner, &GlobalTransform)>,
+    mut voxel_engine: ResMut<VoxelEngine>,
+) {
+    for (mut scanner, _g_transform) in scanners.iter_mut() {
+        if voxel_engine.data_tasks.len() >= MAX_DATA_TASKS {
+            return;
+        }
+        let l = scanner.unresolved_data_load.len();
+        // for chunk_pos in scanner.unresolved_data_load.drain(..) {
+        for chunk_pos in scanner.unresolved_data_load.drain(0..MAX_SCANS.min(l)) {
+            // want to load chunk
+            let is_busy = voxel_engine.world_data.contains_key(&chunk_pos)
+                || voxel_engine.load_data_queue.contains(&chunk_pos)
+                || voxel_engine.data_tasks.contains_key(&chunk_pos);
+            if !is_busy {
+                voxel_engine.load_data_queue.push(chunk_pos);
+                // abort unload
+                let index_of_unloading =
+                    voxel_engine.unload_data_queue.iter().enumerate().find_map(
+                        |(i, pos)| match pos == &chunk_pos {
+                            true => Some(i),
+                            false => None,
+                        },
+                    );
+                if let Some(i) = index_of_unloading {
+                    voxel_engine.unload_data_queue.remove(i);
+                }
+            }
+        }
+    }
+}
+
+pub fn scan_data_unload(
+    mut scanners: Query<(&mut Scanner, &GlobalTransform)>,
+    mut voxel_engine: ResMut<VoxelEngine>,
+) {
+    // find all loaded and check if in range
+    for (mut scanner, _g_transform) in scanners.iter_mut() {
+        for chunk_pos in scanner.unresolved_data_unload.drain(..) {
+            // want to load chunk
+            let is_busy = !voxel_engine.world_data.contains_key(&chunk_pos);
+            if !is_busy {
+                voxel_engine.unload_data_queue.push(chunk_pos);
+            }
+        }
+    }
+}
+
+pub fn scan_mesh_unload(mut scanners: Query<&mut Scanner>, mut voxel_engine: ResMut<VoxelEngine>) {
+    // find all loaded and check if in range
+    for mut scanner in scanners.iter_mut() {
+        for chunk_pos in scanner.unresolved_mesh_unload.drain(..) {
+            voxel_engine.unload_mesh_queue.push(chunk_pos);
+        }
+    }
+}
+
+pub fn scan_mesh(mut scanners: Query<&mut Scanner>, mut voxel_engine: ResMut<VoxelEngine>) {
+    for mut scanner in scanners.iter_mut() {
+        // if voxel_engine.data_tasks.len() >= MAX_MESH_TASKS {
+        //     return;
+        // }
+        let mut retries = Vec::new();
+        let l = scanner.unresolved_mesh_load.len();
+        for chunk_pos in scanner.unresolved_mesh_load.drain(0..MAX_SCANS.min(l)) {
+            let mut busy = voxel_engine.load_mesh_queue.contains(&chunk_pos);
+            // all data available
+            busy |= !ADJACENT_CHUNK_DIRECTIONS
+                .iter()
+                .map(|of| chunk_pos + *of)
+                .all(|p| voxel_engine.world_data.contains_key(&p));
+
+            if !busy {
+                voxel_engine.load_mesh_queue.push(chunk_pos);
+                // abort unload
+                let index_of_unloading =
+                    voxel_engine.unload_mesh_queue.iter().enumerate().find_map(
+                        |(i, pos)| match pos == &chunk_pos {
+                            true => Some(i),
+                            false => None,
+                        },
+                    );
+                if let Some(i) = index_of_unloading {
+                    voxel_engine.unload_mesh_queue.remove(i);
+                }
+            } else {
+                retries.push(chunk_pos);
+            }
+        }
+        scanner.unresolved_mesh_load.append(&mut retries);
+    }
+}
+```
+
+### src/sun.rs
+```
+use std::time::Duration;
+
+use bevy::prelude::*;
+use bevy_inspector_egui::quick::ResourceInspectorPlugin;
+
+pub const DAY_TIME_SEC: f32 = 60.0;
+pub const NIGHT_TIME_SEC: f32 = 1.0;
+pub const CYCLE_TIME: f32 = DAY_TIME_SEC + NIGHT_TIME_SEC;
+
+///! current time of day
+#[derive(Resource)]
+struct SkyTime(pub f32);
+
+// ticked update of skytime
+#[derive(Resource)]
+struct CycleTimer(Timer);
+
+#[derive(Resource, Reflect)]
+pub struct SunSettings {
+    illuminance: f32,
+}
+
+// Marker for updating the position of the light, not needed unless we have multiple lights
+#[derive(Component)]
+pub struct Sun;
+
+pub struct SunPlugin;
+
+impl Plugin for SunPlugin {
+    fn build(&self, app: &mut App) {
+        app.register_type::<SunSettings>();
+        app.insert_resource(SkyTime(0f32));
+        app.insert_resource(SunSettings {
+            illuminance: 4000.0,
+        });
+        app.insert_resource(CycleTimer(Timer::new(
+            Duration::from_millis(450),
+            TimerMode::Repeating,
+        )));
+        app.add_systems(Update, daylight_cycle);
+        app.add_plugins(ResourceInspectorPlugin::<SunSettings>::default());
+    }
+}
+
+fn daylight_cycle(
+    mut query: Query<(&mut Transform, &mut DirectionalLight), With<Sun>>,
+    mut timer: ResMut<SkyTime>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    sun_settings: Res<SunSettings>,
+    mut cycle_timer: ResMut<CycleTimer>,
+) {
+    cycle_timer.0.tick(time.delta());
+
+    if !cycle_timer.0.just_finished() {
+        return;
+    }
+    let multiplier = if keyboard.pressed(KeyCode::KeyI) {
+        6.0
+    } else {
+        1.0
+    };
+    // timer.0 += time.delta_seconds() * multiplier;
+    timer.0 += cycle_timer.0.duration().as_secs_f32() * multiplier;
+    if timer.0 > CYCLE_TIME {
+        timer.0 -= CYCLE_TIME;
+    }
+
+    let day = (timer.0 / DAY_TIME_SEC).min(1.0);
+    let night = ((timer.0 - DAY_TIME_SEC) / NIGHT_TIME_SEC).max(0.0);
+    let percent = day * std::f32::consts::PI + night * std::f32::consts::PI;
+
+    for (mut light_trans, mut directional) in query.iter_mut() {
+        light_trans.rotation = Quat::from_rotation_x(-percent.sin().atan2(percent.cos()));
+        directional.illuminance = percent.sin().max(0.0).powf(2.0) * sun_settings.illuminance;
+    }
+}
+```
+
+### src/utils.rs
+```
+use bevy::prelude::*;
+
+#[inline]
+pub fn index_to_ivec3(i: i32) -> IVec3 {
+    let x = i % 32;
+    let y = (i / 32) % 32;
+    let z = i / (32 * 32);
+    IVec3::new(x, y, z)
+}
+
+#[inline]
+pub fn index_to_ivec3_bounds(i: i32, bounds: i32) -> IVec3 {
+    let x = i % bounds;
+    let y = (i / bounds) % bounds;
+    let z = i / (bounds * bounds);
+    IVec3::new(x, y, z)
+}
+
+#[inline]
+pub fn index_to_ivec3_bounds_reverse(i: i32, bounds: i32) -> IVec3 {
+    let z = i % bounds;
+    let y = (i / bounds) % bounds;
+    let x = i / (bounds * bounds);
+    IVec3::new(x, y, z)
+}
+
+#[inline]
+pub fn is_on_edge(pos: IVec3) -> bool {
+    if pos.x == 0 || pos.x == 32 {
+        return true;
+    }
+    if pos.y == 0 || pos.y == 32 {
+        return true;
+    }
+    if pos.z == 0 || pos.z == 32 {
+        return true;
+    }
+    false
+}
+
+///! if lying on the edge of our chunk, return the edging chunk
+#[inline]
+pub fn get_edging_chunk(pos: IVec3) -> Option<IVec3> {
+    let mut chunk_dir = IVec3::ZERO;
+    if pos.x == 0 {
+        chunk_dir.x = -1;
+    } else if pos.x == 31 {
+        chunk_dir.x = 1;
+    }
+    if pos.y == 0 {
+        chunk_dir.y = -1;
+    } else if pos.y == 31 {
+        chunk_dir.y = 1;
+    }
+    if pos.z == 0 {
+        chunk_dir.z = -1;
+    } else if pos.z == 31 {
+        chunk_dir.z = 1;
+    }
+    if chunk_dir == IVec3::ZERO {
+        None
+    } else {
+        Some(chunk_dir)
+    }
+}
+
+// pos 18 bits, ao 3 bits, normal 4 bits
+// 18-21-25-   left 32-25 = 7
+#[inline]
+pub fn make_vertex_u32(
+    // position: [i32; 3], /*, normal: i32, color: Color, texture_id: u32*/
+    pos: IVec3, /*, normal: i32, color: Color, texture_id: u32*/
+    ao: u32,
+    normal: u32,
+    block_type: u32,
+) -> u32 {
+    pos.x as u32
+        | (pos.y as u32) << 6u32
+        | (pos.z as u32) << 12u32
+        | ao << 18u32
+        | normal << 21u32
+        | block_type << 25u32
+    // | (normal as u32) << 18u32
+    // | (texture_id) << 21u32
+}
+
+#[inline]
+pub fn world_to_chunk(pos: Vec3) -> IVec3 {
+    ((pos - Vec3::splat(16.0)) * (1.0 / 32.0)).as_ivec3()
+}
+
+///! generate a vec of indices
+///! assumes vertices are made of quads, and counter clockwise ordered
+#[inline]
+pub fn generate_indices(vertex_count: usize) -> Vec<u32> {
+    let indices_count = vertex_count / 4;
+    let mut indices = Vec::<u32>::with_capacity(indices_count);
+    (0..indices_count).into_iter().for_each(|vert_index| {
+        let vert_index = vert_index as u32 * 4u32;
+        indices.push(vert_index);
+        indices.push(vert_index + 1);
+        indices.push(vert_index + 2);
+        indices.push(vert_index);
+        indices.push(vert_index + 2);
+        indices.push(vert_index + 3);
+    });
+    indices
+}
+
+#[test]
+fn index_functions() {
+    for z in 0..32 {
+        for y in 0..32 {
+            for x in 0..32 {
+                let pos = IVec3::new(x, y, z);
+                let index = vec3_to_index(pos, 32);
+                let from_index = index_to_ivec3_bounds(index as i32, 32);
+                assert_eq!(pos, from_index);
+            }
+        }
+    }
+}
+
+#[inline]
+pub fn vec3_to_index(pos: IVec3, bounds: i32) -> usize {
+    let x_i = pos.x % bounds;
+    // let y_i = (pos.y * bounds) % bounds;
+    let y_i = (pos.y * bounds);
+    let z_i = pos.z * (bounds * bounds);
+    // let x_i = pos.x % bounds;
+    // let y_i = (pos.y / bounds) % bounds;
+    // let z_i = pos.z / (bounds * bounds);
+    (x_i + y_i + z_i) as usize
+}
+```
+
+### src/voxel.rs
+```
+#[repr(u32)]
+#[derive(Eq, PartialEq, Default, Copy, Clone, Debug)]
+pub enum BlockType {
+    #[default]
+    Air,
+    Grass,
+    Dirt,
+}
+
+pub const MESHABLE_BLOCK_TYPES: &'static [BlockType] = &[BlockType::Grass, BlockType::Dirt];
+
+impl BlockType {
+    pub fn is_solid(&self) -> bool {
+        match self {
+            BlockType::Air => false,
+            BlockType::Grass => true,
+            BlockType::Dirt => true,
+        }
+    }
+    pub fn is_air(&self) -> bool {
+        !self.is_solid()
+    }
+}
+
+#[derive(Default, Copy, Clone, Debug)]
+pub struct BlockData {
+    pub block_type: BlockType,
+}
+```
+
+### src/voxel_engine.rs
+```
+use std::sync::Arc;
+
+use bevy::{
+    asset::LoadState,
+    diagnostic::{Diagnostic, DiagnosticPath, Diagnostics, RegisterDiagnostic},
+    prelude::*,
+    render::{
+        mesh::Indices, primitives::Aabb, render_asset::RenderAssetUsages,
+        render_resource::PrimitiveTopology,
+    },
+    tasks::{block_on, AsyncComputeTaskPool, Task},
+    utils::{HashMap, HashSet},
+};
+use bevy_screen_diagnostics::{Aggregate, ScreenDiagnostics};
+
+use crate::{
+    chunk::ChunkData,
+    chunk_mesh::ChunkMesh,
+    chunks_refs::ChunksRefs,
+    constants::CHUNK_SIZE_I32,
+    lod::Lod,
+    rendering::{GlobalChunkMaterial, ATTRIBUTE_VOXEL},
+    scanner::Scanner,
+    utils::{get_edging_chunk, vec3_to_index},
+    voxel::{BlockData, BlockType},
+};
+use futures_lite::future;
+
+pub struct VoxelEnginePlugin;
+
+pub const MAX_DATA_TASKS: usize = 64;
+pub const MAX_MESH_TASKS: usize = 32;
+
+impl Plugin for VoxelEnginePlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(VoxelEngine::default());
+        // app.add_systems(Update, (start_data_tasks, start_mesh_tasks));
+        app.add_systems(PostUpdate, (start_data_tasks, start_mesh_tasks));
+        // app.add_systems(PostUpdate, (join_data, join_mesh));
+        app.add_systems(Update, start_modifications);
+        app.add_systems(
+            // PostUpdate,
+            Update,
+            ((join_data, join_mesh), (unload_data, unload_mesh)).chain(),
+        );
+        app.add_systems(Update, debug_inputs);
+
+        app.add_systems(Startup, setup_diagnostics);
+        app.register_diagnostic(Diagnostic::new(DIAG_LOAD_MESH_QUEUE));
+        app.register_diagnostic(Diagnostic::new(DIAG_UNLOAD_MESH_QUEUE));
+        app.register_diagnostic(Diagnostic::new(DIAG_LOAD_DATA_QUEUE));
+        app.register_diagnostic(Diagnostic::new(DIAG_UNLOAD_DATA_QUEUE));
+        app.register_diagnostic(Diagnostic::new(DIAG_VERTEX_COUNT));
+        app.register_diagnostic(Diagnostic::new(DIAG_MESH_TASKS));
+        app.register_diagnostic(Diagnostic::new(DIAG_DATA_TASKS));
+        app.add_systems(Update, diagnostics_count);
+    }
+}
+
+pub fn debug_inputs(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut voxel_engine: ResMut<VoxelEngine>,
+    scanners: Query<(&GlobalTransform, &Scanner)>,
+) {
+    if keyboard_input.just_pressed(KeyCode::KeyR) {
+        // swap meshing algorithm
+        use MeshingMethod as MM;
+        voxel_engine.meshing_method = match voxel_engine.meshing_method {
+            MM::VertexCulled => MM::BinaryGreedyMeshing,
+            MM::BinaryGreedyMeshing => MM::VertexCulled,
+        };
+        let (scanner_transform, scanner) = scanners.single();
+        // unload all meshes
+        voxel_engine.unload_all_meshes(scanner, scanner_transform);
+    }
+    if keyboard_input.just_pressed(KeyCode::KeyT) {
+        // toggle rendering method
+    }
+}
+
+#[derive(Debug, Reflect, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum MeshingMethod {
+    VertexCulled,
+    BinaryGreedyMeshing,
+}
+
+///! holds all voxel world data
+#[derive(Resource)]
+pub struct VoxelEngine {
+    pub world_data: HashMap<IVec3, Arc<ChunkData>>,
+    pub vertex_diagnostic: HashMap<IVec3, i32>,
+    pub load_data_queue: Vec<IVec3>,
+    pub load_mesh_queue: Vec<IVec3>,
+    pub unload_data_queue: Vec<IVec3>,
+    pub unload_mesh_queue: Vec<IVec3>,
+    pub data_tasks: HashMap<IVec3, Option<Task<ChunkData>>>,
+    // pub mesh_tasks: HashMap<IVec3, Option<Task<Option<ChunkMesh>>>>,
+    pub mesh_tasks: Vec<(IVec3, Option<Task<Option<ChunkMesh>>>)>,
+    pub chunk_entities: HashMap<IVec3, Entity>,
+    pub lod: Lod,
+    pub meshing_method: MeshingMethod,
+    pub chunk_modifications: HashMap<IVec3, Vec<ChunkModification>>,
+}
+
+pub struct ChunkModification(pub IVec3, pub BlockType);
+
+const DIAG_LOAD_DATA_QUEUE: DiagnosticPath = DiagnosticPath::const_new("load_data_queue");
+const DIAG_UNLOAD_DATA_QUEUE: DiagnosticPath = DiagnosticPath::const_new("unload_data_queue");
+const DIAG_LOAD_MESH_QUEUE: DiagnosticPath = DiagnosticPath::const_new("load_mesh_queue");
+const DIAG_UNLOAD_MESH_QUEUE: DiagnosticPath = DiagnosticPath::const_new("unload_mesh_queue");
+const DIAG_VERTEX_COUNT: DiagnosticPath = DiagnosticPath::const_new("vertex_count");
+const DIAG_MESH_TASKS: DiagnosticPath = DiagnosticPath::const_new("mesh_tasks");
+const DIAG_DATA_TASKS: DiagnosticPath = DiagnosticPath::const_new("data_tasks");
+
+fn setup_diagnostics(mut onscreen: ResMut<ScreenDiagnostics>) {
+    onscreen
+        .add("load_data_queue".to_string(), DIAG_LOAD_DATA_QUEUE)
+        .aggregate(Aggregate::Value)
+        .format(|v| format!("{v:0>4.0}"));
+    onscreen
+        .add("unload_data_queue".to_string(), DIAG_UNLOAD_DATA_QUEUE)
+        .aggregate(Aggregate::Value)
+        .format(|v| format!("{v:0>3.0}"));
+    onscreen
+        .add("load_mesh_queue".to_string(), DIAG_LOAD_MESH_QUEUE)
+        .aggregate(Aggregate::Value)
+        .format(|v| format!("{v:0>4.0}"));
+    onscreen
+        .add("unload_mesh_queue".to_string(), DIAG_UNLOAD_MESH_QUEUE)
+        .aggregate(Aggregate::Value)
+        .format(|v| format!("{v:0>3.0}"));
+    onscreen
+        .add("vertex_count".to_string(), DIAG_VERTEX_COUNT)
+        .aggregate(Aggregate::Value)
+        .format(|v| format!("{v:0>7.0}"));
+    onscreen
+        .add("mesh_tasks".to_string(), DIAG_MESH_TASKS)
+        .aggregate(Aggregate::Value)
+        .format(|v| format!("{v:0>4.0}"));
+    onscreen
+        .add("data_tasks".to_string(), DIAG_DATA_TASKS)
+        .aggregate(Aggregate::Value)
+        .format(|v| format!("{v:0>2.0}"));
+}
+
+fn diagnostics_count(mut diagnostics: Diagnostics, voxel_engine: Res<VoxelEngine>) {
+    diagnostics.add_measurement(&DIAG_LOAD_DATA_QUEUE, || {
+        voxel_engine.load_data_queue.len() as f64
+    });
+    diagnostics.add_measurement(&DIAG_UNLOAD_DATA_QUEUE, || {
+        voxel_engine.unload_data_queue.len() as f64
+    });
+    diagnostics.add_measurement(&DIAG_LOAD_MESH_QUEUE, || {
+        voxel_engine.load_mesh_queue.len() as f64
+    });
+    diagnostics.add_measurement(&DIAG_UNLOAD_MESH_QUEUE, || {
+        voxel_engine.unload_mesh_queue.len() as f64
+    });
+    diagnostics.add_measurement(&DIAG_MESH_TASKS, || voxel_engine.mesh_tasks.len() as f64);
+    diagnostics.add_measurement(&DIAG_DATA_TASKS, || voxel_engine.data_tasks.len() as f64);
+    diagnostics.add_measurement(&DIAG_VERTEX_COUNT, || {
+        voxel_engine
+            .vertex_diagnostic
+            .iter()
+            .map(|(_, v)| v)
+            .sum::<i32>() as f64
+    });
+}
+
+impl VoxelEngine {
+    pub fn unload_all_meshes(&mut self, scanner: &Scanner, scanner_transform: &GlobalTransform) {
+        // stop all any current proccessing
+        self.load_mesh_queue.clear();
+        // self.unload_mesh_queue.clear();
+        self.mesh_tasks.clear();
+        let scan_pos =
+            ((scanner_transform.translation() - Vec3::splat(16.0)) * (1.0 / 32.0)).as_ivec3();
+        for offset in &scanner.mesh_sampling_offsets {
+            let wpos = scan_pos + *offset;
+            self.load_mesh_queue.push(wpos);
+            // self.unload_mesh_queue.push(wpos);
+        }
+    }
+}
+
+impl Default for VoxelEngine {
+    fn default() -> Self {
+        VoxelEngine {
+            world_data: HashMap::new(),
+            load_data_queue: Vec::new(),
+            load_mesh_queue: Vec::new(),
+            unload_data_queue: Vec::new(),
+            unload_mesh_queue: Vec::new(),
+            data_tasks: HashMap::new(),
+            mesh_tasks: Vec::new(),
+            // mesh_tasks: HashMap::new(),
+            chunk_entities: HashMap::new(),
+            lod: Lod::L32,
+            // meshing_method: MeshingMethod::VertexCulled,
+            meshing_method: MeshingMethod::BinaryGreedyMeshing,
+            vertex_diagnostic: HashMap::new(),
+            chunk_modifications: HashMap::new(),
+        }
+    }
+}
+
+///! begin data building tasks for chunks in range
+pub fn start_data_tasks(
+    mut voxel_engine: ResMut<VoxelEngine>,
+    scanners: Query<&GlobalTransform, With<Scanner>>,
+) {
+    let task_pool = AsyncComputeTaskPool::get();
+
+    let VoxelEngine {
+        load_data_queue,
+        data_tasks,
+        ..
+    } = voxel_engine.as_mut();
+
+    let scanner_g = scanners.single();
+    let scan_pos = ((scanner_g.translation() - Vec3::splat(16.0)) * (1.0 / 32.0)).as_ivec3();
+    load_data_queue.sort_by(|a, b| {
+        a.distance_squared(scan_pos)
+            .cmp(&b.distance_squared(scan_pos))
+    });
+
+    let tasks_left = (MAX_DATA_TASKS as i32 - data_tasks.len() as i32)
+        .min(load_data_queue.len() as i32)
+        .max(0) as usize;
+    for world_pos in load_data_queue.drain(0..tasks_left) {
+        // for world_pos in load_data_queue.drain(0..MAX_DATA_TASKS.min(load_data_queue.len())) {
+        // for world_pos in load_data_queue.drain(..) {
+        let k = world_pos;
+        let task = task_pool.spawn(async move {
+            let cd = ChunkData::generate(k);
+            cd
+        });
+        data_tasks.insert(world_pos, Some(task));
+    }
+}
+
+///! destroy enqueued, chunk data
+pub fn unload_data(mut voxel_engine: ResMut<VoxelEngine>) {
+    let VoxelEngine {
+        unload_data_queue,
+        world_data,
+        ..
+    } = voxel_engine.as_mut();
+    for chunk_pos in unload_data_queue.drain(..) {
+        world_data.remove(&chunk_pos);
+    }
+}
+
+///! destroy enqueued, chunk mesh entities
+pub fn unload_mesh(mut commands: Commands, mut voxel_engine: ResMut<VoxelEngine>) {
+    let VoxelEngine {
+        unload_mesh_queue,
+        chunk_entities,
+        vertex_diagnostic,
+        ..
+    } = voxel_engine.as_mut();
+    let mut retry = Vec::new();
+    for chunk_pos in unload_mesh_queue.drain(..) {
+        let Some(chunk_id) = chunk_entities.remove(&chunk_pos) else {
+            continue;
+        };
+        vertex_diagnostic.remove(&chunk_pos);
+        if let Some(mut entity_commands) = commands.get_entity(chunk_id) {
+            entity_commands.despawn();
+        }
+        // world_data.remove(&chunk_pos);
+    }
+    unload_mesh_queue.append(&mut retry);
+}
+
+///! begin mesh building tasks for chunks in range
+pub fn start_mesh_tasks(
+    mut voxel_engine: ResMut<VoxelEngine>,
+    scanners: Query<&GlobalTransform, With<Scanner>>,
+) {
+    let task_pool = AsyncComputeTaskPool::get();
+
+    let VoxelEngine {
+        load_mesh_queue,
+        mesh_tasks,
+        world_data,
+        lod,
+        meshing_method,
+        ..
+    } = voxel_engine.as_mut();
+
+    let scanner_g = scanners.single();
+    let scan_pos = ((scanner_g.translation() - Vec3::splat(16.0)) * (1.0 / 32.0)).as_ivec3();
+    load_mesh_queue.sort_by(|a, b| {
+        a.distance_squared(scan_pos)
+            .cmp(&b.distance_squared(scan_pos))
+    });
+    let tasks_left = (MAX_MESH_TASKS as i32 - mesh_tasks.len() as i32)
+        .min(load_mesh_queue.len() as i32)
+        .max(0) as usize;
+    for world_pos in load_mesh_queue.drain(0..tasks_left) {
+        // for world_pos in load_mesh_queue.drain(..) {
+        let Some(chunks_refs) = ChunksRefs::try_new(world_data, world_pos) else {
+            continue;
+        };
+        let llod = *lod;
+        let task = match meshing_method {
+            MeshingMethod::BinaryGreedyMeshing => task_pool.spawn(async move {
+                crate::greedy_mesher_optimized::build_chunk_mesh(&chunks_refs, llod)
+            }),
+            MeshingMethod::VertexCulled => task_pool.spawn(async move {
+                crate::culled_mesher::build_chunk_mesh_ao(&chunks_refs, llod)
+            }),
+        };
+
+        mesh_tasks.push((world_pos, Some(task)));
+    }
+}
+
+// start
+pub fn start_modifications(mut voxel_engine: ResMut<VoxelEngine>) {
+    let VoxelEngine {
+        world_data,
+        chunk_modifications,
+        load_mesh_queue,
+        ..
+    } = voxel_engine.as_mut();
+    for (pos, mods) in chunk_modifications.drain() {
+        // say i want to load mesh now :)
+        let Some(chunk_data) = world_data.get_mut(&pos) else {
+            continue;
+        };
+        let new_chunk_data = Arc::make_mut(chunk_data);
+        let mut adj_chunk_set = HashSet::new();
+        for ChunkModification(local_pos, block_type) in mods.into_iter() {
+            let i = vec3_to_index(local_pos, 32);
+            if new_chunk_data.voxels.len() == 1 {
+                let mut voxels = vec![];
+                for _ in 0..CHUNK_SIZE_I32 * CHUNK_SIZE_I32 * CHUNK_SIZE_I32 {
+                    voxels.push(BlockData {
+                        block_type: new_chunk_data.voxels[0].block_type,
+                    });
+                }
+                new_chunk_data.voxels = voxels;
+            }
+            new_chunk_data.voxels[i].block_type = block_type;
+            if let Some(edge_chunk) = get_edging_chunk(local_pos) {
+                adj_chunk_set.insert(edge_chunk);
+            }
+        }
+        for adj_chunk in adj_chunk_set.into_iter() {
+            load_mesh_queue.push(pos + adj_chunk);
+        }
+        load_mesh_queue.push(pos);
+    }
+}
+
+///! join the chunkdata threads
+pub fn join_data(mut voxel_engine: ResMut<VoxelEngine>) {
+    let VoxelEngine {
+        world_data,
+        data_tasks,
+        ..
+    } = voxel_engine.as_mut();
+    for (world_pos, task_option) in data_tasks.iter_mut() {
+        let Some(mut task) = task_option.take() else {
+            // should never happend, because we drop None values later
+            warn!("someone modified task?");
+            continue;
+        };
+        let Some(chunk_data) = block_on(future::poll_once(&mut task)) else {
+            *task_option = Some(task);
+            continue;
+        };
+
+        world_data.insert(*world_pos, Arc::new(chunk_data));
+    }
+    data_tasks.retain(|_k, op| op.is_some());
+}
+
+#[derive(Component)]
+pub struct WaitingToLoadMeshTag;
+
+pub fn promote_dirty_meshes(
+    mut commands: Commands,
+    children: Query<(Entity, &Handle<Mesh>, &Parent), With<WaitingToLoadMeshTag>>,
+    mut parents: Query<&mut Handle<Mesh>, Without<WaitingToLoadMeshTag>>,
+    asset_server: Res<AssetServer>,
+) {
+    for (entity, handle, parent) in children.iter() {
+        if let Some(state) = asset_server.get_load_state(handle) {
+            match state {
+                LoadState::Loaded | LoadState::Failed => {
+                    let Ok(mut parent_handle) = parents.get_mut(parent.get()) else {
+                        continue;
+                    };
+                    info!("updgraded!");
+                    *parent_handle = handle.clone();
+                    commands.entity(entity).despawn();
+                }
+                LoadState::Loading => {
+                    info!("loading cool");
+                }
+                _ => (),
+            }
+        }
+    }
+}
+
+///! join the multithreaded chunk mesh tasks, and construct a finalized chunk entity
+pub fn join_mesh(
+    mut voxel_engine: ResMut<VoxelEngine>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    global_chunk_material: Res<GlobalChunkMaterial>,
+) {
+    let VoxelEngine {
+        mesh_tasks,
+        chunk_entities,
+        vertex_diagnostic,
+        ..
+    } = voxel_engine.as_mut();
+    for (world_pos, task_option) in mesh_tasks.iter_mut() {
+        let Some(mut task) = task_option.take() else {
+            // should never happend, because we drop None values later
+            warn!("someone modified task?");
+            continue;
+        };
+        let Some(chunk_mesh_option) = block_on(future::poll_once(&mut task)) else {
+            // failed polling, keep task alive
+            *task_option = Some(task);
+            continue;
+        };
+
+        let Some(mesh) = chunk_mesh_option else {
+            continue;
+        };
+        let mut bevy_mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        vertex_diagnostic.insert(*world_pos, mesh.vertices.len() as i32);
+        bevy_mesh.insert_attribute(ATTRIBUTE_VOXEL, mesh.vertices.clone());
+        // bevy_mesh.set_indices(Some(Indices::U32(mesh.indices.clone().into())));
+        bevy_mesh.insert_indices(Indices::U32(mesh.indices.clone().into()));
+        let mesh_handle = meshes.add(bevy_mesh);
+
+        if let Some(entity) = chunk_entities.get(world_pos) {
+            commands.entity(*entity).despawn();
+        }
+
+        // spawn chunk entity
+        let chunk_entity = commands
+            .spawn((
+                Aabb::from_min_max(Vec3::ZERO, Vec3::splat(32.0)),
+                MaterialMeshBundle {
+                    transform: Transform::from_translation(world_pos.as_vec3() * Vec3::splat(32.0)),
+                    mesh: mesh_handle,
+                    material: global_chunk_material.0.clone(),
+                    ..default()
+                },
+            ))
+            .id();
+        chunk_entities.insert(*world_pos, chunk_entity);
+    }
+    mesh_tasks.retain(|(_p, op)| op.is_some());
+}
+```
+
+### assets/shaders/chunk.wgsl
+```
+#import bevy_pbr::{
+    pbr_fragment::pbr_input_from_standard_material,
+    pbr_functions::alpha_discard,
+}
+
+#ifdef PREPASS_PIPELINE
+#import bevy_pbr::{
+    prepass_io::{FragmentOutput},
+    pbr_deferred_functions::deferred_output,
+}
+#else
+#import bevy_pbr::{
+    forward_io::{FragmentOutput},
+    pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
+}
+#endif
+
+#import bevy_pbr::mesh_functions::{get_model_matrix, mesh_position_local_to_clip, mesh_normal_local_to_world}
+#import bevy_pbr::pbr_functions::{calculate_view, prepare_world_normal}
+#import bevy_pbr::mesh_view_bindings
+#import bevy_pbr::mesh_bindings
+#import bevy_pbr::mesh_bindings::mesh
+#import bevy_pbr::pbr_types::pbr_input_new
+#import bevy_pbr::prepass_utils
+
+struct ChunkMaterial {
+    reflectance: f32,
+    perceptual_roughness: f32,
+    metallic: f32,
+};
+
+@group(2) @binding(0) var<uniform> chunk_material: ChunkMaterial;
+
+struct Vertex {
+    @builtin(instance_index) instance_index: u32,
+    @location(0) vert_data: u32,
+    // @location(1) blend_color: vec4<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_normal: vec3<f32>,
+    @location(1) world_position: vec4<f32>,
+    @location(2) blend_color: vec3<f32>,
+    @location(3) ambient: f32,
+    @location(4) instance_index: u32,
+};
+
+// struct FragmentInput {
+//     // @builtin(position) clip_position: vec4<f32>,
+//     @location(0) blend_color: vec3<f32>,
+//     @location(1) ambient: f32,
+// };
+
+var<private> ambient_lerps: vec4<f32> = vec4<f32>(1.0,0.7,0.5,0.15);
+
+// indexing an array has to be in some memory
+// by declaring this as a var instead it works
+var<private> normals: array<vec3<f32>,6> = array<vec3<f32>,6> (
+	vec3<f32>(-1.0, 0.0, 0.0), // Left
+	vec3<f32>(1.0, 0.0, 0.0), // Right
+	vec3<f32>(0.0, -1.0, 0.0), // Down
+	vec3<f32>(0.0, 1.0, 0.0), // Up
+	vec3<f32>(0.0, 0.0, -1.0), // Forward
+	vec3<f32>(0.0, 0.0, 1.0) // Back
+);
+
+var<private> block_color: array<vec3<f32>,3> = array<vec3<f32>,3> (
+	vec3<f32>(0.0, 0.0, 0.0), // air
+	vec3<f32>(0.0, 1.0, 0.0), // grass
+	vec3<f32>(0.3, 0.4, 0.0), // dirt
+);
+
+
+fn x_positive_bits(bits: u32) -> u32{
+    return (1u << bits) - 1u;
+}
+
+@vertex
+fn vertex(vertex: Vertex) -> VertexOutput {
+    var out: VertexOutput;
+
+    let x = f32(vertex.vert_data & x_positive_bits(6u));
+    let y = f32(vertex.vert_data >> 6u & x_positive_bits(6u));
+    let z = f32(vertex.vert_data >> 12u & x_positive_bits(6u));
+    let ao = vertex.vert_data >> 18u & x_positive_bits(3u);
+    let normal_index = vertex.vert_data >> 21u & x_positive_bits(3u);
+    let block_index = vertex.vert_data >> 25u & x_positive_bits(7u);
+    // let normal_index: u32 = (vertex.v_pos_6b_normal_3b_texid_8b & 1835008u) >> 18u;
+
+    let local_position = vec4<f32>(x,y,z, 1.0);
+    let world_position = get_model_matrix(vertex.instance_index) * local_position;
+    out.clip_position = mesh_position_local_to_clip(
+        get_model_matrix(vertex.instance_index),
+        local_position,
+    );
+
+    let ambient_lerp = ambient_lerps[ao];
+    out.ambient = ambient_lerp;
+    out.world_position = world_position;
+    // out.world_normal = vec3<f32>(0.0,1.0,0.0);
+
+    let normal = normals[normal_index];
+    out.world_normal = mesh_normal_local_to_world(normal, vertex.instance_index);
+
+    let s = 0.05;
+    var noise = simplexNoise2(vec2<f32>(world_position.x*s, world_position.z*s));
+    var k = simplexNoise2(vec2<f32>(world_position.x*s, world_position.z*s));
+
+    // let high = vec3<f32>(0.15, 1.0, 0.2);
+    // let low = vec3<f32>(0.8, 1.0, 0.45);
+    let high = vec3<f32>(9.00, 6.0, 0.0);
+    let low = vec3<f32>(0.8, 1.0, 0.40);
+    // let low = vec3<f32>(1.0, 0.0, 0.05);
+    // let h = (out.world_position.y) / 32.0;
+    noise = (out.world_position.y) / 30.0;
+    // noise += k*0.2;
+    // noise = smoothstep(0.4, 1.0, noise);
+    // noise = 0.0;
+    // noise += h;
+    // noise *= noise;
+
+    // noise = max(noise, 0.00);
+    // noise = 0.0;
+
+    // out.blend_color = (low * noise) + (high * (1.0-noise));
+    let fun = (low * noise) + (high * (1.0-noise));
+    out.blend_color = block_color[block_index];
+    out.instance_index = vertex.instance_index;
+    return out;
+}
+
+// struct FragmentInput {
+//     @location(0) blend_color: vec4<f32>,
+// };
+
+@fragment
+// fn fragment(input: FragmentInput) -> @location(0) vec4<f32> {
+// fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
+fn fragment(input: VertexOutput) -> FragmentOutput {
+    var pbr_input = pbr_input_new();
+
+    pbr_input.flags = mesh[input.instance_index].flags;
+
+    pbr_input.V = calculate_view(input.world_position, false);
+    pbr_input.frag_coord = input.clip_position;
+    pbr_input.world_position = input.world_position;
+
+    pbr_input.world_normal = prepare_world_normal(
+        input.world_normal,
+        false,
+        false,
+    );
+#ifdef LOAD_PREPASS_NORMALS
+    pbr_input.N = prepass_utils::prepass_normal(input.clip_position, 0u);
+#else
+    pbr_input.N = normalize(pbr_input.world_normal);
+#endif
+
+    pbr_input.material.base_color = vec4<f32>(input.blend_color * input.ambient, 1.0);
+
+    pbr_input.material.reflectance = chunk_material.reflectance;
+    pbr_input.material.perceptual_roughness = chunk_material.perceptual_roughness;
+    pbr_input.material.metallic = chunk_material.metallic;
+    // pbr_input.material.metallic = 1.0;
+
+
+#ifdef PREPASS_PIPELINE
+    // in deferred mode we can't modify anything after that, as lighting is run in a separate fullscreen shader.
+    let out = deferred_output(in, pbr_input);
+#else
+    var out: FragmentOutput;
+    // apply lighting
+    out.color = apply_pbr_lighting(pbr_input);
+    out.color = main_pass_post_lighting_processing(pbr_input, out.color);
+#endif
+
+    return out;
+   // return vec4<f32>(input.blend_color, 1.0);
+    // return vec4<f32>(input.blend_color * input.ambient, 1.0);
+    // return vec4<f32>(1.0, 0.0,0.0,1.0);
+}
+
+//  MIT License. © Ian McEwan, Stefan Gustavson, Munrocket, Johan Helsing
+//
+fn mod289(x: vec2f) -> vec2f {
+    return x - floor(x * (1. / 289.)) * 289.;
+}
+
+fn mod289_3(x: vec3f) -> vec3f {
+    return x - floor(x * (1. / 289.)) * 289.;
+}
+
+fn permute3(x: vec3f) -> vec3f {
+    return mod289_3(((x * 34.) + 1.) * x);
+}
+
+//  MIT License. © Ian McEwan, Stefan Gustavson, Munrocket
+fn simplexNoise2(v: vec2f) -> f32 {
+    let C = vec4(
+        0.211324865405187, // (3.0-sqrt(3.0))/6.0
+        0.366025403784439, // 0.5*(sqrt(3.0)-1.0)
+        -0.577350269189626, // -1.0 + 2.0 * C.x
+        0.024390243902439 // 1.0 / 41.0
+    );
+
+    // First corner
+    var i = floor(v + dot(v, C.yy));
+    let x0 = v - i + dot(i, C.xx);
+
+    // Other corners
+    var i1 = select(vec2(0., 1.), vec2(1., 0.), x0.x > x0.y);
+
+    // x0 = x0 - 0.0 + 0.0 * C.xx ;
+    // x1 = x0 - i1 + 1.0 * C.xx ;
+    // x2 = x0 - 1.0 + 2.0 * C.xx ;
+    var x12 = x0.xyxy + C.xxzz;
+    x12.x = x12.x - i1.x;
+    x12.y = x12.y - i1.y;
+
+    // Permutations
+    i = mod289(i); // Avoid truncation effects in permutation
+
+    var p = permute3(permute3(i.y + vec3(0., i1.y, 1.)) + i.x + vec3(0., i1.x, 1.));
+    var m = max(0.5 - vec3(dot(x0, x0), dot(x12.xy, x12.xy), dot(x12.zw, x12.zw)), vec3(0.));
+    m *= m;
+    m *= m;
+
+    // Gradients: 41 points uniformly over a line, mapped onto a diamond.
+    // The ring size 17*17 = 289 is close to a multiple of 41 (41*7 = 287)
+    let x = 2. * fract(p * C.www) - 1.;
+    let h = abs(x) - 0.5;
+    let ox = floor(x + 0.5);
+    let a0 = x - ox;
+
+    // Normalize gradients implicitly by scaling m
+    // Approximation of: m *= inversesqrt( a0*a0 + h*h );
+    m *= 1.79284291400159 - 0.85373472095314 * (a0 * a0 + h * h);
+
+    // Compute final noise value at P
+    let g = vec3(a0.x * x0.x + h.x * x0.y, a0.yz * x12.xz + h.yz * x12.yw);
+    return 130. * dot(m, g);
+}
+```
+
+### assets/shaders/chunk_prepass.wgsl
+```
+#import bevy_pbr::{
+    prepass_bindings,
+    mesh_functions,
+    prepass_io::{FragmentOutput},
+    skinning,
+    morph,
+    mesh_view_bindings::{view, previous_view_proj},
+}
+
+#ifdef DEFERRED_PREPASS
+#import bevy_pbr::rgb9e5
+#endif
+
+#import bevy_pbr::mesh_functions::{mesh_normal_local_to_world}
+#import bevy_render::instance_index::{get_instance_index}
+
+
+struct ChunkMaterial {
+    reflectance: f32,
+    perceptual_roughness: f32,
+    metallic: f32,
+    // _padding: f32,
+};
+
+@group(2) @binding(0) var<uniform> material: ChunkMaterial;
+
+fn x_positive_bits(bits: u32) -> u32{
+    return (1u << bits) - 1u;
+}
+
+struct Vertex {
+    @builtin(instance_index) instance_index: u32,
+    @location(0) vert_data: u32,
+    // @location(0) position: vec3<f32>,
+    // @location(0) vert_data: u32,
+    // @location(1) blend_color: vec4<f32>,
+};
+
+struct MyVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) world_normal: vec3<f32>,
+    // @location(1) world_position: vec4<f32>,
+    // @location(4) blend_color: vec3<f32>,
+    // @location(5) ambient: f32,
+};
+
+// indexing an array has to be in some memory
+// by declaring this as a var instead it works
+var<private> normals: array<vec3<f32>,6> = array<vec3<f32>,6> (
+	vec3<f32>(-1.0, 0.0, 0.0), // Left
+	vec3<f32>(1.0, 0.0, 0.0), // Right
+	vec3<f32>(0.0, -1.0, 0.0), // Down
+	vec3<f32>(0.0, 1.0, 0.0), // Up
+	vec3<f32>(0.0, 0.0, -1.0), // Back
+	vec3<f32>(0.0, 0.0, 1.0) // Forward
+);
+
+@vertex
+fn vertex(vertex: Vertex) -> MyVertexOutput {
+    var out: MyVertexOutput;
+
+    let x = f32((vertex.vert_data & 63u));
+    let y = f32((vertex.vert_data & 4032u) >> 6u);
+    let z = f32((vertex.vert_data & 258048u) >> 12u);
+    let ao = u32((vertex.vert_data & (3u << 18u)) >> 18u);
+    let normal_index = vertex.vert_data >> 21u & x_positive_bits(3u);
+
+
+    // let ambient_lerp = ambient_lerps[ao];
+    // out.ambient = ambient_lerp;
+    // out.blend_color = vec3<f32>(1.0,0.0,0.0);
+
+    let normal = normals[normal_index];
+    // out.world_normal = mesh_normal_local_to_world(normal, vertex.instance_index);
+    out.world_normal = mesh_normal_local_to_world(normal, vertex.instance_index);
+
+    let local_position = vec4<f32>(x,y,z, 1.0);
+
+    // Use vertex_no_morph.instance_index instead of vertex.instance_index to work around a wgpu dx12 bug.
+    // See https://github.com/gfx-rs/naga/issues/2416
+    var model = mesh_functions::get_model_matrix(vertex.instance_index);
+
+    let world_position = model* local_position;
+    out.position = mesh_functions::mesh_position_local_to_clip(model, local_position);
+
+    // out.world_position = mesh_functions::mesh_position_local_to_world(model, local_position);
+
+    return out;
+}
+
+#ifdef PREPASS_FRAGMENT
+@fragment
+fn fragment(in: MyVertexOutput) -> FragmentOutput {
+    var out: FragmentOutput;
+
+    out.frag_depth = in.position.z;
+#ifdef NORMAL_PREPASS
+    out.normal = vec4(in.world_normal * 0.5 + vec3(0.5), 1.0);
+#endif
+
+#ifdef DEFERRED_PREPASS
+    // There isn't any material info available for this default prepass shader so we are just writing 
+    // emissive magenta out to the deferred gbuffer to be rendered by the first deferred lighting pass layer.
+    // This is here so if the default prepass fragment is used for deferred magenta will be rendered, and also
+    // as an example to show that a user could write to the deferred gbuffer if they were to start from this shader.
+    out.deferred = vec4(0u, bevy_pbr::rgb9e5::vec3_to_rgb9e5_(vec3(1.0, 0.0, 1.0)), 0u, 0u);
+    out.deferred_lighting_pass_id = 1u;
+#endif
+
+    return out;
+}
+#endif // PREPASS_FRAGMENT
+```

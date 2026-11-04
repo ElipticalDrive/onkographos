@@ -1,0 +1,174 @@
+# Occupancy Map Generation
+
+Also called: Compute Occupancy Map, ITF Occupancy Compute
+
+## Overview
+Occupancy Map Generation is a GPU compute shader dispatch routine that produces an occupancy map from input volume, gradient, and ITF textures to enable efficient empty-space skipping in volume rendering [S1, unofficial]. It differs from its sibling, [Partitioned Distance Map Combination](1191-partitioned-distance-map-combination.md), by generating a single-resolution occupancy map rather than a continuous distance field or partitioned data [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input Volume:** 3D texture bound to image unit 0, formatted as `GL_R8` or `GL_R16` with `GL_READ_ONLY` access [S1, unofficial].
+*   **Gradient Texture:** 3D texture bound to image unit 1, formatted as `GL_RGBA8` with `GL_READ_ONLY` access [S1, unofficial].
+*   **ITF Texture:** 2D texture bound to image unit 2, formatted as `GL_RGBA8` with `GL_READ_ONLY` access [S1, unofficial].
+*   **Output Occupancy Map:** 3D texture bound to image unit 3, formatted as `GL_R8UI` with `GL_READ_WRITE` access [S1, unofficial].
+*   **Uniform Buffer (Binding 0):** 20 bytes total [S1, unofficial]. Offset 0: `reductionBlockSize` packed as `glm::vec4` (16 bytes) [S1, unofficial]. Offset 16: `useITF2D` as `int` (4 bytes) [S1, unofficial].
+
+**Data Structures:**
+The output occupancy map is bound as `GL_R8UI` with `GL_READ_WRITE` access [S1, unofficial]. The exact semantic meaning of the stored values (binary indicators vs. voxel counts) is not specified in the sources [S1, unofficial].
+
+**Steps:**
+1.  Calculate the 3D workgroup dimensions for the compute shader dispatch [S1, unofficial]. For each axis $i \in \{0, 1, 2\}$, the workgroup size $W_i$ is computed by dividing `sizeOccupancyMap[i]` by 8 and rounding up [S1, unofficial]:
+    $$ W_i = \left\lceil \frac{\text{sizeOccupancyMap}[i]}{8} \right\rceil $$
+2.  Dispatch the compute shader with the calculated workgroup counts $(W_0, W_1, W_2)$ [S1, unofficial].
+3.  Issue a full memory barrier to ensure the written image data is visible to subsequent rendering passes [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_occupancy_map(volume_tex, gradient_tex, itf_tex, occupancy_tex,
+                           size_occupancy_map, reduction_block_size, use_itf_2d):
+    """
+    Host-side dispatch logic for occupancy map generation.
+    """
+    # Step 1: Calculate workgroup dimensions
+    workgroup_x = (size_occupancy_map[0] + 7) // 8
+    workgroup_y = (size_occupancy_map[1] + 7) // 8
+    workgroup_z = (size_occupancy_map[2] + 7) // 8
+
+    # Step 2: Dispatch the compute shader
+    # bind_program(program_name) represents standard shader program binding
+    bind_program("shader_compute_occupancy")
+    # set_uniform(name, value) represents standard uniform upload
+    set_uniform("reductionBlockSize", reduction_block_size)
+    set_uniform("useITF2D", use_itf_2d)
+    # bind_image_unit(unit, tex, access) represents standard image unit binding
+    bind_image_unit(0, volume_tex, access="GL_READ_ONLY")
+    bind_image_unit(1, gradient_tex, access="GL_READ_ONLY")
+    bind_image_unit(2, itf_tex, access="GL_READ_ONLY")
+    bind_image_unit(3, occupancy_tex, access="GL_READ_WRITE")
+    # dispatch_compute(x, y, z) represents standard compute shader dispatch
+    dispatch_compute(workgroup_x, workgroup_y, workgroup_z)
+
+    # Step 3: Memory barrier
+    # memory_barrier(mask) represents standard synchronization primitive
+    memory_barrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
+```
+
+**Parameters:**
+*   `reductionBlockSize`: Controls the granularity of the occupancy reduction [S1, unofficial]. Typical value not given in the sources [S1, unofficial].
+*   `useITF2D`: Flag to select between 2D and 3D ITF lookup modes [S1, unofficial]. Typical value not given in the sources [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The output format `GL_R8UI` limits stored values to 0–255 [S1, unofficial]. If the reduction logic accumulates counts, overflow may occur for large reduction blocks [S1, unofficial].
+*   **Boundaries:** The sources do not specify padding or boundary handling for occupancy map dimensions that are not divisible by 8 [S1, unofficial].
+
+## Subtopics
+
+### Partitioned Occupancy Map Generation
+A GPU compute shader dispatch routine that generates a partitioned occupancy map from volume, gradient, and partitioned occupancy textures using a reduction block size and intensity partition bounds [S1, unofficial]. It differs from standard occupancy map generation by incorporating intensity partition boundaries to produce a partitioned map rather than a single binary map [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Input Volume:** 3D texture bound to image unit 0, formatted as `GL_R8` or `GL_R16` with `GL_READ_ONLY` access [S1, unofficial].
+*   **Gradient Texture:** 3D texture bound to image unit 1, formatted as `GL_RGBA8` with `GL_READ_ONLY` access [S1, unofficial].
+*   **Output Partitioned Occupancy Map:** 3D texture bound to image unit 2, formatted as `GL_R8UI` with `GL_READ_WRITE` access [S1, unofficial].
+*   **Uniform Buffer (Binding 0):** 24 bytes total [S1, unofficial]. Offset 0: `reductionBlockSize` packed as `glm::vec4` (16 bytes) [S1, unofficial]. Offset 16: `partition_intensity_min` as `float` (4 bytes) [S1, unofficial]. Offset 20: `partition_intensity_max` as `float` (4 bytes) [S1, unofficial].
+
+**Steps:**
+1.  Calculate the 3D workgroup dimensions by dividing `sizeOccupancyMap[i]` by 8 and rounding up for each axis $i=0,1,2$ [S1, unofficial].
+2.  Dispatch the compute shader with the calculated workgroup counts [S1, unofficial].
+3.  Issue a full memory barrier to ensure visibility of written image data [S1, unofficial].
+4.  Bind the compute shader `shader_compute_partitioned_occupancy` [S1, unofficial].
+5.  Call the helper function `_ComputePOM` passing the input volume texture, output datatype, texture gradient, output partitioned occupancy map, occupancy map size, reduction block size, and intensity partition boundaries [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_partitioned_occupancy_map(volume_tex, gradient_tex, partitioned_occupancy_tex,
+                                       size_occupancy_map, reduction_block_size,
+                                       partition_intensity_min, partition_intensity_max):
+    """
+    Host-side dispatch logic for partitioned occupancy map generation.
+    """
+    # Step 1: Calculate workgroup dimensions
+    workgroup_x = (size_occupancy_map[0] + 7) // 8
+    workgroup_y = (size_occupancy_map[1] + 7) // 8
+    workgroup_z = (size_occupancy_map[2] + 7) // 8
+
+    # Step 2: Bind the specific shader
+    bind_program("shader_compute_partitioned_occupancy")
+    set_uniform("reductionBlockSize", reduction_block_size)
+    set_uniform("partition_intensity_min", partition_intensity_min)
+    set_uniform("partition_intensity_max", partition_intensity_max)
+    bind_image_unit(0, volume_tex, access="GL_READ_ONLY")
+    bind_image_unit(1, gradient_tex, access="GL_READ_ONLY")
+    bind_image_unit(2, partitioned_occupancy_tex, access="GL_READ_WRITE")
+
+    # Step 3: Dispatch the compute shader
+    dispatch_compute(workgroup_x, workgroup_y, workgroup_z)
+
+    # Step 4: Memory barrier
+    memory_barrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
+
+    # Step 5: Call helper function
+    # _ComputePOM helper implementation details are not provided in the sources [S1, unofficial]
+```
+
+### Brick Occupancy Recomputation
+A compute shader routine where each thread block handles one brick to recompute occupancy in dynamic voxel worlds [S2, unofficial]. It differs from standard occupancy map generation by operating on fixed-size bricks and using shared memory to aggregate counts without atomic operations [S2, unofficial].
+
+**Steps:**
+1.  Launch a compute shader where each thread block handles one brick [S2, unofficial]. The block has exactly 32 threads [S2, unofficial].
+2.  Each thread reads 16 voxels from its assigned part of the brick [S2, unofficial].
+3.  Each thread counts the number of non-air voxels it read and writes this count to its own unsigned integer in shared memory [S2, unofficial].
+4.  Synchronize all threads within the block [S2, unofficial].
+5.  The first thread in the block sums the values from shared memory and writes the total to the brickmap entry for that brick [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_brick_occupancy(brick_data, brickmap):
+    """
+    GPU-side shader logic for brick occupancy recomputation.
+    Assumes 32 threads per block, each processing 16 voxels (512 voxels per brick).
+    """
+    # thread_id represents gl_LocalInvocationIndex (0-31)
+    thread_id = get_thread_id()
+    start_voxel = thread_id * 16
+    end_voxel = start_voxel + 16
+
+    count = 0
+    for v in range(start_voxel, end_voxel):
+        # 0 represents air voxel per source description [S2, unofficial]
+        if brick_data[v] != 0:
+            count += 1
+
+    # shared_counts represents a shared memory array of 32 unsigned integers
+    shared_counts = [0] * 32
+    shared_counts[thread_id] = count
+    # sync_threads() represents __syncthreads() [S2, unofficial]
+    sync_threads()
+
+    if thread_id == 0:
+        total = sum(shared_counts)
+        # brick_index represents the global index of the current brick
+        brick_index = get_brick_index()
+        brickmap[brick_index] = total
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1, unofficial][S2, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial][S2, unofficial].
+*   **Performance:** The brick recomputation is described as fast because it avoids atomic operations and uses shared memory, which is faster than global memory [S2, unofficial].
+*   **Strengths:** Efficient empty-space skipping via precomputed maps [S1, unofficial]. The brick recomputation is suitable for dynamic voxel worlds where occupancy changes frequently [S2, unofficial].
+*   **Limitations:** The occupancy map generation assumes a static volume or requires regeneration if the volume changes [S1, unofficial]. The brick recomputation is limited to fixed-size bricks and requires a specific thread block size of 32 threads [S2, unofficial].
+*   **When to use:** Use when empty-space skipping is needed for volume rendering [S1, unofficial]. Use brick recomputation when the voxel world is dynamic and changes frequently [S2, unofficial].
+
+## Background
+Occupancy Map Generation is part of the DVR_ESS_PDM project by Michael Rauter, which implements Distance Map Acceleration for volume rendering [S1, unofficial]. The concept of using occupancy maps for empty-space skipping is a common technique in volume rendering to skip over empty regions during ray casting [S1, unofficial]. Brick Occupancy Recomputation is described in the context of a voxel simulation project by Joris Rijsdijk, aimed at supporting dynamic voxel worlds in a game engine like Godot [S2, unofficial].
+
+## Sources
+[S1] CalamityMichL/DVR_ESS_PDM, https://github.com/CalamityMichL/DVR_ESS_PDM, fetched 2026-10-26 (unofficial)
+[S2] Ray-Marched Voxel Simulation - Joris Rijsdijk, https://www.jorisar.nl/blog/VoxelPlayground/, fetched 2026-10-25 (unofficial)

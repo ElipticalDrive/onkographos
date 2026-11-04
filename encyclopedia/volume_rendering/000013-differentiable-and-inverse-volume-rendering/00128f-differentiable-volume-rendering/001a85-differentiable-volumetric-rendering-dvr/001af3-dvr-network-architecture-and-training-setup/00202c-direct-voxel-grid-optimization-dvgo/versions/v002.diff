@@ -1,0 +1,155 @@
+--- v001.md
++++ v002.md
+@@ -5,13 +5,13 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   Input: `rays` tensor of shape $(N, 6)$, where the first 3 components are ray origins and the last 3 are ray directions.
+-*   Output: Rendered color image tensor of shape $(N, 3)$.
++*   Input: `rays` tensor of shape $(N, 6)$, where the first 3 components are ray origins and the last 3 are ray directions [G].
++*   Output: Rendered color image tensor of shape $(N, 3)$ [G].
+ 
+ **Data Structures:**
+-*   `t_values`: 1D tensor of shape $(num\_samples)$, storing the midpoints between sampled depths.
+-*   `min`, `max`: Buffers storing the minimum and maximum corners of the scene bounding box in scene coordinates.
+-*   `shape`: Buffer storing the dimensions of the voxel grid.
+-*   `rgb_voxel_grid`: A voxel grid data structure with shape `config.shape` and dimension 3, storing RGB color values.
+-*   `density_voxel_grid`: A voxel grid data structure with shape `config.shape` and dimension 1, storing density values.
++*   `t_values`: 1D tensor of shape $(num\_samples)$, storing the midpoints between sampled depths [S1, unofficial].
++*   `min`, `max`: Buffers storing the minimum and maximum corners of the scene bounding box in scene coordinates [S1, unofficial].
++*   `shape`: Buffer storing the dimensions of the voxel grid [S1, unofficial].
++*   `rgb_voxel_grid`: A voxel grid data structure with shape `config.shape` and dimension 3, storing RGB color values [S1, unofficial].
++*   `density_voxel_grid`: A voxel grid data structure with shape `config.shape` and dimension 1, storing density values [S1, unofficial].
+ 
+ **Parameters:**
+@@ -26,15 +26,15 @@
+ **Algorithm Steps:**
+ 1.  **Initialization:**
+-    *   Compute `depths` as linearly spaced values from `near` to `far` with `num_samples + 1` points.
+-    *   Compute `t_values` as the midpoints between adjacent `depths`: $t_i = \frac{depths_{i+1} + depths_i}{2}$.
+-    *   Initialize `rgb_voxel_grid` with shape `config.shape`, dimension 3, filled with BLUE.
+-    *   Initialize `density_voxel_grid` with shape `config.shape`, dimension 1, filled with 0.001.
+-    *   Register `background` color.
++    *   Compute `depths` as linearly spaced values from `near` to `far` with `num_samples + 1` points [S1, unofficial].
++    *   Compute `t_values` as the midpoints between adjacent `depths`: $t_i = \frac{depths_{i+1} + depths_i}{2}$ [S1, unofficial].
++    *   Initialize `rgb_voxel_grid` with shape `config.shape`, dimension 3, filled with BLUE [S1, unofficial].
++    *   Initialize `density_voxel_grid` with shape `config.shape`, dimension 1, filled with 0.001 [S1, unofficial].
++    *   Register `background` color [S1, unofficial].
+ 2.  **Forward Pass:**
+-    *   Sample points along rays using `sample_rays` with `t_values` and input rays.
+-    *   Rescale sampled points from scene coordinates to grid coordinates: $rescaled = shape \times \frac{samples - min}{max - min}$.
+-    *   Query density grid: $density = \text{ReLU}(\text{squeeze}(\text{density\_voxel\_grid}(rescaled)))$.
+-    *   Query RGB grid: $rgb = \text{clamp}(\text{rgb\_voxel\_grid}(rescaled), 0.0, 1.0)$.
+-    *   Render using `render_along_ray` with density, rgb, and background.
++    *   Sample points along rays using `sample_rays` with `t_values` and input rays [S1, unofficial].
++    *   Rescale sampled points from scene coordinates to grid coordinates: $rescaled = shape \times \frac{samples - min}{max - min}$ [S1, unofficial].
++    *   Query density grid: $density = \text{ReLU}(\text{squeeze}(\text{density\_voxel\_grid}(rescaled)))$ [S1, unofficial].
++    *   Query RGB grid: $rgb = \text{clamp}(\text{rgb\_voxel\_grid}(rescaled), 0.0, 1.0)$ [S1, unofficial].
++    *   Render using `render_along_ray` with density, rgb, and background [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -44,7 +44,47 @@
+ import torch.nn.functional as F
+ 
+-# Assuming VoxelGrid, sample_along_ray, render_along_ray, BLUE, WHITE are defined elsewhere
+-# VoxelGrid is a differentiable interpolation structure
+-# sample_along_ray(ts, origins, directions) returns points in scene coordinates
++# Standard color constants
++BLUE = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32)
++WHITE = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32)
++
++class Config:
++    near: float = 1.5
++    far: float = 3.5
++    num_samples: int = 64
++    min_corner: tuple = (-1.0, -1.0, 0.0)
++    max_corner: tuple = (1.0, 1.0, 1.0)
++    shape: tuple = (128, 128, 128)
++    background = WHITE
++
++class VoxelGrid(nn.Module):
++    def __init__(self, shape, d, fill):
++        super().__init__()
++        fill_tensor = fill if isinstance(fill, torch.Tensor) else torch.full((1, d) + shape, fill, dtype=torch.float32)
++        self.register_buffer('data', fill_tensor)
++        self.shape = shape
++
++    def forward(self, coords):
++        # coords: (N, num_samples, 3) in grid coordinates [0, shape-1]
++        # Normalize to [-1, 1] for grid_sample
++        shape_tensor = torch.tensor(self.shape, dtype=torch.float32, device=coords.device)
++        coords_norm = 2.0 * (coords / (shape_tensor - 1.0)) - 1.0
++        coords_norm = coords_norm.unsqueeze(2).unsqueeze(3)
++        return F.grid_sample(self.data, coords_norm, mode='trilinear', align_corners=False)
++
++def sample_along_ray(ts, origins, directions):
++    # ts: (N, num_samples), origins: (N, 3), directions: (N, 3)
++    return origins.unsqueeze(1) + directions.unsqueeze(1) * ts.unsqueeze(2)
++
++def render_along_ray(density, rgb, background, t_values):
++    # density: (N, num_samples), rgb: (N, num_samples, 3)
++    # Compute sample spacing
++    deltas = torch.cat([t_values[1:] - t_values[:-1], torch.tensor([1e-10], device=t_values.device)])
++    # Compute alpha and transmittance
++    alpha = 1.0 - torch.exp(-density * deltas)
++    T = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :1]), 1.0 - alpha[:, :-1]], dim=1), dim=1)
++    weights = alpha * T[:, :-1]
++    # Composite color
++    color = torch.sum(weights.unsqueeze(2) * rgb, dim=1) + T[:, -1].unsqueeze(1) * background
++    return color
+ 
+ class SimpleDVGO(nn.Module):
+@@ -77,30 +117,25 @@
+         
+         # Rescale to fit within the grid
+-        # samples shape: (N, num_samples, 3)
+-        # min/max/shape shape: (3,)
+         rescaled = self.shape * (samples - self.min) / (self.max - self.min)
+         
+         # Query Density Voxel Grid
+-        # density_voxel_grid(rescaled) returns shape (N, num_samples, 1)
+-        density = torch.squeeze(self.density_voxel_grid(rescaled))
++        density = torch.squeeze(self.density_voxel_grid(rescaled), dim=2)
+         density = F.relu(density)
+         
+         # Query RGB Voxel Grid
+-        # rgb_voxel_grid(rescaled) returns shape (N, num_samples, 3)
+-        rgb = torch.clamp(self.rgb_voxel_grid(rescaled), 0.0, 1.0)
++        rgb = torch.squeeze(self.rgb_voxel_grid(rescaled), dim=2)
++        rgb = torch.clamp(rgb, 0.0, 1.0)
+         
+         # Render
+-        return render_along_ray(density, rgb, self.background)
++        return render_along_ray(density, rgb, self.background, self.t_values)
+ 
+ def sample_rays(t_values, rays, training=True):
+     """Sample points along the rays."""
+-    # Extract ray origins and directions from rays
+     origins = rays[..., :3].to(dtype=torch.float32)
+     directions = rays[..., 3:].to(dtype=torch.float32)
+     
+-    # Add a small random scalar to t_values during training
+     if training:
+         with torch.no_grad():
+-            n = t_values.size(0)
++            n = rays.size(0)
+             random_scalar = (torch.rand(n, device=rays.device) - 0.5) / n
+             actual_ts = t_values.clone() + random_scalar
+@@ -108,5 +143,4 @@
+         actual_ts = t_values.clone()
+         
+-    # Sample along the ray
+     return sample_along_ray(actual_ts, origins, directions)
+ ```
+@@ -116,5 +150,4 @@
+ *   RGB values must be in $[0, 1]$; achieved by clamping after querying the RGB grid [S1, unofficial].
+ *   Training a NeRF can take a long time, so float32 is used everywhere to reduce GPU resources compared to float64 [S1, unofficial].
+-
+ ## Subtopics
+ 
+@@ -123,5 +156,5 @@
+ 
+ ## Operating characteristics
+-DVGO uses float32 everywhere to reduce GPU resources compared to float64, acknowledging that NeRF training takes a long time [S1, unofficial]. The method replaces the MLP with voxel grid lookups, which generally reduces memory usage and can speed up training compared to standard NeRF, although specific performance metrics are not provided in the sources. The default configuration uses a $128^3$ voxel grid and 64 samples per ray.
++DVGO uses float32 everywhere to reduce GPU resources compared to float64, acknowledging that NeRF training takes a long time [S1, unofficial]. The default configuration uses a $128^3$ voxel grid and 64 samples per ray [S1, unofficial].
+ ## Background
+ DVGO (Direct Voxel Grid Optimization) was introduced by Sun et al. [2022] [S1, unofficial]. It is a differentiable volume rendering method that combines ray sampling, coordinate rescaling, voxel grid interpolation for density and color, and volume rendering into a single forward pass [S1, unofficial].

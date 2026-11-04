@@ -1,0 +1,453 @@
+Summary The RHI test texture-shared-cuda.vulkan (CUDA↔Vulkan shared-texture interop) intermittently fails a CHECK_GE numeric-tolerance assertion (in the test harness around tests/testing.h:228). It appears to be a PR-agnostic numeric-tol...
+
+Flaky test: texture-shared-cuda.vulkan intermittently fails CHECK_GE numeric tolerance (CUDA<->Vulkan shared-texture interop) · Issue #787 · shader-slang/slang-rhi · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Flaky test: texture-shared-cuda.vulkan intermittently fails CHECK_GE numeric tolerance (CUDA<->Vulkan shared-texture interop) #787
+New issue
+Copy link
+New issue
+Copy link
+Open
+Testing
+#881
+Open
+Flaky test: texture-shared-cuda.vulkan intermittently fails CHECK_GE numeric tolerance (CUDA<->Vulkan shared-texture interop)#787
+Testing
+#881
+Copy link
+Assignees
+Milestone
+Q3 2026 (Summer)
+Description
+nv-slang-bot
+bot
+opened on Jul 1, 2026
+Issue body actions
+Summary
+The RHI test texture-shared-cuda.vulkan (CUDA↔Vulkan shared-texture interop) intermittently fails a CHECK_GE numeric-tolerance assertion (in the test harness around tests/testing.h:228). It appears to be a PR-agnostic numeric-tolerance flake, not a real regression.
+Observed in shader-slang/slang CI (which runs the vendored slang-rhi test suite) on 3 unrelated PRs over ~1 week:
+Emit conservative-depth layout qualifier for SV_DepthGreaterEqual/LessEqual on GLSL targets slang#11693 (2026-06-24)
+Fix #11731: emit UniformMemory semantics for atomics on legacy Uniform storage class slang#11735 (2026-06-25)
+Add diagnostic warning levels (-Wall/-Wextra/-Wpedantic) slang#11812 (2026-07-01)
+Each occurrence: 965/966 rhi cases pass, only texture-shared-cuda.vulkan fails, and only on windows-release-gpu-rhi — the same rhi suite passes on windows-debug-gpu-rhi and every other platform. A rerun clears it. The three PRs are unrelated (varied frontend / CI / refactor changes that cannot affect CUDA↔Vulkan interop), which is what confirms it's a flake rather than a regression.
+Impact
+Recurring windows-release-gpu-rhi reruns across unrelated shader-slang/slang PRs — each occurrence costs a rerun cycle.
+Suggested fix
+Either widen the CHECK_GE numeric tolerance for the CUDA↔Vulkan interop comparison (if the intermittent miss is within acceptable numeric error), or quarantine / mark-flaky texture-shared-cuda.vulkan on that config until the tolerance is right-sized. A maintainer familiar with the expected interop numeric bounds should choose the tolerance.
+Notes
+Surfaced from CI-health monitoring of shader-slang/slang; the specific failing runs are on the referenced PRs' test-slang-rhi / windows-release-gpu-rhi jobs.
+🤖 Filed by an automated Slang CI coworker — may be inaccurate. A human maintainer should verify run-level evidence before acting.
+Activity
+Next
+jhelferty-nv commented on Jul 2, 2026
+jhelferty-nv
+on Jul 2, 2026
+Contributor
+More actions
+@nv-slang-bot Can you investigate and create a PR to fix this? Prefer the route of widening the tolerance.
+👀React with 👀1Reacted by nv-slang-bot
+jhelferty-nv
+self-assigned this
+on Jul 2, 2026
+jhelferty-nv
+added the
+Testing
+issue type on Jul 2, 2026
+jhelferty-nv
+added
+Dev Reviewed
+on Jul 2, 2026
+nv-slang-bot commented on Jul 2, 2026
+nv-slang-botBot
+on Jul 2, 2026 – with nv-slang-bot
+ContributorAuthor
+More actions
+Investigated and opened a fix (draft, held for maintainer review).
+Status: Fix up as draft PR Widen fuzzy float comparison tolerance for texture-shared-cuda flake #791 — held for maintainer review (not marked ready).
+Link: Widen fuzzy float comparison tolerance for texture-shared-cuda flake #791 (Fixes #787).
+Verdict: Confirmed the PR-agnostic numeric near-miss. The -0.01f fuzzy tolerance the CHECK_GE uses lives in the shared comparator compareResultFuzzy (tests/testing.h), used by every float compare in the suite. Rather than loosen it globally, I scoped a wider tolerance to this test only: an optional tolerance param (default unchanged at 0.01f) threaded through the float compareComputeResult overloads, and texture-shared-cuda's two read-back comparisons pass 0.05f (kInteropTolerance). Every other test stays at ±0.01; 0.05f still catches real interop breakage since the expected channels are coarse (0/0.5/1).
+Next-action: Maintainer review + right-size kInteropTolerance if the exact failing delta is known (it's a single constant in test-texture-shared.cpp), then flip ready-for-review.
+Blocker: None. I could not obtain the exact failing delta — the failing runs are on shader-slang/slang Windows GPU jobs and this Windows-only CUDA↔Vulkan interop test can't be reproduced in a Linux container — so 0.05f is a conservative estimate (the PR states the uncertainty for right-sizing).
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+jhelferty-nv commented on Jul 22, 2026
+jhelferty-nv
+on Jul 22, 2026
+Contributor
+More actions
+@nv-slang-bot Actually, can you check if this is a symptom of a missing synchronization? It showing up in release but not debug is suspicious.
+👀React with 👀1Reacted by nv-slang-bot
+jhelferty-nv
+added this to the Q3 2026 (Summer) milestone on Jul 22, 2026
+nv-slang-bot commented on Jul 22, 2026
+nv-slang-botBot
+on Jul 22, 2026 – with nv-slang-bot
+ContributorAuthor
+More actions
+Investigation: is this a missing-synchronization symptom?
+Short answer: yes — the evidence strongly supports the missing-sync hypothesis over the numeric-tolerance framing. The release-but-not-debug asymmetry is the tell you flagged, and it fits a race, not a rounding error.
+Status: Investigated the CUDA↔Vulkan shared-texture interop path at HEAD 1afb838. The test's cross-API hand-off (test-texture-shared.cpp) relies solely on a host-side producer wait — srcDevice->getQueue(Graphics)->waitOnHost() (line 119) — with no imported/waited external semaphore and no VK_QUEUE_FAMILY_EXTERNAL ownership transfer. getSharedHandle (vk-texture.cpp:64) only exports the memory handle; the CUDA import (cuda-texture.cpp:548 cuImportExternalMemory + cuda-texture.cpp:637 cuExternalMemoryGetMappedMipmappedArray) and CUDA readback (cuda-device.cpp:525 cuMemcpy3D / cuda-device.cpp:538 cuMemcpy) perform no cuStreamSynchronize/semaphore wait. cuWaitExternalSemaphoresAsync is loaded but never called in production code.
+Link: Traced against the sibling surface/swapchain path (cuda-surface.cpp), which already carries the cross-API sync machinery — exported Vulkan timeline semaphore imported into CUDA (:636), VK_QUEUE_FAMILY_EXTERNAL release/acquire ownership barriers (:847,:1043,:1107), plus a cuStreamSynchronize-based host-sync workaround (:992; the GPU-side CUDA→Vulkan semaphore signal is currently #if 0'd at :980 with a note that "the semaphore approach doesn't currently work"). So the ownership-transfer + timeline-semaphore mechanism already exists in this backend and is treated as required for cross-API correctness — the test/interop path just doesn't use any of it. Corroborating that the maintainers already regard this interop synchronization as unfinished: the sibling test-buffer-shared.cpp:40 carries // TODO: Implement actual synchronization (and not this hacky solution) — an explicit in-tree acknowledgment that the shared-resource path lacks real cross-API sync.
+Verdict: Missing cross-API synchronization, not a numeric flake — this is the conclusion the source supports; the release/debug and variant details below are the why-it-fits hypotheses, not independently proven. Proven from source: the copy is a bit-exact float4 copy (trivial-copy.slang) of exactly-representable values {0.0, 0.5, 1.0} in RGBA32Float, so a correctly-synchronized run must yield delta exactly 0.0 — there is no filtering/format-conversion/rounding source that legitimately produces a ~0.01 miss; and the Vulkan→CUDA path performs its cross-API hand-off with no external-semaphore wait and no VK_QUEUE_FAMILY_EXTERNAL ownership transfer (Status bullet). A ±0.01 tolerance therefore cannot make the synchronization correct — it only conceals some near-expected wrong values (a stale/incompletely-visible read can still miss by far more than 0.01 and fail anyway), i.e. it masks rather than fixes. Hypothesis (fits, not confirmed — no failing CI log in hand): the release-but-not-debug, rerun-clears, PR-agnostic pattern is race-shaped, and debug builds plausibly hide it via the validation layer / extra serialization / slower timing; and if only the .vulkan variant fails (not D3D12→CUDA), that would further point at the Vulkan-sharing hand-off over a CUDA-side numeric issue — but I have not verified the per-variant failure breakdown against run logs. ⚠️ This reverses the premise of my earlier draft PR Widen fuzzy float comparison tolerance for texture-shared-cuda flake #791 (tolerance-widening): on this analysis that PR masks a real bug and should be held/closed rather than merged.
+Next-action: ready-for-fix. Proper fix = give the shared-texture interop path real cross-API sync, analogous to the surface path's machinery but for the Vulkan→CUDA direction: (1) have the Vulkan producer export/signal a timeline semaphore, import it into CUDA (cuImportExternalSemaphore) and wait on it (cuWaitExternalSemaphoresAsync — currently loaded but unused) before the CUDA read, instead of relying on the host-only waitOnHost; and (2) perform the Vulkan→VK_QUEUE_FAMILY_EXTERNAL queue-family ownership-transfer barrier on the shared image (it is VK_IMAGE_TILING_OPTIMAL, so an ownership transfer is expected). The cleanest home is a shared IDevice interop-sync primitive so test-buffer-shared.cpp's TODO is retired at the same time. A maintainer should confirm the intended scope (RHI-level API vs. test-only helper) before I hand this to the fixer.
+Blocker: I could not reproduce or capture the failing delta locally — this is a Windows-only CUDA↔Vulkan same-GPU interop test and my environment is a Linux container with no matching GPU. One thing worth confirming from a failing CI log to fully close root-cause: which compare site trips — the direct texture readback (test-texture-shared.cpp:133) or the post-compute buffer (:136) — and the failing index/value. Both are downstream of the same missing hand-off, so the fix is the same either way, but the log would confirm the exact hazard point.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+jhelferty-nv commented on Jul 22, 2026
+jhelferty-nv
+on Jul 22, 2026
+Contributor
+More actions
+Does RHI not have existing primitives that can be used for the interop?
+What RHI-level API fix would you propose?
+👀React with 👀1Reacted by nv-slang-bot
+nv-slang-bot commented on Jul 22, 2026
+nv-slang-botBot
+on Jul 22, 2026 – with nv-slang-bot
+ContributorAuthor
+More actions
+Good questions — I dug into the RHI surface. Short version: RHI already has the right synchronization primitive (IFence, a shareable timeline-valued fence), and Vulkan/D3D12 already implement it end-to-end. There are really two distinct gaps: (a) the CUDA fence gap — CUDA's IFence is a host-value stub and can't import a shared handle; and (b) a cross-API resource-ownership gap — the generic shared-texture path performs no Vulkan queue-family ownership transfer to/from VK_QUEUE_FAMILY_EXTERNAL, and RHI exposes no API for it. So the fix is mostly reuse of IFence for (a), plus new surface for the import direction and for (b).
+1. What already exists
+IFence (include/slang-rhi.h:1640) is a timeline-valued fence with cross-API sharing baked into its contract:
+FenceDesc.isShared (:1635) + IFence::getSharedHandle() (:1652) — create an exportable fence and get an OS handle for it.
+getCurrentValue/setCurrentValue (:1646,:1649) — the timeline value (Vulkan backs this with a VK_SEMAPHORE_TYPE_TIMELINE semaphore, D3D12 with an ID3D12Fence).
+SubmitDesc.waitFences / signalFences (+ values) (:2828–:2833) — GPU-side wait/signal at submit time.
+IDevice::createFence (:3699), host-side IDevice::waitForFences (:3710).
+And both graphics backends already implement it fully:
+Vulkan — isShared creates an exportable VK_SEMAPHORE_TYPE_TIMELINE semaphore (src/vulkan/vk-fence.cpp:32,:44,:56), getSharedHandle exports it via vkGetSemaphoreWin32HandleKHR/vkGetSemaphoreFdKHR (:112), and submit does a real timeline vkQueueSubmit wait/signal.
+D3D12 — D3D12_FENCE_FLAG_SHARED (src/d3d12/d3d12-fence.cpp:32), CreateSharedHandle (:82), queue Wait/Signal.
+So on the producer (Vulkan) side there's nothing to add to the fence implementation itself (the ownership-transfer piece below is separate).
+2. Why the CUDA path can't use it today
+Three concrete synchronization gaps on the CUDA side (the ownership gap in §3 is separate):
+CUDA IFence is a host-value stub, not a real GPU semaphore. getSharedHandle returns SLANG_E_NOT_AVAILABLE (src/cuda/cuda-fence.cpp:38); getCurrentValue/setCurrentValue just read/write an in-process m_currentValue under a mutex (:17–:29). There is no backing CUexternalSemaphore.
+CUDA submit doesn't actually wait on the GPU. CommandQueueImpl::submit has a literal // TODO: wait for fence (src/cuda/cuda-command.cpp:1249) that only compares the host value and SLANG_FAILs if unmet; the signal path just calls setCurrentValue (:1306). No cuWaitExternalSemaphoresAsync/cuSignalExternalSemaphoresAsync (both are loaded in cuda-driver-api.cpp but never called in production; the surface path uses cuImportExternalSemaphore + a host-side cuStreamSynchronize workaround rather than the async wait — see below).
+No import entry point in the public API. Textures and buffers have createTextureFromSharedHandle / createBufferFromSharedHandle (include/slang-rhi.h:3417,:3444), but there is no createFenceFromSharedHandle — so even a correctly-exported Vulkan timeline fence has no way to become a CUDA-side IFence.
+(Corroboration this is known-unfinished: tests/test-buffer-shared.cpp:40 — // TODO: Implement actual synchronization (and not this hacky solution).)
+3. Proposed RHI-level fix
+Shape: reuse the existing IFence for the synchronization half; the new surface is a fence-import entry point plus a decision on how ownership transfer is exposed. No new fence concept is needed.
+(sync — mostly reuse) Fence import + wire CUDA's existing SubmitDesc fence fields. Add a fence-import entry point (createFenceFromSharedHandle(NativeHandle, const FenceDesc&, IFence**)) — textures/buffers already have the analogous method, fences don't — implemented on CUDA via cuImportExternalSemaphore (the surface path does exactly this at src/cuda/cuda-surface.cpp:636), storing a real CUexternalSemaphore. Then make CUDA's submit honor waitFences/signalFences for such fences by calling cuWaitExternalSemaphoresAsync / cuSignalExternalSemaphoresAsync on the imported semaphore + value, replacing the // TODO: wait for fence host-value check. Vulkan/D3D12 already do the timeline wait/signal, so this is CUDA-only for the sync direction.
+(ownership transfer — a genuine second gap, not just a detail). The shared image is VK_SHARING_MODE_EXCLUSIVE + VK_IMAGE_TILING_OPTIMAL, so correctness also needs a Vulkan queue-family release barrier to VK_QUEUE_FAMILY_EXTERNAL (with CUDA's external-memory access coordinated by that transfer + the semaphore). RHI's generic texture-barrier surface does not currently express queue-family ownership, and the only place this is done is the surface path's hand-written Vulkan barriers (src/cuda/cuda-surface.cpp:847/:1043/:1107) — it is not reachable through the public shared-texture path today. So this needs either (i) a small RHI ownership-transfer/import contract on the shared texture, or (ii) to be handled internally by the shared-texture creation/interop path. I'd want your steer on which. The semaphore wait is the load-bearing part for the observed flake, but leaving ownership unresolved would be technically incomplete under the spec.
+With both, the shared-texture path (and test-texture-shared.cpp) would replace the host-only srcDevice->…->waitOnHost() hand-off with: Vulkan signals a shared timeline IFence after the upload → CUDA imports it and submits its readback with that fence in waitFences, with the ownership transfer applied around the shared image. The test-buffer-shared.cpp TODO is retired by the same primitives.
+ABI note (matters for the API shape): IDevice/IFence are COM-style interfaces keyed by a fixed UUID, so appending a method to IDevice in place is not transparently ABI-safe — an older implementation queried by the same UUID won't have the new slot. The clean options are a new versioned/derived interface (e.g. IDevice1 / a small interop interface with its own UUID) carrying createFenceFromSharedHandle, or — if you'd rather not touch the public vtable yet — a test-only helper that does the CUDA import to unblock the flake first and defers the public API. My recommendation is the real (versioned) API, since this is a genuine cross-backend capability gap rather than a test artifact — but the interface-versioning choice is yours.
+Next-action: tell me which shape you want — (A) versioned/derived interface with createFenceFromSharedHandle + CUDA cuWait/SignalExternalSemaphoresAsync + an ownership-transfer contract, or (B) test-only helper first — and how you want ownership transfer surfaced, and I'll hand a concrete implementation brief to the fixer. Draft PR #791 (tolerance-widening) stays parked as masking in the meantime.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+jhelferty-nv commented on Jul 22, 2026
+jhelferty-nv
+on Jul 22, 2026
+Contributor
+More actions
+@nv-slang-bot Hold/close #791. Don’t widen tolerance.
+Don’t add a new public interop-sync API yet.
+Prefer a minimal correctness fix for shared texture/buffer tests:
+After Vulkan/D3D12 producer writes, do an image/buffer release toward VK_QUEUE_FAMILY_EXTERNAL (or D3D12 equivalent) when TextureUsage::Shared / BufferUsage::Shared.
+Keep host waitOnHost() (or make createTexture wait after init upload).
+Align texture-shared with the intended buffer-shared src-side flush before CUDA read.
+Only then consider promoting surface-style external-semaphore machinery to a shared RHI helper — and treat CUDA shared-fence import as a separate scoped feature, because docs/api.md currently marks it unavailable.
+👀React with 👀1Reacted by nv-slang-bot
+nv-slang-bot commented on Aug 5, 2026
+nv-slang-botBot
+on Aug 5, 2026 – with nv-slang-bot
+ContributorAuthor
+More actions
+Opened a draft PR implementing the minimal correctness fix per your scope.
+Status: Fix up as draft PR Fix #787: ping-pong queue-family ownership for shared resources #812 (Fixes #787), held pending review — the queue-family ownership release, not a tolerance change. Superseded PR Widen fuzzy float comparison tolerance for texture-shared-cuda flake #791 stays closed.
+Link: Fix #787: ping-pong queue-family ownership for shared resources #812 — 7 files, +108/−6, label pr: non-breaking.
+Verdict: Root cause confirmed as the missing hand-off: the VK_SHARING_MODE_EXCLUSIVE + VK_IMAGE_TILING_OPTIMAL shared image was passed to the CUDA consumer with only a host-side waitOnHost() and no release to VK_QUEUE_FAMILY_EXTERNAL. The fix releases the image/buffer toward VK_QUEUE_FAMILY_EXTERNAL after the producer's init upload when TextureUsage::Shared / BufferUsage::Shared is set, keeping the layout unchanged so contents are preserved (unlike the surface path's contents-discarding UNDEFINED). D3D12 equivalent: a shared texture is transitioned to D3D12_RESOURCE_STATE_COMMON; device-local buffers are already created in COMMON and decay back after the waited copy, so they need no transition. waitOnHost() is retained, and createTexture/createBuffer wait for the release they emit. One deviation worth your eye: for point 3 I removed test-buffer-shared.cpp's source-side readback (and its // TODO: Implement actual synchronization) rather than adding the mirror of it to texture-shared — once a resource is released to the external queue family, reading it back from Vulkan would need an acquire that the generic barrier path cannot express, so the readback is no longer valid. Happy to invert that if you intended a literal source-side readback.
+Next-action: Review of Fix #787: ping-pong queue-family ownership for shared resources #812. Draft CI is running (pre-commit already green). The release-only half is deliberate per your scope — the CUDA-side acquire / cuImportExternalSemaphore fence import remains the separate scoped feature, and no surface machinery was promoted.
+Blocker: A verification gap you should weigh: texture-shared-cuda / buffer-shared-cuda sit inside #if SLANG_WIN64 and need same-adapter CUDA+Vulkan/D3D12, so the failing repro could not be exercised here (Linux container — the cases aren't even compiled into the test binary). The D3D12 hunk likewise had no local compile coverage, since that backend isn't built on Linux. Local evidence is the Vulkan build plus regressions (texture 202/202, buffer 71/71, no failures); the load-bearing check is texture-shared-cuda.vulkan on windows-release-gpu-rhi no longer producing the intermittent non-zero delta.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+nv-slang-bot
+added a commit that references this issue on Aug 5, 2026
+Fix #787: release shared resources to external queue family
+...
+This issue will close once commit 03e06be is merged into the 'main' branch.
+03e06be
+nv-slang-bot commented on Aug 7, 2026
+nv-slang-botBot
+on Aug 7, 2026 – with nv-slang-bot
+ContributorAuthor
+More actions
+Two further occurrences of this bucket from shader-slang/slang CI, extending the three listed in the
+issue body (#11693, #11735, #11812):
+when
+slang PR
+job
+detail
+2026-07-23
+shader-slang/slang#12201
+test-windows-debug-cl-x86_64-gpu
+sharedBufferVulkanToCUDA.internal — the buffer counterpart of the same CUDA↔Vulkan interop handoff. Notable because it evicted the PR from the merge queue; it auto-requeued and merged ~34 min later with no code change.
+2026-07-28
+shader-slang/slang#12225
+test-windows-debug-cl-x86_64-gpu-rhi
+texture-shared-cuda.vulkan, single subtest, d3d12 variant green. Cleared on rerun (attempt 2 succeeded).
+So the pattern in the issue body still holds — PR-agnostic, single subtest, rerun clears it — and it
+now spans ~5 weeks across 5 unrelated slang PRs. The #12201 case adds a cost data point beyond
+rerun cycles: it can bounce a PR out of the merge queue.
+One observation on fix direction, offered tentatively since the issue body raises widening the
+CHECK_GE tolerance as one option: the comparison here is a bit-exact copy of data across the
+shared texture/buffer, so a numeric-tolerance mismatch is a bit surprising as a root cause — a value
+that is sometimes correct and sometimes reads as zero/stale looks more like the readback racing
+the producing device's writes than like accumulated numeric error. Consistent with that,
+tests/test-buffer-shared.cpp:40 carries:
+```
+// TODO: Implement actual synchronization (and not this hacky solution)
+```
+with the handoff relying on host-side waitOnHost() (test-buffer-shared.cpp:67,
+test-texture-shared.cpp:44,119) rather than an external-semaphore wait or a queue-family ownership
+transfer. If that reading is right, widening the tolerance would mask the race rather than fix it.
+Deferring entirely to whoever owns the interop path — flagging it only because the "Dev Reviewed"
+label suggests a decision may be near.
+Unrelated but adjacent, so noting it to prevent conflation: I filed #816 for a different CUDA
+interop flake (sharedBufferD3D12ToCUDA, cuMemAllocHost → 208 CUDA_ERROR_ALREADY_MAPPED in the
+page allocator). It does not share a code path with this issue — that one is the host-pinned heap,
+this one is cuImportExternalMemory. I had initially suspected they shared a root cause; the code
+says they don't.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+jhelferty-nv commented on Sep 16, 2026
+jhelferty-nv
+on Sep 16, 2026
+Contributor
+More actions
+The Vulkan CUDA shared-texture flake is missing queue-family transfer, not numeric error. Shared images stay VK_SHARING_MODE_EXCLUSIVE on the graphics queue; waitOnHost() is only vkQueueWaitIdle. CUDA then reads an image Vulkan still owns. D3D12 has no exclusive-family transfer, so it already works.
+#812 went the wrong way: create-time release gated on Shared+initData makes Vulkan and D3D12 mean different things and only covers a one-shot initialized create.
+Policy (existing API only — no new entry points)
+Same contract on Vulkan and D3D12:
+One allocation. Producer keeps it after create*.
+Another API may access it only after the producer’s waitOnHost() or after waiting on a shared IFence the producer signaled.
+Producer may use it again after the matching wait. Ping-pong is required.
+Vulkan: release to VK_QUEUE_FAMILY_EXTERNAL and acquire back inside submit / waitOnHost / fence signal, not at create time. Reuse the per-frame pattern in src/cuda/cuda-surface.cpp.
+D3D12: no behavior change. Today’s Shared + getSharedHandle + CUDA import + continued producer use must keep working.
+Document this next to the Shared flags and FenceDesc::isShared in include/slang-rhi.h.
+Tests
+texture-shared-cuda already calls waitOnHost() before getSharedHandle. Fix the implementation; do not change that test.
+Extend buffer-shared-cuda to pin ping-pong: after CUDA writes {1,2,3,4} and waits, read the same values back on the producer. Host waits on both queues are enough. Drop the producer-readback hack it currently uses instead of a real wait.
+Out of scope: createFenceFromSharedHandle for CUDA. CUDA IFence is a host counter (getSharedHandle → NOT_AVAILABLE). GPU-side CUDA waits stay on the CUDA driver, as SlangPy does.
+@nv-slang-bot Please open a PR that implements this policy and the buffer-shared-cuda ping-pong check.
+👀React with 👀1Reacted by nv-slang-bot
+5 remaining items
+Load more
+nv-slang-bot commented on Sep 23, 2026
+nv-slang-botBot
+on Sep 23, 2026 – with nv-slang-bot
+ContributorAuthor
+More actions
+@jhelferty-nv Here is the explicit Shared→External transition proposal we discussed — the separate alternative to #812's register-all. Proposal only, no PR/branch/draft. The four questions at the end are genuinely yours to decide; #812's green HEAD stays untouched and held as the parallel option.
+Sketch — explicit Shared→External ownership API (slang-rhi #787 alternative)
+Status: PROPOSAL awaiting @jhelferty-nv's confirmation. No PR, branch, or draft exists. This is the "separate alternative" from comment 5782267774 — a design to compare against PR #812's internal register-all (which stays as-is at 6e040d1, held). Nothing here touches #812.
+1. Problem restated
+A Shared Vulkan resource is VK_SHARING_MODE_EXCLUSIVE; the external API (CUDA) sees the producer's writes only after a queue-family ownership transfer (QFOT) to VK_QUEUE_FAMILY_EXTERNAL, and the producer sees CUDA's writes only after transferring back. In #812 this transfer is implicit — waitOnHost() releases everything owned, submit()/readBuffer() reacquire. The ask: make the transfer (and acquire-back) an explicit public API so the app says exactly when and what transfers, rather than inferring it from waitOnHost/submit.
+2. Proposed surface (recommended: Approach A)
+A brand-new COM interface with its own SLANG_COM_INTERFACE(...) GUID, queried from ICommandQueue via queryInterface — the standard slang-rhi COM extension mechanism (ISlangUnknown::queryInterface + a fresh interface GUID; the SLANG_COM_INTERFACE macro generates the matching getTypeGuid()). Because it is a new interface, no existing vtable, enum, or struct is touched. It is present only on backends with exclusive-family semantics (Vulkan); queryInterface returns SLANG_E_NO_INTERFACE elsewhere (D3D12/Metal/CUDA need no transfer), and the debug-layer queue forwards the query.
+```
+// New interface — its own GUID, obtained via ICommandQueue::queryInterface. Not implemented by clients.
+class IExternalMemoryQueue : public ISlangUnknown
+{
+    SLANG_COM_INTERFACE(/* fresh GUID */);
+public:
+    // Transfer the given Shared resources from this producer queue's family to the external consumer
+    // (VK_QUEUE_FAMILY_EXTERNAL). The QFOT barrier is submitted on THIS queue and this call WAITS for
+    // it to complete before returning; when it returns, the release has executed and the external API
+    // may access the memory (no further Vulkan host wait is needed). Every resource must be a
+    // same-device IBuffer/ITexture created with BufferUsage/TextureUsage::Shared; a null, duplicate,
+    // non-Shared, or other IResource subtype is rejected with SLANG_E_INVALID_ARG and ownership is
+    // left unchanged (all-or-nothing). Batched: one queue submission for the whole list.
+    virtual SLANG_NO_THROW Result SLANG_MCALL releaseToExternal(IResource* const* resources, uint32_t count) = 0;
+
+    // Reclaim the given Shared resources from the external consumer back to this producer queue's
+    // family. Submitted on THIS queue and WAITS for completion; when it returns the producer owns them
+    // again and may read/submit. The caller MUST have ordered the external work before calling this
+    // (the consumer's own completion, e.g. a CUDA host sync, or the fenced variant below). Same input
+    // rules as releaseToExternal.
+    virtual SLANG_NO_THROW Result SLANG_MCALL acquireFromExternal(IResource* const* resources, uint32_t count) = 0;
+};
+```
+Rationale for the shape: IResource* (shared base of IBuffer/ITexture, slang-rhi.h:727) lets one pair of methods cover buffers and textures with no duplication; queue-level because the QFOT is recorded + submitted on a queue and its ordering is relative to that queue's submit/waitOnHost; batched list because the internal impl already coalesces all barriers into one submission (one queue submission per hand-off, not per resource); synchronous (wait-for-completion) so the app doesn't need a separate waitOnHost to know the transfer landed.
+Fence-ordered variant — a v1 decision I need from you
+The core above orders the acquire against the consumer via the app's host sync (the app ensures CUDA finished before calling acquireFromExternal). The deferred fence-signal idea maps onto a variant that folds the release into the submission that signals a shared fence (and an acquire that waits one) — letting the hand-off order by a FenceDesc::isShared fence with no host stall:
+```
+virtual ... releaseToExternal(IResource* const* resources, uint32_t count, IFence* signalFence, uint64_t signalValue) = 0;
+virtual ... acquireFromExternal(IResource* const* resources, uint32_t count, IFence* waitFence,  uint64_t waitValue)  = 0;
+```
+ABI constraint (important): methods can only be added to IExternalMemoryQueue before it first ships — appending to a released COM interface breaks older implementations against newer callers. So the fence surface must be decided now (included in v1, e.g. as these overloads), or shipped later as a separate new-GUID interface (e.g. IExternalMemoryQueueFenced). Question: fence variant in v1, or wait-for-completion core first + a versioned fenced interface later? I lean toward deciding it now.
+3. Composition with existing concepts (no parallel "shared")
+Reuses BufferUsage::Shared / TextureUsage::Shared unchanged — still how a resource opts into exportable, EXCLUSIVE-mode memory. The new methods reject a non-Shared resource.
+getSharedHandle / create*FromSharedHandle unchanged — the export/import path is orthogonal; the new API governs only ownership timing, not handle plumbing.
+FenceDesc::isShared is the natural ordering primitive for the fenced variant — no new fence concept.
+No new enum, no new struct, no change to getQueue/submit/waitOnHost signatures.
+4. Usage example — buffer-shared-cuda ping-pong, explicit
+```
+auto queue = srcDevice->getQueue(QueueType::Graphics);
+ComPtr<IExternalMemoryQueue> ext;
+queue->queryInterface(IExternalMemoryQueue::getTypeGuid(), (void**)ext.writeRef());   // null on non-Vulkan
+
+IResource* res[] = { srcBuffer };
+if (ext) ext->releaseToExternal(res, 1);   // producer -> EXTERNAL; returns only after the transfer has executed
+srcBuffer->getSharedHandle(&handle);        // hand off to CUDA — it may access immediately (no extra waitOnHost)
+
+// ... CUDA imports handle, reads {0,1,2,3}, writes {1,2,3,4}, and the app host-syncs CUDA ...
+
+if (ext) ext->acquireFromExternal(res, 1);  // EXTERNAL -> producer; returns owning it again
+srcDevice->readBuffer(srcBuffer, 0, size, out);   // now observes {1,2,3,4}
+```
+Contrast #812 (same result, implicit): waitOnHost() alone releases, readBuffer() alone reacquires — the app never names the resource or the transfer. (With the fenced variant, the release would take (sharedFence, value) and the app would order CUDA on that fence instead of a host sync.)
+5. Relationship to #812's register-all
+The explicit API is the lower-level primitive; register-all is a consumer of it, not a competitor. #812's implicit hooks (releaseSharedToExternal on waitOnHost, acquireSharedForSubmit on submit, per-buffer acquire in readBuffer) call the same internal QFOT-barrier helpers this interface would expose.
+Why the explicit API is correct-by-construction on the exact axis where implicit register-all is a standing bet. #812's register-all-vs-precise-acquire discussion exists entirely because RHI is inferring which resources to reacquire before the producer touches them — and that inference has to enumerate every way a Shared resource can be referenced. Each probe grew that set (direct submit args → tracked objects → and it would extend again to any new formation path, e.g. native handles / bindless), so its correctness rests on the inferred set staying complete forever. The explicit API removes the inference: the app names exactly what transfers, so RHI enumerates nothing and there is no completeness set to keep whole. The fragility that drives the #812 fork simply does not exist in this design. The honest counterweight: explicit-only moves the "don't touch an externally-owned resource" obligation onto the app, enforced by documentation rather than by RHI — you trade an inference RHI can silently get wrong for a contract the app can visibly violate.
+Two shippable shapes, your choice:
+(a) Explicit-only: ship IExternalMemoryQueue; drop the implicit register-all. Apps name transfers precisely; no hidden waitOnHost side-effect, no device registry, and — per the argument above — no inferred acquire set whose completeness RHI must guarantee. The device-address/bindless prohibition from Fix #787: ping-pong queue-family ownership for shared resources #812 is then no longer required for correctness (there is no implicit reacquire to keep complete), though the contract must still document that accessing a resource while it is externally-owned is invalid — including via a baked device address or bindless handle — since in this mode nothing in RHI enforces it.
+(b) Both layers: ship the explicit primitive and keep register-all as the implicit default built on top (the waitOnHost/submit hooks call the primitive internally). Convenience for apps that don't manage it; explicit control for those that do — but (b) keeps the inferred-completeness bet for the implicit path.
+My read: (a) is the cleaner "explicit" answer and dissolves #812's completeness burden entirely; (b) preserves the zero-code-change ergonomics #812 gives existing apps at the cost of retaining that bet for the default path. Product call for you.
+6. ABI-safety rationale (per new bit of surface)
+New surface
+Why ABI-safe
+IExternalMemoryQueue (new interface, own SLANG_COM_INTERFACE GUID)
+No existing vtable/enum/struct modified. Obtained via queryInterface; old clients unaffected, new clients feature-detect by a null / SLANG_E_NO_INTERFACE return.
+releaseToExternal / acquireFromExternal (+ any fenced overloads decided in v1)
+Declared together within the brand-new vtable, so no ordering constraint against any shipped interface. Adding methods after this interface ships is NOT safe — that requires a new-GUID interface (see §2).
+Reuse of Shared flags, getSharedHandle, FenceDesc
+No change to existing enums/structs/vtables at all.
+No enum insertion (no renumber risk); no change to IBuffer/ITexture/IDevice/ICommandQueue/IFence vtables. Fully pr: non-breaking.
+7. Alternatives considered (not recommended)
+Approach B — ISharedResource queried from IBuffer/ITexture, releaseToExternal(ICommandQueue*) per resource. More OO (resource is the subject) but chatty: N calls / N submissions for N resources, defeating the batching the internal impl relies on. Rejected for the batch API above.
+Approach C — extend SubmitDesc with release/acquire resource lists. SubmitDesc has no size/version field, so appending members is not ABI-safe (a newer library would read past an older caller's struct) — it would need a whole new descriptor. It also couples ownership to submit and still needs a separate path for a standalone hand-off with no user work. Rejected.
+8. Open questions for @jhelferty-nv (before any PR)
+Fence-ordered variant in v1, or wait-for-completion core first + a versioned fenced interface later? (§2 — must be decided pre-ship for ABI reasons.)
+Explicit-only (a) or both-layers (b) relative to Fix #787: ping-pong queue-family ownership for shared resources #812? (§5)
+Interface name — IExternalMemoryQueue? (alt: ISharedResourceQueue, IQueueExternalOwnership.)
+Queue-level (recommended) vs a device-level IDevice-queried variant?
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+jhelferty-nv commented on Sep 23, 2026
+jhelferty-nv
+on Sep 23, 2026
+Contributor
+More actions
+@nv-slang-bot Please implement this. Do not invent another API.
+API
+Append to ICommandEncoder tail, keep existing GUID:
+```
+handOffShared(uint32_t resourceCount, IResource* const* resources, ICommandQueue* destQueue)
+takeOverShared(uint32_t resourceCount, IResource* const* resources, ICommandQueue* srcQueue)
+```
+Resources: Shared usage, same device as this encoder’s queue.
+Other owner: ICommandQueue* (CUDA device’s graphics queue in the tests). Unwrap debug wrappers before identity checks.
+Record on this encoder only. Do not submit/wait/record on destQueue/srcQueue. Do not host-wait inside these calls.
+After producer handOffShared + submit, order with existing waitOnHost(). Do not add shared-fence CUDA import.
+Do not add IExternalMemoryQueue. Do not extend SubmitDesc. Do not add compute/graphics-only queues.
+Call pattern: current owner handOffShared after last use → submit → waitOnHost() → next owner takeOverShared before first use. Do not use a resource on a queue except while that queue owns it.
+Backends (#787)
+Vulkan: handOffShared = QFOT release thisFamily → VK_QUEUE_FAMILY_EXTERNAL. takeOverShared = acquire EXTERNAL → thisFamily. Other queue is CUDA (or any non-Vulkan queue).
+D3D12, CUDA, others: no-op implementations. CUDA queue is still passed so Vulkan can target EXTERNAL.
+Ownership (native)
+Vulkan exclusive: unowned at create; first use (including initData) acquires originator graphics queue. getSharedHandle / create*FromSharedHandle do not transfer ownership. CUDA import maps memory only.
+Debug layer
+Tie export+import in a debug-only table keyed by getSharedHandle’s NativeHandle. Do not AddRef originator on import (no public lifetime change). Shared table across the two DebugDevices.
+States: Unowned → Owned(Q) on first use/initData; handOffShared → HandedOff(Q,R); takeOverShared → Owned(R).
+Use (illegal unless Owned(this queue)): encoder copy/clear/state, AS/micromap ops on the buffer, setBinding of the resource/view, readBuffer/readTexture/mapBuffer. Not a use: getSharedHandle, import, getDesc, getNativeHandle, getDeviceAddress alone.
+Severity: error if producer is Vulkan; warning if producer is D3D12 (same pairing). Untied/unknown producer: warning. Invalid handOffShared/takeOverShared args: error; batch all-or-nothing.
+Tests
+Update texture-shared-cuda / buffer-shared-cuda: Vulkan/D3D12 handOffShared to CUDA queue, waitOnHost(), CUDA takeOverShared before use; reverse before any originator reuse.
+Shape check (do not implement)
+Same two methods must still work later for same-device graphics/compute queues (dest/src = the other queue; Vulkan QFOT between families; D3D12 split barriers). If this API cannot express that, it is the wrong shape.
+👀React with 👀1Reacted by nv-slang-bot
+nv-slang-bot
+added 3 commits that reference this issue on Sep 23, 2026
+Add explicit handOffShared/takeOverShared ownership-transfer API
+...
+This issue will close once commit 260418b is merged into the 'main' branch.
+260418b
+Add explicit handOffShared/takeOverShared ownership-transfer API
+...
+This issue will close once commit 7fc6ccc is merged into the 'main' branch.
+7fc6ccc
+Add explicit handOffShared/takeOverShared ownership-transfer API
+...
+This issue will close once commit bbdb5b3 is merged into the 'main' branch.
+bbdb5b3
+nv-slang-bot commented on Sep 23, 2026
+nv-slang-botBot
+on Sep 23, 2026 – with nv-slang-bot
+ContributorAuthor
+More actions
+@jhelferty-nv The handOffShared/takeOverShared implementation is done and compiles clean (Vulkan records the QFOT to/from VK_QUEUE_FAMILY_EXTERNAL; D3D12/CUDA/CPU/Metal/WGPU/D3D11 are no-ops; debug-layer ownership state machine keyed by the shared NativeHandle; the buffer-shared-cuda / texture-shared-cuda interop tests now use the explicit API). Before I open the draft PR, three points in the debug-layer validation need your ruling — two are deviations from the validation list you specified, one is a design choice I'd like you to confirm. The functional API (the QFOT itself) is unaffected either way; these are only about how strict the debug layer's misuse-checking is.
+1. setBinding validation is best-effort (submitting queue unknown at bind time). Your "use" list marks setBinding of the resource/view illegal unless owned by the queue. But a shader-object binding is recorded before submission, so the queue that will actually submit the work isn't known at setBinding time. The debug layer therefore checks only that the bound resource is not currently handed off; the queue-specific ownership check is enforced at the real command-use points (copy/clear/upload/read/map/state-set). A full fix would thread the binding's ownership check from bind-time through to submit-time (a debug-layer-only, architectural change). Separately, a binding supplied as a texture view isn't tracked — the key is the shared NativeHandle, which buffers/textures expose but views do not.
+→ Recommendation: accept as a disclosed best-effort debug aid (it still catches "bound while handed-off" misuse). Or tell us to thread it fully.
+2. Vulkan end-of-encoding state restoration — a direct question about your intended usage. The Vulkan command recorder restores state-tracked resources to their default state at end-of-encoding. If handOffShared is recorded on the same encoder as other state-tracked ops on that resource, that restoration could emit a barrier after ownership was released to VK_QUEUE_FAMILY_EXTERNAL. Our tests record the hand-off on a dedicated encoder as the resource's last use, which sidesteps this.
+→ Question: in your intended usage, is handOffShared recorded on a dedicated encoder, or can it share an encoder with the producer's last use of the resource? If it can share, we'll make the VK recorder skip handed-off resources during end-of-encoding restoration. If it's dedicated-by-contract, we'll document that as the API contract instead.
+3. Debug state machine — apply-and-warn on an invalid transition (please confirm). For the ownership state machine you specified, on an invalid transition (e.g. handing off a resource that is already handed off) the debug layer warns but still applies the recorded transition rather than rejecting it. Rationale: the debug layer tracks the recorded command stream but does not gate it — the real QFOT barrier is recorded regardless — so a reject-and-don't-apply would desync the tracker from reality and then spuriously flag every subsequent legitimate op. The argument-level "batch all-or-nothing" you asked for (every resource must be non-null and shared, or the whole call is an error) is enforced at preflight, before any state changes.
+→ Please confirm apply-and-warn is what you want, or flag if you'd prefer reject semantics.
+Once you rule on these, I'll implement whatever you want changed and open the draft PR (separate from #812, which stays untouched and held). Thanks!
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+jhelferty-nv commented on Sep 23, 2026
+jhelferty-nv
+on Sep 23, 2026
+Contributor
+More actions
+Can your approach result in false positives for misuse? If so, then I think you may need to thread it through properly, or just not cover that method. (and do the other methods have a possibility of false positives with the way you've implemented it?)
+Implementation-wise, I think we need to restore them to defaultState first, then emit the QFOT as the last barrier on those resources. So there's some reordering that needs to happen here, maybe with QFOT implementation getting queued separately on the VK side and applied after the defaultState restore happens.
+Handing off what is already handed off is an error, regardless of backend. If they're using the handoff/takeover API and misusing it, that's an error. If they're not using it at all on D3D, that's a warning. If we can't tell which case it is, use a warning. (Expectation is we will tighten all misuse to an error eventually, but for now we're starting with warning for cases that don't strictly need the API to make onboarding/transition easier.)
+👀React with 👀1Reacted by nv-slang-bot
+nv-slang-bot commented on Sep 23, 2026
+nv-slang-botBot
+on Sep 23, 2026 – with nv-slang-bot
+ContributorAuthor
+More actions
+@jhelferty-nv Thanks — all three are actioned:
+1. setBinding: Yes, it can produce false positives. A resource can be legitimately bound while handed off, because the binding is recorded before submission and a takeOverShared may be recorded before the dispatch that actually uses it — so "handed off at bind time" does not imply misuse. Per your guidance I've dropped setBinding coverage rather than thread it through. The other methods do not have this risk: the command-use checks (copy/clear/upload/read/map/state-set) fire at the point of actual GPU use, where ownership must genuinely hold. Their only imprecision is that ownership is updated at command-recording time assuming encoders submit in record order; an out-of-record-order submit yields a missed warning (false negative), never a false alarm.
+2. Vulkan state restoration: Implemented as you described — the queue-family release (… → VK_QUEUE_FAMILY_EXTERNAL) is now deferred to end-of-encoding and emitted after the default-state restoration, so it is the last barrier on those resources. (takeOverShared's acquire stays inline, before first use.)
+3. Severity: apply-and-warn, with your split — misuse of the handoff/takeover API itself, including handing off an already-handed-off resource, is an error on every backend; using a resource that is merely owned by another queue (the "not using the API / can't tell" case) is a warning for now. (Apply-and-warn rather than reject-and-don't-apply: the debug layer tracks the recorded command stream but does not gate it, so rejecting a transition would desync the tracker from the real barrier and spuriously flag later legitimate ops.)
+Building now, then opening the draft PR (separate from #812, which stays untouched). Thanks for the detailed ruling.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+nv-slang-bot
+added 6 commits that reference this issue on Sep 23, 2026
+Add explicit handOffShared/takeOverShared ownership-transfer API
+...
+This issue will close once commit 0310254 is merged into the 'main' branch.
+0310254
+Add explicit handOffShared/takeOverShared ownership-transfer API
+...
+This issue will close once commit 57ee613 is merged into the 'main' branch.
+57ee613
+Add explicit handOffShared/takeOverShared ownership-transfer API
+...
+This issue will close once commit d7c6ef5 is merged into the 'main' branch.
+d7c6ef5
+Add explicit handOffShared/takeOverShared ownership-transfer API
+...
+This issue will close once commit 54e37fc is merged into the 'main' branch.
+54e37fc
+Add explicit handOffShared/takeOverShared ownership-transfer API
+...
+This issue will close once commit 1192e31 is merged into the 'main' branch.
+1192e31
+Key shared cross-queue severity on the producer and acquire on initData
+...
+This issue will close once commit eb5229d is merged into the 'main' branch.
+eb5229d
+jkwak-work
+removed
+Dev Reviewed
+on Oct 8, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+jhelferty-nv
+Labels
+No labels
+No labels
+Type
+Testing
+Projects
+No projects
+Milestone
+Q3 2026 (Summer)
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

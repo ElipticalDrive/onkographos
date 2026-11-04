@@ -2,23 +2,23 @@
 Also called: Gradient Computation for PlenOctree Optimization, NeRF Piecewise Constant Volume Rendering Derivatives
 
 ## Overview
-This method provides the closed-form gradients of the NeRF piecewise constant volume rendering equation with respect to the density ($\boldsymbol{\sigma}$) and color ($\mathbf{c}$) parameters [S1]. It enables direct optimization of PlenOctree attributes using gradient-based methods (e.g., SGD) to refine image quality [S1].
+This method provides the closed-form gradients of the NeRF piecewise constant volume rendering equation with respect to the density ($\boldsymbol{\sigma}$) and color ($\mathbf{c}$) parameters [S1, unofficial]. It enables direct optimization of PlenOctree attributes using gradient-based methods (e.g., SGD) to refine image quality [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Ray segment endpoints $t_0, \dots, t_N$ where $t_0$ is near and $t_N$ is far [S1].
-- Segment lengths $\delta_i = t_{i+1} - t_i$ for $i=0, \dots, N-1$ [S1].
-- Density values $\boldsymbol{\sigma} = (\sigma_0, \dots, \sigma_{N-1})$ where $\sigma_i \ge 0$ [S1].
-- Color values $\mathbf{c} = (c_0, \dots, c_N)$ where $c_i \in [0, 1]^3$ are RGB colors. $c_N$ is the background color (typically a hyperparameter) [S1].
+- Ray segment endpoints $t_0, \dots, t_N$ where $t_0$ is near and $t_N$ is far [S1, unofficial].
+- Segment lengths $\delta_i = t_{i+1} - t_i$ for $i=0, \dots, N-1$ [S1, unofficial].
+- Density values $\boldsymbol{\sigma} = (\sigma_0, \dots, \sigma_{N-1})$ where $\sigma_i \ge 0$ [S1, unofficial].
+- Color values $\mathbf{c} = (c_0, \dots, c_N)$ where $c_i \in [0, 1]^3$ are RGB colors. $c_N$ is the background color (typically a hyperparameter) [S1, unofficial].
 
 **Outputs:**
-- Gradient of rendered color $\hat{\mathbf{C}}$ with respect to density: $\frac{\partial \hat{\mathbf{C}}}{\partial \sigma_i}$ [S1].
-- Gradient of rendered color $\hat{\mathbf{C}}$ with respect to color: $\frac{\partial \hat{\mathbf{C}}}{\partial c_i}$ [S1].
+- Gradient of rendered color $\hat{\mathbf{C}}$ with respect to density: $\frac{\partial \hat{\mathbf{C}}}{\partial \sigma_i}$ [S1, unofficial].
+- Gradient of rendered color $\hat{\mathbf{C}}$ with respect to color: $\frac{\partial \hat{\mathbf{C}}}{\partial c_i}$ [S1, unofficial].
 
 **Data Structures:**
-- Arrays for $\delta$, $\sigma$, $c$, $T$, and $w$ of size $N$ or $N+1$ as appropriate [S1].
-- $T$ stores accumulated transmittance [S1].
-- $w$ stores segment weights [S1].
+- Arrays for $\delta$, $\sigma$, $c$, $T$, and $w$ of size $N$ or $N+1$ as appropriate [S1, unofficial].
+- $T$ stores accumulated transmittance [S1, unofficial].
+- $w$ stores segment weights [S1, unofficial].
 
 **Steps:**
 
@@ -30,14 +30,14 @@ This method provides the closed-form gradients of the NeRF piecewise constant vo
    Initialize $T_0 = 1.0$.
    For $i = 0$ to $N-1$:
    $$ T_{i+1} = T_i \cdot \exp(-\delta_i \sigma_i) $$
-   Note: $T_i$ represents the transmittance from $t_0$ to $t_i$ [S1].
+   Note: $T_i$ represents the transmittance from $t_0$ to $t_i$ [S1, unofficial].
 
 3. **Compute Segment Weights $w_i$:**
    For $i = 0$ to $N-1$:
    $$ w_i = T_i - T_{i+1} $$
    For the background:
    $$ w_N = T_N $$
-   Note: $w_i(\boldsymbol{\sigma}) = T_i(\boldsymbol{\sigma})(1 - \exp(-\sigma_i \delta_i))$ [S1].
+   Note: $w_i(\boldsymbol{\sigma}) = T_i(\boldsymbol{\sigma})(1 - \exp(-\sigma_i \delta_i))$ [S1, unofficial].
 
 4. **Compute Rendered Color (for verification or loss calculation):**
    $$ \hat{\mathbf{C}} = \sum_{i=0}^{N} w_i c_i $$
@@ -45,12 +45,12 @@ This method provides the closed-form gradients of the NeRF piecewise constant vo
 5. **Compute Color Gradients:**
    For $i = 0$ to $N$:
    $$ \frac{\partial \hat{\mathbf{C}}}{\partial c_i} = w_i $$
-   If colors are represented as Spherical Harmonics (SH) coefficients, apply the chain rule [S1]. Since SH basis function values are constant across the ray, the derivative with respect to SH coefficients is $w_i \cdot \text{SH\_basis}(i)$ [S1].
+   If colors are represented as Spherical Harmonics (SH) coefficients, apply the chain rule [S1, unofficial]. Since SH basis function values are constant across the ray, the derivative with respect to SH coefficients is $w_i \cdot \text{SH\_basis}(i)$ [S1, unofficial].
 
 6. **Compute Density Gradients:**
    For each $i \in \{0, \dots, N-1\}$:
    $$ \frac{\partial \hat{\mathbf{C}}}{\partial \sigma_i} = \delta_i \left[ c_i T_{i+1} - \sum_{k=i+1}^N c_k w_k \right] $$
-   Derivation note: The general form is $\frac{\partial \hat{\mathbf{C}}}{\partial \sigma_i} = c_N \frac{\partial T_N}{\partial \sigma_i} + \sum_{k=0}^{N-1} c_k \left( \frac{\partial T_k}{\partial \sigma_i} - \frac{\partial T_{k+1}}{\partial \sigma_i} \right)$ [S1]. Using $\frac{\partial T_k}{\partial \sigma_i} = -\delta_i T_k \mathbf{1}_{k>i}$, this simplifies to the expression above [S1].
+   Derivation note: The general form is $\frac{\partial \hat{\mathbf{C}}}{\partial \sigma_i} = c_N \frac{\partial T_N}{\partial \sigma_i} + \sum_{k=0}^{N-1} c_k \left( \frac{\partial T_k}{\partial \sigma_i} - \frac{\partial T_{k+1}}{\partial \sigma_i} \right)$ [S1, unofficial]. Using $\frac{\partial T_k}{\partial \sigma_i} = -\delta_i T_k \mathbf{1}_{k>i}$, this simplifies to the expression above [S1, unofficial].
 
 **Pseudocode:**
 
@@ -114,8 +114,8 @@ def compute_gradients(t, sigma, c, c_bg):
 ```
 
 **Edge Cases and Pitfalls:**
-- **Boundary Conditions:** The derivative is only defined for $i < N$ because $\sigma_N$ does not exist (only $c_N$) [S1]. The background color $c_N$ is typically not optimized [S1].
-- **SH Colors:** When optimizing SH coefficients, the gradient must be multiplied by the SH basis function value at the query direction [S1]. The basis values are constant for a given ray direction [S1].
+- **Boundary Conditions:** The derivative is only defined for $i < N$ because $\sigma_N$ does not exist (only $c_N$) [S1, unofficial]. The background color $c_N$ is typically not optimized [S1, unofficial].
+- **SH Colors:** When optimizing SH coefficients, the gradient must be multiplied by the SH basis function value at the query direction [S1, unofficial]. The basis values are constant for a given ray direction [S1, unofficial].
 
 ## Operating characteristics
 - Time Complexity: Not given in the sources.
@@ -124,7 +124,7 @@ def compute_gradients(t, sigma, c, c_bg):
 - Limitations: Not given in the sources.
 
 ## Background
-This method was introduced in the PlenOctrees paper by Yu et al. to enable the fine-tuning of PlenOctrees on original training images using NeRF loss with SGD [S1]. It builds on the NeRF volume rendering formulation [S1].
+This method was introduced in the PlenOctrees paper by Yu et al. to enable the fine-tuning of PlenOctrees on original training images using NeRF loss with SGD [S1, unofficial]. It builds on the NeRF volume rendering formulation [S1, unofficial].
 
 ## Sources
-[S1] PlenOctrees For Real-time Rendering of Neural Radiance Fields (NeRFs), http://alexyu.net/plenoctrees/, fetched 2026-10-28
+[S1] PlenOctrees For Real-time Rendering of Neural Radiance Fields (NeRFs), http://alexyu.net/plenoctrees/, fetched 2026-10-28 (unofficial)

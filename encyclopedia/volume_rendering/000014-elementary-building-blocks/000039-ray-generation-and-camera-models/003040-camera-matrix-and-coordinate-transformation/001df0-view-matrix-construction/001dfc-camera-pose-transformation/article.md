@@ -1,0 +1,214 @@
+# Camera Pose Transformation
+
+Also called: Camera Offset and Rotation, Pose Transformation, RotateX
+
+## Overview
+Camera Pose Transformation applies geometric transformations—specifically translation and rotation—to a point or coordinate system to define the camera's position and orientation within a 3D scene [S1, unofficial][S2, unofficial]. It solves the problem of mapping local scene coordinates to the camera's view space or adjusting the camera's extrinsic parameters relative to the world [S1, unofficial][S3, unofficial]. It sets itself apart from [View Matrix Construction](1644-view-matrix-construction.md) by operating on individual points or pose structures directly rather than constructing a full 4x4 matrix from basis vectors, and from [Average Pose Calculation](1645-average-pose-calculation.md) by performing a single rigid transformation rather than aggregating multiple poses.
+
+## How it works
+**Inputs:**
+- A point $p = (x, y, z)$ or a set of points in 3D space [S1, unofficial][S2, unofficial].
+- A rotation angle $\theta$ (float) [S1, unofficial].
+- A translation vector $t$ (optional, e.g., $[0, -1, -2.2]$) [S2, unofficial].
+- A pose structure or matrix (optional, for recentering or rigid transformation contexts) [S3, unofficial][S4, unofficial].
+
+**Outputs:**
+- The transformed point $p'$ or the adjusted camera pose [S1, unofficial][S2, unofficial].
+
+**Data Structures:**
+- Points are represented as 3D vectors $(x, y, z)$ [S2, unofficial].
+- For homogeneous transformations, points are extended to 4D vectors $(x, y, z, w)$ where $w=1$ for points and $w=0$ for vectors [S5, unofficial].
+- Poses may be stored as $3 \times 4$ matrices (rotation $R$ and translation $t$) or as quaternion + translation pairs [S3, unofficial][S4, unofficial].
+
+**Steps:**
+
+1. **Translation (Offset):** If a translation vector $t = (t_x, t_y, t_z)$ is provided, add it to the point $p$:
+   $$
+   p_{offset} = p + t
+   $$
+   Example: Offset by $[0, -1, -2.2]$ [S2, unofficial].
+
+2. **Rotation:** Apply rotation around a specified axis.
+   - **RotateY:** Rotate around the Y-axis by angle $\theta$. The $x$ component remains unchanged. The $y$ and $z$ components are transformed using a 2D rotation matrix:
+     $$
+     \begin{aligned}
+     y' &= y \cos(\theta) + z \sin(\theta) \\
+     z' &= -y \sin(\theta) + z \cos(\theta)
+     \end{aligned}
+     $$
+     Note: The sign convention in [S2, unofficial] uses $-y \sin(\theta)$ for the new $z$, which corresponds to a specific handedness/rotation direction. Standard right-hand rule rotation around Y usually yields $z' = y \sin(\theta) + z \cos(\theta)$ if $y$ is up, but [S2, unofficial] explicitly defines the formula as above. Implementers should follow the source's specific formula if replicating that effect [S2, unofficial].
+   - **RotateX:** Rotate around the X-axis. The $y$ and $z$ components are transformed:
+     $$
+     \begin{aligned}
+     y' &= y \cos(\theta) - z \sin(\theta) \\
+     z' &= y \sin(\theta) + z \cos(\theta)
+     \end{aligned}
+     $$
+     [S1, unofficial]
+   - **RotateZ:** Rotate around the Z-axis. The $x$ and $y$ components are transformed:
+     $$
+     \begin{aligned}
+     x' &= x \cos(\theta) - y \sin(\theta) \\
+     y' &= x \sin(\theta) + y \cos(\theta)
+     \end{aligned}
+     $$
+     [S1, unofficial]
+
+3. **Homogenization (for Matrix Multiplication):** If applying a rigid transformation matrix $T$:
+   - Append $1$ to points: $p_h = [x, y, z, 1]^T$ [S5, unofficial].
+   - Append $0$ to vectors: $v_h = [x, y, z, 0]^T$ [S5, unofficial].
+
+4. **Matrix Application:** Multiply the homogeneous point by the transformation matrix $T$:
+   $$
+   p'_h = T \cdot p_h
+   $$
+   Using einsum notation: `einsum("ij, j -> i", T, p_h)` [S5, unofficial].
+
+5. **Pose Recentering (Optional):** To recenters a set of poses so their average is the identity:
+   - Compute the average pose $P_{avg}$ [S3, unofficial].
+   - Construct a $4 \times 4$ identity-like matrix for $P_{avg}$ by appending $[0, 0, 0, 1]$ to its $3 \times 4$ rotation/translation part [S3, unofficial].
+   - Convert all input poses to $4 \times 4$ matrices by appending $[0, 0, 0, 1]$ [S3, unofficial].
+   - Left-multiply all poses by the inverse of $P_{avg}$: $P'_{i} = P_{avg}^{-1} \cdot P_{i}$ [S3, unofficial].
+
+6. **RigidXform Construction (Optional):** If building from a Pose:
+   - Dequantize and normalize the quaternion from the pose [S4, unofficial].
+   - Reject if orientation is zero [S4, unofficial].
+   - Combine with cell scale and translation [S4, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def rotate_y(p, angle):
+    """
+    Rotates point p around the Y-axis by angle (radians).
+    Based on [S2, unofficial].
+    """
+    x, y, z = p
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    # Note: Formula from [S2, unofficial]
+    new_y = cos_a * y + sin_a * z
+    new_z = -sin_a * y + cos_a * z
+    return (x, new_y, new_z)
+
+def rotate_x(p, angle):
+    """
+    Rotates point p around the X-axis by angle (radians).
+    Based on [S1, unofficial].
+    """
+    x, y, z = p
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    new_y = y * cos_a - z * sin_a
+    new_z = y * sin_a + z * cos_a
+    return (x, new_y, new_z)
+
+def rotate_z(p, angle):
+    """
+    Rotates point p around the Z-axis by angle (radians).
+    Based on [S1, unofficial].
+    """
+    x, y, z = p
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    new_x = x * cos_a - y * sin_a
+    new_y = x * sin_a + y * cos_a
+    return (new_x, new_y, z)
+
+def transform_point(p, translation=None, rotation_axis='y', rotation_angle=0.0):
+    """
+    Applies translation and rotation to point p.
+    """
+    if translation:
+        p = (p[0] + translation[0],
+             p[1] + translation[1],
+             p[2] + translation[2])
+    
+    if rotation_angle != 0.0:
+        if rotation_axis == 'x':
+            p = rotate_x(p, rotation_angle)
+        elif rotation_axis == 'y':
+            p = rotate_y(p, rotation_angle)
+        elif rotation_axis == 'z':
+            p = rotate_z(p, rotation_angle)
+        else:
+            raise ValueError("Unsupported rotation axis")
+            
+    return p
+
+def homogenize_point(p):
+    """
+    Converts 3D point to 4D homogeneous coordinates (w=1).
+    Based on [S5, unofficial].
+    """
+    return p + (1.0,)
+
+def apply_rigid_transform(points, transformation_matrix):
+    """
+    Applies a 4x4 rigid transformation matrix to a list of 3D points.
+    Based on [S5, unofficial].
+    """
+    transformed_points = []
+    for p in points:
+        p_h = homogenize_point(p)
+        # Matrix-vector multiplication: T @ p_h
+        # Assuming transformation_matrix is a list of lists or 2D array
+        new_p_h = [
+            sum(transformation_matrix[i][j] * p_h[j] for j in range(4))
+            for i in range(4)
+        ]
+        # De-homogenize (assuming w=1 for points)
+        transformed_points.append((new_p_h[0], new_p_h[1], new_p_h[2]))
+    return transformed_points
+```
+
+**Parameters:**
+- `angle`: Float representing the rotation angle in radians [S1, unofficial].
+- `translation`: Vector $(t_x, t_y, t_z)$ for offsetting the origin [S2, unofficial].
+- `cell_size_m`: Uniform scale factor converting local cells to world metres (used in RigidXform) [S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Floating-point errors can accumulate in repeated transformations. Normalizing quaternions ensures the conjugate is the exact inverse [S4, unofficial].
+- **Zero Orientation:** Reject poses with zero orientation to avoid undefined rotation [S4, unofficial].
+- **Boundary Conditions:** In ray traversal, origins exactly on a boundary belong to the cell defined by the floor function [S4, unofficial].
+- **Handedness:** Rotation formulas depend on the coordinate system's handedness. [S2, unofficial] uses a specific sign convention for RotateY that may differ from standard right-hand rule implementations. Verify against the target rendering engine's conventions.
+
+## Subtopics
+
+### RotateY
+RotateY is a geometric transformation primitive that rotates a point or shape around the Y-axis in 3D space. It serves as a fundamental building block for constructing camera poses and deforming Signed Distance Fields (SDFs). Unlike [Rotation Transformation](2279-rotation-transformation.md), which may imply a general rotation matrix, RotateY specifically isolates the Y-axis component, and unlike [Twist](1722-twist.md), it applies a uniform rotation angle to the entire object rather than a spatially varying one. It is a sibling to [RotateX](2278-rotatex.md) and [RotateZ](2280-rotatez.md). [S1, unofficial][S2, unofficial]
+
+### RotateZ
+Similar to RotateX, but rotates around the z-axis instead. It takes a float input representing the angle of rotation. [S1, unofficial]
+
+### Pose Recentering
+Recenters a set of poses such that their average pose becomes the identity transformation (origin at center, aligned axes). It involves computing the average pose, constructing a $4 \times 4$ matrix, and left-multiplying all poses by the inverse of the average pose. [S3, unofficial]
+
+### RigidXform
+A transformation structure that maps a volume's local cell space to world metres by applying a uniform cell scale, a rotation, and a translation. It is constructed from a Pose by dequantizing and normalizing the quaternion. The stored rotation is normalized, ensuring the conjugate is the exact inverse. [S4, unofficial]
+
+### Camera Coordinate Homogenization and Rigid Transformation
+A method to apply rigid transformations to camera coordinates by first homogenizing points (appending 1) and vectors (appending 0), then applying the transformation via matrix multiplication (einsum). [S5, unofficial]
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for single point transformation. $O(N)$ for transforming $N$ points.
+- **Memory Complexity:** $O(1)$ for single point. $O(N)$ for storing transformed points.
+- **Performance:** Very fast, as it involves basic arithmetic operations (multiplications and additions).
+- **Strengths:** Simple to implement, efficient for real-time applications, flexible for various rotation axes.
+- **Limitations:** Does not handle non-rigid transformations (scaling, shearing) unless explicitly added. Precision issues may arise with very large or very small coordinates.
+- **When to use:** When defining camera positions, rotating objects in a scene, or adjusting SDFs.
+- **When not to use:** When complex camera models (e.g., fisheye) or non-rigid deformations are required.
+
+## Background
+Camera Pose Transformation is a fundamental concept in computer graphics and computer vision, used in raymarching, volume rendering, and 3D reconstruction. It originates from basic linear algebra and geometry, where rotations and translations are used to transform coordinates between different spaces. The specific implementations cited here are from various educational projects and open-source repositories, including a COS 426 final project on raymarching with SDFs [S1, unofficial], an Observable notebook on raymarching distance functions [S2, unofficial], the original NeRF repository [S3, unofficial], a fixture world implementation [S4, unofficial], and a pixel-splat repository [S5, unofficial].
+
+## Sources
+[S1] PDF COS 426 Final Project Writeup Raymarching with Signed Distance Fields, https://jbaum98.github.io/cos426_final_project/writeup.pdf, fetched 2026-10-27 (unofficial)
+[S2] Introduction to Raymarching Distance Functions, https://observablehq.com/@gre/introduction-to-raymarching-distance-functions, fetched 2026-10-29 (unofficial)
+[S3] bmild/nerf, https://github.com/bmild/nerf, fetched 2026-10-26 (unofficial)
+[S4] T03 — Fixture worlds, rays, and integer brushes, https://github.com/deranjer/spall/pull/4, fetched 2026-10-25 (unofficial)
+[S5] dcharatan/pixelsplat, https://github.com/dcharatan/pixelsplat, fetched 2026-10-27 (unofficial)

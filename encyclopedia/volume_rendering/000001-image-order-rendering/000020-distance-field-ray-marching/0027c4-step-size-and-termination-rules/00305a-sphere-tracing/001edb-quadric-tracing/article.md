@@ -1,0 +1,134 @@
+# Quadric Tracing
+
+Also called: Quadric Sphere Tracing, Accelerated Sphere Tracing with Quadric Bounds
+
+## Overview
+Quadric tracing is a method to accelerate sphere tracing by precomputing an augmented distance field using quadric surfaces (second-degree algebraic surfaces) to bound or unbound scene geometry, reducing the number of Signed Distance Function (SDF) evaluations [S1]. It solves the slowdown of sphere tracing near surfaces and with increasing scene complexity, where function evaluation time and convergence slow drastically [S1]. Unlike relaxed sphere tracing (which uses a scalar to determine step size and reverts if too large) or enhanced sphere tracing (which uses previous two radii to approximate planar surfaces), quadric tracing uses precomputed geometric bounds to accelerate convergence [S1]. It stops when the computed distance value dips below a threshold, switching to enhanced sphere tracing for final convergence [S1].
+
+## How it works
+**Inputs:** A 3D grid of precomputed quadric parameters and SDF values; a ray defined by origin $p_0$ and direction $v$ ($|v|_2 = 1$).
+**Outputs:** Intersection distance $t$ along the ray.
+
+**Data Structures:**
+The accelerator data structure is a regular 3D grid. Each cell stores:
+*   **Quadric of Revolution:** 96 bits (3 floats). Defined relative to the grid point $p_c$. The axis of revolution direction $n \in \mathbb{R}^3$ ($|n|_2 = 1$) is multiplied by $2 + k$ to store the quadric parameters. The scalar parameter $k \in [-1, 1]$ encodes the shape (eccentricity and curvature) [S1].
+*   **SDF Value:** 32 bits (1 float). The signed distance value $d$ at $p_c$ [S1].
+*   **Total:** 128 bits per cell [S1].
+
+**Preprocessing:**
+For every cell in parallel on the GPU, starting from the quadric origin $p_c$:
+1.  Shoot rays in $N$ uniformly sampled directions $v_i$ ($i = 1, \dots, N$) [S1].
+2.  Sphere trace each ray $p_c + t v_i$ until the surface or the bounding box is reached [S1].
+3.  For each ray-surface intersection $(x_i, y_i, z_i) := p_c + t_i v_i$, compute the unique $k_i \in [-1, 1]$ value defining the quadric of revolution touching the surface at that point [S1].
+    *   Operate in the 2D plane defined by $v_i$ and normal $n$.
+    *   Let $q = (q_x, q_y) \in \mathbb{R}^2$ be the rotated projection where $n$ is the y-axis [S1].
+    *   Solve for $k$ using the quadratic equation:
+        $$q_x^2 k^2 + (2 \operatorname{sgn}(q_y) q_y^2 - q_y) k - q_y^2 = 0$$
+    *   Select the smaller solution for $k_i$ [S1].
+4.  To obtain the unbounding quadric within the cell, take the narrowest candidate: $k := \min \{k_i \mid i \in \{1, \dots, N\}\}$ [S1].
+5.  Store the axis direction $n$ (normalized gradient $-\nabla f(p)/|\nabla f(p)|$) scaled by $2+k$, and the SDF value [S1].
+
+**Rendering:**
+1.  For each evaluation point along the ray, query the closest grid cell to get $k$, $n$, and $d$ [S1].
+2.  Intersect the ray with the precomputed quadric to accelerate tracing convergence [S1].
+3.  If the quadric intersection yields a valid step that does not skip the surface, take it. Otherwise, fall back to standard sphere tracing or enhanced sphere tracing [S1].
+4.  Stop when the distance value dips below a threshold [S1].
+
+**Conic Section Definitions:**
+The quadric is a revolution of a conic section. The conic section coefficients $A, B, C$ are functions of $k$:
+$$A(k) = k^2, \quad B(k) = 2(k - 1/2), \quad C(k) = -k$$
+These define the implicit equation in the 2D plane (y-axis is axis of revolution):
+$$A \cdot x^2 + B \cdot y^2 + C \cdot y = 0 \quad (1)$$
+The polar parametrization of the conic section is $s(t) = [\cos(t) \cdot r(t), \sin(t) \cdot r(t)]^T$, where:
+$$r(t) = \frac{-C \cdot \sin(t)}{A \cdot \cos^2(t) + B \cdot \sin^2(t)}$$
+The interval $L(k)$ restricts the parameter $t$ to avoid unwanted hyperbola branches:
+$$L(k) = \begin{cases} \frac{\pi}{2}, & \text{if } A(k) \cdot B(k) \geq 0 \\ \arctan\left(\sqrt{\frac{-A}{B}}\right), & \text{otherwise} \end{cases} \quad (k \in [-1, 1]) \quad (2)$$
+The implicit equation of the unbounding quadric of revolution in 3D (z-axis is axis of revolution) is:
+$$A \cdot (x^2 + y^2) + B \cdot z^2 + C \cdot z = 0 \quad (3)$$
+
+**Ray-Quadric Intersection:**
+Given ray $p_0 + t \cdot v$ ($p_0 = (x_0, y_0, z_0)$, $v = (v_x, v_y, v_z)$), substitute into (3) to solve $at^2 + bt + c = 0$:
+$$a = A \cdot v_x^2 + A \cdot v_y^2 + B \cdot v_z^2$$
+$$b = 2A \cdot x_0 v_x + 2A \cdot y_0 v_y + 2B \cdot z_0 v_z + C v_z$$
+$$c = A \cdot (x_0^2 + y_0^2) + B \cdot z_0^2 + C \cdot z_0$$
+Let roots be $t_1 \leq t_2$. If no real roots, $I := [-\infty, +\infty]$ [S1].
+If $0 \neq |k| < 1/2$ (hyperbolas), omit the unwanted branch:
+$$I := \begin{cases} [-\infty, t_2] & \text{if } (z_0 + t_1 v_z) \cdot k < 0 \\ [t_1, +\infty] & \text{if } (z_0 + t_2 v_z) \cdot k < 0 \end{cases}$$
+If none of the conditions apply, $I$ remains $[t_1, t_2]$ [S1].
+
+**Selecting Intersection $t$:**
+Evaluate the following conditional assignments in order to find the first valid intersection $t \geq 0$:
+1.  $t := t_1$ if $0 < t_2 < +\infty$
+2.  $t := \infty$ if $t_1 < 0$
+3.  $t := 0$ if otherwise
+4.  $t := t_2$ if $t_1 = -\infty$ [S1]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def intersect_quadric(p0, v, A, B, C, k):
+    # Calculate quadratic coefficients
+    a = A * (v.x**2 + v.y**2) + B * v.z**2
+    b = 2 * A * (p0.x * v.x + p0.y * v.y) + 2 * B * p0.z * v.z + C * v.z
+    c = A * (p0.x**2 + p0.y**2) + B * p0.z**2 + C * p0.z
+
+    # Solve quadratic equation
+    if abs(a) < 1e-9:
+        # Linear case
+        if abs(b) < 1e-9:
+            return float('inf')
+        t1 = -c / b
+        t2 = float('inf')
+    else:
+        discriminant = b**2 - 4 * a * c
+        if discriminant < 0:
+            t1 = float('-inf')
+            t2 = float('inf')
+        else:
+            sqrt_d = math.sqrt(discriminant)
+            t1 = (-b - sqrt_d) / (2 * a)
+            t2 = (-b + sqrt_d) / (2 * a)
+            if t1 > t2:
+                t1, t2 = t2, t1
+
+    # Handle hyperbola branch omission if |k| < 0.5 and k != 0
+    if abs(k) < 0.5 and k != 0:
+        z1 = p0.z + t1 * v.z
+        z2 = p0.z + t2 * v.z
+        if z1 * k < 0:
+            t1 = float('-inf')
+        if z2 * k < 0:
+            t2 = float('inf')
+
+    # Select first valid intersection t >= 0
+    t = float('inf')
+    if t1 == float('-inf'):
+        if t2 > 0:
+            t = t2
+        else:
+            t = 0
+    elif t2 > 0:
+        t = t1
+    elif t1 < 0:
+        t = float('inf')
+    else:
+        t = 0
+        
+    return t
+```
+
+## Subtopics
+
+### Enhanced Sphere Tracing with Quadratic Bounds
+Combines regular or improved quadratic Taylor bounds with enhancements: Sub-stepping, ES+1, and Adaptive computation of $\gamma_{Fn}$ [S2]. Using $k > 1$ was never found to be faster when using quadratic bounds [S2]. On the Sponge scene with all enhancements, Linear bounds have 362.3 avg steps, 3815.0 avg octaves, 65.0 ms time. Regular Quad has 70.0 avg steps, 651.1 avg octaves, 16.3 ms time, offering a $\times 4.0$ speedup vs Linear and $\times 6.7$ speedup vs naive [S2]. On Sponge (far) scene, Linear (far) has 147.8 avg steps, 749.6 avg octaves, 16.7 ms time. Regular Quad has 55.8 avg steps, 300.6 avg octaves, 9.8 ms time ($\times 1.7$ vs Linear, $\times 4.1$ vs naive). Improved Quad has 55.8 avg steps, 300.6 avg octaves, 9.7 ms time ($\times 1.7$ vs Linear, $\times 4.2$ vs naive) [S2]. With enhancements, quadratic bounds provide massive performance gains over linear bounds with same enhancements ($\times 4.0$ and $\times 1.7$ speedups on test scenes) and $\times 6.7$ and $\times 4.1$ speedups over the naive method [S2].
+
+## Operating characteristics
+Quadric tracing offers a 20% to 100% speedup in rendering static scenes [S1]. It amortizes the slowdown caused by the complexity of the geometry [S1]. The method takes much larger steps along the ray, often skipping several grid cells without skipping ray-surface intersections [S1]. However, sometimes the quadric does not contain the whole cell it is assigned to, so the acceleration is zero or negligible for some positions [S1]. About 20% of expensive signed distance function evaluations are saved [S1].
+
+## Background
+Quadric tracing was introduced to accelerate sphere tracing for implicit surfaces defined by signed distance functions (SDFs) [S1]. Most implicit surface representations require conversion to a triangle list for efficient, real-time visualization, but distance-based representations allow sphere tracing to enable raytracing for the whole scene within milliseconds using the GPU [S1]. The representation supports set operations such as union, intersection, subtraction, and real-time offsets, allowing any CSG tree to be constructed from a large set of primitives [S1]. However, function evaluation time and convergence slow drastically with scene complexity [S1]. The method generalizes the unbounding sphere and separating plane approach to unbounding quadrics for any SDF [S1]. It is applicable to light visibility computation such as soft shadows, ambient occlusion, and global illumination, as well as room impulse response estimation and deep learning based implicit signed distance functions [S1].
+
+## Sources
+[S1] A Geometric Method for Accelerated Sphere Tracing of Implicit Surfaces, https://doi.org/10.14232/actacyb.290007, fetched 2026-10-26
+[S2] Fast sphere tracing of procedural volumetric noise for very large and detailed scenes, https://doi.org/10.1111/cgf.70072, fetched 2026-10-26

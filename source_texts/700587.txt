@@ -1,0 +1,177 @@
+PyTorch3D is FAIR's library of reusable components for deep learning with 3D data - Clip box triangles as polygons in box3d_overlap by fusheng-ji · Pull Request #2060 · facebookresearch/pytorch3d
+
+Clip box triangles as polygons in box3d_overlap by fusheng-ji · Pull Request #2060 · facebookresearch/pytorch3d · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+fusheng-ji
+commented
+Oct 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Depends on #2059. This branch contains the two commits of #2059 followed by one new commit; please review only the last commit, Clip box triangles as polygons in box3d_overlap.
+Summary
+Problem 1 (accuracy, CPU and CUDA): Faces of the two boxes are matched as coplanar when their normals are within ~2.5 degrees (dEpsilon on cos) and only if a matching triangle exceeds an absolute 1e-4 area. Nearly parallel but distinct faces are therefore removed or left unclipped, and for boxes smaller than ~0.01 coincident faces are never deduplicated. The intersection's surface ends up with missing or double counted faces, so the volume is wrong, sometimes by tens of percent; small boxes with shared planes can give IoU above 1 or inf.
+Problem 2 (cost): Clipping keeps splitting triangles, up to 768 per side, which forces Fix CUDA box IoU triangle buffer capacity #2059 to use a global workspace and makes large batches slower.
+Fix: Each box triangle is clipped by the other box's planes as a convex polygon (at most 3 + 6 vertices). Because a triangle is planar, the vertices inside a plane form one contiguous run, so the output is bounded even when rounding misclassifies vertices close to the plane. Two faces count as coincident only if their boxes are on the same side and each face lies within dEpsilon of the face size (plus the faces' measured non-planarity) of the other's plane; only the inner face is kept. Faces on opposite sides, which bound a thin slab, are clipped normally.
+Scope: The CPU and CUDA paths share the same algorithm and agree to within 7e-7 IoU on all inputs below. The global workspace from Fix CUDA box IoU triangle buffer capacity #2059 is removed. The public API and input validation are unchanged.
+Accuracy
+Compared with float64 halfspace intersections (scipy) on ~17k box pairs: 300 random pairs per scenario, plus every pair where any two implementations disagree by more than 1e-4 in IoU.
+Scenario
+main CPU/CUDA, max IoU error
+This PR, max IoU error
+Random rotated boxes, sizes ~0.01 / 1 / 100
+2.1e-2
+1.6e-7
+Random rotated boxes, including identical pairs
+0.25
+3.0e-7
+Identical boxes with 1e-4 vertex noise
+0.25
+3.5e-4 (noise level)
+Grid boxes with shared planes, size ~0.01
+inf
+5.7e-7
+Grid, nested and commonly rotated boxes, size ~1
+4.2e-7
+3.2e-7
+The same errors occur in ordinary inputs: on 100 x 100 axis-aligned unit cubes with offsets drawn from N(0, 0.05²), main's CPU result is off by up to 0.33 in volume (up to 0.94 in IoU); this PR matches the exact result to within 1.5e-7.
+Performance
+GPU: NVIDIA B200, one fresh process per case, median of 31 CUDA-event samples. CPU: one thread, median of 5 runs.
+Case
+main
+#2059
+This PR
+GPU 1x1
+0.178 ms
+0.192 ms
+0.100 ms
+GPU 100x100
+1.315 ms
+5.533 ms
+0.675 ms
+GPU 100x100, high overlap
+1.804 ms
+7.989 ms
+0.694 ms
+GPU #1805 input, 100x100
+unsafe
+44.22 ms
+0.450 ms
+GPU memory taken by first call
+4252 MiB
+94-348 MiB
+94 MiB
+Kernel stack / registers
+15408 B / 255
+992 B / 255
+848 B / 194, no spills
+CPU rotated 120x127
+1522 ms
+n/a
+232 ms
+CPU 100x100, high overlap
+500 ms
+n/a
+123 ms
+The new kernel is faster than main in all 11 benchmark cases main can run (0.38-0.64x the latency) and needs no workspace. Its outputs match this PR's CPU path to 1e-5 in all 13 cases.
+Validation
+Environment: Linux, Python 3.12.13, PyTorch 2.11.0+cu130, CUDA 13.0, NVIDIA B200 (sm_100).
+New tests: test_iou_coplanar_faces_{cpu,cuda} checks coincident, nearly coincident (within 1e-3), nested, thin-slab and touching faces at scales 1 and 0.01 against analytic overlaps, in a random common rotation. test_iou_rotated_exact_{cpu,cuda} checks two rotated pairs against float64 halfspace intersections. All four fail on main and on Fix CUDA box IoU triangle buffer capacity #2059 and pass here.
+Module suite: All 22 tests in tests/test_iou_box3d.py pass. The Fix CUDA box IoU triangle buffer capacity #2059 tests are kept and renamed where they referred to the removed workspace.
+Memory checking: The 16 regression tests and the stress inputs run under compute-sanitizer --tool memcheck with 0 errors.
+Formatting: clang-format, black, usort, flake8 and git diff --check pass on the changed files.
+Evidence and reproduction
+Accuracy summary and per-pair results: every implementation against float64 halfspace intersections on the same pairs.
+GPU benchmark and CPU benchmark: latency and first-call memory for main, Fix CUDA box IoU triangle buffer capacity #2059 and this PR; raw samples are in the JSON files.
+Module suite and memcheck run on this PR.
+Reproduction instructions: revisions, scenario generator (make_cases.py, with cases.pt included), evaluation and benchmark scripts, and limits.
+Storage: Evidence is maintained on the fork's pr_assets branch; figure and data links pin commit b2acafe.
+Verification limits
+One GPU model and one software stack; the full repository test suite was not rerun.
+Coincident faces are now decided by a distance tolerance of dEpsilon times the face size. Faces closer than that are treated as one plane, so the volume can differ from the exact intersection by up to about that fraction for such inputs.
+The box3d_overlap_naive Python reference in the tests still follows the old triangle algorithm and is unchanged.
+fusheng-ji
+added 3 commits
+October 7, 2026 20:58
+Fix CUDA box IoU triangle buffer capacity
+203555b
+Drop IoU CUDA clip copy-back and coplanar keep buffer
+…
+0d0f69e
+```
+BoxIntersections now alternates between the output and scratch buffers
+instead of copying the clipped triangles back after every plane. With an
+even number of planes the result ends in the output buffer.
+
+The coplanar filter scans Box2 triangles in the outer loop, stops at the
+first coplanar Box1 triangle and compacts in place, so the global Keep
+workspace is no longer needed. Results are bitwise identical.
+```
+Clip box triangles as polygons in box3d_overlap
+…
+3176b7a
+```
+Each triangle of one box is now clipped by the planes of the other box as
+a convex polygon (Sutherland-Hodgman, at most 3 + 6 vertices) instead of
+being split into ever smaller triangles. This bounds per-thread storage,
+so the CUDA kernel needs no global workspace, and both the CPU and CUDA
+paths are faster.
+
+Two faces are treated as coincident when their boxes are on the same
+side and each face lies within dEpsilon of the face size (plus the
+faces' non-planarity) of the other's plane; only the inner face is kept.
+The previous per-triangle test matched planes up to ~2.5 degrees apart
+and relied on an absolute 1e-4 face area threshold, so faces of the
+intersection were double counted or dropped: rotated boxes could be off
+by tens of percent, and boxes smaller than ~0.01 with shared planes by
+up to 100%.
+
+New tests check coincident, nearly coincident and thin-slab faces at two
+scales against analytic overlaps, and two rotated pairs against float64
+halfspace intersections.
+```
+meta-cla
+Bot
+added
+the
+CLA Signed
+This label is managed by the Facebook bot. Authors need to sign the CLA before a PR can be reviewed.
+label
+Oct 8, 2026
+fusheng-ji
+added a commit
+to fusheng-ji/pytorch3d
+that referenced
+this pull request
+Oct 8, 2026
+Add polygon clipping evidence for PR facebookresearch#2060
+b2acafe
+fusheng-ji
+mentioned this pull request
+Oct 8, 2026
+Fix CUDA box IoU triangle buffer capacity
+#2059
+Open
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+CLA Signed
+This label is managed by the Facebook bot. Authors need to sign the CLA before a PR can be reviewed.
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

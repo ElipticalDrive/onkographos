@@ -1,0 +1,144 @@
+Bug Description RegisteredGLBuffer(..., device="cpu") can register its OpenGL buffer with CUDA when a CUDA context is already current. map() then wraps the CUDA-mapped pointer as a CPU array. Reading that array in a CPU kernel can access...
+
+CPU OpenGL buffers can map CUDA pointers as host arrays · Issue #2120 · NVIDIA/warp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+CPU OpenGL buffers can map CUDA pointers as host arrays #2120
+New issue
+Copy link
+New issue
+Copy link
+Open
+#2121
+Open
+CPU OpenGL buffers can map CUDA pointers as host arrays#2120
+#2121
+Copy link
+Description
+fusheng-ji
+opened on Oct 20, 2026
+Issue body actions
+Bug Description
+RegisteredGLBuffer(..., device="cpu") can register its OpenGL buffer with CUDA when a CUDA context is already current. map() then wraps the CUDA-mapped pointer as a CPU array. Reading that array in a CPU kernel can access device memory as host memory.
+I encountered this during an independent CPU/OpenGL correctness investigation while validating configurable primitive resolution. This is a separate defect from #1110, and I do not have downstream production impact to report. Historical CPU rendering support in #344 is related context, not this defect report.
+The following self-contained probe was run in an isolated process against 0382a97e2c72911c1f6bba45274e12833a19d8e2. It initializes a CUDA context, selects CPU for Warp, then registers and maps a small OpenGL buffer. It deliberately asserts before reading a potentially mislabelled device pointer.
+Save as cpu_gl_repro.py and run with the checkout's dependencies and built native libraries:
+```
+CUDA_VISIBLE_DEVICES=0 uv run cpu_gl_repro.py
+```
+```
+"""Run in its own process: CUDA_VISIBLE_DEVICES=0 uv run cpu_gl_repro.py."""
+
+import ctypes
+import unittest
+
+import numpy as np
+import pyglet
+
+import warp as wp
+
+pyglet.options["headless"] = True
+pyglet.options["headless_device"] = 0
+
+from pyglet import gl  # noqa: E402  (headless mode must be selected first)
+
+wp.init()
+with wp.ScopedDevice("cuda:0"):
+    wp.zeros(1, device="cuda:0")
+    wp.synchronize_device("cuda:0")
+    with wp.ScopedDevice("cpu"):
+        window = pyglet.window.Window(width=16, height=16, visible=False)
+        buffer_id = gl.GLuint()
+        gl.glGenBuffers(1, ctypes.byref(buffer_id))
+        registered = None
+        mapped = None
+        try:
+            data = np.arange(8, dtype=np.float32)
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, buffer_id)
+            gl.glBufferData(gl.GL_ARRAY_BUFFER, data.nbytes, data.ctypes.data, gl.GL_DYNAMIC_DRAW)
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
+            registered = wp.RegisteredGLBuffer(int(buffer_id.value), device="cpu")
+            mapped = registered.map(dtype=wp.float32, shape=(len(data),))
+            print("CUDA registration succeeded:", registered.resource is not None, flush=True)
+            print("Mapped array device:", mapped.device, flush=True)
+            # Never dereference a potentially mislabelled CUDA device pointer.
+            unittest.TestCase().assertIsNone(registered.resource, "CPU buffer unexpectedly registered with CUDA")
+            np.testing.assert_array_equal(mapped.numpy(), data)
+        finally:
+            if mapped is not None:
+                registered.unmap()
+            mapped = None
+            registered = None
+            gl.glDeleteBuffers(1, ctypes.byref(buffer_id))
+            window.close()
+```
+Observed on the baseline:
+```
+CUDA registration succeeded: True
+Mapped array device: cpu
+```
+The probe exits with code 1 without dereferencing the suspect pointer. An earlier separate OpenGLRenderer CPU pixel-read run using the same baseline context/render implementation terminated with SIGSEGV (outer exit code 139) before completing a frame. That crash is a retained historical observation, not the outcome of the safe probe above.
+Expected: CPU buffers use ordinary host storage and the OpenGL copy path regardless of ambient CUDA state; they must not attempt CUDA/OpenGL registration. fallback_to_copy=False should reject CPU explicitly. CUDA interoperability and its pinned copy fallback should retain their behavior.
+A focused local fix is prepared: restrict CUDA registration to CUDA devices and share the ordinary host buffer directly with CPU GL transfers. The safe probe passes on that local fix. This report does not claim maintainer assignment or approval.
+System Information
+Baseline: NVIDIA/warp 0382a97e2c72911c1f6bba45274e12833a19d8e2, Warp 1.19.0.dev1
+Linux x86_64; Python 3.12.13; NumPy 2.5.3; Pyglet 2.1.16
+NVIDIA B200; driver 580.126.20; CUDA Toolkit 13.0.88
+NVIDIA EGL/OpenGL 3.3, Pyglet headless mode
+CPU refers to Warp arrays/kernels. Drawing still uses NVIDIA graphics hardware; this is not a software-only graphics or driver-free test. The proposed fix does not expand the public get_pixels() contract.
+Final local fix and validation
+The isolated local fix is d619a625db2d7be4ef3def5c9cfa168bea2c0581 (fusheng-ji/fix-cpu-gl-buffer), based on official main 0382a97e2c72911c1f6bba45274e12833a19d8e2. It includes 2120.fixed.md, moves constructor documentation into the class docstring and retains a single DCO-signed commit. Draft PR #2121 is now open. The complete patch is published for reproduction without relying on a local-only Git commit.
+Fresh validation on that final, clean source revision:
+21/21 renderer/context tests and the 4/4 new tests collected by the default Warp entrypoint passed.
+40/40 rendered frames passed: CPU with CUDA visible, CUDA hidden and an ambient CUDA context, plus CUDA native interoperation.
+15/15 access-flag cases passed across those three CPU environments, CUDA native interoperation and forced CUDA copy fallback. CPU scenarios made zero CUDA graphics registration calls.
+The safe baseline probe fails as expected; the fixed probe passes. The earlier actual crash (exit 139) remains separately labelled historical.
+Strict documentation build, applicable source pre-commit hooks and diff check passed. No native code changed; the existing standard-built libraries and matching native tree/hash provenance are recorded.
+One initial rendering capture was excluded from acceptance because it recorded a dirty worktree at process end while documentation was also being generated. That record is retained, and the scenario was rerun successfully with a clean worktree before and after. The earlier #1110 combined validation is historical and was not rerun for this documentation/changelog refresh.
+Validation report · Commands and summary · Environment and library hashes · Reproduction commands · Safe probe · Rendering/buffer validator · Checksums
+All new evidence is pinned to asset commit 8a23e20cccb4c3aebec2601ce7246e0603f73bde. CPU still refers to Warp arrays/kernels with NVIDIA EGL drawing, not software-only graphics. No performance or new public API claim is made.
+Activity
+fusheng-ji
+added a commit that references this issue on Oct 20, 2026
+Publish CPU and SVD validation (NVIDIAGH-2054)
+...
+8a23e20
+fusheng-ji commented on Oct 20, 2026
+fusheng-ji
+on Oct 20, 2026
+Author
+More actions
+Opened draft PR #2121 for this issue: #2121.
+The patch keeps CPU buffers on the host-copy path and preserves CUDA interoperability and its pinned copy fallback. The PR links the reproducer and source-specific validation records. No maintainer assignment or approval is claimed.
+fusheng-ji
+added 2 commits that reference this issue on Oct 20, 2026
+Fix CPU OpenGL buffer mappings (NVIDIAGH-2120)
+...
+8be105e
+Record warning-state isolation fix (NVIDIAGH-2120)
+...
+f2aaec6
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

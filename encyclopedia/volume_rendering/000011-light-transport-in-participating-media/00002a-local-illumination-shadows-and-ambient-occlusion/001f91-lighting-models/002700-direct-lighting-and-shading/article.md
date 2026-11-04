@@ -1,0 +1,154 @@
+# Direct Lighting and Shading
+
+Also called: Direct Lighting, Lambertian Diffuse with GGX Specular, Lighting and Shading
+
+## Overview
+This method computes the direct illumination contribution for a surface or volume element by combining Lambertian diffuse reflection, an ambient floor, emissive terms, and a non-standard GGX-like specular highlight. It is distinguished from standard PBR implementations by its specific half-vector definition ($H = \text{normalize}(L - V)$) and its integration into voxel-based or splat-based rendering pipelines where immediate shading precedes rasterization or splatting. It serves as the local illumination component in broader light transport simulations, building on [Lighting Models](2056-lighting-models.md).
+
+## How it works
+**Inputs:**
+*   Surface normal $N$ (unit vector).
+*   Light direction $L$ (unit vector, pointing from surface to light).
+*   View direction $V$ (unit vector, pointing from surface to camera).
+*   Light color/intensity $C_{light}$.
+*   Material albedo $\rho$ (diffuse reflectance).
+*   Material roughness $\alpha$ (or similar parameter for specular width).
+*   Block type flag (e.g., `BLOCK_EMISSIVE`).
+*   Emissive intensity $C_{emissive}$ (if applicable).
+
+**Outputs:**
+*   Final shaded color $C_{final}$ (linear HDR).
+
+**Data Structures:**
+*   No complex data structures required for the core shading calculation. Requires access to environment maps (for IBL variants) or light sources.
+
+**Steps:**
+
+1.  **Compute Diffuse Term:**
+    Calculate the Lambertian diffuse contribution using the dot product of the normal and light direction.
+    $$ C_{diffuse} = \max(N \cdot L, 0) \cdot C_{light} $$
+    [S1, unofficial]
+
+2.  **Compute Specular Term (Non-Standard GGX-like):**
+    *   **Half-Vector:** Compute the half-vector $H$ using the non-standard definition:
+        $$ H = \text{normalize}(L - V) $$
+        [S1, unofficial]
+        *Note: Standard GGX uses $H = \text{normalize}(L + V)$. This deviation may produce incorrect specular highlights relative to physical models.* [S1, unofficial]
+    *   **Fresnel Approximation:** Apply Schlick's Fresnel approximation to determine reflectivity $F$. Let $F_0$ be the base reflectivity (often 0.04 for dielectrics or derived from albedo for metals).
+        $$ F = F_0 + (1 - F_0)(1 - H \cdot V)^5 $$
+        [S1, unofficial]
+    *   **Specular Intensity:** Compute the specular term. While the exact GGX distribution term ($D$) and geometry term ($G$) are not fully specified in the primary source, the method implies a standard GGX-like structure scaled by $F$.
+        $$ C_{specular} = F \cdot C_{light} \cdot D(H, \alpha) \cdot G(...) $$
+        [S1, unofficial]
+
+3.  **Add Emissive Contribution:**
+    If the surface block is marked as emissive (determined by hash functions `hash13` and `hash12` in voxel contexts), add the emissive intensity.
+    $$ C_{emissive\_term} = \begin{cases} C_{emissive} & \text{if is\_emissive} \\ 0 & \text{otherwise} \end{cases} $$
+    [S1, unofficial]
+
+4.  **Combine and Tone Map:**
+    Sum the contributions and apply exponential tone mapping.
+    $$ C_{lit} = C_{diffuse} + C_{specular} + C_{emissive\_term} + C_{ambient} $$
+    $$ C_{final} = 1 - \exp(-2 \cdot C_{lit}) $$
+    [S1, unofficial]
+
+**Parameters:**
+*   Tone mapping constant: 2.0 [S1, unofficial]
+*   Ambient floor: Not specified in sources. [G] (Typically a small constant or sky color).
+
+**Edge Cases and Pitfalls:**
+*   **Half-Vector Definition:** The use of $L - V$ instead of $L + V$ is a known deviation from standard GGX. Implementers must be aware this will not conserve energy or reflect light correctly according to standard microfacet theory unless specifically intended for a stylized look. [S1, unofficial]
+*   **Degenerate Normals:** If $N$ is zero or undefined, the diffuse term becomes 0. [G]
+*   **Voxel Interior Origins:** If the ray origin is inside a voxel, the initial normal fallback is $(0, 1, 0)$, which may be inaccurate. [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def direct_lighting_shading(N, L, V, C_light, rho, alpha, is_emissive, C_emissive, C_ambient):
+    # 1. Diffuse Term
+    ndotl = max(dot(N, L), 0.0)
+    C_diffuse = ndotl * C_light
+
+    # 2. Specular Term (Non-Standard GGX-like)
+    # Note: H = normalize(L - V) is non-standard
+    H = normalize(L - V)
+    
+    # Base reflectivity F0
+    # For dielectrics, F0 is typically 0.04. For metals, F0 = rho.
+    # Assuming dielectric default if not specified
+    F0 = 0.04 
+    
+    # Schlick Fresnel Approximation
+    vdotH = dot(V, H)
+    F = F0 + (1.0 - F0) * pow(1.0 - vdotH, 5.0)
+    
+    # GGX-like specular intensity
+    # D and G terms are not fully specified in [S1, unofficial], assuming standard GGX D and Schlick-G
+    # This is a placeholder for the missing microfacet distribution details
+    # In a full implementation, D(H, alpha) and G(N, L, V, alpha) would be calculated here.
+    # For the purpose of this method description, we assume a simplified specular term
+    # proportional to F * C_light.
+    # [G] Standard GGX D term: alpha_sq = alpha * alpha
+    # denom = 4.0 * pow(dot(N, H), 2.0) - 3.0 * alpha_sq + 1.0
+    # D = alpha_sq / (3.14159 * denom * denom) if denom > 0 else 0
+    # [G] Schlick-G geometry term
+    # chi = max(dot(N, L), 0.0)
+    # G_L = chi / (chi * (1.0 - alpha) + alpha)
+    # chi = max(dot(N, V), 0.0)
+    # G_V = chi / (chi * (1.0 - alpha) + alpha)
+    # G = G_L * G_V
+    # C_specular = F * D * G * C_light
+    
+    # Simplified specular for direct implementation based on [S1, unofficial] emphasis on F
+    # Since D and G are not explicitly defined in [S1, unofficial], we cannot provide exact code.
+    # We will assume a basic specular highlight for demonstration, noting the missing details.
+    # [Comment: Exact D and G terms not provided in source [S1, unofficial]. Implementation requires standard GGX D/G or stylized approximation.]
+    C_specular = F * C_light * 0.5 # Placeholder factor for missing D/G
+
+    # 3. Emissive Term
+    C_emissive_term = C_emissive if is_emissive else vec3(0.0)
+
+    # 4. Combine
+    C_lit = C_diffuse + C_specular + C_emissive_term + C_ambient
+
+    # 5. Tone Mapping
+    C_final = 1.0 - exp(-2.0 * C_lit)
+
+    return C_final
+```
+
+## Subtopics
+
+### Split-Sum IBL Shading
+A forward shading strategy where each surfel is shaded independently before rasterization using split-sum Image-Based Lighting (IBL), producing a linear HDR color value that enters the splatting pipeline [S2, unofficial]. It separates the rendering equation into diffuse and specular components, allowing precomputed environment maps and BRDF LUTs to be used efficiently [S2, unofficial]. Choose this when rendering large numbers of surfels with complex environment lighting in a splatting context [S2, unofficial].
+Formula:
+$$ c_k = k_d \rho L_d(\mathbf{n}) + L_s(\mathbf{r}, r) (F_0 \beta_1 + \beta_2) $$
+[S2, unofficial]
+Where:
+*   $c_k$: Outgoing radiance [S2, unofficial]
+*   $k_d$: Diffuse weight, $k_d = (1 - F_0)(1 - \rho)$ [S2, unofficial]
+*   $\rho$: Albedo [S2, unofficial]
+*   $L_d(\mathbf{n})$: Diffuse irradiance from pre-convolved environment map along normal $\mathbf{n}$ [S2, unofficial]
+*   $L_s(\mathbf{r}, r)$: Prefiltered specular radiance along reflection direction $\mathbf{r} = 2(\mathbf{v} \cdot \mathbf{n})\mathbf{n} - \mathbf{v}$ at MIP level determined by roughness [S2, unofficial]
+*   $F_0$: Base reflectivity, $F_0 = 0.04(1 - \rho) + \rho^2$ [S2, unofficial]
+*   $\beta_1, \beta_2$: Scale and bias from BRDF LUT indexed by $(\mathbf{v} \cdot \mathbf{n}, \text{roughness})$ [S2, unofficial]
+
+### Anisotropic Specular Highlights (Disney)
+A method for generating anisotropic specular highlights using the Disney roughness-to-alpha convention [S3, unofficial]. It is used when stylized, anisotropic surface reflections are desired in voxel or ray-traced scenes [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per surface/volume element for the core shading calculation. Split-Sum IBL adds $O(1)$ texture lookups (environment map + BRDF LUT) [S2, unofficial].
+*   **Memory Complexity:** $O(1)$ for local shading. Split-Sum IBL requires storage for environment maps and BRDF LUTs [S2, unofficial].
+*   **Strengths:** Simple to implement; Split-Sum IBL allows for efficient pre-filtering and avoids complex normal filtering issues in splatting [S2, unofficial].
+*   **Limitations:** The non-standard half-vector definition in the base method may lead to physically inaccurate specular highlights [S1, unofficial]. Atmosphere and lighting approximations (e.g., single-step integration) may lack fidelity in complex scenes [S1, unofficial].
+*   **When to use:** Real-time voxel rendering, stylized graphics, or when integrating with splat-based forward rendering pipelines [S1, S2, unofficial].
+*   **When not to use:** Physically accurate offline rendering requiring strict energy conservation and standard microfacet theory [S1, unofficial].
+
+## Background
+The base method originates from a GLSL voxel-world shader implementation, utilizing a non-standard GGX-like specular term and exponential tone mapping [S1, unofficial]. The Split-Sum IBL variant is derived from 3D Surface Splatting for Inverse Rendering (3DSS), which adopts the split-sum approximation for efficient forward shading of surfels [S2, unofficial]. The Anisotropic Specular Highlights variant is associated with the Disney roughness-to-alpha convention in voxel raytracing contexts [S3, unofficial].
+
+## Sources
+[S1] GitHub - razzle-reinizu/Voxel-World-Shader: A GLSL voxel-world shader ..., https://github.com/razzle-reinizu/Voxel-World-Shader, fetched 2026-10-25 (unofficial)
+[S2] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)
+[S3] NiekMSoftware/bad-apple-voxel-raytracer, https://github.com/NiekMSoftware/bad-apple-voxel-raytracer, fetched 2026-10-24 (unofficial)

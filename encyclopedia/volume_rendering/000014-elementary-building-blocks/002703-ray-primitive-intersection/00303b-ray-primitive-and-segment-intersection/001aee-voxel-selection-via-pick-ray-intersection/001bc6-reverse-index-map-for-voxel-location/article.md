@@ -1,0 +1,80 @@
+# Reverse Index Map for Voxel Location
+Also called: P->V Mapping
+## Overview
+The Reverse Index Map for Voxel Location is a technique used to determine the voxel location in volume coordinates ($V$) from the fragment location in the framebuffer plus the current slice z-offset, using a reverse index map ($P \rightarrow V$) [S1, unofficial]. It enables direct manipulation segmentation by computing the corresponding seed voxel from screen coordinates [Parent]. It differs from its siblings by focusing on the inverse lookup from packed framebuffer indices to logical volume coordinates, whereas [Ray-Box Intersection for Interaction](2638-ray-box-intersection-for-interaction.md) computes geometric intersections and [BrushController](2362-brushcontroller.md) manages interaction state.
+## How it works
+**Inputs:** Fragment location in the framebuffer ($F$), current slice z-offset ($Z_{offset}$).
+**Outputs:** Voxel location in volume coordinates ($V$).
+**Data Structures:**
+*   **Reverse Index Texture:** Maps packed coordinates ($P$) to volume coordinates ($V$). The texture stores the volume coordinate corresponding to each packed index.
+
+**Steps:**
+1.  Retrieve the fragment location in the framebuffer ($F$) and the current slice z-offset ($Z_{offset}$) [S1, unofficial].
+2.  Combine $F$ and $Z_{offset}$ to form the packed coordinate $P$ [S1, unofficial].
+3.  Sample the Reverse Index Texture at index $P$ to retrieve the volume coordinate $V$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_voxel_location(fragment_pos, slice_z_offset, reverse_index_texture):
+    """
+    Determines voxel location in volume coordinates from framebuffer fragment.
+    
+    Args:
+        fragment_pos: Tuple (x, y) representing the fragment location in the framebuffer.
+        slice_z_offset: Integer or float representing the current slice z-offset.
+        reverse_index_texture: A lookup structure (texture) mapping packed coordinates P to volume coordinates V.
+        
+    Returns:
+        V: The voxel location in volume coordinates.
+    """
+    # Step 1: Get fragment location and z-offset (already provided as inputs)
+    # Step 2: Form packed coordinate P
+    # The exact packing scheme (e.g., interleaving x, y, z) is not specified in the source.
+    # Assuming a standard interleaving or concatenation based on fragment_pos and slice_z_offset.
+    # [G] Implementation detail: P must be constructed such that it uniquely identifies the voxel
+    # corresponding to the fragment and slice. A common approach is P = (x, y, z_offset).
+    # Since the source does not specify the bit-packing, we assume P is a composite key.
+    packed_coord = (fragment_pos[0], fragment_pos[1], slice_z_offset)
+    
+    # Step 3: Use reverse index map to determine voxel location
+    # The source states: "the reverse index map P->V is used to determine the voxel location"
+    # This implies a direct lookup.
+    voxel_location = reverse_index_texture[packed_coord]
+    
+    return voxel_location
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The source does not specify precision issues. [G] Ensure that the packed coordinate $P$ does not suffer from integer overflow if coordinates are large.
+*   **Boundaries:** If the fragment location is outside the valid framebuffer range or the slice offset is invalid, the lookup may fail. [G] Clamp inputs to valid ranges before packing.
+*   **Degenerate Input:** If the volume is empty or the slice is out of bounds, the reverse index map may return undefined values. [G] Handle null or invalid volume coordinates.
+
+## Subtopics
+
+### Forward Index Map for Texture Indirection
+A technique used during ray integration to map volume coordinates to packed texture coordinates via a forward mapping index texture ($V \rightarrow P$) [S1, unofficial]. It is used in the integration step where each sample requires a texture indirection from volume coordinates to packed texture coordinates [S1, unofficial]. The Forward Index Texture maps volume coordinates ($V$) to packed texture coordinates ($P$) [S1, unofficial]. It is chosen when ray integration requires accessing scalar data from a packed volume representation, complementing the Reverse Index Map which is used for initial voxel selection.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Time:** $O(1)$ per fragment for the lookup, assuming constant-time texture access [S1, unofficial].
+*   **Memory:** Depends on the size of the volume and the packing scheme. The Reverse Index Texture must store a volume coordinate for each packed coordinate, so its size is proportional to the number of voxels or packed indices [S1, unofficial].
+
+**Measured Performance:**
+*   The source mentions that rendering is interleaved with intensity texture updates, allowing user interaction, although all ray directions may require several frames to complete [S1, unofficial].
+*   The technique uses adaptive sampling, which achieves a speedup of the order of the cube root of the data reduction ratio [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Enables interactive manipulation by quickly mapping screen coordinates to volume coordinates [S1, unofficial].
+*   **Limitations:** Requires additional memory for the index textures [S1, unofficial]. The source does not specify performance bottlenecks beyond the multi-frame completion for all ray directions [S1, unofficial].
+
+**When to Use:**
+*   Use when direct manipulation segmentation requires fast mapping from framebuffer fragments to volume voxels [S1, unofficial].
+*   Do not use when geometric intersection is required instead of index-based lookup [Sibling: Ray-Box Intersection for Interaction].
+
+## Background
+The technique is described in the context of Local Ambient Occlusion in Direct Volume Rendering [S1, unofficial]. It is used in a rendering pass that is interleaved with intensity texture updates to allow user interaction [S1, unofficial]. The rendering uses raycasting with adaptive sampling [S1, unofficial].
+
+## Sources
+[S1] Local Ambient Occlusion in Direct Volume Rendering, https://www.researchgate.net/publication/44596498_Local_Ambient_Occlusion_in_Direct_Volume_Rendering, fetched 2026-10-28 (unofficial)

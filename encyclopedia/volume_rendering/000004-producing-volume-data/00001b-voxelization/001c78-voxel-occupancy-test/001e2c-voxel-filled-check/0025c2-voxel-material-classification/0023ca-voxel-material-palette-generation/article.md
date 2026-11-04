@@ -185,4 +185,4 @@ def generate_voxel_palette(materials, material_defs, atlas_width, atlas_height, 
 This method is part of the voxel material classification and storage system in the Godot Voxel plugin [S1, unofficial]. It enables efficient PBR rendering for voxel-based games by mapping discrete voxel IDs to a shared set of material atlases [S1, unofficial].
 
 ## Sources
-[S1] viktor-ferenczi/godot-voxel, https://github.com/viktor-ferenczi/godot-voxel, fetched 2026-10-24 [S1, unofficial]
+[S1] viktor-ferenczi/godot-voxel, https://github.com/viktor-ferenczi/godot-voxel, fetched 2026-10-24 (unofficial)

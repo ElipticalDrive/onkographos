@@ -1,0 +1,119 @@
+# Intersection Target Method
+
+Also called: 2D 8-Connected, 4-Separating Voxelization, Intersection Target Voxelization
+
+## Overview
+The Intersection Target Method is a topological voxelization strategy for effectively 1D input (lines or curves) that guarantees 8-connectivity (adjacent voxels share an edge or corner) and 4-separability (no 4-connected path of background voxels separates foreground components) [S1, unofficial]. It differs from geometric proximity methods by including a voxel if and only if the input intersects a specific geometric "target" shape within that voxel, ensuring topological correctness through the connectivity of these targets [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A parameterized continuous curve $c(t) = (f_x(t), f_y(t))$ for $t \in [0, 1]$.
+- Output: A set of voxels (pixels in 2D) $S_d$ such that the voxelization is 8-connected and 4-separable.
+
+**Data Structures:**
+- The intersection target is defined within each pixel grid cell. For the standard 8-connected variant, the target consists of two line segments:
+  1. A horizontal segment centered at the pixel center, extending to the midpoints of the left and right edges.
+  2. A vertical segment centered at the pixel center, extending to the midpoints of the top and bottom edges.
+  This forms a "crosshairs" shape.
+
+**Steps:**
+1. For each pixel $V$ in the grid:
+2. Define the intersection target $T_V$ as the crosshairs shape within $V$.
+3. Test if the input curve $c(t)$ intersects any part of $T_V$.
+4. If an intersection exists, add $V$ to the output set $S_d$.
+
+**Formulas and Thiness Condition:**
+To ensure "thiness" (at most one voxel per horizontal layer for curves oriented closer to the y-axis), the curve must satisfy:
+$$ \left| \frac{df_y}{df_x} \right| \ge 1 $$
+for all $t$. This ensures the curve is steeper than 45 degrees. Under this condition, if the curve intersects the horizontal segment of the crosshairs target at $(x_0, y_0)$, the x-coordinate is bounded by $[x_0 - 1/2, x_0 + 1/2]$, preventing multiple voxels in the same horizontal layer from the same continuous segment [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def intersection_target_voxelization(curve, grid_bounds):
+    """
+    Voxelizes a 1D curve using the 8-connected, 4-separating intersection target method.
+    
+    Args:
+        curve: A callable or list of points representing c(t) = (fx(t), fy(t)).
+        grid_bounds: Tuple (x_min, y_min, x_max, y_max) defining the grid area.
+        
+    Returns:
+        A set of voxel coordinates (x, y) included in the voxelization.
+    """
+    voxels = set()
+    
+    # Determine grid resolution and cell size
+    # Note: Exact resolution depends on application context; assume unit cells for simplicity
+    # or derive from grid_bounds and desired resolution.
+    # For this implementation, we iterate over integer grid cells covering the bounds.
+    
+    x_min, y_min, x_max, y_max = grid_bounds
+    # Round bounds to nearest integers to define pixel indices
+    start_x = floor(x_min)
+    end_x = ceil(x_max)
+    start_y = floor(y_min)
+    end_y = ceil(y_max)
+    
+    for x in range(start_x, end_x):
+        for y in range(start_y, end_y):
+            # Define the intersection target for pixel (x, y)
+            # Pixel center is (x + 0.5, y + 0.5)
+            # Horizontal segment: from (x, y+0.5) to (x+1, y+0.5)
+            # Vertical segment: from (x+0.5, y) to (x+0.5, y+1)
+            
+            h_line = Segment(Point(x, y + 0.5), Point(x + 1, y + 0.5))
+            v_line = Segment(Point(x + 0.5, y), Point(x + 0.5, y + 1))
+            
+            # Check if curve intersects either segment of the crosshairs target
+            if curve_intersects_segments(curve, [h_line, v_line]):
+                voxels.add((x, y))
+                
+    return voxels
+
+def curve_intersects_segments(curve, segments):
+    """
+    Checks if the curve intersects any of the given line segments.
+    This requires solving for t where c(t) lies on the segment.
+    For a general curve, this may involve numerical root finding or analytical solution.
+    """
+    for seg in segments:
+        if curve_intersects_segment(curve, seg):
+            return True
+    return False
+
+def curve_intersects_segment(curve, segment):
+    """
+    Determines if the curve intersects a specific line segment.
+    Implementation detail: Solve for t such that c(t) is on the segment.
+    For a line segment, this is a system of equations.
+    """
+    # Placeholder for specific intersection logic based on curve type (line, bezier, etc.)
+    # [G] In practice, this involves projecting the curve onto the segment's line
+    # and checking if the intersection point lies within the segment bounds and
+    # corresponds to a valid t in [0, 1].
+    return False # Placeholder: Actual implementation depends on curve definition
+```
+
+**Edge Cases:**
+- Point-like input (effective dimension 0) is ignored unless it falls exactly on the target, which is rare for continuous curves.
+- Curves not satisfying the thinness condition may produce thicker results.
+
+## Subtopics
+
+### 2D 4-Connected, 8-Separating Voxelization
+A variant that guarantees 4-connectivity (adjacent voxels share an edge) and 8-separability. It uses a cross-diagonal intersection target consisting of two curves connecting opposite corners of the pixel (e.g., top-left to bottom-right, and top-right to bottom-left), meeting at the pixel center. This geometry ensures that any continuous path exiting the pixel must pass through the targets of the 4-neighbors, enforcing 4-connectivity [S1, unofficial]. An alternative is a square target pushed to the pixel boundary, but the cross-diagonal is preferred for thinness [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of pixels in the bounding box of the input, assuming efficient intersection testing.
+- **Memory Complexity:** Linear with respect to the number of voxels in the output.
+- **Strengths:** Guarantees topological connectivity (8-connected/4-separable) for 1D input. Simple intersection targets (crosshairs or diamond) are easy to implement in shaders.
+- **Limitations:** Only suitable for effectively 1D input. The diamond variant may include unnecessary voxels for aesthetic reasons but reduces connectivity guarantees slightly compared to the crosshairs variant in specific corner cases [S1, unofficial].
+- **When to use:** When topological correctness of line/curve voxelization is critical, such as in skeletonization or thin structure rendering.
+
+## Background
+The Intersection Target Method was introduced by Laine et al. in "A Topological Approach to Voxelization" (2013) [S1, unofficial]. It builds on the concept of topological voxelization where connectivity is enforced by the geometry of the intersection targets rather than geometric proximity. The method leverages the properties of 8-connectivity and 4-separability, which are equivalent in 2D grid topology [S1, unofficial].
+
+## Sources
+[S1] A Topological Approach to Voxelization - NVIDIA, https://research.nvidia.com/sites/default/files/pubs/2013-06_A-Topological-Approach/laine2013egsr_paper.pdf, fetched 2026-10-29 (unofficial)

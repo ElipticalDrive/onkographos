@@ -3,42 +3,42 @@
 Also called: Fourier Feature Embedding, Frequency Bands Embedding, Harmonic Embedding, NeRF Positional Encoding, Positional Encoding (Fourier Features), Positional Encoding Embedder, Sine/Cosine positional encoding, Sinusoidal Embedding, Sinusoidal Encoding
 
 ## Overview
-Fourier Positional Encoding maps low-dimensional input coordinates (and optionally view directions) into a higher-dimensional space using concatenated sinusoidal functions at exponentially increasing frequencies [S1, S2, S3, S4]. This transformation enables the subsequent Multi-Layer Perceptron (MLP) to represent high-frequency details and sharp boundaries that standard MLPs struggle to learn due to spectral bias [S1, S2, S3, S4]. It differs from standard positional encoding (used in Transformers) by using fixed, non-learned sinusoidal bases rather than learned embeddings, and from SIREN's native sine activations by providing explicit frequency bands as input features rather than relying on the network's internal sine layers to generate high-frequency responses [S1, S4].
+Fourier Positional Encoding maps low-dimensional input coordinates (and optionally view directions) into a higher-dimensional space using concatenated sinusoidal functions at exponentially increasing frequencies [S1, S2, S3, S4, unofficial]. This transformation enables the subsequent Multi-Layer Perceptron (MLP) to represent high-frequency details and sharp boundaries that standard MLPs struggle to learn due to spectral bias [S1, S2, S3, S4, unofficial]. It differs from standard positional encoding (used in Transformers) by using fixed, non-learned sinusoidal bases rather than learned embeddings, and from SIREN's native sine activations by providing explicit frequency bands as input features rather than relying on the network's internal sine layers to generate high-frequency responses [S1, S4, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A tensor of coordinates $x$ with shape `(*batch, input_dims)` [S2, S4].
-- **Output:** A tensor of encoded features with shape `(*batch, out_dim)` [S2, S4].
+- **Input:** A tensor of coordinates $x$ with shape `(*batch, input_dims)` [S2, S4, unofficial].
+- **Output:** A tensor of encoded features with shape `(*batch, out_dim)` [S2, S4, unofficial].
 
 **Data Structures:**
-The method is implemented as a class or function factory that pre-computes frequency bands and stores embedding functions [S2, S4].
-- `freq_bands`: A 1D tensor of shape `(num_freqs,)` containing the base frequencies [S2, S4].
-- `embed_fns`: A list of callable functions that transform the input tensor [S2, S4]. If `include_input` is True, the first function is the identity function [S2, S4]. Subsequent functions apply sine and cosine to scaled inputs for each frequency band [S4].
-- `out_dim`: An integer representing the total output dimensionality [S2, S4].
-- **Layout:** The outputs of `embed_fns` are concatenated along the last axis [S2, S4]. An alternative interleaved layout exists where sine and cosine channels for each input dimension are spaced by a stride of `2 * num_octaves` [S1].
+The method is implemented as a class or function factory that pre-computes frequency bands and stores embedding functions [S2, S4, unofficial].
+- `freq_bands`: A 1D tensor of shape `(num_freqs,)` containing the base frequencies [S2, S4, unofficial].
+- `embed_fns`: A list of callable functions that transform the input tensor [S2, S4, unofficial]. If `include_input` is True, the first function is the identity function [S2, S4, unofficial]. Subsequent functions apply sine and cosine to scaled inputs for each frequency band [S4, unofficial].
+- `out_dim`: An integer representing the total output dimensionality [S2, S4, unofficial].
+- **Layout:** The outputs of `embed_fns` are concatenated along the last axis [S2, S4, unofficial]. An alternative interleaved layout exists where sine and cosine channels for each input dimension are spaced by a stride of `2 * num_octaves` [S1, unofficial].
 
 **Numbered Steps:**
-1. **Initialize Embedding Functions:** Create an empty list `embed_fns` and set `out_dim = 0` [S4].
-2. **Handle Input Inclusion:** If `include_input` is True, append the identity function $f(x) = x$ to `embed_fns` and increment `out_dim` by `input_dims` [S2, S4].
-3. **Generate Frequency Bands:** Calculate the `num_freqs` frequency values [S2, S4]. If `log_sampling` is True, compute exponents as `linspace(0, max_freq_log2, num_freqs)` and set `freq_bands = 2.0 ** exponents` [S2, S4]. If `log_sampling` is False, set `freq_bands = linspace(2.0**0, 2.0**max_freq_log2, num_freqs)` [S2, S4]. Optionally, scale frequencies by $\omega_0$: `freq_bands = omega0 * freq_bands` [S3].
-4. **Create Embedding Functions for Each Frequency:** For each frequency $f$ in `freq_bands` and each function $p$ in `periodic_fns`, create a function $g(x) = p(x \cdot f)$ [S2, S4]. Bind $f$ and $p$ as default arguments in the lambda definition to avoid closure issues where all functions capture the final loop values [S4]. Append $g$ to `embed_fns` and increment `out_dim` by the output dimension of $p$ (typically 1 for sin/cos) [S2, S4].
-5. **Encode Input:** Given input tensor $x$, compute the output by concatenating the results of applying each function in `embed_fns` to $x$ along the last axis [S2, S4].
+1. **Initialize Embedding Functions:** Create an empty list `embed_fns` and set `out_dim = 0` [S4, unofficial].
+2. **Handle Input Inclusion:** If `include_input` is True, append the identity function $f(x) = x$ to `embed_fns` and increment `out_dim` by `input_dims` [S2, S4, unofficial].
+3. **Generate Frequency Bands:** Calculate the `num_freqs` frequency values [S2, S4, unofficial]. If `log_sampling` is True, compute exponents as `linspace(0, max_freq_log2, num_freqs)` and set `freq_bands = 2.0 ** exponents` [S2, S4, unofficial]. If `log_sampling` is False, set `freq_bands = linspace(2.0**0, 2.0**max_freq_log2, num_freqs)` [S2, S4, unofficial]. Optionally, scale frequencies by $\omega_0$: `freq_bands = omega0 * freq_bands` [S3, unofficial].
+4. **Create Embedding Functions for Each Frequency:** For each frequency $f$ in `freq_bands` and each function $p$ in `periodic_fns`, create a function $g(x) = p(x \cdot f)$ [S2, S4, unofficial]. Bind $f$ and $p$ as default arguments in the lambda definition to avoid closure issues where all functions capture the final loop values [S4, unofficial]. Append $g$ to `embed_fns` and increment `out_dim` by the output dimension of $p$ (typically 1 for sin/cos) [S2, S4, unofficial].
+5. **Encode Input:** Given input tensor $x$, compute the output by concatenating the results of applying each function in `embed_fns` to $x$ along the last axis [S2, S4, unofficial].
 
 **Formulas:**
-- **Output Dimension:** If `include_input` is True, $\text{out\_dim} = \text{input\_dims} \times (1 + 2 \times \text{num\_freqs})$ [S4]. If `include_input` is False, $\text{out\_dim} = \text{input\_dims} \times 2 \times \text{num\_freqs}$ [S3]. The factor 2 comes from the sine and cosine functions [S4].
-- **Frequency Generation (Log Sampling):** $\text{freq\_bands} = 2.0^{\text{linspace}(0, \text{max\_freq\_log2}, \text{num\_freqs})}$ [S2, S4].
+- **Output Dimension:** If `include_input` is True, $\text{out\_dim} = \text{input\_dims} \times (1 + 2 \times \text{num\_freqs})$ [S4, unofficial]. If `include_input` is False, $\text{out\_dim} = \text{input\_dims} \times 2 \times \text{num\_freqs}$ [S3, unofficial]. The factor 2 comes from the sine and cosine functions [S4, unofficial].
+- **Frequency Generation (Log Sampling):** $\text{freq\_bands} = 2.0^{\text{linspace}(0, \text{max\_freq\_log2}, \text{num\_freqs})}$ [S2, S4, unofficial].
 
 **Parameters:**
-- `input_dims` (int): Dimensionality of the input vector (e.g., 3) [S4].
-- `num_freqs` (int, also `multires` or `n_harmonic_functions`): Number of frequency bands to generate [S2, S3, S4]. Default is often 6 or 10 [S3, S4].
-- `max_freq_log2` (int): The maximum frequency exponent [S2, S4]. The maximum frequency is $2^{\text{max\_freq\_log2}}$ [S2]. Typically set to `num_freqs - 1` [S2, S4].
-- `log_sampling` (bool): If True, frequencies are sampled logarithmically (powers of 2). If False, they are linearly spaced between $2^0$ and $2^{\text{max\_freq\_log2}}$. Default is True [S2, S4].
-- `include_input` (bool): If True, the original input coordinates are concatenated to the encoded output. Default is True [S2, S3, S4].
-- `periodic_fns` (list of functions): List of activation functions applied to scaled inputs. Default is `[sin, cos]` [S2, S4].
-- `omega0` (float): Scaling factor for frequencies. Default is 1.0 [S3].
+- `input_dims` (int): Dimensionality of the input vector (e.g., 3) [S4, unofficial].
+- `num_freqs` (int, also `multires` or `n_harmonic_functions`): Number of frequency bands to generate [S2, S3, S4, unofficial]. Default is often 6 or 10 [S3, S4, unofficial].
+- `max_freq_log2` (int): The maximum frequency exponent [S2, S4, unofficial]. The maximum frequency is $2^{\text{max\_freq\_log2}}$ [S2, unofficial]. Typically set to `num_freqs - 1` [S2, S4, unofficial].
+- `log_sampling` (bool): If True, frequencies are sampled logarithmically (powers of 2). If False, they are linearly spaced between $2^0$ and $2^{\text{max\_freq\_log2}}$. Default is True [S2, S4, unofficial].
+- `include_input` (bool): If True, the original input coordinates are concatenated to the encoded output. Default is True [S2, S3, S4, unofficial].
+- `periodic_fns` (list of functions): List of activation functions applied to scaled inputs. Default is `[sin, cos]` [S2, S4, unofficial].
+- `omega0` (float): Scaling factor for frequencies. Default is 1.0 [S3, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Lambda Closure Issue:** When generating embedding functions in a loop, variables like `freq` and `p_fn` must be bound as default arguments (e.g., `lambda x, f=freq: torch.sin(x * f)`) [S4]. If not, all functions will capture the final value of the loop variable, resulting in incorrect encoding [S4].
+- **Lambda Closure Issue:** When generating embedding functions in a loop, variables like `freq` and `p_fn` must be bound as default arguments (e.g., `lambda x, f=freq: torch.sin(x * f)`) [S4, unofficial]. If not, all functions will capture the final value of the loop variable, resulting in incorrect encoding [S4, unofficial].
 - **Precision:** For very high frequencies, the argument to sine/cosine can become large, potentially leading to precision issues in floating-point arithmetic [G].
 - **Boundary Conditions:** The encoding is periodic [G]. If the input domain is not periodic or if the highest frequency is too high relative to the sampling rate, aliasing may occur [G]. The choice of `num_freqs` should be guided by the highest frequency detail present in the scene [G].
 
@@ -107,14 +107,14 @@ def get_fourier_embedder(input_dims, num_freqs, max_freq_log2=None, log_sampling
 ## Operating characteristics
 - **Time Complexity:** $O(N \cdot D \cdot F)$, where $N$ is the batch size, $D$ is the input dimension, and $F$ is the number of frequency bands [G]. The operation is element-wise and highly parallelizable on GPUs [G].
 - **Memory Complexity:** $O(N \cdot D \cdot F)$ for the output tensor [G]. The frequency bands are pre-computed and stored once [G].
-- **Measured Performance:** In NeRF, using 10 frequency bands for position and 4 for view directions allows the MLP to reconstruct high-frequency details like text and fine geometry that a raw MLP cannot [S2, S4].
+- **Measured Performance:** In NeRF, using 10 frequency bands for position and 4 for view directions allows the MLP to reconstruct high-frequency details like text and fine geometry that a raw MLP cannot [S2, S4, unofficial].
 - **Strengths:** Simple to implement, differentiable, and effective at overcoming spectral bias in MLPs [G].
 - **Limitations:** The frequencies are fixed and not learned [G]. If the scene contains frequencies outside the range of the chosen bands, details will be lost [G]. The output dimension grows linearly with the number of bands, which can increase the size of the MLP's input layer [G].
 - **When to Use:** When training an MLP to represent a continuous signal (like a neural radiance field) that contains high-frequency details [G].
 - **When Not to Use:** When the signal is very smooth and low-frequency, or when memory constraints prevent the increased input dimensionality [G].
 
 ## Background
-The method is a core component of NeRF pipelines and SIREN-based architectures [S1, S2, S4]. It is inspired by the use of sinusoidal positional encodings in Transformer architectures, but adapted for continuous coordinate representation [G]. It helps the network learn high-frequency scene details [S1, S4].
+The method is a core component of NeRF pipelines and SIREN-based architectures [S1, S2, S4, unofficial]. It is inspired by the use of sinusoidal positional encodings in Transformer architectures, but adapted for continuous coordinate representation [G]. It helps the network learn high-frequency scene details [S1, S4, unofficial].
 
 ## Sources
 [S1] Yonghao-Lee/differentiable-rendering, https://github.com/Yonghao-Lee/differentiable-rendering, fetched 2026-10-26 (unofficial)

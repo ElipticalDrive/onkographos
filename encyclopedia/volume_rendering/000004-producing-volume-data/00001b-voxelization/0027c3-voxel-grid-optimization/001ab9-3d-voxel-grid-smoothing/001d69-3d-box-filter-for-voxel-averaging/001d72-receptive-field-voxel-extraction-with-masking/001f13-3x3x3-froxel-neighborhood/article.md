@@ -1,0 +1,68 @@
+# 3x3x3 Froxel Neighborhood
+
+Also called: 27-tap Froxel Neighborhood
+
+## Overview
+A spatial reconstruction method that extracts a 3×3×3 neighborhood of froxels around a sample point to incorporate spatial information from adjacent depth slices, applying additional smoothing across the volume's depth axis [S1, unofficial]. It extends the planar 3×3 neighborhood by including depth neighbors, which the planar variant lacks [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A froxel grid containing volumetric data [S1, unofficial].
+- A sampling index (uniform) defining the specific offset configuration [S1, unofficial].
+
+**Outputs:**
+- A reconstructed froxel value for each sample point, derived from the 27 sampled neighbors [S1, unofficial].
+
+**Data Structures:**
+- **Sampling Offsets:** A precomputed list of 27 integer offsets $(dx, dy, dz)$, where each component ranges from $-1$ to $1$ [S1, unofficial].
+- **Shader Uniform:** An integer index selecting the active offset list, updated per frame [S1, unofficial].
+
+**Steps:**
+1. Retrieve the precomputed list of 27 offsets based on the current sampling index [S1, unofficial].
+2. For each offset $(dx, dy, dz)$ in the list, sample the froxel value at the corresponding neighbor position relative to the center [G].
+3. Combine the 27 sampled values to produce the reconstructed output [G].
+
+**Formulas:**
+Not given in the sources.
+
+**Parameters:**
+- **Neighborhood Size:** 3×3×3, requiring exactly 27 samples per froxel [S1, unofficial].
+- **Sampling Index:** A uniform integer provided each frame to select the offset list [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions:** The method assumes valid neighbors; out-of-bounds accesses must be masked or clamped, following the parent method's masking logic [G].
+- **Performance:** 27 samples per froxel is considered likely too many for real-time rendering contexts [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sample_3x3x3_froxel(froxel_grid, center_coords, offset_list):
+    # offset_list is a precomputed list of 27 (dx, dy, dz) tuples [S1, unofficial]
+    samples = []
+    for dx, dy, dz in offset_list:
+        nx, ny, nz = center_coords[0] + dx, center_coords[1] + dy, center_coords[2] + dz
+        # Apply boundary masking inherited from parent method [G]
+        if 0 <= nx < froxel_grid.width and 0 <= ny < froxel_grid.height and 0 <= nz < froxel_grid.depth:
+            samples.append(froxel_grid[nx, ny, nz])
+    # Standard averaging step [G]
+    return sum(samples) / len(samples) if samples else froxel_grid[center_coords]
+```
+
+## Subtopics
+
+### 6-Tap Froxel Neighborhood
+A lower-cost alternative using samples from the six nearby froxels and the center froxel (total 7 taps) to compute neighborhood bounds [S1, unofficial]. It is analogous to the 4-tap nearest pixel neighborhood used in INSIDE [S1, unofficial]. Implemented in Godot as precomputed lists of sampling offsets with a per-frame shader uniform for the sampling index [S1, unofficial]. Used in the Frostbite engine's variance clipping bounds construction [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per froxel, but with a high constant factor due to 27 memory accesses and arithmetic operations [S1, unofficial].
+- **Memory Complexity:** Minimal additional memory for offset lists; requires storage for the froxel grid [S1, unofficial].
+- **Performance:** The 27-sample requirement is noted as likely too expensive for real-time rendering [S1, unofficial]. Consequently, the 6-tap variant is often preferred in production engines like Frostbite for tasks such as variance clipping [S1, unofficial].
+- **Strengths:** Provides superior smoothing across depth compared to planar neighborhoods [S1, unofficial].
+- **Limitations:** High computational cost due to the number of samples [S1, unofficial].
+
+## Background
+The method originates from research into temporal anti-aliasing for real-time froxel-based volumetric rendering [S1, unofficial]. It was implemented and tested in the Godot engine as part of a study on volumetric TAA algorithms [S1, unofficial]. The findings were subsequently applied to the Frostbite engine, where variants of the neighborhood (specifically 6-tap) were used in variance clipping and anti-flicker implementations [S1, unofficial].
+
+## Sources
+[S1] Temporal Anti-Aliasing for Real-Time Froxel-Based Volumetric Rendering - Advances in volumetric temporal anti-aliasing for real-time rendering of participating media, https://openalex.org/W7218067689, fetched 2026-11-01 (unofficial)

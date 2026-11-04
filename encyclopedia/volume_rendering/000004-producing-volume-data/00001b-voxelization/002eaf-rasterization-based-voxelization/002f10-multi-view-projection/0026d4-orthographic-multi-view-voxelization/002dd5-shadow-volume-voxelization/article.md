@@ -1,0 +1,206 @@
+# Shadow Volume Voxelization
+
+Also called: Shadow Volume Texture Generation
+
+## Overview
+Shadow Volume Voxelization is a rasterization-based technique that generates a 3D shadow volume texture by voxelizing scene geometry into a 3D grid, where each voxel stores a bitmask representing which of its 8 constituent sub-voxels are occluded [S1, unofficial]. It builds on [Orthographic Multi-View Voxelization](3892-orthographic-multi-view-voxelization.md) by replacing the standard occupancy flag with a 3-bit occlusion mask per coarse voxel, enabling multi-resolution shadow representation through mipmaps. Unlike standard binary voxelization, this method preserves partial occlusion information within each voxel, allowing for smoother shadow transitions and hierarchical shadow testing.
+
+## How it works
+
+### Inputs and Outputs
+- **Inputs**: Scene geometry defined by `MV_Shape` objects, each containing a model matrix. Scene dimensions (width, height, depth) in meters.
+- **Outputs**: A 3D texture (`volume_texture`) with three mip levels (Level 0: finest, Level 1: half resolution, Level 2: quarter resolution), formatted as `GL_R8UI` (unsigned byte, red channel only). Each byte in Level 0 represents a 2x2x2 block of sub-voxels, with each bit indicating occlusion status.
+
+### Data Structures
+The `ShadowVolume` class maintains the following state [S1, unofficial]:
+- `VAO vao`: Vertex Array Object for rendering (details not specified).
+- `int width, height, depth`: Dimensions of the scene in meters.
+- `GLuint volume_texture`: OpenGL texture handle for the 3D shadow volume.
+- `uint8_t* shadow_volume_mip0`: Pointer to the Level 0 mip level data in CPU memory (used for accumulation before upload).
+- `XMLDocument scene_xml`: Parsed scene description.
+- `XMLElement* scene_root`: Root element of the scene XML.
+
+### Numbered Steps
+
+1. **Initialization**: Create a 3D texture with three mip levels. Level 0 has dimensions $(W, H, D)$, Level 1 has $(W/2, H/2, D/2)$, and Level 2 has $(W/4, H/4, D/4)$. The internal format is `GL_R8UI`. Initialize `shadow_volume_mip0` as a zero-filled array of size $W \times H \times D$ bytes [S1, unofficial].
+
+2. **Voxel Position Calculation**: For each voxel $(x_v, y_v, z_v)$ in the input shape:
+   - Calculate its world position by centering the voxel:
+     $$ \text{voxel\_pos} = \vec{3}(x_v, y_v, z_v) + \vec{3}(0.5, 0.5, 0.5) $$
+   - Transform by the model matrix (assuming 10 units per meter):
+     $$ \text{voxel\_pos} = \text{model\_matrix} \times \vec{4}(\text{voxel\_pos}, 10.0) $$
+     [S1, unofficial]
+
+3. **Grid Coordinate Mapping**: Map the transformed world position to 3D texture grid coordinates $(x, y, z)$, centered in the grid:
+   $$ x = \lfloor \text{voxel\_pos}.x \rfloor + \frac{\text{width}}{2} $$
+   $$ y = \lfloor \text{voxel\_pos}.y \rfloor $$
+   $$ z = \lfloor \text{voxel\_pos}.z \rfloor + \frac{\text{depth}}{2} $$
+   [S1, unofficial]
+
+4. **Boundary Check**: If $x < 0$ or $x \geq \text{width}$ or $y < 0$ or $y \geq \text{height}$ or $z < 0$ or $z \geq \text{depth}$, skip the voxel [S1, unofficial].
+
+5. **Index Calculation**: Calculate the index in Level 0. Since 8 voxels share one index in the coarse grid (representing a 2x2x2 block), use integer division:
+   $$ \text{index} = \left\lfloor \frac{x}{2} \right\rfloor + \text{width} \times \left( \left\lfloor \frac{y}{2} \right\rfloor + \text{height} \times \left\lfloor \frac{z}{2} \right\rfloor \right) $$
+   [S1, unofficial]
+
+6. **Bitmask Accumulation**: Determine the bit offset within the byte corresponding to the sub-voxel position within the 2x2x2 block:
+   $$ \text{offset} = (x \bmod 2) + 2 \times (y \bmod 2) + 4 \times (z \bmod 2) $$
+   Set the bit using bitwise OR to accumulate occlusion:
+   $$ \text{shadow\_volume\_mip0}[\text{index}] \ |= \ (1 \ll \text{offset}) $$
+   [S1, unofficial]
+
+7. **Mipmap Generation (Level 1)**: Iterate over Level 0 dimensions $(i, j, k)$. For each cell, compute the Level 1 index:
+   $$ \text{index\_mip1} = \left\lfloor \frac{i}{2} \right\rfloor + \text{width\_mip1} \times \left( \left\lfloor \frac{j}{2} \right\rfloor + \text{height\_mip1} \times \left\lfloor \frac{k}{2} \right\rfloor \right) $$
+   Perform a bitwise OR of the Level 0 cell into the Level 1 cell:
+   $$ \text{shadow\_volume\_mip1}[\text{index\_mip1}] \ |= \ \text{shadow\_volume\_mip0}[\text{index}] $$
+   [S1, unofficial]
+
+8. **Mipmap Generation (Level 2)**: Iterate over Level 1 dimensions $(i, j, k)$. Compute Level 2 index:
+   $$ \text{index\_mip2} = \left\lfloor \frac{i}{2} \right\rfloor + \text{width\_mip2} \times \left( \left\lfloor \frac{j}{2} \right\rfloor + \text{height\_mip2} \times \left\lfloor \frac{k}{2} \right\rfloor \right) $$
+   Perform bitwise OR:
+   $$ \text{shadow\_volume\_mip2}[\text{index\_mip2}] \ |= \ \text{shadow\_volume\_mip1}[\text{index}] $$
+   [S1, unofficial]
+
+9. **Texture Upload**: Upload the accumulated mip levels to the GPU texture object `volume_texture`.
+
+### Parameters
+- **Texture Filtering**: Min filter is `GL_NEAREST_MIPMAP_NEAREST`, Mag filter is `GL_NEAREST` [S1, unofficial].
+- **Wrap Modes**: S, T, R wrap modes are `GL_CLAMP_TO_BORDER` [S1, unofficial].
+- **Mip Level Range**: Base level is 0, Max level is 2 [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Empty Fragment Shader**: The shadow volume fragment shader is empty, indicating it may be used for depth testing or stencil operations rather than direct rendering [S1, unofficial].
+- **Bitwise Accumulation**: The source code uses `+=` but the logic implies bitwise OR or accumulation of unique bits. Use bitwise OR (`|=`) to correctly accumulate occlusion bits without overwriting [S1, unofficial].
+- **Precision**: Floating-point precision in world position calculation may cause voxels to be misassigned near boundaries. Ensure consistent rounding modes [G].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+class ShadowVolume:
+    def __init__(self, width_m, height_m, depth_m):
+        self.width = width_m
+        self.height = height_m
+        self.depth = depth_m
+        # Level 0 dimensions
+        self.w0, self.h0, self.d0 = width_m, height_m, depth_m
+        # Level 1 dimensions
+        self.w1, self.h1, self.d1 = width_m // 2, height_m // 2, depth_m // 2
+        # Level 2 dimensions
+        self.w2, self.h2, self.d2 = width_m // 4, height_m // 4, depth_m // 4
+        
+        # Initialize Level 0 data (CPU-side accumulation)
+        self.shadow_volume_mip0 = np.zeros((self.w0, self.h0, self.d0), dtype=np.uint8)
+        # Initialize Level 1 and Level 2 data
+        self.shadow_volume_mip1 = np.zeros((self.w1, self.h1, self.d1), dtype=np.uint8)
+        self.shadow_volume_mip2 = np.zeros((self.w2, self.h2, self.d2), dtype=np.uint8)
+        
+        self.shapes = []  # List of MV_Shape objects with model_matrix
+
+    def add_shape(self, shape):
+        """Add an MV_Shape with a model matrix to the scene."""
+        self.shapes.append(shape)
+
+    def update_texture(self):
+        """Voxelize scene geometry and generate mipmaps."""
+        # Reset Level 0
+        self.shadow_volume_mip0[:] = 0
+        
+        # Process each shape
+        for shape in self.shapes:
+            model_matrix = shape.model_matrix
+            # Iterate over voxels in the shape's local space
+            # Note: The source implies iterating over input shape voxels,
+            # but does not specify the exact loop bounds for the shape.
+            # Assuming the shape provides its own voxel grid or bounds.
+            # For implementation, this loop depends on the shape's internal structure.
+            # Here we assume a generic iteration over shape voxels.
+            for xv, yv, zv in shape.get_voxel_indices():
+                # Step 2: Calculate world position
+                voxel_pos_centered = np.array([xv + 0.5, yv + 0.5, zv + 0.5])
+                # Transform by model matrix (assuming 10 units per meter)
+                # model_matrix is 4x4, voxel_pos is 3D, so we append 10.0 for w
+                voxel_pos_homogeneous = np.array([voxel_pos_centered[0], voxel_pos_centered[1], 
+                                                  voxel_pos_centered[2], 10.0])
+                voxel_pos_world = model_matrix @ voxel_pos_homogeneous
+                voxel_pos_world = voxel_pos_world[:3]  # Extract x, y, z
+                
+                # Step 3: Map to grid coordinates
+                x = int(np.floor(voxel_pos_world[0])) + self.width // 2
+                y = int(np.floor(voxel_pos_world[1]))
+                z = int(np.floor(voxel_pos_world[2])) + self.depth // 2
+                
+                # Step 4: Boundary check
+                if x < 0 or x >= self.width or y < 0 or y >= self.height or z < 0 or z >= self.depth:
+                    continue
+                
+                # Step 5: Calculate index in Level 0
+                index_x = x // 2
+                index_y = y // 2
+                index_z = z // 2
+                index = index_x + self.width * (index_y + self.height * index_z)
+                
+                # Step 6: Bitmask accumulation
+                offset = (x % 2) + 2 * (y % 2) + 4 * (z % 2)
+                self.shadow_volume_mip0[index] |= (1 << offset)
+        
+        # Step 7: Generate Mipmap Level 1
+        for i in range(self.w0):
+            for j in range(self.h0):
+                for k in range(self.d0):
+                    index_mip0 = i + self.width * (j + self.height * k)
+                    index_mip1 = (i // 2) + self.w1 * ((j // 2) + self.h1 * (k // 2))
+                    self.shadow_volume_mip1[index_mip1] |= self.shadow_volume_mip0[index_mip0]
+        
+        # Step 8: Generate Mipmap Level 2
+        for i in range(self.w1):
+            for j in range(self.h1):
+                for k in range(self.d1):
+                    index_mip1 = i + self.w1 * (j + self.h1 * k)
+                    index_mip2 = (i // 2) + self.w2 * ((j // 2) + self.h2 * (k // 2))
+                    self.shadow_volume_mip2[index_mip2] |= self.shadow_volume_mip1[index_mip1]
+        
+        # Step 9: Upload to GPU (pseudo-code for OpenGL)
+        # self.upload_texture_to_gpu()
+
+    def draw(self):
+        """Render the shadow volume (implementation details not specified)."""
+        pass
+```
+
+## Operating characteristics
+
+### Time and Memory Complexity
+- **Time Complexity**: $O(N \cdot V)$, where $N$ is the number of shapes and $V$ is the number of voxels per shape. Mipmap generation is $O(W \cdot H \cdot D)$ for each level.
+- **Memory Complexity**: $O(W \cdot H \cdot D)$ for Level 0, plus $O(W/2 \cdot H/2 \cdot D/2)$ for Level 1, and $O(W/4 \cdot H/4 \cdot D/4)$ for Level 2. Total memory is approximately $1.75 \times W \cdot H \cdot D$ bytes.
+
+### Measured Performance
+Not given in the sources.
+
+### Scaling
+Scales linearly with scene size and voxel resolution. Mip levels provide hierarchical shadow testing, reducing memory bandwidth for distant shadows.
+
+### Strengths and Limitations
+- **Strengths**: Multi-resolution shadow representation, partial occlusion information, efficient hierarchical testing.
+- **Limitations**: Memory-intensive for high-resolution scenes, requires CPU-side accumulation for Level 0, limited to axis-aligned bounding boxes for grid mapping.
+
+### When to Use
+Use when multi-resolution shadow testing is required and partial occlusion information is beneficial. Not suitable for real-time dynamic scenes with frequent geometry changes due to CPU-side accumulation.
+
+## Background
+
+### Origin
+Shadow Volume Voxelization was introduced in the TTFH/Voxel-Render project [S1, unofficial]. It is an adaptation of traditional shadow volume techniques to a voxel-based rendering pipeline, enabling efficient shadow testing in volume rendering applications.
+
+### History and Development
+The technique is part of the Voxel-Render project, which focuses on voxel-based rendering and shadowing. It builds on earlier work in multi-view voxelization and shadow volume generation.
+
+### Applications
+Used in voxel-based rendering pipelines for shadow testing, particularly in applications requiring hierarchical shadow representation and partial occlusion information.
+
+## Sources
+
+[S1] TTFH/Voxel-Render, https://github.com/TTFH/Voxel-Render, fetched 2026-10-27 (unofficial)

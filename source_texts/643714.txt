@@ -1,0 +1,53 @@
+# sam-3d-spark
+
+Meta's SAM 3D family running locally on DGX Spark (GB10 Blackwell / aarch64 / CUDA 13). Two standalone Docker services, each with a thin FastAPI.
+
+**Status:** maintained for the maintainer's own DGX Spark setup; PRs welcome, support not promised.
+
+## Quick start
+
+```bash
+git clone https://github.com/Logos-Flux/sam-3d-spark.git ~/sam-3d-spark
+cd ~/sam-3d-spark
+
+# 1. Approve HF access (browser, one-time) for the five gated repos listed below
+# 2. Create a Read token at https://huggingface.co/settings/tokens and put it in .env:
+cp .env.example .env
+$EDITOR .env                                 # set HF_TOKEN=hf_...
+
+# 3. Build + start services
+docker compose --profile objects build sam3d-body sam3d-objects
+docker compose --profile objects up -d
+
+# 4. Watch first boot (~27 GB of weights download once, cached thereafter)
+docker compose logs -f sam3d-objects
+
+# 5. Smoke test
+cp your_photo.jpg inputs/test.jpg
+./scripts/smoke_test.sh
+
+# 6. Try the 3D reconstruction
+curl -fsS -F "image=@inputs/your_object.jpg" -F "prompt=a thing" \
+     http://localhost:8793/infer/text | jq .
+# then open the returned viewer_url in a browser
+```
+
+For the full story — per-endpoint details, ComfyUI nodes, mask-tool tradeoffs, tuning knobs, operational runbook — keep reading.
+
+| Service | Port | Inputs | Output |
+|---|---|---|---|
+| **sam3d-body** | 8794 | RGB image | OBJ mesh (3D human body) + skeleton-overlay preview |
+| **sam3d-objects** | 8793 | RGB image + mask (or text prompt, or point) | Gaussian-splat PLY of the masked object |
+
+All four mask-sourcing options on Objects:
+
+| Endpoint | How the mask is built | Cost | Best for |
+|---|---|---|---|
+| `POST /mask/text` | SAM 3 text prompt → list of instance masks | ~1 s | **Preview** text prompts cheaply before committing to 3D |
+| `POST /infer/text` | SAM 3 text prompt → mask → 3D splat | ~5 min | Cluttered scenes, describable objects — **recommended default** |
+| `POST /infer/auto` | SAM 2 single-point prompt → mask → 3D splat | ~5 min | Isolated objects, known object location |
+| `POST /infer` | Caller provides the mask (RGBA alpha, or separate PNG) → 3D splat | ~5 min | Deterministic / pre-segmented pipelines |
+
+Body is always single-step: `POST /infer` with image → mesh.
+
+## One-time setup

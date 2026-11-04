@@ -1,0 +1,214 @@
+# Screen-space blit / Resample copy
+
+Also called: Fullscreen Blit with Crosshair, Resample copy, Screen-space blit, blit.wgsl
+
+## Overview
+This method performs a screen-space copy (blit) of a source texture (typically a compute-shader output) into a target render target, while simultaneously overlaying a debug crosshair. It solves the problem of transferring data between render targets without CPU intervention and providing a visual aid for screen-space alignment. It differs from a standard blit by injecting specific pixel-level logic (the crosshair) and forcing alpha to 1.0 to prevent compositing artifacts on certain windowing systems.
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A source texture accessed via a Shader Resource View (SRV).
+*   **Output:** A target render target view (RTV) cleared to transparent before the draw.
+*   **Parameters:**
+    *   `uSRVSlot`: The shader resource slot index where the source SRV is bound.
+    *   `uSlice`, `uMip`: Indices identifying the specific subresource (slice/mip level) of the target texture.
+    *   `pSRVSrc`: The source SRV handle.
+    *   `pShader`: The shader object containing the vertex and pixel shaders.
+
+### Data Structures
+The implementation relies on Direct3D 11 API objects. Key structures include:
+*   `CPDXRenderTargetView`: Handle for the render target.
+*   `CPDXDepthStencilView`: Handle for the depth stencil.
+*   `D3D11_VIEWPORT`: Structure defining the viewport dimensions.
+*   `VsOut` (Vertex Shader Output): Defined in the source shader, containing position, UV, and flat-interpolated attributes.
+
+### Numbered Steps
+
+1.  **Context Acquisition:** Get the immediate device context (`pDXContext`) from the device.
+2.  **Save State:** Retrieve the current render target view (`pRTVBack`) and depth stencil view (`pDSVBack`) using `OMGetRenderTargets`.
+3.  **Set Target:** Bind the target render target `m_vvpRTVs[uSlice][uMip]` using `OMSetRenderTargets`.
+4.  **Clear:** Clear the target render target to transparent using `ClearRenderTargetView`.
+5.  **Set Viewport:** Create a viewport matching the texture dimensions (`VpDepth`) and set it using `RSSetViewports`. Save the previous viewport (`VpBack`) for restoration.
+6.  **Bind Resources:** Bind the source SRV (`pSRVSrc`) at slot `uSRVSlot` using `PSSetShaderResources`.
+7.  **Set Topology:** Set the primitive topology to `D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP`.
+8.  **Bind Shaders:**
+    *   Set the vertex shader `g_uVSScreenQuad` using `VSSetShader`.
+    *   Set the pixel shader `g_uPSResample` using `PSSetShader`.
+9.  **Draw:** Issue a draw call for 3 vertices using `Draw(3, 0)`.
+10. **Unbind:** Unbind the source SRV, vertex shader, and pixel shader by setting them to `nullptr` (or null SRV) at their respective slots.
+11. **Restore State:** Restore the original viewport using `RSSetViewports` with `VpBack`.
+12. **Restore Targets:** Restore the original render and depth-stencil targets using `OMSetRenderTargets`.
+
+### Vertex Shader
+The vertex shader renders a single oversized triangle that covers the entire screen and extends beyond to ensure full coverage.
+
+*   **Vertices:** 3 vertices with indices 0, 1, 2.
+*   **Positions:**
+    *   Vertex 0: `(-1.0, -1.0)`
+    *   Vertex 1: `(3.0, -1.0)`
+    *   Vertex 2: `(-1.0, 3.0)`
+*   **UVs (Output `uv`):**
+    *   Vertex 0: `(0.0, 1.0)`
+    *   Vertex 1: `(2.0, 1.0)`
+    *   Vertex 2: `(0.0, -1.0)`
+
+### Fragment Shader
+The fragment shader samples the source texture and applies crosshair logic.
+
+1.  **Sample:** Sample the source texture at the interpolated UV coordinate.
+2.  **Calculate Offset:** Determine screen dimensions and the absolute offset in pixels from the screen center `(0.5, 0.5)`. Let `offset_px` be this pixel offset.
+3.  **Crosshair Check:** Determine if the pixel is inside the crosshair arms.
+    *   **Horizontal Arm:** `offset_px.x <= 12.0` AND `offset_px.y <= 2.0` (outer) or `<= 1.0` (inner).
+    *   **Vertical Arm:** `offset_px.y <= 12.0` AND `offset_px.x <= 2.0` (outer) or `<= 1.0` (inner).
+4.  **Color Output:**
+    *   If inside the **inner** crosshair: Return `(1.0, 1.0, 1.0, 1.0)` (White).
+    *   If inside the **outer** crosshair (outline): Return `(0.0, 0.0, 0.0, 1.0)` (Black).
+    *   Otherwise: Return the sampled color with alpha forced to `1.0`. This prevents alpha-compositing issues on Wayland when TAA resolve smuggles markers in the alpha channel.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_target_populate(pSRVSrc, pShader, uSRVSlot, uSlice, uMip):
+    """
+    Performs a screen-space blit with crosshair overlay.
+    """
+    # 1. Get immediate device context
+    pDXContext = get_immediate_device_context()
+
+    # 2. Save current render targets
+    pRTVBack = CPDXRenderTargetView()
+    pDSVBack = CPDXDepthStencilView()
+    pDXContext.OMGetRenderTargets(1, pRTVBack, pDSVBack)
+
+    # 3. Set target render target
+    target_rtv = m_vvpRTVs[uSlice][uMip]
+    pDXContext.OMSetRenderTargets(1, target_rtv, None)
+
+    # 4. Clear target to transparent
+    pDXContext.ClearRenderTargetView(target_rtv, Colors.Transparent)
+
+    # 5. Set viewport to texture dimensions
+    uNumViewports = 1
+    VpBack = D3D11_VIEWPORT()
+    pDXContext.RSGetViewports(uNumViewports, VpBack)
+    
+    VpDepth = CD3D11_VIEWPORT(m_pTexture, target_rtv)
+    pDXContext.RSSetViewports(uNumViewports, VpDepth)
+
+    # 6. Bind source SRV
+    pDXContext.PSSetShaderResources(uSRVSlot, 1, pSRVSrc)
+
+    # 7. Set primitive topology
+    pDXContext.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP)
+
+    # 8. Bind shaders
+    vs = pShader.GetVertexShader(g_uVSScreenQuad)
+    ps = pShader.GetPixelShader(g_uPSResample)
+    pDXContext.VSSetShader(vs, None, 0)
+    pDXContext.GSSetShader(None, None, 0)
+    pDXContext.PSSetShader(ps, None, 0)
+
+    # 9. Draw 3 vertices
+    pDXContext.Draw(3, 0)
+
+    # 10. Unbind resources
+    pNullSRV = LPDXShaderResourceView(None)
+    pDXContext.PSSetShaderResources(uSRVSlot, 1, pNullSRV)
+    pDXContext.VSSetShader(None, None, 0)
+    pDXContext.PSSetShader(None, None, 0)
+
+    # 11. Restore viewport
+    pDXContext.RSSetViewports(uNumViewports, VpBack)
+
+    # 12. Restore render targets
+    pDXContext.OMSetRenderTargets(1, pRTVBack, pDSVBack)
+```
+
+### Fragment Shader Logic Detail
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fragment_shader(uv: vec2<f32>, screen_dims: vec2<f32>, source_texture: Texture2D) -> vec4<f32>:
+    # Sample source
+    color = source_texture.sample(uv)
+    
+    # Calculate pixel offset from center
+    center = vec2<f32>(0.5, 0.5)
+    pixel_pos = uv * screen_dims
+    offset_px = abs(pixel_pos - center * screen_dims)
+    
+    # Check crosshair arms
+    # Horizontal arm
+    h_outer = offset_px.x <= 12.0 and offset_px.y <= 2.0
+    h_inner = offset_px.x <= 12.0 and offset_px.y <= 1.0
+    
+    # Vertical arm
+    v_outer = offset_px.y <= 12.0 and offset_px.x <= 2.0
+    v_inner = offset_px.y <= 12.0 and offset_px.x <= 1.0
+    
+    is_inner = h_inner or v_inner
+    is_outer = (h_outer or v_outer) and not is_inner
+    
+    if is_inner:
+        return vec4<f32>(1.0, 1.0, 1.0, 1.0)
+    elif is_outer:
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0)
+    else:
+        # Force alpha to 1.0 to prevent TAA resolve issues on Wayland
+        return vec4<f32>(color.rgb, 1.0)
+```
+
+### Edge Cases and Pitfalls
+*   **Wayland TAA Artifacts:** Failing to force alpha to 1.0 can result in grass-blade markers from the TAA resolve process leaking into the alpha channel, causing compositing issues.
+*   **Viewport Mismatch:** The viewport must be set to the texture dimensions, not the window dimensions, to ensure correct sampling coordinates.
+*   **State Restoration:** Failing to restore the original render targets and viewport can corrupt subsequent rendering passes.
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time:** O(1) relative to scene complexity; O(N) relative to screen resolution (N = number of pixels). The cost is dominated by the fragment shader execution over the screen area.
+*   **Memory:** O(1) additional memory for state storage (backups of RTV/DSV/Viewport). The source and target textures occupy their respective memory.
+
+### Measured Performance
+*   **Hardware:** Tested on Direct3D 11 hardware.
+*   **Resolution:** Performance scales linearly with screen resolution.
+*   **Scene:** Independent of scene geometry or voxel count, as it operates on screen-space textures.
+
+### Strengths and Limitations
+*   **Strengths:**
+    *   Efficient screen-space data transfer.
+    *   Built-in debug visualization (crosshair).
+    *   Avoids CPU-GPU synchronization overhead by using immediate context commands.
+*   **Limitations:**
+    *   Specific to Direct3D 11 API in the provided implementation.
+    *   Crosshair logic is hardcoded and not configurable via parameters in the base method.
+    *   Alpha forcing may be undesirable for non-debug blits.
+
+### When to Use
+*   Use when transferring compute shader output to a render target for display or further processing.
+*   Use when a debug crosshair is needed for screen-space alignment.
+*   Use when targeting Wayland compositors to avoid TAA-related alpha artifacts.
+
+### When Not to Use
+*   Do not use for general-purpose texture copying where alpha preservation is critical and the Wayland TAA issue is not present.
+*   Do not use if the crosshair overlay is not desired.
+
+## Background
+
+### Origin
+The method originates from the `voxelG` and `VoxelizerX` projects, which are unofficial implementations of voxel rendering techniques. The specific blit implementation with crosshair overlay is documented in the `RenderTarget::Populate` function of `VoxelizerX` [S2, unofficial] and the associated shader code in `voxelG` [S1, unofficial].
+
+### History and Development
+The technique is part of the rendering pipeline for screen-space blitting in voxel renderers. The crosshair overlay was added to assist with debugging screen-space coordinates and alignment. The alpha forcing was introduced to address specific artifacts observed on Wayland compositors with TAA.
+
+### Usage
+Used in voxel rendering pipelines for transferring data between render targets and providing debug visualization.
+
+## Sources
+
+[S1] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)
+[S2] StarsX/VoxelizerX, https://github.com/StarsX/VoxelizerX, fetched 2026-11-01 (unofficial)

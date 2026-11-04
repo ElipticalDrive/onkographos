@@ -1,0 +1,169 @@
+# 3D Bresenham Voxel Tracing
+
+Also called: Grid Raycasting, Ray Tracing through Voxel Grid (DDA), Uniform Grid Traversal, Voxel Volume Raycasting, ligneVoxels1, ligneVoxels2
+
+## Overview
+3D Bresenham Voxel Tracing is a discrete ray traversal algorithm for uniform 3D voxel grids that steps through adjacent voxels along the ray's path using integer arithmetic and error accumulation, rather than floating-point slab intersections [S3, S5, unofficial]. Unlike [Amanatides and Woo Voxel Traversal](3132-amanatides-and-woo-voxel-traversal.md), which uses floating-point $t$-values to determine the next voxel boundary, this method maintains a fixed-step iteration on the dominant axis and updates secondary axes based on accumulated error terms, making it computationally cheaper and immune to floating-point precision errors [S3, unofficial]. It is primarily used for sparse particle systems or dense uniform grids where hierarchical acceleration structures are absent [S1, S4, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray origin $\vec{o}$, ray direction $\vec{r}$ (normalized), grid dimensions $(W, H, D)$, voxel size $s$ (typically $1.0$ for integer indexing), and a voxel grid data structure.
+*   **Output:** Sequence of voxel indices $(x, y, z)$ traversed by the ray, or the first occupied voxel index.
+
+**Data Structures:**
+*   **Voxel Grid:** A dense 3D array or 1D flattened array. For a grid of size $W \times H \times D$, the linear index for coordinate $(x, y, z)$ is calculated as:
+    $$ \text{index} = (z \cdot H + y) \cdot W + x $$
+    [S2, unofficial]
+*   **State Variables:**
+    *   Current integer coordinates $(x, y, z)$.
+    *   Step directions $(x_{inc}, y_{inc}, z_{inc}) \in \{-1, 1\}$.
+    *   Absolute deltas $(dx, dy, dz)$ representing the span in each axis.
+    *   Error accumulators $(c_1, c_2)$ for non-dominant axes.
+
+**Algorithm Steps:**
+1.  **Ray-Grid Intersection:** Calculate the entry point $t_{entry}$ where the ray intersects the grid's Axis-Aligned Bounding Box (AABB). If the ray does not intersect the grid, terminate [S5, unofficial].
+    *   *Note:* If the ray origin is exactly on a voxel boundary or parallel to an axis, an epsilon offset (e.g., $0.0001$) is added to the entry position to avoid degenerate cases [S5, unofficial].
+2.  **Initial Voxel Determination:** Calculate the world position at entry: $\vec{f}_0 = \vec{o} + t_{entry} \cdot \vec{r}$. Convert to voxel coordinates by flooring: $\vec{i}_0 = \lfloor \vec{f}_0 \rfloor$. Clamp $\vec{i}_0$ to $[0, W-1] \times [0, H-1] \times [0, D-1]$ [S1, S5, unofficial].
+3.  **Delta and Direction Calculation:**
+    *   Determine the exit point $\vec{f}_1$ at the far boundary of the grid (or a specified max distance).
+    *   Calculate deltas: $dx = |x_f - x_i|$, $dy = |y_f - y_i|$, $dz = |z_f - z_i|$ [S3, unofficial].
+    *   Determine step directions: $x_{inc} = \text{sign}(x_f - x_i)$, etc. [S3, unofficial].
+4.  **Dominant Axis Identification:** Identify the axis with the largest absolute delta. Let this be the dominant axis $A_{dom}$ with value $D_{max}$ [S3, unofficial].
+5.  **Initialization:**
+    *   Set current position $(x, y, z) = (x_i, y_i, z_i)$ [S3, unofficial].
+    *   Initialize error accumulators. For the standard Bresenham variant, $c_1$ and $c_2$ are initialized to $D_{max} / 2$ to center the error term [S3, unofficial].
+6.  **Traversal Loop:** Iterate $i$ from $1$ to $D_{max}$:
+    *   Increment the dominant axis coordinate: $x_{dom} += x_{inc}$ (or $y_{dom}, z_{dom}$) [S3, unofficial].
+    *   Update error accumulators for the other two axes. If $x$ is dominant:
+        $$ c_1 += dy $$
+        $$ c_2 += dz $$
+    *   Check for secondary axis crossings:
+        *   If $c_1 \ge D_{max}$: $c_1 -= D_{max}$, $y += y_{inc}$ [S3, unofficial].
+        *   If $c_2 \ge D_{max}$: $c_2 -= D_{max}$, $z += z_{inc}$ [S3, unofficial].
+    *   Process the current voxel $(x, y, z)$ (e.g., check for occupancy) [S3, unofficial].
+7.  **Termination:** Stop if an occupied voxel is found, or if the loop completes without hitting any voxel [S1, S5, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bresenham_voxel_trace(ray_origin, ray_direction, grid_width, grid_height, grid_depth, voxel_size=1.0):
+    # 1. Ray-Grid AABB Intersection
+    # Calculate t_entry. If no intersection, return empty.
+    # Simplified: assume ray intersects grid for this example.
+    # In practice, use slab intersection method [S5, unofficial].
+    
+    # 2. Initial Voxel
+    # f0 = ray_origin + t_entry * ray_direction
+    # i0 = floor(f0 / voxel_size)
+    # Clamp i0 to [0, grid_width-1] x [0, grid_height-1] x [0, grid_depth-1]
+    
+    # For demonstration, assume we have start and end voxel coordinates
+    # derived from ray-box intersection.
+    xi, yi, zi = 0, 0, 0 # Placeholder for i0
+    xf, yf, zf = grid_width - 1, grid_height - 1, grid_depth - 1 # Placeholder for exit
+    
+    # 3. Deltas and Directions
+    dx = abs(xf - xi)
+    dy = abs(yf - yi)
+    dz = abs(zf - zi)
+    
+    xinc = 1 if xf > xi else -1
+    yinc = 1 if yf > yi else -1
+    zinc = 1 if zf > zi else -1
+    
+    # 4. Dominant Axis
+    if dx >= dy and dx >= dz:
+        dominant = 'x'
+        max_delta = dx
+    elif dy >= dx and dy >= dz:
+        dominant = 'y'
+        max_delta = dy
+    else:
+        dominant = 'z'
+        max_delta = dz
+        
+    # 5. Initialization
+    x, y, z = xi, yi, zi
+    c1 = max_delta / 2.0
+    c2 = max_delta / 2.0
+    
+    # 6. Traversal
+    # Process start voxel
+    yield (x, y, z)
+    
+    for _ in range(1, max_delta + 1):
+        if dominant == 'x':
+            x += xinc
+            c1 += dy
+            c2 += dz
+            if c1 >= max_delta:
+                c1 -= max_delta
+                y += yinc
+            if c2 >= max_delta:
+                c2 -= max_delta
+                z += zinc
+        elif dominant == 'y':
+            y += yinc
+            c1 += dx
+            c2 += dz
+            if c1 >= max_delta:
+                c1 -= max_delta
+                x += xinc
+            if c2 >= max_delta:
+                c2 -= max_delta
+                z += zinc
+        else: # dominant == 'z'
+            z += zinc
+            c1 += dy
+            c2 += dx
+            if c1 >= max_delta:
+                c1 -= max_delta
+                y += yinc
+            if c2 >= max_delta:
+                c2 -= max_delta
+                x += xinc
+                
+        yield (x, y, z)
+```
+
+**Parameters:**
+*   `voxel_size`: Typically $1.0$ for integer-based indexing [S1, unofficial]. If non-unit, coordinates are scaled by $1/s$ [S1, unofficial].
+*   `EPSILON`: Used for boundary checks and axis-aligned ray detection (e.g., $1.0 \times 10^{-7}$) [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Axis-Aligned Rays:** If $|ray\_direction[axis]| < EPSILON$, the ray is axis-aligned. The algorithm must check if the origin is within the grid bounds for that axis; if not, it returns no intersection [S2, unofficial].
+*   **Tied Boundaries:** In floating-point variants, tied axes are handled by updating all tied axes simultaneously [S2, unofficial]. In Bresenham, the dominant axis is strictly defined by the maximum delta, avoiding ties in iteration count, but secondary axes may cross simultaneously if their deltas are proportional. The error accumulation handles this naturally [S3, unofficial].
+*   **Precision:** Using integer arithmetic for deltas and error terms prevents precision loss over long traversals [S3, unofficial].
+
+## Subtopics
+
+### [Integer-based Amanatides and Woo Voxel Traversal](4246-integer-based-amanatides-and-woo-voxel-traversal.md)
+An integer-based algorithm for traversing a 3D voxel grid along a ray, designed to be fast, exact, and stable by avoiding floating-point arithmetic, using scaled integer values for distance calculations to prevent precision errors [4246-integer-based-amanatides-and-woo-voxel-traversal.md]. It differs from standard Bresenham by maintaining the slab-intersection logic (comparing $t_{max}$ values) but performing all calculations with scaled integers, ensuring exactness without the error-accumulation approximation of Bresenham. Choose this when exact geometric traversal is required without floating-point drift, but the grid is uniform.
+
+### 3D DDA Voxel Grid Tracing
+A ray tracing method for voxel models that walks a block of a model cell by cell using the Amanatides-Woo DDA algorithm, organizing models into $8^3$ blocks within a BVH to skip empty space [S6, unofficial]. It differs from basic Bresenham by incorporating a hierarchical BVH structure to skip empty regions, whereas Bresenham traverses every voxel in the bounding box. Choose this for large, sparse voxel models where empty space can be efficiently culled. Boundary artifacts may occur if neighboring cells are not read correctly across block boundaries [S6, unofficial].
+
+### Voxel-Based Lighting
+A lighting calculation performed using the normal and position derived from the voxel traversal hit, rather than the continuous surface intersection of standard ray tracing [S7, unofficial]. It differs from geometric ray tracing by using the voxel grid's discrete hit position for lighting, which can lead to inaccuracies in ambient occlusion and shadow calculations if not adapted for the voxel domain [S7, unofficial]. Choose this for stylized voxel rendering where performance is prioritized over photorealistic shadow accuracy.
+
+## Operating characteristics
+*   **Time Complexity:** Proportional to the number of voxels traversed, bounded by the maximum dimension of the grid $O(\max(W, H, D))$ for a diagonal ray [S5, unofficial]. The constant factor is very low due to integer arithmetic [S3, unofficial].
+*   **Memory Complexity:** $O(W \cdot H \cdot D)$ for the dense grid storage [S1, unofficial]. No additional acceleration structures are required [S1, unofficial].
+*   **Performance:** On a $256 \times 128 \times 256$ grid, dense traversal visits every voxel, while hierarchical variants (like [Voxel Raycasting with Normal Estimation](3901-voxel-raycasting-with-normal-estimation.md)) skip empty cells [S2, unofficial]. Bresenham is faster than floating-point DDA due to lack of division and floating-point comparisons [S3, unofficial].
+*   **Strengths:** No floating-point precision issues; simple implementation; no hierarchical structure overhead; immediate visibility of voxel changes [S1, unofficial].
+*   **Limitations:** Inefficient for sparse grids as it traverses empty space; limited to uniform grids; boundary artifacts if not handled carefully [S1, S6, unofficial].
+*   **When to Use:** Uniform dense grids, particle systems, or when integer arithmetic is preferred for performance/stability [S3, S4, unofficial].
+*   **When Not to Use:** Sparse hierarchical grids (use [Amanatides and Woo Voxel Traversal](3132-amanatides-and-woo-voxel-traversal.md) or [Restartable DDA for Voxel Traversal](5187-restartable-dda-for-voxel-traversal.md)); non-uniform grids.
+
+## Background
+The method originates from the classic Bresenham line algorithm, adapted for 3D voxel traversal. It is often referred to as "ligneVoxels" in early French computer graphics literature [S3, unofficial]. It is a discrete alternative to the continuous slab-intersection method described by Amanatides and Woo [S1, unofficial]. The approach is widely used in early voxel raycasters and particle rendering systems where simplicity and speed are paramount [S4, unofficial].
+
+## Sources
+[S1] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)
+[S2] Prototype the portable compute-ray data and traversal baseline, https://github.com/PetrSeifert/voxel-nexus/issues/52, fetched 2026-10-25 (unofficial)
+[S3] Tracé des voxels sur le passage d'un rayon, http://raphaello.univ-fcomte.fr/ig/raytracing/ExemplesGLUt/LigneVoxels.htm, fetched 2026-10-25 (unofficial)
+[S4] HectorArellanoDev/WebGPUVoxelConeTracing, https://github.com/HectorArellanoDev/WebGPUVoxelConeTracing, fetched 2026-10-26 (unofficial)
+[S5] an1pse/voxel-traversal, https://github.com/an1pse/voxel-traversal, fetched 2026-10-27 (unofficial)
+[S6] Milestone 13: MagicaVoxel look (.vox, DDA voxel grid, sun/sky, bloom, style voxel), https://github.com/adriendjn/mypbr/pull/10, fetched 2026-10-25 (unofficial)
+[S7] 【Ray tracing】Voxelを作ってみる, https://qiita.com/misaki_mofu/items/026cd353054856921995, fetched 2026-10-25 (unofficial)

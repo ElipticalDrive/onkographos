@@ -1,0 +1,167 @@
+# Octree Leaf Construction with QEF Surface Fitting
+
+Also called: QEF-based Octree Leaf Construction, Quadratic Error Function Surface Fitting for Octree Leaves
+
+## Overview
+This method constructs an octree leaf node representing a voxel containing an isosurface by solving a Quadratic Error Function (QEF) to determine the precise surface position and normal from edge intersections [S1, unofficial]. It differs from its parent, [Adaptive Octree Generation with Flatness Criterion](2482-adaptive-octree-generation-with-flatness-criterion.md), which assigns vertex values via Euclidean distance transform sampling, by using a least-squares geometric fit to refine the surface location within the leaf [S1, unofficial]. It is distinct from [OcMesher](4141-ocmesher.md) by relying on a global QEF solver over all edge crossings rather than local marching cubes-style triangulation [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `globalPos`: The 3D world position of the voxel corner (vec3).
+- `resolution`: The side length of the voxel (float).
+- `m_sampleCache`: A cache for volume sampling (Sampler object).
+- `m_size`: The size parameter for the sampler (int).
+
+**Outputs:**
+- `Octree` leaf node containing:
+  - `m_drawPos`: The fitted surface position (vec3).
+  - `m_qef`: The QEF data structure (QEF object).
+  - `m_averageNormal`: The averaged surface normal (vec3).
+  - `m_corners`: The bitmask of occupied corners (uint8_t).
+
+**Data Structures:**
+- `Octree`: Represents a node in the octree.
+  - If it is a leaf, it stores `m_drawPos`, `m_qef`, `m_averageNormal`, and `m_corners`.
+  - If it is an internal node, it stores a `field` (bitmask) and an array of 8 child pointers.
+- `QEF`: A solver for the Quadratic Error Function.
+  - `add(x, y, z, nx, ny, nz)`: Adds a point-normal constraint.
+  - `solve(position, error, sweeps, error)`: Solves for the optimal position.
+  - `getData()`: Returns the QEF data.
+  - `getMassPoint()`: Returns the centroid of the added points.
+
+**Parameters:**
+- `QEF_ERROR`: Convergence tolerance for the QEF solver. Value: $10^{-6}$ [S1, unofficial].
+- `QEF_SWEEPS`: Number of sweeps for the QEF solver. Value: 4 [S1, unofficial].
+- `MATERIAL_AIR`: Integer constant for air. Value: 0 [S1, unofficial].
+- `MATERIAL_SOLID`: Integer constant for solid. Value: 1 [S1, unofficial].
+- `MAX_CROSSINGS`: Maximum number of edge crossings to process per voxel. Value: 6 [S1, unofficial].
+- `CHILD_MIN_OFFSETS`: An array of 8 vec3 offsets defining the corners of the child voxel relative to the local position.
+
+**Steps:**
+
+1. **Corner Bitmask Initialization:**
+   - Initialize `corners` bitmask to 0.
+   - Loop `i` from 0 to 7:
+     - Calculate `cornerPos = localPos + CHILD_MIN_OFFSETS[i]`.
+     - Sample the volume at `cornerPos` using `Sampler::SampleCache(m_sampleCache, m_size+1, cornerPos)`.
+     - If `sample > 0`, set bit `i` in `corners`: `corners |= (1 << i)`.
+
+2. **Leaf Initialization:**
+   - Create a new `Octree` leaf: `leaf = new Octree(resolution, globalPos)`.
+   - Initialize `edgeCount = 0`.
+   - Initialize `averageNormal = vec3(0.0f)`.
+   - Initialize a `qef` solver instance.
+
+3. **Edge Crossing Detection and QEF Assembly:**
+   - Loop `i` from 0 to 11 (representing the 12 edges of the voxel) while `edgeCount < MAX_CROSSINGS`:
+     - Get edge vertices indices: `c1 = edgevmap[i][0]`, `c2 = edgevmap[i][1]`.
+     - Get material states: `m1 = (corners >> c1) & 1`, `m2 = (corners >> c2) & 1`.
+     - If `m1 == m2`, continue (no crossing).
+     - Calculate edge endpoints: `p1 = globalPos + CHILD_MIN_OFFSETS[c1]`, `p2 = globalPos + CHILD_MIN_OFFSETS[c2]`.
+     - Determine zero-crossing position `p`:
+       - If `m1 > m2`, `p = ApproximateZeroCrossingPositionBinarySearch(p1, p2)`.
+       - Else, `p = ApproximateZeroCrossingPositionBinarySearch(p2, p1)`.
+     - Calculate surface normal `n = CalculateSurfaceNormal(p)`.
+     - Add point `p` and normal `n` to QEF solver: `qef.add(p.x, p.y, p.z, n.x, n.y, n.z)`.
+     - Accumulate normal: `averageNormal += n`.
+     - Increment `edgeCount`.
+
+4. **QEF Solution and Leaf Finalization:**
+   - Solve QEF: `qef.solve(qefPosition, QEF_ERROR, QEF_SWEEPS, QEF_ERROR)`.
+   - Store result in leaf: `leaf->m_drawPos = vec3(qefPosition.x, qefPosition.y, qefPosition.z)`.
+   - Store QEF data: `leaf->m_qef = qef.getData()`.
+   - Calculate average normal: `leaf->m_averageNormal = glm::normalize(averageNormal / (float)edgeCount)`.
+   - Store corner bitmask: `leaf->m_corners = corners`.
+   - Return `leaf`.
+
+**Pitfalls:**
+- If `corners == 0` (voxel fully outside) or `corners == 255` (voxel fully inside), return `nullptr` (no leaf node created) [S1, unofficial].
+- Boundary check: If `leaf->m_drawPos` is outside the voxel bounds `[globalPos, globalPos + leaf->m_size]` in any axis, fallback to QEF mass point: `leaf->m_drawPos = vec3(qef.getMassPoint().x, qef.getMassPoint().y, qef.getMassPoint().z)`. This check is performed twice [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def construct_leaf(global_pos, resolution, sample_cache, size):
+    # Step 1: Corner Bitmask Initialization
+    corners = 0
+    for i in range(8):
+        corner_pos = global_pos + CHILD_MIN_OFFSETS[i]
+        sample = sampler_sample_cache(sample_cache, size + 1, corner_pos)
+        if sample > 0:
+            corners |= (1 << i)
+
+    # Pitfall: Check for fully inside or outside
+    if corners == 0 or corners == 255:
+        return None
+
+    # Step 2: Leaf Initialization
+    leaf = Octree(resolution, global_pos)
+    edge_count = 0
+    average_normal = vec3(0.0, 0.0, 0.0)
+    qef = QEF()
+
+    # Step 3: Edge Crossing Detection and QEF Assembly
+    for i in range(12):
+        if edge_count >= MAX_CROSSINGS:
+            break
+        
+        c1 = edgevmap[i][0]
+        c2 = edgevmap[i][1]
+        
+        m1 = (corners >> c1) & 1
+        m2 = (corners >> c2) & 1
+        
+        if m1 == m2:
+            continue
+        
+        p1 = global_pos + CHILD_MIN_OFFSETS[c1]
+        p2 = global_pos + CHILD_MIN_OFFSETS[c2]
+        
+        if m1 > m2:
+            p = approximate_zero_crossing_position_binary_search(p1, p2)
+        else:
+            p = approximate_zero_crossing_position_binary_search(p2, p1)
+        
+        n = calculate_surface_normal(p)
+        qef.add(p.x, p.y, p.z, n.x, n.y, n.z)
+        average_normal += n
+        edge_count += 1
+
+    # Step 4: QEF Solution and Leaf Finalization
+    qef_position = qef.solve(QEF_ERROR, QEF_SWEEPS, QEF_ERROR)
+    
+    leaf.m_draw_pos = vec3(qef_position.x, qef_position.y, qef_position.z)
+    leaf.m_qef = qef.get_data()
+    
+    if edge_count > 0:
+        leaf.m_average_normal = normalize(average_normal / edge_count)
+    else:
+        leaf.m_average_normal = vec3(0.0, 0.0, 0.0) # [G] Handle degenerate case
+    
+    leaf.m_corners = corners
+
+    # Pitfall: Boundary Check
+    voxel_min = global_pos
+    voxel_max = global_pos + vec3(resolution, resolution, resolution)
+    
+    # Check twice as per source
+    for _ in range(2):
+        if (leaf.m_draw_pos.x < voxel_min.x or leaf.m_draw_pos.x > voxel_max.x or
+            leaf.m_draw_pos.y < voxel_min.y or leaf.m_draw_pos.y > voxel_max.y or
+            leaf.m_draw_pos.z < voxel_min.z or leaf.m_draw_pos.z > voxel_max.z):
+            mass_point = qef.get_mass_point()
+            leaf.m_draw_pos = vec3(mass_point.x, mass_point.y, mass_point.z)
+
+    return leaf
+```
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+This method is part of an octree-based isosurfacing pipeline implemented in the `procgen` project by Tsarpf [S1, unofficial]. It builds on the adaptive octree generation with a flatness criterion to create a hierarchical representation of the surface [S1, unofficial]. The use of QEF for surface fitting is a technique to achieve smooth, high-quality surface reconstruction from scattered point-normal data, in this case derived from voxel edge crossings [S1, unofficial].
+
+## Sources
+[S1] Tsarpf/procgen, https://github.com/Tsarpf/procgen, fetched 2026-10-26 (unofficial)

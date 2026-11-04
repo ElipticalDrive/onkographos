@@ -1,0 +1,129 @@
+# Empty Space Skipping with Octree
+
+Also called: BB-Coef Min/Max Skipping, Empty space leaping, Min-Max Octree Empty Space Skipping, Octree Ray Casting, Octree-based Empty Space Skipping
+
+## Overview
+Empty Space Skipping with Octree is an acceleration technique for isosurface rendering that uses an octree structure storing conservative minimum and maximum scalar value estimates to skip transparent or irrelevant regions [S1][S2, unofficial]. It solves the problem of expensive spline evaluations in empty space by allowing rays to bypass nodes that do not contain the target isovalue [S2, unofficial]. Unlike standard empty-space skipping which may rely on coarse bricks, this method uses hierarchical min/max ranges to prune nodes [S1][S2, unofficial].
+
+## How it works
+**Inputs:**
+- Scalar volume data (typically represented as B-spline coefficients or wavelet coefficients) [S1][S2, unofficial].
+- Target isovalue $I$ [S1][S2, unofficial].
+- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ [G].
+- Leaf size parameter $b$ (trade-off between skipping efficiency and memory) [S2, unofficial].
+
+**Outputs:**
+- Intersection points with the isosurface, or early termination if the ray passes through empty space [S1][S2, unofficial].
+
+**Data Structures:**
+- **Octree Node:** Stores `min_val` and `max_val` representing the conservative bounds of the scalar field in the subtree [S1][S2, unofficial].
+- **Leaf Node:** Corresponds to a group of $b^3$ adjacent polynomials [S2, unofficial].
+- **Cube Representation:** For traversal, cubic cells are represented with vertices storing 2D texture coordinates containing the min/max values of the cell [S3].
+
+**Pre-processing Steps:**
+1. **Leaf Min/Max Estimation:** For each leaf node, estimate the minimum and maximum scalar values using the convex combination property of the B-spline basis [S2, unofficial].
+2. **BB-Form Construction:** For each cubic cell, construct Bernstein-Bézier (BB) forms of its five tetrahedral polynomial pieces [S3].
+3. **BB-Value Assignment:** Set the min/max values of the cubic cell to the min/max values of those BB-coefficients [S3].
+4. **Propagation:** Propagate the min/max values from the leaves towards the root of the octree. Each internal node stores the conservative estimate (min of children mins, max of children maxes) of the minimum and maximum value appearing in its subtree [S1][S2, unofficial].
+
+**Rendering Steps:**
+1. **Traversal:** Perform a GPU-enabled parametric octree traversal [S2, unofficial].
+2. **Culling:** For each visited node, check if the target isovalue $I$ lies within $[node.min\_val, node.max\_val]$. If not, skip the node [S1][S2, unofficial].
+3. **Entry/Exit Point Computation:** Render cubes corresponding to one level of the min/max octree instead of the whole volume [S3]. Compute exit points by rendering cubes with `glCullFace(GL FRONT)` and `glDepthFunc(GL LESS)` [S3]. Compute entry points by rendering cubes again with `glCullFace(GL BACK)` and `glDepthFunc(GL GREATER)` [S3].
+4. **Fragment Shader Logic:** In the fragment shader, discard the fragment if the cube is empty or does not contain the isosurface level [S3].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_aabb_intersect(ray_o, ray_d, bbox_min, bbox_max):
+    """Returns (t_min, t_max) of ray intersection with axis-aligned bounding box, or None if no intersection."""
+    t_min = float('-inf')
+    t_max = float('inf')
+    for i in range(3):
+        if ray_d[i] == 0:
+            if ray_o[i] < bbox_min[i] or ray_o[i] > bbox_max[i]:
+                return None
+        else:
+            t1 = (bbox_min[i] - ray_o[i]) / ray_d[i]
+            t2 = (bbox_max[i] - ray_o[i]) / ray_d[i]
+            if t1 > t2:
+                t1, t2 = t2, t1
+            if t1 > t_min:
+                t_min = t1
+            if t2 < t_max:
+                t_max = t2
+            if t_min > t_max:
+                return None
+    if t_max < 0:
+        return None
+    return (max(t_min, 0.0), t_max)
+
+def traverse_octree(ray_o, ray_d, isovalue, node):
+    """Recursively traverses octree to find nearest isosurface intersection distance t."""
+    # Pruning check
+    if isovalue < node.min_val or isovalue > node.max_val:
+        return None
+    
+    # Leaf node evaluation
+    if node.is_leaf:
+        return evaluate_leaf(ray_o, ray_d, isovalue, node.polynomials)
+    
+    # Internal node: find intersecting children
+    closest_t = None
+    for child in node.children:
+        t_min, t_max = ray_aabb_intersect(ray_o, ray_d, child.bbox_min, child.bbox_max)
+        if t_min is None or t_max <= 0:
+            continue
+        
+        t = traverse_octree(ray_o, ray_d, isovalue, child)
+        if t is not None and (closest_t is None or t < closest_t):
+            closest_t = t
+            
+    return closest_t
+
+def evaluate_leaf(ray_o, ray_d, isovalue, polynomials):
+    """Solves for t where f(ray_o + t * ray_d) = isovalue using BB-coefficients or B-splines."""
+    return solve_polynomial_intersection(ray_o, ray_d, isovalue, polynomials)
+
+def solve_polynomial_intersection(ray_o, ray_d, isovalue, polynomials):
+    # Substitute ray equation into polynomial basis to form cubic in t
+    # Solve c3*t^3 + c2*t^2 + c1*t + c0 = isovalue using Cardano's formula or Newton-Raphson
+    # Return smallest real root t > 0, or None if no intersection exists [G]
+    return None
+```
+
+**Parameters:**
+- $b$: Leaf size factor. Each leaf corresponds to a group of $b^3$ adjacent polynomials, where $b$ is a trade-off factor between more efficient empty space skipping and memory requirement of the tree structure [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Conservative estimates must be tight enough to avoid false negatives (skipping valid regions) but loose enough to allow pruning [G].
+- **Boundary Conditions:** Ensure ray bounding box intersection tests handle rays parallel to axes or originating inside nodes correctly [G].
+- **Zero Direction Component:** When $\mathbf{d}_i = 0$, the ray is parallel to the axis; the test checks if the ray origin lies within the cell bounds along that axis [G].
+
+## Subtopics
+
+### [Octree Traversal with Min/Max Pruning](1739-octree-traversal-with-min-max-pruning.md)
+Uses hierarchical min/max ranges to prune nodes that do not contain the target isovalue, allowing for interactive transfer function changes. Choose when dynamic transfer functions are required.
+
+### [Octree Empty Block Culling](2687-octree-empty-block-culling.md)
+Recursively determines if a node contains any non-empty data blocks, returning `EMPTY` or `NONEMPTY`. Choose for binary or sparse data where exact emptiness is known.
+
+### [View-Dependent Working Set Generation](4965-view-dependent-working-set-generation.md)
+Constructs a view-dependent working set of octree nodes for out-of-core rendering. Choose when memory bandwidth is the bottleneck and data exceeds GPU memory.
+
+## Operating characteristics
+- **Time Complexity:** Traversal is proportional to the number of non-empty nodes intersected by the ray [G]. Pruning reduces this significantly in sparse volumes [S1].
+- **Memory Complexity:** $O(N)$ where $N$ is the number of leaf nodes, plus overhead for the octree structure [G].
+- **Performance:** Reduces the number of expensive spline evaluations by skipping empty regions [S2, unofficial].
+- **Strengths:** Efficient for large datasets [S2, unofficial].
+- **Limitations:** Requires pre-processing to build the octree and compute min/max values; overhead may not be justified for very small or dense volumes [G].
+
+## Background
+The method leverages the properties of B-spline bases and octree structures to enable efficient empty space skipping [S1][S2, unofficial]. It is applied to accelerate volume animation and interactive rendering for moderately sized volumes [S1].
+
+## Sources
+[S1] Volume ray casting — Grokipedia, https://grokipedia.com/page/Volume_ray_casting, fetched 2026-10-26
+[S2] Wavelet-based Multiresolution Isosurface Rendering, https://doi.org/10.2312/vg/vg10/013-020, fetched 2026-10-26 (unofficial)
+[S3] PDF GPU Isosurface Raycasting of FCC Datasets, https://minho-kim-uos.github.io/papers/kim12gpu.pdf, fetched 2026-10-29

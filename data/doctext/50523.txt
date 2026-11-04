@@ -1,0 +1,1765 @@
+### Assets/Scripts/Test.cs
+```
+using UnityEngine;
+
+using DualContouring;
+using LinerAlgebra;
+
+public class Test : MonoBehaviour
+{
+
+    // TODO: 
+    // 1. Add mesh splitting for massive shapes - done
+    // 2. Mutlithreading / Multiprocessing
+
+    public Material color;
+
+    // Start is called before the first frame update
+    void Start()
+    {
+        Density heart = (x, y, z) => {
+            float result = 2 * x * x + y * y + z * z - 1;
+            return Mathf.Pow(result, 3) - z * z * y * y * y;
+        };
+
+        float cubeSize = 2f;
+        Density cube = (x, y, z) => {
+            float X = Mathf.Abs(x);
+            float Y = Mathf.Abs(y);
+            float Z = Mathf.Abs(z);
+            return Mathf.Max(X, Y, Z) - cubeSize;
+        };
+
+        float sphereRadius = 8f;
+        Density sphere = (x, y, z) => {
+            return Vector3.Distance(new Vector3(x, y, z), Vector3.zero) - sphereRadius / 2f;
+        };
+
+        Cuboid bounds = new Cuboid(Vector3.one * -2f, Vector3.one * 2f);
+        DualContour shape = new DualContour(bounds, heart);
+        //ChunkedDualContour shape = new ChunkedDualContour(bounds, sphere, 2, 2, 2);
+
+        foreach (Mesh mesh in shape.Generate(0f, 0f, 6))
+        {
+            GameObject child = new GameObject("Child mesh");
+            child.AddComponent<MeshRenderer>().material = color;
+            child.AddComponent<MeshFilter>().mesh = mesh;
+            child.transform.parent = this.transform;
+        }
+    }
+
+}
+```
+
+### Assets/Scripts/Data Structures/DualContouring/DualContour.cs
+```
+using System.Collections.Generic;
+using UnityEngine;
+
+using DualContouring.Utility;
+using DualContouring;
+
+using LinerAlgebra;
+
+/// <summary>
+/// A class to take a density function and build a mesh from it
+/// </summary>
+public class DualContour
+{
+
+    #region Constants
+
+    // Hyperparameters for QEF fixes
+    private const float BIAS_STRENGTH = 0.01f;
+    
+    private const bool BIAS_FIX = true;
+    private const bool CONSTRAINTS_FIX = true;
+
+    #endregion
+
+    #region Variables
+
+    // Field parameters
+    private Cuboid bounds;
+    private Density function;
+    private float isoLevel;
+
+    // The rendered shape
+    private Octree<NodeData> root;
+
+    #endregion
+
+    #region QEF solving
+
+    /// <summary>
+    /// A method to add intersections and normals that add a bias towards the center of mass
+    /// </summary>
+    /// <param name="intersections"> The intersections list </param>
+    /// <param name="normals"> The normals list </param>
+    private static void AddBias(List<Vector3> intersections, List<Vector3> normals)
+    {
+        // Find the average point of intersection
+        Vector3 massPoint = Vector3.zero;
+        intersections.ForEach(v => massPoint += v);
+        massPoint /= intersections.Count;
+
+        intersections.Add(massPoint);
+        intersections.Add(massPoint);
+        intersections.Add(massPoint);
+
+        // Create axis normals
+        normals.Add(new Vector3(BIAS_STRENGTH, 0f, 0f));
+        normals.Add(new Vector3(0f, BIAS_STRENGTH, 0f));
+        normals.Add(new Vector3(0f, 0f, BIAS_STRENGTH));
+    }
+
+    /// <summary>
+    /// A method to solve a given QEF and keep the result inside the given bounds
+    /// </summary>
+    /// <param name="bounds"> The bounds of work </param>
+    /// <param name="err"> The QEF to solve </param>
+    /// <returns> A point the minimizes the QEF inside the given bounds </returns>
+    private static float[] ApplyConstraint(Cuboid bounds, QEF err)
+    {
+        // A function to filter invalid points
+        bool Bounded(float[] result)
+        {
+            Vector3 point = new Vector3(result[0], result[1], result[2]);
+            return bounds.Contains(point);
+        }
+
+        // Get bounds size and create result list
+        Vector3 size = bounds.size;
+        List<float[]> results = new List<float[]>();
+
+        // Constrain QEF to 6 planes bordering the cell
+        results.Add(err.fixAxis(0, bounds.min.x).Solve());
+        results.Add(err.fixAxis(0, bounds.min.x + size.x).Solve());
+        results.Add(err.fixAxis(1, bounds.min.y).Solve());
+        results.Add(err.fixAxis(1, bounds.min.y + size.y).Solve());
+        results.Add(err.fixAxis(2, bounds.min.z).Solve());
+        results.Add(err.fixAxis(2, bounds.min.z + size.z).Solve());
+
+        // Filter invalid point
+        results = ContourUtility.FilterList(results, Bounded);
+
+        // If all points filtered, try the 12 lines bordering the cell
+        if (results.Count == 0)
+        {
+            results.Add(err.fixAxis(1, bounds.min.y).fixAxis(0, bounds.min.x).Solve());
+            results.Add(err.fixAxis(1, bounds.min.y + size.y).fixAxis(0, bounds.min.x).Solve());
+            results.Add(err.fixAxis(1, bounds.min.y).fixAxis(0, bounds.min.x + size.x).Solve());
+            results.Add(err.fixAxis(1, bounds.min.y + size.y).fixAxis(0, bounds.min.x + size.x).Solve());
+            results.Add(err.fixAxis(2, bounds.min.z).fixAxis(0, bounds.min.x).Solve());
+            results.Add(err.fixAxis(2, bounds.min.z + size.z).fixAxis(0, bounds.min.x).Solve());
+            results.Add(err.fixAxis(2, bounds.min.z).fixAxis(0, bounds.min.x + size.x).Solve());
+            results.Add(err.fixAxis(2, bounds.min.z + size.z).fixAxis(0, bounds.min.x + size.x).Solve());
+            results.Add(err.fixAxis(2, bounds.min.z).fixAxis(1, bounds.min.y).Solve());
+            results.Add(err.fixAxis(2, bounds.min.z + size.z).fixAxis(1, bounds.min.y).Solve());
+            results.Add(err.fixAxis(2, bounds.min.z).fixAxis(1, bounds.min.y + size.y).Solve());
+            results.Add(err.fixAxis(2, bounds.min.z + size.z).fixAxis(1, bounds.min.y + size.y).Solve());
+
+            // Filter invalid point
+            results = ContourUtility.FilterList(results, Bounded);
+        }
+
+        // If no valid point found try corners of the cube
+        if (results.Count == 0)
+            foreach (Vector3 corner in bounds.GetCorners())
+                results.Add(new float[] {corner.x, corner.y, corner.z});
+
+        // Select result with lowest error
+        float[] best = null;
+        float bestErr = float.PositiveInfinity;
+        foreach (float[] result in results)
+        {
+            float pointErr = err.Evaluate(result);
+            if (bestErr > pointErr)
+            {
+                best = result;
+                bestErr = pointErr;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// A method to build and solve a QEF from the given intersections inside the given bounds
+    /// </summary>
+    /// <param name="intersections"> The intersections to add to the QEF </param>
+    /// <param name="normals"> A list containing the normal of each intersection point </param>
+    /// <param name="bounds"> The bounds of work </param>
+    /// <returns> The point the minimizes the QEF and it's error in a array in this format {point.x, point.y, point.z, Error(point)} </returns>
+    private static QEF CreateQEF(List<Vector3> intersections, List<Vector3> normals)
+    {
+        // Add terms to the QEF to add a bias towards the average point of intersection
+        if (BIAS_FIX)
+            AddBias(intersections, normals);
+
+        // Create and solve the QEF
+        QEF err = new QEF(intersections, normals);
+
+        // Create the QEF
+        return err;
+    }
+
+    #endregion
+
+    #region Octree construction
+
+    /// <summary>
+    /// A method to try and simplify a given octree node
+    /// </summary>
+    /// <param name="root"> The node to simplify </param>
+    /// <param name="function"> The function we are contuoring </param>
+    /// <param name="simplificationTolerenceValue"> The maximum error value the a simplification can have to be accepted </param>
+    private static void Simplify(Octree<NodeData> root, float simplificationTolerenceValue)
+    {
+        // Signs to approximate corner encoding
+        int[] signs = {-1, -1, -1, -1, -1, -1, -1, -1};
+	    int midSign = -1;
+
+        // Sum all child QEF's
+        QEF sum = null;
+        for (int i = 0; i < 8; i++)
+        {
+            // Skip trimmed branches
+            if (root[i] == null)
+                continue;
+            
+            // Child not lead, cant simplify
+            QEF data = root[i].GetData().qef;
+            if (data == null)
+                return;
+
+            // Accumulate qef
+            if (sum == null)
+                sum = data;
+            else sum += data;
+
+            // Update signs
+            int encoding = root[i].GetData().cornerEncoding;
+            signs[i] = (encoding>> i) & 1;
+            midSign = (encoding >> (7 - i)) & 1;
+        }
+
+        // Solve sum QEF and bound if needed
+        float[] solution = sum.Solve();
+        Cuboid bounds = root.GetBounds();
+        if (!bounds.Contains(new Vector3(solution[0], solution[1], solution[2])))
+        {
+            float[] bounded = ApplyConstraint(bounds, sum);
+            solution[0] = bounded[0];
+            solution[1] = bounded[1];
+            solution[2] = bounded[2];
+            solution[3] = sum.Evaluate(bounded);
+        }
+
+        // Reject simplification if error is to high
+        if (solution[3] > simplificationTolerenceValue)
+            return;
+
+        // Build the new corner encoding
+        int rootCorners = 0;
+        for (int i = 0; i < 8; i++)
+            rootCorners |= (signs[i] == -1 ? midSign : signs[i]) << i;
+
+        // Turn root in a pseado leaf
+        root.DeleteChildrenArray();
+        root.SetData(new NodeData(sum, new Vector3(solution[0], solution[1], solution[2]), rootCorners, Vector3.Distance(bounds.min, bounds.max)));
+    }
+
+    /// <summary>
+    /// A method to process a octree node and solve it's QEF
+    /// </summary>
+    /// <param name="node"> The node </param>
+    /// <param name="function"> The density function tiling this field </param>
+    /// <param name="isoLevel"> The value of the density function edge </param>
+    /// <returns> True if the node contains geometry, faslse otherwise </returns>
+    private static bool ProcessNode(Octree<NodeData> node, Density function, float isoLevel)
+    {
+        // Compute intersections
+        int encoding;
+        Cuboid bounds = node.GetBounds();
+        List<Vector3> intersections = ContourUtility.FindIntersections(bounds, function, isoLevel, out encoding);
+
+        // If cube is fully inside or oustide the shape trim this branch
+        if (intersections.Count == 0)
+            return false;
+        
+        // Compute normals of intersections
+        List<Vector3> normals = new List<Vector3>();
+        intersections.ForEach(point => normals.Add(ContourUtility.ApproximateGradientAt(point, function)));
+
+        // Solve QEF
+        QEF qef = CreateQEF(intersections, normals);
+        float[] result = qef.Solve();
+
+        // Solve bounded if needed
+        if (!bounds.Contains(new Vector3(result[0], result[1], result[2])))
+            result = ApplyConstraint(bounds, qef);
+
+        // Store data 
+        node.SetData(new NodeData(qef, new Vector3(result[0], result[1], result[2]), encoding, Vector3.Distance(bounds.min, bounds.max)));
+        return true;
+    }
+
+    /// <summary>
+    /// A method to build a octree for a density function
+    /// </summary>
+    /// <param name="root"> The root of the tree </param>
+    /// <param name="function"> The density function </param>
+    /// <param name="isoLevel"> The value of the density function edge </param>
+    /// <param name="simplificationTolerenceValue"> The maximum residual to allow simplification on </param>
+    /// <param name="depth"> The maximum depth for the octree </param>
+    /// <returns> True if the density intersects the octree, false otherwise </returns>
+    private static bool BuildOctree(Octree<NodeData> root, Density function, float isoLevel, float simplificationTolerenceValue, int depth)
+    {
+        // If maximum depth reached
+        if (depth == 0)
+            return ProcessNode(root, function, isoLevel);
+
+        // Subdivide the tree
+        root.SubDivide();
+        int liveChildren = 0;
+
+        // Check each child node
+        for (int i = 0; i < 8; i++)
+        {
+            // If branch is empty trim it
+            if (!BuildOctree(root[i], function, isoLevel, simplificationTolerenceValue, depth - 1))
+                root[i] = null;
+            else liveChildren++;
+        }
+
+        // If all child nodes are trimmed trim the root as well
+        if (liveChildren == 0)
+            return false;
+
+        // Attempt to simplify the root node
+        Simplify(root, simplificationTolerenceValue);
+        return true;
+    }
+
+    #endregion
+
+    #region Mesh generation
+
+    /// <summary>
+    /// A method to build the contuor's mesh
+    /// </summary>
+    /// <param name="root"> The root of the octree to start building from </param>
+    /// <returns> The mesh of the contuor </returns>
+    private static List<Mesh> BuildMesh(Octree<NodeData> root)
+    {
+        // Create lists for mesh data
+        List<Vector3> vertices = new List<Vector3>();
+        List<int> indices = new List<int>();
+        List<Mesh> meshes = new List<Mesh>();
+
+        // Create meshes
+        ContourBuilder.ContourCellProc(root, vertices, indices, meshes);
+        if (vertices.Count > 0)
+            ContourBuilder.CreateMesh(vertices, indices, meshes);
+
+        // Return meshes
+        return meshes;
+    }
+
+    /// <summary>
+    /// A method to generate mesh for the contuor
+    /// </summary>
+    /// <param name="isoLevel"> The value of the density function edge </param>
+    /// <param name="simplificationTolerenceValue"> The error threshold for simplifying octree nodes </param>
+    /// <param name="maxOctreeDepth"> The level of detail for the octree, max number of vertexes = 8 ^ maxOctreeDepth </param>
+    /// <returns> A mesh of the contuor </returns>
+    public List<Mesh> Generate(float isoLevel, float simplificationTolerenceValue, int maxOctreeDepth)
+    {
+        // Build octree
+        this.isoLevel = isoLevel;
+        this.root = new Octree<NodeData>(this.bounds);
+
+        // Check if shape was found
+        if (!BuildOctree(this.root, this.function, isoLevel, simplificationTolerenceValue, maxOctreeDepth))
+            return null;
+
+        // Generate mesh
+        return BuildMesh(this.root);
+    }
+
+    #endregion
+
+    /// <summary>
+    /// A constructor to build a new dual contuor
+    /// </summary>
+    /// <param name="bounds"> The bounds to sample </param>
+    /// <param name="function"> A implicit density function representing the shape to contuor </param>
+    public DualContour(Cuboid bounds, Density function)
+    {
+        this.bounds = bounds;
+        this.function = function;
+        this.isoLevel = 0f;
+    }
+
+}
+```
+
+### Assets/Scripts/Data Structures/DualContouring/Octree.cs
+```
+using UnityEngine;
+using LinerAlgebra;
+
+/// <summary>
+/// A Octree implementation in C#
+/// </summary>
+/// <typeparam name="T"> The type of data to be stored in this tree </typeparam>
+public class Octree<T>
+{
+
+    private Cuboid bounds;
+    private T data;
+
+    private Octree<T>[] children;
+
+    /// <summary>
+    /// A constructor to create a new Octree
+    /// </summary>
+    /// <param name="bounds"> The 3D cube representing the bounds of the space to be stored in this octree </param>
+    public Octree(Cuboid bounds, Octree<T>[] children = null)
+    {
+        if (children != null && children.Length != 8)
+            throw new System.ArgumentException("Octree: children array must be of size 8!");
+
+        this.bounds = bounds;
+        this.children = null;
+    }
+
+    #region Functions
+
+    /// <returns> The bounds of the space in this Octree </returns>
+    public Cuboid GetBounds() => this.bounds;
+
+    /// <summary>
+    /// A method to divide the bounds of this Octree to 8 equal sized children
+    /// </summary>
+    public void SubDivide()
+    {
+        if (this.children != null)
+            return;
+        this.children = new Octree<T>[8];
+
+        Vector3 childSize = this.bounds.size / 2f;
+        for (int i = 0; i < 8; i++)
+        {
+            Vector3 offset = new Vector3
+            (
+                (i & 1) > 0 ? childSize.x : 0,
+                (i & 2) > 0 ? childSize.y : 0,
+                (i & 4) > 0 ? childSize.z : 0
+            );
+
+            Vector3 min = this.bounds.min + offset;
+            Vector3 max = min + childSize;
+
+            Cuboid childBounds = new Cuboid(min, max);
+            this.children[i] = new Octree<T>(childBounds);
+        }
+    }
+
+    /// <returns> The data stored in this Octree node </returns>
+    public T GetData() => this.data;
+
+    /// <summary>
+    /// Stores the given data in this Octree node
+    /// </summary>
+    /// <param name="data"> The data to be stored </param>
+    public void SetData(T data) => this.data = data;
+
+    /// <summary>
+    /// A method to delete the array referencing the child nodes
+    /// </summary>
+    public void DeleteChildrenArray() => this.children = null;
+
+    /// <returns> True if this node is a leaf, false otherwise </returns>
+    public bool IsLeaf() => this.children == null;
+
+    // Quick access to octree child nodes
+    public Octree<T> this[int i]
+    {    
+        get => this.children[i];
+        set => this.children[i] = value;
+    }
+
+    #endregion
+
+}
+```
+
+### Assets/Scripts/Data Structures/Linear Algebra/Cuboid.cs
+```
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace LinerAlgebra
+{
+
+    /// <summary>
+    /// A class to represent a 3D cuboid
+    /// </summary>
+    [System.Serializable]
+    public struct Cuboid
+    {
+
+        public Vector3 min, max;
+
+        public Vector3 size 
+        {
+            get { return this.max - this.min; }
+            set { this.max = this.min + value; }
+        }
+
+        public Vector3 center
+        {
+            get { return this.min + this.size / 2f; }
+            set 
+            {
+                Vector3 halfExtents = this.size / 2f;
+                this.min = value - halfExtents;
+                this.max = value + halfExtents;
+            }
+        }
+
+        /// <summary>
+        /// A constructor to create a new cube
+        /// </summary>
+        /// <param name="min"> The bottom anchor of the cube </param>
+        /// <param name="max"> The upper anchor of the cube </param>
+        public Cuboid(Vector3 min, Vector3 max)
+        {
+            this.min = min;
+            this.max = max;
+        }
+
+        /// <summary>
+        /// A method to check if a given point is contained in this cube
+        /// </summary>
+        /// <param name="point"> The point to be checked </param>
+        /// <returns> True if contained, false otherwise </returns>
+        public bool Contains(Vector3 point)
+        {
+            if (this.min.x >= point.x || this.max.x <= point.x)
+                return false;
+            
+            if (this.min.y >= point.y || this.max.y <= point.y)
+                return false;
+            
+            if (this.min.z >= point.z || this.max.z <= point.z)
+                return false;
+
+            return true;
+        }
+
+        /// <returns> A lise containing the 8 corners of the cube </returns>
+        public List<Vector3> GetCorners()
+        {
+            List<Vector3> corners = new List<Vector3>();
+            for (int i = 0; i < 8; i++)
+            {
+                Vector3 offset = new Vector3
+                (
+                    (i & 1) > 0 ? this.size.x : 0,
+                    (i & 2) > 0 ? this.size.y : 0,
+                    (i & 4) > 0 ? this.size.z : 0
+                );
+
+                corners.Add(this.min + offset);
+            }
+
+            return corners;
+        }
+
+    }
+    
+}
+```
+
+### Assets/Scripts/Data Structures/Linear Algebra/Matrix.cs
+```
+using System;
+
+namespace LinerAlgebra
+{
+
+    /// <summary>
+    /// A MxN matrix implementation in C#
+    /// </summary>
+    public class Matrix : ICloneable
+    {
+
+        #region Internal properties
+
+        private float[,] data;
+
+        #endregion
+
+        #region Properties
+
+        public int width { get => data.GetLength(0); }
+
+        public int height { get => data.GetLength(1); }
+
+        public float this[int i, int j]
+        {
+            get => this.data[i, j];
+            set => this.data[i, j] = value;
+        }
+
+        #endregion
+
+        #region Functions
+
+        /// <summary>
+        /// A method to decompose this matrix to 2 matrices Q and R such that A = Q * R <br/>
+        /// Q - A orthogonal matrix (meaning that Q * Q_T = I, and that Q_T = Q_inverse)
+        /// R - A upper triangular matrix
+        /// </summary>
+        /// <returns> A array containing {Q, R} </returns>
+        public Matrix[] QR_Decomposition()
+        {
+            /* 
+            Compute Uk = Ak - sigma(
+                range: j|1 -> k - 1)
+                action: proj(Uj, Ak)) 
+
+            proj(u, a) = (<u, a> / <u, u>) * u
+            */
+            Matrix U = this.Clone() as Matrix;
+            for (int i = 0; i < this.width; i++)
+            {
+                for (int j = 0; j < i; j++)
+                {
+                    float ua = 0;
+                    for (int k = 0; k < this.height; k++)
+                        ua += U[j, k] * this[i, k];
+
+                    float uu = 0;
+                    for (int k = 0; k < this.height; k++)
+                        uu += U[j, k] * U[j, k];
+                    
+                    float ratio = ua / uu;
+                    for (int k = 0; k < this.height; k++)
+                    U[i, k] -= ratio * U[j, k];
+                }
+            }
+
+            // Compute Q by normallzing all U columns
+            Matrix Q = new Matrix(this.width, this.height);
+            for (int i = 0; i < this.width; i++)
+            {
+                float amplitude = 0f;
+                for (int j = 0; j < this.height; j++)
+                    amplitude += U[i, j] * U[i, j];
+                amplitude = (float) Math.Sqrt(amplitude);
+
+                for (int j = 0; j < this.height; j++)
+                    Q[i, j] = U[i, j] / amplitude;
+            }
+
+            // Compute R = Q_T * A
+            Matrix R = Q.Transpose() * this;
+            return new Matrix[] {Q, R};
+        }
+
+        /// <summary>
+        /// A method to decompose this matreix to L a lower triangular matrix and U a upper triangular matrix, such that A = L * U
+        /// <br/> Note: this method only works for square matrices!
+        /// </summary>
+        /// <returns> A array containing {L, U} </returns>
+        public Matrix[] LU_Decomposition()
+        {
+            // Check matrix is square
+            if (this.width != this.height)
+                throw new System.Exception("Error: Cannot decompose non square matrix!");
+
+            Matrix L = new Matrix(this.width, this.height);
+            Matrix U = new Matrix(this.width, this.height);
+
+            for (int i = 0; i < this.width; i++)
+            {
+                // Comptue upper
+                for (int j = i; j < this.height; j++)
+                {
+                    float sum = 0f;
+                    for (int k = 0; k < i; k++)
+                        sum += L[i, k] * U[k, j];
+
+                    U[i, j] = this[i, j] - sum;
+                }
+
+                // Compute lower
+                for (int j = i; j < this.height; j++)
+                {
+                    if (i == j)
+                        L[i, j] = 1;
+                    else
+                    {
+                        float sum = 0f;
+                        for (int k = 0; k < i; k++)
+                            sum += L[j, k] * U[k, i];
+
+                        L[j, i] = (this[j, i] - sum) / U[i, i];
+                    }
+                }
+            }
+
+            return new Matrix[] {L, U};
+        }
+
+        /// <returns> The determinant of the matrix (if computable) </returns>
+        public float Determinant()
+        {
+            // Check matrix is square
+            if (this.width != this.height)
+                throw new System.Exception("Error: Cannot compute determinant of a non square matrix!");
+            
+            // Decompose to LU
+            Matrix[] LU = this.LU_Decomposition();
+
+            // Compute Det(A) = Det(LU) = Det(U) * Det(L)
+            // Which are the multiplication of the diagonal
+            float det = 1f;
+            for (int i = 0; i < this.width; i++)
+                det *= LU[0][i, i] * LU[1][i, i];
+
+            // Return result
+            return det;
+        }
+
+        /// <summary>
+        /// A method to transpose this matrix (flip it on the main diagonal)
+        /// </summary>
+        /// <returns> A transposed copy of this matrix </returns>
+        public Matrix Transpose()
+        {
+            Matrix result = new Matrix(this.height, this.width);
+            for (int i = 0; i < this.width; i++)
+                for (int j = 0; j < this.height; j++)
+                    result[j, i] = this[i, j];
+
+            return result;
+        }
+
+        /// <summary>
+        /// A method to find the eigen values and vectors of this matrix
+        /// Note: this uses the QR iterative algorithm by computing a better and better guess and stopping when if limit reached or toleranceValue achieved
+        /// </summary>
+        /// <param name="toleranceValue"> The maximum diffrence between iterations </param>
+        /// <param name="maxIterations"> The maximum number of iterations before force stopping </param>
+        /// <returns> A array containing {A, Q}:
+        /// <br/>A - A diagnoal matrix containg the eigenValues on the diagonal
+        /// <br/>Q - A matrix which has the eigenVectors as it's columns </returns>
+        public Matrix[] Eigen(float toleranceValue = 0.01f, int maxIterations = 100)
+        {
+            // Create A, and Q
+            Matrix A = this.Clone() as Matrix;
+            Matrix Q = Matrix.Identity(A.height);
+
+            // Iterate untill toleranceValue is met or iteration limit
+            for (int i = 0; i < maxIterations; i++)
+            {
+                Matrix[] QR = A.QR_Decomposition();
+
+                Matrix next = QR[1] * QR[0];
+                Q *= QR[0];
+
+                // Check for toleranceValue
+                for (int j = 0; j < A.width; j++)
+                    if (Math.Abs(next[j, j] - A[j, j]) > toleranceValue)
+                        goto loop;
+                
+                break;
+                loop: A = next;
+            }
+
+            // Return result
+            return new Matrix[] {A, Q};
+        }
+
+        /// <summary>
+        /// A method to perform a action on each element of the matrix
+        /// </summary>
+        /// <param name="action"> The action to preform </param>
+        public void forEach(Func<float, float> action)
+        {
+            for (int i = 0; i < this.width; i++)
+                for (int j = 0; j < this.height; j++)
+                    this[i, j] = action(this[i, j]);
+        }
+
+        /// <returns> A clone of this matrix </returns>
+        public object Clone()
+        {
+            return new Matrix(this);
+        }
+
+        /// <returns> A string representation of this matrix </returns>
+        public override string ToString()
+        {
+            string output = "";
+            for (int j = 0; j < this.height; j++)
+            {
+                string row = "[";
+                for (int i = 0; i < this.width; i++)
+                    row += this[i, j] + ",";
+                output += row.Substring(0, row.Length - 1) + "]\n";
+            }
+
+            return output;
+        }
+
+        /// <summary>
+        /// A method to create a identity matrix for a given size
+        /// </summary>
+        /// <param name="size"> The size of the matrix </param>
+        /// <returns> A identity matrix with the given size </returns>
+        public static Matrix Identity(int size)
+        {
+            Matrix identity = new Matrix(size, size);
+
+            for (int i = 0; i < size; i++)
+                identity[i, i] = 1f;
+
+            return identity;
+        }
+
+        #endregion
+
+        #region Static Functions
+
+        /// <summary>
+        /// A method to create a vertical vector from a number vector
+        /// </summary>
+        /// <param name="numbers"> The number vector </param>
+        /// <returns> A vertical vector matrix containing the given numbers </returns>
+        public static Matrix BuildVerticalVector(params float[] numbers)
+        {
+            Matrix vector = new Matrix(1, numbers.Length);
+            for (int i = 0; i < numbers.Length; i++)
+                vector[0, i] = numbers[i];
+            return vector;
+        }
+
+        /// <summary>
+        /// A method to create a horizontal vector from a number vector
+        /// </summary>
+        /// <param name="numbers"> The number vector </param>
+        /// <returns> A horizontal vector matrix containing the given numbers </returns>
+        public static Matrix BuildHorizontalVector(params float[] numbers)
+        {
+            Matrix vector = new Matrix(numbers.Length, 1);
+            for (int i = 0; i < numbers.Length; i++)
+                vector[i, 0] = numbers[i];
+            return vector;
+        }
+
+        #endregion
+
+        #region Operators
+
+        // Multiplication
+        public static Matrix operator *(Matrix m1, Matrix m2)
+        {
+            if (m1.width != m2.height)
+                throw new System.Exception("Error: Cannot multiply these matrices!");
+
+            Matrix result = new Matrix(m2.width, m1.height);
+            for (int i = 0; i < result.width; i++)
+                for (int j = 0; j < result.height; j++)
+                    for (int k = 0; k < m1.width; k++)
+                        result[i, j] += m2[i, k] * m1[k, j];
+
+            return result;
+        }
+
+        public static Matrix operator *(Matrix m1, float constant)
+        {
+            Matrix result = new Matrix(m1.width, m1.height);
+            for (int i = 0; i < result.width; i++)
+                for (int j = 0; j < result.height; j++)
+                    result[i, j] = m1[i, j] * constant;
+
+            return result;
+        }
+
+        public static Matrix operator *(float constant, Matrix m1) => m1 * constant;
+
+        // Addition
+        public static Matrix operator +(Matrix m1, Matrix m2)
+        {
+            if (m1.width != m2.width || m1.height != m2.height)
+                throw new System.Exception("Error: Cannot add matrices of different dimensions!");
+
+            Matrix result = new Matrix(m1.width, m1.height);
+            for (int i = 0; i < result.width; i++)
+                for (int j = 0; j < result.height; j++)
+                    result[i, j] = m1[i, j] + m2[i, j];
+
+            return result;
+        }
+
+        public static Matrix operator +(Matrix m1, float constant)
+        {
+            Matrix result = new Matrix(m1.width, m1.height);
+            for (int i = 0; i < result.width; i++)
+                for (int j = 0; j < result.height; j++)
+                    result[i, j] = m1[i, j] + constant;
+
+            return result;
+        }
+
+        // Subtraction
+        public static Matrix operator -(Matrix m1, Matrix m2)
+        {
+            if (m1.width != m2.width || m1.height != m2.height)
+                throw new System.Exception("Error: Cannot subtract matrices of different dimensions!");
+
+            Matrix result = new Matrix(m1.width, m1.height);
+            for (int i = 0; i < result.width; i++)
+                for (int j = 0; j < result.height; j++)
+                    result[i, j] = m1[i, j] - m2[i, j];
+
+            return result;
+        }
+
+        public static Matrix operator -(Matrix m1, float constant)
+        {
+            Matrix result = new Matrix(m1.width, m1.height);
+            for (int i = 0; i < result.width; i++)
+                for (int j = 0; j < result.height; j++)
+                    result[i, j] = m1[i, j] - constant;
+
+            return result;
+        }
+
+        // Division
+        public static Matrix operator /(Matrix m1, float constant)
+        {
+            Matrix result = new Matrix(m1.width, m1.height);
+            for (int i = 0; i < result.width; i++)
+                for (int j = 0; j < result.height; j++)
+                    result[i, j] = m1[i, j] / constant;
+
+            return result;
+        }
+
+        #endregion
+
+        #region Constructors
+
+        /// <summary>
+        /// A constructor to create a new matrix
+        /// </summary>
+        /// <param name="width"> The matrix width </param>
+        /// <param name="height"> The matrix height </param>
+        public Matrix(int width, int height) => this.data = new float[width, height];
+
+        /// <summary>
+        /// A constructor to create a new matrix
+        /// </summary>
+        /// <param name="matrix"> The matrix data in a 2d float array </param>
+        public Matrix(float[,] matrix) => this.data = matrix;
+
+        // Private constructor for cloning
+        private Matrix(Matrix matrix) => this.data = matrix.data.Clone() as float[,];
+
+        #endregion
+
+    }
+    
+}
+```
+
+### Assets/Scripts/Data Structures/Linear Algebra/QEF.cs
+```
+using System.Collections.Generic;
+using UnityEngine;
+namespace LinerAlgebra
+{
+
+    /// <summary>
+    /// A method to represent a QEF of the form sigma(normal[i] * (point - intersection[i]))
+    /// </summary>
+    public class QEF
+    {
+
+        #region Properties
+
+        // Computation variables
+        private Matrix A_TA, A_TB, B_TB;
+        private List<float> fixedValues;
+
+        #endregion
+
+        #region Constructors
+
+        /// <summary>
+        /// A constructor to build a new 3D QEF of the form: sigma(normal[i] * (point - intersection[i]))
+        /// </summary>
+        /// <param name="intersections"> The intersections to add to the QEF </param>
+        /// <param name="normals"> The normal of each intersection </param>
+        /// <param name="fixedValues"> Values to fix for missing axies </param>
+        public QEF(List<Vector3> intersections, List<Vector3> normals, List<float> fixedValues = null)
+        {
+            // A is a matrix containing normals in each line
+            // B is a vector of the dot product of each point and it's normal
+            Matrix A = new Matrix(3, intersections.Count);
+            Matrix B = new Matrix(1, intersections.Count);
+
+            for (int i = 0; i < intersections.Count; i++)
+            {
+                A[0, i] = normals[i].x;
+                A[1, i] = normals[i].y;
+                A[2, i] = normals[i].z;
+
+                B[0, i] = Vector3.Dot(intersections[i], normals[i]);
+            }
+
+            this.InitializeInternalMatrices(A, B);
+            this.InitializeFixedValues(fixedValues);
+        }
+
+        /// <summary>
+        /// A constructor to build a new 2D QEF of the form: sigma(normal[i] * (point - intersection[i]))
+        /// </summary>
+        /// <param name="intersections"> The intersections to add to the QEF </param>
+        /// <param name="normals"> The normal of each intersection </param>
+        /// <param name="fixedValues"> Values to fix for missing axies </param>
+        public QEF(List<Vector2> intersections, List<Vector2> normals, List<float> fixedValues = null)
+        {
+            // A is a matrix containing normals in each line
+            // B is a vector of the dot product of each point and it's normal
+            Matrix A = new Matrix(2, intersections.Count);
+            Matrix B = new Matrix(1, intersections.Count);
+
+            for (int i = 0; i < intersections.Count; i++)
+            {
+                A[0, i] = normals[i].x;
+                A[1, i] = normals[i].y;
+
+                B[0, i] = Vector2.Dot(intersections[i], normals[i]);
+            }
+
+            this.InitializeInternalMatrices(A, B);
+            this.InitializeFixedValues(fixedValues);
+        }
+
+        // Private constructor for quick copying
+        private QEF(Matrix A_TA, Matrix A_TB, Matrix B_TB, List<float> fixedValues = null)
+        {
+            this.A_TA = A_TA;
+            this.A_TB = A_TB;
+            this.B_TB = B_TB;
+
+            this.InitializeFixedValues(fixedValues);
+        }
+
+        // A method to initialize fixed values
+        void InitializeFixedValues(List<float> fixedValues)
+        {
+            if (fixedValues != null)
+                this.fixedValues = new List<float>(fixedValues);
+            else 
+            {
+                this.fixedValues = new List<float>();
+                this.fixedValues.Add(float.NegativeInfinity);
+                this.fixedValues.Add(float.NegativeInfinity);
+                this.fixedValues.Add(float.NegativeInfinity);
+            }
+        }
+
+        // A method to compute the internal matrices needed for the computation
+        void InitializeInternalMatrices(Matrix A, Matrix B)
+        {
+            Matrix A_T = A.Transpose();
+            this.A_TA = A_T * A;
+            this.A_TB = A_T * B;
+            this.B_TB = B.Transpose() * B;
+        }
+
+        #endregion
+
+        #region Functions
+
+        /// <summary>
+        /// A method to minimize the QEF
+        /// </summary>
+        /// <returns> A value X the minimizes the QEF </returns>
+        public float[] Solve()
+        {
+            // U is a matrix containing eigen-vectors in each line
+            // eigen[1] is U_T
+            Matrix[] eigen = this.A_TA.Eigen(Mathf.Epsilon, 500);
+            Matrix U = eigen[1].Transpose();
+
+            // D is a matrix containing 1 / eigen-values on the diagnal
+            Matrix D = new Matrix(this.A_TA.width, this.A_TA.height);
+            for (int i = 0; i < this.A_TA.width; i++)
+            {
+                float value = 1 / eigen[0][i, i];
+                D[i, i] = value < Mathf.Epsilon ? 0f : value;
+            }
+
+            // (A_T * A) ^ -1 = U_T * D * U
+            Matrix A_AT_inv = eigen[1] * D * U;
+            Matrix X = A_AT_inv * this.A_TB;
+
+            // Constrain axis
+            List<float> output = new List<float>();
+            for (int i = 0, j = 0; i < this.fixedValues.Count; i++)
+            {
+                if (fixedValues[i] != float.NegativeInfinity)
+                    output.Add(fixedValues[i]);
+                else output.Add(X[0, j++]);
+            }
+
+            // Return result
+            return new float[] {output[0], output[1], output[2], this.Evaluate(output.ToArray())};
+        }
+
+        /// <summary>
+        /// A method to evaluate the QEF for a given point
+        /// </summary>
+        /// <param name="point"> The point to evaluate </param>
+        /// <returns> The error of the point </returns>
+        public float Evaluate(float[] point)
+        {
+            // Turn the input into a vector matrix
+            Matrix X = new Matrix(1, this.A_TA.height);
+            for (int i = 0; i < X.height; i++)
+                X[0, i] = point[i];
+
+            // Compute error
+            Matrix X_T = X.Transpose();
+            Matrix result = X_T * this.A_TA * X - 2f * X_T * this.A_TB + this.B_TB;
+            return result[0, 0];
+        }
+
+        /// <summary>
+        /// Creates a new QEF with a contrained axis
+        /// </summary>
+        /// <param name="axis"> The axis to contain </param>
+        /// <param name="value"> The value to contain to </param>
+        /// <returns> A new QEF with a contrained axis </returns>
+        public QEF fixAxis(int axis, float value)
+        {
+            // Create smaller constrained matrices
+            Matrix A_TA = new Matrix(this.A_TA.width - 1, this.A_TA.height - 1);
+            Matrix A_TB = new Matrix(this.A_TB.width, this.A_TB.height - 1);
+
+            for (int i = 0; i < this.A_TA.width; i++)
+                for (int j = 0; j < this.A_TA.height; j++)
+                {
+                    // Remove the axis row
+                    if (j == axis)
+                        continue;
+                    
+                    // Remove the axis column and subtract it from A_TB
+                    int y = j > axis ? j - 1 : j;
+                    if (i == axis)
+                    {
+                        A_TB[0, y] = this.A_TB[0, j] - this.A_TA[axis, j] * value;
+                        continue;
+                    }
+                    
+                    // Update A_TA
+                    int x = i > axis ? i - 1 : i;
+                    A_TA[x, y] = this.A_TA[i, j];
+                }
+
+            // Add constraint and create new QEF
+            List<float> fixedValues = new List<float>(this.fixedValues);
+            fixedValues[axis] = value;
+            return new QEF(A_TA, A_TB, this.B_TB, fixedValues);
+        }
+
+        /// <summary>
+        /// A operator to accumulate 2 QEF's
+        /// </summary>
+        /// <param name="a"> The first QEF </param>
+        /// <param name="b"> The second QEF </param>
+        /// <returns> A new QEF from the sum, with no constained axis </returns>
+        public static QEF operator +(QEF a, QEF b) => new QEF(a.A_TA + b.A_TA, a.A_TB + b.A_TB, a.B_TB + b.B_TB, null); 
+
+        #endregion
+
+    }
+    
+}
+```
+
+### Assets/Scripts/Data Structures/DualContouring/MeshGeneration/ContourBuilder.cs
+```
+using System.Collections.Generic;
+using UnityEngine;
+
+using LinerAlgebra;
+
+namespace DualContouring
+{
+
+    /// <summary>
+    /// A class to hold the data of a qef node
+    /// </summary>
+    public struct NodeData
+    {
+        public QEF qef;
+        public Vector3 vertex;
+        public int cornerEncoding, index;
+        public float size;
+
+        /// <summary>
+        /// A constructor to build a new NodeData struct
+        /// </summary>
+        /// <param name="qef"> The qef of the node </param>
+        /// <param name="vertex"> The result of said qef </param>
+        /// <param name="cornerEncoding"> A number whose bits represent what corners crossed the boundry </param>
+        /// <param name="size"> The length of the diagnel of the node bounds </param>
+        public NodeData(QEF qef, Vector3 vertex, int cornerEncoding, float size)
+        {
+            this.qef = qef;
+            this.vertex = vertex;
+            this.cornerEncoding = cornerEncoding;
+            this.index = -1;
+            this.size = size;
+        }
+
+    }
+
+    /// <summary>
+    /// A static class to handle mesh building from a given octree
+    /// </summary>
+    public static class ContourBuilder
+    {
+        private static int MAX_VERTS_PER_MESH = 30000;
+
+        /// <summary>
+        /// A method to create a new mesh and add it to the provided mesh list
+        /// </summary>
+        /// <param name="vertices"> The mesh vertices </param>
+        /// <param name="indices"> The mesh triangles </param>
+        /// <param name="meshes"> The mesh list </param>
+        public static void CreateMesh(List<Vector3> vertices, List<int> indices, List<Mesh> meshes)
+        {
+            // Create new mesh
+            Mesh mesh = new Mesh();
+            mesh.SetVertices(vertices);
+            mesh.SetTriangles(indices, 0);
+            mesh.RecalculateBounds();
+            mesh.RecalculateNormals();
+
+            // Add new mesh to list add clear buffers
+            meshes.Add(mesh);
+            vertices.Clear();
+            indices.Clear();
+        }
+
+        /// <summary>
+        /// A method to convert a given quad to triangles
+        /// </summary>
+        /// <param name="nodes"> The quad nodes </param>
+        /// <param name="direction"> The direction of the edge </param>
+        /// <param name="vertices"> The vertex list </param>
+        /// <param name="indices"> The trinagle ordering list </param>
+        private static void ContourProcessEdge(Octree<NodeData>[] nodes, int direction, List<Vector3> vertices, List<int> indices, List<Mesh> meshes)
+        {
+            // Get needed tables
+            int[,] processEdgeMask = DualContouringData.processEdgeMask;
+            int[,] edgevmap = DualContouringData.edgevmap;
+
+            // Collapse buffers to mesh if needed
+            if (vertices.Count + 4 > MAX_VERTS_PER_MESH)
+                CreateMesh(vertices, indices, meshes);
+
+            // Control parameters
+            int[] ptrs = {-1, -1, -1, -1};
+            bool[] signChange = {false, false, false, false};
+
+            // Quad creation parameters
+            float minSize = float.PositiveInfinity;
+            int minIndex = 0;
+            bool flip = false;
+
+            // For each vertex in quad
+            for (int i = 0; i < 4; i++)
+            {
+                // Node bounds and data
+                Cuboid bounds = nodes[i].GetBounds();
+                NodeData data = nodes[i].GetData();
+
+                // Node size and edge data
+                float size = data.size;
+                int edge = processEdgeMask[direction, i];
+                int encoding = data.cornerEncoding;
+
+                // Check for sign change in edge crossing
+                bool c0Sign = ((encoding >> edgevmap[edge, 0]) & 1) > 0;
+                bool c1Sign = ((encoding >> edgevmap[edge, 1]) & 1) > 0;
+                signChange[i] = c0Sign != c1Sign;
+
+                // Find smallest cell
+                if (size < minSize)
+                {
+                    minSize = size;
+                    minIndex = i;
+                    flip = c0Sign;
+                }
+
+                // Prevent duplicates vertices
+                if (data.index == -1)
+                {
+                    data.index = vertices.Count;
+                    vertices.Add(data.vertex);
+                }
+                ptrs[i] = data.index;
+            }
+
+            // Render quad id needed
+            if (signChange[minIndex])
+            {
+                // Flip surfce normals if needed
+                if (flip)
+                {
+                    indices.Add(ptrs[0]);
+                    indices.Add(ptrs[1]);
+                    indices.Add(ptrs[3]);
+
+                    indices.Add(ptrs[0]);
+                    indices.Add(ptrs[3]);
+                    indices.Add(ptrs[2]);
+                }
+                else
+                {
+                    indices.Add(ptrs[0]);
+                    indices.Add(ptrs[3]);
+                    indices.Add(ptrs[1]);
+
+                    indices.Add(ptrs[0]);
+                    indices.Add(ptrs[2]);
+                    indices.Add(ptrs[3]);
+                }
+            }
+        }
+
+        /// <summary>
+        /// A method to connect edges along a face
+        /// </summary>
+        /// <param name="nodes"> The edges of the face </param>
+        /// <param name="direction"> The connection direction </param>
+        /// <param name="vertices"> The vertex list </param>
+        /// <param name="indices"> The trinagle ordering list </param>
+        private static void ContourEdgeProc(Octree<NodeData>[] nodes, int direction, List<Vector3> vertices, List<int> indices, List<Mesh> meshes)
+        {
+            // Get needed tables
+            int[,,] edgeProcEdgeMask = DualContouringData.edgeProcEdgeMask;
+
+            // Check input validity
+            bool allLeaves = true;
+            for (int i = 0; i < 4; i++)
+            {
+                if (nodes[i] == null)
+                    return;
+                else if (!nodes[i].IsLeaf())
+                    allLeaves = false;
+            }
+
+            // If all are leaves build all triangles
+            if (allLeaves)
+                ContourProcessEdge(nodes, direction, vertices, indices, meshes);
+            // Resolve all adjecnt edges
+            else
+                for (int i = 0; i < 2; i++)
+                {
+                    Octree<NodeData>[] edgeNodes = new Octree<NodeData>[4];
+                    for (int j = 0; j < 4; j++)
+                        edgeNodes[j] = nodes[j].IsLeaf() ? nodes[j] : nodes[j][edgeProcEdgeMask[direction, i, j]];
+
+                    ContourEdgeProc(edgeNodes, edgeProcEdgeMask[direction, i, 4], vertices, indices, meshes);
+                }
+        }
+
+        /// <summary>
+        /// A method to connect faces along a given edge
+        /// </summary>
+        /// <param name="nodes"> The nodes of quad edge </param>
+        /// <param name="direction"> The connection direction </param>
+        /// <param name="vertices"> The vertex list </param>
+        /// <param name="indices"> The trinagle ordering list </param>
+        private static void ContourFaceProc(Octree<NodeData>[] nodes, int direction, List<Vector3> vertices, List<int> indices, List<Mesh> meshes) 
+        {
+            // Get needed tables
+            int[,,] faceProcFaceMask = DualContouringData.faceProcFaceMask;
+            int[,,] faceProcEdgeMask = DualContouringData.faceProcEdgeMask;
+            int[,] orders = DualContouringData.orders;
+
+            // If one of the nodes is null face dosnt exist
+            if (nodes[0] == null || nodes[1] == null)
+                return;
+            
+            // If all are leaves nothing can be done
+            if (nodes[0].IsLeaf() && nodes[1].IsLeaf())
+                return;
+
+            // Resolve all adjacent faces
+            for (int i = 0; i < 4; i++)
+            {
+                Octree<NodeData>[] faceNodes = new Octree<NodeData>[2];
+                for (int j = 0; j < 2; j++)
+                    faceNodes[j] = nodes[j].IsLeaf() ? nodes[j] : nodes[j][faceProcFaceMask[direction, i, j]];
+
+                ContourFaceProc(faceNodes, faceProcFaceMask[direction, i, 2], vertices, indices, meshes);
+            }
+
+            // Resolve all adjacent edges
+            for (int i = 0; i < 4; i++)
+            {
+                Octree<NodeData>[] edgeNodes = new Octree<NodeData>[4];
+                int order = faceProcEdgeMask[direction, i, 0];
+
+                for (int j = 0; j < 4; j++)
+                {
+                    Octree<NodeData> node = nodes[orders[order, j]];
+                    edgeNodes[j] = node.IsLeaf() ? node : node[faceProcEdgeMask[direction, i, j + 1]];
+                }
+
+                ContourEdgeProc(edgeNodes, faceProcEdgeMask[direction, i, 5], vertices, indices, meshes);
+            }
+        }
+
+        /// <summary>
+        /// A method to triangulate a octree cell
+        /// </summary>
+        /// <param name="node"> The cell to process </param>
+        /// <param name="vertices"> The vertex list </param>
+        /// <param name="indices"> The trinagle ordering list </param>
+        public static void ContourCellProc(Octree<NodeData> node, List<Vector3> vertices, List<int> indices, List<Mesh> meshes)
+        {
+            // Get needed tables
+            int[,] cellProcFaceMask = DualContouringData.cellProcFaceMask;
+            int[,] cellProcEdgeMask = DualContouringData.cellProcEdgeMask;
+
+            // If node is leaf nothing can be done
+            if (node.IsLeaf())
+                return;
+
+            // Resolve each child
+            for (int i = 0; i < 8; i++)
+                if (node[i] != null)
+                    ContourCellProc(node[i], vertices, indices, meshes);
+
+            // Check for crossings on each edge
+            for (int i = 0; i < 12; i++)
+            {
+                Octree<NodeData>[] faceNodes = 
+                {
+                    node[cellProcFaceMask[i, 0]],
+                    node[cellProcFaceMask[i, 1]]
+                };
+
+                ContourFaceProc(faceNodes, cellProcFaceMask[i, 2], vertices, indices, meshes);
+            }
+
+            // Check for crossings on each face
+            for (int i = 0; i < 6; i++)
+            {
+                Octree<NodeData>[] edgeNodes = new Octree<NodeData>[4];
+                for (int j = 0; j < 4; j++)
+                    edgeNodes[j] = node[cellProcEdgeMask[i, j]];
+
+                ContourEdgeProc(edgeNodes, cellProcEdgeMask[i, 4], vertices, indices, meshes);
+            }
+        }
+
+    }
+
+}
+```
+
+### Assets/Scripts/Data Structures/DualContouring/MeshGeneration/ContourUtility.cs
+```
+using System.Collections.Generic;
+using UnityEngine;
+
+using LinerAlgebra;
+
+namespace DualContouring.Utility
+{
+
+    /// <summary>
+    /// A class for dual contouring utility methods
+    /// </summary>
+    class ContourUtility
+    {
+        /// <summary>
+        /// A method to filter a list according to a given filter
+        /// </summary>
+        /// <param name="list"> The list to filter </param>
+        /// <param name="filter"> The filter condition </param>
+        /// <typeparam name="T"> The type of the items in the list </typeparam>
+        /// <returns> A new list containing only the items that satisfy the filter condition </returns>
+        public static List<T> FilterList<T>(List<T> list, Condition<T> filter)
+        {
+            List<T> result = new List<T>();
+            foreach (T item in list)
+                if (filter(item))
+                    result.Add(item);
+
+            return result;
+        }
+
+        /// <summary>
+        /// A method to approximate the intersections between a given cube and a density function
+        /// </summary>
+        /// <param name="bounds"> The cube </param>
+        /// <param name="function"> The density function </param>
+        /// <param name="isoLevel"> The value of the density function edge </param>
+        /// <returns> A list of all points of intersection </returns>
+        public static List<Vector3> FindIntersections(Cuboid bounds, Density function, float isoLevel, out int cornerEncoding) 
+        {
+            // Lists for corners and intersections
+            List<Vector3> corners = bounds.GetCorners();
+            List<Vector3> intersections = new List<Vector3>();
+
+            // Foreach edge
+            cornerEncoding = 0;
+            for (int i = 0; i < 12; i++)
+            {
+                int v1Index = DualContouringData.edgevmap[i, 0];
+                int v2Index = DualContouringData.edgevmap[i, 1];
+                // Get its 2 vertices
+                Vector3 v1 = corners[v1Index];
+                Vector3 v2 = corners[v2Index];
+
+                // Compute their density
+                float v1Density = function(v1.x, v1.y, v1.z);
+                float v2Density = function(v2.x, v2.y, v2.z);
+
+                // Check if above or below isoLevel
+                bool v1Sign = v1Density <= isoLevel;
+                bool v2Sign = v2Density <= isoLevel;
+
+                // Update cornerEncoding
+                if (v1Sign)
+                    cornerEncoding |= 1 << v1Index;
+                if (v2Sign)
+                    cornerEncoding |= 1 << v2Index;
+
+                // Check if edge intersects isoLevel
+                if (v1Sign != v2Sign)
+                {
+                    // Interpolate point on edge
+                    float t = (isoLevel - v1Density) / (v2Density - v1Density);
+                    intersections.Add(v1 + (v2 - v1) * t);
+                }
+            }
+
+            return intersections;
+        }
+
+        /// <summary>
+        /// A method to approximate the gradient of a density funtion at a given point
+        /// </summary>
+        /// <param name="point"> The point to evalutae </param>
+        /// <param name="function"> The density function </param>
+        /// <returns> A vector3 representing the gradient </returns>
+        public static Vector3 ApproximateGradientAt(Vector3 point, Density function)
+        {
+            float eps = Mathf.Epsilon;
+            float tEps = 2f * eps;
+
+            return new Vector3
+            (
+                (function(point.x + eps, point.y, point.z) - function(point.x - eps, point.y, point.z)) / tEps,
+                (function(point.x, point.y + eps, point.z) - function(point.x, point.y - eps, point.z)) / tEps,
+                (function(point.x, point.y, point.z + eps) - function(point.x, point.y, point.z - eps)) / tEps
+            );
+        }
+
+        /// <summary>
+        /// A method to filter a octree for a given condition
+        /// </summary>
+        /// <param name="filter"> The condition </param>
+        /// <param name="root"> The root of the octree </param>
+        /// <param name="output"> The output copy tree </param>
+        /// <returns> True if the current root has leaves that satisfy the condition </returns>
+        private static bool FilterOctree(Condition<Octree<NodeData>> filter, Octree<NodeData> root, Octree<NodeData> output)
+        {
+            if (root.IsLeaf())
+                return filter(root);
+
+            output.SubDivide();
+            bool hasChildren = false;
+
+            for (int i = 0; i < 8; i++)
+            {
+                // If relevent copy data
+                if (root[i] != null && FilterOctree(filter, root[i], output[i]))
+                {
+                    output[i].SetData(root[i].GetData());
+                    hasChildren = true;
+                }
+                // Else delete it
+                else output[i] = null;
+            }
+
+            return hasChildren;
+        }
+
+        /// <summary>
+        /// A method to filter a octree for a given condition
+        /// </summary>
+        /// <param name="filter"> The condition </param>
+        /// <param name="root"> The root of the octree </param>
+        /// <returns> A new octree that contains only nodes that have leaves that satisfy the condition, null if none satisfy </returns>
+        public static Octree<NodeData> FilterOctree(Condition<Octree<NodeData>> filter, Octree<NodeData> root)
+        {
+            Octree<NodeData> output = new Octree<NodeData>(root.GetBounds());
+            if (FilterOctree(filter, root, output))
+            {
+                output.SetData(root.GetData());
+                return output;
+            }
+            return null;
+        }
+
+    }
+
+}
+```
+
+### Assets/Scripts/Data Structures/DualContouring/MeshGeneration/DualContouringData.cs
+```
+namespace DualContouring
+{
+
+    // Delegates
+    public delegate float Density(float x, float y, float z);
+    public delegate bool Condition<T>(T item);
+
+    /// <summary>
+    /// A class to save all constant values required by dual contouring
+    /// </summary>
+    public static class DualContouringData
+    {
+
+        // Tables
+        public static readonly int[,] cellProcFaceMask = 
+        {
+            {0, 4, 0},
+            {1, 5, 0},
+            {2, 6, 0},
+            {3, 7, 0},
+            {0, 2, 1},
+            {4, 6, 1},
+            {1, 3, 1},
+            {5, 7, 1},
+            {0, 1, 2},
+            {2, 3, 2},
+            {4, 5, 2},
+            {6, 7, 2}
+        };
+
+        public static readonly int[,,] faceProcFaceMask = 
+        {
+            {
+                {4, 0, 0},
+                {5, 1, 0},
+                {6, 2, 0},
+                {7, 3, 0}
+            },
+            {
+                {2, 0, 1},
+                {6, 4, 1},
+                {3, 1, 1},
+                {7, 5, 1}
+            },
+            {
+                {1, 0, 2},
+                {3, 2, 2},
+                {5, 4, 2},
+                {7, 6, 2}
+            }
+        };
+
+        public static readonly int[,] orders =
+        {
+            {0, 0, 1, 1},
+            {0, 1, 0, 1},
+        };
+
+        public static readonly int[,,] faceProcEdgeMask = 
+        {
+            {
+                {1, 4, 0, 5, 1, 1},
+                {1, 6, 2, 7, 3, 1},
+                {0, 4, 6, 0, 2, 2},
+                {0, 5, 7, 1, 3, 2}
+            },
+            {
+                {0, 2, 3, 0, 1, 0},
+                {0, 6, 7, 4, 5, 0},
+                {1, 2, 0, 6, 4, 2},
+                {1, 3, 1, 7, 5, 2}
+            },
+            {
+                {1, 1, 0, 3, 2, 0},
+                {1, 5, 4, 7, 6, 0},
+                {0, 1, 5, 0, 4, 1},
+                {0, 3, 7, 2, 6, 1}
+            }
+        };
+
+        public static readonly int[,,] edgeProcEdgeMask = 
+        {
+            {
+                {3,2,1,0,0},
+                {7,6,5,4,0}
+            },
+            {
+                {5,1,4,0,1},
+                {7,3,6,2,1}
+            },
+            {
+                {6,4,2,0,2},
+                {7,5,3,1,2}
+            },
+        };
+
+        public static readonly int[,] edgevmap = 
+        {
+            {0, 4}, {1, 5}, {2, 6}, {3, 7}, // X - axis
+            {0, 2}, {1, 3}, {4, 6}, {5, 7}, // Y - axis
+            {0, 1}, {2, 3}, {4, 5}, {6, 7}  // Z - axis
+        };
+
+        public static readonly int[,] processEdgeMask = 
+        {
+            {3, 2, 1, 0},
+            {7, 5, 6, 4},
+            {11, 10, 9, 8}
+        };
+
+        public static readonly int[,] cellProcEdgeMask = 
+        {
+            {0, 1, 2, 3, 0},
+            {4, 5, 6, 7, 0},
+            {0, 4, 1, 5, 1},
+            {2, 6, 3, 7, 1},
+            {0, 2, 4, 6, 2},
+            {1, 3, 5, 7, 2}
+        };
+
+    }
+
+}
+```

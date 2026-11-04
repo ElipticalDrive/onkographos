@@ -1,0 +1,108 @@
+# MLP Neural Field
+Also called: Baseline MLP, Coordinate MLP, Plain MLP, Plain MLP Neural Field, ReLU-MLP
+
+## Overview
+A plain MLP neural field maps continuous spatial coordinates to signal values (such as density and color) using a standard multi-layer perceptron with ReLU activations [S1, unofficial]. It serves as the primary baseline for comparing neural implicit representations, particularly against SIREN, to demonstrate the impact of activation functions on spectral bias and high-frequency reconstruction [S1, unofficial]. Unlike [SIREN Neural Field](1250-siren-neural-field.md), which uses sine activations to capture fine details, the plain MLP struggles with high-frequency signals due to its smooth activation properties [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A tensor of continuous coordinates $z \in \mathbb{R}^{in\_features}$ (typically 3D spatial coordinates $[x, y, z]$).
+*   **Output:** A tensor of signal values $y \in \mathbb{R}^{out\_features}$ (e.g., density and RGB color).
+
+**Data Structures:**
+The network is a sequential stack of linear layers and activations.
+*   **Layer 0:** `Linear(in_features, hidden_features)` with bias.
+*   **Layers 1 to $H-1$:** `Linear(hidden_features, hidden_features)` with bias, followed by an activation function.
+*   **Layer $H$:** `Linear(hidden_features, out_features)` with bias.
+*   **Activation:** Default is ReLU. Other options include Tanh or GELU [S1, unofficial].
+
+**Parameters:**
+*   `in_features`: Dimensionality of input coordinates (default 3) [S1, unofficial].
+*   `out_features`: Dimensionality of output values (default 4 for density + RGB) [S1, unofficial].
+*   `hidden_features`: Width of hidden layers [S1, unofficial].
+*   `hidden_layers`: Number of hidden layers [S1, unofficial].
+*   `bias`: Boolean, whether linear layers carry a bias (default True) [S1, unofficial].
+*   `activation`: String name of the activation function (default "ReLU") [S1, unofficial].
+*   `steps`: Number of training steps (default 2000 for image fitting) [S1, unofficial].
+
+**Algorithm:**
+1.  **Input Preparation:** Clone the input coordinate tensor $z$ and enable gradient tracking on the copy to allow differentiation with respect to coordinates [S1, unofficial].
+2.  **Forward Pass:** Pass the gradient-enabled coordinates through the sequential MLP layers defined above [S1, unofficial].
+3.  **Output:** Return the computed signal values and the gradient-enabled coordinates [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class MLPNeuralField(nn.Module):
+    def __init__(self, in_features, out_features, hidden_features, hidden_layers, bias=True, activation="ReLU"):
+        super().__init__()
+        layers = []
+        # First layer: input to hidden
+        layers.append(nn.Linear(in_features, hidden_features, bias=bias))
+        
+        # Activation for first layer
+        if activation == "ReLU":
+            layers.append(nn.ReLU())
+        elif activation == "Tanh":
+            layers.append(nn.Tanh())
+        elif activation == "GELU":
+            layers.append(nn.GELU())
+        else:
+            raise ValueError(f"Unsupported activation: {activation}")
+
+        # Hidden layers
+        for _ in range(hidden_layers - 1):
+            layers.append(nn.Linear(hidden_features, hidden_features, bias=bias))
+            if activation == "ReLU":
+                layers.append(nn.ReLU())
+            elif activation == "Tanh":
+                layers.append(nn.Tanh())
+            elif activation == "GELU":
+                layers.append(nn.GELU())
+
+        # Output layer
+        layers.append(nn.Linear(hidden_features, out_features, bias=bias))
+        
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, z):
+        """
+        z: [B, in_features] coordinates
+        Returns: [B, out_features] signal values
+        """
+        # Clone input and enable gradients [S1, unofficial]
+        z_grad = z.clone().detach().requires_grad_(True)
+        
+        # Pass through network [S1, unofficial]
+        out = self.network(z_grad)
+        
+        return out, z_grad
+```
+
+**Edge Cases and Pitfalls:**
+*   **Coordinate Convention:** Inputs typically follow the $[-1, 1]$ convention [S1, unofficial].
+*   **Spectral Bias:** The network exhibits spectral bias, meaning it learns low-frequency functions faster than high-frequency ones, leading to blurry reconstructions compared to SIREN [S1, unofficial].
+*   **Gradient Computation:** Gradients must be explicitly enabled on the input copy to compute derivatives like the Laplacian for visualization or regularization [S1, unofficial].
+
+## Subtopics
+
+### [MLP with Input Skips](1643-mlp-with-input-skips.md)
+An MLP architecture that concatenates the original input $z$ to intermediate layers specified in `input_skips`, allowing the network to access low-level features at deeper layers. It differs from the parent [MLP Neural Field](1256-mlp-neural-field.md) by explicitly preserving high-frequency input information in hidden representations, a technique popularized by NeRF.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of hidden layers and features per forward pass. Training time is significantly longer than SIREN for high-frequency scenes; e.g., fitting a simple image may require 2000 steps for ReLU-MLP versus 1000 for SIREN, and still fail to converge to sharp details [S1, unofficial].
+*   **Memory Complexity:** Proportional to the number of parameters: $(in\_features \times hidden\_features) + (hidden\_layers \times hidden\_features^2) + (hidden\_features \times out\_features)$ weights and biases [S1, unofficial].
+*   **Strengths:** Simple implementation; serves as a robust baseline for understanding neural field behavior; stable training for low-frequency signals.
+*   **Limitations:** Poor at representing high-frequency details due to spectral bias; requires more training steps to converge on complex scenes compared to sine-based activations [S1, unofficial].
+*   **When to Use:** As a baseline for comparison; for scenes with low-frequency content; when computational simplicity is prioritized over reconstruction fidelity.
+*   **When Not to Use:** For high-frequency details (e.g., sharp edges, fine textures); when fast convergence is required.
+
+## Background
+The plain MLP neural field was introduced as a baseline method in the context of differentiable rendering and neural implicit representations [S1, unofficial]. It is commonly used to contrast with SIREN (Sinusoidal Representation Networks) to highlight the importance of activation functions in capturing high-frequency signals [S1, unofficial]. The method is implemented in various open-source differentiable rendering frameworks, such as the one by Yonghao Lee [S1, unofficial].
+
+## Sources
+[S1] Yonghao-Lee/differentiable-rendering, https://github.com/Yonghao-Lee/differentiable-rendering, fetched 2026-10-26 (unofficial)

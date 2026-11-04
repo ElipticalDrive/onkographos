@@ -1,0 +1,362 @@
+Powerful web graphics runtime built on WebGL, WebGPU, WebXR and glTF - perf: Choose streamed gsplat LOD by walking a node hierarchy by mvaligursky · Pull Request #9883 · playcanvas/engine
+
+perf: Choose streamed gsplat LOD by walking a node hierarchy by mvaligursky · Pull Request #9883 · playcanvas/engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mvaligursky
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Streamed gsplats (lod-meta.json octrees) now choose their LOD by walking a node hierarchy from the top, instead of evaluating every leaf on each LOD update. The cost follows the size of the rendered cut, not the size of the octree, which matters most for large scenes with tens of thousands of leaves.
+Changes:
+At load, the leaves-only lod-meta.json is reshaped in memory into a hierarchy where each node holds one LOD level and is replaced by its children, one level finer. A level moves up to the highest node whose subtree holds at most 4K splats in that level and all coarser ones, and whose leaves' ranges form one contiguous range of one file. No data is changed or reloaded, and the file format is unchanged.
+The splat budget is fit with a priority queue of refinements, seeded with the top nodes and stopping at the first refinement that does not fit. Distances are measured only for the nodes the walk reaches.
+While the cut streams in, only loaded data renders: a loaded coarser node stands in for children that are still loading, or the finer loaded data stays until the new nodes load. No frame shows a region twice or not at all.
+The per-leaf LOD path, its LOD tables and the scale histogram are removed.
+GSPLAT_DEBUG_NODE_AABBS draws the nodes the cut renders, colored by LOD, and in gray the nodes it is waiting for.
+The hierarchy is the same shape LCC2-style formats store natively, so those can later load into it directly.
+Examples:
+gaussian-splatting/lod-streaming: every LOD preset range ends on 20, so it reaches each scene's coarsest level; a speed hash param scales the camera speed; the LOD Box Shrink slider is removed.
+Performance:
+Poland x64 (26,571 leaves, 31,329 nodes after the reshape): the LOD update during a camera flight drops from 10.2 ms average (92 ms max) to about 1 ms median in a debug build. An update visits about 2,500 nodes and renders about 1,200 at a 4M budget.
+The selected levels match the per-leaf selection for 86-96% of drawn splats at a 4M budget across the tested scenes, and differ by one level elsewhere.
+perf: Choose streamed gsplat LOD by walking a node hierarchy
+…
+4ece97a
+```
+Streamed (octree) gsplats now reshape the leaves-only lod-meta into a
+hierarchy at load, where each node holds a single LOD level and is
+replaced by its children. The budget fit refines the hierarchy from the
+top with a priority queue and stops at the first refinement that does not
+fit, so a LOD update only visits the nodes around the chosen cut instead
+of evaluating every leaf. The data and file format are unchanged.
+
+- Remove the per-leaf LOD path, its LOD tables and the scale histogram.
+- Remove the internal lodDistanceShrink parameter.
+- Node AABB debug view draws the rendered cut, and the nodes it waits
+  for in gray.
+- lod-streaming example: presets reach the scene's coarsest level, and a
+  speed hash param scales the camera speed.
+```
+mvaligursky
+self-assigned this
+Oct 30, 2026
+vercel
+Bot
+deployed
+to
+Preview – engine-api-docs
+October 30, 2026 11:49
+View deployment
+github-actions
+Bot
+commented
+Oct 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Build size report
+This PR changes the size of the minified bundles.
+Bundle
+Minified
+Gzip
+Brotli
+playcanvas.min.js
+2783.1 KB (+3.1 KB, +0.11%)
+721.6 KB (+706 B, +0.10%)
+559.5 KB (+539 B, +0.09%)
+playcanvas.min.mjs
+2779.8 KB (+3.1 KB, +0.11%)
+720.7 KB (+818 B, +0.11%)
+559.0 KB (+575 B, +0.10%)
+vercel
+Bot
+deployed
+to
+Preview – engine
+October 30, 2026 11:50
+View deployment
+mvaligursky
+commented
+Oct 30, 2026
+View reviewed changes
+mvaligursky
+left a comment
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Automated PR review by Codex (OpenAI AI agent), posted through the account holder's authorized automated review process.
+Reviewed 4ece97a against 97c1194, focusing on hierarchy conversion, budget selection, asynchronous cut transitions, file lifetime, and downstream consumers of node state. Three actionable P2 regressions are reported inline, each reproduced with temporary probes and checked against the base revision:
+Sparse LOD chains lose their existing gap-filling behavior and can draw nothing despite resident valid data.
+A loaded child waiting for its sibling is not retained, so cooldown can unload it and trigger another download before the parent can refine.
+Finer fallback nodes are no longer distance-updated, which can suppress required SH color updates.
+Validation: 4,534 unit tests passing (43 pending); 4,532 WebGPU/Metal tests passing (40 pending); 81 bundle tests passing. Builds, consumer type tests, changed engine/test file ESLint, and diff whitespace checks pass. Additional probes exercised normal staged loading, sparse chains, sibling-load/cooldown transitions, and the actual GSplatWorld SH update decision. The engine-conventions skill guided the temporary harness; repository source was not modified.
+Limitations: this review did not independently reproduce the large-scene performance figures or run a visual flight through production streaming assets. Passing suites currently do not cover the three reproduced cases.
+Comment thread
+src/scene/gsplat-unified/gsplat-lod-tree.js
+children = [{
+bound: entry.bound,
+level,
+lods: count > 0 ? { [level]: { file: entry.file[level], offset: entry.offset[level], count } } : {},
+mvaligursky
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P2] Preserve gap filling when converting sparse LOD chains
+Emitting an empty node for every zero/missing count changes the supported sparse-chain behavior, not just the hierarchy representation. For example, a single leaf with counts [100, 0, 20, 10], base distance 5, multiplier 3, and camera distance 10 selects the empty level-1 node in limit mode and draws nothing even with all real files resident; the base revision draws the 100-splat level 0. Likewise [0, 0, 20, 10] disappears at close range instead of using level 2. These cases were explicitly handled and tested by the removed GSplatLodTable. Please retain the distinction between an interior/finest-end gap (use available data) and levels beyond the last real coarse level (intentionally empty), including when combining leaves into parents.
+Automated review by Codex (OpenAI AI agent).
+mvaligursky
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Keeping this as is, by design. A level renders as the data holds it: every splat a leaf has at a level is drawn when that level is selected, and a leaf with no splats at a level draws nothing there. Levels are trained separately, so a region's distant splats can sit in neighbouring leaves at one level and not at another - filling the gap with the finer level would draw those splats on top of the neighbours'.
+Filling it is also expensive: the fill is a range in another level's file, which stops the parents from taking over that level and every finer one. On Poland x64 (3,631 leaves with such a gap) the tree grows from 31K to 138K nodes and a LOD update from ~0.15 ms to ~14 ms. Documented in buildLodTree in 2ce2268.
+Comment thread
+src/scene/gsplat-unified/gsplat-octree-instance.js
+drawn[drawnCount++] = n;
+for (let c = first; c < end; c++) {
+if (!this._isTreeWithinLimit(c, underfillLimit) && !this._isTreeNodeLoaded(c)) {
+this._requestCutNode(c, LOAD_TIER_SWITCH);
+mvaligursky
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P2] Retain loaded children while their siblings are still streaming
+When a coarse parent stays drawn until both finer children are available, the child that finishes first is neither drawn/referenced nor requested by this loop. pollFileResource() schedules that zero-ref file for cooldown, and nothing here cancels or protects it. I reproduced a two-child refinement where A loads while B remains pending: A has refcount 0, expires after cooldownTicks, and the next cut requests A again. The base revision retains A with refcount 1. With a slow sibling or a large set of files, this wastes downloads and can repeatedly prevent the children from being resident together. Please retain files needed for the pending replacement cut until the transition completes or is abandoned, without rendering the children on top of the parent.
+Automated review by Codex (OpenAI AI agent).
+mvaligursky
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in 2ce2268. While a node renders in place of its children, the cut now holds a reference to the children that have already loaded (and the loaded data they refine to), so their cooldown can't unload them before the rest load. The hold is released through the normal cooldown once the cut no longer refines to them, and on destroy and device loss. Tests added.
+Comment thread
+src/scene/gsplat-unified/gsplat-octree-instance.js
+// a region with no node loaded yet renders whatever is loaded below it
+if (nodeState === CUT_FALLBACK) {
+if (loaded) {
+drawn[drawnCount++] = n;
+mvaligursky
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P2] Refresh distances for the finer nodes drawn as fallback
+These descendants were not visited by the budget walk, so drawing them here leaves nodeInfos[n].worldDistanceSq at an earlier camera position (or its initial zero). That field is also used by GSplatWorld.applyWorkBufferUpdates() to decide when SH colors need refreshing. In a reproduction, LOD 0 was measured at distance 1000; after moving to distance 1 and reducing the budget to select an unloaded coarse node, the retained LOD-0 fallback still recorded distance squared 1,000,000. A subsequent 0.1-unit movement with colorUpdateAngle = 1 triggered no color update, whereas the base revision updated it. Measure the fallback paths/rendered nodes with the current camera terms as well, so the traversal optimization does not leave stale SH thresholds.
+Automated review by Codex (OpenAI AI agent).
+mvaligursky
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in 2ce2268: the cut walk now measures the nodes it renders as fallback, so their distance is current for the SH colour update. Test added.
+fix: Hold streamed gsplat children that load before their siblings
+…
+2ce2268
+```
+- While a node renders in place of children that are still loading, hold
+  a reference to the children that have loaded, so their cooldown does
+  not unload them before the rest load.
+- Measure the finer nodes rendered as fallback, so the SH color update
+  thresholds read their current distance.
+- Document that a leaf's empty level renders nothing for its region.
+```
+vercel
+Bot
+deployed
+to
+Preview – engine-api-docs
+October 30, 2026 12:44
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine
+October 30, 2026 12:45
+View deployment
+mvaligursky
+commented
+Oct 30, 2026
+View reviewed changes
+mvaligursky
+left a comment
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Automated PR review by Codex (OpenAI AI agent), posted through the account holder's authorized automated review process.
+Re-reviewed 2ce2268, including the follow-up commit, replies to the previous findings, streaming transitions, and retention/release paths.
+Previous findings:
+Sparse LOD gaps: withdrawn. The explanation about separately trained levels moving splats between neighboring leaves justifies rendering each level as authored; restoring gap filling could duplicate data. The clarified contract is documented. I have not independently benchmarked the quoted performance figures.
+Fallback distances / SH updates: fixed. The targeted reproduction now refreshes the fallback's distance and triggers the expected GSplatWorld color update.
+Waiting-child retention: the original two-level reproduction is fixed, but the same eviction issue remains for intermediate fallback levels in a deeper tree. One P2 is reported inline with a reproduced three-level case.
+Validation: 4,537 unit tests passing (43 pending), 4,535 WebGPU/Metal tests passing (40 pending), and 81 bundle tests passing. Builds, consumer type tests, changed-file ESLint, and diff whitespace checks pass. Temporary streaming probes used the real octree, instance, budget balancer, and cooldown logic; repository source was not modified. The Engine conventions skill guided the temporary harness.
+Limitations: no production-asset visual flight or independent large-scene performance benchmark was run.
+Comment thread
+src/scene/gsplat-unified/gsplat-octree-instance.js
+Outdated
+_retainRegion(n, underfillLimit) {
+const { nodes, nodeLevel, childStart, childCount } = this.octree;
+const refines = this.treeRefined[n] === this.treeStamp;
+if (this._isTreeNodeLoaded(n) && (!refines || nodeLevel[n] - this._treeBand(n) <= underfillLimit)) {
+mvaligursky
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P2] Retain intermediate fallback nodes while their siblings load
+The underfill check still excludes data needed for staged refinement. With a loaded L2 root, two L1 children A/B, a requested L0 cut, and lodUnderfillLimit = 0, let A finish while B remains pending and both L0 descendants are absent. The root stays drawn because B is not coverable, but this condition rejects loaded A (1 - 0 > 0) and recurses into its unloaded L0 child. A therefore keeps refcount 0, expires after cooldownTicks, and is requested again. I reproduced that sequence; loading both A/B together immediately afterward renders both at L1, confirming A was useful fallback data despite being outside the underfill limit. Please retain the loaded fallback coverage the pending transition can actually use, including intermediate nodes outside the limit, and add a three-level staggered-loading regression test. Otherwise slow sibling loads can still cause repeated downloads and delay refinement, so the previous retention finding is only partially fixed.
+Automated review by Codex (OpenAI AI agent).
+mvaligursky
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in 3a40b2d. While a node renders in place of its children, the cut now holds every loaded node it reaches in that region, whatever its level, since once the rest loads it can render any of them - including a coarser one in place of its own children that are still loading. Added the three-level staggered-loading test.
+fix: Hold every loaded streamed gsplat node a pending refinement reaches
+…
+3a40b2d
+```
+While a node renders in place of children that are still loading, hold
+every loaded node the cut reaches in that region, not only those within
+the underfill limit: once the rest loads, the cut can render a node
+coarser than asked for in place of its own children that still load.
+```
+vercel
+Bot
+deployed
+to
+Preview – engine-api-docs
+October 30, 2026 12:54
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – engine
+October 30, 2026 12:55
+View deployment
+mvaligursky
+commented
+Oct 30, 2026
+View reviewed changes
+mvaligursky
+left a comment
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Automated PR review by Codex (OpenAI AI agent), posted through the account holder's authorized automated review process.
+Re-reviewed 3a40b2d and the response to the remaining retention finding. No new actionable findings.
+The remaining P2 is fixed: the independent three-level staggered-loading reproduction now retains the intermediate L1 file while its sibling loads, survives cooldown without unloading or re-requesting it, and promotes it to rendering with a single reference once the sibling arrives. The added regression test covers the reported case. I also checked release/reacquisition when the cut coarsens, destruction while retaining a child, device loss, and reference release after promotion (accounting for the world state's deferred retirement of previously drawn placements).
+The earlier two-level retention and fallback-distance/SH-update reproductions still pass. The sparse-LOD objection remains withdrawn for the reasons discussed previously. There are no outstanding actionable findings from my reviews.
+Validation: 4,538 unit tests passing (43 pending), 4,536 WebGPU/Metal tests passing (40 pending), and 81 bundle tests passing. Builds, consumer type tests, changed-file ESLint, and diff whitespace checks pass. Temporary probes use the real octree, instance, budget balancer, and cooldown logic; repository source was not modified.
+Limitations: no production-asset visual flight or independent large-scene performance benchmark was run.
+Hide details
+View details
+mvaligursky
+merged commit c7c7dc7
+into
+main
+Oct 30, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+mvaligursky
+deleted the
+mv-gsplat-lod-hierarchy
+branch
+October 30, 2026 13:41
+This was referenced Oct 30, 2026
+feat: Load XGRIDS LCC2 gsplat scenes
+#9885
+Merged
+Evaluate gsplat LOD over a tree cut, skip settled leaves and merge draw ranges
+#9609
+Closed
+Hide environments
+Show environments
+This branch was successfully deployed
+2 active
+deployments
+Preview – engine
+—
+3a40b2df
+Deployed
+Oct 30, 2026 by
+vercel[bot]
+View deployment
+Preview – engine-api-docs
+—
+3a40b2df
+Deployed
+Oct 30, 2026 by
+vercel[bot]
+View deployment
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,1515 @@
+# voxel-forge
+
+Compact voxel sections and neighbor-aware greedy meshing in Rust.
+
+`voxel-forge` is a small CPU library for developers building editable, full-cube
+voxel worlds. It combines palette storage, checked world coordinates, and a
+deterministic mesher behind one renderer-independent API. It has no dependencies
+and forbids unsafe Rust.
+
+**Status:** local pre-release, version 0.1.0. The crate has not been published to
+crates.io. Public adoption and compatibility with third-party engines have not
+been established. The package name is provisional until registry availability
+is checked.
+
+![Orthographic preview of the example's actual exported terrain mesh](docs/terrain.png)
+
+Synthetic OBJ geometry rendered by `docs/render_preview.py`, not a game screenshot.
+
+## What works
+
+- Sections contain 16 × 16 × 16 application-defined `u32` IDs. Zero means air.
+- Empty and uniform sections use no heap allocation. Mixed sections use
+  palette indices packed at 1–12 bits, including across word boundaries.
+- Edits reuse dead palette slots, collapse uniform data automatically, and
+  support explicit compaction. Bulk replacement can reuse allocated buffers.
+- Greedy meshing merges adjacent visible faces of the same material. Six
+  optional neighboring sections suppress shared internal faces.
+- Reusable mesher scratch and output buffers avoid fresh per-voxel allocations.
+- Signed 64-bit world coordinates split correctly at negative section borders;
+  conversion and neighbor offsets detect overflow.
+
+The storage and coordinate code were extracted and adapted from a local
+Rust/Vulkan voxel engine. The full-cube mesher was written for this standalone
+API. See [provenance](PROVENANCE.md).
+
+## Try it
+
+Rust 1.85 or newer is the declared minimum. Local verification currently uses
+Rust 1.99 on Windows; the supplied CI also checks the minimum version.
+
+From this directory:
+
+```console
+cargo test --offline
+cargo run --release --offline --example terrain -- terrain.obj
+cargo bench --offline --bench core
+cargo doc --offline --no-deps --open
+```
+
+The example writes a real OBJ mesh with two material groups. Import it into an
+OBJ-capable viewer; +Y is up and one unit is one voxel. It has 1,334 quads
+(2,668 triangles) covering 3,072 visible unit faces.
+
+To use the local checkout from another Rust project:
+
+```toml
+[dependencies]
+voxel-forge = { path = "../voxel-forge" }
+```
+
+```rust
+use voxel_forge::{
+    Face, GreedyMesher, LocalPos, Mesh, Neighborhood, SectionStorage, VoxelId,
+};
+
+fn main() -> Result<(), voxel_forge::VoxelError> {
+    let mut section = SectionStorage::filled(VoxelId::new(1));
+    section.set(LocalPos::new(4, 15, 4)?, VoxelId::AIR);
+
+    let adjacent = SectionStorage::filled(VoxelId::new(2));
+    let input = Neighborhood::new(&section)
+        .with_neighbor(Face::PositiveX, &adjacent);
+
+    let mut mesher = GreedyMesher::default();
+    let mut mesh = Mesh::default();
+    mesher.mesh(&input, &mut mesh);
+
+    for quad in mesh.quads() {
+        let positions = quad.vertices();
+        // Upload these vertices and triangles (0,1,2), (0,2,3) to your renderer.
+        // Vertices are counterclockwise viewed from outside.
+        let material_id = quad.material.raw();
+        let _ = (positions, material_id);
+    }
+    Ok(())
+}
+```
+
+Missing neighbors are air. Remesh both touching sections when a neighbor loads,
+unloads, or changes on the boundary. The library does not schedule this work.
+Storage order is X, then Z, then Y: `index = y * 256 + z * 16 + x`.
+
+## Measured behavior
+
+One local optimized run on an AMD Ryzen 7 5800H, Windows 11, Rust 1.99:
+
+| Fixture | Visible unit faces | Quads | Used storage heap | Mesh median time |
+| --- | ---: | ---: | ---: | ---: |
+| Empty | 0 | 0 | 0 B | 59.920 µs |
+| Solid | 1,536 | 6 | 0 B | 87.648 µs |
+| Synthetic terrain | 3,072 | 1,334 | 1,048 B | 104.872 µs |
+| Air/solid checkerboard | 12,288 | 12,288 | 528 B | 164.956 µs |
+| 4,096 unique solid IDs | 1,536 | 1,536 | 38,912 B | 146.200 µs |
+
+Storage also has 56 inline bytes on this target. A dense `[u32; 4096]` is
+16,384 bytes. High-entropy palettes can cost **more** than dense storage;
+there is currently no automatic dense fallback. Mesher scratch is 23,552 bytes
+and each output quad is 12 bytes on this target. These are owned buffer sizes,
+not process RSS or allocator totals.
+
+Times are medians of 41 batch means, with 25 calls per batch, after warming
+output capacity. They exclude storage construction, GPU work, and rendering.
+They are neither frame rates nor single-call latency percentiles, and do not
+establish performance relative to other libraries. See the [method and raw
+data](benchmarks/README.md) for reproduction and limitations.
+
+## Scope and tradeoffs
+
+Only opaque unit cubes are supported. All nonzero IDs occlude each other;
+different IDs never merge. There are no transparent faces, fluids, slabs,
+lighting, ambient occlusion, UV atlases, persistence, networking, LOD, GPU
+resources, or game assets in this package.
+
+The palette uses linear material lookup during edits and bulk construction.
+It targets low material diversity; construction and editing can degrade with
+thousands of distinct IDs. Meshing decodes a section once, then scans six face
+directions. It currently scans even empty sections. Thread scheduling and
+dirty-section tracking belong to the caller.
+
+The 0.1 API is experimental. No claim of being the fastest or production proven
+is made. Next work is driven by reproducible integration problems, not by
+adding a full game engine; see [planned issues](docs/INITIAL_ISSUES.md).
+
+## Contributing
+
+Useful first contributions include an integration example, independent
+benchmark reproduction, or a minimal failing voxel arrangement. See
+[CONTRIBUTING.md](CONTRIBUTING.md). GitHub issue forms and a CI workflow are
+included for use when this directory becomes a public repository. They have
+not yet run on hosted runners.
+
+## License
+
+[MIT](LICENSE). The license covers this extracted package; it does not license
+the surrounding engine or its assets.
+
+### benches/core.rs
+```
+//! Dependency-free microbenchmark. Samples time batches of repeated calls.
+#[path = "../examples/common/mod.rs"]
+mod common;
+
+use std::{hint::black_box, time::Instant};
+use voxel_forge::{GreedyMesher, Mesh, Neighborhood, SectionStorage};
+
+fn main() {
+    const SAMPLES: usize = 41;
+    const CALLS: usize = 25;
+    println!(
+        "fixture,calls_per_sample,samples,mesh_p50_ns,mesh_p95_ns,mesh_p99_ns,unit_faces,quads,storage_inline_bytes,heap_used_bytes,heap_capacity_bytes,dense_bytes,mesh_used_bytes,mesh_capacity_bytes,scratch_bytes"
+    );
+    for name in ["empty", "solid", "terrain", "checkerboard", "unique"] {
+        let blocks = common::fixture(name);
+        let section = SectionStorage::from_voxels(&blocks).expect("valid fixture");
+        let input = Neighborhood::new(&section);
+        let mut mesher = GreedyMesher::default();
+        let mut output = Mesh::default();
+        // Warm scratch and output capacity before sampling.
+        for _ in 0..10 {
+            mesher.mesh(black_box(&input), black_box(&mut output));
+        }
+        let mut samples = [0_u128; SAMPLES];
+        for sample in &mut samples {
+            let start = Instant::now();
+            for _ in 0..CALLS {
+                mesher.mesh(black_box(&input), black_box(&mut output));
+            }
+            *sample = start.elapsed().as_nanos() / CALLS as u128;
+            black_box(output.quads());
+        }
+        samples.sort_unstable();
+        let percentile = |p: usize| samples[(SAMPLES * p).div_ceil(100) - 1];
+        let mem = section.memory_usage();
+        println!(
+            "{name},{CALLS},{SAMPLES},{},{},{},{},{},{},{},{},{},{},{},{}",
+            percentile(50),
+            percentile(95),
+            percentile(99),
+            output.visible_unit_faces(),
+            output.quads().len(),
+            mem.inline_bytes,
+            mem.heap_used_bytes,
+            mem.heap_capacity_bytes,
+            std::mem::size_of_val(&blocks),
+            output.used_bytes(),
+            output.capacity_bytes(),
+            GreedyMesher::scratch_bytes()
+        );
+    }
+}
+```
+
+### examples/terrain.rs
+```
+//! Export a synthetic two-material terrain section as a standard OBJ file.
+mod common;
+
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+};
+use voxel_forge::{GreedyMesher, Mesh, Neighborhood, SectionStorage};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "terrain.obj".into());
+    let section = SectionStorage::from_voxels(&common::fixture("terrain"))?;
+    let mut mesh = Mesh::default();
+    GreedyMesher::default().mesh(&Neighborhood::new(&section), &mut mesh);
+    let mut file = BufWriter::new(File::create(&path)?);
+    writeln!(
+        file,
+        "# voxel-forge synthetic terrain; +Y up; units = voxels"
+    )?;
+    for quad in mesh.quads() {
+        for [x, y, z] in quad.vertices() {
+            writeln!(file, "v {x} {y} {z}")?;
+        }
+    }
+    for (i, quad) in mesh.quads().iter().enumerate() {
+        writeln!(file, "g material_{}", quad.material.raw())?;
+        let a = i * 4 + 1;
+        writeln!(file, "f {a} {} {}", a + 1, a + 2)?;
+        writeln!(file, "f {a} {} {}", a + 2, a + 3)?;
+    }
+    file.flush()?;
+    let memory = section.memory_usage();
+    println!(
+        "{path}: {} visible unit faces -> {} quads ({} triangles)",
+        mesh.visible_unit_faces(),
+        mesh.quads().len(),
+        mesh.quads().len() * 2
+    );
+    println!(
+        "Storage: {} inline + {} used heap bytes; {} reserved heap bytes",
+        memory.inline_bytes, memory.heap_used_bytes, memory.heap_capacity_bytes
+    );
+    Ok(())
+}
+```
+
+### src/coordinates.rs
+```
+use super::VoxelError;
+
+pub const SECTION_EDGE: usize = 16;
+pub const SECTION_VOLUME: usize = SECTION_EDGE * SECTION_EDGE * SECTION_EDGE;
+
+/// Integer block coordinates: +Y is up. Supports the full i64 domain.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WorldPos {
+    pub x: i64,
+    pub y: i64,
+    pub z: i64,
+}
+
+impl WorldPos {
+    pub const fn new(x: i64, y: i64, z: i64) -> Self {
+        Self { x, y, z }
+    }
+
+    pub fn split(self) -> (SectionPos, LocalPos) {
+        let section = SectionPos::new(
+            self.x.div_euclid(16),
+            self.y.div_euclid(16),
+            self.z.div_euclid(16),
+        );
+        let local = LocalPos::pack(
+            self.x.rem_euclid(16) as u16,
+            self.y.rem_euclid(16) as u16,
+            self.z.rem_euclid(16) as u16,
+        );
+        (section, local)
+    }
+}
+
+/// Section coordinates, NOT block coordinates. Y addresses vertical sections.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SectionPos {
+    pub x: i64,
+    pub y: i64,
+    pub z: i64,
+}
+
+impl SectionPos {
+    pub const fn new(x: i64, y: i64, z: i64) -> Self {
+        Self { x, y, z }
+    }
+
+    pub fn world(self, local: LocalPos) -> Result<WorldPos, VoxelError> {
+        // i128 also handles the last local block of the section containing MAX.
+        fn axis(section: i64, local: u8) -> Result<i64, VoxelError> {
+            i64::try_from(i128::from(section) * 16 + i128::from(local))
+                .map_err(|_| VoxelError::CoordinateOverflow)
+        }
+        Ok(WorldPos::new(
+            axis(self.x, local.x())?,
+            axis(self.y, local.y())?,
+            axis(self.z, local.z())?,
+        ))
+    }
+
+    pub fn origin(self) -> Result<WorldPos, VoxelError> {
+        self.world(LocalPos::ZERO)
+    }
+
+    /// Only complete sections inside the i64 block-coordinate domain are valid.
+    pub fn validate(self) -> Result<(), VoxelError> {
+        self.origin()?;
+        self.world(LocalPos((SECTION_VOLUME - 1) as u16))?;
+        Ok(())
+    }
+
+    pub fn offset(self, x: i64, y: i64, z: i64) -> Result<Self, VoxelError> {
+        let result = Self::new(
+            self.x
+                .checked_add(x)
+                .ok_or(VoxelError::CoordinateOverflow)?,
+            self.y
+                .checked_add(y)
+                .ok_or(VoxelError::CoordinateOverflow)?,
+            self.z
+                .checked_add(z)
+                .ok_or(VoxelError::CoordinateOverflow)?,
+        );
+        result.validate()?;
+        Ok(result)
+    }
+}
+
+/// Validated, packed local coordinates. Invalid indices cannot enter storage APIs.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LocalPos(u16);
+
+impl LocalPos {
+    pub const ZERO: Self = Self(0);
+
+    pub fn new(x: u8, y: u8, z: u8) -> Result<Self, VoxelError> {
+        if x >= 16 || y >= 16 || z >= 16 {
+            return Err(VoxelError::InvalidLocal { x, y, z });
+        }
+        Ok(Self::pack(u16::from(x), u16::from(y), u16::from(z)))
+    }
+
+    const fn pack(x: u16, y: u16, z: u16) -> Self {
+        Self((y << 8) | (z << 4) | x)
+    }
+
+    pub fn from_index(index: usize) -> Result<Self, VoxelError> {
+        if index >= SECTION_VOLUME {
+            return Err(VoxelError::InvalidIndex(index));
+        }
+        Ok(Self(index as u16))
+    }
+
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    pub const fn x(self) -> u8 {
+        (self.0 & 15) as u8
+    }
+
+    pub const fn y(self) -> u8 {
+        (self.0 >> 8) as u8
+    }
+
+    pub const fn z(self) -> u8 {
+        ((self.0 >> 4) & 15) as u8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negative_coordinates_use_floor_division() {
+        for (world, section, local) in [
+            (-33, -3, 15),
+            (-32, -2, 0),
+            (-17, -2, 15),
+            (-16, -1, 0),
+            (-15, -1, 1),
+            (-1, -1, 15),
+            (0, 0, 0),
+            (15, 0, 15),
+            (16, 1, 0),
+            (17, 1, 1),
+            (32, 2, 0),
+        ] {
+            let (s, l) = WorldPos::new(world, world, world).split();
+            assert_eq!(s, SectionPos::new(section, section, section));
+            assert_eq!(l, LocalPos::new(local, local, local).unwrap());
+        }
+    }
+
+    #[test]
+    fn round_trip_extremes_and_mixed_axes() -> Result<(), VoxelError> {
+        for x in [i64::MIN, i64::MIN + 15, -17, -1, 0, 16, i64::MAX] {
+            for y in [i64::MIN, -16, -1, 15, i64::MAX] {
+                for z in [-33, 0, 31, i64::MAX] {
+                    let world = WorldPos::new(x, y, z);
+                    let (section, local) = world.split();
+                    section.validate()?;
+                    assert_eq!(section.world(local)?, world);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_local_index_is_unique_and_x_contiguous() -> Result<(), VoxelError> {
+        for index in 0..SECTION_VOLUME {
+            let p = LocalPos::from_index(index)?;
+            assert_eq!(LocalPos::new(p.x(), p.y(), p.z())?, p);
+            assert_eq!(
+                index,
+                usize::from(p.y()) * 256 + usize::from(p.z()) * 16 + usize::from(p.x())
+            );
+        }
+        assert_eq!(LocalPos::new(1, 0, 0)?.index(), 1);
+        assert_eq!(LocalPos::new(0, 0, 1)?.index(), 16);
+        assert_eq!(LocalPos::new(0, 1, 0)?.index(), 256);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_local_coordinates_and_indices_are_rejected() {
+        for p in [(16, 0, 0), (0, 255, 0), (0, 0, 16)] {
+            assert!(LocalPos::new(p.0, p.1, p.2).is_err());
+        }
+        assert_eq!(
+            LocalPos::from_index(4096),
+            Err(VoxelError::InvalidIndex(4096))
+        );
+        assert!(LocalPos::from_index(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn unrepresentable_sections_and_neighbors_are_rejected() {
+        assert_eq!(
+            SectionPos::new(i64::MAX, 0, 0).origin(),
+            Err(VoxelError::CoordinateOverflow)
+        );
+        let (max, _) = WorldPos::new(i64::MAX, 0, 0).split();
+        assert!(max.offset(1, 0, 0).is_err());
+        let (min, _) = WorldPos::new(0, i64::MIN, 0).split();
+        assert!(min.offset(0, -1, 0).is_err());
+        assert_eq!(
+            SectionPos::new(0, 0, 0).offset(-1, 1, -1).unwrap(),
+            SectionPos::new(-1, 1, -1)
+        );
+    }
+}
+```
+
+### src/lib.rs
+```
+//! Compact, CPU-owned voxel sections and full-cube greedy meshing.
+//!
+//! All nonzero voxel IDs represent opaque unit cubes to the mesher. Storage
+//! treats IDs as arbitrary `u32` values. No game registry or renderer is needed.
+//!
+//! ```
+//! use voxel_forge::{GreedyMesher, Mesh, Neighborhood, SectionStorage, VoxelId};
+//!
+//! let section = SectionStorage::filled(VoxelId::new(1));
+//! let mut mesh = Mesh::default();
+//! GreedyMesher::default().mesh(&Neighborhood::new(&section), &mut mesh);
+//! assert_eq!(mesh.quads().len(), 6);
+//! assert_eq!(mesh.visible_unit_faces(), 6 * 16 * 16);
+//! ```
+
+mod coordinates;
+mod meshing;
+mod section;
+
+// Compile the README's Rust example alongside the API example.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeExamples;
+
+pub use coordinates::{LocalPos, SECTION_EDGE, SECTION_VOLUME, SectionPos, WorldPos};
+pub use meshing::{Face, GreedyMesher, Mesh, Neighborhood, Quad};
+pub use section::{SectionMemory, SectionStorage, StorageKind, VoxelIter};
+
+/// Application-defined material/state identifier. Zero is air.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct VoxelId(u32);
+
+impl VoxelId {
+    pub const AIR: Self = Self(0);
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+    pub const fn is_air(self) -> bool {
+        self.0 == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoxelError {
+    InvalidLocal { x: u8, y: u8, z: u8 },
+    InvalidIndex(usize),
+    CoordinateOverflow,
+    InvalidBlockCount(usize),
+}
+
+impl std::fmt::Display for VoxelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidLocal { x, y, z } => {
+                write!(f, "local coordinates ({x}, {y}, {z}) must be below 16")
+            }
+            Self::InvalidIndex(i) => write!(f, "local index {i} must be below {SECTION_VOLUME}"),
+            Self::CoordinateOverflow => {
+                f.write_str("section is outside the i64 world coordinate domain")
+            }
+            Self::InvalidBlockCount(n) => write!(f, "expected {SECTION_VOLUME} voxels, got {n}"),
+        }
+    }
+}
+impl std::error::Error for VoxelError {}
+```
+
+### src/meshing.rs
+```
+use crate::{LocalPos, SECTION_EDGE, SECTION_VOLUME, SectionStorage, VoxelId};
+
+const AREA: usize = SECTION_EDGE * SECTION_EDGE;
+
+/// Face order also indexes the six neighbor slots. +Y is up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Face {
+    NegativeX,
+    PositiveX,
+    NegativeY,
+    PositiveY,
+    NegativeZ,
+    PositiveZ,
+}
+
+impl Face {
+    pub const ALL: [Self; 6] = [
+        Self::NegativeX,
+        Self::PositiveX,
+        Self::NegativeY,
+        Self::PositiveY,
+        Self::NegativeZ,
+        Self::PositiveZ,
+    ];
+    pub const fn normal(self) -> [i8; 3] {
+        match self {
+            Self::NegativeX => [-1, 0, 0],
+            Self::PositiveX => [1, 0, 0],
+            Self::NegativeY => [0, -1, 0],
+            Self::PositiveY => [0, 1, 0],
+            Self::NegativeZ => [0, 0, -1],
+            Self::PositiveZ => [0, 0, 1],
+        }
+    }
+    fn axes(self) -> (usize, usize, usize) {
+        match self {
+            Self::NegativeX | Self::PositiveX => (0, 1, 2),
+            Self::NegativeY | Self::PositiveY => (1, 2, 0),
+            Self::NegativeZ | Self::PositiveZ => (2, 0, 1),
+        }
+    }
+    fn positive(self) -> bool {
+        self as u8 & 1 != 0
+    }
+}
+
+/// Section-local rectangle. Extent axes are Y/Z for X faces, Z/X for Y,
+/// and X/Y for Z. Coordinates run from 0 to 16, including the outer plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Quad {
+    pub origin: [u8; 3],
+    pub extent: [u8; 2],
+    pub face: Face,
+    pub material: VoxelId,
+}
+
+impl Quad {
+    /// Counterclockwise vertices viewed from outside; triangles (0,1,2),(0,2,3).
+    pub fn vertices(self) -> [[u8; 3]; 4] {
+        let (_, u, v) = self.face.axes();
+        let a = self.origin;
+        let mut b = a;
+        b[u] += self.extent[0];
+        let mut c = b;
+        c[v] += self.extent[1];
+        let mut d = a;
+        d[v] += self.extent[1];
+        if self.face.positive() {
+            [a, b, c, d]
+        } else {
+            [a, d, c, b]
+        }
+    }
+    pub fn unit_faces(self) -> usize {
+        usize::from(self.extent[0]) * usize::from(self.extent[1])
+    }
+}
+
+/// Missing neighbors are treated as air. Remesh a section when a touching
+/// neighbor is loaded, unloaded or edited; no cache or invalidation is implicit.
+pub struct Neighborhood<'a> {
+    pub center: &'a SectionStorage,
+    pub neighbors: [Option<&'a SectionStorage>; 6],
+}
+
+impl<'a> Neighborhood<'a> {
+    pub fn new(center: &'a SectionStorage) -> Self {
+        Self {
+            center,
+            neighbors: [None; 6],
+        }
+    }
+    pub fn with_neighbor(mut self, face: Face, section: &'a SectionStorage) -> Self {
+        self.neighbors[face as usize] = Some(section);
+        self
+    }
+}
+
+/// Reusable output; repeated meshing clears length and retains capacity.
+#[derive(Debug, Default, Clone)]
+pub struct Mesh {
+    quads: Vec<Quad>,
+    visible_unit_faces: usize,
+}
+
+impl Mesh {
+    pub fn quads(&self) -> &[Quad] {
+        &self.quads
+    }
+    /// Culled unit faces before greedy merging, rather than six per solid voxel.
+    pub fn visible_unit_faces(&self) -> usize {
+        self.visible_unit_faces
+    }
+    pub fn used_bytes(&self) -> usize {
+        self.quads.len() * std::mem::size_of::<Quad>()
+    }
+    /// Quad buffer only; excludes this struct and allocator overhead.
+    pub fn capacity_bytes(&self) -> usize {
+        self.quads.capacity() * std::mem::size_of::<Quad>()
+    }
+}
+
+/// Fixed reusable scratch. Decode once, then greedily merge equal material IDs
+/// in each oriented slice. All nonzero IDs occlude each other.
+pub struct GreedyMesher {
+    blocks: [VoxelId; SECTION_VOLUME],
+    borders: [[VoxelId; AREA]; 6],
+    mask: [VoxelId; AREA],
+}
+
+impl Default for GreedyMesher {
+    fn default() -> Self {
+        Self {
+            blocks: [VoxelId::AIR; SECTION_VOLUME],
+            borders: [[VoxelId::AIR; AREA]; 6],
+            mask: [VoxelId::AIR; AREA],
+        }
+    }
+}
+
+fn index(p: [usize; 3]) -> usize {
+    p[1] * AREA + p[2] * SECTION_EDGE + p[0]
+}
+
+impl GreedyMesher {
+    pub const fn scratch_bytes() -> usize {
+        std::mem::size_of::<Self>()
+    }
+
+    /// Replaces output. Only face neighbors affect cube visibility. This is
+    /// deterministic, with no GPU, per-voxel heap allocation or unsafe code.
+    pub fn mesh(&mut self, input: &Neighborhood<'_>, output: &mut Mesh) {
+        output.quads.clear();
+        output.visible_unit_faces = 0;
+        input.center.copy_voxels(&mut self.blocks);
+        for face in Face::ALL {
+            let (axis, u, v) = face.axes();
+            let border = &mut self.borders[face as usize];
+            border.fill(VoxelId::AIR);
+            if let Some(neighbor) = input.neighbors[face as usize] {
+                for j in 0..SECTION_EDGE {
+                    for i in 0..SECTION_EDGE {
+                        let mut p = [0; 3];
+                        p[axis] = if face.positive() { 0 } else { 15 };
+                        p[u] = i;
+                        p[v] = j;
+                        border[j * SECTION_EDGE + i] = neighbor
+                            .get(LocalPos::from_index(index(p)).expect("valid local index"));
+                    }
+                }
+            }
+            for layer in 0..SECTION_EDGE {
+                self.mask.fill(VoxelId::AIR);
+                for j in 0..SECTION_EDGE {
+                    for i in 0..SECTION_EDGE {
+                        let mut p = [0; 3];
+                        p[axis] = layer;
+                        p[u] = i;
+                        p[v] = j;
+                        let material = self.blocks[index(p)];
+                        if material.is_air() {
+                            continue;
+                        }
+                        let adjacent = if (face.positive() && layer == 15)
+                            || (!face.positive() && layer == 0)
+                        {
+                            self.borders[face as usize][j * SECTION_EDGE + i]
+                        } else {
+                            p[axis] = if face.positive() {
+                                layer + 1
+                            } else {
+                                layer - 1
+                            };
+                            self.blocks[index(p)]
+                        };
+                        if adjacent.is_air() {
+                            self.mask[j * SECTION_EDGE + i] = material;
+                            output.visible_unit_faces += 1;
+                        }
+                    }
+                }
+                self.merge_slice(face, layer, output);
+            }
+        }
+    }
+
+    fn merge_slice(&mut self, face: Face, layer: usize, output: &mut Mesh) {
+        let (axis, u, v) = face.axes();
+        for j in 0..SECTION_EDGE {
+            let mut i = 0;
+            while i < SECTION_EDGE {
+                let material = self.mask[j * SECTION_EDGE + i];
+                if material.is_air() {
+                    i += 1;
+                    continue;
+                }
+                let mut width = 1;
+                while i + width < SECTION_EDGE
+                    && self.mask[j * SECTION_EDGE + i + width] == material
+                {
+                    width += 1;
+                }
+                let mut height = 1;
+                while j + height < SECTION_EDGE
+                    && (0..width)
+                        .all(|dx| self.mask[(j + height) * SECTION_EDGE + i + dx] == material)
+                {
+                    height += 1;
+                }
+                for dy in 0..height {
+                    self.mask[(j + dy) * SECTION_EDGE + i..(j + dy) * SECTION_EDGE + i + width]
+                        .fill(VoxelId::AIR);
+                }
+                let mut origin = [0; 3];
+                origin[axis] = (layer + usize::from(face.positive())) as u8;
+                origin[u] = i as u8;
+                origin[v] = j as u8;
+                output.quads.push(Quad {
+                    origin,
+                    extent: [width as u8, height as u8],
+                    face,
+                    material,
+                });
+                i += width;
+            }
+        }
+    }
+}
+```
+
+### src/section.rs
+```
+use std::{iter::FusedIterator, mem::size_of};
+
+use super::{LocalPos, SECTION_VOLUME, VoxelError, VoxelId};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageKind {
+    Empty,
+    Uniform,
+    Palette,
+}
+
+/// Owned payload accounting. Capacities include reserved but unused bytes.
+/// Allocator headers/alignment overhead and process RSS are deliberately excluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionMemory {
+    pub inline_bytes: usize,
+    pub heap_used_bytes: usize,
+    pub heap_capacity_bytes: usize,
+    pub palette_entries: usize,
+    pub bits_per_index: u8,
+}
+
+impl SectionMemory {
+    pub fn owned_bytes(self) -> usize {
+        self.inline_bytes + self.heap_capacity_bytes
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PaletteEntry {
+    id: VoxelId,
+    count: u16, // 4096 fits: enables uniform collapse without scanning all blocks.
+}
+
+#[derive(Debug, Clone)]
+struct Palette {
+    entries: Vec<PaletteEntry>,
+    words: Vec<u64>,
+    bits: u8,
+}
+
+#[derive(Debug, Clone)]
+enum Representation {
+    Empty,
+    Uniform(VoxelId),
+    Palette(Palette),
+}
+
+/// 4096 values, no allocation for air or a uniform section. Mixed data uses
+/// 1..12-bit palette indices packed continuously across u64 word boundaries.
+/// Counts permit reuse of dead palette slots and O(1) collapse to uniform.
+#[derive(Debug, Clone)]
+pub struct SectionStorage {
+    data: Representation,
+}
+
+impl Default for SectionStorage {
+    fn default() -> Self {
+        Self::filled(VoxelId::AIR)
+    }
+}
+
+impl SectionStorage {
+    pub fn filled(id: VoxelId) -> Self {
+        Self {
+            data: if id == VoxelId::AIR {
+                Representation::Empty
+            } else {
+                Representation::Uniform(id)
+            },
+        }
+    }
+
+    /// Bulk construction chooses the final width before allocating packed words.
+    pub fn from_voxels(blocks: &[VoxelId]) -> Result<Self, VoxelError> {
+        if blocks.len() != SECTION_VOLUME {
+            return Err(VoxelError::InvalidBlockCount(blocks.len()));
+        }
+        let first = blocks[0];
+        if blocks.iter().all(|&id| id == first) {
+            return Ok(Self::filled(first));
+        }
+        let mut entries: Vec<PaletteEntry> = Vec::with_capacity(4);
+        // The temporary indices are stack-owned, not one allocation per block.
+        let mut indices = [0_u16; SECTION_VOLUME];
+        for (index, &id) in blocks.iter().enumerate() {
+            let slot = match entries.iter().position(|entry| entry.id == id) {
+                Some(slot) => slot,
+                None => {
+                    entries.push(PaletteEntry { id, count: 0 });
+                    entries.len() - 1
+                }
+            };
+            entries[slot].count += 1;
+            indices[index] = slot as u16;
+        }
+        entries.shrink_to_fit();
+        let bits = index_bits(entries.len());
+        let mut words = vec![0; word_count(bits)];
+        for (index, &slot) in indices.iter().enumerate() {
+            write_index(&mut words, bits, index, usize::from(slot));
+        }
+        Ok(Self {
+            data: Representation::Palette(Palette {
+                entries,
+                words,
+                bits,
+            }),
+        })
+    }
+
+    pub fn kind(&self) -> StorageKind {
+        match self.data {
+            Representation::Empty => StorageKind::Empty,
+            Representation::Uniform(_) => StorageKind::Uniform,
+            Representation::Palette(_) => StorageKind::Palette,
+        }
+    }
+
+    /// Replace bulk data while retaining mixed-output palette/word capacities.
+    /// Uniform output still releases heap storage. Invalid lengths leave data
+    /// untouched. Scratch indices are stack-owned, not a fresh heap allocation.
+    pub fn replace_from_voxels(&mut self, blocks: &[VoxelId]) -> Result<(), VoxelError> {
+        if blocks.len() != SECTION_VOLUME {
+            return Err(VoxelError::InvalidBlockCount(blocks.len()));
+        }
+        let first = blocks[0];
+        if blocks.iter().all(|&id| id == first) {
+            self.fill(first);
+            return Ok(());
+        }
+        if !matches!(self.data, Representation::Palette(_)) {
+            self.data = Representation::Palette(Palette {
+                entries: Vec::with_capacity(4),
+                words: Vec::new(),
+                bits: 0,
+            });
+        }
+        let Representation::Palette(palette) = &mut self.data else {
+            unreachable!("mixed output has a palette");
+        };
+        palette.entries.clear();
+        let mut indices = [0_u16; SECTION_VOLUME];
+        for (index, &id) in blocks.iter().enumerate() {
+            let slot = match palette.entries.iter().position(|entry| entry.id == id) {
+                Some(slot) => slot,
+                None => {
+                    palette.entries.push(PaletteEntry { id, count: 0 });
+                    palette.entries.len() - 1
+                }
+            };
+            palette.entries[slot].count += 1;
+            indices[index] = slot as u16;
+        }
+        palette.bits = index_bits(palette.entries.len());
+        palette.words.resize(word_count(palette.bits), 0);
+        palette.words.fill(0);
+        for (index, &slot) in indices.iter().enumerate() {
+            write_index(&mut palette.words, palette.bits, index, usize::from(slot));
+        }
+        Ok(())
+    }
+
+    pub fn get(&self, position: LocalPos) -> VoxelId {
+        self.at_index(position.index())
+    }
+
+    fn at_index(&self, index: usize) -> VoxelId {
+        match &self.data {
+            Representation::Empty => VoxelId::AIR,
+            Representation::Uniform(id) => *id,
+            Representation::Palette(palette) => {
+                palette.entries[read_index(&palette.words, palette.bits, index)].id
+            }
+        }
+    }
+
+    /// Returns true only if the stored value changed. Repacking occurs only when
+    /// the palette crosses a bit-width boundary, never on ordinary reads/writes.
+    pub fn set(&mut self, position: LocalPos, id: VoxelId) -> bool {
+        let index = position.index();
+        match &mut self.data {
+            Representation::Empty | Representation::Uniform(_) => {
+                let old = self.at_index(index);
+                if old == id {
+                    return false;
+                }
+                let entries = vec![
+                    PaletteEntry {
+                        id: old,
+                        count: (SECTION_VOLUME - 1) as u16,
+                    },
+                    PaletteEntry { id, count: 1 },
+                ];
+                let mut words = vec![0; word_count(1)];
+                write_index(&mut words, 1, index, 1);
+                self.data = Representation::Palette(Palette {
+                    entries,
+                    words,
+                    bits: 1,
+                });
+            }
+            Representation::Palette(palette) => {
+                let old_slot = read_index(&palette.words, palette.bits, index);
+                if palette.entries[old_slot].id == id {
+                    return false;
+                }
+                let new_slot = if let Some(slot) =
+                    palette.entries.iter().position(|entry| entry.id == id)
+                {
+                    slot
+                } else if palette.entries[old_slot].count == 1 {
+                    // Only this block references the old slot. Replace its ID in
+                    // place: no dead entry, repack or 4097th palette slot can arise.
+                    palette.entries[old_slot].id = id;
+                    return true;
+                } else if let Some(slot) = palette.entries.iter().position(|entry| entry.count == 0)
+                {
+                    palette.entries[slot].id = id;
+                    slot
+                } else {
+                    let slot = palette.entries.len();
+                    let new_bits = index_bits(slot + 1);
+                    if new_bits != palette.bits {
+                        palette.words = repack(&palette.words, palette.bits, new_bits);
+                        palette.bits = new_bits;
+                    }
+                    palette.entries.push(PaletteEntry { id, count: 0 });
+                    slot
+                };
+                palette.entries[old_slot].count -= 1;
+                palette.entries[new_slot].count += 1;
+                if usize::from(palette.entries[new_slot].count) == SECTION_VOLUME {
+                    *self = Self::filled(id);
+                } else {
+                    write_index(&mut palette.words, palette.bits, index, new_slot);
+                }
+            }
+        }
+        true
+    }
+
+    pub fn fill(&mut self, id: VoxelId) -> bool {
+        let unchanged = match self.data {
+            Representation::Empty => id == VoxelId::AIR,
+            Representation::Uniform(old) => old == id,
+            Representation::Palette(_) => false,
+        };
+        if unchanged {
+            return false;
+        }
+        *self = Self::filled(id);
+        true
+    }
+
+    /// Local bulk edit: no coordinate hashing. Duplicate positions apply in order.
+    /// Return the number of actual writes, not distinct positions.
+    pub fn set_batch(&mut self, edits: &[(LocalPos, VoxelId)]) -> usize {
+        edits
+            .iter()
+            .filter(|&&(position, id)| self.set(position, id))
+            .count()
+    }
+
+    /// Explicit cold-path compaction removes dead entries and reduces width.
+    /// Never changes values, and never runs implicitly every frame/write.
+    pub fn compact(&mut self) -> bool {
+        let Representation::Palette(palette) = &mut self.data else {
+            return false;
+        };
+        let live = palette
+            .entries
+            .iter()
+            .filter(|entry| entry.count != 0)
+            .count();
+        let has_unused = live != palette.entries.len();
+        let has_capacity = palette.entries.capacity() != palette.entries.len();
+        if !has_unused && !has_capacity {
+            return false;
+        }
+        if has_unused {
+            let mut mapping = vec![0; palette.entries.len()];
+            let mut entries = Vec::with_capacity(live);
+            for (old_slot, &entry) in palette.entries.iter().enumerate() {
+                if entry.count != 0 {
+                    mapping[old_slot] = entries.len();
+                    entries.push(entry);
+                }
+            }
+            let bits = index_bits(live);
+            let mut words = vec![0; word_count(bits)];
+            for index in 0..SECTION_VOLUME {
+                let slot = read_index(&palette.words, palette.bits, index);
+                write_index(&mut words, bits, index, mapping[slot]);
+            }
+            *palette = Palette {
+                entries,
+                words,
+                bits,
+            };
+        } else {
+            palette.entries.shrink_to_fit();
+        }
+        true
+    }
+
+    pub fn iter(&self) -> VoxelIter<'_> {
+        VoxelIter {
+            storage: self,
+            index: 0,
+        }
+    }
+
+    /// Materialize into caller-owned scratch memory (X, then Z, then Y).
+    pub fn copy_voxels(&self, destination: &mut [VoxelId; SECTION_VOLUME]) {
+        match self.data {
+            Representation::Empty => destination.fill(VoxelId::AIR),
+            Representation::Uniform(id) => destination.fill(id),
+            Representation::Palette(_) => {
+                for (output, id) in destination.iter_mut().zip(self.iter()) {
+                    *output = id;
+                }
+            }
+        }
+    }
+
+    pub fn memory_usage(&self) -> SectionMemory {
+        let mut memory = SectionMemory {
+            inline_bytes: size_of::<Self>(),
+            heap_used_bytes: 0,
+            heap_capacity_bytes: 0,
+            palette_entries: 0,
+            bits_per_index: 0,
+        };
+        if let Representation::Palette(palette) = &self.data {
+            memory.heap_used_bytes = palette.entries.len() * size_of::<PaletteEntry>()
+                + palette.words.len() * size_of::<u64>();
+            memory.heap_capacity_bytes = palette.entries.capacity() * size_of::<PaletteEntry>()
+                + palette.words.capacity() * size_of::<u64>();
+            memory.palette_entries = palette.entries.len();
+            memory.bits_per_index = palette.bits;
+        }
+        memory
+    }
+}
+
+pub struct VoxelIter<'a> {
+    storage: &'a SectionStorage,
+    index: usize,
+}
+
+impl Iterator for VoxelIter<'_> {
+    type Item = VoxelId;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index == SECTION_VOLUME {
+            return None;
+        }
+        let value = self.storage.at_index(self.index);
+        self.index += 1;
+        Some(value)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = SECTION_VOLUME - self.index;
+        (remaining, Some(remaining))
+    }
+}
+impl ExactSizeIterator for VoxelIter<'_> {}
+impl FusedIterator for VoxelIter<'_> {}
+
+fn index_bits(entries: usize) -> u8 {
+    (usize::BITS - (entries - 1).leading_zeros()) as u8
+}
+fn word_count(bits: u8) -> usize {
+    SECTION_VOLUME * usize::from(bits) / 64
+}
+
+fn read_index(words: &[u64], bits: u8, index: usize) -> usize {
+    let bit = index * usize::from(bits);
+    let word = bit / 64;
+    let offset = bit % 64;
+    let mut value = words[word] >> offset;
+    if offset + usize::from(bits) > 64 {
+        value |= words[word + 1] << (64 - offset);
+    }
+    (value & ((1_u64 << bits) - 1)) as usize
+}
+
+fn write_index(words: &mut [u64], bits: u8, index: usize, value: usize) {
+    let bit = index * usize::from(bits);
+    let word = bit / 64;
+    let offset = bit % 64;
+    let mask = (1_u64 << bits) - 1;
+    words[word] = (words[word] & !(mask << offset)) | ((value as u64) << offset);
+    if offset + usize::from(bits) > 64 {
+        let high_bits = offset + usize::from(bits) - 64;
+        let high_mask = (1_u64 << high_bits) - 1;
+        words[word + 1] = (words[word + 1] & !high_mask) | ((value as u64) >> (64 - offset));
+    }
+}
+
+fn repack(old: &[u64], old_bits: u8, new_bits: u8) -> Vec<u64> {
+    let mut words = vec![0; word_count(new_bits)];
+    for index in 0..SECTION_VOLUME {
+        write_index(
+            &mut words,
+            new_bits,
+            index,
+            read_index(old, old_bits, index),
+        );
+    }
+    words
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bulk_replacement_reuses_buffers_and_rejects_invalid_input_atomically() {
+        let mut section = SectionStorage::default();
+        let blocks = std::array::from_fn::<_, SECTION_VOLUME, _>(|i| VoxelId::new((i % 8) as u32));
+        section.replace_from_voxels(&blocks).unwrap();
+        assert!(section.iter().eq(blocks));
+        let capacity = section.memory_usage().heap_capacity_bytes;
+        let replacement = blocks.map(|id| VoxelId::new(id.raw() + 100));
+        section.replace_from_voxels(&replacement).unwrap();
+        assert!(section.iter().eq(replacement));
+        assert_eq!(section.memory_usage().heap_capacity_bytes, capacity);
+        for invalid in [&[][..], &replacement[..4095]] {
+            assert!(section.replace_from_voxels(invalid).is_err());
+            assert!(section.iter().eq(replacement));
+            assert_eq!(section.memory_usage().heap_capacity_bytes, capacity);
+        }
+        section
+            .replace_from_voxels(&[VoxelId::new(u32::MAX); SECTION_VOLUME])
+            .unwrap();
+        assert_eq!(section.kind(), StorageKind::Uniform);
+        assert_eq!(section.memory_usage().heap_capacity_bytes, 0);
+        assert!(section.iter().all(|id| id.raw() == u32::MAX));
+        section
+            .replace_from_voxels(&[VoxelId::AIR; SECTION_VOLUME])
+            .unwrap();
+        assert_eq!(section.kind(), StorageKind::Empty);
+    }
+
+    #[test]
+    fn empty_and_uniform_have_no_heap_and_copy_correctly() {
+        for id in [VoxelId::AIR, VoxelId::new(1), VoxelId::new(3)] {
+            let storage = SectionStorage::filled(id);
+            assert_eq!(storage.memory_usage().heap_capacity_bytes, 0);
+            assert_eq!(storage.iter().len(), 4096);
+            assert!(storage.iter().all(|value| value == id));
+            let mut blocks = [VoxelId::new(2); SECTION_VOLUME];
+            storage.copy_voxels(&mut blocks);
+            assert!(blocks.iter().all(|&value| value == id));
+        }
+        assert_eq!(SectionStorage::default().kind(), StorageKind::Empty);
+    }
+
+    #[test]
+    fn single_change_promotes_and_restoring_collapses_without_data_loss() -> Result<(), VoxelError>
+    {
+        for base in [VoxelId::AIR, VoxelId::new(1)] {
+            for index in [0, 63, 64, 2048, 4095] {
+                let mut section = SectionStorage::filled(base);
+                let position = LocalPos::from_index(index)?;
+                assert!(section.set(position, VoxelId::new(3)));
+                assert_eq!(section.memory_usage().bits_per_index, 1);
+                for (i, value) in section.iter().enumerate() {
+                    assert_eq!(value, if i == index { VoxelId::new(3) } else { base });
+                }
+                assert!(section.set(position, base));
+                assert_ne!(section.kind(), StorageKind::Palette);
+                assert_eq!(section.memory_usage().heap_capacity_bytes, 0);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bit_packing_handles_every_width_and_word_boundary() {
+        for bits in 1..=12 {
+            let mask = (1_usize << bits) - 1;
+            let mut words = vec![0; word_count(bits)];
+            for i in 0..SECTION_VOLUME {
+                write_index(&mut words, bits, i, (i * 37 + 7) & mask);
+            }
+            for i in 0..SECTION_VOLUME {
+                assert_eq!(read_index(&words, bits, i), (i * 37 + 7) & mask);
+            }
+            for i in (0..SECTION_VOLUME).step_by(3) {
+                write_index(&mut words, bits, i, 0);
+            }
+            for i in 0..SECTION_VOLUME {
+                assert_eq!(
+                    read_index(&words, bits, i),
+                    if i % 3 == 0 { 0 } else { (i * 37 + 7) & mask }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn four_block_bulk_storage_uses_two_bits_and_round_trips() -> Result<(), VoxelError> {
+        let blocks = std::array::from_fn::<_, SECTION_VOLUME, _>(|i| VoxelId::new((i % 4) as u32));
+        let section = SectionStorage::from_voxels(&blocks)?;
+        let memory = section.memory_usage();
+        assert_eq!(memory.bits_per_index, 2);
+        assert_eq!(memory.heap_capacity_bytes, 1024 + 32);
+        assert!(section.iter().eq(blocks));
+        let mut copied = [VoxelId::AIR; SECTION_VOLUME];
+        section.copy_voxels(&mut copied);
+        assert_eq!(copied, blocks);
+        Ok(())
+    }
+
+    #[test]
+    fn growing_through_all_palette_widths_preserves_4096_unique_values() -> Result<(), VoxelError> {
+        let mut section = SectionStorage::default();
+        for index in 0..SECTION_VOLUME {
+            section.set(LocalPos::from_index(index)?, VoxelId::new(index as u32));
+        }
+        assert_eq!(section.memory_usage().bits_per_index, 12);
+        for (i, id) in section.iter().enumerate() {
+            assert_eq!(id.raw(), i as u32);
+        }
+        for index in 1..SECTION_VOLUME {
+            section.set(LocalPos::from_index(index)?, VoxelId::AIR);
+        }
+        assert_eq!(section.kind(), StorageKind::Empty);
+        assert_eq!(section.memory_usage().heap_capacity_bytes, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn full_palette_replaces_unique_ids_without_growing_past_twelve_bits() -> Result<(), VoxelError>
+    {
+        let blocks = std::array::from_fn::<_, SECTION_VOLUME, _>(|i| VoxelId::new(i as u32));
+        let mut section = SectionStorage::from_voxels(&blocks)?;
+        let before = section.memory_usage();
+        for index in 0..SECTION_VOLUME {
+            let id = VoxelId::new(u32::MAX - index as u32);
+            assert!(section.set(LocalPos::from_index(index)?, id));
+            assert_eq!(section.memory_usage().bits_per_index, 12);
+            assert_eq!(section.memory_usage().palette_entries, SECTION_VOLUME);
+        }
+        for (index, id) in section.iter().enumerate() {
+            assert_eq!(id.raw(), u32::MAX - index as u32);
+        }
+        assert_eq!(section.memory_usage(), before);
+        Ok(())
+    }
+
+    #[test]
+    fn singleton_replacements_do_not_grow_the_palette() -> Result<(), VoxelError> {
+        let mut section = SectionStorage::default();
+        let p = LocalPos::from_index(65)?;
+        section.set(p, VoxelId::new(1));
+        for raw in 2..20_000 {
+            section.set(p, VoxelId::new(raw));
+        }
+        assert_eq!(section.memory_usage().bits_per_index, 1);
+        assert_eq!(section.memory_usage().palette_entries, 2);
+        assert_eq!(section.get(p).raw(), 19_999);
+        assert!(!section.compact());
+        Ok(())
+    }
+
+    #[test]
+    fn dead_palette_slot_is_reused_without_repacking() -> Result<(), VoxelError> {
+        let mut reference =
+            std::array::from_fn::<_, SECTION_VOLUME, _>(|i| VoxelId::new((i % 3) as u32));
+        let mut section = SectionStorage::from_voxels(&reference)?;
+        let before = section.memory_usage();
+        for (index, id) in reference.iter_mut().enumerate() {
+            if *id == VoxelId::new(2) {
+                *id = VoxelId::new(1);
+                section.set(LocalPos::from_index(index)?, *id);
+            }
+        }
+        reference[0] = VoxelId::new(3);
+        section.set(LocalPos::ZERO, reference[0]);
+        assert_eq!(section.memory_usage(), before);
+        assert!(section.iter().eq(reference));
+        assert!(!section.compact());
+        Ok(())
+    }
+
+    #[test]
+    fn random_mutations_compaction_and_fill_match_uncompressed_reference() -> Result<(), VoxelError>
+    {
+        let mut section = SectionStorage::default();
+        let mut reference = [VoxelId::AIR; SECTION_VOLUME];
+        let mut random = 0x1234_5678_u64;
+        for step in 0..80_000 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let index = (random as usize) % SECTION_VOLUME;
+            let id = VoxelId::new(((random >> 32) % 19) as u32);
+            assert_eq!(
+                section.set(LocalPos::from_index(index)?, id),
+                reference[index] != id
+            );
+            reference[index] = id;
+            if step % 997 == 0 {
+                section.compact();
+                assert!(section.iter().eq(reference));
+            }
+        }
+        assert!(section.iter().eq(reference));
+        assert!(section.fill(VoxelId::new(1)));
+        assert!(section.iter().all(|id| id == VoxelId::new(1)));
+        assert!(!section.fill(VoxelId::new(1)));
+        assert!(section.fill(VoxelId::AIR));
+        assert_eq!(section.kind(), StorageKind::Empty);
+        Ok(())
+    }
+
+    #[test]
+    fn batch_order_noops_clones_and_iterator_exhaustion() -> Result<(), VoxelError> {
+        let p = LocalPos::new(15, 15, 15)?;
+        let mut section = SectionStorage::default();
+        assert_eq!(
+            section.set_batch(&[
+                (p, VoxelId::new(1)),
+                (p, VoxelId::new(1)),
+                (p, VoxelId::new(2))
+            ]),
+            2
+        );
+        let clone = section.clone();
+        section.set(p, VoxelId::new(3));
+        assert_eq!(clone.get(p), VoxelId::new(2));
+        let mut iter = clone.iter();
+        for _ in 0..4096 {
+            assert!(iter.next().is_some());
+        }
+        assert_eq!(iter.len(), 0);
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn bulk_construction_rejects_wrong_length_and_compresses_uniform() {
+        assert!(matches!(
+            SectionStorage::from_voxels(&[]),
+            Err(VoxelError::InvalidBlockCount(0))
+        ));
+        assert!(SectionStorage::from_voxels(&vec![VoxelId::AIR; 4097]).is_err());
+        assert_eq!(
+            SectionStorage::from_voxels(&[VoxelId::new(1); SECTION_VOLUME])
+                .unwrap()
+                .kind(),
+            StorageKind::Uniform
+        );
+    }
+
+    #[test]
+    fn removing_many_palette_entries_reduces_width_without_reordering_blocks()
+    -> Result<(), VoxelError> {
+        let mut reference =
+            std::array::from_fn::<_, SECTION_VOLUME, _>(|i| VoxelId::new((i % 9) as u32));
+        let mut section = SectionStorage::from_voxels(&reference)?;
+        assert_eq!(section.memory_usage().bits_per_index, 4);
+        for (index, id) in reference.iter_mut().enumerate() {
+            if id.raw() > 1 {
+                *id = VoxelId::new(1);
+                section.set(LocalPos::from_index(index)?, *id);
+            }
+        }
+        assert_eq!(section.memory_usage().bits_per_index, 4);
+        assert!(section.compact());
+        assert_eq!(section.memory_usage().bits_per_index, 1);
+        assert_eq!(section.memory_usage().heap_capacity_bytes, 528);
+        assert!(section.iter().eq(reference));
+        // Remove the original slot 0 as well: uniform collapse needs no scan.
+        for index in 0..SECTION_VOLUME {
+            section.set(LocalPos::from_index(index)?, VoxelId::new(1));
+        }
+        assert_eq!(section.kind(), StorageKind::Uniform);
+        assert_eq!(section.memory_usage().heap_capacity_bytes, 0);
+        assert!(section.iter().all(|id| id == VoxelId::new(1)));
+        Ok(())
+    }
+}
+```
+
+### examples/common/mod.rs
+```
+use voxel_forge::{SECTION_VOLUME, VoxelId};
+
+pub fn fixture(name: &str) -> [VoxelId; SECTION_VOLUME] {
+    std::array::from_fn(|i| {
+        let x = i % 16;
+        let z = i / 16 % 16;
+        let y = i / 256;
+        match name {
+            "empty" => VoxelId::AIR,
+            "solid" => VoxelId::new(1),
+            "checkerboard" => VoxelId::new(((x + y + z) % 2) as u32),
+            "unique" => VoxelId::new(i as u32 + 1),
+            "terrain" => {
+                let height = 4 + ((x * 3 + z * 5) % 9);
+                if y > height {
+                    VoxelId::AIR
+                } else if y == height {
+                    VoxelId::new(2)
+                } else {
+                    VoxelId::new(1)
+                }
+            }
+            _ => panic!("unknown fixture: {name}"),
+        }
+    })
+}
+```

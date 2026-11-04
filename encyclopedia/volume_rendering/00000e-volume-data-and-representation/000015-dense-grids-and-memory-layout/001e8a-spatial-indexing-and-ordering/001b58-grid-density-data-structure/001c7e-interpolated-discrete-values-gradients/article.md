@@ -3,16 +3,16 @@
 Also called: Cubic Interpolation, Cubic Spline Interpolation, CubicSpline, Discrete Field Interpolation, Interpolated Grid Fields, Tri-Cubic Interpolation
 
 ## Overview
-This method computes the scalar field value at a 3D point using tri-cubic interpolation, requiring a 4×4×4 neighborhood of 64 voxels [S1]. It provides scalar value and gradient fields computed from discrete data at grid vertices using interpolation [S2]. It builds on [Grid Density Data Structure](998-grid-density-data-structure.md) and operates alongside siblings [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) and [EdgeMap Data Layout](1109-edgemap-data-layout.md) [S1, S2].
+This method computes the scalar field value at a 3D point using tri-cubic interpolation, requiring a 4×4×4 neighborhood of 64 voxels [S1, unofficial]. It provides scalar value and gradient fields computed from discrete data at grid vertices using interpolation [S2]. It builds on [Grid Density Data Structure](998-grid-density-data-structure.md) and operates alongside siblings [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) and [EdgeMap Data Layout](1109-edgemap-data-layout.md) [S1, unofficial][S2].
 
 ## How it works
 **Inputs:**
-- A query point $p = (p_x, p_y, p_z)$ in world space [S1].
+- A query point $p = (p_x, p_y, p_z)$ in world space [S1, unofficial].
 - A grid structure `grid` providing spatial indexing and point access via `grid.point(i,j,k)` [S2].
-- Discrete scalar values $V_{ijk}$ stored at grid vertices $(i, j, k)$ [S1, S2].
+- Discrete scalar values $V_{ijk}$ stored at grid vertices $(i, j, k)$ [S1, unofficial][S2].
 
 **Outputs:**
-- A scalar value $f(p)$ representing the interpolated density at $p$ [S1].
+- A scalar value $f(p)$ representing the interpolated density at $p$ [S1, unofficial].
 - A gradient vector $\nabla f(p)$ representing the spatial derivative at $p$ [S2].
 
 **Data Structures:**
@@ -21,20 +21,20 @@ This method computes the scalar field value at a 3D point using tri-cubic interp
 
 **Algorithm Steps:**
 
-1.  **Compute voxel integer coordinates:** $v_i[\text{axis}] = \text{Pos2Voxel}(p, \text{axis})$ [S1].
-2.  **Compute the minimum corner of the voxel containing $p$:** $v_{\min} = \text{bounds}[0] + v_i \times \text{voxel\_dim}$ [S1].
-3.  **Compute local offset $t$ in range $[0,1]$:** $t = (p - v_{\min}) / \text{voxel\_dim}$ [S1].
-4.  **Z-Interpolation:** For each $j \in [-1, 2]$ and $i \in [-1, 2]$, compute 1D cubic interpolation along $z$ using 4 values: $z\_interp[j+1][i+1] = \text{CINT\_CR}(t_z, V_{v_x+i, v_y+j, v_z-1}, V_{v_x+i, v_y+j, v_z}, V_{v_x+i, v_y+j, v_z+1}, V_{v_x+i, v_y+j, v_z+2})$ [S1].
-5.  **Y-Interpolation:** Interpolate the $z$-interpolated values along $y$: $y\_interp[i] = \text{CINT\_CR}(t_y, z\_interp[0][i], z\_interp[1][i], z\_interp[2][i], z\_interp[3][i])$ for $i \in [0, 3]$ [S1].
-6.  **X-Interpolation:** Interpolate the $y$-interpolated values along $x$: $f(p) = \text{CINT\_CR}(t_x, y\_interp[0], y\_interp[1], y\_interp[2], y\_interp[3])$ [S1].
+1.  **Compute voxel integer coordinates:** $v_i[\text{axis}] = \text{Pos2Voxel}(p, \text{axis})$ [S1, unofficial].
+2.  **Compute the minimum corner of the voxel containing $p$:** $v_{\min} = \text{bounds}[0] + v_i \times \text{voxel\_dim}$ [S1, unofficial].
+3.  **Compute local offset $t$ in range $[0,1]$:** $t = (p - v_{\min}) / \text{voxel\_dim}$ [S1, unofficial].
+4.  **Z-Interpolation:** For each $j \in [-1, 2]$ and $i \in [-1, 2]$, compute 1D cubic interpolation along $z$ using 4 values: $z\_interp[j+1][i+1] = \text{CINT\_CR}(t_z, V_{v_x+i, v_y+j, v_z-1}, V_{v_x+i, v_y+j, v_z}, V_{v_x+i, v_y+j, v_z+1}, V_{v_x+i, v_y+j, v_z+2})$ [S1, unofficial].
+5.  **Y-Interpolation:** Interpolate the $z$-interpolated values along $y$: $y\_interp[i] = \text{CINT\_CR}(t_y, z\_interp[0][i], z\_interp[1][i], z\_interp[2][i], z\_interp[3][i])$ for $i \in [0, 3]$ [S1, unofficial].
+6.  **X-Interpolation:** Interpolate the $y$-interpolated values along $x$: $f(p) = \text{CINT\_CR}(t_x, y\_interp[0], y\_interp[1], y\_interp[2], y\_interp[3])$ [S1, unofficial].
 7.  **Gradient Computation:** For gradients, either compute analytically per vertex or use `gradients.compute_discrete_gradients(values)` [S2].
 
 **Cubic Interpolation Basis (Catmull-Rom):**
-The function $\text{CINT\_CR}(t, p_k, p_{k+1}, m_k, m_{k+1})$ interpolates between $p_k$ and $p_{k+1}$ with derivatives $m_k$ and $m_{k+1}$ over interval $[x_k, x_{k+1}]$ [S1]. Let $\Delta = x_{k+1} - x_k$ [S1]. Let $t$ be the normalized parameter in $[0, 1]$ [S1]. Compute powers: $t_2 = t^2$, $t_3 = t^3$ [S1]. Basis functions: $h_{00} = 2t^3 - 3t^2 + 1$, $h_{10} = t^3 - 2t^2 + t$, $h_{01} = -2t^3 + 3t^2$, $h_{11} = t^3 - t^2$ [S1]. Return result: $h_{00} p_k + h_{10} \Delta m_k + h_{01} p_{k+1} + h_{11} \Delta m_{k+1}$ [S1].
+The function $\text{CINT\_CR}(t, p_k, p_{k+1}, m_k, m_{k+1})$ interpolates between $p_k$ and $p_{k+1}$ with derivatives $m_k$ and $m_{k+1}$ over interval $[x_k, x_{k+1}]$ [S1, unofficial]. Let $\Delta = x_{k+1} - x_k$ [S1, unofficial]. Let $t$ be the normalized parameter in $[0, 1]$ [S1, unofficial]. Compute powers: $t_2 = t^2$, $t_3 = t^3$ [S1, unofficial]. Basis functions: $h_{00} = 2t^3 - 3t^2 + 1$, $h_{10} = t^3 - 2t^2 + t$, $h_{01} = -2t^3 + 3t^2$, $h_{11} = t^3 - t^2$ [S1, unofficial]. Return result: $h_{00} p_k + h_{10} \Delta m_k + h_{01} p_{k+1} + h_{11} \Delta m_{k+1}$ [S1, unofficial].
 
 **Parameters:**
 - `grid`: `CGAL::Isosurfacing::Cartesian_grid_3<Kernel>` providing spatial indexing and point access [S2].
-- `voxel_dim`: The physical size of a voxel (spacing) [S1].
+- `voxel_dim`: The physical size of a voxel (spacing) [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 - Not given in the sources. [G]
@@ -51,7 +51,7 @@ def Pos2Voxel(p, axis, origin, spacing):
     return int(math.floor((p[axis] - origin[axis]) / spacing[axis]))
 
 def catmull_rom(t, pk, pk_1, mk, mk_1):
-    """Catmull-Rom interpolation basis function per [S1]."""
+    """Catmull-Rom interpolation basis function per [S1, unofficial]."""
     t2 = t * t
     t3 = t2 * t
     h00 = 2 * t3 - 3 * t2 + 1
@@ -62,7 +62,7 @@ def catmull_rom(t, pk, pk_1, mk, mk_1):
     return h00 * pk + h10 * delta * mk + h01 * pk_1 + h11 * delta * mk_1
 
 def interpolate_tricubic(p, grid, values):
-    """Tri-cubic interpolation per [S1]."""
+    """Tri-cubic interpolation per [S1, unofficial]."""
     origin = grid.bounds[0]
     spacing = grid.spacing
     
@@ -126,7 +126,7 @@ This method retrieves the scalar density value of the single voxel containing a 
 - **When to use it and when not:** Not given in the sources. [G]
 
 ## Background
-The method originates from cubic spline interpolation for scalar field evaluation in volume rendering [S1]. It is implemented in CGAL's Isosurfacing module as `CGAL::Isosurfacing::Interpolated_discrete_values_3` and `CGAL::Isosurfacing::Interpolated_discrete_gradients_3`, used in `contouring_discrete_data.cpp` [S2]. It is also used in CUDA-based volume rendering projects for ray marching with transfer functions [S1].
+The method originates from cubic spline interpolation for scalar field evaluation in volume rendering [S1, unofficial]. It is implemented in CGAL's Isosurfacing module as `CGAL::Isosurfacing::Interpolated_discrete_values_3` and `CGAL::Isosurfacing::Interpolated_discrete_gradients_3`, used in `contouring_discrete_data.cpp` [S2]. It is also used in CUDA-based volume rendering projects for ray marching with transfer functions [S1, unofficial].
 
 ## Sources
 [S1] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)

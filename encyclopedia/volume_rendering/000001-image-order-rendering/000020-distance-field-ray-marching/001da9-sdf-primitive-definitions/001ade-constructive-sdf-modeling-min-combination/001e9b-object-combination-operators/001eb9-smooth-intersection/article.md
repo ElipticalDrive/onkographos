@@ -7,11 +7,12 @@ Smooth Intersection is a Constructive SDF operator that blends the boolean inter
 
 ## How it works
 **Inputs:**
-- $a$: Distance from the first SDF.
-- $b$: Distance from the second SDF.
+- $a$: Distance from the first SDF [S3, unofficial].
+- $b$: Distance from the second SDF [S3, unofficial].
+- $r$: Blending radius or smoothing parameter [S2, unofficial].
 
 **Outputs:**
-- $d$: The resulting blended distance value.
+- $d$: The resulting blended distance value [S3, unofficial].
 
 **Data Structures:**
 None required; scalar operations [S3, unofficial].
@@ -44,13 +45,13 @@ The sources provide two distinct mathematical formulations for the operation [S1
    where $\text{mix}(x, y, t) = x(1-t) + yt$ [S1, unofficial][S2, unofficial].
 
 **Parameters:**
-- $r$: Blending radius or smoothing parameter [S2, unofficial].
-- Typical values: Not given in the sources.
+- $r$ (or $k$): Blending radius or smoothing factor [S2, unofficial].
+- Typical values: Not given in the sources. [S1, unofficial][S2, unofficial]
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Not given in the sources.
-- **Lipschitz Continuity:** Not given in the sources.
-- **Usage Guidelines:** Not given in the sources.
+- Precision: Not given in the sources. [S3, unofficial]
+- Lipschitz Continuity: The operator preserves Lipschitz continuity (gradient magnitude $\le 1$) when the gradients of the two SDFs are orthogonal [S1, unofficial][S2, unofficial]. If gradients deviate by more than $30^\circ$ or surfaces are parallel and close, the condition may break, causing ray marching artifacts [S1, unofficial][S2, unofficial].
+- Usage Guidelines: Not given in the sources. [S1, unofficial][S2, unofficial]
 
 **Pseudocode:**
 The following implements the Geometric/Vector Formulation (S-Intersection) [S3, unofficial].
@@ -69,12 +70,12 @@ def smooth_intersection(a: float, b: float, r: float) -> float:
 ```
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Strengths:** Not given in the sources.
-- **Limitations:** Not given in the sources.
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
+- Time Complexity: Not given in the sources. [S1, unofficial][S2, unofficial]
+- Memory Complexity: Not given in the sources. [S1, unofficial][S2, unofficial]
+- Strengths: Preserves distance field validity and produces correct rounded features without sharp boolean edges [S1, unofficial][S2, unofficial].
+- Limitations: Lipschitz continuity is not guaranteed when SDF gradients are non-orthogonal or surfaces are parallel/close [S1, unofficial][S2, unofficial].
+- When to use: When blending two SDFs requires a smooth, rounded intersection feature while maintaining valid distance bounds [S1, unofficial][S2, unofficial].
+- When not to use: When SDF gradients are expected to deviate by more than $30^\circ$ or when surfaces are parallel and close, as artifacts may occur [S1, unofficial][S2, unofficial].
 
 ## Background
 Smooth Intersection operators are documented in unofficial repositories related to sphere tracing and differentiable rendering [S1, unofficial][S2, unofficial][S3, unofficial]. The specific formulations are attributed to these community implementations [S1, unofficial][S2, unofficial][S4, unofficial].

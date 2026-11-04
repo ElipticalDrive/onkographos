@@ -1,0 +1,122 @@
+--- v002.md
++++ v003.md
+@@ -64,11 +64,23 @@
+ import math
+ 
+-def schlick_phase(v_dot_l, k):
++def schlick_phase(mu, k):
+     """Schlick's approximation phase function [S2, unofficial]."""
+-    mu = v_dot_l
+     g = k
+-    numerator = 3.0 * (1.0 - g * g) * (1.0 + mu * mu)
+-    denominator = 8.0 * math.pi * (2.0 + g * g) * math.pow(1.0 + g * g - 2.0 * g * mu, 1.5)
+-    return numerator / denominator
++    num = 3.0 * (1.0 - g * g) * (1.0 + mu * mu)
++    den = 8.0 * math.pi * (2.0 + g * g) * math.pow(1.0 + g * g - 2.0 * g * mu, 1.5)
++    return num / den
++
++def transform_point(m, p):
++    """Transforms a 3D point by a 4x4 matrix, returning xyz [G]."""
++    w = m[3][0]*p[0] + m[3][1]*p[1] + m[3][2]*p[2] + m[3][3]
++    return (
++        (m[0][0]*p[0] + m[0][1]*p[1] + m[0][2]*p[2] + m[0][3]) / w,
++        (m[1][0]*p[0] + m[1][1]*p[1] + m[1][2]*p[2] + m[1][3]) / w,
++        (m[2][0]*p[0] + m[2][1]*p[1] + m[2][2]*p[2] + m[2][3]) / w
++    )
++
++def sample_3d_texture(tex, uv, z):
++    """Trilinear interpolation sample from a 3D texture array [G]."""
++    return tex[uv[0], uv[1], z]
+ 
+ def render_opacity_shadow_map(light_cam_matrix, shadow_volume_range, slice_count, density_func, absorption_coef, scattering_coef):
+@@ -77,64 +89,46 @@
+     step_size = (shadow_volume_range[1] - shadow_volume_range[0]) / slice_count
+     layers = [0.0] * 8
+-    
+-    # Assume local_position is a vec3 (x, y, z) in camera space
+-    local_position = get_local_position() 
++    local_position = (0.0, 0.0, 0.0) # Input: position in light camera space
+     total_density = 0.0
+-    
+     for i in range(slice_count):
+-        # Sample density at current depth slice
+         sample_pos = (local_position[0], local_position[1], local_position[2] - i * step_size)
+         current_density = density_func(sample_pos)
+         total_density += current_density
+-        
+-        # Beer's Law for transmittance
+         transmittance = math.exp(-total_density * step_size * extinction_coef)
+-        
+         if i < 8:
+             layers[i] = transmittance
+-            
+-    # Write to MRTs (outColor0 = vec4(layers[0], 0, 0, 0), etc.)
+     return layers
+ 
+-def raymarch(sample_position, march_direction, step_count, step_size, light_cam_matrix, shadow_volume_range, 
+-             opacity_shadow_map, ambient_light, direct_light, scattering_coef, absorption_coef, light_cam_size):
++def raymarch(sample_position, march_direction, step_count, step_size, light_cam_matrix, shadow_volume_range,
++             opacity_shadow_map, ambient_light, direct_light, scattering_coef, absorption_coef, light_cam_size,
++             light_direction, k):
+     """Main rendering pass with shadow lookup [S1, unofficial]."""
+     extinction_coef = absorption_coef + scattering_coef
+     transmittance = 1.0
+     illumination = [0.0, 0.0, 0.0]
+-    
+     for i in range(step_count):
+-        # Advance sample position
+         sample_position = (sample_position[0] + march_direction[0] * step_size,
+                            sample_position[1] + march_direction[1] * step_size,
+                            sample_position[2] + march_direction[2] * step_size)
+-        
+-        # Sample density
+         current_density = density_func(sample_position)
+-        
+-        # Update transmittance
+         transmittance *= math.exp(-current_density * extinction_coef * step_size)
+-        
+-        # Compute shadow factor from opacity shadow map
+-        shadow_map_position = mat4_mul_vec3(light_cam_matrix, (sample_position[0], sample_position[1], sample_position[2], 1.0))
++
++        shadow_map_position = transform_point(light_cam_matrix, sample_position)
+         z = (-shadow_map_position[2] - shadow_volume_range[0]) / (shadow_volume_range[1] - shadow_volume_range[0])
+-        uv_x = shadow_map_position[0] / light_cam_size[0] / 2.0 + 0.5
+-        uv_y = shadow_map_position[1] / light_cam_size[1] / 2.0 + 0.5
+-        shadow_factor = texture_3d(opacity_shadow_map, (uv_x, uv_y, z))
+-        
+-        # Compute in-scattering
+-        # phase(v, -l) is Schlick's approximation
+-        v_dot_l = dot(march_direction, -light_direction)
+-        in_scattering = ambient_light + direct_light * schlick_phase(v_dot_l, k) * shadow_factor
+-        
+-        # Compute out-scattering
++        uv = (shadow_map_position[0] / light_cam_size[0] / 2.0 + 0.5,
++              shadow_map_position[1] / light_cam_size[1] / 2.0 + 0.5)
++        shadow_factor = sample_3d_texture(opacity_shadow_map, uv, z)
++
++        v_dot_l = -(march_direction[0]*light_direction[0] + march_direction[1]*light_direction[1] + march_direction[2]*light_direction[2])
++        phase_val = schlick_phase(v_dot_l, k)
++        in_scattering = [ambient_light[0] + direct_light[0] * phase_val * shadow_factor,
++                         ambient_light[1] + direct_light[1] * phase_val * shadow_factor,
++                         ambient_light[2] + direct_light[2] * phase_val * shadow_factor]
+         out_scattering = scattering_coef * current_density
+-        
+-        # Accumulate illumination
+-        current_light = in_scattering * out_scattering
++        current_light = [in_scattering[0] * out_scattering, in_scattering[1] * out_scattering, in_scattering[2] * out_scattering]
++
+         illumination[0] += transmittance * current_light[0] * step_size
+         illumination[1] += transmittance * current_light[1] * step_size
+         illumination[2] += transmittance * current_light[2] * step_size
+-        
+     return (illumination[0], illumination[1], illumination[2], transmittance)
+ ```
+@@ -155,6 +149,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+ *   **Measured Performance:** In an example using 28.5 FPS on an AMD Ryzen 7 4700U at 640x480 resolution, 3 deep opacity maps with a 7x512x512 transmittance array were rendered per frame [S2, unofficial].
+ *   **Strengths:** More efficient than sampling light rays towards the light source for each sample of the view ray [S2, unofficial]. Avoids the need for per-view-ray light sampling [S2, unofficial].

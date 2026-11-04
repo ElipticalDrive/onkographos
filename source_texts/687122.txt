@@ -1,0 +1,2743 @@
+RxGS: Receiver-Generalizable 3D Gaussian Splatting
+for Radio-Frequency Data Synthesis
+arXiv:2605.24290v2 [cs.NI] 2 Nov 2026
+Kang Yang
+Mani Srivastava
+Department of Electrical and Computer Engineering
+University of California, Los Angeles
+kyang73@g.ucla.edu
+mbs@ucla.edu
+Abstract
+Radio-frequency (RF) data synthesis predicts the received signal given transmitter and receiver positions, and is essential for wireless applications. Recent 3D
+Gaussian Splatting (3DGS)-based methods achieve efficient synthesis at any transmitter location within a surveyed scene, but require a separate model for each
+receiver. We therefore present RxGS, a shared 3DGS model that first learns
+receiver-independent Gaussian geometry and then freezes it while learning directional radiance conditioned on receiver position. Its global conditioning branch
+captures receiver-dependent effects shared across the scene, while a local branch
+models per-scatterer variations from the receiver’s geometry and occlusion. The
+shared geometry also supports batched rendering through a multi-receiver rasterizer.
+Across RF datasets, RxGS predicts at receiver positions excluded from training
+within the surveyed scene while significantly reducing training, inference, and
+storage costs. Project page: https://kangyangg.com/projects/rxgs/.
+1
+Introduction
+Radio-frequency (RF) data, such as received signal strength indicator (RSSI) and channel state
+information (CSI), quantifies how RF signals propagate from a transmitter to a receiver in a scene [1].
+Such data is essential for wireless networking and sensing applications [2–8]. For example, network
+planning [3] requires coverage maps that evaluate signal strength across candidate transmitter and
+receiver placements. Fingerprint-based localization [5, 8, 9] depends on databases of RF measurements collected across numerous transmitter positions at multiple receivers. However, acquiring
+these measurements requires site surveys at thousands of transmitter–receiver positions, which is
+prohibitively labor-intensive and time-consuming [10–13].
+RF data synthesis reduces the need for exhaustive site surveys. Classical ray tracing simulations [14–
+17] trace propagation paths through Computer-Aided Design (CAD) scene models. However, accurate
+CAD models require precise scene geometry, material permittivity, and conductivity. These properties
+are difficult to obtain in practice, making simulations infeasible.
+Neural scene representations sidestep these requirements by learning RF scene responses from
+measurements [5, 18–21]. This enables synthesis of novel RF data via differentiable rendering,
+without precise CAD models or material priors. Neural Radiance Field (NeRF)-based RF methods [5,
+21] pioneer this direction but incur prohibitive computational costs from dense volumetric sampling
+and multi-layer perceptron (MLP) inference. 3D Gaussian Splatting (3DGS)-based RF methods [18–
+20] replace volumetric sampling with 3D Gaussians for faster training and inference.
+The rendering interface of 3DGS also shapes how these methods represent the two endpoints of an RF
+link. Optical 3DGS [22–24] is parameterized by a single variable, the camera viewpoint, since the
+scene is queried from one viewpoint at a time. RF data synthesis instead depends on two variables, the
+transmitter position and the receiver position. Existing 3DGS-based RF methods expose the densely
+surveyed moving endpoint as an input and absorb the other, fixed endpoint into model weights. In our
+data, the moving transmitters are surveyed across thousands of positions, while the receivers occupy a
+40th Conference on Neural Information Processing Systems (NeurIPS 2026).
+smaller set of fixed positions. Without an input pathway for the fixed receiver position, these models
+learn receiver-specific radiance coefficients, as detailed in §2.
+However, multi-receiver deployments in a scene are the norm in practice [11, 25, 26]. For example,
+a Bluetooth Low Energy (BLE) localization system deploys dozens of gateways distributed across a
+facility [5]. With a separate checkpoint for each receiver, the costs of a multi-receiver deployment
+grow in two ways. ❶ Scaling Cost: synthesizing RF data for N receivers within one scene requires
+training N independent models. ❷ Adding New Receivers. For per-receiver 3DGS methods, a new
+fixed receiver in the same scene requires a full transmitter survey and its own checkpoint.
+We present RxGS, a 3DGS-based RF data synthesis framework that conditions one shared model on
+fixed receiver locations within a surveyed scene. Our key insight is that scene geometry is receiverindependent while directional radiance is not: scatterers such as walls and furniture remain fixed
+regardless of receiver position, but the angles and distances to the receiver change. This motivates
+a two-stage training procedure. Stage I learns shared 3D Gaussian geometry of the scene. Stage II
+freezes this geometry and jointly learns receiver-conditioned directional radiance.
+When the receiver moves, both the global radiance pattern and each Gaussian’s individual contribution
+change. To capture these effects, we propose two complementary conditioning modules. A global
+module modulates harmonic coefficients based on receiver position, capturing the shared component
+of receiver-dependent variation. A local module adjusts each Gaussian based on its direction,
+distance, and occlusion relative to the receiver, capturing per-scatterer residuals. Both modules are
+radiance-representation-agnostic and apply to existing 3DGS-based RF methods, including spherical
+harmonics (SH), Fourier–Legendre expansions (FLE), and deformation networks [18–20]. For the SH
+and FLE backbones, a batched rasterizer uses the Compute Unified Device Architecture (CUDA) to
+render N receiver outputs in parallel while sharing projection and sorting.
+RxGS introduces explicit fixed-receiver conditioning to 3DGS-based RF synthesis, enabling predictions at receiver locations excluded from training within the surveyed region. On RSSI, it improves
+the RF-3DGS [18] and GSRF [20] per-receiver baselines. With the WRF-GS+ [19] backbone, it
+eliminates two high-error outliers with a 0.33 dBm increase in mean absolute error (MAE). On spatial
+spectrum and CSI, it trails per-receiver baselines by 0.8 to 1.7 dB. Training is up to 45× faster,
+batched FLE/SH inference up to 7.6× faster, and storage up to 24× smaller.
+2
+Preliminaries
+We review the 3DGS-based RF data synthesis framework [18–20] that RxGS builds on.
+1) Scene Representation. The RF scene, e.g., a conference room, is a collection of 3D Gaussian
+primitives {Gk }K
+k=1 , each defined by four attributes:
+Gk = (pk , Ck , ϕk , τk ).
+3
+(1)
+3×3
+The mean pk ∈ R and covariance Ck ∈ R
+define the spatial geometry of each Gaussian.
+The radiance ϕk represents the RF signal emitted by the k-th Gaussian. To model its directional
+dependency, ϕk is parameterized by the coefficients of basis functions on the sphere, such as SH [27]
+or FLE [28]. Transmittance τk models direction-independent attenuation through the k-th Gaussian.
+2) Rendering. Given a receiver at position r and a transmitter at position t, RF data is synthesized
+as follows. Rays are emitted from an emission surface centered at the transmitter t. Each Gaussian
+is projected onto this surface to identify ray–Gaussian intersections based on the ray direction and
+the Gaussian mean pk and covariance Ck . For each intersecting Gaussian along a ray, the directional
+radiance ϕk depends on the direction from the transmitter to the Gaussian center:
+d̂k = (pk − t) / ∥pk − t∥2 .
+(2)
+The received signal for each ray aggregates the radiance ϕk and transmittance τk contributions
+of all intersecting Gaussians along that ray. All Gaussian attributes are then jointly optimized by
+minimizing a reconstruction loss between rendered and ground-truth RF measurements.
+Receiver Dependence. In our setting, RF data synthesis involves a densely surveyed moving endpoint
+and a fixed receiver endpoint. In our datasets, the moving endpoint is the transmitter at t and the fixed
+endpoint is the receiver at r. Across prior formulations, the physical transmitter and receiver labels
+can be reversed. With matched hardware, reciprocity aligns their fixed and moving endpoint roles,
+while directional measurements retain endpoint-specific conventions. In Equation 2, the moving
+2
+transmitter enters explicitly through d̂k , enabling synthesis at new transmitter positions. The fixed
+receiver position r enters implicitly through the ground-truth measurements used during training.
+Consequently, each checkpoint represents the radiance field for its training receiver. Additional
+receiver placements call for separate measurements and fitting.
+3
+Related Work
+NeRF-Based RF Data Synthesis. NeRF2 [5] pioneers neural RF data synthesis by representing the
+scene as a continuous volumetric function parameterized by two large MLPs for attenuation and radiance. Several subsequent works study neural RF synthesis [21, 29–32]. For example, NeWRF [21]
+leverages direction-of-arrival (DoA) priors to reduce the number of emitted rays, improving computational efficiency. GRaF [29] interpolates spatial spectra from geographically proximate transmitters,
+but requires reference spectra at the query receiver at inference, preventing zero-shot prediction at
+unseen receivers. NeRF-based methods such as NeRF2 represent receiver position through the ray
+origin and sampled directions, allowing queries at previously unseen receivers. Dense volumetric
+sampling and repeated MLP queries raise training and inference costs [33, 34].
+3DGS-Based RF Data Synthesis. Existing 3DGS-based RF methods [18–20, 35, 36] fall into two
+categories based on whether neural networks are adopted. WRF-GS+ [19] uses a deformation network
+to predict offsets for Gaussian attributes from Gaussian and transmitter positions, and SwiftWRF [35]
+follows a similar architecture with 2D Gaussians for faster rendering. RF-3DGS [18] and GSRF [20]
+avoid neural networks. RF-3DGS learns geometry from camera images, then retrains SH coefficients
+from RF measurements. GSRF optimizes per-Gaussian FLE radiance coefficients [28] as learnable
+complex-valued parameters. These methods supply the moving endpoint as a spatial query and
+encode the fixed endpoint in a checkpoint, as described in §2. A multi-receiver deployment therefore
+trains one checkpoint per fixed endpoint. WRF-GS+ labels that fixed endpoint as the receiver,
+while RF-3DGS and GSRF label it as the transmitter.
+Radio Maps from Scene Layouts. RadioUNet [47] predicts scalar pathloss maps from 2D occupancy
+maps and transmitter positions using simulated data. By contrast, RxGS synthesizes RSSI, spatial
+spectra, and CSI from RF measurements, including floorplan-free BLE data.
+Relighting in Neural Rendering. Generalizing across receiver positions in RF synthesis is structurally analogous to relighting in optical neural rendering, where both must generalize across a
+variable baked into the learned representation. Several works address this by replacing the standard
+rendering equation with a physically-based rendering (PBR) equation that takes lighting as an explicit input [37–41]. For instance, Relightable 3DGS [39] augments each Gaussian with surface
+normals, bidirectional reflectance distribution function (BRDF) parameters, and incident light to
+compute outgoing radiance under arbitrary illumination. Optical relighting uses BRDF-based priors,
+whereas RF multipath calls for a receiver-dependent signal model tailored to propagation. RxGS
+therefore introduces lightweight learned conditioning modules to capture these receiver-dependent
+effects. Its global module plays a role analogous to a learned environment map, while the global-only
+and additive variants in Table 3 isolate the effects of the two conditioning choices.
+4
+Method
+N
+Consider a scene with transmitter positions {ti }M
+i=1 and receiver positions {rj }j=1 . For each
+transmitter–receiver pair (ti , rj ), the received RF data S(ti , rj ) is measured. S takes different forms
+across modalities: a scalar RSSI value, a spatial spectrum matrix, or complex-valued CSI.
+Prior Formulation (Single-Receiver). Existing 3DGS-based RF data synthesis methods learn a
+separate model Θj for each receiver rj :
+Ŝ(t, rj ) = f (t; Θj ),
+∀ t ∈ R3 .
+(3)
+The per-receiver formulation requires N checkpoints for N receivers. Extending the deployment
+to r∗ ∈
+/ {rj } requires receiver-specific measurements and model training.
+Our Formulation (Receiver-Generalizable). Our goal is to learn a single model Θ that generalizes
+across transmitter positions and fixed receiver positions within a surveyed, static scene:
+Ŝ(t, r) = f (t, r; Θ),
+t ∈ Tsurvey , r ∈ Rsurvey ,
+3
+(4)
+Stage I: Geometry Learning
+Stage II: Receiver-Conditioned Radiance
+𝐫𝒓𝒆𝒇
+𝐫𝒋
+𝐭𝒊 𝐌
+𝒊%𝟏
+Geometry: 𝐩𝒌 , 𝐂𝒌 , 𝛕𝒌 𝐊
+𝒌%𝟏
+𝐭𝒊 𝐌
+𝒊%𝟏
+Global 𝛂𝒍 , 𝛃𝒍
+Modulate harmonics
+Radiance: 𝝓𝒌 𝐊
+𝒌%𝟏
+Local 𝛂𝒌 , 𝛃𝒌
+Modulate Gaussians
+S(t, r)
+Rendered signal
+Geometry: 𝐩𝒌 , 𝐂𝒌 , 𝛕𝒌 𝐊
+𝒌%𝟏
+Transmitter
+Receiver
+Figure 1: RxGS’s two-stage architecture. Stage I learns receiver-independent 3D Gaussian geometry,
+and Stage II conditions radiance on the receiver via global and local modules in one unified model.
+Here Tsurvey and Rsurvey denote transmitter and candidate receiver locations in the surveyed deployment region, including receiver sites excluded from training. The key challenge is to capture
+receiver-dependent variation in one parameter set while managing the accuracy–efficiency tradeoff.
+4.1 Geometry-Radiance Decomposition Workflow
+The key insight behind RxGS is that the 3D Gaussian attributes partition into two groups with
+distinct dependencies. The geometric attributes, position pk , covariance Ck , and transmittance τk ,
+describe where scatterers are located, their spatial extent, and how they attenuate signals. These are
+physical properties of the environment and are independent of the receiver position. The radiance
+coefficients ϕk , in contrast, encode the directional signal response at each Gaussian and change with
+receiver position. Appendix A provides a theoretical analysis showing that, under the rendering
+abstraction adopted by 3DGS-based RF methods, receiver-dependent variation is naturally expressed
+through the radiance term while the geometric attributes remain receiver-independent. Within this
+rendering abstraction, receiver-dependent effects are assigned to radiance while shared geometry
+supports all receivers. This motivates the two-stage training procedure illustrated in Figure 1.
+Stage I: Geometry. All Gaussian attributes (pk , Ck , ϕk , τk ) are jointly optimized on RF measurements from a single reference receiver rref to learn the shared scene geometry. After convergence,
+we freeze {pk , Ck , τk }K
+k=1 for Stage II and discard the Stage I radiance coefficients.
+Stage II: Receiver-Conditioned Radiance. With the geometry fixed, we introduce new radiance
+coefficients conditioned on the receiver position r:
+ϕk (d̂k , r) = g(ϕbase
+, d̂k , r; Θcond ),
+k
+(5)
+where ϕbase
+are learnable base coefficients shared across all receivers, and g is a conditioning function
+k
+that modulates them based on r. g consists of a global module that modulates directional harmonics
+and a local module that modulates individual Gaussians, together parameterized by Θcond . Stage II is
+trained on RF measurements from all available receivers {rj }N
+j=1 jointly, allowing the conditioning
+function to learn how receiver position affects directional radiance.
+4.2 Stage I: Geometry Learning
+Objective. We select an arbitrary reference receiver rref and optimize all Gaussian attributes (pk , Ck , ϕk , τk ) jointly using RF measurements from all transmitter positions. The training
+objective minimizes the prediction error between the rendered and measured RF data:
+{pk , Ck , ϕk , τk }K
+k=1 =
+M
+
+1 X 
+arg min
+ℓ Ŝ(ti ), S(ti , rref ) ,
+{pk ,Ck ,ϕk ,τk } M i=1
+(6)
+where ℓ is a task-specific loss determined by the RF data modality: ℓ1 for scalar RSSI, ℓ2 for
+complex-valued CSI, or a composite loss for spatial spectrum data. The rendered signal Ŝ(ti ) is
+computed via the rendering equation in Equation (21) of Appendix A. Because Gaussian geometry
+is receiver-independent, this objective learns shared attributes from measurements at the reference
+receiver.
+Representation Agnosticism. Stage I is compatible with any directional radiance representation,
+including spherical harmonics [27], MLP-based radiance networks [19], or Fourier–Legendre expansions [28], since the decomposition is independent of how ϕk is parameterized. After convergence,
+we freeze {pk , Ck , τk }K
+k=1 and discard the Stage I radiance coefficients.
+4
+4.3 Stage II: Receiver-Conditioned Radiance
+Objective. With the geometry frozen from Stage I, we introduce a conditioning function gΘ that
+produces receiver-specific radiance from a shared set of learnable base coefficients {ϕbase
+}K
+k
+k=1 :
+ϕk (d̂k , r) = gΘ (ϕbase
+, d̂k , r).
+k
+(7)
+The training objective optimizes {ϕbase
+}K
+k
+k=1 and Θ jointly across all available receivers:
+N M
+
+1 XX 
+ℓ Ŝ(ti , rj ), S(ti , rj ) .
+{ϕbase , Θ} M N j=1 i=1
+{ϕbase
+, Θ} = arg min
+k
+(8)
+k
+The key question is how to design gΘ . A naive approach would condition on the raw receiver
+position r alone, but the decomposition reveals richer structure: the receiver-dependence of ϕk arises
+specifically from the last-segment propagation from each scatterer to the receiver. We formalize this
+below and derive three constraints that dictate the architecture of gΘ : the modulation should be affine,
+it should vary per scatterer, and it can share weights across scatterers.
+4.3.1 Design Constraints from the Propagation Factor
+Proposition 1 (Last-Segment Factorization). Under the multipath model in Definition 1 of Appendix A,
+the radiance of Gaussian k at position pk factorizes into a receiver-independent base ϕbase
+and a
+k
+receiver-dependent last-segment propagation factor ηeff :
+ϕk (d̂k , r) = ηeff (pk , r) · ϕbase
+(d̂k , t),
+k
+(9)
+aggregates all path contributions from the transmitter to scatterer k, and:
+where ϕbase
+k
+ηeff (pk , r) =
+Y
+2π
+2π
+λ
+λ
+· e−j λ ∥pk −r∥ ·
+τm =
+· e−j λ dk · Tk .
+4π∥pk − r∥
+4πdk
+{z
+} m∈I(k,r)
+|
+| {z }
+free-space: path loss + phase
+(10)
+occlusion
+Q
+where dk = ∥pk − r∥ is the last-segment distance, Tk = m∈I(k,r) τm is the occlusion product,
+and I(k, r) is the set of scatterers intersected by the segment from pk to r. The proof is in Appendix B.
+This factorization has three corollaries that dictate the conditioning architecture, each following from
+the structure of ηeff , with proofs in Appendix C.
+Corollary 1 (Global-local decomposition). Decomposing
+the propagation factor in Proposition 1
+P
+1
+as ηeff (pk , r) = η̄(r) + δk (r), where η̄(r) = K
+k ηeff (pk , r) is the scatterer-averaged effect
+and δk (r) is the per-scatterer residual, Equation (9) becomes:
+ϕk (d̂k , r) = η̄(r) · ϕbase
++ δk (r) · ϕbase
+.
+| {z k }
+{z k }
+|
+global (shared)
+(11)
+local (per-k)
+Since δk ̸= 0 for almost all r, both branches are required.
+Corollary 2 (Affine modulation suffices). The complex-valued product in Equation (11) can be
+represented by element-wise affine modulation (1 + α) ⊙ ϕbase
++ β with α, β ∈ Cd , which jointly
+k
+parameterizes the amplitude scaling and phase rotation induced by ηeff .
+Corollary 3 (Index-free form ⇒ shared weights). ηeff depends on k only through the inputs (dk , Tk ),
+which permits a single shared network.
+4.3.2 Conditioning Architecture
+We now instantiate the corollaries as architectural components. Given a receiver position r, the conditioning function gΘ proceeds in three steps: (i) r is mapped to a feature γ(r) via a learnable Fourier
+encoding that captures the two-scale structure of ηeff . (ii) A global branch applies affine modulation
+to all Gaussians based on γ(r), as required by Corollaries 1 and 2. (iii) A local branch refines
+each Gaussian individually using per-scatterer geometric and propagation features, as required by
+Corollary 1, with shared weights across all Gaussians by Corollary 3.
+Receiver Encoding. The propagation factor ηeff in Equation (10) varies at two spatial scales: the
+2π
+path loss ∥pk1−r∥ changes over room-scale distances, while the phase e−j λ ∥pk −r∥ oscillates at the
+centimeter-scale wavelength λ. We use a learnable Fourier encoding of r for both scales:
+
+
+γ(r) = sin(ω1⊤ r), cos(ω1⊤ r), . . . , sin(ωF⊤ r), cos(ωF⊤ r) ,
+(12)
+5
+where the frequency vectors {ωf }F
+f =1 are initialized at logarithmically spaced scales to span both the
+room-scale path loss and the wavelength-scale phase, and are learned end-to-end so that they adapt to
+the scene-specific ratio between room geometry and operating wavelength.
+Global Branch. The global branch captures shared receiver-dependence across all scatterers. When
+the receiver moves, the relative importance of directional harmonics shifts. Low-order components
+capture broad propagation patterns and are less sensitive to receiver position, while high-order
+components encode fine-grained multipath structure varying sharply with r. To model this, an MLP
+generates per-component affine parameters from the receiver encoding and component identity:
+(αℓ , βℓ ) = MLPglobal ([γ(r); cℓ ; eℓ ]) ,
+(13)
+where cℓ encodes the structural identity of radiance component ℓ, i.e., its degree and order in
+the Fourier–Legendre basis, and eℓ is a learnable embedding. Since the radiance is complexvalued, αℓ and βℓ operate on both real and imaginary parts, jointly modulating amplitude and phase
+as required by Corollary 2. The same modulation applies to all Gaussians:
+(ℓ)
+base,(ℓ)
+ϕ̃k (r) = (1 + αℓ ) ⊙ ϕk
++ βℓ ,
+∀ k = 1, . . . , K.
+(14)
+The total cost is O(L) independent of Gaussian count, where L is the number of radiance components,
+keeping the global branch lightweight even for scenes with many Gaussians.
+Local Branch. The local branch captures per-scatterer variation that the global branch cannot
+represent. In RF propagation, a scatterer’s contribution to the received signal depends critically on its
+individual relationship to the receiver. A wall in direct line-of-sight dominates the signal, while a
+scatterer behind multiple obstacles contributes little regardless of the global harmonic adjustment. To
+model this, we construct a six-dimensional feature for each Gaussian k that directly mirrors the three
+quantities governing ηeff in Equation (10): direction, distance, and occlusion.
+r−pk
+The direction v̂k = ∥r−p
+and distance dk = ∥r − pk ∥ are computed directly from the frozen Gausk∥
+sian positions and the receiver position, capturing the free-space path loss d1k and phase rota2π
+tion e−j λ dk on the last segment. These features characterize the free-space component of ηeff per
+scatterer without additional learned geometry, since the Gaussian positions are frozen from Stage I.
+The occlusion, however, requires the cumulative scene density along the path from pk to r, which we
+obtain from the frozen Gaussian geometry without additional supervision. At the start of Stage II,
+we voxelize the scene by splatting each Gaussian’s transmittance into a 3D occupancy grid V based
+on its learned position pk and covariance Ck . For each Gaussian k, we cast a ray from pk to r and
+probe the grid at S evenly spaced points {qk,s }Ss=1 :
+Tk =
+S
+Y
+S
+
+1 − V(qk,s ) ,
+ρ̄k =
+s=1
+1X
+V(qk,s ),
+S s=1
+(15)
+where V(·) denotes theQtrilinearly interpolated occupancy. The transmittance Tk approximates
+the occlusion product m∈I(k,r) τm from Equation (10): Tk → 1 indicates a clear last segment,
+while Tk → 0 indicates heavy occlusion. The mean density ρ̄k provides complementary information,
+distinguishing a single concrete wall where Tk is low but ρ̄k remains moderate, from distributed
+clutter where both Tk and ρ̄k are high. A single shared MLP processes all Gaussians:
+loc
+(αloc
+k , βk ) = MLPlocal ([v̂k ; dk ; Tk ; ρ̄k ]) .
+(16)
+(ℓ)
+Combined Modulation. The two branches compose sequentially: the global branch produces ϕ̃k (r)
+via Equation (14), and the local branch then applies:
+loc
+ϕk (d̂k , r) = (1 + αloc
+k ) ⊙ ϕ̃k (r) + βk ,
+(17)
+mirroring the factored structure of ηeff in Equation (10). Both branches are zero-initialized. Consequently, the conditioning begins as an identity transformation and supports stable training from
+the Stage I solution. The total cost is O(L + K), and the occupancy grid is built once with no gradient
+overhead. At inference, gΘ accepts receiver locations r∗ excluded from training within the surveyed
+scene.
+6
+Table 1: Overall RF data synthesis performance. RxGS uses a single shared model for all N
+receivers. Note: GRaF reports spectrum results only, as its image-format backbone does not transfer
+to scalar RSSI or complex CSI without redesigning its entire architecture.
+BLE RSSI
+Method
+RFID Spectrum
+WiFi CSI
+#Models
+MAE↓
+MSE↓
+PSNR↑
+SSIM↑
+SNR↑
+2
+NeRF [5]
+GRaF [29]
+1
+1
+3.40±0.14
+—
+0.0040±0.0005
+0.0029±0.0004
+24.58±0.51
+26.40±0.58
+0.868±0.011
+0.903±0.007
+21.00±0.46
+—
+RF-3DGS [18]
+OursRF-3DGS
+N
+1
+4.09±0.66
+3.94±0.48
+0.0054±0.0004
+0.0068±0.0007
+23.11±0.32
+22.22±0.38
+0.801±0.008
+0.791±0.012
+21.89±0.56
+20.19±0.39
+GSRF [20]
+OursGSRF
+N
+1
+3.74±0.41
+3.57±0.24
+0.0052±0.0004
+0.0065±0.0006
+23.29±0.35
+22.47±0.35
+0.831±0.010
+0.780±0.012
+21.91±0.52
+21.12±0.49
+WRF-GS+ [19]
+OursWRF-GS+
+N
+1
+5.84±5.85
+6.17±0.71
+0.0034±0.0005
+0.0048±0.0007
+25.81±0.66
+24.27±0.67
+0.892±0.012
+0.860±0.011
+21.84±0.52
+20.55±0.38
+4.4
+Single-Kernel Multi-Receiver Rasterization
+Since the Stage I geometry is receiver-independent, per-Gaussian projection, depth sorting, and basis
+evaluation at d̂k depend only on the transmitter and are shared across all N receivers. For the FLE
+and SH backbones, receiver-specific radiance ϕk (d̂k , rj ) is evaluated in a batched operation after
+shared geometry work. Their rasterizer launches one CUDA kernel that tiles the rendering sphere
+along elevation θ and azimuth ϕ, with gridDim = (tilesθ , tilesϕ , N ). The receiver index maps to the
+third grid dimension, with each block reading its signal slice and writing its output slot. The shared
+projection and sorting work is amortized across receiver queries. The third grid dimension scales
+with N to evaluate receiver-specific radiance and write N outputs, as detailed in Appendix D.
+5
+Experiments
+Implementation. We implement RxGS in PyTorch with custom CUDA kernels for RF signal
+tracing and rasterization. All experiments are conducted on a single NVIDIA H100 GPU. Full
+implementation and hyperparameter details are in Appendix E.
+Datasets. We evaluate RxGS on three RF datasets: ❶ BLE RSSI [5], ❷ RF Identification (RFID)
+spatial spectrum (angular power distribution at the receiver) simulated via Sionna [42, 43], and ❸ WiFi
+CSI [44]. The datasets span scalar RSSI (21 receivers), spectrum matrices (21 receivers), and complexvalued CSI (8 receivers). Full dataset details are provided in Appendix F.
+Metrics. We adopt metrics matched to each dataset’s signal modality. ❶ Mean absolute error (MAE)
+in dBm for BLE RSSI. ❷ Mean squared error (MSE), peak signal-to-noise ratio (PSNR), and structural similarity index (SSIM) [45] for RFID spatial spectrum. ❸ Signal-to-noise ratio (SNR) in dB
+for WiFi CSI, computed across Nsc = 26 subcarriers:
+SNR = −10 log10
+2
+k |ĥk − hk |
+P
+P
+2
+k |hk |
+
+(18)
+where hk and ĥk are the ground-truth and predicted complex CSI at subcarrier k. For each metric, we
+first compute the per-receiver mean by averaging over all test samples. We then report the mean and
+standard deviation across these per-receiver means. This convention emphasizes consistency across
+receivers rather than per-sample prediction variance.
+Baselines. We compare RxGS against five baselines. ❶ NeRF2 [5] is an MLP-based neural RF
+radiance field, representing the leading NeRF-based approach. ❷ GRaF [29] is a NeRF-based crossscene spectrum synthesis method that interpolates reference spectra from neighboring transmitters at
+the query receiver. ❸ GSRF [20] is a complex-valued FLE-based 3DGS method for RF synthesis,
+representing the non-neural 3DGS approach, trained per receiver. ❹ RF-3DGS [18] is the SHbased 3DGS approach for RF synthesis, also trained per receiver. Since camera-based geometry
+initialization is unavailable in RF-only settings, we adopt the geometry-learning pipeline of GSRF [20]
+and replace FLE with SH to match the RF-3DGS radiance formulation. ❺ WRF-GS+ [19] adapts
+deformable 3DGS from the optical domain to RF synthesis by conditioning the deformation network
+on transmitter position, representing the leading neural 3DGS approach, also trained per receiver.
+7
+5.1
+Overall Performance Against Per-Receiver Baselines
+We evaluate RxGS against per-receiver baselines on two axes, synthesis quality in Table 1 and
+computational cost in Table 2. Appendices G.1–G.11 give receiver-level results and analyses.
+Synthesis Quality. Table 1 shows the cost–accuracy tradeoff of one shared receiver-conditioned
+model: mean BLE RSSI error falls for two backbones and rises by 0.33 dBm for WRF-GS+, while
+spectrum and CSI trail per-receiver baselines by 0.8 to 1.7 dB. NeRF-based approaches achieve the
+highest spectrum quality, with GRaF [29] reaching 26.40 dB PSNR and NeRF2 reaching 24.58 dB,
+but at prohibitive cost [18–20]. RxGS instead retains an explicit 3DGS representation to reduce
+training and inference costs.
+On BLE RSSI, RxGS uses one shared model across receivers for each backbone. OursGSRF improves MAE from 3.74 to 3.57 dBm, and OursRF-3DGS from 4.09 to 3.94 dBm. The effect is most
+pronounced for WRF-GS+, whose per-receiver baseline has two high-error receivers above 18 dBm.
+OursWRF-GS+ removes those outliers, while mean MAE increases by 0.33 dBm. Appendix G.1 gives
+the per-receiver breakdown.
+On RFID spectrum and WiFi CSI, RxGS trails per- Table 2: Training, inference, and storage
+receiver baselines by 0.8 to 1.7 dB. On spatial spectrum, for serving N = 21 receivers on RFID.
+the 90 × 360 angular signal has fine directional struc- Method
+Train (h) Infer. (ms) Stor. (MB)
+ture, and the shared variants trail their corresponding per- NeRF2 [5]
+14.3
+2436.4
+2.6
+receiver 3DGS baselines by 0.8 to 1.5 dB PSNR. On CSI, GRaF [29]
+16.2
+59891.4
+143.7
+the complex-valued FLE backbone OursGSRF has the RF-3DGS [18] 2.8
+156.4
+181.9
+0.4
+35.3
+8.8
+smallest gap among the evaluated 3DGS variants, drop- OursRF-3DGS
+ping 0.79 dB from 21.91 to 21.12. Appendix G.2 pro- GSRF [20]
+5.5
+238.1
+548.0
+0.6
+31.2
+26.1
+vides qualitative CSI predictions tracking ground truth OursGSRF
+52.4
+75.6
+in amplitude and phase. The shared model also supports WRF-GS+ [19] 13.6
+OursWRF-GS+
+0.3
+42.5
+3.2
+queries at fixed receivers excluded from training within
+the surveyed scene. These results hold across three architecturally distinct 3DGS backbones, i.e., RF3DGS [18], GSRF [20], and WRF-GS+ [19]. The three backbones use real SH, complex-valued FLE,
+and deformation networks, respectively. Our conditioning modules are compatible with each in the
+evaluated datasets.
+Computational Cost. Table 2 summarizes end-to-end RFID costs at N = 21, with per-backbone
+details in Appendix G.3. RxGS accelerates training by 7× to 45× over per-receiver baselines by
+reducing N independent training runs to a single shared-model fit. Our multi-receiver rasterizer
+renders all N receivers in one batched CUDA call. At N = 21, per-transmitter inference is 7.6× faster
+than per-receiver GSRF, 4.4× faster than RF-3DGS, and 1.2× faster than WRF-GS+. Compared
+with NeRF2 and GRaF, the shared 3DGS variants are 60× to 1900× faster. Replacing N per-receiver
+checkpoints with one shared model compresses the deployable footprint by roughly 21×. The FLE
+and SH variants share projection and sorting across receiver queries. WRF-GS+ retains a per-receiver
+render loop and has a smaller inference gain.
+5.2
+Generalization to Unseen Receivers
+PSNR (dB)
+MAE (dBm)
+We partition the 21 receivers
+Seen Rx Unseen Rx
+Seen Rx Unseen Rx
+27
+into 3 folds of 7, train on 14, and
+12
+evaluate on all 21 receivers. We
+24
+9
+exclude WiFi CSI because its 8
+21
+6
+receivers are too few for mean18
+3
+ingful seen/unseen splits. Per15 NeRF2 RF3D WRFG GSRF Ours
+0 NeRF2 RF3D WRFG GSRF Ours
+receiver baselines use the nearest trained receiver’s checkpoint at
+(a) BLE RSSI
+(b) RFID Spectrum
+unseen positions, while receiverconditioned methods are queried Figure 2: Unseen-receiver generalization. “Ours” is OursGSRF ,
+directly. GRaF [29] is excluded and RF3D / WRFG denote RF-3DGS [18] / WRF-GS+ [19].
+because it requires reference spectra from the query receiver.
+Figure 2 reports the mean and standard deviation across folds. “Ours” denotes OursGSRF , the variant
+closest to its per-receiver baseline in Table 1.
+8
+For BLE RSSI, per-receiver GSRF, RF-3DGS, and WRF-GS+ rise from 3.6–6.1 dBm seen MAE
+to 9.7–11.6 dBm at unseen receivers. On RFID spectrum, they lose 4–6 dB PSNR. WRF-GS+ falls
+from 26.1 to 19.9 dB. Appendix G.4 shows examples.
+Receiver Generalization. NeRF2 , which conditions a continuous neural field on the receiver
+position r, degrades much more gracefully, moving from 3.40 to 5.70 dBm on BLE. RxGS achieves
+the lowest unseen MAE of 4.92 dBm on BLE while matching the best seen performance at 3.75 dBm.
+On spectrum, RxGS nearly matches NeRF2 on unseen PSNR at 21.25 versus 21.48 dB, while staying
+within 2 dB of its own seen performance on both datasets. Appendix G.4 visualizes the predicted
+spectra: RxGS recovers sharp directional peaks at unseen receivers, NeRF2 predictions are overly
+smooth, and WRF-GS+ collapses to the closest seen-receiver pattern. Receiver conditioning supports
+prediction at unseen fixed receiver positions within the surveyed scene.
+5.3 Ablation Study
+We ablate each architectural design on BLE RSSI Table 3: Ablation study on BLE RSSI.
+with OursGSRF , training and evaluating on all 21 receivers. Variant
+MAE↓ (dBm)
+❶ Joint training raises MAE from 3.57 to 4.44 dBm, the
+Full RxGS – OursGSRF
+3.57±0.24
+largest gap in the table, consistent with the decomposition
+4.44±0.39
+derived in Appendix A: jointly optimizing geometry and Joint training (no two-stage)
+radiance prevents geometry from converging to a receiver- Global branch only
+4.11±0.40
+3.91±0.28
+independent solution. ❷ Removing the local or global Local branch only
+branch raises MAE to 4.11 and 3.91 dBm, respectively, Additive modulation
+4.02±0.36
+showing neither alone suffices as predicted by Corollary 1: Without occlusion features
+3.95±0.25
+the global branch captures the scatterer-averaged effect but
+cannot represent per-scatterer residuals, while the local branch captures residuals but cannot efficiently
+model the shared component. ❸ Replacing complex affine modulation (1 + α) ⊙ ϕbase + β with
+an additive shift ϕbase + β raises MAE to 4.02 dBm, consistent with the analysis in Corollary 2:
+additive conditioning lacks the multiplicative structure needed to represent ηeff . ❹ Removing the
+occlusion features Tk and ρ̄k raises MAE to 3.95 dBm, showing that the last-segment transmittance
+product contributes meaningful amplitude information beyond per-scatterer direction and distance.
+The global-only branch provides an environment-map-like RF variant. Combining it with local
+conditioning reduces BLE MAE from 4.11 to 3.57 dBm. Appendix G.5 shows that accuracy at
+unseen receivers improves with more training receivers, with diminishing returns beyond about 12 in
+the evaluated scene. Appendix G.6 gives a 0.55 dBm spread across single-receiver Stage I reference
+choices, and Appendices G.10–G.11 report grid-resolution and conditioning-width sensitivity.
+CDF
+5.4 Application Study: Sparse-Deployment BLE Localization
+Fingerprint-based indoor localization trades off accuracy
+1.0
+against gateway deployment cost. Dense deployments pro- 0.8
+vide high accuracy at high cost, whereas sparse deployments
+Baseline (5 Real Gateways)
+0.6
+5 Real + 16 Synthetic via RxGS
+reduce cost at the expense of accuracy. We show that RxGS
+Upper Bound (21 Real Gateways)
+bridges this gap by synthesizing fingerprints at virtual gate- 0.4
+0.2
+way positions. Following the protocol of §5.2, we assume
+0.00 5 10 15 20 25 30 35 40
+only N = 5 gateways are physically installed and use RxGS
+to synthesize RSSI at the remaining 16 positions, forming
+Localization Error (m)
+a 21-dimensional fingerprint. The 16 virtual positions co- Figure 3: Localization: RxGS bridges
+incide with measured gateway sites excluded from training, 71% of the sparse-to-dense gap.
+allowing direct ground-truth validation of their synthesized
+fingerprints. Each of the 1,200 test transmitters is localized via weighted K-nearest-neighbor (K = 5)
+against a database of 4,800 training positions.
+Figure 3 shows the cumulative distribution function (CDF) of localization error. The sparse 5gateway baseline yields a mean error of 5.61 ± 0.23 m. Augmenting it with 16 RxGS-synthesized
+fingerprints reduces the mean error to 2.98 ± 0.67 m, a 47% improvement over the sparse baseline.
+This closes 71% of the gap to the full 21-gateway oracle, which achieves 1.91 m.
+For 5, 8, 11, 14, and 17 physical gateways, mean errors over 20 random subsets
+are 5.51, 4.11, 3.13, 2.69, and 2.27 m, respectively. Table 4 gives 1.91 m for the full 21-gateway
+reference. The fixed five-gateway layout in Figure 3 yields 5.61 m, compared with 5.51 m averaged
+across the random layouts in Table 4. Appendix G.7 studies network planning.
+9
+Table 4: BLE localization error versus number of physical gateways. For 5–17 gateways, errors are
+averaged over 20 random subsets. The 21-gateway result uses all measurements.
+Physical gateways
+5
+8
+11
+14
+17
+21
+Mean error (m)↓
+5.51
+4.11
+3.13
+2.69
+2.27
+1.91
+Table 4 shows smaller error reductions as physical gateways are added, motivating spatially diverse
+placement and synthesized fingerprints within the surveyed region.
+6
+Conclusion and Future Work
+RxGS learns shared 3DGS geometry and receiver-conditioned radiance for fixed receivers in a
+surveyed scene. It predicts at receiver positions excluded from training using one model instead of N
+receiver-specific checkpoints. On RSSI, it improves RF-3DGS and GSRF, while its WRF-GS+ variant
+eliminates two high-error outliers with a 0.33 dBm increase in mean MAE. On spatial spectrum
+and CSI, it trails per-receiver baselines by 0.8 to 1.7 dB. Training, inference, and storage costs
+decrease by up to 45×, 7.6×, and 24×, respectively.
+The method assumes a static surveyed scene, requires a reference-receiver survey in each new
+environment, and models last-segment receiver effects within the 3DGS rendering abstraction.
+Angular-spectrum experiments use simulated data, while measured CSI spans eight effective receivers
+in one room. Future work will evaluate measured multi-receiver spectra, larger and dynamic scenes,
+full-multipath variation, computational scaling, and cross-environment transfer.
+Acknowledgments and Disclosures
+The research reported in this paper was sponsored in part by the National Science Foundation
+(award # ECCS-2525614) and the U.S. Army DEVCOM Army Research Laboratory (award #
+W911NF1720196). Mani Srivastava was partially supported by the Mukund Padmanabhan Term
+Chair at UCLA. Kang Yang was partially supported by the UCLA Institute for Digital Research and
+Education (IDRE) fellowship. The views and conclusions contained in this document are those of the
+authors and should not be interpreted as representing the official policies, either expressed or implied,
+of the funding agencies. The authors declare no competing interests.
+References
+[1] Yongsen Ma, Gang Zhou, and Shuangquan Wang. WiFi Sensing with Channel State Information: A Survey.
+ACM Computing Surveys, 52(3):1–36, 2019.
+[2] Ali Abedi, Farzan Dehbashi, Mohammad Hossein Mazaheri, Omid Abari, and Tim Brecht. WiTAG:
+Seamless WiFi Backscater Communication. In ACM Special Interest Group on Data Communications (SIGCOMM), 2020.
+[3] Theodore S. Rappaport. Wireless Communications: Principles and Practice. Prentice Hall, 2002.
+[4] Ryu Okubo, Luke Jacobs, Jinhua Wang, Steven Bowers, and Elahe Soltanaghai. Integrated Two-Way
+Radar Backscatter Communication and Sensing with Low-Power IoT Tags. In ACM Special Interest Group
+on Data Communications (SIGCOMM), 2024.
+[5] Xiaopeng Zhao, Zhenlin An, Qingrui Pan, and Lei Yang. NeRF2 : Neural Radio-Frequency Radiance
+Fields. In ACM Annual International Conference on Mobile Computing and Networking (MobiCom), 2023.
+[6] Jiachen Lu, Hailan Shanbhag, and Haitham Al Hassanieh. GeRaF: Neural Geometry Reconstruction from
+Radio Frequency Signals. In Conference on Neural Information Processing Systems (NeurIPS), 2025.
+[7] Chaitanya Amballa, Sattwik Basu, Yu-Lin Wei, Zhijian Yang, Mehmet Ergezer, and Romit Roy Choudhury.
+Can NeRFs See without Cameras? arXiv preprint arXiv:2505.22441, 2025.
+[8] Liuyi Yang, Patrick Finnerty, and Chikara Ohta. Diffusion Model-based RSSI Fingerprint Generation
+for Indoor Localization in Dynamic Environments. In IEEE Wireless and Optical Communications
+Conference (WOCC), pages 402–407, 2025.
+10
+[9] Kang Yang, Yuning Chen, and Wan Du. OrchLoc: In-Orchard Localization via a Single LoRa Gateway and
+Generative Diffusion Model-Based Fingerprinting. In ACM International Conference on Mobile Systems,
+Applications, and Services (MobiSys), 2024.
+[10] Pushpendu Kar and Bhasker Dappuri. Site Survey and Radio Frequency Planning for the Deployment of
+Next Generation WLAN. In Topical Conference on Wireless Sensors and Sensor Networks (WiSNet), 2018.
+[11] Cisco.
+Understand Site Survey Guidelines for WLAN Deployment.
+https://www.
+cisco.com/c/en/us/support/docs/wireless/5500-series-wireless-controllers/
+116057-site-survey-guidelines-wlan-00.html, 2023. [Online].
+[12] Hyojeong Shin, Yohan Chon, Yungeun Kim, and Hojung Cha. MRI: Model-Based Radio Interpolation for
+Indoor War-Walking. IEEE Transactions on Mobile Computing, 14(6):1231–1244, 2014.
+[13] Felipe Parralejo, Fernando J. Aranda, José A. Paredes, Fernando J. Álvarez, and Jorge Morera. Comparative
+Study of Different BLE Fingerprint Reconstruction Techniques. In International Conference on Indoor
+Positioning and Indoor Navigation (IPIN), 2021.
+[14] Zhengqing Yun and Magdy F Iskander. Ray Tracing for Radio Propagation Modeling: Principles and
+Applications. IEEE Access, 3:1089–1100, 2015.
+[15] Esteban Egea-Lopez, Jose Maria Molina-Garcia-Pardo, Martine Lienard, and Pierre Degauque. Opal:
+An Open Source Ray-Tracing Propagation Simulator for Electromagnetic Characterization. Plos One,
+16(11):e0260060, 2021.
+[16] MATLAB. Indoor MIMO-OFDM Communication Link Using Ray Tracing. https://www.mathworks.
+com/help/comm/ug/indoor-mimo-ofdm-communication-link-using-ray-tracing.html,
+2023. [Online].
+[17] Lidong Guo, Xuefei Ning, Yonggan Fu, Tianchen Zhao, Zhuoliang Kang, Jincheng Yu, Yingyan Celine
+Lin, and Yu Wang. Rad-NeRF: Ray-Decoupled Training of Neural Radiance Field. Conference on Neural
+Information Processing Systems (NeurIPS), 37:113742–113771, 2024.
+[18] Lihao Zhang, Haijian Sun, Samuel Berweger, Camillo Gentile, and Rose Qingyang Hu. RF-3DGS:
+Wireless Channel Modeling with Radio Radiance Field and 3D Gaussian Splatting. IEEE Journal on
+Selected Areas in Communications, 2024.
+[19] Chaozheng Wen, Jingwen Tong, Yingdong Hu, Zehong Lin, and Jun Zhang. WRF-GS+: Wireless Radiation
+Field Reconstruction with 3D Gaussian Splatting. IEEE Transactions on Wireless Communications, 2025.
+[20] Kang Yang, Gaofeng Dong, Sijie Ji, Wan Du, and Mani Srivastava. GSRF: Complex-Valued 3D Gaussian
+Splatting for Efficient Radio-Frequency Data Synthesis. arXiv preprint arXiv:2502.01826, 2025.
+[21] Haofan Lu, Christopher Vattheuer, Baharan Mirzasoleiman, and Omid Abari. NeWRF: A Deep Learning Framework for Wireless Radiation Field Reconstruction and Channel Prediction. In International
+Conference on Machine Learning (ICML), 2024.
+[22] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3D Gaussian Splatting
+for Real-Time Radiance Field Rendering. In ACM International Conference on Computer Graphics and
+Interactive Techniques (SIGGRAPH), 2023.
+[23] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mip-Splatting: Alias-Free 3D
+Gaussian Splatting. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024.
+[24] Guikun Chen and Wenguan Wang. A Survey on 3D Gaussian Splatting. arXiv preprint arXiv:2401.03890,
+2024.
+[25] Robin Chataut and Robert Akl. Massive MIMO Systems for 5G and beyond Networks—overview, Recent
+Trends, Challenges, and Future Research Direction. Sensors, 20(10):2753, 2020.
+[26] Mahnoor Ajmal, Ayesha Siddiqa, Bomi Jeong, Junho Seo, and Dongkyun Kim. Cell-Free Massive
+Multiple-Input Multiple-Output Challenges and Opportunities: A Survey. ICT Express, 10(1):194–212,
+2024.
+[27] Volker Schönefeld. Spherical Harmonics. Computer Graphics and Multimedia Group, 18, 2005.
+[28] Rasmus Cornelius and Dirk Heberling. Spherical Wave Expansion with Arbitrary Origin for Near-Field
+Antenna Measurements. IEEE Transactions on Antennas and Propagation, 65(8):4385–4388, 2017.
+11
+[29] Kang Yang, Yuning Chen, and Wan Du. Generalizable Radio-Frequency Radiance Fields for Spatial
+Spectrum Synthesis. arXiv preprint arXiv:2502.05708, 2025.
+[30] Kang Yang, Duaa Nakshbandi, Wan Du, and Mani Srivastava. CoRF: Cross-Scene RF Synthesis by
+Learning Propagation and Preserving Array Physics. arXiv preprint arXiv:2609.34399, 2026.
+[31] Jingzhou Shen, Tianya Zhao, Yanzhao Wu, and Xuyu Wang. NeRF-APT: A New NeRF Framework for
+Wireless Channel Prediction. In IEEE Conference on Computer Communications Workshops (INFOCOM
+WKSHPS), 2025.
+[32] Zihang Zeng, Shu Sun, Meixia Tao, Yin Xu, and Xianghao Yu. VoxelRF: Voxelized Radiance Field for
+Fast Wireless Channel Modeling. IEEE Communications Letters, 30:617–621, 2025.
+[33] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng.
+NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis. Communications of the ACM,
+65(1):99–106, 2021.
+[34] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang, Fanbo Xiang, Jingyi Yu, and Hao Su. MVSNeRF: Fast Generalizable Radiance Field Reconstruction from Multi-View Stereo. In IEEE/CVF International Conference on Computer Vision (ICCV), 2021.
+[35] Mufan Liu, Cixiao Zhang, Qi Yang, Yujie Cao, Yiling Xu, Yin Xu, Shu Sun, Mingzeng Dai, and Yunfeng
+Guan. Deformable 2D Gaussian Splatting for Efficient Wireless Radiance Field Rendering. IEEE
+Transactions on Visualization and Computer Graphics, pages 1–17, 2026.
+[36] Kang Yang, Wan Du, and Mani Srivastava. Scalable 3D Gaussian Splatting-Based RF Signal Spatial
+Propagation Modeling. In ACM Conference on Embedded Networked Sensor Systems (SenSys), 2025.
+[37] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T Barron, Ce Liu, and Hendrik Lensch. NeRD:
+Neural Reflectance Decomposition from Image Collections. In IEEE/CVF International Conference on
+Computer Vision (ICCV), 2021.
+[38] Xiuming Zhang, Pratul P Srinivasan, Boyang Deng, Paul Debevec, William T Freeman, and Jonathan T
+Barron. NeRFactor: Neural Factorization of Shape and Reflectance under an Unknown Illumination. ACM
+Transactions on Graphics, 40(6):1–18, 2021.
+[39] Jian Gao, Chun Gu, Youtian Lin, Zhihao Li, Hao Zhu, Xun Cao, Li Zhang, and Yao Yao. Relightable
+3D Gaussians: Realistic Point Cloud Relighting with Brdf Decomposition and Ray Tracing. In European
+Conference on Computer Vision (ECCV), 2024.
+[40] Zhihao Liang, Qi Zhang, Ying Feng, Ying Shan, and Kui Jia. GS-IR: 3D Gaussian Splatting for Inverse
+Rendering. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024.
+[41] Shunsuke Saito, Gabriel Schwartz, Tomas Simon, Junxuan Li, and Giljoo Nam. Relightable Gaussian
+Codec Avatars. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024.
+[42] Jakob Hoydis, Sebastian Cammerer, Fayçal Ait Aoudia, Avinash Vem, Nikolaus Binder, Guillermo Marcus,
+and Alexander Keller. Sionna: An Open-Source Library for Next-Generation Physical Layer Research.
+arXiv preprint arXiv:2203.11854, 2022.
+[43] Jakob Hoydis, Fayçal Aït Aoudia, Sebastian Cammerer, Merlin Nimier-David, Nikolaus Binder, Guillermo
+Marcus, and Alexander Keller. Sionna RT: Differentiable Ray Tracing for Radio Propagation Modeling. In
+IEEE Globecom Workshops (GC Wkshps), 2023.
+[44] Sibren De Bast and Sofie Pollin. Ultra Dense Indoor MaMIMO CSI Dataset. https://dx.doi.org/10.
+21227/nr6k-8r78, 2025. [Online].
+[45] A Hore and D Ziou. Image Quality Metrics: PSNR Vs. SSIM. International Conference on Pattern
+Recognition. In International Conference on Pattern Recognition (ICPR), 2010.
+[46] Clayton Shepard, Jian Ding, Ryan E Guerra, and Lin Zhong. Understanding Real Many-Antenna MUMIMO Channels. In Asilomar Conference on Signals, Systems and Computers (ACSCC), 2016.
+[47] Ron Levie, Cagkan Yapar, Gitta Kutyniok, and Giuseppe Caire. RadioUNet: Fast Radio Map Estimation
+With Convolutional Neural Networks. IEEE Transactions on Wireless Communications, 2021.
+12
+Appendix Contents
+A Proof of Geometry-Radiance Decomposition
+14
+B Proof of Last-Segment Factorization
+16
+C Proofs of Corollaries 1–3
+17
+C.1 Proof of Corollary 1 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+C.2 Proof of Corollary 2 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+17
+C.3 Proof of Corollary 3 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+18
+D Single-Kernel Multi-Receiver Rasterization
+18
+E Implementation Details
+19
+E.1 Scene Representation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+20
+E.2 Signal Rendering Pipeline . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+20
+E.3 Loss Function . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+E.4 Stage I: Geometry Learning . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+21
+E.5 Stage II: Receiver-Conditioned Radiance . . . . . . . . . . . . . . . . . . . . . . .
+21
+F Dataset Details
+22
+F.1
+BLE RSSI . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+22
+F.2
+RFID Spatial Spectrum . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+22
+F.3
+WiFi CSI . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+23
+G Additional Experiments
+24
+G.1 Per-Receiver Performance Breakdown . . . . . . . . . . . . . . . . . . . . . . . .
+24
+G.2 Qualitative CSI Trace Visualization . . . . . . . . . . . . . . . . . . . . . . . . .
+26
+G.3 Computational Cost: Detailed Breakdown . . . . . . . . . . . . . . . . . . . . . .
+26
+G.4 Qualitative Spectrum Visualization . . . . . . . . . . . . . . . . . . . . . . . . . .
+28
+G.5 Scaling with Number of Receivers . . . . . . . . . . . . . . . . . . . . . . . . . .
+29
+G.6 Sensitivity to Reference Receiver Choice . . . . . . . . . . . . . . . . . . . . . . .
+30
+G.7 Application Study: Network Planning . . . . . . . . . . . . . . . . . . . . . . . .
+30
+G.8 Receiver-Level Accuracy Gaps . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+31
+G.9 Visibility, Bounce Depth, and Occlusion Features . . . . . . . . . . . . . . . . . .
+31
+G.10 Occupancy-Grid Resolution . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+32
+G.11 Conditioning Capacity . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+32
+H Four Evaluation Configurations
+32
+I
+33
+Broader Impacts
+A
+Proof of Geometry-Radiance Decomposition
+We prove that in the 3DGS-based RF rendering framework, the receiver position r influences the
+rendered signal only through the radiance coefficients, while all remaining attributes are receiverindependent.
+Notation. We use sk for scatterer positions in this appendix to distinguish the physical scatterer
+from the Gaussian mean pk . Under Assumption 3, sk and pk coincide, so the two symbols are
+interchangeable.
+Definition 1 (Multipath Channel Model). The received signal at receiver r from transmitter t in a
+K
+scene with K scatterers at fixed positions {sk }k=1 is:
+S (t, r) =
+L
+X
+hl (t, r) ,
+(19)
+l=1
+where L is the number of propagation paths, each traversing an ordered sequence of Pl ≥ 0
+scatterers (sl,1 , . . . , sl,Pl ). A direct line-of-sight path corresponds to Pl = 0 with a single segment dl,0 = ∥t − r∥. The complex coefficient of the l-th path is:
+hl (t, r) =
+Pl
+Y
+Γ (sl,i ) ·
+i=1
+|
+{z
+}
+Pl
+Y
+PPl
+2π
+λ
+· |e−j λ {zj=0 dl,j},
+4πdl,j
+j=0
+phase accumulation
+| {z }
+(20)
+reflection coefficients free-space path loss
+with segment distances dl,0 = ∥t − sl,1 ∥, dl,j between consecutive scatterers, and dl,Pl =
+∥sl,Pl − r∥ for Pl ≥ 1.
+K
+Definition 2 (RF Rendering Equation). Given 3D Gaussians {Gk }k=1 with attributes Gk =
+(pk , Ck , ϕk , τk ), the rendered signal for a ray in direction ω emitted from t is:
+R (ω) =
+K
+ω
+X
+  k−1
+Y
+gk (ω; pk , Ck ) · ϕk d̂k ·
+τm ,
+(21)
+m=1
+k=1
+ 
+where gk is the Gaussian weight measuring ray-Gaussian overlap, ϕk d̂k ∈ C is the directional
+Qk−1
+pk −t
+radiance along d̂k = ∥p
+, and m=1 τm is the cumulative transmittance along the ray. The
+k −t∥
+transmittance τk models intrinsic material attenuation at sk ; directional path-length effects are
+carried by gk . The total rendered signal Ŝ aggregates R (ω) over a finite set of sampled ray
+directions, and represents all signal contributions at the receiver, including the direct line-of-sight
+component absorbed by the Gaussians along the t → r line.
+Definition 3 (Receiver-Independence). A scene attribute ξ is receiver-independent if ∂ξ
+∂r = 0 for all r,
+and receiver-dependent if ξ (r1 ) ̸= ξ (r2 ) for some r1 , r2 .
+Assumption 1 (Static scene). Scatterer positions {sk }, their spatial extents, and material properties {Γ (sk )} are fixed and do not depend on t or r.
+Assumption 2 (Non-triviality). There exist r1 ̸= r2 and t such that S (t, r1 ) ̸= S (t, r2 ).
+Assumption 3 (Per-scatterer modeling abstraction). Each Gaussian Gk is treated as representing
+the aggregate signal contribution localized at a scene point sk , with the Gaussian weight Wk taken
+to absorb the cumulative propagation and attenuation effects of all paths whose last interaction is
+at sk , together with the direct line-of-sight contribution for Gaussians along the t → r line. This is
+a modeling abstraction adopted by 3DGS-based RF methods to bridge the straight-ray rendering
+pipeline and the bouncing-path multipath model; under this abstraction, Wk is identified with the
+multipath aggregate Φk in Equation (22), as discussed in Remark 1.
+Assumption 4 (Rendering-model representability). At the learned optimum, Ŝ (t, r) = S (t, r) in
+the limit of perfect representability.
+Proposition 2 (Geometry-Radiance Decomposition). Under Assumptions 1–4:
+1. The geometric attributes {pk , Ck , τk } are receiver-independent.
+14
+
+
+2. The radiance ϕk = ϕk d̂k , r is receiver-dependent, with receiver-gradient given by
+Equation (27) under the per-scatterer identification.
+3. Under the per-scatterer identification, the radiance is the only term in Equation (21) that
+carries receiver-dependence; all remaining factors are receiver-independent.
+Proof. Step 1 (Per-scatterer decomposition). Each propagation path terminates at the receiver, with
+its final segment originating from a scatterer sl,Pl for Pl ≥ 1, or directly from t for the line-of-sight
+path Pl = 0. Let Lk denote the set of paths whose last interaction is localized at sk , including the LoS
+path assigned to the Gaussian nearest the t → r line under Assumption 3. The sets {Lk } partition all
+paths, yielding:
+K
+X
+X
+Φk (t, r) ,
+Φk ≜
+S (t, r) =
+hl (t, r) .
+(22)
+k=1
+l∈Lk
+For the rendering equation, define the per-ray weight wk (ω) = gk (ω; pk , Ck )
+gating over rays:
+Ŝ (t, r) =
+K
+X
+
+
+Wk · ϕk d̂k , r ,
+Wk ≜
+X
+wk (ω) .
+Qk−1
+m=1 τm . Aggre-
+(23)
+ω
+k=1
+Under Assumptions 3 and 4, the per-scatterer identification is:
+
+
+Wk · ϕk d̂k , r = Φk (t, r) , ∀ k.
+(24)
+This identification is the formal bridge between the rendering-equation weight Wk and the multipath
+aggregate Φk , and is the only point at which the two models are joined.
+Step 2 (Geometric attributes are receiver-independent). By Assumption 1, pk , Ck , and sk
+are fixed, and ω (defined on the emission surface centered at t) is independent of r. Chain rule
+gives ∂gk /∂r = 0 and ∂τk /∂r = 0, so:
+∂Wk
+= 0,
+∂r
+∂ d̂k
+= 0.
+∂r
+(25)
+This establishes claim 1.
+Step 3 (Physical form of the radiance receiver-gradient). Under the per-scatterer identification,
+Equation (24) with Wk ̸= 0 gives ϕk = Φk /Wk . Since Wk is receiver-independent:
+∂ϕk
+1 X ∂hl
+=
+.
+(26)
+∂r
+Wk
+∂r
+l∈Lk
+From Equation (20), hl depends on r only through the last-segment distance dl,Pl = ∥ol − r∥,
+where ol = sl,Pl is the last scatterer for Pl ≥ 1 and ol = t for the line-of-sight path Pl = 0. The
+chain rule with ∂dl,Pl /∂r = −(ol − r)/ ∥ol − r∥ and ∂hl /∂dl,Pl = hl (−1/dl,Pl − j2π/λ) yields:
+
+
+∂ϕk
+1 X
+1
+j2π
+ol − r
+=
+hl ·
++
+·
+.
+(27)
+∂r
+Wk
+dl,Pl
+λ
+∥ol − r∥
+l∈Lk
+The 1/dl,Pl term is the logarithmic derivative of free-space path loss, and 2π/λ is the phase accumulation rate, both standard for last-leg propagation under the Friis law.
+Step 4 (Radiance carries all receiver-dependence). By Assumptions 4 and 2, there exist r1 ̸= r2
+and t with Ŝ (t, r1 ) ̸= Ŝ (t, r2 ). By Equation (23) and the receiver-independence of Wk and d̂k
+from Step 2:
+K
+
+
+i
+h 
+X
+(28)
+Wk · ϕk d̂k , r1 − ϕk d̂k , r2 ̸= 0.
+k=1
+
+
+
+
+Hence there exists k with Wk⋆ ̸= 0 and ϕk⋆ d̂k⋆ , r1 ̸= ϕk⋆ d̂k⋆ , r2 , establishing claim 2.
+Since Step 2 shows all other factors in Equation (21) are receiver-independent, the radiance is the
+only term that can carry receiver-dependence, establishing claim 3.
+⋆
+15
+Combining the three claims, the rendering equation factorizes as:
+
+
+n 
+o
+
+ϕk d̂k , r 
+Ŝ (t, r) = R
+k , Ck , τk },
+,
+t, {p
+|
+{z
+} |
+{z
+}
+∂/∂ r = 0
+(29)
+∂/∂ r ̸= 0
+which justifies freezing the geometric attributes after Stage I and conditioning only the radiance on r
+in Stage II.
+Remark 1 (Scope of Assumption 3). The straight-ray rendering equation and the bouncing-path
+multipath model are not structurally identical: single-bounce paths align naturally with Gaussians
+along t → sk , while multi-bounce and line-of-sight paths do not. Assumption 3 adopts the phenomenological abstraction by which the 3DGS-RF framework bridges these models, assigning each
+path to the Gaussian whose localized region captures its final signal contribution. This assumption is
+invoked only to derive the explicit gradient form in Step 3. Claims 1, 2 (existence), and 3 rest only on
+Assumptions 1, 2, and 4, and hold regardless of whether the per-scatterer abstraction is accepted.
+We frame the result as a structural decomposition of the rendering equation rather than a physical
+theorem. Its role in the paper is to motivate the two-stage architecture rather than to make claims
+about the underlying electromagnetic propagation.
+B
+Proof of Last-Segment Factorization
+Proof. Equation (24) with Wk ̸= 0 gives ϕk = Φk /Wk , and substituting Φk =
+ϕk (d̂k , r) =
+P
+l∈Lk hl :
+1 X
+hl (t, r).
+Wk
+(30)
+l∈Lk
+By the definition of Lk (paths whose last interaction is at sk ), the last scatterer is sl,Pl = sk for
+all l ∈ Lk , so the last-segment distance dl,Pl = ∥sk −r∥ is shared across all paths in Lk . Expanding hl
+from Equation (20) and separating the last-segment terms:
+hl (t, r) =
+Pl
+Y
+Γ(sl,i ) ·
+i=1
+|
+PY
+l −1
+PPl −1
+2π
+2π
+λ
+λ
+· e−j λ ∥sk −r∥ ,
+· e−j λ j=0 dl,j ·
+4πdl,j
+4π∥sk − r∥
+j=0
+{z
+}
+{z
+} |
+η(s ,r)
+(31)
+k
+hup
+l (t)
+where hup
+l (t) contains all reflection coefficients, path losses, and phase accumulations from the
+transmitter to scatterer k along path l. Since η(sk , r) is identical for all l ∈ Lk , it factors out of the
+sum:
+1 X up
+ϕk (d̂k , r) = η(sk , r) ·
+hl (t) .
+(32)
+Wk
+l∈Lk
+|
+{z
+}
+ϕbase
+(d̂k ,t)
+k
+This establishes the free-space factorization ϕk = η · ϕbase
+.
+k
+WhenQthe last segment from sk to r traverses intervening scatterers, the cumulative transmittance m∈I(k,r) τm from the rendering equation (Equation (21)) attenuates the signal further. Under
+Assumption 3, this attenuation acts only on the last segment, so it multiplies η without affecting ϕbase
+,
+k
+yielding the effective propagation factor:
+Y
+ηeff (sk , r) = η(sk , r) ·
+τm .
+(33)
+m∈I(k,r)
+The full factorization follows:
+ϕk (d̂k , r) = ηeff (sk , r) · ϕbase
+(d̂k , t).
+k
+16
+(34)
+C
+Proofs of Corollaries 1–3
+Notation follows Appendix A: sk denotes scatterer positions, interchangeable with the Gaussian
+mean pk under Assumption 3.
+C.1
+Proof of Corollary 1
+Proof. Define the mean propagation effect and per-scatterer residual:
+K
+η̄(r) =
+1 X
+ηeff (sk , r),
+K
+δk (r) = ηeff (sk , r) − η̄(r).
+(35)
+k=1
+By construction, ηeff = η̄ + δk , and substituting into Proposition 1 yields the decomposition in
+Equation (11).
+It remains to show δk ̸= 0 for almost all r. By Equation (10), ηeff (sk1 , r) = ηeff (sk2 , r) requires
+(in the best case where occlusion terms match) ∥sk1 − r∥ = ∥sk2 − r∥, whose solution set is
+the perpendicular bisector hyperplane of sk1 and sk2 — a set of Lebesgue measure zero in R3 .
+Therefore, ηeff (sk1 , r) ̸= ηeff (sk2 , r) for almost all r, so δk ̸= 0 in general. The global term η̄(r) ·
+ϕbase
+alone cannot capture per-scatterer variation, and the local term δk (r) · ϕbase
+alone cannot
+k
+k
+capture the shared component, so both branches are required.
+C.2
+Proof of Corollary 2
+
+
+
+
+Proof. From Proposition 1, ϕk d̂k , r = ηeff (sk , r) · ϕbase
+d̂
+,
+t
+, where ηeff ∈ C. We show
+k
+k
+that affine modulation suffices to represent this complex-valued multiplication, and that two simpler
+alternatives are insufficient in general.
+base,(n)
+Step 1: Complex multiplication as a structured linear map. Write ηeff = a+jb and let ϕk
+=
+xn + jyn denote the n-th component of the complex-valued radiance vector. Component-wise, the
+base,(n)
+product ηeff · ϕk
+expands as:
+"
+# 
+ 
+(n)
+Re(ϕk )
+a −b xn
+=
+.
+(36)
+(n)
+yn
+b a
+Im(ϕk )
+| {z }
+M(ηeff )
+√
+The matrix M simultaneously scales amplitude by |ηeff | = a2 + b2 and rotates phase by ∠ηeff =
+atan2(b, a). Any conditioning mechanism must be able to represent this joint amplitude-and-phase
+operation.
+Step 2: Receiver-shared additive conditioning is insufficient. Consider an additive model ϕk =
+ϕbase
++ β(r), where β depends on r only (shared across all Gaussians, with no per- k dependence).
+k
+For the true radiance ϕk = ηeff · ϕbase
+, this requires:
+k
+β(r) = (ηeff (sk , r) − 1) · ϕbase
+.
+k
+(37)
+Since β does not depend on k, this requires (ηeff (sk1 , r) − 1) · ϕbase
+= (ηeff (sk2 , r) − 1) · ϕbase
+k1
+k2
+base
+for all k1 , k2 , which fails in general since both ηeff and ϕk vary across scatterers. Therefore,
+receiver-shared additive conditioning cannot represent the multiplicative structure.
+Step 3: Real-valued scaling is insufficient. Consider a real-valued scaling model ϕk = α · ϕbase
+k
+with α ∈ R. Component-wise:
+"
+# 
+ 
+(n)
+Re(ϕk )
+α 0 xn
+=
+.
+(38)
+(n)
+0 α yn
+Im(ϕk )
+This is a diagonal matrix that can only scale amplitude, not rotate phase. Matching M(ηeff )
+from Equation (36) requires b = 0, i.e., Im(ηeff ) = 0. From Equation (10), Im(ηeff ) = 0 only
+when 2π
+λ ∥sk − r∥ = nπ for integer n, which holds only at discrete distances. Therefore, real-valued
+scaling fails for general receiver positions.
+17
+Step 4: Complex affine modulation suffices. An element-wise affine modulation (1+α)⊙ϕbase
++β
+k
+with α, β ∈ Cd parameterizes complex scale and shift for each component of ϕbase
+.
+Setting
+α
+=
+k
+(ηeff − 1) · 1 and β = 0 recovers the exact product:
+(1 + α) ⊙ ϕbase
+= ηeff · ϕbase
+.
+k
+k
+(39)
+The additive term β provides additional capacity to absorb residual effects not captured by ηeff alone,
+such as multi-bounce interactions on the last segment. Since affine modulation succeeds where both
+receiver-shared additive conditioning (Step 2) and real-valued scaling (Step 3) fail, it preserves the
+multiplicative structure of the physics while providing slack for residual effects.
+C.3
+Proof of Corollary 3
+Proof. We show that the scatterer index k carries no information beyond the per-scatterer inputs (dk , Tk ) required to evaluate ηeff , and therefore separate per-scatterer networks cannot improve
+over a single shared network.
+Step 1: Index-independence. From Equation (10), the effective propagation factor for any scatterer k
+is:
+2π
+λ
+(40)
+ηeff (sk , r) = f (dk , Tk ) =
+· e−j λ dk · Tk ,
+4πdk
+Q
+where dk = ∥sk − r∥ and Tk = m∈I(k,r) τm . The function f does not depend on the scatterer
+index k: for any two scatterers k1 ̸= k2 , if (dk1 , Tk1 ) = (dk2 , Tk2 ), then ηeff (sk1 , r) = ηeff (sk2 , r).
+In the architectural implementation we augment the network inputs with the direction v̂k and mean
+density ρ̄k to facilitate learning Tk from geometric cues, but these are not required by the theoretical
+form of f .
+Step 2: Per-scatterer networks are redundant. Suppose we use separate networks {fˆk }K
+k=1 , one
+per scatterer, each approximating f . Since f is index-independent from Step 1, the optimal solution
+for every fˆk is identical:
+∗
+fˆk∗1 = fˆk∗2 = · · · = fˆK
+= f, ∀ k1 , k2 .
+(41)
+Therefore, at optimality, all per-scatterer networks converge to the same function, making the separate
+parameterizations redundant.
+Step 3: Shared network suffices. Define a single shared network fˆ that takes per-scatterer inputs
+for any k. From Step 1, fˆ must approximate f (dk , Tk ) over the union of all per-scatterer inputs:
+fˆ ≈ f
+on
+K
+[
+{(dk , Tk ) : r ∈ R3 }.
+(42)
+k=1
+Since f is continuous for dk > 0 and the input domain is bounded in any physical scene, the
+universal approximation theorem guarantees that a single network fˆ with sufficient capacity can
+approximate f to arbitrary precision. Therefore, a single shared network with per-scatterer inputs
+suffices for all k.
+D
+Single-Kernel Multi-Receiver Rasterization
+The core mechanism behind RxGS’s multi-receiver inference is a single CUDA call that renders
+all N receivers at once. This exploits the fact that the sort and per-Gaussian projection depend only
+N
+on the transmitter, not on the receivers. For one transmitter at t serving N receivers {rj }j=1 , the
+pipeline runs three stages, summarized in Algorithm 1.
+Transmitter-Side Preprocessing. We compute Gaussian projections, per-tile bounds, and the depthsorted Gaussian list using only t and the Gaussian state. These results are receiver-independent
+and shared across all N rasterizations. This stage therefore runs once per transmitter regardless of
+receiver count.
+Per-Receiver Directional Signal. We evaluate the FLE/SH directional basis on the transmitter-side
+directions once, then reduce against the per-receiver coefficient tensor of shape (N, K, 2, L) in a
+18
+Algorithm 1 Multi-Receiver Spectrum Rendering for One Transmitter.
+
+K
+Require: Gaussian state pk , Ck , τk , ϕbase
+k
+k=1
+Require: Transmitter position t, receiver positions {rj }N
+j=1
+Require: Angular grid of size Hθ × Wφ over elevation and azimuth
+n
+oN
+Ensure: Spectra Ŝ (j) ∈ R2×Hθ ×Wφ
+(real and imaginary)
+j=1
+1: // Stage 1: Transmitter side, computed once
+2: Project Gaussians onto the unit sphere centered at t and compute per-Gaussian direction d̂k and angular tile
+bounds
+3: Build per-tile depth-sorted Gaussian list via one cub::SortPairs call over (tile, depth) keys
+4: //
+n Stage
+o 2: Per-receiver coefficients, one batched call
+
+(j)
+ϕk
+← rxcond.forward_batched ϕbase
+, {rj } , {pk }
+k
+n
+o
+   n
+o
+(j)
+(j)
+6: sk
+← eval_fle B d̂k , ϕk
+7: // Stage 3: Single CUDA kernel with gridDim.z = N
+8: launch render_multirx«<(tilesθ , tilesφ , N ), block»>
+9: for all angular tile (tθ , tφ ) and receiver j ∈ [1..N ] in parallel do
+10:
+for all direction sample (θ, φ) in tile (tθ , tφ ) in parallel do
+11:
+T ← 1, C ← 0
+12:
+for all Gaussian k in tile’s sorted list (front to back) do
+−1
+13:
+wk ← τk · exp − 21 ∆⊤
+k,θφ Ck ∆k,θφ
+(j)
+14:
+C ← C + T wk sk
+15:
+T ← T (1 − wk )
+16:
+if T < ϵ then break
+17:
+end if
+18:
+end for
+(j)
+19:
+Ŝθφ ← C
+20:
+end for
+21: end for
+5:
+▷ shape (N, K, 2, L)
+▷ basis B shared, reduce over L
+▷ per-receiver signal
+n
+o
+(j)
+single broadcasted operation. This yields the per-receiver signal tensor sk
+∈ RN ×K×2 in one
+batched call rather than N separate evaluations.
+Multi-Receiver Rasterization. A single CUDA kernel is launched with grid dimension gridDim =
+(tilesθ , tilesφ , N ), placing the receiver index on the z-axis. Each thread block reads its receiverspecific signal slice and writes its receiver-specific output slot, while the shared transmitter-side state
+of projections, sorted list, and tile ranges is read by every block. The backward kernel runs with the
+(j)
+same gridDim.z = N to compute per-receiver ∂L/∂ϕk and accumulate Gaussian-level gradients
+across all (j, direction sample) threads via atomicAdd.
+Shared Computation. The standard 3DGS rasterizer computes lines 2 and 3 once, then runs the perdirection alpha-blend once for a single spectrum. For multi-receiver rendering, lines 2 and 3 depend
+only on the transmitter-anchored sphere rays and are reused across receivers. The directional basis
+evaluated at d̂k also depends only on the transmitter and is computed once on line 6. The per-receiver
+(j)
+(j)
+computation reduces to the directional signal sk , the FLE/SH coefficient sequence ϕk projected
+against the shared basis, producing one (N, K, 2) signal tensor. The per-direction rendering then
+runs along an extra batch axis j ∈ [1..N ], mapped to blockIdx.z at kernel launch. Each receiver
+writes to its own output slot without atomic conflicts.
+E
+Implementation Details
+We implement RxGS in PyTorch, with custom CUDA kernels for RF signal tracing and rasterization to support the differentiable RF rendering pipeline. All experiments are conducted on a
+single NVIDIA H100 GPU. This section describes the implementation of the FLE-based scene
+representation. Other representation variants (SH) and signal modalities (RSSI, CSI) follow the same
+training pipeline and optimization strategy. Dataset-specific hyperparameters are reported in Table 5.
+19
+E.1
+Scene Representation
+The RF environment is represented as a set of K 3D Gaussians. Each Gaussian stores five attributes:
+position p ∈ R3 , anisotropic scale s ∈ R3 (log-space), rotation quaternion q ∈ R4 , sigmoid-activated
+2
+transmittance τ ∈ [0, 1], and FLE coefficients f ∈ RL×C . Here L = (ℓmax + 1) is the number
+of FLE basis functions (matching the radiance-component count from the main text), and C is
+the number of signal channels. The storage f realizes the base coefficients ϕbase
+from §4.3 in the
+k
+implementation. The covariance matrix is constructed as Σ = RSS⊤ R⊤ , where R and S are the
+rotation and scaling matrices built from q and s.
+Initialization. We initialize up to 50,000 Gaussians from a point cloud sampled from the scene.
+Scales are set to the log of nearest-neighbor distances, computed via a CUDA KNN module. Rotations
+use identity quaternions, transmittance starts at σ −1 (0.1), and FLE coefficients at zero.
+Table 5: Hyperparameter settings for RxGS across all datasets.
+Parameter
+BLE RSSI
+RFID Spectrum
+WiFi CSI
+Initial Gaussians (Kinit )
+Max FLE degree (ℓmax )
+FLE ramp interval (Tramp )
+Ray directions (nφ × nθ )
+Sphere radius (rrx )
+Position LR (initial)
+Position LR (final)
+Feature LR
+Rest LR ratio
+Transmittance LR
+Scaling LR
+Rotation LR
+Densification threshold (τg )
+Transmittance reset interval
+Fourier bands (F )
+MLP hidden dim (d)
+Component embedding
+dim (dc )
+Occupancy probe samples (S)
+Grid resolution
+Stage I iterations
+Stage II iterations
+50,000
+9
+500
+36 × 9
+4.22
+5.05 × 10−5
+2.06 × 10−6
+1.14 × 10−3
+0.16
+3.79 × 10−2
+2.90 × 10−3
+5.02 × 10−4
+1.97 × 10−4
+4,000
+6
+64
+16
+50,000
+9
+500
+360 × 90
+1.00
+1.60 × 10−4
+1.60 × 10−6
+5.00 × 10−3
+0.20
+1.00 × 10−2
+5.00 × 10−3
+1.00 × 10−3
+2.00 × 10−4
+3,000
+6
+64
+16
+30,000
+4
+100
+72 × 18
+1.00
+2.78 × 10−4
+1.60 × 10−6
+1.53 × 10−2
+0.80
+1.27 × 10−3
+5.00 × 10−3
+1.00 × 10−3
+1.88 × 10−4
+2,000
+5
+256
+16
+16
+1283
+30K
+100K
+16
+1283
+30K
+60K
+16
+1283
+30K
+100K
+E.2
+Signal Rendering Pipeline
+For each Gaussian, the renderer computes a complex signal pair from its directional FLE coefficients
+along the transmitter-to-Gaussian direction. For a direction d̂ = (θ, φ) from the transmitter to
+the Gaussian center, the real and imaginary components of the radiated signal are:
+Re =
+ℓX
+max
+l
+X
+|m|
+[alm cos (mφ) − blm sin (mφ)] Nlm Pl
+(cos θ)
+(43)
+(cos θ)
+(44)
+l=0 m=−l
+Ri =
+ℓX
+max
+l
+X
+|m|
+[alm sin (mφ) + blm cos (mφ)] Nlm Pl
+l=0 m=−l
+|m|
+where alm , blm ∈ f are learnable coefficients, Plq are associated Legendre polynomials computed
+via batched three-term recurrence, and Nlm =
+(2l+1) (l−|m|)!
+· (l+|m|)! is the normalization factor. The
+4π
+20
+custom CUDA rasterizer detailed in Appendix D combines these signals with each Gaussian’s
+covariance and
+p transmittance through covariance-weighted accumulation. The final output amplitude |R| = Re2 + Ri2 + ϵ uses a numerical stabilizer ϵ = 10−8 . The rendering grid uses a sphere
+of radius rrx centered at the transmitter.
+E.3
+Loss Function
+Both training stages use a modality-specific loss: L1 for scalar RSSI, L2 for complex-valued CSI,
+and a composite loss for spatial spectrum. For a rendered spectrum ŷ and ground-truth spectrum y,
+the composite loss is:
+L = (1 − λssim − λfft ) ∥ŷ − y∥1 + λssim (1 − SSIM (ŷ, y)) + λfft ∥F (ŷ) − F (y)∥22
+(45)
+Here λssim and λfft weight the structural-similarity and Fourier-domain terms, respectively. The
+operator F denotes the 2D orthonormal FFT, and SSIM uses an 11 × 11 Gaussian window.
+E.4
+Stage I: Geometry Learning
+Stage I trains all Gaussian parameters using measurements from a single reference receiver. At each
+iteration, a random training sample from the reference receiver is selected, and the rendered signal is
+compared with the measurement using the modality-specific loss.
+Optimizer. We use Adam with per-parameter learning rates listed in Table 5. The position LR
+decays exponentially from its initial to final value with a delay multiplier of 0.01. Higher-degree FLE
+coefficients are additionally scaled by 0.2 to prioritize low-frequency geometry early in training.
+The FLE degree is progressively increased from 0, incrementing every Tramp iterations up to ℓmax .
+Stage I runs for 30K iterations total.
+Adaptive Densification. Gaussians are densified based on accumulated positional gradients every 100 iterations, from iteration 500 to the stage midpoint (iteration 15K). Gaussians exceeding the
+densification threshold τg listed in Table 5 are cloned if their scale is below the scene extent threshold,
+or split into two children with scales reduced by factor 0.8 if above. Gaussians with projected
+screen-space radius above a pixel threshold, or world-space extent exceeding 0.1× the scene extent,
+are pruned. To avoid saturation, transmittance resets to σ −1 (0.01) as specified in Table 5.
+E.5
+Stage II: Receiver-Conditioned Radiance
+With geometry frozen, Stage II trains the FLE coefficients and the conditioning modules across all
+receivers. At each iteration, a random training sample from an available receiver is selected. The
+conditioning modules then modulate the base FLE coefficients using its position, and the modalityspecific loss compares the rendered signal with the corresponding measurement.
+Global Branch. Table 5 specifies F frequency bands per spatial dimension for the learnable Fourier
+encoding of receiver position. The bands start at 2k spacing and are optimized during training. For
+each FLE component, a 3-layer ReLU MLP with hidden dimension d takes the concatenation of
+the encoded RX position, per-component degree and order features, and a learnable per-component
+embedding of dimension dc as input. The MLP produces per-component scale and shift parameters
+that modulate the base FLE coefficients. This modulation is computed once per component and
+broadcast to all K Gaussians, giving O (L) cost independent of Gaussian count.
+Local Branch. At the start of Stage II, a 3D occupancy grid of resolution 1283 is built by splatting
+each frozen Gaussian into a voxel density field using its position, transmittance, and scale with a 2σ
+radius. For each Gaussian k, we cast a ray toward the receiver and probe the grid at S uniformly spaced
+points (from t = 0.05 to t = 0.95) via nearest-neighbor lookup, computing path transmittance Tk =
+QS
+6
+s=1 (1 − ρs ) and mean density ρ̄k . A shared MLP takes [v̂k , dk , Tk , ρ̄k ] ∈ R as input and
+produces per-Gaussian scale and shift parameters. Both MLP final layers are zero-initialized, making
+the initial conditioning transform the identity.
+Optimizer. FLE coefficients and conditioning modules are trained with separate Adam optimizers,
+with learning rates listed in Table 5. Higher-degree FLE coefficients are scaled by 0.2 as in Stage I.
+21
+F
+Dataset Details
+All three datasets use random seed 8371 for reproducible train/test splits. TX denotes transmitter
+and RX denotes receiver throughout this section.
+F.1
+BLE RSSI
+MAE (dBm)
+MAE (dBm)
+MAE (dBm)
+The BLE RSSI dataset is collected in a real-world nursing home occupying ∼15,000 ft2 [5]. NRX =
+21 BLE gateways operating at 2.4 GHz are deployed throughout the facility, each measuring the
+received signal strength (RSSI in dBm) from a moving BLE node. TX positions are collected by
+random walks using 30 BLE nodes, yielding NTX = 6,000 TX positions in total. Each sample is
+a 21-dimensional tuple of RSSI readings from the 21 receivers. Readings below −100 dBm are
+excluded. A random 80/20 split yields 4,800 training and 1,200 test positions.
+RF­3DGS
+10
+OursRF-3DGS
+5
+0
+10
+1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21
+GSRF OursGSRF
+5
+0
+50
+40
+30
+20
+10
+0
+1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21
+WRF­GS+ OursWRF-GS +
+1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21
+Receiver Index
+Figure 4: Per-receiver MAE breakdown on BLE RSSI for each baseline and its receiver-conditioned
+counterpart (lower is better). Adding our receiver conditioning produces more uniform performance
+across receivers and eliminates the catastrophic outliers seen in WRF-GS+ at receivers 4 and 8.
+F.2
+RFID Spatial Spectrum
+Collecting real-world spatial spectrum data requires a calibrated antenna array and precise TX
+positioning across hundreds of positions, making large-scale data collection prohibitively expensive.
+Furthermore, no public multi-receiver spatial spectrum dataset currently exists. We therefore generate
+this dataset via simulation using the NVIDIA Sionna ray tracer [42, 43]. Sionna is a physics-based,
+differentiable ray tracing engine that models line-of-sight, specular reflection, diffuse scattering, and
+refraction, with material properties calibrated to ITU-R standards. Its GPU acceleration enables
+large-scale dataset generation at simulation speeds.
+The scene is a cluttered conference room (8 m × 6 m × 3 m), as shown in Figure 5. Each measurement
+is a 90 × 360 grayscale image capturing the angular power spectrum over elevation and azimuth
+at 2.4 GHz. The dataset contains NTX = 5,089 TX positions and NRX = 21 distributed RX positions
+at z = 2 m height, yielding NTX × NRX = 106,869 spectrum images in total. We use an 80/20
+random split (4,071 train / 1,018 test TX positions).
+22
+3
+2
+1
+0
+1
+2
+3
+Side View (XZ)
+3
+Z (m)
+Y (m)
+Top­Down View (XY)
+2
+1
+0
+4 3 2 1 0 1 2 3 4
+X (m)
+4
+3
+2
+1
+0
+X (m)
+1
+2
+3
+4
+Figure 5: Floor plan of the conference room (8 m × 6 m × 3 m) used for the RFID spectrum dataset.
+Scene Construction. Each scene is modeled as a rectangular room with six surfaces (floor, ceiling,
+four walls), built as Mitsuba triangle meshes. Furniture items including tables, chairs, bookshelves,
+metal cabinets, and glass partitions are represented as axis-aligned box meshes. Each object is
+assigned an ITU radio material (e.g., concrete, plasterboard, wood, metal, glass) with calibrated
+relative permittivity, conductivity, and scattering coefficients following the ITU-R P.2040 standard.
+Channel Simulation. For each TX–RX pair, we place a single isotropic TX antenna and, at
+the RX, an 8 × 8 uniform planar array (UPA) with half-wavelength spacing at f = 2.4 GHz.
+Sionna’s PathSolver performs ray tracing with up to 5 bounces, including line-of-sight, specular
+reflection, diffuse reflection, and refraction. The solver returns H ∈ CNant ×Nsub with Nant = 64
+antennas and Nsub = 512 subcarriers across 100 MHz.
+Spectrum Computation. We compute the angular power spectrum via conventional beamforming (CBF). A 2D Hanning window is applied across the array to suppress sidelobes. Per-element
+phase and amplitude errors (±15◦ , ±1.5 dB) are introduced for realism. The spatial covariance matrix
+is estimated as Rspec = HHH /Nsub . For each scan direction (φ, θ) on a 1◦ -resolution grid covering
+azimuth [0◦ , 360◦ ) and elevation [0◦ , 90◦ ), the beamforming power is:
+P (φ, θ) = aH (φ, θ) Rspec a (φ, θ)
+(46)
+
+where a (φ, θ) = exp j k p⊤
+∈ CNant is the steering vector, k = 2π/λ is the
+ant û (φ, θ)
+wavenumber, pant contains the antenna element positions, and û is the unit direction vector.
+The 3GPP TR 38.901 element radiation pattern is applied in the array’s local coordinate frame.
+The resulting spectrum is peak-normalized to 0 dB and saved as a 90 × 360 grayscale image.
+TX/RX Placement. We place NRX = 21 RX positions at uniformly random (x, y) positions within
+the room with a minimum inter-RX spacing constraint. TX positions are sampled randomly within
+the room volume and validated against furniture collisions via rejection sampling.
+F.3
+WiFi CSI
+Prior work [5, 19] uses the Argos dataset [46] for CSI evaluation, where all antennas are colocated at a single position. For multi-receiver evaluation, we use the KU Leuven Ultra-Dense Indoor MaMIMO CSI Dataset [44], collected using a 64-antenna massive MIMO testbed operating at a
+center frequency of 2.61 GHz with 20 MHz bandwidth. The original measurements comprise 252,004
+channel snapshots over a 1.25 m × 1.25 m transmitter grid at 5 mm spatial resolution, with 100
+complex subcarriers per antenna. In the distributed line-of-sight scenario, eight groups of eight
+antennas surround a ∼5 m × 5 m room in an octagonal layout at z = 1 m.
+Preprocessing. We apply five preprocessing steps to the raw data. First, phase calibration removes
+the random carrier phase offset per antenna, ensuring coherent combination across elements. Second,
+the 8 antennas within each group are coherently averaged after calibration, yielding one effective RX
+per group and NRX = 8 distributed RXs in total. Third, delay-domain denoising truncates the
+channel impulse response to the first 10 of 100 taps via IFFT, truncation, and FFT, suppressing noisedominated late arrivals that carry no useful propagation information. Fourth, the 100 subcarriers are
+averaged into Nsc = 26 frequency bins to reduce redundancy while preserving the frequency-selective
+fading structure. Fifth, nearby TX positions are spatially averaged into NTX = 6,000 output positions
+to reduce wavelength-scale phase variation and produce a spatially consistent dataset suitable for
+scene-level learning.
+23
+Final Dataset. The resulting dataset contains NTX = 6,000 TX positions and NRX = 8 distributed RX positions, yielding NTX × NRX = 48,000 complex CSI vectors of dimension 52 (Nsc =
+26 subcarriers × 2 for real and imaginary), normalized by the global maximum magnitude. We use
+an 80/20 random split (4,800 train / 1,200 test TX positions).
+G
+Additional Experiments
+This appendix presents additional experiments that complement the main text. Appendix G.1
+breaks down Table 1 into per-receiver results. Appendix G.2 visualizes per-subcarrier CSI traces.
+Appendix G.3 expands Table 2 into per-backbone training, inference, and storage breakdowns.
+Appendix G.4 shows spectrum visualizations on seen and unseen receivers. Appendix G.5 analyzes
+how unseen-receiver accuracy scales with training receivers. Appendix G.6 measures sensitivity
+to the Stage I reference receiver. Appendix G.7 reports a network planning study. Appendix G.8
+examines receiver-level accuracy gaps and their geometric correlates. Appendix G.9 compares
+line-of-sight and non-line-of-sight pairs and assesses the occlusion probe.
+G.1
+Per-Receiver Performance Breakdown
+PSNR (dB)
+28
+24
+20
+16
+PSNR (dB)
+28
+24
+20
+16
+PSNR (dB)
+Table 1 reports metrics averaged across all receivers, which can hide substantial per-receiver variation.
+Per-receiver baselines fit each receiver in isolation, and aggregate metrics can obscure high-error
+receivers. We therefore break the results down receiver-by-receiver on all three datasets, pairing
+each baseline with its receiver-conditioned counterpart that augments the same backbone with our
+conditioning module as a single shared model.
+32
+28
+24
+20
+16
+RF­3DGS
+OursRF-3DGS
+1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21
+GSRF OursGSRF
+1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21
+WRF­GS+ OursWRF-GS +
+1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21
+Receiver Index
+Figure 6: Per-receiver PSNR breakdown on RFID spatial spectrum for each baseline and its receiverconditioned counterpart (higher is better). One shared model covers all 21 receivers. Table 1
+summarizes the corresponding average PSNR.
+24
+SNR (dB)
+SNR (dB)
+SNR (dB)
+1
+2
+3
+4
+5
+6
+30
+20
+10
+0
+1
+2
+3
+4
+5
+6
+30
+20
+10
+0
+OursRF-3DGS
+RF­3DGS
+30
+20
+10
+0
+7
+8
+GSRF OursGSRF
+7
+OursWRF-GS +
+WRF­GS+
+1
+2
+3
+4
+5
+Receiver Index
+6
+8
+7
+8
+Figure 7: Per-receiver SNR breakdown on WiFi CSI for each baseline and its receiver-conditioned
+counterpart (higher is better). One shared model covers all 8 distributed receivers. Table 1 summarizes
+the corresponding average SNR.
+Figures 4–7 compare all receivers across three baseline backbones, RF-3DGS [18], GSRF [20],
+and WRF-GS+ [19], and their unified counterparts on BLE RSSI, RFID spatial spectrum,
+and WiFi CSI respectively. Four patterns emerge.
+Uniformity across receivers. For all three backbones and all three datasets, the receiver-conditioned
+variant yields a flatter metric profile across the receiver index. This matches the behavior of a
+model that learns a transferable receiver-conditioning function rather than memorizing per-receiver
+mappings. Weakly-covered receivers benefit from data collected at others.
+Outlier removal. On BLE RSSI, per-receiver WRF-GS+ has two high-error receivers: receiver 4 at
+about 28 dBm and receiver 8 at about 19 dBm MAE, both over 5× its median error. The aggregate
+mean obscures their contribution. Receiver-conditioned WRF-GS+ removes both outliers.
+Spectrum and CSI Accuracy. Table 1 shows that the shared model generally tracks the per-receiver
+profile on RFID spectrum and WiFi CSI. Average PSNR and SNR are lower than those of specialized
+models by 0.8 to 1.7 dB.
+Behavior Across Backbones. The conditioning design applies to all three tested 3DGS backbones,
+but its accuracy effect depends on the backbone and signal modality. It improves the BLE mean
+for RF-3DGS and GSRF, removes the isolated WRF-GS+ failures while slightly raising its mean, and
+trades spectrum and CSI accuracy for one shared model and lower deployment cost.
+These observations corroborate the aggregated numbers in Table 1.
+25
+G.2
+Qualitative CSI Trace Visualization
+Setting. We complement the aggregate SNR numbers in the main text with per-subcarrier CSI
+traces produced by our model on the WiFi CSI dataset. We plot predicted and ground-truth CSI
+vectors HPred , HGT ∈ C26 at three randomly selected test transmitters. The top row of Figure 8
+shows amplitude |H (f )| normalized per panel by max (|HGT | , |HPred |). The bottom row shows
+phase wrapped to [0, 2π).
+Phase (rad) Amplitude
+Results. Across all three TX positions, the predicted amplitude closely follows the ground-truth
+frequency response. Each panel reproduces the multipath-induced amplitude peaks and nulls at
+the correct subcarrier indices. The overall envelope is preserved with only minor shifts of ±1 to 2
+subcarriers near sharp nulls. The phase traces track the ground-truth dispersion equally well. The 2π
+wraparound visible in TX1 occurs at matching subcarrier indices for prediction and reference. No
+panel shows a systematic bias or catastrophic drift. This indicates that RxGS captures both the
+magnitude and phase structure of the channel, not only amplitude statistics.
+TX1
+TX2
+TX3
+1.0
+1.0
+1.0
+0.5
+0.0 0
+2
+00
+0.5
+5
+GT
+10
+15
+20
+Ours
+5
+10 15 20
+Subcarriers
+0.5
+25 0.0 0
+2
+5
+10
+00
+5
+10 15 20
+Subcarriers
+25
+15
+20
+25 0.0 0
+2
+5
+10
+20
+25
+00
+5
+10 15 20
+Subcarriers
+25
+25
+15
+Figure 8: Qualitative CSI traces on the WiFi CSI dataset at three transmitter (TX) positions. Top
+row: amplitude |H (f )| normalized per panel. Bottom row: phase wrapped to [0, 2π). RxGS (green,
+dashed) tracks the ground truth (black, solid) in both amplitude and phase.
+G.3
+Computational Cost: Detailed Breakdown
+We expand on Table 2 and explain why the gains differ across backbones.
+Implicit versus explicit scene representations. Table 2 shows different storage and compute profiles
+for implicit and explicit models. NeRF2 stores only 2.6 MB but takes 14.3 h to train and 2436 ms to
+render N = 21 spectra. GSRF + RxGS stores 26 MB yet trains in 0.6 h and renders in 31 ms. The
+two paradigms swap their cost profiles:
+• Implicit methods (NeRF2 , GRaF) encode the entire scene as a continuous function of position
+and direction using a small MLP. Each transmitter-receiver sample casts one ray per pixel and
+integrates by querying the MLP at O(64–256) depth points, totaling roughly 2 M MLP passes for
+a single 90 × 360 spectrum, with the same number of backward passes during training. Storage
+is small (only MLP weights), but compute scales as O(rays · depth_samples · MLP_FLOPs)
+and grows linearly with output resolution.
+• Explicit methods (RF-3DGS, GSRF, WRF-GS+) parameterize the scene as 10k to 40k Gaussian primitives, each carrying position, scale, rotation, opacity, and a directional coefficient
+vector with L = 16 to 100 entries. Storage scales as O(K · L) and dominates total bytes, but
+the CUDA rasterizer projects all Gaussians once, sorts them per tile, and runs a single perpixel alpha-blend pass with O(Gaussians overlapping the tile) work, typically tens of Gaussians
+per tile. The pipeline is memory-bandwidth bound and parallelizes well on a GPU. For one
+transmitter, the RxGS variants synthesize signals at all N = 21 receivers in 31 to 43 ms.
+Implicit methods use less storage but require more computation per sample, whereas explicit methods
+use more storage with lower per-sample computation.
+Training. RxGS totals 90k iterations per backbone: 30k for Stage I geometry pre-training and 60k
+for Stage II multi-receiver fitting. The per-receiver baselines run N independent fits of Tbase iterations
+each, with Tbase = 200k for WRF-GS+ and 30k for GSRF and RF-3DGS. The raw iteration ratio
+is N · Tbase /90k, with measured speedups also reflecting per-iteration cost differences.
+26
+• RF-3DGS: 2.8 → 0.4 h, a 7× speedup that matches the raw iteration ratio of 21·30k/90k = 7×
+almost exactly, with similar per-iteration cost for Stage II and per-receiver training.
+• GSRF: 5.5 → 0.6 h, a 9× speedup against the same 7× raw ratio. The extra factor comes
+from Stage II running per-iteration slightly faster than per-receiver GSRF, which we attribute to
+amortizing FLE-basis evaluation across the batched receiver dimension.
+• WRF-GS+: 13.6 → 0.3 h, a 45× speedup against a raw iteration ratio of 21 · 200k/90k ≈ 47×.
+Multi-receiver overhead explains the roughly 4% difference. The main gain comes from one 90kiteration run instead of 21 separate 200k-iteration fits.
+NeRF2 and GRaF are already shared models without N -way training. Their 14 to 16 h costs reflect
+roughly 600k iterations of volumetric sampling and backpropagation, consistent with the implicit
+paradigm above.
+Inference. For the GSRF and RF-3DGS backbones, the multi-receiver rasterizer detailed in Appendix D renders all N receivers in one CUDA call. The per-method speedup over the per-receiver
+baseline depends on how much of the original cost was sharable versus per-pixel work:
+• GSRF: 238 → 31 ms, a 7.6× speedup that is the largest of the three because FLE-degree 9
+with L = 100 components per Gaussian makes basis evaluation the dominant per-receiver cost.
+Our batched eval_fle now performs this evaluation once per transmitter and reuses it across
+all N receivers, eliminating the most expensive sharable component.
+• RF-3DGS: 156 → 35 ms, a 4.4× speedup. At SH degree 4 with L = 25, basis evaluation is
+less costly, and most savings arise from shared preprocessing and tile sorting rather than the
+per-pixel kernel.
+• WRF-GS+: 52 → 43 ms, only a 1.2× speedup. In the measured implementation, the receiverindependent DeformModel step is shared, whereas Gaussian rasterization runs separately for
+each receiver in Python. A native multi-receiver rasterizer offers a route to additional inference
+savings for this backbone.
+The cost breakdown also explains two ordering effects. First, GSRF + RxGS ends up faster than RF3DGS + RxGS at 31 versus 35 ms, despite per-receiver GSRF being slower than per-receiver RF3DGS at 11.3 versus 7.45 ms. Once basis evaluation is amortized, the rasterizer dominates, and rasterizer cost scales with the number of Gaussians, of which RF-3DGS has more at 37.7k versus 31.8k.
+Second, NeRF2 and GRaF have no batchable structure across receivers. Their per-transmitter cost
+remains N times the per-sample cost, yielding the 60 to 1900× differences reported in the table.
+Storage. Per-receiver baselines store N independent Gaussian-state checkpoints, whereas RxGS
+stores one. The deployable footprint decreases by roughly a factor of N :
+• GSRF: 548 → 26 MB, a 21× reduction. The absolute RxGS size is the largest of the three
+because GSRF carries K = 32k Gaussians at L = 100 FLE components, and storage scales
+as K · L · C · 4 bytes plus roughly 10K bytes for geometry attributes.
+• RF-3DGS: 182 → 8.8 MB, a 21× reduction. Although RF-3DGS has more Gaussians
+than GSRF (K = 38k), its smaller L = 25 yields a smaller model.
+• WRF-GS+: 75.6 → 3.2 MB, a 24× reduction. The smallest absolute size comes from K = 14k
+at L = 16, plus a 2.2 MB DeformModel. The slightly higher reduction ratio reflects the same N
+collapse at smaller absolute scale.
+The 3.2 → 8.8 → 26 MB ordering of the RxGS rows therefore tracks K · L rather than the perreceiver baseline ranking. NeRF2 and GRaF are shared models that do not multiply with N but
+pay this saving back in inference compute. Their sizes differ substantially (2.6 MB for NeRF2
+versus 143.7 MB for GRaF), because GRaF stores training-receiver reference spectra.
+Receiver-count scaling. Per-receiver baselines require N separately trained and stored models. The
+shared approach stores one model and uses a batched rasterization call for the FLE and SH backbones.
+Stage II training processes receiver-dependent samples, batched inference writes N outputs and
+performs some receiver-dependent work, and the WRF-GS+ variant retains a render loop. Model
+storage is shared, while training and inference costs vary with receiver count and backbone. Table 2
+measures the resulting savings at N = 21.
+27
+Receiver-Conditioned Scene MLPs. NeRF2 [5] conditions a scene MLP on the receiver,
+while GRaF [29] conditions on both endpoints. This approach incurs per-ray volumetric sampling and MLP evaluation at each query. At the measured N = 21 setting, Table 2 shows that NeRF2
+and GRaF take roughly 60 to 1900× longer per transmitter than the shared 3DGS variants. RxGS
+retains the explicit 3DGS scene representation and applies receiver-conditioned modulation around
+frozen geometry. The global and local branches require O(L + K) network evaluations per receiver
+query, consistent with §4.3. The rasterizer in Appendix D shares transmitter-side projection and
+sorting across receivers. The two-stage decomposition trains geometry once and restricts receiver
+dependence to radiance.
+G.4
+Qualitative Spectrum Visualization
+Figure 9 visualizes spectrum predictions on one training receiver (RX1) and two receivers excluded
+from training (RX2, RX3), each evaluated at three test transmitters (TX1, TX2, TX3). For visual clarity
+we show one representative per design family: RxGS for Gaussian splatting with receiver-position
+conditioning, NeRF2 for continuous neural fields with receiver conditioning, and WRF-GS+ for
+per-receiver Gaussian splatting without conditioning. GSRF and RF-3DGS share the per-receiver
+structure of WRF-GS+ and exhibit similar failures at unseen receivers.
+RX1 (Seen)
+TX2
+TX3
+TX1
+TX2
+RX3 (Unseen)
+TX3
+TX1
+TX2
+TX3
+WRF-GS+
+NeRF2
+Ours
+GT
+TX1
+RX2 (Unseen)
+Figure 9: Qualitative comparison of RFID spatial spectrum prediction. RX1 is seen during training,
+while RX2 and RX3 are excluded from training. RxGS produces the closest match to ground truth on
+unseen receivers. NeRF2 predictions are overly smooth, missing sharp directional peaks. At receivers
+excluded from training, WRF-GS+ uses the closest trained-receiver checkpoint, yielding degraded
+predictions.
+All methods recover the dominant structure on the seen receiver RX1. Prediction differences are more
+pronounced at the unseen receivers RX2 and RX3.
+RxGS Preserves Sharp Directional Peaks. On RX2 and RX3, RxGS reproduces the narrow, bright
+lobes of the ground truth (e.g., RX2–TX1, RX2–TX2, RX3–TX1) at the correct azimuth and elevation.
+Receiver conditioning transfers these peaks to unseen receivers.
+NeRF2 Over-Smooths. NeRF2 predictions on unseen receivers are plausible but visibly blurred.
+Peaks smear into broader, lower-amplitude regions, and fine directional structure is lost. The continuous MLP interpolates between training receivers, while the high-frequency lobes that distinguish
+their views are attenuated in these examples.
+28
+WRF-GS+ at Unseen Receivers. WRF-GS+ trains one model per receiver and lacks a query
+mechanism for new receiver positions. At receiver positions excluded from training, it uses the
+nearest trained-receiver checkpoint. The RX2 and RX3 predictions resemble a perturbed version of a
+different receiver’s spectrum. The coarse shape is sometimes close, but peak positions and amplitudes
+are systematically wrong.
+G.5
+Scaling with Number of Receivers
+Setting. We measure how generalization to unseen receivers depends on receiver diversity seen
+during training. For each N ∈ {3, 6, 9, 12, 16, 21}, we train a single unified RxGS model on N
+training receivers and evaluate on all 21 receivers, separating results into seen and unseen groups.
+To control subset-selection variance, we draw 7 random training subsets at each N and report mean
+and standard deviation. The N =21 point serves as an upper bound where all receivers are seen.
+Architecture, hyperparameters, and the transmitter train/test split remain fixed across runs. Only the
+number of training receivers varies.
+MAE (dBm)
+10
+Unseen RX
+All RX
+Seen RX
+8
+6
+4
+3
+6 9 12 16
+# Training Receivers
+PSNR (dB)
+Seen-Receiver Accuracy Is Flat in N . The seen-receiver curves in Figure 10 stay flat as the
+training-receiver count grows. On BLE, seen MAE varies only between 3.55 and 3.80 dBm despite
+the training set growing 7×. On spectrum, seen PSNR ranges from 22.58 to 23.22 dB across the
+same receiver-count settings. Across the tested subsets, shared geometry and receiver conditioning
+maintain similar seen-receiver accuracy as the number of jointly modeled receivers increases.
+21
+(a) BLE RSSI
+24
+22
+20
+18
+16
+Unseen RX
+All RX
+Seen RX
+3
+6 9 12 16
+# Training Receivers
+21
+(b) RFID Spectrum
+Figure 10: Scaling with the number of training receivers. Seen accuracy stays flat while unseen
+accuracy improves with N .
+Unseen-Receiver Accuracy Improves with N . The unseen-receiver curves in Figure 10 drop
+substantially as N increases. On BLE, unseen MAE drops from 8.59 dBm at N =3 to 5.04 dBm
+at N =16, a 41% relative reduction. The seen-to-unseen gap shrinks from 5.04 to 1.32 dBm over
+the same range. On spectrum, unseen PSNR climbs from 20.01 dB at N =3 to 21.39 dB at N =16,
+narrowing the gap from 3.21 to 1.19 dB. Both curves converge to the seen-receiver value as N → 21.
+Implication. The combined pattern of flat seen accuracy and improving unseen accuracy indicates
+that the conditioning module learns a transferable, position-aware function of the receiver rather than
+memorizing per-receiver corrections. A small number of training receivers leaves the conditioning
+manifold too sparse to disambiguate receiver-driven variation from scene-driven structure, producing
+large extrapolation errors. Adding receivers densifies this manifold, enabling accurate interpolation to
+unseen positions. Diminishing returns beyond N =12 indicate that around a dozen training receivers
+cover much of the measured variation in the evaluated scenes. For practical deployment, this means
+one can train on a modest number of representative anchor receivers rather than collecting calibration
+data at every possible position.
+29
+G.6
+Sensitivity to Reference Receiver Choice
+Setting. Stage I requires a reference receiver to learn the scene geometry. Deployment of RxGS
+requires selecting a reference receiver for Stage I. We therefore evaluate the sensitivity of final
+performance to this selection. We compare 21 single-receiver reference choices against an averagedsignal initialization that pools measurements across all receivers, training the full pipeline on the BLE
+dataset under each choice. Stage II is trained across all 21 receivers with the same hyperparameters
+in every run, and we report per-receiver MAE averaged across all 21 test receivers.
+Results. Figure 11 reports the resulting per-receiver MAE. The single-reference variants yield 3.94 ±
+0.13 dBm across a range of [3.67, 4.22] dBm, a 0.55 dBm spread or about 15% of the best singlereference MAE. The narrow spread across the 21 tested choices is consistent with the receiverindependent geometry representation derived in Appendix A. The averaged-signal initialization
+performs slightly better at 3.57 dBm, since pooling across receivers averages out per-receiver measurement noise and yields a cleaner geometry-learning signal. We therefore adopt the averaged-signal
+initialization as the default for all main-paper experiments. Each single-reference run learns Stage I
+geometry using only one receiver without signal averaging, and its MAE is 0.10 to 0.65 dBm above
+the 3.57 dBm averaged default. Averaging is a refinement rather than a requirement and uses only measurements already available to Stage II. In practice, however, either choice would yield comparable
+performance, and a practitioner can use whichever is most convenient for their deployment.
+MAE (dBm)
+4
+3
+2
+1
+0
+avg 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21
+Reference Receiver
+Figure 11: Sensitivity of RxGS to the Stage I reference receiver choice on BLE. Each of the first 21
+bars corresponds to using one receiver as the reference, and the avg bar uses the averaged signal
+across all receivers. The single-reference variants span 3.67 to 4.22 dBm, a 0.55 dBm spread, while
+the averaged-signal initialization achieves 3.57 dBm.
+G.7
+Application Study: Network Planning
+Setting. A common task for a building owner is to choose where to install a small set of access points
+so that wireless coverage is maximized across all client positions. Without an accurate channel model,
+the planner is restricted to deploying access points at positions already surveyed. With RxGS, the
+planner can score unmeasured candidates and select higher-coverage sites.
+As in §5.2, we use a 3-fold split of the 21-gateway BLE RSSI dataset into 14 trained gateways and 7
+gateways excluded from training. For each fold we randomly sample K = 5 surveyed gateways
+from the 14 trained ones and compare three deployment strategies. S URVEY-O NLY deploys at the 5
+surveyed positions with no model and no choice. O URS runs greedy maximum-coverage selection
+over all 21 candidate positions, using real RSSI for the 5 surveyed gateways and RxGS predictions
+for the other 16. U PPER B OUND runs the same greedy selection but uses real RSSI at all 21 gateways,
+giving a full-survey oracle. Once a deployment is chosen, we evaluate it on the test transmitters by
+computing each transmitter’s strongest real RSSI among the 5 deployed access points, which is the
+standard max-power association in wireless networks. Figure 12 renders one representative fold
+as a 24 × 32 grid heatmap with cell size of about 1.6 × 1.6 m. Each cell is colored by the fraction
+of transmitters whose strongest-AP RSSI exceeds −80 dBm, and cells with no test transmitters are
+shown in gray.
+30
+1.0
+Coverage
+Y (m)
+60
+50
+40
+30
+20
+10
+0.5
+10
+20
+30
+X (m)
+40
+Survey­Only (Gap to Upper = 23.7%)
+10
+20
+30
+X (m)
+40
+Ours (Gap to Upper = 8.1%)
+10
+20
+30
+X (m)
+40
+0.0
+Upper Bound
+Figure 12: Coverage heatmaps for K = 5 access-point deployment on the BLE dataset. Each
+cell shows the fraction of test transmitters in a ∼ 1.6 × 1.6 m region whose strongest-AP RSSI
+exceeds −80 dBm. Gray cells contain no measurements. S URVEY-O NLY deploys at 5 surveyed
+gateways, O URS uses RxGS predictions to select 5 from all 21 candidates, and U PPER B OUND
+greedily selects 5 from full-survey RSSI. For the displayed fold, O URS reduces the gap to U PPER
+B OUND from 23.7% to 8.1%.
+Results. The three panels share the same building footprint and the same evaluation transmitters, yet
+the resulting coverage patterns differ markedly. S URVEY-O NLY leaves a cluster of low-coverage (dark
+purple) cells in the upper corridor, where the five randomly surveyed access points provide insufficient
+coverage. These coverage gaps reflect the restriction to surveyed access-point positions. O URS
+reduces the low-coverage region by selecting higher-coverage sites among the 16 unmeasured
+candidates in place of lower-coverage surveyed sites. The remaining low-coverage cells resemble the
+full-survey reference.
+We quantify similarity to the oracle by the average per-cell absolute coverage difference, denoted
+gap-to-Upper. For the representative fold in Figure 12, the gap falls from 23.7% under S URVEY-O NLY
+to 8.1% under O URS, a roughly 3× reduction. Aggregating over the 3 folds, O URS raises the share
+of transmitters covered above −80 dBm from 87.9% under S URVEY-O NLY to 92.6%, recovering
+about 60% of the gap to the full-survey upper bound of 95.8%. In this study, predicted RSSI expands
+the candidate set while retaining the same five-gateway survey budget.
+Practical Survey Guidance. The measured-to-virtual balance depends on anchor diversity, synthesis
+fidelity, learnability of receiver effects, and how well the model represents the scene. A practical
+survey begins with spatially distributed gateways spanning distinct propagation conditions, then uses
+virtual gateways to densify candidates within the surveyed region. Withholding some measured
+gateways during model selection can reveal weakly supported areas and guide additional measurements until unseen-gateway accuracy begins to saturate. Figure 10 shows diminishing returns beyond
+about 12 gateways in this scene. Jointly choosing real and virtual sites remains open.
+G.8
+Receiver-Level Accuracy Gaps
+The RFID spectrum simulation provides visibility labels for examining how the accuracy gap varies
+with receiver geometry. For each of the 21 receivers, we compare OursGSRF with the corresponding
+per-receiver GSRF baseline on the same test samples. We relate the receiver-level PSNR gap to
+the fraction of transmitters with non-line-of-sight (NLoS) paths, mean grid-probed occlusion, and
+distance to the nearest training receiver under the protocol of §5.2. For seen receivers, NLoS fraction
+has the largest observed association with the gap (Pearson r = 0.43, p = 0.054). Two corner
+receivers behind furniture, rx15 and rx19, have approximately 99% NLoS pairs and the largest gaps.
+The correlation is r = 0.27 after excluding those two receivers. At unseen receivers, the correlations
+are r = 0.23 for NLoS fraction, r = 0.12 for mean probed occlusion, and r = 0.04 ( p = 0.88) for
+distance to the nearest training receiver. Nearest-anchor distance shows little association with the gap
+in this split.
+G.9
+Visibility, Bounce Depth, and Occlusion Features
+We use Sionna path geometry to split the same RFID test pairs into line-of-sight (LoS) and nonline-of-sight (NLoS) groups according to last-segment visibility. Table 6 reports PSNR for each
+31
+group. For the unseen-receiver comparison, the per-receiver GSRF reference is trained separately
+with measurements from each evaluated receiver.
+Table 6: RFID spectrum PSNR (dB) by last-segment visibility. At unseen receivers, the per-receiver
+baseline is trained on measurements from each evaluated receiver.
+Method
+Per-receiver GSRF
+OursGSRF , seen receivers
+OursGSRF , unseen receivers
+LoS Pairs
+NLoS Pairs
+23.35
+22.35
+21.07
+23.20
+22.59
+21.40
+Relative to the per-receiver model on the same pairs, the shared model trails by 1.00 dB on lineof-sight (LoS) and 0.61 dB on NLoS pairs at seen receivers. The corresponding gaps at unseen
+receivers are 2.28 and 1.80 dB. Among NLoS pairs, even the heaviest blockage-severity tercile has
+gaps of 0.64 dB seen and 1.50 dB unseen, both below the respective LoS gaps. Grouping pairs instead
+by dominant-path bounce count gives the largest unseen gap for direct paths at 2.2 dB. The one-, two-,
+and three-or-more-bounce groups have unseen gaps between 1.6 and 2.0 dB, and the seen groups
+show no increasing trend with bounce count. In this test set, greater blockage and bounce depth have
+gaps comparable to or smaller than those of LoS and direct paths, respectively. The PSNR gaps are
+relative to each group’s signal dynamic range.
+We also compare the grid-probed last-segment transmittance Tk with Sionna ray-traced visibility.
+At unseen receivers the probe gives Pearson r = 0.40 and an area under the receiver operating
+characteristic curve (AUC) of 0.70. At seen receivers it gives r = 0.40 and AUC 0.73. The probe
+provides similar, moderate visibility discrimination at seen and unseen receivers.
+G.10
+Occupancy-Grid Resolution
+We retrain Stage II on RFID spectrum at each occupancy-grid resolution, keeping the frozen Stage I
+geometry fixed. Table 7 shows that all three settings remain within 0.1 dB of the default 1283 grid.
+Across the evaluated 643 to 2563 range, PSNR varies by only 0.04 dB, indicating limited sensitivity
+to grid size for this room.
+Table 7: Occupancy-grid resolution on RFID spectrum. Stage II is retrained for each setting.
+G.11
+Grid
+643
+1283 (default)
+2563
+PSNR (dB)
+22.43
+22.47
+22.43
+Conditioning Capacity
+We vary the widths of both conditioning MLPs, including the local branch, while keeping their depth
+at three layers. We retrain Stage II for each RFID setting using the same frozen Gaussian geometry.
+Table 8 reports nearly constant PSNR across a roughly 25× increase in conditioning parameters.
+The total PSNR spread is 0.04 dB, and every width remains within 0.1 dB of the default. Stage II
+takes about 21 minutes per setting, while inference for N = 21 receivers remains about 31 ms
+because the same Gaussian set is rasterized. Widening the three-layer conditioner has little effect on
+the approximately 0.8 dB seen-receiver spectrum gap to per-receiver GSRF. The CSI configuration
+already uses width 256, four times the spectrum default, and has a comparable gap. Conditioner
+depth and alternative designs remain directions for improving this accuracy–efficiency tradeoff.
+Table 8: RFID spectrum performance across conditioning widths with three-layer branches retrained
+in Stage II.
+Width d
+64 (default)
+128
+256
+512
+22.47
+11.7k
+22.48
+28.1k
+22.44
+85.6k
+22.46
+298.9k
+PSNR (dB)
+Conditioning parameters
+H
+Four Evaluation Configurations
+RF data synthesis is queried along two axes, transmitter and receiver. Evaluation configurations are
+distinguished by which axis contains test positions excluded from training. Table 9 enumerates the
+32
+four possibilities. The labels in this table follow our experimental setup: transmitter positions are
+densely sampled, while receivers occupy a smaller set of fixed positions.
+Table 9: Four evaluation configurations.
+Seen Receiver
+Seen Transmitter
+Unseen Transmitter
+(1) training fit
+(2) novel transmitter
+Unseen Receiver (3) novel receiver
+(4) novel transmitter & receiver
+Prior per-receiver 3DGS methods principally evaluate cell (2), predicting at an unseen position
+on the moving, densely surveyed side while retaining a checkpoint trained for the fixed receiver
+side [18, 20, 19]. The endpoint names differ across papers: WRF-GS+ fixes the physical receiver,
+whereas RF-3DGS and GSRF fix the physical transmitter, which maps to the fixed receiver role in our
+formulation after applying channel reciprocity. Here, reciprocity aligns endpoint roles for comparing
+model configurations, while direction-resolved measurements such as angular spectra retain their
+physical endpoint orientation. In all three designs, the moving side enters rendering, while the fixed
+side is absorbed into model parameters or training data. NeRF2 instead queries one shared field from
+the receiver’s ray origin and can support unseen receivers at greater computational cost [5]. GRaF’s
+query uses reference spectra measured at each receiver [29]. We follow this convention in §5.1 for
+direct comparison, while using one unified model for all N receivers. Table 2 reports the resulting
+training, inference, and storage savings.
+Cell (4) motivates RxGS: it predicts at an unseen transmitter and a fixed receiver excluded from
+training but located within the surveyed scene and deployment region. This models the addition of
+a receiver within an existing surveyed environment without collecting its measurements or fitting
+another receiver-specific checkpoint. We report cell (4) in §5.2. Cell (4) subsumes cell (3), since
+reusing training transmitters at an unseen receiver is a sub-case of generalizing along both axes.
+Cell (1) reports training-time fit and is bounded by cell (2).
+I
+Broader Impacts
+RxGS reduces the cost of collecting RF data for wireless networking and sensing. Site surveys at
+thousands of transmitter–receiver positions are labor-intensive and time-consuming. Synthesizing RF
+data at unmeasured fixed receiver positions inside a static, surveyed environment could reduce
+the measurement burden for wireless planning and indoor localization, as illustrated in §5.4 and
+Appendix G.7. The coverage estimates may also guide infrastructure placement.
+A future application is connectivity-aware planning for mobile agents within a static, previously
+surveyed environment. A shared model could score candidate receiver positions inside the surveyed
+region without fitting a new checkpoint at each location. Future work will evaluate continuous
+receiver motion, changing environments, and robotic deployments.
+The same capability could be misused for passive localization or tracking without consent if an
+attacker combines synthesized fingerprints with captured signals. This risk is not unique to RxGS
+and applies to any RF fingerprinting method, but practitioners deploying fingerprint databases should
+follow standard privacy safeguards such as on-device inference, aggregation, and informed consent.
+33
+NeurIPS Paper Checklist
+The checklist is designed to encourage best practices for responsible machine learning research,
+addressing issues of reproducibility, transparency, research ethics, and societal impact. Do not remove
+the checklist: The papers not including the checklist will be desk rejected. The checklist should
+follow the references and follow the (optional) supplemental material. The checklist does NOT count
+towards the page limit.
+Please read the checklist guidelines carefully for information on how to answer these questions. For
+each question in the checklist:
+• You should answer [Yes], [No], or [N/A].
+• [N/A] means either that the question is Not Applicable for that particular paper or the
+relevant information is Not Available.
+• Please provide a short (1–2 sentence) justification right after your answer (even for [N/A]).
+The checklist answers are an integral part of your paper submission. They are visible to the
+reviewers, area chairs, senior area chairs, and ethics reviewers. You will also be asked to include it
+(after eventual revisions) with the final version of your paper, and its final version will be published
+with the paper.
+The reviewers of your paper will be asked to use the checklist as one of the factors in their evaluation.
+While [Yes] is generally preferable to [No], it is perfectly acceptable to answer [No] provided a
+proper justification is given (e.g., error bars are not reported because it would be too computationally
+expensive” or “we were unable to find the license for the dataset we used”). In general, answering
+[No] or [N/A] is not grounds for rejection. While the questions are phrased in a binary way, we
+acknowledge that the true answer is often more nuanced, so please just use your best judgment and
+write a justification to elaborate. All supporting evidence can appear either in the main paper or the
+supplemental material, provided in appendix. If you answer [Yes] to a question, in the justification
+please point to the section(s) where related material for the question can be found.
+IMPORTANT, please:
+• Delete this instruction block, but keep the section heading “NeurIPS Paper Checklist",
+• Keep the checklist subsection headings, questions/answers and guidelines below.
+• Do not modify the questions and only use the provided macros for your answers.
+1. Claims
+Question: Do the main claims made in the abstract and introduction accurately reflect the
+paper’s contributions and scope?
+Answer: [Yes]
+Justification: The abstract and introduction reflect the main contributions of RxGS, including
+receiver-generalizable RF data synthesis within a single model and a radiance-representationagnostic conditioning design.
+Guidelines:
+• The answer [N/A] means that the abstract and introduction do not include the claims
+made in the paper.
+• The abstract and/or introduction should clearly state the claims made, including the
+contributions made in the paper and important assumptions and limitations. A [No] or
+[N/A] answer to this question will not be perceived well by the reviewers.
+• The claims made should match theoretical and experimental results, and reflect how
+much the results can be expected to generalize to other settings.
+• It is fine to include aspirational goals as motivation as long as it is clear that these goals
+are not attained by the paper.
+2. Limitations
+Question: Does the paper discuss the limitations of the work performed by the authors?
+Answer: [Yes]
+34
+Justification: Section 6 discusses the limitations of RxGS, including the static-scene assumption and the lack of cross-scene generalization.
+Guidelines:
+• The answer [N/A] means that the paper has no limitation while the answer [No] means
+that the paper has limitations, but those are not discussed in the paper.
+• The authors are encouraged to create a separate “Limitations” section in their paper.
+• The paper should point out any strong assumptions and how robust the results are to
+violations of these assumptions (e.g., independence assumptions, noiseless settings,
+model well-specification, asymptotic approximations only holding locally). The authors
+should reflect on how these assumptions might be violated in practice and what the
+implications would be.
+• The authors should reflect on the scope of the claims made, e.g., if the approach was
+only tested on a few datasets or with a few runs. In general, empirical results often
+depend on implicit assumptions, which should be articulated.
+• The authors should reflect on the factors that influence the performance of the approach.
+For example, a facial recognition algorithm may perform poorly when image resolution
+is low or images are taken in low lighting. Or a speech-to-text system might not be
+used reliably to provide closed captions for online lectures because it fails to handle
+technical jargon.
+• The authors should discuss the computational efficiency of the proposed algorithms
+and how they scale with dataset size.
+• If applicable, the authors should discuss possible limitations of their approach to
+address problems of privacy and fairness.
+• While the authors might fear that complete honesty about limitations might be used by
+reviewers as grounds for rejection, a worse outcome might be that reviewers discover
+limitations that aren’t acknowledged in the paper. The authors should use their best
+judgment and recognize that individual actions in favor of transparency play an important role in developing norms that preserve the integrity of the community. Reviewers
+will be specifically instructed to not penalize honesty concerning limitations.
+3. Theory assumptions and proofs
+Question: For each theoretical result, does the paper provide the full set of assumptions and
+a complete (and correct) proof?
+Answer: [Yes]
+Justification: The geometry-radiance decomposition and the last-segment factorization are
+stated with full assumptions in Section 4 and proved in Appendices A, B, and C.
+Guidelines:
+• The answer [N/A] means that the paper does not include theoretical results.
+• All the theorems, formulas, and proofs in the paper should be numbered and crossreferenced.
+• All assumptions should be clearly stated or referenced in the statement of any theorems.
+• The proofs can either appear in the main paper or the supplemental material, but if
+they appear in the supplemental material, the authors are encouraged to provide a short
+proof sketch to provide intuition.
+• Inversely, any informal proof provided in the core of the paper should be complemented
+by formal proofs provided in appendix or supplemental material.
+• Theorems and Lemmas that the proof relies upon should be properly referenced.
+4. Experimental result reproducibility
+Question: Does the paper fully disclose all the information needed to reproduce the main experimental results of the paper to the extent that it affects the main claims and/or conclusions
+of the paper (regardless of whether the code and data are provided or not)?
+Answer: [Yes]
+Justification: Appendix E provides full implementation details and hyperparameters, and
+Appendix F describes the datasets and splits used for all experiments.
+35
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• If the paper includes experiments, a [No] answer to this question will not be perceived
+well by the reviewers: Making the paper reproducible is important, regardless of
+whether the code and data are provided or not.
+• If the contribution is a dataset and/or model, the authors should describe the steps taken
+to make their results reproducible or verifiable.
+• Depending on the contribution, reproducibility can be accomplished in various ways.
+For example, if the contribution is a novel architecture, describing the architecture fully
+might suffice, or if the contribution is a specific model and empirical evaluation, it may
+be necessary to either make it possible for others to replicate the model with the same
+dataset, or provide access to the model. In general. releasing code and data is often
+one good way to accomplish this, but reproducibility can also be provided via detailed
+instructions for how to replicate the results, access to a hosted model (e.g., in the case
+of a large language model), releasing of a model checkpoint, or other means that are
+appropriate to the research performed.
+• While NeurIPS does not require releasing code, the conference does require all submissions to provide some reasonable avenue for reproducibility, which may depend on the
+nature of the contribution. For example
+(a) If the contribution is primarily a new algorithm, the paper should make it clear how
+to reproduce that algorithm.
+(b) If the contribution is primarily a new model architecture, the paper should describe
+the architecture clearly and fully.
+(c) If the contribution is a new model (e.g., a large language model), then there should
+either be a way to access this model for reproducing the results or a way to reproduce
+the model (e.g., with an open-source dataset or instructions for how to construct
+the dataset).
+(d) We recognize that reproducibility may be tricky in some cases, in which case
+authors are welcome to describe the particular way they provide for reproducibility.
+In the case of closed-source models, it may be that access to the model is limited in
+some way (e.g., to registered users), but it should be possible for other researchers
+to have some path to reproducing or verifying the results.
+5. Open access to data and code
+Question: Does the paper provide open access to the data and code, with sufficient instructions to faithfully reproduce the main experimental results, as described in supplemental
+material?
+Answer: [Yes]
+Justification: The BLE RSSI and WiFi CSI datasets are publicly available as cited, the RFID
+spectrum dataset generation is fully described in Appendix F, and the code will be released
+upon publication.
+Guidelines:
+• The answer [N/A] means that paper does not include experiments requiring code.
+• Please see the NeurIPS code and data submission guidelines (https://neurips.cc/
+public/guides/CodeSubmissionPolicy) for more details.
+• While we encourage the release of code and data, we understand that this might not
+be possible, so [No] is an acceptable answer. Papers cannot be rejected simply for not
+including code, unless this is central to the contribution (e.g., for a new open-source
+benchmark).
+• The instructions should contain the exact command and environment needed to run to
+reproduce the results. See the NeurIPS code and data submission guidelines (https:
+//neurips.cc/public/guides/CodeSubmissionPolicy) for more details.
+• The authors should provide instructions on data access and preparation, including how
+to access the raw data, preprocessed data, intermediate data, and generated data, etc.
+• The authors should provide scripts to reproduce all experimental results for the new
+proposed method and baselines. If only a subset of experiments are reproducible, they
+should state which ones are omitted from the script and why.
+36
+• At submission time, to preserve anonymity, the authors should release anonymized
+versions (if applicable).
+• Providing as much information as possible in supplemental material (appended to the
+paper) is recommended, but including URLs to data and code is permitted.
+6. Experimental setting/details
+Question: Does the paper specify all the training and test details (e.g., data splits, hyperparameters, how they were chosen, type of optimizer) necessary to understand the results?
+Answer: [Yes]
+Justification: Appendix E specifies the optimizer, learning rates, and all hyperparameters,
+and Appendix E specifies the data splits for each dataset.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The experimental setting should be presented in the core of the paper to a level of detail
+that is necessary to appreciate the results and make sense of them.
+• The full details can be provided either with the code, in appendix, or as supplemental
+material.
+7. Experiment statistical significance
+Question: Does the paper report error bars suitably and correctly defined or other appropriate
+information about the statistical significance of the experiments?
+Answer: [Yes]
+Justification: Table 1 and all per-receiver results report the mean and standard deviation
+across per-receiver means, as described in Section 5.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The authors should answer [Yes] if the results are accompanied by error bars, confidence
+intervals, or statistical significance tests, at least for the experiments that support the
+main claims of the paper.
+• The factors of variability that the error bars are capturing should be clearly stated (for
+example, train/test split, initialization, random drawing of some parameter, or overall
+run with given experimental conditions).
+• The method for calculating the error bars should be explained (closed form formula,
+call to a library function, bootstrap, etc.)
+• The assumptions made should be given (e.g., Normally distributed errors).
+• It should be clear whether the error bar is the standard deviation or the standard error
+of the mean.
+• It is OK to report 1-sigma error bars, but one should state it. The authors should
+preferably report a 2-sigma error bar than state that they have a 96% CI, if the hypothesis
+of Normality of errors is not verified.
+• For asymmetric distributions, the authors should be careful not to show in tables or
+figures symmetric error bars that would yield results that are out of range (e.g., negative
+error rates).
+• If error bars are reported in tables or plots, the authors should explain in the text how
+they were calculated and reference the corresponding figures or tables in the text.
+8. Experiments compute resources
+Question: For each experiment, does the paper provide sufficient information on the computer resources (type of compute workers, memory, time of execution) needed to reproduce
+the experiments?
+Answer: [Yes]
+Justification: Section 5 states that all experiments are conducted on a single NVIDIA H100
+GPU, and Table 2 reports per-method training and inference times.
+Guidelines:
+37
+• The answer [N/A] means that the paper does not include experiments.
+• The paper should indicate the type of compute workers CPU or GPU, internal cluster,
+or cloud provider, including relevant memory and storage.
+• The paper should provide the amount of compute required for each of the individual
+experimental runs as well as estimate the total compute.
+• The paper should disclose whether the full research project required more compute
+than the experiments reported in the paper (e.g., preliminary or failed experiments that
+didn’t make it into the paper).
+9. Code of ethics
+Question: Does the research conducted in the paper conform, in every respect, with the
+NeurIPS Code of Ethics https://neurips.cc/public/EthicsGuidelines?
+Answer: [Yes]
+Justification: The research conforms with the NeurIPS Code of Ethics in every respect.
+Guidelines:
+• The answer [N/A] means that the authors have not reviewed the NeurIPS Code of
+Ethics.
+• If the authors answer [No], they should explain the special circumstances that require a
+deviation from the Code of Ethics.
+• The authors should make sure to preserve anonymity (e.g., if there is a special consideration due to laws or regulations in their jurisdiction).
+10. Broader impacts
+Question: Does the paper discuss both potential positive societal impacts and negative
+societal impacts of the work performed?
+Answer: [Yes]
+Justification: Appendix I discusses the broader impacts of RxGS.
+Guidelines:
+• The answer [N/A] means that there is no societal impact of the work performed.
+• If the authors answer [N/A] or [No], they should explain why their work has no societal
+impact or why the paper does not address societal impact.
+• Examples of negative societal impacts include potential malicious or unintended uses
+(e.g., disinformation, generating fake profiles, surveillance), fairness considerations
+(e.g., deployment of technologies that could make decisions that unfairly impact specific
+groups), privacy considerations, and security considerations.
+• The conference expects that many papers will be foundational research and not tied
+to particular applications, let alone deployments. However, if there is a direct path to
+any negative applications, the authors should point it out. For example, it is legitimate
+to point out that an improvement in the quality of generative models could be used to
+generate Deepfakes for disinformation. On the other hand, it is not needed to point out
+that a generic algorithm for optimizing neural networks could enable people to train
+models that generate Deepfakes faster.
+• The authors should consider possible harms that could arise when the technology is
+being used as intended and functioning correctly, harms that could arise when the
+technology is being used as intended but gives incorrect results, and harms following
+from (intentional or unintentional) misuse of the technology.
+• If there are negative societal impacts, the authors could also discuss possible mitigation
+strategies (e.g., gated release of models, providing defenses in addition to attacks,
+mechanisms for monitoring misuse, mechanisms to monitor how a system learns from
+feedback over time, improving the efficiency and accessibility of ML).
+11. Safeguards
+Question: Does the paper describe safeguards that have been put in place for responsible
+release of data or models that have a high risk for misuse (e.g., pre-trained language models,
+image generators, or scraped datasets)?
+38
+Answer: [N/A]
+Justification: The paper poses no such risks.
+Guidelines:
+• The answer [N/A] means that the paper poses no such risks.
+• Released models that have a high risk for misuse or dual-use should be released with
+necessary safeguards to allow for controlled use of the model, for example by requiring
+that users adhere to usage guidelines or restrictions to access the model or implementing
+safety filters.
+• Datasets that have been scraped from the Internet could pose safety risks. The authors
+should describe how they avoided releasing unsafe images.
+• We recognize that providing effective safeguards is challenging, and many papers do
+not require this, but we encourage authors to take this into account and make a best
+faith effort.
+12. Licenses for existing assets
+Question: Are the creators or original owners of assets (e.g., code, data, models), used in
+the paper, properly credited and are the license and terms of use explicitly mentioned and
+properly respected?
+Answer: [Yes]
+Justification: All existing datasets and baselines used in the paper are properly cited in
+Section 5 and Appendix F.
+Guidelines:
+• The answer [N/A] means that the paper does not use existing assets.
+• The authors should cite the original paper that produced the code package or dataset.
+• The authors should state which version of the asset is used and, if possible, include a
+URL.
+• The name of the license (e.g., CC-BY 4.0) should be included for each asset.
+• For scraped data from a particular source (e.g., website), the copyright and terms of
+service of that source should be provided.
+• If assets are released, the license, copyright information, and terms of use in the
+package should be provided. For popular datasets, paperswithcode.com/datasets
+has curated licenses for some datasets. Their licensing guide can help determine the
+license of a dataset.
+• For existing datasets that are re-packaged, both the original license and the license of
+the derived asset (if it has changed) should be provided.
+• If this information is not available online, the authors are encouraged to reach out to
+the asset’s creators.
+13. New assets
+Question: Are new assets introduced in the paper well documented and is the documentation
+provided alongside the assets?
+Answer: [Yes]
+Justification: The RFID spatial spectrum dataset is documented in Appendix F, and the
+implementation is documented in Appendix E.
+Guidelines:
+• The answer [N/A] means that the paper does not release new assets.
+• Researchers should communicate the details of the dataset/code/model as part of their
+submissions via structured templates. This includes details about training, license,
+limitations, etc.
+• The paper should discuss whether and how consent was obtained from people whose
+asset is used.
+• At submission time, remember to anonymize your assets (if applicable). You can either
+create an anonymized URL or include an anonymized zip file.
+39
+14. Crowdsourcing and research with human subjects
+Question: For crowdsourcing experiments and research with human subjects, does the paper
+include the full text of instructions given to participants and screenshots, if applicable, as
+well as details about compensation (if any)?
+Answer: [N/A]
+Justification: The paper does not involve crowdsourcing or research with human subjects.
+Guidelines:
+• The answer [N/A] means that the paper does not involve crowdsourcing nor research
+with human subjects.
+• Including this information in the supplemental material is fine, but if the main contribution of the paper involves human subjects, then as much detail as possible should be
+included in the main paper.
+• According to the NeurIPS Code of Ethics, workers involved in data collection, curation,
+or other labor should be paid at least the minimum wage in the country of the data
+collector.
+15. Institutional review board (IRB) approvals or equivalent for research with human
+subjects
+Question: Does the paper describe potential risks incurred by study participants, whether
+such risks were disclosed to the subjects, and whether Institutional Review Board (IRB)
+approvals (or an equivalent approval/review based on the requirements of your country or
+institution) were obtained?
+Answer: [N/A]
+Justification: The paper does not involve research with human subjects.
+Guidelines:
+• The answer [N/A] means that the paper does not involve crowdsourcing nor research
+with human subjects.
+• Depending on the country in which research is conducted, IRB approval (or equivalent)
+may be required for any human subjects research. If you obtained IRB approval, you
+should clearly state this in the paper.
+• We recognize that the procedures for this may vary significantly between institutions
+and locations, and we expect authors to adhere to the NeurIPS Code of Ethics and the
+guidelines for their institution.
+• For initial submissions, do not include any information that would break anonymity (if
+applicable), such as the institution conducting the review.
+16. Declaration of LLM usage
+Question: Does the paper describe the usage of LLMs if it is an important, original, or
+non-standard component of the core methods in this research? Note that if the LLM is used
+only for writing, editing, or formatting purposes and does not impact the core methodology,
+scientific rigor, or originality of the research, declaration is not required.
+Answer: [N/A]
+Justification: The core method development does not involve LLMs.
+Guidelines:
+• The answer [N/A] means that the core method development in this research does not
+involve LLMs as any important, original, or non-standard components.
+• Please refer to our LLM policy in the NeurIPS handbook for what should or should not
+be described.
+40

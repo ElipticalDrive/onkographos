@@ -1,0 +1,219 @@
+# GPU-based Cut-off Slice Generation
+
+Also called: Rezk-Salama method, Vertex Shader Slice Generation, View-Aligned Slicing (Proxy Geometry Generation), Viewport-Aligned Slices Intersection Algorithm
+
+## Overview
+GPU-based Cut-off Slice Generation is an object-order volume rendering technique that computes proxy geometry (polygons) representing the intersection of slicing planes with the volume's bounding box directly on the GPU [S1, unofficial][S2, book][S4]. It solves the performance bottleneck of CPU-based slice generation by offloading the calculation of intersection points, polygon sorting, and tessellation to the vertex shader, enabling interactive frame rates [S1, unofficial]. Unlike [Plane Slicing](845-plane-slicing.md) which may compute geometry on the CPU, this method keeps the geometry generation pipeline entirely within the graphics hardware, balancing workload between vertex and fragment shaders to maintain high performance during camera rotation and interaction [S1, unofficial].
+
+## How it works
+The method generates a series of parallel polygons (proxy geometry) that slice through the volumetric data. These polygons are rendered in back-to-front or front-to-back order, and hardware blending composites the sampled volume values into the final image [S1, unofficial][S2, book][S3, unofficial].
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   Volumetric data stored as a 3D texture [S1, unofficial].
+    *   Modelview matrix transforming object space to view space [S2, book][S4].
+    *   Camera parameters: position, view direction, viewport [S1, unofficial].
+    *   Rendering parameters: number of slices, sampling rate, voxel size [S1, unofficial][S2, book].
+    *   Transfer function (typically a 2D texture mapping scalar values to RGBA) [S1, unofficial][S2, book].
+*   **Outputs**:
+    *   A set of tessellated triangle primitives (proxy polygons) ready for rasterization [S2, book][S4].
+    *   Final composited image via fragment shader blending [S1, unofficial].
+
+### Data Structures
+*   **Bounding Box**: Represented by 8 vertices ($V_0$ to $V_7$) and 12 edges. In the Rezk-Salama implementation, vertices are ordered such that $V_0$ is closest to the camera and $V_7$ is farthest [S1, unofficial].
+*   **Edge Groups**: Edges are categorized into 6 groups based on their geometric relationship to the viewing direction and texture axes:
+    *   **Red**: $E_{0\rightarrow1}, E_{1\rightarrow4}, E_{4\rightarrow7}$ (always intersect) [S1, unofficial].
+    *   **Blue**: $E_{0\rightarrow3}, E_{3\rightarrow6}, E_{6\rightarrow7}$ (always intersect) [S1, unofficial].
+    *   **Green**: $E_{0\rightarrow2}, E_{2\rightarrow5}, E_{5\rightarrow7}$ (always intersect) [S1, unofficial].
+    *   **Yellow**: $E_{1\rightarrow5}$ (0 or 1 intersection) [S1, unofficial].
+    *   **Cyan**: $E_{2\rightarrow6}$ (0 or 1 intersection) [S1, unofficial].
+    *   **Purple**: $E_{3\rightarrow4}$ (0 or 1 intersection) [S1, unofficial].
+*   **Edge Flags**: Each edge stores a 6-bit flag, where each bit corresponds to one of the 6 faces of the bounding box (Top, Bottom, Left, Right, Front, Back). A bit is set if the edge belongs to that face [S3, unofficial]. This facilitates sorting by checking if adjacent intersection points share a common face via bitwise OR [S3, unofficial].
+*   **Vertex List**: A temporary list with a fixed maximum size of 6 vertices to store intersection points for a single slice plane [S2, book][S4].
+
+### Algorithm Steps
+
+1.  **Initialization**: Bind the volumetric data as a 3D texture [S1, unofficial]. Setup rendering parameters including camera position, view direction, and number of slices [S1, unofficial].
+2.  **Transform Bounding Box**: Transform the 8 vertices of the volume bounding box from object space to view space using the modelview matrix [S2, book][S4].
+3.  **Determine Slicing Planes**:
+    *   Find the minimum ($z_{min}$) and maximum ($z_{max}$) z-coordinates of the transformed vertices in view space [S2, book][S4].
+    *   Calculate the number of sampling planes ($N$) and the spacing ($\Delta z$) based on the voxel size and current sampling rate [S2, book][S4].
+    *   Define $N$ parallel planes perpendicular to the viewing direction (z-axis in view space), spaced equidistantly from the view origin [S1, unofficial][S2, book].
+4.  **Generate Proxy Geometry (Per Plane)**: For each plane $P$ (processed in front-to-back or back-to-front order):
+    *   **Calculate Intersections**: Compute the intersection of plane $P$ with the 12 edges of the bounding box.
+        *   Represent edge $i \rightarrow j$ as $\vec{x} = \vec{V}_i + \lambda \vec{e}_{i \rightarrow j}$, where $\vec{e}_{i \rightarrow j} = \vec{V}_j - \vec{V}_i$ and $\lambda \in [0, 1]$ [S1, unofficial].
+        *   Represent plane $P$ in Hessian normal form: $\overrightarrow{n}_p \cdot \overrightarrow{x} = d$, where $\overrightarrow{n}_p$ is the viewing direction and $d$ is the distance to the origin [S1, unofficial].
+        *   Solve for $\lambda$:
+            $$ \lambda = \begin{cases} \frac{d - \vec{n}_p \cdot \vec{V}_i}{\vec{n}_p \cdot \vec{e}_{i \rightarrow j}}, & \vec{n}_p \cdot \vec{e}_{i \rightarrow j} \neq 0 \\ -1.0, & \text{otherwise} \end{cases} $$
+        *   If $\lambda \in [0, 1]$, the intersection is valid. If the denominator is 0, the edge is parallel to the plane; use $\lambda = -1.0$ to denote this [S1, unofficial].
+    *   **Filter and Sort (Rezk-Salama Method)**:
+        *   The vertex shader must output exactly 6 vertices per polygon, even if the cross-section has fewer vertices [S1, unofficial].
+        *   Traverse the edges in the specific order: Red, Yellow, Green, Cyan, Blue, Purple [S1, unofficial].
+        *   For Red, Green, and Blue edges, an intersection always exists.
+        *   For Yellow, Cyan, and Purple edges, check if an intersection exists ($\lambda \in [0, 1]$).
+        *   If an intersection exists on a "side" edge (Yellow, Cyan, Purple), use it.
+        *   If a side edge has **no** intersection, duplicate the intersection from the preceding "main" edge (Red, Green, or Blue) to fill the vertex slot [S1, unofficial].
+        *   This ensures the output is always a closed polygon with 6 vertices (some potentially duplicated) [S1, unofficial].
+    *   **Alternative Sorting (Moret/Shapiro)**:
+        *   Compute the center of the proxy polygon by averaging the valid intersection points [S2, book][S4].
+        *   Project points onto the x-y plane.
+        *   Sort vertices clockwise or counter-clockwise using a "pseudo-angle" (tangent of the angle combined with sign of coordinates) to avoid trigonometric functions [S2, book][S4].
+    *   **Tessellation**:
+        *   Tessellate the sorted polygon into triangles (using a triangle fan or strip from the center) [S2, book][S4].
+        *   Add vertices to the output vertex array. Transform vertices back to object space if required by the rendering pipeline [S2, book][S4].
+5.  **Rendering**:
+    *   Rasterize the proxy polygons.
+    *   **Fragment Shader**:
+        *   Perform 3D texture lookup using the interpolated texture coordinates from the vertex shader to sample the volume [S1, unofficial].
+        *   Map the scalar value to RGBA using a 2D texture lookup (transfer function) [S1, unofficial].
+        *   Blend the resulting RGBA quadruplets using the alpha channel as the blending factor, accumulating color and opacity [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Vertex Shader Logic for Cut-off Slice Generation
+
+def compute_intersection(V_i, V_j, n_p, d):
+    """
+    Computes lambda for the intersection of edge V_i->V_j with plane n_p.x = d.
+    Returns lambda if valid, -1.0 otherwise.
+    """
+    e = V_j - V_i
+    denom = dot(n_p, e)
+    if denom == 0:
+        return -1.0
+    lambda_val = (d - dot(n_p, V_i)) / denom
+    if 0.0 <= lambda_val <= 1.0:
+        return lambda_val
+    return -1.0
+
+def get_texture_coord(V_i, lambda_val, k, B_min, B_max):
+    """
+    Translates object space coordinate to texture space.
+    k: unit vector in texture space (x, y, or z)
+    B_min, B_max: min/max bounds of bounding box in direction k
+    """
+    e = V_j - V_i # Implicitly available in context
+    if dot(k, e) == 0:
+        # Edge perpendicular to texture axis
+        # Result is 0 or 1 depending on position relative to min/max
+        # Simplified: if V_i is on min side, 0, else 1
+        if dot(k, V_i) <= B_min:
+            return 0.0
+        else:
+            return 1.0
+    elif dot(k, e) > 0:
+        return lambda_val
+    else:
+        return 1.0 - lambda_val
+
+def generate_slice_polygons(vertices_obj, modelview_matrix, n_p, d, B_min, B_max):
+    """
+    Generates 6 vertices for a slice polygon.
+    vertices_obj: Array of 8 bounding box vertices in object space.
+    n_p: Normal of the slicing plane (viewing direction).
+    d: Distance of plane from origin.
+    """
+    # 1. Transform vertices to view space
+    vertices_view = [transform(v, modelview_matrix) for v in vertices_obj]
+    
+    # 2. Define edge groups (indices into vertices_view)
+    # Red: 0->1, 1->4, 4->7
+    # Blue: 0->3, 3->6, 6->7
+    # Green: 0->2, 2->5, 5->7
+    # Yellow: 1->5
+    # Cyan: 2->6
+    # Purple: 3->4
+    
+    edges = [
+        (0, 1), (1, 4), (4, 7), # Red
+        (1, 5),                 # Yellow
+        (0, 2), (2, 5), (5, 7), # Green
+        (2, 6),                 # Cyan
+        (0, 3), (3, 6), (6, 7), # Blue
+        (3, 4)                  # Purple
+    ]
+    
+    # Note: The Rezk-Salama algorithm specifically traverses in order:
+    # Red (3 edges), Yellow (1 edge), Green (3 edges), Cyan (1 edge), Blue (3 edges), Purple (1 edge)
+    # However, since Red/Green/Blue always intersect, we pick one representative or all?
+    # The source says "Red, Yellow, Green, Cyan, Blue, Purple" and outputs 6 vertices.
+    # It implies we pick one intersection from each "group" or specific edges.
+    # Specifically: Red (e.g. 0->1), Yellow (1->5), Green (e.g. 0->2), Cyan (2->6), Blue (e.g. 0->3), Purple (3->4).
+    # Let's select specific edges to form the 6 slots:
+    slot_edges = [
+        (0, 1), # Red
+        (1, 5), # Yellow
+        (0, 2), # Green
+        (2, 6), # Cyan
+        (0, 3), # Blue
+        (3, 4)  # Purple
+    ]
+    
+    output_vertices = []
+    
+    for i, (idx_i, idx_j) in enumerate(slot_edges):
+        V_i = vertices_view[idx_i]
+        V_j = vertices_view[idx_j]
+        
+        lam = compute_intersection(V_i, V_j, n_p, d)
+        
+        if lam != -1.0:
+            # Valid intersection
+            P_view = V_i + lam * (V_j - V_i)
+            # Compute texture coordinates
+            # Assuming texture axis k corresponds to the primary axis of the volume
+            # For simplicity, we assume k is known or derived from volume orientation
+            # Here we assume k is the axis along which the volume is stored (e.g., Z)
+            # In a general case, k is passed or determined by the volume's axis alignment
+            k = vec3(0, 0, 1) # Example: Z-aligned volume
+            tex_coord = get_texture_coord(V_i, lam, k, B_min, B_max)
+            output_vertices.append((P_view, tex_coord))
+        else:
+            # Invalid intersection (side edge)
+            # Duplicate the previous valid intersection
+            if len(output_vertices) > 0:
+                prev = output_vertices[-1]
+                output_vertices.append(prev)
+            else:
+                # Fallback: Should not happen if Red is first and always valid
+                # [G] Guard against empty list
+                output_vertices.append((vec3(0,0,0), vec2(0,0)))
+                
+    return output_vertices
+```
+
+### Parameters
+*   **Slicing Axis**: Typically the viewing direction (z-axis in view space) [S2, book][S4]. Can be modified for advanced algorithms [S2, book].
+*   **Sampling Rate**: Determines the distance between slices, computed from voxel size [S2, book][S4].
+*   **Interaction Response Time**: Must be less than 100ms for real-time interaction [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Vertex Shader Limitations**: Vertex shaders cannot insert or remove vertices. The algorithm must output 6 vertices for every polygon, even if the cross-section is a triangle or quadrilateral [S1, unofficial]. Duplicate vertices are used to fill slots [S1, unofficial].
+*   **Invalid Intersections**: If $\lambda \notin [0, 1]$, the intersection is not on the bounding box edge and is invalid [S1, unofficial].
+*   **Parallel Edges**: If the edge is parallel to the plane normal (denominator is zero), $\lambda$ is set to -1.0 [S1, unofficial].
+*   **Texture Coordinate Direction**: If the edge direction is opposite to the texture axis $\vec{k}$, the texture coordinate is $1 - \lambda$ [S1, unofficial].
+*   **Polygon Closure**: The output vertices must form a closed polygon for correct rasterization [S1, unofficial].
+
+## Subtopics
+
+### [Incremental Intersection and Texture Coordinates](997-incremental-intersection-and-texture-coordinates.md)
+A method to compute intersection points and texture coordinates for axis-aligned boxes against parallel slicing planes incrementally, avoiding the bottleneck of recomputing intersections for every sub-volume and plane. It sets itself apart from naive per-plane intersection by leveraging the uniform spacing and parallel nature of slicing planes to update positions via constant deltas, maintaining an `ActiveIntersectionList` to track active edge intersections.
+
+## Operating characteristics
+*   **Time Complexity**: The intersection calculation is $O(1)$ per slice plane (constant number of edges and vertices) [S1, unofficial][S2, book]. The total time is proportional to the number of slices [S1, unofficial].
+*   **Memory Complexity**: Requires storage for the 3D volume texture and the vertex array for proxy geometry [S2, book][S4].
+*   **Performance**: Significantly improves performance compared to CPU-based slice generation by offloading calculations to the GPU [S1, unofficial]. It is efficient for modern graphics processors, making it suitable for interactive applications [S3, unofficial].
+*   **Strengths**: Real-time interaction support (rotation, slicing) [S1, unofficial]. Balanced workload between vertex and fragment shaders [S1, unofficial].
+*   **Limitations**: The Rezk-Salama method requires specific vertex ordering and duplicate handling, which can be complex to implement [S1, unofficial]. The Arc-ball rotation method has a limitation of not rotating more than 180 degrees in one click-drag operation [S1, unofficial].
+
+## Background
+The method was proposed by Rezk-Salama et al. [50] to move the calculation of cut-off slices from the CPU to the GPU using vertex shaders [S1, unofficial]. It is based on the principles of view-aligned slicing for 3D texture rendering [S2, book][S4]. The coordinate translation algorithm was improved by Shen et al. [56] to be more flexible regarding texture coordinate systems [S1, unofficial]. The sorting method using pseudo-angles is attributed to Moret and Shapiro (1991) [S2, book][S4]. The technique is widely used in scientific visualization and medical imaging for real-time volume rendering [S1, unofficial].
+
+## Sources
+[S1] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
+[S2] Chapter 39. Volume Rendering Techniques | NVIDIA Developer, https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-39-volume-rendering-techniques, fetched 2026-10-26 (book)
+[S3] Volume rendering techniques for general purpose graphics hardware, https://opus4.kobv.de/opus4-fau/files/9/Dissertation.pdf, fetched 2026-10-26 (unofficial)
+[S4] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29

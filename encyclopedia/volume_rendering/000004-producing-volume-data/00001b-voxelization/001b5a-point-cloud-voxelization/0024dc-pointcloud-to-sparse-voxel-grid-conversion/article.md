@@ -1,0 +1,205 @@
+# Pointcloud to Sparse Voxel Grid Conversion
+
+
+## Overview
+Converts a set of 3D points and associated features into a sparse voxel grid representation, storing only voxels that contain at least one point [S1, unofficial]. It differs from dense voxelization by using hash-based indexing to avoid allocating memory for empty space, and from simple occupancy voxelization by aggregating point features (e.g., via mean or sum) into voxel-level tensors [S1, unofficial]. This method serves as the core voxelization step in pipelines converting point clouds to sparse voxel representations for downstream rendering or USD export [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `points`: Tensor of shape $[N, 3]$ containing 3D coordinates, dtype `float32` [S1, unofficial].
+- `features`: Tensor of shape $[N, F]$ containing per-point features, dtype `float32` [S1, unofficial].
+- `grid_cell_size`: Tensor of shape $[3]$ defining the physical size of a voxel in x, y, z dimensions [S1, unofficial].
+- `segment_func`: Aggregation function (e.g., mean, sum, min, max) applied to points falling into the same voxel [S1, unofficial].
+
+**Outputs:**
+- `voxel_features`: Tensor of shape $[N', F]$ where $N'$ is the number of occupied voxels [S1, unofficial].
+- `voxel_indices`: Tensor of shape $[N', 3]$ containing the integer x, y, z indices of occupied voxels [S1, unofficial].
+- `segment_ids`: Tensor of shape $[N]$ mapping each input point to its corresponding voxel segment ID [S1, unofficial].
+- `voxel_start_location`: Tensor of shape $[3]$ containing the minimum coordinate of the bounding box of the point cloud [S1, unofficial].
+
+**Data Structures:**
+- Voxel indices are computed as integer offsets from the minimum point coordinate.
+- A flattened single-number index is derived from the 3D voxel indices to facilitate segment-based pooling.
+
+**Steps:**
+1. **Compute Bounding Box Origin:** Determine the start location of the voxel grid by finding the minimum coordinate across all points [S1, unofficial].
+   $$ \text{start\_location} = \min_{i}(\text{points}_i) $$
+2. **Compute Voxel Indices:** Calculate the integer grid index for each point by subtracting the start location and dividing by the grid cell size, using floor division [S1, unofficial].
+   $$ \text{voxel\_xyz\_indices}_i = \left\lfloor \frac{\text{points}_i - \text{start\_location}}{\text{grid\_cell\_size}} \right\rfloor $$
+3. **Compute Flattened Indices:** Convert 3D voxel indices into a unique 1D integer index for each point to enable segment grouping. The exact mapping depends on the grid dimensions, but typically involves linearizing the 3D coordinates [S1, unofficial].
+4. **Aggregate Features:** Group points by their flattened voxel index and apply the `segment_func` to aggregate features. This produces `voxel_features` and `segment_ids` [S1, unofficial].
+5. **Compute Unique Voxel Indices:** For each unique segment (voxel), determine the maximum 3D index among its constituent points to represent the voxel's position. This step ensures that each occupied voxel is represented exactly once in the output `voxel_indices` [S1, unofficial].
+   $$ \text{voxel\_xyz\_indices}_{unique} = \text{unsorted\_segment\_max}(\text{voxel\_xyz\_indices}, \text{segment\_ids}, \text{num\_segments}) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import tensorflow as tf
+
+def pointcloud_to_sparse_voxel_grid_unbatched(points, features, grid_cell_size, segment_func):
+    """
+    Converts a pointcloud into a sparse voxel grid.
+    
+    Args:
+        points: tf.float32 tensor of size [N, 3].
+        features: tf.float32 tensor of size [N, F].
+        grid_cell_size: tf.float32 tensor of size [3].
+        segment_func: Aggregation function (e.g., tf.math.unsorted_segment_mean).
+        
+    Returns:
+        voxel_features: tf.float32 tensor of size [N', F].
+        voxel_indices: tf.int32 tensor of size [N', 3].
+        segment_ids: tf.int32 tensor of size [N].
+        voxel_start_location: tf.float32 tensor of size [3].
+    """
+    # 1. Compute start location (minimum point coordinate)
+    voxel_start_location = tf.reduce_min(points, axis=0)
+    
+    # 2. Compute voxel xyz indices
+    # floor_divide handles the integer division for negative numbers correctly in TF
+    voxel_xyz_indices = tf.cast(
+        tf.math.floordiv(points - voxel_start_location, grid_cell_size),
+        dtype=tf.int32
+    )
+    
+    # 3. Compute flattened single number indices
+    # Note: The exact implementation of compute_pooled_voxel_indices is not fully detailed in the source,
+    # but it maps 3D indices to a unique 1D integer.
+    # Assuming a standard linearization based on grid dimensions or a hash map.
+    # For implementation, one might use a hash map or linearize if grid size is known.
+    # Here we assume a helper function exists or implement a simple linearization if bounds are known.
+    # Since bounds are not explicitly given as inputs, we rely on the source's helper.
+    # [G] In a pure implementation without TF helpers, one would use a dictionary or hash map
+    # to map (x,y,z) to a unique ID.
+    voxel_xyz_indices, voxel_single_number_indices = compute_pooled_voxel_indices(
+        voxel_xyz_indices=voxel_xyz_indices, pooling_size=(1, 1, 1)
+    )
+    
+    # 4. Pool features using the flattened indices
+    voxel_features, segment_ids, num_segments = pool_features_given_indices(
+        features=features,
+        indices=voxel_single_number_indices,
+        segment_func=segment_func
+    )
+    
+    # 5. Compute unique voxel xyz indices by taking the max over segments
+    voxel_xyz_indices = tf.math.unsorted_segment_max(
+        data=voxel_xyz_indices,
+        segment_ids=segment_ids,
+        num_segments=num_segments
+    )
+    
+    return voxel_features, voxel_xyz_indices, segment_ids, voxel_start_location
+
+def compute_pooled_voxel_indices(voxel_xyz_indices, pooling_size):
+    """
+    Helper to compute unique 1D indices for 3D voxel coordinates.
+    [G] This is a placeholder for the specific linearization or hashing logic.
+    A common approach is to use a hash map or linearize if grid dimensions are fixed.
+    For this implementation, we assume a simple linearization based on a large enough grid size
+    or a hash-based unique ID assignment.
+    """
+    # [G] In TensorFlow, one might use tf.unique or a custom op.
+    # Here we simulate the behavior: assign a unique ID to each unique (x,y,z) tuple.
+    # Convert to string or tuple for hashing, or use a large multiplier if bounds are known.
+    # Since bounds are not known, we use a hash-based approach.
+    # Note: This is a simplification. The actual TF code likely uses a more efficient C++ op.
+    
+    # Flatten the indices for hashing
+    # We assume a simple linearization for demonstration, though it may not be unique for large grids.
+    # A robust implementation would use a hash map.
+    # For the purpose of this article, we note that this step maps 3D coords to 1D IDs.
+    
+    # Using a simple linearization with a large multiplier to avoid collisions for typical point cloud sizes
+    # This is a [G] implementation detail not fully specified in the source.
+    # A better approach is to use tf.unique on the rows.
+    unique_vals, inverse_indices, counts = tf.unique(voxel_xyz_indices, out_idx=tf.int32)
+    # The inverse_indices map each point to its unique voxel ID
+    # However, the source uses 'voxel_single_number_indices' which seems to be a flattened index
+    # before aggregation. Let's assume it's the unique ID.
+    
+    # Re-assigning to match the source's variable names
+    # The source computes voxel_single_number_indices from voxel_xyz_indices
+    # and then uses them for pooling.
+    
+    # Let's assume the source's compute_pooled_voxel_indices returns:
+    # 1. The original voxel_xyz_indices (unchanged)
+    # 2. A 1D index for each point corresponding to its voxel
+    
+    # We will use the inverse_indices from tf.unique as the segment IDs for pooling
+    # But the source returns segment_ids separately.
+    
+    # Let's stick to the source's flow:
+    # voxel_single_number_indices is used for pooling.
+    # segment_ids is the output of pool_features_given_indices.
+    
+    # Actually, looking at the source:
+    # voxel_xyz_indices, voxel_single_number_indices = compute_pooled_voxel_indices(...)
+    # Then pool_features_given_indices(features, voxel_single_number_indices, ...)
+    # Then segment_ids is returned from pool_features_given_indices.
+    
+    # So compute_pooled_voxel_indices must return a 1D index for each point.
+    # We can use tf.unique to get unique IDs.
+    
+    # To match the source's structure exactly:
+    # We need a 1D index for each point.
+    # Let's use a hash map approach in Python for clarity, but the source uses TF ops.
+    
+    # For the pseudocode, we will use a simplified linearization assuming a known grid size,
+    # or note that a hash map is used.
+    
+    # [G] Since the exact implementation of compute_pooled_voxel_indices is not provided,
+    # we will assume it assigns a unique integer ID to each unique (x,y,z) coordinate.
+    
+    # We can use tf.unique to get unique IDs.
+    unique_vals, inverse_indices, counts = tf.unique(voxel_xyz_indices, out_idx=tf.int32)
+    
+    # The inverse_indices are the unique IDs for each point's voxel.
+    # We return the original voxel_xyz_indices and the inverse_indices as the single number indices.
+    return voxel_xyz_indices, inverse_indices
+
+def pool_features_given_indices(features, indices, segment_func):
+    """
+    Aggregates features based on indices.
+    """
+    # Use the unique IDs as segment IDs
+    segment_ids = indices
+    num_segments = tf.reduce_max(segment_ids) + 1
+    
+    # Apply the segment function
+    # Note: tf.math.unsorted_segment_mean requires segment_ids to be 0..num_segments-1
+    # and contiguous. tf.unique provides this.
+    voxel_features = segment_func(features, segment_ids, num_segments)
+    
+    return voxel_features, segment_ids, num_segments
+```
+
+**Parameters:**
+- `grid_cell_size`: Typical values depend on the scene scale. Not given in the sources.
+- `segment_func`: Commonly `tf.math.unsorted_segment_mean` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Floating-point division and floor operations may lead to off-by-one errors if points lie exactly on grid boundaries. The source uses `floordiv`, which handles negative numbers correctly in TensorFlow [S1, unofficial].
+- **Empty Voxels:** The method only outputs occupied voxels, so empty space is not represented [S1, unofficial].
+- **Batching:** The unbatched version does not handle batch sizes; it assumes a single batch of points [S1, unofficial].
+
+## Subtopics
+
+### [DCX Points-to-Voxels](3783-dcx-points-to-voxels.md)
+DCX Points-to-Voxels converts a set of 3D points (from PLY files or 3D Gaussian Splatting) into a sparse voxel grid by averaging point positions and colors within grid cells defined by a bounding box and resolution. It differs from simple occupancy voxelization by storing averaged geometric and color data per voxel, and from dense voxelization by using hash maps to store only occupied cells. This method serves as the core voxelization step in pipelines converting point clouds to sparse voxel representations for downstream rendering or USD export.
+
+## Operating characteristics
+- **Time Complexity:** Dominated by the computation of voxel indices and the aggregation step. Index computation is $O(N)$, and aggregation is $O(N)$ on average with hash maps, but depends on the implementation of `segment_func` [S1, unofficial].
+- **Memory Complexity:** Proportional to the number of occupied voxels $N'$ and the feature dimension $F$, i.e., $O(N' \cdot F)$ [S1, unofficial].
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Efficiently handles sparse data; avoids memory allocation for empty space; flexible aggregation functions [S1, unofficial].
+- **Limitations:** Unbatched version limits scalability; precision issues at grid boundaries [S1, unofficial].
+- **When to Use:** When converting point clouds to sparse voxel grids for rendering or USD export, especially when memory efficiency is critical [S1, unofficial].
+- **When Not to Use:** When dense voxel representations are required or when batching is necessary without modification [S1, unofficial].
+
+## Background
+The method originates from Google Research's TensorFlow 3D (TF3D) library, specifically in the `voxel_utils.py` module [S1, unofficial]. It is designed to facilitate the conversion of point cloud data into a format suitable for 3D deep learning tasks, such as 3D object detection and segmentation [S1, unofficial]. The unbatched version is part of a broader suite of voxelization utilities in TF3D [S1, unofficial].
+
+## Sources
+[S1] https://github.com/google-research/google-research/blob/master/tf3d/utils/voxel_utils.py#L305, https://github.com/google-research/google-research/blob/master/tf3d/utils/voxel_utils.py, fetched 2026-10-27 (unofficial)

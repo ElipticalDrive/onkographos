@@ -3,7 +3,7 @@
 Also called: CGAL::Octree, CGAL::Orthtree, RFVoxelOctree, RFVoxelOctreeNode, Voxel Octree Data Structure
 
 ## Overview
-The octree partitions 3D space into a hierarchical grid of voxels to organize point cloud data for volume rendering and surface extraction [S1, S2]. It recursively subdivides space into eight octants, distinguishing it from flat voxel grids [S1].
+The octree partitions 3D space into a hierarchical grid of voxels to organize point cloud data for volume rendering and surface extraction [S1, unofficial][S2]. It recursively subdivides space into eight octants, distinguishing it from flat voxel grids [S1, unofficial].
 
 ## How it works
 **Inputs:** A set of 3D points (point cloud) and a bounding volume defining the spatial extent [S2].
@@ -123,12 +123,12 @@ The parent method describing the hierarchical subdivision process.
 A sibling method using the octree for rendering optimization rather than spatial indexing for surface extraction.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources [S1, S2].
-*   **Memory Complexity:** Not given in the sources [S1, S2].
+*   **Time Complexity:** Not given in the sources [S1, unofficial][S2].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial][S2].
 *   **Strengths:** Integrates with CGAL isosurfacing algorithms (MC, TMC, DC) [S2].
 *   **Limitations:** Varying depths can cause mesh cracks if not handled by adaptive refinement strategies [S2].
-*   **When to use:** When organizing point clouds for surface extraction or spatial queries requiring hierarchical access [S1, S2].
-*   **When not to use:** Not given in the sources [S1, S2].
+*   **When to use:** When organizing point clouds for surface extraction or spatial queries requiring hierarchical access [S1, unofficial][S2].
+*   **When not to use:** Not given in the sources [S1, unofficial][S2].
 
 ## Background
 The CGAL::Orthtree implementation originated from the 2022 Google Summer of Code, contributed by Julian Stahl, mentored by Daniel Zint and Pierre Alliez [S2]. It provides first implementations of Marching Cubes, Topologically Correct Marching Cubes, and Dual Contouring using octrees [S2].

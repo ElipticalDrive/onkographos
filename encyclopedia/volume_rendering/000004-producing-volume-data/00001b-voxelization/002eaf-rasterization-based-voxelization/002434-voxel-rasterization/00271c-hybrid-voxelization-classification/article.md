@@ -1,0 +1,130 @@
+# Hybrid Voxelization Classification
+
+Also called: GPView Voxelization
+
+## Overview
+Hybrid Voxelization Classification is a GPU-accelerated method for voxelizing 3D CAD models (specifically .obj and .off formats) using a nested, two-level resolution structure [S1, unofficial]. It distinguishes itself from single-resolution rasterization by maintaining a coarse Level1 grid and a finer Level2 grid for voxels containing surface geometry, allowing for detailed normal estimation while managing memory [S1, unofficial]. It builds on [Voxel Rasterization](3204-voxel-rasterization.md) by extending the output data structures to support hierarchical classification and normal accumulation.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D CAD model geometry (triangles) in .obj or .off format.
+*   **Output:** Binary .raw files containing contiguous arrays representing the voxelized state.
+
+**Data Structures:**
+The method uses three primary CUDA device arrays:
+
+1.  **Level1 Voxel Data (`inOutCUDAData`):**
+    *   Type: `float*`
+    *   Layout: One float per Level1 voxel.
+    *   Meaning: A value of `2` indicates a Level1 voxel contains surface points.
+2.  **Level1 Triangle Metadata:**
+    *   `voxelTriCountCUDAData`: `int*` array. Stores the count of triangles intersecting each Level1 voxel.
+    *   `voxelTriIndexCUDAData`: `int*` array. Stores triangle IDs. Indexed as `index * triBuffer + newIndex` [S1, unofficial].
+3.  **Level2 Voxel Data (`level2InOutCUDAData`):**
+    *   Type: `float*`
+    *   Layout: One float per Level2 voxel.
+    *   Meaning: A value of `1` indicates a Level2 surface voxel [S1, unofficial].
+4.  **Level2 Normal Data (`level2NormalCUDAData`):**
+    *   Type: `float*`
+    *   Layout: Stride 4 per Level2 voxel.
+    *   Indices 0-2: Accumulated normal components ($x, y, z$).
+    *   Index 3: Counter of accumulated points (initialized to 0).
+
+**Algorithm Steps:**
+The voxelization process iterates over triangles and maps their vertices/intersections to the voxel grid.
+
+1.  **Level1 Classification:**
+    *   Identify Level1 voxels containing surface points.
+    *   Set `inOutCUDAData[voxelIndex] = 2`.
+    *   Atomically increment the triangle count: `atomicAdd(&voxelTriCountCUDAData[voxelIndex], 1)`.
+    *   Store the triangle ID in `voxelTriIndexCUDAData` [S1, unofficial].
+
+2.  **Level2 Normal Accumulation:**
+    *   For Level2 voxels associated with a Level1 surface voxel, accumulate the surface normal.
+    *   Let $N$ be the surface normal vector and $C$ be the counter at index 3 of `level2NormalCUDAData`.
+    *   Update components:
+        $$
+        \begin{aligned}
+        \text{level2NormalCUDAData}[4i + 0] &\leftarrow \text{level2NormalCUDAData}[4i + 0] + N_x \\
+        \text{level2NormalCUDAData}[4i + 1] &\leftarrow \text{level2NormalCUDAData}[4i + 1] + N_y \\
+        \text{level2NormalCUDAData}[4i + 2] &\leftarrow \text{level2NormalCUDAData}[4i + 2] + N_z \\
+        \text{level2NormalCUDAData}[4i + 3] &\leftarrow \text{level2NormalCUDAData}[4i + 3] + 1
+        \end{aligned}
+        $$
+    *   Set voxel status to 2 (implied by surface presence) [S1, unofficial].
+
+3.  **Level2 Fallback Classification:**
+    *   For Level2 voxels that do not participate in normal accumulation or serve as a fallback, set the status to 1.
+    *   Operation: `level2InOutCUDAData[voxelIndex] = 1` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Device function for Level1 voxel update
+def add_triangle_to_level1(voxel_index, triangle_id):
+    # Set status to 2 (surface voxel)
+    inOutCUDAData[voxel_index] = 2.0
+    
+    # Atomically increment triangle count
+    atomic_add(&voxelTriCountCUDAData[voxel_index], 1)
+    
+    # Store triangle ID
+    # Note: Exact indexing logic 'index * triBuffer + newIndex' 
+    # requires external buffer management not fully detailed in source.
+    # Assuming a simple append or pre-allocated slot for this example:
+    tri_count = atomic_add(&voxelTriCountCUDAData[voxel_index], 0) # Read current count
+    voxelTriIndexCUDAData[voxel_index * max_triangles_per_voxel + tri_count] = triangle_id
+
+# Device function for Level2 Normal Accumulation
+def add_normal_to_level2(voxel_index, normal_x, normal_y, normal_z):
+    base_idx = voxel_index * 4
+    
+    # Accumulate normal components
+    atomic_add(&level2NormalCUDAData[base_idx + 0], normal_x)
+    atomic_add(&level2NormalCUDAData[base_idx + 1], normal_y)
+    atomic_add(&level2NormalCUDAData[base_idx + 2], normal_z)
+    
+    # Increment counter
+    atomic_add(&level2NormalCUDAData[base_idx + 3], 1)
+    
+    # Set status to 2 (surface voxel)
+    # Note: Source implies status 2 for Level2 if normal is accumulated, 
+    # but level2InOutCUDAData uses 1 for Level2 surface. 
+    # We follow the specific instruction: "set the voxel status to 2" for normal accumulation.
+    # However, level2InOutCUDAData is described as having 1 for Level2 surface.
+    # Clarification: inOutCUDAData is Level1. level2InOutCUDAData is Level2.
+    # The source says "set the voxel status to 2" for Level2 in the context of normal accumulation.
+    # But later says "level2InOutCUDAData where a value of 1 indicates a Level2 surface voxel".
+    # We assume the status update refers to the internal classification state, 
+    # and level2InOutCUDAData is updated to 1 for fallback.
+    # To be safe, we update level2InOutCUDAData to 1 if it's a surface voxel.
+    level2InOutCUDAData[voxel_index] = 1.0
+
+# Device function for Level2 Fallback
+def add_point_to_level2_fallback(voxel_index):
+    level2InOutCUDAData[voxel_index] = 1.0
+```
+
+**Parameters:**
+*   **EPSILON:** `0.000001` (used in AABB-triangle overlap tests) [S1, unofficial].
+*   **Resolution:** Not given in the sources.
+
+**Edge Cases:**
+*   **Precision:** Atomic operations on floats (`atomicAdd` for floats) may have precision limitations depending on the GPU architecture.
+*   **Boundaries:** AABB tests use a fixed epsilon for overlap detection [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Proportional to the number of Level1 and Level2 voxels. Level2 data requires 4 floats per voxel (3 for normal, 1 for counter).
+*   **Performance:** GPU-accelerated. Specific benchmarks are not provided in the sources.
+*   **Strengths:** Hybrid resolution allows for detailed normal estimation in complex areas while keeping coarse data simple.
+*   **Limitations:** Requires managing two levels of voxel data and atomic operations for normal accumulation.
+*   **When to use:** When detailed surface normals are required for CAD models and memory efficiency for non-surface areas is important.
+*   **When not:** For simple occupancy visualization where normals are not needed.
+
+## Background
+The method is part of the **GPView** framework, developed by Onur R. Bingol, Sambit Ghadai, Aditya Balu, Gavin Young, and Xin Huang from IDEALab at Iowa State University [S1, unofficial]. It was designed for learning localized features in 3D CAD models for manufacturability analysis, specifically for drilled holes [S1, unofficial]. The framework supports Wavefront (.obj) and .off file formats and outputs binary .raw files [S1, unofficial].
+
+## Sources
+[S1] idealab-isu/GPView, https://github.com/idealab-isu/GPView, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,231 @@
+# Gaussian Property Loading
+
+Also called: PLY Property Loading with Fallbacks, PLY Gaussian Loading
+
+## Overview
+Gaussian Property Loading parses 3D Gaussian parameters (position, scale, rotation, opacity, and spherical harmonics) from a PLY file into a structured data container suitable for differentiable rendering [S2, unofficial]. It solves the problem of converting raw file data into a format suitable for GPU consumption by applying necessary inverse transformations (e.g., exponentiation for scale, sigmoid for opacity) and handling coordinate system inconsistencies [S1, unofficial]. It differs from sibling loaders by specifically handling the `gsplat`-style PLY format which stores scales and opacities in latent space, requiring explicit decoding during load [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A PLY file path containing vertex properties for $N$ Gaussians.
+- Output: A dictionary or struct containing tensors/arrays with keys: `xyz` ($N, 3$), `rot` ($N, 4$), `scale` ($N, 3$), `sh` ($N, 48$), `opacity` ($N, 1$), and `dc_colours` ($N, 3$) [S2, unofficial].
+
+**Data Structures:**
+The output is a flat dictionary of NumPy/PyTorch tensors.
+- `xyz`: Float32, shape $(N, 3)$.
+- `rot`: Float32, shape $(N, 4)$, representing quaternions $(w, x, y, z)$.
+- `scale`: Float32, shape $(N, 3)$, representing log-scale values before transformation.
+- `opacity`: Float32, shape $(N, 1)$, representing sigmoid-transformed values.
+- `sh`: Float32, shape $(N, 48)$, concatenated spherical harmonics coefficients.
+- `dc_colours`: Float32, shape $(N, 3)$, derived from the DC term of SH.
+
+**Steps:**
+1. **Open and Parse Header:** Open the PLY file in binary mode. Parse the header to determine the number of vertices ($N$) and available properties [S3, unofficial].
+2. **Request Properties:** Request the following vertex properties, applying fallback logic if specific names are missing:
+   - Position: `x`, `y`, `z` (required) [S3, unofficial].
+   - Scale: Try `scale_0`, `scale_1`, `scale_2`. Fallback to `scaling_0`, `scaling_1`, `scaling_2` [S3, unofficial].
+   - Rotation: Try `rot_0`, `rot_1`, `rot_2`, `rot_3`. Fallback to `rotation_0`, `rotation_1`, `rotation_2`, `rotation_3` [S3, unofficial].
+   - Color/Features: Try `f_dc_0`, `f_dc_1`, `f_dc_2` (indicating SH presence). If not found, fallback to `red`, `green`, `blue` (RGB). If neither, default to white [S3, unofficial].
+   - Opacity: Try `opacity`. If not found, default to full opacity (1.0) [S3, unofficial].
+3. **Extract Raw Data:**
+   - Extract `x`, `y`, `z` and stack into shape $(N, 3)$ [S2, unofficial].
+   - Extract scale components into shape $(N, 3)$ [S2, unofficial].
+   - Extract rotation components into shape $(N, 4)$ [S2, unofficial].
+   - Extract opacity into shape $(N, 1)$ [S2, unofficial].
+   - Extract SH coefficients:
+     - Identify extra feature names starting with `f_rest_`. Sort them by the integer suffix [S2, unofficial].
+     - Assert the count of extra features equals $3 \times (\text{max\_sh\_degree} + 1)^2 - 3$ [S2, unofficial].
+     - Extract `f_dc_0`, `f_dc_1`, `f_dc_2` into `features_dc` of shape $(N, 3, 1)$ [S2, unofficial].
+     - Extract extra features into `features_extra` of shape $(N, \text{len}(\text{extra\_f\_names}))$. Reshape to $(N, 3, (\text{max\_sh\_degree} + 1)^2 - 1)$ and transpose to $(N, (\text{max\_sh\_degree} + 1)^2 - 1, 3)$ [S2, unofficial].
+4. **Cast Types:** Cast `xyz`, `rot`, `scale`, `opacity`, and feature data to `float32` [S2, unofficial].
+5. **Apply Inverse Transformations:**
+   - **Scale:** Apply exponential function to log-scale values: $\text{scale}_{final} = \exp(\text{scale}_{raw})$ [S1, unofficial].
+   - **Opacity:** Apply sigmoid function: $\text{opacity}_{final} = \frac{1}{1 + \exp(-\text{opacity}_{raw})}$ [S1, unofficial].
+   - **Rotation:** The rotation components are read as quaternions. Normalization is typically applied during optimization or initialization, but loading reads the raw quaternion values [S2, unofficial].
+6. **Concatenate SH Coefficients:**
+   - Reshape `features_dc` to $(-1, 3)$ and `features_extra` to $(\text{len}(\text{features\_dc}), -1)$ [S2, unofficial].
+   - Concatenate along the last axis to form `sh` of shape $(N, \text{total\_SH\_coeffs})$. For `max_sh_degree=3`, total coefficients are $48$ [S2, unofficial].
+7. **Compute DC Colours:**
+   - Extract the first 3 channels of `sh` as `dc_vals` [S2, unofficial].
+   - Apply the SH constant term conversion: $\text{dc\_colours} = \max(\text{dc\_vals} \times C_0 + 0.5, 0)$, where $C_0 = \frac{1}{\sqrt{4\pi}}$ [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import torch
+
+def load_gaussians_from_ply(file_path, max_sh_degree=3):
+    # 1. Open PLY and parse header
+    # Using a library like tinyply or ply_rs logic
+    # Assume ply_data is a dict of lists/arrays after parsing header
+    vertex_count = ply_data['vertex_count']
+    
+    # 2. Request and extract properties with fallbacks
+    # Position
+    xyz = np.stack([ply_data['x'], ply_data['y'], ply_data['z']], axis=1).astype(np.float32)
+    
+    # Scale (fallback: scaling_*)
+    if 'scale_0' in ply_data:
+        scale_raw = np.stack([ply_data['scale_0'], ply_data['scale_1'], ply_data['scale_2']], axis=1)
+    else:
+        scale_raw = np.stack([ply_data['scaling_0'], ply_data['scaling_1'], ply_data['scaling_2']], axis=1)
+    scale_raw = scale_raw.astype(np.float32)
+    
+    # Rotation (fallback: rotation_*)
+    if 'rot_0' in ply_data:
+        rot_raw = np.stack([ply_data['rot_0'], ply_data['rot_1'], ply_data['rot_2'], ply_data['rot_3']], axis=1)
+    else:
+        rot_raw = np.stack([ply_data['rotation_0'], ply_data['rotation_1'], ply_data['rotation_2'], ply_data['rotation_3']], axis=1)
+    rot_raw = rot_raw.astype(np.float32)
+    
+    # Opacity
+    if 'opacity' in ply_data:
+        opacity_raw = np.array(ply_data['opacity']).reshape(-1, 1).astype(np.float32)
+    else:
+        opacity_raw = np.ones((vertex_count, 1), dtype=np.float32)
+        
+    # Color/SH
+    has_sh = 'f_dc_0' in ply_data
+    has_rgb = 'red' in ply_data
+    
+    if has_sh:
+        f_dc = np.stack([ply_data['f_dc_0'], ply_data['f_dc_1'], ply_data['f_dc_2']], axis=1).astype(np.float32) # (N, 3)
+        
+        # Extract rest SH
+        f_rest_names = sorted([k for k in ply_data.keys() if k.startswith('f_rest_')], 
+                              key=lambda x: int(x.split('_')[-1]))
+        # Assert count matches expected
+        expected_rest_count = 3 * (max_sh_degree + 1)**2 - 3
+        assert len(f_rest_names) == expected_rest_count, f"Expected {expected_rest_count} rest SH coeffs, got {len(f_rest_names)}"
+        
+        f_rest = np.column_stack([ply_data[name] for name in f_rest_names]).astype(np.float32) # (N, expected_rest_count)
+        
+        # Reshape and transpose for SH storage
+        # f_rest shape: (N, 3, (max_sh_degree+1)^2 - 1) before transpose? 
+        # Source says: Extract into features_extra of shape (N, len). Reshape to (N, 3, ...). Transpose to (N, ..., 3).
+        # Let's follow source [S2, unofficial] exactly:
+        # features_extra shape (N, len(extra_f_names)) -> reshape to (N, 3, (max_sh_degree + 1)^2 - 1)
+        # Then transpose to (N, (max_sh_degree + 1)^2 - 1, 3)
+        # Then concatenate with f_dc reshaped to (-1, 3)
+        
+        # Actually, source [S2, unofficial] says:
+        # features_dc shape (N, 3, 1). Extract f_dc_0,1,2 into cols 0,1,2.
+        # features_extra shape (N, len). Reshape to (N, 3, (max_sh_degree+1)^2-1). Transpose to (N, (max_sh_degree+1)^2-1, 3).
+        # Concatenate features_dc (reshaped to (-1, 3)) and features_extra (reshaped to (len, -1)) along axis -1.
+        
+        # Let's simplify to the final tensor shape (N, 48) for max_sh_degree=3
+        # Total SH coeffs = (max_sh_degree + 1)^2 * 3
+        # For degree 3: 16 * 3 = 48.
+        
+        # Reshape f_dc (N, 3) to (N, 1, 3) -> flatten to (N, 3) for concatenation?
+        # Source: "Concatenate features_dc (reshaped to (-1, 3)) and features_extra (reshaped to (len(features_dc), -1))"
+        # This implies flattening the spatial/SH dimensions.
+        
+        # Correct interpretation from [S2, unofficial]:
+        # 1. f_dc is (N, 3).
+        # 2. f_rest is processed into (N, (max_sh_degree+1)^2-1, 3).
+        # 3. Concatenate along last axis? No, source says "reshaped to (-1, 3)" and "reshaped to (len, -1)".
+        # This suggests a flat list of coefficients per Gaussian.
+        
+        # Let's construct the final SH tensor directly.
+        # SH coefficients are stored as (N, total_coeffs).
+        # total_coeffs = 3 * (max_sh_degree + 1)^2.
+        
+        # f_dc part: (N, 3)
+        # f_rest part: needs to be (N, 3 * ((max_sh_degree+1)^2 - 1))
+        
+        # Reshape f_rest (N, expected_rest_count) to (N, 3, (max_sh_degree+1)^2-1)
+        f_rest_reshaped = f_rest.reshape(vertex_count, 3, (max_sh_degree + 1)**2 - 1)
+        # Transpose to (N, (max_sh_degree+1)^2-1, 3)
+        f_rest_transposed = f_rest_reshaped.transpose(0, 2, 1)
+        # Flatten to (N, 3 * ((max_sh_degree+1)^2-1))
+        f_rest_flat = f_rest_transposed.reshape(vertex_count, -1)
+        
+        # Combine f_dc (N, 3) and f_rest_flat
+        sh = np.concatenate([f_dc, f_rest_flat], axis=1)
+        
+        # Compute dc_colours
+        # dc_vals are the first 3 channels of sh (which is f_dc)
+        dc_vals = sh[:, :3]
+        SH_C0 = 1.0 / np.sqrt(4 * np.pi)
+        dc_colours = np.maximum(dc_vals * SH_C0 + 0.5, 0.0)
+        
+    elif has_rgb:
+        # Fallback to RGB
+        rgb = np.stack([ply_data['red'], ply_data['green'], ply_data['blue']], axis=1).astype(np.float32)
+        # Normalize to 0-1 if needed? Source doesn't specify normalization for RGB fallback, 
+        # but SH loading assumes normalized. Assuming raw PLY RGB is 0-255 or 0-1?
+        # Standard PLY RGB is often 0-255. However, SH loading code [S2, unofficial] doesn't show normalization for RGB fallback.
+        # We will assume the values are already in the correct range or handled by the renderer.
+        # For consistency with SH DC term, we might need to map RGB to SH DC.
+        # But source [S2, unofficial] only defines dc_colours calculation for the SH path.
+        # If RGB, we might just store RGB in dc_colours or create dummy SH.
+        # Given the prompt asks for implementation from sources, and source [S2, unofficial] only details SH path for dc_colours,
+        # we will assume SH path is the primary one for this method's definition.
+        # If RGB fallback is used, sh is empty or zeros, and dc_colours is just rgb?
+        # Let's stick to the SH path as the primary definition.
+        sh = np.zeros((vertex_count, 3 * (max_sh_degree + 1)**2), dtype=np.float32)
+        # Map RGB to SH DC? Not defined in source. 
+        # We will assume the input has SH if possible, or this branch is less defined.
+        # For the purpose of this article, we focus on the SH loading path which is fully specified.
+        dc_colours = rgb # Placeholder if RGB, but source [S2, unofficial] calculates dc_colours from SH.
+    else:
+        # Default to white
+        sh = np.zeros((vertex_count, 3 * (max_sh_degree + 1)**2), dtype=np.float32)
+        dc_colours = np.ones((vertex_count, 3), dtype=np.float32)
+
+    # 3. Apply Inverse Transformations
+    # Scale: exp
+    scale_final = np.exp(scale_raw)
+    
+    # Opacity: sigmoid
+    opacity_final = 1.0 / (1.0 + np.exp(-opacity_raw))
+    
+    # Rotation: Quaternions are read as is. Normalization is usually done later or assumed valid.
+    # Source [S2, unofficial] does not apply normalization during load, only in optimization step `apply_activations`.
+    # However, `load_gaussians_from_ply` returns `rot`.
+    
+    # 4. Return Dictionary
+    return {
+        'xyz': xyz,
+        'rot': rot_raw,
+        'scale': scale_final,
+        'opacity': opacity_final,
+        'sh': sh,
+        'dc_colours': dc_colours
+    }
+```
+
+**Parameters:**
+- `max_sh_degree`: Maximum spherical harmonic degree. Typical value is 3 [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Missing Properties:** The loader must handle missing properties by falling back to alternative names (`scaling_` vs `scale_`) or defaults (white color, full opacity) [S3, unofficial].
+- **SH Coefficient Count:** The number of `f_rest_` properties must exactly match $3 \times (\text{max\_sh\_degree} + 1)^2 - 3$. A mismatch indicates a corrupted or incompatible PLY file [S2, unofficial].
+- **Precision:** All data should be cast to `float32` to ensure consistency with GPU rendering pipelines [S2, unofficial].
+- **Coordinate Systems:** The PLY format may use a different coordinate system (e.g., RDF) than the internal representation (e.g., RUB). This method loads the raw data; coordinate conversion is handled by a separate sibling method [S1, unofficial].
+
+## Subtopics
+
+### [Gaussian Splat PLY Loader](3254-gaussian-splat-ply-loader.md)
+The Gaussian Splat PLY Loader parses 3D Gaussian parameters from a PLY file into a structured data container. It solves the problem of converting raw file data into a format suitable for differentiable rendering by applying necessary inverse transformations and packing data for GPU consumption. It differs from sibling loaders by specifically handling the `gsplat`-style PLY format which stores scales and opacities in latent space, requiring explicit decoding during load.
+
+### [Coordinate System Conversion for Gaussian Splats](3935-coordinate-system-conversion-for-gaussian-splats.md)
+This method transforms Gaussian splat attributes between different coordinate systems, such as converting from the Right-handed Up-Back (RUB) format used internally to the Right-handed Down-Forward (RDF) format used in PLY files. It sets apart from sibling loaders by handling the specific axis flips and rotations required for quaternion and spherical harmonic consistency, ensuring that the rendered output remains invariant under coordinate system changes.
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of Gaussians $N$, $O(N)$, as it involves reading and transforming each Gaussian's properties independently.
+- **Memory Complexity:** Linear with respect to $N$, $O(N)$, storing position, rotation, scale, opacity, and SH coefficients.
+- **Performance:** Loading is typically fast, dominated by I/O and basic arithmetic operations. The use of `tinyply` or similar efficient parsers ensures minimal overhead.
+- **Strengths:** Handles various PLY formats via fallbacks; correctly decodes latent space parameters (log-scale, sigmoid opacity); integrates seamlessly with SH-based rendering.
+- **Limitations:** Assumes the PLY file contains the expected properties; does not handle coordinate system conversion (requires a separate step); relies on the correctness of the SH coefficient ordering in the file.
+
+## Background
+Gaussian Property Loading is a component of the 3D Gaussian Splatting pipeline, specifically designed to load pre-trained or generated Gaussian models from PLY files. The method was developed as part of the open-source implementations of 3D Gaussian Splatting, such as those by Thomas Antony and others, to facilitate the loading of models trained with differentiable rendering techniques. The use of PLY files as an interchange format allows for easy inspection and modification of Gaussian parameters. The specific handling of latent space parameters (log-scale, sigmoid opacity) is a key feature of the `gsplat`-style PLY format, which ensures that the parameters remain within valid ranges during optimization.
+
+## Sources
+[S1] thomasantony/splat, https://github.com/thomasantony/splat, fetched 2026-10-27 (unofficial)
+[S2] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)
+[S3] liaozhangsheng/gsplat-opengl, https://github.com/liaozhangsheng/gsplat-opengl, fetched 2026-10-28 (unofficial)

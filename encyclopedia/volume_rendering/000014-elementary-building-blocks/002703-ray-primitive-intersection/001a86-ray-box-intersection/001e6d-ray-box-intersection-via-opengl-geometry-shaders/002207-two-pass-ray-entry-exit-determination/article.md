@@ -1,0 +1,101 @@
+# Two-Pass Ray Entry/Exit Determination
+
+Also called: Front/Backface Buffer Raycasting, Ray Setup Pass, Ray casting setup rendering, Two-Pass Raycasting with Back-Face Depth Buffering
+
+## Overview
+This method determines the 3D volume texture coordinates for the entry and exit points of a ray passing through a volume's bounding box by rendering the box geometry to textures [S2, unofficial]. It solves the problem of providing the fragment shader with the precise start and end texture coordinates required for volume traversal without complex CPU-side ray-box intersection calculations [S2, unofficial]. It sets itself apart from sibling methods by using a two-pass rendering approach where the first pass stores exit coordinates in a separate Framebuffer Object (FBO), and the second pass retrieves them [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** The volume's bounding box geometry (typically a cube), the current camera view and projection matrices, and the volume texture dimensions [S1, S2, unofficial].
+*   **Outputs:** Two 2D textures (or a single FBO with multiple attachments) containing the 3D texture coordinates for the ray entry and exit points for each pixel [S2, unofficial].
+
+**Data Structures:**
+*   **Bounding Box Geometry:** A cube defined by 8 vertices. Each vertex has a position and a color attribute representing its 3D texture coordinates [S2, unofficial].
+*   **Framebuffer Object (FBO):** A GPU-resident texture used to store the exit point coordinates from Pass 1 [S2, unofficial].
+*   **Vertex Shader Output:** Contains clip-space position and interpolated texture coordinates (color) [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Initialize Matrices:** Compute the concatenated World-View-Projection matrix ($M_{WVP}$) [S1, unofficial].
+2.  **Pass 1: Render Back Faces (Exit Points):**
+    *   Enable face culling to cull front faces: `glEnable(GL_CULL_FACE)` and `glCullFace(GL_FRONT)` [S2, unofficial].
+    *   Bind the FBO texture for storing exit coordinates.
+    *   Render the bounding box. The vertex shader transforms vertices using $M_{WVP}$ [S1, unofficial]. The fragment shader outputs the vertex color (texture coordinates) [S2, unofficial].
+    *   The resulting texture contains the 3D texture coordinates of the exit point for each ray [S2, unofficial].
+3.  **Pass 2: Render Front Faces (Entry Points):**
+    *   Disable face culling or cull back faces to render front faces [S2, unofficial].
+    *   Bind the FBO texture from Pass 1 as a sampler in the fragment shader.
+    *   Render the bounding box. The vertex shader transforms vertices using $M_{WVP}$ [S1, unofficial].
+    *   The fragment shader receives the vertex color (texture coordinates of the entry point) [S2, unofficial].
+    *   The fragment shader samples the FBO texture at the current fragment's screen position to retrieve the exit point coordinates stored in Pass 1 [S2, unofficial].
+    *   The fragment shader now has both entry and exit 3D texture coordinates and computes the volume rendering integral [S2, unofficial].
+
+**Formulas:**
+*   **Vertex Transformation:** $Pos_{clip} = M_{WVP} \times Pos_{model}$ [S1, unofficial].
+*   **Texture Coordinate Mapping:** The vertices of the bounding box are assigned colors corresponding to their 3D texture coordinates. The axes map as follows: $x$ goes from black (0) to red (1), $y$ goes from black (0) to green (1), and $z$ goes from black (0) to blue (1) [S2, unofficial]. The texture coordinates range from $(0,0,0)$ at the lower-left-black corner to $(1,1,1)$ at the upper-right-white corner [S2, unofficial].
+*   **DirectX Specific Shift:** If using DirectX-style model space coordinates in the range $[-0.5, 0.5]$, they are shifted to normalized texture coordinates in $[0.0, 1.0]$ using: $output.Tex = Pos.xyz + float3(0.5, 0.5, 0.5)$ [S1, unofficial].
+
+**Parameters:**
+*   $M_{WVP}$: Concatenated world-view-projection matrix [S1, unofficial].
+*   Culling Mode: `GL_FRONT` for Pass 1, `GL_BACK` or disabled for Pass 2 [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Texture Coordinate Axes:** The mapping of RGB channels to texture axes ($x,y,z$) must be consistent. $x$ is Red, $y$ is Green, $z$ is Blue [S2, unofficial].
+*   **Precision:** Using 16-bit floating point textures for the FBO may introduce precision errors in the stored coordinates [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def two_pass_ray_setup(bounding_box, matrix_wvp, width, height):
+    # Initialize FBO texture to store exit point coordinates
+    fbo_exit_coords = [[None] * height for _ in range(width)]
+
+    # Pass 1: Render back faces to FBO
+    # Cull front faces so only back faces are processed
+    for screen_x, screen_y in range(width), range(height):
+        # [G] Standard back-face rasterization determines if a ray from this pixel hits a back face
+        hit = standard_back_face_rasterization(screen_x, screen_y, bounding_box, matrix_wvp)
+        if hit is not None:
+            # Vertex color attribute stores the 3D texture coordinate
+            fbo_exit_coords[screen_x][screen_y] = hit.vertex_color
+
+    # Pass 2: Render front faces to default framebuffer
+    output_texture = [[None] * height for _ in range(width)]
+    # Cull back faces or disable culling to render front faces
+    for screen_x, screen_y in range(width), range(height):
+        # [G] Standard front-face rasterization determines if a ray from this pixel hits a front face
+        hit = standard_front_face_rasterization(screen_x, screen_y, bounding_box, matrix_wvp)
+        if hit is not None:
+            entry_tex_coord = hit.vertex_color
+            # Sample FBO at fragment position to retrieve exit point coordinates
+            exit_tex_coord = fbo_exit_coords[screen_x][screen_y]
+            # [S2, unofficial] Fragment shader outputs the result of the volume rendering integral
+            color = compute_volume_rendering_integral(entry_tex_coord, exit_tex_coord)
+            output_texture[screen_x][screen_y] = color
+
+    return output_texture
+```
+
+## Subtopics
+
+### Ray-Box Intersection via OpenGL Geometry Shaders
+Computes entry/exit in a single pass using geometry shaders. Choose when single-pass efficiency is critical and geometry shader support is available. [Ray-Box Intersection via OpenGL Geometry Shaders](1768-ray-box-intersection-via-opengl-geometry-shaders.md)
+
+### CPU-Side Ray-Box Intersection
+Computes entry/exit on the CPU. Choose when GPU memory bandwidth for the FBO is a bottleneck or for simpler implementations. [Ray-Box Intersection](1767-ray-box-intersection.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels, performed twice (two passes) [S2, unofficial].
+*   **Memory Complexity:** Requires storage for one additional FBO texture to store exit coordinates [S2, unofficial].
+*   **Strengths:** Simple to implement using standard OpenGL or DirectX rendering pipeline; avoids complex ray-box intersection math on the GPU [S2, unofficial].
+*   **Limitations:** Requires two rendering passes; precision loss with 16-bit textures [S1, S2, unofficial].
+*   **When to Use:** When using OpenGL or DirectX and a two-pass approach is acceptable [S2, unofficial].
+*   **When Not to Use:** When single-pass performance is critical; when high precision is required and 16-bit textures are insufficient [S1, S2, unofficial].
+
+## Background
+This method was described in educational materials for GPU volume rendering, specifically in the CISC/CMPE 454 course notes [S2, unofficial]. It is also implemented in the D3DVolumeRaycaster project, which uses a similar two-pass setup for DirectX [S1, unofficial]. The technique leverages the rasterization pipeline to compute geometric intersections implicitly [S2, unofficial].
+
+## Sources
+[S1] BernhardKidalka/D3DVolumeRaycaster, https://github.com/BernhardKidalka/D3DVolumeRaycaster, fetched 2026-10-26 (unofficial)
+[S2] CISC/CMPE 454, GPU Volume Rendering, https://watkins.cs.queensu.ca/~jstewart/454/notes/44/44-gpu-volume-rendering.html, fetched 2026-10-30 (unofficial)

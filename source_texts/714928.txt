@@ -1,0 +1,1542 @@
+S KETCH &PATCH ++: E FFICIENT S TRUCTURE -AWARE 3D
+G AUSSIAN R EPRESENTATION
+A P REPRINT
+arXiv:2601.05394v2 [cs.CV] 12 Jan 2026
+Yuang Shi1 , Géraldine Morin2 , Simone Gasparini2 , Wei Tsang Ooi1
+1
+National University of Singapore 2 IRIT - Université de Toulouse
+{yuangshi, ooiwt}@comp.nus.edu.sg
+{simone.gasparini, geraldine.morin}@toulouse-inp.fr
+January 13, 2026
+3DGS
+S&P++ (Ours)
+Size: 395 MB
+PSNR: 31.32 dB
+Size: 4.08 MB
+PSNR: 31.34 dB
+Figure 1: We propose Sketch&Patch++, a hybrid Gaussian representation with 3D structure prior, significantly reducing the storage of 3DGS model by an order of magnitude while maintaining the visual quality.
+A BSTRACT
+3D Gaussian Splatting (3DGS) has emerged as a promising representation for photorealistic rendering of 3D scenes. However, its high storage requirements pose significant challenges for practical applications such as remote visualization, collaborative 3D content sharing, and bandwidthconstrained streaming in extended reality systems. We observe that Gaussians exhibit distinct roles
+and characteristics analogous to traditional artistic techniques — like how artists first sketch outlines
+before filling in broader areas with color, some Gaussians capture high-frequency features such as
+edges and contours, while others represent broader, smoother regions analogous to brush strokes
+that add volume and depth.
+Based on this observation, we propose a hybrid representation that categorizes Gaussians into (i)
+Sketch Gaussians, which represent high-frequency, boundary-defining features, and (ii) Patch Gaussians, which cover low-frequency, smooth regions. This semantic separation naturally enables layered progressive streaming, where the compact Sketch Gaussians establish the structural skeleton
+before Patch Gaussians incrementally refine volumetric detail. In our previous work, we demonstrated the effectiveness of this categorization for man-made scenes by identifying Sketch Gaussians
+using 3D line segments extracted via Line3D++. However, this line-based approach was fundamentally limited to scenes with linear features.
+In this work, we extend our method to arbitrary 3D scenes by proposing a novel hierarchical adaptive categorization framework that operates directly on the 3DGS representation. Our approach
+employs multi-criteria density-based clustering, combined with adaptive quality-driven refinement.
+This method eliminates dependency on external 3D line primitives while ensuring optimal parametric encoding effectiveness. After categorization, Sketch Gaussians are efficiently encoded using
+parametric models leveraging their coherence, while Patch Gaussians undergo optimized pruning,
+retraining, and quantization. Our comprehensive evaluation across diverse scenes, including both
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+man-made and natural environments, demonstrates that our method achieves up to 1.74 dB improvement in PSNR, 6.7 % in SSIM, and 41.4 % in LPIPS at equivalent model sizes compared to
+uniform pruning baselines. For indoor scenes, our method can maintain visual quality with only
+0.5 % of the original model size, representing a 175× compression ratio. This structure-aware representation enables efficient storage, adaptive streaming, and rendering of high-fidelity 3D content
+across bandwidth-constrained networks and resource-limited devices.
+1
+Introduction
+1.1
+Background and Motivation
+The increasing demand for immersive experiences in extended reality (XR) applications, such as virtual reality (VR),
+augmented reality (AR), and cloud gaming, has driven significant progress in 3D scene representation technologies.
+These applications rely on accurately modeling complex 3D environments to deliver high-quality user experiences.
+Classical 3D representations such as meshes and point clouds face challenges in balancing storage efficiency with
+rendering quality, particularly for large-scale environments where point clouds can introduce visual artifacts and holes
+during rendering [23, 53].
+Recently, learning-based methods have given rise to alternative representations that seamlessly model geometry and
+appearance. 3D Gaussian Splatting (3DGS) [23] has emerged as a leading approach for learning more explicit and
+efficient point-based 3D representations while keeping the mix between geometry and appearance, leading to a very
+satisfying visual quality. Compared to point clouds, 3DGS represents 3D scenes with a collection of 3D ellipsoidal
+Gaussian splats (or Gaussians for short), which can mitigate the presence of holes with a much sparser distribution. By
+leveraging the properties of Gaussians and taking advantage of modern GPUs, 3DGS achieves comparable photorealistic quality to NeRF [38] but with significantly improved rendering speed, showing great promise as a foundational
+representation for future immersive multimedia systems and applications. While 3DGS achieves impressive visual
+fidelity, it still generates vast numbers of Gaussians to capture fine geometric and appearance details, with five attributes stored independently. For instance, Kerbl et al. [23] employ one to five million Gaussians to model static
+scenes, demanding up to 1 GB of storage per scene. Such a heavy representation, while suitable for local rendering
+on powerful hardware, poses significant challenges for remote rendering, sharing, and real-time transmission of 3DGS
+models across networks.
+The substantial storage requirements of 3DGS models have motivated continuous efforts in compression. Numerous
+recent works (see Section 2.3) have proposed various compression strategies, achieving significant size reductions
+while maintaining visual quality. However, compression alone is insufficient for practical deployment, as efficient
+delivery of 3DGS content requires adapting compressed representations to streaming pipelines that enable progressive transmission and adaptive quality based on network conditions and viewing requirements [54, 29]. Common
+point-based streaming strategies, such as 3D downsampling or spatial tiling, are widely used to generate scalable and
+multi-resolution representations for 3D streaming [15, 56, 52, 49, 45]. Given that 3DGS is also a point-based representation (i.e. the centers of the Gaussians), it is natural to consider adapting these techniques for Gaussians. However,
+these streaming techniques are difficult to apply to 3DGS due to the unique properties of its Gaussian-based representation and optimization. Unlike conventional point clouds, 3DGS employs heterogeneous Gaussians parameterized
+by ellipsoid shape and view-dependent color, with attributes optimized iteratively to minimize discrepancies between
+rendered and ground-truth images, leading to a non-uniform and highly interdependent distribution. This tightly coupled optimization means that spatial partitioning or downsampling techniques often result in substantial visual quality
+degradation [51, 48, 54, 55, 26], as the interdependent Gaussians cannot be meaningfully decomposed without retraining. Furthermore, most existing compression methods treat 3DGS as a monolithic representation without semantic
+structure, making it challenging for progressive/scalable streaming.
+1.2
+Key Observations
+3DGS’s adaptive density control mechanism introduces storage inefficiencies. The adaptive density control aims to
+enhance visual fidelity by cloning Gaussians in under-reconstructed regions and splitting those in over-reconstructed
+areas, based on 2D positional gradients. And the reliance on 2D gradients often highlight the need for densification
+in high-frequency and boundary-defining areas, such as edges and contours [50]. As a result, 3DGS naturally forms
+dense clusters of Gaussians along structural boundaries and detailed areas, while smooth regions such as walls remain
+sparsely populated. This adaptive behavior is essential for capturing fine details and avoiding artifacts. However, it
+also leads to a highly non-uniform distribution where many Gaussians convey redundant information in locally dense
+regions [27, 32, 36].
+2
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+(a) 3DGS (Relaxed, τ = 0.01).
+(b) 3DGS (Medium, τ = 0.002).
+A P REPRINT
+(c) 3DGS (Strict, τ = 0.0002).
+Figure 2: Impact of densification on 3DGS models. (a) Relaxed (τ = 0.01), (b) medium (τ = 0.002), and (c) strict
+(τ = 0.0002) densification thresholds produce 10K, 27K, and 589K Gaussians respectively. Top row: rendered images
+with PSNR values. Middle row: per-pixel reconstruction error maps. Bright regions indicate higher reconstruction
+error, while darker areas correspond to well-reconstructed regions. Bottom row: Gaussian distributions. Note the
+correlation between the density of Gaussians and the sharp/smooth areas.
+For better understanding, we visualize the impact of adaptive density control in Figure 2, which compares three
+3DGS models trained with different densification thresholds τ . Here, we vary this parameter to produce three levels
+of density: a relaxed configuration (τ = 0.01), a medium configuration (τ = 0.002), and a strict configuration
+(τ = 0.0002, identical to the original 3DGS implementation [23]), resulting in 10K, 27K, and 589K Gaussians,
+respectively. As shown, the per-pixel reconstruction error maps (middle row) reveal that reconstruction errors are
+predominantly concentrated in high-frequency regions such as edges, contours, and fine details, while smooth areas
+like walls exhibit minimal error. To reduce these errors and improve visual quality, 3DGS adaptively allocates more
+Gaussians to these challenging regions, as evidenced by the dense clustering along edges and structural boundaries in
+the bottom row. This gradient-driven densification naturally produces dense clusters at edges and sparse coverage in
+smooth regions.
+This observation motivates our representation approach, which exploits this structural difference by applying specialized encoding strategies to these two distinct types of regions. Specifically, we propose categorizing Gaussians into
+two distinct roles: Sketch Gaussians (SketchGS in short) and Patch Gaussians (PatchGS in short), drawing inspiration
+from traditional artistic techniques. Like how artists first sketch outlines before filling in broader areas with color,
+SketchGS captures boundary-defining features such as edges and contours, serving as the semantic scaffolding of the
+scene. In contrast, PatchGS, analogous to broader brush strokes that add volume and depth to a painting, provides
+volumetric coverage for smoother and broader regions.
+To unveil the characteristics of this categorization, we extract SketchGS and PatchGS in the Room scene [3] as an
+example (shown in Figure 3), and quantify their characteristics (shown in Figure 4). Specifically, the SketchGS
+comprises 1.16 million Gaussians organized into coherent clusters, while PatchGS contains 0.43 million unclustered
+Gaussians (Figure 4a). More critically, Figure 4b demonstrates that SketchGS exhibits significantly higher spatial
+density (106 Gaussians per unit volume) compared to PatchGS (104 Gaussians per unit volume), approximately 100×
+denser, confirming their role in capturing fine-grained details within compact regions. Figure 4c further shows that
+3
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+(a) SketchGS (1.16 million Gaussians).
+A P REPRINT
+(b) PatchGS (0.43 million Gaussians).
+Figure 3: Renderings of SketchGS and PatchGS in the Room scene. (a) SketchGS (1.16 million Gaussians) exhibits
+dense edge-aligned structures. (b) PatchGS (0.43 million Gaussians) shows scattered surface coverage. For each
+category, we show the 3DGS rendering (left) and Gaussian center rendering (right).
+(c) Elongation.
+Density
+102
+Volume
+(b) Density.
+106
+3.5
+3.0
+2.5
+2.0
+1.5 SketchGS PatchGS
+Elongation
+(a) Number.
+# Gaussians
+105 SketchGS PatchGS
+107
+106
+105
+104
+103 SketchGS PatchGS
+101
+100
+10 1 SketchGS PatchGS
+(d) Spatial Volume.
+Figure 4: Characteristic of SketchGS and PatchGS in the Room scene: (a) Gaussian count, (b) density, (c) elongation,
+and (d) spatial volume. Compared with PatchGS (1.16 million Gaussians), SketchGS (0.43 million Gaussians) are
+100× denser, 1.5× more elongated, and 27× more compact, confirming their distinct roles as edge-aligned structures
+versus scattered surface coverage.
+SketchGS clusters are notably more elongated (2.82 on average elongation) than PatchGS samples (1.99 on average
+elongation), where elongation is computed as the ratio of the first to second principal component variance from PCA,
+quantifying the degree of linear alignment along edge structures. This observation is consistent with their alignment
+along linear or curvilinear edge structures. Furthermore, Figure 4d reveals that SketchGS occupy minimal spatial
+volume (1.30 unit3 on average), while PatchGS are distributed across substantially larger volumes (35.11 unit3 ).
+Grounded on these observations, we propose leveraging the unique structural properties of SketchGS, which typically
+represent high-frequency and boundary-defining features that are inherently linear or curvilinear. Specifically, instead
+of explicitly densely populating these areas with SketchGS, we propose encoding the coherent SketchGS into compact
+parametric models, to preserve both the visual quality and semantic information with data of significantly smaller size.
+For smoother and low-frequency regions, the PatchGS is stored with Gaussian parameters, given the naturally sparse
+distribution of Gaussians in these areas. This dual-role categorization forms the basis of our hybrid Gaussian representation, and is designed to enhance scalability, structure awareness, and storage efficiency for 3DGS. Moreover, the
+semantic separation between boundary-defining SketchGS and volumetric PatchGS naturally enables layered progressive streaming, where the compact SketchGS layer can be transmitted first to establish the scene’s structural skeleton,
+followed by incremental PatchGS layers that progressively refine visual detail according to available bandwidth (see
+Figure 5).
+1.3
+Approach Overview
+In our previous work [50], we introduced Sketch&Patch (S&P in short), a method that utilizes these distinct characteristics for efficient 3D Gaussian representation. We proposed identifying SketchGS using 3D line segments extracted
+via Line3D++ [20, 21]. By abstracting coherent SketchGS along these line segments into polynomial models and applying targeted optimization to PatchGS, our representation maintains the visual quality with only 2.3 % of the original
+model size on man-made scenes.
+However, this approach had a fundamental limitation. The reliance on Line3D++, which explicitly reconstructs 3D
+line segments from multi-view 2D line detections through matching and triangulation, restricted the applicability primarily to scenes with linear geometric features. Line3D++ is specifically designed to abstract edges and contours
+into straight line segments, making it highly effective for man-made environments with well-defined edges and planar
+surfaces. However, natural scenes, organic objects, and environments with curved boundaries or irregular structures
+4
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+𝑓$(⋅)
+𝑓!(⋅)
+Encode
+𝑓#(⋅)
+(Fig. 6)
+Store or
+Transmit
+Sketch and Patch
+Representation
+𝑓$(⋅)
+𝑓!(⋅)
+𝑓#(⋅)
+Decode
+Render
+𝑓"(⋅)
+𝑓"(⋅)
+Input Images
+A P REPRINT
+Sketch and Patch
+Representation
+Viewpoint
+Figure 5: The streaming pipeline. We propose to build an efficient representation by leveraging the 3D structure
+information, which can be essentially regarded as a “codec” in the context of the streaming system.
+cannot be adequately represented by piecewise linear approximations, limiting the generalizability of our previous approach beyond architectural and manufactured environments. Furthermore, Line3D++ employs a multi-stage pipeline
+grounded in 2D image analysis to estimate 3D line segments. As reported in [65], this cascading estimation process
+introduces multiple sources of uncertainty and error accumulation when performed on natural scenes with curved
+boundaries and irregular structures, resulting in incomplete scene coverage and degraded reconstruction quality.
+To overcome this limitation and extend the applicability of our hybrid Gaussian representation to arbitrary 3D scenes,
+we propose a fundamentally different approach, Sketch&Patch++ (S&P++ in short), that introspectively analyzes the
+3DGS representation itself, rather than imposing external geometric assumptions. Our key insight is that the coherence
+patterns of boundary-defining Gaussians (i.e., their spatial clustering and attribute consistency) emerge directly from
+3DGS optimization dynamics as shown in Figure 4, and are independent of whether underlying scene geometry follows
+straight edges or curves. The same arguments and observations were also made in recent 3DGS works [5, 12, 67, 65].
+Rather than estimating 3D structures from uncertain 2D observations, we directly analyze the converged 3D Gaussian
+distribution, to understand the scene structure in 3D.
+Our categorization method consists of two parts. First, we develop a hierarchical adaptive clustering framework that
+identifies SketchGS through multi-dimensional analysis. Our specially designed multi-criteria density-based clustering simultaneously considers spatial proximity, directional alignment of Gaussian orientations, and color similarity.
+Second, we introduce an adaptive quality-driven refinement mechanism. For each identified cluster, the performance
+of the polynomial regression modeling is evaluated. Clusters that exceed quality thresholds are automatically subdivided using a residual-based splitting strategy that groups Gaussians with similar modeling errors. The partitioning
+is iteratively refined until each cluster achieves satisfactory encoding quality. Finally, clusters containing fewer than
+a minimum threshold of Gaussians are filtered out, as the parametric model overhead would outweigh compression
+benefits for small clusters. This creates a feedback loop where partitioning adapts not merely to spatial density, but to
+actual parametric encoding effectiveness.
+This hierarchical framework offers fundamental advantages over line-segment-based methods. First, by operating on
+the optimized Gaussian distribution rather than 2D images, we eliminate the cascading error propagation inherent to
+multi-view 2D segment reconstruction pipelines. Second, whether boundaries follow straight lines, smooth curves, or
+irregular contours, the clustering tend to identify coherent Gaussian concentrations based on their emergent properties
+rather than presumed geometric primitives. This enables the applicability to both man-made and natural scenes. Third,
+our adaptive refinement ensures that the resulting clusters are optimally suited for parametric encoding, balancing cluster size against modeling accuracy to achieve efficient compression without sacrificing visual quality. Once identified,
+SketchGS is encoded using parametric models that capture smooth attribute variations along coherent clusters, while
+PatchGS undergoes pruning and compression. The result is a generalized hybrid representation that achieves better
+trade-off between storage efficiency and visual quality across diverse scene types, while uniquely enabling adaptive
+streaming through its semantically meaningful layered structure — a capability not offered by existing compression
+methods that lack such decomposition.
+Beyond the generalized categorization, S&P++ introduces additional compression techniques to further reduce storage requirements. Specifically, we first apply tailored vector quantization [41] to PatchGS attributes, exploiting the
+fact that low-frequency volumetric regions tolerate aggressive quantization without perceptual degradation. Furthermore, we develop a cascaded bitstream compression and serialization pipeline, including half-precision conversion for
+polynomial coefficients, Draco geometry compression [14] for SketchGS positions, and entropy coding, to systematically exploit redundancies at multiple levels. These enhancements, combined with the generalized categorization
+framework, enable compression ratios of 116× to 175× compared to vanilla 3DGS.
+Our contributions can be summarized as follows.
+5
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+• Sketch&Patch++, a novel and generalized dual-role categorization method of 3DGS into Sketch and Patch
+Gaussians, reflecting their distinct functions in scene representation. It extends our hybrid representation
+approach beyond man-made scenes to arbitrary scenes.
+• A hybrid and efficient Gaussian representation that i) semantically encodes high-frequency boundary-defining
+features with linear/curvilinear parametric approximation, ii) preserves volumetric detail for low-frequency
+regions using optimized Gaussians with selective pruning and quantization, and iii) enables layered progressive streaming through the semantic separation of structural and volumetric content.
+• Comprehensive experimental validation demonstrating that our generalized method achieves consistent improvements across diverse scene types, improving visual quality by up to 1.74 dB in PSNR, 6.7 % in SSIM,
+and 41.4 % in LPIPS at equivalent model sizes. Correspondingly, our method compresses indoor scenes
+with up to 0.5 % of the original model size (a 175× compression ratio) while maintaining comparable visual
+quality.
+2
+Background and Related Work
+2.1
+3D Gaussian Splatting
+3D Gaussian splatting (3DGS) [23] proposes a 3D reconstructed model capable of novel view synthesis, known for
+its high reconstruction quality, faster training speed, and real-time rendering through rapid rasterization. The 3DGS
+represents a scene using a collection of Gaussians optimized to fit a set of input images, compared with a splattingbased [72] rendering of the model.
+Each Gaussian is parameterized by a center position µ ∈ R3×3 , a 3D covariance matrix Σ, an opacity α, and a color
+c which is described by a set of Spherical Harmonic (SH) coefficients K. A Gaussian centered at µ is defined as:
+1 T −1
+G(x) = e− 2 x Σ x .
+To construct a collection of 3D Gaussians that accurately captures the scene’s essence, 3DGS introduces an optimization method using differentiable rendering to estimate the parameters of the 3D Gaussians, fitting a set of calibrated
+input images of the given scene. During optimization, 3DGS iteratively renders 2D images from the training views and
+minimizes the loss between the rendered images and the ground-truth input images. The loss function is a combination
+of the L1 loss and the Structural Similarity loss (SSIM) [60], weighted by L = λ · L1 + (1 − λ) · LSSIM .
+During the 3DGS training process, Gaussians adapt to better fit their surroundings. Density is controlled by a positional
+gradient threshold, balancing between the number of parameters and the fitting accuracy. Starting from a sparse point
+set generated by Structure from Motion (SfM), the model iteratively removes the Gaussian splats whose opacities
+are below the pre-set threshold, and densifies the Gaussian splats in regions with high positional gradients. In areas
+lacking detail, low-density Gaussians are duplicated and shifted along the gradient to create new geometry. In areas of
+excessive overlap, large Gaussians are split into smaller ones to achieve finer granularity. This adaptive density control
+refines the scene representation while managing the number of Gaussians to balance model complexity and rendering
+quality, as illustrated in Figure 2 which gives an example of how different densification thresholds affect such balance.
+2.2
+3D Scene Structure Representations
+Our work benefits from the correlation between scene structure and the 3DGS representation (see Figures 2 to 4). In
+the following, we review existing methods for extracting geometric structure from 3D scenes by identifying structural
+features at different dimensionalities. Just as 2D images can be decomposed into key points, edges, and homogeneous
+regions, 3D scenes contain structural features at multiple scales: 2D surface regions (planes or coherent surfaces), 1D
+features (line segments, edges, or curves), and 0D features (corners and 3D key points). Methods for extracting these
+structures vary depending on the input data type (2D images versus 3D data) and the target feature representation.
+In earlier methods, extracting features from 2D inputs to abstract 3D line segments typically relies on Structure from
+Motion (SfM) algorithms [16, 47, 62]. SfM reconstructs 3D structures from unordered image sets by simultaneously
+estimating intrinsic and extrinsic camera parameters and a sparse 3D point cloud. With SfM results, the mapping
+from 2D planes to 3D space becomes feasible. Some methods extract features from images to identify or abstract line
+descriptors — 2D line segments on the image plane — using classical techniques [57, 22, 68], or neural network-based
+methods such as DeepLSD [42]. These 2D descriptors are then matched across multiple views to identify the same or
+similar line segments visible from different viewpoints. This process is influenced by the range of viewpoint coverage
+and occluded areas. Once matching is complete, geometric methods like triangulation [2, 69, 43, 37] or other epipolar
+constraints [19, 20, 21] are used to back project the segments into 3D space. Some approaches further leverage deeper
+geometric relationships, such as planes [61]. Also, recent methods [66, 31, 64] extract 3D data containing only edge
+6
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+regions from 2D images to reduce noise inherent to reconstructed 3D data. Despite significant progress in recent
+works, abstracting 2D data edges into 3D edges/curves still faces inherent limitations. These include robustness issues
+introduced by geometric computation errors.
+Scene structure can also be achieved directly from 3D point clouds or other 3D data structures. Such methods directly classify and identify edge regions within 3D point clouds, which are then abstracted or parameterized into line
+segments or curves. Processing directly on 3D data avoids occlusion issues caused by multi-view matching but faces
+challenges from the inherent noise in 3D data and the complexities of parameter tuning for feature detection. Some
+works [46, 6, 58] address these challenges through point filtering steps, robust loss functions, and parameterized estimation techniques that improve robustness to noise. Methods [33, 35] leverage deep neural networks trained on large
+annotated datasets to learn hidden edge features within point cloud distributions, ultimately predicting a 3D wireframe.
+While these methods provide valuable structural representations for various applications, they typically require explicit
+feature detection pipelines, which either through geometric algorithms or learned models, and may not generalize well
+across diverse scene types. In contrast, our approach directly analyzes the distribution of optimized 3D Gaussians
+to infer structural characteristics, leveraging the inherent clustering patterns that emerge from 3DGS optimization
+dynamics without requiring explicit geometric priors or feature detection.
+2.3
+Compact 3DGS Representation
+While 3DGS [23] leverages efficient techniques such as anisotropic Gaussians [72], tile-based sorting, and approximate α-blending to achieve high-performance rendering, the presence of redundancy in the set of Gaussian splats
+continues to impact computational efficiency. Minimizing these redundancies is crucial for optimizing model performance across various applications.
+The model size in 3DGS is primarily affected by two factors. First, complex and high-frequency areas require sophisticated parameters to represent. In particular, advanced spherical harmonics coefficients are needed for accurate
+modeling. Second, as discussed in Section 2.1, the model generation process introduces additional Gaussian splats
+based on density thresholds during scene fitting. The combination of these factors leads to significant storage overhead.
+Recent research has approached these challenges from multiple angles. To address parameter complexity, several
+methods have been proposed: region-based vector quantization [40], K-means codebooks [39], and view-direction
+exclusion [4]. Fan et al. [10] employ knowledge distillation [18] to compress spherical harmonics parameters, while
+Lee et al. [30] utilize learned binary masks and grid-based neural networks as alternatives to spherical harmonics.
+Based on the anchor-based representation constructed by Scaffold-GS [34], HAC [7] and HAC++ [8] leverages 3D
+coordinates to guide quantization and entropy coding, while ContextGS [59] encodes the anchors hierarchically.
+Parallel efforts have focused on managing Gaussian density [44, 34, 25, 51, 36, 71]. Some works utilize the technique
+of Level of Detail (LOD). For instance, Ren et al. [44] propose an octree-based organization where each level corresponds to anchor Gaussian splats defining different LODs. Their approach, enhanced by Scaffold-GS [34], combines
+anchor Gaussians with MLPs for anchor-level feature estimation, resulting in improved representation efficiency. We
+introduce LapisGS [51], a layered representation scheme enabling progressive and continuous quality adaptation for
+bandwidth-aware streaming applications. Mallick et al. applies selective densification based on pixel saliency and
+gradients to reduce the redundancy of 3DGS [36]. Similarly, Zhang et al. propose GaussianSpa [71] which constraints
+3DGS simplification during training to force Gaussians to distribute sparsely.
+These methods, however, primarily focus on either parameter compression or LOD structuring without considering
+the inherent roles of different Gaussian splats in scene representation. Our approach fundamentally differs by recognizing and leveraging the distinct characteristics of Gaussians, categorizing them into Sketch and Patch components
+based on their geometric significance. This structure-aware strategy enables more efficient representation by applying
+appropriate encoding techniques to each category: compact parametric models for boundary-defining features and
+optimized pruning for volumetric regions. Meanwhile, our Sketch and Patch categorization is complementary to these
+existing compression and LOD techniques. Parameter compression methods like vector quantization [40], codebook
+learning [39], or SH compression [10, 30] can be applied to SketchGS and PatchGS while maintaining their distinct
+roles. This compatibility ensures that our method can serve as a foundation for further optimizations while providing
+its unique benefits in storage efficiency and visual quality preservation.
+7
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+~2× to ~20×
+Compression
+~4×
+Compression
+4. Prune &
+Optimize
+5. Quantize
+PatchGS
+(Optimized)
+PatchGS
+6. Bitstream
+Compress
+3. Decode
+1. Categorize
+Hybrid Representation
+SketchGS
+(Decoded)
+3D Gaussians
+𝑓! (⋅)
+2. Encode
+SketchGS
+A P REPRINT
+𝑓" (⋅)
+~200×
+Compression
+𝑓$ (⋅)
+𝑓# (⋅)
+Parametric Models
+Figure 6: Starting from the original 3DGS, our method first categorizes (1) Gaussians into SketchGS and PatchGS
+(Section 3.1). SketchGS, which capture high-frequency boundary-defining features with spatial-attribute coherence,
+are encoded (2) using parametric polynomial models, achieving up to ∼ 200× compression. For smoother regions,
+Patch Gaussians are pruned and retrained (4) together with the decoded (3) Sketch Gaussians to ensure compactness
+(∼ 2× to ∼ 20× compression) while preserving visual fidelity. Vector quantization (5) is then applied to further
+reduce the storage of the optimized PatchGS with additional ∼ 4× compression. The resulting hybrid representation
+is finally packed into a unified bitstream (6) with cascaded compression, enabling efficient storage coding, progressive
+streaming, and practical deployment in networked rendering applications (Section 3.2).
+3
+Proposed Methodology
+While 3DGS can represent complex 3D scenes, the globally estimated set of Gaussian splats is non-uniform due to
+heterogeneous attributes; also, the adaptive density control mechanism creates numerous Gaussian splats, which leads
+to storage inefficiencies and thus challenges the need for more scalable and efficient representations.
+To address these challenges, we propose S&P++, a hybrid Gaussian representation that categorizes Gaussians into
+SketchGS and PatchGS. SketchGS captures high-frequency, boundary-defining features and is compactly encoded using parametric models based on their spatial-attribute coherence, achieving up to 248× compression ratio. In contrast,
+PatchGS represents low-frequency, smoother regions and is optimized for storage efficiency through retraining and
+quantization. This categorization allows us to leverage the structural properties of the scene and its correlation to
+3DGS density and bias (Figure 2), achieving a representation that balances scalability, efficiency, and visual quality.
+As illustrated in Figure 6, S&P++ consists of the following steps. First, we identify coherent clusters of Gaussian
+splats that exhibit structural regularity across spatial, geometric, and appearance dimensions using a multi-criteria
+density-based clustering approach (Section 3.1). Unlike our previous work [50], which relied on explicit 3D line segment extraction as a prior for identifying SketchGS, the new approach classifies Gaussians directly from their intrinsic
+properties, enabling a more flexible and generalizable partitioning strategy. The identified clusters are then refined
+through an adaptive splitting process guided by polynomial modeling performance, which distinguishes geometrically
+structured and boundary-defining clusters (SketchGS) from scattered PatchGS. The Sketch Gaussians are then encoded using parametric models that compactly represent their attributes, significantly reducing storage requirements.
+For smoother regions, represented by Patch Gaussians, we first apply pruning to sparsify their distribution and then
+retraining to maintain visual fidelity. Since they represent coherent regions, we perform vector quantization to further
+reduce the model size (Section 3.2). Finally, all encoded components are serialized into a unified bitstream format
+with cascaded compression for each component type.
+3.1
+Categorizing Sketch and Patch Gaussians
+The first step of the pipeline analyzes the 3D scene to identify Gaussians with coherent relationships and partitions
+them into SketchGS and PatchGS. This partitioning is critical to achieving an effective hybrid representation, as it
+directly determines which Gaussians benefit from parametric encoding versus alternative compression strategies.
+8
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+Motivation for Clustering-Based Partitioning. In our previous work [50], we employed a line-guided approach that
+first extracted 3D line segments from 2D input images using Line3D++ [21], then identified SketchGS through radius
+search and RANSAC-based filtering around these pre-defined 3D lines. While this line-based method effectively
+captured Gaussians along linear edges and contours, it imposed several limitations. First, the approach is inherently
+constrained by the quality and completeness of the line extraction algorithm. Line3D++ is specially designed for manmade scenes with sharp, clear edges and boundaries, which cannot well detect curved features, irregular boundaries,
+or regions where 2D line detection is unreliable (e.g., natural scenes or organic objects). Second, the dependency on
+2D-to-3D projection can introduce errors in scenarios with sparse views or challenging camera configurations.
+To overcome these limitations, we introduce a clustering-based partitioning strategy that directly analyzes the Gaussians themselves, discovering structured configurations without relying on external geometric priors. This data-driven
+approach is more robust to scene variations and naturally adapts to the local structure of the Gaussian distribution. By
+identifying clusters that exhibit multi-dimensional coherence (spatial proximity, directional alignment, and color similarity), we can discover not only linear features but also more complex structured patterns that do not align perfectly
+with straight line segments.
+Multi-Criteria Density-Based Clustering. We propose an extension of the Density-Based Spatial Clustering of
+Applications with Noise (DBSCAN) algorithm [9] that simultaneously evaluates multiple complementary criteria to
+identify coherent Gaussian clusters. Unlike conventional DBSCAN, which considers only spatial proximity, our approach leverages three distinct distance metrics that capture different aspects of Gaussian splat coherence. Specifically,
+for each Gaussian splat Gi , we define three complementary distance measures:
+• Spatial distance. The Euclidean distance between Gaussian centers in 3D space captures geometric proximity: dspatial (Gi , Gj ) = ∥µi − µj ∥2 , where µi ∈ R3 represents the position of splat Gi .
+• Directional distance. To capture orientation coherence, which is particularly important for Gaussians concenni ·nj
+trated along edges and boundaries, we compute a cosine similarity: ddirection (Gi , Gj ) = 1 − ( ||ni ||||n
++ 1)/2,
+j ||
+where ni represents the normalized principal direction derived from the Gaussian’s covariance structure. The
+resulting similarity ranges from 0 , meaning exactly the same, to +1 , meaning exactly the opposite.
+• Color distance. We incorporate perceptual color similarity using RGB features: dcolor (Gi , Gj ) = ∥ci − cj ∥2 ,
+where ci represents the RGB color vector of Gaussian Gi .
+We define Gaussian Gj as a neighbor of Gi if and only if all three distance constraints are simultaneously satisfied:
+Gj ∈ N (Gi ) ⇔ (dspatial (Gi , Gj ) ≤ ϵs ) ∧ (ddirection (Gi , Gj ) ≤ ϵd ) ∧ (dcolor (Gi , Gj ) ≤ ϵc ) ,
+(1)
+where ϵs , ϵd , ϵc are the spatial threshold, directional threshold, and color threshold, respectively. The use of separate
+epsilon thresholds (ϵs , ϵd , ϵc ) provides fine-grained control over each criterion’s influence on the clustering outcome.
+In contrast to the single radius parameter r in our previous line-based method [50], this multi-criteria formulation
+offers greater flexibility in capturing different types of structural coherence.
+As a 3DGS scene usually consists of millions of Gaussians, to accelerate the neighborhood queries, we employ a
+two-stage filtering strategy. First, we partition Gaussian positions into a k-d tree to retrieve all splats within the spatial
+epsilon threshold ϵs , leveraging the efficient O(log n) nearest neighbor search. Second, for the spatially proximate
+candidates, we compute the directional and color distances and retain only those splats satisfying all three epsilon
+constraints. This hierarchical filtering reduces computational complexity from O(n2 ) to approximately O(n log n +
+nk), where k is the average number of spatial neighbors.
+Following standard DBSCAN terminology, we classify Gaussians as core points (with at least min samples neighbors
+satisfying all three criteria), border points (non-core Gaussians within the neighborhood of a core point), or noise points
+(Gaussians not belonging to any cluster). Clusters are formed by connecting core points and their neighborhoods
+through a breadth-first traversal, ensuring density-connected components are merged into coherent groups.
+Adaptive Polynomial Regression-Based Refinement. While multi-criteria DBSCAN effectively identifies spatially
+and perceptually coherent groups, not all clusters exhibit the characteristic of SketchGS. To distinguish geometrically
+structured clusters from scattered point configurations, we introduce an adaptive refinement stage based on polynomial
+modeling performance. This strategy is inspired by our previous work [50], where we employed random sample
+consensus (RANSAC) [11] to filter out Gaussians with large modeling error from SketchGS, to ensure modeling
+coherence. However, rather than using RANSAC for outlier rejection within line segments, we now use polynomial
+modeling quality as a criterion for adaptive cluster splitting and refinement.
+Polynomial Regression Modeling. For each cluster C obtained from multi-criteria DBSCAN, we model the relationship between Gaussian positions and their attributes using polynomial regression (PR). Similar to our previous
+approach [50], we fit separate polynomial models for four key attributes: scaling, rotation (quaternion), opacity, and
+9
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+color. Specifically, given the normalized 3D positions X ∈ Rn×3 of splats in cluster C, we fit polynomial models,
+where the degree of polynomial is chosen by grid search in the range of [1, 10]: a = fa (X) + ϵa , where a represents one of the four attributes and fa (·) is the polynomial model trained using least-squares regression on polynomial
+features generated by: Φ(X) = [1, x1 , x2 , x3 , x21 , x1 x2 , . . . , xd1 , xd2 , xd3 ]. The number of coefficients for a degree-d
+polynomial in 3D is 61 (d + 1)(d + 2)(d + 3), yielding at most 286 coefficients per attribute model.
+Pn
+We evaluate the quality of polynomial regression models using Mean Squared Error (MSE): MSEattr = n1 i=1 ∥âi −
+ai ∥22 , where âi represents the predicted attribute
+and ai the actual attribute. A combined quality metric aggregates
+P
+individual attribute MSEs: MSEcombined = attr wattr · MSEattr , with equal weights wattr = 0.25 for each of the four
+attributes (scaling, rotation, opacity, and color) in our implementation.
+Clusters exhibiting low polynomial regression error (MSEcombined < τmax ) demonstrate strong correlations between
+positions and attributes, indicating geometric structure characteristic of edge-aligned or boundary-defining properties.
+Conversely, high MSE suggests scattered, patch-like arrangements where attributes vary irregularly and resist compact
+parametric representations.
+Iterative Cluster Splitting. For clusters failing to meet the quality threshold τmax , we perform adaptive splitting to
+isolate coherent sub-regions. The splitting process leverages polynomial regression residual patterns:
+1. Residual feature construction. For cluster C with n Gaussians, we compute absolute residuals for each attribute: Rattr = |apred − aactual |, where the apred and aactual are normalized. We concatenate residuals across
+all attributes to form an n × dresidual feature matrix R.
+2. Spatial-residual feature fusion. To maintain spatial locality while grouping Gaussians with similar modeling
+errors, we construct a combined feature representation: F = [β ·R || (1−β)·X], where X contains positions,
+and β weight the residual and spatial components.
+3. K-means sub-clustering. We apply K-means clustering on F to partition C into k sub-clusters, where k ∈
+[2, min(4, ⌈MSEcombined /τmax ⌉ + 1)] is dynamically determined based on the severity of modeling failure.
+4. Recursive refinement. Each sub-cluster is re-evaluated with polynomial regression. Sub-clusters meeting the
+quality threshold are accepted as SketchGS candidates, while those exceeding τmax undergo further splitting.
+This recursive refinement continues until clusters either achieve satisfactory polynomial regression performance, reach
+the minimum cluster size threshold Smin , or exceed the maximum iteration limit Tmax . The adaptive splitting process
+effectively balances modeling fidelity with compression efficiency, ensuring that only clusters with strong geometric
+coherence are classified as SketchGS.
+Post-processing and Outlier Removal. Even within validated SketchGS clusters, we observe that the polynomial
+model for scaling attribute tends to introduce a bias, which can result in poorly modeled long and thin Gaussians.
+We introduce a post-processing phase to address a critical issue caused by the polynomial regression for scaling. To
+mitigate this, we decode the SketchGS candidates and use the Interquartile Range (IQR) method to identify outlier
+Gaussians with extreme scaling values that deviate from the expected distribution. This post-processing ensures that
+only visually consistent Gaussians are retained for the later encoding, improving the accuracy of the SketchGS representation and ensuring better alignment with the underlying scene structure. Gaussians that are filtered out during
+this process are not discarded but instead reclassified as PatchGS, ensuring that no geometric information is lost while
+maintaining the most appropriate representation for each Gaussian based on its characteristics.
+Gaussians Categorization. Through this hierarchical pipeline, Gaussians are naturally split into two categories:
+• SketchGS. Clusters that satisfy multi-criteria DBSCAN coherence, exhibit low polynomial regression error,
+and meet size constraints. These clusters typically concentrate along object boundaries, edges, and geometric
+discontinuities where Gaussians align in structured configurations. Compared to our previous line-based
+approach [50], this clustering-based method can identify a broader range of structured patterns, including
+curved features and complex boundaries that may not align perfectly with straight line segments. Specifically,
+up to 88.7 % and 65.9 % Gaussians are classified as SketchGS for indoor scenes and for outdoor scenes,
+respectively, which are 1.2× and 707.8× more compared to our previous work.
+• PatchGS. All remaining Gaussians that either failed to cluster under the multi-criteria DBSCAN constraints,
+belonged to clusters with persistently high polynomial regression error despite splitting, or were excluded
+due to size constraints of DBSCAN. These Gaussians typically represent smooth surface regions with less
+geometric structure and are sparsely distributed in the 3DGS representation.
+10
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+In Table 1, we show the average model size and relative ratio of raw SketchGS and PatchGS, which are classified by
+our clustering method, across different datasets. Note that the raw SketchGS and PatchGS are not further encoded and
+optimized, which will be detailed in Section 3.2.
+Table 1: The average model size (MB) of raw SketchGS and raw PatchGS across different datasets. The relative ratio
+of each component is indicated.
+3.2
+Model
+Deep Blending
+Tanks&Temples
+Mip-NeRF360
+• Vanilla 3DGS
+◦ Raw PatchGS
+◦ Raw SketchGS
+703.77 (100 %)
+142.14 (20.2 %)
+579.63 (79.8 %)
+436.50 (100 %)
+245.07 (56.1 %)
+191.43 (43.9 %)
+738.74 (100 %)
+290.14 (39.3 %)
+448.60 (60.7 %)
+Gaussian Encoding and Optimization
+Following the hierarchical clustering and categorization process described in Section 3.1, we obtain two distinct Gaussian groups with fundamentally different characteristics: SketchGS exhibiting strong correlations between their 3D
+positions and Gaussian attributes along boundary-defining features, and PatchGS distributed sparsely across broader
+surface regions capturing low-frequency appearance variations.
+To efficiently compress these categorized Gaussians, we employ a compression pipeline that tailors encoding strategies
+to the structural properties of each category. For SketchGS, we leverage PR models to compactly encode their attributes
+by exploiting the coherent relationships between positions and attributes within clusters. For PatchGS, we apply a
+combination of pruning-based optimization to reduce redundancy, followed by vector quantization to compress the
+remaining Gaussian attributes. Finally, we apply cascaded bitstream compression and serialization to further exploit
+redundancies. This compression framework builds upon our previous work [50], which established the effectiveness
+of polynomial regression for SketchGS and pruning-based optimization for PatchGS. These core strategies remain
+unchanged in this extension, as they have proven robust for their respective Gaussian categories. The key innovations
+introduced in this extended version are twofold.
+First, we incorporate vector quantization [41] for PatchGS attributes, motivated by the observation that these Gaussians
+represent low-frequency appearance variations in smooth regions where aggressive quantization introduces minimal
+perceptual artifacts. Second, we introduce a cascaded bitstream compression and serialization pipeline that systematically compresses polynomial coefficients, SketchGS positions, and quantized attributes through specialized techniques
+(half-precision conversion, Google’s Draco geometry compression, and entropy coding), followed by final gzip compression to capture inter-component redundancies.
+Sketch Gaussian Encoding. After identifying SketchGS through our clustering-based categorization, we encode
+their attributes efficiently while preserving visual quality. The coherent relationships between Gaussian positions and
+their attributes within each cluster, strengthened by the robust multi-criteria DBSCAN and adaptive PR-based refinement detailed in Section 3.1, enable compact representation through polynomial modeling. As shown in Table 2, this
+approach achieves approximately 20× compression for SketchGS across different datasets, with the PR models themselves occupying only 6 % to 10 % of the encoded representation while Gaussian positions constitute the remaining
+over 90 %.
+Table 2: The average size (MB) and relative ratios of each component of PR-encoded SketchGS.
+Model
+• Raw SketchGS
+• PR-Encoded SketchGS
+◦ Gaussian Positions
+◦ PR Models
+Deep Blending
+Tanks&Temples
+Mip-NeRF360
+579.63
+191.43
+448.60
+31.37 (100 %)
+29.32 (93.5 %)
+2.05 (6.5 %)
+10.42 (100 %)
+9.45 (90.7 %)
+0.97 (9.3 %)
+29.80 (100 %)
+26.77 (89.8 %)
+3.03 (10.2 %)
+The effectiveness of PR for SketchGS stems from the predictable relationships between 3D positions and Gaussian
+attributes within coherent clusters. For each cluster C, we fit PR models that predict Gaussian attributes (scaling,
+rotation, opacity, and color) from their 3D positions. This parametric encoding transforms the storage requirement
+from per-Gaussian attribute values to a small set of polynomial coefficients shared across all Gaussians in the cluster, achieving substantial compression while maintaining high reconstruction accuracy. By encoding SketchGS with
+11
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+polynomial models, we efficiently represent the high-frequency boundary features of the scene, which typically concentrate significant storage in the original 3DGS model, with minimal memory footprint. This compact representation
+not only reduces storage requirements but also enables adaptive processing, making it suitable for scalable 3D scene
+reconstruction and rendering applications.
+Importantly, our clustering-based approach to identifying SketchGS allows polynomial encoding to be applied more
+broadly than in our previous line-based method. The line-based approach was limited to detecting Gaussians near
+explicit line segments, often missing coherent structures in curved regions, organic objects, and natural scenes where
+linear features are sparse or absent. In contrast, our clustering method automatically discovers geometrically coherent
+Gaussian groups regardless of whether they align with straight edges or curves, capturing a larger fraction of compressible Gaussians and thus achieving better overall compression ratios. Our experiments (Section 4), particularly
+Table 3, further demonstrate the storage efficiency of SketchGS encoding across diverse scene types.
+Patch Gaussian Pruning and Optimization. The core idea behind PatchGS optimization is to reduce the number
+of Gaussians in smoother and broader regions of the 3D scene, where low-frequency variations are typically captured. While SketchGS efficiently encodes high-frequency features through parametric models, PatchGS handles the
+volumetric representation of smoother regions where a sparser distribution is sufficient. To this end, we leverage retraining, which allows for selective pruning of Patch Gaussians while ensuring that visual quality is maintained. The
+pruning and retraining methodology for PatchGS remains consistent with our previous work [50], preserving a proven
+optimization pipeline.
+The process starts with the encoding and decoding of SketchGS. Once the SketchGS is (compactly) encoded by PR
+models, we decode it and fix the decoded version for pruning and retraining, and the decoded SketchGS remains
+unchanged during the subsequent process. Note that the decoded SketchGS is used during retraining, rather than the
+original SketchGS, allowing the PatchGS to compensate for errors introduced by the encoding-decoding process of
+the SketchGS. The retraining focuses on optimizing the PatchGS, which are first pruned by randomly and uniformly
+removing some of them to improve the compactness of the model, and then retrained to improve the visual quality of
+the results. This retraining process ensures that the PatchGS is optimized to align with the visual structure of the scene
+w.r.t. the given SketchGS.
+Through pruning, retraining, and quantization, we achieve a more compact 3DGS representation where each Gaussian
+type serves its designated role: SketchGS efficiently captures high-frequency, boundary-defining features, while optimized PatchGS provides comprehensive coverage of smoother regions. This dual optimization strategy significantly
+reduces the total number of Gaussians required to represent the scene while maintaining high fidelity. The result is a
+hybrid representation that efficiently allocates storage resources according to the geometric characteristics of different scene regions, i.e. compact parametric models for high-frequency features and optimized sparse distribution for
+volumetric regions.
+Vector Quantization. Unlike SketchGS, which captures sharp discontinuities and high-frequency boundary features
+requiring precise attribute values to maintain edge sharpness and structural definition, PatchGS models gradual appearance changes across broader regions where fine-grained attribute precision has minimal perceptual impact. Therefore,
+for additional storage efficiency, we apply vector quantization to the optimized PatchGS following Papantonakis et
+al. [41].
+This compression scheme employs K-means clustering to create codebooks for various Gaussian attributes, including
+opacity, scaling, quaternion rotation (real and imaginary parts), base color coefficients, and spherical harmonics color
+components. Instead of storing exact values, the indices are maintained to the nearest values in fixed-size codebooks.
+For vector attributes, separate indices are used for each component while sharing a single codebook. Based on the empirical experiments from Papantonakis et al. [41], 256-entry codebooks with 1-byte indices are used, offering optimal
+compression while preserving visual quality. Note that Gaussian positions are not compressed with codebooks because
+it leads to significant quality degradation, according to their pilot experiments. Instead, 16-bit half-float quantization
+is applied to Gaussian positions and codebook entries to further reduce storage requirements while maintaining visual
+fidelity.
+Bitstream Compression and Serialization. After encoding the SketchGS via polynomial modeling and optimizing
+the PatchGS through pruning, retraining, and vector quantization, our method produces three primary components:
+i) polynomial regression model coefficients, ii) SketchGS positions, and iii) quantized PatchGS attributes and positions. While these components are already significantly compressed compared to the original 3DGS representation,
+their serialized forms exhibit additional redundancy and structure that can be further exploited through specialized
+compression techniques. To maximize storage efficiency, we apply a cascaded compression pipeline.
+Polynomial Model Compression. The polynomial regression models that encode Sketch Gaussian attributes consist of floating-point coefficient arrays. To compress these coefficients efficiently, we first convert all full-precision
+12
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+floating-point coefficients to half-precision (16-bit) floats, reducing the raw storage by 2× while maintaining sufficient
+numerical precision for accurate attribute prediction during decoding. Empirical analysis shows that for polynomial
+coefficients with typical magnitudes of 1e−4 (measured as mean absolute coefficient value), the absolute conversion
+error remains below 1e−8, corresponding to a relative error of less than 0.01 %. We then apply zlib compression to the
+serialized half-float coefficients. This two-stage compression achieves an overall compression ratio of approximately
+2.14× for polynomial model data.
+Sketch Gaussian Position Compression. While SketchGS positions represent only spatial coordinates without attribute information (which is encoded in the polynomial models), they constitute a substantial portion of the encoded
+SketchGS representation. As shown in Table 2, position data typically occupy over 90 % of the PR-encoded SketchGS
+storage, making their efficient compression critical for achieving higher compression ratios. These 3D positions
+µi ∈ R3 exhibit strong spatial coherence within clusters, as they correspond to structured geometric features such
+as edges and boundaries. To exploit this spatial coherence, we employ Google Draco [14], a specialized geometry
+compression library designed for 3D mesh and point cloud data. Draco achieves high compression ratios through a
+combination of quantization, prediction-based encoding, and entropy coding. In our experiments, Draco achieves the
+compression ratio of approximately 22.3× for SketchGS positions, drastically reducing the storage footprint while
+maintaining sufficient positional accuracy (with mean error smaller than 0.04 % of the scene diameter).
+Final Bitstream Packing. After applying specialized compression to the polynomial models and Sketch Gaussian
+positions, we serialize all three components (compressed polynomial coefficients, Draco-compressed Sketch positions,
+and quantized Patch Gaussians) into a unified bitstream with a structured header that specifies component offsets and
+sizes, which is essential for practical streaming scenarios. Despite the component-level compression already applied,
+the concatenated bitstream often exhibits residual redundancy at the inter-component level, such as repeated header
+patterns, alignment padding, and correlations between components. To capture these remaining redundancies, we
+apply gzip compression to the entire packed bitstream as a final post-processing step, which provides an additional
+5 % reduction in storage.
+Through this comprehensive cascaded compression pipeline, combining component-specific techniques (polynomial
+precision reduction, Draco geometry compression, vector quantization) with unified bitstream entropy coding, we
+achieve substantial high compression ratios while maintaining visual fidelity across diverse scene types.
+4
+Experimental results
+4.1
+Experimental Setup
+Dataset and Metrics. We conducted a comprehensive evaluation of our method across seven representative scenes
+from three distinct datasets: Playroom and Drjohnson from the Deep Blending dataset [17], Room, Kitchen, Garden,
+and Train from the Mip-NeRF360 dataset [3], and Truck from the Tanks&Temples dataset [28]. As illustrated in
+Figure 7, these scenes were strategically selected to encompass a diverse spectrum of geometric complexities and
+structural characteristics. This comprehensive selection enables systematic assessment of our method’s adaptability
+across varying scene morphologies, including bounded indoor environments with well-defined structural elements
+(Playroom, Drjohnson, Room, Kitchen), expansive unbounded outdoor scenes with irregular structures (Truck, Train,
+Garden).
+We quantitatively assessed the visual fidelity of our 3D Gaussian representations using three complementary metrics:
+peak signal-to-noise ratio (PSNR), structural similarity index measure (SSIM) [60], and learned perceptual image
+patch similarity (LPIPS) [70]. We use the same train/test split settings from the original 3DGS work [23] for consistent
+and meaningful comparisons. The metrics are computed based on the testing set.
+Implementation. Our implementation is based on the official 3D Gaussian Splatting codebase [24]. We initially
+trained 3DGS models for each scene using the default hyperparameters on an NVIDIA H100 GPU. Subsequently,
+we applied our proposed categorization method to distinguish between Sketch and Patch Gaussians based on their
+structural characteristics and spatial coherence properties, as detailed in Section 3. Following the categorization,
+polynomial regression (PR) is utilized to model the spatial distribution of Sketch Gaussians, and the trained PR models
+and SketchGS positions are further compressed with quantization and Google’s Draco, respectively. Patch Gaussians
+undergo pruning, retraining, and quantization to achieve further compact representation. Finally, all the encoded files
+are packed into bitstream with gzip compression. The PR model’s degree was determined through a comprehensive
+grid search, ensuring optimal representation. We maintained consistent hyperparameters across all training stages.
+The identification and modeling of SketchGS were implemented using Python’s multiprocessing capabilities, running
+on dual AMD Epyc 9334 CPUs with 3.9 GHz and 32 cores per CPU. For scenes with millions of Gaussians, our
+experiments demonstrate that through K-D tree and parallel processing optimization of the clustering and refinement
+13
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+(a) Playroom.
+(b) Drjohnson.
+(e) Kitchen.
+(c) Train.
+(f) Room.
+A P REPRINT
+(d) Truck.
+(g) Garden.
+Figure 7: The seven scenes used in our evaluation: Playroom, Drjohnson, Train, Truck, Kitchen, Room, and Garden.
+These scenes encompass diverse man-made environments, ranging from interior spaces with furniture and architectural
+details to exterior objects.
+stages, we achieve at least two orders of magnitude faster speed, where the gain is mainly from clustering. For
+refining and polynomial modeling, processing 100 to 200 clusters per scene requires only 1 to 2 min. The subsequent
+PatchGS retraining takes a fraction of the original 3DGS training time, typically requiring only 70 % to 80 % of the
+initial training time with the same iterations due to the reduced Gaussian population after pruning. Consequently, our
+method achieves comparable or even faster end-to-end processing times compared to standard 3DGS training while
+producing significantly more storage-efficient representations. In Section 4.2, we analyze the time efficiency of our
+algorithm.
+Comparison Methods. We implemented three comparative approaches to validate our method:
+• Sketch&Patch (S&P). This represents our previous work [50], which employs Line3D++ [21] for extracting 3D line segments as a geometric prior to identify SketchGS. While this line-based method demonstrated
+promising results for scenes with strong linear features characteristic of man-made environments, it fundamentally relies on explicit straight-line detection and cannot generalize well to scenes with curved boundaries, organic structures, or natural environments. By comparing against this baseline, we demonstrate the
+improvements achieved through our new clustering-based categorization that automatically adapts to diverse
+geometric structures without imposing handcrafted geometric assumptions.
+• Prune&Retrain. This method applies a uniform pruning and retraining strategy across all Gaussians, without distinguishing between Sketch and Patch categories. All Gaussians are treated homogeneously, which
+represents a naive compression baseline that does not leverage structural scene properties or geometric coherence patterns. This method serves as an ablation study to demonstrate the significance of recognizing and
+processing Gaussians differently based on their structural roles.
+• Sketch. The method focuses exclusively on the encoding of SketchGS, deliberately omitting the pruning
+and retraining of PatchGS. Note that the SketchGS and PatchGS are retrieved by our clustering and refinement method. To quantify the storage efficiency and visual quality trade-offs inherent in compact boundarydefining feature representation, we progressively reduce the number of SketchGS and measure the visual
+quality and model size. This method is the only one not to retrain the model.
+4.2
+Results Analysis
+Figures 8 to 10 plot the visual quality versus the model size across the three benchmark datasets: Mip-NeRF360,
+Tanks&Temples, and DeepBlending. To generate rate-distortion (R-D) curves, we varied parameters for each method.
+For the Prune&Retrain baseline, we created multiple models by reducing the number of Gaussians by factors of
+{1, 2, 4, 6, 8, 10, 15, 20} through uniform pruning, followed by retraining. For the Sketch method, we reduce the
+14
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+S&P
+Sketch
+Prune&Retrain
+S&P++
+30.0
+Prune&Retrain
+S&P++
+PSNR (dB)
+PSNR (dB)
+PSNR (dB)
+28.5
+22.5
+101
+102
+Model Size (MB)
+103
+22.0
+(a) Mip-NeRF360.
+Prune&Retrain
+S&P++
+29.0
+23.0
+28.0
+30.0
+S&P
+Sketch
+29.5
+23.5
+29.0
+27.0
+24.0
+S&P
+Sketch
+A P REPRINT
+28.0
+101
+102
+Model Size (MB)
+103
+27.5
+(b) Tanks&Temples.
+101
+102
+Model Size (MB)
+103
+(c) DeepBlending.
+Figure 8: R-D curves for PSNR: (a) Mip-NeRF360, (b) Tanks&Temples, and (c) DeepBlending. Note the model size
+is log-scaled.
+S&P
+Sketch
+0.90
+Prune&Retrain
+S&P++
+0.86
+S&P
+Sketch
+Prune&Retrain
+S&P++
+0.84
+SSIM
+0.82
+0.86
+0.89
+0.80
+0.84
+101
+102
+Model Size (MB)
+103
+0.78
+(a) Mip-NeRF360.
+Prune&Retrain
+S&P++
+0.90
+SSIM
+SSIM
+0.88
+0.91
+S&P
+Sketch
+101
+102
+Model Size (MB)
+103
+0.88
+(b) Tanks&Temples.
+101
+102
+Model Size (MB)
+103
+(c) DeepBlending.
+Figure 9: R-D curves for SSIM: (a) Mip-NeRF360, (b) Tanks&Temples, and (c) DeepBlending. Note the model size
+is log-scaled.
+0.25
+Prune&Retrain
+S&P++
+0.30
+0.20
+0.25
+0.26
+0.24
+0.18
+101
+102
+Model Size (MB)
+(a) Mip-NeRF360.
+103
+Prune&Retrain
+S&P++
+0.28
+0.20
+0.15
+S&P
+Sketch
+0.30
+0.23
+0.18
+0.12
+Prune&Retrain
+S&P++
+LPIPS
+0.28
+LPIPS
+0.23
+S&P
+Sketch
+LPIPS
+S&P
+Sketch
+101
+102
+Model Size (MB)
+(b) Tanks&Temples.
+103
+0.22
+101
+102
+Model Size (MB)
+103
+(c) DeepBlending.
+Figure 10: R-D curves for LPIPS: (a) Mip-NeRF360, (b) Tanks&Temples, and (c) DeepBlending. Note the model size
+is log-scaled.
+number of SketchGS by randomly selecting {0%, 25%, 50%, 75%, 100%} of the Sketch Gaussians and adding these
+to the full set of Patch Gaussians. For our previous method (denoted as S&P), we utilized all line segments from
+Line3D++ [21] for SketchGS identification and controlled the bitrate by reducing PatchGS with downsample factors
+of {1, 2, 4, 6, 8, 10, 15, 20} through uniform pruning and retraining. For our proposed method (denoted as S&P++),
+we control the bitrate in the same manner while employing the improved DBSCAN-based clustering for SketchGS
+identification and compression techniques.
+We make the following observations from these results.
+Compression Efficiency. Compared to the original 3DGS models (the rightmost points), our S&P++ method achieves
+substantial compression ratios while maintaining comparable or even superior visual quality. For instance, on Deep15
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+Blending, S&P++ compresses the model from 703.77 MB to 4.03 MB (a 175× compression ratio, 0.5 % of the original size) with only a 0.28 dB drop in PSNR (from 29.52 to 29.24) and negligible degradation in SSIM (from 0.902 to
+0.898). Remarkably, on Mip-NeRF360, S&P++ at 75.69 MB actually surpasses the original 767 MB model, achieving 29.74 dB PSNR compared to 29.62 dB. This improvement can be explained by the fact that raw 3DGS models
+contain redundant Gaussians that may introduce rendering artifacts; better pruning and densification strategies can
+improve reconstruction quality at lower sizes [50, 71, 27, 32].
+Improvement over S&P. Our proposed S&P++ method consistently achieves smaller model sizes at the same quality
+while maintaining better visual quality at the same model size, compared to our previous S&P method. For example,
+at equivalent PSNR levels, S&P++ requires only 25 % to 38 % of the storage needed by S&P. Specifically, compared
+to S&P, S&P++ achieves 2.7× smaller on Mip-NeRF360 (20.6 MB vs. 54.7 MB at 29.5 dB PSNR), 3.3× smaller on
+DeepBlending (10.1 MB vs. 33.3 MB at 29.4 dB PSNR), and 3.9× smaller on Tanks&Temples (15.7 MB vs. 61.5 MB
+at 23.5 dB PSNR). This improvement stems from our DBSCAN-based clustering approach, which more accurately
+identifies and refines SketchGS. Unlike S&P’s reliance on detected line segments with Line3D++ [21], which may
+miss important boundary features or include biased detections, our multi-criteria clustering directly operates on Gaussian attributes to capture true high-frequency and boundary-defining features, resulting in more efficient SketchGS
+encoding and better PatchGS allocation.
+Robustness Compared to Prune&Retrain. The Prune&Retrain baseline exhibits rapid quality degradation as the
+model size decreases, whereas S&P++ maintains stable performance across a wide range of compression ratios. On
+Mip-NeRF360, Prune&Retrain drops 1.70 dB in PSNR when compressed from 767 MB to 38 MB, while S&P++
+drops only 0.63 dB over a similar relative compression (from 76 MB to 6 MB). At comparable model sizes around
+38 MB, S&P++ outperforms Prune&Retrain by 1.74 dB in PSNR, 6.7 % in SSIM, and 41.4 % in LPIPS. This substantial performance gap arises because uniform global pruning indiscriminately removes Gaussians regardless of
+their importance, inevitably eliminating critical high-frequency features essential for sharp edges and fine details. In
+contrast, our method’s categorization preserves SketchGS (high-frequency boundary-defining features) intact while
+selectively pruning only from PatchGS (low-frequency volumetric regions), where redundancy is higher and removal
+has less perceptual impact. We further analyze this effect in Section 4.3.
+Necessity of PatchGS Retraining. The Sketch method, which simply combines SketchGS with the original unpruned
+PatchGS without retraining, consistently yields the worst performance across all datasets and metrics. This poor
+performance indicates that PatchGS retraining is essential. After SketchGS are identified and refined, the remaining
+PatchGS must be retrained to compensate for representation errors and adapt to the modified Gaussian distribution.
+Without this retraining step, PatchGS cannot effectively fill the gaps left by SketchGS extraction, leading to visible
+artifacts and quality degradation. As a learning-based representation, retraining 3DGS is a common and widely used
+strategy to maintain the quality and size trade-off [1, 48].
+Qualitative Comparison. To illustrate the performance of the proposed method, we also present the visual comparison
+with the other methods in Figures 11 to 13, for qualitative analysis. For fair comparison, we selected models representing each method’s maximum achievable compression while maintaining acceptable visual quality, corresponding
+to the leftmost points in the R-D curves.
+It can be observed that both S&P and S&P++ excel in preserving geometric details and structural integrity, owing to
+their explicit categorization of Gaussians into SketchGS and PatchGS with separate compression strategies. On Playroom, both methods achieve SSIM of 0.95, which surpass even the original Vanilla 3DGS (0.94), while Prune&Retrain
+drops to 0.93. The zoomed regions reveal that our methods effectively preserve sharp edges and boundary features,
+such as the clearly readable book titles on the bookshelf and the fine fur texture of the stuffed animal. On Truck,
+the performance gap becomes more pronounced. S&P and S&P++ maintain SSIM of 0.83, whereas Prune&Retrain
+degrades to 0.78, exhibiting visible blurring around the headlight contours and loss of metallic surface details. This
+advantage stems from the categorization-based approach: by identifying and preserving SketchGS (high-frequency
+boundary features) separately from PatchGS (low-frequency volumetric regions), our methods retain critical geometric structures that uniform global pruning inevitably destroys.
+Notably, S&P++ achieves visual quality comparable to S&P while requiring substantially less storage. At equivalent
+SSIM levels, S&P++ is 6.7× smaller on Playroom (4.88 MB vs. 32.79 MB), 9.6× smaller on Room (2.82 MB vs.
+27.00 MB), and 4.6× smaller on Truck (5.84 MB vs. 26.65 MB). This significant storage reduction, without sacrificing perceptual quality, demonstrates the effectiveness of our improved clustering-based SketchGS identification, which
+more precisely captures boundary-defining features and enables more aggressive yet visually lossless compression of
+PatchGS.
+16
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+Ground Truth
+Vanilla 3DGS
+Prune & Retrain
+A P REPRINT
+S&P
+S&P++
+SSIM: 0.94
+SSIM: 0.93
+SSIM: 0.95
+SSIM: 0.95
+Size: 631.40 MB
+Size: 31.57 MB
+Size: 32.79 MB
+Size: 4.88 MB
+Figure 11: Rendered images of 3DGS on Playroom generated from four methods.
+Ground Truth
+Vanilla 3DGS
+Prune & Retrain
+S&P
+S&P++
+SSIM: 0.89
+SSIM: 0.86
+SSIM: 0.89
+SSIM: 0.89
+Size: 395.20 MB
+Size: 26.34 MB
+Size: 27.00 MB
+Size: 2.82 MB
+Figure 12: Rendered images of 3DGS on Room generated from four methods.
+Ground Truth
+Vanilla 3DGS
+Prune & Retrain
+S&P
+S&P++
+SSIM: 0.85
+SSIM: 0.78
+SSIM: 0.83
+SSIM: 0.83
+Size: 630.21 MB
+Size: 35.85 MB
+Size: 26.65 MB
+Size: 5.84 MB
+Figure 13: Rendered images of 3DGS on Truck generated from four methods.
+4.3
+Ablation Effect of Sketch and Patch
+As shown in Figures 8 to 10, the superior performance of our method S&P++ over the Prune&Retrain approach
+underscores the importance of differential treatment of Gaussian categories. With the same model size, our method
+consistently achieves better visual quality. This is because uniform pruning and retraining, while effective for general
+optimization, fail to capitalize on the distinct characteristics of boundary and non-boundary regions.
+To better illustrate this distinction, we show the visualization of the rendering performance versus the ratio of SketchGS
+for the scene Playroom constructed by methods S&P++ (w/o Quantize) and Prune&Retrain in Figure 14a. For fair
+comparison, we evaluate S&P++ without vector quantization and bitstream compression to maintain comparable
+model sizes with Prune&Retrain. Otherwise, with these additional compression techniques applied, the R-D curve of
+our complete S&P++ method would shift significantly leftward, making direct visual comparison with Prune&Retrain
+difficult to interpret due to non-overlapping model size ranges. This controlled comparison isolates the impact of our
+clustering-based categorization from the additional compression enhancements.
+The Sketch ratio, defined as the number of Sketch Gaussians over the total number of Gaussians, provides valuable
+insight into the effectiveness of our method. As can be observed in Figure 14a (bottom), in our S&P++ (w/o Quantize)
+method, the Sketch ratio increases as the model size decreases, ranging from approximately 73 % at the largest model
+size to 98 % at the most compressed state. This trend occurs because we fix the SketchGS while progressively pruning
+and optimizing the PatchGS, ensuring the preservation of critical boundary features even under extreme pruning. In
+contrast, the Prune&Retrain method maintains a constant Sketch ratio of approximately 73 % across all model sizes, as
+it uniformly prunes and optimizes all Gaussians without distinguishing their structural roles. This uniform treatment
+leads to suboptimal resource allocation, particularly evident in their SSIM values shown in Figure 14a (top). Even
+when our method has the highest SketchGS ratio (98 %) at the smallest model size, it achieves better visual quality
+compared to Prune&Retrain. This superior performance demonstrates that preserving SketchGS while selectively
+optimizing PatchGS is more effective than uniform pruning, especially under stringent storage constraints.
+17
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+0.910
+A P REPRINT
+S&P++ (w/o Quantize)
+Prune&Retrain
+SSIM
+0.905
+0.900
+0.895
+100%
+Sketch Ratio
+95%
+S&P++ (w/o Quantize)
+Prune&Retrain
+90%
+85%
+80%
+75%
+70%
+102
+Model Size
+103
+(a) SSIM and SketchGS ratio vs. model size.
+(b) Prune&Retrain, 39 MB.
+(c) S&P++ (w/o Quantize), 31 MB.
+Figure 14: Ablation study of Sketch-Patch categorization on the Playroom scene. (a) SSIM and Sketch ratio versus
+model size. (b-c) Visual comparison showing rendered image (top), error map showing absolute RGB difference
+from ground truth (middle), and Gaussian centers (bottom). Our method consistently outperforms uniform pruning
+across all compression levels. The quality advantage primarily stems from high-frequency boundary regions where our
+selective preservation of SketchGS maintains structural definition, while uniform pruning degrades these perceptually
+critical features.
+We further visualize the qualitative differences between the 3DGS models with comparable size, which are en/decoded
+from two methods in Figure 14b and Figure 14c. The upper row shows the rendered results, where despite using
+31 MB storage, our method achieves noticeably higher quality with 0.96 SSIM, compared with Prune&Retrain at
+39 MB with 0.94 SSIM. The middle row presents the error maps (absolute difference between rendered and ground
+truth RGB images). Our method exhibits substantially darker error maps, particularly along object boundaries and
+structural edges, confirming superior reconstruction accuracy. The bottom row visualizes the spatial distribution of
+Gaussian centers. As can be observed, the quality difference primarily stems from the SketchGS regions, i.e., the
+high-frequency boundary features. Our method’s denser SketchGS coverage along structural boundaries corresponds
+to sharper, better-defined features in the rendering, while Prune&Retrain’s uniform pruning has removed critical
+boundary-defining Gaussians, leading to increased artifacts in these perceptually important regions.
+In summary, the consistent superiority of our method validates the significance of distinguishing between SketchGS
+and PatchGS through clustering-based categorization, enabling targeted optimization strategies for each category.
+4.4
+Model Size Breakdown
+We present Table 3, which provides a detailed breakdown of our hybrid representation’s storage requirements, comparing SketchGS and PatchGS components with the baseline Vanilla 3DGS at equivalent visual quality levels in terms
+of LPIPS (0.15 on Mip-NeRF360, 0.23 on Tanks&Temples, and 0.24 on DeepBlending). Our S&P++ achieves compression ratios of 174.6×, 116.1×, and 125.2× for Deep Blending, Tanks&Temples, and Mip-NeRF360 datasets
+respectively, reducing vanilla 3DGS models to just 4.03 MB, 3.76 MB, and 5.90 MB while maintaining equivalent
+visual quality.
+The results reveal that our parametric encoding of SketchGS achieves remarkable efficiency, requiring no more than
+2.63 MB of storage after full compression (PR encoding, Draco compression, and coefficient quantization) across all
+18
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+Table 3: Impact of each component of the proposed method on model size at equivalent visual quality. We report storage requirements (in MB) across three datasets, and indicate relative compression ratios with respect to the baseline.
+Model
+Deep Blending
+Tanks&Temples
+Mip-NeRF360
+• Vanilla 3DGS
+• S&P++ GS
++ w/ Bitstream Packing
+703.77 (1.0×)
+4.16 (169.2×)
+4.03 (174.6×)
+436.50 (1.0×)
+3.85 (113.4×)
+3.76 (116.1×)
+738.74 (1.0×)
+5.99 (123.3×)
+5.90 (125.2×)
+◦ Sketch Gaussians
++ w/ PR Encoding
++ w/ Draco Compress.
++ w/ PR Quantization
+579.63 (1.0×)
+31.37 (18.5×)
+3.75 (154.6×)
+2.63 (220.4×)
+191.43 (1.0×)
+10.42 (18.4×)
+1.31 (146.1×)
+0.79 (241.9×)
+448.60 (1.0×)
+29.80 (15.1×)
+3.84 (116.8×)
+2.24 (200.3×)
+◦ Patch Gaussians
++ w/ Prune & Retrain
++ w/ Quantization
+124.14 (1.0×)
+7.10 (20.0×)
+1.53 (92.2×)
+245.07 (1.0×)
+12.25 (20.0×)
+3.06 (80.1×)
+290.14 (1.0×)
+14.51 (20.0×)
+3.75 (77.37×)
+test scenes. The compact representation of SketchGS is particularly noteworthy, as these boundary-defining elements
+typically require dense sampling in traditional approaches to maintain edge and contour fidelity. Our method’s ability
+to encode these features efficiently while preserving their visual importance validates the effectiveness of our PR-based
+approach combined with specialized geometry compression. Furthermore, this efficiency in SketchGS representation
+allows for a more optimal allocation of storage resources to PatchGS, contributing to the overall balance between
+storage efficiency and visual quality.
+Moreover, we can observe that pruning and optimization, combined with vector quantization, contribute significantly
+to compressing the PatchGS, resulting in an average of 77× to 92× reduction in size compared to the original PatchGS
+representation.
+In summary, this breakdown demonstrates that our method’s superior compression performance stems from the synergy of specialized techniques for each Gaussian category. SketchGS compression achieves 200× to 242× ratios
+through PR encoding, Draco compression, and quantization, while PatchGS compression achieves 77× to 92× ratios
+through pruning and vector quantization. The asymmetric treatment enabled by our clustering-based categorization is
+essential for achieving the overall 116× to 175× compression ratios while maintaining visual quality.
+4.5
+Time Efficiency
+Beyond compression efficiency and visual quality, computational time is also crucial for practical deployment. We
+compare the end-to-end compression time of our method against the training time of vanilla 3DGS, and compression time of HAC++ [8] which is reported as the state-of-the-art (SOTA) in 3DGS compression [1]. All methods are
+evaluated on the Mip-NeRF360 dataset, with each experiment repeated three times and averaged to ensure reliable
+measurements. For HAC++, we follow the original settings from the paper, which used two compression configurations to produce lowrate and highrate versions. For our S&P++ method, we also report results for two compression
+configurations: lowrate with aggressive PatchGS pruning (downsample factor 20) and highrate without PatchGS pruning. Figure 15 presents the average training time comparison, while Table 4 provides a detailed breakdown of the
+computational pipeline of our method.
+As shown in Figure 15, vanilla 3DGS requires 1634 s for training on average, while HAC++ exhibits significantly
+higher computational costs of 3038 s (lowrate) and 3278 s (highrate), representing 1.9× to 2.0× overhead compared
+to vanilla 3DGS. This substantial overhead stems from the complex hierarchical anchor-based decomposition and iterative refinement process. In contrast, our S&P++ method demonstrates superior computational efficiency, completing
+in 1559 s (lowrate) and 1660 s (highrate). Remarkably, our lowrate configuration achieves 4.6 % speedup over vanilla
+3DGS while simultaneously providing 113×-176× compression, and our highrate configuration remains comparable
+to vanilla 3DGS with only 4 s overhead. Compared to HAC++, our method is approximately 1.9× faster for both
+compression levels.
+The computational efficiency of our method stems from its algorithmic design. As shown in Table 4, the categorization and modeling stages require approximately 304 s total or 19 % of training time. This includes clustering (133 s),
+polynomial regression (144 s), and post-processing (27 s). The downsampling and retraining stage dominates at 80 %
+of total time, but operates on a dramatically reduced Gaussian population in the lowrate configuration after aggressive PatchGS pruning (downsample factor 20, removing ∼ 95 % of PatchGS), while the highrate configuration skips
+19
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+×103
+3.5
+3038s
+Time (seconds)
+3.0
+3278s
+Table 4: Training time breakdown (seconds) for S&P++
+on Mip-NeRF360. Lowrate configuration uses downsample factor 20 for PatchGS pruning; highrate configuration skips PatchGS pruning. PatchGS retraining dominates computational cost (80 %), while categorization
+and encoding require 20 % of time.
+2.5
+2.0
+1.5
+1634s
+1559s
+1660s
+1.0
+Method
+Component
+3DGS
+HAC++
+–
+–
+1633.66
+3038.19 3278.08
+Clustering
+Poly. Regression
+Post-processing
+Downsampling
+Retraining
+Quantization
+Bitstream
+132.90
+144.14
+26.65
+0.5
+0.0
+3DGS
+HAC++ HAC++ S&P++ S&P++
+(Lowrate) (Highrate) (Lowrate) (Highrate)
+S&P++
+Method
+Lowrate
+1.79
+1246.15
+5.05
+1.80
+Highrate
+2.80
+1338.12
+13.35
+1.80
+Figure 15: Training time across methods on MipTotal
+1558.48 1659.76
+NeRF360. S&P++ (stacked bars shows component
+breakdown) achieves comparable or faster training
+times than 3DGS while providing 116×-175× compression, and is 1.9× faster than HAC++ [8].
+pruning entirely and only performs retraining on the original PatchGS population. The reduced population in lowrate
+enables faster per-iteration optimization, allowing retraining to complete in 1246 s compared to 1634 s of vanilla
+3DGS, while the highrate configuration requires 1338 s due to maintaining the full PatchGS set. The remaining stages
+(quantization, and bitstream compression) impose minimal overhead of less than 1 %. Unlike the iterative hierarchical
+optimization of HAC++, which requires multiple scene passes, our one-time clustering-based categorization followed
+by targeted optimization avoids iterative refinement overhead while achieving superior compression ratios.
+In summary, our S&P++ method achieves high compression ratios (113×-176×), superior visual quality, and training efficiency comparable to or better than vanilla 3DGS, while offering approximately 2× speedup over HAC++.
+The lowrate configuration is ideal for storage-constrained scenarios requiring both training efficiency and compact
+representation, while the highrate configuration maintains training time parity with vanilla 3DGS while delivering
+substantial compression. This combination makes our approach highly practical for real-world deployment where
+both storage and computational efficiency are critical.
+4.6
+Comparison with State-of-the-Art Methods
+Our S&P++ method is fundamentally designed to construct a compact representation with semantic structure—distinguishing features from volumetric content to enable applications such as adaptive streaming. Nevertheless,
+we evaluate its performance against SOTA 3DGS compression methods to demonstrate its competitiveness in ratedistortion trade-offs. We compare against ten recent compression approaches: ScaffoldGS [34], LightGaussian [10],
+EAGLES [13], CompactGS [30], ReducedGS [41], ContextGS [59], MesonGS [63], GaussSpa [71], HAC [7], and
+HAC++ [8]. Figure 16 presents rate-distortion curves showing LPIPS versus model size across three datasets: MipNeRF360, Tanks&Temples, and DeepBlending.
+As shown, our method achieves highly competitive performance across all three datasets, consistently forming part
+of the rate-distortion frontier alongside the best-performing methods. On the Mip-NeRF360 dataset (Figure 16a) and
+Tanks&Temples dataset (Figure 16b), which includes both bounded indoor scenes and unbounded outdoor environments, our method achieves strong performance which is competitive to other SOTAs, achieving LPIPS values around
+0.138 to 0.217 at the range from 4 MB to 60 MB. Notably, our method demonstrates particularly strong performance
+on the DeepBlending dataset (Figure 16c), where it achieves the best quality-size trade-off among all compared methods. Specifically, at model sizes ranging from approximately 4 MB to 32 MB, our method achieves LPIPS values of
+0.239 to 0.245, outperforming all competing approaches including the recent HAC++ which requires 6 MB to reach
+0.258 LPIPS. This superior performance on DeepBlending, which consists of bounded indoor scenes (Playroom and
+Drjohnson), validates our hypothesis that clustering-based categorization effectively identifies and compactly encodes
+high-frequency boundary features characteristic of man-made environments.
+The exceptional performance on DeepBlending and competitive performance on Tanks&Temples and Mip-NeRF360
+correlate with scene structure characteristics. DeepBlending primarily contains man-made environments with well20
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+0.26
+0.24
+0.22
+0.20
+0.18
+0.16
+3DGS (431.0 MB)
+ScaffoldGS
+LightGauss
+EAGLES
+CompactGS
+ReducedGS
+HAC++
+HAC
+ContextGS
+MesonGS
+GaussSPA
+S&P++
+50
+100 150 200
+Model Size (MB)
+250
+(a) Mip-NeRF360.
+0.32
+0.30
+0.28
+0.26
+0.24
+0.22
+3DGS (663.9 MB)
+ScaffoldGS
+LightGauss
+EAGLES
+CompactGS
+ReducedGS
+HAC++
+HAC
+ContextGS
+MesonGS
+GaussSPA
+S&P++
+LPIPS
+ContextGS
+MesonGS
+GaussSPA
+S&P++
+LPIPS
+CompactGS
+ReducedGS
+HAC++
+HAC
+LPIPS
+0.20
+0.18
+0.16
+0.14
+0.12
+0.10 0
+3DGS (750.9 MB)
+ScaffoldGS
+LightGauss
+EAGLES
+A P REPRINT
+10 20 30 40 50 60 70 80 90
+Model Size (MB)
+(b) Tanks&Temples.
+10
+20 30 40 50
+Model Size (MB)
+60
+(c) DeepBlending.
+Figure 16: Comparison with the SOTAs on LPIPS: (a) Mip-NeRF360, (b) Tanks&Temples, and (c) DeepBlending.
+defined geometric structures, such as bookshelves, walls, building facades, where our clustering-based categorization excels at identifying coherent boundary features, yielding high SketchGS ratios (typically 80 % as shown in
+Table 1) that enable substantial compression through polynomial regression encoding. In contrast, Mip-NeRF360 and
+Tanks&Temples include unbounded outdoor scenes with organic structures and natural environments, where geometric coherence is less pronounced and volumetric content dominates, resulting in lower proportions of compressible
+structured features. This scene-dependent behavior is expected and reflects a fundamental characteristic: methods
+specializing in structured feature compression excel on man-made environments, while more general pruning-based
+approaches may perform more uniformly across scene types at the cost of not exploiting structural coherence.
+4.7
+Adaptive Streaming Capability
+Beyond compression efficiency, the semantic separation of SketchGS and PatchGS provides a natural framework for
+adaptive streaming, which cannot be achieved by existing methods such as HAC++ [8], which lack semantically
+meaningful decomposition. While a comprehensive evaluation of streaming performance is beyond the scope of this
+work, we present a preliminary exploration to illustrate the potential of our representation.
+The asymmetry between the compact high-frequency boundary-defining representation (SketchGS) and the lowfrequency volumetric content (PatchGS) motivates a layered streaming approach. Conceptually, such a protocol could
+work as follows. The client first receives layer L0 containing the compact SketchGS representation, establishing the
+geometric skeleton of the scene with minimal data transfer. Subsequently, PatchGS could be transmitted in incremental layers (L1 and so on), with Gaussians potentially ordered by opacity and volumetric coverage to prioritize visually
+significant content [51, 10, 41]. At any point during transmission, the renderer would combine all received layers to
+produce the current frame.
+Figure 17 illustrates the progressive rendering at each layer. We apply our method to the Playroom scene and produce a
+compressed model achieving comparable quality to vanilla 3DGS (PSNR: 29.99 dB, SSIM: 0.906, LPIPS: 0.242). The
+resulting model is 17.45 MB, with SketchGS requiring only 1.48 MB (8.5 %) while PatchGS accounts for 15.97 MB
+(91.5 %). We construct four layers for our Sketch-Patch GS model, where L0 is the SketchGS, L1 includes the
+top 25 % of PatchGS, L2 the top 50 %, L3 the top 75 %, and L4 the complete set. As shown, with L0 alone, the
+renderer produces a structural skeleton capturing object boundaries and edges, which is not yet a complete rendering
+but providing a geometric foundation. Upon receiving L1 (5.47 MB), the scene becomes viewable as PatchGS begins
+filling volumetric regions. Quality improves through subsequent layers L2 (9.46 MB) and L3 (13.46 MB), reaching
+full quality with L4 .
+This decomposition is similar to the base-layer and enhancement-layer paradigm adopted in scalable video coding
+standards. Such a capability could benefit mobile and web-based 3DGS viewers under varying network conditions,
+VR/AR applications requiring responsive initial loading, and bandwidth-constrained streaming scenarios. We leave a
+rigorous evaluation of streaming performance, including comparisons with alternative streaming strategies, to future
+work.
+5
+Discussion and Conclusion
+Previously, we proposed Sketch&Patch [50], which introduced a novel perspective on hybrid 3D Gaussian representation by recognizing and leveraging the distinct roles of different Gaussian types in man-made environments. In
+21
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+(a) L0 (1.48 MB).
+(b) L1 (5.47 MB).
+(c) L2 (9.46 MB).
+(d) L3 (13.46 MB).
+A P REPRINT
+(e) L4 (17.45 MB).
+Figure 17: Illustration of progressive rendering during adaptive streaming on the Playroom scene. From L0 to
+L4 : SketchGS only (High-frequency boundary regions), then progressive addition of 25 %, 50 %, 75 %, and 100 %
+PatchGS.
+this work, we propose a generalized framework Sketch&Patch++ that successfully operates on arbitrary scenes with
+significant compression performance, overcoming the limitation of our earlier line-based approach to man-made environments. By employing multi-criteria density-based clustering directly on Gaussian attributes, Sketch&Patch++
+identifies SketchGS and PatchGS based on geometry and appearance coherence, eliminating dependency on external
+geometric primitives such as Line3D++. Furthermore, Advanced compression and optimization techniques are tailored
+to SketchGS and PatchGS based on their unique roles in 3DGS representation. Experimental results across diverse
+datasets, including both man-made and natural scenes, demonstrate that Sketch&Patch++ achieves up to 175× (0.5 %
+of the original model size) compression while maintaining comparable visual quality, reaching comparable or superior
+performance to state-of-the-art compression methods. Compared to Sketch&Patch, the generalized method achieves
+2.7× to 3.9× smaller model sizes at equivalent quality levels. Moreover, the semantic separation of SketchGS and
+PatchGS provides a unique capability not offered by existing methods: the potential for adaptive streaming, where the
+compact SketchGS layer can serve as an initial preview followed by progressive PatchGS refinement.
+While our generalized method addresses the scene-type limitation and achieves superior compression performance,
+several challenges remain for future investigation. First, our current implementation focuses on static scenes, and
+extending this approach to dynamic scenarios presents interesting challenges. Dynamic scenes would require temporal coherence in both Sketch and Patch Gaussian representations, as well as efficient updating mechanisms to handle
+moving objects and changing geometries. Developing incremental clustering strategies that can adapt to scene changes
+without full recomputation would be particularly valuable for real-time applications. Second, while we demonstrated
+the potential for adaptive streaming through our preliminary exploration in Section 4.7, a comprehensive evaluation
+remains as future work. Rigorous evaluation of this capability, including comparisons with alternative streaming
+strategies, latency measurements, and user studies under realistic network conditions, would be valuable for validating
+the practical benefits of our representation for bandwidth-adaptive applications. Third, incorporating semantic understanding into the categorization process presents a promising direction. Currently, our method relies on geometric and
+appearance features for clustering, but integrating semantic information could enable more intelligent Gaussian allocation based on object importance and viewer attention patterns. For instance, Gaussians representing salient objects or
+regions of interest could be prioritized differently than background elements, potentially improving perceptual quality
+at aggressive compression ratios.
+References
+[1] M. T. Bagdasarian, P. Knoll, Y. Li, F. Barthel, A. Hilsmann, P. Eisert, and W. Morgenstern. 3DGS.zip: A survey
+on 3D Gaussian splatting compression methods. Computer Graphics Forum, page e70078, 2025.
+[2] Caroline Baillard, Cordelia Schmid, Andrew Zisserman, and Andrew Fitzgibbon. Automatic line matching and
+3D reconstruction of buildings from multiple views. In ISPRS Conference on Automatic Extraction of GIS
+Objects from Digital Imagery, volume 32, pages 69–80, 1999.
+[3] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded anti-aliased neural radiance fields. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24, 2022, pages 5460–5469. IEEE, 2022.
+[4] Yuanhao Cai, Yixun Liang, Jiahao Wang, Angtian Wang, Yulun Zhang, Xiaokang Yang, Zongwei Zhou, and
+Alan L. Yuille. Radiative Gaussian splatting for efficient X-ray novel view synthesis. In Computer Vision ECCV 2024 - 18th European Conference, Milan, Italy, September 29-October 4, 2024, Proceedings, Part I,
+volume 15059 of Lecture Notes in Computer Science, pages 283–299. Springer, 2024.
+22
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+[5] Kunal Chelani, Assia Benbihi, Torsten Sattler, and Fredrik Kahl. Edgegaussians - 3d edge mapping via gaussian
+splatting. In IEEE/CVF Winter Conference on Applications of Computer Vision, WACV 2025, Tucson, AZ, USA,
+February 26 - March 6, 2025, pages 3268–3279. IEEE, 2025.
+[6] Siheng Chen, Dong Tian, Chen Feng, Anthony Vetro, and Jelena Kovacevic. Fast resampling of threedimensional point clouds via graphs. IEEE Transactions on Signal Processing, 66(3):666–681, 2018.
+[7] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi, and Jianfei Cai. HAC: hash-grid assisted context for
+3d gaussian splatting compression. In Computer Vision - ECCV 2024 - 18th European Conference, Milan, Italy,
+September 29-October 4, 2024, Proceedings, Part VII, pages 422–438, 2024.
+[8] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi, and Jianfei Cai. Hac++: Towards 100x compression
+of 3d gaussian splatting. IEEE Transactions on Pattern Analysis and Machine Intelligence, 47(11):10210–10226,
+November 2025.
+[9] Martin Ester, Hans-Peter Kriegel, Jörg Sander, and Xiaowei Xu. Density-based spatial clustering of applications
+with noise. In Int. Conf. knowledge discovery and data mining, volume 240, 1996.
+[10] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and Zhangyang Wang. LightGaussian: Unbounded
+3D Gaussian compression with 15x reduction and 200+ FPS. In Advances in Neural Information Processing
+Systems 38: Annual Conference on Neural Information Processing Systems 2024, NeurIPS 2024, Vancouver,
+BC, Canada, December 10 - 15, 2024, 2024.
+[11] Martin A. Fischler and Robert C. Bolles. Random sample consensus: A paradigm for model fitting with applications to image analysis and automated cartography. Communications of the ACM, 24(6):381–395, 1981.
+[12] Zhirui Gao, Renjiao Yi, Yaqiao Dai, Xuening Zhu, Wei Chen, Chenyang Zhu, and Kai Xu. Curve-aware gaussian
+splatting for 3d parametric curve reconstruction. CoRR, abs/2506.21401, 2025.
+[13] Sharath Girish, Kamal Gupta, and Abhinav Shrivastava. EAGLES: efficient accelerated 3d gaussians with
+lightweight encodings. In Computer Vision - ECCV 2024 - 18th European Conference, Milan, Italy, September 29-October 4, 2024, Proceedings, Part LXIII, pages 54–71, 2024.
+[14] Google. Draco 3D data compression. https://github.com/google/draco. Accessed: 2023-11-28.
+[15] Bo Han, Yu Liu, and Feng Qian. ViVo: visibility-aware mobile volumetric video streaming. In MobiCom ’20:
+The 26th Annual International Conference on Mobile Computing and Networking, London, United Kingdom,
+September 21-25, 2020, pages 11:1–11:13. ACM, 2020.
+[16] Andrew Harltey and Andrew Zisserman. Multiple view geometry in computer vision (2. ed.). Cambridge University Press, 2006.
+[17] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel J. Brostow. Deep
+blending for free-viewpoint image-based rendering. ACM Transactions on Graphics, 37(6):1–15, 2018.
+[18] Geoffrey E. Hinton, Oriol Vinyals, and Jeffrey Dean. Distilling the knowledge in a neural network. CoRR,
+abs/1503.02531, 2015.
+[19] Manuel Hofer, Michael Maurer, and Horst Bischof. Improving sparse 3d models for man-made environments
+using line-based 3d reconstruction. In The 2nd International Conference on 3D Vision, 3DV 2014, Tokyo, Japan,
+December 8-11, 2014, Volume 1, pages 535–542. IEEE Computer Society, 2014.
+[20] Manuel Hofer, Michael Maurer, and Horst Bischof. Line3D: Efficient 3D scene abstraction for the built environment. In Pattern Recognition - 37th German Conference, GCPR 2015, Aachen, Germany, October 7-10, 2015,
+Proceedings, volume 9358 of Lecture Notes in Computer Science, pages 237–248. Springer, 2015.
+[21] Manuel Hofer, Michael Maurer, and Horst Bischof. Efficient 3D scene abstraction using line segments. Computer
+Vision and Image Understanding, 157:167–178, 2017.
+[22] Siyu Huang, Fangbo Qin, Pengfei Xiong, Ning Ding, Yijia He, and Xiao Liu. TP-LSD: tri-points based line
+segment detector. In Computer Vision - ECCV 2020 - 16th European Conference, Glasgow, UK, August 23-28,
+2020, Proceedings, Part XXVII, volume 12372 of Lecture Notes in Computer Science, pages 770–785. Springer,
+2020.
+[23] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian splatting for realtime radiance field rendering. ACM Transactions on Graphics, 42(4):139:1–139:14, 2023.
+[24] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3D Gaussian Splatting for
+Real-Time Radiance Field Rendering. https://github.com/graphdeco-inria/gaussian-splatting, 2023.
+[25] Bernhard Kerbl, Andreas Meuleman, Georgios Kopanas, Michael Wimmer, Alexandre Lanvin, and George Drettakis. A hierarchical 3d gaussian representation for real-time rendering of very large datasets. ACM Transactions
+on Graphics, 43(4):62:1–62:15, 2024.
+23
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+[26] Gunjoong Kim, Seonghoon Park, Jeho Lee, Chanyoung Jung, Hyungchol Jun, and Hojung Cha. Vega: Fully
+immersive mobile volumetric video streaming with 3D Gaussian splatting. In Proceedings of the 31st Annual
+International Conference on Mobile Computing and Networking, ACM MOBICOM ’25, page 1106–1120, New
+York, NY, USA, 2025. Association for Computing Machinery.
+[27] Sieun Kim, Kyungjin Lee, and Youngki Lee. Color-cued efficient densification method for 3D Gaussian splatting.
+In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024 - Workshops, Seattle, WA,
+USA, June 17-18, 2024, pages 775–783. IEEE, 2024.
+[28] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: benchmarking large-scale
+scene reconstruction. ACM Transactions on Graphics, 36(4):78:1–78:13, 2017.
+[29] Nehal Baganal Krishna, Yuang Shi, Wei Tsang Ooi, and Amr Rizk. Netsplat: Data plane network assistance for
+streaming 3d gaussian splatting scenes. In Proceedings of the 3rd Workshop on Emerging Multimedia Systems,
+pages 58–60, 2025.
+[30] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park. Compact 3D Gaussian representation for radiance field. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024,
+Seattle, WA, USA, June 16-22, 2024, pages 21719–21728. IEEE, 2024.
+[31] Lei Li, Songyou Peng, Zehao Yu, Shaohui Liu, Rémi Pautrat, Xiaochuan Yin, and Marc Pollefeys. 3D neural edge
+reconstruction. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2024, Seattle, WA,
+USA, June 16-22, 2024, pages 21219–21229. IEEE, 2024.
+[32] Yanyan Li, Chenyu Lyu, Yan Di, Guangyao Zhai, Gim Hee Lee, and Federico Tombari. GeoGaussian: Geometryaware Gaussian splatting for scene rendering. In Computer Vision - ECCV 2024 - 18th European Conference,
+Milan, Italy, September 29-October 4, 2024, Proceedings, Part XXXV, volume 15093 of Lecture Notes in Computer Science, pages 441–457. Springer, 2024.
+[33] Yujia Liu, Stefano D’Aronco, Konrad Schindler, and Jan Dirk Wegner. PC2WF: 3D wireframe reconstruction
+from raw point clouds. In The 9th International Conference on Learning Representations, ICLR 2021, Virtual
+Event, Austria, May 3-7, 2021, 2021.
+[34] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. Scaffold-GS: Structured 3D Gaussians for view-adaptive rendering. In IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 20654–20664. IEEE, 2024.
+[35] Wenchao Ma, Bin Tan, Nan Xue, Tianfu Wu, Xianwei Zheng, and Gui-Song Xia. HoW-3D: Holistic 3D wireframe perception from a single image. In The 10th International Conference on 3D Vision, 3DV 2022, Prague,
+Czech Republic, September 12-16, 2022, pages 596–605. IEEE, 2022.
+[36] Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus Steinberger, Francisco Vicente Carrasco, and
+Fernando De la Torre. Taming 3dgs: High-quality radiance fields with limited resources. In SIGGRAPH Asia
+2024 Conference Papers, SA 2024, Tokyo, Japan, December 3-6, 2024, pages 2:1–2:11, 2024.
+[37] Branislav Micusı́k and Horst Wildenauer. Structure from motion with line segments under relaxed endpoint
+constraints. International Journal of Computer Vision, 124(1):65–79, 2017.
+[38] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren
+Ng. NeRF: representing scenes as neural radiance fields for view synthesis. Communications of the ACM,
+65(1):99–106, Dec 2021.
+[39] K. L. Navaneet, Kossar Pourahmadi Meibodi, Soroush Abbasi Koohpayegani, and Hamed Pirsiavash. Compact3D: Compressing Gaussian splat radiance field models with vector quantization. CoRR, abs/2311.18159,
+2023.
+[40] Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. Compressed 3D Gaussian splatting for accelerated novel view synthesis. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR
+2024, Seattle, WA, USA, June 16-22, 2024, pages 10349–10358. IEEE, 2024.
+[41] Panagiotis Papantonakis, Georgios Kopanas, Bernhard Kerbl, Alexandre Lanvin, and George Drettakis. Reducing
+the memory footprint of 3d gaussian splatting. Proceedings of the ACM on Computer Graphics and Interactive
+Techniques, 7(1):16:1–16:17, 2024.
+[42] Rémi Pautrat, Daniel Barath, Viktor Larsson, Martin R. Oswald, and Marc Pollefeys. DeepLSD: Line segment
+detection and refinement with deep image gradients. In IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, CVPR 2023, Vancouver, BC, Canada, June 17-24, 2023, pages 17327–17336. IEEE, 2023.
+[43] Srikumar Ramalingam, Michel Antunes, Daniel Snow, Gim Hee Lee, and Sudeep Pillai. Line-sweep: Crossratio for wide-baseline matching and 3D reconstruction. In IEEE Conference on Computer Vision and Pattern
+Recognition, CVPR 2015, Boston, MA, USA, June 7-12, 2015, pages 1238–1246. IEEE Computer Society, 2015.
+24
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+[44] Kerui Ren, Lihan Jiang, Tao Lu, Mulin Yu, Linning Xu, Zhangkai Ni, and Bo Dai. Octree-GS: Towards consistent
+real-time rendering with LOD-structured 3D Gaussians. CoRR, abs/2403.17898, 2024.
+[45] Michael Rudolph, Stefan Schneegass, and Amr Rizk. RABBIT: live transcoding of V-PCC point cloud streams.
+In Proceedings of the 14th Conference on ACM Multimedia Systems, MMSys 2023, Vancouver, BC, Canada,
+June 7-10, 2023, pages 97–107, 2023.
+[46] Ruwen Schnabel, Roland Wahl, and Reinhard Klein. Efficient RANSAC for point-cloud shape detection. Computer Graphics Forum, 26(2):214–226, 2007.
+[47] Johannes L. Schönberger and Jan-Michael Frahm. Structure-from-motion revisited. In 2016 IEEE Conference
+on Computer Vision and Pattern Recognition, CVPR 2016, Las Vegas, NV, USA, June 27-30, 2016, pages 4104–
+4113. IEEE Computer Society, 2016.
+[48] Yuang Shi. 3d gaussian-based immersive media streaming in networked extended reality. In Proceedings of the
+16th ACM Multimedia Systems Conference, MMSys 2025, Stellenbosch, South Africa, 31 March 2025 - 4 April
+2025, pages 356–360. ACM, 2025.
+[49] Yuang Shi, Bennett Clement, and Wei Tsang Ooi. QV4: QoE-based viewpoint-aware V-PCC-encoded volumetric
+video streaming. In Proceedings of the 15th ACM Multimedia Systems Conference, MMSys 2024, Bari, Italy,
+April 15-18, 2024, pages 144–154. ACM, 2024.
+[50] Yuang Shi, Simone Gasparini, Géraldine Morin, Chenggang Yang, and Wei Tsang Ooi. Sketch and patch:
+Efficient 3d gaussian representation for man-made scenes. In Proceedings of the 17th International Workshop
+on IMmersive Mixed and Virtual Environment Systems, MMVE 2025, University of Stellenbosch, Stellenbosch,
+South Africa, 31 March 2025- 4 April 2025, pages 51–57. ACM, 2025.
+[51] Yuang Shi, Géraldine Morin, Simone Gasparini, and Wei Tsang Ooi. LapisGS: Layered Progressive 3D Gaussian
+Splatting for Adaptive Streaming. In The 12th International Conference on 3D Vision, 3DV 2025, Singapore,
+March 25-28, 2025. IEEE, 2025.
+[52] Yuang Shi, Pranav Venkatram, Yifan Ding, and Wei Tsang Ooi. Enabling low bit-rate MPEG V-PCC-encoded
+volumetric video streaming with 3D sub-sampling. In Proceedings of the 14th Conference on ACM Multimedia
+Systems, MMSys 2023, Vancouver, BC, Canada, June 7-10, 2023, pages 108–118. ACM, 2023.
+[53] Yuang Shi, Ruoyu Zhao, Simone Gasparini, Géraldine Morin, and Wei Tsang Ooi. Volumetric video compression
+through neural-based representation. In Proceedings of the 16th International Workshop on Immersive Mixed and
+Virtual Environment Systems, MMVE 2024, Bari, Italy, April 15-18, 2024, pages 85–91. ACM, 2024.
+[54] Yuan-Chun Sun, Yuang Shi, Cheng-Tse Lee, Mufeng Zhu, Wei Tsang Ooi, Yao Liu, Chun-Ying Huang, and
+Cheng-Hsin Hsu. LTS: A DASH streaming system for dynamic multi-layer 3d gaussian splatting scenes. In
+Proceedings of the 16th ACM Multimedia Systems Conference, MMSys 2025, Stellenbosch, South Africa, 31
+March 2025 - 4 April 2025, pages 136–147. ACM, 2025.
+[55] Yi-Zhen Tsai, Xuechen Zhang, Zheng Li, and Jiasi Chen. L3GS: Layered 3D Gaussian splats for efficient
+3D scene delivery. In Proceedings of the 31st Annual International Conference on Mobile Computing and
+Networking, ACM MOBICOM ’25, page 453–467, New York, NY, USA, 2025. Association for Computing
+Machinery.
+[56] Irene Viola and Pablo César. Volumetric video streaming: Current approaches and implementations. Immersive
+Video Technologies, pages 425–443, 2023.
+[57] Rafael Grompone von Gioi, Jérémie Jakubowicz, Jean-Michel Morel, and Gregory Randall. LSD: a line segment
+detector. Image Processing On Line, 2:35–55, 2012.
+[58] Xiaogang Wang, Yuelang Xu, Kai Xu, Andrea Tagliasacchi, Bin Zhou, Ali Mahdavi-Amiri, and Hao Zhang.
+PIE-NET: parametric inference of point cloud edges. In Advances in Neural Information Processing Systems
+33: Annual Conference on Neural Information Processing Systems 2020, NeurIPS 2020, December 6-12, 2020,
+virtual, 2020.
+[59] Yufei Wang, Zhihao Li, Lanqing Guo, Wenhan Yang, Alex C. Kot, and Bihan Wen. ContextGS : Compact 3D
+Gaussian splatting with anchor level context model. In Advances in Neural Information Processing Systems 38:
+Annual Conference on Neural Information Processing Systems 2024, NeurIPS 2024, Vancouver, BC, Canada,
+December 10 - 15, 2024, 2024.
+[60] Zhou Wang, Alan C. Bovik, Hamid R. Sheikh, and Eero P. Simoncelli. Image quality assessment: from error
+visibility to structural similarity. IEEE transactions on image processing, 13(4):600–612, 2004.
+[61] Dong Wei, Yi Wan, Yongjun Zhang, Xinyi Liu, Bin Zhang, and Xiqi Wang. ELSR: efficient line segment
+reconstruction with planes and points guidance. In IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, CVPR 2022, New Orleans, LA, USA, June 18-24, 2022, pages 15786–15794. IEEE, 2022.
+25
+Sketch&Patch++: Efficient Structure-Aware 3D Gaussian Representation
+A P REPRINT
+[62] Changchang Wu. Towards linear-time incremental structure from motion. In The 1st International Conference
+on 3D Vision, 3DV 2013, Seattle, Washington, USA, June 29 - July 1, 2013, pages 127–134. IEEE Computer
+Society, 2013.
+[63] Shuzhao Xie, Weixiang Zhang, Chen Tang, Yunpeng Bai, Rongwei Lu, Shijia Ge, and Zhi Wang. Mesongs:
+Post-training compression of 3d gaussians via efficient attribute transformation. In Computer Vision - ECCV
+2024 - 18th European Conference, Milan, Italy, September 29-October 4, 2024, Proceedings, Part XXXIII, pages
+434–452, 2024.
+[64] Nan Xue, Bin Tan, Yuxi Xiao, Liang Dong, Gui-Song Xia, Tianfu Wu, and Yujun Shen. NEAT: distilling 3D
+wireframes from neural attraction fields. In IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+CVPR 2024, Seattle, WA, USA, June 16-22, 2024, pages 19968–19977. IEEE, 2024.
+[65] Chenggang Yang and Yuang Shi. LineGS: 3D line segment representation on 3D Gaussian splatting. CoRR,
+abs/2412.00477, 2024.
+[66] Yunfan Ye, Renjiao Yi, Zhirui Gao, Chenyang Zhu, Zhiping Cai, and Kai Xu. NEF: neural edge fields for 3D
+parametric curve reconstruction from multi-view images. In IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, CVPR 2023, Vancouver, BC, Canada, June 17-24, 2023, pages 8486–8495. IEEE, 2023.
+[67] Haiyang Ying and Matthias Zwicker. Sketchsplat: 3d edge reconstruction via differentiable multi-view sketch
+splatting. CoRR, abs/2503.14786, 2025.
+[68] Haotian Zhang, Yicheng Luo, Fangbo Qin, Yijia He, and Xiao Liu. ELSD: efficient line segment detector and
+descriptor. In The 18th IEEE/CVF International Conference on Computer Vision, ICCV 2021, Montreal, QC,
+Canada, October 10-17, 2021, pages 2949–2958. IEEE, 2021.
+[69] Lilian Zhang and Reinhard Koch. Structure and motion from line correspondences: Representation, projection, initialization and sparse bundle adjustment. Journal of Visual Communication and Image Representation,
+25(5):904–915, 2014.
+[70] Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness
+of deep features as a perceptual metric. In 2018 IEEE Conference on Computer Vision and Pattern Recognition,
+CVPR 2018, Salt Lake City, UT, USA, June 18-22, 2018, pages 586–595. IEEE, 2018.
+[71] Yangming Zhang, Wenqi Jia, Wei Niu, and Miao Yin. GaussianSpa: An ”optimizing-sparsifying” simplification
+framework for compact and high-quality 3d gaussian splatting. In IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, CVPR 2025, Nashville, TN, USA, June 11-15, 2025, pages 26673–26682, 2025.
+[72] Matthias Zwicker, Hanspeter Pfister, Jeroen van Baar, and Markus H. Gross. EWA volume splatting. In The 12th
+IEEE Visualization Conference, IEEE Vis 2001, San Diego, CA, USA, October 24-26, 2001, Proceedings, pages
+29–36. IEEE Computer Society, 2001.
+26

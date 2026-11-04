@@ -1,0 +1,158 @@
+# Tiled Fitting with Hann Tapering
+
+Also called: Overlapping Tile Partitioning with Hann Tapering, Overlapping tile fitting, Partition-of-unity tiling, Tiled Fitting
+
+## Overview
+Tiled Fitting with Hann Tapering is a volume data fitting strategy that partitions large 3D volumes into overlapping tiles to fit Gaussian splat models independently, thereby enabling processing on hardware with limited memory [S1, unofficial]. It solves the problem of GPU memory exhaustion for large volumes (e.g., $2048^3$ float32) by decomposing the domain into smaller, manageable chunks [S1, unofficial]. It is distinguished from non-overlapping tiling by the application of a raised-cosine (Hann) taper in overlap regions, which ensures a partition-of-unity and prevents visible seams, keeping the seam-to-interior residual ratio within 1.01–1.13 of a monolithic fit [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume (e.g., OME-Zarr layout) exceeding available GPU memory; a total seed budget (number of splats); tile size $T$; overlap size $L$.
+*   **Output:** A unified scene graph (partition tree or flat leaf) containing the union of splat sets from all tiles.
+
+**Data Structures:**
+*   **Tile Grid:** A regular 3D grid of tiles. The stride between tile origins is $T - L$.
+*   **Tile Data:** Each tile contains a subset of the volume voxels, multiplied by a taper window.
+*   **Splat Set:** The output of the fitting optimizer for a single tile.
+
+**Parameters:**
+*   $T$: Tile size in voxels per dimension. Typical range: 64–256 [S1, unofficial].
+*   $L$: Overlap size in voxels. Typical range: 5–20% of $T$ [S1, unofficial].
+*   Constraint: $L \le T/2$ to prevent triple overlap [S1, unofficial].
+*   $\alpha$: Exponent for seed budget division. Value: 0.44 [S1, unofficial].
+
+**Steps:**
+
+1.  **Tile Partitioning:**
+    Divide the volume domain into tiles on a regular grid with stride $S = T - L$.
+    *Edge Case:* If the last candidate tile along any axis has a unique coverage (non-overlapping portion) thinner than the overlap $L$, fold it into its predecessor. This ensures no tile is smaller than the overlap allows [S1, unofficial].
+
+2.  **Apodization (Tapering):**
+    For each tile, apply a raised-cosine (half-Hann) taper to the voxel data in the overlap regions.
+    Let $k$ be the index of a voxel within the overlap region, where $k = 1, \dots, L$.
+    The weight $w(k)$ is:
+    $$ w(k) = \frac{1}{2} \left( 1 - \cos \left( \frac{\pi k}{L + 1} \right) \right) $$
+    This window is applied along each overlap face. Adjacent windows sum to 1.0 (partition-of-unity). The first and last tiles on each grid axis retain unit weight on their outer faces (no taper on the exterior boundary) [S1, unofficial].
+
+3.  **Seed Budget Division:**
+    Distribute the total integer seed budget $N_{total}$ among the tiles.
+    For each tile $i$, calculate its weight $W_i$ based on its Hann-weighted voxel count and intensity:
+    $$ W_i = \left( \sum_{v \in \text{tile}_i} w(v) \cdot \max(0, I(v) - I_{floor}) \right)^{\alpha} $$
+    where $I(v)$ is the voxel intensity, $I_{floor}$ is a floor value (quarter-share floor), and $\alpha = 0.44$.
+    The seed count for tile $i$, $N_i$, is:
+    $$ N_i = \text{round} \left( N_{total} \cdot \frac{W_i}{\sum_{j} W_j} \right) $$
+    [S1, unofficial].
+
+4.  **Independent Fitting:**
+    Fit the Gaussian splat model for each tile independently using the assigned seed count $N_i$. This step is embarrassingly parallel and can be distributed across multiple GPUs or submitted as Slurm array jobs [S1, unofficial].
+
+5.  **Union and Merge:**
+    Union the splat sets from all tiles.
+    *   Default structure: A `kind=partition` tree with one part per tile.
+    *   Alternative: A single flat leaf (using `--flat`) [S1, unofficial].
+    The merge operation streams spatial tiles as parts without holding the entire volume in memory [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def hann_taper_weight(k, L):
+    """
+    Calculate Hann taper weight for voxel index k in overlap region of size L.
+    k is 1-based index from the tile edge into the overlap.
+    """
+    return 0.5 * (1.0 - math.cos(math.pi * k / (L + 1)))
+
+def fit_tiled_volume(volume_data, total_seeds, T, L):
+    """
+    volume_data: 3D array or iterator over voxels
+    total_seeds: int, total number of splats to fit
+    T: int, tile size
+    L: int, overlap size
+    """
+    assert L <= T / 2, "Overlap must be <= half tile size to prevent triple overlap"
+    
+    # 1. Determine tile grid
+    # Assuming volume dimensions are D_x, D_y, D_z
+    # Calculate number of tiles along each axis
+    # Stride is T - L
+    # Handle edge folding: if remaining space < L, fold into previous
+    
+    tiles = []
+    # Pseudocode for grid generation is complex; simplified assumption:
+    # Generate tile coordinates and sizes. Fold last tile if unique part < L.
+    # For implementation, iterate axes and generate tile bounds.
+    
+    # 2. Calculate weights and assign seeds
+    tile_weights = []
+    for tile in tiles:
+        # Extract voxel data for this tile
+        # Apply Hann taper to overlap regions
+        weighted_intensity_sum = 0.0
+        for voxel in tile.voxels:
+            # Determine if voxel is in overlap and its index k
+            # Apply taper w(k)
+            # Add to sum if intensity > floor (quarter-share floor logic)
+            # Note: Exact floor value and intensity thresholding details 
+            # are implementation-specific but follow the formula structure.
+            pass 
+        
+        # Raise to alpha = 0.44
+        weight = weighted_intensity_sum ** 0.44
+        tile_weights.append(weight)
+        
+    total_weight = sum(tile_weights)
+    
+    # 3. Distribute seeds
+    tile_seed_counts = []
+    for w in tile_weights:
+        count = round(total_seeds * (w / total_weight))
+        tile_seed_counts.append(count)
+        
+    # 4. Parallel Fitting
+    # Each tile is fitted independently with its seed count
+    # This step is parallelized across GPUs/Slurm jobs
+    tile_splat_sets = []
+    for tile, seeds in zip(tiles, tile_seed_counts):
+        splat_set = fit_single_tile(tile.data, seeds)
+        tile_splat_sets.append(splat_set)
+        
+    # 5. Merge
+    # Union splat sets into a partition tree or flat leaf
+    scene = merge_splat_sets(tile_splat_sets, kind='partition')
+    
+    return scene
+```
+
+## Subtopics
+
+### Tiled Fitting with Raised-Cosine Apodisation
+A large-volume fitting strategy that partitions the domain into tiles, applies raised-cosine apodisation windows to ensure partition-of-unity at boundaries, and unions the resulting splat sets linearly [S1, unofficial]. It is chosen when seamless blending between tiles is critical. It differs from hard-cut tiling by eliminating seams. Tile sizes range from 64 to 256 voxels, and overlaps from 0% to 40% [S1, unofficial]. Finer grids (81–90 tiles) pay the most in quality loss, and more overlap beyond moderate levels buys nothing and degrades quality [S1, unofficial]. Seam-to-interior residual ratio is 1.01–1.13 at 5–20% overlap. At fixed budget, tiled union stays within −0.98 to +0.19 dB of monolithic fit in moderate-overlap configurations. 40% overlap costs 0.54–1.68 dB. Per-tile GPU footprint is 43–46 MB allocated tensor memory per million voxels fitted at once [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Memory:** Decomposes large volumes (e.g., $2048^3$ float32) into smaller tiles (e.g., $256^3$) to fit within consumer GPU memory (e.g., 24 GB) [S1, unofficial]. Per-tile GPU footprint is 43–46 MB of allocated tensor memory per million voxels fitted at once [S1, unofficial].
+*   **Time:** Embarrassingly parallel. The batch fitter plans the tiling once and spreads the plan over GPUs or Slurm array jobs [S1, unofficial].
+
+**Measured Performance:**
+*   Compared against monolithic fits at the same splat budget, the tiled union's seam-to-interior residual ratio stays within 1.01–1.13 of the seamless fit's, at most 13% above it [S1, unofficial].
+*   At a fixed budget, the tiled union stays within −0.98 to +0.19 dB of the monolithic fit's PSNR in moderate-overlap configurations (5–20%) [S1, unofficial].
+*   Tiling at a fixed splat budget and 5–20% overlap costs at most one decibel of PSNR [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Enables fitting of volumes larger than GPU memory; seamless blending via partition-of-unity; scalable via parallel scheduling [S1, unofficial].
+*   **Limitations:** Hard cuts without overlap raise seam-to-interior residual ratio to 2.15–7.52 times that of seamless fits [S1, unofficial]. Overlapping tiles without taper are worse (8.0–30.8 dB below monolithic fit) [S1, unofficial]. Finer grids pay the most in quality loss [S1, unofficial].
+
+**When to Use:**
+*   Use when the volume exceeds GPU memory and seamless rendering is required.
+*   Use 5–20% overlap for optimal balance.
+*   Avoid hard cuts or overlap without tapering [S1, unofficial].
+
+## Background
+Originated in the Luxar project for Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data [S1, unofficial]. It addresses the limitations of monolithic fitting for large-scale scientific volumes (e.g., confocal blastocyst, light-sheet Tribolium embryo) [S1, unofficial]. The method uses OME-Zarr inputs directly, fitting every timepoint and channel as its own task [S1, unofficial].
+
+## Sources
+[S1] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)

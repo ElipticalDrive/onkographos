@@ -1,0 +1,3016 @@
+# LWJGL Voxel Raycasting
+Raycasting voxels in LWJGL. End goal is some hands on experience with sparse voxel DAGs
+
+
+Based on:
+* [GPU Gems Chapter 37. Octree Textures on the GPU](https://developer.nvidia.com/gpugems/GPUGems2/gpugems2_chapter37.html)
+* [LWJGL ray tracing tutorial](https://github.com/LWJGL/lwjgl3-demos/blob/master/src/org/lwjgl/demo/opengl/raytracing/tutorial/Tutorial1.java)
+
+## Video demo
+[![Ray Casting Adventure](https://img.youtube.com/vi/Zje1os8DDPk/3.jpg)](https://www.youtube.com/watch?v=Zje1os8DDPk)
+
+
+## Screenshots
+4x4x4 sphere attempt, first rays that were cast
+
+<img src="https://github.com/RvanderLaan/lwjgl-voxel-raycasting/blob/master/src/main/resources/screenshots/4x4x4%20sphere%20-%20attempt%201.png" width="400" />
+
+artifact free 32x32x32 sphere
+
+<img src="https://github.com/RvanderLaan/lwjgl-voxel-raycasting/blob/master/src/main/resources/screenshots/ss%20(2018-10-20%20at%2012.24.34).png" width="400" />
+
+32x32x32 sphere with unbounded rays
+
+<img src="https://github.com/RvanderLaan/lwjgl-voxel-raycasting/blob/master/src/main/resources/screenshots/ss%20(2018-10-20%20at%2001.28.21).jpg" width="400" />
+
+### src/main/resources/quad.fs.glsl
+```
+/*
+ * Copyright LWJGL. All rights reserved.
+ * License terms: https://www.lwjgl.org/license
+ */
+/* The texture we are going to sample */
+uniform sampler2D tex;
+
+/* This comes interpolated from the vertex shader */
+in vec2 texcoord;
+
+out vec4 color;
+
+void main(void) {
+  /* Well, simply sample the texture */
+  color = texture2D(tex, texcoord);
+}
+```
+
+### src/main/resources/quad.vs.glsl
+```
+/*
+ * Copyright LWJGL. All rights reserved.
+ * License terms: https://www.lwjgl.org/license
+ */
+/* The position of the vertex as two-dimensional vector */
+in vec2 vertex;
+
+/* Write interpolated texture coordinate to fragment shader */
+out vec2 texcoord;
+
+void main(void) {
+  gl_Position = vec4(vertex, 0.0, 1.0);
+  /*
+   * Compute texture coordinate by simply
+   * interval-mapping from [-1..+1] to [0..1]
+   */
+  texcoord = vertex * 0.5 + vec2(0.5, 0.5);
+}
+```
+
+### src/main/resources/raytracing.glsl
+```
+/*
+ * Copyright LWJGL. All rights reserved.
+ * License terms: https://www.lwjgl.org/license
+ */
+#version 430 core
+
+/**
+ * The framebuffer image we write to.
+ */
+layout(binding = 0, rgba32f) uniform image2D framebufferImage;
+
+uniform sampler3D voxelTexture;
+
+/**
+ * Describes the view frustum of the camera via its world-space corner
+ * edge vectors which we perform bilinear interpolation on to get the
+ * world-space direction vector of a work item's framebuffer pixel.
+ * See function main().
+ */
+uniform vec3 eye, ray00, ray01, ray10, ray11;
+
+uniform float invNumberOfIndGrids;
+/** texture size, inverse texture size, half inverse texture size */
+uniform vec3 textureSize;
+
+// How to look up colors:
+// 0: Traverse the octree
+// 1: Show the 3D texture directly as it is stored in memory
+// 2: Same as (1) but show the color that the voxels point to
+uniform int lookupMode = 1;
+
+#define LARGE_FLOAT 1E+10
+#define NUM_BOXES 10
+#define EPSILON 0.0001
+#define HRDWTREE_MAX_DEPTH 16
+
+
+/**
+ * Describes an axis-aligned box by its minimum and maximum corner
+ * oordinates.
+ */
+struct Box {
+  vec3 min, max;
+};
+
+const Box unitBox = {vec3(0), vec3(1)};
+
+/**
+ * Our scene description is very simple. We just use a static array
+ * of boxes, each defined by its minimum and maximum corner coordinates.
+ */
+const Box boxes[NUM_BOXES] = {
+  {vec3(-5.0, -0.1, -5.0), vec3(5.0, 0.0, 5.0)}, // <- bottom
+  {vec3(-5.1, 0.0, -5.0), vec3(-5.0, 5.0, 5.0)}, // <- left
+  {vec3(5.0, 0.0, -5.0), vec3(5.1, 5.0, 5.0)},   // <- right
+  {vec3(-5.0, 0.0, -5.1), vec3(5.0, 5.0, -5.0)}, // <- back
+  {vec3(-5.0, 0.0, 5.0), vec3(5.0, 5.0, 5.1)},   // <- front
+  {vec3(-1.0, 1.0, -1.0), vec3(1.0, 1.1, 1.0)},   // <- table top
+  {vec3(-1.0, 0.0, -1.0), vec3(-0.8, 1.0, -0.8)},   // <- table foot
+  {vec3(-1.0, 0.0,  0.8), vec3(-0.8, 1.0, 1.0)},   // <- table foot
+  {vec3(0.8, 0.0, -1.0), vec3(1.0, 1.0, -0.8)},   // <- table foot
+  {vec3(0.8, 0.0,  0.8), vec3(1.0, 1.0, 1.0)}   // <- table foot
+};
+
+// The offset each child box has
+const vec3 childBoxOffsets[8] = {
+    vec3(0,     0,      0),
+    vec3(1,   0,      0),
+    vec3(0,     1,    0),
+    vec3(1,   1,    0),
+    vec3(0,     0,      1),
+    vec3(1,   0,      1),
+    vec3(0,     1,    1),
+    vec3(1,   1,    1),
+};
+
+/**
+ * Describes the first intersection of a ray with a box.
+ */
+struct HitInfo {
+  /*
+   * The value of the parameter 't' in the ray equation
+   * `p = origin + dir * t` at which p is a point on one of the boxes
+   * intersected by the ray.
+   */
+  float near;
+  /*
+   * The index of the box into the 'boxes' array.
+   */
+  int i;
+};
+
+/**
+ * Compute whether the given ray `origin + t * dir` intersects the given
+ * box 'b' and return the values of the parameter 't' at which the ray
+ * enters and exists the box, called (tNear, tFar). If there is no
+ * intersection then tNear > tFar or tFar < 0.
+ */
+vec2 intersectBox(vec3 origin, vec3 dir, const Box b) {
+  vec3 tMin = (b.min - origin) / dir;
+  vec3 tMax = (b.max - origin) / dir;
+  vec3 t1 = min(tMin, tMax);
+  vec3 t2 = max(tMin, tMax);
+  float tNear = max(max(t1.x, t1.y), t1.z);
+  float tFar = min(min(t2.x, t2.y), t2.z);
+  return vec2(tNear, tFar);
+}
+
+/**
+ * Compute the closest intersection of the given ray `origin + t * dir`
+ * with all boxes and return whether there was any intersection and
+ * store the value of 't' at the intersection as well as the index of
+ * the intersected box into the out-parameter 'info'.
+ */
+bool intersectBoxes(vec3 origin, vec3 dir, out HitInfo info) {
+  float smallest = LARGE_FLOAT;
+  bool found = false;
+  for (int i = 0; i < NUM_BOXES; i++) {
+    vec2 lambda = intersectBox(origin, dir, boxes[i]);
+    if (lambda.y >= 0.0 && lambda.x < lambda.y && lambda.x < smallest) {
+      info.near = lambda.x;
+      info.i = i;
+      smallest = lambda.x;
+      found = true;
+    }
+  }
+  return found;
+}
+
+uint hash3(uint x, uint y, uint z) {
+  x += x >> 11;
+  x ^= x << 7;
+  x += y;
+  x ^= x << 3;
+  x += z ^ (x >> 14);
+  x ^= x << 6;
+  x += x >> 15;
+  x ^= x << 5;
+  x += x >> 12;
+  x ^= x << 9;
+  return x;
+}
+float random(vec3 f) {
+  uint mantissaMask = 0x007FFFFFu;
+  uint one = 0x3F800000u;
+  uvec3 u = floatBitsToUint(f);
+  uint h = hash3(u.x, u.y, u.z);
+  return uintBitsToFloat((h & mantissaMask) | one) - 1.0;
+}
+
+
+
+struct Cell {
+    vec3 boxStart, boxEnd;
+    vec4 data;
+};
+
+/**
+ * Based on https://developer.nvidia.com/gpugems/GPUGems2/gpugems2_chapter37.html
+ */
+Cell treeLookup(vec3 m) {
+    vec4 cellData = vec4(0.0, 0.0, 0.0, 0.0);
+    vec3 p;
+    float pow2 = 1.0;
+
+    vec3 boxStart = vec3(0);
+
+    float depth = 0;
+
+    for (float i = 0; i < HRDWTREE_MAX_DEPTH; i++) { // fixed # of iterations
+        // already in a leaf?
+        if (cellData.w < 0.9) {
+            // compute lookup coords. within current node
+            // fract(m * pow2) gets the relative lookup position in the current node (cell.xyz)
+            vec3 localOffset = fract(m * pow2);
+            p = cellData.xyz + localOffset * invNumberOfIndGrids;
+
+            // continue to next depth
+            cellData = texture(voxelTexture, p); // maybe offset slightly? + vec3(0.05));
+
+            // if the cell is an index node, the leaf box is in a different position
+            // the local offset points to a point in space between [0, 1]^3
+            ivec3 iLocalOffset = ivec3(localOffset * 2); // map [0, 1) range to floored [0, 1]
+            int localOffsetIndex = iLocalOffset.x + 2 * iLocalOffset.y + 4 * iLocalOffset.z;
+
+            pow2 *= 2.0;
+            boxStart += childBoxOffsets[localOffsetIndex] / pow2;
+        }
+
+        // Check properties of new cell:
+        if (cellData.w > 0.9)    // a leaf has been reached
+            break;
+        if (cellData.w < 0.1)   // empty cell
+            break;
+
+    }
+    Cell res;
+    res.boxStart = boxStart;
+    res.boxEnd = boxStart + vec3(1 / pow2);
+    res.data = cellData;
+    return res;
+}
+
+bool isInUnitCube(vec3 lookup) {
+    return all(lessThan(lookup, vec3(1))) && all(greaterThanEqual(lookup, vec3(0)));
+}
+
+/**
+ * Given the ray `origin + t * dir` trace it through the scene,
+ * checking for the nearest collision with any of the above defined
+ * boxes, and return a computed color.
+ *
+ * @param origin the origin of the ray
+ * @param dir the direction vector of the ray
+ * @returns the computed color
+ */
+vec4 trace(vec3 origin, vec3 dir) {
+    // Define the initial travseral lookup point
+    vec3 lookup = origin;
+
+    // Start lookup always at bounds of unit cube, else you get texture repeat artifacts
+    if (!isInUnitCube(lookup)) {
+        vec2 unitBoxIntersection = intersectBox(origin, dir, unitBox);
+        lookup += dir * unitBoxIntersection.x * 1.001;
+    }
+
+/*
+//    float textureSize = 16.0;
+//    float voxelSize = 1 / textureSize;
+//    // Todo: Intersect with cells at deepest depth instead of brute forcing samples
+//    // Like this: http://www.cse.yorku.ca/~amana/research/grid.pdf
+//    vec3 currentVoxel = floor(lookup * textureSize);
+//    // step direction
+//    vec3 step = sign(dir);
+//    // value at which the first new voxel boundary is found along dir from the origin for each axis
+//    vec3 nextVoxelBoundary = (currentVoxel + step) * voxelSize;
+//    vec3 tMax = (nextVoxelBoundary - lookup * textureSize) / dir;
+//    // how far away the edge of the voxel is at the current position
+//    vec3 tDelta = (voxelSize / dir) * step;
+//
+//
+//    for (int i = 0; i < 64; i++) {
+//        if (tMax.x < tMax.y) {
+//            if (tMax.x < tMax.z) {
+//                currentVoxel.x += step.x;
+//                tMax.x += tDelta.x;
+//            } else {
+//                currentVoxel.z += step.z;
+//                tMax.z += tDelta.z;
+//            }
+//        } else {
+//            if (tMax.y < tMax.z) {
+//                currentVoxel.y += step.y;
+//                tMax.y += tDelta.y;
+//            } else {
+//                currentVoxel.z += step.z;
+//                tMax.z += tDelta.z;
+//            }
+//        }
+////        if (!isInUnitCube(currentVoxel * voxelSize)) break;
+//        vec4 cell = treeLookup(currentVoxel * voxelSize);
+//        if (cell.w != 0)
+//            return cell.rgb;
+//    }
+//    return vec3(0);
+*/
+
+    ////////////////////////////////////////////////////////////
+    // Quick n dirty implementation for now:
+    // Do several lookups along rays from the camera viewpoint
+    Cell cell;
+    float lookupDist = 0.001;
+    for (int i = 0;
+        i < 128 && isInUnitCube(lookup);
+        i++) {
+
+        // Look up the color in the middle of the voxel at the 'lookup' position, else you get artifacts
+        // this means: roundedLookup = (lookup * texSize) * invTexSize + half invTexSize
+        vec3 roundedLookup = floor(lookup * textureSize.x) * textureSize.y + textureSize.z;
+
+        if (lookupMode == 1) {
+            // Look up the value that the current cell is pointing to
+            cell = treeLookup(roundedLookup);
+
+            // Intersect with the box that was found at the lookup position.
+            // Next lookup is beyond the second intersection point
+            Box childBox = {cell.boxStart, cell.boxEnd};
+            vec2 childBoxIntersection = intersectBox(lookup, dir, childBox);
+            lookup += dir * childBoxIntersection.y * 1.0001; // smaller value = thicker black lines :D
+//            lookup += dir * lookupDist; // Larger steps further from the camera
+        }
+        else if (lookupMode == 2) {
+            // Use this instead to look at the 3d volume texture directly
+            cell.data = texture(voxelTexture, roundedLookup);
+
+            lookup += dir * lookupDist; // Larger steps further from the camera
+        }
+        lookupDist *= 1.05;
+//        else {
+//            // Use this instead to look up a color and use it as a lookup
+//            vec3 lookup2 = texture(voxelTexture, lookup).rgb;
+//            cell = texture(voxelTexture, lookup2);
+//        }
+
+        // If it's not and empty cell, return its color
+        if (cell.data.w != 0)
+            return vec4(cell.data.rgb / float((i + 4) / 16.0), cell.data.a);
+
+//        lookupDist *= 1.01;
+//        lookup += dir * lookupDist; // Larger steps further from the camera
+//        lookup += dir * lookupDist * (random(lookup) + 0.01); // noisy borders
+    }
+    // If no lookup succeeds, return a background color
+    return vec4(0);
+
+//  hitinfo hinfo;
+//  /* Intersect the ray with all boxes */
+//  if (!intersectBoxes(origin, dir, hinfo))
+//    return vec3(0.0); // <- nothing hit, return black
+//  /*
+//   * hitinfo will give use the index of the box.
+//   * So, get the actual box with that index.
+//   */
+//  box b = boxes[hinfo.i];
+//  /*
+//   * And compute some gray scale color based on the index to
+//   * just allow us to visually differentiate the boxes.
+//   */
+//  return vec3(float(hinfo.i+1) / NUM_BOXES);
+////    return texture(voxelTexture, origin * 10).rgb;
+}
+
+
+
+
+layout (local_size_x = 16, local_size_y = 16) in;
+
+/**
+ * Entry point of this GLSL compute shader.
+ */
+void main(void) {
+  /*
+   * Obtain the 2D index of the current compute shader work item via
+   * the built-in gl_GlobalInvocationID variable and store it in a 'px'
+   * variable because we need it later.
+   */
+  ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+  /*
+   * Also obtain the size of the framebuffer image. We could have used
+   * a custom uniform for that as well. But GLSL already provides it as
+   * a built-in function.
+   */
+  ivec2 size = imageSize(framebufferImage);
+  /*
+   * Because we have to execute our compute shader with a global work
+   * size that is a power of two, we need to check whether the current
+   * work item is still within our actual framebuffer dimension so that
+   * we do not accidentally write to or read from unallocated memory
+   * later.
+   */
+  if (any(greaterThanEqual(px, size)))
+    return; // <- no work to do, return.
+  /*
+   * Now we take our rayNN uniforms declared above to determine the
+   * world-space direction from the eye position through the current
+   * work item's pixel's center in the framebuffer image. We use the
+   * 'px' variable, cast it to a floating-point vector, offset it by
+   * half a pixel's width (in whole pixel units) and then transform that
+   * position relative to our framebuffer size to get values in the
+   * interval [(0, 0), (1, 1)] for all work items covering our
+   * framebuffer.
+   */
+  vec2 p = (vec2(px) + vec2(0.5)) / vec2(size);
+  /*
+   * Use bilinear interpolation based on the X and Y fraction
+   * (within 0..1) with our rayNN vectors defining the world-space
+   * vectors along the corner edges of the camera's view frustum. The
+   * result is the world-space direction of the ray originating from the
+   * camera/eye center through the work item's framebuffer pixel center.
+   */
+  vec3 dir = mix(mix(ray00, ray01, p.y), mix(ray10, ray11, p.y), p.x);
+  /*
+   * Now, trace the list of boxes with the ray `eye + t * dir`.
+   * The result is a computed color which we will write at the work
+   * item's framebuffer pixel.
+   */
+
+    // Brute force depth of field
+//   vec3 focalPoint = eye + normalize(dir) * 0.2;
+//   float aperature = 0.01;
+//   float numSamples = 8;
+//   float invNumSamples = 1 / numSamples;
+//   vec4 color = vec4(0); // trace(eye, normalize(dir));
+//   for (int i = 0; i < numSamples; i++) {
+//        vec3 iEye = eye + random(eye + i * dir) * aperature;
+//        vec3 iDir = normalize(focalPoint - iEye);
+//        color += trace(iEye, iDir) * invNumSamples;
+//   }
+
+   vec4 color = trace(eye, normalize(dir));
+
+
+
+//  color = mix(color, trace(eye + random(eye*1.1) * 0.001, normalize(dir)), 0.5);
+
+    // Simple dithering effect, can maybe be used for shadows?
+    // Or differentiating types of nodes?
+  if (color.w < 0.6)
+       color.rgb = mix(color.rgb, vec3(0), vec3((px / 2) % 2 == ivec2(0)));
+//    color.rgb = mix(color.rgb, vec3(0), vec3(mod(vec2(px / 2), (length(eye) + 1)) <= vec2(0.01)));
+
+
+//    vec3 color = texture(voxelTexture, vec3(p, eye.x)).rgb;
+
+//    vec3 lookup = texture(voxelTexture, vec3(p, eye.x)).rgb;
+//    vec3 color = texture(voxelTexture, lookup.xyz + vec3(0.05)).rgb;
+
+
+//    vec3 color = vec3(p, eye.x);
+
+  /*
+   * Store the final color in the framebuffer's pixel of the current
+   * work item.
+   */
+  imageStore(framebufferImage, px, vec4(color.rgb, 1.0));
+}
+```
+
+### src/main/java/core/Camera.java
+```
+package core;
+
+import lombok.Getter;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
+
+public class Camera {
+
+    @Getter
+    protected Vector3f position;
+    @Getter
+    protected Quaternionf rotation;
+
+    public static Vector3f UP = new Vector3f(0, 1, 0);
+
+    public Camera(Vector3f pos) {
+        this.position = pos;
+        // Look towards negative Z by default (Y is up)
+        rotation = new Quaternionf().lookAlong(new Vector3f(0, 0, -1), UP);
+    }
+
+    public void lookAt(Vector3f dir) {
+        rotation.lookAlong(dir, UP);
+    }
+}
+```
+
+### src/main/java/core/Cell.java
+```
+package core;
+
+import org.joml.Vector3f;
+import org.joml.Vector4f;
+
+import java.nio.ByteBuffer;
+
+/**
+ * core.SVO Node
+ * Designed for 4 bytes per node
+ * First 3 are RGB, last one is node type:
+ * EMPTY = 0, DATA = 0.5, INDEX = 1
+ */
+public class Cell {
+
+    private Vector4f data;
+
+    private static Vector4f EMPTY_DATA = new Vector4f(0);
+
+    public Vector3f realLocation;
+
+    private Cell(Vector4f data) {
+        this.data = data;
+    }
+
+    public enum NodeType {
+        EMPTY(0),
+        INDEX(0.5f),
+        DATA(1);
+
+        private float value;
+        NodeType(float value) {
+            this.value = value;
+        }
+    }
+
+
+
+    public NodeType getNodeType() {
+        if (data == null) return NodeType.EMPTY;
+
+        float type = data.w;
+        if (type < 0.1) return NodeType.EMPTY;
+        if (type < 0.6) return NodeType.INDEX;
+        return NodeType.DATA;
+    }
+
+    public void getData(int position, ByteBuffer buffer) {
+        Vector4f realData = data;
+        if (getNodeType() == NodeType.EMPTY) {
+            realData = EMPTY_DATA;
+        }
+//        realData.get(position, buffer);
+        buffer.put(position + 0, (byte) ((int) Math.floor(realData.x * 255f) & 0xFF));
+        buffer.put(position + 1, (byte) ((int) Math.floor(realData.y * 255f) & 0xFF));
+        buffer.put(position + 2, (byte) ((int) Math.floor(realData.z * 255f) & 0xFF));
+        buffer.put(position + 3, (byte) ((int) Math.floor(realData.w * 255f) & 0xFF));
+    }
+
+    public static Cell createEmpty() {
+        return new Cell(null);
+    }
+    public static Cell createData(Vector3f rgb) {
+        return new Cell(new Vector4f(rgb, NodeType.DATA.value));
+    }
+
+    /**
+     *
+     * @param index Index in the 3D texture
+     * @return
+     */
+    public static Cell createIndex(Vector3f index) {
+        return new Cell(new Vector4f(index, NodeType.INDEX.value));
+    }
+}
+```
+
+### src/main/java/core/Controller.java
+```
+package core;
+
+import input.CursorHandler;
+import input.KeyboardHandler;
+import input.MouseButtonHandler;
+import org.joml.Vector2f;
+import org.joml.Vector3f;
+
+import static org.lwjgl.glfw.GLFW.*;
+import static org.lwjgl.glfw.GLFW.GLFW_KEY_LEFT_CONTROL;
+import static org.lwjgl.glfw.GLFW.GLFW_KEY_SPACE;
+
+public class Controller {
+    private Camera camera;
+    private SVO svo;
+
+    private Vector2f prevCursorPos = new Vector2f();
+    private Vector2f mouseSensitivity = new Vector2f(1);
+
+    private Vector3f eulerAngles = new Vector3f();
+
+    public Controller(Camera camera, SVO svo) {
+        this.camera = camera;
+        this.svo = svo;
+    }
+
+    private Vector3f localTranslationTemp = new Vector3f();
+    private Vector3f globalTranslationTemp = new Vector3f();
+
+    public void update(float dt) {
+        localTranslationTemp.set(0);
+        globalTranslationTemp.set(0);
+        float factor = 0.1f;
+        if (KeyboardHandler.isKeyDown(GLFW_KEY_LEFT_SHIFT))
+            factor *= 3.0f;
+        if (KeyboardHandler.isKeyDown(GLFW_KEY_LEFT_CONTROL))
+            factor /= 10.0f;
+
+        if (KeyboardHandler.isKeyDown(GLFW_KEY_W)) {
+            localTranslationTemp.add(0, 0, factor * dt);
+        }
+        if (KeyboardHandler.isKeyDown(GLFW_KEY_S)) {
+            localTranslationTemp.add(0, 0, -factor * dt);
+        }
+        if (KeyboardHandler.isKeyDown(GLFW_KEY_A)) {
+            localTranslationTemp.add(factor * dt, 0, 0);
+        }
+        if (KeyboardHandler.isKeyDown(GLFW_KEY_D)) {
+            localTranslationTemp.add(-factor * dt, 0, 0);
+        }
+        if (KeyboardHandler.isKeyDown(GLFW_KEY_LEFT_ALT)) {
+            globalTranslationTemp.add(0, -factor * dt, 0);
+        }
+        if (KeyboardHandler.isKeyDown(GLFW_KEY_SPACE)) {
+            globalTranslationTemp.add(0, factor * dt, 0);
+        }
+        camera.getPosition().add(localTranslationTemp.rotate(camera.getRotation()));
+        camera.getPosition().add(globalTranslationTemp);
+
+
+//        if (KeyboardHandler.isKeyDown(GLFW_KEY_Q)) {
+//            camera.getRotation().rotateZ(-factor * dt);
+//        }
+//        if (KeyboardHandler.isKeyDown(GLFW_KEY_E)) {
+//            camera.getRotation().rotateZ(factor * dt);
+//        }
+
+
+        if (MouseButtonHandler.isButtonDown(0)) {
+
+            // If mouse is down, compute the camera rotation based on mouse cursor location.
+//            currRotationAboutY = rotationAboutY + (mouseX - mouseDownX) * 0.01f;
+            camera.getRotation().rotateLocalY(-(CursorHandler.getCursorPos().x - prevCursorPos.x) * mouseSensitivity.x * dt);
+
+            // Check if X axis rotation is allowed (not too far down or up)
+            camera.getRotation().getEulerAnglesXYZ(eulerAngles);
+            float addRotX = (CursorHandler.getCursorPos().y - prevCursorPos.y) * mouseSensitivity.y * dt;
+//            if (Math.abs(eulerAngles.x % (Math.PI / 2f) + addRotX) < Math.PI / 2f)
+                camera.getRotation().rotateX(addRotX);
+        }
+
+        prevCursorPos.set(CursorHandler.getCursorPos());
+
+        // Gravity: check voxel below camera
+//        Vector3f m = camera.getPosition().sub(0, 1/(float) svo.getMaxTextureSize(), 0, new Vector3f());
+//        IndirectionGrid lookup = svo.getIndirectionPool().get(0);
+//        for (int i = 0; i < svo.getMaxDepth(); i++) {
+//
+//            lookup = svo.getIndirectionPool().get()
+//        }
+    }
+}
+```
+
+### src/main/java/core/IndirectionGrid.java
+```
+package core;
+
+import lombok.Getter;
+import org.joml.Vector3f;
+import org.joml.Vector3i;
+import org.lwjgl.BufferUtils;
+
+import java.nio.BufferUnderflowException;
+import java.nio.ByteBuffer;
+import java.nio.FloatBuffer;
+
+public class IndirectionGrid {
+
+    private static Vector3i[] CHILD_TEXTURE_OFFSETS = {
+            new Vector3i(0, 0, 0),
+            new Vector3i(1, 0, 0),
+            new Vector3i(0, 1, 0),
+            new Vector3i(1, 1, 0),
+            new Vector3i(0, 0, 1),
+            new Vector3i(1, 0, 1),
+            new Vector3i(0, 1, 1),
+            new Vector3i(1, 1, 1),
+    };
+
+    @Getter
+    private Cell[] children;
+
+    @Getter
+    private int depth = 0;
+
+    @Getter
+    private int index = 0;
+
+    public IndirectionGrid() {
+        children = new Cell[8];
+        for (int i = 0; i < 8; i++)
+            children[i] = Cell.createEmpty();
+    }
+
+    public void setNode(int x, int y, int z, Cell node) {
+        int index = x + 2 * y + 4 * z;
+        setNode(index, node);
+    }
+
+    public void setNode(int index, Cell node) {
+        if (index < 0 || index >= 8) {
+            System.err.println("Index out of bounds for core.IndirectionGrid insertion: " + index);
+            return;
+        }
+        children[index] = node;
+    }
+
+    public static int getTextureIndex(int textureSize, int x, int y, int z, int child) {
+        Vector3i of = CHILD_TEXTURE_OFFSETS[child];
+        return (x + of.x) + (y + of.y) * textureSize + (z + of.z) * textureSize * textureSize;
+    }
+
+    /**
+     * Inserts the cells of this indirection grid in a 2x2x2 cube in a bytebuffer texture
+     * @param textureSize
+     * @param x
+     * @param y
+     * @param z
+     * @param buffer
+     */
+    public void get(int textureSize, int x, int y, int z, ByteBuffer buffer) {
+        for (int i = 0; i < 8; i++) {
+            Cell cell = children[i];
+            int textureIndex = getTextureIndex(textureSize, x, y, z, i);
+            int position = textureIndex * 4;
+            if (position < buffer.limit()) {
+                cell.getData(position, buffer);
+            } else {
+                System.out.println("OUT OF LIMITS: " + x + ", " + y + ", " + z + " -> " + position + "(>" + buffer.limit() + ")");
+                break;
+            }
+        }
+    }
+}
+```
+
+### src/main/java/core/IntersectionUtils.java
+```
+package core;
+
+import geometry.Plane;
+import geometry.Sphere;
+import org.joml.Vector3f;
+
+public class IntersectionUtils {
+    Vector3f temp = new Vector3f();
+    float plane_distance(Plane p, Vector3f point) {
+        return point.sub(p.position, temp).dot(p.direction);
+    }
+
+    boolean sphere_inside_plane(Sphere s, Plane p) {
+        return -plane_distance(p, s.getOrigin()) > s.getRadius();
+    }
+
+    boolean sphere_outside_plane(Sphere s, Plane p) {
+        return plane_distance(p, s.getOrigin()) > s.getRadius();
+    }
+
+    boolean sphere_intersects_plane(Sphere s, Plane p) {
+        return Math.abs(plane_distance(p, s.getOrigin())) <= s.getRadius();
+    }
+
+//    boolean sphere_inside_box(Sphere s, box b) {
+//
+//        if (!sphere_inside_plane(s, b.front))  { return false; }
+//        if (!sphere_inside_plane(s, b.back))   { return false; }
+//        if (!sphere_inside_plane(s, b.top))    { return false; }
+//        if (!sphere_inside_plane(s, b.bottom)) { return false; }
+//        if (!sphere_inside_plane(s, b.left))   { return false; }
+//        if (!sphere_inside_plane(s, b.right))  { return false; }
+//
+//        return true;
+//
+//    }
+//
+//    boolean sphere_intersects_box(Sphere s, box b) {
+//
+//        boolean in_left   = !sphere_outside_plane(s, b.left);
+//        boolean in_right  = !sphere_outside_plane(s, b.right);
+//        boolean in_front  = !sphere_outside_plane(s, b.front);
+//        boolean in_back   = !sphere_outside_plane(s, b.back);
+//        boolean in_top    = !sphere_outside_plane(s, b.top);
+//        boolean in_bottom = !sphere_outside_plane(s, b.bottom);
+//
+//        if (sphere_intersects_plane(s, b.top) &&
+//                in_left && in_right && in_front && in_back) {
+//            return true;
+//        }
+//
+//        if (sphere_intersects_plane(s, b.bottom) &&
+//                in_left && in_right && in_front && in_back) {
+//            return true;
+//        }
+//
+//        if (sphere_intersects_plane(s, b.left) &&
+//                in_top && in_bottom && in_front && in_back) {
+//            return true;
+//        }
+//
+//        if (sphere_intersects_plane(s, b.right) &&
+//                in_top && in_bottom && in_front && in_back) {
+//            return true;
+//        }
+//
+//        if (sphere_intersects_plane(s, b.front) &&
+//                in_top && in_bottom && in_left && in_right) {
+//            return true;
+//        }
+//
+//        if (sphere_intersects_plane(s, b.back) &&
+//                in_top && in_bottom && in_left && in_right) {
+//            return true;
+//        }
+//
+//        return false;
+//    }
+//
+//    boolean sphere_outside_box(Sphere s, box b) {
+//        return !(sphere_inside_box(s, b) || sphere_intersects_box(s, b));
+//    }
+
+
+}
+```
+
+### src/main/java/core/Launcher.java
+```
+package core;
+
+import input.CursorHandler;
+import input.KeyboardHandler;
+import input.MouseButtonHandler;
+import org.joml.Matrix4f;
+import org.joml.Vector3f;
+import org.lwjgl.BufferUtils;
+import org.lwjgl.glfw.*;
+import org.lwjgl.opengl.GL;
+import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL12;
+import org.lwjgl.opengl.GLUtil;
+import org.lwjgl.system.Callback;
+import org.lwjgl.system.MemoryStack;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
+import java.text.DecimalFormat;
+import java.text.NumberFormat;
+
+import static org.lwjgl.glfw.GLFW.*;
+import static org.lwjgl.glfw.GLFW.glfwDestroyWindow;
+import static org.lwjgl.glfw.GLFW.glfwTerminate;
+import static org.lwjgl.opengl.GL11.GL_FLOAT;
+import static org.lwjgl.opengl.GL11.GL_NEAREST;
+import static org.lwjgl.opengl.GL11.GL_TEXTURE_2D;
+import static org.lwjgl.opengl.GL11.GL_TEXTURE_MAG_FILTER;
+import static org.lwjgl.opengl.GL11.GL_TEXTURE_MIN_FILTER;
+import static org.lwjgl.opengl.GL11.GL_TRIANGLES;
+import static org.lwjgl.opengl.GL11.glBindTexture;
+import static org.lwjgl.opengl.GL11.glDeleteTextures;
+import static org.lwjgl.opengl.GL11.glDrawArrays;
+import static org.lwjgl.opengl.GL11.glGenTextures;
+import static org.lwjgl.opengl.GL11.glViewport;
+import static org.lwjgl.opengl.GL15.*;
+import static org.lwjgl.opengl.GL15.GL_ARRAY_BUFFER;
+import static org.lwjgl.opengl.GL15.GL_WRITE_ONLY;
+import static org.lwjgl.opengl.GL20.*;
+import static org.lwjgl.opengl.GL20.glUniform3f;
+import static org.lwjgl.opengl.GL20.glUseProgram;
+import static org.lwjgl.opengl.GL30.*;
+import static org.lwjgl.opengl.GL30.GL_RGBA32F;
+import static org.lwjgl.opengl.GL30.glBindVertexArray;
+import static org.lwjgl.opengl.GL33.glBindSampler;
+import static org.lwjgl.opengl.GL33.glGenSamplers;
+import static org.lwjgl.opengl.GL33.glSamplerParameteri;
+import static org.lwjgl.opengl.GL42.*;
+import static org.lwjgl.opengl.GL42.glBindImageTexture;
+import static org.lwjgl.opengl.GL43.GL_COMPUTE_SHADER;
+import static org.lwjgl.opengl.GL43.GL_COMPUTE_WORK_GROUP_SIZE;
+import static org.lwjgl.opengl.GL43.glDispatchCompute;
+import static org.lwjgl.system.MathUtil.mathRoundPoT;
+import static org.lwjgl.system.MemoryUtil.NULL;
+import static org.lwjgl.system.MemoryUtil.memAddress;
+
+public class Launcher {
+
+    /** The GLFW window handle. */
+    private long window;
+    private int width = 800;
+    private int height = 600;
+    private int fps = 0;
+    /**  Whether we need to recreate our ray tracer framebuffer. */
+    private boolean resetFramebuffer = true;
+
+    /** The OpenGL texture acting as our framebuffer for the ray tracer. */
+    private int tex;
+    /** A VAO simply holding a VBO for rendering a simple quad. */
+    private int vao;
+    /** The shader program handle of the compute shader. */
+    private int computeProgram;
+    /** The shader program handle of a fullscreen quad shader. */
+    private int quadProgram;
+    /** A sampler object to sample the framebuffer texture when finally presenting it
+     * on the screen. */
+    private int sampler;
+
+    private Shader computeShader;
+
+    /** The texture containing the voxelized data structure */
+    private int voxelTexture, voxelTextureDirect;
+
+    /** The location of the 'eye' uniform declared in the compute shader holding the
+     * world-space eye position. */
+//    private int eyeUniform;
+    /** The location of the rayNN uniforms. These will be explained later. */
+//    private int ray00Uniform, ray10Uniform, ray01Uniform, ray11Uniform;
+
+    /** The binding point in the compute shader of the framebuffer image (level 0 of
+     * the {@link #tex} texture). */
+    private int framebufferImageBinding;
+    /** Value of the work group size in X dimension declared in the compute shader. */
+    private int workGroupSizeX;
+    /** Value of the work group size in Y dimension declared in the compute shader. */
+    private int workGroupSizeY;
+
+    private Matrix4f projMatrix = new Matrix4f();
+    private Matrix4f viewMatrix = new Matrix4f();
+    private Matrix4f invViewProjMatrix = new Matrix4f();
+    private Vector3f tmpVector = new Vector3f();
+
+    private Camera camera;
+    private Controller controller;
+    private RenderController renderController;
+
+    /*
+     * All the GLFW callbacks we use to detect certain events, such as keyboard and
+     * mouse events or window resize events.
+     */
+    private GLFWErrorCallback errCallback;
+    private KeyboardHandler keyCallback;
+    private GLFWFramebufferSizeCallback fbCallback;
+    private CursorHandler cpCallback;
+    private MouseButtonHandler mbCallback;
+
+    /*
+     * LWJGL's OpenGL debug callback object, which will get notified by OpenGL about
+     * certain events, such as OpenGL errors, warnings or merely information.
+     */
+    private Callback debugProc;
+
+    private SVO svo;
+
+    public Launcher() {
+    }
+
+    /** Do everything necessary once at the start of the application. */
+    private void init() throws IOException {
+        /*
+         * Set a GLFW error callback to be notified about any error messages GLFW
+         * generates.
+         */
+        glfwSetErrorCallback(errCallback = GLFWErrorCallback.createPrint(System.err));
+        /*
+         * Initialize GLFW itself.
+         */
+        if (!glfwInit())
+            throw new IllegalStateException("Unable to initialize GLFW");
+
+        /*
+         * And set some OpenGL context attributes, such as that we are using OpenGL 4.3.
+         * This is the minimum core version such so that can use compute shaders.
+         */
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE); // <- make the window visible explicitly later
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+
+        /*
+         * Now, create the window.
+         */
+        window = glfwCreateWindow(width, height, "SVO Ray tracing", NULL, NULL);
+        if (window == NULL)
+            throw new AssertionError("Failed to create the GLFW window");
+
+        /* And set some GLFW callbacks to get notified about events. */
+
+        glfwSetKeyCallback(window, keyCallback = new KeyboardHandler());
+
+        /*
+         * We need to get notified when the GLFW window framebuffer size changed (i.e.
+         * by resizing the window), in order to recreate our own ray tracer framebuffer
+         * texture.
+         */
+        glfwSetFramebufferSizeCallback(window, fbCallback = new GLFWFramebufferSizeCallback() {
+            public void invoke(long window, int width, int height) {
+                if (width > 0 && height > 0 && (Launcher.this.width != width || Launcher.this.height != height)) {
+                    Launcher.this.width = width;
+                    Launcher.this.height = height;
+                    Launcher.this.resetFramebuffer = true;
+                }
+            }
+        });
+
+        glfwSetCursorPosCallback(window, cpCallback = new CursorHandler());
+
+        glfwSetMouseButtonCallback(window, mbCallback = new MouseButtonHandler());
+
+        /*
+         * Center the created GLFW window on the screen.
+         */
+        GLFWVidMode vidmode = glfwGetVideoMode(glfwGetPrimaryMonitor());
+        glfwSetWindowPos(window, (vidmode.width() - width) / 2, (vidmode.height() - height) / 2);
+        glfwMakeContextCurrent(window);
+        glfwSwapInterval(1); // ctrl f vsync v-sync
+        glfwShowWindow(window);
+
+        /*
+         * Account for HiDPI screens where window size != framebuffer pixel size.
+         */
+        try (MemoryStack frame = MemoryStack.stackPush()) {
+            IntBuffer framebufferSize = frame.mallocInt(2);
+            nglfwGetFramebufferSize(window, memAddress(framebufferSize), memAddress(framebufferSize) + 4);
+            width = framebufferSize.get(0);
+            height = framebufferSize.get(1);
+        }
+
+        GL.createCapabilities();
+        debugProc = GLUtil.setupDebugMessageCallback();
+
+        camera = new Camera(new Vector3f(0.5f, 0.5f, 0.05f));
+
+        /* Create all needed GL resources */
+        createFramebufferTexture();
+        createSampler();
+        quadFullScreenVao();
+        createComputeProgram();
+        initComputeProgram();
+        createQuadProgram();
+        initQuadProgram();
+        svo = createVoxelTexture();
+        setStaticUniforms(svo);
+
+        controller = new Controller(camera, svo);
+        renderController = new RenderController(computeShader, RenderController.LookupMode.OCTREE, voxelTexture, voxelTextureDirect);
+    }
+
+    private void setStaticUniforms(SVO svo) {
+        float texSize = svo.getMaxTextureSize();
+
+        glUseProgram(computeProgram);
+
+        // Set number of indirection grids
+        glUniform1f(computeShader.getUniformId("invNumberOfIndGrids"), 2f / texSize);
+
+        // Set voxel texture size
+        glUniform3f(
+                computeShader.getUniformId("textureSize"),
+                texSize,
+                1 / texSize,
+                1 / (2f * texSize)
+        );
+
+        glUseProgram(0);
+    }
+
+    private SVO createVoxelTexture() {
+        SVO svo = new SVO(4, 100);
+        int textureSize = svo.getMaxTextureSize();
+        svo.generateDemoScene();
+        svo.generateSVO();
+//        System.out.println("textureSize + \", \" + invNumberOfIndGrids = " + textureSize + ", " + invNumberOfIndGrids);
+        voxelTexture = SVO.uploadTexture(textureSize, svo.getTextureData());
+        voxelTextureDirect = SVO.uploadTexture(textureSize, svo.getNormalVolumeTextureData());
+        GL11.glBindTexture(GL12.GL_TEXTURE_3D, voxelTexture);
+        return svo;
+    }
+
+    private void update(float dt) {
+        if (KeyboardHandler.isKeyPressed(GLFW_KEY_ESCAPE)) {
+            glfwSetWindowShouldClose(window, true);
+        }
+
+        controller.update(dt);
+        renderController.update(dt);
+
+        // Reset raw input controllers
+        KeyboardHandler.update();
+        MouseButtonHandler.update();
+
+        String camPosText = camera.getPosition().toString(new DecimalFormat("0.0"));
+        glfwSetWindowTitle(window, "SVO Ray tracing - " + fps + " FPS - CamPos: " + camPosText);
+
+
+        setStaticUniforms(svo);
+    }
+
+    /** Create a VAO with a full-screen quad VBO.
+     */
+    private void quadFullScreenVao() {
+        /*
+         * Really simple. Just a VAO with a VBO to render a full-screen quad as two
+         * triangles.
+         */
+        this.vao = glGenVertexArrays();
+        int vbo = glGenBuffers();
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        ByteBuffer bb = BufferUtils.createByteBuffer(4 * 2 * 6);
+        FloatBuffer fv = bb.asFloatBuffer();
+        fv.put(-1.0f).put(-1.0f);
+        fv.put(1.0f).put(-1.0f);
+        fv.put(1.0f).put(1.0f);
+        fv.put(1.0f).put(1.0f);
+        fv.put(-1.0f).put(1.0f);
+        fv.put(-1.0f).put(-1.0f);
+        glBufferData(GL_ARRAY_BUFFER, bb, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, false, 0, 0L);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+    }
+
+    /** Create the full-screen quad shader.
+     */
+    private void createQuadProgram() throws IOException {
+        /*
+         * Create program and shader objects for our full-screen quad rendering.
+         */
+        int program = glCreateProgram();
+        int vshader = ResourceUtils.createShader("quad.vs.glsl", GL_VERTEX_SHADER, "330");
+        int fshader = ResourceUtils.createShader("quad.fs.glsl", GL_FRAGMENT_SHADER, "330");
+        glAttachShader(program, vshader);
+        glAttachShader(program, fshader);
+        glBindAttribLocation(program, 0, "vertex");
+        glBindFragDataLocation(program, 0, "color");
+        glLinkProgram(program);
+        int linked = glGetProgrami(program, GL_LINK_STATUS);
+        String programLog = glGetProgramInfoLog(program);
+        if (programLog.trim().length() > 0) {
+            System.err.println(programLog);
+        }
+        if (linked == 0) {
+            throw new AssertionError("Could not link program");
+        }
+        this.quadProgram = program;
+    }
+
+    /** Create the tracing compute shader program. */
+    private void createComputeProgram() throws IOException {
+        /*
+         * Create our GLSL compute shader. It does not look any different to creating a
+         * program with vertex/fragment shaders. The only thing that changes is the
+         * shader type, now being GL_COMPUTE_SHADER.
+         */
+        int program = glCreateProgram();
+        int cshader = ResourceUtils.createShader("raytracing.glsl",
+                GL_COMPUTE_SHADER);
+        glAttachShader(program, cshader);
+        glLinkProgram(program);
+        int linked = glGetProgrami(program, GL_LINK_STATUS);
+        String programLog = glGetProgramInfoLog(program);
+        if (programLog.trim().length() > 0) {
+            System.err.println(programLog);
+        }
+        if (linked == 0) {
+            throw new AssertionError("Could not link program");
+        }
+        this.computeProgram = program;
+        this.computeShader = new Shader(computeProgram);
+    }
+
+    /** Initialize the full-screen-quad program. This just binds the program briefly
+     * to obtain the uniform locations. */
+    private void initQuadProgram() {
+        glUseProgram(quadProgram);
+        int texUniform = glGetUniformLocation(quadProgram, "tex");
+        glUniform1i(texUniform, 0);
+        glUseProgram(0);
+    }
+
+    /** Initialize the compute shader. This just binds the program briefly to obtain
+     * the uniform locations, the declared work group size values and the image
+     * binding point of the framebuffer image. */
+    private void initComputeProgram() {
+        glUseProgram(computeProgram);
+        IntBuffer workGroupSize = BufferUtils.createIntBuffer(3);
+        glGetProgramiv(computeProgram, GL_COMPUTE_WORK_GROUP_SIZE, workGroupSize);
+        workGroupSizeX = workGroupSize.get(0);
+        workGroupSizeY = workGroupSize.get(1);
+
+        /* Query the "image binding point" of the image uniform */
+        IntBuffer params = BufferUtils.createIntBuffer(1);
+        int loc = glGetUniformLocation(computeProgram, "framebufferImage");
+        glGetUniformiv(computeProgram, loc, params);
+        framebufferImageBinding = params.get(0);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_3D, voxelTexture);
+        glUseProgram(0);
+    }
+
+    /** Create the texture that will serve as our framebuffer that the compute shader
+     * will write/render to.
+     */
+    private void createFramebufferTexture() {
+        this.tex = glGenTextures();
+        glBindTexture(GL_TEXTURE_2D, tex);
+        /*
+         * glTexStorage2D only allocates space for the texture, but does not initialize
+         * it with any values. This is fine, because we use the texture solely as output
+         * texture in the compute shader.
+         */
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA32F, width, height);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    /** Create the sampler to sample the framebuffer texture within the fullscreen
+     * quad shader. We use NEAREST filtering since one texel on the framebuffer
+     * texture corresponds exactly to one pixel on the GLFW window framebuffer.
+     */
+    private void createSampler() {
+        this.sampler = glGenSamplers();
+        glSamplerParameteri(this.sampler, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glSamplerParameteri(this.sampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
+
+    /** Recreate the framebuffer when the window size changes.
+     */
+    private void resizeFramebufferTexture() {
+        glDeleteTextures(tex);
+        createFramebufferTexture();
+    }
+
+    /** Compute one frame by tracing the scene using our compute shader.
+     * The resulting pixels will be written to the framebuffer texture {@link #tex}.
+     */
+    private void trace() {
+        glUseProgram(computeProgram);
+
+        /* Rotate camera about Y axis. */
+//        cameraPosition.set((float) sin(-currRotationAboutY) * 3.0f, 2.0f, (float) cos(-currRotationAboutY) * 3.0f).normalize();
+        Vector3f lookat = camera.getRotation().transform(new Vector3f(0, 0, 1)).add(camera.getPosition());
+        viewMatrix.setLookAt(camera.getPosition(), lookat, Camera.UP);
+
+        /*
+         * If the framebuffer size has changed, because the GLFW window was resized, we
+         * need to reset the camera's projection matrix and recreate our framebuffer
+         * texture.
+         */
+        if (resetFramebuffer) {
+            projMatrix.setPerspective((float) Math.toRadians(60.0f), (float) width / height, 1f, 2f);
+            resizeFramebufferTexture();
+            resetFramebuffer = false;
+        }
+        /*
+         * Invert the view-projection matrix to unproject NDC-space coordinates to
+         * world-space vectors. See next few statements.
+         */
+        projMatrix.invertPerspectiveView(viewMatrix, invViewProjMatrix);
+
+        /*
+         * Compute and set the view frustum corner rays in the shader for the shader to
+         * compute the direction from the eye through a framebuffer's pixel center for a
+         * given shader work item.
+         */
+        glUniform3f(computeShader.getUniformId("eye"),
+                camera.getPosition().x, camera.getPosition().y, camera.getPosition().z);
+        invViewProjMatrix.transformProject(tmpVector.set(-1, -1, 0)).sub(camera.getPosition());
+        glUniform3f(computeShader.getUniformId("ray00"),
+                tmpVector.x, tmpVector.y, tmpVector.z);
+        invViewProjMatrix.transformProject(tmpVector.set(-1, 1, 0)).sub(camera.getPosition());
+        glUniform3f(computeShader.getUniformId("ray01"),
+                tmpVector.x, tmpVector.y, tmpVector.z);
+        invViewProjMatrix.transformProject(tmpVector.set(1, -1, 0)).sub(camera.getPosition());
+        glUniform3f(computeShader.getUniformId("ray10"),
+                tmpVector.x, tmpVector.y, tmpVector.z);
+        invViewProjMatrix.transformProject(tmpVector.set(1, 1, 0)).sub(camera.getPosition());
+        glUniform3f(computeShader.getUniformId("ray11"),
+                tmpVector.x, tmpVector.y, tmpVector.z);
+
+
+        // Set voxel texture location (TEXTURE0)
+        glUniform1i(computeShader.getUniformId("voxelTexture"), 0);
+
+        /*
+         * Bind level 0 of framebuffer texture as writable image in the shader. This
+         * tells OpenGL that any writes to the image defined in our shader is going to
+         * go to the first level of the texture 'tex'.
+         */
+        glBindImageTexture(framebufferImageBinding, tex, 0, false, 0, GL_WRITE_ONLY, GL_RGBA32F);
+
+
+        /*
+         * Compute appropriate global work size dimensions. Because OpenGL only allows
+         * to invoke a compute shader with a power-of-two global work size in each
+         * dimension, we need to compute a size that is both a power-of-two and that
+         * covers our complete framebuffer. We use LWJGL's built-in method
+         * mathRoundPoT() for this.
+         */
+        int worksizeX = mathRoundPoT(width);
+        int worksizeY = mathRoundPoT(height);
+
+        /* Invoke the compute shader. */
+        glDispatchCompute(worksizeX / workGroupSizeX, worksizeY / workGroupSizeY, 1);
+        /*
+         * Synchronize all writes to the framebuffer image before we let OpenGL source
+         * texels from it afterwards when rendering the final image with the full-screen
+         * quad.
+         */
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+        /* Reset bindings. */
+        glBindImageTexture(framebufferImageBinding, 0, 0, false, 0, GL_WRITE_ONLY, GL_RGBA32F);
+        glUseProgram(0);
+    }
+
+    /** Present the final image on the default framebuffer of the GLFW window. */
+    private void present() {
+        /*
+         * Draw the rendered image on the screen using a textured full-screen quad.
+         */
+        glUseProgram(quadProgram);
+        glBindVertexArray(vao);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glBindSampler(0, this.sampler);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glBindSampler(0, 0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindVertexArray(0);
+        glUseProgram(0);
+    }
+
+    private void loop() {
+
+        long nanoStart = System.nanoTime();
+        float dt = 1 / 60f;
+        int fpsCounter = 0;
+        long fpsNanoStart = System.nanoTime();
+
+        // Our render loop is really simple...
+        while (!glfwWindowShouldClose(window)) {
+            // ...we just poll for GLFW window events (as usual).
+            glfwPollEvents();
+
+            update(dt);
+
+            long renderStart = System.nanoTime();
+
+            // Tell OpenGL about any possibly modified viewport size.
+            glViewport(0, 0, width, height);
+            // Call the compute shader to trace the scene and produce an image in our
+            // framebuffer texture.
+            trace();
+            // Finally we blit/render the framebuffer texture to the default window
+            // framebuffer of the GLFW window.
+            present();
+            // Tell the GLFW window to swap buffers so that our rendered framebuffer texture
+            // becomes visible.
+            glfwSwapBuffers(window);
+
+//            float renderTime = (System.nanoTime() - renderStart) / 1e9f;
+//            System.out.println("renderTime = " + renderTime + "ms");
+
+            long nanoNow = System.nanoTime();
+            dt = (nanoNow - nanoStart) / 1e9f;
+
+            nanoStart = System.nanoTime();
+
+            if (nanoNow - fpsNanoStart > 1e9) {
+                fpsNanoStart = nanoNow;
+                fps = fpsCounter;
+                fpsCounter = 0;
+            }
+            fpsCounter++;
+        }
+    }
+
+    private void run() throws Exception {
+        try {
+            init();
+            loop();
+            if (debugProc != null)
+                debugProc.free();
+            errCallback.free();
+            keyCallback.free();
+            fbCallback.free();
+            cpCallback.free();
+            mbCallback.free();
+            glfwDestroyWindow(window);
+        } finally {
+            glfwTerminate();
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        new Launcher().run();
+    }
+}
+```
+
+### src/main/java/core/RenderController.java
+```
+package core;
+
+import input.KeyboardHandler;
+import lombok.AllArgsConstructor;
+import lombok.NonNull;
+import org.lwjgl.glfw.GLFW;
+import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL12;
+
+import static org.lwjgl.opengl.GL41C.*;
+
+public class RenderController {
+    private Shader computeShader;
+    private LookupMode lookupMode = LookupMode.OCTREE;
+
+    private int voxelTexture, voxelTextureDirect;
+    private boolean isVoxelTextureActive = true;
+
+    enum LookupMode {
+        OCTREE(1),
+        TEXTURE_DIRECT(2),
+        TEXTURE_LOOKUP(3);
+
+        private int value;
+        LookupMode(int value) {
+            this.value = value;
+        }
+    }
+
+    public RenderController(Shader computeShader, LookupMode lookupMode, int voxTex, int voxTexDirect) {
+        this.computeShader = computeShader;
+        glProgramUniform1i(
+                computeShader.getProgramId(),
+                computeShader.getUniformId("lookupMode"),
+                lookupMode.value);
+
+        this.voxelTexture = voxTex;
+        this.voxelTextureDirect = voxTexDirect;
+    }
+
+    public void update(float dt) {
+        LookupMode newLookupMode = lookupMode;
+        if (KeyboardHandler.isKeyPressed(GLFW.GLFW_KEY_1))
+            newLookupMode = LookupMode.OCTREE;
+        else if (KeyboardHandler.isKeyPressed(GLFW.GLFW_KEY_2))
+            newLookupMode = LookupMode.TEXTURE_DIRECT;
+        else if (KeyboardHandler.isKeyPressed(GLFW.GLFW_KEY_3))
+            newLookupMode = LookupMode.TEXTURE_LOOKUP;
+
+        if (lookupMode != newLookupMode) {
+            lookupMode = newLookupMode;
+            glProgramUniform1i(
+                    computeShader.getProgramId(),
+                    computeShader.getUniformId("lookupMode"),
+                    lookupMode.value);
+        }
+
+        if (KeyboardHandler.isKeyPressed(GLFW.GLFW_KEY_T)) {
+            GL11.glBindTexture(GL12.GL_TEXTURE_3D, isVoxelTextureActive ? voxelTextureDirect : voxelTexture);
+            isVoxelTextureActive = !isVoxelTextureActive;
+        }
+    }
+}
+```
+
+### src/main/java/core/ResourceUtils.java
+```
+package core;
+
+import org.joml.Vector3f;
+import org.lwjgl.BufferUtils;
+import org.lwjgl.PointerBuffer;
+
+import java.io.*;
+import java.net.URL;
+import java.nio.ByteBuffer;
+import java.nio.FloatBuffer;
+import java.nio.IntBuffer;
+import java.nio.channels.FileChannel;
+
+import static org.lwjgl.opengl.GL20.*;
+import static org.lwjgl.opengl.GL20.GL_COMPILE_STATUS;
+import static org.lwjgl.opengl.GL20.glGetShaderInfoLog;
+import static org.lwjgl.system.MemoryUtil.memUTF8;
+
+public class ResourceUtils {
+
+    private static final Vector3f VECTOR_MINUS_ONE = new Vector3f(-1.0f, -1.0f, -1.0f);
+    private static final Vector3f VECTOR_PLUS_ONE = new Vector3f(1.0f, 1.0f, 1.0f);
+
+    /**
+     * Write the vertices (position and normal) of an axis-aligned unit box into
+     * the provided {@link FloatBuffer}.
+     *
+     * @param fv
+     *            the {@link FloatBuffer} receiving the vertex position and
+     *            normal
+     */
+    public static void triangulateUnitBox(FloatBuffer fv) {
+        triangulateBox(VECTOR_MINUS_ONE, VECTOR_PLUS_ONE, fv);
+    }
+
+    /**
+     * Write the vertices (position and normal) of an axis-aligned box with the
+     * given corner coordinates into the provided {@link FloatBuffer}.
+     *
+     * @param min
+     *            the min corner
+     * @param max
+     *            the max corner
+     * @param fv
+     *            the {@link FloatBuffer} receiving the vertex position and
+     *            normal
+     */
+    public static void triangulateBox(Vector3f min, Vector3f max, FloatBuffer fv) {
+        /* Front face */
+        fv.put(min.x).put(min.y).put(max.z).put(0.0f).put(0.0f).put(1.0f);
+        fv.put(max.x).put(min.y).put(max.z).put(0.0f).put(0.0f).put(1.0f);
+        fv.put(max.x).put(max.y).put(max.z).put(0.0f).put(0.0f).put(1.0f);
+        fv.put(max.x).put(max.y).put(max.z).put(0.0f).put(0.0f).put(1.0f);
+        fv.put(min.x).put(max.y).put(max.z).put(0.0f).put(0.0f).put(1.0f);
+        fv.put(min.x).put(min.y).put(max.z).put(0.0f).put(0.0f).put(1.0f);
+        /* Back face */
+        fv.put(max.x).put(min.y).put(min.z).put(0.0f).put(0.0f).put(-1.0f);
+        fv.put(min.x).put(min.y).put(min.z).put(0.0f).put(0.0f).put(-1.0f);
+        fv.put(min.x).put(max.y).put(min.z).put(0.0f).put(0.0f).put(-1.0f);
+        fv.put(min.x).put(max.y).put(min.z).put(0.0f).put(0.0f).put(-1.0f);
+        fv.put(max.x).put(max.y).put(min.z).put(0.0f).put(0.0f).put(-1.0f);
+        fv.put(max.x).put(min.y).put(min.z).put(0.0f).put(0.0f).put(-1.0f);
+        /* Left face */
+        fv.put(min.x).put(min.y).put(min.z).put(-1.0f).put(0.0f).put(0.0f);
+        fv.put(min.x).put(min.y).put(max.z).put(-1.0f).put(0.0f).put(0.0f);
+        fv.put(min.x).put(max.y).put(max.z).put(-1.0f).put(0.0f).put(0.0f);
+        fv.put(min.x).put(max.y).put(max.z).put(-1.0f).put(0.0f).put(0.0f);
+        fv.put(min.x).put(max.y).put(min.z).put(-1.0f).put(0.0f).put(0.0f);
+        fv.put(min.x).put(min.y).put(min.z).put(-1.0f).put(0.0f).put(0.0f);
+        /* Right face */
+        fv.put(max.x).put(min.y).put(max.z).put(1.0f).put(0.0f).put(0.0f);
+        fv.put(max.x).put(min.y).put(min.z).put(1.0f).put(0.0f).put(0.0f);
+        fv.put(max.x).put(max.y).put(min.z).put(1.0f).put(0.0f).put(0.0f);
+        fv.put(max.x).put(max.y).put(min.z).put(1.0f).put(0.0f).put(0.0f);
+        fv.put(max.x).put(max.y).put(max.z).put(1.0f).put(0.0f).put(0.0f);
+        fv.put(max.x).put(min.y).put(max.z).put(1.0f).put(0.0f).put(0.0f);
+        /* Top face */
+        fv.put(min.x).put(max.y).put(max.z).put(0.0f).put(1.0f).put(0.0f);
+        fv.put(max.x).put(max.y).put(max.z).put(0.0f).put(1.0f).put(0.0f);
+        fv.put(max.x).put(max.y).put(min.z).put(0.0f).put(1.0f).put(0.0f);
+        fv.put(max.x).put(max.y).put(min.z).put(0.0f).put(1.0f).put(0.0f);
+        fv.put(min.x).put(max.y).put(min.z).put(0.0f).put(1.0f).put(0.0f);
+        fv.put(min.x).put(max.y).put(max.z).put(0.0f).put(1.0f).put(0.0f);
+        /* Bottom face */
+        fv.put(min.x).put(min.y).put(min.z).put(0.0f).put(-1.0f).put(0.0f);
+        fv.put(max.x).put(min.y).put(min.z).put(0.0f).put(-1.0f).put(0.0f);
+        fv.put(max.x).put(min.y).put(max.z).put(0.0f).put(-1.0f).put(0.0f);
+        fv.put(max.x).put(min.y).put(max.z).put(0.0f).put(-1.0f).put(0.0f);
+        fv.put(min.x).put(min.y).put(max.z).put(0.0f).put(-1.0f).put(0.0f);
+        fv.put(min.x).put(min.y).put(min.z).put(0.0f).put(-1.0f).put(0.0f);
+    }
+
+    /**
+     * Create a shader object from the given classpath resource.
+     *
+     * @param resource
+     *            the class path
+     * @param type
+     *            the shader type
+     *
+     * @return the shader object id
+     *
+     * @throws IOException
+     */
+    public static int createShader(String resource, int type) throws IOException {
+        return createShader(resource, type, null);
+    }
+
+    private static ByteBuffer resizeBuffer(ByteBuffer buffer, int newCapacity) {
+        ByteBuffer newBuffer = BufferUtils.createByteBuffer(newCapacity);
+        buffer.flip();
+        newBuffer.put(buffer);
+        return newBuffer;
+    }
+
+    /**
+     * Reads the specified resource and returns the raw data as a ByteBuffer.
+     *
+     * @param resource   the resource to read
+     * @param bufferSize the initial buffer size
+     *
+     * @return the resource data
+     *
+     * @throws IOException if an IO error occurs
+     */
+    public static ByteBuffer ioResourceToByteBuffer(String resource, int bufferSize) throws IOException {
+        ByteBuffer buffer;
+        URL url = Thread.currentThread().getContextClassLoader().getResource(resource);
+        File file = new File(url.getFile());
+        if (file.isFile()) {
+            FileInputStream fis = new FileInputStream(file);
+            FileChannel fc = fis.getChannel();
+            buffer = fc.map(FileChannel.MapMode.READ_ONLY, 0, fc.size());
+            fc.close();
+            fis.close();
+        } else {
+            buffer = BufferUtils.createByteBuffer(bufferSize);
+            InputStream source = url.openStream();
+            if (source == null)
+                throw new FileNotFoundException(resource);
+            try {
+                byte[] buf = new byte[8192];
+                while (true) {
+                    int bytes = source.read(buf, 0, buf.length);
+                    if (bytes == -1)
+                        break;
+                    if (buffer.remaining() < bytes)
+                        buffer = resizeBuffer(buffer, buffer.capacity() * 2);
+                    buffer.put(buf, 0, bytes);
+                }
+                buffer.flip();
+            } finally {
+                source.close();
+            }
+        }
+        return buffer;
+    }
+
+    /**
+     * Create a shader object from the given classpath resource.
+     *
+     * @param resource
+     *            the class path
+     * @param type
+     *            the shader type
+     * @param version
+     *            the GLSL version to prepend to the shader source, or null
+     *
+     * @return the shader object id
+     *
+     * @throws IOException
+     */
+    public static int createShader(String resource, int type, String version) throws IOException {
+        int shader = glCreateShader(type);
+
+        ByteBuffer source = ioResourceToByteBuffer(resource, 8192);
+
+        if ( version == null ) {
+            PointerBuffer strings = BufferUtils.createPointerBuffer(1);
+            IntBuffer lengths = BufferUtils.createIntBuffer(1);
+
+            strings.put(0, source);
+            lengths.put(0, source.remaining());
+
+            glShaderSource(shader, strings, lengths);
+        } else {
+            PointerBuffer strings = BufferUtils.createPointerBuffer(2);
+            IntBuffer lengths = BufferUtils.createIntBuffer(2);
+
+            ByteBuffer preamble = memUTF8("#version " + version + "\n", false);
+
+            strings.put(0, preamble);
+            lengths.put(0, preamble.remaining());
+
+            strings.put(1, source);
+            lengths.put(1, source.remaining());
+
+            glShaderSource(shader, strings, lengths);
+        }
+
+        glCompileShader(shader);
+        int compiled = glGetShaderi(shader, GL_COMPILE_STATUS);
+        String shaderLog = glGetShaderInfoLog(shader);
+        if (shaderLog.trim().length() > 0) {
+            System.err.println(shaderLog);
+        }
+        if (compiled == 0) {
+            throw new AssertionError("Could not compile shader");
+        }
+        return shader;
+    }
+
+}
+```
+
+### src/main/java/core/SVO.java
+```
+package core;
+
+import geometry.Geometry;
+import lombok.Getter;
+import org.joml.Vector3f;
+import org.joml.Vector3i;
+import org.lwjgl.BufferUtils;
+import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL12;
+
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+
+import geometry.*;
+
+/**
+ * Implementation based on https://developer.nvidia.com/gpugems/GPUGems2/gpugems2_chapter37.html
+ */
+public class SVO {
+
+    @Getter
+    private ArrayList<IndirectionGrid> indirectionPool;
+    @Getter
+    private int maxDepth;
+    @Getter
+    private int worldSize;
+
+    @Getter
+    private ArrayList<Geometry> geometries;
+
+    /**
+     * Creates a Sparse Voxel Octree
+     * @param maxDepth
+     * @param worldSize
+     */
+    public SVO(int maxDepth, int worldSize) {
+        this.maxDepth = maxDepth;
+        this.worldSize = worldSize;
+        this.geometries = new ArrayList<>();
+        this.indirectionPool = new ArrayList<>(8 * maxDepth * maxDepth);
+    }
+
+    public void generateDemoScene() {
+        geometries.add(new Sphere(new Vector3f(worldSize / 3f), worldSize / 4f, new Vector3f(0.5f, 0.5f, 0.5f)));
+        geometries.add(new Sphere(new Vector3f(worldSize / 6f), worldSize / 8f, new Vector3f(0.5f, 0.5f, 0.5f)));
+//        geometries.add(new Sphere(new Vector3f(3 * worldSize / 4f), worldSize / 3f, new Vector3f(0.5f, 0.5f, 0.5f)));
+//        geometries.add(new Sphere(new Vector3f(3 * worldSize / 4f, worldSize /4f, worldSize/4f), worldSize / 6f, new Vector3f(0.5f, 0.5f, 0.5f)));
+//        geometries.add(new Line(new Vector3f(.4f), new Vector3f(.4f, 0.4f, 0.5f)));
+    }
+
+    public void generateSVO() {
+        createNode(0, new Vector3f(0));
+    }
+
+    private static Vector3f[] childBoxOffsets = {
+            new Vector3f(0, 0, 0),
+            new Vector3f(1, 0, 0),
+            new Vector3f(0, 1, 0),
+            new Vector3f(1, 1, 0),
+            new Vector3f(0, 0, 1),
+            new Vector3f(1, 0, 1),
+            new Vector3f(0, 1, 1),
+            new Vector3f(1, 1, 1),
+    };
+
+    /**
+     * Every indirection grid is located in texture memory at a 2x2x2 cube, starting at 0, 0, 0
+     * @param indirectionGridIndex
+     * @return
+     */
+    protected Vector3f getNormalizedTextureIndex(int indirectionGridIndex) {
+        Vector3i i = getTextureIndex(indirectionGridIndex);
+        return new Vector3f(i).div((float) getMaxTextureSize());
+    }
+
+    protected Vector3i getTextureIndex(int indirectionGridIndex, Vector3i target) {
+        int textureSize = getMaxTextureSize();
+        int halfTextureSize = textureSize / 2;
+        int x = (indirectionGridIndex % halfTextureSize) * 2;
+        int y = ((indirectionGridIndex / halfTextureSize) % halfTextureSize) * 2;
+        int z = ((indirectionGridIndex / (halfTextureSize * halfTextureSize))) * 2;
+        target.set(x, y, z);
+
+//        if (x >= textureSize || y >= textureSize || z >= textureSize) {
+//            System.out.println("OOB: " + indirectionGridIndex + " at " + x + ", " + y + ", " + z);
+//        }
+
+//        System.out.println(target.toString());
+        return target;
+    }
+    protected Vector3i getTextureIndex(int indirectionGridIndex) {
+        return getTextureIndex(indirectionGridIndex, new Vector3i());
+    }
+
+    /**
+     * Recursively creates nodes in the core.SVO from the specified geometries.
+     *
+     * Algorithm: For each cell of this grid, check if in intersects with any geometry.
+     * If it does not, that cell can be marked as empty.
+     * If it does, two things can happen:
+     *      If at max depth, this cell becomes a data cell ,representing the color of the geometry
+     *      Else, the cell becomes a link to a new indirection grid that is located in this cell
+     *
+     * @param depth
+     * @param boxStart
+     */
+    protected int createNode(int depth, Vector3f boxStart) {
+        int currentIGIndex = indirectionPool.size();
+        IndirectionGrid ig = new IndirectionGrid();
+        indirectionPool.add(ig);
+
+        // Todo: Put actual texture index in Index Nodes afterwards,
+        // so that the texture size can be adjusted to the amount of indir nodes
+
+        // The size of a child box is worldSize / 2^D, e.g. 1 -> 0.5 -> 0.25 -> 0.125 -> ...
+        float childBoxSize = worldSize / (float) Math.pow(2, depth + 1);
+
+        // Loop over all 8 sub-nodes
+        for (int i = 0; i < 8; i++) {
+            Vector3f childBoxStart = childBoxOffsets[i].mul(childBoxSize, new Vector3f()).add(boxStart);
+            Vector3f childBoxEnd   = new Vector3f(childBoxSize).add(childBoxStart);
+
+            // Find intersection of this child node with any geometry
+            Geometry intersection = geometries.stream()
+                    .filter((g -> g.intersects(childBoxStart, childBoxEnd)))
+                    .findFirst()
+                    .orElse(null);
+
+            if (depth + 1 != maxDepth) {
+                // If not at max depth, check whether the child node should be subdivided
+                if (intersection != null) {
+                    // Subdivide the child node: Add a new intersection grid
+                    int newIGIndex = createNode(depth + 1, childBoxStart);
+
+                    // Create a link from the child node to the next indirection grid
+                    // The texture index is the IG at current pool index + 1, which is the size()
+                    Vector3f textureIndex = getNormalizedTextureIndex(newIGIndex);
+                    ig.setNode(i, Cell.createIndex(textureIndex));
+                }
+            } else {
+                // If at max depth, possibly add a data node
+                if (intersection != null) {
+                    // Create a data node with the color of the geometry
+                    Vector3f color = new Vector3f(intersection.getColor());
+                    color.set(childBoxStart).div(worldSize);
+//                    color.set((float) Math.random(), (float) Math.random(), (float) Math.random());
+                    Cell cell = Cell.createData(color);
+                    ig.setNode(i, cell);
+
+                    cell.realLocation = new Vector3f(childBoxStart).div(worldSize);
+
+                }
+            }
+        }
+        return currentIGIndex;
+    }
+
+    public int getMaxTextureSize() {
+        // At the start it is not known how many IGs there are, so worst case scenario:
+        // every cell contains data
+        // This means:
+        // Every depth step, 2 new cells per dimension
+        // for every data cell, log(N) index cells
+//        return 8;
+        int n = (int) Math.pow(2, maxDepth);
+        int logN = (int) Math.log(n);
+        int textureSize = n + logN;
+        textureSize /= 2; // Todo: Assumption that 1/2 of the space is empty, may break stuff
+
+        // Max texture size of 256 since index nodes can only point to 2^8=255 values along each axis
+        return Math.min(
+                nextPowerOfTwo(textureSize),
+                256);
+    }
+
+    private static int nextPowerOfTwo(int value) {
+        int highestOneBit = Integer.highestOneBit(value);
+        if (value == highestOneBit) {
+            return value;
+        }
+        return highestOneBit << 1;
+    }
+
+    public ByteBuffer getNormalVolumeTextureData() {
+        int textureSize = getMaxTextureSize();
+        ByteBuffer textureData = BufferUtils.createByteBuffer(textureSize * textureSize * textureSize * 4); // 4 bytes since r g b a
+
+        for (int i = 0; i < indirectionPool.size(); i++) {
+            for (Cell cell : indirectionPool.get(i).getChildren()) {
+                if (cell.getNodeType() == Cell.NodeType.DATA) {
+                    Vector3f realLocation = cell.realLocation;
+                    realLocation.mul(textureSize);
+                    int textureIndex = (int) realLocation.x;
+                    textureIndex += (int) realLocation.y * textureSize;
+                    textureIndex += (int) realLocation.z * textureSize * textureSize;
+                    textureIndex *= 4;
+                    cell.getData(textureIndex, textureData);
+                }
+            }
+        }
+
+        return textureData;
+    }
+
+    public ByteBuffer getTextureData() {
+        // Todo: Each cell should be placed in memory as they are in space: 2x2x2 cube, instead of
+        // 8 values in a row as is happening now
+
+//        System.out.println("Generating texture...");
+        System.out.println("Max depth: " + maxDepth + ", IndirectionPool size: " + indirectionPool.size());
+
+        int textureSize = getMaxTextureSize();
+        System.out.println("Texture Size: " + textureSize + "^3 = " + (int) Math.pow(textureSize, 3));
+
+        // In a worst case scenario, all octree nodes are used, so the tree is subdivided to maxDepth everywhere
+//        int size = getMaxTextureSize();
+        ByteBuffer textureData = BufferUtils.createByteBuffer(textureSize * textureSize * textureSize * 4); // 4 bytes since r g b a
+
+        Vector3i index = new Vector3i();
+        for (int i = 0; i < indirectionPool.size(); i++) {
+            getTextureIndex(i, index);
+
+            // Insert pool cells in a cube in texture memory
+            indirectionPool.get(i).get(textureSize, index.x, index.y, index.z, textureData);
+        }
+
+        int bytesUsed = indirectionPool.size();
+        System.out.println("Cells used: " + bytesUsed + "/" + ((textureData.limit() / 4) / 8) + " (" + Math.round(100 * 4 * 8 * bytesUsed / (float) textureData.limit()) + "%)");
+        return textureData;
+    }
+
+    public static int uploadTexture(int size, ByteBuffer textureData) {
+        int texID = GL11.glGenTextures();
+
+        GL11.glEnable(GL12.GL_TEXTURE_3D);
+        GL11.glBindTexture(GL12.GL_TEXTURE_3D, texID);
+//        GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_LINEAR);
+//        GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_LINEAR);
+        GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL11.GL_TEXTURE_MIN_FILTER, GL11.GL_NEAREST);
+        GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL11.GL_TEXTURE_MAG_FILTER, GL11.GL_NEAREST);
+        GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL11.GL_TEXTURE_WRAP_S, GL11.GL_REPEAT);
+        GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL11.GL_TEXTURE_WRAP_T, GL11.GL_REPEAT);
+        GL11.glTexParameteri(GL12.GL_TEXTURE_3D, GL12.GL_TEXTURE_WRAP_R, GL11.GL_REPEAT);
+        GL12.glTexImage3D(GL12.GL_TEXTURE_3D, 0, GL11.GL_RGBA, size, size, size, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, textureData);
+
+        GL11.glBindTexture(GL12.GL_TEXTURE_3D, 0);
+
+        return texID;
+    }
+}
+```
+
+### src/main/java/core/Shader.java
+```
+package core;
+
+import lombok.Getter;
+
+import org.lwjgl.opengl.*;
+
+import java.util.HashMap;
+
+public class Shader {
+
+    @Getter
+    private int programId;
+    private HashMap<String, Integer> uniforms;
+
+    public Shader(int programId) {
+        this.programId = programId;
+        uniforms = new HashMap<>();
+    }
+
+    public void use() {
+        GL20.glUseProgram(programId);
+    }
+
+    public static void unuse() {
+        GL20.glUseProgram(0);
+    }
+
+    public int getUniformId(String id) {
+        if (!uniforms.containsKey(id)) {
+            int uni = GL20.glGetUniformLocation(programId, id);
+            uniforms.put(id, uni);
+            return uni;
+        }
+        return uniforms.get(id);
+    }
+
+    public int getUniformBlockIndex(String id) {
+        if (!uniforms.containsKey(id)) {
+            int uni = GL31.glGetUniformBlockIndex(programId, id);
+            uniforms.put(id, uni);
+            return uni;
+        }
+        return uniforms.get(id);
+    }
+}
+```
+
+### src/main/java/geometry/Box.java
+```
+package geometry;
+
+import org.joml.Vector3f;
+
+public class Box extends Geometry {
+
+
+
+    @Override
+    public boolean intersects(Vector3f boxStart, Vector3f boxEnd) {
+        return false;
+    }
+}
+```
+
+### src/main/java/geometry/Geometry.java
+```
+package geometry;
+
+import lombok.Getter;
+import lombok.NonNull;
+import lombok.Setter;
+import org.joml.Vector3f;
+
+public abstract class Geometry {
+
+    @NonNull @Getter @Setter
+    protected Vector3f color;
+
+    /** Whether the surface of the geometry intersects with a box */
+    public abstract boolean intersects(Vector3f boxStart, Vector3f boxEnd);
+}
+```
+
+### src/main/java/geometry/Line.java
+```
+package geometry;
+
+import lombok.AllArgsConstructor;
+import org.joml.Vector3f;
+
+@AllArgsConstructor
+public class Line extends Geometry {
+
+    private Vector3f lineStart, lineEnd;
+
+    @Override
+    /**
+     * Based on https://stackoverflow.com/questions/3106666/intersection-of-line-segment-with-axis-aligned-box-in-c-sharp
+     */
+    public boolean intersects(Vector3f boxStart, Vector3f boxEnd) {
+        Vector3f beginToEnd = lineEnd.sub(lineStart, new Vector3f());
+        Vector3f beginToMin = boxStart.sub(lineStart, new Vector3f());
+        Vector3f beginToMax = boxEnd.sub(lineStart, new Vector3f());
+        float tNear = -Float.MAX_VALUE;
+        float tFar = Float.MAX_VALUE;
+
+        for (int axis = 0; axis < 3; axis++) {
+            if (beginToEnd.get(axis) == 0) { // parallel
+                if (beginToMin.get(axis) > 0 || beginToMax.get(axis) < 0)
+                    return false; // segment is not between planes
+            } else {
+                float t1 = beginToMin.get(axis) / beginToEnd.get(axis);
+                float t2 = beginToMax.get(axis) / beginToEnd.get(axis);
+                float tMin = Math.min(t1, t2);
+                float tMax = Math.max(t1, t2);
+                if (tMin > tNear) tNear = tMin;
+                if (tMax < tFar) tFar = tMax;
+                if (tNear > tFar || tFar < 0) return false;
+            }
+        }
+        return (tNear >= 0 && tNear <= 1) || (tFar >= 0 && tFar <= 1);
+    }
+}
+```
+
+### src/main/java/geometry/Plane.java
+```
+package geometry;
+
+import org.joml.Vector3f;
+
+public class Plane {
+    public Vector3f position, direction;
+}
+```
+
+### src/main/java/geometry/Sphere.java
+```
+package geometry;
+
+import lombok.Getter;
+import lombok.NonNull;
+import lombok.RequiredArgsConstructor;
+import org.joml.Vector3f;
+
+@RequiredArgsConstructor
+public class Sphere extends Geometry {
+
+    @NonNull @Getter
+    private Vector3f origin;
+    @NonNull @Getter
+    private float radius;
+
+    public Sphere(Vector3f origin, float radius, Vector3f color) {
+        this.origin = origin;
+        this.radius = radius;
+        this.color = color;
+    }
+
+    private float squared(float x) { return x * x; }
+
+    @Override
+    public boolean intersects(Vector3f boxStart, Vector3f boxEnd) {
+        // Only the surface of the sphere should produce intersections, not the whole volume
+        // The surface is where the box intersects the volume but is not fully inside it
+        boolean intersectsVolume = intersectsVolume(boxStart, boxEnd, radius);
+        boolean insideVolume = insideVolume(boxStart, boxEnd, radius);
+        return intersectsVolume && !insideVolume;
+    }
+
+    public boolean intersectsVolume(Vector3f boxStart, Vector3f boxEnd, float R) {
+        // https://stackoverflow.com/questions/4578967/cube-sphere-intersection-test
+        Vector3f S = origin;
+        float dist_squared = 0;
+
+        // Calculate the closest distance from the cube to the sphere
+        if      (S.x < boxStart.x)  dist_squared    += squared(S.x - boxStart.x);
+        else if (S.x > boxEnd.x)    dist_squared    += squared(S.x - boxEnd.x);
+        if      (S.y < boxStart.y)  dist_squared    += squared(S.y - boxStart.y);
+        else if (S.y > boxEnd.y)    dist_squared    += squared(S.y - boxEnd.y);
+        if      (S.z < boxStart.z)  dist_squared    += squared(S.z - boxStart.z);
+        else if (S.z > boxEnd.z)    dist_squared    += squared(S.z - boxEnd.z);
+
+        // If the closest distance is within the radius, it intersects the sphere's volume
+        return dist_squared <= R * R;
+    }
+
+    public boolean insideVolume(Vector3f boxStart, Vector3f boxEnd, float R) {
+        // Based on https://stackoverflow.com/questions/4578967/cube-sphere-intersection-test
+        Vector3f S = origin;
+        float dist_squared = 0;
+
+        // Calculate the furthest distance from the cube to the sphere
+        if      (S.x < boxStart.x)  dist_squared    += squared(S.x - boxEnd.x);
+        else if (S.x > boxEnd.x)    dist_squared    += squared(S.x - boxStart.x);
+        else                        dist_squared    += Math.max(squared(S.x - boxEnd.x), squared(S.x - boxStart.x));
+
+        if      (S.y < boxStart.y)  dist_squared    += squared(S.y - boxEnd.y);
+        else if (S.y > boxEnd.y)    dist_squared    += squared(S.y - boxStart.y);
+        else                        dist_squared    += Math.max(squared(S.y - boxEnd.y), squared(S.y - boxStart.y));
+
+        if      (S.z < boxStart.z)  dist_squared    += squared(S.z - boxEnd.z);
+        else if (S.z > boxEnd.z)    dist_squared    += squared(S.z - boxStart.z);
+        else                        dist_squared    += Math.max(squared(S.z - boxEnd.z), squared(S.z - boxStart.z));
+
+        // If the furthest distance is within the radius, the box is fully inside the sphere's volume
+        return dist_squared <= R * R;
+    }
+}
+```
+
+### src/main/java/input/CursorHandler.java
+```
+package input;
+
+import org.joml.Vector2f;
+import org.lwjgl.glfw.GLFWCursorPosCallback;
+
+public class CursorHandler extends GLFWCursorPosCallback {
+    
+    private static Vector2f cursorPos = new Vector2f();
+
+    @Override
+    public void invoke(long window, double xpos, double ypos) {
+        cursorPos.x = (float) xpos;
+        cursorPos.y = (float) ypos;
+    }   
+    
+    public static Vector2f getCursorPos() {
+        return cursorPos;
+    }
+}
+```
+
+### src/main/java/input/KeyboardHandler.java
+```
+package input;
+
+import org.lwjgl.glfw.GLFWKeyCallback;
+
+import java.util.LinkedList;
+import java.util.Queue;
+
+import static org.lwjgl.glfw.GLFW.GLFW_PRESS;
+import static org.lwjgl.glfw.GLFW.GLFW_RELEASE;
+
+public class KeyboardHandler extends GLFWKeyCallback {
+    // Only true once when key is released
+    public static boolean[] release = new boolean[65536];
+    // Only true once when key is pushed
+    public static boolean[] push = new boolean[65536];
+    // True whenever a key is pressed down
+    public static boolean[] down = new boolean[65536];
+    
+    // To 'unpress' keys
+    private static Queue<Integer> liftRelease  = new LinkedList<Integer>(); 
+    private static Queue<Integer> liftPush     = new LinkedList<Integer>(); 
+    
+    @Override
+    public void invoke(long window, int key, int scancode, int action, int mods) {
+        if (key < 0)
+            return;
+        
+        if (action == GLFW_PRESS) {
+            push[key] = true;
+            liftPush.add(key);
+        } else if (action == GLFW_RELEASE) {
+            release[key] = true;
+            liftRelease.add(key);
+        }
+
+        down[key] = action != GLFW_RELEASE;
+    }
+    
+    public static void update() {
+        for (int i = 0; i < liftRelease.size(); i++) 
+            release[liftRelease.poll()] = false;
+        for (int i = 0; i < liftPush.size(); i++) 
+            push[liftPush.poll()] = false;
+    }
+
+    /**  Only true once when key is released */
+    public static boolean isKeyReleased(int keycode) {
+        return release[keycode];
+    }
+    /**  Only true once when key is pushed */
+    public static boolean isKeyPressed(int keycode) {
+        return push[keycode];
+    }
+    /** True whenever a key is pressed down */
+    public static boolean isKeyDown(int keycode) {
+        return down[keycode];
+    }
+}
+```
+
+### src/main/java/input/MouseButtonHandler.java
+```
+package input;
+
+import org.lwjgl.glfw.GLFW;
+import org.lwjgl.glfw.GLFWMouseButtonCallback;
+
+import java.util.LinkedList;
+import java.util.Queue;
+
+import static org.lwjgl.glfw.GLFW.GLFW_PRESS;
+import static org.lwjgl.glfw.GLFW.GLFW_RELEASE;
+
+public class MouseButtonHandler extends GLFWMouseButtonCallback {
+    
+    // Only true once when key is released
+    public static boolean[] release = new boolean[GLFW.GLFW_MOUSE_BUTTON_LAST+1];
+    // Only true once when key is pushed
+    public static boolean[] push = new boolean[GLFW.GLFW_MOUSE_BUTTON_LAST+1];
+    // True whenever a key is pressed down
+    public static boolean[] down = new boolean[GLFW.GLFW_MOUSE_BUTTON_LAST+1];
+    
+    // To 'unpress' keys
+    private static Queue<Integer> liftRelease  = new LinkedList<Integer>(); 
+    private static Queue<Integer> liftPush     = new LinkedList<Integer>();
+
+    @Override
+    public void invoke(long window, int button, int action, int mods) {
+        if (button < 0)
+            return;
+        
+        if (action == GLFW_PRESS) {
+            push[button] = true;
+            liftPush.add(button);
+        } else if (action == GLFW_RELEASE) {
+            release[button] = true;
+            liftRelease.add(button);
+        }
+
+        down[button] = action != GLFW_RELEASE;
+    }
+    
+    public static void update() {
+        for (int i = 0; i < liftRelease.size(); i++) 
+            release[liftRelease.poll()] = false;
+        for (int i = 0; i < liftPush.size(); i++) 
+            push[liftPush.poll()] = false;
+    }
+    
+    /**  Only true once when key is released */
+    public static boolean isButtonReleased(int keycode) {
+        return release[keycode];
+    }
+    /**  Only true once when key is pushed */
+    public static boolean isButtonPressed(int keycode) {
+        return push[keycode];
+    }
+    /** True whenever a key is pressed down */
+    public static boolean isButtonDown(int keycode) {
+        return down[keycode];
+    }
+
+}
+```
+
+### src/main/java/input/ScrollHandler.java
+```
+package input;
+
+import org.lwjgl.glfw.GLFWScrollCallback;
+
+public class ScrollHandler extends GLFWScrollCallback {
+    
+    public static double[] offset = new double[2];
+    
+
+    @Override
+    public void invoke(long window, double xoffset, double yoffset) {
+        offset[0] = xoffset;
+        offset[1] = yoffset;
+    }
+    
+    public static void update() {
+        offset[0] = 0;
+        offset[1] = 0;
+    }
+}
+```
+
+### src/main/java/ui/Frame.java
+```
+package ui;
+
+import core.ResourceUtils;
+import org.lwjgl.glfw.*;
+import org.lwjgl.nuklear.*;
+import org.lwjgl.opengl.*;
+import org.lwjgl.stb.*;
+import org.lwjgl.system.*;
+
+import java.io.*;
+import java.nio.*;
+import java.util.*;
+
+import static org.lwjgl.glfw.Callbacks.*;
+import static org.lwjgl.glfw.GLFW.*;
+import static org.lwjgl.nuklear.Nuklear.*;
+import static org.lwjgl.opengl.ARBDebugOutput.*;
+import static org.lwjgl.opengl.GL30C.*;
+import static org.lwjgl.stb.STBTruetype.*;
+import static org.lwjgl.system.MemoryStack.*;
+import static org.lwjgl.system.MemoryUtil.*;
+
+
+public class Frame {
+    private static final int BUFFER_INITIAL_SIZE = 4 * 1024;
+
+    private static final int MAX_VERTEX_BUFFER  = 512 * 1024;
+    private static final int MAX_ELEMENT_BUFFER = 128 * 1024;
+
+    private static final NkAllocator ALLOCATOR;
+
+    private static final NkDrawVertexLayoutElement.Buffer VERTEX_LAYOUT;
+
+    static {
+        ALLOCATOR = NkAllocator.create()
+                .alloc((handle, old, size) -> nmemAllocChecked(size))
+                .mfree((handle, ptr) -> nmemFree(ptr));
+
+        VERTEX_LAYOUT = NkDrawVertexLayoutElement.create(4)
+                .position(0).attribute(NK_VERTEX_POSITION).format(NK_FORMAT_FLOAT).offset(0)
+                .position(1).attribute(NK_VERTEX_TEXCOORD).format(NK_FORMAT_FLOAT).offset(8)
+                .position(2).attribute(NK_VERTEX_COLOR).format(NK_FORMAT_R8G8B8A8).offset(16)
+                .position(3).attribute(NK_VERTEX_ATTRIBUTE_COUNT).format(NK_FORMAT_COUNT).offset(0)
+                .flip();
+    }
+
+    private final ByteBuffer ttf;
+
+    private long win;
+
+    private int
+            width,
+            height;
+
+    private int
+            display_width,
+            display_height;
+
+    private NkContext ctx          = NkContext.create();
+    private NkUserFont default_font = NkUserFont.create();
+
+    private NkBuffer          cmds         = NkBuffer.create();
+    private NkDrawNullTexture null_texture = NkDrawNullTexture.create();
+
+    private int vbo, vao, ebo;
+    private int prog;
+    private int vert_shdr;
+    private int frag_shdr;
+    private int uniform_tex;
+    private int uniform_proj;
+
+    private final InfoPanel infoPanel = new InfoPanel();
+
+    public Frame() {
+
+        try {
+            this.ttf = ResourceUtils.ioResourceToByteBuffer("fonts/FiraSans-Regular.ttf", 512 * 1024);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void run() {
+        NkContext ctx = setupWindow(win);
+
+        int BITMAP_W = 1024;
+        int BITMAP_H = 1024;
+
+        int FONT_HEIGHT = 18;
+        int fontTexID   = glGenTextures();
+
+        STBTTFontinfo          fontInfo = STBTTFontinfo.create();
+        STBTTPackedchar.Buffer cdata    = STBTTPackedchar.create(95);
+
+        float scale;
+        float descent;
+
+        try (MemoryStack stack = stackPush()) {
+            stbtt_InitFont(fontInfo, ttf);
+            scale = stbtt_ScaleForPixelHeight(fontInfo, FONT_HEIGHT);
+
+            IntBuffer d = stack.mallocInt(1);
+            stbtt_GetFontVMetrics(fontInfo, null, d, null);
+            descent = d.get(0) * scale;
+
+            ByteBuffer bitmap = memAlloc(BITMAP_W * BITMAP_H);
+
+            STBTTPackContext pc = STBTTPackContext.mallocStack(stack);
+            stbtt_PackBegin(pc, bitmap, BITMAP_W, BITMAP_H, 0, 1, NULL);
+            stbtt_PackSetOversampling(pc, 4, 4);
+            stbtt_PackFontRange(pc, ttf, 0, FONT_HEIGHT, 32, cdata);
+            stbtt_PackEnd(pc);
+
+            // Convert R8 to RGBA8
+            ByteBuffer texture = memAlloc(BITMAP_W * BITMAP_H * 4);
+            for (int i = 0; i < bitmap.capacity(); i++) {
+                texture.putInt((bitmap.get(i) << 24) | 0x00FFFFFF);
+            }
+            texture.flip();
+
+            glBindTexture(GL_TEXTURE_2D, fontTexID);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, BITMAP_W, BITMAP_H, 0, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, texture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+
+            memFree(texture);
+            memFree(bitmap);
+        }
+
+        default_font
+                .width((handle, h, text, len) -> {
+                    float text_width = 0;
+                    try (MemoryStack stack = stackPush()) {
+                        IntBuffer unicode = stack.mallocInt(1);
+
+                        int glyph_len = nnk_utf_decode(text, memAddress(unicode), len);
+                        int text_len  = glyph_len;
+
+                        if (glyph_len == 0) {
+                            return 0;
+                        }
+
+                        IntBuffer advance = stack.mallocInt(1);
+                        while (text_len <= len && glyph_len != 0) {
+                            if (unicode.get(0) == NK_UTF_INVALID) {
+                                break;
+                            }
+
+                            /* query currently drawn glyph information */
+                            stbtt_GetCodepointHMetrics(fontInfo, unicode.get(0), advance, null);
+                            text_width += advance.get(0) * scale;
+
+                            /* offset next glyph */
+                            glyph_len = nnk_utf_decode(text + text_len, memAddress(unicode), len - text_len);
+                            text_len += glyph_len;
+                        }
+                    }
+                    return text_width;
+                })
+                .height(FONT_HEIGHT)
+                .query((handle, font_height, glyph, codepoint, next_codepoint) -> {
+                    try (MemoryStack stack = stackPush()) {
+                        FloatBuffer x = stack.floats(0.0f);
+                        FloatBuffer y = stack.floats(0.0f);
+
+                        STBTTAlignedQuad q       = STBTTAlignedQuad.mallocStack(stack);
+                        IntBuffer        advance = stack.mallocInt(1);
+
+                        stbtt_GetPackedQuad(cdata, BITMAP_W, BITMAP_H, codepoint - 32, x, y, q, false);
+                        stbtt_GetCodepointHMetrics(fontInfo, codepoint, advance, null);
+
+                        NkUserFontGlyph ufg = NkUserFontGlyph.create(glyph);
+
+                        ufg.width(q.x1() - q.x0());
+                        ufg.height(q.y1() - q.y0());
+                        ufg.offset().set(q.x0(), q.y0() + (FONT_HEIGHT + descent));
+                        ufg.xadvance(advance.get(0) * scale);
+                        ufg.uv(0).set(q.s0(), q.t0());
+                        ufg.uv(1).set(q.s1(), q.t1());
+                    }
+                })
+                .texture(it -> it
+                        .id(fontTexID));
+
+        nk_style_set_font(ctx, default_font);
+    }
+
+    /**
+     * IMPORTANT: `nk_glfw_render` modifies some global OpenGL state
+     * with blending, scissor, face culling, depth test and viewport and
+     * defaults everything back into a default state.
+     * Make sure to either a.) save and restore or b.) reset your own state after
+     * rendering the UI.
+     */
+    public void render() {
+        infoPanel.layout(ctx, 50, 50);
+        render(NK_ANTI_ALIASING_ON, MAX_VERTEX_BUFFER, MAX_ELEMENT_BUFFER);
+    }
+
+    private void setupContext() {
+        String NK_SHADER_VERSION = Platform.get() == Platform.MACOSX ? "#version 150\n" : "#version 300 es\n";
+        String vertex_shader =
+                NK_SHADER_VERSION +
+                        "uniform mat4 ProjMtx;\n" +
+                        "in vec2 Position;\n" +
+                        "in vec2 TexCoord;\n" +
+                        "in vec4 Color;\n" +
+                        "out vec2 Frag_UV;\n" +
+                        "out vec4 Frag_Color;\n" +
+                        "void main() {\n" +
+                        "   Frag_UV = TexCoord;\n" +
+                        "   Frag_Color = Color;\n" +
+                        "   gl_Position = ProjMtx * vec4(Position.xy, 0, 1);\n" +
+                        "}\n";
+        String fragment_shader =
+                NK_SHADER_VERSION +
+                        "precision mediump float;\n" +
+                        "uniform sampler2D Texture;\n" +
+                        "in vec2 Frag_UV;\n" +
+                        "in vec4 Frag_Color;\n" +
+                        "out vec4 Out_Color;\n" +
+                        "void main(){\n" +
+                        "   Out_Color = Frag_Color * texture(Texture, Frag_UV.st);\n" +
+                        "}\n";
+
+        nk_buffer_init(cmds, ALLOCATOR, BUFFER_INITIAL_SIZE);
+        prog = glCreateProgram();
+        vert_shdr = glCreateShader(GL_VERTEX_SHADER);
+        frag_shdr = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(vert_shdr, vertex_shader);
+        glShaderSource(frag_shdr, fragment_shader);
+        glCompileShader(vert_shdr);
+        glCompileShader(frag_shdr);
+        if (glGetShaderi(vert_shdr, GL_COMPILE_STATUS) != GL_TRUE) {
+            throw new IllegalStateException();
+        }
+        if (glGetShaderi(frag_shdr, GL_COMPILE_STATUS) != GL_TRUE) {
+            throw new IllegalStateException();
+        }
+        glAttachShader(prog, vert_shdr);
+        glAttachShader(prog, frag_shdr);
+        glLinkProgram(prog);
+        if (glGetProgrami(prog, GL_LINK_STATUS) != GL_TRUE) {
+            throw new IllegalStateException();
+        }
+
+        uniform_tex = glGetUniformLocation(prog, "Texture");
+        uniform_proj = glGetUniformLocation(prog, "ProjMtx");
+        int attrib_pos = glGetAttribLocation(prog, "Position");
+        int attrib_uv  = glGetAttribLocation(prog, "TexCoord");
+        int attrib_col = glGetAttribLocation(prog, "Color");
+
+        {
+            // buffer setup
+            vbo = glGenBuffers();
+            ebo = glGenBuffers();
+            vao = glGenVertexArrays();
+
+            glBindVertexArray(vao);
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+
+            glEnableVertexAttribArray(attrib_pos);
+            glEnableVertexAttribArray(attrib_uv);
+            glEnableVertexAttribArray(attrib_col);
+
+            glVertexAttribPointer(attrib_pos, 2, GL_FLOAT, false, 20, 0);
+            glVertexAttribPointer(attrib_uv, 2, GL_FLOAT, false, 20, 8);
+            glVertexAttribPointer(attrib_col, 4, GL_UNSIGNED_BYTE, true, 20, 16);
+        }
+
+        {
+            // null texture setup
+            int nullTexID = glGenTextures();
+
+            null_texture.texture().id(nullTexID);
+            null_texture.uv().set(0.5f, 0.5f);
+
+            glBindTexture(GL_TEXTURE_2D, nullTexID);
+            try (MemoryStack stack = stackPush()) {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, stack.ints(0xFFFFFFFF));
+            }
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        }
+
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+    }
+
+    private NkContext setupWindow(long win) {
+        glfwSetScrollCallback(win, (window, xoffset, yoffset) -> {
+            try (MemoryStack stack = stackPush()) {
+                NkVec2 scroll = NkVec2.mallocStack(stack)
+                        .x((float)xoffset)
+                        .y((float)yoffset);
+                nk_input_scroll(ctx, scroll);
+            }
+        });
+        glfwSetCharCallback(win, (window, codepoint) -> nk_input_unicode(ctx, codepoint));
+        glfwSetKeyCallback(win, (window, key, scancode, action, mods) -> {
+            boolean press = action == GLFW_PRESS;
+            switch (key) {
+                case GLFW_KEY_ESCAPE:
+                    glfwSetWindowShouldClose(window, true);
+                    break;
+                case GLFW_KEY_DELETE:
+                    nk_input_key(ctx, NK_KEY_DEL, press);
+                    break;
+                case GLFW_KEY_ENTER:
+                    nk_input_key(ctx, NK_KEY_ENTER, press);
+                    break;
+                case GLFW_KEY_TAB:
+                    nk_input_key(ctx, NK_KEY_TAB, press);
+                    break;
+                case GLFW_KEY_BACKSPACE:
+                    nk_input_key(ctx, NK_KEY_BACKSPACE, press);
+                    break;
+                case GLFW_KEY_UP:
+                    nk_input_key(ctx, NK_KEY_UP, press);
+                    break;
+                case GLFW_KEY_DOWN:
+                    nk_input_key(ctx, NK_KEY_DOWN, press);
+                    break;
+                case GLFW_KEY_HOME:
+                    nk_input_key(ctx, NK_KEY_TEXT_START, press);
+                    nk_input_key(ctx, NK_KEY_SCROLL_START, press);
+                    break;
+                case GLFW_KEY_END:
+                    nk_input_key(ctx, NK_KEY_TEXT_END, press);
+                    nk_input_key(ctx, NK_KEY_SCROLL_END, press);
+                    break;
+                case GLFW_KEY_PAGE_DOWN:
+                    nk_input_key(ctx, NK_KEY_SCROLL_DOWN, press);
+                    break;
+                case GLFW_KEY_PAGE_UP:
+                    nk_input_key(ctx, NK_KEY_SCROLL_UP, press);
+                    break;
+                case GLFW_KEY_LEFT_SHIFT:
+                case GLFW_KEY_RIGHT_SHIFT:
+                    nk_input_key(ctx, NK_KEY_SHIFT, press);
+                    break;
+                case GLFW_KEY_LEFT_CONTROL:
+                case GLFW_KEY_RIGHT_CONTROL:
+                    if (press) {
+                        nk_input_key(ctx, NK_KEY_COPY, glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS);
+                        nk_input_key(ctx, NK_KEY_PASTE, glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS);
+                        nk_input_key(ctx, NK_KEY_CUT, glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS);
+                        nk_input_key(ctx, NK_KEY_TEXT_UNDO, glfwGetKey(window, GLFW_KEY_Z) == GLFW_PRESS);
+                        nk_input_key(ctx, NK_KEY_TEXT_REDO, glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS);
+                        nk_input_key(ctx, NK_KEY_TEXT_WORD_LEFT, glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS);
+                        nk_input_key(ctx, NK_KEY_TEXT_WORD_RIGHT, glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS);
+                        nk_input_key(ctx, NK_KEY_TEXT_LINE_START, glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS);
+                        nk_input_key(ctx, NK_KEY_TEXT_LINE_END, glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS);
+                    } else {
+                        nk_input_key(ctx, NK_KEY_LEFT, glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS);
+                        nk_input_key(ctx, NK_KEY_RIGHT, glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS);
+                        nk_input_key(ctx, NK_KEY_COPY, false);
+                        nk_input_key(ctx, NK_KEY_PASTE, false);
+                        nk_input_key(ctx, NK_KEY_CUT, false);
+                        nk_input_key(ctx, NK_KEY_SHIFT, false);
+                    }
+                    break;
+            }
+        });
+        glfwSetCursorPosCallback(win, (window, xpos, ypos) -> nk_input_motion(ctx, (int)xpos, (int)ypos));
+        glfwSetMouseButtonCallback(win, (window, button, action, mods) -> {
+            try (MemoryStack stack = stackPush()) {
+                DoubleBuffer cx = stack.mallocDouble(1);
+                DoubleBuffer cy = stack.mallocDouble(1);
+
+                glfwGetCursorPos(window, cx, cy);
+
+                int x = (int)cx.get(0);
+                int y = (int)cy.get(0);
+
+                int nkButton;
+                switch (button) {
+                    case GLFW_MOUSE_BUTTON_RIGHT:
+                        nkButton = NK_BUTTON_RIGHT;
+                        break;
+                    case GLFW_MOUSE_BUTTON_MIDDLE:
+                        nkButton = NK_BUTTON_MIDDLE;
+                        break;
+                    default:
+                        nkButton = NK_BUTTON_LEFT;
+                }
+                nk_input_button(ctx, nkButton, x, y, action == GLFW_PRESS);
+            }
+        });
+
+        nk_init(ctx, ALLOCATOR, null);
+        ctx.clip(it -> it
+                .copy((handle, text, len) -> {
+                    if (len == 0) {
+                        return;
+                    }
+
+                    try (MemoryStack stack = stackPush()) {
+                        ByteBuffer str = stack.malloc(len + 1);
+                        memCopy(text, memAddress(str), len);
+                        str.put(len, (byte)0);
+
+                        glfwSetClipboardString(win, str);
+                    }
+                })
+                .paste((handle, edit) -> {
+                    long text = nglfwGetClipboardString(win);
+                    if (text != NULL) {
+                        nnk_textedit_paste(edit, text, nnk_strlen(text));
+                    }
+                }));
+
+        setupContext();
+        return ctx;
+    }
+
+    private void update() {
+        nk_input_begin(ctx);
+//        glfwPollEvents();
+
+        NkMouse mouse = ctx.input().mouse();
+        if (mouse.grab()) {
+            glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+        } else if (mouse.grabbed()) {
+            float prevX = mouse.prev().x();
+            float prevY = mouse.prev().y();
+            glfwSetCursorPos(win, prevX, prevY);
+            mouse.pos().x(prevX);
+            mouse.pos().y(prevY);
+        } else if (mouse.ungrab()) {
+            glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        }
+
+        nk_input_end(ctx);
+    }
+
+    private void render(int AA, int max_vertex_buffer, int max_element_buffer) {
+        try (MemoryStack stack = stackPush()) {
+            // setup global state
+            glEnable(GL_BLEND);
+            glBlendEquation(GL_FUNC_ADD);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_CULL_FACE);
+            glDisable(GL_DEPTH_TEST);
+            glEnable(GL_SCISSOR_TEST);
+            glActiveTexture(GL_TEXTURE0);
+
+            // setup program
+            glUseProgram(prog);
+            glUniform1i(uniform_tex, 0);
+            glUniformMatrix4fv(uniform_proj, false, stack.floats(
+                    2.0f / width, 0.0f, 0.0f, 0.0f,
+                    0.0f, -2.0f / height, 0.0f, 0.0f,
+                    0.0f, 0.0f, -1.0f, 0.0f,
+                    -1.0f, 1.0f, 0.0f, 1.0f
+            ));
+            glViewport(0, 0, display_width, display_height);
+        }
+
+        {
+            // convert from command queue into draw list and draw to screen
+
+            // allocate vertex and element buffer
+            glBindVertexArray(vao);
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+
+            glBufferData(GL_ARRAY_BUFFER, max_vertex_buffer, GL_STREAM_DRAW);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, max_element_buffer, GL_STREAM_DRAW);
+
+            // load draw vertices & elements directly into vertex + element buffer
+            ByteBuffer vertices = Objects.requireNonNull(glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY, max_vertex_buffer, null));
+            ByteBuffer elements = Objects.requireNonNull(glMapBuffer(GL_ELEMENT_ARRAY_BUFFER, GL_WRITE_ONLY, max_element_buffer, null));
+            try (MemoryStack stack = stackPush()) {
+                // fill convert configuration
+                NkConvertConfig config = NkConvertConfig.callocStack(stack)
+                        .vertex_layout(VERTEX_LAYOUT)
+                        .vertex_size(20)
+                        .vertex_alignment(4)
+                        .null_texture(null_texture)
+                        .circle_segment_count(22)
+                        .curve_segment_count(22)
+                        .arc_segment_count(22)
+                        .global_alpha(1.0f)
+                        .shape_AA(AA)
+                        .line_AA(AA);
+
+                // setup buffers to load vertices and elements
+                NkBuffer vbuf = NkBuffer.mallocStack(stack);
+                NkBuffer ebuf = NkBuffer.mallocStack(stack);
+
+                nk_buffer_init_fixed(vbuf, vertices/*, max_vertex_buffer*/);
+                nk_buffer_init_fixed(ebuf, elements/*, max_element_buffer*/);
+                nk_convert(ctx, cmds, vbuf, ebuf, config);
+            }
+            glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
+            glUnmapBuffer(GL_ARRAY_BUFFER);
+
+            // iterate over and execute each draw command
+            float fb_scale_x = (float)display_width / (float)width;
+            float fb_scale_y = (float)display_height / (float)height;
+
+            long offset = NULL;
+            for (NkDrawCommand cmd = nk__draw_begin(ctx, cmds); cmd != null; cmd = nk__draw_next(cmd, cmds, ctx)) {
+                if (cmd.elem_count() == 0) {
+                    continue;
+                }
+                glBindTexture(GL_TEXTURE_2D, cmd.texture().id());
+                glScissor(
+                        (int)(cmd.clip_rect().x() * fb_scale_x),
+                        (int)((height - (int)(cmd.clip_rect().y() + cmd.clip_rect().h())) * fb_scale_y),
+                        (int)(cmd.clip_rect().w() * fb_scale_x),
+                        (int)(cmd.clip_rect().h() * fb_scale_y)
+                );
+                glDrawElements(GL_TRIANGLES, cmd.elem_count(), GL_UNSIGNED_SHORT, offset);
+                offset += cmd.elem_count() * 2;
+            }
+            nk_clear(ctx);
+        }
+
+        // default OpenGL state
+        glUseProgram(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+        glDisable(GL_BLEND);
+        glDisable(GL_SCISSOR_TEST);
+    }
+
+    private void destroy() {
+        glDetachShader(prog, vert_shdr);
+        glDetachShader(prog, frag_shdr);
+        glDeleteShader(vert_shdr);
+        glDeleteShader(frag_shdr);
+        glDeleteProgram(prog);
+        glDeleteTextures(default_font.texture().id());
+        glDeleteTextures(null_texture.texture().id());
+        glDeleteBuffers(vbo);
+        glDeleteBuffers(ebo);
+        nk_buffer_free(cmds);
+
+        GL.setCapabilities(null);
+    }
+
+    private void shutdown() {
+        Objects.requireNonNull(ctx.clip().copy()).free();
+        Objects.requireNonNull(ctx.clip().paste()).free();
+        nk_free(ctx);
+        destroy();
+        Objects.requireNonNull(default_font.query()).free();
+        Objects.requireNonNull(default_font.width()).free();
+
+        Objects.requireNonNull(ALLOCATOR.alloc()).free();
+        Objects.requireNonNull(ALLOCATOR.mfree()).free();
+    }
+}
+```
+
+### src/main/java/ui/InfoPanel.java
+```
+package ui;
+
+
+import org.lwjgl.*;
+import org.lwjgl.nuklear.*;
+import org.lwjgl.system.*;
+
+import java.nio.*;
+
+import static org.lwjgl.nuklear.Nuklear.*;
+import static org.lwjgl.system.MemoryStack.*;
+
+public class InfoPanel {
+    private static final int EASY = 0;
+    private static final int HARD = 1;
+
+    NkColorf background = NkColorf.create()
+            .r(0.10f)
+            .g(0.18f)
+            .b(0.24f)
+            .a(1.0f);
+
+    private int op = EASY;
+
+    private IntBuffer compression = BufferUtils.createIntBuffer(1).put(0, 20);
+
+    InfoPanel() {
+    }
+
+    void layout(NkContext ctx, int x, int y) {
+        try (MemoryStack stack = stackPush()) {
+            NkRect rect = NkRect.mallocStack(stack);
+
+            if (nk_begin(
+                    ctx,
+                    "Demo",
+                    nk_rect(x, y, 230, 250, rect),
+                    NK_WINDOW_BORDER | NK_WINDOW_MOVABLE | NK_WINDOW_SCALABLE | NK_WINDOW_MINIMIZABLE | NK_WINDOW_TITLE
+            )) {
+                nk_layout_row_static(ctx, 30, 80, 1);
+                if (nk_button_label(ctx, "button")) {
+                    System.out.println("button pressed");
+                }
+
+                nk_layout_row_dynamic(ctx, 30, 2);
+                if (nk_option_label(ctx, "easy", op == EASY)) {
+                    op = EASY;
+                }
+                if (nk_option_label(ctx, "hard", op == HARD)) {
+                    op = HARD;
+                }
+
+                nk_layout_row_dynamic(ctx, 25, 1);
+                nk_property_int(ctx, "Compression:", 0, compression, 100, 10, 1);
+
+                nk_layout_row_dynamic(ctx, 20, 1);
+                nk_label(ctx, "background:", NK_TEXT_LEFT);
+                nk_layout_row_dynamic(ctx, 25, 1);
+                if (nk_combo_begin_color(ctx, nk_rgb_cf(background, NkColor.mallocStack(stack)), NkVec2.mallocStack(stack).set(nk_widget_width(ctx), 400))) {
+                    nk_layout_row_dynamic(ctx, 120, 1);
+                    nk_color_picker(ctx, background, NK_RGBA);
+                    nk_layout_row_dynamic(ctx, 25, 1);
+                    background
+                            .r(nk_propertyf(ctx, "#R:", 0, background.r(), 1.0f, 0.01f, 0.005f))
+                            .g(nk_propertyf(ctx, "#G:", 0, background.g(), 1.0f, 0.01f, 0.005f))
+                            .b(nk_propertyf(ctx, "#B:", 0, background.b(), 1.0f, 0.01f, 0.005f))
+                            .a(nk_propertyf(ctx, "#A:", 0, background.a(), 1.0f, 0.01f, 0.005f));
+                    nk_combo_end(ctx);
+                }
+            }
+            nk_end(ctx);
+        }
+    }
+}
+```

@@ -1,0 +1,63 @@
+# Grid Deactivation
+
+Also called: deactivate
+
+## Overview
+Grid Deactivation returns a new grid where any active voxel whose value equals a specific `value` is deactivated (removed from the active set) [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `grid`: The source volume grid [S1, unofficial].
+- `value`: The scalar value identifying voxels to deactivate [S1, unofficial].
+
+**Outputs:**
+- `new_grid`: A new grid object containing only active voxels whose values differ from `value` [S1, unofficial].
+
+**Data Structures:**
+- The source grid provides iteration over its active voxels [S1, unofficial].
+- A temporary collection `data` stores the voxels to retain [S1, unofficial].
+
+**Steps:**
+1. Initialize an empty collection `data` [S1, unofficial].
+2. Iterate through all active voxels in `grid` [S1, unofficial].
+3. For each active voxel `v`, if `v.value != value`, append `v` to `data` [S1, unofficial].
+4. Construct `new_grid` using `data` and the original grid's background configuration [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def grid_deactivation(grid, value):
+    data = []
+    for voxel in grid.active_voxels():
+        if voxel.value != value:
+            data.append(voxel)
+    # Reconstruct grid structure from filtered data and original background configuration [G]
+    new_grid = reconstruct_grid(data, grid.tree.background)
+    return new_grid
+```
+
+**Parameters:**
+- `value`: The scalar threshold for deactivation. Not given in the sources.
+
+**Edge Cases:**
+- If all active voxels match `value`, the resulting grid has an empty active set [S1, unofficial].
+- Floating-point precision may cause exact equality checks to fail for computed values; consider a tolerance threshold if applicable [G].
+
+## Subtopics
+
+### [Mask Clipping](3229-mask-clipping.md)
+Mask Clipping returns a new grid containing only the active voxels of a source grid that correspond to active locations in a separate mask grid. It differs from its parent, Grid Deactivation, which removes voxels based on a specific scalar value, by using a binary spatial inclusion criterion defined by another grid's active set.
+
+## Operating characteristics
+**Time Complexity:** $O(N_{\text{active}})$, as each active voxel in the source grid is visited exactly once [G].
+**Memory Complexity:** $O(N_{\text{kept}})$, for storing the filtered active voxels in the new grid [G].
+**Performance:** Depends on the iteration speed over active voxels and the sparsity of the grid. Specific timing measurements are not provided in the sources.
+**Strengths:** Directly filters voxels by scalar value without requiring spatial traversal optimizations.
+**Limitations:** Requires full iteration of the active set; does not prune inactive regions during the filter step.
+
+## Background
+This operation is defined in the Lyr.jl volume rendering library [S1, unofficial].
+
+## Sources
+[S1] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)

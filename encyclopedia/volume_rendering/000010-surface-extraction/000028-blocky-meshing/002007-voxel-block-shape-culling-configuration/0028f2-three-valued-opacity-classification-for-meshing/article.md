@@ -1,0 +1,112 @@
+# Three-Valued Opacity Classification for Meshing
+
+Also called: Mesh Layer Priority, Opaque/Water/TransparentSolid Classification, Occlusion Check
+
+## Overview
+A classification system for block IDs into three mutually exclusive layers ('opaque', 'water', 'transparentSolid') to determine rendering material and buffer assignment [S1, unofficial]. It solves the insufficiency of a single boolean 'transparent' flag by distinguishing between fluids (water) requiring bespoke shaders and see-through solids (glass/leaves) requiring alpha blending [S1, unofficial]. Unlike a boolean transparent flag which collapses water and glass/leaves into one category, this three-valued model allows water to use a bespoke shader (ripple, refraction) while glass/leaves use the ordinary block atlas with alpha blending [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A block ID (integer).
+- Output: A layer index (0, 1, or 2) corresponding to 'opaque', 'water', or 'transparentSolid'.
+
+**Data Structures:**
+- `MESH_LAYER_PRIORITY`: A constant array defining the priority order: `['transparentSolid', 'water', 'opaque']` [S1, unofficial].
+- `MESH_LAYERS`: A constant array defining the buffer emission order (draw order): `['opaque', 'water', 'transparentSolid']` [S1, unofficial].
+- `lookup`: A fixed-size typed array (e.g., `Uint8Array`) indexed by block ID, storing the layer index for each ID [S1, unofficial].
+- `OPAQUE_LAYER`: The index of 'opaque' in `MESH_LAYERS` [S1, unofficial].
+
+**Steps:**
+1. Initialize `lookup` array with size equal to the maximum block ID + 1, filled with the index of 'opaque' (default layer).
+2. For each block ID in `transparentSolidBlockIds`, set `lookup[blockId]` to the index of 'transparentSolid' in `MESH_LAYERS`.
+3. For each block ID in `waterBlockIds`, set `lookup[blockId]` to the index of 'water' in `MESH_LAYERS`.
+4. To classify a block ID:
+   - Return `lookup[blockId]`.
+
+**Formula:**
+- Priority Order: `transparentSolid > water > opaque`. This order determines which layer a block ID belongs to if it appears in multiple sets [S1, unofficial].
+- Occlusion Check: Return true if `blockId` is not `AIR` AND `lookup[blockId]` equals `OPAQUE_LAYER` index [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+MESH_LAYERS = ['opaque', 'water', 'transparentSolid']
+OPAQUE_LAYER_INDEX = MESH_LAYERS.index('opaque')  # 0
+WATER_LAYER_INDEX = MESH_LAYERS.index('water')    # 1
+TRANSPARENT_SOLID_LAYER_INDEX = MESH_LAYERS.index('transparentSolid')  # 2
+
+# Initialization
+def init_lookup(max_block_id, transparent_solid_ids, water_ids):
+    # Default to opaque layer
+    lookup = [OPAQUE_LAYER_INDEX] * (max_block_id + 1)
+    
+    # Apply priority: transparentSolid > water > opaque
+    # Since we iterate in priority order, later assignments overwrite earlier ones
+    # However, the priority is defined as transparentSolid > water > opaque.
+    # This means if a block is in both, it should be transparentSolid.
+    # So we should assign in reverse priority order: opaque, then water, then transparentSolid
+    # Or, check membership in ordered sets: first check transparentSolid, then water, then opaque.
+    
+    # Let's follow the "ordered sets" check logic for classification, 
+    # but for pre-computation, we can just overwrite.
+    # Priority: transparentSolid is highest. So if in transparentSolid, it's transparentSolid.
+    # If not, but in water, it's water. Else opaque.
+    
+    # Set default to opaque
+    for i in range(len(lookup)):
+        lookup[i] = OPAQUE_LAYER_INDEX
+        
+    # Set water
+    for bid in water_ids:
+        lookup[bid] = WATER_LAYER_INDEX
+        
+    # Set transparentSolid (overwrites water if overlap)
+    for bid in transparent_solid_ids:
+        lookup[bid] = TRANSPARENT_SOLID_LAYER_INDEX
+        
+    return lookup
+
+def classify_block(block_id, lookup):
+    # Return the pre-computed layer index
+    return lookup[block_id]
+
+def is_occluding(block_id, lookup):
+    # Only fully opaque solids occlude
+    # blockId is not AIR AND lookup[blockId] equals OPAQUE_LAYER index
+    if block_id == 0: # Assuming 0 is AIR
+        return False
+    return lookup[block_id] == OPAQUE_LAYER_INDEX
+```
+
+**Parameters:**
+- `MESH_LAYER_PRIORITY`: `['transparentSolid', 'water', 'opaque']` [S1, unofficial].
+- `MESH_LAYERS`: `['opaque', 'water', 'transparentSolid']` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Using `Effect's HashSet` instead of native JavaScript `Set` for block ID lookups causes a 1.9x slowdown compared to native `Set` and 12.3x slowdown compared to `Uint8Array` lookup due to structural equality dispatch [S1, unofficial].
+- Incorrectly classifying water or transparent solids as occluding causes the 'world is inside out' bug where inner surfaces render incorrectly [S1, unofficial].
+
+## Subtopics
+
+### [Block ID Layer Lookup Table](4415-block-id-layer-lookup-table.md)
+The Block ID Layer Lookup Table is a memory layout optimization that replaces hash-based set lookups with direct array indexing to classify block IDs into mesh layers during the inner meshing loop. It solves the performance bottleneck of iterating over `Set` or `HashSet` structures when processing hundreds of thousands of cells per chunk, by pre-computing a fixed-size typed array indexed by block ID. Unlike hash sets, which incur collision resolution overhead, this method provides $O(1)$ access with minimal constant factors, specifically tailored for the three-valued opacity classification system.
+
+### Layer Routing via Sink
+A mechanism that routes generated quads into specific layers (opaque, water, transparentSolid) based on the block ID and a pre-computed lookup table [S1, unofficial]. The `push` function determines the layer index by calling `layerAt(lookup, quad.blockId)` [S1, unofficial]. If the layer index is 0, push the quad to the `opaque` array [S1, unofficial]. If the layer index is 1, push the quad to the `water` array [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per block ID lookup after $O(N)$ pre-computation, where $N$ is the number of unique block IDs [S1, unofficial].
+- **Memory Complexity:** $O(M)$ for the lookup table, where $M$ is the maximum block ID + 1 [S1, unofficial].
+- **Measured Performance:** Using `Uint8Array` lookup is 12.3x faster than `Effect's HashSet` and 6.5x faster than native `Set` (1.9x faster than `Set`) [S1, unofficial].
+- **Strengths:** Enables distinct shaders for water and transparent solids; prevents occlusion bugs.
+- **Limitations:** Requires pre-computation; fixed-size array may waste memory if block IDs are sparse and large.
+- **When to Use:** When rendering requires distinct visual treatments for different types of transparent/translucent blocks.
+- **When Not to Use:** When all blocks are opaque or a single transparent shader suffices.
+
+## Background
+Originated in the `mc-meshing` project by Nerima Games [S1, unofficial]. The method was developed to address the limitations of boolean transparency flags in voxel meshing, allowing for more complex rendering effects like water ripples and glass refraction [S1, unofficial]. It is used in the `mc-meshing` library for Minecraft-style voxel rendering [S1, unofficial].
+
+## Sources
+[S1] nerima-games/mc-meshing, https://github.com/nerima-games/mc-meshing, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,206 @@
+# Tiny NeRF
+
+Also called: TinyNeRF, TinyNeRF-S, TinyNeRF-w/o block, TinyNeRF-w/o fine tuning
+
+## Overview
+Tiny NeRF is a compression pipeline for voxel-based neural radiance fields that transforms voxel grids into the frequency domain via block-wise Discrete Cosine Transformation (DCT), then prunes and quantizes the resulting coefficients to reduce storage by over 100x with minimal quality loss [S1, unofficial]. Unlike sibling methods that prune empty spatial voxels (e.g., [Unbounded inward-facing scene parameterization](957-unbounded-inward-facing-scene-parameterization.md), [Position-Only NeRF Field](1253-position-only-nerf-field.md)), Tiny NeRF operates on frequency coefficients, allowing higher pruning rates by overcoming foreground-background ratio limitations [S1, unofficial]. It differs from [MLPRender_Fea](2414-mlprender-fea.md) and [View-Dependent MLP](2444-view-dependent-mlp.md) by compressing the explicit voxel grid representation rather than optimizing the MLP architecture itself [S1, unofficial].
+
+## How it works
+**Inputs:** Original voxel grid $V \in \mathbb{R}^{C \times N_x \times N_y \times N_z}$ containing density and feature values [S1, unofficial].
+**Outputs:** Compressed representation consisting of pruned and quantized DCT coefficients, a global scaling factor $\alpha$, and metadata (block size, pruning ratios) [S1, unofficial].
+
+**Data Structures:**
+1.  **Input Grid:** $V \in \mathbb{R}^{C \times N_x \times N_y \times N_z}$ [S1, unofficial].
+2.  **Blocks:** The grid is divided into $\frac{N_x}{B_x} \times \frac{N_y}{B_y} \times \frac{N_z}{B_z}$ blocks, each of size $C \times B_x \times B_y \times B_z$ [S1, unofficial]. Default block size is $4 \times 4 \times 4$ [S1, unofficial].
+3.  **DCT Coefficients:** $\bar{V} \in \mathbb{R}^{C \times B_x \times B_y \times B_z}$ per block [S1, unofficial].
+4.  **Pruned Coefficients:** $\bar{V}_P$, where low-magnitude coefficients are set to zero [S1, unofficial].
+5.  **Quantized Coefficients:** $\bar{V}_Q$, containing low-bit integers [S1, unofficial].
+6.  **Scaling Factor:** $\alpha \in \mathbb{R}$, a single floating-point scalar [S1, unofficial].
+
+**Formulas:**
+*   **DCT:** For a block $V \in \mathbb{R}^{C \times B_x \times B_y \times B_z}$, the transformed coefficient $\bar{\mathcal{V}}_{c,i,j,k}$ is:
+    $$ \bar{\mathcal{V}}_{c,i,j,k} = \sum_{x,y,z} \frac{u_i u_j u_k}{\sqrt{B_x B_y B_z}} \mathcal{V}_{c,x,y,z} \times \cos\left(\frac{\pi}{B_x} i(x + \frac{1}{2})\right) \cos\left(\frac{\pi}{B_y} j(y + \frac{1}{2})\right) \cos\left(\frac{\pi}{B_z} k(z + \frac{1}{2})\right) $$
+    where $x, y, z$ and $i, j, k$ span from $[1, 1, 1]$ to $[B_x, B_y, B_z]$, and $u_i = 1$ if $i=0$ else $\sqrt{2}$ [S1, unofficial].
+*   **IDCT:**
+    $$ \mathcal{V}_{c,x,y,z} = \sum_{i,j,k} \frac{u_i u_j u_k}{\sqrt{B_x B_y B_z}} \bar{\mathcal{V}}_{c,i,j,k} \times \cos\left(\frac{\pi}{B_x} i(x + \frac{1}{2})\right) \cos\left(\frac{\pi}{B_y} j(y + \frac{1}{2})\right) \cos\left(\frac{\pi}{B_z} k(z + \frac{1}{2})\right) $$
+    [S1, unofficial].
+*   **Quantization Bounds (b-bit):** $Q_{min} = -2^{b-1}$, $Q_{max} = 2^{b-1} - 1$ [S1, unofficial].
+*   **Quantization Approximation:** $\bar{V}_P \approx \alpha \bar{V}_Q$ [S1, unofficial].
+
+**Parameters:**
+*   **Grid Resolution:** $160^3$ [S1, unofficial].
+*   **Total Iterations:** 20,000 [S1, unofficial].
+*   **Batch Size:** 8,192 camera rays [S1, unofficial].
+*   **Pruning Aware Training Start:** Iteration 5,000 [S1, unofficial].
+*   **Quantization Aware Training Start:** Iteration 12,000 [S1, unofficial].
+*   **Pruning Ratios:** Density: 0.3, 0.15; Features: 0.03, 0.015 (typical values tested) [S1, unofficial].
+*   **Quantization Bit Widths:** 4, 8, 16 (typical values tested) [S1, unofficial].
+
+**Steps:**
+1.  **Block-wise DCT:** Divide the input grid $V$ into blocks of size $B_x \times B_y \times B_z$. Apply DCT to each block independently to obtain $\bar{V}$ [S1, unofficial].
+2.  **Pruning:** Sort DCT coefficients in each block by absolute value. Retain the top $K$ coefficients (where $K$ is determined by the pruning ratio) and set the rest to zero to obtain $\bar{V}_P$ [S1, unofficial].
+3.  **Pruning-Aware Training (Default):**
+    *   Recover grid $\mathcal{V}_P = \text{IDCT}(\bar{V}_P)$ [S1, unofficial].
+    *   Render rays using $\mathcal{V}_P$ [S1, unofficial].
+    *   Compute loss $\mathcal{L}$ [S1, unofficial].
+    *   Approximate gradients w.r.t. original grid $V$ using Straight-Through Estimator (STE): $\frac{\partial \mathcal{L}}{\partial V} \approx \frac{\partial \mathcal{L}}{\partial \mathcal{V}_P}$ [S1, unofficial].
+    *   Update $V$ [S1, unofficial].
+4.  **Quantization Initialization:**
+    *   Initialize $\alpha$ and $\bar{V}_Q$ by iterating:
+        1.  $\bar{V}_Q = \text{clip}(\text{round}(\frac{\bar{V}_P}{\alpha}), Q_{min}, Q_{max})$ [S1, unofficial].
+        2.  $\alpha = \frac{\langle \bar{V}_P, \bar{V}_Q \rangle}{\langle \bar{V}_Q, \bar{V}_Q \rangle}$ [S1, unofficial].
+    *   Repeat until convergence [S1, unofficial].
+5.  **Quantization-Aware Training (Default):**
+    *   Freeze $\alpha$ [S1, unofficial].
+    *   Compute $\bar{V}_Q$ using the quantization formula [S1, unofficial].
+    *   Recover grid $\mathcal{V}_Q = \text{IDCT}(\alpha \bar{V}_Q)$ [S1, unofficial].
+    *   Render rays using $\mathcal{V}_Q$ [S1, unofficial].
+    *   Compute loss $\mathcal{L}$ [S1, unofficial].
+    *   Approximate gradients w.r.t. $V$ using STE: $\frac{\partial \mathcal{L}}{\partial V} \approx \frac{\partial \mathcal{L}}{\partial \mathcal{V}_Q}$ [S1, unofficial].
+    *   Update $V$ [S1, unofficial].
+6.  **Inference:**
+    *   Recover grid $\mathcal{V} = \text{IDCT}(\alpha \bar{V}_Q)$ [S1, unofficial].
+    *   Perform standard volume rendering [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+
+def dct_block(V_block):
+    """Block-wise 3D DCT matching the mathematical definition."""
+    C, Bx, By, Bz = V_block.shape
+    V_dct = torch.zeros_like(V_block)
+    for c in range(C):
+        for i in range(Bx):
+            for j in range(By):
+                for k in range(Bz):
+                    ui = 1.0 if i == 0 else math.sqrt(2)
+                    uj = 1.0 if j == 0 else math.sqrt(2)
+                    uk = 1.0 if k == 0 else math.sqrt(2)
+                    factor = (ui * uj * uk) / math.sqrt(Bx * By * Bz)
+                    val = 0.0
+                    for x in range(Bx):
+                        for y in range(By):
+                            for z in range(Bz):
+                                val += V_block[c, x, y, z] * math.cos(math.pi * i * (x + 0.5) / Bx) * math.cos(math.pi * j * (y + 0.5) / By) * math.cos(math.pi * k * (z + 0.5) / Bz)
+                    V_dct[c, i, j, k] = factor * val
+    return V_dct
+
+def idct_block(V_dct_block):
+    """Block-wise 3D IDCT matching the mathematical definition."""
+    C, Bx, By, Bz = V_dct_block.shape
+    V = torch.zeros_like(V_dct_block)
+    for c in range(C):
+        for x in range(Bx):
+            for y in range(By):
+                for z in range(Bz):
+                    val = 0.0
+                    for i in range(Bx):
+                        for j in range(By):
+                            for k in range(Bz):
+                                ui = 1.0 if i == 0 else math.sqrt(2)
+                                uj = 1.0 if j == 0 else math.sqrt(2)
+                                uk = 1.0 if k == 0 else math.sqrt(2)
+                                factor = (ui * uj * uk) / math.sqrt(Bx * By * Bz)
+                                val += V_dct_block[c, i, j, k] * factor * math.cos(math.pi * i * (x + 0.5) / Bx) * math.cos(math.pi * j * (y + 0.5) / By) * math.cos(math.pi * k * (z + 0.5) / Bz)
+                    V[c, x, y, z] = val
+    return V
+
+def apply_blockwise_dct(V, block_size):
+    C, Nx, Ny, Nz = V.shape
+    Bx, By, Bz = block_size
+    V_dct = torch.zeros_like(V)
+    for bx in range(0, Nx, Bx):
+        for by in range(0, Ny, By):
+            for bz in range(0, Nz, Bz):
+                block = V[:, bx:bx+Bx, by:by+By, bz:bz+Bz]
+                V_dct[:, bx:bx+Bx, by:by+By, bz:bz+Bz] = dct_block(block)
+    return V_dct
+
+def apply_blockwise_idct(V_dct, block_size):
+    C, Nx, Ny, Nz = V_dct.shape
+    Bx, By, Bz = block_size
+    V = torch.zeros_like(V_dct)
+    for bx in range(0, Nx, Bx):
+        for by in range(0, Ny, By):
+            for bz in range(0, Nz, Bz):
+                block = V_dct[:, bx:bx+Bx, by:by+By, bz:bz+Bz]
+                V[:, bx:bx+Bx, by:by+By, bz:bz+Bz] = idct_block(block)
+    return V
+
+def prune_coefficients(V_dct, ratio):
+    C, Nx, Ny, Nz = V_dct.shape
+    V_dct_flat = V_dct.view(C, -1)
+    abs_vals = torch.abs(V_dct_flat)
+    K = int(V_dct_flat.shape[1] * ratio)
+    _, indices = torch.topk(abs_vals, K, dim=1, largest=True)
+    mask = torch.zeros_like(V_dct_flat)
+    mask.scatter_(1, indices, 1.0)
+    return V_dct_flat * mask
+
+def quantize_init(V_pruned, bit_width):
+    Q_min = -2**(bit_width - 1)
+    Q_max = 2**(bit_width - 1) - 1
+    alpha = torch.tensor(1.0)
+    V_Q = torch.zeros_like(V_pruned)
+    for _ in range(10):
+        V_Q = torch.clamp(torch.round(V_pruned / alpha), Q_min, Q_max)
+        alpha = torch.sum(V_pruned * V_Q) / (torch.sum(V_Q * V_Q) + 1e-8)
+    return alpha, V_Q
+
+def train_tiny_nerf(V_init, block_size, pruning_ratio, bit_width, total_iters=20000):
+    V = V_init.clone()
+    # Stage 1: Common training (0-5000 iterations)
+    for i in range(5000):
+        # Render rays with V, compute loss, update V
+        pass
+
+    # Stage 2: Pruning-aware training (5000-12000 iterations)
+    V_dct = apply_blockwise_dct(V, block_size)
+    V_dct_pruned = prune_coefficients(V_dct, pruning_ratio)
+    V_pruned_spatial = apply_blockwise_idct(V_dct_pruned, block_size)
+
+    for i in range(5000, 12000):
+        # Render rays with V_pruned_spatial, compute loss L
+        # Gradients w.r.t V via STE: dL/dV approx dL/dV_pruned_spatial
+        # Update V
+        pass
+
+    # Stage 3: Quantization-aware training (12000-20000 iterations)
+    alpha, V_Q = quantize_init(V_dct_pruned, bit_width)
+
+    for i in range(12000, 20000):
+        V_Q = torch.clamp(torch.round(V_dct_pruned / alpha), -2**(bit_width-1), 2**(bit_width-1)-1)
+        V_quantized_spatial = apply_blockwise_idct(alpha * V_Q, block_size)
+        # Render rays with V_quantized_spatial, compute loss L
+        # Gradients w.r.t V via STE: dL/dV approx dL/dV_quantized_spatial
+        # Update V
+        pass
+
+    return alpha, V_Q, block_size, pruning_ratio, bit_width
+```
+
+**Subtopics:**
+*   **TinyNeRF-S:** A variant that applies pruning and quantization in the spatial domain instead of the frequency domain. It performs significantly worse than TinyNeRF, especially at smaller model sizes (e.g., 0.5 dB lower PSNR at 2MB) [S1, unofficial].
+*   **TinyNeRF-w/o block:** A variant that applies DCT to the whole grid without blocking. It performs worse than both TinyNeRF and TinyNeRF-S, suffers more numerical errors, and converges slower [S1, unofficial].
+*   **TinyNeRF-w/o fine tuning:** A variant that compresses a pre-trained model without retraining. It achieves 50x compression with minimal PSNR drop (31.95 to 31.68) and takes seconds to compress, but is less optimal than fine-tuned versions [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training time increases from 3 minutes (DVGO baseline) to 6.5 minutes on an NVIDIA A100 GPU for a 2MB model [S1, unofficial]. Inference time increases by 5ms (total 209ms) due to IDCT and dequantization [S1, unofficial].
+*   **Memory Complexity:** Model size is reduced from 203MB (DVGO) to 2MB, a >100x compression [S1, unofficial].
+*   **Performance:** On the synthetic NeRF dataset, TinyNeRF(2MB) achieves 31.72 PSNR and 0.954 SSIM, with only 0.2 PSNR and 0.003 SSIM degradation compared to the uncompressed baseline [S1, unofficial].
+*   **Strengths:** High compression ratio with minimal quality loss; fast training (<10 mins); effective on inward-facing scenes; handles foreground-background ratios better than spatial pruning [S1, unofficial].
+*   **Limitations:** Runtime computation and memory requirements are not reduced during inference because original voxel grids must be recovered via IDCT [S1, unofficial]; numerical errors increase with block size [S1, unofficial].
+*   **When to use:** When storage or transmission bandwidth is limited, and training time is acceptable [S1, unofficial]. Suitable for inward-facing synthetic scenes [S1, unofficial].
+*   **When not to use:** When real-time inference speed is critical and IDCT overhead is unacceptable; when the scene has high-frequency details that do not compress well in the frequency domain [G].
+
+## Background
+Tiny NeRF was introduced by Sun et al. in 2023 in the paper "TinyNeRF: Towards 100x Compression of Voxel Radiance Fields" [S1, unofficial]. It builds on the DVGO (Direct Voxel Grid Optimization) framework [S1, unofficial]. The method leverages the sparsity of visual signals in the frequency domain, a property widely used in image compression [S1, unofficial]. It addresses the high storage demand of voxel-based NeRF methods like NSVF, Plenoxels, and DVGO, which typically prune empty voxels but are limited by foreground-background ratios [S1, unofficial].
+
+## Sources
+[S1] TinyNeRF: Towards 100 x Compression of Voxel Radiance Fields, https://doi.org/10.1609/aaai.v37i3.25469, fetched 2026-10-26 (unofficial)
+[S2] sr-bang/NeRF, https://github.com/sr-bang/NeRF, fetched 2026-10-27
+[S3] Fourier Feature Networks and Neural Volume Rendering, https://github.com/matajoh/fourier_feature_nets, fetched 2026-10-26 (unofficial)

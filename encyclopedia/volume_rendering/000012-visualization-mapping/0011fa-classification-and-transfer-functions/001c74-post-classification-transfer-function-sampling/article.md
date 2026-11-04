@@ -1,0 +1,114 @@
+# Post-classification Transfer Function Sampling
+
+Also called: 1D/2D Transfer Function, Post-classification, TF Lookup, Transfer Function Mapping
+
+## Overview
+Post-classification transfer function sampling is a volume rendering technique where scalar voxel values are first interpolated in world space and subsequently mapped to color and opacity via transfer functions (TFs) [S3]. This approach contrasts with pre-classification, which maps values to color/opacity on the grid before resampling; post-classification maintains high-frequency details but can introduce striping artifacts [S3]. It differs from pre-integrated methods by evaluating the TF at discrete sample points rather than integrating optical properties over the segment [S3].
+
+## How it works
+**Inputs:** Volume texture (scalar data), Transfer Function texture(s) (1D or 2D), camera parameters, ray casting loop state.
+**Outputs:** Final color and opacity for each pixel.
+
+**Data Structures:**
+1.  **Volume Texture:** 3D texture containing scalar density values.
+2.  **1D Transfer Function Texture:** Dimensions $256 \times 1 \times 1$, format `R8G8B8A8Unorm` [S2, unofficial]. Maps density to base color and opacity.
+3.  **2D Transfer Function Texture:** Dimensions $256 \times 64 \times 1$, format `R8G8B8A8Unorm` [S2, unofficial]. Maps (density, gradient magnitude) to color and opacity.
+4.  **Gradient Texture (Optional):** Pre-computed gradient magnitudes, often derived using a Sobel operator [S1, unofficial].
+
+**Steps:**
+1.  **Ray Casting:** Cast a ray through the volume.
+2.  **Sampling:** For each sample point along the ray, interpolate the scalar value $d$ from the volume texture [S3].
+3.  **Gradient Calculation (for 2D TF):** If using a 2D TF, compute the gradient magnitude $g$ at the sample point. This can be done by sampling a pre-computed gradient texture [S1, unofficial] or computing it from the volume data [S1, unofficial].
+4.  **TF Lookup:**
+    *   *1D Case:* Sample the 1D TF texture at coordinate $d$ to retrieve base color $C_{base}$ and opacity $\alpha_{base}$ [S2, unofficial].
+    *   *2D Case:* Sample the 2D TF texture at coordinates $(d, g)$ to retrieve color $C$ and opacity $\alpha$ [S2, unofficial]. The gradient magnitude is used to emphasize boundaries; homogeneous regions (low gradient) may be made more transparent [S1, unofficial].
+5.  **Compositing:** Use the retrieved $C$ and $\alpha$ in the standard front-to-back volume rendering equation:
+    $$ C_{out} = C_{in} + C \cdot \alpha \cdot (1 - \alpha_{in}) $$
+    $$ \alpha_{out} = \alpha_{in} + \alpha \cdot (1 - \alpha_{in}) $$
+    where $C_{in}, \alpha_{in}$ are the accumulated color and opacity from previous samples.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Assume standard ray casting loop variables:
+# ray_origin, ray_direction, step_size
+# volume_texture: 3D sampler
+# tf_1d_texture: 1D sampler (optional)
+# tf_2d_texture: 2D sampler (optional)
+# gradient_texture: 3D sampler (optional, for gradient magnitude)
+
+def post_classification_sample(ray_origin, ray_direction, num_samples):
+    acc_color = vec3(0.0)
+    acc_alpha = 0.0
+    
+    for i in range(num_samples):
+        # 1. Sample position in world space
+        t = i * step_size
+        pos = ray_origin + t * ray_direction
+        
+        # 2. Sample scalar density from volume
+        density = texture(volume_texture, pos).r
+        
+        # 3. Determine TF lookup strategy
+        if use_2d_tf:
+            # Compute or sample gradient magnitude
+            # Using pre-computed gradient texture for efficiency [S1, unofficial]
+            grad_mag = texture(gradient_texture, pos).r
+            
+            # 4. Sample 2D TF: (density, gradient_magnitude) -> (color, opacity)
+            # Coordinates normalized to [0,1] assuming textures are sized for full range
+            tf_coord = vec2(density, grad_mag)
+            tf_result = texture(tf_2d_texture, tf_coord)
+            color = tf_result.rgb
+            alpha = tf_result.a
+        else:
+            # 1D TF: density -> (color, opacity)
+            tf_coord = vec2(density, 0.5) # y-coordinate irrelevant for 1D
+            tf_result = texture(tf_1d_texture, tf_coord)
+            color = tf_result.rgb
+            alpha = tf_result.a
+            
+        # 5. Front-to-back compositing
+        # Contribution of current sample
+        contribution = color * alpha * (1.0 - acc_alpha)
+        acc_color += contribution
+        acc_alpha += alpha * (1.0 - acc_alpha)
+        
+        # Early ray termination if opaque enough
+        if acc_alpha > 0.99:
+            break
+            
+    return acc_color, acc_alpha
+```
+
+**Parameters:**
+*   TF Texture Size: 1D: $256 \times 1 \times 1$; 2D: $256 \times 64 \times 1$ [S2, unofficial].
+*   Format: `R8G8B8A8Unorm` [S2, unofficial].
+
+**Pitfalls:**
+*   **Striping Artifacts:** Post-classification maintains high-frequency components introduced by nonlinear TFs, which can manifest as striping artifacts in the final image, especially with coarse sampling [S3].
+*   **Gradient Noise:** If gradients are computed on-the-fly from noisy volume data, the 2D TF lookup may produce erratic color/opacity variations [S1, unofficial].
+
+## Subtopics
+
+### 3D Pre-integrated Transfer Function
+A variant where the transfer function is stored in a 3D texture and accessed using interpolated floating-point coordinates during optical property accumulation [S4, unofficial]. It handles varying sampling frequencies and constant brick values by integrating properties over the segment [S4, unofficial]. This allows maintaining constant brightness and provides better rendering quality compared to standard post-classification when using adaptive sampling steps [S4, unofficial]. To balance rendering quality and cache efficiency, the 3D texture size is minimized to fit as much data as possible in the texture cache [S4, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of samples per ray. The TF lookup is a constant-time texture access.
+*   **Memory Complexity:** Depends on TF texture sizes. 1D TF: $256 \times 4$ bytes. 2D TF: $256 \times 64 \times 4$ bytes [S2, unofficial]. Gradient texture adds $O(V)$ memory for volume size $V$.
+*   **Performance:** Fast due to simple texture lookups. However, striping artifacts may require higher sampling rates or anti-aliasing, increasing cost [S3].
+*   **Strengths:** Simple implementation; preserves high-frequency details better than pre-classification [S3].
+*   **Limitations:** Prone to striping artifacts; requires careful handling of gradient computation if using 2D TFs [S1, unofficial][S3].
+*   **When to Use:** When high-frequency detail preservation is critical and striping can be mitigated (e.g., via supersampling or adaptive sampling).
+*   **When Not to Use:** When memory is extremely constrained (2D TFs are larger than 1D) or when striping artifacts are unacceptable without significant performance overhead.
+
+## Background
+Post-classification is a fundamental technique in volume rendering, contrasting with pre-classification [S3]. It is widely used in real-time volume rendering systems where simplicity and speed are prioritized [S1, S2, unofficial]. The use of 2D TFs incorporating gradient magnitude for boundary enhancement is a common extension [S1, S2, unofficial]. Pre-integrated classification, a related concept, was introduced by Max et al. and later applied to 3D texture mapping by Engel et al. to address under-sampling issues [S3].
+
+## Sources
+[S1] rokcej/volumetric-ray-casting, https://github.com/rokcej/volumetric-ray-casting, fetched 2026-10-26 (unofficial)
+[S2] sho3la/GPUGemsVolumeRendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)
+[S3] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+[S4] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)

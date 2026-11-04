@@ -1,0 +1,808 @@
+# Volumetric Smoke — Compute Shader Ray Marching
+
+> Real-time volumetric smoke rendered entirely on the GPU: a voxel grid drives a two-stage ray
+> march, with animated Worley noise breaking up the silhouette.
+
+**Engine:** Unity · **Languages:** C#, HLSL (compute) · **Built:** 2024
+
+---
+
+## Overview
+
+Smoke is represented as an occupancy grid of voxels living in a `ComputeBuffer`, and rendered
+by marching a ray per pixel through that volume in a compute shader. There is no particle
+system and no billboard geometry — the smoke is evaluated analytically per pixel and composited
+back over the frame.
+
+The pipeline is:
+
+```
+Voxeliser.cs    →  builds/expands the voxel occupancy grid on a ComputeBuffer
+CS_Noise        →  generates animated Worley noise into a RWTexture2D
+CSRaytrace      →  marches rays through the grid, accumulating density
+Unlit/Combiner  →  composites the smoke buffer over the camera image
+```
+
+---
+
+## Ray Marching
+
+### Camera ray reconstruction
+
+Each thread rebuilds its own world-space ray from its pixel coordinate — UV to normalised
+device coordinates, through the inverse projection matrix into view space, then into world
+space by the camera-to-world matrix:
+
+```hlsl
+float2 uv    = id.xy / float2(_TextureWidth, _TextureHeight);
+float4 ndcCS = float4(uv.x * 2 - 1, uv.y * 2 - 1, 0, 1);
+float3 viewDir   = mul(_invProjectionMatrix, ndcCS).xyz;
+float3 rayVector = normalize(mul(_CamToWorldMatrix, float4(viewDir, 0)).xyz);
+```
+
+### Two-stage march with empty-space skipping
+
+The expensive part of volumetric rendering is sampling density in places that have none, so the
+march runs in two phases.
+
+**Stage one** steps cheaply along the ray doing nothing but occupancy lookups, until it either
+enters a smoke voxel or exceeds the maximum ray length:
+
+```hlsl
+while (smokeValue <= 0 && length < _RayMaxLength) {
+    length += stepSize;
+    positionWS = origin + length * rayVector;
+    smokeValue = getSmokeVoxel(positionWS);
+}
+```
+
+**Stage two** only begins once the ray is inside the volume, and accumulates density over a
+bounded number of samples. Rays that never intersect the smoke pay only for the cheap
+occupancy test — the density function is never evaluated for them.
+
+Voxel lookup flattens 3D coordinates into the linear buffer as
+`z * (X * Y) + y * X + x`, with an out-of-bounds guard returning `-1` so the marcher can
+distinguish "outside the volume" from "empty voxel".
+
+### Density
+
+Density falls off with normalised distance from the smoke origin, softened by `smoothstep` and
+perturbed by the noise texture, which is what stops the smoke reading as a hard analytic sphere.
+
+---
+
+## Procedural Noise on the GPU
+
+`CS_Noise` generates **Worley (cellular) noise** directly into a `RWTexture2D` rather than
+loading an authored texture. For each pixel it searches the surrounding 5×5 cell neighbourhood,
+hashes each cell to a feature point, and keeps the minimum distance:
+
+```hlsl
+float2 cell   = floor(uv) + float2(i, j);
+float2 kPoint = cell + frac(sin(dot(cell, float2(12.9898, 78.233))) * 43758.5453);
+float  dist   = distance(uv, kPoint);
+if (dist < minDist) { minDist = dist; bestPoint = kPoint; }
+```
+
+Scrolling the sample coordinates by `_Time` animates the field, so the smoke's internal detail
+churns rather than sitting static.
+
+---
+
+## Voxel Debug Visualisation
+
+`Voxeliser` can render the occupancy grid directly as instanced cubes, using a
+`ComputeBuffer` of `IndirectArguments` so every voxel is drawn in a single indirect draw call
+rather than one call per cube. Smoke expansion over time is driven by an `AnimationCurve`, so
+the growth easing is authored in the Inspector instead of hardcoded.
+
+---
+
+## Known Issues
+
+### The noise is sampled in screen space — this is the main bug
+
+`sampleDensity` indexes the noise texture by the ray's **screen UV** rather than by the sampled
+world position:
+
+```hlsl
+float noiseValue = _NoiseTexture[uint2(uv.x * _NoiseResolution.x, uv.y * _NoiseResolution.y)].r;
+```
+
+Because `uv` is constant for the whole ray, every sample along that ray receives the *same*
+noise value, and the pattern is pinned to the screen rather than to the volume. The visible
+result is that detail **swims across the smoke as the camera moves**, instead of being attached
+to it — and the noise adds no variation along the ray's depth at all.
+
+The fix is to sample by world position, so the field is genuinely three-dimensional and
+camera-independent:
+
+```hlsl
+float noiseValue = sampleNoise3D(samplePoint);   // not screen uv
+```
+
+### Others
+
+- **Stage two ignores the volume bounds.** Once density accumulation starts it runs a fixed 40
+  steps regardless of whether the ray has left the voxel grid, so smoke can bleed past the
+  volume it is supposed to occupy.
+- **`col` is reassigned every iteration** of the accumulation loop when it only needs writing
+  once after it.
+- **The Y bounds test is asymmetric.** `getSmokeVoxel` tests X and Z symmetrically against
+  ±extent, but Y against `-extent.y + extent.y` (i.e. `0`) and `extent.y + extent.y`. It works
+  because the volume is anchored at ground level, but it reads as a mistake rather than intent.
+- **`float length` shadows the HLSL intrinsic `length()`** inside the marching kernel.
+- Smoke is rendered to a reduced-resolution target and composited back up, which is the right
+  strategy for volumetrics, but there is no upsampling filter — edges are blocky under motion.
+
+---
+
+## What I'd Do Differently
+
+Beyond the bugs above: the density function is a sphere falloff, so this renders a *smoke ball*
+rather than smoke. Driving density from the voxel grid itself — with the grid advected by a
+simple velocity field — would make it behave like a volume instead of a shaded primitive. The
+occupancy buffer is already the right data structure for that; it just isn't being used for
+anything except empty-space skipping.
+
+### Assets/Combiner.shader
+```
+Shader "Unlit/Combiner"
+{
+    Properties
+    {
+        _MainTex ("Texture", 2D) = "white" {}
+        _SmokeTex("Smoke Texture", 2D) = "white" {}
+        _VoronoiTex("Voronoi Texture", 2D) = "white" {}
+    }
+    SubShader
+    {
+        Tags { "RenderType"="Opaque" }
+        LOD 100
+
+        Pass
+        {
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+            // make fog work
+            #pragma multi_compile_fog
+
+            #include "UnityCG.cginc"
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float2 uv : TEXCOORD0;
+            };
+
+            struct v2f
+            {
+                float2 uv : TEXCOORD0;
+                float4 vertex : SV_POSITION;
+            };
+
+            sampler2D _MainTex;
+            sampler2D _SmokeTex;
+            sampler2D _VoronoiTex;
+
+            v2f vert(appdata v)
+            {
+                v2f o;
+                o.vertex = UnityObjectToClipPos(v.vertex);
+                o.uv = v.uv;
+                return o;
+            }
+
+            fixed4 frag(v2f i) : SV_Target
+            {
+                fixed4 colSrc = tex2D(_MainTex, i.uv);
+                fixed4 colSmoke = tex2D(_SmokeTex, i.uv);
+                float colNoise = tex2D(_VoronoiTex, i.uv).r;
+
+                colNoise = saturate(colNoise + .1);
+
+
+            //    float n1 = noise(i.uv); // Corrected to use a vector if 'i.uv' is a float2 type
+             //   fixed4 noiseContribution = fixed4(n1, n1, n1, 1);
+
+                fixed4 finalColor = colSmoke.a * (colSmoke*(colNoise*0.4)) + (1 - colSmoke.a) * colSrc;
+
+                return finalColor;
+            }
+            ENDCG
+        }
+    }
+}
+```
+
+### Assets/DebugVoxels.shader
+```
+Shader "Unlit/DebugVoxels"
+{
+    Properties
+    {
+        _MainTex ("Texture", 2D) = "white" {}
+    }
+    SubShader
+    {
+        Tags { "RenderType"="Opaque" }
+        LOD 100
+
+        Pass
+        {
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+            // make fog work
+            #pragma multi_compile_fog
+
+            #include "UnityCG.cginc"
+
+
+            float3 _BoundsExtent;
+            uint3 _VoxelResolution;
+            float _VoxelSize;
+            int _MaxFillSteps, _DebugVoxels;
+
+            StructuredBuffer<int> _SmokeBuffer;
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float3 normal : NORMAL;
+            };
+
+            struct v2f
+            {
+                float4 vertex : SV_POSITION;
+                float3 hashCol : TEXCOORD0;
+                float3 normal : TEXCOORD1;
+            };
+
+            sampler2D _MainTex;
+            float4 _MainTex_ST;
+
+            float hash(uint n) {
+                // integer hash copied from https://www.shadertoy.com/view/flX3R2
+                n = (n << 13U) ^ n;
+                n = n * (n * n * 15731U + 0x789221U) + 0x1376312589U;
+                return float(n & uint(0x7fffffffU)) / float(0x7fffffff);
+            }
+
+            v2f vert (appdata v, uint instanceID : SV_INSTANCEID)
+            {
+                v2f i;
+
+                //calculates the xyz transforms based on the instance ID
+                uint x = instanceID % (_VoxelResolution.x);
+                uint y = (instanceID / _VoxelResolution.x) % _VoxelResolution.y;
+                uint z = instanceID / (_VoxelResolution.x * _VoxelResolution.y);
+                //calculates the new positions
+                i.vertex = UnityObjectToClipPos((v.vertex + float3(x, y, z)) * _VoxelSize + (_VoxelSize * 0.5f) - _BoundsExtent);
+                i.vertex *= _SmokeBuffer[instanceID];
+                //calculates normal
+                i.normal = UnityObjectToWorldNormal(v.normal);
+                i.hashCol = float3(hash(instanceID), hash(instanceID * 2), hash(instanceID * 3));
+                //i.hashCol = float3(_SmokeBuffer[instanceID], _SmokeBuffer[instanceID], _SmokeBuffer[instanceID]);
+
+
+
+
+                return i;
+            }
+
+            
+
+            fixed4 frag(v2f i) : SV_Target
+            {
+                // Generate a random color based on instance ID
+                fixed3 randomColor = fixed3(hash(i.vertex.x), hash(i.vertex.y), hash(i.vertex.z));
+
+                // Combine the random color with the normal as alpha
+                fixed4 col = fixed4(i.hashCol, 1.0);
+                return col;
+            }
+            ENDCG
+        }
+    }
+}
+```
+
+### Assets/RayMarching.cs
+```
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+[RequireComponent(typeof(Camera))]
+public class RayMarching : MonoBehaviour
+{
+    private Camera cam;
+
+    public ComputeShader raymarchComputeShader;
+    public Voxeliser voxeliser;
+
+    private int kernelIndex;
+    private RenderTexture smokeTexture, depthTex;
+    private Material combiningMaterial;
+
+    private int width, height;
+
+    public float length = 10f;
+
+    public float smoothing;
+    public float densityMUlt;
+
+    public Vector3 testCase;
+    /////////////////////////////////////////////////
+    public int textureWidth = 256;
+    public int textureHeight = 256;
+    public float scale = 10.0f;
+    private RenderTexture resultTexture;
+    public int kernalNum2;
+    ///////////////////////////////////////////
+    /// <summary>
+
+
+    /// </summary>
+    void Start()
+    {
+        cam = Camera.main;
+
+        kernelIndex = raymarchComputeShader.FindKernel("CSRaytrace");
+    //    kernalNum2 = raymarchComputeShader.FindKernel()
+        combiningMaterial = new Material(Shader.Find("Unlit/Combiner"));
+
+
+       // width = Screen.width;
+       // height = Screen.height;
+
+        width = Mathf.CeilToInt(Screen.width / 8);
+        height = Mathf.CeilToInt(Screen.height / 8);
+
+        // Initialize and set up the smoke texture
+        smokeTexture = new RenderTexture(width,height , 0, RenderTextureFormat.ARGB64, RenderTextureReadWrite.Linear);
+        smokeTexture.enableRandomWrite = true;
+        // Set additional shader properties
+        raymarchComputeShader.SetFloat("_RayMaxLength", 50.0f);
+        raymarchComputeShader.SetVector("_BoundsExtent", voxeliser.boundsExtent);
+        
+        raymarchComputeShader.SetInt("_TextureWidth", width);
+        raymarchComputeShader.SetInt("_TextureHeight", height);
+
+        raymarchComputeShader.SetInt("_VoxelsX", voxeliser.voxelsX);
+        raymarchComputeShader.SetInt("_VoxelsY", voxeliser.voxelsY);
+        raymarchComputeShader.SetInt("_VoxelsZ", voxeliser.voxelsZ);
+
+
+        resultTexture = new RenderTexture(256,256, 0, RenderTextureFormat.ARGB64, RenderTextureReadWrite.Linear);
+        resultTexture.enableRandomWrite = true;
+
+        raymarchComputeShader.SetFloat("_Time", Time.time);
+        raymarchComputeShader.SetTexture(1, "_NoiseTexture", resultTexture);
+
+        raymarchComputeShader.SetVector("_NoiseResolution", new Vector2(textureWidth, textureHeight));
+        raymarchComputeShader.SetFloat("_Scale", scale);
+        raymarchComputeShader.Dispatch(1, textureWidth / 8, textureHeight / 8, 1);
+
+   
+
+    }
+
+    private void OnRenderImage(RenderTexture source, RenderTexture destination)
+    {
+        // Set matrix and buffer data
+        raymarchComputeShader.SetMatrix("_CamToWorldMatrix", cam.cameraToWorldMatrix);
+        raymarchComputeShader.SetMatrix("_invProjectionMatrix",cam.projectionMatrix.inverse);
+        raymarchComputeShader.SetVector("camPosWS", cam.transform.position);
+        raymarchComputeShader.SetBuffer(kernelIndex, "_SmokeVoxels", voxeliser.smokeBuffer);
+
+        raymarchComputeShader.SetFloat("_VoxelResolution", voxeliser.voxelSize);
+
+        raymarchComputeShader.SetFloat("_Smoothing", smoothing);
+        raymarchComputeShader.SetFloat("_DensityMult", densityMUlt);
+
+        raymarchComputeShader.SetVector("_SmokeOrigin", voxeliser.smokeOrigin);
+        raymarchComputeShader.SetFloat("_SmokeRadius", (float)voxeliser.smokeRadius);
+        raymarchComputeShader.SetTexture(0, "_NoiseTexture", resultTexture);
+        // Dispatch the compute shader
+        raymarchComputeShader.SetTexture(kernelIndex, "_ResultTexture", smokeTexture);
+        raymarchComputeShader.Dispatch(kernelIndex, smokeTexture.width / 8, smokeTexture.height / 8, 1);
+
+        raymarchComputeShader.SetFloat("_Time", Time.time);
+        raymarchComputeShader.SetTexture(1, "_NoiseTexture", resultTexture);
+        raymarchComputeShader.Dispatch(1, textureWidth / 8, textureHeight / 8, 1);
+
+        // Combine textures
+        combiningMaterial.SetTexture("_MainTex", source);
+        combiningMaterial.SetTexture("_SmokeTex", smokeTexture);
+        combiningMaterial.SetTexture("_VoronoiTex", resultTexture);
+
+        Graphics.Blit(source, destination, combiningMaterial);
+
+
+    }
+    private void Update()
+    {
+        if (Time.frameCount % 30 == 0)
+        {
+            float nLen = (testCase - voxeliser.smokeOrigin).magnitude;
+            nLen /= voxeliser.smokeRadius;
+            nLen = 1 - Mathf.SmoothStep(0, 1, nLen);
+            print(nLen);
+        }
+    }
+    private void OnDrawGizmos()
+    {
+
+        Gizmos.color = Color.green;
+        Gizmos.DrawWireSphere(cam.transform.position, 1);
+
+        Gizmos.DrawWireSphere(testCase,1);
+    }
+
+    private void OnDisable()
+    {
+        // Release resources
+        smokeTexture.Release();
+    }
+}
+```
+
+### Assets/RaytraceShader.compute
+```
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSRaytrace
+#pragma kernel CS_Noise
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float4> _ResultTexture;
+
+int _TextureWidth;
+int _TextureHeight;
+
+StructuredBuffer<int> _SmokeVoxels;
+int _VoxelsX, _VoxelsY, VoxelsZ;
+
+
+float3 _BoundsExtent;
+float _VoxelResolution;
+
+float4x4 _invProjectionMatrix;
+float4x4 _CamToWorldMatrix;
+float3 camPosWS;
+
+float3 _SmokeOrigin;
+float _SmokeRadius;
+float _Smoothing;
+float _DensityMult;
+float _RayMaxLength;
+
+
+float _Time;
+///////////////////////////////////////////////////////
+
+RWTexture2D<float4> _NoiseTexture;
+uint2 _NoiseResolution;
+float _Scale;
+
+[numthreads(8, 8, 1)]
+void CS_Noise(uint3 id : SV_DispatchThreadID){
+    uint width = _NoiseResolution.x;
+    uint height = _NoiseResolution.y;
+
+    if (id.x >= width || id.y >= height) return;
+    float2 uv = float2(id.x, id.y) / _NoiseResolution;
+    uv *= _Scale;
+    uv += _Time/5;
+
+
+    float2 bestPoint;
+    float minDist = 1.0; // Large initial distance
+
+    // Sample random points in the neighborhood
+    int range = 2; // Search range for neighboring seeds
+    for (int j = -range; j <= range; j++)
+    {
+        for (int i = -range; i <= range; i++)
+        {
+            float2 cell = floor(uv) + float2(i, j);
+            float2 kPoint = cell + frac(sin(dot(cell, float2(12.9898, 78.233))) * 43758.5453);
+            float dist = distance(uv, kPoint);
+            if (dist < minDist)
+            {
+                minDist = dist;
+                bestPoint = kPoint;
+            }
+        }
+    }
+
+    // Color based on the distance
+    float color = 1-minDist;
+    _NoiseTexture[id.xy] = float4(color, color, color, 1.0);
+
+}
+
+///////////////////////////////////////////////////////
+
+
+int getSmokeVoxel(float3 position) {
+   // int returnVal = -1;
+    // Check if the world space position is currently within the bounds
+    // If they are not, return 0;
+    
+
+    if (position.x < -_BoundsExtent.x || position.x > _BoundsExtent.x ||
+        position.y < -_BoundsExtent.y + _BoundsExtent.y || position.y > _BoundsExtent.y+ _BoundsExtent.y ||
+        position.z < -_BoundsExtent.z || position.z > _BoundsExtent.z)
+    {
+        return -1;
+    }
+    
+
+    float3 adjustedPosition = position + float3(_BoundsExtent.x, 0, _BoundsExtent.z);
+
+    adjustedPosition /= _VoxelResolution;
+    adjustedPosition = floor(adjustedPosition);
+   // adjustedPosition *= _VoxelResolution;
+
+    int index = adjustedPosition.z * (_VoxelsX * _VoxelsY) + adjustedPosition.y * _VoxelsX + adjustedPosition.x;
+    return _SmokeVoxels[index];
+
+}
+
+float sampleDensity(float3 pos,float2 uv) {
+    float distanceFromOrigin = length(pos - _SmokeOrigin); // Calculate the Euclidean distance from the origin
+    float normalizedDistance = distanceFromOrigin / _SmokeRadius; // Normalize based on the smoke radius
+    // Smoothstep to create a soft edge as it approaches the boundary of the smoke radius
+
+    float noiseValue = _NoiseTexture[uint2(uv.x * _NoiseResolution.x, uv.y * _NoiseResolution.y)].r;
+    //here i use _NoiseTexture which is a RWTexture2d<float4> that is _NoiseResolution.xy in size  we use the uv coordinates to get the value stored in the red channel and add it to the normalisedDistance
+    noiseValue *= 0.1;
+    return 1- smoothstep(_Smoothing,1.,normalizedDistance+noiseValue); // Softens edges between 80% and 100% of the radius
+
+
+}
+
+[numthreads(8, 8, 1)]
+void CSRaytrace(uint3 id : SV_DispatchThreadID)
+{
+    float3 origin = camPosWS;
+
+    float2 uv = (id.xy / float2(_TextureWidth, _TextureHeight)); //gets the UV Coordinates
+    float4 ndcCS = float4(uv.x * 2-1, uv.y * 2-1, 0, 1); //converts the uv coordinates to normalized device coordinates ndc in clip space
+    float3 viewDir = mul(_invProjectionMatrix, ndcCS).xyz;
+    float3 rayVector = mul(_CamToWorldMatrix, float4(viewDir, 0)).xyz;
+    rayVector = normalize(rayVector);
+
+    float4 col = float4(0.0, 0.0, 0.0, 0.0);  // Initialize color
+
+    float3 positionWS = origin;
+
+    uint rayIndex = id.y * _TextureWidth + id.x;
+
+    float length = 0;
+    float stepSize =0.2;
+    float smokeValue = -1;
+
+
+    // Ray marching loop
+    while (smokeValue <= 0 && length < _RayMaxLength) {
+        length += stepSize;
+        positionWS = origin + length * rayVector;
+        smokeValue = getSmokeVoxel(positionWS);
+    }
+
+
+    if (smokeValue == 1) {
+        int stage2StepMax = 40;
+        int stage2StepNum = 0;
+        float accumulatedDensity = 0;
+        while (stage2StepNum < stage2StepMax) {
+
+            float3 samplePoint = origin + length * rayVector;
+            accumulatedDensity += saturate(sampleDensity(samplePoint, uv)) * _DensityMult;
+
+            length += stepSize;
+            col = float4(0.4, 0.4, 0.4, accumulatedDensity);
+            stage2StepNum++;
+        }
+    }
+
+    
+    // Output the color to the render texture
+    _ResultTexture[id.xy] = col;
+}
+```
+
+### Assets/VoxelShader.compute
+```
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float4> Result;
+
+[numthreads(64,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // TODO: insert actual code here!
+
+    Result[id.xy] = float4(id.x & id.y, (id.x & 15)/15.0, (id.y & 15)/15.0, 0.0);
+}
+```
+
+### Assets/Voxeliser.cs
+```
+using System.Collections;
+using System.Collections.Generic;
+using UnityEditor.UIElements;
+using UnityEngine;
+
+public class Voxeliser : MonoBehaviour
+{
+    [Header("Half the scale of the area")]
+    public Vector3 boundsExtent = new Vector3(3, 3, 3);
+    
+    [Header("")]
+    public float voxelSize = 0.5f;
+    private ComputeBuffer argBuffer;
+    public ComputeBuffer smokeBuffer;
+    public int[] smokeArr;
+    public int voxelsX, voxelsY, voxelsZ, totalVoxels;
+
+    public float smokeRadius = 4;
+    public Vector3 smokeOrigin;
+    private float smokeTimer = 10f;
+    public float smokeExpansionTime;
+    public AnimationCurve easingCurve;
+
+    public Mesh debugMesh;
+    private Material debugMaterial;
+    private Bounds debugBounds;
+
+    public bool Debugging = false;
+
+    // Start is called before the first frame update
+    void OnEnable()
+    {
+        Vector3 boundsSize = boundsExtent * 2;
+        debugBounds = new Bounds(new Vector3(0, boundsExtent.y, 0), boundsSize);
+
+        voxelsX = Mathf.CeilToInt(boundsSize.x / voxelSize);
+        voxelsY = Mathf.CeilToInt(boundsSize.y / voxelSize);
+        voxelsZ = Mathf.CeilToInt(boundsSize.z / voxelSize);
+        totalVoxels = voxelsX * voxelsY * voxelsZ;
+
+
+
+        smokeBuffer = new ComputeBuffer(totalVoxels, sizeof(int));
+        smokeArr = new int[totalVoxels];
+        int[] initialSmokeData = new int[totalVoxels]; // Create an array to hold initial smoke data
+        for (int i = 0; i < totalVoxels; i++)
+        {
+            initialSmokeData[i] = 0; // Set each voxel value to 0
+        }
+        smokeBuffer.SetData(initialSmokeData);
+
+
+        //Debug Voxels
+        debugMaterial = new Material(Shader.Find("Unlit/DebugVoxels"));
+
+        argBuffer = new ComputeBuffer(1, 5 * sizeof(uint), ComputeBufferType.IndirectArguments);  
+        uint[] args = new uint[5] { 0, 0, 0, 0, 0 };
+        args[0] = (uint)debugMesh.GetIndexCount(0);
+        args[1] = (uint)totalVoxels;
+        args[2] = (uint)debugMesh.GetIndexStart(0);
+        args[3] = (uint)debugMesh.GetBaseVertex(0);
+        argBuffer.SetData(args);
+
+        InspectSmokeBuffer();
+    }
+    private void Update()
+    {
+        if(Input.GetMouseButton(2))
+        {
+            Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+            RaycastHit hit;
+            if (Physics.Raycast(ray, out hit, 100))
+            {
+                smokeTimer = 0f;
+                smokeOrigin = hit.point;
+                
+            }
+        }
+
+        if (Time.frameCount % 30 == 0)
+        {
+            UpdateSmokeBuffer();
+        }
+
+        smokeTimer += Time.deltaTime;
+
+
+        if (!Debugging) return;
+        debugMaterial.SetVector("_VoxelResolution", new Vector3(voxelsX, voxelsY, voxelsZ));
+        debugMaterial.SetVector("_BoundsExtent", boundsExtent);
+        debugMaterial.SetFloat("_VoxelSize", voxelSize);
+
+        debugMaterial.SetBuffer("_SmokeBuffer", smokeBuffer);
+
+        Graphics.DrawMeshInstancedIndirect(debugMesh, 0, debugMaterial, debugBounds, argBuffer);
+    }
+
+    private void UpdateSmokeBuffer()
+    {
+        // Clear the smoke buffer
+        int[] smokeData = new int[totalVoxels];
+        smokeBuffer.SetData(smokeData);
+        
+
+
+        // Iterate through each voxel
+        for (int x = 0; x < voxelsX; x++)
+        {
+            for (int y = 0; y < voxelsY; y++)
+            {
+                for (int z = 0; z < voxelsZ; z++)
+                {
+                    // Calculate the position of the current voxel
+                    Vector3 voxelPos = new Vector3(x * voxelSize, y * voxelSize, z * voxelSize);
+                    voxelPos -= new Vector3(boundsExtent.x,0,boundsExtent.z);
+                    // Calculate the distance between the voxel and the smoke origin
+                    float distance = Vector3.Distance(voxelPos, smokeOrigin);
+                    //Calculate smokeRadius from timer;
+                    float normalValue = Mathf.InverseLerp(0f, smokeExpansionTime, smokeTimer);
+                    float currentSmokeRadius = easingCurve.Evaluate(normalValue) * smokeRadius;
+                    
+                    // If the distance is within the radius, set the voxel value to 1 in the smoke buffer
+                    if (distance <= currentSmokeRadius)
+                    {
+                        int index = x + y * voxelsX + z * voxelsX * voxelsY;
+                        smokeData[index] = 1;
+                    }
+                }
+            }
+        }
+
+        // Update the smoke buffer with the new data
+        smokeBuffer.SetData(smokeData);
+        smokeBuffer.GetData(smokeArr);
+        InspectSmokeBuffer();
+    }
+
+
+    void InspectSmokeBuffer()
+    {
+        // Create an array to hold the data retrieved from the buffer
+        int[] smokeBufferData = new int[totalVoxels]; // Assuming totalVoxels is the size of your buffer
+
+        // Get the data from the buffer and store it in the array
+        smokeBuffer.GetData(smokeBufferData);
+
+        // Now you can inspect the contents of the array, which represents the buffer data
+        for (int i = 0; i < totalVoxels; i++)
+        {
+            // Output each element of the array to the console
+           // Debug.Log("SmokeBuffer[" + i + "] = " + smokeBufferData[i]);
+        }
+    }
+
+    void OnDestroy()
+    {
+        if (smokeBuffer != null)
+            smokeBuffer.Release();
+        if (argBuffer != null)
+            smokeBuffer.Release();
+    }
+
+    private void OnDrawGizmos()
+    {
+        Gizmos.color = Color.red;
+        Gizmos.DrawWireCube(debugBounds.center, debugBounds.extents * 2);
+    }
+}
+```

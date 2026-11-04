@@ -1,0 +1,131 @@
+# GPU Data Layout
+
+
+## Overview
+GPU Data Layout defines the host-side memory structures and OpenGL resource IDs required to manage volumetric rendering state on the GPU. It solves the problem of organizing heterogeneous resources—3D scalar textures, 1D transfer function tables, and offscreen framebuffers—into a unified configuration object for raycasting mappers. It differs from [Volume Texture Creation](1857-volume-texture-creation.md) by focusing on the logical grouping and ID management of these resources rather than the API calls to generate them, and from [Volume Texture Setup](4055-volume-texture-setup.md) by handling the broader context including color tables and depth buffers.
+
+## How it works
+The layout organizes rendering state into specific arrays and integer IDs. The implementation must initialize these structures before passing them to the raycasting shader or framebuffer objects.
+
+**Inputs and Outputs**
+- Input: Volumetric data dimensions, component count, and data type (constrained by mapper requirements).
+- Output: A populated `TextureObjects` array and associated framebuffer/texture IDs.
+
+**Data Structures**
+The core layout is defined by the following fields:
+
+1.  **TextureObjects**: An array of 5 `unsigned int` values storing OpenGL texture IDs.
+    -   Index 0: 3D scalar texture (volume data).
+    -   Index 1: 1D color table (transfer function).
+    -   Index 2: 1D opacity table (transfer function).
+    -   Index 3: 2D grabbed depth buffer.
+    -   Index 4: 2D color buffer.
+2.  **MaxValueFrameBuffer** and **MaxValueFrameBuffer2**: Two `unsigned int` framebuffer IDs used for ping-pong accumulation in MIP (Maximum Intensity Projection) mode.
+3.  **BoundingBox**: A `double` array of size $8 \times 3$ storing the world coordinates of the 8 corners of the dataset bounding box.
+4.  **FrameBufferObject**: An `unsigned int` ID for the primary offscreen framebuffer object.
+5.  **DepthRenderBufferObject**: An `unsigned int` ID for the depth renderbuffer attached to the framebuffer.
+6.  **NoiseTexture**: A `float` array storing procedural noise data for speckle reduction.
+7.  **NoiseTextureSize**: An `int` specifying the 1D dimension size of the noise texture.
+8.  **NoiseTextureId**: An `unsigned int` OpenGL ID for the noise texture.
+9.  **TextureCoord_1toN**: An array of `vtkTransform` pointers mapping texture coordinates from the primary volume to additional volumes. The size is `MAX_NUMBER_OF_ADDITIONAL_VOLUMES`.
+
+**Constraints and Validation**
+Before finalizing the layout, the following constraints must be met [S1, unofficial]:
+-   Scalar data must be single-component or four-component with non-independent components.
+-   If four-component data is used, the data type must be `VTK_UNSIGNED_CHAR` (RGBA).
+-   Additive blend mode is only supported with single-component scalars.
+
+**Pseudocode**
+The following pseudocode demonstrates the initialization and validation of the GPU data layout structure.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def initialize_gpu_data_layout(volume_data, blend_mode):
+    """
+    Initialize the GPU data layout structure for volume rendering.
+    
+    Args:
+        volume_data: Object containing GetNumberOfComponents() and GetDataType().
+        blend_mode: Integer constant for the blend mode (e.g., ADDITIVE_BLEND).
+        
+    Returns:
+        dict: The populated layout dictionary or None if validation fails.
+    """
+    num_components = volume_data.GetNumberOfComponents()
+    data_type = volume_data.GetDataType()
+    
+    # Validation: Component and Type Constraints
+    # Only one component scalars, or four component with non-independent components, are supported.
+    valid_components = (num_components == 1) or (num_components == 4)
+    
+    # If 4 components, it must be unsigned char (RGBA)
+    if num_components == 4 and data_type != VTK_UNSIGNED_CHAR:
+        return None
+        
+    # Additive mode only works with 1-component scalars
+    if blend_mode == ADDITIVE_BLEND and num_components != 1:
+        return None
+        
+    if not valid_components:
+        return None
+
+    # Initialize Texture Objects Array (Size 5)
+    # Indices: 0=3D Scalar, 1=1D Color, 2=1D Opacity, 3=2D Depth Grab, 4=2D Color Buffer
+    texture_objects = [0] * 5
+    
+    # Initialize Framebuffer IDs for MIP ping-pong
+    max_value_framebuffer = 0
+    max_value_framebuffer2 = 0
+    
+    # Initialize Bounding Box (8 corners, 3 coords each)
+    bounding_box = [[0.0, 0.0, 0.0] for _ in range(8)]
+    
+    # Initialize Framebuffer and Renderbuffer IDs
+    frame_buffer_object = 0
+    depth_render_buffer_object = 0
+    
+    # Initialize Noise Texture for speckle reduction
+    noise_texture_size = 0 # Not given in the sources.
+    noise_texture = []     # Float array
+    noise_texture_id = 0
+    
+    # Initialize Coordinate Transforms for additional volumes
+    # Size depends on MAX_NUMBER_OF_ADDITIONAL_VOLUMES
+    texture_coord_1_to_n = [None] * MAX_NUMBER_OF_ADDITIONAL_VOLUMES
+    
+    layout = {
+        "TextureObjects": texture_objects,
+        "MaxValueFrameBuffer": max_value_framebuffer,
+        "MaxValueFrameBuffer2": max_value_framebuffer2,
+        "BoundingBox": bounding_box,
+        "FrameBufferObject": frame_buffer_object,
+        "DepthRenderBufferObject": depth_render_buffer_object,
+        "NoiseTexture": noise_texture,
+        "NoiseTextureSize": noise_texture_size,
+        "NoiseTextureId": noise_texture_id,
+        "TextureCoord_1toN": texture_coord_1_to_n
+    }
+    
+    return layout
+```
+
+## Subtopics
+
+### [GPU Texture Loading](2473-gpu-texture-loading.md)
+Transfers volumetric scalar data from host memory or binary files into GPU-accessible 3D textures. It differs by focusing on the data transfer mechanism rather than the logical layout organization.
+
+### [Tiled 2D Texture Storage for 3D Fields](2740-tiled-2d-texture-storage-for-3d-fields.md)
+Stores 3D scalar fields in 2D textures using a tiling scheme. It differs by using 2D texture objects instead of native 3D textures for memory layout.
+
+## Operating characteristics
+-   **Memory Complexity**: The layout itself is lightweight, storing only IDs and small metadata arrays. The actual memory consumption is determined by the textures referenced by `TextureObjects` and `NoiseTexture`.
+-   **Performance**: Accessing the layout is $O(1)$. The performance impact comes from the GPU operations referenced by the IDs (texture sampling, framebuffer blitting).
+-   **Strengths**: Centralizes resource management, simplifying the shader interface by using a single array of texture IDs.
+-   **Limitations**: Tightly coupled to OpenGL (uses `unsigned int` IDs). Not given in the sources.
+
+## Background
+This layout structure originates from the VTK (Visualization Toolkit) Multi Volume Ray Caster implementation, specifically within the `vtkGPUMultiVolumeRayCastMapper` and related classes. It was developed to support multi-volume rendering and MIP accumulation on the GPU.
+
+## Sources
+[S1] bozorgi/VTKMultiVolumeRayCaster, https://github.com/bozorgi/VTKMultiVolumeRayCaster, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,148 @@
+# Shadow Volume Representation (SVR)
+
+Also called: Global Light Propagation, Global Shadow Volume, SVR (Shadow Volume Representation)
+
+## Overview
+Shadow Volume Representation (SVR) is a sparse data structure that stores global opacity ($\alpha_g$) along rays from volume points to a light source, enabling efficient estimation of direct light contribution in participating media [S1, unofficial]. It distinguishes itself from full-resolution ray integration by decoupling the storage resolution from the integration resolution, allowing interactive adjustment of the shadow map density while maintaining high-quality visibility estimates [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A volumetric dataset with local piecewise opacities ($\alpha_{l_p}$) computed along rays towards a light source; a sparse multi-resolution grid structure (e.g., flat blocking) defining the SVR resolution.
+*   **Output:** A sparse grid storing global opacity values $\alpha_g$ for each voxel in the SVR grid.
+
+**Data Structures**
+The SVR is stored in a sparse data structure, typically a flat blocking multi-resolution structure [S1, unofficial].
+*   **SVR Grid:** A 3D grid with resolution $N_{svr} \times N_{svr} \times N_{svr}$.
+*   **Resolution Ratio:** The SVR resolution is typically 1:4 relative to the data volume resolution $N_{data}$ [S1, unofficial]. Each sample in the SVR covers a block of $4^3 = 64$ voxels in the data volume.
+*   **Sparse Storage:** Only non-empty blocks are stored to save memory [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Initialize SVR:** Create the sparse grid structure. Determine the block size based on the 1:4 ratio (or user-defined interactive parameter) [S1, unofficial].
+2.  **Iterate Voxels:** For each voxel $v$ in the data volume:
+    a.  **Ray Casting:** Cast a ray from $v$ towards the light source.
+    b.  **High-Resolution Integration:** Sample the local piecewise opacity $\alpha_{l_p}(s_i)$ at high resolution along the ray segment from $v$ to the light source [S1, unofficial]. Linear interpolation is used to estimate local segments, introducing minor errors [S1, unofficial].
+    c.  **Compute Global Opacity:** Calculate $\alpha_g$ for the starting point $s_0$ (the voxel position) using the product formula:
+        $$ \alpha_g(s_0) = 1 - \prod_{i=0}^k (1 - \alpha_{l_p}(s_i)) $$
+        where $k$ is the number of samples along the ray, and $\alpha_{l_p}(s_i)$ are the local opacities at sample points $s_i$ [S1, unofficial].
+    d.  **Store Result:** Map the voxel $v$ to its corresponding block in the sparse SVR grid. Store the computed $\alpha_g(s_0)$ in that block [S1, unofficial].
+3.  **Handle Empty Blocks (Pitfall Mitigation):** If a ray originates in an empty block (ignored by the sparse structure), it may miss occlusion from neighboring non-empty blocks [S1, unofficial]. To fix this:
+    a.  Advance the ray origin to the next non-empty block along the ray direction before computing $\alpha_g$ [S1, unofficial].
+    b.  Compute $\alpha_g$ for this advanced origin and store it in the corresponding non-empty block [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_svr(data_volume, light_direction, svr_resolution_ratio=4):
+    """
+    Computes the Shadow Volume Representation (SVR).
+    
+    Args:
+        data_volume: 3D array of local piecewise opacities alpha_lp.
+        light_direction: Normalized vector pointing to the light source.
+        svr_resolution_ratio: Ratio of data volume resolution to SVR resolution.
+        
+    Returns:
+        svr_grid: Sparse dictionary mapping block coordinates to global opacity values.
+    """
+    # Determine SVR grid dimensions
+    data_res = data_volume.shape[0]
+    svr_res = data_res // svr_resolution_ratio
+    block_size = svr_resolution_ratio
+    
+    # Sparse storage: key=(block_x, block_y, block_z), value=global_opacity
+    svr_grid = {}
+    
+    # Iterate over all voxels in the data volume
+    for x in range(data_res):
+        for y in range(data_res):
+            for z in range(data_res):
+                # Ray origin is the current voxel
+                ray_origin = (x, y, z)
+                
+                # Check if the block containing this voxel is empty in the sparse structure
+                # Note: In a real implementation, 'is_block_empty' would check the sparse structure
+                # or a separate occupancy grid. For this self-contained example, we assume
+                # we must handle the pitfall by advancing if the current block is empty.
+                block_coords = (x // block_size, y // block_size, z // block_size)
+                
+                # If the block is empty (or not yet computed), advance the ray
+                # to the next non-empty block along the light direction.
+                # This is a simplified check; in practice, one might pre-compute
+                # block occupancy.
+                if not is_block_occupied(block_coords, svr_grid):
+                    # Advance ray to next non-empty block
+                    ray_origin = advance_to_next_non_empty_block(
+                        ray_origin, light_direction, block_size, data_res
+                    )
+                    # Recompute block coordinates for the advanced origin
+                    block_coords = (
+                        ray_origin[0] // block_size,
+                        ray_origin[1] // block_size,
+                        ray_origin[2] // block_size
+                    )
+                
+                # Cast ray from ray_origin to light source
+                # Sample local piecewise opacities at high resolution
+                samples = sample_ray_along_direction(
+                    ray_origin, light_direction, data_volume
+                )
+                
+                # Compute global opacity using the product formula
+                # alpha_g(s0) = 1 - product(1 - alpha_lp(si))
+                transmittance = 1.0
+                for alpha_lp in samples:
+                    transmittance *= (1.0 - alpha_lp)
+                
+                global_opacity = 1.0 - transmittance
+                
+                # Store in sparse grid
+                svr_grid[block_coords] = global_opacity
+                
+    return svr_grid
+
+def is_block_occupied(block_coords, svr_grid):
+    """Check if a block is already in the sparse grid."""
+    return block_coords in svr_grid
+
+def advance_to_next_non_empty_block(origin, direction, block_size, data_res):
+    """
+    Advances the ray origin to the next non-empty block along the direction.
+    This is a placeholder for the specific logic to find the next occupied block.
+    In practice, this might involve traversing the sparse structure or
+    checking an occupancy grid.
+    """
+    # Simplified: just return the original origin for this example.
+    # A real implementation would step along the direction until a non-empty block is found.
+    return origin
+
+def sample_ray_along_direction(origin, direction, data_volume):
+    """
+    Samples the local piecewise opacity along the ray.
+    Returns a list of alpha_lp values.
+    """
+    # Placeholder for high-resolution ray marching logic
+    # This would involve stepping through the data_volume along the direction
+    # and interpolating alpha_lp values.
+    return [0.1, 0.2, 0.3] # Example values
+```
+
+**Parameters**
+*   **SVR Resolution Ratio:** Typically 1:4, meaning each SVR sample covers $4^3=64$ voxels [S1, unofficial]. This can be adjusted interactively [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Empty Blocks:** Rays originating in empty blocks (ignored by the sparse structure) may miss occlusion from neighboring non-empty blocks [S1, unofficial]. Solution: Advance the ray to the next non-empty block before computing $\alpha_g$ [S1, unofficial].
+*   **Interpolation Errors:** Linear interpolation used to estimate local segments introduces small errors in $\alpha_{l_p}$ [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of voxels and the length of the ray integration. High-resolution integration is performed for each voxel, but storage is sparse [S1, unofficial].
+*   **Memory Complexity:** Proportional to the number of non-empty blocks in the SVR grid, which is significantly less than the full data volume if the volume is sparse [S1, unofficial].
+*   **Performance:** Allows interactive adjustment of SVR resolution. Lower resolutions can be used for dynamic scenes, with incremental refinement when static [S1, unofficial].
+*   **Strengths:** Reduces storage and computation compared to full-resolution shadow maps while maintaining high-quality visibility estimates [S1, unofficial].
+*   **Limitations:** Interpolation errors; potential for missed occlusion if empty block handling is not implemented correctly [S1, unofficial].
+
+## Background
+SVR was introduced in the context of interactive global light propagation in direct volume rendering [S1, unofficial]. It builds on the concept of local piecewise integration to enable efficient global light contribution estimation [S1, unofficial]. The method is part of a broader framework that includes in-scattering estimation and incremental refinement [S1, unofficial].
+
+## Sources
+[S1] Interactive Global Light Propagation in Direct Volume Rendering using Local Piecewise Integration, https://doi.org/10.2312/vg/vg-pbg08/105-112, fetched 2026-10-26 (unofficial)

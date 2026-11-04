@@ -1,0 +1,171 @@
+--- v001.md
++++ v002.md
+@@ -1,11 +1,9 @@
+ # DepthPredictor
+-
+-
+ ## Overview
+-The `DepthPredictor` is a PyTorch `nn.Module` that implements the depth prediction pipeline for differentiable volume rendering. It integrates a distribution sampler with conversion functions to transform raw feature tensors into probabilistic depth estimates and associated opacities [S1, unofficial]. It differs from sibling methods like [Monocular Depth Predictor with Distribution Sampling](3879-monocular-depth-predictor-with-distribution-sampling.md) by explicitly handling the unbinding of PDF and offset channels, sampling from the resulting discrete distribution, and computing opacity via a cumulative transmittance formulation [S1, unofficial].
++The `DepthPredictor` is a PyTorch `nn.Module` that implements a depth prediction pipeline by integrating a distribution sampler with conversion functions [S1, unofficial]. It transforms raw feature tensors containing probability density function (PDF) and offset channels into probabilistic depth estimates and associated opacities, differing from sibling methods by explicitly handling discrete distribution sampling and transmittance-based opacity computation [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** `features` tensor of shape `Float[Tensor, "batch view ray surface depth 2"]` [S1, unofficial]. The last dimension contains two channels: raw probability density function (PDF) values and raw offset values.
++*   **Input:** `features` tensor of shape `Float[Tensor, "batch view ray surface depth 2"]` [S1, unofficial]. The last dimension contains two channels: raw PDF values and raw offset values [S1, unofficial].
+ *   **Outputs:**
+     *   `depth`: `Float[Tensor, "batch view ray surface sample"]` [S1, unofficial].
+@@ -14,20 +12,20 @@
+ 
+ **Data Structures:**
+-The method relies on a `sampler` object (typically a `DistributionSampler`) which provides `sample` and `gather` methods. The sampler handles the discrete sampling from the PDF and the gathering of corresponding offset values.
++The method uses a sampler object that provides `sample` and `gather` methods to handle discrete sampling from the PDF and retrieval of corresponding offset values [S1, unofficial].
+ 
+ **Parameters:**
+-*   `num_depths`: The number of discrete depth buckets (size of the `depth` dimension in input).
+-*   `near`: Near plane distance for depth conversion. If `None`, computed from camera geometry [S1, unofficial].
+-*   `far`: Far plane distance for depth conversion. If `None`, computed from camera geometry [S1, unofficial].
+-*   `deterministic`: Boolean flag for sampling mode.
+-*   `gaussians_per_pixel`: Number of samples to draw per pixel/ray.
+-*   `use_transmittance`: Boolean flag controlling opacity calculation method.
++*   `num_depths`: Integer specifying the number of discrete depth buckets (size of the `depth` dimension in input) [S1, unofficial].
++*   `near`: Near plane distance for depth conversion [S1, unofficial].
++*   `far`: Far plane distance for depth conversion [S1, unofficial].
++*   `deterministic`: Boolean flag controlling sampling mode [S1, unofficial].
++*   `gaussians_per_pixel`: Integer specifying the number of samples to draw per pixel/ray [S1, unofficial].
++*   `use_transmittance`: Boolean flag controlling the opacity calculation method [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Unbind Features:** Separate the last dimension of `features` into `pdf_raw` and `offset_raw` tensors.
+-2.  **Normalize PDF:** Apply a Softmax function to `pdf_raw` to obtain the probability density function `pdf`.
+-3.  **Normalize Offsets:** Apply a Sigmoid function to `offset_raw` to obtain bounded offsets `offset`.
+-4.  **Sample:** Use the sampler to draw `index` and corresponding PDF densities `pdf_i` from `pdf`. The number of samples is determined by `gaussians_per_pixel`.
+-5.  **Gather Offsets:** Retrieve the offsets corresponding to the sampled indices: `offset = sampler.gather(index, offset)`.
++1.  **Unbind Features:** Separate the last dimension of `features` into `pdf_raw` and `offset_raw` tensors [S1, unofficial].
++2.  **Normalize PDF:** Apply a Softmax function to `pdf_raw` to obtain the probability density function `pdf` [S1, unofficial].
++3.  **Normalize Offsets:** Apply a Sigmoid function to `offset_raw` to obtain bounded offsets `offset` [S1, unofficial].
++4.  **Sample:** Draw `index` and corresponding PDF densities `pdf_i` from `pdf` using the sampler, with the sample count determined by `gaussians_per_pixel` [S1, unofficial].
++5.  **Gather Offsets:** Retrieve the offsets corresponding to the sampled indices: `offset = sampler.gather(index, offset)` [S1, unofficial].
+ 6.  **Calculate Relative Disparity:** Compute relative disparity using the sampled indices and offsets:
+     $$ \text{relative\_disparity} = \frac{\text{index} + \text{offset}}{\text{num\_depths}} $$
+@@ -36,10 +34,10 @@
+ 8.  **Compute Opacity:**
+     *   If `use_transmittance` is true:
+-        a. Compute cumulative sum of PDF: `partial = pdf.cumsum(dim=-1)`.
+-        b. Shift cumulative sum to align with transmittance: `partial = torch.cat((torch.zeros_like(partial[..., :1]), partial[..., :-1]), dim=-1)`.
+-        c. Compute opacity per bucket: `opacity_raw = pdf / (1 - partial + 1e-10)`.
+-        d. Gather opacity values: `opacity = sampler.gather(index, opacity_raw)`.
++        a. Compute cumulative sum of PDF: `partial = pdf.cumsum(dim=-1)` [S1, unofficial].
++        b. Shift cumulative sum to align with transmittance: `partial = torch.cat((torch.zeros_like(partial[..., :1]), partial[..., :-1]), dim=-1)` [S1, unofficial].
++        c. Compute opacity per bucket: `opacity_raw = pdf / (1 - partial + 1e-10)` [S1, unofficial].
++        d. Gather opacity values: `opacity = sampler.gather(index, opacity_raw)` [S1, unofficial].
+     *   If `use_transmittance` is false:
+-        a. Set opacity directly to the sampled PDF density: `opacity = pdf_i`.
++        a. Set opacity directly to the sampled PDF density: `opacity = pdf_i` [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -56,97 +54,41 @@
+         self.far = far
+         self.use_transmittance = use_transmittance
+-        # Helper functions assumed to be defined elsewhere or as standard ops
+-        # to_pdf: Softmax
+-        # to_offset: Sigmoid
+-        # relative_disparity_to_depth: Linear mapping or inverse projection
+ 
+     def forward(self, features, deterministic=False, gaussians_per_pixel=1):
+-        # 1. Unbind features
+         pdf_raw, offset_raw = features.unbind(dim=-1)
+-        
+-        # 2. Normalize PDF
+         pdf = torch.softmax(pdf_raw, dim=-1)
+-        
+-        # 3. Normalize Offsets
+         offset = torch.sigmoid(offset_raw)
+-        
+-        # 4. Sample indices and PDF densities
+         index, pdf_i = self.sampler.sample(pdf, deterministic, gaussians_per_pixel)
+-        
+-        # 5. Gather offsets
+         offset = self.sampler.gather(index, offset)
+-        
+-        # 6. Calculate relative disparity
+         relative_disparity = (index + offset) / self.num_depths
+-        
+-        # 7. Convert to depth
+         depth = relative_disparity_to_depth(relative_disparity, self.near, self.far)
+-        
+-        # 8. Compute opacity
+         if self.use_transmittance:
+             partial = pdf.cumsum(dim=-1)
+-            # Shift: prepend zeros, drop last element
+             partial = torch.cat((torch.zeros_like(partial[..., :1]), partial[..., :-1]), dim=-1)
+-            opacity_raw = pdf / (1 - partial + 1e-10)
+-            opacity = self.sampler.gather(index, opacity_raw)
++            opacity = pdf / (1 - partial + 1e-10)
++            opacity = self.sampler.gather(index, opacity)
+         else:
+             opacity = pdf_i
+-            
+         return depth, opacity, index
+ 
+ def relative_disparity_to_depth(relative_disparity, near, far):
+-    """
+-    Converts relative disparity [0, 1] to depth.
+-    Standard linear mapping in disparity space often implies:
+-    depth = 1 / ( (1 - relative_disparity) / near + relative_disparity / far )
+-    However, the source notes imply a direct conversion function.
+-    If 'relative_disparity' is linear in depth (unlikely for perspective), it would be:
+-    depth = near + relative_disparity * (far - near)
+-    
+-    Given the context of 'disparity', it is likely inverse depth related.
+-    But the source code snippet shows:
+-    relative_disparity = (index + offset) / num_depths
+-    And then calls relative_disparity_to_depth.
+-    
+-    Without explicit formula in notes, we assume a standard perspective depth conversion
+-    from normalized disparity if 'disparity' is used, or linear if 'depth' is used.
+-    The term 'relative disparity' usually implies 1/z.
+-    Let's assume the standard inverse mapping for disparity d in [0,1]:
+-    z = 1 / ( (1-d)/near + d/far )
+-    
+-    However, if the source treats it as linear depth buckets:
+-    z = near + d * (far - near)
+-    
+-    The source does not specify the exact formula for relative_disparity_to_depth.
+-    We will use the linear assumption as 'relative disparity' might be a misnomer for 'normalized depth'
+-    in some contexts, OR we leave it as a call to a helper.
+-    
+-    Given the ambiguity, we define it as a helper function.
+-    """
+-    # Placeholder for the specific conversion logic if not standard.
+-    # In many volume rendering papers, depth buckets are linear in depth or disparity.
+-    # If linear in depth:
++    # Standard linear mapping from normalized disparity to depth [G]
+     return near + relative_disparity * (far - near)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Division by Zero:** The opacity calculation includes a small epsilon (`1e-10`) to prevent division by zero when `1 - partial` is zero [S1, unofficial].
+-*   **Near/Far Plane Calculation:** If `near` or `far` are `None`, they are computed based on camera origins and directions, handling cases where the origin is at the camera position or on the zero-depth plane [S1, unofficial].
++*   **Division by Zero:** The opacity calculation includes a small epsilon (`1e-10`) to prevent division by zero when `1 - partial` approaches zero [S1, unofficial].
++*   **Near/Far Plane Boundaries:** The `near` and `far` parameters define the valid depth range; values outside this range produce invalid depth estimates [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Monocular Depth Predictor with Distribution Sampling
+-A sibling method that also uses distribution sampling but may differ in the specific architecture of the predictor or the sampling strategy. Choose this when a monocular prior is integrated directly into the sampling process. [Link](3879-monocular-depth-predictor-with-distribution-sampling.md)
++A sibling method that also uses distribution sampling but may differ in the specific architecture of the predictor or the sampling strategy [S1, unofficial]. Choose this when a monocular prior is integrated directly into the sampling process [Link](3879-monocular-depth-predictor-with-distribution-sampling.md).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the softmax, sigmoid, and sampling operations, which are $O(N)$ where $N$ is the number of depth buckets times the batch/ray dimensions. The gather operations are also $O(N)$.
+-*   **Memory Complexity:** $O(N)$ for storing the PDF, offset, and intermediate tensors.
+-*   **Strengths:** Differentiable end-to-end with PyTorch Autograd; flexible sampling strategies; explicit handling of transmittance-based opacity.
+-*   **Limitations:** Requires careful tuning of `num_depths` and `gaussians_per_pixel`; performance depends on the quality of the underlying feature extractor.
+-*   **When to use:** When differentiable depth prediction is needed for volume rendering or NeRF-based applications.
+-*   **When not to use:** When non-differentiable depth estimation is sufficient, or when hardware constraints prevent large batch sizes.
++Not given in the sources.
+ 
+ ## Background
+-The `DepthPredictor` is part of the `pixelsplat` library, which focuses on differentiable stereo and multi-view reconstruction. It builds on the [Differentiable Depth Function Forward/Backward Pass](1047-differentiable-depth-function-forward-backward-pass.md) to allow gradients to flow through the depth prediction to the decoder parameters and latent code [S1, unofficial]. The method was developed by David Charatan and colleagues as part of the PixelSplat project [S1, unofficial].
++Not given in the sources.
+ 
+ ## Sources

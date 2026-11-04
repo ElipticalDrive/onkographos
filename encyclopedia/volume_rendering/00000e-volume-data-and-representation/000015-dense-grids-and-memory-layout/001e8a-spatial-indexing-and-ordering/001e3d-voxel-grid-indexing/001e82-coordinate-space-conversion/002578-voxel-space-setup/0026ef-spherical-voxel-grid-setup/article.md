@@ -1,0 +1,175 @@
+# Spherical Voxel Grid Setup
+
+Also called: SVR grid setup, Spherical voxel grid, SphericalVoxelGrid Initialization
+
+## Overview
+Spherical Voxel Grid Setup initializes the data structures required for efficient ray casting traversal within a spherical coordinate volume [S1, unofficial]. It computes discretization steps, precomputes trigonometric values, and constructs geometric primitives (line segments) that define voxel boundaries, enabling the `walkSphericalVolume` algorithm to determine ray-voxel intersections [S1, unofficial]. It differs from Cartesian voxel grid setups by operating in an $(r, \theta, \phi)$ coordinate system tailored for egocentric view synthesis, where resolution requirements are anisotropic and radial distances vary significantly [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `num_radial_sections` ($N_r$): Integer count of voxels along the radial axis [S1, unofficial].
+- `num_polar_sections` ($N_p$): Integer count of voxels along the polar axis [S1, unofficial].
+- `num_azimuthal_sections` ($N_a$): Integer count of voxels along the azimuthal axis [S1, unofficial].
+- `min_bound`: `SphereBound` struct containing `radial` ($r_{min}$), `polar` ($\theta_{min}$), and `azimuthal` ($\phi_{min}$) lower bounds [S1, unofficial].
+- `max_bound`: `SphereBound` struct containing `radial` ($r_{max}$), `polar` ($\theta_{max}$), and `azimuthal` ($\phi_{max}$) upper bounds [S1, unofficial].
+- `sphere_center`: 3D Cartesian vector $(x_c, y_c, z_c)$ representing the center of the spherical volume [S1, unofficial].
+
+**Outputs:**
+- A `SphericalVoxelGrid` object containing:
+  - Discretization deltas: `delta_radius_`, `delta_theta_`, `delta_phi_` [S1, unofficial].
+  - Precomputed squared radial deltas: `delta_radii_sq_` (array of size $N_r + 1$) [S1, unofficial].
+  - Precomputed trigonometric values: `polar_trig_values_` (size $N_p + 1$), `azimuthal_trig_values_` (size $N_a + 1$) [S1, unofficial].
+  - Line segment arrays: `P_max_polar_` (size $N_p + 1$), `P_max_azimuthal_` (size $N_a + 1$) [S1, unofficial].
+  - Bound vectors: `center_to_polar_bound_vectors_`, `center_to_azimuthal_bound_vectors_` [S1, unofficial].
+
+**Data Structures:**
+- `SphereBound`:
+  ```cpp
+  struct SphereBound {
+      double radial;
+      double polar;
+      double azimuthal;
+  };
+  ```
+- `LineSegment`:
+  ```cpp
+  struct LineSegment {
+      double P1;
+      double P2;
+  };
+  ```
+- `TrigonometricValues`:
+  ```cpp
+  struct TrigonometricValues {
+      double cosine;
+      double sine;
+  };
+  ```
+
+**Steps:**
+
+1.  **Compute Discretization Deltas:**
+    Calculate the step size for each dimension based on the bounds and section counts [S1, unofficial].
+    $$ \Delta r = \frac{r_{max} - r_{min}}{N_r} $$
+    $$ \Delta \theta = \frac{\theta_{max} - \theta_{min}}{N_p} $$
+    $$ \Delta \phi = \frac{\phi_{max} - \phi_{min}}{N_a} $$
+    Store these as `delta_radius_`, `delta_theta_`, and `delta_phi_` respectively [S1, unofficial].
+
+2.  **Precompute Squared Radial Deltas:**
+    Initialize `delta_radii_sq_` as a vector of size $N_r + 1$ [S1, unofficial]. This array stores the squared distance from the sphere center to the radial voxel boundaries [S1, unofficial]. The values are computed starting from `max_radius` ($r_{max}$) and subtracting `delta_radius_` at each step [S1, unofficial].
+    $$ \text{delta\_radii\_sq\_}[i] = (r_{max} - i \cdot \Delta r)^2 \quad \text{for } i = 0 \dots N_r $$
+    The implementation iterates such that the first element is $r_{max}^2$ and the last is $r_{min}^2$ (effectively $0^2$ if $r_{min}=0$) [S1, unofficial].
+
+3.  **Precompute Trigonometric Values:**
+    Initialize `polar_trig_values_` (size $N_p + 1$) and `azimuthal_trig_values_` (size $N_a + 1$) [S1, unofficial]. These arrays store the sine and cosine of the angular boundaries [S1, unofficial].
+    For polar angles $\theta$:
+    $$ \theta_i = \theta_{min} + i \cdot \Delta \theta \quad \text{for } i = 0 \dots N_p $$
+    $$ \text{polar\_trig\_values\_}[i] = \{ \cos(\theta_i), \sin(\theta_i) \} $$
+    For azimuthal angles $\phi$:
+    $$ \phi_i = \phi_{min} + i \cdot \Delta \phi \quad \text{for } i = 0 \dots N_a $$
+    $$ \text{azimuthal\_trig\_values\_}[i] = \{ \cos(\phi_i), \sin(\phi_i) \} $$
+
+4.  **Compute Max Radius Line Segments:**
+    Initialize `P_max_polar_` and `P_max_azimuthal_` arrays using `initializeMaxRadiusLineSegments` [S1, unofficial]. These line segments represent the intersection points of the radial voxel boundaries with the maximum radius sphere in the polar and azimuthal planes, respectively [S1, unofficial]. For each section $i$, the line segment endpoints $P1$ and $P2$ are derived from the sphere center and the precomputed trigonometric values scaled by `sphere_max_radius_` ($r_{max}$) [S1, unofficial]. Specifically, the code notes that `sphere_max_radius_` is set to `max_bound.radial` [S1, unofficial].
+
+5.  **Compute Bound Vectors:**
+    Calculate `center_to_polar_bound_vectors_` and `center_to_azimuthal_bound_vectors_` by subtracting the $P_{max}$ coordinates from `sphere_center` [S1, unofficial]. These vectors are used to translate the line segment calculations relative to the sphere's center in Cartesian space [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+from dataclasses import dataclass
+from typing import List, Dict, Tuple
+
+@dataclass
+class LineSegment:
+    P1: float
+    P2: float
+
+@dataclass
+class SphericalVoxelGrid:
+    delta_radius_: float
+    delta_theta_: float
+    delta_phi_: float
+    delta_radii_sq_: List[float]
+    polar_trig_values_: List[Dict[str, float]]
+    azimuthal_trig_values_: List[Dict[str, float]]
+    P_max_polar_: List[LineSegment]
+    P_max_azimuthal_: List[LineSegment]
+    center_to_polar_bound_vectors_: List[Tuple[float, float, float]]
+    center_to_azimuthal_bound_vectors_: List[Tuple[float, float, float]]
+    sphere_center_: Tuple[float, float, float]
+
+def setup_spherical_voxel_grid(num_radial_sections: int, num_polar_sections: int, num_azimuthal_sections: int,
+                               min_bound: Dict[str, float], max_bound: Dict[str, float],
+                               sphere_center: Tuple[float, float, float]) -> SphericalVoxelGrid:
+    # 1. Compute Discretization Deltas [S1, unofficial]
+    delta_radius_ = (max_bound['radial'] - min_bound['radial']) / num_radial_sections
+    delta_theta_ = (max_bound['polar'] - min_bound['polar']) / num_polar_sections
+    delta_phi_ = (max_bound['azimuthal'] - min_bound['azimuthal']) / num_azimuthal_sections
+
+    # 2. Precompute Squared Radial Deltas [S1, unofficial]
+    delta_radii_sq_ = []
+    current_r = max_bound['radial']
+    for _ in range(num_radial_sections + 1):
+        delta_radii_sq_.append(current_r * current_r)
+        current_r -= delta_radius_
+
+    # 3. Precompute Trigonometric Values [S1, unofficial]
+    polar_trig_values_ = []
+    for i in range(num_polar_sections + 1):
+        theta = min_bound['polar'] + i * delta_theta_
+        polar_trig_values_.append({'cosine': math.cos(theta), 'sine': math.sin(theta)})
+
+    azimuthal_trig_values_ = []
+    for i in range(num_azimuthal_sections + 1):
+        phi = min_bound['azimuthal'] + i * delta_phi_
+        azimuthal_trig_values_.append({'cosine': math.cos(phi), 'sine': math.sin(phi)})
+
+    # 4. Compute Max Radius Line Segments [S1, unofficial]
+    # Source does not provide the exact geometric formula for initializeMaxRadiusLineSegments [S1, unofficial].
+    # It computes line segment endpoints using sphere_center, sphere_max_radius_, and trig values.
+    P_max_polar_ = [LineSegment(P1=0.0, P2=0.0) for _ in range(num_polar_sections + 1)]
+    P_max_azimuthal_ = [LineSegment(P1=0.0, P2=0.0) for _ in range(num_azimuthal_sections + 1)]
+
+    # 5. Compute Bound Vectors [S1, unofficial]
+    center_to_polar_bound_vectors_ = []
+    for seg in P_max_polar_:
+        center_to_polar_bound_vectors_.append((sphere_center[0] - seg.P1, sphere_center[1] - seg.P2, sphere_center[2]))
+    center_to_azimuthal_bound_vectors_ = []
+    for seg in P_max_azimuthal_:
+        center_to_azimuthal_bound_vectors_.append((sphere_center[0] - seg.P1, sphere_center[1] - seg.P2, sphere_center[2]))
+
+    return SphericalVoxelGrid(
+        delta_radius_=delta_radius_, delta_theta_=delta_theta_, delta_phi_=delta_phi_,
+        delta_radii_sq_=delta_radii_sq_, polar_trig_values_=polar_trig_values_,
+        azimuthal_trig_values_=azimuthal_trig_values_, P_max_polar_=P_max_polar_,
+        P_max_azimuthal_=P_max_azimuthal_, center_to_polar_bound_vectors_=center_to_polar_bound_vectors_,
+        center_to_azimuthal_bound_vectors_=center_to_azimuthal_bound_vectors_, sphere_center_=sphere_center
+    )
+```
+
+**Edge Cases and Pitfalls:**
+- The grid coordinate system uses polar and azimuthal angles within the range $[0, 2\pi]$ [S1, unofficial]. A TODO in the source indicates a potential future update to change the polar grid range to $[0, \pi]$ [S1, unofficial]. Implementers should be aware of this current convention [S1, unofficial].
+- `sphere_max_radius_` is currently set to `max_bound.radial` [S1, unofficial]. If the volume is not centered at the origin or if `min_bound.radial` is not 0, the radial deltas still span the full range $[r_{min}, r_{max}]$, but the trigonometric and line segment calculations rely on `sphere_max_radius_` for the outer boundary geometry [S1, unofficial].
+
+## Subtopics
+
+### [Balanced Spherical Grid](3942-balanced-spherical-grid.md)
+Uses two complementary spherical grids (Yin and Yang) with exponential radial scaling to maintain uniform cell aspect ratios, handling anisotropic resolution requirements for panoramic imagery.
+
+## Operating characteristics
+- **Time Complexity:** The setup phase is $O(N_r + N_p + N_a)$ due to the linear precomputation of deltas, trigonometric values, and line segments [S1, unofficial].
+- **Memory Complexity:** $O(N_r + N_p + N_a)$ to store the precomputed arrays [S1, unofficial].
+- **Strengths:** Precomputing trigonometric values and squared radial deltas significantly accelerates the ray casting traversal (`walkSphericalVolume`) by avoiding repeated expensive function calls during rendering [S1, unofficial].
+- **Limitations:** The current implementation uses a fixed angular range of $[0, 2\pi]$ for polar angles, which may not align with standard spherical coordinate conventions ($[0, \pi]$) and may require updates [S1, unofficial].
+- **Usage:** Designed for egocentric view synthesis where the camera is at the center of the spherical volume [S1, unofficial].
+
+## Background
+The Spherical Voxel Grid Setup is part of the Spherical Volume Rendering (SVR) algorithm, developed for efficient rendering of radiance fields in egocentric view synthesis [S1, unofficial]. It addresses the inefficiencies of Cartesian grids when dealing with panoramic imagery, where resolution requirements vary with distance and angle [S1, unofficial]. The method was introduced in the `spherical-volume-rendering/svr-algorithm` repository [S1, unofficial].
+
+## Sources
+[S1] spherical-volume-rendering/svr-algorithm, https://github.com/spherical-volume-rendering/svr-algorithm, fetched 2026-10-24 (unofficial)

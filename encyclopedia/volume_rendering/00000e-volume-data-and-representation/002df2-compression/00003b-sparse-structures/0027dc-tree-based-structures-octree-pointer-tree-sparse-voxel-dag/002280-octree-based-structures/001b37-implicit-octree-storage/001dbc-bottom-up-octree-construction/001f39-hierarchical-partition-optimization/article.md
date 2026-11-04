@@ -1,0 +1,153 @@
+# Hierarchical Partition Optimization
+
+Also called: Bottom-up Lagrangian optimization, Dynamic programming for hierarchical partitions, Offline optimization setup, Preprocessing Algorithm
+
+## Overview
+Hierarchical Partition Optimization is an offline preprocessing algorithm that constructs an optimal adaptive-resolution hierarchical partition and assigns extraction methods to its nodes, balancing memory consumption against expected extraction time [S1, unofficial]. It solves the problem of finding a partition that minimizes a global Lagrangian cost function under a memory constraint [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input:** A 3D scalar volume dataset, a set of $m$ candidate extraction methods, a minimal block size parameter (e.g., $2 \times 2 \times 2$), a sequence of Lagrange multipliers, and a resolution parameter $\delta$ [S1, unofficial].
+- **Output:** An optimal hierarchical partition $P^*$ and an assignment vector $A^*$ mapping each leaf node to one of the $m$ methods [S1, unofficial].
+
+**Data Structures**
+- **Maximal Partition Tree ($P_{max}$):** A full partitioning tree where leaf nodes correspond to the minimal block size [S1, unofficial]. Each node $\nu$ represents a spatial block $B_\nu$ [S1, unofficial].
+- **Cost Estimates:** For every node $\nu$ and method $a \in \{1, \dots, m\}$, precomputed values for $M(B_\nu, a)$ (required memory space) and $E[T(B_\nu, a, t)]$ (expected extraction time at isovalue $t$) [S1, unofficial].
+- **Overhead Parameters:** $\Delta M$ (additional storage space to indicate that $B_\nu$ is partitioned) and $\Delta E[T](\nu)$ (expected time to check node $\nu$ during extraction) [S1, unofficial].
+
+**Formulas**
+The global Lagrangian cost function is [S1, unofficial]:
+$$ J_\lambda(P, A) := E[T(P, A, t)] + \lambda \cdot M(P, A) $$
+The local Lagrangian cost at node $\nu$ is [S1, unofficial]:
+$$ J_\lambda(P_\nu, A_\nu) := E[T(P_\nu, A_\nu, t)] + \lambda \cdot M(P_\nu, A_\nu) $$
+Let $P_{\nu 0}$ denote the trivial partition at node $\nu$ (only one block, $B_\nu$ itself) [S1, unofficial]. The optimal local cost at node $\nu$ is computed recursively [S1, unofficial]:
+$$ \min_{P_\nu, A_\nu} J_\lambda(P_\nu, A_\nu) = \min \left( \min_{a=1,\dots,m} J_\lambda(P_{\nu 0}, (a)), \; \Delta E[T](\nu) + \lambda \Delta M + \sum_{\mu \in \text{children}(\nu)} \min_{P_\mu, A_\mu} J_\lambda(P_\mu, A_\mu) \right) $$
+The first term handles the case where the volume is not further partitioned; the second term handles the partitioned case [S1, unofficial].
+
+**Steps**
+1. Read volume data [S1, unofficial].
+2. Build the full partitioning tree $P_{max}$ using a minimal block size (e.g., $2 \times 2 \times 2$) for the termination criterion at leaf nodes [S1, unofficial].
+3. For all nodes $\nu$ and methods $a = 1, \dots, m$, estimate the required space $M(B_\nu, a)$ and the expected extraction time $E[T(B_\nu, a, t)]$ [S1, unofficial].
+4. Choose a sequence of Lagrange multipliers $(\lambda_i)$ with $0 < \lambda_1 < \lambda_2 < \dots < \lambda_l$. Also choose a resolution parameter $\delta > 0$ [S1, unofficial].
+5. For each $\lambda_i$, run the bottom-up Lagrangian optimization and obtain the optimal partition $P^*_{\lambda_i}$, the assignment vector $A^*_{\lambda_i}$, and the required space $M(P^*_{\lambda_i}, A^*_{\lambda_i})$ [S1, unofficial].
+6. Insert more $\lambda$-values and repeat Step 5 to ensure that $M(P^*_{\lambda_i}, A^*_{\lambda_i}) / M(P^*_{\lambda_{i+1}}, A^*_{\lambda_{i+1}}) \le 1 + \delta$ for all $i$ [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hierarchical_partition_optimization(volume, methods, min_block_size, delta):
+    # Step 1 & 2: Build maximal tree
+    # Sources do not specify tree construction details; standard recursive subdivision to min_block_size [G]
+    P_max = build_full_octree(volume, min_block_size)
+
+    # Step 3: Estimate costs for all nodes and methods
+    # Sources do not specify cost estimation; implement domain-specific models [G]
+    M = {}
+    E = {}
+    for node in P_max.all_nodes():
+        for method in methods:
+            M[node][method] = estimate_memory(node.block, method)
+            E[node][method] = estimate_time(node.block, method)
+
+    # Precompute overheads for partitioning
+    Delta_M = 0.0  # Additional storage space to indicate a split [S1, unofficial]
+    Delta_E_T = 0.0  # Expected time to check a node during extraction [S1, unofficial]
+
+    # Step 4: Choose lambda sequence
+    # Sources do not specify sequence generation; use a logarithmic or linear sweep [G]
+    lambdas = generate_lambda_sequence()
+
+    results = []
+
+    # Step 5 & 6: Iterate and refine
+    for lam in lambdas:
+        optimal_costs = {}
+        optimal_assignments = {}
+
+        for node in P_max.bottom_up_order():
+            # Option 1: Trivial partition (no split)
+            best_triv_cost = float('inf')
+            best_triv_method = None
+            for method in methods:
+                cost = E[node][method] + lam * M[node][method]
+                if cost < best_triv_cost:
+                    best_triv_cost = cost
+                    best_triv_method = method
+
+            # Option 2: Partition (split into children)
+            if node.is_leaf():
+                best_part_cost = float('inf')
+            else:
+                sum_children_costs = 0
+                for child in node.children:
+                    sum_children_costs += optimal_costs[child]
+                best_part_cost = Delta_E_T + lam * Delta_M + sum_children_costs
+
+            if best_triv_cost <= best_part_cost:
+                optimal_costs[node] = best_triv_cost
+                optimal_assignments[node] = ('trivial', best_triv_method)
+            else:
+                optimal_costs[node] = best_part_cost
+                optimal_assignments[node] = ('partition', None)
+
+        total_memory = compute_total_memory(P_max, optimal_assignments)
+        results.append((lam, total_memory, optimal_assignments))
+
+    refined_lambdas = refine_lambda_sequence(results, delta)
+    final_result = run_optimization_with_lambdas(P_max, M, E, Delta_M, Delta_E_T, refined_lambdas)
+
+    return final_result.optimal_partition, final_result.optimal_assignment
+
+# Helper definitions
+def build_full_octree(volume, min_block_size):
+    # Standard recursive subdivision until block dimensions <= min_block_size [G]
+    pass
+
+def estimate_memory(block, method):
+    # Domain-specific memory cost model [G]
+    pass
+
+def estimate_time(block, method):
+    # Domain-specific time cost model [G]
+    pass
+
+def generate_lambda_sequence():
+    # Standard sweep strategy (e.g., logarithmic) [G]
+    pass
+
+def compute_total_memory(tree, assignments):
+    # Recursively sum M[node][method] for trivial nodes, or children's memory for partition nodes [G]
+    pass
+
+def refine_lambda_sequence(results, delta):
+    # Insert new lambdas between existing ones where memory ratio > 1 + delta [G]
+    pass
+
+def run_optimization_with_lambdas(tree, M, E, Delta_M, Delta_E_T, lambdas):
+    # Re-runs the main loop with refined lambdas and returns final partition/assignment [G]
+    pass
+```
+
+**Edge Cases and Pitfalls**
+- **Precision:** The comparison between trivial and partition costs must handle floating-point precision issues, especially when $\lambda$ is small [G].
+- **Boundary Conditions:** The minimal block size must be chosen such that it is smaller than any meaningful feature in the volume, otherwise the tree cannot refine sufficiently [G].
+- **Degenerate Input:** If the volume is uniform, the trivial partition will always be optimal for any $\lambda > 0$ [G].
+
+## Subtopics
+
+### [Restricted Adjacency Merging](3556-restricted-adjacency-merging.md)
+Restricted Adjacency Merging is a strategy for merging extracted isosurface components from adjacent spatial blocks in sparse volume rendering. It solves the problem of inefficiently merging blocks that do not share a true geometric boundary by restricting merges to only those blocks (brothers or nephews) that are adjacent in space.
+
+## Operating characteristics
+- **Time Complexity:** The preprocessing phase runs in $O(N \cdot m \cdot L)$, where $N$ is the number of nodes in $P_{max}$, $m$ is the number of methods, and $L$ is the number of Lagrange multipliers [S1, unofficial]. Each node is processed once per lambda value.
+- **Memory Complexity:** $O(N \cdot m)$ to store cost estimates and optimal assignments [S1, unofficial].
+- **Performance:** The method is designed for offline use. The preprocessing needs to be executed only once and can be carried out offline. Results can be stored to a file and used multiple times for different memory constraints [S1, unofficial].
+- **Strengths:** Provides an optimal trade-off between memory and time for a given $\lambda$. Can handle multiple extraction methods simultaneously [S1, unofficial].
+- **Limitations:** Requires prior knowledge of memory and time costs for all blocks and methods. The bottom-up approach assumes that the optimal solution for a node depends only on the optimal solutions of its children (Principle of Optimality) [S1, unofficial].
+
+## Background
+Hierarchical Partition Optimization was introduced in the context of optimal hybrid memory-constrained isosurface extraction [S1, unofficial]. It uses dynamic programming to solve the global Lagrangian optimization problem for hierarchical partitions [S1, unofficial]. The method relies on the Principle of Optimality, which states that the subtree rooted at any node in the optimal partition, together with the method assignment vector attached to the leaf nodes, provides the solution of the local Lagrangian optimization problem relative to that node [S1, unofficial].
+
+## Sources
+[S1] Optimal hybrid memory constrained isosurface extraction, http://nbn-resolving.de/urn:nbn:de:bsz:352-130091, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,216 @@
+Facilitating a reasonable and accurate physical description of light in the presence of real-time constraints has always been the driver of work in the field of interactive computer graphics. For me, what makes voxel cone tracing so intriguing is the combination of a less canonical data structure (i.e., the voxel representation) as the center point…
+
+Global Illumination Using Voxel Cone Tracing – Andrew Pham
+Skip to content
+Andrew Pham
+Cone Tracing, Global Illumination, GPU, Real-Time Rendering, Voxels
+July 29, 2019July 4, 2020
+Facilitating a reasonable and accurate physical description of light in the presence of real-time constraints has always been the driver of work in the field of interactive computer graphics. For me, what makes voxel cone tracing so intriguing is the combination of a less canonical data structure (i.e., the voxel representation) as the center point of the technique and the insight to extrapolate from something different than ray tracing (i.e., cone tracing) to describe that additional light bounce in real-time rendering scenarios. The Tomorrow Children was able to achieve somewhere around 30 frames in an era when PS4 games and static precomputations driving PBR reign supreme.
+The idea behind Cyril Crassin’s paper is simple: convert a scene into a voxel representation in which we bake view-independent direct illumination data that will be used in subsequent determinations of indirect illumination. This is a key thing to note. We are essentially determining that radiance from the additional light bounce—as in the light contribution to our pixel not from the light directly—by storing the effect of the light on the surfaces that are relevant to our pixel in question. If you understand that, then you’ll understand that we can also store self-emission data from emissive materials that will later translate into direct illumination from said materials—and potentially bake other useful data as well.
+Next, we mipmap the 3D voxel texture so that we can sample it later when we ray march it during the render pass. Finally, we perform cone traces in screen space to determine the indirect diffuse and indirect specular lighting contributions to our pixel. In my implementation, I also choose to calculate the direct diffuse illumination from cone tracing.
+Voxel cone tracing offers several advantages compared to other state-of-the-art techniques. For one, we avoid costly precomputation steps, which isn’t that big an issue, but some people don’t like loading screens, so here we are. It also does well with dynamic scenes due to a voxelization scheme that is more amenable to performance than normal scene data with polygonal meshes. We get ambient occlusion for free with all the cone tracing and light bouncing. It has incredible upside in that we can include second order bounces (and more) if we need to and calibrate the correct data to be stored in our structure.
+With that out of the way, let’s walk through each step of the algorithm in more detail.
+Voxelization and Direct/Self-Emissive Light Injection Pass
+The first thing we do is create a voxel representation of the scene geometry. We do that by using shaders to perform that conversion from a scene consisting of triangle meshes to our representation. While the paper describes using a dynamic sparse voxel octree to represent the scene, I decided to opt for favorable cache locality during ray marching and something that lends itself well to the texture filtering hardware on the GPU over strictly reducing GPU memory usage. A regular grid or 3D texture suffices for demonstration purposes, but I may have to revisit that assertion later.
+There are several things to keep in mind about this process. Conceptually, we are rasterizing a world-space primitive using a viewport of the same dimensions as one of the sides of the voxel grid (i.e., a predetermined voxel texture resolution, which is 64 x 64 in our case). The crux move is to leverage the fixed-function rasterization hardware so that there is a corresponding color calculation for a voxel for each fragment shader invocation.
+```
+in vec3 WorldPos;
+// ...
+layout (RGBA8) uniform image3D gTexture3D;
+
+// ...
+
+bool isInsideUnitCube()
+{
+    return abs(WorldPos.x) < 1.0f && abs(WorldPos.y) < 1.0f && abs(WorldPos.z) < 1.0f;
+}
+
+void main()
+{
+    if (!isInsideUnitCube())
+    {
+        return;
+    }
+
+    // ...
+
+    vec3 position = WorldPos * 0.5f + 0.5f;
+    imageStore(gTexture3D, ivec3(imageSize(gTexture3D) * position), vec4(vec3(color), 1.0f));
+}
+```
+Additionally, we want to disable writes to the framebuffer because we only care about writing to our 3D texture in a highly parallelized fashion. The setup looks like this:
+```
+glBindFramebuffer(GL_FRAMEBUFFER, 0);
+_voxelizeShader->use();
+
+glViewport(0, 0, _voxelTextureRes, _voxelTextureRes);
+
+glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+glDisable(GL_CULL_FACE);
+glDisable(GL_DEPTH_TEST);
+glDisable(GL_BLEND);
+
+_voxelTexture->bind(*_voxelizeShader, phoenix::G_TEXTURE_3D, 0);
+glBindImageTexture(0, _voxelTexture->_textureID, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA8);
+
+scene->_pointLight->setUniforms(*_voxelizeShader);
+
+renderMeshes(scene->_meshes, *_voxelizeShader);
+glGenerateMipmap(GL_TEXTURE_3D);
+
+glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+```
+The voxelization vertex shader isn’t anything fancy; we’re just transforming the vertices to world space and passing them to the geometry shader. As for the geometry shader itself, the reason that we need one is so we can select the axis that presents the primitive in the most visible way to prevent artifacts that appear as cracks between voxels.
+```
+#version 460 core
+layout (triangles) in;
+layout (triangle_strip, max_vertices = 3) out;
+
+in vec3 WorldPosGS[];
+in vec3 WorldNormalGS[];
+
+out vec3 WorldPos;
+out vec3 WorldNormal;
+
+void main()
+{
+    // Plane normal
+    const vec3 N = abs(cross(WorldPosGS[1] - WorldPosGS[0], WorldPosGS[2] - WorldNormalGS[0]));
+    for (int i = 0; i < 3; ++i)
+    {
+        WorldPos = WorldPosGS[i];
+        WorldNormal = WorldNormalGS[i];
+        if (N.z > N.x && N.z > N.y)
+        {
+            gl_Position = vec4(WorldPos.x, WorldPos.y, 0.0f, 1.0f);
+        }
+        else if (N.x > N.y && N.x > N.z)
+        {
+            gl_Position = vec4(WorldPos.y, WorldPos.z, 0.0f, 1.0f);
+        }
+        else
+        {
+            gl_Position = vec4(WorldPos.x, WorldPos.z, 0.0f, 1.0f);
+        }
+        EmitVertex();
+    }
+    EndPrimitive();
+}
+```
+For each vertex on the triangle primitive, we pass its world position to the fragment shader and use that information to index into our regular grid data structure, as shown above.
+As for what data to inject into our texture, there are many ways to skin a carrot. I personally decided to incorporate the material’s data, passed in as uniform values from the CPU, and used it as a correction factor in the calculation of diffuse lighting, which I store. The diffuse lighting itself is determined by the usual light intensity and color uniform values, the Lambertian factor, and the attenuation based on additional values passed in from the application. There is no notion of view-dependence during our voxelization process, so we save those specular calculations for our render pass.
+After baking our meshes and the associated illumination into our 3D texture, we have OpenGL generate a mipmap on that texture. This will facilitate the ideal hardware texture filtering for us and allow us to efficiently ray march and sample the structure, which we will do next.
+Cone Tracing Pass
+Notice the reflection of Happy Buddha on Suzanne, albeit quite voxelized.
+Cone tracing isn’t dissimilar from standard ray tracing, and in this implementation we operate with respect to each point in world space as we trace a number of samples to estimate the radiance for each such point.
+The idea behind cone tracing is simple: we can compute the incoming spectral radiance by ray marching the mipmapped 3D texture and then accumulate those values to determine the outgoing spectral radiance for a given point. Essentially, the indirect diffuse contribution to the overall output of the rendering equation is approximated by outward cone traces with respect to a given point and some uniform correction factors (not shown in the code snippet below). We only trace a single cone in the direction of the reflection using a supplied aperture for the indirect specular lighting. The aperture is a crucial input to the cone tracing function that will allow us to calibrate the amount of reflection and specular effect as an approximation of the roughness of the material.
+```
+vec3 calcIndirectDiffuseLighting()
+{
+    vec3 T = cross(N, vec3(0.0f, 1.0f, 0.0f));
+    vec3 B = cross(T, N);
+
+    vec3 Lo = vec3(0.0f);
+
+    float aperture = PI / 3.0f;
+    vec3 direction = N;
+    Lo += coneTrace(direction, aperture);
+    direction = 0.7071f * N + 0.7071f * T;
+    Lo += coneTrace(direction, aperture);
+    // Rotate the tangent vector about the normal using the 5th roots of unity to obtain the subsequent diffuse cone directions
+    direction = 0.7071f * N + 0.7071f * (0.309f * T + 0.951f * B);
+    Lo += coneTrace(direction, aperture);
+    direction = 0.7071f * N + 0.7071f * (-0.809f * T + 0.588f * B);
+    Lo += coneTrace(direction, aperture);
+    direction = 0.7071f * N - 0.7071f * (-0.809f * T - 0.588f * B);
+    Lo += coneTrace(direction, aperture);
+    direction = 0.7071f * N - 0.7071f * (0.309f * T - 0.951f * B);
+    Lo += coneTrace(direction, aperture);
+
+    return Lo / 6.0f;
+}
+
+vec3 calcIndirectSpecularLighting()
+{
+    return coneTrace(R, gMaterial._aperture);
+}
+```
+As for the cone tracing itself, we blend samples of the 3D voxel texture until we reach an accumulated opacity of around 1 (this can be calibrated) for the incoming spectral radiance value that we wish to calculate. We definitely want to initialize the starting position of our ray marching routine to be a slight offset from the world position that we’re interested in; we want to avoid sampling the self-emission and direct illumination associated with that point twice, which we will incorporate elsewhere.
+Where does the cone in cone tracing fit in all of this? Well, given some distance from our starting position, we want to determine the diameter of the base of our cone at that point during our ray marching procedure. This diameter is going to serve as a proxy for how large of an area we need to sample and accumulate color from. This is where the mipmapping comes in. Essentially, when we sample a higher mipmap level on a given point, the effect is akin to sampling a larger area due to the automatic filtering of values in the subsequent mipmap levels. What this means is that the automatic texture filtering already did most of the work for us, and the samples for a given cone base with a certain diameter can be quickly obtained by specifying the corresponding mip level and having the hardware trilinearly interpolate a value for us at that given point during our ray marching.
+```
+vec3 coneTrace(vec3 direction, float aperture)
+{
+    vec3 start = WorldPos + VOXEL_OFFSET_CORRECTION_FACTOR * VOXEL_SIZE * N;
+
+    vec4 Lv = vec4(0.0f);
+
+    float tanHalfAperture = tan(aperture / 2.0f);
+    float tanEighthAperture = tan(aperture / 8.0f);
+    float stepSizeCorrectionFactor = (1.0f + tanEighthAperture) / (1.0f - tanEighthAperture);
+    float step = stepSizeCorrectionFactor * VOXEL_SIZE / 2.0f;
+
+    float distance = step;
+
+    for (int i = 0; i < NUM_STEPS && Lv.a <= 0.9f; ++i)
+    {
+        vec3 position = start + distance * direction;
+        if (!isInsideUnitCube(position))
+        {
+            break;
+        }
+        position = position * 0.5f + 0.5f;
+
+        float diameter = 2.0f * tanHalfAperture * distance;
+        float mipLevel = log2(diameter / VOXEL_SIZE);
+        vec4 LvStep = 100.0f * step * textureLod(gTexture3D, position, mipLevel);
+        if (LvStep.a > 0.0f)
+        {
+            LvStep.rgb /= LvStep.a;
+            // Alpha blending
+            Lv.rgb += (1.0f - Lv.a) * LvStep.a * LvStep.rgb;
+            Lv.a += (1.0f - Lv.a) * LvStep.a;
+        }
+        distance += step;
+    }
+    return Lv.rgb;
+}
+```
+From here on out, it’s pretty simple to add the direct lighting contributions along with any potential emissive colors. As mentioned previously, I decided to also calculate the direct diffuse contribution with a single cone trace, but this isn’t strictly necessary. I’ll leave it up to you to decide how you want to interpret your data to render the sublime effects that you desire.
+And that just about wraps it up!
+Potential Optimizations
+I wrote a little bit about sparse voxel octrees, but one thing to note is that The Tomorrow Children utilized something called the voxel cascade as its voxel representation. This article does a much better job describing the data structure, but the idea is to store different levels of voxels in different 3D textures, each of which has the same resolution as the others, but different dimensions. Similar to how cascaded shadow maps work, we can achieve a finer resolution and better distillation of volumetric data for the meshes that are up close and represent things that are farther away in a coarse manner.
+But the real secret sauce is that they update each cascade at different rates, with the closest ones getting updated more frequently. Definitely something to think about.
+Resources
+Cyril Crassin’s Interactive Indirect Illumination Using Voxel Cone Tracing
+Graphics Deep Dive: Cascaded voxel cone tracing in The Tomorrow Children
+Share this:
+Share on X (Opens in new window)
+X
+Share on Facebook (Opens in new window)
+Facebook
+Like Loading...
+Related
+Tagged
+Cone Tracing
+Global Illumination
+GPU
+Real-Time Rendering
+Voxels
+Published
+July 29, 2019July 4, 2020
+Leave a Reply Cancel reply
+Comment
+Reblog
+Subscribe
+Subscribed
+Andrew Pham
+Have a WordPress.com account? Log in now.
+Andrew Pham
+Copy shortlinkView post in Reader
+Manage subscriptionsSign upLog in
+Report this content
+Collapse this bar
+Loading Comments...
+%d
+Create your own website, free on WordPress.com.Create your own website.
+Start free

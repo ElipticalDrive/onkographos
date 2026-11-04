@@ -1,0 +1,124 @@
+# Multi-dimensional Style Transfer Function (2D)
+
+Also called: 2D Style Transfer Function, 2D Transfer Function
+
+## Overview
+This method extends the Style Transfer Function (1D) approach to map two input attributes, such as data value and gradient magnitude, to visual styles using a two-dimensional domain [S1][S2, unofficial]. It allows for finer control and more sophisticated visualization by leveraging the joint distribution of attributes, distinguishing it from the single-attribute mapping of its parent [S3]. Unlike standard 2D transfer functions that map directly to color/opacity, this method interpolates between discrete styles defined in a style function texture [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Two normalized input attributes $(u, v)$ (e.g., data value and gradient magnitude), and the eye-space normal components $(n_x, n_y)$.
+*   **Outputs:** Final color $(r, g, b)$ and opacity $\alpha_d$.
+
+**Data Structures:**
+1.  **Transfer Function Texture (tfTex):** A 2D texture storing two indices $(i_x, i_y)$ instead of a single index $i$.
+    *   $i_x$ increases along the horizontal axis.
+    *   $i_y$ increases along the vertical axis.
+    *   Layout: Each texel contains the pair $(i_x, i_y)$ corresponding to the input coordinates $(u, v)$.
+2.  **Index Function Texture (ift):** A 2D texture mapping style indices.
+    *   Width: Maximum number of horizontal style nodes in the 2D transfer function.
+    *   Height: Maximum number of vertical style nodes.
+    *   Layout: Each texel stores a single integer style index $j$.
+3.  **Style Function Texture (sft):** A 3D texture (or 2D texture with index dimension) storing the visual styles.
+    *   Dimensions: $(n_x, n_y, j)$, where $n_x, n_y$ are normal components and $j$ is the style index.
+    *   Layout: Each texel stores a color $(r, g, b)$ and opacity $\alpha_d$.
+
+**Steps:**
+1.  **Map Inputs to Indices:** Convert the input attributes $(u, v)$ into continuous texture coordinates $(i_x, i_y)$ for the transfer function texture. The specific mapping depends on the domain of the attributes (e.g., normalized to $[0, 1]$).
+2.  **Compute Grid Indices:** Calculate the integer grid coordinates for bilinear interpolation:
+    $$ i_{x0} = \lfloor i_x \rfloor, \quad i_{y0} = \lfloor i_y \rfloor $$
+    $$ i_{x1} = i_{x0} + 1, \quad i_{y1} = i_{y0} + 1 $$
+3.  **Compute Interpolation Weights:**
+    $$ w_x = i_x - i_{x0} $$
+    $$ w_y = i_y - i_{y0} $$
+4.  **Lookup Style Indices:** Perform four lookups into the index function texture `ift` to retrieve the style indices at the corners of the grid cell:
+    $$ j_{00} = \text{ift}(i_{x0}, i_{y0}) $$
+    $$ j_{10} = \text{ift}(i_{x1}, i_{y0}) $$
+    $$ j_{01} = \text{ift}(i_{x0}, i_{y1}) $$
+    $$ j_{11} = \text{ift}(i_{x1}, i_{y1}) $$
+5.  **Lookup Styles:** Perform four lookups into the style function texture `sft` using the eye-space normal components $(n_x, n_y)$ and the retrieved style indices:
+    $$ C_{00} = \text{sft}(n_x, n_y, j_{00}) $$
+    $$ C_{10} = \text{sft}(n_x, n_y, j_{10}) $$
+    $$ C_{01} = \text{sft}(n_x, n_y, j_{01}) $$
+    $$ C_{11} = \text{sft}(n_x, n_y, j_{11}) $$
+    Where each $C$ is a vector $(r, g, b, \alpha_d)$.
+6.  **Bilinear Interpolation:** Compute the final color and opacity by bilinearly interpolating the four style vectors:
+    $$ C_{final} = \left( C_{00} \cdot (1 - w_x) + C_{10} \cdot w_x \right) \cdot (1 - w_y) + \left( C_{01} \cdot (1 - w_x) + C_{11} \cdot w_x \right) \cdot w_y $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def style_transfer_2d(u, v, nx, ny, tfTex, ift, sft):
+    # 1. Map input attributes to transfer function texture coordinates
+    # Note: The exact mapping from (u, v) to (ix, iy) depends on the 
+    # specific attribute domains and normalization. 
+    # Assuming u, v are already normalized to [0, 1] relative to the 
+    # transfer function texture dimensions.
+    ix = u * tfTex.width
+    iy = v * tfTex.height
+
+    # 2. Compute grid indices
+    ix0 = floor(ix)
+    iy0 = floor(iy)
+    ix1 = ix0 + 1
+    iy1 = iy0 + 1
+
+    # 3. Compute interpolation weights
+    wx = ix - ix0
+    wy = iy - iy0
+
+    # 4. Lookup style indices from index function texture
+    j00 = ift[ix0, iy0]
+    j10 = ift[ix1, iy0]
+    j01 = ift[ix0, iy1]
+    j11 = ift[ix1, iy1]
+
+    # 5. Lookup styles from style function texture
+    c00 = sft[nx, ny, j00]
+    c10 = sft[nx, ny, j10]
+    c01 = sft[nx, ny, j01]
+    c11 = sft[nx, ny, j11]
+
+    # 6. Bilinear interpolation
+    # Interpolate along x-axis
+    c_x0 = c00 * (1 - wx) + c10 * wx
+    c_x1 = c01 * (1 - wx) + c11 * wx
+
+    # Interpolate along y-axis
+    c_final = c_x0 * (1 - wy) + c_x1 * wy
+
+    return c_final
+```
+
+**Parameters:**
+*   **Input Attributes:** Common choices are data value and gradient magnitude [S1][S2, unofficial][S3]. Other attributes include object identifier, distance, saliency, or importance [S1][S2, unofficial].
+*   **Axis Mapping:** Horizontal axis typically maps to data values; vertical axis typically maps to gradient magnitudes [S3].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** If $i_x$ or $i_y$ exceed the texture bounds, clamping or wrapping must be applied. The sources do not specify the default behavior.
+*   **Opacity Correction:** When using fewer slices or changing the sampling rate $s$ from a reference rate $s_0$, the opacity must be scaled to maintain overall intensity. The formula is provided in [S3] but not explicitly detailed in the notes for the 2D case. [G: Typically, opacity is scaled by $s/s_0$ or similar factor depending on the integration method].
+*   **Normal Components:** The method requires eye-space normal components $(n_x, n_y)$. These must be computed from the volume gradient and transformed to eye space before lookup.
+
+## Subtopics
+
+### Mip-Mapping for Style Functions
+Optimizes the lookup of the style function texture by using mipmaps to reduce aliasing and improve performance. [Mip-Mapping for Style Functions](782-mip-mapping-for-style-functions.md)
+
+### GPU Implementation of Style Transfer Function Lookup
+Details the efficient implementation of the lookup process on the GPU, leveraging texture units and fragment shaders. [GPU Implementation of Style Transfer Function Lookup](5389-gpu-implementation-of-style-transfer-function-lookup.md)
+
+## Operating characteristics
+*   **Time Complexity:** The lookup involves a constant number of texture accesses (4 for `ift`, 4 for `sft`) and simple arithmetic operations. It is independent of the number of style nodes.
+*   **Memory Complexity:** Requires storage for the 2D transfer function texture, the 2D index function texture, and the 3D style function texture. The size of the index function texture is determined by the number of style nodes.
+*   **Performance:** Measured on an AMD Athlon 64 X2 Dual 4600+ CPU and NVidia GeForce 7900 GTX GPU, style transfer functions showed comparable or slightly better performance than regular transfer functions (e.g., 11.9 fps vs 11.7 fps in one test case) [S1].
+*   **Strengths:** Allows for intuitive direct manipulation via brushes to paint into the 2D transfer function texture [S3]. Provides finer control over feature classification by incorporating gradient magnitude [S3].
+*   **Limitations:** Requires computation of gradients and normals. The complexity of the transfer function design increases with the number of dimensions [S3].
+
+## Background
+The method was introduced by Stefan Bruckner and Michael E. Gröller in their paper "Style Transfer Functions for Illustrative Volume Rendering" [S1][S2, unofficial]. It extends the 1D style transfer function approach to multi-dimensional domains, specifically 2D, to handle attributes like data value and gradient magnitude [S1][S2, unofficial]. The concept of using 2D transfer functions for data value and gradient magnitude was previously explored by Kindlmann and Durkin [S3]. The method is used in illustrative volume rendering to achieve artistic styles while maintaining data fidelity.
+
+## Sources
+[S1] Style Transfer Functions for Illustrative Volume Rendering, https://doi.org/10.1111/j.1467-8659.2007.01095.x, fetched 2026-10-26
+[S2] Style Transfer Functions for Illustrative Volume Rendering, https://www.researchgate.net/publication/227615609_Style_Transfer_Functions_for_Illustrative_Volume_Rendering, fetched 2026-10-27 (unofficial)
+[S3] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29

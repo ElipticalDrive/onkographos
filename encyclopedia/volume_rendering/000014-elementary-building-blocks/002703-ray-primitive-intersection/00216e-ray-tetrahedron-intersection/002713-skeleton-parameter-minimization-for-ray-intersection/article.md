@@ -1,0 +1,192 @@
+# Skeleton Parameter Minimization for Ray Intersection
+
+Also called: Inverted Minima Computation, Rational Function Root Finding for SCALIS
+
+## Overview
+This method computes the intersection of a ray with a Scale-Invariant Integral Surface (SCALIS) by minimizing the squared distance from the ray to the skeleton curve, normalized by the local radius, rather than solving the implicit surface equation directly [S1]. It replaces complex sphere-cone intersection logic with a robust root-finding procedure on a rational function, offering superior numerical stability and computational efficiency [S1].
+
+## How it works
+**Inputs:**
+*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (unit vector).
+*   Skeleton segment defined by endpoints $\mathbf{p}_0$ and $\mathbf{p}_1$, with radii $\tau_0$ and $\tau_1$.
+*   Skeleton length $L = \|\mathbf{p}_1 - \mathbf{p}_0\|$.
+
+**Outputs:**
+*   The ray parameter $t_{min}$ corresponding to the closest intersection point.
+*   The skeleton parameter $s_{min} \in [0, L]$ where the minimum occurs.
+
+**Data Structures:**
+*   Vectors $\mathbf{m}, \mathbf{u}, \mathbf{d}$ are 3D floating-point vectors.
+*   Scalars $b, c, s_{cand}$ are floating-point numbers.
+
+**Definitions:**
+*   $\mathbf{u} = \mathbf{p}_1 - \mathbf{p}_0$ is the skeleton direction vector.
+*   $\Delta \tau = \tau_1 - \tau_0$ is the radius change along the segment.
+*   $\mathbf{m} = \mathbf{p}_0 - \mathbf{o}$ is the vector from the ray origin to the skeleton start point.
+*   The skeleton point at parameter $s$ is $\mathbf{p}(s) = \mathbf{p}_0 + \frac{s}{L}\mathbf{u}$.
+*   The radius at parameter $s$ is $\tau(s) = \tau_0 + \frac{s}{L}\Delta \tau$.
+*   $d_{\mathbf{r}}(\mathbf{p}(s))$ is the perpendicular distance from the ray to the point $\mathbf{p}(s)$.
+
+**Steps:**
+
+1.  **Precompute Geometric Terms:**
+    Compute the projection of $\mathbf{m}$ onto the ray direction $\mathbf{d}$:
+    $$ \mathbf{m}_{\perp} = \mathbf{m} - (\mathbf{m}^T \mathbf{d}) \mathbf{d} $$
+    This vector $\mathbf{m}_{\perp}$ represents the component of $\mathbf{m}$ orthogonal to the ray.
+
+2.  **Compute Coefficients for the Linear Equation:**
+    Calculate the coefficients $b$ and $c$ for the linear equation $bs + c = 0$, which arises from setting the derivative of the objective function to zero [S1]:
+    $$ b = \tau_0 L^2 (1 - (\mathbf{u}^T \mathbf{d})^2) - \Delta \tau L \mathbf{u}^T \mathbf{m}_{\perp} $$
+    $$ c = \Delta \tau \|\mathbf{m}_{\perp}\|^2 + \tau_0 L \mathbf{u}^T \mathbf{m}_{\perp} $$
+
+3.  **Find Candidate Minimum:**
+    If $|b| > \epsilon$ (where $\epsilon$ is a small tolerance for numerical stability, e.g., $10^{-9}$), solve for the critical point $s_{cand}$:
+    $$ s_{cand} = -\frac{c}{b} $$
+    If $|b| \le \epsilon$, the derivative does not vanish within the interval (or is constant), so no internal critical point exists. Set $s_{cand}$ to `None`.
+
+4.  **Evaluate Candidates:**
+    The global minimum of the objective function $f(s) = \frac{d_{\mathbf{r}}^2(\mathbf{p}(s))}{\tau(s)^2}$ must occur either at the boundaries $s=0$ or $s=L$, or at the internal critical point $s_{cand}$ if it lies within $[0, L]$.
+    
+    Define the objective function value at any $s$:
+    $$ f(s) = \frac{\|\mathbf{m}_{\perp} + \frac{s}{L}\mathbf{u}_{\perp}\|^2}{\tau(s)^2} $$
+    where $\mathbf{u}_{\perp} = \mathbf{u} - (\mathbf{u}^T \mathbf{d}) \mathbf{d}$ is the component of the skeleton direction orthogonal to the ray. Note that $\|\mathbf{m}_{\perp} + \frac{s}{L}\mathbf{u}_{\perp}\|^2$ is the squared distance from the ray to $\mathbf{p}(s)$.
+    
+    Evaluate $f(s)$ at:
+    *   $s=0$
+    *   $s=L$
+    *   $s=s_{cand}$ (only if $0 \le s_{cand} \le L$)
+    
+    Select the $s$ value that yields the minimum $f(s)$. Let this be $s_{min}$.
+
+5.  **Compute Ray Intersection Parameter:**
+    The closest point on the skeleton is $\mathbf{p}(s_{min})$. The ray parameter $t_{min}$ is found by projecting $\mathbf{p}(s_{min})$ onto the ray:
+    $$ t_{min} = \mathbf{p}(s_{min})^T \mathbf{d} - \mathbf{o}^T \mathbf{d} $$
+    (Assuming $\mathbf{o}^T \mathbf{d}$ is subtracted if the ray is not parameterized from origin, or simply $t_{min} = (\mathbf{p}(s_{min}) - \mathbf{o}) \cdot \mathbf{d}$).
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def skeleton_param_minimization(ray_o, ray_d, p0, p1, tau0, tau1):
+    """
+    Finds the ray parameter t_min for intersection with a SCALIS primitive
+    defined by a linear skeleton segment.
+    
+    Args:
+        ray_o: 3D vector, ray origin
+        ray_d: 3D vector, ray direction (assumed unit length)
+        p0: 3D vector, skeleton start point
+        p1: 3D vector, skeleton end point
+        tau0: float, radius at p0
+        tau1: float, radius at p1
+        
+    Returns:
+        t_min: float, ray parameter of closest intersection
+        s_min: float, skeleton parameter of closest point
+    """
+    L = norm(p1 - p0)
+    if L < 1e-9:
+        # Degenerate skeleton (point)
+        # Distance from ray to point p0
+        m = p0 - ray_o
+        proj = dot(m, ray_d)
+        closest_point_on_ray = ray_o + proj * ray_d
+        dist_sq = norm(p0 - closest_point_on_ray)**2
+        # For a point, the "intersection" is ambiguous without radius logic,
+        # but typically treated as boundary case. 
+        # Assuming standard SCALIS logic, we return the projection.
+        return proj, 0.0
+
+    u = p1 - p0
+    delta_tau = tau1 - tau0
+    m = p0 - ray_o
+    
+    # Precompute orthogonal components relative to ray direction
+    u_dot_d = dot(u, ray_d)
+    m_dot_d = dot(m, ray_d)
+    
+    # u_perp and m_perp are vectors orthogonal to ray_d
+    u_perp = u - u_dot_d * ray_d
+    m_perp = m - m_dot_d * ray_d
+    
+    # Coefficients for linear equation bs + c = 0
+    # b = tau0 * L^2 * (1 - (u^T d)^2) - delta_tau * L * (u^T m_perp)
+    # Note: u^T m_perp = u^T (m - (m^T d)d) = u^T m - (u^T d)(m^T d)
+    # However, the source formula uses u^T m_perp directly.
+    u_dot_m_perp = dot(u, m_perp)
+    
+    term1 = tau0 * (L**2) * (1 - (u_dot_d**2))
+    term2 = delta_tau * L * u_dot_m_perp
+    b = term1 - term2
+    
+    # c = delta_tau * ||m_perp||^2 + tau0 * L * (u^T m_perp)
+    m_perp_norm_sq = dot(m_perp, m_perp)
+    term3 = delta_tau * m_perp_norm_sq
+    term4 = tau0 * L * u_dot_m_perp
+    c = term3 + term4
+    
+    s_min = 0.0
+    min_f = float('inf')
+    
+    # Helper to evaluate objective function f(s)
+    def eval_f(s):
+        # Radius at s
+        tau_s = tau0 + (s / L) * delta_tau
+        # Point at s
+        p_s = p0 + (s / L) * u
+        # Vector from ray origin to p_s
+        m_s = p_s - ray_o
+        # Orthogonal component to ray
+        m_s_perp = m_s - dot(m_s, ray_d) * ray_d
+        # Squared distance
+        dist_sq = dot(m_s_perp, m_s_perp)
+        # Objective function
+        if tau_s < 1e-9:
+            return float('inf')
+        return dist_sq / (tau_s**2)
+
+    # Check boundaries
+    f0 = eval_f(0.0)
+    if f0 < min_f:
+        min_f = f0
+        s_min = 0.0
+        
+    fL = eval_f(L)
+    if fL < min_f:
+        min_f = fL
+        s_min = L
+        
+    # Check internal critical point
+    if abs(b) > 1e-9:
+        s_cand = -c / b
+        if 0.0 <= s_cand <= L:
+            fcand = eval_f(s_cand)
+            if fcand < min_f:
+                min_f = fcand
+                s_min = s_cand
+                
+    # Compute t_min
+    p_s_min = p0 + (s_min / L) * u
+    t_min = dot(p_s_min - ray_o, ray_d)
+    
+    return t_min, s_min
+```
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Skeleton:** If $L \approx 0$, the skeleton is a point. The method should fall back to a point-ray intersection test [G].
+*   **Zero Radius:** If $\tau(s) \approx 0$, the objective function diverges. In practice, SCALIS fields often have a minimum radius or the intersection is determined by the boundary conditions if the minimum is at the endpoint [S1].
+*   **Numerical Stability:** The source notes that this approach is more numerically stable than solving the implicit equation directly, which involves finding scaling factors for sphere-cone intersections [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per primitive. The method involves a constant number of vector operations and a single linear solve.
+*   **Memory Complexity:** $O(1)$ auxiliary space.
+*   **Strengths:** Avoids iterative root-finding or complex geometric primitives (spheres/cones). It is analytically exact for linear skeletons and radii.
+*   **Limitations:** Assumes linear skeleton segments and linearly varying radii. End-point corrections may be needed for integral field accuracy near skeleton endpoints due to divergence in field variations [S1].
+*   **When to use:** When rendering SCALIS fields with linear skeleton primitives. It is preferred over direct implicit surface solving for its stability and speed [S1].
+
+## Background
+This method was introduced in the context of ray tracing Scale-Invariant Integral Surfaces (SCALIS) [S1]. SCALIS fields are defined by a skeleton curve and a radius field, representing smooth, tubular structures. The method inverts the order of minimization: instead of finding the ray parameter $t$ for a fixed skeleton parameter $s$, it finds the skeleton parameter $s$ that minimizes the normalized distance, then derives $t$ [S1]. This avoids the complexity of handling sphere-cone intersections inherent in the direct formulation [S1].
+
+## Sources
+[S1] Fast Ray Tracing of Scale‐Invariant Integral Surfaces, https://doi.org/10.1111/cgf.14208, fetched 2026-10-26

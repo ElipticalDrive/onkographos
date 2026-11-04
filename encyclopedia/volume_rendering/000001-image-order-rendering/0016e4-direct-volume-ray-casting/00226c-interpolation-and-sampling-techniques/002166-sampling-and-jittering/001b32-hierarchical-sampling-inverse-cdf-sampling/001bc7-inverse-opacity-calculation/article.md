@@ -3,63 +3,63 @@
 Also called: inverse opacity sampling
 
 ## Overview
-Inverse Opacity Calculation is a differentiable method for generating importance samples along a ray in volume rendering by inverting the cumulative distribution function (CDF) of the rendering contribution [S1, S2]. It solves the problem of finding the ray parameter $t$ corresponding to a target cumulative density value $y$, allowing samples to be drawn directly from transmittance estimates rather than computing expensive integrals [S2]. Unlike standard NeRF hierarchical sampling, which interpolates exponentiated densities (probabilities) and requires auxiliary losses, this method interpolates the density field directly (piecewise linear or constant), offering better numerical stability for end-to-end optimization [S1]. It enables Monte Carlo estimates with fewer ray points and allows gradients to back-propagate through the sampling process to the density field parameters [S1].
+Inverse Opacity Calculation is a differentiable method for generating importance samples along a ray in volume rendering by inverting the cumulative distribution function (CDF) of the rendering contribution [S1, unofficial][S2]. It solves the problem of finding the ray parameter $t$ corresponding to a target cumulative density value $y$, allowing samples to be drawn directly from transmittance estimates rather than computing expensive integrals [S2]. Unlike standard NeRF hierarchical sampling, which interpolates exponentiated densities (probabilities) and requires auxiliary losses, this method interpolates the density field directly (piecewise linear or constant), offering better numerical stability for end-to-end optimization [S1, unofficial]. It enables Monte Carlo estimates with fewer ray points and allows gradients to back-propagate through the sampling process to the density field parameters [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Ray grid points $t_1, \dots, t_{m+1}$ (where $t_1=t_n, t_{m+1}=t_f$) and corresponding density values $\sigma_{\mathbf{r}}(t_j)$ predicted by a neural network [S1].
-- A target cumulative opacity value $y \in [0, y_f]$, where $y_f = 1 - \exp(-\int_{t_n}^{t_f} \sigma_{\mathbf{r}}(s) ds)$ is the total pixel opacity [S1].
+- Ray grid points $t_1, \dots, t_{m+1}$ (where $t_1=t_n, t_{m+1}=t_f$) and corresponding density values $\sigma_{\mathbf{r}}(t_j)$ predicted by a neural network [S1, unofficial].
+- A target cumulative opacity value $y \in [0, y_f]$, where $y_f = 1 - \exp(-\int_{t_n}^{t_f} \sigma_{\mathbf{r}}(s) ds)$ is the total pixel opacity [S1, unofficial].
 
 **Outputs:**
-- A sample position $t$ along the ray such that the cumulative opacity up to $t$ equals $y$ [S1].
+- A sample position $t$ along the ray such that the cumulative opacity up to $t$ equals $y$ [S1, unofficial].
 
 **Data Structures:**
-- **Grid Points:** Array $t$ of size $m+1$, sorted $t_1 < t_2 < \dots < t_{m+1}$ [S1].
-- **Densities:** Array $\sigma$ of size $m+1$, where $\sigma_j = \sigma_{\mathbf{r}}(t_j) \ge 0$ [S1].
-- **Cumulative Integrals:** Precomputed array $I$ of size $m+1$, where $I_j$ is the integral of density from $t_n$ to $t_j$ [S1].
+- **Grid Points:** Array $t$ of size $m+1$, sorted $t_1 < t_2 < \dots < t_{m+1}$ [S1, unofficial].
+- **Densities:** Array $\sigma$ of size $m+1$, where $\sigma_j = \sigma_{\mathbf{r}}(t_j) \ge 0$ [S1, unofficial].
+- **Cumulative Integrals:** Precomputed array $I$ of size $m+1$, where $I_j$ is the integral of density from $t_n$ to $t_j$ [S1, unofficial].
 
 **Steps:**
 
 1. **Compute Total Opacity ($y_f$):**
-   Calculate the total integral $I_{total} = \int_{t_n}^{t_f} \sigma_{\mathbf{r}}(s) ds$ using the chosen approximation (piecewise constant or linear) [S1].
-   Compute $y_f = 1 - \exp(-I_{total})$ [S1].
+   Calculate the total integral $I_{total} = \int_{t_n}^{t_f} \sigma_{\mathbf{r}}(s) ds$ using the chosen approximation (piecewise constant or linear) [S1, unofficial].
+   Compute $y_f = 1 - \exp(-I_{total})$ [S1, unofficial].
 
 2. **Generate Target Values:**
-   Generate $k$ i.i.d. uniform random samples $u_i \sim \mathcal{U}[0, 1]$ [S1].
-   Compute target cumulative opacity values: $y_{fu, i} = y_f \cdot u_i$ [S1].
-   *Optional Stratification:* For lower variance, use stratified sampling: $u_i \sim \mathcal{U}[\frac{i-1}{k+1}, \frac{i}{k+1}]$ [S1].
+   Generate $k$ i.i.d. uniform random samples $u_i \sim \mathcal{U}[0, 1]$ [S1, unofficial].
+   Compute target cumulative opacity values: $y_{fu, i} = y_f \cdot u_i$ [S1, unofficial].
+   *Optional Stratification:* For lower variance, use stratified sampling: $u_i \sim \mathcal{U}[\frac{i-1}{k+1}, \frac{i}{k+1}]$ [S1, unofficial].
 
 3. **Identify Bin:**
-   For each $y_{fu}$, find the index $i$ such that the cumulative integral up to $t_i$ is less than or equal to the target integral value $I_{target} = -\ln(1 - y_{fu})$ [S1].
-   Specifically, find $i$ such that $I_i \le I_{target} < I_{i+1}$ [S1].
-   *Note:* $I_{target}$ is derived from $y_{fu}$ via the inverse of the opacity function $F_r(t) = 1 - \exp(-\int \sigma)$ [S1]. The equation to solve is $-\ln(1 - y_{fu}) = \int_{t_n}^t \sigma_r(s) ds$ [S1].
+   For each $y_{fu}$, find the index $i$ such that the cumulative integral up to $t_i$ is less than or equal to the target integral value $I_{target} = -\ln(1 - y_{fu})$ [S1, unofficial].
+   Specifically, find $i$ such that $I_i \le I_{target} < I_{i+1}$ [S1, unofficial].
+   *Note:* $I_{target}$ is derived from $y_{fu}$ via the inverse of the opacity function $F_r(t) = 1 - \exp(-\int \sigma)$ [S1, unofficial]. The equation to solve is $-\ln(1 - y_{fu}) = \int_{t_n}^t \sigma_r(s) ds$ [S1, unofficial].
 
 4. **Solve for $t$ within Bin:**
    Depending on the density approximation, solve for $\Delta t = t - t_i$:
 
-   **Case A: Piecewise Constant Approximation** [S1]
-   Assume density is constant $\sigma_{\mathbf{r}}(\hat{t}_i)$ within bin $[t_i, t_{i+1}]$ [S1].
+   **Case A: Piecewise Constant Approximation** [S1, unofficial]
+   Assume density is constant $\sigma_{\mathbf{r}}(\hat{t}_i)$ within bin $[t_i, t_{i+1}]$ [S1, unofficial].
    The integral equation is linear:
    $$ I_{target} = I_i + \sigma_{\mathbf{r}}(\hat{t}_i)(t - t_i) $$
    Solve for $t$:
    $$ t = t_i + \frac{I_{target} - I_i}{\sigma_{\mathbf{r}}(\hat{t}_i)} $$
-   *Pitfall:* If $\sigma_{\mathbf{r}}(\hat{t}_i) \approx 0$, add a small epsilon $\epsilon$ to the denominator for stability [S1].
+   *Pitfall:* If $\sigma_{\mathbf{r}}(\hat{t}_i) \approx 0$, add a small epsilon $\epsilon$ to the denominator for stability [S1, unofficial].
 
-   **Case B: Piecewise Linear Approximation** [S1]
-   Assume density varies linearly between $\sigma_i = \sigma_{\mathbf{r}}(t_i)$ and $\sigma_{i+1} = \sigma_{\mathbf{r}}(t_{i+1})$ [S1].
+   **Case B: Piecewise Linear Approximation** [S1, unofficial]
+   Assume density varies linearly between $\sigma_i = \sigma_{\mathbf{r}}(t_i)$ and $\sigma_{i+1} = \sigma_{\mathbf{r}}(t_{i+1})$ [S1, unofficial].
    The integral is quadratic in $t$. Let $\Delta t = t - t_i$.
-   Formulate the quadratic equation $0 = a\Delta t^2 + b\Delta t + c$ [S1]:
+   Formulate the quadratic equation $0 = a\Delta t^2 + b\Delta t + c$ [S1, unofficial]:
    $$ a = \frac{\sigma_{i+1} - \sigma_i}{2} $$
    $$ b = \sigma_i \times (t_{i+1} - t_i) $$
    $$ c = \left( I_i - I_{target} \right) \times (t_{i+1} - t_i) $$
-   Here $I_{target}$ is the target integral [S1].
+   Here $I_{target}$ is the target integral [S1, unofficial].
    Solve for $\Delta t$:
    $$ \Delta t = \frac{-b + \sqrt{b^2 - 4ac}}{2a} $$
-   Since the integral is monotonically increasing, we take the positive root [S1].
+   Since the integral is monotonically increasing, we take the positive root [S1, unofficial].
    Then $t = t_i + \Delta t$.
 
 5. **Back-propagation:**
-   The solution $t$ is a differentiable function of the densities $\sigma_{\mathbf{r}}$ [S1]. Gradients flow from the loss through $t$ to the density network parameters [S1].
+   The solution $t$ is a differentiable function of the densities $\sigma_{\mathbf{r}}$ [S1, unofficial]. Gradients flow from the loss through $t$ to the density network parameters [S1, unofficial].
 
 **Pseudocode:**
 
@@ -94,7 +94,7 @@ def inverse_opacity_calculation(t_vals, sigma_vals, y_targets, approx_type='line
 
     # 2. Convert y_targets to target integrals I_targets
     # y = 1 - exp(-I) => I = -ln(1 - y)
-    # Clamp y to avoid log(0) [S1]
+    # Clamp y to avoid log(0) [S1, unofficial]
     y_clamped = torch.clamp(y_targets, max=1.0 - 1e-6)
     I_targets = -torch.log(1.0 - y_clamped)
     
@@ -114,7 +114,7 @@ def inverse_opacity_calculation(t_vals, sigma_vals, y_targets, approx_type='line
     
     if approx_type == 'constant':
         # t = t_i + (I_target - I_i) / sigma_i
-        # Add epsilon for stability [S1]
+        # Add epsilon for stability [S1, unofficial]
         eps = 1e-6
         delta_t = (I_targets - I_i) / (sigma_i + eps)
         t_samples = t_i + delta_t
@@ -129,12 +129,12 @@ def inverse_opacity_calculation(t_vals, sigma_vals, y_targets, approx_type='line
         discriminant = torch.clamp(discriminant, min=0.0)
         sqrt_disc = torch.sqrt(discriminant)
         
-        # Numerical stability for quadratic root [S4]
+        # Numerical stability for quadratic root [S4, unofficial]
         # If a is near zero, use linear approximation: delta_t = -c/b
         zero_a = torch.abs(a) < 1e-6
         delta_t_linear = torch.where(zero_a, -c / (b + 1e-6), (-b + sqrt_disc) / (2 * a + 1e-6))
         
-        # If b is near zero, use delta_t = sqrt(c/a) [S4]
+        # If b is near zero, use delta_t = sqrt(c/a) [S4, unofficial]
         zero_b = torch.abs(b) < 1e-6
         delta_t_linear = torch.where(zero_b, torch.sqrt(c / (a + 1e-6)), delta_t_linear)
         
@@ -144,15 +144,15 @@ def inverse_opacity_calculation(t_vals, sigma_vals, y_targets, approx_type='line
 ```
 
 **Parameters:**
-- $k$: Number of samples per ray. Typical value is 8 for visible quality without artifacts [S1].
-- Learning rate for proposal density network: Starts at $5 \times 10^{-5}$ and decays to $5 \times 10^{-6}$ [S1].
-- Learning rate for fine density network: Starts at $5 \times 10^{-4}$ and decays to $5 \times 10^{-5}$ [S1].
-- Density output activation: Softplus (ensures non-negative density) [S1].
+- $k$: Number of samples per ray. Typical value is 8 for visible quality without artifacts [S1, unofficial].
+- Learning rate for proposal density network: Starts at $5 \times 10^{-5}$ and decays to $5 \times 10^{-6}$ [S1, unofficial].
+- Learning rate for fine density network: Starts at $5 \times 10^{-4}$ and decays to $5 \times 10^{-5}$ [S1, unofficial].
+- Density output activation: Softplus (ensures non-negative density) [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Zero Density:** When $\sigma_{\mathbf{r}}(\hat{t}_i) \approx 0$, the denominator in the piecewise constant inverse formula becomes unstable. Add a small epsilon $\epsilon$ to the denominator [S1].
-- **Analytic Inversion:** The opacity function $F_r(t)$ cannot be computed analytically in practice because it requires integrating the density field. It must be approximated using piecewise constant or linear approximations [S1].
-- **Boundary Conditions:** Ensure $y_{target}$ is clamped to $[0, 1-\epsilon]$ to avoid numerical issues with $\ln(1-y)$ [S1].
+- **Zero Density:** When $\sigma_{\mathbf{r}}(\hat{t}_i) \approx 0$, the denominator in the piecewise constant inverse formula becomes unstable. Add a small epsilon $\epsilon$ to the denominator [S1, unofficial].
+- **Analytic Inversion:** The opacity function $F_r(t)$ cannot be computed analytically in practice because it requires integrating the density field. It must be approximated using piecewise constant or linear approximations [S1, unofficial].
+- **Boundary Conditions:** Ensure $y_{target}$ is clamped to $[0, 1-\epsilon]$ to avoid numerical issues with $\ln(1-y)$ [S1, unofficial].
 
 ## Subtopics
 
@@ -160,39 +160,39 @@ def inverse_opacity_calculation(t_vals, sigma_vals, y_targets, approx_type='line
 A differentiable method that interpolates the density field directly, offering better numerical stability for end-to-end optimization compared to NeRF's hierarchical sampling. Choose this when optimizing neural radiance fields end-to-end without auxiliary losses.
 
 ### Piecewise Linear Approximation Inverse
-An explicit formula to solve for time $t$ given a target integral value $y$, assuming density $\sigma_r$ varies linearly within each sample interval [S4]. The integral approximation is $I_1(t) = \sum_{j=1}^{i} \frac{\sigma_r(t_j) + \sigma_r(t_{j-1})}{2} (t_j - t_{j-1}) + \frac{(\sigma_r(t_i) + \bar{\sigma}_r(t))}{2} (t - t_i)$, where $\bar{\sigma}_r(t)$ is the linearly interpolated density at $t$ [S4]. Solving $y = I_1(t)$ yields the quadratic $0 = a\Delta t^2 + b\Delta t + c$ with $a = \frac{\sigma_r(t_{i+1}) - \sigma_r(t_i)}{2}$, $b = \sigma_r(t_i) \times (t_{i+1} - t_i)$, and $c = \left( \sum_{j=1}^i \frac{\sigma_r(t_j) + \sigma_r(t_{j-1})}{2} (t_j - t_{j-1}) - y \right) \times (t_{i+1} - t_i)$ [S4]. The root is $\Delta t = \frac{-b + \sqrt{b^2 - 4ac}}{2a}$ [S4]. For computational stability, the standard formula is rewritten as $\Delta t = \frac{2c}{b + \sqrt{b^2 - 4ac}}$ when $a \approx 0$, and small epsilon is added to square roots and denominators [S4]. If $b \approx 0$, use $\Delta t = \sqrt{c/a}$; if $a \approx 0$, use $\Delta t = -c/b$ [S4].
+An explicit formula to solve for time $t$ given a target integral value $y$, assuming density $\sigma_r$ varies linearly within each sample interval [S4, unofficial]. The integral approximation is $I_1(t) = \sum_{j=1}^{i} \frac{\sigma_r(t_j) + \sigma_r(t_{j-1})}{2} (t_j - t_{j-1}) + \frac{(\sigma_r(t_i) + \bar{\sigma}_r(t))}{2} (t - t_i)$, where $\bar{\sigma}_r(t)$ is the linearly interpolated density at $t$ [S4, unofficial]. Solving $y = I_1(t)$ yields the quadratic $0 = a\Delta t^2 + b\Delta t + c$ with $a = \frac{\sigma_r(t_{i+1}) - \sigma_r(t_i)}{2}$, $b = \sigma_r(t_i) \times (t_{i+1} - t_i)$, and $c = \left( \sum_{j=1}^i \frac{\sigma_r(t_j) + \sigma_r(t_{j-1})}{2} (t_j - t_{j-1}) - y \right) \times (t_{i+1} - t_i)$ [S4, unofficial]. The root is $\Delta t = \frac{-b + \sqrt{b^2 - 4ac}}{2a}$ [S4, unofficial]. For computational stability, the standard formula is rewritten as $\Delta t = \frac{2c}{b + \sqrt{b^2 - 4ac}}$ when $a \approx 0$, and small epsilon is added to square roots and denominators [S4, unofficial]. If $b \approx 0$, use $\Delta t = \sqrt{c/a}$; if $a \approx 0$, use $\Delta t = -c/b$ [S4, unofficial].
 
 ### Numerical Stability in Inverse Opacity
-A stable computation method for inverse opacity input $y$, which combines a uniform sample $u$ and ray opacity $y_f = 1 - \exp(-\int_{t_n}^{t_f} \sigma_r(s)ds)$ [S4]. The input is computed as $y = -\log(1 - y_f u)$ [S4]. To avoid precision loss, it is rewritten using logsumexp: $y = -\log \left( \exp(\log(1-u)) + \exp(\log u - \int_{t_n}^{t_f} \sigma_r(s) ds) \right)$ [S4]. For opaque rays where $\int_{t_n}^{t_f} \sigma_r(s)ds \approx 0$, the logsumexp implementation becomes computationally unstable, so $y$ is replaced with $u$ as they are almost identical [S4].
+A stable computation method for inverse opacity input $y$, which combines a uniform sample $u$ and ray opacity $y_f = 1 - \exp(-\int_{t_n}^{t_f} \sigma_r(s)ds)$ [S4, unofficial]. The input is computed as $y = -\log(1 - y_f u)$ [S4, unofficial]. To avoid precision loss, it is rewritten using logsumexp: $y = -\log \left( \exp(\log(1-u)) + \exp(\log u - \int_{t_n}^{t_f} \sigma_r(s) ds) \right)$ [S4, unofficial]. For opaque rays where $\int_{t_n}^{t_f} \sigma_r(s)ds \approx 0$, the logsumexp implementation becomes computationally unstable, so $y$ is replaced with $u$ as they are almost identical [S4, unofficial].
 
 ### Piecewise Constant Approximation Inverse
-An explicit formula to solve for time $t$ given a target integral value $y$, assuming density $\sigma_r$ is constant within each sample interval $[t_{j-1}, t_j]$ [S4]. The integral approximation is $I_0(t) = \sum_{j=1}^i \sigma_{\mathbf{r}}(\hat{t}_j)(t_j - t_{j-1}) + \sigma_{\mathbf{r}}(\hat{t}_i)(t - t_i)$, where $\sigma_{\mathbf{r}}(\hat{t}_j)$ is the density at sample $j$ and $t_j$ are sample positions [S4]. Solving $y = I_0(t)$ yields $t = t_i + \frac{y - \sum_{j=1}^i \sigma_r(\hat{t}_j)(t_j - t_{j-1})}{\sigma_r(\hat{t}_i)}$ [S4]. When density $\sigma_r(\hat{t}_i) \approx 0$, the denominator becomes unstable, so a small epsilon value is added to the denominator to improve stability [S4].
+An explicit formula to solve for time $t$ given a target integral value $y$, assuming density $\sigma_r$ is constant within each sample interval $[t_{j-1}, t_j]$ [S4, unofficial]. The integral approximation is $I_0(t) = \sum_{j=1}^i \sigma_{\mathbf{r}}(\hat{t}_j)(t_j - t_{j-1}) + \sigma_{\mathbf{r}}(\hat{t}_i)(t - t_i)$, where $\sigma_{\mathbf{r}}(\hat{t}_j)$ is the density at sample $j$ and $t_j$ are sample positions [S4, unofficial]. Solving $y = I_0(t)$ yields $t = t_i + \frac{y - \sum_{j=1}^i \sigma_r(\hat{t}_j)(t_j - t_{j-1})}{\sigma_r(\hat{t}_i)}$ [S4, unofficial]. When density $\sigma_r(\hat{t}_i) \approx 0$, the denominator becomes unstable, so a small epsilon value is added to the denominator to improve stability [S4, unofficial].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-- The method requires computing cumulative integrals $O(M)$ and solving a quadratic/linear equation per sample $O(1)$ [S1].
-- It avoids redundant radiance queries compared to dense uniform grids, potentially reducing computation during training and inference [S1].
+- The method requires computing cumulative integrals $O(M)$ and solving a quadratic/linear equation per sample $O(1)$ [S1, unofficial].
+- It avoids redundant radiance queries compared to dense uniform grids, potentially reducing computation during training and inference [S1, unofficial].
 
 **Measured Performance:**
-- On the Lego scene (Blender dataset) with $(N_p=16, N_f=32)$, RVS achieves PSNR 29.18 vs NeRF 27.09, SSIM 0.928 vs 0.913, and LPIPS 0.112 vs 0.121, with relative training time 0.37 vs 0.39 [S1].
-- On the Lego scene with $(N_p=64, N_f=192)$, RVS achieves PSNR 33.03 vs NeRF 32.69, SSIM 0.964 vs 0.962, and LPIPS 0.047 vs 0.048, with relative training time 0.98 vs 1.0 [S1].
-- On the Blender dataset (average) with $(N_p=32, N_f=64)$, RVS achieves PSNR 30.26 vs NeRF 29.49, SSIM 0.939 vs 0.934, and LPIPS 0.082 vs 0.085 [S1].
-- On the LLFF dataset (average) with $(N_p=32, N_f=64)$, RVS achieves PSNR 26.01 vs NeRF 26.01 (tie), SSIM 0.796 vs 0.796 (tie), and LPIPS 0.273 vs 0.273 (tie) [S1].
+- On the Lego scene (Blender dataset) with $(N_p=16, N_f=32)$, RVS achieves PSNR 29.18 vs NeRF 27.09, SSIM 0.928 vs 0.913, and LPIPS 0.112 vs 0.121, with relative training time 0.37 vs 0.39 [S1, unofficial].
+- On the Lego scene with $(N_p=64, N_f=192)$, RVS achieves PSNR 33.03 vs NeRF 32.69, SSIM 0.964 vs 0.962, and LPIPS 0.047 vs 0.048, with relative training time 0.98 vs 1.0 [S1, unofficial].
+- On the Blender dataset (average) with $(N_p=32, N_f=64)$, RVS achieves PSNR 30.26 vs NeRF 29.49, SSIM 0.939 vs 0.934, and LPIPS 0.082 vs 0.085 [S1, unofficial].
+- On the LLFF dataset (average) with $(N_p=32, N_f=64)$, RVS achieves PSNR 26.01 vs NeRF 26.01 (tie), SSIM 0.796 vs 0.796 (tie), and LPIPS 0.273 vs 0.273 (tie) [S1, unofficial].
 
 **Strengths and Limitations:**
-- **Strengths:** Fully differentiable, allows end-to-end training without auxiliary reconstruction losses, improves reconstruction quality for hierarchical models, reduces variance with stratified sampling [S1].
-- **Limitations:** Requires careful handling of zero-density bins. The proposal density learned via RVS is significantly different from NeRF's, suggesting that mimicking the fine density is not optimal for the proposal [S1].
+- **Strengths:** Fully differentiable, allows end-to-end training without auxiliary reconstruction losses, improves reconstruction quality for hierarchical models, reduces variance with stratified sampling [S1, unofficial].
+- **Limitations:** Requires careful handling of zero-density bins. The proposal density learned via RVS is significantly different from NeRF's, suggesting that mimicking the fine density is not optimal for the proposal [S1, unofficial].
 
 **When to Use:**
-- Use when training neural radiance fields end-to-end and wanting to avoid auxiliary losses [S1].
-- Use when higher quality is needed with fewer samples (e.g., real-time or constrained compute) [S1].
-- Do not use if the scene has large regions of zero density without proper epsilon handling, as it may cause instability in the constant approximation [S1].
+- Use when training neural radiance fields end-to-end and wanting to avoid auxiliary losses [S1, unofficial].
+- Use when higher quality is needed with fewer samples (e.g., real-time or constrained compute) [S1, unofficial].
+- Do not use if the scene has large regions of zero density without proper epsilon handling, as it may cause instability in the constant approximation [S1, unofficial].
 
 ## Background
-Inverse Opacity Calculation, often referred to as Reparameterized Volume Sampling (RVS), was introduced by Khrulkhov et al. in 2023 [S1]. It builds on the concept of inverse transform sampling used in NeRF but derives the sampling distribution from the density field directly rather than from a separate proposal network with auxiliary losses [S1]. The method leverages the mathematical equivalence between the CDF of the rendering contribution and the transmittance function [S2]. It is used in novel view synthesis and neural radiance field optimization [S1].
+Inverse Opacity Calculation, often referred to as Reparameterized Volume Sampling (RVS), was introduced by Khrulkhov et al. in 2023 [S1, unofficial]. It builds on the concept of inverse transform sampling used in NeRF but derives the sampling distribution from the density field directly rather than from a separate proposal network with auxiliary losses [S1, unofficial]. The method leverages the mathematical equivalence between the CDF of the rendering contribution and the transmittance function [S2]. It is used in novel view synthesis and neural radiance field optimization [S1, unofficial].
 
 ## Sources
-[S1] Differentiable Rendering with Reparameterized Volume Sampling, https://doi.org/10.48550/arxiv.2302.10970, fetched 2026-10-26
+[S1] Differentiable Rendering with Reparameterized Volume Sampling, https://doi.org/10.48550/arxiv.2302.10970, fetched 2026-10-26 (unofficial)
 [S2] NerfAcc: Efficient Sampling Accelerates NeRFs, https://doi.org/10.1109/iccv51070.2023.01699, fetched 2026-10-26
 [S3] GreatDrake/reparameterized-volume-sampling, https://github.com/GreatDrake/reparameterized-volume-sampling, fetched 2026-10-26 (unofficial)
-[S4] Differentiable Rendering With Reparameterized Volume Sampling, https://openreview.net/pdf?id=zHSaBQtj-l, fetched 2026-10-29
+[S4] Differentiable Rendering With Reparameterized Volume Sampling, https://openreview.net/pdf?id=zHSaBQtj-l, fetched 2026-10-29 (unofficial)

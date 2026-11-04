@@ -1,0 +1,219 @@
+# Iridescent Material with Perturbation
+
+Also called: Iridescent Material (Cosine Palette), Iridescent Material with Specular and Shadow
+
+## Overview
+This method renders iridescent surfaces by mapping a scalar input to a 3D color vector using a cosine palette function, simulating thin-film interference colors [S1, unofficial]. It combines this base iridescent layer with specular highlights and shadowing to create a complete shading model [S1, unofficial]. It differs from [Distance Color Blending](791-distance-color-blending.md) by using a continuous palette function driven by perturbed normals rather than discrete distance-based color mixing, and from [Phong Shading with SDF Normals](1977-phong-shading-with-sdf-normals.md) by explicitly modeling interference-like color shifts via the palette function rather than standard diffuse/specular reflection [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Ray origin (`rayOrigin`), ray direction (`rayDirection`), collision distance (`collision.x`), light position (`lightPos`), gamma value (`GAMMA`).
+- **Outputs:** Final screen-space RGB color.
+
+**Data Structures:**
+- `vec3`: 3-component floating-point vector (x, y, z).
+- `float`: Single-precision floating-point scalar.
+- `vec3 pal(float t, vec3 a, vec3 b, vec3 c, vec3 d)`: Palette function returning a color.
+- `vec3 spectrum(float n)`: Spectrum function returning a color based on input `n`.
+
+**Parameters:**
+- `GAMMA`: Gamma correction exponent. Typical value: 2.2 [S1, unofficial].
+- Palette coefficients for `spectrum`:
+  - $a = (0.5, 0.5, 0.5)$
+  - $b = (0.5, 0.5, 0.5)$
+  - $c = (1.0, 1.0, 1.0)$
+  - $d = (0.0, 0.33, 0.67)$ [S1, unofficial]
+
+**Steps:**
+1. **Calculate Intersection Point:** Compute the 3D position of the hit point:
+   $$pos = rayOrigin + rayDirection \cdot collision.x$$
+   [S1, unofficial]
+
+2. **Calculate Normal:** Compute the surface normal at `pos`. Let this be `nor` [S1, unofficial].
+
+3. **Calculate View and Light Directions:**
+   $$eyeDirection = normalize(rayOrigin - pos)$$
+   $$lightDirection = normalize(lightPos - pos)$$
+   [S1, unofficial]
+
+4. **Calculate Reflection Vector:**
+   $$reflection = reflect(rayDirection, nor)$$
+   [S1, unofficial]
+
+5. **Calculate Base Iridescent Color:**
+   a. Compute perturbation vector:
+      $$perturb = sin(pos \cdot 10.)$$
+      [S1, unofficial]
+   b. Compute perturbed normal input for spectrum:
+      $$n_{input} = dot(nor + perturb \cdot 0.05, eyeDirection) \cdot 2.$$
+      [S1, unofficial]
+   c. Compute base color using the spectrum function:
+      $$color = spectrum(n_{input})$$
+      [S1, unofficial]
+
+6. **Calculate Specular Component:**
+   a. Compute initial specular term:
+      $$specular = clamp(dot(reflection, lightDirection), 0., 1.)$$
+      [S1, unofficial]
+   b. Modulate specular with sine wave and raise to power:
+      $$specular = pow((sin(specular \cdot 20. - 3.) \cdot 0.5 + 0.5) + 0.1, 32.) \cdot specular$$
+      [S1, unofficial]
+   c. Scale by 0.1:
+      $$specular = specular \cdot 0.1$$
+      [S1, unofficial]
+   d. Add secondary specular component:
+      $$specular = specular + pow(clamp(dot(reflection, lightDirection), 0., 1.) + 0.3, 8.) \cdot 0.1$$
+      [S1, unofficial]
+
+7. **Calculate Shadow:**
+   a. Define dome direction:
+      $$dome = (0, 1, 0)$$
+      [S1, unofficial]
+   b. Compute shadow factor:
+      $$shadow = pow(clamp(dot(nor, dome) \cdot 0.5 + 1.2, 0., 1.), 3.)$$
+      [S1, unofficial]
+
+8. **Combine Colors:**
+   $$color = color \cdot shadow + specular$$
+   [S1, unofficial]
+
+9. **Apply Gamma Correction:**
+   $$finalColor = linearToScreen(color)$$
+   [S1, unofficial]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def pal(t: float, a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) -> np.ndarray:
+    """Cosine palette function."""
+    return a + b * np.cos(2 * np.pi * (c * t + d))
+
+def spectrum(n: float) -> np.ndarray:
+    """Spectrum function using specific palette coefficients."""
+    a = np.array([0.5, 0.5, 0.5])
+    b = np.array([0.5, 0.5, 0.5])
+    c = np.array([1.0, 1.0, 1.0])
+    d = np.array([0.0, 0.33, 0.67])
+    return pal(n, a, b, c, d)
+
+def gamma(color: np.ndarray, g: float) -> np.ndarray:
+    """Apply gamma correction."""
+    return np.power(color, g)
+
+def linear_to_screen(linear_rgb: np.ndarray, gamma_val: float = 2.2) -> np.ndarray:
+    """Convert linear RGB to screen space."""
+    return gamma(linear_rgb, 1.0 / gamma_val)
+
+def iridescent_material(ray_origin: np.ndarray, ray_direction: np.ndarray, collision_x: float, 
+                        light_pos: np.ndarray, normal_func, gamma_val: float = 2.2) -> np.ndarray:
+    """
+    Calculate iridescent material color.
+    
+    Args:
+        ray_origin: Origin of the ray.
+        ray_direction: Direction of the ray.
+        collision_x: Distance to the collision point.
+        light_pos: Position of the light source.
+        normal_func: Function to compute normal at a given position.
+        gamma_val: Gamma value for correction.
+        
+    Returns:
+        Final screen-space color.
+    """
+    # Step 1: Calculate Intersection Point
+    pos = ray_origin + ray_direction * collision_x
+    
+    # Step 2: Calculate Normal
+    nor = normal_func(pos)
+    
+    # Step 3: Calculate View and Light Directions
+    eye_direction = (ray_origin - pos)
+    eye_direction = eye_direction / np.linalg.norm(eye_direction)
+    
+    light_direction = (light_pos - pos)
+    light_direction = light_direction / np.linalg.norm(light_direction)
+    
+    # Step 4: Calculate Reflection Vector
+    # reflect(I, N) = I - 2 * dot(I, N) * N
+    # Note: ray_direction is incoming, so we use -ray_direction for standard reflect formula if N is outward.
+    # However, the source code uses reflect(rayDirection, nor). 
+    # In GLSL, reflect(I, N) assumes I is the incident vector. 
+    # If rayDirection is from eye to surface, it is the incident vector.
+    reflection = ray_direction - 2 * np.dot(ray_direction, nor) * nor
+    
+    # Step 5: Calculate Base Iridescent Color
+    perturb = np.sin(pos * 10.0)
+    n_input = np.dot(nor + perturb * 0.05, eye_direction) * 2.0
+    color = spectrum(n_input)
+    
+    # Step 6: Calculate Specular Component
+    specular = np.dot(reflection, light_direction)
+    specular = np.clip(specular, 0.0, 1.0)
+    
+    specular = np.power((np.sin(specular * 20.0 - 3.0) * 0.5 + 0.5) + 0.1, 32.0) * specular
+    specular = specular * 0.1
+    
+    specular_term2 = np.dot(reflection, light_direction)
+    specular_term2 = np.clip(specular_term2, 0.0, 1.0)
+    specular = specular + np.power(specular_term2 + 0.3, 8.0) * 0.1
+    
+    # Step 7: Calculate Shadow
+    dome = np.array([0.0, 1.0, 0.0])
+    shadow = np.dot(nor, dome) * 0.5 + 1.2
+    shadow = np.clip(shadow, 0.0, 1.0)
+    shadow = np.power(shadow, 3.0)
+    
+    # Step 8: Combine Colors
+    color = color * shadow + specular
+    
+    # Step 9: Apply Gamma Correction
+    final_color = linear_to_screen(color, gamma_val)
+    
+    return final_color
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The use of `sin` and `pow` with large exponents (32, 8) can lead to precision issues if inputs are not clamped properly. The `clamp` operations on dot products are critical [S1, unofficial].
+- **Boundaries:** The shadow calculation involves `dot(nor, dome) * 0.5 + 1.2`. If `nor` is not normalized or `dome` is not a unit vector, this may produce incorrect results. The source assumes `nor` is normalized [S1, unofficial].
+- **Degenerate Input:** If `collision.x` is invalid (e.g., no collision), the method should not be executed. The source code checks `if (collision.x > -0.5)` [S1, unofficial].
+
+## Subtopics
+
+### Thin-Film Interference via Airy Summation
+A technique for rendering iridescence in thin films (soap bubbles, oil films) using Airy summation for s/p polarization over multiple wavelengths [S2, unofficial]. It performs Airy summation for s and p polarization components, samples 9 wavelengths to compute the interference pattern, and applies the interference model over a dielectric base or a metal base [S2, unofficial]. For metal bases, it derives the complex Index of Refraction (IOR) from F0 and edge tint using Gulbrandsen's inversion [S2, unofficial]. A key pitfall is that thin film at zero thickness must be handled as a special case to avoid numerical instability or incorrect reflection [S2, unofficial].
+
+### Mixing Phong and Iridescence
+A technique to blend Blinn-Phong lighting with iridescent lighting to create tinted iridescent objects [S1, unofficial]. It calculates Blinn-Phong specular by calling `blinnPhongSpec(lightDirection, eyeDirection, nor, 0.5)` to get `power`, multiplies by `tint` to get `baseColor` [S1, unofficial]. It calculates iridescent color as defined in the base iridescent method [S1, unofficial]. It calculates Blinn-Phong base color as `baseColor = power * tint` [S1, unofficial]. It blends using `mix(baseColor, color, mixBaseAndIridescent)` [S1, unofficial]. The parameter `mixBaseAndIridescent` is a slider controlling the blend factor between Blinn-Phong and iridescent lighting, typically in range [0,1] [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- **Time:** The method involves a constant number of trigonometric and power operations per hit point. The complexity is O(1) per pixel/sample, assuming normal calculation is O(1) [S1, unofficial].
+- **Memory:** Minimal memory usage, only storing intermediate vectors and scalars [S1, unofficial].
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Not given in the sources.
+
+**Strengths and Limitations:**
+- **Strengths:** Simple to implement, produces visually appealing iridescent effects with minimal computational cost [S1, unofficial].
+- **Limitations:** The iridescence is an approximation and does not physically model thin-film interference accurately [S1, unofficial]. The perturbation is based on position, which may not align with surface features [S1, unofficial].
+
+**When to Use:**
+- Use when a fast, visually convincing iridescent effect is needed, such as in real-time rendering or stylized graphics [S1, unofficial].
+
+**When Not to Use:**
+- Use [Thin-Film Interference via Airy Summation](#thin-film-interference-via-airy-summation) when physical accuracy is required [S2, unofficial].
+
+## Background
+The method originates from Thomas Hooper’s Crystals shader, which uses a combination of raymarching and SDF [S1, unofficial]. It was popularized in the context of Shadertoy shaders, where cosine palette functions are commonly used for iridescence [S1, unofficial]. The technique is often used in real-time graphics and procedural art [S1, unofficial].
+
+## Sources
+[S1] Show HN: Iridescent crystal with raymarching and signed distance fields, https://varun.ca/ray-march-sdf/, fetched 2026-10-26 (unofficial)
+[S2] Add volumetric rendering, advanced materials, and imager effects, https://github.com/MihrimatriX/photon-engine/pull/3, fetched 2026-10-28 (unofficial)

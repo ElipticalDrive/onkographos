@@ -1,0 +1,259 @@
+# Fast Deterministic GPU Voxelization (Sort-Scatter)
+
+Also called: fast GPU voxelizer, parallel sort + unique + scatter PyTorch path
+
+## Overview
+Fast Deterministic GPU Voxelization is a PyTorch-based method for converting 3D point clouds into a fixed-size voxel grid that achieves bit-identical output to a reference C++/CUDA implementation while providing a ~100x speedup [S1, unofficial]. It replaces an $O(N^2)$ sequential CUDA kernel with a parallel pipeline of filtering, coordinate computation, stable sorting, and scattering [S1, unofficial]. Unlike the standard `deterministic=False` path which relies on non-reproducible atomic operations, this method guarantees reproducibility by preserving original point order within voxels via stable sorting [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** `points` tensor of shape $(N, D)$, where $N$ is the number of points and $D \ge 3$ (typically 4, including intensity or time). `rmin` and `rmax` define the bounding box. `voxel_size` defines the grid resolution. `max_voxels` is the global limit on occupied voxels. `max_num_points` is the limit on points per voxel.
+*   **Outputs:** `voxels` tensor of shape $(M, max\_num\_points, D)$, `coors` tensor of shape $(M, 3)$, and `num_points_per_voxel` tensor of shape $(M)$. $M$ is the actual number of occupied voxels, capped at `max_voxels`.
+
+**Data Structures:**
+*   `points`: Float tensor on GPU.
+*   `in_range`: Boolean mask of length $N$.
+*   `voxel_coords`: Integer tensor of shape $(N', 3)$, where $N'$ is the number of points within the range and valid grid bounds.
+*   `sort_keys`: Integer tensor of shape $(N')$, representing a linearized voxel index (e.g., $z \cdot H \cdot W + y \cdot W + x$) used for sorting.
+
+**Parameters:**
+*   `voxel_size`: Float scalar or vector $(v_x, v_y, v_z)$.
+*   `rmin`, `rmax`: Float vectors $(x_{min}, y_{min}, z_{min})$ and $(x_{max}, y_{max}, z_{max})$.
+*   `max_voxels`: Integer. If the number of unique voxels exceeds this, the method falls back to the reference C++ implementation to preserve bit-identity [S1, unofficial].
+*   `max_num_points`: Integer. Maximum points retained per voxel.
+
+**Algorithm Steps:**
+1.  **Range Filtering:** Compute a boolean mask for points inside the bounding box. The condition is inclusive of the lower bound and exclusive of the upper bound: $p_i \in [r_{min}, r_{max})$ for all dimensions [S1, unofficial].
+2.  **Coordinate Computation:** For each point in the filtered set, compute its voxel coordinate $c$ for each dimension $d \in \{x, y, z\}$:
+    $$ c_d = \lfloor \frac{p_d - r_{min,d}}{v_d} + 0.5 \rfloor $$
+    This formula mirrors the C++ `round()` behavior exactly [S1, unofficial].
+3.  **Grid Boundary Validation:** Compute the grid dimensions $G_d = \lceil \frac{r_{max,d} - r_{min,d}}{v_d} \rceil$ (or derived from config). Filter out points where any coordinate $c_d < 0$ or $c_d \ge G_d$. This step is critical to handle non-integer grid sizes or points at the upper bound that might round up to an out-of-bounds index [S1, unofficial].
+4.  **Linearization:** Compute a unique linear key for each valid voxel coordinate to enable sorting. For 3D coordinates $(x, y, z)$ and grid dimensions $(W, H, D)$:
+    $$ key = z \cdot (W \cdot H) + y \cdot W + x $$
+5.  **Stable Sorting:** Sort the points (and their associated data) by the linear key using a stable sort algorithm. This preserves the original relative order of points that map to the same voxel [S1, unofficial].
+6.  **Grouping and Truncation:** Identify unique voxel keys. For each unique voxel, select the first `max_num_points` points from the sorted list. Points beyond this limit are discarded [S1, unofficial].
+7.  **Scattering:** Scatter the selected points into the output `voxels` tensor, populate `coors` with the voxel coordinates, and record the count of points per voxel in `num_points_per_voxel` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def voxelize_fast_gpu(points, rmin, rmax, voxel_size, max_voxels, max_num_points, grid_dims):
+    """
+    points: (N, D) float tensor
+    rmin: (3,) float tensor
+    rmax: (3,) float tensor
+    voxel_size: (3,) float tensor
+    grid_dims: (3,) int tensor (W, H, D)
+    """
+    # 1. Range Filter: inclusive min, exclusive max
+    # [S1, unofficial]
+    in_range = torch.all((points[:, :3] >= rmin) & (points[:, :3] < rmax), dim=1)
+    pts = points[in_range]
+    
+    if pts.numel() == 0:
+        return torch.empty((0, max_num_points, pts.shape[1]), device=pts.device), \
+               torch.empty((0, 3), dtype=torch.long, device=pts.device), \
+               torch.empty((0,), dtype=torch.long, device=pts.device)
+
+    # 2. Compute Voxel Coordinates
+    # c = floor((p - rmin) / voxel_size + 0.5)
+    # [S1, unofficial]
+    coords = torch.floor((pts[:, :3] - rmin) / voxel_size + 0.5).long()
+    
+    # 3. Grid Boundary Validation
+    # Keep only points where 0 <= coord < grid_dim
+    # [S1, unofficial]
+    valid = torch.all((coords >= 0) & (coords < grid_dims), dim=1)
+    pts = pts[valid]
+    coords = coords[valid]
+    
+    if pts.numel() == 0:
+        return torch.empty((0, max_num_points, pts.shape[1]), device=pts.device), \
+               torch.empty((0, 3), dtype=torch.long, device=pts.device), \
+               torch.empty((0,), dtype=torch.long, device=pts.device)
+
+    # 4. Linearize Coordinates for Sorting
+    # key = z * (W * H) + y * W + x
+    # [S1, unofficial]
+    W, H, D = grid_dims
+    keys = coords[:, 2] * (W * H) + coords[:, 1] * W + coords[:, 0]
+    
+    # 5. Stable Sort
+    # Sort by keys. Stable sort preserves original point order for same keys.
+    # [S1, unofficial]
+    sorted_indices = torch.argsort(keys, stable=True)
+    sorted_pts = pts[sorted_indices]
+    sorted_keys = keys[sorted_indices]
+    
+    # 6. Identify Unique Voxels and Counts
+    # Find unique keys and their counts
+    # [S1, unofficial]
+    unique_keys, counts = torch.unique_consecutive(sorted_keys, return_counts=True)
+    
+    # Check if number of voxels exceeds max_voxels
+    if counts.numel() > max_voxels:
+        # Fallback to C++ op is required for bit-identity
+        # [S1, unofficial]
+        raise NotImplementedError("Fallback to C++ op required when M > max_voxels")
+        
+    num_voxels = counts.numel()
+    
+    # 7. Select Points per Voxel
+    # We need to select the first max_num_points points for each voxel
+    # Create a mask for the first max_num_points points in each group
+    # [S1, unofficial]
+    # Calculate cumulative counts to determine start indices
+    cum_counts = torch.cat([torch.tensor([0], device=counts.device), counts[:-1]])
+    
+    # Generate indices for all points in the sorted list
+    all_indices = torch.arange(pts.shape[0], device=pts.device)
+    
+    # Determine the rank of each point within its voxel group
+    # rank = all_indices - cum_counts[voxel_id]
+    # This requires mapping sorted_indices back to voxel IDs or using a different approach
+    # Efficient approach: Use torch.unique_consecutive to get group boundaries
+    
+    # Re-calculate group boundaries
+    # start_idx for each unique key
+    start_indices = torch.cat([torch.tensor([0], device=counts.device), cum_counts])
+    end_indices = start_indices + counts
+    
+    # Create a tensor of ranks for each point
+    # rank[i] = i - start_indices[unique_key_index[i]]
+    # We need to map each sorted index to its unique key index
+    # Since sorted_keys is sorted, we can use searchsorted or just iterate
+    # However, for pure PyTorch without loops:
+    
+    # Create a tensor of voxel IDs for each sorted point
+    # This is tricky without a loop or advanced indexing. 
+    # Alternative: Use the fact that unique_keys are sorted.
+    # We can use torch.searchsorted to find which unique key each sorted key belongs to.
+    
+    voxel_ids = torch.searchsorted(unique_keys, sorted_keys)
+    
+    # Calculate rank within voxel
+    # rank = current_index_in_sorted_array - start_index_of_voxel
+    # But current_index_in_sorted_array is just the index in the sorted list
+    # We need the start index of the voxel in the sorted list
+    # start_indices[voxel_ids] gives the start index of each voxel's points in the sorted list
+    
+    ranks = torch.arange(pts.shape[0], device=pts.device) - start_indices[voxel_ids]
+    
+    # Mask for points to keep: rank < max_num_points
+    keep_mask = ranks < max_num_points
+    
+    # Apply mask
+    final_pts = sorted_pts[keep_mask]
+    final_coords = coords[keep_mask] # Note: coords was also sorted by sorted_indices
+    # Wait, coords was sorted by sorted_indices? No, coords was filtered.
+    # We need to sort coords as well.
+    
+    # Let's restart the sorting step to include coords
+    # 5. Stable Sort (pts and coords)
+    sorted_indices = torch.argsort(keys, stable=True)
+    sorted_pts = pts[sorted_indices]
+    sorted_coords = coords[sorted_indices]
+    sorted_keys = keys[sorted_indices]
+    
+    # 6. Unique and Counts
+    unique_keys, counts = torch.unique_consecutive(sorted_keys, return_counts=True)
+    
+    if counts.numel() > max_voxels:
+        raise NotImplementedError("Fallback to C++ op required")
+        
+    num_voxels = counts.numel()
+    
+    # 7. Ranks and Mask
+    voxel_ids = torch.searchsorted(unique_keys, sorted_keys)
+    start_indices = torch.cat([torch.tensor([0], device=counts.device), cum_counts])
+    ranks = torch.arange(pts.shape[0], device=pts.device) - start_indices[voxel_ids]
+    keep_mask = ranks < max_num_points
+    
+    final_pts = sorted_pts[keep_mask]
+    final_coords = sorted_coords[keep_mask]
+    
+    # 8. Scatter Output
+    # We need to organize final_pts into (num_voxels, max_num_points, D)
+    # And final_coords into (num_voxels, 3)
+    
+    # Create output tensors
+    voxels = torch.zeros((num_voxels, max_num_points, final_pts.shape[1]), device=pts.device)
+    coors = torch.zeros((num_voxels, 3), dtype=torch.long, device=pts.device)
+    num_points_per_voxel = torch.zeros((num_voxels,), dtype=torch.long, device=pts.device)
+    
+    # Fill coors
+    coors = unique_keys.unsqueeze(1).repeat(1, 3) # This is wrong, unique_keys is linear
+    # We need to de-linearize unique_keys to get x, y, z
+    # [S1, unofficial]
+    coors[:, 2] = unique_keys // (W * H)
+    coors[:, 1] = (unique_keys % (W * H)) // W
+    coors[:, 0] = unique_keys % W
+    
+    # Fill voxels and counts
+    # We need to scatter final_pts into voxels based on their voxel ID
+    # But final_pts is a flat list of kept points. We need to know which voxel each belongs to.
+    # We can re-calculate voxel_ids for the kept points
+    
+    kept_voxel_ids = voxel_ids[keep_mask]
+    
+    # Use scatter_ or index_copy_
+    # For each voxel, we want to place points in order
+    # Since we kept the first max_num_points, we can just fill sequentially
+    
+    # Efficient scatter:
+    # Create a tensor of indices for the destination
+    # dest_idx = voxel_id * max_num_points + rank
+    # But rank is local to the voxel.
+    
+    # Let's use a loop over voxels if num_voxels is small, or advanced indexing
+    # Advanced indexing:
+    # For each point in final_pts, we know its voxel_id and its rank (which is its position in the kept list for that voxel)
+    # Actually, the rank in the kept list is not directly available.
+    # We know the global index in the sorted list.
+    # The rank within the voxel is kept_voxel_rank = global_index_in_sorted - start_index_of_voxel
+    # But we filtered points.
+    
+    # Simpler approach:
+    # Iterate over unique keys (voxels) and copy the slice
+    # This is Python loop but only over voxels, not points.
+    # [S1, unofficial]
+    for i, key in enumerate(unique_keys):
+        # Find range in sorted list
+        start = start_indices[i]
+        end = start + counts[i]
+        # Get points for this voxel
+        voxel_pts = sorted_pts[start:end]
+        # Truncate if necessary
+        voxel_pts = voxel_pts[:max_num_points]
+        # Place in output
+        voxels[i, :voxel_pts.shape[0], :] = voxel_pts
+        num_points_per_voxel[i] = voxel_pts.shape[0]
+        
+    return voxels, coors, num_points_per_voxel
+```
+
+## Subtopics
+
+### Grid Pooling (Max Pooling over Points)
+Aggregates features within voxels using max pooling rather than truncation. Chosen when feature preservation is prioritized over strict point count limits. [Link](4327-grid-pooling-max-pooling-over-points.md)
+
+### Grid-based Scene Cropping with KNN Precomputation
+Focuses on spatial cropping and neighbor search precomputation rather than the voxelization step itself. Chosen for downstream neighbor queries. [Link](4462-grid-based-scene-cropping-with-knn-precomputation.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \log N)$ due to the stable sort step, where $N$ is the number of points within the range. This is a significant improvement over the $O(N^2)$ complexity of the reference C++ implementation which scans previous points for rank [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ for storing intermediate tensors (masks, coordinates, keys).
+*   **Performance:** On an NVIDIA H100 with PyTorch 2.12, the method achieves 0.69–0.70 ms per frame for 250k points, compared to 69.8–70.1 ms for the C++ deterministic version, a ~100x speedup [S1, unofficial]. In a full end-to-end training loop, this reduces per-step time from 2.61 s to 0.38 s (~6.9x faster) [S1, unofficial].
+*   **Strengths:** Bit-identical output to the reference implementation; highly parallelizable; reproducible.
+*   **Limitations:** Falls back to the slower C++ implementation if the number of occupied voxels exceeds `max_voxels` [S1, unofficial]. Requires PyTorch and CUDA.
+*   **When to use:** BEVFusion training where deterministic, reproducible voxelization is required and performance is critical.
+*   **When not to use:** Deployment scenarios like Autoware which use different voxelizers (e.g., spconv hash voxelizer) [S1, unofficial].
+
+## Background
+The method was introduced in a pull request to the Tier4 AWML repository in June 2026 by Max-Bin [S1, unofficial]. It was developed to address a bottleneck in BEVFusion training, where the existing deterministic CUDA voxelizer was too slow due to its sequential nature. The method leverages PyTorch's built-in sorting and scattering operations to achieve parallelism while maintaining the strict determinism required for reproducible research and training [S1, unofficial].
+
+## Sources
+[S1] perf(BEVFusion): faster bit-identical GPU voxelizer (training), https://github.com/tier4/AWML/pull/212, fetched 2026-10-26 (unofficial)

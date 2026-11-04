@@ -1,0 +1,157 @@
+# Uniform Grid Adjacent Cell Indexing
+
+Also called: Adjacent Cell Indexing, Edge Neighbor Indexing
+
+## Overview
+Uniform Grid Adjacent Cell Indexing computes the linear memory indices of the four cells sharing a specific grid edge in a uniform voxel grid [S1, unofficial]. It solves the problem of efficiently locating neighboring cells for operations such as multi-material interface definition without traversing a graph structure [S1, unofficial]. It differs from its parent, [Voxel Grid Indexing](1719-voxel-grid-indexing.md), by specifically resolving the topology of edge-adjacent neighbors using arithmetic offsets based on edge orientation [S1, unofficial]. It differs from [Multi-Material Cell Map Indexing & Access](4886-multi-material-cell-map-indexing-access.md) by computing raw linear indices rather than material-specific pointers [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `edgePos`: A 3D coordinate representing the position of the edge [S1, unofficial].
+- `edgeType`: An integer identifier (0, 1, or 2) indicating the axis parallel to the edge [S1, unofficial].
+- `m_size`: The grid dimension parameter [S1, unofficial].
+- `m_halfSize`: Half the grid dimension, used for boundary checks [S1, unofficial].
+- `kBadIndex`: A sentinel value indicating a non-existent neighbor [S1, unofficial].
+
+**Outputs:**
+- `cells`: An array of 4 integers containing the linear indices of the adjacent cells [S1, unofficial].
+
+**Data Structures:**
+- The method operates on a uniform grid where cell positions are mapped to linear indices via a helper function `pointToIndex` [S1, unofficial].
+
+**Formulas:**
+Let $dy = (m\_size + 1) \times (m\_size + 1)$ and $dz = 1$ [S1, unofficial].
+The base index is $idx = \text{pointToIndex}(edgePos)$ [S1, unofficial].
+
+For **Edge Type 0** (parallel to X axis):
+$$
+\begin{aligned}
+cells[2] &= idx \\
+cells[0] &= idx - dy - dz \\
+cells[1] &= idx - dz \\
+cells[3] &= idx - dy
+\end{aligned}
+$$
+[S1, unofficial]
+
+For **Edge Type 1** (parallel to Y axis):
+Let $dx = (m\_size + 1)$ and $dz = 1$ [S1, unofficial].
+$$
+\begin{aligned}
+cells[2] &= idx \\
+cells[0] &= idx - dx - dz \\
+cells[1] &= idx - dx \\
+cells[3] &= idx - dz
+\end{aligned}
+$$
+[S1, unofficial]
+
+For **Edge Type 2** (parallel to Z axis):
+Let $dx = (m\_size + 1)$ and $dy = (m\_size + 1) \times (m\_size + 1)$ [S1, unofficial].
+$$
+\begin{aligned}
+cells[2] &= idx \\
+cells[0] &= idx - dx - dy \\
+cells[1] &= idx - dy \\
+cells[3] &= idx - dx
+\end{aligned}
+$$
+[S1, unofficial]
+
+**Steps:**
+1. Determine the stride constants ($dx, dy, dz$) based on `edgeType` [S1, unofficial].
+2. Compute the linear index of the reference point on the edge using `pointToIndex` [S1, unofficial].
+3. Apply the subtraction offsets defined by the edge type to compute the four neighbor indices [S1, unofficial].
+4. Validate each computed index against the grid boundaries [S1, unofficial]. If an index falls outside the valid range, replace it with `kBadIndex` [S1, unofficial].
+
+**Pitfalls:**
+- **Boundary Conditions:** Accessing cells outside the grid must return `kBadIndex` [S1, unofficial]. For Edge Type 0 (X-parallel), invalid neighbors occur at specific Y and Z boundaries:
+    - If $edgePos.y == -m\_halfSize$, `cells[0]` and `cells[3]` are invalid [S1, unofficial].
+    - If $edgePos.y == m\_halfSize$, `cells[1]` and `cells[2]` are invalid [S1, unofficial].
+    - If $edgePos.z == -m\_halfSize$, `cells[0]` and `cells[1]` are invalid [S1, unofficial].
+    - If $edgePos.z == m\_halfSize$, `cells[2]` and `cells[3]` are invalid [S1, unofficial].
+- **Indexing Assumption:** The use of $(m\_size + 1)$ as a stride suggests the grid indexing space includes boundary nodes or faces, distinct from standard $0 \dots N-1$ cell indexing [S1, unofficial]. Implementers must ensure `pointToIndex` uses the same stride convention [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_adjacent_cells(edge_pos, edge_type, m_size, m_half_size, k_bad_index):
+    """
+    Computes linear indices of 4 cells adjacent to an edge in a uniform grid.
+    edge_pos: tuple (x, y, z)
+    edge_type: 0 (X-parallel), 1 (Y-parallel), 2 (Z-parallel)
+    """
+    # pointToIndex implementation inferred from stride convention in source [S1, unofficial]
+    def point_to_index(pos):
+        x, y, z = pos
+        stride_y = (m_size + 1) * (m_size + 1)
+        stride_z = 1
+        return x * stride_y + y * stride_z + z
+
+    idx = point_to_index(edge_pos)
+    cells = [0, 0, 0, 0]
+
+    if edge_type == 0:  # Parallel to X
+        dy = (m_size + 1) * (m_size + 1)
+        dz = 1
+        cells[2] = idx
+        cells[0] = idx - dy - dz
+        cells[1] = idx - dz
+        cells[3] = idx - dy
+        
+        # Boundary checks for Type 0 [S1, unofficial]
+        if edge_pos[1] == -m_half_size:
+            cells[0] = k_bad_index
+            cells[3] = k_bad_index
+        if edge_pos[1] == m_half_size:
+            cells[1] = k_bad_index
+            cells[2] = k_bad_index
+        if edge_pos[2] == -m_half_size:
+            cells[0] = k_bad_index
+            cells[1] = k_bad_index
+        if edge_pos[2] == m_half_size:
+            cells[2] = k_bad_index
+            cells[3] = k_bad_index
+
+    elif edge_type == 1:  # Parallel to Y
+        dx = (m_size + 1)
+        dz = 1
+        cells[2] = idx
+        cells[0] = idx - dx - dz
+        cells[1] = idx - dx
+        cells[3] = idx - dz
+        # Boundary checks for Type 1 not given in the sources. [G]
+
+    elif edge_type == 2:  # Parallel to Z
+        dx = (m_size + 1)
+        dy = (m_size + 1) * (m_size + 1)
+        cells[2] = idx
+        cells[0] = idx - dx - dy
+        cells[1] = idx - dy
+        cells[3] = idx - dx
+        # Boundary checks for Type 2 not given in the sources. [G]
+
+    return cells
+```
+
+## Subtopics
+
+### [Multi-Material Quad Vertex Index Mapping](4910-multi-material-quad-vertex-index-mapping.md)
+Multi-Material Quad Vertex Index Mapping maps a cell edge type to a four-element vertex index array defining a quadrilateral primitive. It resolves vertex connectivity for a quad face using pointer arithmetic on a cell array, building on [Uniform Grid Adjacent Cell Indexing](2992-uniform-grid-adjacent-cell-indexing.md) which computes adjacent cell linear indices. Choose this variant when generating explicit quadrilateral geometry for multi-material interfaces rather than accessing raw neighbor indices.
+
+### Uniform Grid Boundary Checks
+Uniform Grid Boundary Checks provide utility functions to validate whether a face or cell position lies within the grid bounds or on the boundary [S1, unofficial]. `isFaceInGrid` checks if a face is inside the grid; for face type 0 (normal X), this requires $|facePos.x| \le m\_halfSize$ and $-m\_halfSize \le facePos.y < m\_halfSize$, $-m\_halfSize \le facePos.z < m\_halfSize$ [S1, unofficial]. `isFaceOnBorder` checks if a face is on the boundary; for face type 0, true if $|facePos.x| == m\_halfSize$ [S1, unofficial]. `isCellInGrid` returns false if any coordinate is $< -m\_halfSize$ or $\ge m\_halfSize$ [S1, unofficial]. `isCellOnBorder` returns true if any coordinate is $-m\_halfSize$ or $m\_halfSize - 1$ [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for index computation and boundary checks [S1, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary space [G].
+- **Performance:** Extremely fast due to simple arithmetic and no memory allocation or traversal [G].
+- **Strengths:** Deterministic, branch-predictable when boundary checks are optimized, suitable for GPU shaders or tight loops [G].
+- **Limitations:** Requires careful handling of boundary conditions to avoid out-of-bounds memory access and relies on a specific grid indexing convention [S1, unofficial].
+
+## Background
+This method originates from the `isomesh` project by Svenny, which implements efficient isosurface extraction and multi-material mesh generation from voxel data [S1, unofficial]. It is designed for uniform grids where topological relationships are implicit in the memory layout [S1, unofficial].
+
+## Sources
+[S1] Svenny/isomesh, https://github.com/Svenny/isomesh, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,478 @@
+# Efficient Path-Space Differentiable Volume Rendering With Respect To Shapes
+
+Z. Yu1,2 , C. Zhang2 , O. Maury2 , C. Hery2 , Z. Dong2 , S. Zhao1
+
+1University of California, Irvine 2Meta Reality Labs Research
+
+
+
+Figure 1: We introduce a new technique for the differentiable rendering of translucent objects with respect to their shapes. Compared to state-of-the-art formulations [ZWZ∗ 19, ZYZ21], our technique enjoys the advantages of not requiring silhouette detection or specifying change rates inside translucent objects, and allows efficient shape optimization for translucent objects. In this example, using 40 images of a translucent pig (with three shown), we optimize the shape of this object. (Please use Adobe Acrobat and click column (c) to view an animation of the optimization process.)
+
+#### Abstract
+
+Differentiable rendering of translucent objects with respect to their shapes has been a long-standing problem. State-of-theart methods require detecting object silhouettes or specifying change rates inside translucent objects—both of which can be expensive for translucent objects with complex shapes.
+
+In this paper, we address this problem for translucent objects with no refractive or reflective boundaries. By reparameterizing interior components of differential path integrals, our new formulation does not require change rates to be specified in the interior of objects. Further, we introduce new Monte Carlo estimators based on this formulation that do not require explicit detection of object silhouettes.
+
+# 1. Introduction
+
+Translucent materials such as marble, wax, and human skin are ubiquitous in the real world and crucial to many applications, such as computational fabrication, remote sensing, and biomedical imaging. Therefore, simulating the appearances, or forward rendering, of these materials has been an active research topic in computer graphics, leading to mature algorithms capable of efficiently and accurately rendering translucent materials in complex virtual environments.
+
+Differentiable rendering concerns estimating derivatives of radiometric measurements (e.g., radiance) with respect to differential changes of a scene. These techniques have a wide range of applications by facilitating, for instance, the use of gradient-based optimization for solving inverse-rendering problems.
+
+Recently, great progress has been made in the differentiable rendering of translucent materials. Mathematically, differential radiative transfer [ZWZ∗ 19] differentiates the widely adopted radiative transfer framework [Cha60]. Also, generalized differential path integrals [ZYZ21] present an alternative formulation based on the path-integral formulation [PKK00]. Both formulations offer the same level of physical accuracy and the generality of differentiation with respect to arbitrary scene parameters.
+
+On the other hand, efficient differentiation with respect to shapes of translucent objects remains a challenge. Although the aforementioned mathematical formulations both support such geometric differentiations, the resulting algorithms require, respectively, detecting object silhouettes and specifying changing rates in the interior of translucent objects—both of which can be expensive for objects with complex geometries.
+
+In this paper, we take a first step to address this problem and focus on differentiating shapes of translucent objects without refractive or reflective boundaries. Our technique supports full volumetric light transport (e.g., multiple scattering) and scales better for translucent objects with complex geometries than previous methods [ZWZ∗ 19,ZYZ21].
+
+- Concretely, our contributions include:
+- Devising a reparameterized form of (the interior component of) Zhang et al.'s [ZYZ21] generalized differential path integrals (§4\). Our formulation only requires change rates (with respect to shapes of object boundaries) to be evaluated on object boundaries.
+- Introducing unbiased Monte Carlo estimators for our reparameterized path integrals (§5\).
+
+To validate our theory and algorithms, we compare our derivative estimates with those produced using finite differences (Figure 7\). We further demonstrate the effectiveness of our method using differentiable rendering (Figures 8 and 9\) and inverse rendering (Figures 10 and 11\) examples.
+
+# 2. Related Work
+
+Forward volume rendering. Monte Carlo methods have been the "gold standard" for simulating photon and neutron transport in complex environments [SG69]. In computer graphics, volume path tracing (e.g., [KVH84,CPP∗ 05]) is capable of producing unbiased and consistent estimates of radiometric measures. Further, based on the path-integral formulation [Vea97, PKK00], more advanced bidirectional [LW96] and Markov-Chain Monte Carlo (e.g., [PKK00, KSKAC02,JM12]) methods have been introduced to allow efficient simulation of challenging light-transport effects such as glossy interreflection and caustics.
+
+For a comprehensive survey on Monte Carlo volume rendering techniques, we refer to Novak et al.'s survey [NGHJ18].
+
+Differentiable volume rendering. Specialized differentiable volume rendering has been used to solve analysis-by-synthesis problems in volumetric scattering [GZB∗ 13], prefiltering of highresolution volumes [ZWDR16], and fabrication of translucent materials [SRB∗ 19]. All these methods compute derivatives with respect to specific material properties like optical density.
+
+For general-purpose differentiable volume rendering, Che et al. [CLZ∗ 20] developed a system [CLZ∗ 20] capable of computing derivatives with respect to optical material and local normal properties. Recently, efficient tracking methods [NDMKJ22], differentiation techniques [NDSRJ20, VSJ21], and differentiable rendering systems [NDVZJ19, JSRV22] have been introduced to allow differentiable volume rendering to scale to complex scenes with millions of parameters. Vicini et al. [VJK21] introduced a non-exponential transmittance model that improves the volumetric representation of opaque surfaces and their reconstruction using differentiable rendering. Unfortunately, when applied to volume rendering, these methods have difficulties differentiating with respect to shapes as they neglect discontinuities of optical densities that evolve with boundary shapes.
+
+To overcome this challenge, Zhang et al. [ZWZ∗ 19] adopted Monte Carlo edge sampling [LADL18] (originally developed for differentiable rendering of surfaces) and introduced the first differentiable volumetric path tracer capable of differentiating with respect to shapes of translucent objects. This technique—which we refer to as "DTRT"—requires detection of object silhouettes and can be prohibitively expensive for complex scenes.
+
+Later, Zhang et al. [ZYZ21] introduced a technique—which we refer to as "PSDR"—by generalizing the formulation of differential path integrals [ZMY∗ 20] to volumetric light transport. Offering the same level of generality as DTRT, PSDR allows the development of new Monte Carlo methods with better efficiency by not requiring expensive silhouette detection. On the other hand, when differentiating with respect to shapes of translucent objects, PSDR requires specifying change rates in the interior of these objects, which can be expensive. In §4, we will address this problem by introducing a reparameterized formulation that does not involve change rates inside translucent objects.
+
+Recently, Deng et al. [DLW∗ 22] extended PSDR to support bidirectional subsurface scattering distribution functions (BSSRDFs)—an approximated formulation of volumetric light transport. Our technique, on the other hand, uses the full radiative transfer model [Cha60] and is orthogonal to Deng et al.'s approach.
+
+# 3. Preliminaries
+
+In this paper, we tackle differentiable rendering of translucent objects with no refractive interfaces or reflective boundaries. Further, we focus on differentiation with respect to shapes of such objects.
+
+In the following, we review the related mathematical formulations: generalized path integral (§3.1\) and its differential expression (§3.2\). Then, we formally specify our problem (§3.3\).
+
+# 3.1. Generalized Path Integral
+
+The formulation of generalized path integrals [Vea97,PKK00] has been the mathematical foundation of many modern Monte Carlo rendering techniques such as bidirectional path tracing [VG95, LW96] and Metropolis light transport [VG97].
+
+Under this formulation, the response I ∈ R of a radiometric detector is expressed as a generalized path integral [Vea97,PKK00] of the form:
+
+
+$$I = \int_{\Omega} f(\bar{\mathbf{x}}) \, d\mu(\bar{\mathbf{x}}), \quad (1)$$
+
+where x¯ = (x*0,..., *xN) denotes a light transport path (with x*0 on a light source and *xN on a detector). Additionally, Ω is the path space with measure µ, and f is the measurement contribution function. In the following, we summarize the definitions of these terms.
+
+Path space and measure. With the presence of translucent objects (without refractive/reflective boundaries), the path space can be defined as
+
+$$\Omega = \bigcup_{N \geq 1} (\mathcal{V} \cup \mathcal{M})^{N+1}, \quad (2)$$
+
+where V and M denote, respectively, the interior of all translucent objects and the surfaces of all opaque objects. For a light transport path x¯ = (x*0,..., *xN) ∈ Ω, the measure µ satisfies
+
+
+$$d\mu(\bar{\mathbf{x}}) = \prod_{n=0}^N \begin{cases} dA(\mathbf{x}_n), & (\mathbf{x}_n \in \mathcal{M}) \\ dV(\mathbf{x}_n), & (\mathbf{x}_n \in \mathcal{V}) \end{cases} \quad (3)$$
+
+where d*A* and d*V* denote, respectively, the surface-area and volume measures.
+
+Measurement contribution. Given a light path x¯ = (x*0,..., *xN), its measurement contribution f(x¯) equals the product of per-vertex terms f*v and per-segment ones *G:
+
+
+$$f(\vec{x}) := \left[ \prod_{n=0}^N f_v(\mathbf{x}_{n-1} \rightarrow \mathbf{x}_n \rightarrow \mathbf{x}_{n+1}) \right] \left[ \prod_{n=1}^N G(\mathbf{x}_{n-1} \leftrightarrow \mathbf{x}_n) \right]. \quad (4)$$
+
+In this equation, the per-vertex contribution *f*v is defined as
+
+$$f_{\nu}(\mathbf{x}_{n-1} \rightarrow \mathbf{x}_n \rightarrow \mathbf{x}_{n+1}) := \begin{cases} f_{\nu}(\mathbf{x}_{n-1} \rightarrow \mathbf{x}_n \rightarrow \mathbf{x}_{n+1}), & (0 < n < N, \mathbf{x}_n \in \mathcal{M}) \\ \sigma_{\nu}(\mathbf{x}_n) f_{\nu}(\mathbf{x}_{n-1} \rightarrow \mathbf{x}_n \rightarrow \mathbf{x}_{n+1}), & (0 < n < N, \mathbf{x}_n \in \mathcal{V}) \\ L_e(\mathbf{x}_0 \rightarrow \mathbf{x}_1), & (n=0) \\ W_e(\mathbf{x}_{N-1} \rightarrow \mathbf{x}_N), & (n=N) \end{cases} \quad (5)$$
+
+where *f*s is the bidirectional scattering distribution function (BSDF), *f*p denotes the single-scattering phase function, σs is the scattering coefficient, and *L*e and *W*e capture the source emission and detector importance (or response). Additionally, the persegment generalized geometric term is given by:
+
+
+$$G(\mathbf{x} \leftrightarrow \mathbf{y}) := T(\mathbf{x} \leftrightarrow \mathbf{y}) \mathbb{V}(\mathbf{x} \leftrightarrow \mathbf{y}) \frac{D_{\mathbf{x}}(\mathbf{y}) D_{\mathbf{y}}(\mathbf{x})}{\|\mathbf{x} - \mathbf{y}\|^2}, \quad (6)$$
+
+where, for any points x, y ∈ V ∪M,
+
+$$D_{\mathbf{x}}(\mathbf{y}) := \begin{cases} |\mathbf{n}(\mathbf{x}) \cdot \vec{x}|, & (\mathbf{x} \in \mathcal{M}) \\ 1, & (\mathbf{x} \in \mathcal{V}) \end{cases} \quad (7)$$
+
+with n(x) being the (unit-length) surface normal at x, and −→xy := (y−x)/∥y−x∥ is the unit direction from x to y.
+
+Lastly, in Eq. \(6\), V(x ↔ y) denotes the mutual visibility function, and T(x ↔ y) indicates the transmittance between x and y that equals
+
+
+$$T(\mathbf{x} \leftrightarrow \mathbf{y}) = \exp \left[ - \int_{\mathbf{x}'} \sigma_t d\ell \right], \quad (8)$$
+
+where σt is the extinction coefficient (or optical density); xy denotes the line segment connecting x and y; and ℓ is the curve-length measure.
+
+# 3.2. Generalized Differential Path Integral
+
+Zhang et al. [ZYZ21] have recently derived derivatives of generalized path integrals as generalized differential path integrals—a result we briefly revisit in the following.
+
+Material-form reparameterization. When the scene geometry (e.g., object location) depends on some parameter θ, Zhang et al. proposed to apply a change of variable to the ordinary path integral so that the new domain of integration becomes independent of θ, simplifying differentiations with respect to this parameter.
+
+To this end, one can parameterize the scene geometry using a motion X such that X(·,θ) is a differentiable bijection that maps some fixed reference volume BV and surface BM to, respectively, the interior V(θ) of translucent objects and the surfaces M(θ) of opaque objects. Lastly, we call any x ∈ V(θ) ∪M(θ) a spatial point and any p ∈ BV ∪ BM a material point.
+
+Then, applying the change of variable given by the mapping X(·,θ) to each vertex of a light path allows Eq. \(1\) to be rewritten as the material-form generalized path integral:
+
+
+$$I = \int_{\hat{\Omega}} \hat{f}(\vec{p}) \, d\mu(\vec{p}), \quad (9)$$
+
+where the domain of integration is the material path space Ωˆ given by
+
+
+$$\hat{\Omega} := \bigcup_{N \geq 1} (\mathcal{B}_V \cup \mathcal{B}_M)^{N+1}, \quad (10)$$
+
+which comprises material light paths p¯ = (p*0 ,..., *pN ).
+
+In Eq. \(9\), ˆ*f* is the material measurement contribution provided by the original measurement contribution of Eq. \(4\) and Jacobian determinants J capturing this change of variable:
+
+
+$$\hat{f}(\bar{\mathbf{p}}) := f(\bar{\mathbf{x}}) \prod_{n=0}^N J(\mathbf{p}_n), \quad (11)$$
+
+where x¯ = (x*0,..., *xn) with xn = X(pn ,θ), and
+
+
+$$J(\mathbf{p}) := \left\{ \begin{array}{l} \|\text{dA}(\mathbf{x}(\mathbf{p}, \Theta))/\text{dA}(\mathbf{p})\|, \quad (\mathbf{p} \in \mathcal{B}_M) \\ \|\text{dV}(\mathbf{x}(\mathbf{p}, \Theta))/\text{dV}(\mathbf{p})\|, \quad (\mathbf{p} \in \mathcal{B}_Y) \end{array} \right. \quad (12)$$
+
+Generalized differential path integral. In general, the derivative of Eq. \(9\) have been proven [ZMY∗ 20,ZYZ21] to equal
+
+
+$$\frac{dI}{d\theta} = \int_{\hat{\Omega}} \frac{d\hat{f}(\vec{p})}{d\theta} d\mu(\vec{p}) + \int_{\hat{\Delta}\hat{\Omega}} \Delta \hat{f}(\vec{p}) v_{\perp}(\vec{p}_K) d\mu(\vec{p}). \quad (13)$$
+
+This result is called the (material-form) generalized differential path integral. In Eq. \(13\), the interior component is over the same material path space Ωˆ as the material-form generalized path integral in Eq. \(9\). In contrast, the boundary integral is over the material boundary path space ∆Ωˆ comprised of material boundary paths. These paths are identical to the ordinary ones except for having one boundary segment pK−1 pK such that the spatial representations xK−1 = X(pK−1 ,θ) and xK = X(pK ,θ) of the endpoints reside on visibility boundaries with respect to each other. Additionally, ∆ ˆ*f* denotes the difference in material measurement contribution ˆ*f* across the discontinuity boundary (at pK ), and v⊥(pK ) is the normal change rate (with respect to θ) of the discontinuity boundary. We refer the readers to the work by Zhang et al. [ZYZ21] for the precise definitions of the boundary component.
+
+
+
+Figure 2: Material-form reparameterization: Zhang et al. [ZYZ21] proposed to reparameterize surfaces M(θ) of opaque objects and volumes V(θ) of translucent objects that evolve with some scene parameter θ*. This can be achieved using a differentiable bijection* X(·,θ) that maps some θ*-independent reference surface* BM = M(0) and volume BV = V(0) to the evolving M(θ) and V(θ), respectively.
+
+# 3.3. Problem Specification
+
+We focus on differentiable renderings of translucent objects with respect to their shapes expressed with some parameter θ and make the following assumptions:
+
+S.1 The translucent objects contain no refractive or reflective boundaries (i.e., with "null" BSDFs\)—which ensures that these objects cause no visibility discontinuities. Further, there are no visibility boundaries (such as cast or volume shadows) that depend on the parameter θ. S.2 The parameter θ controls only shapes of translucent objects (but not their material properties such as extinction and scattering coefficients).
+
+We note that, Our derivatives use one parameter θ ∈ R for simplicity and can be generalized for multiple parameters θ ∈ R m easily. In §4, we will discuss why Assumption S.1 is needed as well as how it can be relaxed. When solving practical inverse-rendering problems, our technique can be used to compute partial derivatives with respect to object shapes. Other partial derivatives with respect to, for example, material optical properties can be computed using other existing methods such as path-replay backpropagation [VSJ21].
+
+For notational simplicity, we assume without loss of generality that all differentiations with respect to θ are evaluated at θ = 0, and define
+
+| $d_\theta := [^{dh}/d\theta]_{\theta=0}$ | $\partial_\theta h := [^{dh}/\partial\theta]_{\theta=0}$ | (14) |
+|------------------------------------------|----------------------------------------------------------|------|
+|                                          |                                                          |      |
+
+as total and partial derivatives of h (for any scalar- or vector-valued function h).
+
+Under the aforementioned settings, the boundary component of the generalized differential path integral \(13\) vanishes, yielding
+
+
+$$d_0 I = \int_{\hat{\mathbf{\Delta}}} (d_0 \hat{f}(\vec{p})) d\mu(\vec{p}), \quad (15)$$
+
+with ˆ*f* defined in Eq. \(11\).
+
+Reference configuration. As illustrated in Figure 2, similar to prior works [ZYZ21], we set the reference volume to BV = V(0) and the reference surface to BM = M(0). This causes the mapping X(·,0) to reduce to the identity map and the Jacobian determinants ∥d*xn*/d*pn*∥ defined in Eq. \(12\) to equal one. Further, the path space Ω(0) coincides with the material path space Ωˆ .
+
+We note that, when θ controls scene geometry, the derivative of ∥d*xn*/d*pn*∥ with respect to θ is generally nonzero—even at θ = 0.
+
+Challenges. Evaluating dθ ˆ*f*(p¯) for any path p¯ = (p*0 ,..., *pN ) requires specifying and differentiating the mapping X(·,θ) at each vertex pn . When optimizing the shapes of translucent objects expressed using triangle meshes, the scene parameter θ controls the positions of mesh vertices. In this case, the mapping X(·,θ) is not uniquely determined for pn in the interior of the reference volume (i.e., pn ∈ BV ), and the choice of the mapping X(pn ,θ) does not affect the resulting derivative dθ I—as long as it is continuous.
+
+Previously, Zhang et al. [ZYZ21] used tetrahedral meshes to interpolate X(·,θ) defined on the boundaries of translucent objects into their interiors. Despite offering high generality (by being capable of handling, for example, visibility discontinuities and refractive interfaces), this method introduces high computational overhead by requiring frequent tetrahedralizations and point-intetrahedron lookups.
+
+To address this problem for translucent objects with no refractive/reflective boundaries, we will introduce a mathematical formulation that does not require evaluating X(·,θ) inside objects in §4 and new Monte Carlo estimators for this formulation in §5.
+
+# 4. Reparameterized Interior Differential Path Integrals
+
+Based on the aforementioned assumptions (S.1 and S.2), we now introduce a reparameterized form of the interior differential path integral expressed in Eq. \(15\). The key idea is to convert the volume integral to a boundary area integral using the divergence theorem. By doing so, the terms related to the mapping X(·,θ) are moved from the interior to the boundary. This provides comutational benefits as the mapping X(·,θ) does not need to be evaluted in the interior of the volume, avoiding the need for the expensive tetrahedralization. In the context of surface-based differentiable rendering, Bangaru et.al. [BLD20], on the contrary, applied the divergence theorem in the opposite way to avoid dedicated data structure for edge sampling.
+
+To facilitate our derivations, provided some reference volume BV and motion X, we define the velocity v as a vector field over BV given by
+
+
+$$\mathbf{v}(\mathbf{p}) := d_{\theta} \mathbf{X}(\mathbf{p}, \theta). \quad (16)$$
+
+Based on the velocity v, we further define the normal velocity v⊥ as a scalar field over the boundary ∂BV of the reference volume BV :
+
+
+$$v_{\perp}(\mathbf{p}) := \mathbf{v}(\mathbf{p}) \cdot \mathbf{n}(\mathbf{p}), \quad (17)$$
+
+where n denotes the outward unit-normal field associated with ∂BV , and "·" is the dot-product operator.
+
+# 4.1. Simple Volume Integrals
+
+Before deriving our general result for material-form differential path integral defined in Eq. \(15\), we first consider the following material-form differential volume integral:
+
+
+$$\int_{\mathcal{B}_V} d_{\theta} \hat{h}(\mathbf{p}, \boldsymbol{\theta}) dV(\mathbf{p}), \quad (18)$$
+
+where h*ˆ is the given by some scalar-valued differentiable function *h evaluted at x = X(p,θ), and jacobian determinant J(p,θ) = ∥d*V*(x)/d*V*(p)∥ defined in Eq. \(12\) capturing the change of variable:
+
+$$\hat{h}(\mathbf{p}, \Theta) := h(\mathbf{x}, \Theta) J(\mathbf{p}, \Theta), \quad (19)$$
+
+Based on the chain rule, it holds that
+
+
+$$\int_{\mathcal{B}_\nu} d_0 \hat{h} dV = \int_{\mathcal{B}_\nu} (\nabla \hat{h} \cdot \mathbf{v} + \partial_0 \hat{h}) dV, \quad (20)$$
+
+where v is the velocity defined in Eq. \(16\). According to integration by parts, it holds that
+
+
+$$\int_{B_V} \mathbf{v} \cdot \nabla \hat{h} d\mathbf{V} = \int_{B_V} \nabla \cdot (\hat{h} \mathbf{v}) d\mathbf{A} - \int_{B_V} \hat{h} \nabla \cdot \mathbf{v} d\mathbf{V}, \quad (21)$$
+
+where "∇·" is the divergence operator. Then, applying the divergence theorem to first term on the right-hand side of Eq. \(21\) yields
+
+
+$$\int_{\mathcal{B}_V} \mathbf{v} \cdot \nabla \hat{h} \, dV = \int_{\partial \mathcal{B}_V} \hat{h} \, v_\perp \, dA - \int_{\mathcal{B}_V} \hat{h} \, \nabla \cdot \mathbf{v} \, dV, \quad (22)$$
+
+Substituting Eq. \(22\) back into Eq. \(20\) yields
+
+
+$$\int_{B_V} d_\theta \hat{h} dV = \int_{\partial B_V} \hat{h} v_\perp \, dA + \int_{B_V} (\partial_\theta \hat{h} - \hat{h} \nabla \cdot \mathbf{v}) \, dV, \quad (23)$$
+
+where v⊥ is the scalar-valued normal velocity defined in Eq. \(17\).
+
+As discussed in §3.3, under the configuration of reference volume BV = V(0), the mapping X(·,0) reduces to the identity map, and J(p,0) equals one.
+
+
+
+| $\hat{h}(\mathbf{p}, 0) = h(\mathbf{p}, 0) J(\mathbf{p}, 0) = h(\mathbf{p}, 0).$ | (24) |
+|----------------------------------------------------------------------------------|------|
+|----------------------------------------------------------------------------------|------|
+
+Simple case. When h(x,θ) = h(x) does not depend on θ directly, it holds that
+
+
+$$\partial_{\theta} \hat{h}(\mathbf{p}, 0) = h(\mathbf{p}, 0) \partial_{\theta} J(\mathbf{p}, 0), \quad (25)$$
+
+Substituting Eqs. \(24\) and \(25\) into Eq. \(23\) gives
+
+
+$$i = \int_{\partial B_\nu} h v_\perp \, \mathrm{d}A + \int_{B_\nu} h (\partial_\theta J - \nabla \cdot \mathbf{v}) \, \mathrm{d}V, \quad (26)$$
+
+where, as shown in Eq. (2) from Chapter III, Section 10 of the book by Gurtin [Gur81], it holds that
+
+$$\partial_{\theta} J(\mathbf{p}, \boldsymbol{\theta}) = J(\mathbf{p}, \boldsymbol{\theta}) (\nabla \cdot \mathbf{v})(\mathbf{p}), \quad (27)$$
+
+for all p ∈ BV . Under the configuration of reference volume BV = V(0), J(p,0) equals one, resulting in
+
+
+$$\partial_{\theta} J(\mathbf{p}, 0) = (\nabla \cdot \mathbf{v})(\mathbf{p}), \quad (28)$$
+
+This relation is a key ingredient for deriving the well-known Reynolds transport theorem [Rey03].
+
+Given Eq. \(28\), the volume integral in Eq. \(26\) vanishes, allowing Eq. \(18\) to be rewritten as an integral over the boundary ∂BV :
+
+
+$$I = \int_{\partial \mathcal{B}_V} h v_\perp \, dA. \quad (29)$$
+
+
+
+Figure 3: When a translucent object with "null" interfaces (illustrated as the gray rectangle) moves with the parameter θ*, the measurement contribution f*(p¯) can depend on θ*—even with the path p fixed.* ¯
+
+General case. When the integrand h(x,θ) directly depends on the parameter θ, we have
+
+| $\partial_0 \hat{h}(\mathbf{p}, 0) = h(\mathbf{p}, 0) \partial_0 J(\mathbf{p}, 0) + \partial_0 h(\mathbf{p}, 0).$ | (30) |
+|-------------------------------------------------------------------------------------------------------------------|------|
+|-------------------------------------------------------------------------------------------------------------------|------|
+
+By handling the first term on the right-hand side in a similar fashion as the simple case, we obtain a reparameterized form of Eq. \(18\):
+
+
+$$I = \int_{\mathcal{B}_V} \partial_\theta h(\mathbf{p}, \theta) dV(\mathbf{p}) + \int_{\partial\mathcal{B}_V} h(\mathbf{p}, 0) v_\perp(\mathbf{p}) dA(\mathbf{p}). \quad (31)$$
+
+Despite involving one extra boundary component than Eq. \(18\), the reparameterized Eq. \(31\) enjoys the key advantage of not requiring the mapping X(·,θ) or the velocity v to be calculated in the interior of the reference volume BV . This is because its interior component R BV ∂θ h(p,θ)d*V*(p) only takes partial derivative with respect to the parameter θ and does not involve the mapping X(·,θ).
+
+### 4.2. Volume Path Integrals
+
+We now leverage the results derived in §4.1 to differentiate integrals over material paths p¯ := (p*0 ,..., *pN ) comprised of (N +1) volume vertices p*0 ,..., *pN ∈ BV (for some fixed N):
+
+
+$$I = \int_{\hat{\mathbf{A}}_N} d\mathbf{\theta} \left( h(\bar{\mathbf{x}}, \boldsymbol{\theta}) \prod_{n=0}^N J(\mathbf{p}_n, \boldsymbol{\theta}) \right) d\mu(\bar{\mathbf{p}}), \quad (32)$$
+
+where Ωˆ N := B N+1 V , x¯ := (x*0,..., *xN) is the spatial description of the path p¯ with xn = X(pn ,θ), and µ is defined in Eq. \(3\).
+
+Based on the derivations detailed in Appendix A, we show that the derivative ˙I in Eq.\(32\) can be expressed as
+
+
+$$I = \int_{\hat{\Omega}_N} \partial_{\theta} h(\bar{\mathbf{p}}, \boldsymbol{\theta}) d\boldsymbol{\mu}(\bar{\mathbf{p}}) + \int_{\partial\hat{\Omega}_N} h(\bar{\mathbf{p}}) v_{\perp}(\mathbf{p}_n) d\dot{\boldsymbol{\mu}}_N(\bar{\mathbf{p}}), \quad (33)$$
+
+where the boundary domain ∂Ωˆ N and the associated measure ˙µN are defined, respectively, in Eqs. \(46\) and \(47\) in Appendix A.
+
+Similar to Eq. \(31\), the interior component on the right-hand side of Eq. \(33\) does not involve the motion X or the velocity v.
+
+
+
+
+
+Figure 4: Boundary path spaces: (a) Zhang et al. [ZMY∗ 20] differential path integrals involve a boundary path space ∆Ωˆ comprised of paths with exactly one boundary segment. (b) Our volume boundary path space ∂Ωˆ consists of paths each with exactly one volume boundary vertex (p*1 *in this example).
+
+Handling general differential path integrals. Although Eq. \(33\) is defined for paths comprised of (N +1) volume vertices only (i.e., pn ∈ BV for all n), this result can be generalized easily to the general case of Eq. \(15\) where a path can also contain surface vertices (i.e., pn ∈ BM for some n). Specifically, by letting h be the measurement contribution function f and pre-integrating all surface vertices, we obtain the main result of this section:
+
+
+$$\begin{aligned} & \int_{\hat{\Omega}} d_{\theta} \hat{f}(\vec{p}) d\mu(\vec{p}) \\ &= \int_{\hat{\Omega}} \underbrace{\text{interior}}_{\text{boundary}} f(\vec{p}) d\mu(\vec{p}) + \int_{\partial \hat{\Omega}} f(\vec{p}) v_{\perp}(\mathbf{p}_K) d\mu(\vec{p}), \end{aligned} \quad (34)$$
+
+where ∂Ωˆ is the volume boundary path space comprised of volume boundary paths p¯ = (p*0 ,..., *pN ) containing exactly one volume boundary vertex pK residing on the boundary ∂BV of the reference volume for some 0 < K < N. For paths with two or more vertices constrained on the boundary, they have zero measure and make no contribution to the first-order derivatives. Further, the differential measure ˙µ satisfies
+
+$$d\dot{\mu}(\vec{p}) = dA(\mathbf{p}_K) \prod_{n \neq K} \begin{cases} dV(\mathbf{p}_n), & (\mathbf{p}_n \in \mathcal{B}_Y) \\ dA(\mathbf{p}_n), & (\mathbf{p}_n \in \mathcal{B}_M) \end{cases} \quad (35)$$
+
+Discussion. In Eq. \(34\), the path contribution f(p¯) can vary with the parameter θ, even with the path p¯ fixed. This is mainly because the transmittance T(pn ↔ pn+1 )—which is a factor of f can depend on θ when a segment pn pn+1 of the path crosses the ("null") interface of some translucent object (as illustrated in Figure 3\). Such dependency is captured by the interior component.
+
+Additionally, the volume boundary path space ∂Ωˆ is fundamentally different from the original boundary path space ∆Ωˆ in Eq. \(13\). As illustrated in Figure 4, the former contains paths with one vertex constrained on the boundary of some translucent object. The latter, on the other hand, consists of paths containing a pair of vertices constrained by a visibility boundary caused by some opaque surface.
+
+Continuity assumption. Our derivation of the main result of Eq. \(34\) relies on the assumption (S.1) of having no reflective/refractive or (volume) shadow boundaries. This assumption ensures that material measurement contribution ˆ*f* to be continuous in the interior of BV—which is required for applying the divergence theorem to obtain Eq. \(22\).
+
+We note that our theory does not fundamentally rely on this assumption: When it is violated, one can make the volume boundary vertices to be constrained on the union of volume boundaries ∂BV as well as visibility (e.g., volume shadow) boundaries. However, since the "velocity" of visibility boundaries can be nontrivial to compute (without tetrahedralization), we consider the relaxation of Assumption S.1 an important topic for future research.
+
+#### 5. Monte Carlo Estimators
+
+We now introduce new Monte Carlo methods to estimate Eq. \(34\). Since the interior component of Eq. \(34\) can be handled in similar fashion as that of the ordinary differential path integral of Eq \(13\) except for having the path vertices "detached"—we focus on the newly introduced boundary component:
+
+
+$$i_{\text{bnd}} := \int_{\partial \hat{\Omega}} f(\vec{p}) v_{\perp}(\mathbf{p}_K) \, d\dot{\mu}(\vec{p}). \quad (36)$$
+
+By randomly sampling volume boundary paths p¯ (from the volume boundary path space ∂Ωˆ ), we obtain the following (single-sample) Monte Carlo estimator of Eq. \(36\):
+
+$$\langle \mathbf{I}_{\text{bnd}} \rangle = f(\vec{\mathbf{p}}) \nu_{\perp}(\mathbf{p}_K) / \text{pdf}(\vec{\mathbf{p}}), \quad (37)$$
+
+where pdf(p¯) denotes the probability density for sampling p¯.
+
+Based on this framework, we introduce a unidirectional and a bidirectional estimator—both of which support the full radiative transfer model [Cha60] including multiple scattering, anisotropic phase functions, and heterogeneity. Further, we combine these estimators using multiple importance sampling (MIS).
+
+Unidirectional estimator. Starting with p 0 on the detector, our unidirectional estimation first builds a "main" path (p D 0 , p D 1 ,...) using (unidirectional) volume path tracing, Then, for each vertex p D n , the estimator construct a "side" path by explicitly drawing the volume boundary vertex p B n ∈ ∂BV (i.e., from the "null" boundary of a translucent object) and connecting this point to a light source via a subpath (p S n,0 ,..., p S n,mn ) for some mn ≥ 0. This gives a volume boundary path (p S n,mn ,..., p S n,0 , p B n , p D n ,..., p 0 ) where p B n corresponds to a volume scattering event happening exactly on the boundary (see Figure 5\).
+
+In practice, we sample the volume boundary vertex p B n by first drawing a direction ω*n* based on the BSDF or phase function at p D n . Then, we trace a ray from p D n in the direction ω*n* and let p B n be an intersection between this ray and all "null" interfaces ∂BV . Further, to avoid high computational overhead for generating "side" paths when the "main" one is long (i.e., with large numbers of vertices), we apply Russian roulette at each vertex p D n of the "main" path based on the throughput to stochastically skip the generation of "side" paths.
+
+
+
+Figure 5: Our unidirectional sampling of volume boundary paths.
+
+
+
+Figure 6: Our bidirectional sampling of volume boundary paths.
+
+Bidirectional estimator. Additionally, we introduce a bidirectional estimator that samples volume boundary paths by first drawing the volume boundary vertex p B . From this vertex, the algorithm then constructs two subpaths (using unidirectional sampling with next-event estimation) to connect p B to the light source and the detector, respectively (see Figure 6\). This process is conceptually similar to the multi-directional technique introduced by Zhang et al. [ZMY∗ 20] for sampling ordinary boundary paths.
+
+Multiple importance sampling. Provided two volume boundary paths p¯ 1 and p¯ 2 sampled independently using our unidirectional and bidirectional estimators, respectively, we weight their contributions with (path-level) multiple importance sampling. Using the balanced heuristic [Vea97], we have
+
+
+$$\langle \hat{\mathbf{l}}_{\text{bnd}} \rangle_{\text{mis}} = \frac{f(\tilde{\mathbf{p}}_1) v_{\perp}(\mathbf{p}_{K1})}{\text{pdf}_1(\tilde{\mathbf{p}}_1) + \text{pdf}_2(\tilde{\mathbf{p}}_1)} + \frac{f(\tilde{\mathbf{p}}_2) v_{\perp}(\mathbf{p}_{K2})}{\text{pdf}_1(\tilde{\mathbf{p}}_2) + \text{pdf}_2(\tilde{\mathbf{p}}_2)}, \quad (38)$$
+
+where pdf1 and pdf2 denote the probabilities for sampling a path using our unidirectional and bidirectional methods, respectively.
+
+In this equation, since the two volume boundary paths p¯ 1 and p¯ 2 can be sampled independently, they can have varying lengths and *K*1 does not have to equal *K*2.
+
+We note that, using this MIS estimator requires computing the probability densities pdf1 and pdf2 , which can be difficult when methods like delta tracking [WMHL65] are used to sample freeflight distances.
+
+In this paper, we use the MIS estimator in Eq. \(38\) only for objects with homogeneous optical densities and the aforementioned bidirectional estimator for those with spatially varying albedo.
+
+#### 6. Results
+
+We implement our technique (§4 and §5\) on the CPU based on the system developed by Yu et al. [YZN∗ 22] that utilizes the Enzyme automatic differentiation framework [MC20].
+
+### 6.1. Validation and Evaluation
+
+We validate our technique in Figure 7 using the "Bunny 1" that contains a homogeneous translucent bunny under an area light. Derivatives (with respect to the horizontal position of the bunny) estimated by our method closely matches the reference given by finite differences (FD).
+
+Additionally, in Figure 8, we evaluate our technique by comparing derivatives estimated with FD, our method, and Zhang et al.'s path-space method [ZYZ21] (indicated as PSDR). This figure uses a "Bumpy ball" scene containing a homogeneous translucent bumpy ball under environmental illumination, and the derivatives are with respect to the horizontal position of the object. When the ball is rendered from a distance, our bidirectional method outperforms the unidirectional. When the ball is rendered close-up, our unidirectional estimators outperforms the bidirectional one, thanks to its pixel-level stratification. In both cases, our MIS estimator offers the best quality at equal time while PSDR suffers from high variance due to tetrahedralization and point-in-tetrahedron tests.
+
+Lastly, we compare our technique with both PSDR and the differential radiative transfer method [ZWZ∗ 19] (indicated as "DTRT") in Figure 9. This example includes a "Bunny 2" scene where a homogeneous translucent Bunny is lit by an area light with complex shape (as illustrated in "Configuration"). When estimating derivatives with respect to the horizontal position of the area light, both our method and PSDR benefit from the material-form parameterization (described in §3.2\) and do not require detecting boundaries of the light. DTRT—which relies on the spherical integral formulation—requires explicit silhouette detection and, therefore, performs significantly worse than both PSDR and our method.
+
+#### 6.2. Inverse-Rendering Results
+
+We further demonstrate the usefulness of our method using several synthetic inverse-rendering examples. Please refer to Table 1 for performance statistics and the supplemental material for animated versions of these results.
+
+In Figure 10, we compare inverse-rendering performance between our method and PSDR. The "Bumpy ball" example in this figure uses the same translucent ball as Figure 8 under area lighting, and we optimize the shape of the ball. Additionally, the "Cube" example involves a heterogeneous object under area lighting, and we jointly optimize the shape of the object and its spatially varying albedo. We compute derivatives with respect to albedo using path-replay backpropagation [VSJ21]. For both examples, we adjust sample counts so that our method and the PSDR baseline takes approximately the same time per iteration. Using identical optimization settings (including initializations and learning rates), our method produces significantly cleaner gradients (at equal time), allowing the optimizations to converge much faster.
+
+Lastly, since translucent objects with "null" interfaces can also
+
+Table 1: Inverse-rendering configurations and performance statistics. In this table, "Trg." indicates the number of target images; "Bat." is the size of mini-batches (i.e., the number of images rendered per iteration); "Param." denotes the number of scene parameters being optimized; "Iter." is the number of iterations; and "DR" indicates the time spent (on an AMD Ryzen 3950X CPU) per iteration on differentiable rendering using our method.
+
+|          | Scene |       |     | Trg. | Bat. | Param.  | Iter. | DR     |
+|----------|-------|-------|-----|------|------|---------|-------|--------|
+|          | P IG  | (Fig. | 1)  | 40   | 5    | 599,733 | 200   | 38.06s |
+| B UMPY B | ALL   | (Fig. | 10) | 20   | 2    | 149,685 | 400   | 9.53s  |
+| C        | UBE   | (Fig. | 10) | 20   | 2    | 29,952  | 100   | 5.81s  |
+| L ETTER  | Y     | (Fig. | 11) | 20   | 1    | 15,084  | 160   | 11.0s  |
+| K        | ITTY  | (Fig. | 11) | 20   | 4    | 300,123 | 500   | 5.30s  |
+
+be represented using regular 3D volumes (with spatially varying densities\), we compare in Figure 11 mesh-based inverse rendering using our method and volume-based inverse rendering [NDMKJ22]. This figure involves two examples, "Letter Y" and "Kitty", each containing a homogeneous translucent object with known single-scattering albedo under environmental illumination. When using our method, we optimize the shapes of the object boundaries. When using Nimier-David et al. [NDMKJ22]'s, in contrast, we optimize per-voxel optical densities. Using equal sample, our method converges faster and produces overall cleaner reconstructions.
+
+We note that, volume-based representations enjoy a few advantages over mesh-based ones—such as the flexibility for supporting topology changes. Figure 11 is to show practical advantages of our method (and mesh-based representations) when applied to solid objects with constant topology.
+
+#### 7. Discussion and Conclusion
+
+Limitations and future work. Our technique is currently limited to translucent objects without refractive or reflective boundaries. Generalizing it to support these interfaces is an important topic for future research. Additionally, our MIS estimator is only applicable to translucent objects with homogeneous optical densities. Extending it to support heterogeneous densities by leveraging, for instance, the null-scattering formulation [MGJ19] is worth exploring.
+
+Conclusion. We devised a new formulation for differentiable rendering of translucent objects with respect to their shapes. By reparameterizing interior components of differential path integrals as a new class of boundary path integrals, our formulation does not require change rates to be specified in the interior of objects. Additionally, we developed new Monte Carlo estimators for the newly introduced boundary path integral.
+
+We validated our technique by comparing derivatives estimated with finite-difference (FD) and ours methods. Further, we demonstrated the effectiveness of our method using a few differentiable rendering and inverse rendering results.
+
+#### References
+
+- [BLD20] BANGARU S., LI T.-M., DURAND F.: Unbiased warped-area sampling for differentiable rendering. ACM Trans. Graph. 39, 6 (2020), 245:1–245:18. 4 [Cha60] CHANDRASEKHAR S.: Radiative transfer. Courier Corporation, 1960. 1, 2, 6 [CLZ∗20] CHE C., LUAN F., ZHAO S., BALA K., GKIOULEKAS I.: Towards learning-based inverse subsurface scattering. In 2020 IEEE International Conference on Computational Photography (ICCP) (2020), IEEE, pp. 1–12. 2 [CPP∗05] CEREZO E., PÉREZ F., PUEYO X., SERON F. J., SILLION
+- F. X.: A survey on participating media rendering techniques. The Visual Computer 21, 5 (2005), 303–328. 2 [DLW∗22] DENG X., LUAN F., WALTER B., BALA K., MARSCHNER S.: Reconstructing translucent objects using differentiable rendering. In ACM SIGGRAPH 2022 Conference Proceedings (2022), pp. 38:1–38:10. 2 [Gur81] GURTIN M. E.: An introduction to continuum mechanics. Academic press, 1981. 5 [GZB∗13] GKIOULEKAS I., ZHAO S., BALA K., ZICKLER T., LEVIN A.: Inverse volume rendering with material dictionaries. ACM Trans. Graph. 32, 6 (2013), 162:1–162:13. 2 [JM12] JAKOB W., MARSCHNER S.: Manifold exploration: A markov chain monte carlo technique for rendering scenes with difficult specular transport. ACM Trans. Graph. 31, 4 (2012), 58:1–58:13. 2 [JSRV22] JAKOB W., SPEIERER S., ROUSSEL N., VICINI D.: Dr.jit: A just-in-time compiler for differentiable rendering. ACM Trans. Graph. 41, 4 (2022), 124:1–124:19. 2 [KSKAC02] KELEMEN C., SZIRMAY-KALOS L., ANTAL G., CSONKA F.: A simple and robust mutation strategy for the metropolis light transport algorithm. In Computer Graphics Forum (2002), vol. 21, Wiley Online Library, pp. 531–540. 2 [KVH84] KAJIYA J. T., VON HERZEN B. P.: Ray tracing volume densities. SIGGRAPH Comput. Graph. 18, 3 (1984), 165–174. 2 [LADL18] LI T.-M., AITTALA M., DURAND F., LEHTINEN J.: Differentiable monte carlo ray tracing through edge sampling. ACM Trans. Graph. 37, 6 (2018), 222:1–222:11. 2 [LW96] LAFORTUNE E. P., WILLEMS Y. D.: Rendering participating media with bidirectional path tracing. In Rendering techniques' 96. Springer, 1996, pp. 91–100. 2 [MC20] MOSES W., CHURAVY V.: Instead of rewriting foreign code for machine learning, automatically synthesize fast gradients. In Advances in Neural Information Processing Systems (2020), Larochelle H., Ranzato M., Hadsell R., Balcan M. F., Lin H., (Eds.), vol. 33, Curran Associates, Inc., pp. 12472–12485. 7 [MGJ19] MILLER B., GEORGIEV I., JAROSZ W.: A null-scattering path integral formulation of light transport. ACM Trans. Graph. 38, 4 (2019), 44:1–44:13. 8 [NDMKJ22] NIMIER-DAVID M., MÜLLER T., KELLER A., JAKOB W.: Unbiased inverse volume rendering with differential trackers. ACM Trans. Graph. 41, 4 (2022), 44:1–44:20. 2, 8, 11 [NDSRJ20] NIMIER-DAVID M., SPEIERER S., RUIZ B., JAKOB W.: Radiative backpropagation: an adjoint method for lightning-fast differentiable rendering. ACM Trans. Graph. 39, 4 (2020), 146:1–146:15. 2 [NDVZJ19] NIMIER-DAVID M., VICINI D., ZELTNER T., JAKOB W.: Mitsuba 2: A retargetable forward and inverse renderer. ACM Trans. Graph. 38, 6 (2019), 203:1–203:17. 2 [NGHJ18] NOVÁK J., GEORGIEV I., HANIKA J., JAROSZ W.: Monte Carlo methods for volumetric light transport simulation. In Computer Graphics Forum (2018), vol. 37, Wiley Online Library, pp. 551–576. 2 [PKK00] PAULY M., KOLLIG T., KELLER A.: Metropolis light transport for participating media. In Rendering Techniques 2000. Springer, 2000, pp. 11–22. 1, 2
+
+- [Rey03] REYNOLDS O.: Papers on mechanical and physical subjects: the sub-mechanics of the universe, vol. 3. The University Press, 1903. 5 [SG69] SPANIER J., GELBARD E. M.: Monte Carlo principles and neutron transport problems. The Addison-Wesley Publishing Company, 1969. 2 [SRB∗19] SUMIN D., RITTIG T., BABAEI V., NINDEL T., WILKIE A., DIDYK P., BICKEL B., KRIVÁNEK ˇ J., MYSZKOWSKI K., WEYRICH T.: Geometry-aware scattering compensation for 3d printing. ACM Trans. Graph. 38, 4 (2019), 111:1–111:14. 2 [Vea97] VEACH E.: Robust Monte Carlo methods for light transport simulation, vol. 1610. Stanford University PhD thesis, 1997. 2, 7 [VG95] VEACH E., GUIBAS L.: Bidirectional estimators for light transport. In Photorealistic Rendering Techniques. Springer, 1995, pp. 145–
+- 167. 2 [VG97] VEACH E., GUIBAS L. J.: Metropolis light transport. In Proceedings of the 24th Annual Conference on Computer Graphics and Interactive Techniques (1997), SIGGRAPH '97, ACM Press/Addison-Wesley Publishing Co., p. 65–76. 2 [VJK21] VICINI D., JAKOB W., KAPLANYAN A.: A non-exponential transmittance model for volumetric scene representations. Transactions on Graphics (Proceedings of SIGGRAPH) 40, 4 (Aug. 2021), 136:1– 136:16. 2 [VSJ21] VICINI D., SPEIERER S., JAKOB W.: Path replay backpropagation: Differentiating light paths using constant memory and linear time. ACM Trans. Graph. 40, 4 (2021). 2, 4, 7 [WMHL65] WOODCOCK E., MURPHY T., HEMMINGS P., LONG-WORTH S.: Techniques used in the gem code for monte carlo neutronics calculations in reactors and other systems of complex geometry. In Proc. Conf. Applications of Computing Methods to Reactor Problems (1965), vol. 557. 7 [YZN∗22] YU Z., ZHANG C., NOWROUZEZAHRAI D., DONG Z., ZHAO S.: Efficient differentiation of pixel reconstruction filters for pathspace differentiable rendering. ACM Trans. Graph. 41, 6 (2022), 191:1– 191:16. 7 [ZMY∗20] ZHANG C., MILLER B., YAN K., GKIOULEKAS I., ZHAO S.: Path-space differentiable rendering. ACM Trans. Graph. 39, 4 (2020), 143:1–143:19. 2, 3, 6, 7 [ZWDR16] ZHAO S., WU L., DURAND F., RAMAMOORTHI R.: Downsampling scattering parameters for rendering anisotropic media. ACM Trans. Graph. 35, 6 (2016), 166:1–166:11. 2 [ZWZ∗19] ZHANG C., WU L., ZHENG C., GKIOULEKAS I., RA-MAMOORTHI R., ZHAO S.: A differential theory of radiative transfer. ACM Trans. Graph. 38, 6 (2019), 227:1–227:16. 1, 2, 7, 10 [ZYZ21] ZHANG C., YU Z., ZHAO S.: Path-space differentiable rendering of participating media. ACM Trans. Graph. 40, 4 (2021), 76:1–76:15. 1, 2, 3, 4, 7, 10, 11
+
+#### Appendix A: Derivation of Eq. \(33\)
+
+We now show how Eq. \(33\) can be derived from Eq. \(32\). When the function h does not directly depend on θ, according to the chain rule, it holds that
+
+
+$$d_{\theta} h(\bar{\mathbf{x}}) = \sum_{n=0}^N \left\{ \frac{\partial h}{\partial \mathbf{x}_n} \right\}_{\mathbf{x}_n=\mathbf{X}(\mathbf{p}_n, 0)} \cdot \mathbf{v}(\mathbf{p}_n). \quad (39)$$
+
+Further, according to the product rule, it holds that
+
+
+$$\partial_{\theta} \prod_{n=0}^N J(\mathbf{p}_n, \theta) = \sum_{n=0}^N \partial_{\theta} J(\mathbf{p}_n, \theta) \prod_{m \neq n} J(\mathbf{p}_m, 0) = \sum_{n=0}^N \partial_{\theta} J(\mathbf{p}_n, \theta). \quad (40)$$
+
+Provided Eqs. \(39\) and \(40\), we have
+
+$$\begin{aligned} d_{\Theta} \left( h(\bar{\mathbf{x}}) \prod_{n=0}^N J(\mathbf{p}_n, \Theta) \right) \\ = \sum_{n=0}^N ((\nabla_n h)(\bar{\mathbf{p}}) \cdot \mathbf{v}(\mathbf{p}_n) + h(\bar{\mathbf{p}}) \partial_{\Theta} J(\mathbf{p}_n, \Theta)). \end{aligned} \quad (41)$$
+
+According to Eqs. \(18, 26, 28, 29\), it holds that
+
+
+$$\begin{aligned} & \int_{\mathcal{B}_V} ((\nabla h)(\bar{\mathbf{p}}) \cdot \mathbf{v}(\mathbf{p}_n) + h(\bar{\mathbf{p}}) \partial_\theta J(\mathbf{p}_n, \theta)) d\mathbf{V}(\mathbf{p}_n) \\ &= \int_{\partial\mathcal{B}_V} h(\bar{\mathbf{p}}) v_\perp(\mathbf{p}_n) d\mathbf{A}(\mathbf{p}_n). \end{aligned} \quad (42)$$
+
+Given Eqs. \(41\) and \(42\), the interior integral in Eq. \(32\) can be rewritten as
+
+
+$$i = \sum_{K=0}^N \int_{\partial \hat{\Omega}_{N,K}} h(\vec{p}) v_{\perp}(\mathbf{p}_K) d\mu_{N,K}(\vec{p}), \quad (43)$$
+
+where ∂Ωˆ N,K := B K V ×∂BV × B*N*−K V , and
+
+
+$$d\dot{\mu}_{N,K}(\vec{p}) := dA(\mathbf{p}_K) \prod_{n \neq K} dV(\mathbf{p}_n). \quad (44)$$
+
+Notationally, Eq. \(43\) can be further simplified as a single boundary path integral of the form
+
+$$i = \int_{\partial \hat{\Omega}_N} h(\vec{p}) v_{\perp}(\mathbf{p}_K) d\dot{\mu}_N(\vec{p}), \quad (45)$$
+
+where
+
+
+$$\partial \hat{\Omega}_N := \cup_{K=0}^N \partial \hat{\Omega}_{N,K}, \quad (46)$$
+
+and, for any P ⊂ ∂Ωˆ ,
+
+
+$$\dot{\mu}_N(\mathcal{P}) := \sum_{K=0}^N \dot{\mu}_{N,K} \left( \partial \hat{\boldsymbol{\Omega}}_{N,K} \cap \mathcal{P} \right), \quad (47)$$
+
+with ˙µN,K defined in Eq. \(44\). When the integrand h(x¯,θ) directly depends on the parameter θ, similar to Eq. \(31\), one extra interior integral of the partial derivative ∂θ h needs to be introduced, yielding Eq. \(33\).
+
+
+
+Figure 7: We validate our technique by comparing derivatives obtained using finite differences (b) and our method (c). Additionally, we visualize our interior (d1) and boundary (d2) components given by the corresponding terms in Eq. \(34\). Our full estimate (c) equals the sum of these two components.
+
+
+
+Figure 8: Validation & evaluation: We compare derivative estimates (visualized using the same color map as Figure 7\) generated with our unidirectional (c1), bidirectional (c2), and MIS (c3) estimators to those obtained using finite differences (b) as well as Zhang et al.'s PSDR [ZYZ21] (d).
+
+
+
+Figure 9: Validation & evaluation: We compare derivative estimates (visualized using the same color map as Figure 7\) generated with our MIS estimator (c) to those obtained using finite differences (b), PSDR [ZYZ21] (d), and DTRT [ZWZ∗ 19] (e).
+
+
+
+Figure 10: Inverse-rendering comparison between our method and PSDR [ZYZ21]. For each example, we show images used for optimization on the top and shape visualizations on the bottom. The "Mesh Error" information is only used for evaluation (and not for optimization). We use 20 target images for both examples (with one shown).
+
+
+
+Figure 11: Inverse-rendering comparison between our method (using mesh-based geometric representations) and Nimier-David et al.'s approach [NDMKJ22] (using voxel-based representations indicated as "voxel"). We use 20 target images for both examples (with one shown).

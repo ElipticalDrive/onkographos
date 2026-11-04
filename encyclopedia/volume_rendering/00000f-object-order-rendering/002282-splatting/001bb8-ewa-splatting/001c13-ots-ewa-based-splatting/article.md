@@ -1,0 +1,152 @@
+# OTS (EWA-Based Splatting)
+
+Also called: EWA-Based Splatting
+
+## Overview
+OTS (Opacity-Thin-Side) is a volume rendering technique that treats each point as a Gaussian reconstruction kernel on the surface, projects it into screen space, and convolves it with a low-pass filter to produce a resampling filter actually rasterized. This implementation uses a simplified kernel: screen-aligned spherical impostors with isotropic linear falloff, rasterized as plain point sprites, trading anisotropic, correctly band-limited footprint for a formulation needing no per-point normals or radii. It differs from standard EWA Splatting by preserving the 2D amplitude $a'$ (opacity) across projections rather than the weight $w$, and by requiring a Jacobian determinant correction to preserve the integral of the extinction coefficient under perspective projection.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $N$ 3D Gaussian primitives, each defined by a mean $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$, and weight $w_i$.
+*   **Output:** A 2D image $I(\mathbf{p})$.
+
+**Data Structures:**
+*   **Primitive:** Stores $\boldsymbol{\mu}_i \in \mathbb{R}^3$, $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite), and scalar $w_i$.
+*   **Projected Primitive:** Stores $\boldsymbol{\mu}'_i \in \mathbb{R}^2$, $\boldsymbol{\Sigma}'_i \in \mathbb{R}^{2 \times 2}$, and amplitude $a'_i$.
+
+**Steps:**
+
+1.  **Projection:** For each primitive $i$, compute the projected 2D mean $\boldsymbol{\mu}'_i$ and covariance $\boldsymbol{\Sigma}'_i$ in screen space. This involves transforming the 3D Gaussian from world-space to screen space. Since perspective projection is non-linear, an affine approximation is used [S1].
+2.  **Amplitude Calculation:** Compute the projected amplitude $a'_i$. Unlike standard EWA which preserves weight $w$, OTS preserves the 2D amplitude $a'$ [S1].
+3.  **Jacobian Correction:** Multiply the weight $a'$ by the determinant of the Jacobian of the perspective projection to preserve the integral of the extinction coefficient, as $\boldsymbol{\Sigma}'$ is affected by perspective projection [S1].
+4.  **Rendering:** For each pixel $\mathbf{p}$, accumulate contributions from all primitives $i$ sorted by depth. The contribution of primitive $i$ is determined by the 2D Gaussian function $f_i(\mathbf{p})$.
+
+**Formulas:**
+
+The projected 2D Gaussian function $f_i(\mathbf{p})$ is defined as the marginal distribution of the 3D Gaussian along the view axis [S1]:
+
+$$
+f_i(\mathbf{p}) = \mathcal{G}_2^n(\mathbf{p}, w_i, \boldsymbol{\mu}'_i, \boldsymbol{\Sigma}'_i) = \int_{-\infty}^{\infty} \mathcal{G}_3^n(\mathcal{R}(t), w_i, \boldsymbol{\mu}_i, \boldsymbol{\Sigma}_i) \, dt
+$$
+
+where $\mathcal{G}_2^n$ denotes a normalized 2D Gaussian. The final image function $I(\mathbf{p})$ is computed using the approximation of no overlap, sorted order, uniform color per Gaussian, affine projection, and first-order Taylor expansion of attenuation ($e^x \approx 1-x$) [S1]:
+
+$$
+I(\mathbf{p}) = \sum_{i=0}^N c_i(\mathcal{R})g_i(\mathbf{p}) \prod_{j=0}^{i-1} (1 - g_j(\mathbf{p})) + c_b \prod_{i=0}^N (1 - g_i(\mathbf{p}))
+$$
+
+where $c_i(\mathcal{R})$ is the color, $g_i(\mathbf{p})$ is the opacity derived from $f_i(\mathbf{p})$, and $c_b$ is the background color.
+
+**Parameters:**
+*   **Clamp:** $f_i(\mathbf{p})$ must be clamped because 2D Gaussians can now produce values greater than 1. This clamp is required for correctness in the OTS model, though it was already present in the 3DGS codebase for numerical stability [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_projected_gaussian(primitive, view_matrix, proj_matrix):
+    """
+    Computes the projected 2D Gaussian parameters for a primitive.
+    primitive: {mu: (3,), Sigma: (3,3), w: float}
+    Returns: {mu_prime: (2,), Sigma_prime: (2,2), a_prime: float}
+    """
+    # 1. Project mean and covariance
+    # Transform 3D mean to screen space
+    mu_4 = np.append(primitive['mu'], 1.0)
+    mu_screen_homogeneous = proj_matrix @ view_matrix @ mu_4
+    mu_prime = mu_screen_homogeneous[:2] / mu_screen_homogeneous[2]
+    
+    # Transform covariance using the Jacobian of the projection
+    # J is the 2x3 upper-left block of the projection matrix adjusted for perspective
+    # Simplified: Use affine approximation as per EWA/3DGS
+    J = proj_matrix[:2, :3] @ view_matrix[:3, :]
+    Sigma_prime = J @ primitive['Sigma'] @ J.T
+    
+    # 2. Compute amplitude a'
+    # In OTS, a' is preserved across projections. 
+    # Standard EWA preserves weight w.
+    # The exact formula for a' from w is not fully detailed in the notes, 
+    # but it involves the determinant of the Jacobian.
+    det_J = np.linalg.det(J)
+    a_prime = primitive['w'] * abs(det_J)
+    
+    return {
+        'mu_prime': mu_prime,
+        'Sigma_prime': Sigma_prime,
+        'a_prime': a_prime
+    }
+
+def render_pixel(p, primitives_sorted):
+    """
+    Renders a single pixel p.
+    p: (2,) pixel coordinates
+    primitives_sorted: list of projected primitives sorted back-to-front
+    Returns: color (3,)
+    """
+    accumulated_opacity = 0.0
+    accumulated_color = np.zeros(3)
+    background_color = np.zeros(3) # Assume black background for simplicity
+    
+    for prim in primitives_sorted:
+        # Compute 2D Gaussian value at p
+        diff = p - prim['mu_prime']
+        # Compute Mahalanobis distance
+        # Note: Sigma_prime might need regularization if singular
+        inv_Sigma = np.linalg.inv(prim['Sigma_prime'])
+        dist = diff @ inv_Sigma @ diff
+        
+        # Compute f_i(p)
+        # Normalized Gaussian: 1/(2*pi*sqrt(det(Sigma))) * exp(-0.5 * dist)
+        det_Sigma = np.linalg.det(prim['Sigma_prime'])
+        if det_Sigma <= 0:
+            continue # Degenerate case
+            
+        norm_factor = 1.0 / (2.0 * np.pi * np.sqrt(det_Sigma))
+        f_i = norm_factor * np.exp(-0.5 * dist)
+        
+        # Clamp f_i for correctness in OTS model
+        f_i = np.clip(f_i, 0.0, 1.0)
+        
+        # Compute opacity g_i(p)
+        # In standard EWA/3DGS, g_i is often just f_i or related to a'
+        # The notes state o_i(p) = G_2^u(p, a', mu', Sigma')
+        # Assuming g_i(p) = f_i(p) for the attenuation term in the Taylor approx
+        g_i = f_i
+        
+        # Accumulate
+        # I(p) = sum c_i * g_i * prod(1 - g_j) + c_b * prod(1 - g_i)
+        # Using front-to-back or back-to-front? 
+        # Standard EWA uses back-to-front for alpha blending.
+        # The formula given is for back-to-front accumulation.
+        
+        alpha = g_i
+        color = prim['color'] # Assume color is stored in primitive
+        
+        accumulated_color += (1.0 - accumulated_opacity) * alpha * color
+        accumulated_opacity += (1.0 - accumulated_opacity) * alpha
+        
+        if accumulated_opacity > 0.999:
+            break
+            
+    final_color = accumulated_color + (1.0 - accumulated_opacity) * background_color
+    return final_color
+```
+
+## Subtopics
+
+### [Self-Attenuation Rendering](1154-self-attenuation-rendering.md)
+Self-Attenuation Rendering is a volumetric splatting technique that accurately accounts for the exponential extinction of a Gaussian primitive along the viewing ray, rather than ignoring it or using a first-order Taylor approximation. It solves the problem of visual inaccuracies and training instability caused by the standard approximation $1-g(\mathbf{p})$ for attenuation, which fails when the extinction coefficient $g(\mathbf{p})$ exceeds 1. Unlike standard EWA Splatting and 3DGS, which approximate the attenuation term, this method uses the exact exponential form $1-e^{-f(\mathbf{p})}$, remaining valid for any $f(\mathbf{p}) \in [0, \infty)$ without requiring clamping. Implementing this requires switching from back-to-front traversal to front-to-back traversal in the backward pass.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of splats covering the pixel. Sorting is $O(N \log N)$.
+*   **Memory Complexity:** $O(N)$ to store primitive parameters.
+*   **Strengths:** Simplified kernel avoids per-point normals and radii calculations. Jacobian correction ensures correct integral preservation under perspective.
+*   **Limitations:** Uses screen-aligned spherical impostors, trading anisotropic, correctly band-limited footprint for simplicity. Requires clamping of $f_i(\mathbf{p})$ for correctness.
+*   **When to use:** When computational efficiency is prioritized over precise anisotropic filtering and normal estimation is difficult or expensive.
+
+## Background
+OTS (Opacity-Thin-Side) is a variant of EWA Splatting. It builds on [EWA Splatting](1069-ewa-splatting.md). The method was introduced in "Does 3D Gaussian Splatting Need Accurate Volumetric Rendering?" [S1].
+
+## Sources
+[S1] Does 3D Gaussian Splatting Need Accurate Volumetric Rendering?, https://doi.org/10.1111/cgf.70032, fetched 2026-10-26

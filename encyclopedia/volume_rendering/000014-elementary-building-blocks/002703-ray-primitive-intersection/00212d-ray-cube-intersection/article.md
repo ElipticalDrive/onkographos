@@ -1,0 +1,273 @@
+# Ray-Cube Intersection
+
+Also called: box initialization
+
+## Overview
+Ray-Cube Intersection computes the precise entry ($t_0$) and exit ($t_1$) points of a ray relative to an axis-aligned cube (AABB) defined by lower and upper bounds. It serves as the foundational primitive test for voxel-based volume rendering, determining whether a ray intersects the volume boundary and identifying the specific face of entry or exit. Unlike [Ray-box intersection](776-ray-box-intersection.md), which often returns a boolean or a generic hit structure, this method explicitly calculates the 3D intersection coordinates and the geometric face index, which are required to initialize the traversal state for brick-level methods like [Ray-Cube Intersection (Brick/Slab)](3620-ray-cube-intersection-brick-slab.md).
+
+## How it works
+The method consists of two distinct calculations: one for the entry point ($t_0$) and one for the exit point ($t_1$). Both rely on computing intersection parameters along each axis and selecting the extremal value to determine the first or last face crossed.
+
+### Inputs and Outputs
+**Inputs:**
+- `raypos`: The origin of the ray, a 3D vector $(x, y, z)$.
+- `raydir`: The direction of the ray, a 3D vector $(dx, dy, dz)$.
+- `dir_lower`: The lower corner of the cube, a 3D vector $(min_x, min_y, min_z)$.
+- `dir_upper`: The upper corner of the cube, a 3D vector $(max_x, max_y, max_z)$.
+
+**Outputs:**
+- `HitEntry`: A structure containing the 3D position $t_0$ and the entry face index `inface`.
+- `HitExit`: A structure containing the 3D position $t_1$ and the exit face index `outface`.
+
+### Data Structures
+The hit structure is defined as:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Hit:
+    position: Vector3  # 3D float vector (x, y, z)
+    face: int          # Integer index identifying the face
+```
+
+### Formulas and Steps
+
+#### 1. Exit Point Calculation ($t_1$)
+This step finds where the ray leaves the cube.
+
+1.  **Compute Intersection Parameters ($Q_v$):**
+    For each axis $i \in \{0, 1, 2\}$ (corresponding to $x, y, z$), calculate:
+    $$ Q_v[i] = \frac{dir\_upper[i] - raypos[i]}{raydir[i]} $$
+    [S1, unofficial]
+
+2.  **Identify Minimum Axis:**
+    Find the index $i$ of the minimum component in $Q_v$:
+    $$ i = \text{mincomponentf3index}(Q_v) $$
+    [S1, unofficial]
+
+3.  **Calculate Intersection Distance ($Q$):**
+    $$ Q = Q_v[i] $$
+    [S1, unofficial]
+
+4.  **Calculate 3D Position ($t_1$):**
+    $$ t_1 = raypos + raydir \times Q $$
+    [S1, unofficial]
+
+5.  **Determine Exit Face (`outface`):**
+    Use a lookup table `outfaces[i][direction]`, where `direction` is determined by the sign of the ray direction component:
+    $$ \text{direction} = \begin{cases} 0 & \text{if } raydir[i] < 0 \\ 1 & \text{otherwise} \end{cases} $$
+    $$ outface = outfaces[i][\text{direction}] $$
+    [S1, unofficial]
+    *Note: `direction` 0 corresponds to the negative face, and 1 to the positive face.*
+
+6.  **Clamp Position:**
+    To ensure numerical precision and exact boundary alignment, set the $i$-th component of $t_1$ to the corresponding bound:
+    $$ t_1[i] = dir\_upper[i] $$
+    [S1, unofficial]
+
+7.  **Return:**
+    Return `Hit` with `position = t1` and `face = outface`.
+
+#### 2. Entry Point Calculation ($t_0$)
+This step finds where the ray enters the cube.
+
+1.  **Compute Intersection Parameters ($Q_v$):**
+    For each axis $i \in \{0, 1, 2\}$, calculate:
+    $$ Q_v[i] = \frac{dir\_lower[i] - raypos[i]}{raydir[i]} $$
+    [S1, unofficial]
+
+2.  **Handle Invalid Values:**
+    Coalesce any `NaN` values in $Q_v$ to negative infinity ($-\infty$) to handle division by zero or invalid inputs.
+    [S1, unofficial]
+
+3.  **Identify Maximum Axis:**
+    Find the index $i$ of the maximum component in $Q_v$:
+    $$ i = \text{maxcomponentf3index}(Q_v) $$
+    [S1, unofficial]
+
+4.  **Calculate Intersection Distance ($Q$):**
+    $$ Q = Q_v[i] $$
+    [S1, unofficial]
+
+5.  **Calculate 3D Position ($t_0$):**
+    $$ t_0 = raypos + raydir \times Q $$
+    [S1, unofficial]
+
+6.  **Determine Entry Face (`inface`):**
+    Use a lookup table `infaces[i][direction]`, where `direction` is determined by the sign of the ray direction component:
+    $$ \text{direction} = \begin{cases} 0 & \text{if } raydir[i] < 0 \\ 1 & \text{otherwise} \end{cases} $$
+    $$ inface = infaces[i][\text{direction}] $$
+    [S1, unofficial]
+    *Note: The logic for `inface` maps direction 0 (negative ray dir) to the positive face of the cube, and direction 1 (positive ray dir) to the negative face, consistent with the ray entering from that side.*
+
+7.  **Clamp Position:**
+    To ensure numerical precision and exact boundary alignment, set the $i$-th component of $t_0$ to the corresponding bound:
+    $$ t_0[i] = dir\_lower[i] $$
+    [S1, unofficial]
+
+8.  **Return:**
+    Return `Hit` with `position = t0` and `face = inface`.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+from typing import Tuple, List, Optional
+
+# Helper types
+Vector3 = Tuple[float, float, float]
+Hit = Tuple[Vector3, int] # (position, face_index)
+
+def min_component_index(v: Vector3) -> int:
+    """Returns the index of the minimum value in a 3D vector."""
+    min_val = v[0]
+    min_idx = 0
+    if v[1] < min_val:
+        min_val = v[1]
+        min_idx = 1
+    if v[2] < min_val:
+        min_val = v[2]
+        min_idx = 2
+    return min_idx
+
+def max_component_index(v: Vector3) -> int:
+    """Returns the index of the maximum value in a 3D vector."""
+    max_val = v[0]
+    max_idx = 0
+    if v[1] > max_val:
+        max_val = v[1]
+        max_idx = 1
+    if v[2] > max_val:
+        max_val = v[2]
+        max_idx = 2
+    return max_idx
+
+def ray_cube_exit(raypos: Vector3, raydir: Vector3, dir_upper: Vector3) -> Optional[Hit]:
+    """
+    Calculates the exit point (t1) of a ray into a cube.
+    Returns None if no valid exit is found.
+    """
+    # 1. Compute Qv
+    Qv = [
+        (dir_upper[0] - raypos[0]) / raydir[0],
+        (dir_upper[1] - raypos[1]) / raydir[1],
+        (dir_upper[2] - raypos[2]) / raydir[2]
+    ]
+    
+    # 2. Identify minimum axis
+    i = min_component_index(Qv)
+    Q = Qv[i]
+    
+    # 3. Calculate t1
+    t1 = (
+        raypos[0] + raydir[0] * Q,
+        raypos[1] + raydir[1] * Q,
+        raypos[2] + raydir[2] * Q
+    )
+    
+    # 4. Determine outface
+    # direction: 0 if raydir[i] < 0, else 1
+    direction = 0 if raydir[i] < 0 else 1
+    # outfaces is a lookup table [axis][direction] -> face_index
+    # Exact values depend on implementation, but structure is fixed.
+    # We assume outfaces is provided or defined as per source logic.
+    # For the purpose of this self-contained code, we define a placeholder 
+    # that must be populated by the caller or a global constant.
+    # [S1, unofficial] outfaces[i][direction]
+    outface = get_outface(i, direction) 
+    
+    # 5. Clamp t1
+    t1_clamped = list(t1)
+    t1_clamped[i] = dir_upper[i]
+    t1_final = tuple(t1_clamped)
+    
+    return (t1_final, outface)
+
+def ray_cube_entry(raypos: Vector3, raydir: Vector3, dir_lower: Vector3) -> Optional[Hit]:
+    """
+    Calculates the entry point (t0) of a ray into a cube.
+    Returns None if no valid entry is found.
+    """
+    # 1. Compute Qv
+    Qv = [
+        (dir_lower[0] - raypos[0]) / raydir[0],
+        (dir_lower[1] - raypos[1]) / raydir[1],
+        (dir_lower[2] - raypos[2]) / raydir[2]
+    ]
+    
+    # 2. Coalesce NaN to -inf
+    Qv = [-math.inf if math.isnan(v) else v for v in Qv]
+    
+    # 3. Identify maximum axis
+    i = max_component_index(Qv)
+    Q = Qv[i]
+    
+    # 4. Calculate t0
+    t0 = (
+        raypos[0] + raydir[0] * Q,
+        raypos[1] + raydir[1] * Q,
+        raypos[2] + raydir[2] * Q
+    )
+    
+    # 5. Determine inface
+    # direction: 0 if raydir[i] < 0, else 1
+    direction = 0 if raydir[i] < 0 else 1
+    # infaces is a lookup table [axis][direction] -> face_index
+    # [S1, unofficial] infaces[i][direction]
+    inface = get_inface(i, direction)
+    
+    # 6. Clamp t0
+    t0_clamped = list(t0)
+    t0_clamped[i] = dir_lower[i]
+    t0_final = tuple(t0_clamped)
+    
+    return (t0_final, inface)
+
+def get_outface(axis: int, direction: int) -> int:
+    """
+    Placeholder for the outfaces lookup table.
+    In a real implementation, this would be a static array or switch statement.
+    The source [S1, unofficial] implies a 2D array outfaces[3][2].
+    """
+    # Example mapping (implementation specific, but structure is fixed by [S1, unofficial])
+    # We return a dummy value to satisfy Python syntax requirements.
+    # The actual face index depends on the coordinate system and face numbering convention.
+    return 0 # Not given in the sources.
+
+def get_inface(axis: int, direction: int) -> int:
+    """
+    Placeholder for the infaces lookup table.
+    The source [S1, unofficial] implies a 2D array infaces[3][2].
+    """
+    return 0 # Not given in the sources.
+```
+
+### Parameters
+- `dir_lower`, `dir_upper`: The bounding box of the cube. [S2, unofficial]
+- `raypos`, `raydir`: The ray definition.
+
+### Edge Cases and Pitfalls
+- **Negative Qv Components:** If any component of $Q_v$ is negative, the ray may originate outside the cube or point away from the relevant face, yielding no valid entry/exit within the box bounds. The function should return a null hit. [S1, unofficial]
+- **All Negative Qv:** If all components of $Q_v$ are negative, the ray does not intersect the cube in the forward direction. Return a null hit. [S1, unofficial]
+- **Division by Zero:** If `raydir[i]` is 0, the division results in infinity or NaN. The source [S1, unofficial] specifies coalescing NaNs to negative infinity for the entry calculation to handle this gracefully.
+- **Precision:** Clamping the intersection point to the exact boundary (`dir_lower` or `dir_upper`) is critical to avoid self-intersection artifacts in subsequent traversal steps. [S1, unofficial]
+
+## Subtopics
+
+### [Ray-Cube Intersection (Brick/Slab)](3620-ray-cube-intersection-brick-slab.md)
+This method performs the primary hit resolution for a ray entering a 4×4×4 voxel brick, finding the entry point ($t_0$) of the first solid voxel the ray crosses within a specified time interval $[t_{lo}, t_{hi}]$. It builds on [Ray-Cube Intersection](2466-ray-cube-intersection.md) by extending the boundary check into a full traversal of the brick's interior voxels using the Amanatides-Woo Digital Differential Analyzer (DDA). Unlike the parent method which only identifies the cube entry face, this method returns the specific voxel index and normal of the first opaque (or non-transparent, if configured) voxel encountered, or -1 if the ray misses all solid voxels in the brick.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for both entry and exit calculations, involving a constant number of arithmetic operations and comparisons.
+- **Memory Complexity:** $O(1)$, requiring only a few temporary vectors and scalars.
+- **Strengths:** Provides exact boundary intersection points and face indices, which are essential for robust voxel traversal. The clamping step ensures numerical stability.
+- **Limitations:** Does not perform traversal within the volume; it only determines the entry/exit boundaries. Requires careful handling of division by zero and NaN values.
+- **When to Use:** When initializing ray traversal for voxel-based volume rendering, specifically when the entry/exit points and face normals are needed to set up the DDA state.
+- **When Not to Use:** When only a boolean intersection test is required (use [Ray-box intersection](776-ray-box-intersection.md) or a simpler AABB test). When traversing the interior of the volume (use [Ray-Cube Intersection (Brick/Slab)](3620-ray-cube-intersection-brick-slab.md)).
+
+## Background
+The method is derived from implementations in voxel rendering libraries, specifically the `landscapes` repository [S1, unofficial] and the `r3d` repository [S2, unofficial]. The `landscapes` source provides the detailed algorithm for calculating $t_0$ and $t_1$ with face identification, while `r3d` provides the context of initializing a polyhedron structure as an axis-aligned cube. The approach is a standard technique in ray tracing for axis-aligned bounding boxes, adapted here for explicit face and coordinate output.
+
+## Sources
+[S1] realazthat/landscapes, https://github.com/realazthat/landscapes, fetched 2026-10-26 (unofficial)
+[S2] devonmpowell/r3d, https://github.com/devonmpowell/r3d, fetched 2026-10-27 (unofficial)

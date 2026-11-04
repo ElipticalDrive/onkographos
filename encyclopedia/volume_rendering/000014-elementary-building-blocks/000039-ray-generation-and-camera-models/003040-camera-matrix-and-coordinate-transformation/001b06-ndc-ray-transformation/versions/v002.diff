@@ -1,0 +1,189 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # NDC Ray Transformation
+ 
+-Also called: Forward-facing NDC rendering, NDC Ray Conversion, NDC Ray Space for Real Scenes, NDC Space Ray Tracing, NDC Space Transformation, Normalized Device Coordinate (NDC) Rays, Normalized Device Coordinate Ray Mapping, Normalized Device Coordinate ray space
++Also called: Normalized Device Coordinate Rays, Normalized Device Coordinate Ray Mapping, NDC Ray Conversion
+ 
+ ## Overview
+@@ -8,27 +8,27 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Ray origins $\mathbf{o} = (o_x, o_y, o_z)$ and directions $\mathbf{d} = (d_x, d_y, d_z)$ in camera space (where the camera looks down the $-z$ axis), image width $W$, height $H$, focal length $f_{cam}$, and near plane distance $n$.
++*   **Input:** Ray origins $\mathbf{o} = (o_x, o_y, o_z)$ and directions $\mathbf{d} = (d_x, d_y, d_z)$ in camera space (where the camera looks down the $-z$ axis), image width $W$, height $H$, focal length $f_{cam}$, and near plane distance $n$ [S1].
+ *   **Output:** NDC ray origins $\mathbf{o}'$ and directions $\mathbf{d}'$ in NDC space.
+ 
+ **Data Structures:**
+-Rays are typically stored as two arrays (or a single structured array) of shape $(N, 3)$, where $N$ is the number of rays (e.g., $W \times H$).
++Rays are typically stored as two arrays of shape $(N, 3)$, where $N$ is the number of rays (e.g., $W \times H$) [G].
+ *   `rays_o`: Float32 array of shape $(N, 3)$ containing $(o_x, o_y, o_z)$.
+ *   `rays_d`: Float32 array of shape $(N, 3)$ containing $(d_x, d_y, d_z)$.
+ 
+ **Parameters:**
+-*   $n$: Near plane distance. Must be positive.
+-*   $f_{cam}$: Focal length in pixels.
+-*   $W, H$: Image dimensions in pixels.
++*   $n$: Near plane distance. Must be positive [S1].
++*   $f_{cam}$: Focal length in pixels [S1].
++*   $W, H$: Image dimensions in pixels [S1].
+ *   $f$: Far plane distance. For real scenes extending to infinity, $f \to \infty$ [S1].
+ 
+ **Steps:**
+ 
+-1.  **Shift Ray Origins to Near Plane:**
+-    To ensure that linear sampling in NDC space corresponds to linear disparity sampling, the original ray origin $\mathbf{o}$ is shifted to the intersection with the near plane $z = -n$ [S1].
++1.  **Shift Ray Origins to Near Plane (Implementation Detail):**
++    To ensure that linear sampling in NDC space corresponds to linear disparity sampling, the original ray origin $\mathbf{o}$ is shifted to the intersection with the near plane $z = -n$ before the NDC conversion [S1].
+     Calculate the shift parameter $t_n$:
+     $$ t_n = -\frac{n + o_z}{d_z} $$
+     Update the origin:
+     $$ \mathbf{o}_n = \mathbf{o} + t_n \mathbf{d} $$
+-    *Note: This step assumes $d_z \neq 0$. If $d_z \approx 0$, the ray is parallel to the near plane and does not intersect it in the forward direction; this is a degenerate case for forward-facing scenes.*
++    *Note: This step assumes $d_z \neq 0$. If $d_z \approx 0$, the ray is parallel to the near plane and does not intersect it in the forward direction; this is a degenerate case for forward-facing scenes [G].*
+ 
+ 2.  **Compute Projection Constants:**
+@@ -40,18 +40,18 @@
+ 
+ 3.  **Calculate NDC Origin $\mathbf{o}'$:**
+-    The NDC origin is the projection of the shifted origin $\mathbf{o}_n$ [S1]:
+-    $$ o'_x = a_x \frac{o_{n,x}}{o_{n,z}} $$
+-    $$ o'_y = a_y \frac{o_{n,y}}{o_{n,z}} $$
+-    $$ o'_z = a_z + \frac{b_z}{o_{n,z}} = 1 + \frac{2n}{o_{n,z}} $$
++    The NDC origin is calculated by projecting the *original* ray origin $\mathbf{o}$ (not the shifted $\mathbf{o}_n$) [S1]:
++    $$ o'_x = a_x \frac{o_x}{o_z} $$
++    $$ o'_y = a_y \frac{o_y}{o_z} $$
++    $$ o'_z = a_z + \frac{b_z}{o_z} = 1 + \frac{2n}{o_z} $$
+ 
+ 4.  **Calculate NDC Direction $\mathbf{d}'$:**
+     The NDC direction is derived by factoring out the common term from the difference between the projected ray point and the projected origin [S1]:
+-    $$ d'_x = a_x \left( \frac{d_x}{d_z} - \frac{o_{n,x}}{o_{n,z}} \right) $$
+-    $$ d'_y = a_y \left( \frac{d_y}{d_z} - \frac{o_{n,y}}{o_{n,z}} \right) $$
+-    $$ d'_z = -\frac{b_z}{o_{n,z}} = -\frac{2n}{o_{n,z}} $$
++    $$ d'_x = a_x \left( \frac{d_x}{d_z} - \frac{o_x}{o_z} \right) $$
++    $$ d'_y = a_y \left( \frac{d_y}{d_z} - \frac{o_y}{o_z} \right) $$
++    $$ d'_z = -\frac{b_z}{o_z} = -\frac{2n}{o_z} $$
+ 
+-5.  **Reparameterization (Optional but implied for sampling):**
++5.  **Reparameterization:**
+     The parameter $t'$ in NDC space relates to the original parameter $t$ by:
+-    $$ t' = \frac{t d_z}{o_{n,z} + t d_z} $$
++    $$ t' = \frac{t d_z}{o_z + t d_z} $$
+     As $t \to \infty$, $t' \to 1$. Thus, sampling $t'$ linearly from 0 to 1 covers the depth range from the near plane to infinity [S1].
+ 
+@@ -77,62 +77,32 @@
+         np.ndarray: NDC ray directions, shape (..., 3).
+     """
+-    # 1. Shift ray origins to the near plane z = -near
+-    # tn = -(near + oz) / dz
+-    # rays_o_n = rays_o + tn[..., None] * rays_d
+-    
+-    # Vectorized calculation for batched rays
+-    # Ensure rays_d has the same shape as rays_o for broadcasting
+-    # rays_o and rays_d are typically (N, 3) or (H, W, 3)
+-    
+-    # Calculate tn
+-    # Note: rays_d[..., 2] is dz. rays_o[..., 2] is oz.
+-    # Camera looks in -z direction, so near plane is at z = -near.
+-    # Intersection: o_z + t * d_z = -near => t = (-near - o_z) / d_z
+-    # The source uses tn = -(n + oz) / dz which is equivalent to (-near - oz) / dz
+-    
++    # 1. Shift ray origins to the near plane z = -near (implementation detail)
+     dz = rays_d[..., 2]
+     oz = rays_o[..., 2]
+-    
+-    # Avoid division by zero if dz is 0 (parallel rays)
+-    # In forward facing scenes, dz should be negative (looking down -z)
+-    # If dz is 0, the ray never intersects the near plane z=-near in the forward direction.
+-    # We assume valid rays for forward facing scenes.
+-    
+     tn = -(near + oz) / dz
+-    
+-    # Shift origins
+     rays_o_n = rays_o + tn[..., np.newaxis] * rays_d
+     
+-    # 2. Compute constants
++    # 2. Compute constants (assuming f -> infinity)
+     ax = -fcam / (W / 2.0)
+     ay = -fcam / (H / 2.0)
+-    # az = 1
+     bz = 2.0 * near
+     
+-    # 3. Calculate NDC Origin o'
+-    # o'_x = ax * ox_n / oz_n
+-    # o'_y = ay * oy_n / oz_n
+-    # o'_z = 1 + bz / oz_n
+-    
+-    oz_n = rays_o_n[..., 2]
+-    
+-    # Avoid division by zero if oz_n is 0
+-    # Since we shifted to z=-near, oz_n should be -near (unless near=0)
+-    # If near > 0, oz_n = -near != 0.
+-    
+-    rays_o_ndc = np.zeros_like(rays_o_n)
+-    rays_o_ndc[..., 0] = ax * rays_o_n[..., 0] / oz_n
+-    rays_o_ndc[..., 1] = ay * rays_o_n[..., 1] / oz_n
+-    rays_o_ndc[..., 2] = 1.0 + bz / oz_n
++    # 3. Calculate NDC Origin o' from the ORIGINAL origin rays_o (not shifted)
++    # o'_x = ax * ox / oz
++    # o'_y = ay * oy / oz
++    # o'_z = 1 + bz / oz
++    rays_o_ndc = np.zeros_like(rays_o)
++    rays_o_ndc[..., 0] = ax * rays_o[..., 0] / oz
++    rays_o_ndc[..., 1] = ay * rays_o[..., 1] / oz
++    rays_o_ndc[..., 2] = 1.0 + bz / oz
+     
+     # 4. Calculate NDC Direction d'
+-    # d'_x = ax * (dx/dz - ox_n/oz_n)
+-    # d'_y = ay * (dy/dz - oy_n/oz_n)
+-    # d'_z = -bz / oz_n
+-    
++    # d'_x = ax * (dx/dz - ox/oz)
++    # d'_y = ay * (dy/dz - oy/oz)
++    # d'_z = -bz / oz
+     rays_d_ndc = np.zeros_like(rays_d)
+-    rays_d_ndc[..., 0] = ax * (rays_d[..., 0] / dz - rays_o_n[..., 0] / oz_n)
+-    rays_d_ndc[..., 1] = ay * (rays_d[..., 1] / dz - rays_o_n[..., 1] / oz_n)
+-    rays_d_ndc[..., 2] = -bz / oz_n
++    rays_d_ndc[..., 0] = ax * (rays_d[..., 0] / dz - rays_o[..., 0] / oz)
++    rays_d_ndc[..., 1] = ay * (rays_d[..., 1] / dz - rays_o[..., 1] / oz)
++    rays_d_ndc[..., 2] = -bz / oz
+     
+     return rays_o_ndc, rays_d_ndc
+@@ -140,12 +110,12 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Division by Zero:** If $d_z = 0$, the ray is parallel to the near plane and does not intersect it. This is a degenerate case for forward-facing scenes. If $o_{n,z} = 0$, the shifted origin is at the origin, which should not happen if $n > 0$ and the shift is correct.
+-*   **Coordinate System:** The derivation assumes the camera looks down the $-z$ axis. If the camera looks down $+z$, signs must be adjusted.
+-*   **Far Plane:** The simplification $a_z=1, b_z=2n$ relies on $f \to \infty$. If a finite far plane is used, the full projection matrix constants must be used [S1].
+-*   **Bounding Volume:** The NDC space is a cube $[-1, 1]^3$. Points outside this volume may require clamping or culling, although the transformation maps the entire forward half-space to this volume.
++*   **Division by Zero:** If $d_z = 0$, the ray is parallel to the near plane and does not intersect it. If $o_z = 0$, the shifted origin is at the origin, which should not happen if $n > 0$ and the shift is correct [G].
++*   **Coordinate System:** The derivation assumes the camera looks down the $-z$ axis [S1]. If the camera looks down $+z$, signs must be adjusted [G].
++*   **Far Plane:** The simplification $a_z=1, b_z=2n$ relies on $f \to \infty$ [S1].
++*   **Bounding Volume:** The NDC space is a cube $[-1, 1]^3$ [S1]. Points outside this volume may require clamping or culling, although the transformation maps the entire forward half-space to this volume [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of rays. The transformation involves basic arithmetic operations per ray.
+-*   **Memory Complexity:** $O(N)$ to store the transformed rays.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of rays. The transformation involves basic arithmetic operations per ray [G].
++*   **Memory Complexity:** $O(N)$ to store the transformed rays [G].
+ *   **Strengths:**
+     *   Allows rendering of scenes extending to infinity within a fixed bounding volume [S1].
+@@ -153,12 +123,12 @@
+     *   Converts perspective rays to parallel rays in NDC space, simplifying some aspects of volume rendering or neural network input [S1].
+ *   **Limitations:**
+-    *   Only suitable for forward-facing scenes.
+-    *   Requires careful handling of the near plane and ray shifting.
+-    *   Not suitable for scenes with significant depth variation near the camera where disparity changes rapidly, potentially requiring dense sampling.
++    *   Only suitable for forward-facing scenes [S1].
++    *   Requires careful handling of the near plane and ray shifting [S2, unofficial].
++    *   Not suitable for scenes with significant depth variation near the camera where disparity changes rapidly, potentially requiring dense sampling [G].
+ *   **When to Use:** Ideal for forward-facing real-world scene reconstruction (e.g., LLFF, DeepVoxels) where the scene extends to infinity and a fixed bounding volume is desired [S1].
+-*   **When Not to Use:** Not suitable for scenes with significant camera motion around the object (e.g., 360-degree rotation) or scenes with objects very close to the camera where disparity sampling becomes inefficient.
++*   **When Not to Use:** Not suitable for scenes with significant camera motion around the object (e.g., 360-degree rotation) or scenes with objects very close to the camera where disparity sampling becomes inefficient [S1].
+ 
+ ## Background
+-The NDC Ray Transformation was introduced in the context of Neural Radiance Fields (NeRF) for rendering real-world forward-facing scenes [S1]. The standard NeRF approach uses a synthetic scene bounded within a cube, but real-world captures can extend to infinity. The NDC space, commonly used in triangle rasterization pipelines, was adapted to map the depth range of real scenes into $[-1, 1]$ using disparity instead of metric depth [S1]. This allows the neural network to learn a bounded representation of the scene. The method was used in experiments with datasets like DeepVoxels and LLFF [S1].
++The NDC Ray Transformation was introduced in the context of Neural Radiance Fields (NeRF) for rendering real-world forward-facing scenes [S1]. The standard NeRF approach uses a synthetic scene bounded within a cube, but real-world captures can extend to infinity [S1]. The NDC space, commonly used in triangle rasterization pipelines, was adapted to map the depth range of real scenes into $[-1, 1]$ using disparity instead of metric depth [S1]. This allows the neural network to learn a bounded representation of the scene [S1]. The method was used in experiments with datasets like DeepVoxels and LLFF [S1].
+ 
+ ## Sources

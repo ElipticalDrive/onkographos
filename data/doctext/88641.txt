@@ -1,0 +1,3678 @@
+# Sparse CUDA Marching Cubes for PyTorch
+
+This repository contains a high-performance PyTorch extension for performing the Marching Cubes and Dual Marching Cube on sparse voxel grids using CUDA. 
+The implementation is written in CUDA C++ and exposed to Python via PyTorch's C++ extension API, allowing seamless integration into existing PyTorch-based workflows.
+
+Core algorithm is derived from amazing [cubvh](https://github.com/ashawkey/cubvh) from [ashakey](https://github.com/ashawkey) and [pdmc](https://github.com/seonghunn/pdmc).
+
+## Features
+
+- **Sparse Voxel:** Operates on explicitly defined voxel coordinates (`[M, 3]`) and their corresponding corner values (`[M, 8]`) or center values (`[N, 3] - [N, 1]`), avoiding the need for dense 3D grids.
+- **Sparse Marching Cube:** generates trimesh for given sparse voxel sdfs.
+- **Sparse Dual Marching Cube:** generates quadmesh for given sparse voxel sdfs.
+- **CUDA QEM Decimation** w/ preventing degenerate faces and normal fliping (experimental).
+- **CUDA-Accelerated:** Leverages the massive parallelism of NVIDIA GPUs to process thousands of voxels simultaneously.
+
+![](result.png)
+
+- Left: **Sparse MC** vs. Right: **Sparse DMC** results
+
+## Requirements
+
+- [PyTorch](https://pytorch.org/) (with CUDA support)
+- A C++17 compatible compiler (e.g., GCC, Clang, MSVC)
+- [NVIDIA CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) (matching the version used by your PyTorch installation)
+
+## Installation
+
+You can install the package by cloning this repository and running the `setup.py` script.
+
+```bash
+# Clone the repository
+git clone https://github.com/hwanhuh/spcumc.git
+cd spcumc
+
+# Install the package
+pip install . 
+
+# clean existing build and re-install in editable mode
+rm -rf *.egg-info build && pip install -e .
+```
+
+## Usage
+
+### Sparse Marching Cube
+
+For scenarios where the input scalar field is defined at grid points rather than as pre-computed corners for each voxel, the `sparse_marching_cubes_from_points` function provides a convenient and high-performance solution.
+
+This function takes a set of `[N, 3]` integer coordinates and a corresponding `[N]` tensor of scalar values at those points. 
+It then uses a high-performance CUDA backend to automatically gather the 8 corner values required for each voxel. 
+If a corner does not exist in the provided point set, a default value is used.
+
+This approach is ideal for sparse SDF representations where you have a list of points and their SDF values.
+
+```python
+import torch
+import spcumc 
+
+# coords, sdfs: [N, 3], [N] cuda tensor
+verts, faces = spcumc.sparse_marching_cubes_from_points(
+    coords, 
+    sdfs, 
+    iso_level, 
+    default_value=1.0
+)
+
+print(f"Generated mesh with {verts.shape[0]} vertices and {faces.shape[0]} triangles.")
+```
+
+### Sparse Dual Marching Cube 
+```python
+import torch
+import spcumc 
+
+# coords, sdfs: [N, 3], [N] cuda tensor
+verts, faces = spcumc.sparse_dual_marching_cubes_from_points(
+    coords, 
+    sdfs, 
+    iso_level, 
+    default_value=1.0
+)
+
+print(f"Generated mesh with {verts.shape[0]} vertices and {faces.shape[0]} quads.")
+```
+
+### Decimation 
+
+- supports only tri faces
+
+```python
+vertices, faces = spcumc.decimate_mesh(vertices, faces, target_vertex_count=10000)
+print(f"Generated mesh with {vertices.shape[0]} vertices and {faces.shape[0]} triangles.")
+```
+
+### api.py
+```
+import torch
+import spcumc._backend as _backend
+
+def sparse_marching_cubes(coords, corners, iso, ensure_consistency=False):
+    """
+    Performs sparse marching cubes on a set of voxels.
+
+    Args:
+        coords (torch.Tensor): Integer tensor of shape [N, 3] with the (x, y, z) coordinates of the voxels.
+        corners (torch.Tensor): Float tensor of shape [N, 8] with the scalar values at the 8 corners of each voxel.
+        iso (float): The iso-level to contour at.
+        ensure_consistency (bool): If True, averages corner values at shared locations to ensure a consistent mesh.
+
+    Returns:
+        (torch.Tensor, torch.Tensor): A tuple containing:
+            - verts: Float tensor of shape [V, 3] with the vertex positions.
+            - tris: Int tensor of shape [T, 3] with the triangle indices.
+    """
+    if not coords.is_cuda: coords = coords.cuda()
+    if not corners.is_cuda: corners = corners.cuda()
+    
+    coords = coords.int().contiguous()
+    corners = corners.float().contiguous()
+
+    verts, tris = _backend.sparse_marching_cubes(coords, corners, iso, ensure_consistency)
+
+    return verts, tris
+
+def get_cube_indices(corners, iso):
+    """
+    Calculates the marching cubes case index for each voxel based on corner values.
+
+    Args:
+        corners (torch.Tensor): Float tensor of shape [N, 8] with the scalar values at the 8 corners of each voxel.
+        iso (float): The iso-level to contour at.
+
+    Returns:
+        torch.Tensor: An integer tensor of shape [N] with the case index for each voxel.
+    """
+    if not corners.is_cuda: corners = corners.cuda()
+    
+    v = corners.float()
+    cube_indices = (v < iso).int()
+    cube_indices = (
+        cube_indices[:, 0] * 1 |
+        cube_indices[:, 1] * 2 |
+        cube_indices[:, 2] * 4 |
+        cube_indices[:, 3] * 8 |
+        cube_indices[:, 4] * 16 |
+        cube_indices[:, 5] * 32 |
+        cube_indices[:, 6] * 64 |
+        cube_indices[:, 7] * 128
+    ).int()
+    
+    return cube_indices
+
+def sparse_marching_cubes_from_points(coords, point_values, iso, default_value=1.0):
+    """
+    Performs sparse marching cubes from a sparse grid of scalar values.
+
+    This function uses a high-performance CUDA backend to construct the 8 corner
+    values for each active voxel by looking up values in the provided sparse grid.
+
+    Args:
+        coords (torch.Tensor): Integer tensor of shape [N, 3] with the (x, y, z)
+            coordinates of the active voxels. These are also the points in the grid
+            with defined scalar values.
+        point_values (torch.Tensor): Float tensor of shape [N] or [N, 1] with the
+            scalar value at each coordinate in `coords`.
+        iso (float): The iso-level to contour at.
+        default_value (float): The scalar value to assume for corner points that are
+            not in the input `coords`. This should be a value that is known to be
+            either completely inside or completely outside the surface.
+
+    Returns:
+        (torch.Tensor, torch.Tensor): A tuple containing:
+            - verts: Float tensor of shape [V, 3] with the vertex positions.
+            - tris: Int tensor of shape [T, 3] with the triangle indices.
+    """
+    if not coords.is_cuda: coords = coords.cuda()
+    if not point_values.is_cuda: point_values = point_values.cuda()
+
+    coords = coords.int().contiguous()
+    point_values = point_values.float().contiguous().flatten()
+
+    verts, tris = _backend.sparse_marching_cubes_from_points(coords, point_values, iso, default_value)
+
+    return verts, tris
+
+def sparse_dual_marching_cubes(coords, corners, iso):
+    """
+    Performs sparse dual marching cubes on a set of voxels.
+
+    Dual marching cubes generates quad-based meshes instead of triangle meshes.
+    Each active voxel generates a dual vertex at its center, and quads are formed
+    by connecting dual vertices across shared marching cube edges.
+
+    Args:
+        coords (torch.Tensor): Integer tensor of shape [N, 3] with the (x, y, z) coordinates of the voxels.
+        corners (torch.Tensor): Float tensor of shape [N, 8] with the scalar values at the 8 corners of each voxel.
+        iso (float): The iso-level to contour at.
+
+    Returns:
+        (torch.Tensor, torch.Tensor): A tuple containing:
+            - verts: Float tensor of shape [V, 3] with the vertex positions (dual vertices).
+            - quads: Int tensor of shape [Q, 4] with the quad indices.
+    """
+    if not coords.is_cuda: coords = coords.cuda()
+    if not corners.is_cuda: corners = corners.cuda()
+
+    coords = coords.int().contiguous()
+    corners = corners.float().contiguous()
+
+    verts, quads = _backend.sparse_dual_marching_cubes(coords, corners, iso)
+
+    return verts, quads
+
+def sparse_dual_marching_cubes_from_points(coords, point_values, iso, default_value=1.0):
+    """
+    Performs sparse dual marching cubes from a sparse grid of scalar values.
+
+    This function builds corner values from a sparse grid and then generates
+    a quad-based mesh using the dual marching cubes algorithm.
+
+    Args:
+        coords (torch.Tensor): Integer tensor of shape [N, 3] with the (x, y, z)
+            coordinates of the active voxels.
+        point_values (torch.Tensor): Float tensor of shape [N] or [N, 1] with the
+            scalar value at each coordinate in `coords`.
+        iso (float): The iso-level to contour at.
+        default_value (float): The scalar value to assume for corner points that are
+            not in the input `coords`.
+
+    Returns:
+        (torch.Tensor, torch.Tensor): A tuple containing:
+            - verts: Float tensor of shape [V, 3] with the vertex positions (dual vertices).
+            - quads: Int tensor of shape [Q, 4] with the quad indices.
+    """
+    if not coords.is_cuda: coords = coords.cuda()
+    if not point_values.is_cuda: point_values = point_values.cuda()
+
+    coords = coords.int().contiguous()
+    point_values = point_values.float().contiguous().flatten()
+
+    verts, quads = _backend.sparse_dual_marching_cubes_from_points(coords, point_values, iso, default_value)
+
+    return verts, quads
+
+def decimate_mesh(vertices, faces, target_vertex_count):
+    """
+    Decimate a triangle mesh using quadric error metrics (QEM).
+
+    This function reduces the number of vertices in a mesh by iteratively
+    collapsing edges, while minimizing geometric error using quadric error metrics.
+
+    Args:
+        vertices (torch.Tensor): Float tensor of shape [V, 3] with vertex positions.
+        faces (torch.Tensor): Integer tensor of shape [F, 3] with triangle indices.
+        target_vertex_count (int): Target number of vertices after decimation.
+
+    Returns:
+        (torch.Tensor, torch.Tensor): A tuple containing:
+            - vertices: Float tensor of shape [V', 3] with decimated vertex positions.
+            - faces: Integer tensor of shape [F', 3] with decimated triangle indices.
+
+    Note:
+        The actual number of vertices in the output may be slightly different
+        from target_vertex_count depending on the mesh topology.
+    """
+    vertices = vertices.float().contiguous()
+    faces = faces.int().contiguous()
+
+    new_vertices, new_faces = _backend.decimate_mesh(vertices, faces, target_vertex_count)
+
+    return new_vertices, new_faces
+```
+
+### demo.py
+```
+import torch
+import trimesh
+import numpy as np
+
+def create_sparse_sphere(voxel_res=128, radius=0.3, center_x=0, center_y=0, center_z=0, band=2/128):
+    grid_values = np.linspace(0.0, 1.0, voxel_res)
+    x, y, z = np.meshgrid(grid_values, grid_values, grid_values, indexing='ij')
+
+    dist = np.sqrt((x - 0.5)**2 + (y - 0.5)**2 + (z - 0.5)**2)
+
+    sdf_values = dist - radius
+    mask = np.abs(sdf_values) <= band
+    
+    sparse_coords = np.stack(np.where(mask), axis=-1).astype(np.int32)
+    sparse_sdfs = sdf_values[mask].astype(np.float32)
+
+    coords_tensor = torch.from_numpy(sparse_coords)
+    sdfs_tensor = torch.from_numpy(sparse_sdfs)
+
+    return coords_tensor, sdfs_tensor
+
+def save_obj_with_quads(filepath, verts, faces):
+    verts_np = verts.cpu().numpy()
+    faces_np = faces.cpu().numpy()
+
+    with open(filepath, 'w') as f:
+        for v in verts_np:
+            f.write(f"v {v[0]} {v[1]} {v[2]}\n")
+
+        if faces_np.shape[-1] == 3:
+            for face in faces_np:
+                f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
+
+        elif faces_np.shape[-1] == 4:
+            for face in faces_np:
+                f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1} {face[3]+1}\n")
+
+coords, feats = create_sparse_sphere()
+
+vertices, faces = spcumc.sparse_dual_marching_cubes_from_points(
+    coords.cuda(), 
+    feats.float().cuda(), 
+    0.0, 
+)
+save_obj_with_quads('output_sphere_mc.obj', vertices, faces)
+
+vertices, faces = spcumc.sparse_marching_cubes_from_points(
+    coords.cuda(), 
+    feats.float().cuda(), 
+    0.0, 
+)
+save_obj_with_quads('output_sphere_dmc.obj', vertices, faces)
+```
+
+### setup.py
+```
+from setuptools import setup
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+setup(
+    name='spcumc',
+    version='0.1.0',
+    author='Hwan Heo',
+    author_email='gjghks950@naver.com',
+    description='Sparse Marching Cubes with CUDA and PyTorch bindings',
+    ext_modules=[
+        CUDAExtension(
+            name='spcumc._backend',
+            sources=[
+                'src/api.cpp',
+                'src/spcumc.cu',
+                'src/spdmc.cu',
+                'src/decimation.cu',
+            ],
+            extra_compile_args={'cxx': ['-g'], 'nvcc': ['-O2', '--extended-lambda']}
+        ),
+    ],
+    cmdclass={
+        'build_ext': BuildExtension
+    },
+    packages=['spcumc'],
+    py_modules=[],
+)
+```
+
+### spcumc/__init__.py
+```
+from ._backend import (
+    sparse_marching_cubes,
+    sparse_marching_cubes_from_points,
+    sparse_dual_marching_cubes,
+    sparse_dual_marching_cubes_from_points,
+    decimate_mesh
+)
+
+__all__ = [
+    'sparse_marching_cubes',
+    'sparse_marching_cubes_from_points',
+    'sparse_dual_marching_cubes',
+    'sparse_dual_marching_cubes_from_points',
+    'decimate_mesh'
+]
+__version__ = '0.1.0'
+```
+
+### src/api.cpp
+```
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
+#include <torch/extension.h>
+#include "api.h"
+
+// C++ interface
+std::tuple<at::Tensor, at::Tensor> sparse_marching_cubes(at::Tensor coords, at::Tensor corners, double iso_d, bool ensure_consistency) {
+    TORCH_CHECK(coords.is_cuda(), "coords must be a CUDA tensor");
+    TORCH_CHECK(corners.is_cuda(), "corners must be a CUDA tensor");
+    TORCH_CHECK(coords.is_contiguous(), "coords must be contiguous");
+    TORCH_CHECK(corners.is_contiguous(), "corners must be contiguous");
+    TORCH_CHECK(coords.dim() == 2 && coords.size(1) == 3, "coords has incorrect shape");
+    TORCH_CHECK(corners.dim() == 2 && corners.size(1) == 8, "corners has incorrect shape");
+    TORCH_CHECK(coords.size(0) == corners.size(0), "coords and corners must have same number of voxels");
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    int N = coords.size(0);
+    float iso = (float)iso_d;
+
+    auto result = _sparse_marching_cubes(
+        coords.data_ptr<int>(),
+        corners.data_ptr<float>(),
+        N,
+        iso,
+        ensure_consistency,
+        stream
+    );
+
+    // Convert results to Tensors
+    at::Tensor verts_tensor = torch::empty({(long)result.first.size(), 3}, torch::dtype(torch::kFloat32).device(coords.device()));
+    at::Tensor tris_tensor = torch::empty({(long)result.second.size(), 3}, torch::dtype(torch::kInt32).device(coords.device()));
+
+    if (!result.first.empty()) {
+        cudaMemcpyAsync(verts_tensor.data_ptr<float>(), result.first.data().get(), result.first.size() * sizeof(V3f), cudaMemcpyDeviceToDevice, stream);
+    }
+    if (!result.second.empty()) {
+        cudaMemcpyAsync(tris_tensor.data_ptr<int>(), result.second.data().get(), result.second.size() * sizeof(Tri), cudaMemcpyDeviceToDevice, stream);
+    }
+    
+    return {verts_tensor, tris_tensor};
+}
+
+std::tuple<at::Tensor, at::Tensor> sparse_marching_cubes_from_points(at::Tensor coords, at::Tensor point_values, double iso_d, double default_value_d) {
+    TORCH_CHECK(coords.is_cuda(), "coords must be a CUDA tensor");
+    TORCH_CHECK(point_values.is_cuda(), "point_values must be a CUDA tensor");
+    TORCH_CHECK(coords.is_contiguous(), "coords must be contiguous");
+    TORCH_CHECK(point_values.is_contiguous(), "point_values must be contiguous");
+    TORCH_CHECK(coords.dim() == 2 && coords.size(1) == 3, "coords has incorrect shape");
+    TORCH_CHECK(point_values.dim() == 1 || (point_values.dim() == 2 && point_values.size(1) == 1), "point_values has incorrect shape");
+    TORCH_CHECK(coords.size(0) == point_values.size(0), "coords and point_values must have same number of elements");
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    int N = coords.size(0);
+    float iso = (float)iso_d;
+    float default_value = (float)default_value_d;
+
+    auto result = _sparse_marching_cubes_from_points(
+        coords.data_ptr<int>(),
+        point_values.data_ptr<float>(),
+        N,
+        iso,
+        default_value,
+        stream
+    );
+
+    // Convert results to Tensors
+    at::Tensor verts_tensor = torch::empty({(long)result.first.size(), 3}, torch::dtype(torch::kFloat32).device(coords.device()));
+    at::Tensor tris_tensor = torch::empty({(long)result.second.size(), 3}, torch::dtype(torch::kInt32).device(coords.device()));
+
+    if (!result.first.empty()) {
+        cudaMemcpyAsync(verts_tensor.data_ptr<float>(), result.first.data().get(), result.first.size() * sizeof(V3f), cudaMemcpyDeviceToDevice, stream);
+    }
+    if (!result.second.empty()) {
+        cudaMemcpyAsync(tris_tensor.data_ptr<int>(), result.second.data().get(), result.second.size() * sizeof(Tri), cudaMemcpyDeviceToDevice, stream);
+    }
+    
+    return {verts_tensor, tris_tensor};
+}
+
+
+// Sparse Dual Marching Cubes
+std::tuple<at::Tensor, at::Tensor> sparse_dual_marching_cubes(at::Tensor coords, at::Tensor corners, double iso_d) {
+    TORCH_CHECK(coords.is_cuda(), "coords must be a CUDA tensor");
+    TORCH_CHECK(corners.is_cuda(), "corners must be a CUDA tensor");
+    TORCH_CHECK(coords.is_contiguous(), "coords must be contiguous");
+    TORCH_CHECK(corners.is_contiguous(), "corners must be contiguous");
+    TORCH_CHECK(coords.dim() == 2 && coords.size(1) == 3, "coords has incorrect shape");
+    TORCH_CHECK(corners.dim() == 2 && corners.size(1) == 8, "corners has incorrect shape");
+    TORCH_CHECK(coords.size(0) == corners.size(0), "coords and corners must have same number of voxels");
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    int N = coords.size(0);
+    float iso = (float)iso_d;
+
+    auto [vertices_dev, quads_dev] = _sparse_dual_marching_cubes(
+        coords.data_ptr<int>(),
+        corners.data_ptr<float>(),
+        N,
+        iso,
+        stream
+    );
+
+    // Convert results to Tensors
+    at::Tensor verts_tensor = torch::empty({(long)vertices_dev.size(), 3}, torch::dtype(torch::kFloat32).device(coords.device()));
+    at::Tensor quads_tensor = torch::empty({(long)quads_dev.size(), 4}, torch::dtype(torch::kInt32).device(coords.device()));
+
+    if (!vertices_dev.empty()) {
+        cudaMemcpyAsync(verts_tensor.data_ptr<float>(), vertices_dev.data().get(), vertices_dev.size() * sizeof(V3f), cudaMemcpyDeviceToDevice, stream);
+    }
+    if (!quads_dev.empty()) {
+        cudaMemcpyAsync(quads_tensor.data_ptr<int>(), quads_dev.data().get(), quads_dev.size() * sizeof(Quad), cudaMemcpyDeviceToDevice, stream);
+    }
+
+    return {verts_tensor, quads_tensor};
+}
+
+std::tuple<at::Tensor, at::Tensor> sparse_dual_marching_cubes_from_points(at::Tensor coords, at::Tensor point_values, double iso_d, double default_value_d) {
+    TORCH_CHECK(coords.is_cuda(), "coords must be a CUDA tensor");
+    TORCH_CHECK(point_values.is_cuda(), "point_values must be a CUDA tensor");
+    TORCH_CHECK(coords.is_contiguous(), "coords must be contiguous");
+    TORCH_CHECK(point_values.is_contiguous(), "point_values must be contiguous");
+    TORCH_CHECK(coords.dim() == 2 && coords.size(1) == 3, "coords has incorrect shape");
+    TORCH_CHECK(point_values.dim() == 1 || (point_values.dim() == 2 && point_values.size(1) == 1), "point_values has incorrect shape");
+    TORCH_CHECK(coords.size(0) == point_values.size(0), "coords and point_values must have same number of elements");
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    int N = coords.size(0);
+    float iso = (float)iso_d;
+    float default_value = (float)default_value_d;
+
+    auto [vertices_dev, quads_dev] = _sparse_dual_marching_cubes_from_points(
+        coords.data_ptr<int>(),
+        point_values.data_ptr<float>(),
+        N,
+        iso,
+        default_value,
+        stream
+    );
+
+    // Convert results to Tensors
+    at::Tensor verts_tensor = torch::empty({(long)vertices_dev.size(), 3}, torch::dtype(torch::kFloat32).device(coords.device()));
+    at::Tensor quads_tensor = torch::empty({(long)quads_dev.size(), 4}, torch::dtype(torch::kInt32).device(coords.device()));
+
+    if (!vertices_dev.empty()) {
+        cudaMemcpyAsync(verts_tensor.data_ptr<float>(), vertices_dev.data().get(), vertices_dev.size() * sizeof(V3f), cudaMemcpyDeviceToDevice, stream);
+    }
+    if (!quads_dev.empty()) {
+        cudaMemcpyAsync(quads_tensor.data_ptr<int>(), quads_dev.data().get(), quads_dev.size() * sizeof(Quad), cudaMemcpyDeviceToDevice, stream);
+    }
+
+    return {verts_tensor, quads_tensor};
+}
+
+
+// Mesh Decimation
+std::tuple<at::Tensor, at::Tensor> decimate_mesh(at::Tensor vertices, at::Tensor faces, int target_vertex_count) {
+    TORCH_CHECK(vertices.dim() == 2 && vertices.size(1) == 3, "vertices must have shape [N, 3]");
+    TORCH_CHECK(faces.dim() == 2 && faces.size(1) == 3, "faces must have shape [F, 3]");
+    TORCH_CHECK(vertices.is_contiguous(), "vertices must be contiguous");
+    TORCH_CHECK(faces.is_contiguous(), "faces must be contiguous");
+    TORCH_CHECK(target_vertex_count > 0, "target_vertex_count must be positive");
+
+    int num_vertices = vertices.size(0);
+    int num_faces = faces.size(0);
+
+    // Convert to CPU if on CUDA
+    at::Tensor vertices_cpu = vertices.cpu().to(torch::kFloat32);
+    at::Tensor faces_cpu = faces.cpu().to(torch::kInt32);
+
+    std::vector<V3f> verts_vec(num_vertices);
+    std::vector<Tri> faces_vec(num_faces);
+
+    float* v_ptr = vertices_cpu.data_ptr<float>();
+    int* f_ptr = faces_cpu.data_ptr<int>();
+
+    for (int i = 0; i < num_vertices; ++i) {
+        verts_vec[i].x = v_ptr[i * 3 + 0];
+        verts_vec[i].y = v_ptr[i * 3 + 1];
+        verts_vec[i].z = v_ptr[i * 3 + 2];
+    }
+
+    for (int i = 0; i < num_faces; ++i) {
+        faces_vec[i].v0 = f_ptr[i * 3 + 0];
+        faces_vec[i].v1 = f_ptr[i * 3 + 1];
+        faces_vec[i].v2 = f_ptr[i * 3 + 2];
+    }
+
+    // Call CUDA decimation
+    decimate_cuda(verts_vec, faces_vec, target_vertex_count);
+
+    // Convert back to tensors
+    int new_num_vertices = verts_vec.size();
+    int new_num_faces = faces_vec.size();
+
+    at::Tensor new_vertices = torch::empty({new_num_vertices, 3}, torch::dtype(torch::kFloat32));
+    at::Tensor new_faces = torch::empty({new_num_faces, 3}, torch::dtype(torch::kInt32));
+
+    float* new_v_ptr = new_vertices.data_ptr<float>();
+    int* new_f_ptr = new_faces.data_ptr<int>();
+
+    for (int i = 0; i < new_num_vertices; ++i) {
+        new_v_ptr[i * 3 + 0] = verts_vec[i].x;
+        new_v_ptr[i * 3 + 1] = verts_vec[i].y;
+        new_v_ptr[i * 3 + 2] = verts_vec[i].z;
+    }
+
+    for (int i = 0; i < new_num_faces; ++i) {
+        new_f_ptr[i * 3 + 0] = faces_vec[i].v0;
+        new_f_ptr[i * 3 + 1] = faces_vec[i].v1;
+        new_f_ptr[i * 3 + 2] = faces_vec[i].v2;
+    }
+
+    // Move to original device if needed
+    if (vertices.is_cuda()) {
+        new_vertices = new_vertices.to(vertices.device());
+        new_faces = new_faces.to(faces.device());
+    }
+
+    return {new_vertices, new_faces};
+}
+
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    // Sparse Marching Cubes
+    m.def("sparse_marching_cubes", &sparse_marching_cubes, "Sparse Marching Cubes (original)",
+          py::arg("coords"), py::arg("corners"), py::arg("iso"), py::arg("ensure_consistency") = false);
+    m.def("sparse_marching_cubes_from_points", &sparse_marching_cubes_from_points, "Sparse Marching Cubes from a grid of points",
+          py::arg("coords"), py::arg("point_values"), py::arg("iso"), py::arg("default_value") = 1.0);
+
+    // Sparse Dual Marching Cubes
+    m.def("sparse_dual_marching_cubes", &sparse_dual_marching_cubes, "Sparse Dual Marching Cubes",
+          py::arg("coords"), py::arg("corners"), py::arg("iso"));
+    m.def("sparse_dual_marching_cubes_from_points", &sparse_dual_marching_cubes_from_points, "Sparse Dual Marching Cubes from a grid of points",
+          py::arg("coords"), py::arg("point_values"), py::arg("iso"), py::arg("default_value") = 1.0);
+
+    // Mesh Decimation
+    m.def("decimate_mesh", &decimate_mesh, "Decimate mesh using QEM edge collapse",
+          py::arg("vertices"), py::arg("faces"), py::arg("target_vertex_count"));
+}
+```
+
+### src/api.h
+```
+#pragma once
+
+#include <ATen/cuda/CUDAContext.h>
+#include <torch/torch.h>
+#include <cuda_runtime.h>
+#include <memory>
+#include <thrust/device_vector.h>
+
+using V3f = float3;
+struct Tri { int v0, v1, v2; };
+struct Quad { int v0, v1, v2, v3; };
+
+// Sparse Marching Cubes
+std::tuple<at::Tensor, at::Tensor> sparse_marching_cubes(at::Tensor coords, at::Tensor corners, double iso_d, bool ensure_consistency = false);
+std::tuple<at::Tensor, at::Tensor> sparse_marching_cubes_from_points(at::Tensor coords, at::Tensor point_values, double iso_d, double default_value);
+
+// Sparse Dual Marching Cubes
+std::tuple<at::Tensor, at::Tensor> sparse_dual_marching_cubes(at::Tensor coords, at::Tensor corners, double iso_d);
+std::tuple<at::Tensor, at::Tensor> sparse_dual_marching_cubes_from_points(at::Tensor coords, at::Tensor point_values, double iso_d, double default_value);
+
+// CUDA forward declarations
+std::pair<thrust::device_vector<V3f>, thrust::device_vector<Tri>>
+_sparse_marching_cubes(const int* d_coords, const float* d_corners, int N, float iso, bool ensure_consistency, cudaStream_t stream);
+
+std::pair<thrust::device_vector<V3f>, thrust::device_vector<Tri>>
+_sparse_marching_cubes_from_points(const int* d_coords, const float* d_point_values, int N, float iso, float default_value, cudaStream_t stream);
+
+std::tuple<thrust::device_vector<V3f>, thrust::device_vector<Quad>>
+_sparse_dual_marching_cubes(const int* d_coords, const float* d_corners, int N, float iso, cudaStream_t stream);
+
+std::tuple<thrust::device_vector<V3f>, thrust::device_vector<Quad>>
+_sparse_dual_marching_cubes_from_points(const int* d_coords, const float* d_point_values, int N, float iso, float default_value, cudaStream_t stream);
+
+// Mesh Decimation
+std::tuple<at::Tensor, at::Tensor> decimate_mesh(at::Tensor vertices, at::Tensor faces, int target_vertex_count);
+
+// Decimation CUDA forward declaration
+void decimate_cuda(std::vector<V3f>& vertices, std::vector<Tri>& faces, int target_vertex_count);
+```
+
+### src/decimation.cu
+```
+#include "api.h" 
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <algorithm>
+#include <unordered_set>
+#include <numeric>
+
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
+#include <thrust/sort.h>
+#include <thrust/unique.h>
+#include <thrust/sequence.h>
+#include <thrust/copy.h>
+#include <thrust/scan.h>
+#include <thrust/for_each.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/constant_iterator.h>
+#include <thrust/reduce.h>
+
+
+#define CHECK_CUDA(call) do { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        fprintf(stderr, "CUDA Error in %s at line %d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while (0)
+
+struct Quadricf {
+    float a00, a01, a02, a11, a12, a22;
+    float b0, b1, b2;
+    float c;
+
+    __host__ __device__ Quadricf() {
+        a00 = a01 = a02 = a11 = a12 = a22 = 0.f;
+        b0 = b1 = b2 = 0.f;
+        c = 0.f;
+    }
+};
+
+// v0 < v1
+struct Edge {
+    int v0, v1;
+    __host__ __device__ bool operator<(const Edge& other) const {
+        return (v0 < other.v0) || (v0 == other.v0 && v1 < other.v1);
+    }
+    __host__ __device__ bool operator==(const Edge& other) const {
+        return v0 == other.v0 && v1 == other.v1;
+    }
+};
+
+
+// ===================================================================
+// Device-Side utility functions
+// ===================================================================
+__device__ inline V3f operator+(const V3f& a, const V3f& b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
+__device__ inline V3f operator-(const V3f& a, const V3f& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+__device__ inline V3f operator*(const V3f& a, float s) { return {a.x * s, a.y * s, a.z * s}; }
+__device__ inline float dot(const V3f& a, const V3f& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+__device__ inline V3f cross(const V3f& a, const V3f& b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
+__device__ inline float squared_norm(const V3f& v) { return dot(v, v); }
+__device__ inline float norm(const V3f& v) { return sqrtf(squared_norm(v)); }
+__device__ inline V3f normalize(const V3f& v) { float n = norm(v); return n > 1e-6f ? V3f{v.x * (1.f/n), v.y * (1.f/n), v.z * (1.f/n)} : V3f{0.f,0.f,0.f}; }
+
+__device__ inline void atomicAdd(Quadricf* addr, const Quadricf& val) {
+    atomicAdd(&addr->a00, val.a00); atomicAdd(&addr->a01, val.a01); atomicAdd(&addr->a02, val.a02);
+    atomicAdd(&addr->a11, val.a11); atomicAdd(&addr->a12, val.a12); atomicAdd(&addr->a22, val.a22);
+    atomicAdd(&addr->b0, val.b0); atomicAdd(&addr->b1, val.b1); atomicAdd(&addr->b2, val.b2);
+    atomicAdd(&addr->c, val.c);
+}
+
+// ===================================================================
+// CUDA kernel functions
+// ===================================================================
+
+__global__ void kernel_calculate_vertex_quadrics(
+    const V3f* vertices, const Tri* faces, int num_faces, Quadricf* vertex_quadrics) {
+
+    int face_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (face_idx >= num_faces) return;
+
+    Tri f = faces[face_idx];
+    V3f v0 = vertices[f.v0];
+    V3f v1 = vertices[f.v1];
+    V3f v2 = vertices[f.v2];
+
+    V3f n = cross(v1 - v0, v2 - v0);
+    float area = 0.5f * norm(n);
+    if (area <= 1e-8f) return;
+
+    n = normalize(n);
+    float d = -dot(n, v0); // Use ax+by+cz+d=0 form
+
+    Quadricf q;
+    q.a00 = n.x * n.x; q.a01 = n.x * n.y; q.a02 = n.x * n.z;
+    q.a11 = n.y * n.y; q.a12 = n.y * n.z; q.a22 = n.z * n.z;
+    q.b0 = n.x * d; q.b1 = n.y * d; q.b2 = n.z * d;
+    q.c = d * d;
+
+    // We can remove area weighting if it causes issues, but it's generally good
+    q.a00 *= area; q.a01 *= area; q.a02 *= area;
+    q.a11 *= area; q.a12 *= area; q.a22 *= area;
+    q.b0 *= area; q.b1 *= area; q.b2 *= area;
+    q.c *= area;
+
+    atomicAdd(&vertex_quadrics[f.v0], q);
+    atomicAdd(&vertex_quadrics[f.v1], q);
+    atomicAdd(&vertex_quadrics[f.v2], q);
+}
+
+
+__global__ void kernel_extract_face_edges(const Tri* faces, int num_faces, Edge* all_edges) {
+    int face_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (face_idx >= num_faces) return;
+    
+    Tri f = faces[face_idx];
+    int v0 = f.v0, v1 = f.v1, v2 = f.v2; 
+
+    all_edges[face_idx * 3 + 0] = {min(v0, v1), max(v0, v1)};
+    all_edges[face_idx * 3 + 1] = {min(v1, v2), max(v1, v2)};
+    all_edges[face_idx * 3 + 2] = {min(v2, v0), max(v2, v0)};
+}
+
+
+__global__ void kernel_calculate_edge_costs(
+    const Edge* edges, int num_edges,
+    const V3f* vertices, const Quadricf* vertex_quadrics,
+    const bool* is_boundary, // Flag for boundary edges
+    float* costs, V3f* collapse_pos, 
+    const Tri* faces,
+    const int* vertex_to_face_map,
+    const int* vertex_to_face_offsets) {
+
+    int edge_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (edge_idx >= num_edges) return;
+    
+    Edge e = edges[edge_idx];
+    int v0_idx = e.v0;
+    int v1_idx = e.v1;
+
+    Quadricf q0 = vertex_quadrics[v0_idx];
+    Quadricf q1 = vertex_quadrics[v1_idx];
+    
+    Quadricf q;
+    q.a00 = q0.a00 + q1.a00; q.a01 = q0.a01 + q1.a01; q.a02 = q0.a02 + q1.a02;
+    q.a11 = q0.a11 + q1.a11; q.a12 = q0.a12 + q1.a12; q.a22 = q0.a22 + q1.a22;
+    q.b0 = q0.b0 + q1.b0; q.b1 = q0.b1 + q1.b1; q.b2 = q0.b2 + q1.b2;
+    q.c = q0.c + q1.c;
+
+    float det = q.a00 * (q.a11 * q.a22 - q.a12 * q.a12) -
+                q.a01 * (q.a01 * q.a22 - q.a12 * q.a02) +
+                q.a02 * (q.a01 * q.a12 - q.a11 * q.a02);
+
+    V3f p0 = vertices[v0_idx];
+    V3f p1 = vertices[v1_idx];
+    V3f pos;
+
+    if (fabsf(det) > 1e-8f) {
+        float inv_det = 1.0f / det;
+        pos.x = -inv_det * ( (q.a11 * q.a22 - q.a12 * q.a12) * q.b0 + (q.a02 * q.a12 - q.a01 * q.a22) * q.b1 + (q.a01 * q.a12 - q.a02 * q.a11) * q.b2 );
+        pos.y = -inv_det * ( (q.a02 * q.a12 - q.a01 * q.a22) * q.b0 + (q.a00 * q.a22 - q.a02 * q.a02) * q.b1 + (q.a02 * q.a01 - q.a00 * q.a12) * q.b2 );
+        pos.z = -inv_det * ( (q.a01 * q.a12 - q.a02 * q.a11) * q.b0 + (q.a02 * q.a01 - q.a00 * q.a12) * q.b1 + (q.a00 * q.a11 - q.a01 * q.a01) * q.b2 );
+    } else {
+        pos = (p0 + p1) * 0.5f; // Fallback to midpoint if matrix is singular
+    }
+
+    // Sanity check to prevent spikes.
+    // If the new position is too far from the original edge, it's likely due to numerical instability.
+    // In that case, clamp the position to the edge's midpoint.
+    float edge_len_sq = squared_norm(p1 - p0);
+    V3f midpoint = (p0 + p1) * 0.5f;
+    if (squared_norm(pos - midpoint) > edge_len_sq) {
+        pos = midpoint;
+    }
+
+    float cost = q.a00*pos.x*pos.x + 2*q.a01*pos.x*pos.y + 2*q.a02*pos.x*pos.z + q.a11*pos.y*pos.y + 2*q.a12*pos.y*pos.z + q.a22*pos.z*pos.z + 
+                 2*q.b0*pos.x + 2*q.b1*pos.y + 2*q.b2*pos.z + q.c;
+
+    bool causes_flip = false;
+    bool causes_degeneracy = false;
+
+    // Iterate over one-ring neighborhood of v0
+    for (int i = vertex_to_face_offsets[v0_idx]; i < vertex_to_face_offsets[v0_idx+1]; ++i) {
+        int face_idx = vertex_to_face_map[i];
+        Tri f = faces[face_idx];
+
+        // This face will be removed by the collapse, so no need to check it.
+        if ((f.v0 == v0_idx || f.v1 == v0_idx || f.v2 == v0_idx) &&
+            (f.v0 == v1_idx || f.v1 == v1_idx || f.v2 == v1_idx)) {
+            continue;
+        }
+        
+        int p_idx = f.v0, q_idx = f.v1, r_idx = f.v2;
+        V3f p = vertices[p_idx], q_v = vertices[q_idx], r = vertices[r_idx];
+        
+        V3f old_normal = cross(q_v - p, r - p);
+
+        // Simulate the new positions
+        if (p_idx == v0_idx || p_idx == v1_idx) p = pos;
+        if (q_idx == v0_idx || q_idx == v1_idx) q_v = pos;
+        if (r_idx == v0_idx || r_idx == v1_idx) r = pos;
+        
+        V3f new_normal = cross(q_v - p, r - p);
+
+        // Check for near-zero area (degeneration)
+        if (squared_norm(new_normal) < 1e-12f) {
+            causes_degeneracy = true;
+            break;
+        }
+
+        // Check for normal flip
+        if (dot(old_normal, new_normal) < 0.0f) {
+            causes_flip = true;
+            break;
+        }
+    }
+
+    // v1 one-ring
+    if (!causes_flip && !causes_degeneracy) {
+        for (int i = vertex_to_face_offsets[v1_idx]; i < vertex_to_face_offsets[v1_idx+1]; ++i) {
+            int face_idx = vertex_to_face_map[i];
+            Tri f = faces[face_idx];
+
+            // This face will be removed by the collapse, so no need to check it.
+            if ((f.v0 == v0_idx || f.v1 == v0_idx || f.v2 == v0_idx) &&
+                (f.v0 == v1_idx || f.v1 == v1_idx || f.v2 == v1_idx)) {
+                continue;
+            }
+            
+            int p_idx = f.v0, q_idx = f.v1, r_idx = f.v2;
+            V3f p = vertices[p_idx], q_v = vertices[q_idx], r = vertices[r_idx];
+            
+            V3f old_normal = cross(q_v - p, r - p);
+
+            // Simulate the new positions
+            if (p_idx == v0_idx || p_idx == v1_idx) p = pos;
+            if (q_idx == v0_idx || q_idx == v1_idx) q_v = pos;
+            if (r_idx == v0_idx || r_idx == v1_idx) r = pos;
+            
+            V3f new_normal = cross(q_v - p, r - p);
+
+            // Check for near-zero area (degeneration)
+            if (squared_norm(new_normal) < 1e-11f) {
+                causes_degeneracy = true;
+                break;
+            }
+
+            // Check for normal flip
+            if (dot(old_normal, new_normal) < 0.0f) {
+                causes_flip = true;
+                break;
+            }
+        }
+    }
+    
+    // Penalty
+    if (is_boundary[edge_idx]) {
+        cost += edge_len_sq * 1000.0f;
+    }
+    
+    if (causes_flip || causes_degeneracy) {
+        pos = midpoint;
+        cost += edge_len_sq * 1000.0f; 
+    }
+    
+    costs[edge_idx] = cost;
+    collapse_pos[edge_idx] = pos;
+}
+
+__global__ void kernel_resolve_remap_table(int* remap_table, int num_vertices) {
+    int v_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (v_idx >= num_vertices) return;
+
+    int current = v_idx;
+    int next = remap_table[current];
+    while(current != next) {
+        current = next;
+        next = remap_table[current];
+    }
+    remap_table[v_idx] = current;
+}
+
+
+__global__ void kernel_update_faces(Tri* faces, int num_faces, const int* remap_table) {
+    int face_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (face_idx >= num_faces) return;
+    
+    Tri f = faces[face_idx];
+    int v0 = remap_table[f.v0];
+    int v1 = remap_table[f.v1];
+    int v2 = remap_table[f.v2];
+
+    if (v0 == v1 || v1 == v2 || v2 == v0) {
+        faces[face_idx] = {-1, -1, -1};
+    } else {
+        faces[face_idx] = {v0, v1, v2};
+    }
+}
+
+
+__global__ void kernel_update_vertex_positions(
+    V3f* vertices, const int* remap_table, const V3f* new_positions, const int* collapse_v0_indices, int num_collapses) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= num_collapses) return;
+    
+    // The final destination vertex is remap_table[original_v0]
+    int v_idx = remap_table[collapse_v0_indices[i]];
+    vertices[v_idx] = new_positions[i];
+}
+
+
+__global__ void kernel_compact_and_remap_faces(
+    const Tri* old_faces, int num_valid_faces, Tri* new_faces, const int* new_indices) {
+    int face_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (face_idx >= num_valid_faces) return;
+
+    Tri f = old_faces[face_idx];
+    new_faces[face_idx] = {new_indices[f.v0], new_indices[f.v1], new_indices[f.v2]};
+}
+
+// Functor for atomic marking
+struct MarkActiveVertices {
+    int* active_ptr;
+    const Tri* faces_ptr;
+    MarkActiveVertices(int* ap, const Tri* fp) : active_ptr(ap), faces_ptr(fp) {}
+    __device__ void operator()(int idx) const {
+        Tri f = faces_ptr[idx];
+        atomicExch(&active_ptr[f.v0], 1);
+        atomicExch(&active_ptr[f.v1], 1);
+        atomicExch(&active_ptr[f.v2], 1);
+    }
+};
+
+// Functor for compacting vertices
+struct CompactVertices {
+    const V3f* old_v;
+    V3f* new_v;
+    const int* active;
+    const int* indices;
+    CompactVertices(const V3f* ov, V3f* nv, const int* a, const int* i) : old_v(ov), new_v(nv), active(a), indices(i) {}
+    __device__ void operator()(int idx) const {
+        if (active[idx]) {
+            new_v[indices[idx]] = old_v[idx];
+        }
+    }
+};
+
+
+// ===================================================================
+// Host-Side Orchestration
+// ===================================================================
+
+void build_vertex_to_face_adjacency(int num_vertices, const std::vector<Tri>& faces,
+                                    std::vector<int>& vertex_to_face_map,
+                                    std::vector<int>& vertex_to_face_offsets) {
+    vertex_to_face_offsets.assign(num_vertices + 1, 0);
+    std::vector<std::vector<int>> temp_map(num_vertices);
+
+    for (int i = 0; i < faces.size(); ++i) {
+        temp_map[faces[i].v0].push_back(i);
+        temp_map[faces[i].v1].push_back(i);
+        temp_map[faces[i].v2].push_back(i);
+    }
+
+    int total_entries = 0;
+    for (int i = 0; i < num_vertices; ++i) {
+        vertex_to_face_offsets[i] = total_entries;
+        total_entries += temp_map[i].size();
+    }
+    vertex_to_face_offsets[num_vertices] = total_entries;
+
+    vertex_to_face_map.resize(total_entries);
+    for (int i = 0; i < num_vertices; ++i) {
+        std::copy(temp_map[i].begin(), temp_map[i].end(), vertex_to_face_map.begin() + vertex_to_face_offsets[i]);
+    }
+}
+
+void decimate_cuda(std::vector<V3f>& vertices, std::vector<Tri>& faces, int target_vertex_count) {
+    int num_vertices = vertices.size();
+    int num_faces = faces.size();
+    if (num_vertices <= target_vertex_count) return;
+
+    thrust::device_vector<V3f> d_vertices = vertices;
+    thrust::device_vector<Tri> d_faces = faces;
+
+    const int MAX_ITERATIONS = 2;
+    const int THREADS_PER_BLOCK = 256;
+
+    for (int iter = 0; iter < MAX_ITERATIONS && num_vertices > target_vertex_count; ++iter) {
+        printf("Iteration %d: Vertices = %d, Faces = %d\n", iter, num_vertices, num_faces);
+        if (num_faces == 0) break;
+
+        // Build and transfer adjacency info for this iteration's mesh state
+        std::vector<Tri> h_faces(d_faces.size());
+        thrust::copy(d_faces.begin(), d_faces.end(), h_faces.begin());
+
+        std::vector<int> h_v_to_f_map, h_v_to_f_offsets;
+        build_vertex_to_face_adjacency(num_vertices, h_faces, h_v_to_f_map, h_v_to_f_offsets);
+        
+        thrust::device_vector<int> d_v_to_f_map = h_v_to_f_map;
+        thrust::device_vector<int> d_v_to_f_offsets = h_v_to_f_offsets;
+
+        // 1. Calculate vertex-wise quadrics
+        thrust::device_vector<Quadricf> d_vertex_quadrics(num_vertices);
+        CHECK_CUDA(cudaMemset(thrust::raw_pointer_cast(d_vertex_quadrics.data()), 0, num_vertices * sizeof(Quadricf)));
+        
+        int grid_size = (num_faces + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        kernel_calculate_vertex_quadrics<<<grid_size, THREADS_PER_BLOCK>>>(
+            thrust::raw_pointer_cast(d_vertices.data()),
+            thrust::raw_pointer_cast(d_faces.data()),
+            num_faces,
+            thrust::raw_pointer_cast(d_vertex_quadrics.data())
+        );
+        CHECK_CUDA(cudaDeviceSynchronize());
+
+        // 2. Extract unique edges and calculate costs
+        thrust::device_vector<Edge> d_all_edges(num_faces * 3);
+        kernel_extract_face_edges<<<grid_size, THREADS_PER_BLOCK>>>(
+            thrust::raw_pointer_cast(d_faces.data()),
+            num_faces,
+            thrust::raw_pointer_cast(d_all_edges.data())
+        );
+        
+        thrust::sort(d_all_edges.begin(), d_all_edges.end());
+        
+        // Identify boundary edges for preservation
+        thrust::device_vector<Edge> d_unique_edges = d_all_edges;
+        auto unique_end = thrust::unique(thrust::device, d_unique_edges.begin(), d_unique_edges.end());
+        d_unique_edges.resize(unique_end - d_unique_edges.begin());
+        int num_unique_edges = d_unique_edges.size();
+
+        thrust::device_vector<int> d_edge_counts(num_unique_edges);
+        thrust::reduce_by_key(
+            d_all_edges.begin(), d_all_edges.end(),
+            thrust::constant_iterator<int>(1),
+            d_unique_edges.begin(), d_edge_counts.begin()
+        );
+
+        thrust::device_vector<bool> d_is_boundary(num_unique_edges);
+        thrust::transform(d_edge_counts.begin(), d_edge_counts.end(), d_is_boundary.begin(), 
+            [] __device__ (int count) { return count == 1; });
+        
+        
+        thrust::device_vector<float> d_edge_costs(num_unique_edges);
+        thrust::device_vector<V3f> d_collapse_pos(num_unique_edges);
+
+        grid_size = (num_unique_edges + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        kernel_calculate_edge_costs<<<grid_size, THREADS_PER_BLOCK>>>(
+            thrust::raw_pointer_cast(d_unique_edges.data()), num_unique_edges,
+            thrust::raw_pointer_cast(d_vertices.data()), thrust::raw_pointer_cast(d_vertex_quadrics.data()),
+            thrust::raw_pointer_cast(d_is_boundary.data()),
+            thrust::raw_pointer_cast(d_edge_costs.data()), thrust::raw_pointer_cast(d_collapse_pos.data()),
+            thrust::raw_pointer_cast(d_faces.data()),
+            thrust::raw_pointer_cast(d_v_to_f_map.data()),
+            thrust::raw_pointer_cast(d_v_to_f_offsets.data())
+        );
+        CHECK_CUDA(cudaDeviceSynchronize());
+
+        // 3. Select an independent set of edges to collapse
+        thrust::device_vector<int> d_edge_indices(num_unique_edges);
+        thrust::sequence(d_edge_indices.begin(), d_edge_indices.end());
+        
+        thrust::sort_by_key(d_edge_costs.begin(), d_edge_costs.end(), d_edge_indices.begin());
+
+        thrust::host_vector<int> h_sorted_indices = d_edge_indices;
+        thrust::host_vector<Edge> h_unique_edges = d_unique_edges;
+        thrust::host_vector<V3f> h_collapse_pos = d_collapse_pos;
+        
+        std::vector<bool> vertex_used(num_vertices, false);
+        std::vector<std::pair<int, int>> collapses;
+        std::vector<V3f> new_positions_batch;
+        std::vector<int> collapse_v0_indices_batch;
+
+        // Control the number of collapses per iteration for stability
+        // int num_collapses_this_iteration = std::min((int)(num_vertices * 0.5), num_vertices - target_vertex_count);
+        int num_collapses_this_iteration = num_vertices - target_vertex_count;
+        if (num_collapses_this_iteration <= 0 && num_vertices > target_vertex_count) {
+             num_collapses_this_iteration = 1; 
+        } else if (num_collapses_this_iteration <= 0) {
+            break; 
+        }
+        
+        for (int i = 0; i < num_unique_edges && collapses.size() < num_collapses_this_iteration; ++i) {
+            int original_edge_idx = h_sorted_indices[i];
+            Edge e = h_unique_edges[original_edge_idx];
+            if (!vertex_used[e.v0] && !vertex_used[e.v1]) {
+                vertex_used[e.v0] = true;
+                vertex_used[e.v1] = true;
+                collapses.push_back({e.v1, e.v0}); // {v_to_remove, v_to_keep}
+                new_positions_batch.push_back(h_collapse_pos[original_edge_idx]);
+                collapse_v0_indices_batch.push_back(e.v0);
+            }
+        }
+        
+        if (collapses.empty()) break;
+        int num_collapses = collapses.size();
+        
+        // 4. Perform edge collapses
+        thrust::device_vector<int> d_remap_table(num_vertices);
+        thrust::sequence(d_remap_table.begin(), d_remap_table.end());
+
+        thrust::host_vector<int> h_remap_table = d_remap_table;
+        for(const auto& p : collapses) { h_remap_table[p.first] = p.second; }
+        d_remap_table = h_remap_table;
+
+        grid_size = (num_vertices + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        kernel_resolve_remap_table<<<grid_size, THREADS_PER_BLOCK>>>(thrust::raw_pointer_cast(d_remap_table.data()), num_vertices);
+        CHECK_CUDA(cudaDeviceSynchronize());
+        
+        thrust::device_vector<int> d_collapse_v0_indices = collapse_v0_indices_batch;
+        thrust::device_vector<V3f> d_new_positions_batch = new_positions_batch;
+        grid_size = (num_collapses + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        kernel_update_vertex_positions<<<grid_size, THREADS_PER_BLOCK>>>(
+            thrust::raw_pointer_cast(d_vertices.data()),
+            thrust::raw_pointer_cast(d_remap_table.data()),
+            thrust::raw_pointer_cast(d_new_positions_batch.data()),
+            thrust::raw_pointer_cast(d_collapse_v0_indices.data()),
+            num_collapses
+        );
+        CHECK_CUDA(cudaDeviceSynchronize());
+        
+        grid_size = (num_faces + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        kernel_update_faces<<<grid_size, THREADS_PER_BLOCK>>>(
+            thrust::raw_pointer_cast(d_faces.data()), num_faces,
+            thrust::raw_pointer_cast(d_remap_table.data())
+        );
+        CHECK_CUDA(cudaDeviceSynchronize());
+        
+        // 5. Compact mesh (remove dead faces and unused vertices)
+        thrust::device_vector<Tri> d_valid_faces(num_faces);
+        auto valid_faces_end = thrust::copy_if(d_faces.begin(), d_faces.end(), d_valid_faces.begin(), 
+            [] __device__ (const Tri& f) { return f.v0 != -1; });
+        int num_valid_faces = valid_faces_end - d_valid_faces.begin();
+        d_valid_faces.resize(num_valid_faces);
+        
+        if (num_valid_faces == 0) {
+            num_vertices = 0;
+            num_faces = 0;
+            break;
+        }
+
+        thrust::device_vector<int> d_active_vertices(num_vertices, 0);
+        
+        thrust::for_each(thrust::counting_iterator<int>(0), thrust::counting_iterator<int>(num_valid_faces),
+            MarkActiveVertices(thrust::raw_pointer_cast(d_active_vertices.data()), thrust::raw_pointer_cast(d_valid_faces.data()))
+        );
+        
+        thrust::device_vector<int> d_new_indices(num_vertices);
+        thrust::exclusive_scan(d_active_vertices.begin(), d_active_vertices.end(), d_new_indices.begin());
+        
+        // The new vertex count is the sum of all elements in d_active_vertices.
+        // It can be calculated from the end of the exclusive scan plus the last element of the input.
+        thrust::host_vector<int> h_last_active = d_active_vertices;
+        thrust::host_vector<int> h_last_new_index = d_new_indices;
+        int new_num_vertices = h_last_new_index.back() + h_last_active.back();
+
+        thrust::device_vector<V3f> d_new_vertices(new_num_vertices);
+        thrust::for_each(thrust::counting_iterator<int>(0), thrust::counting_iterator<int>(num_vertices),
+            CompactVertices(
+                thrust::raw_pointer_cast(d_vertices.data()),
+                thrust::raw_pointer_cast(d_new_vertices.data()),
+                thrust::raw_pointer_cast(d_active_vertices.data()),
+                thrust::raw_pointer_cast(d_new_indices.data())
+            )
+        );
+
+        thrust::device_vector<Tri> d_compacted_faces(num_valid_faces);
+        grid_size = (num_valid_faces + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        kernel_compact_and_remap_faces<<<grid_size, THREADS_PER_BLOCK>>>(
+            thrust::raw_pointer_cast(d_valid_faces.data()), num_valid_faces,
+            thrust::raw_pointer_cast(d_compacted_faces.data()),
+            thrust::raw_pointer_cast(d_new_indices.data())
+        );
+
+        d_vertices.swap(d_new_vertices);
+        d_faces.swap(d_compacted_faces);
+        num_vertices = new_num_vertices;
+        num_faces = num_valid_faces;
+    }
+    
+    vertices.resize(num_vertices);
+    faces.resize(num_faces);
+    thrust::copy(d_vertices.begin(), d_vertices.end(), vertices.begin());
+    thrust::copy(d_faces.begin(), d_faces.end(), faces.begin());
+}
+```
+
+### src/spcumc.cu
+```
+#include "api.h"
+#include <cuda_runtime.h>
+#include <thrust/device_vector.h>
+#include <thrust/device_ptr.h>
+#include <thrust/sequence.h>
+#include <thrust/sort.h>
+#include <thrust/unique.h>
+#include <thrust/transform.h>
+#include <thrust/scan.h>
+#include <thrust/scatter.h>
+#include <thrust/gather.h>
+#include <thrust/for_each.h>
+#include <thrust/execution_policy.h>
+// Added for memory-optimized pipeline
+#include <thrust/copy.h>
+#include <thrust/tuple.h>
+#include <thrust/iterator/zip_iterator.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
+
+
+
+// Lookup tables (partial placeholder). 
+__device__ __constant__ int edgeTable[256] = {
+    0x0  , 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
+    0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
+    0x190, 0x99 , 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
+    0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
+    0x230, 0x339, 0x33 , 0x13a, 0x636, 0x73f, 0x435, 0x53c,
+    0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
+    0x3a0, 0x2a9, 0x1a3, 0xaa , 0x7a6, 0x6af, 0x5a5, 0x4ac,
+    0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
+    0x460, 0x569, 0x663, 0x76a, 0x66 , 0x16f, 0x265, 0x36c,
+    0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
+    0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff , 0x3f5, 0x2fc,
+    0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+    0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55 , 0x15c,
+    0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
+    0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc ,
+    0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
+    0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc,
+    0xcc , 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+    0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c,
+    0x15c, 0x55 , 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
+    0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc,
+    0x2fc, 0x3f5, 0xff , 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+    0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c,
+    0x36c, 0x265, 0x16f, 0x66 , 0x76a, 0x663, 0x569, 0x460,
+    0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac,
+    0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa , 0x1a3, 0x2a9, 0x3a0,
+    0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
+    0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33 , 0x339, 0x230,
+    0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c,
+    0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99 , 0x190,
+    0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
+    0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0   
+};
+
+__device__ __constant__ int triTable[256][16] = {
+    {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 8, 3, 9, 8, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 3, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {9, 2, 10, 0, 2, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {2, 8, 3, 2, 10, 8, 10, 9, 8, -1, -1, -1, -1, -1, -1, -1},
+    {3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 11, 2, 8, 11, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 9, 0, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 11, 2, 1, 9, 11, 9, 8, 11, -1, -1, -1, -1, -1, -1, -1},
+    {3, 10, 1, 11, 10, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 10, 1, 0, 8, 10, 8, 11, 10, -1, -1, -1, -1, -1, -1, -1},
+    {3, 9, 0, 3, 11, 9, 11, 10, 9, -1, -1, -1, -1, -1, -1, -1},
+    {9, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 3, 0, 7, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 1, 9, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 1, 9, 4, 7, 1, 7, 3, 1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 10, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {3, 4, 7, 3, 0, 4, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1},
+    {9, 2, 10, 9, 0, 2, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1},
+    {2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4, -1, -1, -1, -1},
+    {8, 4, 7, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {11, 4, 7, 11, 2, 4, 2, 0, 4, -1, -1, -1, -1, -1, -1, -1},
+    {9, 0, 1, 8, 4, 7, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1},
+    {4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1, -1, -1, -1, -1},
+    {3, 10, 1, 3, 11, 10, 7, 8, 4, -1, -1, -1, -1, -1, -1, -1},
+    {1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4, -1, -1, -1, -1},
+    {4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3, -1, -1, -1, -1},
+    {4, 7, 11, 4, 11, 9, 9, 11, 10, -1, -1, -1, -1, -1, -1, -1},
+    {9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {9, 5, 4, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 5, 4, 1, 5, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {8, 5, 4, 8, 3, 5, 3, 1, 5, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 10, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {3, 0, 8, 1, 2, 10, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1},
+    {5, 2, 10, 5, 4, 2, 4, 0, 2, -1, -1, -1, -1, -1, -1, -1},
+    {2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8, -1, -1, -1, -1},
+    {9, 5, 4, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 11, 2, 0, 8, 11, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1},
+    {0, 5, 4, 0, 1, 5, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1},
+    {2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5, -1, -1, -1, -1},
+    {10, 3, 11, 10, 1, 3, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1},
+    {4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10, -1, -1, -1, -1},
+    {5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3, -1, -1, -1, -1},
+    {5, 4, 8, 5, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1},
+    {9, 7, 8, 5, 7, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {9, 3, 0, 9, 5, 3, 5, 7, 3, -1, -1, -1, -1, -1, -1, -1},
+    {0, 7, 8, 0, 1, 7, 1, 5, 7, -1, -1, -1, -1, -1, -1, -1},
+    {1, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {9, 7, 8, 9, 5, 7, 10, 1, 2, -1, -1, -1, -1, -1, -1, -1},
+    {10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3, -1, -1, -1, -1},
+    {8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2, -1, -1, -1, -1},
+    {2, 10, 5, 2, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1},
+    {7, 9, 5, 7, 8, 9, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1},
+    {9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11, -1, -1, -1, -1},
+    {2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7, -1, -1, -1, -1},
+    {11, 2, 1, 11, 1, 7, 7, 1, 5, -1, -1, -1, -1, -1, -1, -1},
+    {9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11, -1, -1, -1, -1},
+    {5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0, -1},
+    {11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0, -1},
+    {11, 10, 5, 7, 11, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 3, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {9, 0, 1, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 8, 3, 1, 9, 8, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1},
+    {1, 6, 5, 2, 6, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 6, 5, 1, 2, 6, 3, 0, 8, -1, -1, -1, -1, -1, -1, -1},
+    {9, 6, 5, 9, 0, 6, 0, 2, 6, -1, -1, -1, -1, -1, -1, -1},
+    {5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8, -1, -1, -1, -1},
+    {2, 3, 11, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {11, 0, 8, 11, 2, 0, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1},
+    {0, 1, 9, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1},
+    {5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11, -1, -1, -1, -1},
+    {6, 3, 11, 6, 5, 3, 5, 1, 3, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6, -1, -1, -1, -1},
+    {3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9, -1, -1, -1, -1},
+    {6, 5, 9, 6, 9, 11, 11, 9, 8, -1, -1, -1, -1, -1, -1, -1},
+    {5, 10, 6, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 3, 0, 4, 7, 3, 6, 5, 10, -1, -1, -1, -1, -1, -1, -1},
+    {1, 9, 0, 5, 10, 6, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1},
+    {10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4, -1, -1, -1, -1},
+    {6, 1, 2, 6, 5, 1, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7, -1, -1, -1, -1},
+    {8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6, -1, -1, -1, -1},
+    {7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9, -1},
+    {3, 11, 2, 7, 8, 4, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1},
+    {5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11, -1, -1, -1, -1},
+    {0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1},
+    {9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6, -1},
+    {8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6, -1, -1, -1, -1},
+    {5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11, -1},
+    {0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7, -1},
+    {6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9, -1, -1, -1, -1},
+    {10, 4, 9, 6, 4, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 10, 6, 4, 9, 10, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1},
+    {10, 0, 1, 10, 6, 0, 6, 4, 0, -1, -1, -1, -1, -1, -1, -1},
+    {8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10, -1, -1, -1, -1},
+    {1, 4, 9, 1, 2, 4, 2, 6, 4, -1, -1, -1, -1, -1, -1, -1},
+    {3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4, -1, -1, -1, -1},
+    {0, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {8, 3, 2, 8, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1},
+    {10, 4, 9, 10, 6, 4, 11, 2, 3, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6, -1, -1, -1, -1},
+    {3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10, -1, -1, -1, -1},
+    {6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1, -1},
+    {9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3, -1, -1, -1, -1},
+    {8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1, -1},
+    {3, 11, 6, 3, 6, 0, 0, 6, 4, -1, -1, -1, -1, -1, -1, -1},
+    {6, 4, 8, 11, 6, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {7, 10, 6, 7, 8, 10, 8, 9, 10, -1, -1, -1, -1, -1, -1, -1},
+    {0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10, -1, -1, -1, -1},
+    {10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0, -1, -1, -1, -1},
+    {10, 6, 7, 10, 7, 1, 1, 7, 3, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7, -1, -1, -1, -1},
+    {2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9, -1},
+    {7, 8, 0, 7, 0, 6, 6, 0, 2, -1, -1, -1, -1, -1, -1, -1},
+    {7, 3, 2, 6, 7, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7, -1, -1, -1, -1},
+    {2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7, -1},
+    {1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11, -1},
+    {11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1, -1, -1, -1, -1},
+    {8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6, -1},
+    {0, 9, 1, 11, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0, -1, -1, -1, -1},
+    {7, 11, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {3, 0, 8, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 1, 9, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {8, 1, 9, 8, 3, 1, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1},
+    {10, 1, 2, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 10, 3, 0, 8, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1},
+    {2, 9, 0, 2, 10, 9, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1},
+    {6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8, -1, -1, -1, -1},
+    {7, 2, 3, 6, 2, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {7, 0, 8, 7, 6, 0, 6, 2, 0, -1, -1, -1, -1, -1, -1, -1},
+    {2, 7, 6, 2, 3, 7, 0, 1, 9, -1, -1, -1, -1, -1, -1, -1},
+    {1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6, -1, -1, -1, -1},
+    {10, 7, 6, 10, 1, 7, 1, 3, 7, -1, -1, -1, -1, -1, -1, -1},
+    {10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8, -1, -1, -1, -1},
+    {0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7, -1, -1, -1, -1},
+    {7, 6, 10, 7, 10, 8, 8, 10, 9, -1, -1, -1, -1, -1, -1, -1},
+    {6, 8, 4, 11, 8, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {3, 6, 11, 3, 0, 6, 0, 4, 6, -1, -1, -1, -1, -1, -1, -1},
+    {8, 6, 11, 8, 4, 6, 9, 0, 1, -1, -1, -1, -1, -1, -1, -1},
+    {9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6, -1, -1, -1, -1},
+    {6, 8, 4, 6, 11, 8, 2, 10, 1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6, -1, -1, -1, -1},
+    {4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9, -1, -1, -1, -1},
+    {10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3, -1},
+    {8, 2, 3, 8, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1},
+    {0, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8, -1, -1, -1, -1},
+    {1, 9, 4, 1, 4, 2, 2, 4, 6, -1, -1, -1, -1, -1, -1, -1},
+    {8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1, -1, -1, -1, -1},
+    {10, 1, 0, 10, 0, 6, 6, 0, 4, -1, -1, -1, -1, -1, -1, -1},
+    {4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3, -1},
+    {10, 9, 4, 6, 10, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 9, 5, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 3, 4, 9, 5, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1},
+    {5, 0, 1, 5, 4, 0, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1},
+    {11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5, -1, -1, -1, -1},
+    {9, 5, 4, 10, 1, 2, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1},
+    {6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5, -1, -1, -1, -1},
+    {7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2, -1, -1, -1, -1},
+    {3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6, -1},
+    {7, 2, 3, 7, 6, 2, 5, 4, 9, -1, -1, -1, -1, -1, -1, -1},
+    {9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7, -1, -1, -1, -1},
+    {3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0, -1, -1, -1, -1},
+    {6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8, -1},
+    {9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7, -1, -1, -1, -1},
+    {1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4, -1},
+    {4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10, -1},
+    {7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10, -1, -1, -1, -1},
+    {6, 9, 5, 6, 11, 9, 11, 8, 9, -1, -1, -1, -1, -1, -1, -1},
+    {3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5, -1, -1, -1, -1},
+    {0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11, -1, -1, -1, -1},
+    {6, 11, 3, 6, 3, 5, 5, 3, 1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6, -1, -1, -1, -1},
+    {0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10, -1},
+    {11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5, -1},
+    {6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3, -1, -1, -1, -1},
+    {5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2, -1, -1, -1, -1},
+    {9, 5, 6, 9, 6, 0, 0, 6, 2, -1, -1, -1, -1, -1, -1, -1},
+    {1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8, -1},
+    {1, 5, 6, 2, 1, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6, -1},
+    {10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0, -1, -1, -1, -1},
+    {0, 3, 8, 5, 6, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {10, 5, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {11, 5, 10, 7, 5, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {11, 5, 10, 11, 7, 5, 8, 3, 0, -1, -1, -1, -1, -1, -1, -1},
+    {5, 11, 7, 5, 10, 11, 1, 9, 0, -1, -1, -1, -1, -1, -1, -1},
+    {10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1, -1, -1, -1, -1},
+    {11, 1, 2, 11, 7, 1, 7, 5, 1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11, -1, -1, -1, -1},
+    {9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7, -1, -1, -1, -1},
+    {7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2, -1},
+    {2, 5, 10, 2, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1},
+    {8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5, -1, -1, -1, -1},
+    {9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2, -1, -1, -1, -1},
+    {9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2, -1},
+    {1, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 7, 0, 7, 1, 1, 7, 5, -1, -1, -1, -1, -1, -1, -1},
+    {9, 0, 3, 9, 3, 5, 5, 3, 7, -1, -1, -1, -1, -1, -1, -1},
+    {9, 8, 7, 5, 9, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {5, 8, 4, 5, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1},
+    {5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0, -1, -1, -1, -1},
+    {0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5, -1, -1, -1, -1},
+    {10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4, -1},
+    {2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8, -1, -1, -1, -1},
+    {0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11, -1},
+    {0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5, -1},
+    {9, 4, 5, 2, 11, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4, -1, -1, -1, -1},
+    {5, 10, 2, 5, 2, 4, 4, 2, 0, -1, -1, -1, -1, -1, -1, -1},
+    {3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9, -1},
+    {5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2, -1, -1, -1, -1},
+    {8, 4, 5, 8, 5, 3, 3, 5, 1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 4, 5, 1, 0, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5, -1, -1, -1, -1},
+    {9, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 11, 7, 4, 9, 11, 9, 10, 11, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11, -1, -1, -1, -1},
+    {1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11, -1, -1, -1, -1},
+    {3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4, -1},
+    {4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2, -1, -1, -1, -1},
+    {9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3, -1},
+    {11, 7, 4, 11, 4, 2, 2, 4, 0, -1, -1, -1, -1, -1, -1, -1},
+    {11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4, -1, -1, -1, -1},
+    {2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9, -1, -1, -1, -1},
+    {9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7, -1},
+    {3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10, -1},
+    {1, 10, 2, 8, 7, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 9, 1, 4, 1, 7, 7, 1, 3, -1, -1, -1, -1, -1, -1, -1},
+    {4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1, -1, -1, -1, -1},
+    {4, 0, 3, 7, 4, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 8, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {9, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {3, 0, 9, 3, 9, 11, 11, 9, 10, -1, -1, -1, -1, -1, -1, -1},
+    {0, 1, 10, 0, 10, 8, 8, 10, 11, -1, -1, -1, -1, -1, -1, -1},
+    {3, 1, 10, 11, 3, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 11, 1, 11, 9, 9, 11, 8, -1, -1, -1, -1, -1, -1, -1},
+    {3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9, -1, -1, -1, -1},
+    {0, 2, 11, 8, 0, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {3, 2, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {2, 3, 8, 2, 8, 10, 10, 8, 9, -1, -1, -1, -1, -1, -1, -1},
+    {9, 10, 2, 0, 9, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8, -1, -1, -1, -1},
+    {1, 10, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 3, 8, 9, 1, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 9, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
+};
+
+// Device helper: corner offset vectors for a voxel (assuming voxel coordinate = corner 0 position).
+__device__ __constant__ int3 cornerOffset[8] = {
+    {0,0,0}, {1,0,0}, {1,1,0}, {0,1,0},
+    {0,0,1}, {1,0,1}, {1,1,1}, {0,1,1}
+};
+
+// Edge i  connects EDGE_CORNERS[i][0]  ↔  EDGE_CORNERS[i][1]
+// Matches the edge order required by edgeTable & triTable
+__device__ __constant__ int EDGE_CORNERS[12][2] = {
+    {0,1},{1,2},{2,3},{3,0},   // 0–3  bottom square, X Y X Y
+    {4,5},{5,6},{6,7},{7,4},   // 4–7  top    square
+    {0,4},{1,5},{2,6},{3,7}    // 8–11 vertical edges (Z)
+};
+
+
+// Device struct to represent an edge-vertex key (to deduplicate vertices)
+struct EdgeKey {
+    int x, y, z;
+    unsigned char axis;
+    __host__ __device__ bool operator==(const EdgeKey& o) const {
+        return x == o.x && y == o.y && z == o.z && axis == o.axis;
+    }
+    __host__ __device__ bool operator<(const EdgeKey& o) const {
+        if (x < o.x) return true; if (x > o.x) return false;
+        if (y < o.y) return true; if (y > o.y) return false;
+        if (z < o.z) return true; if (z > o.z) return false;
+        return axis < o.axis;
+    }
+};
+
+// Functors to avoid device-only lambdas with Thrust templates
+struct HeadFlagFunctor {
+    const EdgeKey* keys;
+    __host__ __device__ int operator()(int i) const {
+        if (i == 0) return 1;
+        EdgeKey a = keys[i];
+        EdgeKey b = keys[i - 1];
+        return (a == b) ? 0 : 1;
+    }
+};
+
+struct IsNonZero {
+    __host__ __device__ bool operator()(int x) const { return x != 0; }
+};
+
+struct MinusOne {
+    __host__ __device__ int operator()(int x) const { return x - 1; }
+};
+
+struct RemapTri {
+    const int* map;
+    __host__ __device__ void operator()(Tri& tri) const {
+        tri.v0 = map[tri.v0];
+        tri.v1 = map[tri.v1];
+        tri.v2 = map[tri.v2];
+    }
+};
+
+// Helper struct to pack 3D coordinates into a single 64-bit integer key
+// This allows using Thrust's sort and search operations efficiently.
+struct CoordKey {
+    // Pack 3 20-bit integers into one 64-bit integer.
+    // This assumes coordinates are within [0, 1048575].
+    static __host__ __device__ int64_t get_key(int x, int y, int z) {
+        return (static_cast<int64_t>(x) << 40) | (static_cast<int64_t>(y) << 20) | static_cast<int64_t>(z);
+    }
+
+    static __host__ __device__ thrust::tuple<int, int, int> get_coords(int64_t key) {
+        int x = (key >> 40) & 0xFFFFF;
+        int y = (key >> 20) & 0xFFFFF;
+        int z = key & 0xFFFFF;
+        return thrust::make_tuple(x, y, z);
+    }
+};
+
+// CUDA kernel to gather the 8 corner values for each active voxel
+__global__ void gather_corners_kernel(
+    const int* __restrict__ active_voxel_coords, // Shape: [N, 3]
+    int N,
+    const int64_t* __restrict__ sorted_point_keys,   // Shape: [M]
+    const float* __restrict__ sorted_point_values, // Shape: [M]
+    int M,
+    float default_value,
+    float* __restrict__ out_corners               // Shape: [N, 8]
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    // Base coordinate of the active voxel
+    int vx = active_voxel_coords[i * 3 + 0];
+    int vy = active_voxel_coords[i * 3 + 1];
+    int vz = active_voxel_coords[i * 3 + 2];
+
+    // For each of the 8 corners of the voxel...
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        int3 offset = cornerOffset[j];
+        int cx = vx + offset.x;
+        int cy = vy + offset.y;
+        int cz = vz + offset.z;
+
+        // Pack the corner coordinate into a key
+        int64_t query_key = CoordKey::get_key(cx, cy, cz);
+
+        // Perform a binary search on the sorted point keys
+        // This is equivalent to thrust::lower_bound but usable inside a kernel
+        const int64_t* first = sorted_point_keys;
+        int count = M;
+        while (count > 0) {
+            int step = count / 2;
+            const int64_t* mid = first + step;
+            if (*mid < query_key) {
+                first = mid + 1;
+                count -= step + 1;
+            } else {
+                count = step;
+            }
+        }
+        int found_idx = first - sorted_point_keys;
+
+        // If found, use the value; otherwise, use the default
+        float value = default_value;
+        if (found_idx < M && sorted_point_keys[found_idx] == query_key) {
+            value = sorted_point_values[found_idx];
+        }
+        out_corners[i * 8 + j] = value;
+    }
+}
+
+// CUDA kernel: classify voxels, count intersections and triangles
+__global__ void classifyVoxels(const int* coords, const float* corners,
+                               int N, float iso,
+                               int* vertCount, int* triCount) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    // Load the 8 corner values for voxel i
+    float v[8];
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        v[j] = corners[i*8 + j];
+    }
+    // Determine cube index (bitmask of corners < iso)
+    int cubeIndex = 0;
+    if (v[0] < iso) cubeIndex |= 1;
+    if (v[1] < iso) cubeIndex |= 2;
+    if (v[2] < iso) cubeIndex |= 4;
+    if (v[3] < iso) cubeIndex |= 8;
+    if (v[4] < iso) cubeIndex |= 16;
+    if (v[5] < iso) cubeIndex |= 32;
+    if (v[6] < iso) cubeIndex |= 64;
+    if (v[7] < iso) cubeIndex |= 128;
+    // Lookup intersected edges
+    int mask = edgeTable[cubeIndex];
+    // Count set bits in mask (number of intersection vertices)
+    // __popc is efficient built-in for counting bits in an int.
+    int numVerts = __popc(mask & 0xFFF);  // mask is 12-bit at most
+    vertCount[i] = numVerts;
+    // Count triangles for this cube configuration using triTable
+    int numTris = 0;
+    // triTable[cubeIndex][...] contains groups of 3 edge indices for each triangle, terminated by -1
+    for (int t = 0; t < 15; t += 3) {
+        if (triTable[cubeIndex][t] == -1) break;
+        numTris++;
+    }
+    triCount[i] = numTris;
+}
+
+__global__ void classifyVoxels_from_cases(const int* cube_indices,
+                                          int N,
+                                          int* vertCount, int* triCount) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    int cubeIndex = cube_indices[i];
+    int mask = edgeTable[cubeIndex];
+    int numVerts = __popc(mask & 0xFFF);
+    vertCount[i] = numVerts;
+
+    int numTris = 0;
+    for (int t = 0; t < 15; t += 3) {
+        if (triTable[cubeIndex][t] == -1) break;
+        numTris++;
+    }
+    triCount[i] = numTris;
+}
+
+__global__ void generateVertices(const int* coords, const float* corners,
+                                 const int* prefixVert, int N, float iso,
+                                 EdgeKey* outKeys, V3f* outVerts)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    int base = prefixVert[i];             // first vertex slot for this voxel
+    int vx   = coords[i*3+0];
+    int vy   = coords[i*3+1];
+    int vz   = coords[i*3+2];
+
+    float v[8];
+    #pragma unroll
+    for (int c = 0; c < 8; ++c) v[c] = corners[i*8 + c];
+
+    // --- cube index & edge mask ---------------------------------------------
+    int ci = 0;
+    if (v[0] < iso) ci |= 1;   if (v[1] < iso) ci |= 2;
+    if (v[2] < iso) ci |= 4;   if (v[3] < iso) ci |= 8;
+    if (v[4] < iso) ci |= 16;  if (v[5] < iso) ci |= 32;
+    if (v[6] < iso) ci |= 64;  if (v[7] < iso) ci |= 128;
+    int mask = edgeTable[ci];
+    if (mask == 0) return;
+
+    int outOfs = 0;   // how many verts already emitted for this voxel
+
+    // ------------------------------------------------------------------------
+    #pragma unroll
+    for (int e = 0; e < 12; ++e)
+    {
+        if (!(mask & (1 << e))) continue;
+
+        int a = EDGE_CORNERS[e][0];
+        int b = EDGE_CORNERS[e][1];
+
+        float va = v[a], vb = v[b];
+        float denom = vb - va;
+        float t;
+        if (fabsf(denom) < 1e-30f)
+            t = 0.5f;                       // degenerate edge → midpoint
+        else {
+            t = (iso - va) / denom;         // interpolate
+            t = fminf(fmaxf(t, 0.f), 1.f);  // clamp numerical noise
+        }
+
+        int3 offA = cornerOffset[a];
+        int3 offB = cornerOffset[b];
+        float3 pA = make_float3(vx + offA.x, vy + offA.y, vz + offA.z);
+        float3 pB = make_float3(vx + offB.x, vy + offB.y, vz + offB.z);
+        float3 P  = { pA.x + t*(pB.x-pA.x),
+                      pA.y + t*(pB.y-pA.y),
+                      pA.z + t*(pB.z-pA.z) };
+
+        // ------------ build dedup key (lower corner + axis) ------------------
+        EdgeKey key;
+        key.x = (offA.x < offB.x ? vx+offA.x : vx+offB.x);
+        key.y = (offA.y < offB.y ? vy+offA.y : vy+offB.y);
+        key.z = (offA.z < offB.z ? vz+offA.z : vz+offB.z);
+        key.axis = (offA.x != offB.x) ? 0 : (offA.y != offB.y ? 1 : 2);
+
+        outVerts[base + outOfs] = P;
+        outKeys [base + outOfs] = key;
+        ++outOfs;
+    }
+    // now outOfs == __popc(mask)  ✔
+}
+
+__global__ void generateVertices_from_cases(const int* coords, const float* corners, const int* cube_indices,
+                                            const int* prefixVert, int N, float iso,
+                                            EdgeKey* outKeys, V3f* outVerts)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    int base = prefixVert[i];
+    int vx = coords[i*3+0];
+    int vy = coords[i*3+1];
+    int vz = coords[i*3+2];
+
+    float v[8];
+    #pragma unroll
+    for (int c = 0; c < 8; ++c) v[c] = corners[i*8 + c];
+
+    int cubeIndex = cube_indices[i];
+    int mask = edgeTable[cubeIndex];
+    if (mask == 0) return;
+
+    int outOfs = 0;
+
+    #pragma unroll
+    for (int e = 0; e < 12; ++e)
+    {
+        if (!(mask & (1 << e))) continue;
+
+        int a = EDGE_CORNERS[e][0];
+        int b = EDGE_CORNERS[e][1];
+
+        float va = v[a], vb = v[b];
+        float denom = vb - va;
+        float t;
+        if (fabsf(denom) < 1e-30f)
+            t = 0.5f;
+        else {
+            t = (iso - va) / denom;
+            t = fminf(fmaxf(t, 0.f), 1.f);
+        }
+
+        int3 offA = cornerOffset[a];
+        int3 offB = cornerOffset[b];
+        float3 pA = make_float3(vx + offA.x, vy + offA.y, vz + offA.z);
+        float3 pB = make_float3(vx + offB.x, vy + offB.y, vz + offB.z);
+        float3 P  = { pA.x + t*(pB.x-pA.x),
+                      pA.y + t*(pB.y-pA.y),
+                      pA.z + t*(pB.z-pA.z) };
+
+        EdgeKey key;
+        key.x = (offA.x < offB.x ? vx+offA.x : vx+offB.x);
+        key.y = (offA.y < offB.y ? vy+offA.y : vy+offB.y);
+        key.z = (offA.z < offB.z ? vz+offA.z : vz+offB.z);
+        key.axis = (offA.x != offB.x) ? 0 : (offA.y != offB.y ? 1 : 2);
+
+        outVerts[base + outOfs] = P;
+        outKeys [base + outOfs] = key;
+        ++outOfs;
+    }
+}
+
+// CUDA kernel: generate triangles (with *old* vertex indices, will remap later)
+__global__ void generateTriangles(const int* coords, const float* corners,
+                                  const int* prefixVert, const int* prefixTri,
+                                  int N, float iso, Tri* outTris) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    int triStart = prefixTri[i];    // starting index in triangle array for voxel i
+    int baseVert = prefixVert[i];   // starting index of this voxel's vertices in vertex array
+    // Load corner values
+    float v[8];
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        v[j] = corners[i*8 + j];
+    }
+    // Compute cubeIndex and edge mask again
+    int cubeIndex = 0;
+    if (v[0] < iso) cubeIndex |= 1;
+    if (v[1] < iso) cubeIndex |= 2;
+    if (v[2] < iso) cubeIndex |= 4;
+    if (v[3] < iso) cubeIndex |= 8;
+    if (v[4] < iso) cubeIndex |= 16;
+    if (v[5] < iso) cubeIndex |= 32;
+    if (v[6] < iso) cubeIndex |= 64;
+    if (v[7] < iso) cubeIndex |= 128;
+    int mask = edgeTable[cubeIndex];
+    if (mask == 0) return;
+    // Iterate over triangle entries in triTable
+    int outIdx = 0;
+    for (int t = 0; t < 15; t += 3) {
+        int e0 = triTable[cubeIndex][t];
+        if (e0 == -1) break;  // end of list
+        int e1 = triTable[cubeIndex][t+1];
+        int e2 = triTable[cubeIndex][t+2];
+        // Compute original (pre-deduplication) vertex indices for each edge
+        // Count how many intersection vertices in this voxel come before the one on edge e
+        // i.e., popcount of all lower-numbered edges in the mask.
+        int off0 = __popc(mask & ((1 << e0) - 1));
+        int off1 = __popc(mask & ((1 << e1) - 1));
+        int off2 = __popc(mask & ((1 << e2) - 1));
+        Tri tri;
+        tri.v0 = baseVert + off0;
+        tri.v1 = baseVert + off2; // flip to make sure the triangle is counter-clockwise
+        tri.v2 = baseVert + off1;
+        outTris[triStart + outIdx] = tri;
+        outIdx++;
+    }
+}
+
+__global__ void generateTriangles_from_cases(const int* cube_indices,
+                                             const int* prefixVert, const int* prefixTri,
+                                             int N, Tri* outTris) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    int triStart = prefixTri[i];
+    int baseVert = prefixVert[i];
+
+    int cubeIndex = cube_indices[i];
+    int mask = edgeTable[cubeIndex];
+    if (mask == 0) return;
+
+    int outIdx = 0;
+    for (int t = 0; t < 15; t += 3) {
+        int e0 = triTable[cubeIndex][t];
+        if (e0 == -1) break;
+        int e1 = triTable[cubeIndex][t+1];
+        int e2 = triTable[cubeIndex][t+2];
+
+        int off0 = __popc(mask & ((1 << e0) - 1));
+        int off1 = __popc(mask & ((1 << e1) - 1));
+        int off2 = __popc(mask & ((1 << e2) - 1));
+        Tri tri;
+        tri.v0 = baseVert + off0;
+        tri.v1 = baseVert + off2;
+        tri.v2 = baseVert + off1;
+        outTris[triStart + outIdx] = tri;
+        outIdx++;
+    }
+}
+
+// Device kernel to ensure corner consistency using atomic operations
+__global__ void collectCornerContributions(const int* coords, const float* corners, int N,
+                                          int* corner_x, int* corner_y, int* corner_z, float* corner_vals, int* corner_counts) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N * 8) return;
+    
+    int voxel_id = tid / 8;
+    int corner_id = tid % 8;
+    
+    // Get voxel position
+    int vx = coords[voxel_id * 3 + 0];
+    int vy = coords[voxel_id * 3 + 1]; 
+    int vz = coords[voxel_id * 3 + 2];
+    
+    // Get corner position
+    int3 offset = cornerOffset[corner_id];
+    int cx = vx + offset.x;
+    int cy = vy + offset.y;
+    int cz = vz + offset.z;
+    
+    // Store corner data
+    corner_x[tid] = cx;
+    corner_y[tid] = cy;
+    corner_z[tid] = cz;
+    corner_vals[tid] = corners[voxel_id * 8 + corner_id];
+    corner_counts[tid] = 1;
+}
+
+__global__ void updateCornerValues(const int* coords, float* corners, int N,
+                                 const int* unique_x, const int* unique_y, const int* unique_z, 
+                                 const float* avg_vals, int num_unique) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N * 8) return;
+    
+    int voxel_id = tid / 8;
+    int corner_id = tid % 8;
+    
+    // Get voxel position
+    int vx = coords[voxel_id * 3 + 0];
+    int vy = coords[voxel_id * 3 + 1]; 
+    int vz = coords[voxel_id * 3 + 2];
+    
+    // Get corner position
+    int3 offset = cornerOffset[corner_id];
+    int cx = vx + offset.x;
+    int cy = vy + offset.y;
+    int cz = vz + offset.z;
+    
+    // Binary search for this corner coordinate
+    int left = 0, right = num_unique - 1;
+    while (left <= right) {
+        int mid = (left + right) / 2;
+        int mx = unique_x[mid];
+        int my = unique_y[mid]; 
+        int mz = unique_z[mid];
+        
+        if (cx < mx || (cx == mx && cy < my) || (cx == mx && cy == my && cz < mz)) {
+            right = mid - 1;
+        } else if (cx > mx || (cx == mx && cy > my) || (cx == mx && cy == my && cz > mz)) {
+            left = mid + 1;
+        } else {
+            // Found exact match, update corner value
+            corners[voxel_id * 8 + corner_id] = avg_vals[mid];
+            break;
+        }
+    }
+}
+
+// Helper structure for corner data sorting
+struct CornerData {
+    int x, y, z;
+    float value;
+    int count;
+    
+    __host__ __device__ bool operator<(const CornerData& other) const {
+        if (x != other.x) return x < other.x;
+        if (y != other.y) return y < other.y;
+        return z < other.z;
+    }
+    
+    __host__ __device__ bool operator==(const CornerData& other) const {
+        return x == other.x && y == other.y && z == other.z;
+    }
+};
+
+// Reduction operator for averaging
+struct CornerAverage {
+    __host__ __device__ CornerData operator()(const CornerData& a, const CornerData& b) const {
+        CornerData result;
+        result.x = a.x;  // coordinates should be same
+        result.y = a.y;
+        result.z = a.z;
+        result.value = a.value + b.value;  // sum values
+        result.count = a.count + b.count;  // sum counts
+        return result;
+    }
+};
+
+
+
+// Host function: sparse marching cubes from points
+std::pair<thrust::device_vector<V3f>, thrust::device_vector<Tri>>
+_sparse_marching_cubes_from_points(
+    const int* d_coords,          // Active voxel coordinates [N, 3]
+    const float* d_point_values,  // SDF values at each coordinate [N]
+    int N,                        // Number of active voxels / points
+    float iso,
+    float default_value,
+    cudaStream_t stream
+) {
+    if (N <= 0) {
+        return {thrust::device_vector<V3f>(), thrust::device_vector<Tri>()};
+    }
+
+    // --- Step 1: Create a sorted map from the input point coordinates and values ---
+    
+    // Device vectors to hold the keys (packed coords) and their corresponding values
+    thrust::device_vector<int64_t> point_keys(N);
+    thrust::device_vector<float> point_values_copy(d_point_values, d_point_values + N);
+
+    // Kernel to transform [N, 3] int coordinates into [N] int64_t keys
+    thrust::transform(thrust::cuda::par.on(stream),
+        thrust::make_counting_iterator<int>(0),
+        thrust::make_counting_iterator<int>(N),
+        point_keys.begin(),
+        [d_coords] __device__ (int i) {
+            return CoordKey::get_key(d_coords[i*3+0], d_coords[i*3+1], d_coords[i*3+2]);
+        });
+
+    // Sort the keys and apply the same permutation to the values
+    thrust::sort_by_key(thrust::cuda::par.on(stream), point_keys.begin(), point_keys.end(), point_values_copy.begin());
+
+    // --- Step 2: Gather corner values for each active voxel ---
+
+    // Allocate space for the [N, 8] corner values tensor
+    thrust::device_vector<float> corners(N * 8);
+
+    // Launch the kernel to find/gather the 8 corner values for each of the N voxels
+    int threads = 256;
+    int blocks = (N + threads - 1) / threads;
+    gather_corners_kernel<<<blocks, threads, 0, stream>>>(
+        d_coords, N,
+        thrust::raw_pointer_cast(point_keys.data()),
+        thrust::raw_pointer_cast(point_values_copy.data()),
+        N, // Number of known points is the same as number of voxels
+        default_value,
+        thrust::raw_pointer_cast(corners.data())
+    );
+
+    // --- Step 3: Call the original sparse marching cubes implementation ---
+    // We pass `ensure_consistency=false` because our gathering process should already
+    // result in a consistent mesh if the input points are unique.
+    return _sparse_marching_cubes(d_coords, thrust::raw_pointer_cast(corners.data()), N, iso, false, stream);
+}
+
+
+// Host function: sparse marching cubes
+std::pair<thrust::device_vector<V3f>, thrust::device_vector<Tri>>
+_sparse_marching_cubes(const int* d_coords, const float* d_corners, int N, float iso, bool ensure_consistency, cudaStream_t stream) {
+    // Output containers
+    thrust::device_vector<V3f> vertices; 
+    thrust::device_vector<Tri> triangles;
+    if (N <= 0) {
+        // No voxels, return empty mesh
+        return {vertices, triangles};
+    }
+
+    // Create a copy of corners data if we need to ensure consistency
+    thrust::device_vector<float> corners_copy;
+    const float* d_corners_to_use = d_corners;
+    
+    if (ensure_consistency) {
+        // Copy original corner data
+        corners_copy.resize(N * 8);
+        thrust::copy(thrust::cuda::par.on(stream), 
+                     d_corners, d_corners + N * 8, 
+                     corners_copy.begin());
+        
+        // Total number of corner instances (8 per voxel)
+        const int total_corners = N * 8;
+        
+        // Create arrays to store corner data
+        thrust::device_vector<int> corner_x(total_corners);
+        thrust::device_vector<int> corner_y(total_corners);
+        thrust::device_vector<int> corner_z(total_corners);
+        thrust::device_vector<float> corner_vals(total_corners);
+        thrust::device_vector<int> corner_counts(total_corners);
+        
+        // Collect all corner contributions
+        int threads_corner = 256;
+        int blocks_corner = (total_corners + threads_corner - 1) / threads_corner;
+        collectCornerContributions<<<blocks_corner, threads_corner, 0, stream>>>(
+            d_coords, d_corners, N,
+            thrust::raw_pointer_cast(corner_x.data()),
+            thrust::raw_pointer_cast(corner_y.data()),
+            thrust::raw_pointer_cast(corner_z.data()),
+            thrust::raw_pointer_cast(corner_vals.data()),
+            thrust::raw_pointer_cast(corner_counts.data()));
+        
+        // Create corner data structure for sorting and averaging
+        thrust::device_vector<CornerData> corner_data(total_corners);
+        thrust::transform(thrust::cuda::par.on(stream),
+                          thrust::counting_iterator<int>(0),
+                          thrust::counting_iterator<int>(total_corners),
+                          corner_data.begin(),
+                          [corner_x_ptr = thrust::raw_pointer_cast(corner_x.data()),
+                           corner_y_ptr = thrust::raw_pointer_cast(corner_y.data()),
+                           corner_z_ptr = thrust::raw_pointer_cast(corner_z.data()),
+                           corner_vals_ptr = thrust::raw_pointer_cast(corner_vals.data()),
+                           corner_counts_ptr = thrust::raw_pointer_cast(corner_counts.data())] __device__ (int i) {
+                              CornerData data;
+                              data.x = corner_x_ptr[i];
+                              data.y = corner_y_ptr[i];
+                              data.z = corner_z_ptr[i];
+                              data.value = corner_vals_ptr[i];
+                              data.count = corner_counts_ptr[i];
+                              return data;
+                          });
+        
+        // Sort by corner coordinates
+        thrust::sort(thrust::cuda::par.on(stream), corner_data.begin(), corner_data.end());
+        
+        // Reduce by key to get average for each unique corner
+        thrust::device_vector<CornerData> unique_corners(total_corners);
+        thrust::device_vector<CornerData> corner_sums(total_corners);
+        
+        auto new_end = thrust::reduce_by_key(
+            thrust::cuda::par.on(stream),
+            corner_data.begin(), corner_data.end(),
+            corner_data.begin(),
+            unique_corners.begin(),
+            corner_sums.begin(),
+            [] __device__ (const CornerData& a, const CornerData& b) {
+                return a.x == b.x && a.y == b.y && a.z == b.z;
+            },
+            CornerAverage());
+        
+        int num_unique = new_end.first - unique_corners.begin();
+        unique_corners.resize(num_unique);
+        corner_sums.resize(num_unique);
+        
+        // Compute averages and create coordinate arrays
+        thrust::device_vector<int> unique_x(num_unique);
+        thrust::device_vector<int> unique_y(num_unique);
+        thrust::device_vector<int> unique_z(num_unique);
+        thrust::device_vector<float> avg_vals(num_unique);
+        
+        thrust::transform(thrust::cuda::par.on(stream),
+                          thrust::counting_iterator<int>(0),
+                          thrust::counting_iterator<int>(num_unique),
+                          thrust::make_zip_iterator(thrust::make_tuple(
+                              unique_x.begin(), unique_y.begin(), unique_z.begin(), avg_vals.begin())),
+                          [unique_corners_ptr = thrust::raw_pointer_cast(unique_corners.data()),
+                           corner_sums_ptr = thrust::raw_pointer_cast(corner_sums.data())] __device__ (int i) {
+                              const CornerData& corner = unique_corners_ptr[i];
+                              const CornerData& sum = corner_sums_ptr[i];
+                              float avg = sum.value / sum.count;
+                              return thrust::make_tuple(corner.x, corner.y, corner.z, avg);
+                          });
+        
+        // Update corner values using the simpler kernel
+        updateCornerValues<<<blocks_corner, threads_corner, 0, stream>>>(
+            d_coords,
+            thrust::raw_pointer_cast(corners_copy.data()),
+            N,
+            thrust::raw_pointer_cast(unique_x.data()),
+            thrust::raw_pointer_cast(unique_y.data()),
+            thrust::raw_pointer_cast(unique_z.data()),
+            thrust::raw_pointer_cast(avg_vals.data()),
+            num_unique);
+        
+        d_corners_to_use = thrust::raw_pointer_cast(corners_copy.data());
+    }
+
+    // Temporary arrays for counts and prefix sums
+    thrust::device_vector<int> vertCount(N);
+    thrust::device_vector<int> triCount(N);
+
+    int threads = 256;
+    int blocks = (N + threads - 1) / threads;
+    classifyVoxels<<<blocks, threads, 0, stream>>>(d_coords, d_corners_to_use, N, iso,
+                                                  thrust::raw_pointer_cast(vertCount.data()),
+                                                  thrust::raw_pointer_cast(triCount.data()));
+
+    thrust::device_vector<int> prefixVert(N);
+    thrust::device_vector<int> prefixTri(N);
+    thrust::exclusive_scan(thrust::cuda::par.on(stream),
+                           vertCount.begin(), vertCount.end(), prefixVert.begin());
+    thrust::exclusive_scan(thrust::cuda::par.on(stream),
+                           triCount.begin(), triCount.end(), prefixTri.begin());
+
+    // Compute totals
+    int M = vertCount.empty() ? 0 : (prefixVert.back() + vertCount.back());
+    int T = triCount.empty() ? 0 : (prefixTri.back() + triCount.back());
+
+    // Free counts early to lower peak memory
+    thrust::device_vector<int>().swap(vertCount);
+    thrust::device_vector<int>().swap(triCount);
+
+    // Allocate space for all intersection vertices (M) and their keys
+    thrust::device_vector<EdgeKey> keys(M);
+    thrust::device_vector<V3f>    verts(M);
+
+    // Generate vertices in parallel
+    blocks = (N + threads - 1) / threads;
+    generateVertices<<<blocks, threads, 0, stream>>>(d_coords, d_corners_to_use,
+                                                    thrust::raw_pointer_cast(prefixVert.data()),
+                                                    N, iso,
+                                                    thrust::raw_pointer_cast(keys.data()),
+                                                    thrust::raw_pointer_cast(verts.data()));
+
+    // Create index array [0, 1, ..., M-1] to track original positions
+    thrust::device_vector<int> indices(M);
+    if (M > 0) {
+        thrust::sequence(thrust::cuda::par.on(stream), indices.begin(), indices.end());
+
+        // Sort by key and reorder verts and indices in one pass (no extra vertsSorted buffer)
+        auto zipped_vals = thrust::make_zip_iterator(thrust::make_tuple(verts.begin(), indices.begin()));
+        thrust::sort_by_key(thrust::cuda::par.on(stream), keys.begin(), keys.end(), zipped_vals);
+
+        // Build head flags using a transform iterator functor
+        EdgeKey* d_keys = thrust::raw_pointer_cast(keys.data());
+        auto count_begin = thrust::make_counting_iterator<int>(0);
+        auto head_flags = thrust::make_transform_iterator(count_begin, HeadFlagFunctor{d_keys});
+
+        // Compute inclusive scan of head flags directly into group ids (1-based)
+        thrust::device_vector<int> mapSortedToUnique(M);
+        thrust::inclusive_scan(thrust::cuda::par.on(stream), head_flags, head_flags + M, mapSortedToUnique.begin());
+
+        // Number of unique vertices
+        int uniqueCount = 0;
+        cudaMemcpyAsync(&uniqueCount, thrust::raw_pointer_cast(mapSortedToUnique.data()) + (M - 1),
+                        sizeof(int), cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+        vertices.resize(uniqueCount);
+
+        // Emit unique vertices by copying only the heads
+        thrust::copy_if(thrust::cuda::par.on(stream),
+                        verts.begin(), verts.end(),
+                        head_flags,
+                        vertices.begin(),
+                        IsNonZero());
+
+        // Build mapping from original vertex index -> new unique index
+        thrust::device_vector<int> mapOrigToNew(M);
+        // Convert to 0-based ids in-place and scatter back to original order
+        thrust::transform(thrust::cuda::par.on(stream),
+                          mapSortedToUnique.begin(), mapSortedToUnique.end(),
+                          mapSortedToUnique.begin(),
+                          MinusOne());
+        thrust::scatter(thrust::cuda::par.on(stream),
+                        mapSortedToUnique.begin(), mapSortedToUnique.end(),
+                        indices.begin(),
+                        mapOrigToNew.begin());
+
+        // Free temporaries no longer needed before allocating triangles
+        thrust::device_vector<EdgeKey>().swap(keys);
+        thrust::device_vector<V3f>().swap(verts);
+        thrust::device_vector<int>().swap(indices);
+        thrust::device_vector<int>().swap(mapSortedToUnique);
+
+        // Generate triangles (old indices)
+        triangles.resize(T);
+        blocks = (N + threads - 1) / threads;
+        generateTriangles<<<blocks, threads, 0, stream>>>(d_coords, d_corners_to_use,
+                                                         thrust::raw_pointer_cast(prefixVert.data()),
+                                                         thrust::raw_pointer_cast(prefixTri.data()),
+                                                         N, iso,
+                                                         thrust::raw_pointer_cast(triangles.data()));
+        // Remap triangle vertex indices to the new deduplicated indices
+        if (T > 0) {
+            int* d_map = thrust::raw_pointer_cast(mapOrigToNew.data());
+            thrust::for_each(thrust::cuda::par.on(stream),
+                             triangles.begin(), triangles.end(),
+                             RemapTri{d_map});
+        }
+        // mapOrigToNew freed on scope exit
+    } else {
+        // No intersections; still need to size triangles correctly
+        triangles.resize(T);
+        if (T > 0) {
+            blocks = (N + threads - 1) / threads;
+            generateTriangles<<<blocks, threads, 0, stream>>>(d_coords, d_corners_to_use,
+                                                             thrust::raw_pointer_cast(prefixVert.data()),
+                                                             thrust::raw_pointer_cast(prefixTri.data()),
+                                                             N, iso,
+                                                             thrust::raw_pointer_cast(triangles.data()));
+            // No remap needed; M==0 implies T should also be 0 for standard MC, but keep safe
+        }
+    }
+
+    cudaStreamSynchronize(stream);
+    return { std::move(vertices), std::move(triangles) };
+}
+```
+
+### src/spcumc.cuh
+```
+#pragma once
+```
+
+### src/spdmc.cu
+```
+// Sparse Dual Marching Cubes implementation
+// Based on pdmc (Parallel Dual Marching Cubes) adapted for sparse voxels
+
+#include "api.h"
+#include <cuda_runtime.h>
+#include <thrust/device_vector.h>
+#include <thrust/device_ptr.h>
+#include <thrust/sequence.h>
+#include <thrust/sort.h>
+#include <thrust/unique.h>
+#include <thrust/transform.h>
+#include <thrust/scan.h>
+#include <thrust/scatter.h>
+#include <thrust/gather.h>
+#include <thrust/for_each.h>
+#include <thrust/execution_policy.h>
+#include <thrust/copy.h>
+#include <thrust/tuple.h>
+#include <thrust/iterator/zip_iterator.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
+
+using V3f = float3;
+using V4i = int4;
+using Triangle = int3;
+
+struct Quadric {
+    float a2, ab, ac, ad;
+    float b2, bc, bd;
+    float c2, cd;
+    float d2;
+
+    __device__ Quadric() {
+        a2 = ab = ac = ad = 0.f;
+        b2 = bc = bd = 0.f;
+        c2 = cd = 0.f;
+        d2 = 0.f;
+    }
+
+    __device__ void add(const Quadric& other) {
+        a2 += other.a2; ab += other.ab; ac += other.ac; ad += other.ad;
+        b2 += other.b2; bc += other.bc; bd += other.bd;
+        c2 += other.c2; cd += other.cd;
+        d2 += other.d2;
+    }
+};
+
+__device__ __constant__ int dmcEdgeToCorners[12][2] = {
+    {0, 1}, {1, 3}, {2, 3}, {0, 2},
+    {4, 5}, {5, 7}, {6, 7}, {4, 6},
+    {0, 4}, {1, 5}, {2, 6}, {3, 7}
+};
+
+// Dual Marching Cubes lookup tables from pdmc
+__device__ __constant__ int dmcMcCorners[8][3] = {
+    {0, 0, 0},
+    {1, 0, 0},
+    {0, 1, 0},
+    {1, 1, 0},
+    {0, 0, 1},
+    {1, 0, 1},
+    {0, 1, 1},
+    {1, 1, 1},
+};
+
+// Edge locations: [x, y, z, axis] where axis: 0=X, 1=Y, 2=Z
+__device__ __constant__ int dmcEdgeLocations[12][4] = {
+    {0, 0, 0, 0},  // edge 0
+    {1, 0, 0, 2},  // edge 1
+    {0, 0, 1, 0},  // edge 2
+    {0, 0, 0, 2},  // edge 3
+    {0, 1, 0, 0},  // edge 4
+    {1, 1, 0, 2},  // edge 5
+    {0, 1, 1, 0},  // edge 6
+    {0, 1, 0, 2},  // edge 7
+    {0, 0, 0, 1},  // edge 8
+    {1, 0, 0, 1},  // edge 9
+    {1, 0, 1, 1},  // edge 10
+    {0, 0, 1, 1},  // edge 11
+};
+
+// Patch indices for each MC case
+__constant__ int mcFirstPatchIndex[257] = {
+    0, 0, 1, 2, 3, 4, 5, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    21, 22, 24, 25, 28, 29, 31, 33, 35, 36, 38, 39, 41, 42, 43, 45, 46, 47, 49,
+    51, 53, 54, 56, 59, 60, 61, 63, 65, 66, 67, 68, 69, 70, 71, 73, 74, 76, 77,
+    79, 81, 82, 83, 85, 86, 87, 88, 89, 91, 93, 95, 96, 97, 99, 100, 102, 105, 107,
+    109, 110, 111, 112, 113, 114, 115, 117, 118, 119, 120, 122, 123, 125, 127, 129, 130, 131, 132,
+    133, 134, 136, 139, 141, 143, 145, 147, 149, 150, 153, 157, 159, 161, 163, 165, 166, 167, 168,
+    169, 170, 171, 172, 173, 174, 175, 177, 179, 180, 181, 182, 183, 185, 186, 187, 189, 191, 193,
+    195, 197, 200, 202, 203, 205, 206, 207, 208, 209, 210, 211, 213, 215, 218, 220, 223, 225, 229,
+    231, 233, 235, 237, 238, 240, 241, 243, 244, 245, 247, 248, 249, 251, 253, 255, 256, 257, 259,
+    260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 271, 272, 274, 275, 276, 277, 278, 279, 280,
+    282, 283, 284, 285, 287, 289, 291, 292, 293, 295, 296, 297, 299, 300, 301, 302, 303, 304, 305,
+    306, 307, 309, 310, 311, 312, 314, 315, 316, 317, 318, 320, 321, 322, 323, 324, 325, 327, 328,
+    329, 330, 331, 332, 334, 335, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 347, 348, 349,
+    350, 351, 352, 353, 354, 355, 356, 357, 358, 358};
+
+__constant__ int mcFirstEdgeIndex[359] = {
+    0, 3, 6, 10, 13, 17, 20, 23, 28, 31, 34, 37, 41, 46, 50, 55,
+    60, 64, 67, 71, 74, 77, 82, 85, 88, 93, 96, 99, 102, 108, 111, 114,
+    118, 121, 125, 128, 134, 138, 141, 147, 152, 155, 160, 163, 166, 169, 173, 178,
+    181, 184, 188, 191, 195, 198, 204, 207, 210, 213, 216, 219, 224, 230, 234, 237,
+    242, 245, 251, 256, 260, 265, 270, 274, 277, 281, 287, 292, 295, 300, 303, 307,
+    312, 315, 321, 326, 330, 334, 341, 348, 352, 355, 358, 361, 364, 367, 371, 374,
+    378, 383, 386, 390, 396, 399, 402, 405, 408, 411, 415, 418, 423, 426, 431, 437,
+    443, 448, 452, 457, 460, 464, 470, 475, 479, 482, 487, 492, 495, 499, 504, 507,
+    511, 515, 522, 528, 533, 540, 544, 547, 550, 553, 556, 559, 563, 566, 571, 574,
+    578, 581, 586, 589, 593, 597, 604, 607, 610, 613, 616, 619, 622, 625, 630, 633,
+    639, 642, 647, 650, 656, 659, 666, 672, 677, 683, 689, 694, 700, 705, 712, 716,
+    719, 724, 730, 733, 740, 746, 753, 759, 762, 765, 768, 771, 774, 777, 780, 783,
+    787, 790, 793, 796, 800, 803, 806, 809, 812, 817, 820, 824, 827, 831, 836, 842,
+    847, 853, 859, 864, 867, 870, 874, 877, 880, 883, 886, 891, 894, 897, 900, 903,
+    908, 911, 914, 917, 920, 923, 929, 932, 936, 939, 943, 947, 952, 955, 962, 967,
+    970, 977, 983, 986, 992, 996, 999, 1003, 1008, 1014, 1017, 1021, 1025, 1029, 1034, 1037,
+    1044, 1049, 1052, 1057, 1061, 1066, 1072, 1079, 1084, 1088, 1093, 1099, 1105, 1110, 1113, 1118,
+    1125, 1131, 1134, 1140, 1146, 1153, 1158, 1162, 1169, 1172, 1175, 1181, 1184, 1188, 1191, 1195,
+    1198, 1202, 1206, 1210, 1215, 1221, 1224, 1229, 1236, 1241, 1244, 1249, 1255, 1262, 1266, 1271,
+    1276, 1280, 1285, 1291, 1294, 1299, 1306, 1312, 1317, 1320, 1326, 1332, 1338, 1345, 1352, 1355,
+    1358, 1363, 1367, 1373, 1376, 1381, 1384, 1389, 1395, 1402, 1408, 1415, 1422, 1425, 1428, 1434,
+    1437, 1443, 1448, 1454, 1459, 1465, 1469, 1472, 1476, 1481, 1486, 1490, 1495, 1499, 1505, 1508,
+    1513, 1519, 1523, 1526, 1530, 1533, 1536};
+
+__constant__ int mcEdgeIndex[1536] = {
+    0, 3, 8, 0, 1, 9, 1, 3, 8, 9, 4, 7, 8, 0, 3, 4, 7, 0, 1, 9, 4, 7, 8, 1,
+    3, 4, 7, 9, 4, 5, 9, 0, 3, 8, 4, 5, 9, 0, 1, 4, 5, 1, 3, 4, 5, 8, 5, 7,
+    8, 9, 0, 3, 5, 7, 9, 0, 1, 5, 7, 8, 1, 3, 5, 7, 2, 3, 11, 0, 2, 8, 11, 0,
+    1, 9, 2, 3, 11, 1, 2, 8, 9, 11, 4, 7, 8, 2, 3, 11, 0, 2, 4, 7, 11, 0, 1, 9,
+    4, 7, 8, 2, 3, 11, 1, 2, 4, 7, 9, 11, 4, 5, 9, 2, 3, 11, 0, 2, 8, 11, 4, 5,
+    9, 0, 1, 4, 5, 2, 3, 11, 1, 2, 4, 5, 8, 11, 5, 7, 8, 9, 2, 3, 11, 0, 2, 5,
+    7, 9, 11, 0, 1, 5, 7, 8, 2, 3, 11, 1, 2, 5, 7, 11, 1, 2, 10, 0, 3, 8, 1, 2,
+    10, 0, 2, 9, 10, 2, 3, 8, 9, 10, 4, 7, 8, 1, 2, 10, 0, 3, 4, 7, 1, 2, 10, 0,
+    2, 9, 10, 4, 7, 8, 2, 3, 4, 7, 9, 10, 4, 5, 9, 1, 2, 10, 0, 3, 8, 4, 5, 9,
+    1, 2, 10, 0, 2, 4, 5, 10, 2, 3, 4, 5, 8, 10, 5, 7, 8, 9, 1, 2, 10, 0, 3, 5,
+    7, 9, 1, 2, 10, 0, 2, 5, 7, 8, 10, 2, 3, 5, 7, 10, 1, 3, 10, 11, 0, 1, 8, 10,
+    11, 0, 3, 9, 10, 11, 8, 9, 10, 11, 4, 7, 8, 1, 3, 10, 11, 0, 1, 4, 7, 10, 11, 0,
+    3, 9, 10, 11, 4, 7, 8, 4, 7, 9, 10, 11, 4, 5, 9, 1, 3, 10, 11, 0, 1, 8, 10, 11,
+    4, 5, 9, 0, 3, 4, 5, 10, 11, 4, 5, 8, 10, 11, 5, 7, 8, 9, 1, 3, 10, 11, 0, 1,
+    5, 7, 9, 10, 11, 0, 3, 5, 7, 8, 10, 11, 5, 7, 10, 11, 6, 7, 11, 0, 3, 8, 6, 7,
+    11, 0, 1, 9, 6, 7, 11, 1, 3, 8, 9, 6, 7, 11, 4, 6, 8, 11, 0, 3, 4, 6, 11, 0,
+    1, 9, 4, 6, 8, 11, 1, 3, 4, 6, 9, 11, 4, 5, 9, 6, 7, 11, 0, 3, 8, 4, 5, 9,
+    6, 7, 11, 0, 1, 4, 5, 6, 7, 11, 1, 3, 4, 5, 8, 6, 7, 11, 5, 6, 8, 9, 11, 0,
+    3, 5, 6, 9, 11, 0, 1, 5, 6, 8, 11, 1, 3, 5, 6, 11, 2, 3, 6, 7, 0, 2, 6, 7,
+    8, 0, 1, 9, 2, 3, 6, 7, 1, 2, 6, 7, 8, 9, 2, 3, 4, 6, 8, 0, 2, 4, 6, 0,
+    1, 9, 2, 3, 4, 6, 8, 1, 2, 4, 6, 9, 4, 5, 9, 2, 3, 6, 7, 0, 2, 6, 7, 8,
+    4, 5, 9, 0, 1, 4, 5, 2, 3, 6, 7, 1, 2, 4, 5, 6, 7, 8, 2, 3, 5, 6, 8, 9,
+    0, 2, 5, 6, 9, 0, 1, 2, 3, 5, 6, 8, 1, 2, 5, 6, 1, 2, 10, 6, 7, 11, 0, 3,
+    8, 1, 2, 10, 6, 7, 11, 0, 2, 9, 10, 6, 7, 11, 2, 3, 8, 9, 10, 6, 7, 11, 4, 6,
+    8, 11, 1, 2, 10, 0, 3, 4, 6, 11, 1, 2, 10, 0, 2, 9, 10, 4, 6, 8, 11, 2, 3, 4,
+    6, 9, 10, 11, 4, 5, 9, 1, 2, 10, 6, 7, 11, 0, 3, 8, 4, 5, 9, 1, 2, 10, 6, 7,
+    11, 0, 2, 4, 5, 10, 6, 7, 11, 2, 3, 4, 5, 8, 10, 6, 7, 11, 5, 6, 8, 9, 11, 1,
+    2, 10, 0, 3, 5, 6, 9, 11, 1, 2, 10, 0, 2, 5, 6, 8, 10, 11, 2, 3, 5, 6, 10, 11,
+    1, 3, 6, 7, 10, 0, 1, 6, 7, 8, 10, 0, 3, 6, 7, 9, 10, 6, 7, 8, 9, 10, 1, 3,
+    4, 6, 8, 10, 0, 1, 4, 6, 10, 0, 3, 4, 6, 8, 9, 10, 4, 6, 9, 10, 4, 5, 9, 1,
+    3, 6, 7, 10, 0, 1, 6, 7, 8, 10, 4, 5, 9, 0, 3, 4, 5, 6, 7, 10, 4, 5, 6, 7,
+    8, 10, 1, 3, 5, 6, 8, 9, 10, 0, 1, 5, 6, 9, 10, 0, 3, 8, 5, 6, 10, 5, 6, 10,
+    5, 6, 10, 0, 3, 8, 5, 6, 10, 0, 1, 9, 5, 6, 10, 1, 3, 8, 9, 5, 6, 10, 4, 7,
+    8, 5, 6, 10, 0, 3, 4, 7, 5, 6, 10, 0, 1, 9, 4, 7, 8, 5, 6, 10, 1, 3, 4, 7,
+    9, 5, 6, 10, 4, 6, 9, 10, 0, 3, 8, 4, 6, 9, 10, 0, 1, 4, 6, 10, 1, 3, 4, 6,
+    8, 10, 6, 7, 8, 9, 10, 0, 3, 6, 7, 9, 10, 0, 1, 6, 7, 8, 10, 1, 3, 6, 7, 10,
+    2, 3, 11, 5, 6, 10, 0, 2, 8, 11, 5, 6, 10, 0, 1, 9, 2, 3, 11, 5, 6, 10, 1, 2,
+    8, 9, 11, 5, 6, 10, 4, 7, 8, 2, 3, 11, 5, 6, 10, 0, 2, 4, 7, 11, 5, 6, 10, 0,
+    1, 9, 4, 7, 8, 2, 3, 11, 5, 6, 10, 1, 2, 4, 7, 9, 11, 5, 6, 10, 4, 6, 9, 10,
+    2, 3, 11, 0, 2, 8, 11, 4, 6, 9, 10, 0, 1, 4, 6, 10, 2, 3, 11, 1, 2, 4, 6, 8,
+    10, 11, 6, 7, 8, 9, 10, 2, 3, 11, 0, 2, 6, 7, 9, 10, 11, 0, 1, 6, 7, 8, 10, 2,
+    3, 11, 1, 2, 6, 7, 10, 11, 1, 2, 5, 6, 0, 3, 8, 1, 2, 5, 6, 0, 2, 5, 6, 9,
+    2, 3, 5, 6, 8, 9, 4, 7, 8, 1, 2, 5, 6, 0, 3, 4, 7, 1, 2, 5, 6, 0, 2, 5,
+    6, 9, 4, 7, 8, 2, 3, 4, 5, 6, 7, 9, 1, 2, 4, 6, 9, 0, 3, 8, 1, 2, 4, 6,
+    9, 0, 2, 4, 6, 2, 3, 4, 6, 8, 1, 2, 6, 7, 8, 9, 0, 1, 2, 3, 6, 7, 9, 0,
+    2, 6, 7, 8, 2, 3, 6, 7, 1, 3, 5, 6, 11, 0, 1, 5, 6, 8, 11, 0, 3, 5, 6, 9,
+    11, 5, 6, 8, 9, 11, 4, 7, 8, 1, 3, 5, 6, 11, 0, 1, 4, 5, 6, 7, 11, 0, 3, 5,
+    6, 9, 11, 4, 7, 8, 4, 5, 6, 7, 9, 11, 1, 3, 4, 6, 9, 11, 0, 1, 4, 6, 8, 9,
+    11, 0, 3, 4, 6, 11, 4, 6, 8, 11, 1, 3, 6, 7, 8, 9, 11, 0, 1, 9, 6, 7, 11, 0,
+    3, 6, 7, 8, 11, 6, 7, 11, 5, 7, 10, 11, 0, 3, 8, 5, 7, 10, 11, 0, 1, 9, 5, 7,
+    10, 11, 1, 3, 8, 9, 5, 7, 10, 11, 4, 5, 8, 10, 11, 0, 3, 4, 5, 10, 11, 0, 1, 9,
+    4, 5, 8, 10, 11, 1, 3, 4, 5, 9, 10, 11, 4, 7, 9, 10, 11, 0, 3, 8, 4, 7, 9, 10,
+    11, 0, 1, 4, 7, 10, 11, 1, 3, 4, 7, 8, 10, 11, 8, 9, 10, 11, 0, 3, 9, 10, 11, 0,
+    1, 8, 10, 11, 1, 3, 10, 11, 2, 3, 5, 7, 10, 0, 2, 5, 7, 8, 10, 0, 1, 9, 2, 3,
+    5, 7, 10, 1, 2, 5, 7, 8, 9, 10, 2, 3, 4, 5, 8, 10, 0, 2, 4, 5, 10, 0, 1, 9,
+    2, 3, 4, 5, 8, 10, 1, 2, 4, 5, 9, 10, 2, 3, 4, 7, 9, 10, 0, 2, 4, 7, 8, 9,
+    10, 0, 1, 2, 3, 4, 7, 10, 4, 7, 8, 1, 2, 10, 2, 3, 8, 9, 10, 0, 2, 9, 10, 0,
+    1, 2, 3, 8, 10, 1, 2, 10, 1, 2, 5, 7, 11, 0, 3, 8, 1, 2, 5, 7, 11, 0, 2, 5,
+    7, 9, 11, 2, 3, 5, 7, 8, 9, 11, 1, 2, 4, 5, 8, 11, 0, 1, 2, 3, 4, 5, 11, 0,
+    2, 4, 5, 8, 9, 11, 4, 5, 9, 2, 3, 11, 1, 2, 4, 7, 9, 11, 0, 3, 8, 1, 2, 4,
+    7, 9, 11, 0, 2, 4, 7, 11, 2, 3, 4, 7, 8, 11, 1, 2, 8, 9, 11, 0, 1, 2, 3, 9,
+    11, 0, 2, 8, 11, 2, 3, 11, 1, 3, 5, 7, 0, 1, 5, 7, 8, 0, 3, 5, 7, 9, 5, 7,
+    8, 9, 1, 3, 4, 5, 8, 0, 1, 4, 5, 0, 3, 4, 5, 8, 9, 4, 5, 9, 1, 3, 4, 7,
+    9, 0, 1, 4, 7, 8, 9, 0, 3, 4, 7, 4, 7, 8, 1, 3, 8, 9, 0, 1, 9, 0, 3, 8};
+
+// dmcEdgeOffset table
+__constant__ int8_t const dmcEdgeOffset[256][12] = {
+    {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, -1, -1, 0, -1, -1, -1, -1, 0, -1, -1, -1},
+    {0, 0, -1, -1, -1, -1, -1, -1, -1, 0, -1, -1},
+    {-1, 0, -1, 0, -1, -1, -1, -1, 0, 0, -1, -1},
+    {-1, -1, -1, -1, 0, -1, -1, 0, 0, -1, -1, -1},
+    {0, -1, -1, 0, 0, -1, -1, 0, -1, -1, -1, -1},
+    {0, 0, -1, -1, 1, -1, -1, 1, 1, 0, -1, -1},
+    {-1, 0, -1, 0, 0, -1, -1, 0, -1, 0, -1, -1},
+    {-1, -1, -1, -1, 0, 0, -1, -1, -1, 0, -1, -1},
+    {0, -1, -1, 0, 1, 1, -1, -1, 0, 1, -1, -1},
+    {0, 0, -1, -1, 0, 0, -1, -1, -1, -1, -1, -1},
+    {-1, 0, -1, 0, 0, 0, -1, -1, 0, -1, -1, -1},
+    {-1, -1, -1, -1, -1, 0, -1, 0, 0, 0, -1, -1},
+    {0, -1, -1, 0, -1, 0, -1, 0, -1, 0, -1, -1},
+    {0, 0, -1, -1, -1, 0, -1, 0, 0, -1, -1, -1},
+    {-1, 0, -1, 0, -1, 0, -1, 0, -1, -1, -1, -1},
+    {-1, -1, 0, 0, -1, -1, -1, -1, -1, -1, -1, 0},
+    {0, -1, 0, -1, -1, -1, -1, -1, 0, -1, -1, 0},
+    {0, 0, 1, 1, -1, -1, -1, -1, -1, 0, -1, 1},
+    {-1, 0, 0, -1, -1, -1, -1, -1, 0, 0, -1, 0},
+    {-1, -1, 1, 1, 0, -1, -1, 0, 0, -1, -1, 1},
+    {0, -1, 0, -1, 0, -1, -1, 0, -1, -1, -1, 0},
+    {0, 0, 2, 2, 1, -1, -1, 1, 1, 0, -1, 2},
+    {-1, 0, 0, -1, 0, -1, -1, 0, -1, 0, -1, 0},
+    {-1, -1, 1, 1, 0, 0, -1, -1, -1, 0, -1, 1},
+    {0, -1, 0, -1, 1, 1, -1, -1, 0, 1, -1, 0},
+    {0, 0, 1, 1, 0, 0, -1, -1, -1, -1, -1, 1},
+    {-1, 0, 0, -1, 0, 0, -1, -1, 0, -1, -1, 0},
+    {-1, -1, 1, 1, -1, 0, -1, 0, 0, 0, -1, 1},
+    {0, -1, 0, -1, -1, 0, -1, 0, -1, 0, -1, 0},
+    {0, 0, 1, 1, -1, 0, -1, 0, 0, -1, -1, 1},
+    {-1, 0, 0, -1, -1, 0, -1, 0, -1, -1, -1, 0},
+    {-1, 0, 0, -1, -1, -1, -1, -1, -1, -1, 0, -1},
+    {0, 1, 1, 0, -1, -1, -1, -1, 0, -1, 1, -1},
+    {0, -1, 0, -1, -1, -1, -1, -1, -1, 0, 0, -1},
+    {-1, -1, 0, 0, -1, -1, -1, -1, 0, 0, 0, -1},
+    {-1, 1, 1, -1, 0, -1, -1, 0, 0, -1, 1, -1},
+    {0, 1, 1, 0, 0, -1, -1, 0, -1, -1, 1, -1},
+    {0, -1, 0, -1, 1, -1, -1, 1, 1, 0, 0, -1},
+    {-1, -1, 0, 0, 0, -1, -1, 0, -1, 0, 0, -1},
+    {-1, 1, 1, -1, 0, 0, -1, -1, -1, 0, 1, -1},
+    {0, 2, 2, 0, 1, 1, -1, -1, 0, 1, 2, -1},
+    {0, -1, 0, -1, 0, 0, -1, -1, -1, -1, 0, -1},
+    {-1, -1, 0, 0, 0, 0, -1, -1, 0, -1, 0, -1},
+    {-1, 1, 1, -1, -1, 0, -1, 0, 0, 0, 1, -1},
+    {0, 1, 1, 0, -1, 0, -1, 0, -1, 0, 1, -1},
+    {0, -1, 0, -1, -1, 0, -1, 0, 0, -1, 0, -1},
+    {-1, -1, 0, 0, -1, 0, -1, 0, -1, -1, 0, -1},
+    {-1, 0, -1, 0, -1, -1, -1, -1, -1, -1, 0, 0},
+    {0, 0, -1, -1, -1, -1, -1, -1, 0, -1, 0, 0},
+    {0, -1, -1, 0, -1, -1, -1, -1, -1, 0, 0, 0},
+    {-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0},
+    {-1, 1, -1, 1, 0, -1, -1, 0, 0, -1, 1, 1},
+    {0, 0, -1, -1, 0, -1, -1, 0, -1, -1, 0, 0},
+    {0, -1, -1, 0, 1, -1, -1, 1, 1, 0, 0, 0},
+    {-1, -1, -1, -1, 0, -1, -1, 0, -1, 0, 0, 0},
+    {-1, 1, -1, 1, 0, 0, -1, -1, -1, 0, 1, 1},
+    {0, 0, -1, -1, 1, 1, -1, -1, 0, 1, 0, 0},
+    {0, -1, -1, 0, 0, 0, -1, -1, -1, -1, 0, 0},
+    {-1, -1, -1, -1, 0, 0, -1, -1, 0, -1, 0, 0},
+    {-1, 1, -1, 1, -1, 0, -1, 0, 0, 0, 1, 1},
+    {0, 0, -1, -1, -1, 0, -1, 0, -1, 0, 0, 0},
+    {0, -1, -1, 0, -1, 0, -1, 0, 0, -1, 0, 0},
+    {-1, -1, -1, -1, -1, 0, -1, 0, -1, -1, 0, 0},
+    {-1, -1, -1, -1, -1, -1, 0, 0, -1, -1, -1, 0},
+    {0, -1, -1, 0, -1, -1, 1, 1, 0, -1, -1, 1},
+    {0, 0, -1, -1, -1, -1, 1, 1, -1, 0, -1, 1},
+    {-1, 0, -1, 0, -1, -1, 1, 1, 0, 0, -1, 1},
+    {-1, -1, -1, -1, 0, -1, 0, -1, 0, -1, -1, 0},
+    {0, -1, -1, 0, 0, -1, 0, -1, -1, -1, -1, 0},
+    {0, 0, -1, -1, 1, -1, 1, -1, 1, 0, -1, 1},
+    {-1, 0, -1, 0, 0, -1, 0, -1, -1, 0, -1, 0},
+    {-1, -1, -1, -1, 0, 0, 1, 1, -1, 0, -1, 1},
+    {0, -1, -1, 0, 1, 1, 2, 2, 0, 1, -1, 2},
+    {0, 0, -1, -1, 0, 0, 1, 1, -1, -1, -1, 1},
+    {-1, 0, -1, 0, 0, 0, 1, 1, 0, -1, -1, 1},
+    {-1, -1, -1, -1, -1, 0, 0, -1, 0, 0, -1, 0},
+    {0, -1, -1, 0, -1, 0, 0, -1, -1, 0, -1, 0},
+    {0, 0, -1, -1, -1, 0, 0, -1, 0, -1, -1, 0},
+    {-1, 0, -1, 0, -1, 0, 0, -1, -1, -1, -1, 0},
+    {-1, -1, 0, 0, -1, -1, 0, 0, -1, -1, -1, -1},
+    {0, -1, 0, -1, -1, -1, 0, 0, 0, -1, -1, -1},
+    {0, 0, 1, 1, -1, -1, 1, 1, -1, 0, -1, -1},
+    {-1, 0, 0, -1, -1, -1, 0, 0, 0, 0, -1, -1},
+    {-1, -1, 0, 0, 0, -1, 0, -1, 0, -1, -1, -1},
+    {0, -1, 0, -1, 0, -1, 0, -1, -1, -1, -1, -1},
+    {0, 0, 1, 1, 1, -1, 1, -1, 1, 0, -1, -1},
+    {-1, 0, 0, -1, 0, -1, 0, -1, -1, 0, -1, -1},
+    {-1, -1, 1, 1, 0, 0, 1, 1, -1, 0, -1, -1},
+    {0, -1, 0, -1, 1, 1, 0, 0, 0, 1, -1, -1},
+    {0, 0, 1, 1, 0, 0, 1, 1, -1, -1, -1, -1},
+    {-1, 0, 0, -1, 0, 0, 0, 0, 0, -1, -1, -1},
+    {-1, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, -1},
+    {0, -1, 0, -1, -1, 0, 0, -1, -1, 0, -1, -1},
+    {0, 0, 0, 0, -1, 0, 0, -1, 0, -1, -1, -1},
+    {-1, 0, 0, -1, -1, 0, 0, -1, -1, -1, -1, -1},
+    {-1, 0, 0, -1, -1, -1, 1, 1, -1, -1, 0, 1},
+    {0, 1, 1, 0, -1, -1, 2, 2, 0, -1, 1, 2},
+    {0, -1, 0, -1, -1, -1, 1, 1, -1, 0, 0, 1},
+    {-1, -1, 0, 0, -1, -1, 1, 1, 0, 0, 0, 1},
+    {-1, 1, 1, -1, 0, -1, 0, -1, 0, -1, 1, 0},
+    {0, 1, 1, 0, 0, -1, 0, -1, -1, -1, 1, 0},
+    {0, -1, 0, -1, 1, -1, 1, -1, 1, 0, 0, 1},
+    {-1, -1, 0, 0, 0, -1, 0, -1, -1, 0, 0, 0},
+    {-1, 1, 1, -1, 0, 0, 2, 2, -1, 0, 1, 2},
+    {0, 2, 2, 0, 1, 1, 3, 3, 0, 1, 2, 3},
+    {0, -1, 0, -1, 0, 0, 1, 1, -1, -1, 0, 1},
+    {-1, -1, 0, 0, 0, 0, 1, 1, 0, -1, 0, 1},
+    {-1, 1, 1, -1, -1, 0, 0, -1, 0, 0, 1, 0},
+    {0, 1, 1, 0, -1, 0, 0, -1, -1, 0, 1, 0},
+    {0, -1, 0, -1, -1, 0, 0, -1, 0, -1, 0, 0},
+    {-1, -1, 0, 0, -1, 0, 0, -1, -1, -1, 0, 0},
+    {-1, 0, -1, 0, -1, -1, 0, 0, -1, -1, 0, -1},
+    {0, 0, -1, -1, -1, -1, 0, 0, 0, -1, 0, -1},
+    {0, -1, -1, 0, -1, -1, 0, 0, -1, 0, 0, -1},
+    {-1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, -1},
+    {-1, 0, -1, 0, 0, -1, 0, -1, 0, -1, 0, -1},
+    {0, 0, -1, -1, 0, -1, 0, -1, -1, -1, 0, -1},
+    {0, -1, -1, 0, 0, -1, 0, -1, 0, 0, 0, -1},
+    {-1, -1, -1, -1, 0, -1, 0, -1, -1, 0, 0, -1},
+    {-1, 1, -1, 1, 0, 0, 1, 1, -1, 0, 1, -1},
+    {0, 0, -1, -1, 1, 1, 0, 0, 0, 1, 0, -1},
+    {0, -1, -1, 0, 0, 0, 0, 0, -1, -1, 0, -1},
+    {-1, -1, -1, -1, 0, 0, 0, 0, 0, -1, 0, -1},
+    {-1, 0, -1, 0, -1, 0, 0, -1, 0, 0, 0, -1},
+    {0, 0, -1, -1, -1, 0, 0, -1, -1, 0, 0, -1},
+    {0, -1, -1, 0, -1, 1, 1, -1, 0, -1, 1, -1},
+    {-1, -1, -1, -1, -1, 0, 0, -1, -1, -1, 0, -1},
+    {-1, -1, -1, -1, -1, 0, 0, -1, -1, -1, 0, -1},
+    {0, -1, -1, 0, -1, 1, 1, -1, 0, -1, 1, -1},
+    {0, 0, -1, -1, -1, 1, 1, -1, -1, 0, 1, -1},
+    {-1, 0, -1, 0, -1, 1, 1, -1, 0, 0, 1, -1},
+    {-1, -1, -1, -1, 0, 1, 1, 0, 0, -1, 1, -1},
+    {0, -1, -1, 0, 0, 1, 1, 0, -1, -1, 1, -1},
+    {0, 0, -1, -1, 1, 2, 2, 1, 1, 0, 2, -1},
+    {-1, 0, -1, 0, 0, 1, 1, 0, -1, 0, 1, -1},
+    {-1, -1, -1, -1, 0, -1, 0, -1, -1, 0, 0, -1},
+    {0, -1, -1, 0, 1, -1, 1, -1, 0, 1, 1, -1},
+    {0, 0, -1, -1, 0, -1, 0, -1, -1, -1, 0, -1},
+    {-1, 0, -1, 0, 0, -1, 0, -1, 0, -1, 0, -1},
+    {-1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, -1},
+    {0, -1, -1, 0, -1, -1, 0, 0, -1, 0, 0, -1},
+    {0, 0, -1, -1, -1, -1, 0, 0, 0, -1, 0, -1},
+    {-1, 0, -1, 0, -1, -1, 0, 0, -1, -1, 0, -1},
+    {-1, -1, 0, 0, -1, 1, 1, -1, -1, -1, 1, 0},
+    {0, -1, 0, -1, -1, 1, 1, -1, 0, -1, 1, 0},
+    {0, 0, 1, 1, -1, 2, 2, -1, -1, 0, 2, 1},
+    {-1, 0, 0, -1, -1, 1, 1, -1, 0, 0, 1, 0},
+    {-1, -1, 1, 1, 0, 2, 2, 0, 0, -1, 2, 1},
+    {0, -1, 0, -1, 0, 1, 1, 0, -1, -1, 1, 0},
+    {0, 0, 2, 2, 1, 3, 3, 1, 1, 0, 3, 2},
+    {-1, 0, 0, -1, 0, 1, 1, 0, -1, 0, 1, 0},
+    {-1, -1, 1, 1, 0, -1, 0, -1, -1, 0, 0, 1},
+    {0, -1, 0, -1, 1, -1, 1, -1, 0, 1, 1, 0},
+    {0, 0, 1, 1, 0, -1, 0, -1, -1, -1, 0, 1},
+    {-1, 0, 0, -1, 0, -1, 0, -1, 0, -1, 0, 0},
+    {-1, -1, 1, 1, -1, -1, 0, 0, 0, 0, 0, 1},
+    {0, -1, 0, -1, -1, -1, 0, 0, -1, 0, 0, 0},
+    {0, 0, 1, 1, -1, -1, 0, 0, 0, -1, 0, 1},
+    {-1, 0, 0, -1, -1, -1, 0, 0, -1, -1, 0, 0},
+    {-1, 0, 0, -1, -1, 0, 0, -1, -1, -1, -1, -1},
+    {0, 1, 1, 0, -1, 1, 1, -1, 0, -1, -1, -1},
+    {0, -1, 0, -1, -1, 0, 0, -1, -1, 0, -1, -1},
+    {-1, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, -1},
+    {-1, 1, 1, -1, 0, 1, 1, 0, 0, -1, -1, -1},
+    {0, 1, 1, 0, 0, 1, 1, 0, -1, -1, -1, -1},
+    {0, -1, 0, -1, 1, 0, 0, 1, 1, 0, -1, -1},
+    {-1, -1, 0, 0, 0, 0, 0, 0, -1, 0, -1, -1},
+    {-1, 0, 0, -1, 0, -1, 0, -1, -1, 0, -1, -1},
+    {0, 1, 1, 0, 1, -1, 1, -1, 0, 1, -1, -1},
+    {0, -1, 0, -1, 0, -1, 0, -1, -1, -1, -1, -1},
+    {-1, -1, 0, 0, 0, -1, 0, -1, 0, -1, -1, -1},
+    {-1, 0, 0, -1, -1, -1, 0, 0, 0, 0, -1, -1},
+    {0, 0, 0, 0, -1, -1, 0, 0, -1, 0, -1, -1},
+    {0, -1, 0, -1, -1, -1, 0, 0, 0, -1, -1, -1},
+    {-1, -1, 0, 0, -1, -1, 0, 0, -1, -1, -1, -1},
+    {-1, 0, -1, 0, -1, 0, 0, -1, -1, -1, -1, 0},
+    {0, 0, -1, -1, -1, 0, 0, -1, 0, -1, -1, 0},
+    {0, -1, -1, 0, -1, 0, 0, -1, -1, 0, -1, 0},
+    {-1, -1, -1, -1, -1, 0, 0, -1, 0, 0, -1, 0},
+    {-1, 1, -1, 1, 0, 1, 1, 0, 0, -1, -1, 1},
+    {0, 0, -1, -1, 0, 0, 0, 0, -1, -1, -1, 0},
+    {0, -1, -1, 0, 1, 0, 0, 1, 1, 0, -1, 0},
+    {-1, -1, -1, -1, 0, 0, 0, 0, -1, 0, -1, 0},
+    {-1, 0, -1, 0, 0, -1, 0, -1, -1, 0, -1, 0},
+    {0, 0, -1, -1, 0, -1, 0, -1, 0, 0, -1, 0},
+    {0, -1, -1, 0, 0, -1, 0, -1, -1, -1, -1, 0},
+    {-1, -1, -1, -1, 0, -1, 0, -1, 0, -1, -1, 0},
+    {-1, 0, -1, 0, -1, -1, 0, 0, 0, 0, -1, 0},
+    {0, 0, -1, -1, -1, -1, 1, 1, -1, 0, -1, 1},
+    {0, -1, -1, 0, -1, -1, 0, 0, 0, -1, -1, 0},
+    {-1, -1, -1, -1, -1, -1, 0, 0, -1, -1, -1, 0},
+    {-1, -1, -1, -1, -1, 0, -1, 0, -1, -1, 0, 0},
+    {0, -1, -1, 0, -1, 1, -1, 1, 0, -1, 1, 1},
+    {0, 0, -1, -1, -1, 1, -1, 1, -1, 0, 1, 1},
+    {-1, 0, -1, 0, -1, 1, -1, 1, 0, 0, 1, 1},
+    {-1, -1, -1, -1, 0, 0, -1, -1, 0, -1, 0, 0},
+    {0, -1, -1, 0, 0, 0, -1, -1, -1, -1, 0, 0},
+    {0, 0, -1, -1, 1, 1, -1, -1, 1, 0, 1, 1},
+    {-1, 0, -1, 0, 0, 0, -1, -1, -1, 0, 0, 0},
+    {-1, -1, -1, -1, 0, -1, -1, 0, -1, 0, 0, 0},
+    {0, -1, -1, 0, 1, -1, -1, 1, 0, 1, 1, 1},
+    {0, 0, -1, -1, 0, -1, -1, 0, -1, -1, 0, 0},
+    {-1, 0, -1, 0, 0, -1, -1, 0, 0, -1, 0, 0},
+    {-1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0},
+    {0, -1, -1, 0, -1, -1, -1, -1, -1, 0, 0, 0},
+    {0, 0, -1, -1, -1, -1, -1, -1, 0, -1, 0, 0},
+    {-1, 0, -1, 0, -1, -1, -1, -1, -1, -1, 0, 0},
+    {-1, -1, 0, 0, -1, 0, -1, 0, -1, -1, 0, -1},
+    {0, -1, 0, -1, -1, 0, -1, 0, 0, -1, 0, -1},
+    {0, 0, 1, 1, -1, 1, -1, 1, -1, 0, 1, -1},
+    {-1, 0, 0, -1, -1, 0, -1, 0, 0, 0, 0, -1},
+    {-1, -1, 0, 0, 0, 0, -1, -1, 0, -1, 0, -1},
+    {0, -1, 0, -1, 0, 0, -1, -1, -1, -1, 0, -1},
+    {0, 0, 1, 1, 1, 1, -1, -1, 1, 0, 1, -1},
+    {-1, 0, 0, -1, 0, 0, -1, -1, -1, 0, 0, -1},
+    {-1, -1, 0, 0, 0, -1, -1, 0, -1, 0, 0, -1},
+    {0, -1, 0, -1, 0, -1, -1, 0, 0, 0, 0, -1},
+    {0, 0, 0, 0, 0, -1, -1, 0, -1, -1, 0, -1},
+    {-1, 1, 1, -1, 0, -1, -1, 0, 0, -1, 1, -1},
+    {-1, -1, 0, 0, -1, -1, -1, -1, 0, 0, 0, -1},
+    {0, -1, 0, -1, -1, -1, -1, -1, -1, 0, 0, -1},
+    {0, 0, 0, 0, -1, -1, -1, -1, 0, -1, 0, -1},
+    {-1, 0, 0, -1, -1, -1, -1, -1, -1, -1, 0, -1},
+    {-1, 0, 0, -1, -1, 0, -1, 0, -1, -1, -1, 0},
+    {0, 1, 1, 0, -1, 1, -1, 1, 0, -1, -1, 1},
+    {0, -1, 0, -1, -1, 0, -1, 0, -1, 0, -1, 0},
+    {-1, -1, 0, 0, -1, 0, -1, 0, 0, 0, -1, 0},
+    {-1, 0, 0, -1, 0, 0, -1, -1, 0, -1, -1, 0},
+    {0, 0, 0, 0, 0, 0, -1, -1, -1, -1, -1, 0},
+    {0, -1, 0, -1, 0, 0, -1, -1, 0, 0, -1, 0},
+    {-1, -1, 1, 1, 0, 0, -1, -1, -1, 0, -1, 1},
+    {-1, 0, 0, -1, 0, -1, -1, 0, -1, 0, -1, 0},
+    {0, 1, 1, 0, 1, -1, -1, 1, 0, 1, -1, 1},
+    {0, -1, 0, -1, 0, -1, -1, 0, -1, -1, -1, 0},
+    {-1, -1, 0, 0, 0, -1, -1, 0, 0, -1, -1, 0},
+    {-1, 0, 0, -1, -1, -1, -1, -1, 0, 0, -1, 0},
+    {0, 0, 0, 0, -1, -1, -1, -1, -1, 0, -1, 0},
+    {0, -1, 0, -1, -1, -1, -1, -1, 0, -1, -1, 0},
+    {-1, -1, 0, 0, -1, -1, -1, -1, -1, -1, -1, 0},
+    {-1, 0, -1, 0, -1, 0, -1, 0, -1, -1, -1, -1},
+    {0, 0, -1, -1, -1, 0, -1, 0, 0, -1, -1, -1},
+    {0, -1, -1, 0, -1, 0, -1, 0, -1, 0, -1, -1},
+    {-1, -1, -1, -1, -1, 0, -1, 0, 0, 0, -1, -1},
+    {-1, 0, -1, 0, 0, 0, -1, -1, 0, -1, -1, -1},
+    {0, 0, -1, -1, 0, 0, -1, -1, -1, -1, -1, -1},
+    {0, -1, -1, 0, 0, 0, -1, -1, 0, 0, -1, -1},
+    {-1, -1, -1, -1, 0, 0, -1, -1, -1, 0, -1, -1},
+    {-1, 0, -1, 0, 0, -1, -1, 0, -1, 0, -1, -1},
+    {0, 0, -1, -1, 0, -1, -1, 0, 0, 0, -1, -1},
+    {0, -1, -1, 0, 0, -1, -1, 0, -1, -1, -1, -1},
+    {-1, -1, -1, -1, 0, -1, -1, 0, 0, -1, -1, -1},
+    {-1, 0, -1, 0, -1, -1, -1, -1, 0, 0, -1, -1},
+    {0, 0, -1, -1, -1, -1, -1, -1, -1, 0, -1, -1},
+    {0, -1, -1, 0, -1, -1, -1, -1, 0, -1, -1, -1},
+    {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+};
+
+// dmcQuad table: [edge_type][4_vertices][dx, dy, dz, edge_id]
+__constant__ int const dmcQuad[6][4][4] = {
+    {{0, 0, 0, 0}, {0, -1, 0, 4}, {0, -1, -1, 6}, {0, 0, -1, 2}},
+    {{0, 0, 0, 8}, {0, 0, -1, 11}, {-1, 0, -1, 10}, {-1, 0, 0, 9}},
+    {{0, 0, 0, 3}, {-1, 0, 0, 1}, {-1, -1, 0, 5}, {0, -1, 0, 7}},
+
+    {{0, 0, 0, 0}, {0, 0, -1, 2}, {0, -1, -1, 6}, {0, -1, 0, 4}},
+    {{0, 0, 0, 8}, {-1, 0, 0, 9}, {-1, 0, -1, 10}, {0, 0, -1, 11}},
+    {{0, 0, 0, 3}, {0, -1, 0, 7}, {-1, -1, 0, 5}, {-1, 0, 0, 1}},
+};
+
+// Edge masks for each marching cubes case
+__device__ __constant__ int dmcEdgeTable[256] = {
+    0x0  , 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
+    0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
+    0x190, 0x99 , 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
+    0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
+    0x230, 0x339, 0x33 , 0x13a, 0x636, 0x73f, 0x435, 0x53c,
+    0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
+    0x3a0, 0x2a9, 0x1a3, 0xaa , 0x7a6, 0x6af, 0x5a5, 0x4ac,
+    0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
+    0x460, 0x569, 0x663, 0x76a, 0x66 , 0x16f, 0x265, 0x36c,
+    0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
+    0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff , 0x3f5, 0x2fc,
+    0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+    0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55 , 0x15c,
+    0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
+    0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc ,
+    0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
+    0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc,
+    0xcc , 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+    0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c,
+    0x15c, 0x55 , 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
+    0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc,
+    0x2fc, 0x3f5, 0xff , 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+    0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c,
+    0x36c, 0x265, 0x16f, 0x66 , 0x76a, 0x663, 0x569, 0x460,
+    0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac,
+    0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa , 0x1a3, 0x2a9, 0x3a0,
+    0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
+    0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33 , 0x339, 0x230,
+    0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c,
+    0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99 , 0x190,
+    0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
+    0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0
+};
+
+__device__ __constant__ int3 dmcCornerOffset[8] = {
+    {0,0,0}, {1,0,0}, {0,1,0}, {1,1,0},
+    {0,0,1}, {1,0,1}, {0,1,1}, {1,1,1}
+};
+
+__device__ float sigmoidAdjust(float t) {
+    constexpr float BETA = 5.0f;
+    float centered = t - 0.5f;
+    return 1.0f / (1.0f + expf(-BETA * centered));
+}
+
+__global__ void calculatePatchQuadricsKernel(const int* coords, const float* corners, int N, float iso,
+                                             const uint8_t* cellCodes, const int* patchPrefix,
+                                             Quadric* patchQuadrics, V3f* patchCentroids) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    uint8_t cubeCode = cellCodes[i];
+    if (cubeCode == 0 || cubeCode == 255) return;
+
+    int vx = coords[i*3+0];
+    int vy = coords[i*3+1];
+    int vz = coords[i*3+2];
+
+    float v[8];
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        v[j] = corners[i*8 + j];
+    }
+
+    int firstPatch = mcFirstPatchIndex[cubeCode];
+    int lastPatch = mcFirstPatchIndex[cubeCode + 1];
+    int outputBaseIdx = patchPrefix[i];
+
+    for (int patch_index = firstPatch; patch_index < lastPatch; ++patch_index) {
+        Quadric q_accum; // patch quadratic
+        V3f centroid = make_float3(0.0f, 0.0f, 0.0f);
+        float num_points = 0.0f;
+
+        int firstEdge = mcFirstEdgeIndex[patch_index];
+        int lastEdge = mcFirstEdgeIndex[patch_index + 1];
+
+        for (int edge_index = firstEdge; edge_index < lastEdge; ++edge_index) {
+            int eid = mcEdgeIndex[edge_index];
+
+            // MC
+            int c0_idx = dmcEdgeToCorners[eid][0];
+            int c1_idx = dmcEdgeToCorners[eid][1];
+
+            float v0_val = v[c0_idx];
+            float v1_val = v[c1_idx];
+            float t = (iso - v0_val) / (v1_val - v0_val + 1e-30f);
+
+            t = sigmoidAdjust(t);
+            t = fminf(fmaxf(t, 0.f), 1.f);
+
+            int3 off0 = dmcCornerOffset[c0_idx];
+            int3 off1 = dmcCornerOffset[c1_idx];
+
+            V3f p = make_float3(vx + off0.x + t * (off1.x - off0.x),
+                                vy + off0.y + t * (off1.y - off0.y),
+                                vz + off0.z + t * (off1.z - off0.z));
+
+            // Accumulate for centroid
+            centroid.x += p.x;
+            centroid.y += p.y;
+            centroid.z += p.z;
+            num_points += 1.0f;
+
+            // Calculate gradient at edge point using trilinear interpolation
+            // Point p is in local coordinates [vx, vx+1] x [vy, vy+1] x [vz, vz+1]
+            float local_x = p.x - vx;
+            float local_y = p.y - vy;
+            float local_z = p.z - vz;
+
+            // Trilinear interpolation of gradient
+            // Gradient in x: derivative with respect to x
+            // float grad_x = (1.0f - local_y) * (1.0f - local_z) * (v[1] - v[0]) +
+            //                local_y * (1.0f - local_z) * (v[3] - v[2]) +
+            //                (1.0f - local_y) * local_z * (v[5] - v[4]) +
+            //                local_y * local_z * (v[7] - v[6]);
+
+            // float grad_y = (1.0f - local_x) * (1.0f - local_z) * (v[2] - v[0]) +
+            //                local_x * (1.0f - local_z) * (v[3] - v[1]) +
+            //                (1.0f - local_x) * local_z * (v[6] - v[4]) +
+            //                local_x * local_z * (v[7] - v[5]);
+
+            // float grad_z = (1.0f - local_x) * (1.0f - local_y) * (v[4] - v[0]) +
+            //                local_x * (1.0f - local_y) * (v[5] - v[1]) +
+            //                (1.0f - local_x) * local_y * (v[6] - v[2]) +
+            //                local_x * local_y * (v[7] - v[3]);
+
+            // Gradient in x
+            float gx0 = (v[1] - v[0]) * (1 - local_y) * (1 - local_z) +
+                        (v[3] - v[2]) * local_y * (1 - local_z) +
+                        (v[5] - v[4]) * (1 - local_y) * local_z +
+                        (v[7] - v[6]) * local_y * local_z;
+
+            // Gradient in y
+            float gy0 = (v[2] - v[0]) * (1 - local_x) * (1 - local_z) +
+                        (v[3] - v[1]) * local_x * (1 - local_z) +
+                        (v[6] - v[4]) * (1 - local_x) * local_z +
+                        (v[7] - v[5]) * local_x * local_z;
+
+            // Gradient in z
+            float gz0 = (v[4] - v[0]) * (1 - local_x) * (1 - local_y) +
+                        (v[5] - v[1]) * local_x * (1 - local_y) +
+                        (v[6] - v[2]) * (1 - local_x) * local_y +
+                        (v[7] - v[3]) * local_x * local_y;
+
+            V3f n = make_float3(gx0, gy0, gz0);
+            float grad_len = sqrtf(n.x*n.x + n.y*n.y + n.z*n.z);
+            if (grad_len > 1e-6f) {
+                n.x /= grad_len;
+                n.y /= grad_len;
+                n.z /= grad_len;
+            } else {
+                // Fallback: use edge direction
+                V3f edge_dir = make_float3(off1.x - off0.x, off1.y - off0.y, off1.z - off0.z);
+                float edge_len = sqrtf(edge_dir.x*edge_dir.x + edge_dir.y*edge_dir.y + edge_dir.z*edge_dir.z);
+                if (edge_len > 1e-6f) {
+                    n = make_float3(edge_dir.x / edge_len, edge_dir.y / edge_len, edge_dir.z / edge_len);
+                } else {
+                    n = make_float3(0.0f, 0.0f, 1.0f);
+                }
+            }
+
+            // planar equation (ax + by + cz - d = 0)
+            float d_plane = n.x * p.x + n.y * p.y + n.z * p.z;
+
+            // Quadric Matrix
+            Quadric q_plane;
+            q_plane.a2 = n.x * n.x; 
+            q_plane.ab = n.x * n.y; 
+            q_plane.ac = n.x * n.z; 
+            q_plane.ad = - d_plane * n.x;
+
+            q_plane.b2 = n.y * n.y; 
+            q_plane.bc = n.y * n.z; 
+            q_plane.bd = - d_plane * n.y;
+
+            q_plane.c2 = n.z * n.z; 
+            q_plane.cd = -d_plane * n.z;
+            q_plane.d2 = d_plane * d_plane;
+
+            q_accum.add(q_plane);
+        }
+
+        // Compute centroid
+        if (num_points > 0.0f) {
+            centroid.x /= num_points;
+            centroid.y /= num_points;
+            centroid.z /= num_points;
+        }
+
+        int patch_out_idx = outputBaseIdx + (patch_index - firstPatch);
+        patchQuadrics[patch_out_idx] = q_accum;
+        patchCentroids[patch_out_idx] = centroid;
+    }
+}
+
+__global__ void solveQemKernel(int totalPatches, const Quadric* patchQuadrics,
+                                const V3f* patchCentroids, V3f* verts) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= totalPatches) return;
+
+    Quadric q = patchQuadrics[i];
+
+    // 3x3 matrix
+    // | a2 ab ac | |x|   |-ad|
+    // | ab b2 bc | |y| = |-bd|
+    // | ac bc c2 | |z|   |-cd|
+    float det = q.a2 * (q.b2 * q.c2 - q.bc * q.bc) -
+                q.ab * (q.ab * q.c2 - q.bc * q.ac) +
+                q.ac * (q.ab * q.bc - q.b2 * q.ac);
+
+    if (fabsf(det) < 1e-8f) {
+        // Singular/near-singular matrix: use MC centroid as fallback
+        verts[i] = patchCentroids[i];
+        return;
+    }
+
+    float inv_det = 1.0f / det;
+    
+    // inverted matrix (Cramer's rule)
+    float x = inv_det * (
+        -q.ad * (q.b2 * q.c2 - q.bc * q.bc) +
+         q.bd * (q.ab * q.c2 - q.ac * q.bc) -
+         q.cd * (q.ab * q.bc - q.ac * q.b2)
+    );
+    float y = inv_det * (
+         q.ad * (q.ab * q.c2 - q.ac * q.bc) -
+         q.bd * (q.a2 * q.c2 - q.ac * q.ac) +
+         q.cd * (q.a2 * q.bc - q.ab * q.ac)
+    );
+    float z = inv_det * (
+        -q.ad * (q.ab * q.bc - q.ac * q.b2) +
+         q.bd * (q.a2 * q.bc - q.ab * q.ac) -
+         q.cd * (q.a2 * q.b2 - q.ab * q.ab)
+    );
+
+    verts[i] = make_float3(x, y, z);
+}
+
+__device__ float scalar_triple_product(const V3f& v1, const V3f& v2,
+                                        const V3f& v3, const V3f& ref) {
+    V3f v2_ref = {v2.x - ref.x, v2.y - ref.y, v2.z - ref.z};
+    V3f v3_ref = {v3.x - ref.x, v3.y - ref.y, v3.z - ref.z};
+    V3f cross_product = {
+        v2_ref.y * v3_ref.z - v2_ref.z * v3_ref.y,
+        v2_ref.z * v3_ref.x - v2_ref.x * v3_ref.z,
+        v2_ref.x * v3_ref.y - v2_ref.y * v3_ref.x
+    };
+    V3f v1_ref = {v1.x - ref.x, v1.y - ref.y, v1.z - ref.z};
+    return v1_ref.x * cross_product.x + v1_ref.y * cross_product.y + v1_ref.z * cross_product.z;
+}
+
+
+// Helper struct to pack 3D coordinates into a single 64-bit integer key
+struct CoordKey {
+    static __host__ __device__ int64_t get_key(int x, int y, int z) {
+        return (static_cast<int64_t>(x) << 40) | (static_cast<int64_t>(y) << 20) | static_cast<int64_t>(z);
+    }
+
+    static __host__ __device__ thrust::tuple<int, int, int> get_coords(int64_t key) {
+        int x = (key >> 40) & 0xFFFFF;
+        int y = (key >> 20) & 0xFFFFF;
+        int z = key & 0xFFFFF;
+        return thrust::make_tuple(x, y, z);
+    }
+};
+
+// Build a hash map: coord -> voxel index
+__global__ void buildCoordMap(const int* coords, int N, int64_t* coord_keys, int* voxel_indices) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    int x = coords[i*3+0];
+    int y = coords[i*3+1];
+    int z = coords[i*3+2];
+    coord_keys[i] = CoordKey::get_key(x, y, z);
+    voxel_indices[i] = i;
+}
+
+// Lookup voxel index by coordinates
+__device__ int findVoxelIndex(const int64_t* sorted_keys, const int* sorted_indices,
+                              int N, int x, int y, int z) {
+    int64_t query_key = CoordKey::get_key(x, y, z);
+
+    // Binary search
+    const int64_t* first = sorted_keys;
+    int count = N;
+    while (count > 0) {
+        int step = count / 2;
+        const int64_t* mid = first + step;
+        if (*mid < query_key) {
+            first = mid + 1;
+            count -= step + 1;
+        } else {
+            count = step;
+        }
+    }
+    int found_idx = first - sorted_keys;
+
+    if (found_idx < N && sorted_keys[found_idx] == query_key) {
+        return sorted_indices[found_idx];
+    }
+    return -1;
+}
+
+// Count MC vertices (entering/exiting edges)
+__global__ void countMcVertsKernel(const int* coords, const float* corners, int N, float iso,
+                                    int* mcVertCount) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    float v[8];
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        v[j] = corners[i*8 + j];
+    }
+
+    // Count entering/exiting edges (X, Y, Z directions)
+    int count = 0;
+    float d0 = v[0]; // corner 000
+    float dx = v[1]; // corner 100
+    float dy = v[2]; // corner 010
+    float dz = v[4]; // corner 001
+
+    if ((d0 < iso && dx >= iso) || (dx < iso && d0 >= iso)) count++;
+    if ((d0 < iso && dy >= iso) || (dy < iso && d0 >= iso)) count++;
+    if ((d0 < iso && dz >= iso) || (dz < iso && d0 >= iso)) count++;
+
+    mcVertCount[i] = count;
+}
+
+// Index MC vertices and record their types
+__global__ void indexMcVertsKernel(const int* coords, const float* corners, int N, float iso,
+                                    const int* mcVertPrefix,
+                                    int* mcVertToVoxel, uint8_t* mcVertType,
+                                    float* mcVertEdgeP, float* mcVertEdgeN) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    int vx = coords[i*3+0];
+    int vy = coords[i*3+1];
+    int vz = coords[i*3+2];
+
+    float v[8];
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        v[j] = corners[i*8 + j];
+    }
+
+    int outputIdx = mcVertPrefix[i];
+    float d0 = v[0];
+    float vals[3] = {v[1], v[2], v[4]}; // dx, dy, dz
+
+    V3f v0 = make_float3(vx, vy, vz);
+    V3f vn[3] = {
+        make_float3(vx+1, vy, vz),
+        make_float3(vx, vy+1, vz),
+        make_float3(vx, vy, vz+1)
+    };
+
+    for (int dim = 0; dim < 3; dim++) {
+        float d = vals[dim];
+        bool entering = d0 < iso && d >= iso;
+        bool exiting = d < iso && d0 >= iso;
+
+        if (entering || exiting) {
+            mcVertToVoxel[outputIdx] = i;
+            mcVertType[outputIdx] = (exiting ? 3 : 0) + dim;
+
+            // Store edge endpoints for concavity testing later
+            if (entering) {
+                mcVertEdgeP[outputIdx*3+0] = vn[dim].x;
+                mcVertEdgeP[outputIdx*3+1] = vn[dim].y;
+                mcVertEdgeP[outputIdx*3+2] = vn[dim].z;
+                mcVertEdgeN[outputIdx*3+0] = v0.x;
+                mcVertEdgeN[outputIdx*3+1] = v0.y;
+                mcVertEdgeN[outputIdx*3+2] = v0.z;
+            } else {
+                mcVertEdgeP[outputIdx*3+0] = v0.x;
+                mcVertEdgeP[outputIdx*3+1] = v0.y;
+                mcVertEdgeP[outputIdx*3+2] = v0.z;
+                mcVertEdgeN[outputIdx*3+0] = vn[dim].x;
+                mcVertEdgeN[outputIdx*3+1] = vn[dim].y;
+                mcVertEdgeN[outputIdx*3+2] = vn[dim].z;
+            }
+            outputIdx++;
+        }
+    }
+}
+
+__device__ uint8_t get_neighbor_cell_code(
+    int nx, int ny, int nz,
+    const int64_t* sorted_coord_keys, const int* sorted_voxel_indices, int totalVoxels,
+    const float* all_corners, float iso)
+{
+    int neighbor_idx = findVoxelIndex(sorted_coord_keys, sorted_voxel_indices, totalVoxels, nx, ny, nz);
+    if (neighbor_idx == -1) {
+        return 0; // Neighbor doesn't exist, cannot resolve, return empty code
+    }
+
+    // If neighbor exists, compute its code from its 8 corner values
+    int code = 0;
+    const float* neighbor_corners = all_corners + neighbor_idx * 8;
+    if (neighbor_corners[0] >= iso) code |= 1;
+    if (neighbor_corners[1] >= iso) code |= 2;
+    if (neighbor_corners[2] >= iso) code |= 4;
+    if (neighbor_corners[3] >= iso) code |= 8;
+    if (neighbor_corners[4] >= iso) code |= 16;
+    if (neighbor_corners[5] >= iso) code |= 32;
+    if (neighbor_corners[6] >= iso) code |= 64;
+    if (neighbor_corners[7] >= iso) code |= 128;
+    return code;
+}
+
+// Count patches per voxel
+__global__ void countPatchesKernel(const int* coords, const float* corners, int N, float iso,
+                                    uint8_t* cellCodes, int* patchCount) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    float v[8];
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        v[j] = corners[i*8 + j];
+    }
+
+    // Compute cube code
+    int cubeCode = 0;
+    if (v[0] >= iso) cubeCode |= 1;
+    if (v[1] >= iso) cubeCode |= 2;
+    if (v[2] >= iso) cubeCode |= 4;
+    if (v[3] >= iso) cubeCode |= 8;
+    if (v[4] >= iso) cubeCode |= 16;
+    if (v[5] >= iso) cubeCode |= 32;
+    if (v[6] >= iso) cubeCode |= 64;
+    if (v[7] >= iso) cubeCode |= 128;
+
+    cellCodes[i] = cubeCode;
+    int numPatches = mcFirstPatchIndex[cubeCode + 1] - mcFirstPatchIndex[cubeCode];
+    patchCount[i] = numPatches;
+}
+
+// Create dual vertices (patch centers)
+__global__ void createDualVertsKernel(const int* coords, const float* corners, int N, float iso,
+                                       const uint8_t* cellCodes, const int* patchPrefix,
+                                       V3f* verts) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    uint8_t cubeCode = cellCodes[i];
+    if (cubeCode == 0 || cubeCode == 255) return;
+
+    int vx = coords[i*3+0];
+    int vy = coords[i*3+1];
+    int vz = coords[i*3+2];
+
+    float v[8];
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        v[j] = corners[i*8 + j];
+    }
+
+    int firstPatch = mcFirstPatchIndex[cubeCode];
+    int lastPatch = mcFirstPatchIndex[cubeCode + 1];
+    int outputIdx = patchPrefix[i];
+
+    for (int patch_index = firstPatch; patch_index < lastPatch; ++patch_index) {
+        V3f p = make_float3(0, 0, 0);
+        float num = 0;
+
+        int firstEdge = mcFirstEdgeIndex[patch_index];
+        int lastEdge = mcFirstEdgeIndex[patch_index + 1];
+
+        for (int edge_index = firstEdge; edge_index < lastEdge; ++edge_index) {
+            int eid = mcEdgeIndex[edge_index];
+            int ex = dmcEdgeLocations[eid][0];
+            int ey = dmcEdgeLocations[eid][1];
+            int ez = dmcEdgeLocations[eid][2];
+            int dim = dmcEdgeLocations[eid][3];
+
+            // Compute MC vertex on this edge
+            int c0 = (ex) + (ey)*2 + (ez)*4;
+            int c1_offset[3] = {1, 2, 4};
+            int c1 = c0 + c1_offset[dim];
+
+            float v0_val = v[c0];
+            float v1_val = v[c1];
+            float t = (iso - v0_val) / (v1_val - v0_val + 1e-30f);
+            t = fminf(fmaxf(t, 0.f), 1.f);
+
+            int3 off0 = dmcCornerOffset[c0];
+            int3 off1 = dmcCornerOffset[c1];
+
+            float px = vx + off0.x + t * (off1.x - off0.x);
+            float py = vy + off0.y + t * (off1.y - off0.y);
+            float pz = vz + off0.z + t * (off1.z - off0.z);
+
+            p.x += px;
+            p.y += py;
+            p.z += pz;
+            num += 1.0f;
+        }
+
+        p.x /= num;
+        p.y /= num;
+        p.z /= num;
+
+        verts[outputIdx++] = p;
+    }
+}
+
+// Get patch index for a given voxel and edge
+__device__ int getPatchIndex(int voxel_idx, int edge_id,
+                              const uint8_t* cellCodes, const int* patchPrefix) {
+    uint8_t cellCode = cellCodes[voxel_idx];
+    int8_t offset = dmcEdgeOffset[cellCode][edge_id];
+    if (offset < 0) return -1;
+    return patchPrefix[voxel_idx] + offset;
+}
+
+// Create quads
+__global__ void createQuadsKernel(const int* coords, int N,
+                                   const uint8_t* cellCodes, const int* patchPrefix,
+                                   const int* mcVertPrefix, const int* mcVertToVoxel,
+                                   const uint8_t* mcVertType,
+                                   const int64_t* sorted_coord_keys, const int* sorted_voxel_indices,
+                                   int totalVoxels, int totalMcVerts,
+                                   Quad* quads) {
+    int quad_index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (quad_index >= mcVertPrefix[N]) return; // Total MC verts = quads
+    if (quad_index >= totalMcVerts) return;
+
+    int voxel_idx = mcVertToVoxel[quad_index];
+    uint8_t vert_type = mcVertType[quad_index];
+
+    int vx = coords[voxel_idx*3+0];
+    int vy = coords[voxel_idx*3+1];
+    int vz = coords[voxel_idx*3+2];
+
+    // Build quad from 4 neighboring cells
+    Quad q = {-1, -1, -1, -1};
+
+    for (int i = 0; i < 4; ++i) {
+        int dx = dmcQuad[vert_type][i][0];
+        int dy = dmcQuad[vert_type][i][1];
+        int dz = dmcQuad[vert_type][i][2];
+        int eid = dmcQuad[vert_type][i][3];
+
+        int nx = vx + dx;
+        int ny = vy + dy;
+        int nz = vz + dz;
+
+        // Find neighbor voxel
+        int neighbor_idx = findVoxelIndex(sorted_coord_keys, sorted_voxel_indices,
+                                          totalVoxels, nx, ny, nz);
+
+        if (neighbor_idx >= 0) {
+            int patch_idx = getPatchIndex(neighbor_idx, eid, cellCodes, patchPrefix);
+            if (i == 0) q.v0 = patch_idx;
+            else if (i == 1) q.v1 = patch_idx;
+            else if (i == 2) q.v2 = patch_idx;
+            else if (i == 3) q.v3 = patch_idx;
+        }
+    }
+
+    if (q.v0 < 0 || q.v1 < 0 || q.v2 < 0 || q.v3 < 0) {
+        q.v0 = q.v1 = q.v2 = q.v3 = -1;
+    }
+
+    quads[quad_index] = q;
+}
+
+// Gather corners kernel for from_points
+__global__ void gather_corners_kernel_dual(
+    const int* __restrict__ active_voxel_coords, int N,
+    const int64_t* __restrict__ sorted_point_keys,
+    const float* __restrict__ sorted_point_values, int M,
+    float default_value, float* __restrict__ out_corners) {
+
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    int vx = active_voxel_coords[i * 3 + 0];
+    int vy = active_voxel_coords[i * 3 + 1];
+    int vz = active_voxel_coords[i * 3 + 2];
+
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+        int3 offset = dmcCornerOffset[j];
+        int cx = vx + offset.x;
+        int cy = vy + offset.y;
+        int cz = vz + offset.z;
+
+        int64_t query_key = CoordKey::get_key(cx, cy, cz);
+
+        const int64_t* first = sorted_point_keys;
+        int count = M;
+        while (count > 0) {
+            int step = count / 2;
+            const int64_t* mid = first + step;
+            if (*mid < query_key) {
+                first = mid + 1;
+                count -= step + 1;
+            } else {
+                count = step;
+            }
+        }
+        int found_idx = first - sorted_point_keys;
+
+        float value = default_value;
+        if (found_idx < M && sorted_point_keys[found_idx] == query_key) {
+            value = sorted_point_values[found_idx];
+        }
+        out_corners[i * 8 + j] = value;
+    }
+}
+
+struct is_valid_quad {
+    __host__ __device__
+    bool operator()(const Quad& q) const {
+        return q.v0 != -1; 
+    }
+};
+
+// Main sparse dual marching cubes function
+std::tuple<thrust::device_vector<V3f>, thrust::device_vector<Quad>>
+_sparse_dual_marching_cubes(const int* d_coords, const float* d_corners, int N, float iso, cudaStream_t stream) {
+
+    const int threads = 256;
+    int blocks = (N + threads - 1) / threads;
+
+    thrust::device_vector<V3f> vertices;
+    thrust::device_vector<Quad> quads;
+
+    if (N == 0) return {std::move(vertices), std::move(quads)};
+
+    // Step 1: Build coordinate lookup map
+    thrust::device_vector<int64_t> coord_keys(N);
+    thrust::device_vector<int> voxel_indices(N);
+
+    buildCoordMap<<<blocks, threads, 0, stream>>>(
+        d_coords, N,
+        thrust::raw_pointer_cast(coord_keys.data()),
+        thrust::raw_pointer_cast(voxel_indices.data())
+    );
+
+    // Sort by coordinate keys
+    auto zipped = thrust::make_zip_iterator(thrust::make_tuple(coord_keys.begin(), voxel_indices.begin()));
+    thrust::sort(thrust::cuda::par.on(stream), zipped, zipped + N);
+
+    // Step 2: Count MC vertices
+    thrust::device_vector<int> mcVertCount(N);
+    countMcVertsKernel<<<blocks, threads, 0, stream>>>(
+        d_coords, d_corners, N, iso,
+        thrust::raw_pointer_cast(mcVertCount.data())
+    );
+
+    thrust::device_vector<int> mcVertPrefix(N + 1);
+    thrust::exclusive_scan(thrust::cuda::par.on(stream),
+                        mcVertCount.begin(), mcVertCount.end(),
+                        mcVertPrefix.begin());
+
+    thrust::transform(thrust::cuda::par.on(stream),
+                  mcVertPrefix.begin() + (N - 1), 
+                  mcVertPrefix.begin() + N,
+                  mcVertCount.begin() + (N - 1),  
+                  mcVertPrefix.begin() + N,      
+                  thrust::plus<int>());
+
+    int totalMcVerts = 0;
+    cudaMemcpyAsync(&totalMcVerts, thrust::raw_pointer_cast(mcVertPrefix.data()) + N,
+                    sizeof(int), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    if (totalMcVerts == 0) return {std::move(vertices), std::move(quads)};
+
+    // Step 3: Index MC vertices
+    thrust::device_vector<int> mcVertToVoxel(totalMcVerts);
+    thrust::device_vector<uint8_t> mcVertType(totalMcVerts);
+    thrust::device_vector<float> mcVertEdgeP(totalMcVerts * 3);
+    thrust::device_vector<float> mcVertEdgeN(totalMcVerts * 3);
+
+    indexMcVertsKernel<<<blocks, threads, 0, stream>>>(
+        d_coords, d_corners, N, iso,
+        thrust::raw_pointer_cast(mcVertPrefix.data()),
+        thrust::raw_pointer_cast(mcVertToVoxel.data()),
+        thrust::raw_pointer_cast(mcVertType.data()),
+        thrust::raw_pointer_cast(mcVertEdgeP.data()),
+        thrust::raw_pointer_cast(mcVertEdgeN.data())
+    );
+
+    // Step 4: Count patches
+    thrust::device_vector<uint8_t> cellCodes(N);
+    thrust::device_vector<int> patchCount(N);
+
+    countPatchesKernel<<<blocks, threads, 0, stream>>>(
+        d_coords, d_corners, N, iso,
+        thrust::raw_pointer_cast(cellCodes.data()),
+        thrust::raw_pointer_cast(patchCount.data())
+    );
+
+    thrust::device_vector<int> patchPrefix(N + 1);
+    thrust::exclusive_scan(thrust::cuda::par.on(stream),
+                        patchCount.begin(), patchCount.end(),
+                        patchPrefix.begin());
+
+    thrust::transform(thrust::cuda::par.on(stream),
+                  patchPrefix.begin() + (N - 1),
+                  patchPrefix.begin() + N,
+                  patchCount.begin() + (N - 1),
+                  patchPrefix.begin() + N,
+                  thrust::plus<int>());
+
+    int totalPatches = 0;
+    cudaMemcpyAsync(&totalPatches, thrust::raw_pointer_cast(patchPrefix.data()) + N,
+                    sizeof(int), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    if (totalPatches == 0) return {std::move(vertices), std::move(quads)};
+
+    // Step 5: Create dual vertices w/o QEM
+    vertices.resize(totalPatches);
+    createDualVertsKernel<<<blocks, threads, 0, stream>>>(
+        d_coords, d_corners, N, iso,
+        thrust::raw_pointer_cast(cellCodes.data()),
+        thrust::raw_pointer_cast(patchPrefix.data()),
+        thrust::raw_pointer_cast(vertices.data())
+    );
+
+    // // Step 5: Create dual vertices w/ QEM
+    // thrust::device_vector<Quadric> patchQuadrics(totalPatches);
+    // thrust::device_vector<V3f> patchCentroids(totalPatches);
+    // calculatePatchQuadricsKernel<<<blocks, threads, 0, stream>>>(
+    //     d_coords, d_corners, N, iso,
+    //     thrust::raw_pointer_cast(cellCodes.data()),
+    //     thrust::raw_pointer_cast(patchPrefix.data()),
+    //     thrust::raw_pointer_cast(patchQuadrics.data()),
+    //     thrust::raw_pointer_cast(patchCentroids.data())
+    // );
+
+    // // Step 5.5: solve QEM
+    // vertices.resize(totalPatches);
+    // int patch_blocks = (totalPatches + threads - 1) / threads;
+    // solveQemKernel<<<patch_blocks, threads, 0, stream>>>(
+    //     totalPatches,
+    //     thrust::raw_pointer_cast(patchQuadrics.data()),
+    //     thrust::raw_pointer_cast(patchCentroids.data()),
+    //     thrust::raw_pointer_cast(vertices.data())
+    // );
+
+    // Step 6: Create quads
+    quads.resize(totalMcVerts);
+    int quad_blocks = (totalMcVerts + threads - 1) / threads;
+
+    createQuadsKernel<<<quad_blocks, threads, 0, stream>>>(
+        d_coords, N,
+        thrust::raw_pointer_cast(cellCodes.data()),
+        thrust::raw_pointer_cast(patchPrefix.data()),
+        thrust::raw_pointer_cast(mcVertPrefix.data()),
+        thrust::raw_pointer_cast(mcVertToVoxel.data()),
+        thrust::raw_pointer_cast(mcVertType.data()),
+        thrust::raw_pointer_cast(coord_keys.data()),
+        thrust::raw_pointer_cast(voxel_indices.data()),
+        N,
+        totalMcVerts,
+        thrust::raw_pointer_cast(quads.data())
+    );
+
+    cudaStreamSynchronize(stream);
+
+    int num_valid_quads = thrust::count_if(thrust::cuda::par.on(stream),
+                                       quads.begin(), quads.end(),
+                                       is_valid_quad());
+
+    if (num_valid_quads == 0) {
+        vertices.clear();
+        quads.clear();
+        return {std::move(vertices), std::move(quads)};
+    }
+
+    thrust::device_vector<Quad> valid_quads(num_valid_quads);
+
+    thrust::copy_if(thrust::cuda::par.on(stream),
+                    quads.begin(), quads.end(),
+                    valid_quads.begin(),
+                    is_valid_quad());
+
+    cudaStreamSynchronize(stream);
+
+
+    return {std::move(vertices), std::move(valid_quads)};
+}
+
+// From points wrapper
+std::tuple<thrust::device_vector<V3f>, thrust::device_vector<Quad>>
+_sparse_dual_marching_cubes_from_points(const int* d_coords, const float* d_point_values,
+                                        int N, float iso, float default_value, cudaStream_t stream) {
+    const int threads = 256;
+
+    if (N == 0) {
+        thrust::device_vector<V3f> vertices;
+        thrust::device_vector<Quad> quads;
+        return {std::move(vertices), std::move(quads)};
+    }
+
+    // Step 1: Create sorted point keys for efficient lookup
+    thrust::device_vector<int64_t> point_keys(N);
+    thrust::device_vector<float> point_values(N);
+
+    thrust::transform(thrust::cuda::par.on(stream),
+                     thrust::make_counting_iterator(0),
+                     thrust::make_counting_iterator(N),
+                     point_keys.begin(),
+                     [d_coords] __device__ (int i) {
+                         int x = d_coords[i*3+0];
+                         int y = d_coords[i*3+1];
+                         int z = d_coords[i*3+2];
+                         return CoordKey::get_key(x, y, z);
+                     });
+
+    cudaMemcpyAsync(thrust::raw_pointer_cast(point_values.data()),
+                    d_point_values, N * sizeof(float), cudaMemcpyDeviceToDevice, stream);
+
+    auto zipped = thrust::make_zip_iterator(thrust::make_tuple(point_keys.begin(), point_values.begin()));
+    thrust::sort(thrust::cuda::par.on(stream), zipped, zipped + N);
+
+    // Step 2: Gather corners for each voxel
+    thrust::device_vector<float> corners(N * 8);
+
+    int blocks = (N + threads - 1) / threads;
+    gather_corners_kernel_dual<<<blocks, threads, 0, stream>>>(
+        d_coords, N,
+        thrust::raw_pointer_cast(point_keys.data()),
+        thrust::raw_pointer_cast(point_values.data()),
+        N, default_value,
+        thrust::raw_pointer_cast(corners.data())
+    );
+
+    // Step 3: Call sparse dual marching cubes
+    return _sparse_dual_marching_cubes(
+        d_coords,
+        thrust::raw_pointer_cast(corners.data()),
+        N, iso, stream
+    );
+}
+```

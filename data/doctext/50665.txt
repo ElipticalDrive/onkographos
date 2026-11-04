@@ -1,0 +1,1535 @@
+# UE5 Voxel Engine — Technical Prototype
+
+A Minecraft-style voxel rendering and chunk streaming system built in **Unreal Engine 5 C++**. The focus was implementing the hard parts from scratch — procedural mesh generation, face culling, async chunk loading, and real-time voxel editing — without any third-party voxel plugins.
+
+![Gameplay demo](screenshots/minecraft_clone_gameplay.gif)
+
+---
+
+## Core systems
+
+**Procedural mesh generation** — chunks are rendered using `UProceduralMeshComponent` with all geometry (vertices, indices, normals, UVs, tangents) computed manually per voxel face in C++. Each chunk is split into 16×16×16 sections (16 tall = 16×16×256 total) for efficient partial rebuilds.
+
+**Neighbor-based face culling** — only faces adjacent to air are emitted, eliminating all interior geometry before it hits the GPU.
+
+**Texture atlas UV mapping** — block types map to sub-regions of a shared atlas via a per-face lookup table, with correct per-direction UV inversion for winding order.
+
+**Async chunk streaming** — mesh generation runs on UE5's thread pool via `Async(EAsyncExecution::ThreadPool, ...)`, returning `TFuture<TArray<MeshData*>>`. Results feed into a `TQueue` and are consumed one per frame on the game thread. In-flight chunks are tracked in a `TMap<int32, TFuture<...>*>` to prevent duplicate generation.
+
+**Real-time voxel editing** — left-click places a block, right-click removes one. A line trace from the camera identifies the target chunk and voxel. The affected section is rebuilt immediately; if the edit falls on a section boundary, the adjacent section is rebuilt too.
+
+**Blueprint-driven world generation** — `BlueprintPopulateBlock(i, j, k)` exposes block population to Blueprints, allowing terrain algorithms to be iterated without recompiling C++. Current terrain: a sine-wave heightmap in the Y direction.
+
+![World generation Blueprint](screenshots/world_gen_blueprint.png)
+
+---
+
+## Architecture
+
+```
+FPSCharacter (Tick)
+  ├── Detects chunk boundary crossing
+  ├── PlayerMovedToAnotherChunk() → ThreadPool tasks → TFuture<MeshData>
+  └── Dequeues results → AChunk::CreateChunk()
+
+AChunk
+  ├── GenerateChunkData()        — block array via Blueprint callback
+  ├── GetMeshData()              — face culling, UVs, normals per section
+  ├── CreateVoxelChunk()         — uploads to UProceduralMeshComponent
+  ├── AddVoxel() / RemoveVoxel() — edits block array, rebuilds section(s)
+  └── ChunkMap                   — TMap<int32, AChunk*> spatial hash
+```
+
+---
+
+## Known limitations
+
+- **No inter-chunk face culling** — boundary faces are always rendered regardless of neighbor content
+- **No chunk unloading** — stubbed; spatial hash cleanup and actor destroy are the next step
+- **No load priority** — chunks load in grid iteration order, not by distance to player
+- **No greedy meshing** — adjacent same-type faces are not merged
+- **Minimal world gen** — sine-wave only; no noise, biomes, or caves
+
+---
+
+## Controls
+
+| Input | Action |
+|-------|--------|
+| WASD | Move |
+| Space | Jump |
+| Mouse | Look |
+| Left click | Place block |
+| Right click | Remove block |
+| 1 – 4 | Select block type |
+
+### Source/MinecraftClone.Target.cs
+```
+// Fill out your copyright notice in the Description page of Project Settings.
+
+using UnrealBuildTool;
+using System.Collections.Generic;
+
+public class MinecraftCloneTarget : TargetRules
+{
+	public MinecraftCloneTarget(TargetInfo Target) : base(Target)
+	{
+		Type = TargetType.Game;
+        DefaultBuildSettings = BuildSettingsVersion.Latest;
+        IncludeOrderVersion = EngineIncludeOrderVersion.Latest;
+        ExtraModuleNames.AddRange( new string[] { "MinecraftClone" } );
+	}
+}
+```
+
+### Source/MinecraftCloneEditor.Target.cs
+```
+// Fill out your copyright notice in the Description page of Project Settings.
+
+using UnrealBuildTool;
+using System.Collections.Generic;
+
+public class MinecraftCloneEditorTarget : TargetRules
+{
+	public MinecraftCloneEditorTarget(TargetInfo Target) : base(Target)
+	{
+		Type = TargetType.Editor;
+        DefaultBuildSettings = BuildSettingsVersion.Latest;
+        IncludeOrderVersion = EngineIncludeOrderVersion.Latest;
+        ExtraModuleNames.AddRange( new string[] { "MinecraftClone" } );
+	}
+}
+```
+
+### Source/MinecraftClone/Chunk.cpp
+```
+// Fill out your copyright notice in the Description page of Project Settings.
+
+#include "Chunk.h"
+#include "Async/Async.h"
+
+// Creating a standard root object.
+AChunk::AChunk()
+{
+	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
+	//PrimaryActorTick.bCanEverTick = true;
+
+	mesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("GeneratedMesh"));
+	RootComponent = mesh;
+	// New in UE 4.17, multi-threaded PhysX cooking.
+	mesh->bUseAsyncCooking = true;
+	// Sets default values
+
+	UMaterial* m = LoadObject<UMaterial>(NULL, TEXT("/Game/Textures/TileTextures_Mat"));
+
+	for(int i = 0; i < 16; i++)
+		mesh->SetMaterial(i, m);
+
+
+	UE_LOG(LogTemp, Log, TEXT("Generated %d"), this);
+}
+
+void AChunk::PostDuplicate(EDuplicateMode::Type DuplicateMode)
+{
+	Super::PostDuplicate(DuplicateMode);
+
+	UE_LOG(LogTemp, Log, TEXT("Duplicated to %d"), this);
+}
+
+void AChunk::BeginDestroy()
+{
+	Super::BeginDestroy();
+
+	UE_LOG(LogTemp, Log, TEXT("Destroying %d"), this);
+}
+
+// This is called when actor is spawned (at runtime or when you drop it into the world in editor)
+void AChunk::PostActorCreated()
+{
+	Super::PostActorCreated();
+
+	UE_LOG(LogTemp, Log, TEXT("PostActorCreated Blocks Size %d %d %d"), mBlocks.Num(), &mBlocks, this);
+}
+
+// This is called when actor is already in level and map is opened
+void AChunk::PostLoad()
+{
+	Super::PostLoad();
+
+	UE_LOG(LogTemp, Log, TEXT("PostLoad Chunk Mem Size %d"), sizeof(mBlocks));
+}
+
+// Each chunk it's a stack of sections, one on top of another
+// For a 16x16x256 chunk, the sectionSideWidth will be 16, and the number of Sections is 16, 16*16 = 256
+TArray<BlockType> AChunk::GenerateChunkData(int chunkI, int chunkJ, int sectionSideWidth, int numberOfSections,
+	int& sideWidth, int& sectionCount, TPopulateBlockFunc PopulateBlock)
+{
+	// Setup the chunk size
+	sideWidth = sectionSideWidth; sectionCount = numberOfSections;
+
+	// Setup the block array
+	// Add an extra row and an extra column to account for edges
+	TArray<BlockType> blocks;
+	int sideSize = sectionSideWidth + 1;
+	blocks.SetNum(numberOfSections * sideSize * sideSize * sideSize);
+
+	int I, J, K; 
+	for (int i = 0; i < blocks.Num(); i++)
+	{
+		GetIJKFromPositionInTArray(i, sectionSideWidth, I, J, K);
+		blocks[i] = PopulateBlock(I, J, K, FChunkInfo{ chunkI, chunkJ, sectionSideWidth });
+	}
+
+	return blocks;
+}
+
+void AChunk::CreateVoxelChunk(TArray<BlockType> blocks, int sectionSide, int sectionCount)
+{
+	mBlocks = TArray<BlockType>(blocks);
+	mSectionSide = sectionSide; mSectionCount = sectionCount;
+
+	UE_LOG(LogTemp, Log, TEXT("Blocks Size %d %d %d"), mBlocks.Num(), &mBlocks, this);
+
+	// Generate the mesh data by sections, each of sectionSide*sectionSide, start at the bottom
+
+	for (int32 section = 0; section < mSectionCount; section++)
+	{
+		// Get mesh data for this section only
+		MeshData* d = GetMeshData(0,0, section, mSectionCount, mBlocks, mSectionSide);
+
+		// Create the section
+		mesh->CreateMeshSection_LinearColor(section, d->vertices, d->Triangles, d->normals, d->UV0, d->vertexColors, d->tangents, true);
+
+		delete(d); d = NULL;
+	}
+
+	// Enable collision data
+	mesh->ContainsPhysicsTriMeshData(true);
+}
+
+// Gets the mesh information for a given section of the chunk
+// Note that any TArrays passed in will be overwritten
+TArray<MeshData*> AChunk::GetMeshDataForChunk(int32 chunkI, int32 chunkJ, 
+	int32 sectionCount, TArray<BlockType> blocks, int32 sectionSide)
+{
+	TArray<MeshData*> chunkMeshData; chunkMeshData.SetNum(sectionCount);
+
+	// Get mesh data for all sections
+	for (int32 section = 0; section < sectionCount; section++)
+	{
+		chunkMeshData[section] = GetMeshData(chunkI, chunkJ, section, sectionCount, blocks, sectionSide);
+	}
+
+	return chunkMeshData;
+}
+
+// Gets the mesh information for a given section of the chunk
+// Note that any TArrays passed in will be overwritten
+MeshData* AChunk::GetMeshData(int32 chunkI, int32 chunkJ, int32 sectionID, int32 sectionCount, TArray<BlockType> blocks, int32 sectionSide)
+{
+	MeshData* result = new MeshData();
+
+	if (sectionID >= sectionCount)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Attempting to GetMeshData for %d but the max count is %d"), sectionID, sectionCount);
+		return result;
+	}
+
+	// Clear the arrays
+	result->vertices.Empty(); result->Triangles.Empty(); result->normals.Empty();
+	result->UV0.Empty(); result->tangents.Empty(); result->vertexColors.Empty();
+
+	result->sectionCount = sectionCount; result->sectionSide = sectionSide;
+	result->blocks = blocks;
+	result->chunkI = chunkI; result->chunkJ = chunkJ;
+
+	int initialI = sectionID * sectionSide, lastI = (sectionID + 1) * sectionSide;
+
+	for (int i = initialI; i < lastI; i++)
+	{
+		for (int j = 0; j <= sectionSide; j++)
+		{
+			for (int k = 0; k <= sectionSide; k++)
+			{
+				if (blocks[GetPositionInTArray(i,j,k,sectionSide)] == BlockType::AIR) continue;
+				for (int d = 0; d < MeshData::Direction::SIZE; d++)
+				{
+					if (CheckIfNeighboorIsAir(MeshData::Direction(d), blocks, i, j, k, sectionCount, sectionSide, *result))
+					{
+						AddVoxelFace(MeshData::Direction(d), blocks[GetPositionInTArray(i, j, k, sectionSide)],
+							result, i, j, k);
+					}
+				}
+			}
+		}
+	}
+
+	return result;
+}
+
+bool AChunk::CheckIfNeighboorIsAir(MeshData::Direction direction, TArray<BlockType>& blocks, int i, int j, int k,
+	int sectionCount, int sectionSide, MeshData& data)
+{
+	FVector offset = data.NORMALS[direction];
+	int newI = i + offset.Z, newJ = j + offset.Y, newK = k + offset.X;
+
+	// Chunks have an extra column and row to handle interchunk rendering
+	//  so newI == sectionSide * sectionSide, newJ == sectionSide and newK == sectionSide are all valid
+	if (newI > sectionSide * sectionSide || newI < 0) return false;
+	if (newJ > sectionSide || newJ < 0) return false;
+	if (newK > sectionSide || newK < 0) return false;
+
+	// Ignore checks between blocks at the edge (not owned by this chunk)
+	if (j == sectionSide && newJ == sectionSide) return false;
+	if (k == sectionSide && newK == sectionSide) return false;
+
+	return blocks[GetPositionInTArray(newI,newJ,newK, sectionSide)] == BlockType::AIR;
+}
+
+void AChunk::UpdateVoxel(int32 i, int32 j, int32 k, BlockType blockType)
+{
+	int positionInTArray = GetPositionInTArray(i, j, k, mSectionSide);
+
+	// Don't do anything if blocks are already set to what we want
+	if (mBlocks[positionInTArray] == blockType) return;
+
+	UE_LOG(LogTemp, Log, TEXT("UpdateVoxel: Updating chunk %d %d"), mChunkX, mChunkY);
+	mBlocks[positionInTArray] = blockType;
+
+	// Reconstruct the current section
+	int32 section = i / mSectionSide;
+
+	// Check if section above or below needs update (current i is right at the edge)
+	if (i % mSectionSide == 0 || (i + 1) % mSectionSide == 0)
+	{
+		int32 extraSection = i % mSectionSide == 0 ? section - 1 : section + 1;
+
+		MeshData* d = GetMeshData(0, 0, extraSection, mSectionCount, mBlocks, mSectionSide);
+		mesh->ClearMeshSection(extraSection);
+		mesh->CreateMeshSection_LinearColor(extraSection, d->vertices, d->Triangles, d->normals, d->UV0, d->vertexColors, d->tangents, true);
+
+		delete(d);
+
+		UE_LOG(LogTemp, Log, TEXT("Extra section updated i: %d, extraSection: %d"), i, extraSection);
+	}
+
+	MeshData* d = GetMeshData(0, 0, section, mSectionCount, mBlocks, mSectionSide);
+	mesh->ClearMeshSection(section);
+	mesh->CreateMeshSection_LinearColor(section, d->vertices, d->Triangles, d->normals, d->UV0, d->vertexColors, d->tangents, true);
+	delete(d);
+
+	// Interchunk updates, make sure adjacent blocks are notified of the change
+	//  only do this for blocks we own (j >= 0 && j < sectionSide, k >= 0 && k < sectionSide)
+	//  Also, only going through the back and left chunks prevents recursive calls back and forth
+	// Back chunk boundary
+	if (j == 0)
+	{
+		auto nextChunk = ChunkMap.Find(GetHashFromChunkPosition(mChunkX, mChunkY - 1));
+		if (nextChunk) (*nextChunk)->UpdateVoxel(i, mSectionSide, k, blockType);
+	}
+	// Left chunk boundary
+	if (k == 0)
+	{
+		auto nextChunk = ChunkMap.Find(GetHashFromChunkPosition(mChunkX - 1, mChunkY));
+		if (nextChunk) (*nextChunk)->UpdateVoxel(i, j, mSectionSide, blockType);
+	}
+}
+
+void AChunk::AddVoxel(FVector insidePoint, BlockType blockTypeToAdd)
+{
+	int k = int(insidePoint.X) / BlockSize;
+	int j = int(insidePoint.Y) / BlockSize;
+	int i = int(insidePoint.Z) / BlockSize;
+
+	// Chunks have an extra column and row to handle interchunk rendering
+	//  so newI == sectionSide * sectionSide, newJ == sectionSide and newK == sectionSide are all valid
+	if (i > mSectionCount * mSectionSide || i < 0) return;
+	if (j > mSectionSide || j < 0) return;
+	if (k > mSectionSide || k < 0) return;
+
+	UE_LOG(LogTemp, Log, TEXT("AddVoxel: Updating chunk(s)"));
+
+	// Interchunk checks, check if the voxel we are adding doesn't belong to the current chunk
+	// Front chunk boundary
+	if (j == mSectionSide)
+	{
+		auto nextChunk = ChunkMap.Find(GetHashFromChunkPosition(mChunkX, mChunkY + 1));
+		if (nextChunk) (*nextChunk)->UpdateVoxel(i, 0, k, blockTypeToAdd);
+	}
+	// Right chunk boundary
+	else if (k == mSectionSide)
+	{
+		auto nextChunk = ChunkMap.Find(GetHashFromChunkPosition(mChunkX + 1, mChunkY));
+		if (nextChunk) (*nextChunk)->UpdateVoxel(i, j, 0, blockTypeToAdd);
+	}
+	// Current chunk
+	else
+	{
+		UpdateVoxel(i, j, k, blockTypeToAdd);
+	}
+}
+
+void AChunk::RemoveVoxel(FVector insidePoint)
+{
+	int k = int(insidePoint.X) / BlockSize;
+	int j = int(insidePoint.Y) / BlockSize;
+	int i = int(insidePoint.Z) / BlockSize;
+
+	UE_LOG(LogTemp, Log, TEXT("RemoveVoxel: Updating chunk(s)"));
+
+	// Interchunk checks, check if the voxel we are adding doesn't belong to the current chunk
+	// Front chunk boundary
+	if (j == mSectionSide)
+	{
+		auto nextChunk = ChunkMap.Find(GetHashFromChunkPosition(mChunkX, mChunkY + 1));
+		if (nextChunk) (*nextChunk)->UpdateVoxel(i, 0, k, BlockType::AIR);
+	}
+	// Right chunk boundary
+	else if (k == mSectionSide)
+	{
+		auto nextChunk = ChunkMap.Find(GetHashFromChunkPosition(mChunkX + 1, mChunkY));
+		if (nextChunk) (*nextChunk)->UpdateVoxel(i, j, 0, BlockType::AIR);
+	}
+	// Current chunk
+	else
+	{
+		UpdateVoxel(i, j, k, BlockType::AIR);
+	}
+}
+
+void AChunk::AddVoxelFace(MeshData::Direction direction,
+	BlockType currentBlockType,
+	MeshData* data,
+	int i, int j, int k)
+{
+	FDateTime start = FDateTime::UtcNow();
+
+	const int numVertices = 4;
+	int lastNumVertices = data->vertices.Num();
+	FVector position = FVector(k * BlockSize, j * BlockSize, i * BlockSize);
+
+	// VERTICES
+	for (int v = 0; v < numVertices; v++) data->vertices.Add(data->VERTICES[direction][v]*100 + position);
+
+	// TRIANGLES
+	data->Triangles.Add(lastNumVertices + 0);
+	data->Triangles.Add(lastNumVertices + 1);
+	data->Triangles.Add(lastNumVertices + 2);
+	data->Triangles.Add(lastNumVertices + 3);
+	data->Triangles.Add(lastNumVertices + 2);
+	data->Triangles.Add(lastNumVertices + 1);
+
+	// NORMALS
+	for (int v = 0; v < numVertices; v++) data->normals.Add(data->NORMALS[direction]);
+
+	auto getUVIndices = [data](int32 index, int32& outUVI, int32& outUVJ)
+	{
+		outUVI = index / data->ATLAS_SIZE;
+		outUVJ = index % data->ATLAS_SIZE;
+	};
+
+	// UVI -> rows -> V, UVJ -> columns -> U
+	int UVI = 0;
+	int UVJ = 0;
+	float UVSize = 1.0f / data->ATLAS_SIZE;
+	switch (direction)
+	{
+	case MeshData::UP:
+		getUVIndices(data->BlockTypeTextureIndex[int(currentBlockType)][0], UVI, UVJ);
+		break;
+	case MeshData::DOWN:
+		getUVIndices(data->BlockTypeTextureIndex[int(currentBlockType)][2], UVI, UVJ);
+		break;
+	case MeshData::RIGHT:
+		getUVIndices(data->BlockTypeTextureIndex[int(currentBlockType)][1], UVI, UVJ);
+		break;
+	case MeshData::LEFT:
+		getUVIndices(data->BlockTypeTextureIndex[int(currentBlockType)][1], UVI, UVJ);
+		break;
+	case MeshData::FORWARD:
+		getUVIndices(data->BlockTypeTextureIndex[int(currentBlockType)][1], UVI, UVJ);
+		break;
+	case MeshData::BACK:
+		getUVIndices(data->BlockTypeTextureIndex[int(currentBlockType)][1], UVI, UVJ);
+		break;
+	}
+		
+	// UVs
+	// TODO: Make the texture mapping to use RHI
+	// TODO: Make the lighting more efficient
+	data->UV0.Add(data->UVS_Inverted[direction][0] * UVSize + FVector2D(UVJ * UVSize, UVI * UVSize));
+	data->UV0.Add(data->UVS_Inverted[direction][1] * UVSize + FVector2D(UVJ * UVSize, UVI * UVSize));
+	data->UV0.Add(data->UVS_Inverted[direction][2] * UVSize + FVector2D(UVJ * UVSize, UVI * UVSize));
+	data->UV0.Add(data->UVS_Inverted[direction][3] * UVSize + FVector2D(UVJ * UVSize, UVI * UVSize));
+
+	//TANGENTS
+	for (int v = 0; v < numVertices; v++) data->tangents.Add(data->TANGENTS[direction]);
+
+	// VERTEX COLOR
+	data->vertexColors.Add(FLinearColor(0.75, 0.75, 0.75, 1.0));
+	data->vertexColors.Add(FLinearColor(0.75, 0.75, 0.75, 1.0));
+	data->vertexColors.Add(FLinearColor(0.75, 0.75, 0.75, 1.0));
+	data->vertexColors.Add(FLinearColor(0.75, 0.75, 0.75, 1.0));
+}
+
+// Given an i, j, k position, return the position in the resulting block array
+int AChunk::GetPositionInTArray(int i, int j, int k, int sectionSide)
+{
+	int sideSize = sectionSide + 1; // + 1 to account for edges
+	return i * sideSize * sideSize + j * sideSize + k;
+}
+
+// Given the position in the block array, return its corresponding i, j, k position
+void AChunk::GetIJKFromPositionInTArray(int pos, int sectionSide, int& i, int& j, int& k)
+{
+	int sideSize = sectionSide + 1; // + 1 to account for edges
+	i = pos / (sideSize * sideSize);
+	j = (pos % (sideSize * sideSize)) / sideSize;
+	k = (pos % (sideSize * sideSize)) % sideSize;
+}
+
+void AChunk::CreateTriangle()
+{
+	TArray<FVector> vertices;
+	vertices.Add(FVector(0, 0, 0));
+	vertices.Add(FVector(0, 100, 0));
+	vertices.Add(FVector(0, 0, 100));
+
+	TArray<int32> Triangles;
+	Triangles.Add(0);
+	Triangles.Add(1);
+	Triangles.Add(2);
+
+	TArray<FVector> normals;
+	normals.Add(FVector(1, 0, 0));
+	normals.Add(FVector(1, 0, 0));
+	normals.Add(FVector(1, 0, 0));
+
+	TArray<FVector2D> UV0;
+	UV0.Add(FVector2D(0, 0));
+	UV0.Add(FVector2D(1, 0));
+	UV0.Add(FVector2D(0, 1));
+
+
+	TArray<FProcMeshTangent> tangents;
+	tangents.Add(FProcMeshTangent(0, 1, 0));
+	tangents.Add(FProcMeshTangent(0, 1, 0));
+	tangents.Add(FProcMeshTangent(0, 1, 0));
+
+	TArray<FLinearColor> vertexColors;
+	vertexColors.Add(FLinearColor(0.75, 0.75, 0.75, 1.0));
+	vertexColors.Add(FLinearColor(0.75, 0.75, 0.75, 1.0));
+	vertexColors.Add(FLinearColor(0.75, 0.75, 0.75, 1.0));
+
+	mesh->CreateMeshSection_LinearColor(0, vertices, Triangles, normals, UV0, vertexColors, tangents, true);
+
+	// Enable collision data
+	mesh->ContainsPhysicsTriMeshData(true);
+}
+
+// Called when the game starts or when spawned
+void AChunk::BeginPlay()
+{
+	Super::BeginPlay();
+}
+
+// Called every frame
+void AChunk::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+}
+
+TArray<MeshData*> AChunk::GetMeshDataForChunk(int32 ChunkX, int32 ChunkY, TPopulateBlockFunc PopulateBlock)
+{
+	int dummy;
+	TArray<BlockType> blocks = AChunk::GenerateChunkData(ChunkX, ChunkY, 16, 16, dummy, dummy, PopulateBlock);
+
+	return AChunk::GetMeshDataForChunk(ChunkX, ChunkY, 16, blocks, 16);
+}
+
+void AChunk::CreateChunk(int32 ChunkX, int32 ChunkY, UWorld* World)
+{
+	//FVector location = FVector(ChunkX * 1600, ChunkY * 1600, -400);
+	//FRotator rotation = FRotator();
+	//const FTransform transform = FTransform(location);
+
+	//if (GEngine)
+	//{
+	//	const int32 AlwaysAddKey = -1; // Passing -1 means that we will not try and overwrite an   
+	//								   // existing message, just add a new one  
+	//	if (World)
+	//	{
+	//		AChunk* const newChunk = World->SpawnActor<AChunk>(AChunk::StaticClass(), transform);
+
+	//		TArray<BlockType> blocks; int32 dummy;
+	//		newChunk->GenerateChunkData(16, 16, 100, blocks, dummy, dummy);
+	//		newChunk->CreateVoxelChunk(blocks, 16, 16);
+	//	}
+
+	//	GEngine->AddOnScreenDebugMessage(AlwaysAddKey, 0.5f, FColor::Yellow, TEXT("Chunk created"));
+
+	//	//AChunk::ChunkMap.Add(FVector2D(ChunkX, ChunkY), newChunk);
+	//}
+}
+
+TMap<int32, AChunk*> AChunk::ChunkMap;
+TMap<int32, TFuture<TArray<MeshData*>>*> AChunk::chunkResults;
+void AChunk::CreateChunk(int32 ChunkX, int32 ChunkY, UWorld* World, TArray<MeshData*> chunkData)
+{
+	FVector location = FVector(ChunkX * 1600, ChunkY * 1600, -1000);
+	FRotator rotation = FRotator();
+	const FTransform transform = FTransform(location);
+
+	if (GEngine)
+	{
+		const int32 AlwaysAddKey = -1; // Passing -1 means that we will not try and overwrite an   
+									   // existing message, just add a new one  
+		if (World)
+		{
+			AChunk* const newChunk = World->SpawnActor<AChunk>(AChunk::StaticClass(), transform);
+
+			newChunk->SetActorLabel(FString::Printf(TEXT("Chunk_%d_%d"), ChunkX, ChunkY));
+			newChunk->mBlocks = TArray<BlockType>(chunkData[0]->blocks);
+			newChunk->mSectionSide = chunkData[0]->sectionSide; newChunk->mSectionCount = chunkData[0]->sectionCount;
+			newChunk->mChunkX = ChunkX;
+			newChunk->mChunkY = ChunkY;
+
+			// Generate the mesh data by sections, each of sectionSide*sectionSide, start at the bottom
+			for (int32 section = 0; section < 16; section++)
+			{
+				MeshData* d = chunkData[section];
+
+				// Create the section
+				newChunk->mesh->CreateMeshSection_LinearColor(section, d->vertices, d->Triangles, d->normals, d->UV0, d->vertexColors, d->tangents, true);
+
+				if(chunkData[section]) delete(chunkData[section]); 
+			}
+
+			chunkData.Empty();
+
+			// Enable collision data
+			newChunk->mesh->ContainsPhysicsTriMeshData(true);
+
+			AChunk::ChunkMap.Add(GetHashFromChunkPosition(ChunkX, ChunkY), newChunk);
+		}
+
+		GEngine->AddOnScreenDebugMessage(AlwaysAddKey, 20.0f, FColor::Yellow, FString::Printf(TEXT("Chunk created %d %d %f %f"), ChunkX, ChunkY, location.X, location.Y));
+	}
+}
+
+void AChunk::PlayerMovedToAnotherChunk(int newChunkX, int newChunkY, TQueue<TArray<MeshData*>> &chunkLoaderQueue, 
+	TPopulateBlockFunc PopulateBlock, int32 ChunkRenderDistance)
+{
+	// Go through all the chunks in the ChunkMap, remove the extra chunks
+	// TODO: put this back to unload chunks
+	//TArray<int32> keys;
+	//AChunk::ChunkMap.GetKeys(keys);
+
+	//for (FVector2D k : keys)
+	//{
+	//	if (abs(k.X - chunkX) > CHUNK_RENDER_DISTANCE || abs(k.Y - chunkY) > CHUNK_RENDER_DISTANCE)
+	//		AChunk::ChunkMap.Remove(k);
+	//}
+	//AChunk::ChunkMap.Compact();
+
+	auto LoadChunk = [&chunkLoaderQueue](int32 i, int32 j, TPopulateBlockFunc PopulateBlock)
+	{
+		int hash = GetHashFromChunkPosition(i, j);
+		if (ChunkMap.Contains(hash) || chunkResults.Contains(hash)) return;
+
+		// Create the chunk
+		TFunction<void()> ChunkCallback = [i, j, renderer = &chunkLoaderQueue]()
+		{
+			TFuture<TArray<MeshData*>>** result = chunkResults.Find(GetHashFromChunkPosition(i, j));
+			chunkResults.Remove(GetHashFromChunkPosition(i, j));
+
+			if (result)
+			{
+				renderer->Enqueue((*result)->Get());
+			}
+		};
+		TFunction<TArray<MeshData*>()> ChunkTask = [i, j, PopulateBlock]()
+		{
+			return GetMeshDataForChunk(i, j, PopulateBlock);
+		};
+
+		TFuture<TArray<MeshData*>>* t = new TFuture<TArray<MeshData*>>(Async(EAsyncExecution::ThreadPool, ChunkTask, ChunkCallback));
+		chunkResults.Add(GetHashFromChunkPosition(i, j), t);
+	};
+
+	// TODO: Use a heap to give priority to the chunks closest to the player
+
+	// Go through all the chunks that need to be rendered, figure out which need to be added to the chunkmap
+	for (int i = newChunkX - ChunkRenderDistance; i <= newChunkX + ChunkRenderDistance; i++)
+	{
+		for (int j = newChunkY - ChunkRenderDistance; j <= newChunkY + ChunkRenderDistance; j++)
+		{
+			if (i != 0 || j != 0)
+				LoadChunk(i, j, PopulateBlock);
+		}
+	}
+}
+
+void AChunk::ClearAllQueuedChunkTasks()
+{
+	// Clean up all the tasks
+	for (auto chunk : chunkResults)
+	{
+		auto chunkTask = chunk.Value;
+		chunkTask->Reset();
+	}
+	chunkResults.Empty();
+}
+
+//TODO: Is this used??
+void FChunkCreateTask::DoWork() {
+	AChunk::CreateChunk(ChunkX, ChunkY, World);
+}
+```
+
+### Source/MinecraftClone/Chunk.h
+```
+// Fill out your copyright notice in the Description page of Project Settings.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/Actor.h"
+#include "ProceduralMeshComponent.h"
+#include "Engine/Engine.h"
+#include "Containers/Map.h"
+#include "Chunk.generated.h"
+
+UENUM(BlueprintType)
+enum class BlockType : uint8
+{
+	AIR UMETA(DisplayName = "AIR"),
+	GRASS UMETA(DisplayName = "GRASS"),
+	DIRT UMETA(DisplayName = "DIRT"),
+	STONE UMETA(DisplayName = "STONE"),
+	WOOD UMETA(DisplayName = "WOOD"),
+	LEAVES UMETA(DisplayName = "LEAVES")
+};
+
+USTRUCT(BlueprintType)
+struct FChunkInfo
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chunk X origin")
+	int32 ChunkX;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chunk Y origin")
+	int32 ChunkY;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Chunk Size in blocks")
+	int32 ChunkSizeInBlocks;
+};
+
+using TPopulateBlockFunc = TFunction <BlockType(int32 i, int32 j, int32 k, FChunkInfo chunkInfo)>;
+
+class MeshData
+{
+public:
+	TArray<FVector> vertices;
+	TArray<int32> Triangles;
+	TArray<FVector> normals;
+	TArray<FVector2D> UV0;
+	TArray<FProcMeshTangent> tangents;
+	TArray<FLinearColor> vertexColors;
+	TArray<BlockType> blocks;
+	int32 sectionSide;
+	int32 sectionCount;
+	int32 chunkI;
+	int32 chunkJ;
+
+	static enum Direction
+	{
+		UP = 0,
+		DOWN = 1,
+		LEFT = 2,
+		RIGHT = 3,
+		FORWARD = 4,
+		BACK = 5,
+		SIZE = 6
+	};
+
+	const FString DirectionImage[Direction::SIZE][8] =
+	{
+		"UP", "DOWN", "LEFT", "RIGHT", "FORWARD", "BACK"
+	};
+
+
+	const int32 ATLAS_SIZE = 4;
+	// Top1, Side1, Bottom1, Top2, Side2, Bottom2, Top3, Side3, Bottom3, ...
+	// Needs to be BLOCKTYPE::SIZE * 3
+	const int32 BlockTypeTextureIndex[6][3] =
+	{
+		{-1, -1, -1},// AIR
+		{0,  3,  2},// GRASS
+		{2,  2,  2},// DIRT
+		{1,  1,  1},// STONE
+		{5,  4,  5},// WOOD
+		{6,  6,  6}// LEAVES
+	};
+
+	const FVector NORMALS[Direction::SIZE] =
+	{ FVector(0,0,1), // up
+	  FVector(0,0,-1), // down
+	  FVector(-1,0,0), // left
+	  FVector(1,0,0), // right
+	  FVector(0,-1,0), // forward
+	  FVector(0,1,0) // back 
+	};
+
+	const FProcMeshTangent TANGENTS[Direction::SIZE] =
+	{ FProcMeshTangent(1, 0, 0), // up
+	  FProcMeshTangent(1, 0, 0), // down
+	  FProcMeshTangent(0, 0, 1), // left
+	  FProcMeshTangent(0, 0, 1), // right
+	  FProcMeshTangent(0, 0, 1), // forward
+	  FProcMeshTangent(0, 0, 1) // back
+	};
+
+	const FVector VERTICES[Direction::SIZE][4] =
+	{
+		{ FVector(1, 0, 1), FVector(0, 0, 1), FVector(1, 1, 1), FVector(0, 1, 1) },
+		{ FVector(0, 0, 0), FVector(1, 0, 0), FVector(0, 1, 0), FVector(1, 1, 0) },
+		{ FVector(0, 0, 0), FVector(0, 1, 0), FVector(0, 0, 1), FVector(0, 1, 1) },
+		{ FVector(1, 1, 0), FVector(1, 0, 0), FVector(1, 1, 1), FVector(1, 0, 1) },
+		{ FVector(0, 0, 0), FVector(0, 0, 1), FVector(1, 0, 0), FVector(1, 0, 1) },
+		{ FVector(0, 1, 0), FVector(1, 1, 0), FVector(0, 1, 1), FVector(1, 1, 1) }
+	};
+
+	const FVector2D UVS[Direction::SIZE][4] =
+	{
+		{ FVector2D(0.9, 0.1), FVector2D(0.1, 0.1), FVector2D(0.9, 0.9), FVector2D(0.1, 0.9) }, // up
+		{ FVector2D(0.01, 0.01), FVector2D(0.99, 0.01), FVector2D(0.01, 0.99), FVector2D(0.99, 0.99) }, // down
+		{ FVector2D(0.01, 0.01), FVector2D(0.99, 0.01), FVector2D(0.01, 0.99), FVector2D(0.99, 0.99) }, // left
+		{ FVector2D(0.99, 0.01), FVector2D(0.01, 0.01), FVector2D(0.99, 0.99), FVector2D(0.01, 0.99) }, // right
+		{ FVector2D(0.01, 0.01), FVector2D(0.01, 0.99), FVector2D(0.99, 0.01), FVector2D(0.99, 0.99) }, // forward
+		{ FVector2D(0.01, 0.01), FVector2D(0.99, 0.01), FVector2D(0.01, 0.99), FVector2D(0.99, 0.99) }  // back
+	};
+
+	const FVector2D UVS_Inverted[Direction::SIZE][4] =
+	{
+		{ FVector2D(0, 1), FVector2D(1, 1), FVector2D(0, 0), FVector2D(1, 0) }, // up
+		{ FVector2D(1, 1), FVector2D(0, 1), FVector2D(1, 0), FVector2D(0, 0) }, // down
+		{ FVector2D(1, 1), FVector2D(0, 1), FVector2D(1, 0), FVector2D(0, 0) }, // left
+		{ FVector2D(0, 1), FVector2D(1, 1), FVector2D(0, 0), FVector2D(1, 0) }, // right
+		{ FVector2D(1, 1), FVector2D(1, 0), FVector2D(0, 1), FVector2D(0, 0) }, // forward
+		{ FVector2D(1, 1), FVector2D(0, 1), FVector2D(1, 0), FVector2D(0, 0) }  // back
+	};
+};
+
+UCLASS(Blueprintable)
+class MINECRAFTCLONE_API AChunk : public AActor
+{
+	GENERATED_BODY()
+	
+public:	
+	// Sets default values for this actor's properties
+	AChunk();
+
+	void PostDuplicate(EDuplicateMode::Type DuplicateMode);
+
+	void BeginDestroy();
+
+	static TArray<BlockType> GenerateChunkData(int chunkI, int chunkJ, int sectionSideWidth, int numberOfSections,
+		int& sideWidth, int& sectionCount, TPopulateBlockFunc PopulateBlock);
+
+	UFUNCTION(BlueprintCallable, Category = "VoxelChunk")
+	void CreateVoxelChunk(TArray<BlockType> blocks, int sectionSide, int sectionCount);
+
+	void AddVoxel(FVector insidePoint, BlockType blockTypeToAdd);
+
+	void RemoveVoxel(FVector insidePoint);
+
+	static void PlayerMovedToAnotherChunk(int newChunkX, int newChunkY, TQueue<TArray<MeshData*>>& chunkLoaderQueue,
+		TPopulateBlockFunc PopulateBlock,
+		int32 ChunkRenderDistance);
+
+	static TMap<int32, AChunk*> ChunkMap;
+	const static int BlockSize = 100;
+
+	static TMap <int32, TFuture<TArray<MeshData*>>*> chunkResults;
+
+	static MeshData* GetMeshData(int32 chunkI, int32 chunkJ, 
+		int32 sectionID, int32 sectionCount, TArray<BlockType> blocks, int32 sectionSide);
+	static TArray<MeshData*> GetMeshDataForChunk(int32 chunkI, int32 chunkJ, 
+		int32 sectionCount, TArray<BlockType> blocks, int32 sectionSide);
+	static TArray<MeshData*> GetMeshDataForChunk(int32 ChunkX, int32 ChunkY, TPopulateBlockFunc PopulateBlock);
+
+	static void ClearAllQueuedChunkTasks();
+
+	static void CreateChunk(int32 ChunkX, int32 ChunkY, UWorld* World);
+	static void CreateChunk(int32 ChunkX, int32 ChunkY, UWorld* World, TArray<MeshData*> chunkData);
+
+protected:
+	// Called when the game starts or when spawned
+	virtual void BeginPlay() override;
+
+public:	
+	// Called every frame
+	virtual void Tick(float DeltaTime) override;
+
+private:
+	UPROPERTY(VisibleAnywhere)
+	UProceduralMeshComponent* mesh;
+
+	UPROPERTY(VisibleAnywhere)
+	int mSectionSide = 10;
+
+	UPROPERTY(VisibleAnywhere)
+	int mSectionCount = 10;
+
+	UPROPERTY(VisibleAnywhere)
+	TArray<BlockType> mBlocks;
+
+	UPROPERTY(VisibleAnywhere)
+	int mChunkX;
+
+	UPROPERTY(VisibleAnywhere)
+	int mChunkY;
+
+	void PostActorCreated();
+
+	void PostLoad();
+
+	void UpdateVoxel(int32 i, int32 j, int32 k, BlockType blockType);
+
+	static bool CheckIfNeighboorIsAir(MeshData::Direction direction,
+		TArray<BlockType>& blocks, int i, int j, int k, 
+		int sectionCount, int sectionSide, MeshData& data);
+
+	static void AddVoxelFace(MeshData::Direction direction, 
+		BlockType currentBlockType,
+		MeshData* data,
+		int i, int j, int k);
+
+	static int GetPositionInTArray(int i, int j, int k, int sectionSide);
+
+	static void GetIJKFromPositionInTArray(int pos, int sectionSide, int &i, int &j, int &k);
+
+	static int GetHashFromChunkPosition(int ChunkX, int ChunkY)
+	{
+		uint32 half16bit = 1 << 15;
+		return uint32(uint32(ChunkX + half16bit) << 16) + uint16(ChunkY + half16bit);
+	}
+
+	void CreateTriangle();
+};
+
+class FChunkCreateTask : public FNonAbandonableTask
+{
+	friend class FAutoDeleteAsyncTask<FChunkCreateTask>;
+
+public:
+	FChunkCreateTask(int32 chunkX, int32 chunkY, UWorld* world) :
+		ChunkX(chunkX),
+		ChunkY(chunkY),
+		World(world)
+	{}
+
+protected:
+	int32 ChunkX;
+	int32 ChunkY;
+	UWorld* World;
+
+	void DoWork();
+
+	// This next section of code needs to be here.  Not important as to why.
+
+	FORCEINLINE TStatId GetStatId() const
+	{
+		RETURN_QUICK_DECLARE_CYCLE_STAT(FMyTaskName, STATGROUP_ThreadPoolAsyncTasks);
+	}
+};
+```
+
+### Source/MinecraftClone/DamageableActor.cpp
+```
+// Fill out your copyright notice in the Description page of Project Settings.
+
+
+#include "DamageableActor.h"
+
+// Sets default values
+ADamageableActor::ADamageableActor()
+{
+ 	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
+	PrimaryActorTick.bCanEverTick = true;
+
+}
+
+// Called when the game starts or when spawned
+void ADamageableActor::BeginPlay()
+{
+	Super::BeginPlay();
+	
+}
+
+// Called every frame
+void ADamageableActor::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+}
+
+void ADamageableActor::TakeAtack()
+{
+	// Perform health reduction logic ie currentHealth -= incomingDamage
+	onTakeAttack();
+}
+```
+
+### Source/MinecraftClone/DamageableActor.h
+```
+// Fill out your copyright notice in the Description page of Project Settings.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/Actor.h"
+#include "DamageableActor.generated.h"
+
+UCLASS()
+class MINECRAFTCLONE_API ADamageableActor : public AActor
+{
+	GENERATED_BODY()
+	
+public:	
+	// Sets default values for this actor's properties
+	ADamageableActor();
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "Attack")
+	void onTakeAttack();
+
+	UPROPERTY(EditAnywhere, Category = "Attack")
+	bool isAttackable = true;
+
+protected:
+	// Called when the game starts or when spawned
+	virtual void BeginPlay() override;
+
+public:	
+	// Called every frame
+	virtual void Tick(float DeltaTime) override;
+
+	void TakeAtack();
+};
+```
+
+### Source/MinecraftClone/FPSCharacter.cpp
+```
+// Fill out your copyright notice in the Description page of Project Settings.
+
+
+#include "FPSCharacter.h"
+#include "Engine/World.h"
+#include "DamageableActor.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "Chunk.h"
+
+// Sets default values
+AFPSCharacter::AFPSCharacter()
+{
+ 	// Set this character to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
+	PrimaryActorTick.bCanEverTick = true;
+
+	// 3rd person camera boom
+	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
+	CameraBoom->SetupAttachment(RootComponent);
+	CameraBoom->TargetArmLength = 400.0f;
+	CameraBoom->bUsePawnControlRotation = true; // rotate arm based on controller
+
+	// 3rd person camera
+	FollowCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("FollowCamera"));
+	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
+	FollowCamera->bUsePawnControlRotation = false; // camera follows the arm, not directly
+
+	// 3rd person feel
+	bUseControllerRotationYaw = false;
+	bUseControllerRotationPitch = false;
+	bUseControllerRotationRoll = false;
+
+	GetCharacterMovement()->bOrientRotationToMovement = true;
+	GetCharacterMovement()->RotationRate = FRotator(0.0f, 540.0f, 0.0f); // turn speed
+}
+
+// Called when the game starts or when spawned
+void AFPSCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+
+	AChunk::ChunkMap.Empty();
+
+	if (!PopulateBlockFunction)
+	{
+		PopulateBlockFunction =
+			[WeakActor = MakeWeakObjectPtr(this)](int32 i, int32 j, int32 k, FChunkInfo chunkInfo) {
+			if (!WeakActor.IsValid()) return BlockType::AIR;
+			return WeakActor->BlueprintPopulateBlock(i, j, k, chunkInfo);
+			};
+	}
+
+	// TODO: Use a heap to give priority to the chunks closest to the player
+	TArray<MeshData*> d = AChunk::GetMeshDataForChunk(0, 0, PopulateBlockFunction);
+	chunkRenderQueue.Enqueue(d);
+}
+
+void AFPSCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	AChunk::ClearAllQueuedChunkTasks();
+}
+
+// Called every frame
+void AFPSCharacter::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	// ChunkMap handling
+	// TODO: Stop making these static magic numbers
+	// (1000,1000) -> (0,0); (-1000, -1000) -> (-1, -1); (-1601, -1601) -> (-2, -2); (1601, 1601) -> (1, 1)
+	int32 chunkX = floor(GetActorLocation().X / 1600.0f);
+	int32 chunkY = floor(GetActorLocation().Y / 1600.0f);
+
+	if (LastChunkX != chunkX || LastChunkY != chunkY)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 20.0f, FColor::Yellow, FString::Printf(TEXT("Moved to new chunk %d %d"), chunkX, chunkY));
+
+		LastChunkX = chunkX; LastChunkY = chunkY;
+
+		AChunk::PlayerMovedToAnotherChunk(chunkX, chunkY, chunkRenderQueue, 
+			PopulateBlockFunction, CHUNK_RENDER_DISTANCE);
+	}
+
+
+	if(!chunkRenderQueue.IsEmpty())
+	{
+		TArray<MeshData*> chunkData; chunkRenderQueue.Dequeue(chunkData);
+
+		AChunk::CreateChunk(chunkData[0]->chunkI, chunkData[0]->chunkJ, GetWorld(), chunkData);
+	}
+}
+
+// Called to bind functionality to input
+void AFPSCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+{
+	Super::SetupPlayerInputComponent(PlayerInputComponent);
+}
+
+void AFPSCharacter::PrimaryFire()
+{
+	FHitResult hit = InstantShot();
+	AChunk* hitActor = Cast<AChunk>(hit.GetActor());
+
+	if (hitActor)
+	{
+		FVector pointInside = hit.ImpactPoint + hit.ImpactNormal - hit.GetActor()->GetActorLocation();
+
+		hitActor->AddVoxel(pointInside, blockInHand);
+	}
+}
+
+void AFPSCharacter::SecondaryFire()
+{
+	FHitResult hit = InstantShot();
+	AChunk* hitActor = Cast<AChunk>(hit.GetActor());
+
+	if (hitActor)
+	{
+		FVector pointInside = hit.ImpactPoint - hit.ImpactNormal - hit.GetActor()->GetActorLocation();
+
+		hitActor->RemoveVoxel(pointInside);
+	}
+}
+
+void AFPSCharacter::ChangeBlockInHand(BlockType newBlockType)
+{
+	if (newBlockType > BlockType::AIR && newBlockType <= BlockType::LEAVES)
+		blockInHand = newBlockType;
+}
+
+FHitResult AFPSCharacter::InstantShot()
+{
+	FVector  rayLocation;
+	FRotator rayRotation;
+	FVector  endTrace;
+
+	APlayerController* const playerController = GetWorld()->GetFirstPlayerController();
+	if (playerController)
+	{
+		playerController->GetPlayerViewPoint(rayLocation, rayRotation);
+
+		endTrace = rayLocation + rayRotation.Vector() * weaponRange;
+	}
+
+	FCollisionQueryParams traceParams(SCENE_QUERY_STAT(InstantShot), true, GetInstigator());
+	FHitResult hit(ForceInit);
+	GetWorld()->LineTraceSingleByChannel(hit, rayLocation, endTrace, ECC_Visibility, traceParams);
+
+	return hit;
+}
+```
+
+### Source/MinecraftClone/FPSCharacter.h
+```
+// Fill out your copyright notice in the Description page of Project Settings.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/SpringArmComponent.h"
+#include "Camera/CameraComponent.h"
+#include "Chunk.h"
+#include "FPSCharacter.generated.h"
+
+UCLASS()
+class MINECRAFTCLONE_API AFPSCharacter : public ACharacter
+{
+	GENERATED_BODY()
+
+public:
+	// Sets default values for this character's properties
+	AFPSCharacter();
+
+	UPROPERTY(VisibleAnywhere, Category = "Camera")
+	USpringArmComponent* CameraBoom;
+
+	UPROPERTY(VisibleAnywhere, Category = "Camera")
+	UCameraComponent* FollowCamera;
+
+	UPROPERTY(EditAnywhere, Category = "Weapon")
+	float weaponRange{ 1000 };
+
+	UPROPERTY(EditAnywhere, Category = "ChunkGeneration")
+	int32 CHUNK_RENDER_DISTANCE { 10 };
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "ChunkGeneration")
+	BlockType BlueprintPopulateBlock(int32 i, int32 j, int32 k, FChunkInfo ChunkInfo);
+
+	TPopulateBlockFunc PopulateBlockFunction = NULL;
+
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	void PrimaryFire();
+
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	void SecondaryFire();
+
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	void ChangeBlockInHand(BlockType newBlockType);
+
+	// TODO: This should be in its own subsystem
+	TQueue<TArray<MeshData*>> chunkRenderQueue;
+
+protected:
+	// Called when the game starts or when spawned
+	virtual void BeginPlay() override;
+
+	// Called when the game ends or when the object is destroyed
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	FHitResult InstantShot();
+
+public:	
+	BlockType blockInHand = BlockType::DIRT;
+
+	// Called every frame
+	virtual void Tick(float DeltaTime) override;
+
+	// Called to bind functionality to input
+	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
+
+private:
+	int32 LastChunkX = 1000;
+	int32 LastChunkY = 1000;
+};
+```
+
+### Source/MinecraftClone/MinecraftClone.Build.cs
+```
+// Fill out your copyright notice in the Description page of Project Settings.
+
+using UnrealBuildTool;
+
+public class MinecraftClone : ModuleRules
+{
+	public MinecraftClone(ReadOnlyTargetRules Target) : base(Target)
+	{
+		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+	
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "ProceduralMeshComponent" });
+
+		PrivateDependencyModuleNames.AddRange(new string[] {  });
+
+		// Uncomment if you are using Slate UI
+		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
+		
+		// Uncomment if you are using online features
+		// PrivateDependencyModuleNames.Add("OnlineSubsystem");
+
+		// To include OnlineSubsystemSteam, add it to the plugins section in your uproject file with the Enabled attribute set to true
+	}
+}
+```
+
+### Source/MinecraftClone/MinecraftClone.cpp
+```
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "MinecraftClone.h"
+#include "Modules/ModuleManager.h"
+
+IMPLEMENT_PRIMARY_GAME_MODULE( FDefaultGameModuleImpl, MinecraftClone, "MinecraftClone" );
+```
+
+### Source/MinecraftClone/MinecraftClone.h
+```
+// Fill out your copyright notice in the Description page of Project Settings.
+
+#pragma once
+
+#include "CoreMinimal.h"
+```
+
+### Source/MinecraftClone/MinecraftCloneGameModeBase.cpp
+```
+// Fill out your copyright notice in the Description page of Project Settings.
+
+
+#include "MinecraftCloneGameModeBase.h"
+```
+
+### Source/MinecraftClone/MinecraftCloneGameModeBase.h
+```
+// Fill out your copyright notice in the Description page of Project Settings.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/GameModeBase.h"
+#include "MinecraftCloneGameModeBase.generated.h"
+
+/**
+ * 
+ */
+UCLASS()
+class MINECRAFTCLONE_API AMinecraftCloneGameModeBase : public AGameModeBase
+{
+	GENERATED_BODY()
+	
+};
+```
+
+### Source/MinecraftClone/WorldHeightNoise.cpp
+```
+// WorldHeightNoise.cpp
+
+#include "WorldHeightNoise.h"
+#include "Math/RandomStream.h"
+
+namespace
+{
+	// Cache the permutation table for the last-used seed so repeated calls
+	// (e.g. querying height for many actors per tick) don't rebuild it every time.
+	int32 CachedSeed = MIN_int32;
+	uint8 CachedTable[512];
+}
+
+void UWorldHeightNoise::BuildPermutation(int32 Seed, uint8 OutTable[512])
+{
+	uint8 P[256];
+	for (int32 i = 0; i < 256; ++i)
+	{
+		P[i] = static_cast<uint8>(i);
+	}
+
+	FRandomStream RandomStream(Seed);
+	for (int32 i = 255; i > 0; --i)
+	{
+		const int32 j = RandomStream.RandRange(0, i);
+		Swap(P[i], P[j]);
+	}
+
+	for (int32 i = 0; i < 256; ++i)
+	{
+		OutTable[i] = P[i];
+		OutTable[i + 256] = P[i];
+	}
+}
+
+float UWorldHeightNoise::Fade(float T)
+{
+	return T * T * T * (T * (T * 6.0f - 15.0f) + 10.0f);
+}
+
+float UWorldHeightNoise::Lerp(float T, float A, float B)
+{
+	return A + T * (B - A);
+}
+
+float UWorldHeightNoise::Grad(int32 Hash, float X, float Y)
+{
+	// 2D gradient: 8 directions from the low 3 bits of the hash.
+	switch (Hash & 7)
+	{
+	case 0: return  X + Y;
+	case 1: return  X - Y;
+	case 2: return -X + Y;
+	case 3: return -X - Y;
+	case 4: return  X;
+	case 5: return -X;
+	case 6: return  Y;
+	default: return -Y;
+	}
+}
+
+float UWorldHeightNoise::RawPerlin2D(float X, float Y, int32 Seed)
+{
+	if (Seed != CachedSeed)
+	{
+		BuildPermutation(Seed, CachedTable);
+		CachedSeed = Seed;
+	}
+	const uint8* P = CachedTable;
+
+	const int32 XI = FMath::FloorToInt(X) & 255;
+	const int32 YI = FMath::FloorToInt(Y) & 255;
+
+	const float XF = X - FMath::FloorToFloat(X);
+	const float YF = Y - FMath::FloorToFloat(Y);
+
+	const float U = Fade(XF);
+	const float V = Fade(YF);
+
+	const int32 AA = P[P[XI] + YI];
+	const int32 AB = P[P[XI] + YI + 1];
+	const int32 BA = P[P[XI + 1] + YI];
+	const int32 BB = P[P[XI + 1] + YI + 1];
+
+	const float Res = Lerp(V,
+		Lerp(U, Grad(AA, XF, YF),
+			Grad(BA, XF - 1.0f, YF)),
+		Lerp(U, Grad(AB, XF, YF - 1.0f),
+			Grad(BB, XF - 1.0f, YF - 1.0f)));
+
+	return Res; // roughly in [-1, 1]
+}
+
+float UWorldHeightNoise::FractalPerlin2D(float X, float Y, const FWorldHeightNoiseSettings& Settings)
+{
+	float Total = 0.0f;
+	float Frequency = 1.0f;
+	float Amplitude = 1.0f;
+	float MaxValue = 0.0f;
+
+	const int32 Octaves = FMath::Clamp(Settings.Octaves, 1, 8);
+
+	for (int32 i = 0; i < Octaves; ++i)
+	{
+		Total += RawPerlin2D(X * Frequency, Y * Frequency, Settings.Seed) * Amplitude;
+		MaxValue += Amplitude;
+		Amplitude *= Settings.Persistence;
+		Frequency *= Settings.Lacunarity;
+	}
+
+	return MaxValue > 0.0f ? Total / MaxValue : 0.0f; // roughly [-1, 1]
+}
+
+float UWorldHeightNoise::GetHeightAtWorldLocation(float WorldX, float WorldY, const FWorldHeightNoiseSettings& Settings)
+{
+	const float Scale = FMath::Max(Settings.Scale, KINDA_SMALL_NUMBER);
+
+	const float NoiseX = WorldX / Scale;
+	const float NoiseY = WorldY / Scale;
+
+	const float Noise = FractalPerlin2D(NoiseX, NoiseY, Settings); // [-1, 1]
+
+	return Settings.BaseHeight + Noise * Settings.HeightScale;
+}
+
+float UWorldHeightNoise::GetHeightAtLocation(const FVector& WorldLocation, const FWorldHeightNoiseSettings& Settings)
+{
+	return GetHeightAtWorldLocation(WorldLocation.X, WorldLocation.Y, Settings);
+}
+```
+
+### Source/MinecraftClone/WorldHeightNoise.h
+```
+// WorldHeightNoise.h
+// Self-contained Perlin-based height sampler for UE5.
+// Feed it world-space X/Y (e.g. from an Actor's location) and it returns a
+// single height value � useful for procedural terrain, placing objects at
+// "ground level" without a physical landscape, foliage scatter, etc.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Kismet/BlueprintFunctionLibrary.h"
+#include "WorldHeightNoise.generated.h"
+
+USTRUCT(BlueprintType)
+struct FWorldHeightNoiseSettings
+{
+	GENERATED_BODY()
+
+	// Random seed. Same seed + same settings = same terrain every time.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Height Noise")
+	int32 Seed = 1337;
+
+	// World units per noise "cell". Bigger = broader, smoother hills.
+	// Smaller = tighter, bumpier terrain. Try 1000-5000 for landscape-scale.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Height Noise", meta = (ClampMin = "0.01"))
+	float Scale = 2000.0f;
+
+	// Number of noise layers summed together. More = finer detail, slower.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Height Noise", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 Octaves = 4;
+
+	// Amplitude falloff per octave. Lower = smoother, higher = rougher/noisier.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Height Noise", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Persistence = 0.5f;
+
+	// Frequency multiplier per octave. 2.0 is the standard choice.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Height Noise", meta = (ClampMin = "1.0"))
+	float Lacunarity = 2.0f;
+
+	// Final output is remapped to [BaseHeight - HeightScale, BaseHeight + HeightScale].
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Height Noise")
+	float HeightScale = 500.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Height Noise")
+	float BaseHeight = 0.0f;
+};
+
+UCLASS()
+class MINECRAFTCLONE_API UWorldHeightNoise : public UBlueprintFunctionLibrary
+{
+	GENERATED_BODY()
+
+public:
+	/**
+	 * Returns a single world-space height (Z) for the given world X/Y,
+	 * remapped into [BaseHeight - HeightScale, BaseHeight + HeightScale].
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Height Noise")
+	static float GetHeightAtWorldLocation(float WorldX, float WorldY, const FWorldHeightNoiseSettings& Settings);
+
+	/** Convenience overload taking a full world location; only X/Y are used. */
+	UFUNCTION(BlueprintCallable, Category = "Height Noise")
+	static float GetHeightAtLocation(const FVector& WorldLocation, const FWorldHeightNoiseSettings& Settings);
+
+private:
+	static float RawPerlin2D(float X, float Y, int32 Seed);
+	static float FractalPerlin2D(float X, float Y, const FWorldHeightNoiseSettings& Settings);
+
+	static float Fade(float T);
+	static float Lerp(float T, float A, float B);
+	static float Grad(int32 Hash, float X, float Y);
+	static void BuildPermutation(int32 Seed, uint8 OutTable[512]);
+};
+```

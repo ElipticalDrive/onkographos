@@ -1,0 +1,175 @@
+# Multi-Level Hashed Grid Construction
+
+Also called: Grid Encoding (Hash Grid), Hash Grid, Hashed grid with macrocells, Multi-Level Hashed Grid, Row Displacement Compressed Grid
+
+## Overview
+Multi-Level Hashed Grid Construction is a method for rapidly building a sparse acceleration structure for volume rendering and ray tracing that combines the memory efficiency of hashed grids with the traversal speed of multi-level structures [S1, S2, unofficial]. It solves the problem of high memory consumption in classic multi-level array grids and the poor traversal performance of one-level hashed grids by using row displacement compression to eliminate empty cells and macrocells to skip large empty regions [S1, unofficial]. Unlike its sibling [Hash Grids](936-hash-grids.md), which uses a single resolution level, this method employs multiple resolutions to balance detail and coverage, and unlike [Voxel World Data Structure](1101-voxel-world-data-structure.md), it avoids storing explicit empty voxels by compressing the grid topology [S1, unofficial].
+
+## How it works
+The method constructs a hierarchical grid structure in two main phases: building the compressed hash table for the finest level and constructing macrocells for coarser levels.
+
+### Inputs and Outputs
+**Inputs:**
+- Scene geometry (e.g., triangles or points).
+- Grid density parameter $\rho$ (empirically 32 for typical scanned scenes) [S1, unofficial].
+- Hash grid parameters: `base_res` (lowest level resolution), `level` (number of levels), `per_level_scales` (scaling factor, typically 1.3195079565048218), `max_params` (max entries per level, $2^{\log_2 T}$), and `numof_hash_feet` (feature dimensions, typically 2) [S2, unofficial].
+- Macrocell downscaling factor (empirically 6) [S1, unofficial].
+
+**Outputs:**
+- A compressed hash table `H` and item list `L` for the finest level [S1, unofficial].
+- Macrocell bit arrays for coarser levels [S1, unofficial].
+- Hash embedding buffer containing feature vectors for all levels [S2, unofficial].
+
+### Data Structures
+
+**1. Offset Array O**
+- Layout: Array of integers.
+- Purpose: Stores computed offsets for rows $(y, z)$ to map 3D coordinates to 1D indices.
+- Size: Depends on grid dimensions $M_y$ (y-dimension) and $M_z$ (z-dimension).
+
+**2. Hash Table H**
+- Layout: Array of machine words (integers).
+- Purpose: Stores item counts (initially) and starting indices for item lists (after prefix sum).
+- Size: $N_H$, determined by the last non-empty bit in the temporary bit array $b_H$ plus one.
+
+**3. Item List L**
+- Layout: Linear array of object indices (integers).
+- Purpose: Stores indices of scene items (e.g., triangles) intersecting each cell.
+- Size: $H[N_H - 1]$. Items for cell $i$ are stored contiguously, indexed by $H[i]$.
+
+**4. Macrocells**
+- Layout: 3D bit array.
+- Purpose: Indicates if a region of space is empty.
+- Construction: Downscaled by a factor of 6 on each extent from the finest grid bitmap [S1, unofficial].
+
+**5. Hash Table Metadata (Multi-Level)**
+- `offsets`: Vector of 16 `int32`, storing cumulative offsets for each level.
+- `hash_map_sizes`: Vector of 16 `uint32`, storing the size of the hash map for each level.
+- `hash_map_indicator`: Vector of 16 `int32`, indicator (1 if resolution$^3 \le$ params\_in\_level, else 0).
+- `hash_embedding`: 1D field of `data_type`, size equal to total parameters across all levels [S2, unofficial].
+
+### Algorithm Steps
+
+#### Phase 1: Finest Level Hashed Grid Construction (Row Displacement Compression)
+
+1.  **Determine Grid Dimensions:** Use Heuristic 1 with density parameter $\rho$ (e.g., 32) to determine the grid dimensions $M_x, M_y, M_z$ [S1, unofficial].
+2.  **Compute Row Offsets:** Calculate offsets for each $(y, z)$ row to compress the 3D grid into a 1D structure.
+    $$o(y, z) = (M_y \times z) + y$$
+    Store these in array `O` [S1, unofficial].
+3.  **Identify Non-Empty Cells:** Iterate through scene items. For each item intersecting cell $i=(x,y,z)$, mark the corresponding bit in a temporary bit array $b_H$ at index $h(x,y,z)$:
+    $$h(x,y,z) = O[(M_y \times z) + y] + x$$
+    [S1, unofficial].
+4.  **Allocate Hash Table H:** Determine $N_H$ as the position of the last non-empty bit in $b_H$ plus one. Allocate `H` of size $N_H$ and initialize to zero [S1, unofficial].
+5.  **Count Items:** For each item intersecting cell $j$, increment `H[j]`. After this pass, `H[j]` contains the count of items in cell $j$ [S1, unofficial].
+6.  **Prefix Sum:** Compute prefix sums to determine starting indices.
+    ```python
+    for i from 1 to N_H:
+        H[i] = H[i] + H[i-1]
+    ```
+    After this, `H[N_H - 1]` holds the total number of items, and `H[j]` points to the end of the item list for cell $j$ [S1, unofficial].
+7.  **Allocate Item List L:** Allocate `L` of size `H[N_H - 1]` [S1, unofficial].
+8.  **Insert Items:** Iterate through items in reverse order (to maintain sorted indices) and insert them into `L`.
+    ```python
+    for i from N_I - 1 down to 0:
+        for each cell j intersected by item i:
+            H[j] = H[j] - 1
+            L[H[j]] = i
+    ```
+    [S1, unofficial].
+
+#### Phase 2: Multi-Level Hash Grid Initialization (Feature Encoding)
+
+1.  **Calculate Level Parameters:** For each level $i$ from 0 to `level` - 1:
+    -   Calculate resolution:
+        $$\text{resolution}_i = \lceil \text{base\_res} \times \exp(i \times \log(\text{per\_level\_scales})) - 1.0 \rceil + 1$$
+    -   Calculate `params_in_level` = $\text{resolution}_i^3$, rounded up to the nearest multiple of 8, capped at `max_params` [S2, unofficial].
+    -   Determine `hash_map_indicator`: 1 if $\text{resolution}_i^3 \le \text{params\_in\_level}$, else 0.
+    -   Accumulate offsets for the embedding buffer [S2, unofficial].
+2.  **Verify Initialization:** Assert that the final accumulated offset equals the shape of the `hash_embedding` array [S2, unofficial].
+
+#### Phase 3: Macrocell Construction
+
+1.  **Create Finest Bitmap:** Generate a 3D bitmap $D$ representing the occupancy of the finest hashed grid cells [S1, unofficial].
+2.  **Downscale:** Downscale $D$ by a factor of 6 on each extent using a quick 3D bitmap scaling operation to create coarser macrocell levels [S1, unofficial].
+3.  **Store Macrocells:** Store the resulting 3D bit arrays for each level. These are used during traversal to skip empty regions [S1, unofficial].
+
+### Pseudocode: Hash Table Initialization (Multi-Level)
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def init_hash_table(base_res, level, per_level_scales, max_params):
+    offsets = [0] * 16
+    hash_map_sizes = [0] * 16
+    hash_map_indicator = [0] * 16
+    
+    current_offset = 0
+    
+    for i in range(level):
+        # Calculate resolution for level i
+        # Note: exp(i * log(s)) is equivalent to s^i
+        scale_factor = per_level_scales ** i
+        resolution = int(math.ceil(base_res * scale_factor - 1.0)) + 1
+        
+        # Calculate params
+        raw_params = resolution ** 3
+        # Round up to nearest multiple of 8
+        if raw_params % 8 != 0:
+            params_in_level = ((raw_params // 8) + 1) * 8
+        else:
+            params_in_level = raw_params
+            
+        # Cap at max_params
+        if params_in_level > max_params:
+            params_in_level = max_params
+            
+        # Indicator
+        if raw_params <= max_params: # Or potentially params_in_level <= max_params depending on exact logic
+             indicator = 1
+        else:
+             indicator = 0
+             
+        hash_map_sizes[i] = params_in_level
+        hash_map_indicator[i] = indicator
+        offsets[i] = current_offset
+        
+        current_offset += params_in_level
+        
+    # Verify
+    assert current_offset == len(hash_embedding)
+    
+    return offsets, hash_map_sizes, hash_map_indicator
+```
+
+### Parameters and Typical Values
+-   **Grid Density ($\rho$):** 32 (for Buddha scene, balances render time and build time) [S1, unofficial].
+-   **per_level_scales:** 1.3195079565048218 [S2, unofficial].
+-   **Macrocell Downscaling Factor:** 6 [S1, unofficial].
+-   **numof_hash_feet:** 2 [S2, unofficial].
+-   **base_res:** Variable, depends on scene scale [S2, unofficial].
+-   **max_params:** $2^{\log_2 T}$ [S2, unofficial].
+
+### Edge Cases and Pitfalls
+-   **Memory Exhaustion:** Non-compressed multi-level array grids can exhaust system memory for large scenes (e.g., Lucy scene), whereas hashed grids reduce memory footprint by roughly one order of magnitude [S1, unofficial].
+-   **Hash Collisions:** The row displacement compression assumes a perfect hash function for static data, avoiding collisions in the compressed structure [S1, unofficial].
+-   **Small Non-Uniform Scenes:** For small scenes with non-uniform density (e.g., Office, Conference), classic adaptive multi-level array grids may outperform this method [S1, unofficial].
+
+## Subtopics
+
+### Multigrid Volume Compression Header Generation
+An algorithm to generate compression headers for a multigrid volume representation. It determines the dominant label and constant subregion status for each node in the hierarchy by analyzing child elements. It initializes a constant flag, iterates through 8 children (skipping those with label `0xFFFFFFFF`), counts label occurrences to find the max label, and updates the constant flag only if all children are constant and share the same label. It writes the max label and constant flag to the output array and updates the LOD start index by adding `current_dim^3` [S3, unofficial].
+
+## Operating characteristics
+-   **Time Complexity:** Linear in the number of scene items $N_I$, except for hash function computation which has a worst-case complexity of $O(M \times 4/3)$, where $M$ is the number of cells in the grid [S1, unofficial].
+-   **Memory Complexity:** Roughly one order of magnitude lower than regular, non-compressed multi-level array grids [S1, unofficial]. Multi-level hashed grids have slightly higher memory consumption than one-level hashed grids due to the macrocell structures [S1, unofficial].
+-   **Performance:** Multi-level hashed grids provide around twice the render time performance of one-level hashed grids for large scanned scenes with many empty cells, due to macrocells [S1, unofficial]. Build times are short and roughly linear with the number of triangles [S1, unofficial].
+-   **Strengths:** Low memory footprint, fast build time, good render performance for large sparse scenes.
+-   **Limitations:** Less effective for small, non-uniform density scenes compared to adaptive array grids [S1, unofficial].
+
+## Background
+The method was introduced to address the limitations of one-level hashed grids (poor render time) and classic multi-level grids (high memory usage) in the context of interactive ray tracing of large scanned models [S1, unofficial]. It builds on row displacement compression techniques [S1, unofficial] and macrocell concepts from Wald et al. (2006) [S1, unofficial]. The multi-level hash grid encoding variant is also used in neural graphics primitives (NGP) for feature encoding [S2, unofficial].
+
+## Sources
+[S1] SCITEPRESS - SCIENCE AND TECHNOLOGY PUBLICATIONS, https://www.scitepress.org/PublishedPapers/2010/28153/, fetched 2026-10-24 (unofficial)
+[S2] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)
+[S3] max-pio/compressed-segmentation-volumes, https://github.com/max-pio/compressed-segmentation-volumes, fetched 2026-10-26 (unofficial)

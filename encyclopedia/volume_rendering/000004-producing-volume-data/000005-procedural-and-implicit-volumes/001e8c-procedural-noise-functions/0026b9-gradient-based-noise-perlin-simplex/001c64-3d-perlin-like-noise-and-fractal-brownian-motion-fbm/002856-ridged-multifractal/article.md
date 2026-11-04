@@ -1,0 +1,121 @@
+# Ridged Multifractal
+
+Also called: Ridged FBM, Ridged Noise, ridgedmf
+
+## Overview
+Ridged Multifractal is a fractal noise technique that generates sharp, ridge-like structures by applying a non-linear transformation to the absolute value of base noise, combined with inter-octave feedback. Unlike standard FBM which produces soft, cloud-like volumes, Ridged Multifractal creates high-contrast linear features suitable for terrain ridges, lightning, or brittle fracture patterns. It builds on [3D Perlin-like Noise and Fractal Brownian Motion (FBM)](1260-3d-perlin-like-noise-and-fractal-brownian-motion-fbm.md) by replacing the linear summation with a ridge-specific kernel and a multiplicative feedback loop.
+
+## How it works
+**Inputs and Outputs**
+- Input: 3D coordinate $p$, number of octaves $N$, frequency multiplier (lacunarity) $L$, amplitude multiplier (gain) $G$, ridge offset $O$, and a base noise function $n(p)$ returning values in $[0, 1]$ or $[-1, 1]$.
+- Output: Scalar field value $V$ representing the ridged structure intensity.
+
+**Data Structures**
+- No complex structures required. Standard floating-point accumulators for sum, frequency, amplitude, and previous octave value.
+
+**Parameters**
+- $O$ (Offset): Controls ridge sharpness. Typical value: $1.0$ [S1, unofficial].
+- $L$ (Lacunarity): Frequency scaling per octave. Typical value: $2.0$ [S1, unofficial].
+- $G$ (Gain): Amplitude scaling per octave. Typical value: $0.5$ [S1, unofficial].
+- $N$ (Octaves): Number of layers. Typical value: $4-6$ [S2].
+
+**Algorithm Steps**
+1. Initialize `sum = 0.0`, `freq = Frequency`, `amp = 0.5`, `prev = 1.0`.
+2. Loop for $i$ from $0$ to $N-1$:
+   a. Compute base noise: $h = n(p \times freq)$.
+   b. Apply ridge transformation:
+      $$h_{abs} = |h|$$
+      $$h_{ridge} = (O - h_{abs})^2$$
+   c. Apply feedback: $n_{oct} = h_{ridge} \times amp \times prev$.
+   d. Accumulate: `sum += n_oct`.
+   e. Update feedback: `prev = h_ridge`.
+   f. Update frequency: `freq *= L`.
+   g. Update amplitude: `amp *= G`.
+3. Return `sum`.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ridged_multifractal(p, octaves, frequency, lacunarity, gain, offset, noise_func):
+    """
+    Computes the Ridged Multifractal value at point p.
+    
+    Args:
+        p: vec3, input coordinate.
+        octaves: int, number of FBM octaves.
+        frequency: float, initial frequency.
+        lacunarity: float, frequency multiplier per octave.
+        gain: float, amplitude multiplier per octave.
+        offset: float, ridge offset parameter (typically 1.0).
+        noise_func: function, returns float in [0, 1] or [-1, 1].
+        
+    Returns:
+        float, the ridged multifractal value.
+    """
+    sum_val = 0.0
+    freq = frequency
+    amp = 0.5  # Initial amplitude, often normalized or set by user
+    prev = 1.0
+    
+    for i in range(octaves):
+        # 1. Get base noise
+        # Note: noise_func should return values suitable for the ridge transform.
+        # If noise_func returns [-1, 1], it is often centered or scaled.
+        # Standard implementation assumes noise output is used directly in |noise|.
+        n = noise_func(p * freq)
+        
+        # 2. Ridge Transformation
+        # Take absolute value to create V-shapes at zero crossings
+        h_abs = abs(n)
+        # Subtract from offset and square to create sharp ridges
+        h_ridge = (offset - h_abs) ** 2
+        
+        # 3. Feedback and Accumulation
+        # Multiply by previous octave's ridge value for feedback
+        octave_val = h_ridge * amp * prev
+        sum_val += octave_val
+        
+        # 4. Update state for next octave
+        prev = h_ridge
+        freq *= lacunarity
+        amp *= gain
+        
+    return sum_val
+```
+
+**Edge Cases and Pitfalls**
+- **Division by Zero**: When using the output for coloring (e.g., `color / max(value, epsilon)`), ensure a minimum epsilon (e.g., $0.05$) is used to prevent division by zero [S2].
+- **Offset Sensitivity**: If $O$ is too small, ridges become too thin or disappear. If $O$ is too large, the structure becomes blobby [S1, unofficial].
+- **Feedback Instability**: High gain values with many octaves can cause the feedback loop to explode or vanish. Gain $0.5$ is stable for most cases [S1, unofficial].
+- **Noise Range**: The ridge formula $(O - |n|)^2$ assumes $n$ is bounded. If $n$ is unbounded, clipping or normalization is required [S2].
+
+## Subtopics
+
+### [Noise Field Generator](1302-noise-field-generator.md)
+Generates structured noise fields; choose when uniform distribution is needed over procedural variation.
+
+### [Global Cloud Cover with Curl Noise](1711-global-cloud-cover-with-curl-noise.md)
+Uses divergence-free noise for fluid-like motion; choose for atmospheric effects.
+
+### [3D Perlin-Worley Noise Texture Generation](2355-3d-perlin-worley-noise-texture-generation.md)
+Combines gradient and distance noise; choose for cellular/ridged hybrid textures.
+
+### [Voxel World Generation with Perlin Noise](2556-voxel-world-generation-with-perlin-noise.md)
+Optimized for voxel grids; choose for discrete terrain generation.
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ per sample, where $N$ is the number of octaves. Each octave requires one noise evaluation and constant-time arithmetic.
+- **Memory Complexity**: $O(1)$ auxiliary space. No large buffers required unless caching noise values.
+- **Performance**: On modern GPUs, Ridged FBM is comparable in cost to standard FBM, but the non-linear operations ($| \cdot |$, squaring) may introduce slight divergence if not vectorized properly [S2].
+- **Strengths**: Produces highly realistic terrain ridges, lightning, and crack patterns with minimal parameters.
+- **Limitations**: Less suitable for soft, volumetric features like clouds or smoke. Sensitive to offset parameter tuning.
+- **When to Use**: Terrain generation, lightning effects, brittle material fractures.
+- **When Not to Use**: Soft volumetric clouds, organic tissue simulation.
+
+## Background
+Ridged Multifractal was introduced as a variant of Fractal Brownian Motion (FBM) to address the need for sharp, linear features in procedural generation. It is widely used in terrain synthesis and visual effects. The technique relies on the absolute value of noise to create V-shaped ridges at zero crossings, distinguishing it from standard FBM which produces soft, isotropic noise [S2]. The feedback mechanism, where the output of one octave influences the amplitude of the next, enhances the structural coherence of the ridges [S1, unofficial].
+
+## Sources
+[S1] Scrawk/Marching-Cubes-On-The-GPU, https://github.com/Scrawk/Marching-Cubes-On-The-GPU, fetched 2026-10-26 (unofficial)
+[S2] skills/skills/shader-dev/techniques/procedural-noise.md at main ..., https://github.com/MiniMax-AI/skills/blob/main/skills/shader-dev/techniques/procedural-noise.md, fetched 2026-10-27

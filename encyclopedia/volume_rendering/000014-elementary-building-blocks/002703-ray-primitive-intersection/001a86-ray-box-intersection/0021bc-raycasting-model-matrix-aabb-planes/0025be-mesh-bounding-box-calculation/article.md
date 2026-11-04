@@ -1,0 +1,131 @@
+# Mesh Bounding Box Calculation
+
+Also called: axis-aligned bounding box, min-max vertex bounds
+
+## Overview
+Computes the axis-aligned bounding box (AABB) of a mesh by determining the minimum and maximum coordinates across all vertex positions [S1, unofficial]. It provides the foundational spatial extent for explicit geometry, serving as the input for subsequent ray-box intersection tests in raycasting [Parent](2607-raycasting-model-matrix-aabb-planes.md). Unlike methods operating on implicit point clouds or sample sets, this method specifically targets the vertex coordinates of explicit triangular or polygonal meshes [S1, unofficial].
+
+## How it works
+**Inputs:** A list of 3D vertices $V = \{v_0, v_1, \dots, v_{n-1}\}$, where each vertex $v_i$ has coordinates $(x_i, y_i, z_i)$.
+**Outputs:** An AABB defined by two 3D vectors: `min` ($mn$) and `max` ($mx$).
+
+**Data Structures:**
+*   `Vec3`: A structure containing three floating-point components (e.g., `x`, `y`, `z` or an array `m_pos[3]`).
+*   `mn`, `mx`: `Vec3` instances initialized to the bounds.
+
+**Steps:**
+1.  **Validation:** Check if the vertex list $V$ is empty. If empty, the method is undefined for this overload [S1, unofficial].
+2.  **Initialization:** Set `mn` and `mx` to the coordinates of the first vertex $v_0$.
+    $$ mn = v_0, \quad mx = v_0 $$
+3.  **Iteration:** For each vertex $v_i$ in $V$ where $i$ ranges from $1$ to $n-1$:
+    For each dimension $d \in \{0, 1, 2\}$ (representing X, Y, Z):
+    $$ mn[d] = \min(v_i[d], mn[d]) $$
+    $$ mx[d] = \max(v_i[d], mx[d]) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_mesh_aabb(vertices):
+    """
+    Computes the AABB for a list of 3D vertices.
+    vertices: List of tuples or objects with x, y, z attributes.
+    Returns: (min_vec, max_vec)
+    """
+    if not vertices:
+        raise ValueError("Empty vertex list causes undefined behavior")
+    
+    # Initialize min and max with the first vertex
+    first = vertices[0]
+    mn = [first.x, first.y, first.z]
+    mx = [first.x, first.y, first.z]
+    
+    # Iterate through remaining vertices
+    for i in range(1, len(vertices)):
+        v = vertices[i]
+        # Update min and max for each dimension
+        if v.x < mn[0]: mn[0] = v.x
+        if v.x > mx[0]: mx[0] = v.x
+        
+        if v.y < mn[1]: mn[1] = v.y
+        if v.y > mx[1]: mx[1] = v.y
+        
+        if v.z < mn[2]: mn[2] = v.z
+        if v.z > mx[2]: mx[2] = v.z
+        
+    return mn, mx
+```
+
+**Parameters:**
+*   `EPSILON`: A small constant (e.g., $10^{-9}$) sometimes used in related precision contexts, though not explicitly applied in the basic min/max loop [S1, unofficial].
+*   `precision_type`: Can be `float` or `double` [S1, unofficial].
+
+**Edge Cases:**
+*   **Empty Input:** Accessing `v[0]` on an empty list causes undefined behavior [S1, unofficial].
+*   **Degenerate Geometry:** The method works correctly for degenerate meshes (single point, line, or coplanar vertices) as it strictly computes the extent of the provided coordinates.
+
+## Subtopics
+
+### Bounding Cube Creation
+Creates a cubic bounding box (AABox) by expanding the minimum bounding box dimensions to be equal in all axes, padding equally on both sides [S2, unofficial].
+*   **Definition:** Converts an arbitrary AABB into a cube centered at the same centroid.
+*   **Steps:**
+    1.  Get the mesh's bounding box `min` and `max`.
+    2.  Calculate axis lengths: $L_x = max_x - min_x$, $L_y = max_y - min_y$, $L_z = max_z - min_z$.
+    3.  Find the maximum length $L_{max} = \max(L_x, L_y, L_z)$.
+    4.  For each axis $i$, calculate delta: $\delta_i = L_{max} - L_i$.
+    5.  Adjust bounds: $min_i = min_i - \delta_i / 2$, $max_i = max_i + \delta_i / 2$.
+*   **When to choose:** When a uniform spatial resolution or cubic voxelization grid is required, ensuring no axis is smaller than the largest dimension of the object [S2, unofficial].
+*   **Link:** [Bounding Cube Creation](3612-mesh-bounding-box-calculation.md#bounding-cube-creation)
+
+### Character Bounding Box Initialization
+Initializes positions of specific character primitives (S, A, N, G) and arcs, computing a surrounding bounding box to optimize sphere tracing queries [S3, unofficial].
+*   **Definition:** A specialized bounding box calculation for signed distance field (SDF) character rendering.
+*   **Steps:**
+    1.  Define primitives (arcs for 'S', vertices for 'A', 'N', 'G').
+    2.  Compute global min/max x, y, z of all primitives.
+    3.  Apply an offset (default $0.1$) to the bounds to avoid missing points too close to the letters.
+    4.  Create `surrounding_bbox` with these coordinates.
+*   **When to choose:** Specifically for SDF-based text rendering where tight bounds improve ray marching efficiency [S3, unofficial].
+*   **Link:** [Character Bounding Box Initialization](3612-mesh-bounding-box-calculation.md#character-bounding-box-initialization)
+
+### AABB Vertex Coordinate Encoding
+Determines the coordinates of any of the 8 vertices of an AABB using a vertex index (0-7) and bit manipulation, avoiding floating-point arithmetic for coordinate selection [S4, unofficial].
+*   **Definition:** A lookup method for AABB corners based on binary encoding.
+*   **Steps:**
+    1.  The AABB has 8 vertices.
+    2.  Bit 0 of the index corresponds to X, Bit 1 to Y, Bit 2 to Z.
+    3.  If the bit is 0, the coordinate is `min`; if 1, it is `max`.
+    4.  Extract coordinates using bit masking:
+        $$ x = aabb.x\_minmax[(i \& 1) >> 0] $$
+        $$ y = aabb.y\_minmax[(i \& 2) >> 1] $$
+        $$ z = aabb.z\_minmax[(i \& 4) >> 2] $$
+*   **When to choose:** When iterating over AABB corners for plane intersection tests or collision detection where floating-point branching is undesirable [S4, unofficial].
+*   **Link:** [AABB Vertex Coordinate Encoding](3612-mesh-bounding-box-calculation.md#aabb-vertex-coordinate-encoding)
+
+### AABB Enclosure (Union)
+Computes the AABB enclosing two input AABBs by taking the component-wise minimum of their mins and maximum of their maxs [S4, unofficial].
+*   **Definition:** Merging two spatial bounds into one.
+*   **Steps:**
+    1.  Given $b_0$ and $b_1$.
+    2.  $new\_min = \min(b_0.min, b_1.min)$
+    3.  $new\_max = \max(b_0.max, b_1.max)$
+*   **When to choose:** When combining multiple objects or sub-grids into a single parent bounding volume [S4, unofficial].
+*   **Link:** [AABB Enclosure (Union)](3612-mesh-bounding-box-calculation.md#aabb-enclosure-union)
+
+## Operating characteristics
+*   **Time Complexity:** $O(n)$, where $n$ is the number of vertices. Each vertex is visited exactly once.
+*   **Memory Complexity:** $O(1)$ auxiliary space (excluding the input vertex list). Only two `Vec3` structures are maintained.
+*   **Strengths:** Extremely fast, cache-friendly, and numerically stable for standard floating-point ranges.
+*   **Limitations:** Does not account for mesh normals or implicit surfaces; only bounds the explicit vertex positions. Empty inputs cause crashes in the basic implementation [S1, unofficial].
+*   **When to use:** As a first-pass culling step in raycasting or rasterization.
+*   **When not to use:** When tighter bounds are required (e.g., oriented bounding boxes) or when the mesh has no vertices (e.g., pure implicit volume).
+
+## Background
+The method is a fundamental primitive in computer graphics, often referred to as computing "min-max vertex bounds" [S1, unofficial]. It is widely used in voxelization pipelines to determine the grid extent for sparse voxel DAGs [S2, unofficial] and in raycasting models to define the initial search volume [Parent](2607-raycasting-model-matrix-aabb-planes.md). The specific implementation details, such as the empty-list pitfall, are documented in community-maintained voxelizer repositories [S1, unofficial]. The bit-manipulation trick for vertex encoding is a known optimization in low-level graphics programming [S4, unofficial].
+
+## Sources
+[S1] kctess5/voxelizer, https://github.com/kctess5/voxelizer, fetched 2026-10-26 (unofficial)
+[S2] prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs, https://github.com/prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs, fetched 2026-10-26 (unofficial)
+[S3] AlerianEmperor/SDF-Sphere-Tracing, https://github.com/AlerianEmperor/SDF-Sphere-Tracing, fetched 2026-10-26 (unofficial)
+[S4] A Couple 3D AABB Tricks, https://gpfault.net/posts/aabb-tricks.html, fetched 2026-10-29 (unofficial)

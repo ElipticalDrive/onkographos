@@ -1,0 +1,232 @@
+# Grid-based Density Sampling with Blue Noise
+
+Also called: Blue Noise Stratified Sampling, Blue Noise Voxel Sampling
+
+## Overview
+A method to sample points from a 3D grid density field using stratified sampling guided by blue noise to reduce aliasing and ensure uniform distribution [S1, unofficial]. It differs from sibling methods like [Coarse-to-Fine SDF Sampling](3495-coarse-to-fine-sdf-sampling-for-mesh-creation.md) by explicitly constructing a probability distribution over a voxel grid and sampling indices via multinomial distribution, rather than refining a mesh or point cloud through geometric proximity.
+
+## How it works
+**Inputs:**
+- `resolution`: Tuple of 3 integers $(R_x, R_y, R_z)$ defining the grid dimensions.
+- `bottom`: Tensor of shape $(3,)$ defining the minimum corner of the voxel space.
+- `size`: Tensor of shape $(3,)$ defining the total extent of the voxel space.
+- `density`: Tensor of shape $(R_x, R_y, R_z)$ containing non-negative density values for each voxel.
+- `num_points`: Integer, the number of sample points to generate.
+- `bn`: A `BlueNoise` instance providing pre-computed blue noise patterns.
+
+**Outputs:**
+- `points`: Tensor of shape $(N, 3)$ containing the sampled 3D coordinates.
+- `voxel_indices`: Tensor of shape $(M, 3)$ containing the unique 3D voxel indices containing the sampled points.
+
+**Data Structures:**
+- `Grid`: A class holding the state.
+  - `resolution`: `tuple[int, int, int]`
+  - `bottom`: `torch.Tensor` shape $(3,)$
+  - `size`: `torch.Tensor` shape $(3,)$
+  - `density`: `torch.Tensor` shape $(R_x, R_y, R_z)$
+  - `bn`: `BlueNoise` instance
+
+**Steps:**
+
+1. **Compute Voxel Centers:**
+   Calculate the voxel size vector:
+   $$ v_{size} = \frac{size}{resolution} $$
+   For each voxel index $(i, j, k)$ where $0 \le i < R_x$, $0 \le j < R_y$, $0 \le k < R_z$, compute the center:
+   $$ c_{ijk} = bottom + v_{size} \cdot (i + 0.5, j + 0.5, k + 0.5) $$
+
+2. **Normalize Density to Frequencies:**
+   Clone the density tensor. Set all values $\le 0$ to $0$. Sum all values in the tensor to get $S$. Divide each value by $S$ to obtain the probability distribution $P$:
+   $$ P_{ijk} = \frac{\max(D_{ijk}, 0)}{\sum_{all} \max(D_{uv}, 0)} $$
+
+3. **Sample Voxel Indices:**
+   Flatten $P$ into a 1D tensor of size $R_x R_y R_z$. Use `torch.multinomial` with replacement=True to draw `num_points` indices from this distribution. Map these linear indices back to 3D coordinates $(i, j, k)$ if necessary, or keep as linear indices for lookup.
+
+4. **Generate Sample Points:**
+   For each sampled voxel index, retrieve its center $c_{ijk}$. Add a small random epsilon to break ties and avoid boundary issues:
+   $$ p = c_{ijk} + \epsilon, \quad \epsilon \sim \text{Uniform}(0, 10^{-6}) \text{ per dimension} $$
+   *Note: The source code adds `torch.rand(points.shape[0], 3) * 1e-6` to the final points.*
+
+5. **Find Containing Voxels:**
+   For the generated points $p$, compute the voxel index:
+   $$ idx = \lfloor \frac{p - bottom}{v_{size}} \rfloor $$
+   Filter indices to ensure they are within $[0, resolution-1]$ for each dimension. Return the unique 3D indices.
+
+6. **Mask Density (Optional/Contextual):**
+   If masking is required (e.g., for functional density sampling), flatten the density tensor. Compute linear indices from the 3D voxel indices. Create a zero tensor of the same shape as density. Set values at the linear indices to the original density values. Reshape back.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+
+class Grid:
+    def __init__(self, resolution, bottom, size, density, bn):
+        self.resolution = resolution
+        self.bottom = torch.tensor(bottom, dtype=torch.float32)
+        self.size = torch.tensor(size, dtype=torch.float32)
+        self.density = torch.tensor(density, dtype=torch.float32)
+        self.bn = bn
+
+    def sample_points(self, num_points):
+        # 1. Compute voxel size
+        voxel_size = self.size / torch.tensor(self.resolution, dtype=torch.float32)
+        
+        # 2. Normalize density
+        density_cloned = self.density.clone()
+        density_cloned = torch.clamp(density_cloned, min=0.0)
+        total_sum = torch.sum(density_cloned)
+        if total_sum == 0:
+            # Fallback to uniform if all densities are zero
+            probs = torch.ones_like(density_cloned) / density_cloned.numel()
+        else:
+            probs = density_cloned / total_sum
+            
+        # Flatten probabilities
+        probs_flat = probs.view(-1)
+        
+        # 3. Sample voxel indices using multinomial
+        # torch.multinomial expects probabilities, replacement=True
+        sampled_indices = torch.multinomial(probs_flat, num_points, replacement=True)
+        
+        # Convert linear indices to 3D coordinates
+        # Assuming row-major (C-style) flattening
+        z = sampled_indices // (self.resolution[0] * self.resolution[1])
+        remainder = sampled_indices % (self.resolution[0] * self.resolution[1])
+        y = remainder // self.resolution[0]
+        x = remainder % self.resolution[0]
+        
+        voxel_indices_3d = torch.stack([x, y, z], dim=1).to(torch.float32)
+        
+        # 4. Compute centers and add epsilon
+        # Center = bottom + voxel_size * (index + 0.5)
+        centers = self.bottom + voxel_size * (voxel_indices_3d + 0.5)
+        
+        # Add small random epsilon
+        epsilon = torch.rand_like(centers) * 1e-6
+        points = centers + epsilon
+        
+        return points, voxel_indices_3d
+
+    def find_containing_voxels(self, points):
+        # 5. Find containing voxels
+        # idx = floor((points - bottom) / voxel_size)
+        voxel_size = self.size / torch.tensor(self.resolution, dtype=torch.float32)
+        indices = torch.floor((points - self.bottom) / voxel_size)
+        
+        # Filter indices to be within [0, resolution-1]
+        mask = (indices >= 0).all(dim=1) & (indices < torch.tensor(self.resolution, dtype=torch.float32)).all(dim=1)
+        valid_indices = indices[mask]
+        
+        # Return unique 3D indices
+        unique_indices, _ = torch.unique(valid_indices, dim=0, return_inverse=False)
+        return unique_indices
+
+    def mask_density(self, voxel_indices_3d):
+        # 6. Mask density for containing voxels
+        density_flat = self.density.view(-1)
+        
+        # Compute linear indices from 3D indices
+        # Linear index = x + y * Rx + z * Rx * Ry
+        x = voxel_indices_3d[:, 0].long()
+        y = voxel_indices_3d[:, 1].long()
+        z = voxel_indices_3d[:, 2].long()
+        Rx, Ry, Rz = self.resolution
+        
+        linear_indices = x + y * Rx + z * (Rx * Ry)
+        
+        # Create zero tensor
+        masked_density_flat = torch.zeros_like(density_flat)
+        
+        # Set values at linear indices to original density values
+        # Use scatter_ to handle duplicates if any (though unique_indices should prevent this)
+        masked_density_flat.scatter_(0, linear_indices, self.density.view(-1)[linear_indices])
+        
+        # Reshape back
+        masked_density = masked_density_flat.view(self.density.shape)
+        return masked_density
+
+class BlueNoise:
+    def __init__(self, npz_path, device='cpu'):
+        self.device = device
+        self.noise_levels = []
+        # Load npz file
+        data = np.load(npz_path)
+        for key in sorted(data.files):
+            # Normalize to [-1, 1] range as per source
+            noise = (torch.tensor(data[key], dtype=torch.float32, device=device) - 0.5) * 2.0
+            self.noise_levels.append(noise)
+
+    def aggregate_noise(self, level):
+        """
+        Returns blue noise at a specified level. Level must be a positive integer. No effect after level 6.
+        Amount of points is:
+        - Level 0: 32
+        - Level 1: 140
+        - Level 2: 505
+        - Level 3: 1738
+        - Level 4: 5898
+        - Level 5: 19938
+        - Level 6: 67323
+        """
+        if level < 0:
+            level = 0
+        if level > 6:
+            level = 6
+        return torch.cat(self.noise_levels[:level+1], dim=0)
+
+    def aggregate_randomized_targeted_noise(self, nb_points):
+        if nb_points <= 32:
+            random_points_indx = torch.randperm(32, device=self.device)[:nb_points]
+            return self.aggregate_noise(0)[random_points_indx]
+        elif nb_points <= 140:
+            random_points_indx = torch.randperm(140, device=self.device)[:nb_points]
+            return self.aggregate_noise(1)[random_points_indx]
+        elif nb_points <= 505:
+            random_points_indx = torch.randperm(505, device=self.device)[:nb_points]
+            return self.aggregate_noise(2)[random_points_indx]
+        elif nb_points <= 1738:
+            random_points_indx = torch.randperm(1738, device=self.device)[:nb_points]
+            return self.aggregate_noise(3)[random_points_indx]
+        elif nb_points <= 5898:
+            random_points_indx = torch.randperm(5898, device=self.device)[:nb_points]
+            return self.aggregate_noise(4)[random_points_indx]
+        elif nb_points <= 19938:
+            random_points_indx = torch.randperm(19938, device=self.device)[:nb_points]
+            return self.aggregate_noise(5)[random_points_indx]
+        else:
+            random_points_indx = torch.randperm(67323, device=self.device)[:nb_points]
+            return self.aggregate_noise(6)[random_points_indx]
+```
+
+**Parameters:**
+- `resolution`: Typical values depend on scene complexity. The source uses 32 for the grid in functional sampling.
+- `epsilon`: $10^{-6}$ is used to perturb points slightly from voxel centers.
+- `BlueNoise Levels`: Pre-computed noise patterns are aggregated up to level 6, supporting up to 67,323 points.
+
+**Edge Cases and Pitfalls:**
+- **Zero Density:** If the sum of density is zero, `torch.multinomial` will fail or produce uniform noise. The pseudocode handles this by falling back to uniform probabilities.
+- **Boundary Conditions:** Points sampled near the boundary might fall outside the grid if not clamped. The `find_containing_voxels` step filters indices to $[0, resolution-1]$.
+- **Precision:** Using `float32` is standard. The epsilon addition helps avoid exact integer boundary issues in `floor` operations.
+
+## Subtopics
+
+### Functional Density Sampling for Mesh Points
+Samples new points based on a functional density defined over a grid, masks the grid density for voxels containing mesh vertices, and aggregates the new points' SDF values [S1, unofficial]. It determines resampling parameters via `resample_point_method(sdf, tets, x_nx3, method=resampled_points_method)` to get `nb_resampled_points` and `neighbor_active_points_mask`. If `nb_resampled_points` is 0, it returns early. It creates a grid (e.g., resolution 32, bounds -1.0 to 2.0), populates it with density from a function applied to voxel centers, and masks this density using the voxels containing `kal_mesh.vertices`. It then samples new points using `grid.sample_points(nb_resampled_points)` and aggregates them with existing points using `aggregation(updated_x_nx3, neighbor_active_points_mask, x_nx3, sdf, tets, features=features, method=aggregation_method)`.
+
+## Operating characteristics
+- **Time Complexity:** Sampling is dominated by `torch.multinomial`, which is $O(N \log M)$ or $O(N)$ depending on implementation, where $N$ is `num_points` and $M$ is the number of voxels ($R_x R_y R_z$). Finding containing voxels is $O(N)$.
+- **Memory Complexity:** $O(M)$ for the density grid and $O(N)$ for the output points.
+- **Performance:** The source reports optimization with 32K points taking less than 4 minutes on an RTX 3090 GPU [S1, unofficial].
+- **Strengths:** Reduces aliasing through blue noise guidance. Ensures uniform distribution according to the density field.
+- **Limitations:** Requires a pre-computed density grid. Resolution of the grid limits the detail of the sampling distribution.
+- **When to use:** When you need to sample points from a volumetric density field with minimal aliasing, particularly for SDF evaluation or mesh reconstruction.
+- **When not to use:** When the density field is sparse or irregular, or when higher precision is needed than the grid resolution allows.
+
+## Background
+Originated in the TetWeave project by Alexandre Binninger [S1, unofficial]. TetWeave represents shapes as a point cloud with SDF values and optional spherical harmonics coefficients, reconstructing meshes via Delaunay tetrahedralization and Marching Tetrahedra [S1, unofficial]. The method is used in the optimization pipeline to resample points based on functional density, aiding in the reconstruction of shapes from rendered targets [S1, unofficial].
+
+## Sources
+[S1] AlexandreBinninger/TetWeave, https://github.com/AlexandreBinninger/TetWeave, fetched 2026-10-27 (unofficial)

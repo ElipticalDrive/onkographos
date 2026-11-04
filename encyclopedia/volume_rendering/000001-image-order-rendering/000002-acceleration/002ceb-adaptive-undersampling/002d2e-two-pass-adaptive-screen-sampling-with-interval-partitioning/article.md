@@ -1,0 +1,184 @@
+# Two-pass Adaptive Screen Sampling with Interval Partitioning
+
+Also called: Two-pass Adaptive Undersampling with Interval Partitioning, Two-pass adaptive screen sampling plus partitioning the interval of integration into M pieces
+
+## Overview
+This method accelerates volume integral calculation by partitioning the ray integration interval into $M$ equal pieces and using a second pass to interpolate or recompute integrals for pixels based on neighborhood coherence [S1]. It builds on [Adaptive Undersampling](5397-adaptive-undersampling.md) by increasing the undersampling factor through interval partitioning, allowing pixels to reuse integral data from neighbors rather than integrating over the entire ray [S1]. Unlike standard adaptive undersampling, it explicitly manages the granularity of integration steps to balance interpolation accuracy against recomputation cost [S1].
+
+## How it works
+**Inputs:** 3D volume texture (normalized to unit cube), transfer function, ray origin $s$, ray direction $r$, maximum intervals $M$, color difference threshold $\delta$.
+**Outputs:** Final pixel color $C$.
+
+**Data Structures:**
+*   **G-buffer ($G$):** Stores integration results per pixel.
+    *   $G[0].rgb$: Final pixel color.
+    *   $G[0].a$: Distance to the start of the volume (transparency entry point).
+    *   $G[i]$ for $i > 0$: Intermediate integral results for the $i$-th interval, storing `rgb` (accumulated color contribution) and `a` (accumulated alpha contribution).
+    *   Size: $M+1$ elements per pixel. In practice, limited by hardware G-buffer size (e.g., 8 elements on GTX 780 Ti) [S1].
+
+**Parameters:**
+*   $M$: User-selected maximum number of intervals. Typical value: 8 [S1].
+*   $\delta$: Threshold for color difference to determine if bilinear interpolation is sufficient. Typical value: 0.05 [S1].
+
+**Algorithm Steps:**
+
+1.  **Pass 1 (Coarse Sampling):**
+    *   For a subset of pixels (e.g., one per $n \times n$ block), calculate the volume integral over $M$ equal-length intervals.
+    *   Initialize step size: $step = \sqrt{3} / M$. The factor $\sqrt{3}$ accounts for the maximum ray length in the unit cube texture space [S1].
+    *   Calculate maximum number of full steps: $imax = \lfloor length(f - s) / step \rfloor$, where $f$ is the far plane intersection [S1].
+    *   Calculate length of the last partial interval: $lastStep = length(f - s) - step \times imax$ [S1].
+    *   Normalize ray direction: $r = normalize(f - s)$ [S1].
+    *   Find entry point: $v = s + G[0].a \cdot r$, where $G[0].a = GetDistanceForStart(s, f)$ [S1].
+    *   Initialize accumulators: $C = 0$, $A = 0$ [S1].
+    *   Loop $i$ from 0 to $imax$:
+        *   Compute interval integral: $G[i+1] = VolumeIntegral(v, step)$ [S1].
+        *   Update color: $C = C + (1 - A) \cdot G[i+1].rgb \times G[i+1].a$ [S1].
+        *   Update alpha: $A = A + (1 - A) \cdot G[i+1].a$ [S1].
+        *   Advance ray: $v = v + step \cdot r$ [S1].
+    *   Handle last shorter interval if $A < 1$:
+        *   Compute $G[imax+2] = VolumeIntegral(v, lastStep)$ [S1].
+        *   Update $C$ and $A$ using the same recurrence relations [S1].
+    *   Store final color: $G[0].rgb = C$ [S1].
+
+2.  **Pass 2 (Refinement/Interpolation):**
+    *   For pixels not processed in Pass 1 (or requiring refinement), check neighborhood coherence using the four neighboring pixels' G-buffer data ($G_i$, $i \in [0,3]$) [S1].
+    *   **Optimization:** Accelerate start point calculation by casting the ray from $s + r \cdot \min\{G_i[0].a\}$ instead of $s$, using the minimum start distance from the 4 neighboring pixels [S1].
+    *   Check coherence: If $\max_{neighbors} |Color_i - Color_{current}| < \delta$, use bilinear interpolation of neighbor colors for $G[0].rgb$ [S1].
+    *   If coherence is insufficient, compute integrals for $M$ intervals:
+        *   Initialize $C=0, A=0, v$ (using optimized start) [S1].
+        *   Loop $k$ from 1 to $M$:
+            *   Check neighbor interval coherence: If neighbor color differences for interval $k$ are $< \delta/M$, interpolate [S1].
+            *   Else, compute integral $I = VolumeIntegral(v, step)$ (or $lastStep$ if $k=M$) [S1].
+            *   Update $C$ and $A$ using recurrence relations [S1].
+            *   Advance $v$ [S1].
+    *   Store final result in $G[0].rgb$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pass1(pixel, volume, tf, s, f, M, delta):
+    # Calculate distance to volume entry
+    dist_start = get_distance_for_start(s, f)
+    if dist_start <= 0:
+        return background_color
+    
+    # Initialize G-buffer
+    G = [None] * (M + 2)
+    G[0] = {'rgb': 0.0, 'a': dist_start}
+    
+    # Setup ray parameters
+    ray_len = length(f - s)
+    step = sqrt(3) / M
+    imax = floor(ray_len / step)
+    last_step = ray_len - step * imax
+    r = normalize(f - s)
+    
+    # Start inside volume
+    v = s + dist_start * r
+    
+    C = 0.0
+    A = 0.0
+    
+    # Integrate over M intervals
+    for i in range(imax):
+        # VolumeIntegral returns {'rgb': color_contrib, 'a': alpha_contrib}
+        interval_result = volume_integral(v, step, volume, tf)
+        
+        # Update color and alpha
+        C = C + (1 - A) * interval_result['rgb'] * interval_result['a']
+        A = A + (1 - A) * interval_result['a']
+        
+        # Store intermediate result
+        G[i + 1] = interval_result
+        
+        # Advance ray
+        v = v + step * r
+    
+    # Handle last shorter interval if ray hasn't terminated
+    if A < 1.0:
+        interval_result = volume_integral(v, last_step, volume, tf)
+        C = C + (1 - A) * interval_result['rgb'] * interval_result['a']
+        A = A + (1 - A) * interval_result['a']
+        G[imax + 2] = interval_result
+        
+    G[0]['rgb'] = C
+    return G
+
+def pass2(pixel, neighbors_G, volume, tf, s, f, M, delta):
+    # Get neighbor colors
+    neighbor_colors = [n[0]['rgb'] for n in neighbors_G]
+    
+    # Check coherence for full interpolation
+    max_diff = max(abs(c - pixel.current_color_estimate) for c in neighbor_colors)
+    
+    if max_diff < delta:
+        # Bilinear interpolation of neighbor colors
+        return bilinear_interpolate(neighbor_colors)
+    
+    # Recompute integrals with optimized start
+    # Find min start distance among neighbors
+    min_start_dist = min(n[0]['a'] for n in neighbors_G)
+    
+    ray_len = length(f - s)
+    step = sqrt(3) / M
+    imax = floor(ray_len / step)
+    last_step = ray_len - step * imax
+    r = normalize(f - s)
+    
+    # Optimized start point
+    v = s + r * min_start_dist
+    
+    C = 0.0
+    A = 0.0
+    
+    for k in range(1, M + 1):
+        # Check interval-specific coherence
+        # Note: Source implies checking neighbor color differences for the specific interval
+        # If < delta/M, interpolate. Else compute.
+        # Simplified logic based on source description:
+        interval_coherent = True # Placeholder for specific interval check logic
+        if not interval_coherent:
+            current_step = last_step if k == M else step
+            interval_result = volume_integral(v, current_step, volume, tf)
+            
+            C = C + (1 - A) * interval_result['rgb'] * interval_result['a']
+            A = A + (1 - A) * interval_result['a']
+            
+            v = v + current_step
+        else:
+            # Interpolate interval contribution from neighbors
+            # Implementation detail: Source does not specify exact interpolation formula for intervals
+            # Assuming linear interpolation of interval results from neighbors
+            neighbor_interval_results = [n[k] for n in neighbors_G if n[k] is not None]
+            if neighbor_interval_results:
+                avg_interval = average(neighbor_interval_results)
+                C = C + (1 - A) * avg_interval['rgb'] * avg_interval['a']
+                A = A + (1 - A) * avg_interval['a']
+                
+    return C
+```
+
+**Edge Cases and Pitfalls:**
+*   **High/Low Coherence:** Performance decreases if data has high coherence (many pixels interpolated, less benefit from partitioning) or low coherence (many pixels require full recomputation) [S1]. Optimal performance is at medium coherence [S1].
+*   **Early Ray Termination:** If a significant number of rays end early (e.g., bones), acceleration factor decreases because intervals are short and harder to partition [S1].
+*   **G-buffer Limits:** Hardware limits the number of G-buffer elements. On GTX 780 Ti, max is 8, limiting $M$ to 8 unless components are packed [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Reduces the number of full volume integrations by leveraging interpolation and interval partitioning. Average FPS increase by a factor of 1.5 compared to standard adaptive undersampling [S1]. Further acceleration of 1.6-2.1x over two-pass adaptive screen sampling without interval partitioning [S1].
+*   **Memory Complexity:** Requires a G-buffer of size $M+1$ per sampled pixel. Limited by hardware G-buffer size (e.g., 8 elements) [S1].
+*   **Measured Performance:** On a 3.4GHz Intel Core i7 2600, 4.0GB RAM, NVidia GForce GTX 780 Ti, resolution 1200x900, dataset 256x256x256:
+    *   Standard Adaptive Undersampling (A): 32 FPS [S1].
+    *   Two-pass Adaptive Screen Sampling (B): 72 FPS [S1].
+    *   Proposed Method (C): 118 FPS [S1].
+    *   Acceleration C/A = 3.69, C/B = 1.64 [S1].
+*   **Scaling:** Increasing $M$ from 8 to 16 (by storing two integrals in one G-buffer element) increases performance by ~21% on average, but further increases are considered ineffective [S1].
+*   **Strengths:** Effective for spatially coherent data with transfer functions that exclude early ray termination [S1].
+*   **Limitations:** Performance degrades with high coherence (less gain) or low coherence (more recomputation). Less effective for data with significant early ray termination (e.g., bones) [S1].
+
+## Background
+The method was proposed in "Fast Adaptive Undersampling for Volume Rendering" (2019) [S1]. It was implemented in Unity3D using OpenGL ES 3.1 [S1]. The approach extends previous work on two-pass adaptive screen sampling by introducing interval partitioning to better manage the trade-off between interpolation accuracy and computational cost [S1].
+
+## Sources
+[S1] Fast Adaptive Undersampling for Volume Rendering, http://wscg.zcu.cz/wscg2019/Full/A37-full.PDF, fetched 2026-10-27

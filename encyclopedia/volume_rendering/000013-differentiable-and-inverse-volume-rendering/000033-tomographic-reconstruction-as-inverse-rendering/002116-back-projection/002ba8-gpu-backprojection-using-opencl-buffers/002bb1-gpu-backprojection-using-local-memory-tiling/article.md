@@ -1,0 +1,114 @@
+# GPU Backprojection using Local-Memory Tiling
+
+Also called: GPU Backprojection with Local Memory Tiling, GPU-Local
+
+## Overview
+A GPU-accelerated tomographic reconstruction variant that optimizes memory access patterns by tiling the Z-axis reconstruction loop using OpenCL local memory [S1, unofficial]. It reduces global memory bandwidth pressure by reusing projection data across threads within a work-group, distinguishing it from the parent [GPU Backprojection using OpenCL Buffers](5110-gpu-backprojection-using-opencl-buffers.md) which relies solely on global memory buffers for projection storage.
+
+## How it works
+**Inputs:**
+- `projections`: `std::vector<float>` of size $P \times W \times H$.
+- `P`: Number of projections.
+- `W`, `H`: Detector width and height in pixels.
+- `NX`, `NY`: Volume dimensions ($NX \times NX \times NY$).
+- `voxelSize`: Voxel size in mm.
+- `pixelSize`: Pixel size in mm.
+- `sdd`: Source-to-detector distance in mm.
+- `sod`: Source-to-object distance in mm.
+
+**Outputs:**
+- `std::vector<float>` representing the reconstructed volume of size $NX \times NX \times NY$.
+
+**Data Structures:**
+- **Volume Buffer**: Global memory buffer of size $NX \times NX \times NY$ floats, initialized to zero.
+- **Projection Buffer**: Global memory buffer containing pre-filtered projections.
+- **Local Memory Buffers**: Two local memory buffers (`col0`, `col1`) of size $H$ floats each, used to cache projection columns for interpolation.
+
+**Parameters:**
+- `TILE_Z`: Tile size along the Z-axis, defined as 64 [S1, unofficial].
+- **Local Memory Requirement**: $2 \times H \times \text{sizeof(float)}$ bytes [S1, unofficial].
+
+**Steps:**
+1. **Pre-filtering**: Apply the FDK pre-filter (ramp filter and cosine weighting) on the CPU using `applyFDKPreFilter` before GPU execution [S1, unofficial].
+2. **Device Check**: Check the device's local memory size. If insufficient, print an info message but proceed (no explicit fallback) [S1, unofficial].
+3. **Kernel Loading**: Load the kernel source from `kernels/backprojection_local.cl` [S1, unofficial].
+4. **Volume Allocation**: Allocate the volume buffer and fill it with zeros [S1, unofficial].
+5. **NDRange Calculation**:
+   - Local size: $(1, 1, \text{TILE\_Z})$ [S1, unofficial].
+   - Global Z size: Round up $NY$ to the nearest multiple of `TILE_Z`: $gz = ((NY + \text{TILE\_Z} - 1) / \text{TILE\_Z}) \times \text{TILE\_Z}$ [S1, unofficial].
+   - Global X, Y sizes: $NX$ [S1, unofficial].
+6. **Projection Loop**: Loop over projections $p$ from $0$ to $P-1$.
+   - Calculate the projection angle based on $p$ and $P$.
+   - Create the projection buffer and set kernel arguments. Arguments 2 and 3 are local memory buffers (`col0`, `col1`) passed as size in bytes (address is `nullptr`) [S1, unofficial].
+   - Launch the kernel with the calculated 3D NDRange (global size, local size) [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reconstructGPU_Local(projections, P, W, H, NX, NY, voxelSize, pixelSize, sdd, sod):
+    TILE_Z = 64
+    
+    # 1. Pre-filter on CPU
+    filtered_projections = applyFDKPreFilter(projections, P, W, H, voxelSize, sdd, pixelSize)
+    
+    # 2. Check local memory size (implementation detail omitted, proceed regardless)
+    
+    # 3. Load kernel from 'kernels/backprojection_local.cl'
+    kernel_source = load_kernel_source('kernels/backprojection_local.cl')
+    
+    # 4. Allocate volume buffer and zero it
+    volume = [0.0] * (NX * NX * NY)
+    
+    # 5. Calculate NDRange
+    local_size = (1, 1, TILE_Z)
+    gz = ((NY + TILE_Z - 1) // TILE_Z) * TILE_Z
+    global_size = (NX, NX, gz)
+    
+    # 6. Loop over projections
+    for p in range(P):
+        angle = calculate_angle(p, P)
+        
+        # Create projection buffer from filtered_projections for current angle
+        proj_buffer = create_buffer(filtered_projections, p, W, H)
+        
+        # Local memory buffers for interpolation columns
+        local_mem_col0_size = H * 4  # sizeof(float) = 4
+        local_mem_col1_size = H * 4
+        
+        # Set kernel arguments
+        # Arg 0: volume buffer
+        # Arg 1: proj_buffer
+        # Arg 2: local_mem_col0_size (nullptr address)
+        # Arg 3: local_mem_col1_size (nullptr address)
+        # Arg 4-10: P, W, H, NX, NY, voxelSize, pixelSize, sdd, sod, angle
+        set_kernel_arguments(kernel, proj_buffer, volume, local_mem_col0_size, local_mem_col1_size, 
+                             P, W, H, NX, NY, voxelSize, pixelSize, sdd, sod, angle)
+        
+        # Launch kernel
+        launch_kernel(kernel, global_size, local_size)
+        
+    # Return volume
+    return volume
+```
+
+**Kernel Logic (Conceptual):**
+The kernel iterates over X and Y coordinates. For each voxel $(x, y, z)$, it calculates the projection coordinates $(u, v)$ on the detector. It uses local memory to cache two columns of the projection image (`col0` and `col1`) to facilitate bilinear interpolation of the projection value at $(u, v)$. The interpolated value is weighted by $(sod \cdot sod) / u_{proj}^2$ and accumulated into the volume [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Local Memory Overflow**: If $2 \times H \times \text{sizeof(float)}$ exceeds the device's local memory limit, the behavior is undefined or the kernel may fail. The source checks this but proceeds without fallback [S1, unofficial].
+- **Boundary Conditions**: Projection coordinates outside $[0, W-1] \times [0, H-1]$ are skipped [S1, unofficial].
+- **Precision**: Uses `float` for volume accumulation. Large numbers of projections may lead to precision loss.
+
+## Operating characteristics
+- **Time Complexity**: $O(P \cdot NX \cdot NX \cdot NY)$, same as CPU backprojection, but optimized for GPU parallelism.
+- **Memory Complexity**: $O(P \cdot W \cdot H + NX \cdot NX \cdot NY + H)$ for global buffers and local memory [S1, unofficial].
+- **Performance**: Reduces global memory bandwidth pressure by reusing projection data in local memory [S1, unofficial].
+- **Strengths**: Efficient memory access pattern for Z-axis reconstruction.
+- **Limitations**: Requires sufficient local memory ($2 \cdot H \cdot 4$ bytes). No fallback if local memory is insufficient [S1, unofficial].
+
+## Background
+This method is part of a GPU-accelerated CT reconstruction toolkit, specifically optimizing the backprojection step using OpenCL local memory tiling [S1, unofficial]. It builds on the FDK algorithm and CPU-based pre-filtering [S1, unofficial].
+
+## Sources
+[S1] hardik0001/ct-reconstruction-gpu, https://github.com/hardik0001/ct-reconstruction-gpu, fetched 2026-10-27 (unofficial)

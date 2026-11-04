@@ -1,0 +1,157 @@
+# Distance Map Acceleration
+
+Also called: Accelerated Volume Rendering with Chebyshev Distance Maps, Chebyshev Distance Maps, Chebyshev distance map ray traversal, Distance Field Ray Marching Acceleration, Empty space skipping using distance maps, Ray Traversal with Distance Map Skipping
+
+## Overview
+Distance Map Acceleration is a ray traversal technique that uses a precomputed Chebyshev distance map to skip sampling points in empty regions of a volumetric image, reducing texture memory bandwidth and improving frame rates for volume and isosurface rendering [S1][S2, unofficial]. It builds on [Occupancy Grid and Map-Based Empty Space Skipping](3852-occupancy-grid-and-map-based-empty-space-skipping.md) by replacing simple binary occupancy checks with distance-based leapfrogging, allowing rays to jump directly to the nearest occupied region boundary [S1]. Unlike [Two-stage Ray Marching with Empty-Space Skipping](2985-two-stage-ray-marching-with-empty-space-skipping.md) which may use hierarchical structures or multiple passes, this method performs a single-pass ray cast accelerated by a 3D distance field [S2, unofficial].
+
+## How it works
+**Inputs:**
+- Volume data texture (scalar values).
+- Transfer function parameters (intensity and gradient thresholds) [S2, unofficial].
+- Camera ray origin and direction.
+- Block size $B$ (integer, typically $4^3$) [S1][S2, unofficial].
+
+**Outputs:**
+- Rendered image with empty space skipped.
+
+**Data Structures:**
+1.  **Volume Texture:** 3D texture containing voxel intensities. Dimensions $d_{\text{vol}} = (d_x, d_y, d_z)$ [S1].
+2.  **Gradient Map:** 3D texture storing precomputed gradient magnitudes. Generated via compute shader if `use_precomputed_gradient` is true [S2, unofficial].
+3.  **Occupancy Map:** 3D texture of binary flags (occupied/unoccupied). Dimensions $d_{\text{occ}} = (d_x/B, d_y/B, d_z/B)$ [S1].
+4.  **Distance Map:** 3D texture storing Chebyshev distance to the nearest occupied block. Dimensions same as Occupancy Map [S1][S2, unofficial].
+5.  **Transfer Function Uniform:** Buffer containing `imin`, `imax`, `gmin`, `gmax` [S2, unofficial].
+
+**Preprocessing Steps:**
+1.  **Gradient Map Generation:** If enabled, dispatch a compute shader to calculate gradient magnitudes for all voxels using the tetrahedron method [S1].
+2.  **Occupancy Map Generation:** Dispatch a compute shader to evaluate each block of size $B \times B \times B$.
+    -   For **volume rendering**: A block is occupied if any voxel within it has non-zero alpha according to the transfer function [S1].
+    -   For **isosurface rendering**: A block is occupied if the isosurface threshold lies between the min and max voxel values in the block. A single-voxel halo around the block is also checked [S1].
+3.  **Distance Map Generation:** Convert the occupancy map to a Chebyshev distance map using a compute shader. The Chebyshev distance between two points $(x_1, y_1, z_1)$ and $(x_2, y_2, z_2)$ is $\max(|x_1-x_2|, |y_1-y_2|, |z_1-z_2|)$ [S1].
+
+**Ray Traversal Algorithm:**
+1.  **Ray-Volume Intersection:** Compute entry $t_{\text{entry}}$ and exit $t_{\text{exit}}$ of the ray with the volume bounding box. If the ray does not intersect, return background [S1].
+2.  **Sampling Parameters:** Calculate the number of samples $n$ and step size $\Delta t$:
+    $$ n = \lceil \max \vec{x}(\mathbf{d}) \cdot \| \mathbf{t}_{\text{exit}} - \mathbf{t}_{\text{entry}} \| \cdot f \rceil $$
+    $$ \Delta t = \frac{t_{\text{exit}} - t_{\text{entry}}}{n - 1} $$
+    where $\mathbf{d}$ is the ray direction, $f \ge 1$ is a sampling factor, and $\max \vec{x}$ returns the maximum component of the vector [S1].
+3.  **Ray Casting Loop:**
+    -   Initialize current position $t = t_{\text{entry}}$.
+    -   While $t < t_{\text{exit}}$:
+        -   Convert normalized texture coordinate $t$ to volume voxel coordinate $u_{\text{vol}}$ and occupancy map coordinate $u_{\text{occ}}$:
+            $$ u_{\text{vol}} = d_{\text{vol}} \cdot t $$
+            $$ u_{\text{occ}} = \frac{d_{\text{vol}}}{B} \cdot t $$
+        -   Sample the occupancy map at $u_{\text{occ}}$.
+        -   If the block is **empty**:
+            -   Sample the distance map at $u_{\text{occ}}$ to get distance $D$ to the nearest occupied block [S1].
+            -   Calculate the step $\Delta i$ in occupancy map indices to reach the next occupied region. For dimension $j \in \{x, y, z\}$:
+                $$ \Delta i_j = \begin{cases} \lceil (1 + \lfloor u_{\text{occ},j} \rfloor - u_{\text{occ},j}) / \Delta u_j \rceil & \text{if } \Delta u_j > 0 \\ \lceil (\lfloor u_{\text{occ},j} \rfloor - u_{\text{occ},j}) / \Delta u_j \rceil & \text{otherwise} \end{cases} $$
+                where $\Delta u_j$ is the change in occupancy map coordinate per sample step along the ray [S1].
+            -   Convert $\Delta i$ to normalized distance $\Delta t_{\text{skip}}$ and advance $t \leftarrow t + \Delta t_{\text{skip}}$ [S1].
+        -   If the block is **occupied**:
+            -   Sample the volume and gradient map at $u_{\text{vol}}$.
+            -   Apply transfer function using `imin`, `imax`, `gmin`, `gmax` to compute color and opacity [S2, unofficial].
+            -   Composite the sample into the ray buffer.
+            -   Check for early ray termination [S2, unofficial].
+            -   Advance $t \leftarrow t + \Delta t$.
+4.  **Clipping:** The volume is clipped at a specified `clip_distance` from the camera. If the viewpoint enters the volume, the intersection vertices are computed in a vertex shader. Volumes are also clipped against the depth buffer [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def distance_map_accelerated_ray_cast(ray_origin, ray_direction, volume_tex, occ_map, dist_map, block_size, tf_params):
+    # 1. Ray-Volume Intersection
+    t_entry, t_exit = intersect_box(ray_origin, ray_direction, volume_bounds)
+    if t_entry > t_exit:
+        return background_color
+
+    # 2. Sampling Parameters
+    ray_len = length(ray_direction)
+    # max_x returns the maximum component of the vector
+    n = ceil(max_component(ray_direction) * ray_len * sampling_factor)
+    if n < 1:
+        n = 1
+    delta_t = (t_exit - t_entry) / (n - 1) if n > 1 else 0.0
+
+    # 3. Precompute occupancy map step sizes per sample
+    # u_occ = (d_vol / B) * t
+    # delta_u_occ = (d_vol / B) * delta_t
+    d_vol = volume_tex.dimensions
+    delta_u_occ = (d_vol / block_size) * delta_t
+
+    t = t_entry
+    color = vec3(0.0)
+    alpha = 0.0
+
+    while t < t_exit:
+        # Map t to occupancy map coordinates
+        u_occ = (d_vol / block_size) * t
+        
+        # Check occupancy
+        if not occ_map.sample(u_occ):
+            # Empty block: skip using distance map
+            dist = dist_map.sample(u_occ)
+            
+            # Calculate steps to next occupied block
+            # For each dimension, calculate steps to exit current block or reach neighbor
+            steps = vec3(0)
+            for j in {x, y, z}:
+                if delta_u_occ[j] > 0:
+                    steps[j] = ceil((1.0 + floor(u_occ[j]) - u_occ[j]) / delta_u_occ[j])
+                else:
+                    steps[j] = ceil((floor(u_occ[j]) - u_occ[j]) / delta_u_occ[j])
+            
+            # Convert steps to normalized distance
+            # The skip distance is determined by the dimension requiring the fewest steps to hit an occupied block
+            # Note: The source defines delta_i_j but implies using the distance map for the actual leap
+            # In Chebyshev distance, the distance is in block units.
+            # We advance t by the distance to the nearest occupied block in normalized coords
+            skip_dist_normalized = dist * (block_size / d_vol[j]) # Approximation, exact mapping depends on ray direction
+            # More robustly: find the smallest t_advance such that the new u_occ is occupied
+            # Using the distance map value directly as a bound for skipping
+            t += dist * (block_size / d_vol[j]) # [G] Simplified leap based on Chebyshev distance in block units
+        else:
+            # Occupied block: sample volume
+            u_vol = d_vol * t
+            val = volume_tex.sample(u_vol)
+            grad = gradient_map.sample(u_vol) if gradient_map else 0.0
+            
+            # Apply Transfer Function
+            alpha_val = tf_apply(val, grad, tf_params)
+            
+            # Composite
+            color = color + alpha_val * (1.0 - alpha) * sample_color
+            alpha = alpha + alpha_val * (1.0 - alpha)
+            
+            if alpha >= 1.0:
+                break
+                
+            t += delta_t
+
+    return color
+```
+
+## Subtopics
+
+### [Partitioned Distance Map Combination](1191-partitioned-distance-map-combination.md)
+Runtime assembly of partitioned distance maps to enable empty space skipping without recomputing the distance transform on transfer function changes.
+
+### [Occupancy Map Generation](1197-occupancy-map-generation.md)
+GPU compute shader routine to produce binary occupancy maps from volume data for empty-space skipping.
+
+## Operating characteristics
+- **Time Complexity:** Preprocessing is $O(V)$ where $V$ is the number of voxels for gradient and occupancy map generation. Ray traversal is $O(N_{\text{samples}})$ in the worst case, but significantly reduced by skipping empty space. The skip step calculation is $O(1)$ per block [S1].
+- **Memory Complexity:** Occupancy map requires $1/B^3$ of the volume memory. For $B=4$, this is $1/64$th [S1]. Distance map requires similar memory to occupancy map [S1]. Gradient map requires additional memory if precomputed [S1].
+- **Performance:** Reduces texture samples in empty regions, improving frame rates [S1]. Performance depends on the sparsity of the volume and the block size $B$ [S1].
+- **Strengths:** Efficient empty space skipping; simple implementation; works well with GPU compute shaders [S1][S2, unofficial].
+- **Limitations:** Requires preprocessing; distance map generation can be costly for large volumes; Chebyshev distance may overestimate skip distances in some cases compared to Euclidean [S1].
+- **When to use:** Volume rendering with significant empty space; isosurface rendering [S1].
+- **When not to use:** Dense volumes with little empty space; dynamic volumes where preprocessing cost outweighs benefits [S1].
+
+## Background
+Distance Map Acceleration was introduced by Lachlan Deakin and Mark Knackstedt in 2019 in "Accelerated Volume Rendering with Chebyshev Distance Maps" [S2, unofficial]. It is an extension of their earlier work on empty space skipping [S1]. The method is implemented in the open-source Vulkan renderer `VkVolume` [S2, unofficial].
+
+## Sources
+[S1] Efficient ray casting of volumetric images using distance maps for empty space skipping, https://doi.org/10.1007/s41095-019-0155-y, fetched 2026-10-24
+[S2] GitHub - LDeakin/VkVolume: Vulkan-based volume renderer with efficient ..., https://github.com/LDeakin/VkVolume, fetched 2026-10-26 (unofficial)

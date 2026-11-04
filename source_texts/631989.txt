@@ -1,0 +1,586 @@
+Model Evaluation Tools. Contribute to dtcenter/MET development by creating an account on GitHub.
+
+Feature #3335 point_weight_flag by JohnHalleyGotway · Pull Request #3427 · dtcenter/MET · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+JohnHalleyGotway
+commented
+Aug 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Change summary
+Aggregating point verification statistics across an observation network over-emphasizes data-rich regions: where stations are densely clustered, many nearly redundant observations dominate the result. This PR adds kernel density estimation (KDE) point weighting to MET, following the station density weighting of Rodwell et al. (2010) and Haiden et al. (2012), so that each station's weight reflects how densely its neighborhood is sampled.
+The weight for station k is the inverse of its station density:
+```
+w_k = 1 / rho_k,  where  rho_k = sum_l exp(-(a_kl / kde_ref_angle)^2)
+```
+The sum is over all stations l, including l = k, and a_kl is the great circle angle between the stations. Since a_kk = 0, rho_k ≥ 1 and the weights always fall in the range (0, 1], where a weight of 1 indicates an isolated station. This is consistent with grid_weight_flag = COS_LAT grid weights.
+High-level summary of changes:
+Add the point_weight_flag = KDE option to Point-Stat, Ensemble-Stat, and Pair-Stat.
+Add two new configuration options:
+kde_ref_angle (default 0.75 degrees) defines the kernel reference angle and must be greater than 0 for KDE.
+write_weights (default FALSE) writes the SID or KDE point weights to ASCII output files that can be reused as mask.sid station ID files.
+Compute point weights separately for each verification task, using only the stations whose observations that task uses, so adding or removing a task never changes the results of any other task. For example, adding TMP/Z2 versus ADPSFC does not change the weights applied to TMP/P850 versus ADPUPA.
+Write one point weight file per verification task, named ..._NAME_LEVEL_TYPE_point_weights.txt using the forecast variable name and level, with the 1-based task index appended if two tasks share a name and level.
+Treat each unique station ID as a single point in the density calculation, located at the first location encountered for that station within each task.
+Add the new PointWeightInfo class to the vx_util library and the new gc_angle() function to the vx_nav library. Since vx_util now calls vx_nav, update the library link order for the affected tools.
+Add 5 new unit tests to unit_point_weight.xml, including a Pair-Stat test that reads Point-Stat MPR output and reproduces its KDE weights and weighted contingency table counts.
+Update the documentation for the new options and output files, and correct the outdated statement that SEEPS density weighting is not implemented.
+Clean up the ordering and whitespace of existing configuration files, and fix a few small unrelated issues found along the way (listed below).
+Files changed
+Library code
+src/basic/vx_util/
+point_weight.h, point_weight.cc (new): Define the PointWeightType enumeration (None, SID, KDE) and the PointWeightInfo class, which stores the point weighting settings and each task's station locations and weights. Includes:
+parse_conf_point_weight() to parse point_weight_flag, kde_ref_angle, and write_weights, erroring out if kde_ref_angle <= 0 for KDE.
+compute_kde_weights() to compute the KDE weights with an OpenMP-parallelized pairwise loop.
+write_weights() to write the weights in the SID(weight) format used by mask.sid files.
+build_point_weight_file_tags() to build unique, file-name-safe tags from each task's forecast name and level.
+vx_util.h: Include point_weight.h.
+Makefile.am, Makefile.in: Compile point_weight.cc.
+src/basic/vx_config/
+config_constants.h: Move the PointWeightType enumeration to point_weight.h, move conf_key_point_weight_flag from the Point-Stat specific section to the common section, and add conf_key_kde_ref_angle, conf_key_write_weights, and conf_val_kde.
+config_util.h, config_util.cc: Remove parse_conf_point_weight_flag(), which is replaced by parse_conf_point_weight() in vx_util.
+src/libcode/vx_nav/
+nav.h, nav.cc: Add gc_angle() to compute the great circle angle, in degrees, between two lat/lon points. Also clean up the existing functions by initializing variables where they are declared and removing commented-out code.
+src/libcode/vx_statistics/
+pair_base.h, pair_base.cc: set_point_weight() now takes a PointWeightInfo object. For SID weighting, it also records the weights applied so they can be written to the output. For KDE weighting, it computes the weights, if needed, and applies them to the matched pairs. Also removes trailing whitespace.
+pair_data_point.h, pair_data_point.cc, pair_data_ensemble.h, pair_data_ensemble.cc: add_point_obs() now returns a bool indicating whether the observation was used in at least one matched pair, so the tools know which station locations to collect for KDE.
+obs_error.cc: Guard the two omp_get_thread_num() calls with #ifdef _OPENMP, which fixes a compilation error when OpenMP is not enabled. This bug also exists in develop.
+Tools
+Point-Stat (src/tools/core/point_stat/)
+point_stat_conf_info.h, point_stat_conf_info.cc: Parse the point weight settings once and copy them into a new PointWeightInfo member of each PointStatVxOpt verification task.
+point_stat.cc: Collect station locations for each task from the observations it uses, apply each task's point weights, set each task's point weight file name, and write the point weight files. Also updates the revision history and fixes a typo in the copyright header.
+Makefile.am, Makefile.in: Link -lvx_nav after -lvx_util.
+Ensemble-Stat (src/tools/core/ensemble_stat/)
+ensemble_stat_conf_info.h, ensemble_stat_conf_info.cc: Same per-task PointWeightInfo changes as Point-Stat.
+ensemble_stat.cc: Same per-task station collection, weighting, and output as Point-Stat. Also renames tmp_str to base_name in setup_txt_files() and updates the revision history.
+Makefile.am, Makefile.in: Link -lvx_nav after -lvx_util.
+Pair-Stat (src/tools/core/pair_stat/)
+pair_stat_conf_info.h, pair_stat_conf_info.cc: Same per-task PointWeightInfo changes as Point-Stat, and collect station locations in PairStatVxOpt::add_mpr_line() and PairStatVxOpt::add_ioda_pair(), which covers MPR, Python embedding, and IODA input.
+pair_stat.cc: Apply each task's point weights, set each task's point weight file name, and write the point weight files. Also updates the revision history and fixes a typo in the copyright header.
+Makefile.am, Makefile.in: Link -lvx_nav after -lvx_util.
+Other tools
+src/tools/core/grid_stat/, series_analysis/, stat_analysis/, src/tools/other/gen_ens_prod/: Makefile.am, Makefile.in: Link -lvx_nav after -lvx_util, which is now required because vx_util calls gc_angle().
+src/tools/other/gsi_tools/Makefile.am, Makefile.in: Same link order change, and remove the redundant trailing -lvx_util.
+Default configuration files
+data/config/ConfigConstants: Add the KDE = 3 point weight flag value.
+data/config/PointStatConfig_default, EnsembleStatConfig_default, PairStatConfig_default: Add kde_ref_angle = 0.75; and write_weights = FALSE;.
+scripts/config/PointStatConfig: Add the new options, and move rank_corr_flag and seeps_p1_thresh to match the ordering of the default config file.
+scripts/config/EnsembleStatConfig: Add the new options.
+data/config/STATAnalysisConfig_CBS_Index, STATAnalysisConfig_GO_Index: Remove trailing whitespace.
+Unit tests
+internal/test_unit/xml/unit_point_weight.xml
+Add 5 new tests: point_weight_POINT_STAT_KDE, point_weight_POINT_STAT_PROB_KDE, point_weight_ENSEMBLE_STAT_NONE, point_weight_ENSEMBLE_STAT_KDE, and point_weight_PAIR_STAT_KDE.
+The Pair-Stat test reads the MPR output of point_weight_POINT_STAT_KDE and should reproduce its per-task KDE weights and weighted CTC counts, to within the rounding of the lat/lon values in the MPR output.
+Set the masking regions and point weight flag through environment variables, and check that the per-task point weight output files exist.
+Point weight test configuration files
+PointStatConfig_point_weight: Set mask.grid, mask.sid, and point_weight_flag from environment variables, enable write_weights, and add TMP/Z2 versus ADPSFC to demonstrate a wide range of KDE weights (about 0.03 to 1.0) alongside the ADPUPA fields. Also includes the reordering described below.
+PointStatConfig_prob_point_weight, EnsembleStatConfig_point_weight: Set mask.grid, mask.sid, and point_weight_flag from environment variables, and add the new options.
+PairStatConfig_point_weight (new): Pair-Stat config for point_weight_PAIR_STAT_KDE, verifying the same fields as PointStatConfig_point_weight.
+Other test configuration files: These changes add the new options with their default values or only reorder or reformat existing entries, so they are not expected to change any output.
+Point-Stat configs: add the new options and reorder existing entries (32 files)
+Add kde_ref_angle and write_weights, and move duplicate_flag, rank_corr_flag, obs_summary, hss_ec_value, seeps_p1_thresh, and seeps_point_climo_name to match the ordering of PointStatConfig_default, where present.
+internal/test_unit/config/PointStatConfig_APCP (also adds seeps_p1_thresh set to its default value)
+internal/test_unit/config/PointStatConfig_APCP_HIRA
+internal/test_unit/config/PointStatConfig_GTG_latlon
+internal/test_unit/config/PointStatConfig_GTG_lc
+internal/test_unit/config/PointStatConfig_INTERP_OPTS
+internal/test_unit/config/PointStatConfig_LAND_TOPO_MASK
+internal/test_unit/config/PointStatConfig_LAPSE_RATE_MSL_AGL
+internal/test_unit/config/PointStatConfig_MASK_SID
+internal/test_unit/config/PointStatConfig_MPR_OBTYPE
+internal/test_unit/config/PointStatConfig_PHYS
+internal/test_unit/config/PointStatConfig_PHYS_pint
+internal/test_unit/config/PointStatConfig_SEEPS
+internal/test_unit/config/PointStatConfig_WINDS
+internal/test_unit/config/PointStatConfig_aeronet
+internal/test_unit/config/PointStatConfig_airnow
+internal/test_unit/config/PointStatConfig_climo
+internal/test_unit/config/PointStatConfig_climo_WMO
+internal/test_unit/config/PointStatConfig_climo_prob
+internal/test_unit/config/PointStatConfig_dup
+internal/test_unit/config/PointStatConfig_mpr_thresh
+internal/test_unit/config/PointStatConfig_obs_summary
+internal/test_unit/config/PointStatConfig_obs_summary_all
+internal/test_unit/config/PointStatConfig_prob
+internal/test_unit/config/PointStatConfig_python
+internal/test_unit/config/PointStatConfig_qty_inc_exc
+internal/test_unit/config/PointStatConfig_sid_inc_exc
+internal/test_unit/config/PointStatConfig_ugrid_mpas_diag (also fixes the "ecept" typo in a comment)
+internal/test_unit/config/PointStatConfig_ugrid_mpas_out (also fixes the "ecept" typo in a comment)
+internal/test_unit/config/PointStatConfig_ugrid_no_dataset (also fixes the "ecept" typo in a comment)
+internal/test_unit/config/ref_config/PointStatConfig_ADPUPA (also adds seeps_p1_thresh set to its default value)
+internal/test_unit/config/ref_config/PointStatConfig_ONLYSF (also adds seeps_p1_thresh set to its default value)
+internal/test_unit/config/ref_config/PointStatConfig_WINDS (also adds seeps_p1_thresh set to its default value)
+Point-Stat, Ensemble-Stat, and Pair-Stat configs: add the new options only (16 files)
+Add kde_ref_angle = 0.75; and write_weights = FALSE;.
+internal/test_unit/config/PointStatConfig_range_azimuth
+internal/test_unit/config/PointStatConfig_ugrid_lfric_pressure_levels (also adds point_weight_flag = NONE;)
+internal/test_unit/config/EnsembleStatConfig
+internal/test_unit/config/EnsembleStatConfig_LAND_TOPO_MASK
+internal/test_unit/config/EnsembleStatConfig_LAPSE_RATE_MSL_AGL
+internal/test_unit/config/EnsembleStatConfig_MASK_SID
+internal/test_unit/config/EnsembleStatConfig_climo
+internal/test_unit/config/EnsembleStatConfig_grid_weight
+internal/test_unit/config/EnsembleStatConfig_one_cdf_bin
+internal/test_unit/config/EnsembleStatConfig_python
+internal/test_unit/config/EnsembleStatConfig_qty_inc_exc
+internal/test_unit/config/EnsembleStatConfig_rps_climo_bin_prob
+internal/test_unit/config/EnsembleStatConfig_single_file_grib
+internal/test_unit/config/EnsembleStatConfig_single_file_nc
+internal/test_unit/config/PairStatConfig_ioda
+internal/test_unit/config/PairStatConfig_mpr
+Whitespace and comment cleanup only (9 files)
+internal/test_unit/config/GridStatConfig_fbias_perc_thresh: Remove trailing whitespace.
+internal/test_unit/config/GridStatConfig_ugrid_mpas: Fix the "ecept" typo in a comment.
+internal/test_unit/config/GridStatConfig_ugrid_mpas_diag: Fix the "ecept" typo in a comment.
+internal/test_unit/config/MODEConfig_multivar: Remove trailing whitespace.
+internal/test_unit/config/MODEConfig_multivar_3_2: Remove trailing whitespace.
+internal/test_unit/config/MODEConfig_multivar_super: Remove trailing whitespace.
+internal/test_unit/config/PB2NCConfig_all: Remove trailing whitespace.
+internal/test_unit/config/PB2NCConfig_vlevel: Remove trailing whitespace.
+internal/test_unit/config/STATAnalysisConfig_SFC_SS_Index: Remove trailing whitespace.
+Documentation
+docs/Users_Guide/config_options.rst: Document the KDE option for point_weight_flag, including the weight formula, the (0, 1] range, per-task weights, and the first-location rule for each station, and add Pair-Stat to the supported tools. Document kde_ref_angle and its requirement to be greater than 0, and write_weights with the per-task file naming.
+docs/Users_Guide/point-stat.rst: Add the new options to the configuration summary, document the point weight output files, and replace the outdated statement that SEEPS density weighting "has not yet been implemented in MET".
+docs/Users_Guide/ensemble-stat.rst, pair-stat.rst: Add the new options to the configuration summary and document the point weight output files.
+docs/Users_Guide/release-notes.rst: Add upgrade notes for the new configuration options.
+docs/Users_Guide/refs.rst: Fix the page range of the Rodwell et al. (2010) reference (1344-1363).
+GitHub workflows
+.github/workflows/compilation_options.yml: Remove unnecessary comments about a disabled cron schedule.
+Expected Differences
+Do these changes introduce new tools, command line arguments, or configuration file options? [Yes]
+If yes, please describe:
+Adds 1 new configuration value to enable this logic:
+```
+point_weight_flag = KDE;
+```
+Adds 2 new configuration options to configure the KDE point weights:
+```
+kde_ref_angle     = 0.75;
+write_weights     = FALSE;
+```
+Do these changes modify the structure of existing or add new output data types (e.g. statistic line types or NetCDF variables)? [Yes]
+If yes, please describe:
+When write_weights = TRUE; and point_weight_flag is set to SID or KDE, a new ASCII output file is written for each verification task, named ..._NAME_LEVEL_TYPE_point_weights.txt, where NAME and LEVEL are the forecast variable name and level and TYPE is SID or KDE. The file lists each station ID and its weight in the SID(weight) format used by mask.sid files.
+Pull Request Testing
+Describe testing already performed for these changes:
+In unit_point_weight.xml, I added 5 new tests: point_weight_POINT_STAT_KDE, point_weight_POINT_STAT_PROB_KDE, point_weight_ENSEMBLE_STAT_NONE, point_weight_ENSEMBLE_STAT_KDE, and point_weight_PAIR_STAT_KDE. Also see the testing described in this issue comment for details.
+The KDE weights fall in the range (0, 1]. The TMP/Z2 versus ADPSFC task ranges from about 0.03 to 1.0, while the sparser ADPUPA tasks range from about 0.91 to 1.0.
+Adding the TMP/Z2 versus ADPSFC task does not change the weights or statistics for the TMP/P850 versus ADPUPA task.
+The Pair-Stat test reproduces the Point-Stat KDE weights for each task to within 3e-6 and the weighted CTC counts to within 1e-5, which reflects the rounding of the lat/lon values in the MPR output.
+Recommend testing for the reviewer(s) to perform, including the location of input datasets, and any additional instructions:
+Briefly review code changes.
+Carefully review documentation updates on RTD (https://metplus--3427.org.readthedocs.build/projects/met/en/3427/?readthedocs-diff=true&readthedocs-diff-chunk=1)
+Inspect changes and additions to the unit test output.
+Please find this code compiled as the met_test user in seneca:/d1/projects/MET/MET_pull_requests/met-13.0.0/rc1/MET-feature_3335_point_weight_flag.
+Do these changes include sufficient documentation updates, ensuring that no errors or warnings exist in the build of the documentation? [Yes]
+Do these changes include sufficient testing updates? [Yes]
+Will this PR result in changes to the MET test suite? [Yes]
+If yes, describe the new output and/or changes to the existing output:
+New and changed output in the point_weight unit test output directory, including the new KDE and Pair-Stat test output, the per-task point weight files, and the TMP/Z2 versus ADPSFC output added to the Point-Stat point weight tests. Other test configuration changes only add the new options with their default values or reorder existing entries, and are not expected to change any output.
+Note that the link checker test will fail because issue #3416 has not been completed yet.
+Will this PR result in changes to existing METplus Use Cases? [No]
+If yes, create a new Update Truth METplus issue to describe them.
+Do these changes introduce new SonarQube findings? [No]
+If yes, please describe:
+While some existing issues are flagged, the overall number of findings is reduced slightly from 13,426 in develop to 13,381 for this pull request.
+Please complete this pull request review by [Monday Aug 31, 2026].
+Recommend that we review this PR with @mpm-meto when we meet on Aug 27, 2026.
+Pull Request Checklist
+See the METplus Workflow for details.
+Review the source issue metadata (required labels, projects, and milestone).
+Complete the PR definition above.
+Ensure the PR title matches the feature or bugfix branch name.
+Define the PR metadata, as permissions allow.
+Select: Reviewer(s) and Development issue
+Select: Milestone as the version that will include these changes
+Select: METplus-X.Y Support project for bugfix releases or MET-X.Y Development project for the next coordinated release
+After submitting the PR, select the ⚙️ icon in the Development section of the right hand sidebar. Search for the issue that this PR will close and select it, if it is not already selected.
+After the PR is approved, merge your changes. If permissions do not allow this, request that the reviewer do the merge.
+Close the linked issue and delete your feature or bugfix branch from GitHub.
+JohnHalleyGotway
+added 30 commits
+May 12, 2026 19:14
+Per #3335, add kde_ref_angle and write_weights options to the User's …
+…
+4396e1d
+```
+…Guide and config file for Point-Stat and Ensemble-Stat.
+```
+Per #3335, update Point-Stat and Ensemble-Stat to parse the new point…
+…
+46e6d75
+```
+…_weight_flag = KDE option and update unit_point_weight.xml to test out the new option.
+```
+Per #3335, save work in progress.
+c04bee3
+Per #3335, work in progress defining and using the PointWeightInfo cl…
+…
+e8accb9
+```
+…ass.
+```
+Per #3335, rename PointWeightFlag::add() as PointWeightFlag::add_loca…
+…
+ef831ea
+```
+…tion().
+```
+Per #3335, move PointWeightInfo into new vx_util/point_weight.h and .…
+…
+0290f70
+```
+…cc location.
+```
+Per #3335, implement kde weights.
+4689ae5
+Per #3335, can pass PointWeightInfo as const since set_point_weight()…
+…
+486d706
+```
+… calls compute_kde_weights() if they've not already been computed.
+```
+Per #3335, needed to switch ADPUPA to ADPSFC to revert back to previo…
+…
+885fb08
+```
+…us functionality.
+```
+Per #3335, add debug logging and pass (lat,lon) correctly.
+1a3c9da
+Per #3335, fix spacing
+021df1f
+Per #3335, clean up and store the current version, even if there's co…
+…
+00a014d
+```
+…ncern with exactly how the weights are computed.
+```
+Per #3335, add logic to write the point weight output file.
+3882855
+Per #3335, update docs and unit tests to demonstrate writing the poin…
+…
+e9a4650
+```
+…t_weights.txt output ASCII files.
+```
+Per #3335, update all the MET Point-Stat and Ensemble-Stat config files.
+47d1d3c
+Per #3335, get rid of trailing whitespace
+81cc453
+Per #3335, also update the Pair-Stat config files.
+fdb5d96
+Per #3335, in compute_kde_weights() call angle_between() to get a lon…
+…
+0a035d9
+```
+…gitude difference no larger than 180 degrees.
+```
+Unrelated to #3335, remove commented out reminder from compilation_op…
+…
+fe30a3d
+```
+…tions.yml since testing the compilation options on released versions has proven sufficient. I don't see a need to also test routinely through cron.
+```
+Per #3335, correct mistakes in the unit test configurations to mostly…
+…
+4aa99ff
+```
+… replicate previous outputs #ci-run-unit
+```
+Merge remote-tracking branch 'origin/develop' into feature_3335_point…
+…
+56f10c5
+```
+…_weight_flag
+```
+Merge remote-tracking branch 'origin/develop' into feature_3335_point…
+…
+f9d9770
+```
+…_weight_flag
+```
+Delete script accidentally committed.
+657be1f
+Only whitespace changes
+9db5986
+Merge remote-tracking branch 'origin/develop' into feature_3335_point…
+…
+c0d27a4
+```
+…_weight_flag
+```
+Merge remote-tracking branch 'origin/develop' into feature_3335_point…
+…
+7ba3196
+```
+…_weight_flag
+```
+Per #3335, update logic to rescale KDE weight to a stadard range of 1…
+…
+01eecef
+```
+… to 100.
+```
+Per #3335, updating the tense.
+40bf2ea
+Merge remote-tracking branch 'origin/develop' into feature_3335_point…
+…
+5333465
+```
+…_weight_flag
+```
+Per #3335, define gc_angle() in vx_nav and update PointWeightInfo::co…
+…
+b466595
+```
+…mpute_kde_weights() to call it when computing the angle from the center of the earth to the two lat/lon points on the surface.
+```
+JohnHalleyGotway
+added 4 commits
+August 24, 2026 22:29
+Per #3335, update the kde reference angle to 5.0 for GDAS global obse…
+…
+cce594a
+```
+…rvations and update ensemble stat to write out the point weights.
+```
+Per #3335, update the list of expected output files.
+593ccd4
+Per #3335, minor SonarQube change.
+8bdaa71
+Per #3335, tweak the wording of the error message.
+90cbeea
+JohnHalleyGotway
+mentioned this pull request
+Aug 25, 2026
+Enhancement: Enhance the Point-Stat, Ensemble-Stat, and Pair-Stat wrappers to support KDE point weighting options
+dtcenter/METplus#3339
+Closed
+8 of 23 tasks
+JohnHalleyGotway
+added 4 commits
+August 27, 2026 00:03
+Per #3335, update the 13.0 release notes.
+cb1cc6e
+Per #3335, remove 'NONE' from upgrade instructions since those sectio…
+…
+b980feb
+```
+…ns are no longer empty.
+```
+Merge branch 'develop' into feature_3335_point_weight_flag
+b3de4de
+Per #3335, fix revision history in ensemble_stat.cc
+526cddf
+JohnHalleyGotway
+marked this pull request as draft
+September 24, 2026 17:46
+JohnHalleyGotway
+commented
+Sep 24, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+@KathrynNewman, FYI, I converted this PR back to a draft after finding some remaining work to be completed in the Pair-Stat tool. When that's finished, I'll change it back to ready for review and ping you.
+JohnHalleyGotway
+and others
+added 6 commits
+September 24, 2026 12:06
+Per #3335, fix compilation and linker errors from merging develop. Re…
+…
+ce8c6bc
+```
+…store the gc_angle() definition to nav.cc, which was dropped when resolving the merge conflict, and return obs_used from the early return in VxPairDataEnsemble::add_point_obs(), which now returns bool.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Per #3335, guard the omp_get_thread_num() calls in obs_error.cc with …
+…
+428ac6f
+```
+…#ifdef _OPENMP so that MET compiles when OpenMP is not enabled.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Per #3335, update the KDE point weight computation. Include the l = k…
+…
+88fe230
+```
+… term in the station density sum, as described in Rodwell et al. (2010), so that weights are always finite and fall in the range (0, 1], and remove the infinite weight error check. Remove the 1 to 100 rescaling of weights for consistency with COS_LAT grid weights. Error out if kde_ref_angle is not positive for point_weight_flag = KDE. Set kde_ref_angle to its 0.75 default in the Point-Stat unit test configs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Per #3335, add point_weight_flag = KDE support to Pair-Stat by collec…
+…
+716469d
+```
+…ting station locations from MPR, Python, and IODA pairs. Add the point_weight_PAIR_STAT_KDE unit test, which reads the MPR output from Point-Stat, and add TMP/Z2 versus ADPSFC to the Point-Stat and Pair-Stat point weight test configs to demonstrate a wider range of KDE weights.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Per #3335, compute point weights separately for each verification tas…
+…
+dcae3b9
+```
+…k so that adding a task does not change the results of other tasks. Store a PointWeightInfo object in each Point-Stat, Ensemble-Stat, and Pair-Stat VxOpt, collect station locations per task, and write one point weight file per task, named using the forecast name and level (with the task index appended for duplicates). Remove the user-defined copy operations from PointWeightInfo so that it is noexcept movable. Also fix a typo in the copyright header of pair_stat.cc and point_stat.cc.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Per #3335, update the documentation for point weighting. Describe the…
+…
+a3d2422
+```
+… KDE weight computation and its (0, 1] range, per-task weights and point weight file naming, and the kde_ref_angle requirement, and add Pair-Stat to the list of supported tools. Document the point weight output files for Point-Stat, Ensemble-Stat, and Pair-Stat, correct the outdated SEEPS density weighting statement, and fix the page range for the Rodwell et al. (2010) reference.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+JohnHalleyGotway
+commented
+Sep 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Author
+@KathrynNewman I'm marking this PR as ready for review again. A review of the changes revealed some issues:
+The weight computation for each point should include comparing against itself which is what the references do. That basically means initializing the weight sums to 1.0 rather than 0.0. The good news is that this solves the whole divide by zero = infinite weight problem. That makes it much easier for users.
+Rather than computing the KDE weights once for each run, they're now computed separately for each vx task. Previously verifying against both ADPSFC and ADPUPA in one run would produce different results from verifying against them in separate runs. Now, the weights are computed from their locations separately.
+You'll notice a lot more detail in the PR body. AI really helped summarize a large set of changes.
+JohnHalleyGotway
+marked this pull request as ready for review
+September 24, 2026 19:58
+JohnHalleyGotway
+and others
+added 3 commits
+September 30, 2026 11:49
+Merge branch 'develop' into feature_3335_point_weight_flag
+359856b
+Merge remote-tracking branch 'origin/develop' into feature_3335_point…
+…
+ae5c803
+```
+…_weight_flag
+```
+Per #3335, fix compilation after merging develop: use unique_ptr::get…
+…
+1297aac
+```
+…() for fcst_info
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+JohnHalleyGotway
+mentioned this pull request
+Oct 13, 2026
+Feature #3291 clang
+#3466
+Merged
+9 of 17 tasks
+Merge remote-tracking branch 'origin/develop' into feature_3335_point…
+…
+66dad6c
+```
+…_weight_flag
+
+# Conflicts:
+#	src/libcode/vx_statistics/pair_data_ensemble.cc
+```
+JohnHalleyGotway
+mentioned this pull request
+Oct 16, 2026
+Bugfix #3465 seeps
+#3479
+Draft
+6 of 17 tasks
+JohnHalleyGotway
+and others
+added 4 commits
+October 21, 2026 18:52
+Merge branch 'develop' into feature_3335_point_weight_flag
+…
+5707b78
+```
+Resolve the docs/Users_Guide/config_options.rst conflict in the
+"point_weight_flag" section. This branch changed the introduction to "Three
+point weighting options are currently supported:" when adding the KDE option,
+while #3416 reworded it on develop to avoid a hard-coded count, which had
+already gone stale once. Keep the develop wording, which is correct with the
+KDE option added.
+
+The remaining documentation and source files, including config_util.cc,
+pair_base.cc, pair_data_point.cc, point_stat.cc, pair_stat.cc and
+ensemble_stat.cc, merged cleanly with the #3291 clang and #3416 proofreading
+changes from develop.
+```
+Merge remote-tracking branch 'origin/develop' into feature_3335_point…
+…
+f88f1e0
+```
+…_weight_flag
+
+# Conflicts:
+#	docs/Users_Guide/release-notes.rst
+```
+Merge remote-tracking branch 'origin/develop' into feature_3335_point…
+…
+195257c
+```
+…_weight_flag
+
+Resolve the ensemble_stat.cc revision history conflict by keeping both
+entries in date order: #3335 (05/12/26) from this branch stays at 051,
+#3426/#3429 (09/04/26) moves to 052, and #3448 (09/25/26) from develop
+becomes 053.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/develop' into feature_3335_point…
+…
+22a72de
+```
+…_weight_flag
+
+# Conflicts:
+#	src/libcode/vx_statistics/pair_base.cc
+```
+sonarqubecloud
+Bot
+commented
+Oct 31, 2026
+Copy link
+Copy Markdown
+Quality Gate failed
+Failed conditions
+7.9% Duplication on New Code (required ≤ 3%)
+See analysis details on SonarQube Cloud
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

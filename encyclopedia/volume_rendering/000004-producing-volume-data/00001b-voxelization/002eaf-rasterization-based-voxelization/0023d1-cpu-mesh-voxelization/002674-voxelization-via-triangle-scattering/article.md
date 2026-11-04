@@ -1,0 +1,345 @@
+# Voxelization via Triangle Scattering
+
+Also called: Phase 2, voxelize
+
+## Overview
+Voxelization via Triangle Scattering converts a triangle mesh into a 3D grid of voxels to identify the air region for acoustic simulation. It rasterizes surface triangles into the grid using an exact overlap test and isolates the connected air volume via flood fill, avoiding acceleration structures like BVHs. It differs from its parent [CPU Mesh Voxelization](3137-cpu-mesh-voxelization.md) by scattering triangles into cells rather than iterating cells against triangles, and from [Inner Loop Optimizations for CPU Mesh Voxelization](4048-inner-loop-optimizations-for-cpu-mesh-voxelization.md) by prioritizing exact geometric overlap over conservative bounding box approximations.
+
+## How it works
+**Inputs:** A list of triangles (each defined by 3 vertices in 3D space) and a target grid resolution (cell size $\Delta$).
+**Outputs:** A 3D boolean grid where `true` indicates solid (geometry) and `false` indicates air. A `leaked` flag indicating if the air region is not sealed.
+
+**Data Structures:**
+*   `Grid`: A 3D array of booleans with dimensions $(N_x+2) \times (N_y+2) \times (N_z+2)$, providing a 1-cell padding on all sides.
+*   `Triangle`: Struct with fields `v0`, `v1`, `v2` (each a 3D vector).
+
+**Algorithm Steps:**
+
+1.  **Grid Initialization:**
+    Initialize the `Grid` to all `false` (air). The padding cells are conceptually exterior.
+
+2.  **Triangle Scattering (Rasterization):**
+    For each triangle $T$ in the input mesh:
+    a.  Compute the axis-aligned bounding box (AABB) of $T$ in world coordinates.
+    b.  Convert the AABB to grid coordinates to determine the range of cells $[i_{min}, i_{max}] \times [j_{min}, j_{max}] \times [k_{min}, k_{max}]$ that intersect the triangle's bounding box.
+    c.  Iterate over every cell $(i, j, k)$ in this range.
+    d.  Perform an **exact 13-axis Separating Axis Theorem (SAT)** overlap test between the triangle $T$ and the voxel cell $C_{i,j,k}$.
+        *   The 13 axes consist of the 3 face normals of the cell and the 10 cross products of the cell edges with the triangle edges.
+        *   If a separating axis is found, the triangle and cell do not overlap.
+        *   If no separating axis is found, they overlap.
+    e.  If they overlap, mark `Grid[i, j, k] = true` (solid).
+
+3.  **Flood Fill for Air Region:**
+    a.  Select a seed point $P_{seed}$ inside the room.
+    b.  Map $P_{seed}$ to grid coordinates $(i_s, j_s, k_s)$.
+    c.  If `Grid[i_s, j_s, k_s]` is `true` (solid), the seed is invalid. Perform **Seed Relocation**:
+        *   Generate candidate cells ordered by increasing radius from the seed, then by distance to the grid center.
+        *   For each candidate, perform a temporary flood fill.
+        *   Select the first candidate that results in a sealed fill (does not reach the padded rim).
+    d.  Perform a 6-connected flood fill starting from the valid seed cell.
+    e.  Mark all reachable cells as `false` (air).
+    f.  If the fill reaches any cell in the 1-cell padding, set `leaked = true` and issue a warning. Do not throw an error.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+from collections import deque
+
+def voxelize(triangles, grid_dims, cell_size):
+    """
+    Voxelize a triangle mesh into a grid.
+    grid_dims: (Nx, Ny, Nz) number of interior cells.
+    cell_size: float, size of one voxel.
+    """
+    # 1. Initialize grid with padding
+    # Dimensions include 1-cell padding on all sides
+    shape = (grid_dims[0] + 2, grid_dims[1] + 2, grid_dims[2] + 2)
+    grid = [[False] * shape[2] for _ in range(shape[1])]
+    for i in range(shape[0]):
+        for j in range(shape[1]):
+            for k in range(shape[2]):
+                grid[i][j][k] = False
+
+    # Helper: Convert world point to grid index
+    def world_to_grid(p):
+        return (
+            int(math.floor(p[0] / cell_size)) + 1,
+            int(math.floor(p[1] / cell_size)) + 1,
+            int(math.floor(p[2] / cell_size)) + 1
+        )
+
+    # Helper: Get cell AABB in world coordinates
+    def get_cell_aabb(i, j, k):
+        # i, j, k are grid indices (1-based interior + padding)
+        # World bounds of the cell
+        x0 = (i - 1) * cell_size
+        x1 = i * cell_size
+        y0 = (j - 1) * cell_size
+        y1 = j * cell_size
+        z0 = (k - 1) * cell_size
+        z1 = k * cell_size
+        return (x0, y0, z0, x1, y1, z1)
+
+    # Helper: 13-axis SAT overlap test
+    def triangle_cell_overlap(tri, i, j, k):
+        # tri: (v0, v1, v2) where v is (x,y,z)
+        # Cell AABB
+        x0, y0, z0, x1, y1, z1 = get_cell_aabb(i, j, k)
+        
+        # 1. Cell face normals (3 axes)
+        # Check separation along X, Y, Z
+        if tri_max_x(tri) < x0 or tri_min_x(tri) > x1: return False
+        if tri_max_y(tri) < y0 or tri_min_y(tri) > y1: return False
+        if tri_max_z(tri) < z0 or tri_min_z(tri) > z1: return False
+
+        # 2. Triangle face normal (1 axis)
+        # Project cell onto triangle normal
+        n = cross(tri_v1(tri) - tri_v0(tri), tri_v2(tri) - tri_v0(tri))
+        n_len_sq = dot(n, n)
+        if n_len_sq == 0: return True # Degenerate triangle, assume overlap if AABB overlaps
+        
+        # Project cell corners onto n
+        # Cell corners are 8 points. We need min/max projection.
+        # Optimization: Only check corners that are extreme in direction of n
+        # For simplicity, check all 8 corners
+        corners = [
+            (x0, y0, z0), (x1, y0, z0), (x0, y1, z0), (x1, y1, z0),
+            (x0, y0, z1), (x1, y0, z1), (x0, y1, z1), (x1, y1, z1)
+        ]
+        proj_min = float('inf')
+        proj_max = float('-inf')
+        for c in corners:
+            p = dot(c, n) / n_len_sq # Projected scalar along n (unnormalized)
+            if p < proj_min: proj_min = p
+            if p > proj_max: proj_max = p
+            
+        # Project triangle vertices onto n
+        t_proj = [dot(tri_v0(tri), n) / n_len_sq,
+                  dot(tri_v1(tri), n) / n_len_sq,
+                  dot(tri_v2(tri), n) / n_len_sq]
+        t_min = min(t_proj)
+        t_max = max(t_proj)
+        
+        if t_max < proj_min or t_min > proj_max: return False
+
+        # 3. Edge cross products (9 axes)
+        # Edges of triangle: e0=v1-v0, e1=v2-v1, e2=v0-v2
+        # Edges of cell: 12 edges.
+        # We check cross products of each triangle edge with each cell edge.
+        tri_edges = [
+            tri_v1(tri) - tri_v0(tri),
+            tri_v2(tri) - tri_v1(tri),
+            tri_v0(tri) - tri_v2(tri)
+        ]
+        cell_edges = [
+            (x1-x0, 0, 0), (0, y1-y0, 0), (0, 0, z1-z0),
+            (x1-x0, 0, 0), (0, y1-y0, 0), (0, 0, z1-z0),
+            (x1-x0, 0, 0), (0, y1-y0, 0), (0, 0, z1-z0),
+            (x1-x0, 0, 0), (0, y1-y0, 0), (0, 0, z1-z0)
+        ]
+        # Actually, cell edges are:
+        # X-edges: 4
+        # Y-edges: 4
+        # Z-edges: 4
+        # Let's list them explicitly
+        cell_edge_vecs = [
+            (x1-x0, 0, 0), (x1-x0, 0, 0), (x1-x0, 0, 0), (x1-x0, 0, 0), # X
+            (0, y1-y0, 0), (0, y1-y0, 0), (0, y1-y0, 0), (0, y1-y0, 0), # Y
+            (0, 0, z1-z0), (0, 0, z1-z0), (0, 0, z1-z0), (0, 0, z1-z0)  # Z
+        ]
+        
+        for te in tri_edges:
+            for ce in cell_edge_vecs:
+                axis = cross(te, ce)
+                axis_len_sq = dot(axis, axis)
+                if axis_len_sq == 0: continue
+                
+                # Project triangle vertices
+                t_proj = [dot(tri_v0(tri), axis) / axis_len_sq,
+                          dot(tri_v1(tri), axis) / axis_len_sq,
+                          dot(tri_v2(tri), axis) / axis_len_sq]
+                t_min = min(t_proj)
+                t_max = max(t_proj)
+                
+                # Project cell corners
+                c_proj = []
+                for c in corners:
+                    c_proj.append(dot(c, axis) / axis_len_sq)
+                c_min = min(c_proj)
+                c_max = max(c_proj)
+                
+                if t_max < c_min or t_min > c_max: return False
+
+        return True
+
+    # Helper: Triangle min/max helpers
+    def tri_v0(t): return t[0]
+    def tri_v1(t): return t[1]
+    def tri_v2(t): return t[2]
+    def tri_min_x(t): return min(t[0][0], t[1][0], t[2][0])
+    def tri_max_x(t): return max(t[0][0], t[1][0], t[2][0])
+    def tri_min_y(t): return min(t[0][1], t[1][1], t[2][1])
+    def tri_max_y(t): return max(t[0][1], t[1][1], t[2][1])
+    def tri_min_z(t): return min(t[0][2], t[1][2], t[2][2])
+    def tri_max_z(t): return max(t[0][2], t[1][2], t[2][2])
+
+    # Vector ops
+    def cross(a, b):
+        return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
+    def dot(a, b):
+        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+    def sub(a, b):
+        return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
+
+    # 2. Scatter Triangles
+    for tri in triangles:
+        # Compute AABB in world coords
+        min_x = tri_min_x(tri)
+        max_x = tri_max_x(tri)
+        min_y = tri_min_y(tri)
+        max_y = tri_max_y(tri)
+        min_z = tri_min_z(tri)
+        max_z = tri_max_z(tri)
+
+        # Convert to grid indices (inclusive range)
+        # Grid index 0 is padding. Interior starts at 1.
+        # A point at world 0 maps to grid 1.
+        # We need to cover all cells that intersect the AABB.
+        i_min = max(1, int(math.floor(min_x / cell_size)) + 1)
+        i_max = min(grid_dims[0], int(math.floor(max_x / cell_size)) + 1)
+        j_min = max(1, int(math.floor(min_y / cell_size)) + 1)
+        j_max = min(grid_dims[1], int(math.floor(max_y / cell_size)) + 1)
+        k_min = max(1, int(math.floor(min_z / cell_size)) + 1)
+        k_max = min(grid_dims[2], int(math.floor(max_z / cell_size)) + 1)
+
+        for i in range(i_min, i_max + 1):
+            for j in range(j_min, j_max + 1):
+                for k in range(k_min, k_max + 1):
+                    if triangle_cell_overlap(tri, i, j, k):
+                        grid[i][j][k] = True
+
+    # 3. Flood Fill
+    # Seed selection
+    # Assume seed_world is provided or derived from scene center
+    # For this implementation, we assume a seed_world is passed or we pick center
+    # If not passed, we pick the center of the interior grid
+    seed_world = (grid_dims[0]*cell_size/2, grid_dims[1]*cell_size/2, grid_dims[2]*cell_size/2)
+    
+    si, sj, sk = world_to_grid(seed_world)
+    
+    # Clamp to interior
+    si = max(1, min(si, grid_dims[0]))
+    sj = max(1, min(sj, grid_dims[1]))
+    sk = max(1, min(sk, grid_dims[2]))
+
+    leaked = False
+    
+    # If seed is solid, relocate
+    if grid[si][sj][sk]:
+        # Find nearest free cell
+        # Candidates ordered by radius from seed, then distance to grid center
+        candidates = []
+        for i in range(1, grid_dims[0]+1):
+            for j in range(1, grid_dims[1]+1):
+                for k in range(1, grid_dims[2]+1):
+                    if not grid[i][j][k]:
+                        dist_sq = (i-si)**2 + (j-sj)**2 + (k-sk)**2
+                        center_dist_sq = (i - grid_dims[0]/2)**2 + (j - grid_dims[1]/2)**2 + (k - grid_dims[2]/2)**2
+                        candidates.append((dist_sq, center_dist_sq, i, j, k))
+        
+        candidates.sort(key=lambda x: (x[0], x[1]))
+        
+        valid_seed = None
+        for c in candidates:
+            ci, cj, ck = c[2], c[3], c[4]
+            # Perform temporary fill to check if sealed
+            if is_sealed_fill(grid, ci, cj, ck, grid_dims):
+                valid_seed = (ci, cj, ck)
+                break
+        
+        if valid_seed:
+            si, sj, sk = valid_seed
+        else:
+            # Fallback: if no sealed fill found, use original seed and accept leak
+            pass
+
+    # Perform flood fill
+    queue = deque([(si, sj, sk)])
+    visited = set()
+    visited.add((si, sj, sk))
+    
+    while queue:
+        i, j, k = queue.popleft()
+        
+        # Check if we hit the padding
+        if i == 0 or i == grid_dims[0]+1 or j == 0 or j == grid_dims[1]+1 or k == 0 or k == grid_dims[2]+1:
+            leaked = True
+            continue
+            
+        # Mark as air (it's already false, but logically we are visiting air)
+        # In this grid, False is air. We just need to traverse False cells.
+        
+        # Neighbors
+        for di, dj, dk in [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]:
+            ni, nj, nk = i+di, j+dj, k+dk
+            if 0 <= ni < shape[0] and 0 <= nj < shape[1] and 0 <= nk < shape[2]:
+                if (ni, nj, nk) not in visited:
+                    # If it's padding, it's exterior
+                    if ni == 0 or ni == shape[0]-1 or nj == 0 or nj == shape[1]-1 or nk == 0 or nk == shape[2]-1:
+                        leaked = True
+                        visited.add((ni, nj, nk))
+                    elif not grid[ni][nj][nk]: # It's air
+                        visited.add((ni, nj, nk))
+                        queue.append((ni, nj, nk))
+
+    return grid, leaked
+
+def is_sealed_fill(grid, si, sj, sk, grid_dims):
+    """Check if flood fill from (si,sj,sk) stays within interior bounds."""
+    shape = (grid_dims[0] + 2, grid_dims[1] + 2, grid_dims[2] + 2)
+    queue = deque([(si, sj, sk)])
+    visited = set()
+    visited.add((si, sj, sk))
+    
+    while queue:
+        i, j, k = queue.popleft()
+        
+        # If we hit padding, it's not sealed
+        if i == 0 or i == grid_dims[0]+1 or j == 0 or j == grid_dims[1]+1 or k == 0 or k == grid_dims[2]+1:
+            return False
+            
+        for di, dj, dk in [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]:
+            ni, nj, nk = i+di, j+dj, k+dk
+            if 0 <= ni < shape[0] and 0 <= nj < shape[1] and 0 <= nk < shape[2]:
+                if (ni, nj, nk) not in visited:
+                    if not grid[ni][nj][nk]: # Air
+                        visited.add((ni, nj, nk))
+                        queue.append((ni, nj, nk))
+    return True
+```
+
+**Parameters:**
+*   **Overlap Test:** Exact 13-axis SAT. Conservative AABB tests are rejected because they thicken oblique walls, changing the air volume and modal frequencies [S1, unofficial].
+*   **Padding:** 1 cell on all sides [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Exterior Bias:** Seeds on -x/-y/-z walls or within half a cell inward could previously leak into the exterior padding due to scan order bias. This is fixed by validating that the fill remains sealed [S1, unofficial].
+*   **Leak Detection:** A gap of one cell drains the interior, making the 'air region' the whole bounding box. Silently decomposing this produces large, quiet nonsense. The algorithm reports a leak flag rather than throwing an error, allowing the caller to inspect the grid [S1, unofficial].
+*   **Sealed Voids:** The 6-connected flood fill excludes sealed voids (e.g., a closed closet), marking them as solid. This is intentional as they are not part of the room's acoustic volume [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Proportional to the surface area in cells (number of solid cells produced) rather than grid volume $\times \log(\text{triangles})$. This is because work is proportional to the number of triangles $\times$ cells covered by their bounding boxes, and each cell is tested against the triangles covering it [S1, unofficial].
+*   **Memory Complexity:** $O(N_x N_y N_z)$ for the grid. No acceleration structures (BVH) are required [S1, unofficial].
+*   **Strengths:** No BVH construction overhead. Exact overlap test preserves geometry fidelity for acoustic modal frequencies. Leak detection allows for debugging [S1, unofficial].
+*   **Limitations:** Staircasing of non-axis-aligned surfaces is intrinsic to grid methods. Corner attribution is ambiguous (first triangle to reach a cell wins) [S1, unofficial].
+*   **When to use:** When exact geometry is critical for acoustic simulation and BVH construction is undesirable or too slow.
+*   **When not to use:** When the grid resolution is very high and the scene is sparse, as the scattering approach may be slower than BVH-based queries for very large scenes with few triangles [S1, unofficial].
+
+## Background
+This method was implemented as Phase 2 of the ARD (Acoustic Room Decomposition) pipeline in the `cram` project. It was developed to replace a BVH-based approach specified in an earlier design, as scattering triangles into cells was found to be strictly better in terms of work proportional to surface area and avoiding acceleration structure overhead [S1, unofficial]. The implementation was part of a pull request that also included Phase 3 (decomposition) [S1, unofficial].
+
+## Sources
+[S1] feat(ard): voxelization and rectangular decomposition (Phases 2 and 3), https://github.com/10log/cram/pull/192, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,122 @@
+--- v002.md
++++ v003.md
+@@ -15,6 +15,6 @@
+ 
+ **Data Structures:**
+-- **Gaussian Point Cloud:** A list of $N_p$ Gaussians. Each Gaussian $i$ stores $\boldsymbol{\mu}_i$, $\boldsymbol{\Sigma}_i$, $\alpha_i$, and $\mathbf{f}_i$ [S1].
+-- **Tiles:** The 2D image plane is partitioned into non-overlapping tiles. Each tile maintains a sorted list of indices of Gaussians that overlap its screen-space bounding box [S1].
++- **Gaussian Point Cloud:** A list of $N_p$ Gaussians, each storing $\boldsymbol{\mu}_i$, $\boldsymbol{\Sigma}_i$, $\alpha_i$, and $\mathbf{f}_i$ [S1].
++- **Tiles:** The 2D image plane is partitioned into non-overlapping tiles [S1]. Each tile maintains a sorted list of indices of Gaussians that overlap its screen-space bounding box [S1].
+ 
+ **Steps:**
+@@ -45,5 +45,5 @@
+ 
+ 4. **Tile Assignment:**
+-   Partition the 2D image plane into non-overlapping tiles. Assign each 3D Gaussian $i$ to the tiles whose bounding boxes overlap with the 2D projection defined by $(\mathbf{u}_i, \boldsymbol{\Sigma}''_i)$ [S1].
++   Partition the 2D image plane into non-overlapping tiles [S1]. Assign each 3D Gaussian $i$ to the tiles whose bounding boxes overlap with the 2D projection defined by $(\mathbf{u}_i, \boldsymbol{\Sigma}''_i)$ [S1].
+ 
+ 5. **Sorting:**
+@@ -59,5 +59,5 @@
+    $$ I(p) = \sum_{j \in \mathcal{N}} \mathbf{i}_j $$
+    where $\mathbf{i}_j$ is the radiation intensity of the $j$-th intersection point $\mathbf{x}_j$ [S1].
+-   The source also defines a term $\sigma_j = \alpha_j P(\mathbf{x}_j | \boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j)$ in the context of the blending table, but the final intensity formula is a direct sum $\sum \mathbf{i}_j$, not the alpha-compositing product form used in standard 3DGS [S1].
++   The source defines a term $\sigma_j = \alpha_j P(\mathbf{x}_j | \boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j)$ in the context of the blending table, but the final intensity formula is a direct sum $\sum \mathbf{i}_j$, not the alpha-compositing product form used in standard 3DGS [S1].
+ 
+ **Pseudocode:**
+@@ -91,11 +91,12 @@
+     
+     # Step 1: Project centers to image coordinates
+-    mu_homo = np.column_stack([g['mu'] for g in gaussians], np.ones(N)) # (N, 4)
+-    t_homo = (M_ext @ mu_homo.T).T # (N, 4)
+-    t = t_homo[:, :3] # (N, 3)
++    mu_arr = np.array([g['mu'] for g in gaussians]) # (N, 3)
++    mu_homo = np.hstack([mu_arr, np.ones((N, 1))])  # (N, 4)
++    t_homo = mu_homo @ M_ext.T                      # (N, 4)
++    t = t_homo[:, :3]                               # (N, 3)
+     
+     # Project to image coordinates
+-    u_homo = (M_int @ t.T).T # (N, 4)
+-    u = u_homo[:, :2] # (N, 2), image coordinates
++    u_homo = t @ M_int.T                            # (N, 4)
++    u = u_homo[:, :2]                               # (N, 2), image coordinates
+     
+     # Step 2: Transform Covariance
+@@ -112,4 +113,8 @@
+         ty, tz = t[i, 1], t[i, 2]
+         
++        # Guard: discard Gaussians behind the detector plane
++        if tz <= 0:
++            continue
++            
+         # Compute J_i (corrected from source's formatting error)
+         J = np.array([
+@@ -130,10 +135,10 @@
+     tiles = [[[] for _ in range(num_tiles_x)] for _ in range(num_tiles_y)]
+     
+-    for i in range(N):
++    for i in range(len(Sigma_2d_list)):
+         ux, uy = u[i]
+         Sigma_2d_i = Sigma_2d_list[i]
+         
+         # Determine bounding box in pixels (approx 2 sigma)
+-        eigvals = np.linalg.eigvals(Sigma_2d_i)
++        eigvals = np.linalg.eigvalsh(Sigma_2d_i)
+         max_std = math.sqrt(max(eigvals)) * 2.0
+         
+@@ -144,22 +149,22 @@
+         tile_y_min, tile_y_max = max(0, min_y // tile_size), min(num_tiles_y - 1, max_y // tile_size)
+         
+-        for ty in range(tile_y_min, tile_y_max + 1):
+-            for tx in range(tile_x_min, tile_x_max + 1):
+-                tiles[ty][tx].append(i)
++        for tile_y in range(tile_y_min, tile_y_max + 1):
++            for tile_x in range(tile_x_min, tile_x_max + 1):
++                tiles[tile_y][tile_x].append(i)
+                 
+     # Step 5: Sorting
+-    for ty in range(num_tiles_y):
+-        for tx in range(num_tiles_x):
+-            tiles[ty][tx].sort(key=lambda idx: t[idx, 2])
++    for tile_y in range(num_tiles_y):
++        for tile_x in range(num_tiles_x):
++            tiles[tile_y][tile_x].sort(key=lambda idx: t[idx, 2])
+             
+     # Step 6: Intensity Calculation
+     I = np.zeros((image_height, image_width))
+     
+-    for ty in range(num_tiles_y):
+-        for tx in range(num_tiles_x):
+-            tile_gaussians = tiles[ty][tx]
+-            
+-            y_start, y_end = ty * tile_size, min((ty + 1) * tile_size, image_height)
+-            x_start, x_end = tx * tile_size, min((tx + 1) * tile_size, image_width)
++    for tile_y in range(num_tiles_y):
++        for tile_x in range(num_tiles_x):
++            tile_gaussians = tiles[tile_y][tile_x]
++            
++            y_start, y_end = tile_y * tile_size, min((tile_y + 1) * tile_size, image_height)
++            x_start, x_end = tile_x * tile_size, min((tile_x + 1) * tile_size, image_width)
+             
+             for y in range(y_start, y_end):
+@@ -171,5 +176,6 @@
+                         # Check if pixel is inside the 2D Gaussian ellipse
+                         try:
+-                            dist_sq = v @ np.linalg.inv(Sigma_2d_list[idx]) @ v
++                            Sigma_inv = np.linalg.inv(Sigma_2d_list[idx] + 1e-6 * np.eye(2))
++                            dist_sq = v @ Sigma_inv @ v
+                         except np.linalg.LinAlgError:
+                             dist_sq = float('inf')
+@@ -177,5 +183,5 @@
+                         if dist_sq <= 4.0: # 2 sigma threshold
+                             # Probability weight sigma_j = alpha_j * P(x_j | mu_j, Sigma_j)
+-                            # x_j is the intersection point; evaluated at projected center as proxy [G]
++                            # x_j is the intersection point; evaluated at projected pixel center as proxy [G]
+                             P_2d = math.exp(-0.5 * dist_sq)
+                             i_j = gaussians[idx]['alpha'] * P_2d
+@@ -190,5 +196,5 @@
+ - **Boundaries:** The bounding box calculation for tile assignment must be clamped to the image boundaries [G].
+ - **Degenerate Input:** If $\boldsymbol{\Sigma}_i$ is singular, the inverse in the probability calculation will fail. Regularization or checking for positive definiteness is required [G].
+-- **X-ray Geometry:** The definition of the intersection point $\mathbf{x}_j$ is not explicitly detailed in the source beyond being the "intersection 3D point of the X-ray landing on pixel p". Implementers must define the ray equation from the X-ray source through the pixel to find $\mathbf{x}_j$ for the probability evaluation [S1].
++- **X-ray Geometry:** The definition of the intersection point $\mathbf{x}_j$ is not explicitly detailed in the source beyond being the "intersection 3D point of the X-ray landing on pixel p" [S1]. Implementers must define the ray equation from the X-ray source through the pixel to find $\mathbf{x}_j$ for the probability evaluation [S1].
+ 
+ ## Operating characteristics

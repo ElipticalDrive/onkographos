@@ -1,0 +1,92 @@
+# Universal Hash Optimization
+
+Also called: Universal Hash Function for Hash Grids
+
+## Overview
+Universal Hash Optimization is a technique used within Sparse Voxel Octree (SVO) structures to mitigate hash collisions in the underlying hash table [S1, unofficial]. It replaces standard deterministic hashing with a randomized universal hash function, ensuring that distinct non-isomorphic nodes are distributed uniformly across hash table buckets [S1, unofficial]. This reduces the average number of equality checks required during lookups, thereby improving search performance compared to naive hashing methods that may cluster nodes in specific buckets [S1, unofficial].
+
+## How it works
+The method operates on a node $n$ within an octree structure. It computes a hash value $k$ recursively for internal nodes and directly from metadata for leaf nodes (voxels), then applies a linear congruential transformation to map this value to a bucket index.
+
+**Inputs and Outputs:**
+*   Input: A node $n$ in the octree.
+*   Output: An integer hash value representing the bucket index.
+
+**Data Structures:**
+*   **Node $n$**: Represents a voxel or an internal octree node.
+*   **info(n)**: A function returning the unique identifier or metadata hash associated with a voxel node $n$.
+*   **Children**: For non-voxel nodes, a list of 8 child nodes.
+*   **Parameters**:
+    *   $p$: A prime number [S1, unofficial].
+    *   $m$: The number of buckets in the hash table [S1, unofficial].
+    *   $a, b$: Integers such that $a, b \in \{0, \dots, p-1\}$ [S1, unofficial].
+
+**Algorithm Steps:**
+1.  Initialize accumulator $k = 0$.
+2.  Check if $n$ is a voxel (leaf node).
+3.  If $n$ is **not** a voxel:
+    a.  Iterate through all children $c$ of node $n$.
+    b.  Recursively compute the hash for each child $c$.
+    c.  XOR the child's hash into the accumulator: $k \leftarrow k \oplus \text{recursive}(c)$.
+    d.  Apply the universal hash transformation to the accumulator: $k \leftarrow (a \cdot k + b) \pmod p$.
+4.  If $n$ **is** a voxel:
+    a.  Set $k \leftarrow \text{info}(n)$.
+5.  Return the final hash value: $(a \cdot k + b) \pmod p$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def universal_hash(n, a, b, p):
+    """
+    Computes the universal hash for a node n.
+    
+    Args:
+        n: The node to hash.
+        a: Multiplicative constant integer in [0, p-1].
+        b: Additive constant integer in [0, p-1].
+        p: Prime modulus.
+        
+    Returns:
+        Integer bucket index.
+    """
+    k = 0
+    
+    if not is_voxel(n):
+        for c in children(n):
+            # Recursive step for child
+            child_hash = universal_hash(c, a, b, p)
+            # XOR accumulation
+            k = k ^ child_hash
+            # Universal hash transformation step
+            k = (a * k + b) % p
+    else:
+        # Leaf node: use node info
+        k = info(n)
+        
+    # Final transformation
+    return (a * k + b) % p
+```
+
+**Edge Cases and Pitfalls:**
+*   **Parameter Selection**: The choice of $a$ and $b$ is critical. They must be chosen randomly or from a universal family to ensure the probability of collision between distinct nodes is low [S1, unofficial].
+*   **Modulus Arithmetic**: The intermediate calculations $(a \cdot k + b)$ can overflow standard integer types if $p$ is large. Implementation must handle modular arithmetic carefully to prevent overflow before the modulo operation [G].
+*   **Voxel Info**: The `info(n)` function must return a value that effectively distinguishes between different voxel contents or states [S1, unofficial].
+
+## Subtopics
+
+### Memoization for Hash Lookup
+An optimization to avoid redundant recursive hash computations by caching results in an external hash table [S1, unofficial]. When searching for a node, the system checks an external hash table using the node's memory address as the key [S1, unofficial]. If the address is found, the cached hash value is returned immediately [S1, unofficial]. If not found, the recursive hash computation is executed, the result is stored in the external hash table, and then returned [S1, unofficial]. If the structure of a node is modified (e.g., children are added or removed), its entry must be removed from the external hash table to ensure consistency [S1, unofficial]. This reduces the computational cost of repeated lookups on the same subtree [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: The hash computation is $O(N)$ where $N$ is the number of nodes in the subtree being hashed, due to the recursive traversal [S1, unofficial]. With memoization, subsequent lookups for the same node address become $O(1)$ [S1, unofficial].
+*   **Memory Complexity**: Standard implementation uses $O(1)$ extra space per recursive call stack frame. Memoization adds $O(M)$ space where $M$ is the number of unique nodes cached [S1, unofficial].
+*   **Performance**: The universal hash function reduces the clustering of nodes in hash table buckets, leading to fewer collisions and faster average-case lookup times compared to non-universal hashing [S1, unofficial].
+*   **Strengths**: Uniform distribution of nodes minimizes worst-case collision scenarios [S1, unofficial].
+*   **Limitations**: Requires storing parameters $a, b, p$ and potentially maintaining the memoization table [S1, unofficial].
+
+## Background
+This method originates from research into the compression and efficiency of Sparse Voxel Octrees for Global Illumination calculations [S1, unofficial]. The specific implementation was developed to address the inefficiency of standard hash tables in SVO structures, where naive hashing caused a significant percentage of nodes to accumulate in single buckets, slowing down searches [S1, unofficial]. The universal hash function used is adapted from the family of universal hash functions described by Braverman et al. (cited as [BB11] in the source) [S1, unofficial].
+
+## Sources
+[S1] Estudio de la compresión y la eficiencia del Sparse Voxel Octree en el cálculo de la Iluminación Global, https://hdl.handle.net/2117/445971, fetched 2026-10-26 (unofficial)

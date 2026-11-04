@@ -1,0 +1,96 @@
+# Three-Pass GPU Point Rendering Pipeline
+Also called: Hardware Accelerated Point Splatting Pipeline
+## Overview
+This method renders point clouds by decomposing the splatting process into three distinct rendering passes to achieve perspective-accurate results on modern GPUs [S1, unofficial]. It solves the problem of correctly projecting and blending 3D points into a 2D image while handling depth occlusion and filter weight normalization [S1, unofficial]. It differs from single-pass approaches by explicitly separating depth estimation, color accumulation, and normalization, allowing for more accurate handling of projective distortions and varying splat sizes [S1, unofficial].
+## How it works
+**Inputs:** A set of 3D points with associated attributes (color, position, orientation) and camera parameters (intrinsics, extrinsics).
+**Outputs:** A final color image.
+
+**Data Structures:**
+*   **Framebuffers:**
+    *   `Depth_Buffer`: Stores depth values. Initialized to infinity.
+    *   `Color_Buffer`: Stores accumulated color values (RGB). Initialized to zero.
+    *   `Weight_Buffer`: Stores accumulated filter weights (scalar). Initialized to zero. [G] (Implicit in normalization step).
+
+**Steps:**
+
+1.  **Pass 1: Depth Offset Rendering**
+    Render a depth image of the scene. The depth values are slightly offset along the viewing rays to resolve depth conflicts during subsequent blending [S1, unofficial]. This pass establishes the occlusion order.
+
+2.  **Pass 2: Splat Accumulation**
+    Draw splats using OpenGL points (preferred over quads or triangles for performance and simplicity) [S1, unofficial].
+    *   Enable depth testing to ensure only the closest splat contributes to each pixel.
+    *   Disable depth buffer updates (write-only depth test).
+    *   Enable color blending.
+    *   In the fragment shader, compute the splat's contribution. The fragment shader accumulates color values in the `Color_Buffer` and filter weights in the `Weight_Buffer` [S1, unofficial]. This effectively computes the weighted sum of the splat contributions.
+
+3.  **Pass 3: Normalization**
+    Normalize the accumulated color values by dividing the color in `Color_Buffer` by the accumulated filter weights in `Weight_Buffer` for each pixel [S1, unofficial]. This corrects for the varying density and overlap of splats.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def three_pass_point_rendering(points, camera_params):
+    # Initialize framebuffers
+    depth_buffer = create_buffer(inf)
+    color_buffer = create_buffer(0.0)
+    weight_buffer = create_buffer(0.0)
+
+    # Pass 1: Render depth offset
+    render_depth_offset(points, camera_params, depth_buffer)
+
+    # Pass 2: Accumulate splats
+    enable_depth_test()
+    disable_depth_write()
+    enable_color_blend()
+    
+    for point in points:
+        # Compute splat projection and variance matrix
+        # Note: Inversion of projective mapping may be ill-conditioned
+        # if splat degenerates into a line segment [S1, unofficial]
+        splat = compute_splat(point, camera_params)
+        
+        # Rasterize splat
+        # Fragment shader updates color_buffer and weight_buffer
+        rasterize_splat(splat, color_buffer, weight_buffer)
+
+    # Pass 3: Normalize
+    for pixel in image_resolution:
+        if weight_buffer[pixel] > epsilon:
+            color_buffer[pixel] /= weight_buffer[pixel]
+        else:
+            color_buffer[pixel] = 0.0
+            
+    return color_buffer
+```
+
+**Parameters:**
+*   **Rendering Primitive:** OpenGL points [S1, unofficial].
+*   **Depth Offset:** Small value along viewing ray [S1, unofficial].
+*   **Epsilon:** Small value to prevent division by zero in normalization [G].
+
+**Edge Cases:**
+*   **Ill-conditioned Inversion:** Computing the variance matrix requires inverting the projective mapping, which can be numerically ill-conditioned if the splat is about to degenerate into a line segment [S1, unofficial].
+*   **Zero Weight:** Pixels with no splat coverage have zero weight; normalization must handle this to avoid NaNs [G].
+
+## Subtopics
+
+### Standard Point Splatting Assembly
+This variant describes the core assembly step for standard point splatting, writing point colors to a canvas based on depth sorting and a fixed or implicit radius [S2, unofficial]. It involves initializing canvases (`depth_canvas` with `inf`, `color_canvas` and `label_canvas` with zeros, `index_canvas` with -1), sorting points by depth, and iteratively writing colors if the point's depth is less than the current depth at that pixel. A written mask is created where `depth_canvas < inf`, and unwritten pixels are set to default values [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** O(N) for N points, assuming constant-time splat rasterization. The three-pass structure adds a small constant overhead compared to single-pass methods.
+*   **Memory Complexity:** O(W*H) for the framebuffers (depth, color, weight), where W and H are image dimensions.
+*   **Strengths:** Perspective-accurate splatting, handles occlusion correctly via depth testing, leverages GPU hardware acceleration efficiently.
+*   **Limitations:** Requires multiple passes, potentially ill-conditioned matrix inversion for extreme view angles, requires careful handling of depth offsets.
+*   **When to use:** When perspective accuracy is critical and hardware acceleration is available.
+*   **When not to use:** For very simple orthographic projections where single-pass suffices, or on hardware with limited multi-pass support.
+
+## Background
+Originated from research on perspective-accurate splatting using modern GPU vertex and fragment programs [S1, unofficial]. It builds on previous methods for hardware-accelerated point splatting [S1, unofficial]. The use of OpenGL points instead of quads/triangles is a key optimization noted in the source [S1, unofficial].
+
+## Sources
+[S1] Perspective Accurate Splatting, http://infoscience.epfl.ch/record/149345, fetched 2026-10-26 (unofficial)
+[S2] Luhao03/Point-Splatting-Multi-View-2D-Rendering-Pipeline, https://github.com/Luhao03/Point-Splatting-Multi-View-2D-Rendering-Pipeline, fetched 2026-10-28 (unofficial)

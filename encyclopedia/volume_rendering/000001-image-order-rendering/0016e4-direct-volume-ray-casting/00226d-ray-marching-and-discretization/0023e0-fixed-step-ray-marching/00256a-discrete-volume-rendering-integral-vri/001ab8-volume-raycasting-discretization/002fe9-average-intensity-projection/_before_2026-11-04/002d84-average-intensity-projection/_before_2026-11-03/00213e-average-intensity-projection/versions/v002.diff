@@ -1,0 +1,229 @@
+--- v001.md
++++ v002.md
+@@ -26,5 +26,5 @@
+ ### Data Structures
+ *   **Ray:** Defined by origin `or` and direction `dir` [S2, unofficial].
+-*   **Transfer Function (Optional):** A 1D texture (`GL_TEXTURE_1D`) mapping scalar values to color/opacity. In pure AIP, this is often bypassed or used only for final color mapping [S2, S3, unofficial].
++*   **Transfer Function (Optional):** A 1D texture (`GL_TEXTURE_1D`) mapping scalar values to color/opacity. In pure AIP, this is often bypassed or used only for final color mapping [S2, S4, unofficial].
+ *   **Accumulators:**
+     *   `totalVoxelValue` or `meanSum`: Accumulates the sum of sampled intensities [S4, S3, unofficial].
+@@ -51,68 +51,63 @@
+     *   **Advance:** `curPos = curPos + direction * stepsize` [S2, unofficial].
+ 6.  **Finalize:** Compute the average: `meanValue = totalVoxelValue / cnt` [S2, S4, unofficial].
+-7.  **Color Mapping (Optional):** Map `meanValue` to a final color using a transfer function or color map [S3, unofficial]. If lighting is enabled, calculate normals from the mean position and apply lighting [S3, unofficial].
++7.  **Color Mapping (Optional):** Map `meanValue` to a final color using a transfer function or color map [S4, unofficial]. If lighting is enabled, calculate normals from the mean position and apply lighting [S4, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-def average_intensity_projection(volume_texture, view_pos, image_width, image_height, num_steps=256, scale=1.0):
++import math
++
++def average_intensity_projection(volume_data, view_pos, image_width, image_height, num_steps=256, scale=1.0, fov_deg=60.0):
+     """
+     Renders an Average Intensity Projection of a 3D volume.
+     
+     Args:
+-        volume_texture: 3D texture object or array of shape (Z, Y, X)
+-        view_pos: Camera position (vec3)
++        volume_data: 3D array of shape (Z, Y, X) with values in [0, 1]
++        view_pos: Camera position (list/tuple of 3 floats)
+         image_width: Output image width
+         image_height: Output image height
+         num_steps: Number of samples per ray
+         scale: Scaling factor for image dimensions relative to volume
++        fov_deg: Field of view in degrees for perspective projection
+         
+     Returns:
+         image_data: 2D array of floats (0.0 to 1.0) representing average intensity
+     """
+-    image_data = np.zeros((image_height, image_width))
++    image_data = [[0.0 for _ in range(image_width)] for _ in range(image_height)]
+     
+     # Define bounding box for intersection (example: unit cube centered at origin)
+-    # Note: Specific bounds depend on volume coordinate system. 
+-    # Source [S2, unofficial] uses min=(-1,-1,-1), max=(1,1,1). Source [S4, unofficial] uses volume indices.
+-    bbox_min = np.array([-1.0, -1.0, -1.0])
+-    bbox_max = np.array([1.0, 1.0, 1.0])
++    bbox_min = [-1.0, -1.0, -1.0]
++    bbox_max = [1.0, 1.0, 1.0]
+     
+     for y in range(image_height):
+         for x in range(image_width):
+-            # Map pixel to world space
+-            # Source [S4, unofficial] uses orthographic mapping: originalX = pixelX / scale
+-            # Source [S2, unofficial] uses perspective: fpos derived from fragment position on cube
+-            # Implementing perspective ray casting as per [S2, unofficial]
+-            
+-            # Calculate fragment position on the bounding box face
+-            # Assuming a standard projection matrix inverse is applied to get fpos
+-            # For simplicity, assuming fpos is provided or calculated from screen coords
+-            fpos = calculate_fragment_position(x, y, image_width, image_height, bbox_min, bbox_max)
+-            
+-            direction = normalize(fpos - view_pos)
++            # Calculate ray direction from pixel coordinates
++            direction = compute_ray_direction(x, y, image_width, image_height, fov_deg)
+             
+             # Ray-Bbox Intersection (Slab Method)
+-            t_enter, t_exit = intersect_box(view_pos, direction, bbox_min, bbox_max)
+-            
+-            if t_enter > t_exit:
+-                continue # Ray misses volume
+-                
++            result = intersect_box(view_pos, direction, bbox_min, bbox_max)
++            if result is None:
++                continue
++                
++            t_enter, t_exit = result
+             dist = t_exit - t_enter
+             step_size = dist / num_steps
+             
+             total_value = 0.0
+-            count = 1 # Avoid division by zero
+-            
+-            current_pos = view_pos + direction * t_enter
+-            
+-            for i in range(num_steps):
++            count = 1  # Avoid division by zero, matches [S2, unofficial] initialization
++            
++            current_pos = [
++                view_pos[0] + direction[0] * t_enter,
++                view_pos[1] + direction[1] * t_enter,
++                view_pos[2] + direction[2] * t_enter
++            ]
++            
++            for _ in range(num_steps):
+                 count += 1
+                 
+                 # Coordinate transformation specific to source [S2, unofficial]
+-                # Scale Z to fit texture coordinate space [-1, 1] after mapping
+-                tmp = np.array([current_pos[0], current_pos[1], current_pos[2] * 2.3486238532110093])
++                tmp = [current_pos[0], current_pos[1], current_pos[2] * 2.3486238532110093]
+                 
+                 # Map to [0, 1] texture coordinates
+-                tex_pos = (1.0 + tmp) / 2.0
++                tex_pos = [(1.0 + tmp[0]) / 2.0, (1.0 + tmp[1]) / 2.0, (1.0 + tmp[2]) / 2.0]
+                 
+                 # Invert Y axis
+@@ -120,49 +115,72 @@
+                 
+                 # Sample volume
+-                # Clamp tex_pos to [0, 1] to handle boundary conditions
+-                tex_pos_clamped = np.clip(tex_pos, 0.0, 1.0)
+-                val = sample_volume(volume_texture, tex_pos_clamped)
+-                
++                val = sample_volume(volume_data, tex_pos)
+                 total_value += val
+                 
+                 # Advance position
+-                current_pos = current_pos + direction * step_size
++                current_pos = [
++                    current_pos[0] + direction[0] * step_size,
++                    current_pos[1] + direction[1] * step_size,
++                    current_pos[2] + direction[2] * step_size
++                ]
+                 
+             # Compute average
+             mean_value = total_value / count
+-            image_data[y, x] = mean_value
++            image_data[y][x] = mean_value
+             
+     return image_data
+ 
+-def sample_volume(texture, tex_coords):
+-    """
+-    Samples a 3D texture using trilinear interpolation.
+-    """
+-    # Implementation depends on specific texture API. 
+-    # Assuming standard GLSL-like texture3d behavior
+-    return texture3d(texture, tex_coords)
++def compute_ray_direction(pixel_x, pixel_y, img_w, img_h, fov_deg=60.0):
++    """Computes a normalized ray direction for a given pixel in a perspective camera."""
++    aspect = img_w / img_h
++    fov_rad = math.radians(fov_deg)
++    half_h = math.tan(fov_rad / 2.0)
++    half_w = half_h * aspect
++    dx = (pixel_x / img_w - 0.5) * 2.0 * half_w
++    dy = (0.5 - pixel_y / img_h) * 2.0 * half_h
++    # Camera looks down -Z axis
++    dir_vec = [dx, dy, -1.0]
++    length = math.sqrt(dir_vec[0]**2 + dir_vec[1]**2 + dir_vec[2]**2)
++    return [dir_vec[0]/length, dir_vec[1]/length, dir_vec[2]/length]
+ 
+ def intersect_box(origin, direction, min_b, max_b):
+     """
+     Slab method for ray-box intersection.
+-    Returns (t_enter, t_exit). Returns None if no intersection.
+-    """
+-    t_min = (min_b - origin) / direction
+-    t_max = (max_b - origin) / direction
+-    
+-    t1 = np.minimum(t_min, t_max)
+-    t2 = np.maximum(t_min, t_max)
+-    
+-    t_enter = np.maximum(np.maximum(t1[0], t1[1]), t1[2])
+-    t_exit = np.minimum(np.minimum(t2[0], t2[1]), t2[2])
++    Returns (t_enter, t_exit) or None if no intersection.
++    """
++    t_min = [0.0, 0.0, 0.0]
++    t_max = [0.0, 0.0, 0.0]
++    
++    for i in range(3):
++        if direction[i] == 0.0:
++            if origin[i] < min_b[i] or origin[i] > max_b[i]:
++                return None
++            t_min[i] = -float('inf')
++            t_max[i] = float('inf')
++        else:
++            t_min[i] = (min_b[i] - origin[i]) / direction[i]
++            t_max[i] = (max_b[i] - origin[i]) / direction[i]
++            
++    t_enter = max(t_min[0], t_min[1], t_min[2])
++    t_exit = min(t_max[0], t_max[1], t_max[2])
+     
+     if t_enter > t_exit:
+         return None
++    if t_exit < 0:
++        return None  # Box is behind the ray
+         
+-    # Ensure we start inside or at the entry point
+     if t_enter < 0:
+         t_enter = 0
+-        
+     return t_enter, t_exit
++
++def sample_volume(volume_data, tex_coords):
++    """Samples a 3D volume using clamped nearest-neighbor for pseudocode simplicity."""
++    # Clamp coordinates to [0, 1]
++    c = [max(0.0, min(1.0, v)) for v in tex_coords]
++    # Map to array indices (assuming volume_data is Z, Y, X)
++    z_idx = int(c[2] * (len(volume_data) - 1))
++    y_idx = int(c[1] * (len(volume_data[0]) - 1))
++    x_idx = int(c[0] * (len(volume_data[0][0]) - 1))
++    return volume_data[z_idx][y_idx][x_idx]
+ ```
+ 
+@@ -175,10 +193,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of samples per ray [S2, unofficial].
+-*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels [S4, unofficial].
+-*   **Performance:** Very fast due to the lack of complex compositing (opacity/alpha blending) and lighting calculations [S1, S4, unofficial].
+-*   **Strengths:** Simple implementation, fast rendering, useful for quick overviews or X-ray-like visualizations [S1, S4, unofficial].
++*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of samples per ray [G].
++*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels [G].
++*   **Performance:** Very fast due to the lack of complex compositing (opacity/alpha blending) and lighting calculations [G].
++*   **Strengths:** Simple implementation, fast rendering, useful for quick overviews or X-ray-like visualizations [G].
+ *   **Limitations:** Low contrast, no depth cues from occlusion, sensitive to noise and background clutter [S1, unofficial].
+-*   **When to Use:** When speed is critical and depth perception is not required, or for initial data exploration [S1, unofficial].
++*   **When to Use:** When speed is critical and depth perception is not required, or for initial data exploration [G].
+ *   **When Not to Use:** When detailed structural visualization, depth cues, or high contrast is needed [S1, unofficial].
+ 
+@@ -189,5 +207,6 @@
+ [S1] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)
+ [S2] ShashwatC/Ray, https://github.com/ShashwatC/Ray, fetched 2026-10-26 (unofficial)
+-[S3] viljanvr/VisualNifty, https://github.com/viljanvr/VisualNifty, fetched 2026-10-26 (unofficial)
+-[S4] indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, https://github.com/indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, fetched 2026-10-26 (unofficial)
+-[S5] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)+[S3] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
++[S4] viljanvr/VisualNifty, https://github.com/viljanvr/VisualNifty, fetched 2026-10-26 (unofficial)
++[S5] indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, https://github.com/indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, fetched 2026-10-26 (unofficial)
++[S6] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)

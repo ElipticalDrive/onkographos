@@ -1,0 +1,74 @@
+# Tiled 2D Texture Storage for 3D Fields
+
+Also called: 2D Texture Tiling for 3D Fields, Tiled 2D Texture Storage
+
+## Overview
+A technique to store a 3D scalar field in a 2D texture by tiling the 3D volume into 2D slices, allowing efficient GPU access via texture lookups [S1, unofficial]. It maps 3D coordinates to 2D texture coordinates using a tiling scheme where the Z-coordinate determines the tile position, enabling standard 2D texture sampling hardware to access volumetric data [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- Input: A 3D scalar field of dimensions $N_x \times N_y \times N_z$.
+- Input: `tilesX`, the number of tiles along the X-axis of the 2D texture.
+- Output: A 2D texture of dimensions $W \times H$ containing the tiled volume data.
+
+**Data Structures**
+The 2D texture is organized as a grid of tiles [S1, unofficial]. Each tile corresponds to a slice of the 3D volume [S1, unofficial]. Bit packing and exact field layouts are not given in the sources.
+
+**Parameters**
+- `tilesX`: The number of tiles along the X-axis of the 2D texture. It determines the tiling layout [S1, unofficial].
+- `gridSize`: The resolution of the volume in the X and Y dimensions, used to calculate texture coordinates [S1, unofficial].
+
+**Mapping Formula**
+To map a 3D coordinate $(x, y, z)$ to 2D texture coordinates $(u, v)$ [S1, unofficial]:
+1. Calculate the tile indices for the Z-coordinate [S1, unofficial]:
+   $$tileX = z \pmod{tilesX}$$
+   $$tileY = \lfloor z / tilesX \rfloor$$
+2. Calculate the texture coordinates [S1, unofficial]:
+   $$u = tileX \cdot gridSize + x$$
+   $$v = tileY \cdot gridSize + y$$
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def map_3d_to_2d_texture(x, y, z, tilesX, gridSize):
+    """
+    Maps 3D volume coordinates to 2D texture coordinates.
+    
+    Args:
+        x: X coordinate in volume (0 <= x < gridSize)
+        y: Y coordinate in volume (0 <= y < gridSize)
+        z: Z coordinate in volume (0 <= z < N_z)
+        tilesX: Number of tiles along X-axis of the 2D texture
+        gridSize: Spatial resolution of the volume in X and Y dimensions
+        
+    Returns:
+        (u, v): 2D texture coordinates
+    """
+    # Bounds checking not given in sources [G]
+    tileX = z % tilesX
+    tileY = z // tilesX
+    u = tileX * gridSize + x
+    v = tileY * gridSize + y
+    return u, v
+```
+
+**Edge Cases and Pitfalls**
+Not given in the sources.
+
+## Subtopics
+
+### [2D Texture-Based Volume Rendering with Z-Slice Packing](4269-2d-texture-based-volume-rendering-with-z-slice-packing.md)
+Renders a 3D scalar field by storing Z-slices in a tiled 2D texture grid, allowing 3D sampling via 2D texture lookups and trilinear interpolation. It differs from standard 3D texture sampling by mapping 3D coordinates to a 2D atlas, requiring explicit slice indexing and offset calculation in the shader. Choose it when leveraging 2D texture hardware for volume rendering is required.
+
+### [Point Cloud Volumetric Rendering via 2D Atlas](4879-point-cloud-volumetric-rendering-via-2d-atlas.md)
+A real-time GPU-accelerated technique for rendering 3D volumetric data (specifically point clouds or scalar fields) by storing the volume in a 2D texture atlas and rendering it as a point cloud where each point represents a voxel/sample. The depth of each sample is encoded in the atlas layout to allow correct sorting and rendering order without traditional depth buffering for the volume itself. Achieves 60Hz on GTX1080 for a 4k atlas, while Intel 630 graphics render a 2k atlas at ~20fps.
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+This technique is used in GPU-based volume rendering and marching cubes implementations to leverage 2D texture hardware for 3D data access [S1, unofficial].
+
+## Sources
+[S1] 3merillon/WebGL2-GPU-Marching-Cubes, https://github.com/3merillon/WebGL2-GPU-Marching-Cubes, fetched 2026-10-28 (unofficial)

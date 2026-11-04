@@ -1,0 +1,105 @@
+# GPU-based Ray-casting for Unstructured Grids
+Also called: Accurate and efficient GPU ray-casting algorithm for volume rendering of unstructured grid data
+
+## Overview
+This method provides a GPU-based ray-casting algorithm for volume rendering of unstructured grid data that guarantees accurate rendering results for non-convex meshes [S1, unofficial]. It solves the difficulty of mapping irregular unstructured grid data efficiently to GPU hardware by employing the per-pixel intersection list concept from the Bunyk algorithm to ensure correct visibility sorting [S1, unofficial]. Unlike direct volume rendering approaches that must overcome cell ordering and per-cell processing bottlenecks, this method represents intersection lists for all faces as an array using a novel construction algorithm for efficient memory access on the GPU [S1, unofficial]. It extends a prior image-tile-based work distribution method to fit modern GPU architectures, increasing ray-coherency in a thread block and improving memory access efficiency [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Unstructured grid dataset (faces/vertices), camera parameters, transfer function.
+*   **Output:** Rendered image.
+
+**Data Structures:**
+*   **Intersection Lists:** Represented as a flat array constructed via a novel algorithm to ensure efficient memory access on the GPU [S1, unofficial]. This structure replaces the irregular mesh topology with a format suitable for GPU thread execution.
+*   **Work Distribution:** Image-tile-based distribution extended for modern GPU architectures to group rays within thread blocks [S1, unofficial].
+
+**Steps:**
+1.  **Preprocessing (Intersection List Construction):** Construct the intersection lists for all faces. The method uses a novel construction algorithm to represent these lists as an array, optimizing for GPU memory access patterns [S1, unofficial].
+2.  **Work Distribution:** Distribute rendering work using an extended image-tile-based scheme. This groups rays into thread blocks to increase ray-coherency and improve memory access efficiency [S1, unofficial].
+3.  **Ray Casting Execution:** Perform ray-casting on the GPU where a single GPU thread handles each ray [S1, unofficial].
+4.  **Visibility Sorting and Integration:** Use the per-pixel intersection lists to determine the order of face intersections. This guarantees accurate visibility sorting for non-convex meshes [S1, unofficial].
+5.  **Computation Strategy:** Employ an on-demand calculation strategy. The method explicitly avoids using a per-thread local buffer to reduce redundant computation, as this is not appropriate for modern GPU architectures [S1, unofficial]. Instead, it allows duplicate computations to achieve better overall performance [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode based on [S1, unofficial]
+# Note: Specific construction algorithm details are not provided in the source.
+
+def gpu_ray_casting(unstructured_grid, camera, transfer_function):
+    # 1. Construct intersection lists for all faces
+    # The source describes a "novel construction algorithm" but does not provide the code.
+    # This step creates an array representation of intersection lists optimized for GPU memory access.
+    intersection_lists = construct_intersection_lists(unstructured_grid)
+
+    # 2. Distribute work using image-tile-based scheme
+    # Extends prior work to fit modern GPU architectures for ray-coherency.
+    tiles = create_tiles(camera.resolution)
+
+    # 3. Launch GPU kernel
+    # Each thread handles one ray.
+    for tile in tiles:
+        launch_kernel(tile, intersection_lists, camera, transfer_function)
+
+def ray_casting_kernel(tile, intersection_lists, camera, transfer_function):
+    # Get pixel coordinates from thread ID
+    pixel = get_pixel_from_thread_id()
+    
+    # Generate ray from camera
+    ray = generate_ray(camera, pixel)
+    
+    # Retrieve intersection list for this pixel
+    # The list contains faces intersected by the ray, sorted for visibility
+    face_list = get_intersection_list(intersection_lists, pixel)
+    
+    # On-demand calculation strategy
+    # No per-thread local buffer is used to avoid performance penalties on modern GPUs.
+    # Duplicate computations are allowed for better performance.
+    color = vec3(0.0)
+    alpha = 0.0
+    
+    for face in face_list:
+        # Calculate intersection distance
+        t = intersect_ray_face(ray, face)
+        
+        # Evaluate optical properties on-demand
+        # Source does not specify the exact integration formula (e.g., volume rendering integral)
+        # but implies accurate results for non-convex meshes via the sorted list.
+        sample = evaluate_transfer_function(face, t, transfer_function)
+        
+        # Composite
+        color, alpha = composite(color, alpha, sample)
+        
+    return color
+```
+
+**Parameters:**
+*   **Tile Size:** Not given in the sources.
+*   **Thread Block Size:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Per-thread Local Buffer:** Using a per-thread local buffer to reduce redundant computation is not appropriate for modern GPU architectures and should be avoided [S1, unofficial].
+*   **Non-convex Meshes:** The method specifically addresses non-convex meshes by ensuring accurate visibility sorting via the intersection lists [S1, unofficial].
+
+## Subtopics
+
+### [Pixel Ray Image (PRI)](2467-pixel-ray-image-pri.md)
+The Pixel Ray Image (PRI) is a semi-regular data structure for volume rendering of unstructured grids that replaces the irregular mesh with a pixelized projection plane and 1D linear splines defined on sampling rays. It solves the difficulty of mapping irregular unstructured grid data efficiently to GPU hardware by leveraging coherent sample placement and 2D texture storage, allowing efficient rendering utilizing shader programming and a slice-based rendering scheme similar to hardware-accelerated rendering for regular grids. Unlike direct volume rendering approaches that must overcome cell ordering and per-cell processing bottlenecks, PRI pre-computes ray-cell intersections into a texture-friendly format.
+
+### [GPU-based Ray Traversal on Tetrahedral Meshes](3165-gpu-based-ray-traversal-on-tetrahedral-meshes.md)
+This method performs volume rendering on tetrahedral meshes by executing fast ray traversal concurrently for all pixels on a GPU. It solves the problem of accurately integrating optical properties through unstructured, non-convex volumetric data by traversing the mesh topology directly. It is distinguished from sibling methods like Pixel Ray Image (PRI) by its explicit use of neighbor pointers and texture-memory-based adjacency lookups to navigate the tetrahedral grid, rather than spatial acceleration structures like BVHs or grids.
+
+## Operating characteristics
+*   **Performance:** Up to 36.5 times higher performance for the ray-casting process and 19.7 times higher performance for the whole volume rendering process compared with the Bunyk algorithm using a CPU core [S1, unofficial].
+*   **Performance:** Up to 8.2 times higher performance than a GPU-based cell projection method while generating more accurate rendering results [S1, unofficial].
+*   **Strengths:** Guarantees accurate rendering results for non-convex meshes; efficient memory access on GPU via novel intersection list construction; improved ray-coherency through extended image-tile-based work distribution.
+*   **Limitations:** Allows duplicate computations (on-demand strategy) which may increase arithmetic intensity, though this is deemed more efficient than local buffer usage on modern GPUs [S1, unofficial].
+*   **When to use:** When accurate volume rendering of non-convex unstructured grids is required on GPU hardware, and performance is critical compared to CPU-based or cell-projection methods.
+*   **When not to use:** When per-thread local buffering is preferred for simplicity despite potential performance penalties on modern architectures, or when the overhead of constructing the novel intersection lists outweighs the benefits for very small datasets.
+
+## Background
+The method was presented in a paper titled "Accurate and efficient GPU ray‐casting algorithm for volume rendering of unstructured grid data" by Gibeom Gu and Duksu Kim, published in ETRI Journal in February 2020 [S1, unofficial]. It builds upon prior work on image-tile-based work distribution and the Bunyk algorithm's per-pixel intersection list concept. The authors applied the method to three unstructured grid datasets with different characteristics to demonstrate its efficiency and accuracy [S1, unofficial].
+
+## Sources
+[S1] Accurate and efficient GPU ray‐casting algorithm for volume rendering of unstructured grid data, https://www.researchgate.net/publication/339188888_Accurate_and_efficient_GPU_raycasting_algorithm_for_volume_rendering_of_unstructured_grid_data, fetched 2026-10-28 (unofficial)

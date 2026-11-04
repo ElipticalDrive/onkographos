@@ -1,0 +1,2718 @@
+RCPG: Real-Time Product Path Guiding Using Radiance Cascades
+JULIUS IKKALA, Tampere University, Finland
+PEKKA JÄÄSKELÄINEN, Tampere University, Finland
+MARKKU MÄKITALO, Tampere University, Finland
+Ground truth
+VXPG [Lu et al. 2024], 3 spp / 37.5 ms
+RCPG (Ours), 3 spp / 14.9 ms
+PDF up to
+Cascade C
+C=0
+FLIP: 0.342
+FLIP: 0.319
+C=1
+C=2
+Fig. 1. At an equal number of samples per pixel, Radiance Cascade Path Guiding (RCPG) achieves higher quality at less than half the frame time compared to
+the previous state-of-the-art method Voxel Path Guiding (VXPG) [Lu et al. 2024] in the “Staircase” scene. RCPG is a product sampling method, which allows
+us to avoid separately sampling guided and BSDF bounce rays like VXPG does, in part explaining the performance improvement. On the right, the probability
+distribution function (PDF) for RCPG sampling on the first bounce ray is shown in the octahedral projection [Meyer et al. 2010]. In order to visualize the
+hierarchical nature of radiance cascades, the PDFs are shown with an increasing number of cascades being used in the sampling process.
+We present Radiance Cascade Path Guiding (RCPG), a real-time product
+path guiding method that improves upon previous state-of-the-art realtime path guiding methods both in quality and performance. We derive
+bounds for radiance intervals such that the direction of incoming light is
+not misrepresented by radiance cascades. This allows us to take advantage
+of the hierarchical nature of radiance cascades in a sampling process that
+takes the product of the incoming radiance and the material’s BSDF into
+account. It is also possible to compute the probability distribution function
+of RCPG sampling for any given direction, making it readily compatible
+with other sampling methods, such as multiple importance sampling (MIS)
+and unbiased ReSTIR.
+As a product sampling scheme, RCPG can use a single sampling method for
+producing scattering directions, as opposed to needing separate importance
+sampling schemes for incident radiance and the BSDF. Compared to prior
+state-of-the-art real-time path guiding methods utilizing multi-sample MIS,
+this allows RCPG to generally trace twice as many paths per pixel within a
+real-time frame rate. Because the data structure is defined in world space,
+it can be used to generate samples starting from off-screen path vertices,
+which is necessary for effective multi-bounce path guiding.
+Authors’ Contact Information: Julius Ikkala, julius.ikkala@tuni.fi, Tampere University,
+Tampere, Finland; Pekka Jääskeläinen, pekka.jaaskelainen@tuni.fi, Tampere University,
+Tampere, Finland; Markku Mäkitalo, markku.makitalo@tuni.fi, Tampere University,
+Tampere, Finland.
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+and/or a fee. Request permissions from permissions@acm.org.
+© 2026 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+ACM XXXX-XXXX/2026/7-ART
+https://doi.org/10.1145/nnnnnnn.nnnnnnn
+CCS Concepts: • Computing methodologies → Ray tracing.
+Additional Key Words and Phrases: Real-time rendering, global illumination,
+path tracing, importance sampling, product sampling, path guiding, radiance
+cascades, linearly transformed cosines
+ACM Reference Format:
+Julius Ikkala, Pekka Jääskeläinen, and Markku Mäkitalo. 2026. RCPG: RealTime Product Path Guiding Using Radiance Cascades. 1, 1 (July 2026),
+25 pages. https://doi.org/10.1145/nnnnnnn.nnnnnnn
+1
+Introduction
+Monte Carlo Path Tracing is perhaps the most well-known photorealistic rendering method that can be used to compute an unbiased
+estimate for the solution of the rendering equation [Kajiya 1986].
+However, with a limited number of samples, the estimates are very
+noisy. While this noise can be reduced by applying denoising techniques to the resulting images, such approaches are inherently lossy
+and cause bias.
+Another approach is to improve the Monte Carlo sampling itself.
+There are various methods for this, many of which can be used together. Path Guiding methods are based on constructing or learning
+a data structure based on the lighting of the scene being rendered,
+which is then used to inform sampling [Vorba et al. 2019]. Traditionally, path guiding methods have focused on offline rendering,
+but real-time methods are starting to emerge as well [Alber et al.
+2025; Derevyannykh 2022; Lu et al. 2024]. Additionally, sample reuse
+schemes such as ReSTIR [Bitterli et al. 2020] are also gaining popularity. The noise level of ReSTIR-based renderers can be lowered
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+2 •
+Ikkala et al.
+with improved initial samples, especially in the worst-case situations where the number of samples usable for spatial and temporal
+reuse is low.
+Real-time realistic lighting methods that are not based on path
+tracing are also still being researched [Majercik et al. 2019; Sannikov
+2023]. Occasionally, these methods may represent lighting information of the scene in such a format that they may provide useful
+information for path guiding as well. In this article we show that one
+such method, “Radiance Cascades” [Osborne and Sannikov 2024],
+is particularly suited to be used as a path guiding data structure.
+By its hierarchical nature, the method makes it straightforward to
+sample directions efficiently, taking into account both the surface
+BSDF and indirect illumination. It can thus be used for real-time
+product path guiding.
+We build upon radiance cascades in order to allow for path guiding, and present the following novel contributions:
+• Application of the data structure to path guiding.
+• Derivation of radiance interval bounds for preserving directional information in radiance cascades.
+• A product path guiding method that improves upon state-ofthe-art in real-time path guiding in both speed and quality.
+2
+Related work
+Radiance Cascades (RC) were introduced in a draft paper [Sannikov 2023] for use primarily in two-dimensional global illumination, although they also propose generalizations to the third dimension. The first academically published description of the method is in
+the context of astrophysics [Osborne and Sannikov 2024]. The core
+idea of radiance cascades is to compute a hierarchical representation
+of radiance in such a way that it is later possible to approximately
+reconstruct the radiance field in an efficient manner. The method
+organizes probes in multiple grids of different resolutions called
+“cascades”, where the probes encode information from a limited
+range of distances. Higher-density cascades contain shorter-range
+probes. The method has recently seen interesting developments
+with the introduction of “Holographic Radiance Cascades” [Freeman et al. 2025], although this work is not yet directly applicable to
+path guiding due to the limitation to 4-directional fluence and poor
+scaling to three dimensions. Compared to NERFs [Mildenhall et al.
+2020], radiance cascades represent the radiance field with lower
+quality, but can usually be constructed in just a few milliseconds or
+less and are more straightforward to use for efficient importance
+sampling.
+Linearly Transformed Cosines (LTC) enable efficient analytical approximations of BSDFs. They were originally introduced for
+analytical shading with polygonal area lights [Heitz et al. 2016] and
+have also been applied to BRDF importance sampling of polygonal
+lights [Peters 2021]. LTC approximations work by applying a linear
+transformation matrix to a cosine lobe such that it approximates
+a more complex BSDF, such as Trowbridge-Reitz [Trowbridge and
+Reitz 1975; Walter et al. 2007]. As the optimal linear transformation
+heavily depends on material roughness and viewing angle, the coefficients of these matrices are typically computed into a lookup
+table in a pre-processing step. We utilize LTCs for computing BSDF
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+weights during our iterative sampling process and optionally also
+for sampling from within a single texel of a light probe.
+Path guiding methods are a class of sampling techniques for
+path tracing that adapt to the scene content in order to select better
+rays [Vorba et al. 2019]. They collect or learn scene-dependent
+lighting information either during sampling or ahead of time, in
+order to guide future samples to directions which are more likely
+to contribute lighting. Much of the prior work in path guiding has
+focused on offline rendering [Jensen 1995; Lafortune and Willems
+1995; Müller et al. 2017]. While many of these methods are based
+on 5D tree structures [Lafortune and Willems 1995; Müller et al.
+2017] or neural representations [Dong et al. 2023; Müller et al. 2019]
+that are currently relatively slow for sampling in real-time, some
+offline approaches present concepts that are also applicable to realtime rendering. In particular, Gaussian mixture models [Vorba et al.
+2014], von Mises–Fisher (vMF) distributions [Ruppert et al. 2020]
+and voxelization [Rath et al. 2023] have found use in the real-time
+domain as well [Alber et al. 2025; Derevyannykh 2022; Lu et al. 2024].
+Practical Product Path Guiding [Diolatzis et al. 2020] proposes
+an LTC-based product sampling scheme in the offline context, which
+we adapt to implement product sampling with radiance cascades in
+our method.
+Neural methods typically aim to learn a continuous distribution,
+thus sidestepping problems with discrete approaches. In Neural
+Parametric Mixtures [Dong et al. 2023], vMF mixtures are used for
+approximating the full product distribution, and optimized online
+with stochastic gradient descent. While their OptiX-based implementation is able to perform a single inference and importance
+sampling iteration in 3 milliseconds in 1280x720 image resolution,
+they note that there is work left to do on making the method practical for interactive rendering and that the training process can take
+seconds per scene.
+The full product distribution can also be represented with Normalized Anisotropic Spherical Gaussians [Huang et al. 2024],
+where each shading point is mapped onto a 5-parameter spherical distribution that is learned with a small multilayer perceptron,
+using stochastic ray samples. Samples are drawn either from the
+learned distribution or from the BSDF, based on the learned selection
+probability. Their Clight-based implementation takes approximately
+85–372 ms per sample (with naive scaling based on the reported
+1024 spp results) on an Nvidia RTX 2080 Ti GPU, depending on the
+scene and resolution. The method can therefore be suitable for interactive use, but is an order of magnitude away from high-framerate
+real-time use.
+Higher-dimensional distributions can also be broken down, as
+is done with Distribution Factorization [Figueiredo et al. 2025],
+which separates the 2D distribution into marginal and conditional
+1D PDFs. Each PDF is then modeled with a separate neural network,
+which in this case learns the distribution at a set of uniformly spaced
+discrete coordinates. While the separation also allows for caching
+the individual components for more efficiency, the method is not
+targeted towards real-time usage; rendering the presented examples
+takes tens of seconds or even minutes. With naive scaling based
+on their equal-time results, the faster of their methods, “DF-N”,
+takes 55–103 ms to compute one sample at an unreported image
+resolution.
+RCPG: Real-Time Product Path Guiding Using Radiance Cascades
+Neural resampling is also used for production rendering. In
+Disney’s Hyperion CPU renderer [Rath et al. 2025], a GPU-trained
+network can directly estimate the incident RGB radiance, instead of
+a PDF. They also use resampled importance sampling (RIS) [Talbot
+et al. 2005] to generate product samples (radiance times BSDF) from
+a set of candidate samples, determining optimized candidate counts
+through aggregated statistics. As the queries are performed on CPU,
+the runtime is in the order of tens of seconds per sample. A later
+modification to this method replaces the radiance encoding scheme
+with a hash-grid-sphere encoding [Weier et al. 2026], improving
+quality at the cost of about 40% slower performance.
+Learning the light transport can also be formulated as a reinforcement learning problem, where updating the incident radiance
+corresponds to the Q-learning algorithm [Dahm and Keller 2017].
+The light sources are treated as rewards, and the reinforcement
+policy decides the scattering directions, for example based on representing each surface sample point with a discretized hemisphere.
+Their implementation takes 51 ms for 1 spp at a 720p resolution,
+with an unspecified GPU.
+In one early real-time path guiding publication [Dittebrandt et al.
+2020], temporally- and sample-adaptive world-space octrees are
+used to construct Visibility Light Caches (VLC) and Compressed
+Directional Quadtrees (CDQ); the former are used for product importance sampling next event estimation rays, and the latter for
+sampling indirect lighting. The combined VLC+CDQ method takes
+about 17 ms for a 1 spp 1080p frame on an RTX 2080 Ti, although
+the implementation is primarily evaluated with Quake 2 video game
+levels that contain relatively simplistic 3D scenes with few polygons
+by modern standards.
+A real-time path guiding method based on learning a 2D Gaussian distribution on a 2D projection of the hemisphere has been
+proposed [Derevyannykh 2022]. They store one such distribution
+per pixel, making it a screen-space method. Hence, we call this
+approach Screen-Space Path Guiding (SSPG) in this paper. The
+method is primarily only useful for a single bounce of indirect light;
+off-screen intersections do not have path guiding data. Our method
+instead stores its distributions in world-space grids and is discretized
+to texels instead of an analytical distribution.
+Markov Chain Mixture Models [Dittebrandt et al. 2023] uses
+screen-space vMF distributions to approximate the product of incident radiance and BSDF. Each pixel hosts its own vMF lobe, and
+the Markov chains transition by exchanging vMF lobe parameters
+between pixels. Their implementation runs in 15–16 ms for an 8 spp
+1080p frame, on an RTX 2080 Ti. This method is primarily positioned
+for direct light sampling, with indirect light left as future work.
+This future work is then realized in Markov Chain Path Guiding (MCPG) [Alber et al. 2025], where the vMF distributions are
+instead stored in a world-space hash grid data structure, which allows for handling indirect light and single scattering as well. This
+work is omitted from comparisons in this paper due to difficulty
+of replication with arbitrary scenes; their implementation is specific to the Quake game engine, and they do not compare to other
+state-of-the-art real-time path guiding methods either. In the relatively low-poly Quake 2 levels measured in their paper, the method
+reaches 2–4 spp in 15–19 ms with two bounces for a 1080p frame,
+using an AMD Radeon RX 7900 XTX GPU.
+• 3
+Voxel Path Guiding (VXPG) [Lu et al. 2024] takes a different
+approach by storing per-voxel importance in a voxelized version
+of the scene. During training, rays inject light in the voxels they
+intersect. This data is then used to sample brighter voxels more
+often. While VXPG does not rely on temporal information, temporal flickering can be present, as the light injection is inherently
+stochastic and may entirely miss voxels at random. In contrast, our
+method does utilize temporal information in the form we propose,
+leading to initial instability but being more temporally stable after
+a few dozen frames.
+Techniques suitable for path guiding can also be extended to
+other applications related to path sampling control. Progressive
+Spatio-temporal Filtering [Pantaleoni 2020] combines path tracing and radiosity-style finite element solvers for versatile filtering
+of samples produced by a path sampler, for example for control
+variates and biased estimation. They employ a 5D spatio-directional
+hash grid, with an additional spherical harmonics representation
+to describe normal variations within a grid cell. Combined with
+spherical Gaussian mixture models and k-d trees, their method is
+able to handle product distributions without computing the product of individual radiance and BSDF approximations. While their
+extended applications are performant, the path guiding application
+itself suffers from a large 70 ms overhead (for a 1 spp 1080p frame
+on an RTX 2080 Ti) and high memory consumption.
+Reservoir-based Spatiotemporal Importance Resampling
+(ReSTIR) is a method that allows for biased and unbiased reuse
+of samples in a ray tracer in a manner that drastically increases
+overall sample quality. It was originally proposed for direct illumination [Bitterli et al. 2020], but has been extended for global illumination [Ouyang et al. 2021] and generalized to path tracing [Lin
+et al. 2022]. ReSTIR is orthogonal to path guiding and can be used in
+addition to it; path guiding methods can be used to generate highquality candidate samples for ReSTIR to reuse, which reduces the
+resulting noise and artifacting. The quality improvement attained
+with ReSTIR-based resampling methods is usually so drastic that
+it is difficult to justify omitting it in real-time use. Concurrently
+with our work, ReSTIR [Lin et al. 2022] has also been generalized
+to handle path guiding: In ReSTIR PG [Zeng et al. 2025], the full
+product distribution for path guiding is directly estimated from
+ReSTIR samples, via a four-lobe vMF mixture that approximates a
+marginal 2D distribution within each spatial hash grid cell. This
+method produces high-quality 1 spp 1080p frames in 18–33 ms on
+an RTX 6000 Ada GPU.
+3
+Construction of radiance cascades
+We build and update the radiance cascades data structure in realtime, although the ray tracing involved with this is temporally
+amortized across multiple frames. In Section 3.1, we outline radiance cascades, a hierarchical set of grids containing light probes
+representing radiance from limited distance intervals. Next, in Section 3.2, we derive bounds related to those radiance intervals such
+that radiance cascades can be used in path guiding. Then, we present
+the rationale for selecting a spherical mapping for use in the light
+probes in Section 3.3.
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+4
+•
+Ikkala et al.
+tmin
+tmax
+Fig. 2. The “radiance interval” defines a distance range where surfaces
+contribute radiance to a probe. In this case, the probe’s origin is the blue dot
+on the left. Only light reflecting from the teapot contributes to the probe,
+as the other objects are outside of the interval’s range and are ignored.
+The radiance cascade construction pipeline then proceeds in the
+following order: First, we determine the set of probes that can actually be accessed during sampling and cull the rest as described in
+Section 3.4. Then, we trace new rays to get updated radiance information, as explained in Section 3.5. Finally, we collect information
+across cascades to build the final path guiding data structure, as
+outlined in Section 3.6.
+3.1 Cascades
+In the context of radiance cascades, a cascade refers to a grid, where
+each grid cell contains a probe. The grid is scaled to cover the entire
+scene, has a power-of-two resolution and has equal extent along
+each axis (is a cube). Each cascade covers the same volume but with
+a different resolution. Each probe stores an image of the surrounding radiance originating from a limited distance range, [𝑡𝑚𝑖𝑛 , 𝑡𝑚𝑎𝑥 ].
+This range is called the radiance interval and depends on the cascade.
+Figure 2 visualizes a radiance interval. Each texel of a probe contains two values: Radiance and transparency. Transparency is the
+proportion of light that can pass through the interval; if an opaque
+object covers visibility through the interval, it is zero.
+“Cascade 0” is the most spatially dense grid, where each probe has
+the lowest angular resolution and shortest interval: [0, 𝑡 0 ]. Each step
+to a higher cascade halves the spatial resolution (i.e., probe density),
+doubles the angular resolution (i.e., probe’s image resolution), and
+extends the radiance interval to [𝑡𝑛−1, 𝑡𝑛 ], where 𝑡𝑛 > 𝑡𝑛−1 and
+𝑡𝑛+1 −𝑡𝑛 > 𝑡𝑛 −𝑡𝑛−1 , i.e., each interval covers a longer range further
+out. Together, information from all cascades can be combined to
+reconstruct radiance with high spatial resolution, at the expense of
+low angular resolution with short-distance rays. In Section 3.2, we
+derive a formula for 𝑡𝑛 that faithfully retains directional information,
+which is crucial for path guiding.
+With three-dimensional radiance cascades, the total number of
+texels in a single cascade is 𝑀 3 𝑁 2 , where 𝑀 3 is the number of probes,
+and 𝑁 2 is the number of texels per probe. As the probe count of the
+ 3
+next cascade is 𝑀2 = 81 𝑀 3 and probe texel count is (2𝑁 ) 2 = 4𝑁 2 ,
+the total number of texels per cascade halves. This means that, over
+all cascades, the majority of texels belong to cascades with shorter
+radiance intervals; this is beneficial for performance, as shorter rays
+can often be traced faster [Arm Limited 2025].
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+This scaling property is very useful, as it allows the whole radiance cascades data structure to have an asymptotic space complexity
+of 𝑂 (𝑀03 𝑁 02 ), where 𝑀0 and 𝑁 0 relate to the spatial and angular resolution of cascade 0, respectively. This is the same as a naive grid
+of probes at that resolution, yet the further cascades in the structure allow for reconstructing the radiance field with a much higher
+angular resolution.
+The maximum number of cascades in the structure is log2 (𝑀0 ).
+As 𝑀0 is a power of two, this is always a whole number. The last
+cascade has only one probe. It is typical that especially for the
+final couple of cascades, the radiance interval begins outside of
+all scene geometry, and can therefore never actually intersect any
+surface. In practice,
+√ we omit computing and storing such cascades.
+We use 𝑡𝑚𝑖𝑛 > 𝐿 3 as the condition to omit a cascade, where 𝐿 is
+equal to the scene’s bounding AABB’s largest extent and 𝑡𝑚𝑖𝑛 is
+the beginning of the radiance interval used in that cascade. This
+condition tests if a radiance interval from one corner of the cascade
+begins outside of the furthest corner, thereby having no chance of
+containing any scene geometry.
+Our approach diverges from prior work on radiance cascades in
+a few key ways. For performance reasons, we always use nearestneighbor interpolation. This way, each probe of cascade 𝑛 has a
+single corresponding parent probe in cascade 𝑛 + 1, and radiance
+intervals are merged by looking up further intervals from the parent
+probes in successive cascades.
+To allow for this nearest-neighbor interpolation and to increase
+reliability for path guiding, we assign the value of each texel by numerically integrating over its solid angle and the grid cell’s volume.
+In practice, this means that the ray origins are jittered within the
+probe’s grid cell and the ray directions are jittered within the texel’s
+solid angle, and an exponential moving average of the results is
+taken with ratio 𝛼 = 1/30. The approach from the original radiance
+cascades paper [Sannikov 2023], tracing one deterministic ray per
+texel, places a limit on the minimum size of representable scene
+detail and can miss important lighting details that are smaller than
+that minimum.
+In comparison with SD-trees [Müller et al. 2017], radiance cascades also store an approximation of the surrounding 5D light field.
+However, there are some key differences. Radiance cascades do not
+include any adaptive splitting; the structure itself does not adapt
+when updated, only the values contained are changed. In real-time
+rendering on a GPU, this predictable and uniform structure is somewhat of a benefit, as “traversing” the structure for updating or sampling does not involve divergence in control flow.
+SD-trees and other tree-like path guiding data structures usually
+store an independent representation for the directional portion of
+the data (quadtree [Müller et al. 2017] or vMF mixture [Ruppert
+et al. 2020]) separately for each leaf node of the spatial tree, and
+thereby decouple the spatial and directional domains. The hierarchical structure of radiance cascades intertwines the two domains by
+storing short-distance lighting with high spatial resolution and low
+directional resolution, and long-distance lighting with low spatial
+resolution and high directional resolution. The spatial resolution
+of each cascade is directly linked and inversely proportional to the
+angular resolution on that cascade.
+RCPG: Real-Time Product Path Guiding Using Radiance Cascades
+• 5
+(a) Surrounding radiance viewed from (b) Detail is lost when storing radia probe’s center.
+ance in low resolution (32x16).
+(c) Nearby areas become blurry when (d) Faraway detail is still lost in the
+jittering the ray origin.
+low-resolution probe texture.
+Fig. 4. The point 𝑝 is at a distance of 𝑡 from the probe. With 𝑙 being the
+width of the cell’s edge, we derive a lower bound 𝜃𝑚𝑖𝑛 for the parallax angle
+towards 𝑝 from within the cell (span of directions that the point can be
+seen from). This lower bound is computed using the angle subtended by
+the inner circle of the cell on the point 𝑝, as that is always smaller than
+the angle subtended by the cell itself and is conveniently independent of
+direction.
+with an edge length of 𝑙. This approach allows the bound to remain
+independent of the direction of 𝑝 and ensures that the result is
+transferable to 3D as well, despite being derived in 2D. This works,
+because we can think of the circle as a sphere’s equator. Now, with
+straightforward trigonometry, we can solve the 𝜃𝑚𝑖𝑛 bound:
+(e) By strategically selecting the 𝑡𝑚𝑎𝑥 (f) ... the probe can resolve all visible
+limit of the radiance interval...
+features.
+Fig. 3. A visual representation of the motivation for parallax-based radiance
+interval bounds. Left column: Original incident radiance. Right column:
+Discretized radiance as it would be stored in a radiance cascade probe. The
+equirectangular projection is used for visualization purposes only; in practice,
+we use an octahedral mapping for the probes. We can select the radiance
+interval bounds so that the probe resolution is sufficient to represent the
+incident radiance. This works by taking into account the fact that we jitter
+the ray origins within the grid cell occupied by the probe.
+3.2 Parallax-based radiance interval bounds
+When computing the value of a probe’s texel, the integration over all
+starting points inside the probe’s cell acts as a low-pass filter on the
+probe’s image, as shown in Figure 3(c). The width of the passband
+depends on the distance 𝑡 of a scene point 𝑝 to the probe. Effectively,
+the contribution of 𝑝 is “smeared” across all the potential directions
+it can be seen from inside the cell, and we denote this “parallax”
+range with angle 𝜃 . This angle is equivalent to the angular diameter
+of the “blurred” point in the probe’s image.
+The most distant scene points included in the radiance interval
+experience the least parallax, and thus retain the highest angular
+frequency available in that cascade. We now derive a conservative
+estimate for 𝑡𝑚𝑎𝑥 where the probe resolution is known to be sufficient to represent the incident radiance. The approach is visualized
+in Figure 3. We later use this result as a guideline for defining the
+radiance intervals that we actually use in this paper.
+The highest signal frequencies occur when there is least parallax.
+To represent the minimum possible parallax, we compute a conservative lower bound for the parallax angle, 𝜃𝑚𝑖𝑛 , towards the point
+𝑝 at distance 𝑡𝑚𝑎𝑥 .
+As shown in Figure 4, we simplify the problem by deriving 𝜃𝑚𝑖𝑛
+as if the parallax only occurred within the inner circle of a cell
+𝑙
+2𝑡𝑚𝑎𝑥
+Now, estimating that 𝜃𝑚𝑖𝑛 is the window width of a low-pass
+filter, the top angular frequency of the passband is 𝑓𝑚𝑎𝑥 = 𝜃 1 . The
+𝑚𝑖𝑛
+𝑡𝑚𝑎𝑥 of a cascade is now chosen such that the minimum angular
+resolution of the probes on that cascade is sufficient to sample the
+resulting signal. Following the Nyquist–Shannon sampling theorem [Shannon 1949], this means that:
+𝜃𝑚𝑖𝑛 = 2 arcsin
+𝑓𝑚𝑎𝑥 =
+1
+1
+=
+𝜃𝑚𝑖𝑛 2 arcsin
+𝑙
+2𝑡𝑚𝑎𝑥
+<
+𝑓𝑠
+2
+where 𝑓𝑠 is the angular sampling frequency of the probe, which
+is directly related to its image resolution. The lowest possible frequency is a safe assumption for 𝑓𝑠 , i.e., longest angle across the
+largest texel’s solid angle. We precalculate 𝑓𝑠 with a brute-force
+method for all probe cascades. The value of 𝑡𝑚𝑎𝑥 then follows:
+𝑡𝑚𝑎𝑥 =
+𝑙
+2 sin 𝑓1
+𝑠
+As sin is nearly linear close to zero, assuming 𝑙 and 𝑓𝑠 double
+each cascade, it approximately holds that 𝑡𝑚𝑎𝑥 ∝ 4𝑖 , where 𝑖 is the
+cascade index. We do not use this additional approximation in our
+implementation, but highlight it to contrast with literature. The
+“penumbra condition” in the initial paper [Sannikov 2023] yields
+𝑡 ∝ 2𝑖 instead. Later related work proposes the use of 𝑡 ∝ 22𝑖 = 4𝑖
+for standard radiance cascades [Freeman et al. 2025; Osborne and
+Sannikov 2024].
+While the power-of-two ray lengths from the penumbra condition
+allow for much higher resolutions in the probes, they allow adjacent
+probes to have parallax exceeding the angular radius of one texel,
+which either results in double-images during linear interpolation or
+wasted probe resolution if jittering inside a cell. Even though these
+issues do not visibly affect diffuse lighting due to the penumbra
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+6 •
+Ikkala et al.
+however, the determinant is only computed once per sample, and is
+not particularly complex for the octahedral projection:
+3
+|𝑱 | = (1 + 2 · min(1 − |𝑥 | − |𝑦|, 0) − 2|𝑥 | − 2|𝑦| + 2|𝑥𝑦| + 2𝑥 2 + 2𝑦 2 ) − 2
+where 𝑥, 𝑦 ∈ [−1, 1] define the 2D position in the octahedral map.
+3.4 Culling probes by voxelization
+3.3 Probe mapping
+When extending radiance cascades to the third dimension, the number of probes in the volume can quickly become prohibitively large.
+For example, using a resolution of 1283 for cascade 0 with 16 texels
+for each probe, computing two rays (primary ray & shadow ray)
+for each texel in 5 cascades would involve ∼ 130 million rays. The
+performance cost of tracing this many rays is excessive.
+Because probes are selected using nearest-neighbor sampling, if
+a probe’s cell does not overlap with any geometry, it will be unused.
+Therefore, we can skip updating those probes. To do this, we conservatively voxelize the scene in real time, resulting in a 3D lookup
+texture that marks the cells occupied by any geometry. Rasterization
+hardware is utilized to perform the voxelization efficiently [Crassin
+et al. 2011; Dong et al. 2004].
+We perform this voxelization at the resolution of cascade 0, i.e.,
+the cascade with the highest spatial resolution. This can then be
+used to produce lower-resolution voxelizations somewhat akin to
+constructing mipmaps: A lower-resolution voxel is marked as occupied if any of the voxels in the corresponding 2x2x2 block of the
+higher-resolution map is occupied. When a cell is not occupied, the
+corresponding probe can be culled.
+For each cell, we also track the total number of frames that it has
+been occupied, so that we know if the probe has been visited in the
+past and old data is available. This is useful in dynamic scenarios
+where moving objects may return to a position they have previously
+occupied, in which case we can retain some of the previous probe
+data instead of restarting from scratch.
+We stress that while we use a voxelization-based culling scheme
+in this paper, it is not a core part of the algorithm and alternate
+culling methods may be more suitable if implementing RCPG for a
+production renderer.
+In 3D, the probes in radiance cascades store spherical images. In order to discretize these into a square 2D bitmap, a spherical projection
+mapping is needed. Initially, we explored equal-area mappings [Clarberg 2008; Mortari et al. 2011]. The benefit of equal-area projections
+in this use case is that by definition, they allow for a uniform distribution of resolution per solid angle. Equal-area transforms also
+have a constant Jacobian determinant across every point, which can
+simplify PDF computation when sampling uniformly from a texel.
+However, as this projection has to be done for each corner of
+each texel that is considered during the iterative sampling process,
+the octahedral projection [Meyer et al. 2010] is more suitable for
+real-time use due to its very efficient implementation. Unlike most
+equal-area mappings, computing the octahedral projection does not
+involve transcendental functions. Figure 5 demonstrates how this
+projection mapping is constructed.
+As this projection does not preserve the equal-area property, it
+slightly reduces the consistency of sampling, and introduces additional complexity by having a non-constant Jacobian determinant;
+We trace one ray per probe texel. Ray origins and directions are
+jittered with the 𝑅5 sequence [Roberts 2018] (3 dimensions for position within the probe’s cell, 2 for direction within the texel), and an
+average color and visibility are computed via exponential moving
+average. This allows the probe to represent all positions within its
+cell, and each texel to represent all possible directions within its
+solid angle. Unfortunately, the moving average also introduces some
+temporal delay to updating the radiance cascades.
+We suggest ignoring backfaces when casting rays for radiance
+cascades. For cells near surfaces, a portion of the jittered positions of
+the probes are likely inside geometry, in which case they generally
+contribute no radiance. By ignoring backfaces, rays can often pass
+through enclosing geometry. This way, even those samples can
+contribute some useful radiance data.
+When a ray has intersected a surface, the radiance it contributes
+to the texel must be determined. To do this, we shade the surface
+Fig. 5. The octahedral projection. Each octant of the unit sphere is mapped
+into the corresponding triangle on an octahedron; the triangles of this
+octahedron are then unwrapped onto a unit square. Note that all corners of
+the square map to the bottom of the octahedron.
+condition, they cause misrepresentation of the direction of incoming
+radiance, making power-of-two lengths unsuitable for path guiding.
+Using this conservative estimate of 𝑡𝑚𝑎𝑥 for the radiance intervals
+would mean that the limiting factor for detail in the probes is always
+the parallax, not the probe texture resolution. This is excessive in
+practice, and implies that for almost the entire radiance interval, a
+lot of the available probe resolution is effectively wasted. In practice,
+we achieve slightly better end results with RCPG by doubling this
+estimate and thereby switching from “wasted resolution” to “lost
+detail” near the halfway point of the radiance interval. Therefore,
+in the measurements, we instead use:
+′
+𝑡𝑚𝑎𝑥
+=
+𝑙
+sin 𝑓1
+𝑠
+and instead estimate 𝑓𝑠 from the angle across the shortest edge
+of the probe texel with the smallest solid angle. A more extreme
+approach would be to use the conservative estimate of 𝑡𝑚𝑎𝑥 as the
+𝑡𝑚𝑖𝑛 instead, which would mean that sufficient probe resolution is
+only available for the nearest points in the radiance interval. While
+that approach is somewhat viable as well, it appears to produce
+slightly worse sampling quality in RCPG.
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+3.5 Ray casting
+RCPG: Real-Time Product Path Guiding Using Radiance Cascades
+with a configurable number of light samples. All measurements
+in this paper use the minimum of a single sample per frame. Any
+light sampling method can be used, although we utilize a light
+BVH [Conty Estevez and Kulla 2018] for the probe updates in this
+paper. Note that the light sampling method used during the probe
+update does not have to be the same one that is used for path tracing
+later on. All light types can be supported with RCPG as long as the
+light sampling method used during the probe updates supports them.
+Area lights, environment maps, and spotlights are demonstrated in
+Figure 6.
+When multiple indirect bounces are desired, the previous frame’s
+cascade 0 after the gathering step (Section 3.6) can be used to compute indirect lighting for the surface, treating each texel as an area
+light source and evaluating lighting using linearly transformed
+cosines. Due to using the previous frame’s radiance cascades, there
+will be a delay in the sampling’s adaptation to the current frame.
+The shading of surfaces computed this way is shown in Figure 7.
+We stress that the shading in that figure is not the final output of
+the renderer, but a visualization of the shading used internally in
+order to guide the sampling of multiple bounces of indirect light.
+Erroneous or missing lighting phenomena in this estimate only increase noise in the sampling of indirect light passing through areas
+that present the error. We compute the radiance cascades in this
+recursive manner in all multi-bounce measurements of this paper.
+We omit direct visibility of explicit lights from the probes. Point
+lights or directional lights, even if not infinitesimal, are usually very
+small in terms of solid angle. Such small light sources are usually
+better left to next event estimation (NEE) schemes, as the texels in
+radiance cascades often don’t have enough resolution to represent
+them well. We propose to use radiance cascade path guiding only for
+sampling indirect light and emissive meshes, not for direct lighting.
+Figure 8 displays the difference between using RCPG with or
+without NEE. In the case without NEE, the directional light is directly
+included in the radiance cascade data, allowing RCPG to sample
+that light as well. While both options are technically unbiased, it
+is clear that the combination with NEE is superior in quality. NEE
+also makes it more likely for RCPG rays to successfully “follow
+through” on the radiance that is stored in the radiance cascades,
+which improves the overall image quality even in indirect lighting.
+3.6 Gathering
+The final step in the building of the radiance cascades structure
+is merging the radiance intervals of high-resolution probes back
+into low-resolution probes, and computing the moving averages of
+radiance and transparency for each probe texel.
+Initially, if light is arriving from outside the range of a cascade, it
+does not affect that cascade. For importance sampling, however, we
+would like to know all of the light arriving from a direction, instead
+of just light that is within a specific range. Hence, for each texel
+in a probe, we gather the incoming light from the corresponding 4
+texels in the next cascade. The coverage ratio of a texel is used to
+alpha-blend the gathered light in the background of that texel. This
+process is visualized in Figure 9. Because some texel values may
+incorrectly be zero due to the value being computed stochastically,
+we ensure that the sampling remains unbiased by adding a small
+• 7
+positive value to the luminance, 𝐿𝑎𝑣𝑔 · 𝛾. For cascade 0, 𝐿𝑎𝑣𝑔 is
+the average of luminances over the entire probe, while for further
+cascades the 2x2 neighborhood is used. 𝛾 is an arbitrary small value,
+for which we use 𝛾 = 0.05 in this paper. Higher values cause higher
+noise levels but fewer outlier samples.
+4
+Sampling from radiance cascades
+The process for sampling from the radiance cascades involves traversing through the hierarchy, selecting a texel from the highest
+cascade, and generating a direction from within the solid angle of
+that texel. The BSDF-aware weighting for texel selection utilizes
+linearly transformed cosines, which we review in Section 4.1. The
+traversal through the structure and selection of a texel is presented
+in Section 4.2. Finally, methods for sampling within the texel are
+specified in Section 4.3.
+4.1 Linearly transformed cosines
+Linearly Transformed Cosines (LTC) [Heitz et al. 2016] model more
+complex BSDF lobes using cosine lobes with a linear transformation
+applied. They are able to represent lobes of varying roughness,
+skewness and anisotropy. LTC matrices are typically precalculated
+with a fitting process.
+We use LTCs to compute estimates of the lighting contribution of
+probe texels during sampling, by treating each texel as a polygonal
+area light. Computing the irradiance of such a light can be done
+analytically [Baum et al. 1989; Lambert 1760]:
+𝐸=
+
+
+𝑘
+𝑝𝑖 × 𝑝 𝑗
+1 Õ
+·𝑛
+arccos(𝑝𝑖 · 𝑝 𝑗 )
+2𝜋 𝑖=1
+|𝑝𝑖 × 𝑝 𝑗 |
+(1)
+where 𝑛 is the normal of the shaded surface, 𝑝 are the vertices
+of the polygonal light relative to the point being shaded, 𝑘 is the
+number of vertices and 𝑗 = (𝑖 + 1) mod 𝑘. Equation (1) requires
+that 𝑝𝑖 is above the horizon: 𝑝𝑖 · 𝑛 ≥ 0. For this purpose, the vertices
+must be clipped to the upper hemisphere. This process is called
+horizon clipping.
+Linearly Transformed Cosines allows us to use this same equation for approximating specular reflections, by transforming the
+points 𝑝𝑖′ = 𝑀 −1 𝑝𝑖 , where 𝑀 is the linear transformation matrix.
+Diverging from the usual 4-parameter fit [Heitz et al. 2016], we use
+a 3-parameter fit of the inverse transformation matrix:
+𝑎 0 𝑏 
+
+
+𝑀 −1 = 0 1 0
+0 0 𝑐 
+
+
+where 𝑎, 𝑏, 𝑐 ∈ [0, 1] are fittable parameters that depend on the
+material’s roughness and incident angle. This places all parameters
+within an easily fittable range, but can still represent roughness,
+skewness and anisotropy. More importantly, this method ensures
+two important properties. First, the resulting lobe is non-zero everywhere in the upper hemisphere, which is vital for keeping the
+sampling process unbiased. Second, it retains the horizon, i.e., no
+point above the shaded surface can get transformed under the surface. This means that horizon clipping can be performed before
+applying the transformation, sharing the computational cost between the diffuse and specular lobes.
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+8 •
+Ikkala et al.
+Fig. 6. “The Breakfast Room” scene by Wig42 (CC BY 3.0) [Bitterli 2016], modified to have two spotlights, a painting with emissive triangles, and an environment
+map. The left image is rendered with an unguided path tracer, while the right one is rendered using RCPG, both at 8 samples per pixel. In this scenario, the
+sunlight is part of the environment map and not an explicit directional light. Here, RCPG has been configured to only include indirect lighting in the cascades;
+it therefore does not help with sampling direct light, but significantly reduces noise in indirect lighting.
+Fig. 7. Left: Ground truth indirect light. Right: Surfaces shaded using radiance cascades directly. Surfaces are only shaded this way when tracing rays for
+updating radiance cascade probes, so issues in its quality can only affect the noise level and are not directly indicative of the renderer’s final output. Our
+optimizations aiming for bandwidth reduction affect the quality significantly; the color of lighting is lost and nearest neighbor interpolation is obvious.
+However, computing noise-free indirect lighting this way is quick: Shading this 1280 x 720 image took around 0.5 ms.
+Fig. 8. RCPG with an emissive teapot in the Sponza scene [The Khronos Group 2023]. Left: RCPG without NEE, 8 spp. Right: RCPG with NEE, 4 spp. Both
+configurations have roughly equivalent ray counts. While the left image is technically unbiased, shaded areas near the sunlight’s edges take a very long time
+to converge. The vast majority of their samples are directed towards the sun due to the limited grid resolution.
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+RCPG: Real-Time Product Path Guiding Using Radiance Cascades
+Reference LF at C0 position
+Cascade 0
+Cascade 1
+Cascade 2
+• 9
+function traverseCascade0(𝑥, 𝜌, 𝑣𝑖𝑒𝑤, 𝑇 𝐵𝑁 ):
+𝑝𝑟𝑜𝑏𝑒 ← 𝑔𝑒𝑡𝑃𝑟𝑜𝑏𝑒 (0, 𝑥)
+3
+𝑊𝑠𝑢𝑚 ← 0
+4
+for 𝑡𝑒𝑥𝑒𝑙 ∈ 𝑝𝑟𝑜𝑏𝑒 do
+5
+𝐿 ← loadLuminance(𝑡𝑒𝑥𝑒𝑙)
+6
+𝑊 ← 𝐿 · integrateBSDF(𝑡𝑒𝑥𝑒𝑙,𝑇 𝐵𝑁 , 𝑣𝑖𝑒𝑤, 𝜌)
+7
+/* Weighted reservoir sampling
+*/
+8
+𝑊𝑠𝑢𝑚 ← 𝑊𝑠𝑢𝑚 + 𝑊
+9
+if uniformRandom() · 𝑊𝑠𝑢𝑚 < 𝑊 then
+10
+𝑡𝑒𝑥𝑒𝑙𝑛 ← 𝑡𝑒𝑥𝑒𝑙
+11
+𝑊𝑛 ← 𝑊
+12
+𝐿𝑛 ← 𝐿
+13
+end
+14
+end
+𝑛
+15
+𝑃𝑀𝐹𝑛 ← 𝑊𝑊𝑠𝑢𝑚
+16
+𝑉𝑛 ← 1 − loadCoverage(𝑡𝑒𝑥𝑒𝑙𝑛 )
+17
+return 𝑃𝑀𝐹𝑛 , 𝑡𝑒𝑥𝑒𝑙𝑛 , 𝐿𝑛 , 𝑉𝑛
+Algorithm 1: Importance sampling a texel from the first cascade,
+cascade 0.
+1
+2
+Fig. 9. A simulated set of three probes from subsequent cascades, demonstrating the gathering process. Left: Ground truth light field data from
+the position of the example C0 cascade probe. Top row: Original radiance
+cascade data before gathering. Coverage is visualized using a background
+checkerboard pattern. Bottom row: Texels with radiance data gathered from
+higher cascades. The gathering process starts from the probes with the
+highest angular resolution, and proceeds towards lower-resolution probes.
+After gathering, the C0 cascade contains a low-resolution approximation of
+the reference image.
+Unfortunately, this 3-parameter fit does cause bimodal distributions near grazing angles with low roughnesses. This manifests as
+a weaker second, retro-reflecting lobe. We do not consider this a
+major issue for our importance sampling use case, but it limits the
+general usefulness of the fit.
+4.2 Sampling from the probes
+In order to draw a sample from radiance cascades, we first find the
+probes on each cascade whose grid cells contain the point 𝑥 where
+we wish to generate the next ray. The first step in sampling is to
+importance sample a texel from each probe in the hierarchy. For the
+first cascade (i.e., cascade 0), we iterate over all texels in the probe,
+picking one texel by weighted random sampling. This process is
+outlined in pseudo-code in Algorithm 1. The solid angle of that
+texel covers 4 texels in the next cascade’s probe. We proceed to then
+select one of those texels by weighted random sampling as well (Algorithm 2). We traverse through all cascades in this hierarchical
+fashion to produce a single texel in the highest-resolution cascade.
+The final sampled ray direction is then generated from within the
+solid angle covered by this texel. The whole process of sampling a
+direction with RCPG is shown in Algorithm 3.
+The weight in each step is computed using the separability approximation [Diolatzis et al. 2020]:
+∫
+Ω
+𝐿(𝑥, 𝜔𝑖 )𝜌 (𝜔𝑜 , 𝜔𝑖 ) cos(𝜃 )𝑑𝜔𝑖 ≈
+∫
+∫Ω
+Ω
+𝐿(𝑥, 𝜔𝑖 )𝑑𝜔𝑖 ·
+𝜌 (𝜔𝑜 , 𝜔𝑖 ) cos(𝜃 )𝑑𝜔𝑖
+∫ The luminance value stored in each texel in Section 3.6 represents
+Ω 𝐿(𝑥, 𝜔𝑖 )𝑑𝜔𝑖 , where Ω is the solid angle covered by that texel.
+We also take the BSDF of the surface
+into account by computing
+∫
+an LTC-based approximation of Ω 𝜌 (𝜔𝑜 , 𝜔𝑖 ) cos(𝜃 )𝑑𝜔𝑖 . This LTC
+computation proceeds as described in Section 4.1, except we use a
+very approximate horizon clipping method: Each vertex coordinate
+function traverseCascade(𝑥, 𝜌, 𝑣𝑖𝑒𝑤, 𝑇 𝐵𝑁 , 𝑐𝑎𝑠𝑐𝑎𝑑𝑒,
+𝑃𝑀𝐹𝑝 , 𝑡𝑒𝑥𝑒𝑙𝑝 , 𝐿𝑝 , 𝑉𝑝 ):
+2
+𝑝𝑟𝑜𝑏𝑒 ← getProbe(𝑐𝑎𝑠𝑐𝑎𝑑𝑒, 𝑥)
+3
+𝑊𝑠𝑢𝑚 ← 0
+4
+/* gathers 2x2 footprint at position
+corresponding to the previous cascade’s
+chosen texel.
+*/
+5
+𝑓 𝑜𝑜𝑡𝑝𝑟𝑖𝑛𝑡 ← gather2x2(𝑝𝑟𝑜𝑏𝑒, getCoord(𝑡𝑒𝑥𝑒𝑙𝑝 ) · 2)
+6
+𝐿𝑎𝑣𝑔 ← average(loadLuminance(𝑓 𝑜𝑜𝑡𝑝𝑟𝑖𝑛𝑡))
+7
+for 𝑡𝑒𝑥𝑒𝑙 ∈ 𝑓 𝑜𝑜𝑡𝑝𝑟𝑖𝑛𝑡 do
+8
+𝐿𝑐 ← loadLuminance(𝑡𝑒𝑥𝑒𝑙)
+9
+/* Subtract the low-resolution 2x2 average
+that was added to the previous cascade’s
+luminance during gathering, and replace
+with our higher-resolution value.
+*/
+10
+𝐿 ← 𝐿𝑝 + (𝐿𝑐 − 𝐿𝑎𝑣𝑔 ) · 𝑉𝑝
+11
+𝑊 ← 𝐿 · integrateBSDF(𝑡𝑒𝑥𝑒𝑙,𝑇 𝐵𝑁 , 𝑣𝑖𝑒𝑤, 𝜌)
+12
+𝑊𝑠𝑢𝑚 ← 𝑊𝑠𝑢𝑚 + 𝑊
+13
+if uniformRandom() · 𝑊𝑠𝑢𝑚 < 𝑊 then
+14
+𝑡𝑒𝑥𝑒𝑙𝑛 ← 𝑡𝑒𝑥𝑒𝑙
+15
+𝑊𝑛 ← 𝑊
+16
+𝐿𝑛 ← 𝐿
+17
+end
+18
+end
+𝑛
+19
+𝑃𝑀𝐹𝑛 ← 𝑃𝑀𝐹𝑝 · 𝑊𝑊𝑠𝑢𝑚
+20
+𝑉𝑛 ← 𝑉𝑝 · (1 − loadCoverage(𝑡𝑒𝑥𝑒𝑙𝑛 ))
+21
+return 𝑃𝑀𝐹𝑛 , 𝑡𝑒𝑥𝑒𝑙𝑛 , 𝐿𝑛 , 𝑉𝑛
+Algorithm 2: Selection of a texel from one cascade further.
+1
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+10
+•
+Ikkala et al.
+1
+5.1 Memory bandwidth management
+2
+In practice, generating a sample from the radiance cascades structure
+is very bandwidth-intensive. Assuming a baseline implementation,
+where:
+function SampleRCPG(𝑥, 𝜌, 𝑣𝑖𝑒𝑤, 𝑛𝑜𝑟𝑚𝑎𝑙):
+𝑇 𝐵𝑁 ← createTangentSpace(𝑛𝑜𝑟𝑚𝑎𝑙, 𝑣𝑖𝑒𝑤)
+3
+𝑃𝑀𝐹, 𝑡𝑒𝑥𝑒𝑙, 𝐿, 𝑉 ← traverseCascade0(𝑥, 𝜌, 𝑣𝑖𝑒𝑤,𝑇 𝐵𝑁 )
+4
+for 𝑐𝑎𝑠𝑐𝑎𝑑𝑒 ∈ 𝑐𝑎𝑠𝑐𝑎𝑑𝑒𝑠 [1 :] do
+5
+𝑃𝑀𝐹, 𝑡𝑒𝑥𝑒𝑙, 𝐿, 𝑉 ← traverseCascade(
+6
+𝑥, 𝜌, 𝑣𝑖𝑒𝑤,𝑇 𝐵𝑁 , 𝑐𝑎𝑠𝑐𝑎𝑑𝑒, 𝑃𝑀𝐹, 𝑡𝑒𝑥𝑒𝑙, 𝐿, 𝑉 )
+7
+end
+8
+return sampleTexel(𝑥, 𝑃𝑀𝐹, 𝑡𝑒𝑥𝑒𝑙, 𝜌, 𝑣𝑖𝑒𝑤,𝑇 𝐵𝑁 )
+Algorithm 3: The whole process of producing a sample using
+RCPG. Implementations for sampleTexel are discussed in Section 4.3.
+is clamped to the upper hemisphere. This can cause some underestimation of the texel’s contribution at grazing angles, but as the LTC
+is non-zero for the entire upper hemisphere, it will not cause bias,
+since PDFs are computed using the same process as well.
+4.3 Sampling from the chosen texel
+Once the traversal stage has selected a texel from a probe, what
+remains is the sampling of a ray from within that texel. We propose
+two options for this.
+The first approach is simple: Use a uniform distribution within
+the texel’s solid angle. This method is very simple to implement,
+but not necessarily optimal. A drawback is that it can pick samples
+from below the horizon, and large texels can be poorly sampled
+for narrow BSDF lobes. While it is not always ideal, we use this
+method in the measurements of this paper due to its slightly better
+performance. Note that even with this approach, LTCs are still used
+to determine weighting for texel selection, as described in Section 4.2.
+The uniform distribution is only utilized to sample a direction within
+a texel.
+The second approach is to treat the chosen texel as a polygonal
+light, and use an LTC-based BSDF importance sampling scheme
+with it [Peters 2021]. This method improves sampling quality when
+the texels are large and lobes are narrow (e.g., grazing angles reflecting close-by objects), and never produces below-horizon samples.
+We can also reuse the LTC fit from Section 4.1 here, but accurate
+horizon clipping is needed instead of the approximate method used
+in Section 4.2. This method can cause a performance impact by
+introducing many more arithmetic operations. Whether this impact
+is substantial or not depends on if the shader is bandwidth-limited;
+in simple scenes with a single indirect light bounce, the impact can
+be high, whereas complex scenes with multi-bounce lighting are
+less likely to be severely affected.
+5
+Implementation
+There are several non-trivial implementation details that require
+careful consideration when implementing RCPG. Section 5.1 discusses optimizing memory bandwidth usage, while Section 5.2 covers optimizations for computationally intensive portions of the algorithm. Finally, Section 5.3 describes how to integrate RCPG into
+a path tracer.
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+• The first cascade’s probes store 16 pixels
+• The pixels are stored as 4 floating point values (red, green,
+blue and visibility)
+• The radiance cascade structure has 5 cascades
+• Linear interpolation is used spatially between probes
+the method has to read 4096 bytes per sample. When done on a
+1920 × 1080 display at 60 Hertz, this is roughly 475 gigabytes per
+second. While this fits within the theoretical bounds of modern highend GPUs [NVIDIA Corporation 2025], combined with the need to
+take multiple samples (one per bounce) and all other bandwidthdependent operations related to ray tracing and shading, bandwidth
+quickly becomes a limiting factor.
+We take several steps to reduce memory bandwidth. First, we
+store lighting with one 32-bit floating point value representing
+luminance and one 8-bit value for visibility. While this can harm
+sampling quality with colored materials, we do not consider this
+to be a major factor in typical scenes. Unfortunately, half-precision
+values exhibit artifacting with our moving average computation,
+which is why 32-bit floating points are used for luminance. These
+are stored in separate textures, so that luminance for a 2x2 footprint
+can be gathered in a single operation, and visibility can be read only
+for the chosen texel during each iteration.
+Second, we avoid linear interpolation and instead opt for nearestneighbor sampling, both in the spatial and angular domains. This
+causes visible hard edges in the noise levels between areas, but is
+an 8x improvement for the bandwidth. These edges can be hidden
+by denoising algorithms or ReSTIR. Together, these measures take
+the theoretical memory bandwidth to roughly 15.4 gigabytes per
+second, which is much more palatable.
+5.2 Computational optimizations
+The product sampling method involves lots of computation due to
+calculations related to the weighting of each texel. The arccos in
+Equation (1) is relatively inefficient to evaluate directly on modern
+GPUs. Assuming 𝑛 is aligned to the Z axis as in tangent-space
+shading, and that vertices 𝑝 are unit vectors, we can also represent
+the equation as:
+𝑘
+Õ
+arccos(𝑝𝑖 · 𝑝 𝑗 )
+(𝑝𝑖 𝑝 𝑗 − 𝑝𝑖 𝑦 𝑝 𝑗𝑥 )
+2𝜋
+|
+sin
+(arccos(𝑝𝑖 · 𝑝 𝑗 ))| 𝑥 𝑦
+𝑖=1
+(2)
+Similarly to [Hill and Heitz 2016], 𝑝𝑖 ·𝑝 𝑗 = 𝑑 is computed normally,
+arccos(𝑑 )
+but we use a simpler fitted approximation for 2𝜋 · | sin (arccos(𝑑 ) ) | . We
+found that a third-degree polynomial and an inverse square root
+suffice for importance sampling:
+
+−0.709693 · 𝑑 3 + 3.787823 · 𝑑 2 + 20.448902 · 𝑑 + 15.951386
+− 1
+2
+RCPG: Real-Time Product Path Guiding Using Radiance Cascades
+NEE
+NEE
+Primary
+Primary
+Guided
+Guided
+BSDF
+(a) With VXPG, the contributions
+from guided and BSDF subpaths
+are merged via MIS, and both
+have follow-up NEE rays. Only the
+BSDF subpath continues for further
+bounces. This way, the guiding data
+structure does not need to include
+data for more than one bounce.
+(b) With RCPG, only the guided subpath is taken. It is a product sampling scheme, so the BSDF is taken
+into account in the guided subpath
+as well. The path guiding data structure is able to take further bounces
+into account when configured to do
+so.
+Fig. 10. The path guiding approach taken by VXPG (a) versus our approach
+(b). While approach (a) is safe in that it is never significantly worse than
+BSDF sampling alone, approach (b) either requires much fewer rays or
+avoids divergence compared using single-sample MIS. Both traits are very
+desirable for real-time rendering.
+Additionally, we use 16-bit floating point types for most of the
+sampling code, as the very common fused-multiply-add (FMA) operation can be performed at double-rate on modern GPU architectures [Advanced Micro Devices, Inc. 2025; NVIDIA Corporation
+2018].
+5.3 Integration in a path tracer
+It is possible to compute the PDFs of RCPG sampling for arbitrary
+directions at arbitrary surfaces, and it is thus trivially compatible
+with multiple importance sampling (MIS) schemes. The PDFs are
+computed very similarly to sampling (Sections 4.2 and 4.3), by evaluating the probability of choosing the texel that covers the given
+direction at each iteration.
+While path guiding samples are usually combined with BSDF
+sampling via MIS (one such approach is shown in Figure 10(a)),
+we instead propose to fully rely on RCPG-guided samples in realtime use (as in Figure 10(b)). Due to RCPG implementing product
+sampling, samples generated with it already take the BSDF into
+account.
+Single-sample MIS with BSDF sampling in particular appears to
+usually not be worthwhile with RCPG. When using it, we generally
+encounter increased noise levels by most metrics at equal sample
+counts. Despite the ray count being equal, single-sample MIS also results in 40–80% higher frame times due to higher branch divergence
+during sampling. Still, single-sample MIS can reduce variance and
+can be a reasonable choice when using RCPG for unbiased offline
+rendering.
+We suggest using RCPG in a multiple importance sampling setup
+with a next event estimation or light sampling scheme such as “light
+•
+11
+trees” [Conty Estevez and Kulla 2018; Tokuyoshi et al. 2024]; RCPG
+may sample small area light sources poorly, and does not help with
+sampling infinitesimal lights. Figure 8 shows how RCPG behaves
+with and without NEE.
+6
+Experimental setup
+We compare our method, Radiance Cascade Path Guiding (RCPG),
+to unguided unidirectional path tracing (PT) including next event
+estimation, Screen-Space Path Guiding (SSPG) [Derevyannykh 2022]
+and Voxel Path Guiding (VXPG) [Lu et al. 2024]. All measurements
+are run at a resolution of 1920 × 1080 on an Nvidia RTX 3090 GPU,
+and 1000 warm-up frames are given for the path guiding methods
+to train their path guiding data structures unless otherwise noted
+for a specific measurement. The high number of warm-up frames
+is chosen specifically to present the ideal image quality for SSPG,
+which can take a very long time to stabilize in certain scenes. RCPG,
+VXPG or ReSTIR do not need such long warm-up periods for the
+image quality to stabilize, see Figure 11.
+Performance measurements are taken from GPU timings by averaging over 250 frames. Reference images are rendered using unidirectional path tracing, with 262144 samples per pixel. Quality
+measurements are done with four different metrics: MAE, PSNR,
+SSIM [Wang et al. 2004] and FLIP [Andersson et al. 2020].
+The MAE metric is computed from the images in linear color
+space (i.e., before applying tone mapping or gamma correction),
+while the other metrics operate on tone mapped [Reinhard et al.
+2002] and gamma-corrected LDR images. MAE is specifically used
+over MSE, as it is much less sensitive to outliers. All of the compared
+methods, including the reference path tracer, are able to produce rare
+but extreme outlier samples (“fireflies”), making the MSE of different
+frames at real-time sample counts vary by orders of magnitude.
+Some prior path guiding literature has made the observation that
+path guiding methods may actually increase variance, even if quality
+is improved by other metrics [Diolatzis et al. 2020]. Nevertheless,
+as MSE is directly related to the estimator’s variance, we use this
+metric specifically when showing the convergence behavior of the
+compared methods.
+Three different configurations are used:
+• One bounce of indirect light (Figure 12).
+• Two bounces of indirect light (Figure 13).
+• Sampling in conjunction with ReSTIR GI [Ouyang et al. 2021],
+with 1 canonical sample per pixel (Figure 14)
+SSPG is omitted from the two-bounce case due to the method
+only properly handling one bounce, and it is also omitted from
+the ReSTIR comparison as its paper [Derevyannykh 2022] did not
+propose this kind of usage. In non-ReSTIR cases, the sample counts
+are chosen such that the frame rate is as close as possible to 30 Hz,
+or 33.33 ms.
+Our RCPG implementation is done on top of an open-source rendering framework, “Tauray” [Ikkala et al. 2022].1 The authors of
+Voxel Path Guiding have provided an open-source implementation
+in “SIByLEngine” [Lu 2023]; this was used for the measurements
+in their paper, and we also use this implementation to measure
+their technique. Since the SSPG paper was not published with an
+1 Our implementation is available at https://github.com/vga-group/tauray/tree/rcpg.
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+12
+•
+Ikkala et al.
+implementation for reproduction, we also use the SSPG implementation from the VXPG authors [Lu et al. 2024]. An exactly matching
+shading model has been implemented to all methods, so that they all
+converge towards the same image, barring differences in individual
+pixels due to differing rounding errors. The SSPG and VXPG implementations have been modified to support a 1920 × 1080 resolution,
+and various performance fixes and improvements have been applied
+to match their ray tracing performance with that of Tauray.
+RCPG is configured to use a probe resolution of 4x4 at cascade 0,
+and a grid structure of 1283 scaled to encompass the full scene. We
+use the “uniform” strategy for sampling a direction from within a
+texel, as described in Section 4.3, although LTCs are still used when
+selecting which texel to sample. This strategy is chosen because the
+alternative method has a significant performance impact, as further
+discussed in Section 8. Recursively lit radiance cascades are used in
+the cases with two indirect light bounces.
+In the RCPG configuration used in the measurements, there are
+5 cascades in every scene, with a total number of 2396672 probes
+allocated (310 MB). These numbers are determined entirely by the
+spatial and angular resolutions as well as the probe representation,
+and are not affected by the scene’s size or contents. The concrete
+values of the radiance interval bounds (𝑡𝑛 ) depend on the scale of the
+scene, and the number of active probes depends on geometry; these
+are listed in Table 1. “Active memory” is the amount of memory
+used by the active probes; this is the amount of memory that is
+actually accessed during probe updates and sampling. It is supplied
+to give a sense of the lower bound that could be achievable with a
+more compact data structure that doesn’t store unused probes. The
+interval bounds are derived as described in Section 3.2.
+The VXPG voxel grid resolution is configured to be 1283 . While
+3
+64 is the default in their implementation and also used for measurements in the VXPG paper [Lu et al. 2024], we choose this higher
+resolution to match with RCPG and because it results in very similar
+or slightly improved equal-time quality by all metrics in every scene.
+Resolutions higher than this adversely impact performance with
+very marginal per-sample quality improvement in the test scenes.
+VXPG is used with the same MIS strategy as in its publication,
+i.e., tracing and combining both the guided and BSDF paths with
+MIS and only continuing the BSDF path for further bounces. While
+single-sample MIS could be used as an alternate approach that
+matches the ray count with RCPG, the additional divergence it
+introduces means that the sample count is not doubled in practice.
+We found such a setup to consistently cause higher noise levels
+in equal-time measurements and it is therefore not used in this
+paper. While it may be possible to develop a divergence-avoiding
+single-sample MIS scheme for VXPG, as has been done for some
+other path guiding methods [Dittebrandt et al. 2020], that would be
+a non-trivial extension of the VXPG algorithm and is therefore not
+done here.
+In all cases, ReSTIR is configured to be unbiased and to compute a
+single bounce of indirect light. One temporal and one spatial sample
+are reused, with a spatial search radius of 32 pixels and a maximum
+history confidence of 8. Only a single canonical path is traced.
+Due to implementation issues and complications arising from
+matching the output from two different renderers, the following limitations are imposed on the scenes: Roughness is always above 0.05,
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+normal maps are removed, and transparent surfaces are removed.
+The roughness limitation stems from our prototype implementation
+of RCPG; sharp reflections would need an alternate code path for
+zero and near-zero roughness BSDFs, as the LTC approximation is
+not accurate enough. Issues with both refraction and alpha-blending
+are common to the implementations of all compared methods, while
+none inherently prevent these features from working. Normal maps
+are not supported by the VXPG and SSPG implementations. The
+VXPG implementation does not appear to properly sample emissive
+surfaces, so explicit light sources (a directional light or multiple
+point lights) are used instead. To eliminate differences in next event
+estimation, the implementations are modified to always sample one
+of the lights with equal probability.
+The test scenes and camera angles are chosen such that the measurements rely heavily on indirect lighting. They also represent a
+variety of geometric and material complexity, along with various
+visibility characteristics that affect the performance of different path
+guiding approaches. The following six scenes are chosen:
+• “Ajar”: “Veach, Ajar” re-made by Benedikt Bitterli (CC0) [Bitterli 2016]
+– Simple scene, with a single rectangular slit of light that is
+traditionally difficult to sample.
+– Teapot materials modified to suit the limitations listed
+above.
+• “Breakfast”: “The Breakfast Room” by Wig42 (CC BY 3.0) [Bitterli 2016]
+– Simple scene, with interesting shadows and reflective caustics.
+– Materials have been adjusted and the angle of the sun has
+been changed.
+• “Classroom”: “Classroom” by Christophe Seux (CC0) [Blender
+Foundation 2019]
+– Medium-complexity textured scene with broad, disjoint
+shadows.
+– Materials have been modified for glTF export and the above
+limitations.
+• “Rungholt”: “Alone in the dark” by kescha (CC BY 3.0) [McGuire
+2017]
+– Large-scale scene with high geometric complexity.
+– Alpha transparency has been removed from materials.
+• “Staircase”: “The Wooden Staircase” by Wig42 (CC BY 3.0) [Bitterli 2016]
+– Medium-complexity scene with interesting visibility characteristics.
+– Materials and lighting have been adjusted.
+• “Kitchen”: “Country Kitchen” by Jay-Artist (CC BY 3.0) [Bitterli 2016]
+– Closeup of the stovetop, with specular-specular paths lit by
+4 point lights. All lights are close to white surfaces, which
+contribute a large amount of bounced light.
+– Materials and lighting have been adjusted to induce such
+paths.
+RCPG: Real-Time Product Path Guiding Using Radiance Cascades
+•
+13
+Table 1. Scene-specific statistics of RCPG.
+7
+Scene
+Scene AABB size
+Active probes
+Active memory
+𝑡0
+𝑡1
+𝑡2
+𝑡3
+𝑡4
+Ajar
+Breakfast
+Classroom
+Rungholt
+Staircase
+Kitchen
+(11.30, 4.80, 9.20)
+(11.62, 9.32, 14.43)
+(10.17, 3.11, 8.51)
+(655, 69, 550)
+(7.02, 7.84, 10.59)
+(6.92, 3.38, 8.65)
+127067
+99447
+113740
+70936
+175886
+117288
+31.7 MB
+27.4 MB
+26.9 MB
+13.9 MB
+40.0 MB
+30.1 MB
+0.126
+0.161
+0.113
+7.309
+0.118
+0.097
+0.564
+0.720
+0.508
+32.69
+0.528
+0.432
+2.521
+3.221
+2.270
+146.2
+2.363
+1.931
+10.72
+13.69
+9.652
+621.6
+10.05
+8.213
+44.24
+56.51
+39.83
+2565
+41.47
+33.89
+Results
+The “Ajar” scene measurements are listed in Table 2. This scene is
+effectively ideal for VXPG: The rectangular slit of light very cleanly
+matches the voxel data structure, and visibility is very simple in
+most of the scene. It’s possible to see some edges in the noise level
+of RCPG sampling on the door in Figures 12 and 13. In non-ReSTIR
+tests, RCPG is second in this scene, with a clear margin, and the
+aforementioned noise edges are no longer visible in Figure 14. ReSTIR results are addressed collectively later.
+Table 3 contains measurements in the “Breakfast” scene. Here,
+the best quality in the one- and two-bounce cases is achieved using
+RCPG. It is also apparent that RCPG is able to sample the caustic
+reflection much better than the other methods, as seen in Figure 12.
+In the two-bounce case, the unguided path tracer manages twice
+the number of samples compared to RCPG. This underlines an
+interesting performance issue in multi-bounce path tracing; after
+one bounce, the intersection points are already highly divergent
+between nearby pixels, causing divergent memory accesses to the
+path guiding data structures. This significantly slows down both
+VXPG and RCPG, both of which include significant amounts of
+memory traffic during sampling.
+In the “Classroom” (Table 4), “Rungholt” (Table 5), and “Staircase” (Table 6) scenes, RCPG dominates in all measurements. RCPG
+manages to trace roughly 2–3 times as many samples compared
+to SSPG and VXPG. The sample count is not directly comparable,
+as the latter two methods utilize multi-sample MIS for quality and
+unbiasedness, while RCPG only samples a single bounce ray per
+intersection. There are also differences in the performance of the
+sampling procedures. These scenes are somewhat difficult for VXPG;
+they contain lots of important details that are smaller than a voxel,
+and exhibit non-trivial visibility.
+The many metallic reflective surfaces and multiple light sources
+in the “Kitchen” scene (Table 7) pose a problem for the grid-like
+structure of VXPG and RCPG. While RCPG can sample reflective
+surfaces as well, the angular resolution of the radiance cascade
+data is generally very limited, harming its usefulness with highly
+directional lighting. VXPG stores irradiance for its voxels, limiting
+its ability to effectively sample light reflected from shiny surfaces.
+Additionally, it is not very effective with the mostly occluded light
+sources present in this scene. Especially the pink light, which is
+located inside the lampshade, causes a lot of temporal instability
+with VXPG. In the end, the regular unguided path tracer is quite
+strong in this scene, defeating RCPG by the PSNR and SSIM metrics.
+Quality over the first 64 initial frames (without warm-up frames)
+is separately measured in the “Staircase” scene in Figure 11. In this
+figure, it becomes very apparent that the Gaussian lobes of SSPG
+can be slow to converge. In this scene in particular, early frames
+seem to cause the distribution to overfit to a non-ideal direction, and
+recovering from this takes especially long. PT and VXPG have flat
+curves, as they do not reuse temporal information. The construction
+and updating of the radiance cascades is temporally amortized,
+causing a slower stabilization for RCPG. This construction occurs
+in world-space, and does not need to be restarted if the camera is
+moved. ReSTIR by its nature relies on temporal reuse, so all ReSTIR
+curves indicate that the quality improves quickly during the initial
+dozen or so frames.
+In the ReSTIR measurements, RCPG ends up with the best image
+quality in all scenes by most metrics, although VXPG wins in “Ajar”,
+“Breakfast”, and “Rungholt” by the MAE metric. Visually, VXPG
+seems to suffer from temporal flickering in some scenes, which is
+visible as instability in Figure 11 as well as in a similar graph in
+the original paper [Lu et al. 2024]. This is likely caused by the light
+injection step of VXPG, which includes stochastic steps that can
+occasionally miss some voxels. The fluctuating probability distribution function caused by this could introduce instability in unbiased
+ReSTIR’s temporal reuse, and thus raise the overall noise level with
+ReSTIR.
+RCPG also suffers from similar instability issues, particularly during its initial frames when the radiance cascades have not yet stabilized and when used with high 𝛼 values for the exponential moving
+average. We assume this to be the reason causing the RCPG+ReSTIR
+curve to stabilize later than PT+ReSTIR. The level of temporal instability appears to be highly scene-dependent in both VXPG and
+RCPG, which is the likely reason for why they trade wins in the
+MAE metric with ReSTIR.
+Figure 15 visualizes the probability distribution functions around
+the circled example points. The PDFs are shown with Lambert’s
+cylindrical equal-area projection in the above-surface hemisphere.
+In the figure, the “ground truth” is the ideal PDF sampled from the
+luminance, computed with a path tracer. In these images, RCPG is
+shown using BSDF texel sampling. If uniform sampling was used
+instead, each texel would have a constant color, but would otherwise
+be practically identical. When only looking at support (directions
+where PDFs are non-zero), VXPG’s distribution matches the ground
+truth very well. However, their magnitudes are further from correct
+than SSPG or RCPG. RCPG is somewhere in between SSPG and
+VXPG in terms of detail, but has more closely matching magnitude
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+14
+•
+Ikkala et al.
+Table 2. Quality measurements in Ajar. Times are in milliseconds.
+Method
+spp
+Time
+MAE
+PSNR
+SSIM
+FLIP
+Table 4. Quality measurements in Classroom. Times are in milliseconds.
+Method
+30 fps equal time, 1 indirect bounce
+PT
+SSPG
+VXPG
+RCPG
+37
+14
+13
+23
+33.22
+33.33
+33.66
+33.74
+0.137
+0.094
+0.041
+0.071
+12.89
+17.60
+29.21
+22.50
+0.188
+0.286
+0.772
+0.420
+22
+4
+11
+33.07
+32.74
+33.40
+0.259
+0.129
+0.157
+10.38
+19.92
+16.71
+0.085
+0.327
+0.198
+0.235
+0.186
+0.039
+0.094
+PT
+SSPG
+VXPG
+RCPG
+0.336
+0.127
+0.164
+PT
+VXPG
+RCPG
+21
+7
+6
+16
+1
+1
+1
+5.55
+15.16
+12.43
+0.134
+0.076
+0.095
+spp
+Time
+MAE
+20.48
+22.33
+24.81
+0.380
+0.462
+0.558
+0.155
+0.105
+0.083
+12
+2
+6
+PSNR
+SSIM
+FLIP
+PT+ReSTIR
+VXPG+ReSTIR
+RCPG+ReSTIR
+28
+8
+7
+19
+33.41
+33.85
+34.70
+34.05
+0.083
+0.077
+0.084
+0.053
+Method
+16
+2
+9
+32.28
+31.51
+34.91
+0.159
+0.236
+0.150
+15.75
+17.64
+18.08
+21.92
+0.208
+0.250
+0.261
+0.345
+13.78
+12.51
+15.46
+0.172
+0.150
+0.193
+1
+1
+1
+spp
+0.174
+0.158
+0.156
+0.112
+PT
+SSPG
+VXPG
+RCPG
+20
+5
+5
+13
+1
+1
+1
+7.03
+32.32
+14.38
+0.103
+0.051
+0.083
+0.197
+0.277
+0.183
+0.161
+0.132
+0.220
+0.123
+14.22
+16.38
+13.94
+18.26
+0.301
+0.350
+0.286
+0.395
+0.215
+0.175
+0.226
+0.151
+33.32
+36.07
+33.19
+0.250
+0.413
+0.236
+12.56
+10.61
+13.80
+0.253
+0.200
+0.263
+0.261
+0.347
+0.223
+8.55
+32.48
+17.92
+0.198
+0.188
+0.160
+18.14
+17.63
+19.45
+0.402
+0.439
+0.501
+0.181
+0.183
+0.137
+Time
+MAE
+PSNR
+SSIM
+FLIP
+33.73
+32.11
+33.64
+33.17
+0.034
+0.027
+0.055
+0.025
+17.74
+20.43
+15.19
+21.53
+0.415
+0.547
+0.310
+0.578
+0.144
+0.113
+0.212
+0.106
+PT
+VXPG
+RCPG
+12
+2
+7
+34.80
+31.02
+35.38
+0.045
+0.074
+0.034
+16.41
+14.03
+19.32
+0.360
+0.257
+0.486
+0.169
+0.273
+0.133
+18.84
+19.37
+20.59
+0.512
+0.528
+0.691
+0.180
+0.213
+0.120
+ReSTIR
+19.78
+19.69
+21.46
+0.291
+0.305
+0.420
+0.156
+0.147
+0.116
+than either of them. Both VXPG and SSPG may produce samples
+below the horizon; RCPG can produce such samples when uniform
+texel sampling is used.
+Table 8 lists a performance breakdown of the path tracing pipeline
+when sampling with RCPG, using 1 sample per pixel. The building
+of the radiance cascades structure is split into 3 steps: “RC probe
+culling”, corresponding to Section 3.4; “RC trace”, corresponding to
+Section 3.5; and “RC gather”, corresponding to Section 3.6. The “path
+tracing” step includes RCPG sampling.
+The convergence behavior of the compared methods in terms
+of MSE is shown in Figures 16, 17, 18, 19, 20, and 21. Curves labeled as “warm” are computed including path guiding history from
+1000 frames, while “cold” curves start without any prior guiding
+information. As convergence and low variance are especially important metrics in the offline rendering context, we also demonstrate
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+32.86
+34.32
+34.66
+33.72
+30 fps equal time, 2 indirect bounces
+ReSTIR
+PT+ReSTIR
+VXPG+ReSTIR
+RCPG+ReSTIR
+FLIP
+30 fps equal time, 1 indirect bounce
+30 fps equal time, 2 indirect bounces
+PT
+VXPG
+RCPG
+SSIM
+Table 5. Quality measurements in Rungholt. Times are in milliseconds.
+30 fps equal time, 1 indirect bounce
+PT
+SSPG
+VXPG
+RCPG
+PSNR
+ReSTIR
+Table 3. Quality measurements in Breakfast. Times are in milliseconds.
+Method
+MAE
+30 fps equal time, 2 indirect bounces
+ReSTIR
+PT+ReSTIR
+VXPG+ReSTIR
+RCPG+ReSTIR
+Time
+30 fps equal time, 1 indirect bounce
+30 fps equal time, 2 indirect bounces
+PT
+VXPG
+RCPG
+spp
+PT+ReSTIR
+VXPG+ReSTIR
+RCPG+ReSTIR
+1
+1
+1
+11.73
+27.75
+22.80
+0.116
+0.029
+0.059
+a more offline-focused configuration of RCPG with an additional
+curve labeled “RCPG (MIS)”. This configuration uses single-sample
+MIS, combining RCPG samples with BSDF samples, and computes
+radiance cascades using a regular (i.e., non-moving) average. The
+number of samples per frame is also matched for equal-time and
+reported in the figures. Compared to the real-time configuration, the
+only metric it occasionally improves is MSE. The single-sample MIS
+configuration has a consistent negative impact on all other metrics.
+The convergence curves demonstrate that RCPG and the other
+compared real-time path guiding methods converge towards the reference. However, their propensity to occasionally generate outlier
+samples (“fireflies”), even when suppressed by MIS, means that a
+regular unguided path tracer often converges at a faster rate even
+if the path guiding methods are usually superior by other metrics.
+The “Breakfast” and “Staircase” scenes are prone to causing fireflies
+RCPG: Real-Time Product Path Guiding Using Radiance Cascades
+Table 6. Quality measurements in Staircase. Times are in milliseconds.
+Method
+spp
+Time
+MAE
+PSNR
+SSIM
+PT
+RCPG+ReSTIR
+SSPG
+FLIP
+33.56
+34.13
+33.75
+34.00
+0.214
+0.158
+0.258
+0.137
+14.83
+19.62
+16.07
+20.89
+0.325
+0.459
+0.335
+0.516
+0.232
+0.171
+0.217
+0.132
+30 fps equal time, 2 indirect bounces
+PT
+VXPG
+RCPG
+17
+3
+8
+33.24
+37.14
+33.14
+0.340
+0.491
+0.280
+13.17
+12.40
+16.53
+0.258
+0.215
+0.334
+0.289
+0.343
+0.212
+20.77
+18.01
+23.40
+0.433
+0.418
+0.584
+0.173
+0.214
+0.116
+0.4
+0.2
+ReSTIR
+PT+ReSTIR
+VXPG+ReSTIR
+RCPG+ReSTIR
+1
+1
+1
+6.68
+23.66
+14.67
+0.258
+0.217
+0.185
+0
+Table 7. Quality measurements in Kitchen. Times are in milliseconds.
+Method
+spp
+Time
+MAE
+PSNR
+SSIM
+FLIP
+30 fps equal time, 1 indirect bounce
+PT
+SSPG
+VXPG
+RCPG
+27
+9
+7
+18
+33.37
+33.73
+32.79
+32.82
+0.269
+0.300
+0.333
+0.248
+18.83
+17.48
+15.96
+18.38
+0.292
+0.232
+0.185
+0.250
+0.245
+0.261
+0.282
+0.216
+30 fps equal time, 2 indirect bounces
+PT
+VXPG
+RCPG
+15
+3
+8
+33.78
+37.09
+32.74
+PT+ReSTIR
+VXPG+ReSTIR
+RCPG+ReSTIR
+1
+1
+1
+8.57
+18.11
+15.37
+0.558
+0.662
+0.547
+15.92
+12.28
+14.89
+0.196
+0.097
+0.147
+0.365
+0.414
+0.344
+13.81
+13.95
+14.17
+0.157
+0.154
+0.160
+0.299
+0.350
+0.282
+ReSTIR
+0.433
+0.416
+0.414
+due to reflective caustics from intricate metal objects (there is a
+metal chandelier above the view frustum in “Staircase”). When not
+including BSDF samples with MIS, RCPG usually causes more extreme fireflies than the other compared methods. This is particularly
+apparent in the “Staircase” scene in Figure 20, where the very spiky
+convergence curve of RCPG is flattened by MIS.
+8
+RCPG
+VXPG+ReSTIR
+MAE
+29
+9
+8
+19
+15
+0.6
+30 fps equal time, 1 indirect bounce
+PT
+SSPG
+VXPG
+RCPG
+PT+ReSTIR
+VXPG
+•
+Ablation study
+Figure 22 shows how the LTC-based method of picking a sample
+direction from within a texel improves sampling quality with a lowroughness surface. However, there is a performance impact, making
+this type of sampling less attractive for real-time rendering.
+While the size of the cascade 0 probe grid could be adjusted
+depending on how complex the scene is, we use 1283 in all measurements. The visual effect of adjusting this size is shown in Figure 23,
+0
+10
+20
+30
+40
+Frame index
+50
+60
+Fig. 11. The mean absolute error of each method during the first 64 frames
+in the “Staircase” scene. The parameters match Table 6. Note that while the
+other curves are computed with equal-time parameters (targeting 30 frames
+per second), the ReSTIR curves are not equal-time, which is one reason why
+their quality may appear surprisingly poor in this figure. The training of
+SSPG takes very long; it takes hundreds of frames to reach equilibrium,
+which is outside of this plot but settles at 0.158, slightly above RCPG and
+below RCPG+ReSTIR.
+and the related performance and quality measurements are shown
+in Table 9.
+The effect of changing the angular resolution of cascade 0 is
+measured in Table 10 and visualized in Figure 24. While higher resolutions come with a notable quality improvement, their performance
+cost is prohibitive for real-time use cases. 4x4 is the minimum value
+currently available in our implementation, due to the massive solid
+angles of texels in the 2x2 configuration running into corner cases
+in our LTC BSDF integration routines.
+The speed at which RCPG adapts to lighting changes depends
+on the 𝛼 parameter of the exponential moving average used in
+the stochastic integration of radiance cascade probe texels. The
+influence the parameter has on image quality after a drastic lighting
+change is shown in Figure 25. Figure 26 displays the measurement
+scene, where the direction of most indirect light instantaneously
+changes. Higher values of 𝛼 adapt faster, but are more temporally
+inconsistent.
+9
+Discussion and limitations
+In light of the measurements, Radiance Cascade Path Guiding is
+very effective in a large variety of scenes, as well as usually being a
+better fit for combination with ReSTIR than previous real-time path
+guiding methods. The radiance cascade representation inherently
+represents only visible surfaces. When jittering and details thinner
+than a grid cell are involved, this visibility information is not perfect,
+and light can leak through the transitions between cascades. If the
+general direction of incoming light is similar, poor grid resolution
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+16
+•
+Ikkala et al.
+0.235
+GT, Ajar
+PT, 37 spp / 33.22 ms
+0.174
+GT, Breakfast
+PT, 28 spp / 33.41 ms
+0.215
+GT, Classroom
+PT, 21 spp / 32.86 ms
+0.144
+GT, Rungholt
+PT, 20 spp / 33.73 ms
+0.232
+GT, Staircase
+PT, 29 spp / 33.56 ms
+0.245
+GT, Kitchen
+PT, 27 spp / 33.37 ms
+0.186
+0.039
+0.094
+SSPG, 14 spp / 33.33 ms
+VXPG, 13 spp / 33.66 ms
+RCPG, 23 spp / 33.74 ms
+0.158
+0.156
+0.112
+SSPG, 8 spp / 33.85 ms
+VXPG, 7 spp / 34.70 ms
+RCPG, 19 spp / 34.05 ms
+0.175
+0.226
+0.151
+SSPG, 7 spp / 34.32 ms
+VXPG, 6 spp / 34.66 ms
+RCPG, 16 spp / 33.72 ms
+0.113
+0.212
+0.106
+SSPG, 5 spp / 32.11 ms
+VXPG, 5 spp / 33.64 ms
+RCPG, 13 spp / 33.17 ms
+0.171
+0.217
+0.132
+SSPG, 9 spp / 34.13 ms
+VXPG, 8 spp / 33.75 ms
+RCPG, 19 spp / 34.00 ms
+0.261
+0.282
+0.216
+SSPG, 9 spp / 33.73 ms
+VXPG, 7 spp / 32.79 ms
+RCPG, 18 spp / 32.82 ms
+Fig. 12. 30 fps equal-time results, with a single indirect light bounce. GT stands for “Ground Truth”. The FLIP value of each image (compared to ground truth)
+is reported in the top-left corner. More detailed numeric results are tabulated in Tables 2, 3, 4, 5, 6, and 7.
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+RCPG: Real-Time Product Path Guiding Using Radiance Cascades
+0.336
+GT, Ajar
+PT, 22 spp / 33.07 ms
+0.197
+GT, Breakfast
+PT, 16 spp / 32.28 ms
+0.261
+GT, Classroom
+PT, 12 spp / 33.32 ms
+0.169
+GT, Rungholt
+PT, 12 spp / 34.80 ms
+0.289
+GT, Staircase
+PT, 17 spp / 33.24 ms
+0.365
+GT, Kitchen
+PT, 15 spp / 33.78 ms
+0.127
+0.164
+VXPG, 4 spp / 32.74 ms
+RCPG, 11 spp / 33.40 ms
+0.277
+0.183
+VXPG, 2 spp / 31.51 ms
+RCPG, 9 spp / 34.91 ms
+0.347
+0.223
+VXPG, 2 spp / 36.07 ms
+RCPG, 6 spp / 33.19 ms
+0.273
+0.133
+VXPG, 2 spp / 29.98 ms
+RCPG, 7 spp / 35.38 ms
+0.343
+0.212
+VXPG, 3 spp / 37.14 ms
+RCPG, 8 spp / 33.14 ms
+0.414
+0.344
+VXPG, 3 spp / 37.09 ms
+RCPG, 8 spp / 32.74 ms
+•
+17
+Fig. 13. 30 fps equal-time results, with two indirect light bounces. SSPG is excluded as the method only samples a single bounce. The FLIP value of each image
+(compared to ground truth) is reported in the top-left corner. More detailed numeric results are tabulated in Tables 2, 3, 4, 5, 6, and 7.
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+18
+•
+Ikkala et al.
+0.155
+GT, Ajar
+0.105
+PT / 5.55 ms
+0.156
+GT, Breakfast
+0.147
+PT / 7.03 ms
+0.181
+GT, Classroom
+0.180
+0.173
+VXPG / 27.75 ms
+0.214
+PT / 6.68 ms
+0.299
+GT, Kitchen
+VXPG / 32.48 ms
+0.213
+PT / 11.73 ms
+GT, Staircase
+VXPG / 32.32 ms
+0.183
+PT / 8.55 ms
+GT, Rungholt
+VXPG / 15.16 ms
+VXPG / 23.66 ms
+0.350
+PT / 8.57 ms
+VXPG / 18.11 ms
+0.083
+RCPG / 12.43 ms
+0.116
+RCPG / 14.38 ms
+0.137
+RCPG / 17.92 ms
+0.120
+RCPG / 22.80 ms
+0.116
+RCPG / 14.67 ms
+0.282
+RCPG / 15.37 ms
+Fig. 14. Result images of the methods in combination with ReSTIR, using a single light bounce. The FLIP value of each image (compared to ground truth) is
+reported in the top-left corner. More detailed numeric results are tabulated in Tables 2, 3, 4, 5, 6, and 7.
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+RCPG: Real-Time Product Path Guiding Using Radiance Cascades
+(a) The “Classroom” scene with the point used for PDF visualizations below
+circled in red. The viewpoint is from the ceiling towards the floor.
+•
+19
+(f) The “Staircase” scene with the point used for PDF visualizations below
+circled in red. The viewpoint is on the lampshade, facing towards the chair.
+(b) Ground truth
+(c) SSPG
+(g) Ground truth
+(h) SSPG
+(d) VXPG
+(e) RCPG
+(i) VXPG
+(j) RCPG
+Fig. 15. Visualizations of the probability distribution function around an example point, in solid angle measure.
+does not harm RCPG nearly as much as VXPG. On the other hand,
+VXPG can prevail in simpler scenes like Ajar, which neatly fit a
+voxel representation.
+SSPG is also often highly effective. However, its efficacy is tied to
+screen-space; if the camera moves, SSPG can take some time to retrain its Gaussian lobes. Guiding information is also only available
+for on-screen surfaces, making SSPG unsuitable for multi-bounce
+rendering. This heavily limits its usefulness in typical real-time
+rendering tasks, where the camera is nearly always animated or
+interactive. It is not an issue for either RCPG or VXPG, whose data
+structures operate in world space.
+Highly local and directional lighting environments, such as those
+induced by caustics, often reveal the limited spatial and angular
+resolution of RCPG. In such circumstances, the grid-like structure
+can be visible as edges between more and less noisy areas. An
+example of this is shown in Figure 27.
+The same figure also demonstrates another limitation with lowroughness materials: The ring itself appears much noisier due to
+the LTC weighting being an increasingly poor approximation for
+the actual BSDF towards very low roughnesses. For such materials,
+one may entirely forgo RCPG and just use regular BSDF importance
+sampling, although the additional divergence this can cause is likely
+to somewhat reduce performance.
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+20 •
+Ikkala et al.
+Table 8. The execution time of the whole rendering pipeline for RCPG. Numbers are in milliseconds. All cases use 1 sample per pixel path tracing. Path tracing
+is performed at a resolution of 1920 × 1080. When two indirect bounces are used, recursively lit radiance cascades are enabled, complicating the “RC trace”
+pass.
+Scene
+Voxelization
+RC probe culling
+RC trace
+RC gather
+Path tracing
+Tonemapping
+Total
+0.27
+0.22
+0.23
+0.12
+0.33
+0.23
+1.66
+1.99
+2.47
+2.41
+1.92
+1.95
+0.09
+0.08
+0.09
+0.08
+0.09
+0.08
+3.04
+3.22
+4.03
+6.60
+3.66
+3.48
+0.26
+0.22
+0.24
+0.12
+0.34
+0.25
+3.18
+4.18
+5.55
+4.59
+4.12
+4.00
+0.08
+0.08
+0.08
+0.09
+0.09
+0.08
+4.97
+5.86
+7.64
+8.94
+6.64
+6.10
+1 indirect bounce
+Ajar
+Breakfast
+Classroom
+Rungholt
+Staircase
+Kitchen
+0.29
+0.24
+0.35
+2.27
+0.27
+0.38
+0.06
+0.06
+0.06
+0.05
+0.06
+0.06
+0.70
+0.63
+0.83
+1.67
+0.99
+0.78
+2 indirect bounces
+Ajar
+Breakfast
+Classroom
+Rungholt
+Staircase
+Kitchen
+RCPG (warm)
+VXPG
+RCPG (MIS)
+0.29
+0.25
+0.36
+2.31
+0.28
+0.39
+RCPG (cold)
+SSPG (warm)
+0.06
+0.06
+0.06
+0.06
+0.06
+0.06
+1.10
+1.07
+1.35
+1.77
+1.75
+1.32
+PT
+SSPG (cold)
+RCPG (warm)
+VXPG
+RCPG (MIS)
+100
+10 −1
+10 −2
+MSE
+MSE
+PT
+SSPG (cold)
+101
+100
+10 −1
+10 −3
+10 −2
+10 −4
+10 −3
+10 −5 0
+10
+RCPG (cold)
+SSPG (warm)
+101
+102
+Accumulated frames
+103
+Fig. 16. MSE as a function of frames when accumulating samples in the
+“Ajar” scene, using the same single-bounce settings as in Table 2. “RCPG
+(MIS)” is using 12 spp per frame (34.21 ms). “SSPG (cold)” suffers from a
+low-brightness area (back wall) remaining very noisy for a long time, while
+variance reduces at a faster rate elsewhere.
+The exponential moving average used when integrating probe
+data can hinder the efficacy of RCPG in dynamic scenes. With moving geometry, this can manifest as visible edges between noisy and
+less noisy areas, where the probes on the noisy side have less history.
+This is seen in Figure 28, where the dragon’s head has just entered
+an area with no history on the first few cascades. The impact is
+somewhat mitigated by initializing the history of the previously
+unvisited probes by their visited neighbors, as well as the upper
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+10 −4 0
+10
+101
+102
+Accumulated frames
+103
+Fig. 17. MSE as a function of frames when accumulating samples in the
+“Breakfast” scene, using the same single-bounce settings as in Table 3. “RCPG
+(MIS)” is using 10 spp per frame (31.92 ms).
+Table 9. The effect of cascade 0 grid size on build time and image quality in
+the “Staircase” scene, with one sample per pixel.
+Grid size
+RC build time (ms)
+Sampling time (ms)
+FLIP
+163
+0.09
+0.15
+0.36
+1.38
+6.06
+1.56
+1.70
+1.69
+1.92
+1.82
+0.462
+0.436
+0.412
+0.383
+0.360
+323
+643
+1283
+2563
+RCPG: Real-Time Product Path Guiding Using Radiance Cascades
+RCPG (cold)
+SSPG (warm)
+PT
+SSPG (cold)
+RCPG (warm)
+VXPG
+RCPG (MIS)
+101
+101
+100
+100
+10 −1
+10 −1
+MSE
+MSE
+RCPG (warm)
+VXPG
+RCPG (MIS)
+10 −2
+10 −3
+10 −4 0
+10
+101
+102
+Accumulated frames
+RCPG (warm)
+VXPG
+RCPG (MIS)
+PT
+SSPG (cold)
+10 −2
+10 −4 0
+10
+103
+RCPG (cold)
+SSPG (warm)
+PT
+SSPG (cold)
+RCPG (warm)
+VXPG
+RCPG (MIS)
+10 −1
+102
+10 −2
+101
+10 −3
+100
+10 −4
+10 −5
+101
+102
+Accumulated frames
+103
+Fig. 20. MSE as a function of frames when accumulating samples in the
+“Staircase” scene, using the same single-bounce settings as in Table 6. “RCPG
+(MIS)” is using 11 spp per frame (34.52 ms).
+MSE
+MSE
+21
+10 −3
+Fig. 18. MSE as a function of frames when accumulating samples in the
+“Classroom” scene, using the same single-bounce settings as in Table 4.
+“RCPG (MIS)” is using 9 spp per frame (32.82 ms).
+10 −6 0
+10
+RCPG (cold)
+SSPG (warm)
+•
+RCPG (cold)
+SSPG (warm)
+PT
+SSPG (cold)
+10 −1
+10 −2
+101
+102
+Accumulated frames
+10 −3 0
+10
+103
+Fig. 19. MSE as a function of frames when accumulating samples in the
+“Rungholt” scene, using the same single-bounce settings as in Table 5. “RCPG
+(MIS)” is using 9 spp per frame (34.90 ms).
+Table 10. The effect of cascade 0 probe resolution on build time and image
+quality in the “Classroom” scene, with one sample per pixel path tracing.
+Resolution
+RC build time (ms)
+Sampling time (ms)
+FLIP
+4x4
+8x8
+16x16
+1.12
+3.20
+12.57
+2.47
+2.74
+7.12
+0.364
+0.341
+0.324
+101
+102
+Accumulated frames
+103
+Fig. 21. MSE as a function of frames when accumulating samples in the
+“Kitchen” scene, using the same single-bounce settings as in Table 7. “RCPG
+(MIS)” is using 10 spp per frame (32.85 ms).
+cascade probes being more likely to have history due to covering a
+larger portion of the scene.
+The worst-case dynamic scenario for RCPG occurs when the lighting configuration changes completely and suddenly, as in Figure 26.
+In this situation, RCPG briefly produces samples that are worse than
+a regular path tracer, as all of the accumulated probe data prioritizes
+sampling a direction that no longer provides indirect light.
+While RCPG quite reliably reduces noise in terms of MAE, SSIM
+and FLIP, it does not necessarily always reduce variance compared
+to an unguided path tracer. Like in prior product path guiding
+work [Diolatzis et al. 2020], RCPG is prone to producing fireflies
+due to not necessarily having found a direction that contributes
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+22 •
+Ikkala et al.
+Fig. 22. Left: Reference image from the “Staircase” scene, depicting a grazingangle reflection. Middle: RCPG, with uniform texel sampling, SSIM = 0.0837.
+Right: RCPG, with BSDF texel sampling, SSIM = 0.0842. 1 sample per pixel
+is used. Quality differences are minor, but most visible near the center of
+the image, where BSDF texel sampling has slightly better quality. In this
+case, BSDF sampling is 25% slower in the path tracing step than uniform
+sampling.
+Fig. 24. 1 sample-per-pixel images demonstrating the effect of the angular
+resolution of cascade 0. Top left: Reference image from the “Classroom”
+scene. Top right is 4x4, bottom left is 8x8, and bottom right is 16x16.
+𝛼 = 1/10
+𝛼 = 1/100
+𝛼 = 1/30
+𝛼 = 1/200
+𝛼 = 1/60
+16 SPP PT
+1.2
+MAE
+1
+Fig. 23. 1 sample-per-pixel images demonstrating the effect of the grid size
+of cascade 0. Top left: Reference image from the “Staircase” scene. Top right
+is 643 , bottom left is 1283 , and bottom right is 2563 .
+significantly. This is especially likely to occur if the scene contains
+a high-contribution area with a small solid angle, e.g., caustic reflections from small metal objects, such as in the “Breakfast” and
+“Staircase” scenes. As such, RCPG may increase variance compared
+to an unguided path tracer. While RCPG improves MAE over the
+path tracer in these scenes and does converge towards the reference,
+it also produces more fireflies than the unguided path tracer in them,
+ultimately resulting in a worse MSE in equal time.
+Fireflies can be directly mitigated with various methods [Pharr
+2019], but doing so typically involves introducing bias. It is also
+possible to limit the effect that fireflies can have by combining
+RCPG with BSDF sampling using MIS. However, that can cause a
+clear negative impact on both performance and/or noise in terms
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+0.8
+0.6
+0
+50
+100
+150
+200
+Frames after lighting change
+250
+Fig. 25. The effect of the 𝛼 parameter of the probe update’s exponential
+moving average when in dynamic lighting conditions. The scenario matches
+Figure 26. The value used in all other measurements of this paper is 𝛼 = 1/30,
+as it often provides a reasonable tradeoff between temporal stability and
+adaptation speed.
+RCPG: Real-Time Product Path Guiding Using Radiance Cascades
+(a) 1000 history frames
+(d) 40 history frames
+(b) After light change
+(e) 60 history frames
+23
+(c) 20 history frames
+(f) PT, equal SPP
+Fig. 26. In this worst-case scenario, spotlights lighting up the curtains of
+Sponza flip from one side’s curtain to the other in an instantaneous movement. Image (a) is taken after 1000 frames, but prior to flipping the spotlights.
+Image (b) is the first frame after lights have been flipped, making effectively
+all accumulated path guiding information counter-productive. Subsequent
+images (c), (d), and (e) are taken at 20 frame intervals after the lighting
+change, demonstrating adaptation to the new lighting environment. Finally,
+image (f) is path traced without path guiding. All images are rendered with
+16 samples per pixel.
+(a) RCPG (42 spp), MAE: 0.050
+•
+(b) PT (136 spp), MAE: 0.049
+Fig. 27. A golden ring on a white platform, lit by a bright point light such that
+caustics are clearly visible. While both RCPG and an unguided path tracer
+reach approximately the same mean absolute error in this scenario, the grid
+structure of RCPG causes uneven noise levels in the caustic highlight. RCPG
+also exhibits more noise in the ring itself due to the LTC-based importance
+sampling being an increasingly poor match for low-roughness surfaces. The
+sample counts used here are chosen for equal time.
+of MAE, which are likely more important metrics for real-time use.
+Therefore, RCPG is not a very effective sampling method when
+unbiased rendering is strictly required, and other sampling methods
+may be more suitable under such circumstances.
+Fig. 28. In this dynamic scenario, a white Stanford Dragon [Stanford University Computer Graphics Laboratory 1996] takes 60 frames to move from
+one end of Sponza’s hallway to the other, and is tracked by the camera.
+Every other curtain is lit with a spotlight, and the dragon is fully lit by
+indirect light. The left image is rendered with 128 frames of warmup in this
+position, representing the ideal circumstances for RCPG. The right image is
+in dynamic movement with no warmup, exhibiting increased noise in the
+green lighting on the dragon’s head when it enters previously unvisited
+cascade probes. Both are rendered with 16 samples per pixel.
+10 Future work
+In many real-time scenarios, one may forgo path guiding data structures and instead focus on maximizing the number of samples per
+pixel, especially as the core ray-casting operation is becoming increasingly cheap with each round of improvements to hardware
+acceleration. Many interesting approaches to real-time path guiding
+could become viable if ray tracing ceases to be the largest individual
+performance bottleneck; e.g., VXPG could be improved by drawing
+multiple samples and selecting one via RIS [Talbot et al. 2005], using
+additional visibility rays as weights.
+For world-space path guiding, it would be interesting to find
+an effective representation with a much lower bandwidth cost, as
+well as investigating methods to increase coherence, such as Shader
+Execution Reordering [NVIDIA Corporation 2022].
+While the method currently culls probes using a real-time voxelized version of the scene, one potential future improvement to
+this would be available if hardware ray tracing APIs gained the
+ability to perform distance queries on their acceleration structures.
+That way, the probe culling could be implemented without a separate voxelization step. Alternatively, memory consumption with
+the voxelized representation could be reduced by utilizing sparse
+voxel octrees [Crassin et al. 2009].
+Similarly, allocating memory for all probes (even the culled ones)
+is wasteful, and may be an obstacle for applying this method for large
+dynamic worlds such as in many types of video games. As shown in
+Table 1, only ∼ 10% of the allocated memory is actually used during
+probe updates or sampling. A more efficient data structure could
+allow scaling the method to larger scenes, such as a sparse voxel
+octree [Crassin et al. 2009] or spatial hash grids.
+During the probe update step, it may be possible to share the
+results of traced rays across probes of different cascades. This could
+yield notable performance improvements by reducing the number
+of rays traced, but is non-trivial to organize in a way that is efficient
+in real-time rendering.
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+24 •
+Ikkala et al.
+While the proposed method stores radiance information as luminance, one could also store full RGB colors. This could be made practical by storing two copies of the radiance cascades data structure;
+one with single-precision floating point values per color channel,
+and another with RGBE-encoded values. The former is necessary
+to retain sufficient precision for the exponential moving average,
+while the latter could be used during the sampling procedure. The
+main drawback of such an approach is likely to be increased arithmetic pressure during sampling due to the decoding of the RGBE
+format. This could still be an effective strategy in scenes with highly
+saturated material colors.
+Instead of stochastically accumulating rays in the radiance cascades, each texel could instead be computed using cone or beam
+tracing. This could allow computing approximations of texel values
+with a single sample and improve path guiding in dynamic scenes
+by removing the need for temporal reuse via exponential moving
+average. However, there is currently no hardware acceleration for
+these methods. Still, for example Sparse Voxel Octrees could possibly
+be used for this purpose [Crassin et al. 2011].
+11 Conclusion
+We presented a path guiding algorithm, RCPG, which leverages
+the unique properties of radiance cascades to implement a product path guiding scheme that is suitable for real-time rendering on
+contemporary hardware. Our method is both significantly faster
+and higher quality in equal time than state-of-the-art methods. We
+also developed the theory of radiance cascades further by deriving radiance interval bounds that preserve directional information.
+This development may enable other use cases for radiance cascades
+outside of just path guiding.
+Acknowledgments
+This work was supported by the Research Council of Finland under
+Grant 336357 (PROFI 6 - TAU Imaging Research Platform) and Grant
+351623.
+References
+Advanced Micro Devices, Inc. 2025. "RDNA4" Instruction Set Architecture Reference
+Guide. https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/
+instruction-set-architectures/rdna4-instruction-set-architecture.pdf
+Lucas Alber, Johannes Hanika, and Carsten Dachsbacher. 2025. Real-Time Markov
+Chain Path Guiding for Global Illumination and Single Scattering. Proc. ACM
+Comput. Graph. Interact. Tech. 8, 1 (2025). doi:10.1145/3728296
+Pontus Andersson, Jim Nilsson, Tomas Akenine-Möller, Magnus Oskarsson, Kalle
+Åström, and Mark D. Fairchild. 2020. FLIP: A Difference Evaluator for Alternating
+Images. Proc. ACM Comput. Graph. Interact. Tech. 3, 2, Article 15 (Aug. 2020), 23 pages.
+doi:10.1145/3406183
+Arm Limited. 2025. Efficient ray tracing. https://developer.arm.com/documentation/
+101897/0304/Ray-tracing/Efficient-ray-tracing
+Daniel R. Baum, Holly E. Rushmeier, and James M. Winget. 1989. Improving radiosity
+solutions through the use of analytically determined form-factors. SIGGRAPH
+Comput. Graph. 23, 3 (July 1989), 325–334. doi:10.1145/74334.74367
+Benedikt Bitterli. 2016. Rendering resources. https://benedikt-bitterli.me/resources/.
+Benedikt Bitterli, Chris Wyman, Matt Pharr, Peter Shirley, Aaron Lefohn, and Wojciech
+Jarosz. 2020. Spatiotemporal reservoir resampling for real-time ray tracing with
+dynamic direct lighting. ACM Trans. Graph. 39, 4, Article 148 (Aug. 2020), 17 pages.
+doi:10.1145/3386569.3392481
+Blender Foundation. 2019. Blender Demo Files. https://www.blender.org/download/
+demo-files/
+Petrik Clarberg. 2008. Fast Equal-Area Mapping of the (Hemi)Sphere using SIMD.
+Journal of Graphics Tools 13, 3 (2008), 53–68. doi:10.1080/2151237X.2008.10129263
+, Vol. 1, No. 1, Article . Publication date: July 2026.
+Alejandro Conty Estevez and Christopher Kulla. 2018. Importance Sampling of Many
+Lights with Adaptive Tree Splitting. Proc. ACM Comput. Graph. Interact. Tech. 1, 2,
+Article 25 (Aug. 2018), 17 pages. doi:10.1145/3233305
+Cyril Crassin, Fabrice Neyret, Sylvain Lefebvre, and Elmar Eisemann. 2009. GigaVoxels:
+ray-guided streaming for efficient and detailed voxel rendering. In Proceedings of
+the 2009 Symposium on Interactive 3D Graphics and Games (Boston, Massachusetts)
+(I3D ’09). Association for Computing Machinery, New York, NY, USA, 15–22. doi:10.
+1145/1507149.1507152
+Cyril Crassin, Fabrice Neyret, Miguel Sainz, Simon Green, and Elmar Eisemann. 2011.
+Interactive Indirect Illumination Using Voxel Cone Tracing. Computer Graphics
+Forum 30, 7 (2011), 1921–1930. doi:10.1111/j.1467-8659.2011.02063.x
+Ken Dahm and Alexander Keller. 2017. Learning light transport the reinforced way. In
+ACM SIGGRAPH 2017 Talks (Los Angeles, California) (SIGGRAPH ’17). Association
+for Computing Machinery, New York, NY, USA, Article 73, 2 pages. doi:10.1145/
+3084363.3085032
+Mikhail Derevyannykh. 2022. Real-Time Path-Guiding Based on Parametric Mixture
+Models. In Eurographics 2022 - Short Papers, Nuria Pelechano and David Vanderhaeghe (Eds.). The Eurographics Association. doi:10.2312/egs.20221024
+Stavros Diolatzis, Adrien Gruson, Wenzel Jakob, Derek Nowrouzezahrai, and George
+Drettakis. 2020. Practical Product Path Guiding Using Linearly Transformed Cosines.
+In Computer Graphics Forum (Proceedings of Eurographics Symposium on Rendering)
+39, 4 (July 2020). doi:10.1111/cgf.14051
+Addis Dittebrandt, Johannes Hanika, and Carsten Dachsbacher. 2020. Temporal Sample
+Reuse for Next Event Estimation and Path Guiding for Real-Time Path Tracing. In
+Eurographics Symposium on Rendering - DL-only Track, Carsten Dachsbacher and
+Matt Pharr (Eds.). The Eurographics Association. doi:10.2312/sr.20201135
+Addis Dittebrandt, Vincent Schüßler, Johannes Hanika, Sebastian Herholz, and Carsten
+Dachsbacher. 2023. Markov Chain Mixture Models for Real-Time Direct Illumination.
+Computer Graphics Forum 42, 4 (2023), e14881. doi:10.1111/cgf.14881
+Honghao Dong, Guoping Wang, and Sheng Li. 2023. Neural Parametric Mixtures for
+Path Guiding. In SIGGRAPH ’23 Conference Proceedings (Los Angeles, CA, USA).
+Association for Computing Machinery, 10 pages. doi:10.1145/3588432.3591533
+Zhao Dong, Wei Chen, Hujun Bao, Hongxin Zhang, and Qunsheng Peng. 2004. Realtime Voxelization for Complex Polygonal Models. In Proceedings of the Computer
+Graphics and Applications, 12th Pacific Conference (PG ’04). IEEE Computer Society,
+USA, 43–50. doi:10.5555/1025128.1026026
+Pedro Figueiredo, Qihao He, and Nima Khademi Kalantari. 2025. Neural Path Guiding with Distribution Factorization. In Eurographics Symposium on Rendering. The
+Eurographics Association. doi:10.2312/sr.20251178
+Rouli Freeman, Alexander Sannikov, and Adrian Margel. 2025. Holographic Radiance
+Cascades for 2D Global Illumination. arXiv:2505.02041 [cs.GR]
+Eric Heitz, Jonathan Dupuy, Stephen Hill, and David Neubelt. 2016. Real-time polygonallight shading with linearly transformed cosines. ACM Trans. Graph. 35, 4, Article 41
+(July 2016), 8 pages. doi:10.1145/2897824.2925895
+Stephen Hill and Eric Heitz. 2016. Real-time area lighting: A journey from research to
+production. ACM SIGGRAPH Courses (2016).
+Jiawei Huang, Akito Iizuka, Hajime Tanaka, Taku Komura, and Yoshifumi Kitamura.
+2024. Online Neural Path Guiding with Normalized Anisotropic Spherical Gaussians.
+ACM Trans. Graph. 43, 3, Article 26 (2024), 18 pages. doi:10.1145/3649310
+Julius Ikkala, Markku Mäkitalo, Tuomas Lauttia, Erwan Leria, and Pekka Jääskeläinen.
+2022. Tauray: A Scalable Real-Time Open-Source Path Tracer for Stereo and Light
+Field Displays. In SIGGRAPH Asia 2022 Technical Communications (Daegu, Republic
+of Korea) (SA ’22 Technical Communications). Association for Computing Machinery,
+New York, NY, USA. doi:10.1145/3550340.3564225
+Henrik Wann Jensen. 1995. Importance Driven Path Tracing using the Photon Map.
+In Rendering Techniques ’95, Patrick M. Hanrahan and Werner Purgathofer (Eds.).
+Springer Vienna, Vienna, 326–335. doi:10.1007/978-3-7091-9430-0_31
+James T. Kajiya. 1986. The rendering equation. SIGGRAPH Comput. Graph. 20, 4 (Aug.
+1986), 143–150. doi:10.1145/15886.15902
+Eric P. Lafortune and Yves D. Willems. 1995. A 5D Tree to Reduce the Variance of
+Monte Carlo Ray Tracing. In Rendering Techniques ’95, Patrick M. Hanrahan and
+Werner Purgathofer (Eds.). Springer Vienna, Vienna, 11–20. doi:10.1007/978-3-70919430-0_2
+Johann Heinrich Lambert. 1760. Photometria sive de mensura et gradibus luminis,
+colorum et umbrae. Klett.
+Daqi Lin, Markus Kettunen, Benedikt Bitterli, Jacopo Pantaleoni, Cem Yuksel, and Chris
+Wyman. 2022. Generalized Resampled Importance Sampling: Foundations of ReSTIR.
+ACM Transactions on Graphics (TOG) 41, 4 (2022). doi:10.1145/3528223.3530158
+Haolin Lu. 2023. SIByLEngine2023. https://github.com/SuikaSibyl/SIByLEngine2023
+Haolin Lu, Wesley Chang, Trevor Hedstrom, and Tzu-Mao Li. 2024. Real-Time Path
+Guiding Using Bounding Voxel Sampling. ACM Trans. Graph. 43, 4, Article 125 (July
+2024), 14 pages. doi:10.1145/3658203
+Zander Majercik, Jean-Philippe Guertin, Derek Nowrouzezahrai, and Morgan McGuire.
+2019. Dynamic Diffuse Global Illumination with Ray-Traced Irradiance Fields.
+Journal of Computer Graphics Techniques (JCGT) 8, 2 (5 June 2019). http://jcgt.org/
+published/0008/02/01/
+RCPG: Real-Time Product Path Guiding Using Radiance Cascades
+Morgan McGuire. 2017. Computer Graphics Archive. https://casual-effects.com/data
+Quirin Meyer, Jochen Süßmuth, Gerd Sußner, Marc Stamminger, and Günther Greiner.
+2010. On Floating-Point Normal Vectors. Computer Graphics Forum 29, 4 (2010),
+1405–1409. doi:10.1111/j.1467-8659.2010.01737.x
+Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. 2020. NeRF: Representing Scenes as Neural Radiance Fields
+for View Synthesis. In Computer Vision – ECCV 2020, Andrea Vedaldi, Horst Bischof,
+Thomas Brox, and Jan-Michael Frahm (Eds.). Springer International Publishing,
+Cham, 405–421. doi:10.1007/978-3-030-58452-8_24
+Daniele Mortari, Martın Avendano, and Pedro Davalos. 2011. Uniform distribution of
+points on a sphere with application in aerospace engineering. Spaceflight Mechanics
+140 (2011), 1–14. doi:10.2514/2.4497
+Thomas Müller, Markus Gross, and Jan Novák. 2017. Practical path guiding for efficient
+light-transport simulation. In Computer Graphics Forum, Vol. 36. Wiley Online
+Library, 91–100. doi:10.1111/cgf.13227
+Thomas Müller, Brian Mcwilliams, Fabrice Rousselle, Markus Gross, and Jan Novák.
+2019. Neural Importance Sampling. ACM Trans. Graph. 38, 5, Article 145 (Oct. 2019),
+19 pages. doi:10.1145/3341156
+NVIDIA Corporation. 2018. NVIDIA Turing GPU Architecture.
+https://images.
+nvidia.com/aem-dam/en-zz/Solutions/design-visualization/technologies/turingarchitecture/NVIDIA-Turing-Architecture-Whitepaper.pdf
+NVIDIA Corporation. 2022. Shader Execution Reordering. https://d29g4g2dyqv443.
+cloudfront.net/sites/default/files/akamai/gameworks%2Fser-whitepaper.pdf
+NVIDIA Corporation. 2025.
+NVIDIA RTX Blackwell GPU Architecture.
+https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtxblackwell-gpu-architecture.pdf
+Christopher M. J. Osborne and Alexander Sannikov. 2024. Radiance cascades: a novel
+high-resolution formal solution for multidimensional non-LTE radiative transfer.
+RAS Techniques and Instruments 4 (12 2024), rzae062. doi:10.1093/rasti/rzae062
+Yaobin Ouyang, Shiqiu Liu, Markus Kettunen, Matt Pharr, and Jacopo Pantaleoni. 2021.
+ReSTIR GI: Path Resampling for Real-Time Path Tracing. Computer Graphics Forum
+40, 8 (2021), 17–29. doi:10.1111/cgf.14378
+Jacopo Pantaleoni. 2020. Online path sampling control with progressive spatio-temporal
+filtering. SN Computer Science 1, 5 (2020), 279. doi:10.1007/s42979-020-00291-z
+Christoph Peters. 2021. BRDF importance sampling for polygonal lights. ACM Trans.
+Graph. 40, 4, Article 140 (July 2021), 14 pages. doi:10.1145/3450626.3459672
+Matt Pharr. 2019. Ignoring the Inconvenient When Tracing Rays. Apress, Berkeley, CA,
+247–253. doi:10.1007/978-1-4842-4427-2_17
+Alexander Rath, Marco Manzi, Sebastian Weiss, Tiziano Portenier, Farnood Salehi, Saeed
+Hadadan, and Marios Papas. 2025. Neural Resampling with Optimized Candidate
+Allocation. In Eurographics Symposium on Rendering. The Eurographics Association.
+doi:10.2312/sr.20251181
+Alexander Rath, Ömercan Yazici, and Philipp Slusallek. 2023. Focal Path Guiding for
+Light Transport Simulation. In ACM SIGGRAPH 2023 Conference Proceedings (Los
+Angeles, CA, USA) (SIGGRAPH ’23). Association for Computing Machinery, New
+York, NY, USA, Article 30, 10 pages. doi:10.1145/3588432.3591543
+Erik Reinhard, Michael Stark, Peter Shirley, and James Ferwerda. 2002. Photographic
+tone reproduction for digital images. ACM Trans. Graph. 21, 3 (July 2002), 267–276.
+doi:10.1145/566654.566575
+Martin Roberts. 2018. The Unreasonable Effectiveness of Quasirandom Sequences.
+https://extremelearning.com.au/unreasonable-effectiveness-of-quasirandomsequences/ Accessed: 2025-09-08.
+Lukas Ruppert, Sebastian Herholz, and Hendrik P. A. Lensch. 2020. Robust fitting of
+parallax-aware mixtures for path guiding. ACM Trans. Graph. 39, 4, Article 147
+(Aug. 2020), 15 pages. doi:10.1145/3386569.3392421
+Alexander Sannikov. 2023. Radiance Cascades: A Novel Approach to Calculating Global
+Illumination[WIP]. https://github.com/Raikiri/RadianceCascadesPaper/blob/main/
+out_latexmk2/RadianceCascades.pdf Accessed: 2025-09-08.
+Claude E. Shannon. 1949. Communication in the Presence of Noise. Proceedings of the
+IRE 37, 1 (1949), 10–21. doi:10.1109/JRPROC.1949.232969
+Stanford University Computer Graphics Laboratory. 1996.
+Stanford Dragon.
+https://graphics.stanford.edu/data/3Dscanrep/.
+Justin F. Talbot, David Cline, and Parris Egbert. 2005. Importance Resampling for Global
+Illumination. In Proceedings of the Sixteenth Eurographics Conference on Rendering
+Techniques (Konstanz, Germany) (EGSR ’05). Eurographics Association, Goslar, DEU,
+139–146. doi:10.5555/2383654.2383674
+The Khronos Group. 2023. glTF Sample Assets. https://github.com/KhronosGroup/glTFSample-Assets/tree/main/Models/Sponza Accessed: 2025-09-08.
+Yusuke Tokuyoshi, Sho Ikeda, Paritosh Kulkarni, and Takahiro Harada. 2024. Hierarchical Light Sampling with Accurate Spherical Gaussian Lighting. In SIGGRAPH
+Asia 2024 Conference Papers (Tokyo, Japan) (SA ’24). Association for Computing
+Machinery, New York, NY, USA, Article 82, 11 pages. doi:10.1145/3680528.3687647
+T. S. Trowbridge and K. P. Reitz. 1975. Average irregularity representation of a rough
+surface for ray reflection. J. Opt. Soc. Am. 65, 5 (May 1975). doi:10.1364/JOSA.65.
+000531
+•
+25
+Jiří Vorba, Johannes Hanika, Sebastian Herholz, Thomas Müller, Jaroslav Křivánek, and
+Alexander Keller. 2019. Path Guiding in Production. In ACM SIGGRAPH 2019 Courses
+(Los Angeles, California) (SIGGRAPH ’19). ACM, New York, NY, USA, Article 18,
+77 pages. doi:10.1145/3305366.3328091
+Jiří Vorba, Ondřej Karlík, Martin Šik, Tobias Ritschel, and Jaroslav Křivánek. 2014.
+On-line learning of parametric mixture models for light transport simulation. ACM
+Trans. Graph. 33, 4, Article 101 (July 2014), 11 pages. doi:10.1145/2601097.2601203
+Bruce Walter, Stephen R. Marschner, Hongsong Li, and Kenneth E. Torrance. 2007.
+Microfacet Models for Refraction through Rough Surfaces. In Proceedings of the
+18th Eurographics Conference on Rendering Techniques (Grenoble, France) (EGSR’07).
+Goslar, DEU. doi:10.2312/EGWR/EGSR07/195-206
+Zhou Wang, Alan C. Bovik, Hamid R. Sheikh, and Eero P. Simoncelli. 2004. Image
+quality assessment: from error visibility to structural similarity. IEEE Transactions
+on Image Processing 13, 4 (2004), 600–612. doi:10.1109/TIP.2003.819861
+Philippe Weier, Lukas Bode, Philipp Slusallek, Adrián Jarabo, and Sébastien Speierer.
+2026. Beyond Positional Encoding: A 5D Spatio-Directional Hash Encoding. In
+Proceedings of the Special Interest Group on Computer Graphics and Interactive
+Techniques Conference Conference Papers (SIGGRAPH Conference Papers ’26). Association for Computing Machinery, New York, NY, USA, Article 118, 10 pages.
+doi:10.1145/3799902.3811182
+Zheng Zeng, Markus Kettunen, Chris Wyman, Lifan Wu, Ravi Ramamoorthi, Ling-Qi
+Yan, and Daqi Lin. 2025. ReSTIR PG: Path Guiding with Spatiotemporally Resampled
+Paths. In Proceedings of the SIGGRAPH Asia 2025 Conference Papers (SA Conference
+Papers ’25). Association for Computing Machinery, New York, NY, USA, Article 12,
+11 pages. doi:10.1145/3757377.3763813
+, Vol. 1, No. 1, Article . Publication date: July 2026.

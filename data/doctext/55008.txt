@@ -1,0 +1,327 @@
+# Unfinished: Dual Contouring
+An attempt at general purpose dual-contouring isosurface extraction, with the implementation being incomplete.
+
+See a screenshot of the `sphere` example below. Run it yourself `cargo run --example sphere`.
+
+![sphere example](./docs/screenshots/0.1.1.png)
+
+References:
+- https://www.boristhebrave.com/2018/04/15/dual-contouring-tutorial/
+- https://dexyfex.com/2016/05/16/voxels-and-dual-contouring/
+- https://dexyfex.com/2016/07/14/voxels-and-seamless-lod-transitions/
+- https://github.com/nickgildea/fast_dual_contouring
+- https://github.com/hmeyer/tessellation
+- https://www.reddit.com/r/Unity3D/comments/ieenax/highaccuracy_dual_contouring_on_the_gpu_tech/
+- https://www.mattkeeter.com/projects/contours/
+- https://ngildea.blogspot.com/2015/06/dual-contouring-with-opencl.html
+
+### examples/sphere.rs
+```
+/*
+░█▀▀░█▀█░█░█░█▀▀░█▀▄░█▀▀░░░█▀▀░█░█░█▀█░█▄█░█▀█░█░░░█▀▀
+░▀▀█░█▀▀░█▀█░█▀▀░█▀▄░█▀▀░░░█▀▀░▄▀▄░█▀█░█░█░█▀▀░█░░░█▀▀
+░▀▀▀░▀░░░▀░▀░▀▀▀░▀░▀░▀▀▀░░░▀▀▀░▀░▀░▀░▀░▀░▀░▀░░░▀▀▀░▀▀▀
+
+This example creates a mesh based on an SDF for a sphere.
+It uses the bevy game engine to create a simple scene and
+render the mesh.
+
+Control + Mouse Drag orbits the camera.
+Right Click + Mouse Drag pans the camera.
+Scroll Wheel adjusts the zoom level.
+*/
+
+/*
+░▀█▀░█▄█░█▀█░█▀█░█▀▄░▀█▀░█▀▀
+░░█░░█░█░█▀▀░█░█░█▀▄░░█░░▀▀█
+░▀▀▀░▀░▀░▀░░░▀▀▀░▀░▀░░▀░░▀▀▀
+*/
+
+use bevy::{
+    pbr::wireframe::{Wireframe, WireframeColor, WireframePlugin},
+    prelude::*,
+    render::{
+        mesh::{Indices, PrimitiveTopology},
+        render_resource::WgpuFeatures,
+        settings::{RenderCreation, WgpuSettings},
+        RenderPlugin,
+    },
+};
+use bevy_infinite_grid::{
+    GridShadowCamera, InfiniteGridBundle, InfiniteGridPlugin, InfiniteGridSettings,
+};
+use dual_contouring::{dc_meshing, DCBounds, DCInput};
+use smooth_bevy_cameras::{
+    controllers::orbit::{OrbitCameraBundle, OrbitCameraController, OrbitCameraPlugin},
+    LookTransformPlugin,
+};
+
+/*
+░█▀▄░█▀▀░█▀▀░▀█▀░█▀█░▀█▀░▀█▀░▀█▀░█▀█░█▀█░█▀▀
+░█░█░█▀▀░█▀▀░░█░░█░█░░█░░░█░░░█░░█░█░█░█░▀▀█
+░▀▀░░▀▀▀░▀░░░▀▀▀░▀░▀░▀▀▀░░▀░░▀▀▀░▀▀▀░▀░▀░▀▀▀
+ */
+
+#[derive(Default)]
+struct SphereFunction;
+
+impl DCInput for SphereFunction {
+    fn get_bounds(&self) -> DCBounds {
+        DCBounds {
+            x: (-12, 12),
+            y: (-12, 12),
+            z: (-12, 12),
+        }
+    }
+
+    fn get_value(&self, x: i32, y: i32, z: i32) -> f32 {
+        f32::sqrt((x * x + y * y + z * z) as f32) - 8.5
+    }
+
+    fn get_gradient(&self, x: i32, y: i32, z: i32) -> [f32; 3] {
+        Vec3::new(x as f32, y as f32, z as f32).normalize().into()
+    }
+}
+
+/*
+░█▀▀░█▀▀░▀█▀░█░█░█▀█
+░▀▀█░█▀▀░░█░░█░█░█▀▀
+░▀▀▀░▀▀▀░░▀░░▀▀▀░▀░░
+*/
+
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    // Create grid for referencing scale
+    commands.spawn(InfiniteGridBundle::default());
+
+    // Create camera in Bevy
+    commands
+        .spawn(Camera3dBundle::default())
+        .insert(OrbitCameraBundle::new(
+            OrbitCameraController::default(),
+            Vec3::new(10., 10., 0.),
+            Vec3::new(0., 0., 0.),
+            Vec3::Y,
+        ));
+
+    // Create light in Bevy
+    commands.spawn(DirectionalLightBundle {
+        transform: Transform::from_xyz(1., 5., 5.).looking_at(Vec3::ZERO, Vec3::Y),
+        ..default()
+    });
+
+    // Run the meshing algorithm on our sphere function
+    let raw_output = dc_meshing(SphereFunction::default());
+
+    // Define a Bevy mesh using the output from our meshing algorithm
+    let mesh = Mesh::new(PrimitiveTopology::TriangleList)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, raw_output.vertices)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, raw_output.normals)
+        .with_indices(Some(Indices::U32(raw_output.indices)));
+
+    // Add our mesh to Bevy
+    commands.spawn((
+        PbrBundle {
+            mesh: meshes.add(mesh),
+            material: materials.add(StandardMaterial::default()),
+            transform: Transform::from_xyz(0., 0., 0.),
+            ..default()
+        },
+        Wireframe,
+        WireframeColor { color: Color::RED },
+    ));
+}
+
+/*
+░█▄█░█▀█░▀█▀░█▀█
+░█░█░█▀█░░█░░█░█
+░▀░▀░▀░▀░▀▀▀░▀░▀
+*/
+
+fn main() {
+    App::new()
+        .add_plugins((
+            DefaultPlugins.set(RenderPlugin {
+                render_creation: RenderCreation::Automatic(WgpuSettings {
+                    features: WgpuFeatures::POLYGON_MODE_LINE,
+                    ..default()
+                }),
+            }),
+            WireframePlugin,
+            LookTransformPlugin,
+            OrbitCameraPlugin::default(),
+            InfiniteGridPlugin,
+        ))
+        .add_systems(Startup, setup)
+        .run();
+}
+```
+
+### src/lib.rs
+```
+use glam::i32::IVec3;
+use std::collections::HashMap;
+
+pub struct DCBounds {
+    pub x: (i32, i32),
+    pub y: (i32, i32),
+    pub z: (i32, i32),
+}
+
+pub trait DCInput {
+    fn get_bounds(&self) -> DCBounds;
+    fn get_value(&self, x: i32, y: i32, z: i32) -> f32;
+    fn get_gradient(&self, x: i32, y: i32, z: i32) -> [f32; 3];
+}
+
+pub struct DCOutput {
+    pub vertices: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub indices: Vec<u32>,
+}
+
+pub fn dc_meshing(input: impl DCInput) -> DCOutput {
+    let bounds = input.get_bounds();
+
+    // Validate bounds are positive in debug builds
+    debug_assert!(
+        bounds.x.1 - bounds.x.0 - 1 > 0
+            && bounds.y.1 - bounds.y.0 - 1 > 0
+            && bounds.z.1 - bounds.z.0 - 1 > 0
+    );
+
+    let mut vertex_buffer = Vec::<[f32; 3]>::new();
+    let mut normal_buffer = Vec::<[f32; 3]>::new();
+    let mut index_list = Vec::<u32>::new();
+    let mut vertex_map = HashMap::<IVec3, u32>::new();
+
+    // Note that these direction vectors cannot be ordered different than
+    // the following, otherwise the mesh quads will face inwards and not outwards
+    let planes = [
+        (IVec3::X, IVec3::Y),
+        (IVec3::Z, IVec3::X),
+        (IVec3::Y, IVec3::Z),
+    ];
+
+    for x in bounds.x.0..(bounds.x.1 - 1) {
+        for y in bounds.y.0..(bounds.y.1 - 1) {
+            for z in bounds.z.0..(bounds.z.1 - 1) {
+                if let Some(vertex) = dc_place_vertex(&input, x, y, z) {
+                    let position = IVec3::new(x, y, z);
+                    vertex_map.insert(position, vertex_buffer.len() as u32);
+                    vertex_buffer.push(vertex);
+                    normal_buffer.push(input.get_gradient(x, y, z));
+
+                    for (basis_1, basis_2) in planes {
+                        check_quad(
+                            &input,
+                            &vertex_map,
+                            position,
+                            basis_1,
+                            basis_2,
+                            &mut index_list,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    DCOutput {
+        vertices: vertex_buffer,
+        normals: normal_buffer,
+        indices: index_list,
+    }
+}
+
+fn dc_place_vertex(input: &impl DCInput, x: i32, y: i32, z: i32) -> Option<[f32; 3]> {
+    let points = [
+        input.get_value(x, y, z),
+        input.get_value(x + 1, y, z),
+        input.get_value(x + 1, y + 1, z),
+        input.get_value(x, y + 1, z),
+        input.get_value(x, y, z + 1),
+        input.get_value(x + 1, y, z + 1),
+        input.get_value(x + 1, y + 1, z + 1),
+        input.get_value(x, y + 1, z + 1),
+    ];
+
+    for index in 0..7 {
+        if sign_change(points[index], points[index + 1]) {
+            return Some([x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5]);
+        }
+    }
+    None
+}
+
+fn sign_change(a: f32, b: f32) -> bool {
+    a.max(b) > 0. && a.min(b) < 0. || (a == 0. && b != 0.) || (a != 0. && b == 0.)
+}
+
+fn check_quad(
+    input: &impl DCInput,
+    vertex_map: &HashMap<IVec3, u32>,
+    position: IVec3,
+    basis_1: IVec3,
+    basis_2: IVec3,
+    mut index_list: &mut Vec<u32>,
+) {
+    let bounds = input.get_bounds();
+
+    let top_left = position - basis_1;
+    let top_right = position;
+    let bottom_left = position - basis_1 - basis_2;
+    let bottom_right = position - basis_2;
+
+    if bottom_left.x > bounds.x.0
+        && bottom_left.y > bounds.y.0
+        && bottom_left.z > bounds.z.0
+        && vertex_map.contains_key(&top_left)
+        && vertex_map.contains_key(&bottom_left)
+        && vertex_map.contains_key(&bottom_right)
+    {
+        create_quad(
+            &mut index_list,
+            vertex_map[&top_left],
+            vertex_map[&top_right],
+            vertex_map[&bottom_left],
+            vertex_map[&bottom_right],
+            input.get_value(position.x, position.y, position.z) > 0.,
+        );
+    }
+}
+
+fn create_quad(
+    index_list: &mut Vec<u32>,
+    top_left: u32,
+    top_right: u32,
+    bottom_left: u32,
+    bottom_right: u32,
+    clockwise: bool,
+) {
+    if clockwise {
+        // Top left triangle
+        index_list.push(top_left);
+        index_list.push(top_right);
+        index_list.push(bottom_left);
+
+        // Bottom right triangle
+        index_list.push(bottom_right);
+        index_list.push(bottom_left);
+        index_list.push(top_right);
+    } else {
+        // Top left triangle
+        index_list.push(top_left);
+        index_list.push(bottom_left);
+        index_list.push(top_right);
+
+        // Bottom right triangle
+        index_list.push(bottom_right);
+        index_list.push(top_right);
+        index_list.push(bottom_left);
+    }
+}
+```

@@ -1,0 +1,131 @@
+# Piecewise Linear Spectrum Model
+
+Also called: Continuous Spectrum Representation
+
+## Overview
+The Piecewise Linear Spectrum Model is a continuous spectral representation method for volume rendering that replaces discrete binning with exact positions and intensities, ensuring energy conservation and accurate Doppler shift representation [S1]. Unlike the [Point-Sampled Spectrum Model](3468-point-sampled-spectrum-model.md), which suffers from information loss and accuracy issues due to fixed bands, this model models spectral lines as trapezoidal bands with linearly varying intensity, allowing for precise handling of non-uniform spectral intervals [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Scalar densities, velocities, and their projected portions at sample points along a viewing ray; spectral line positions and intensities.
+*   **Output:** Accumulated spectral radiance along the viewing ray.
+
+**Data Structures:**
+The model represents spectral bands as trapezoidal shapes defined by their position and width. The indicator function for a contiguous set $A$ is used to define the support of these bands:
+$$
+1_A(x) = \begin{cases} 1, & x \in A \\ 0, & x \notin A \end{cases} \quad (14)
+$$
+Pieces are strictly nonnegative in their defined intervals, and intervals $A_i$ must not overlap [S1].
+
+**Steps:**
+1.  **Linear Assumption:** Assume that scalar densities, velocities, and their projected portions vary linearly between two sample points along a viewing ray [S1]. This allows spectral lines to be modeled as trapezoidal bands with linearly varying intensity [S1].
+2.  **Broadening:** Before accumulation, spectral lines are broadened into trapezoidal shapes based on the linear variation of velocity [S1].
+3.  **Splitting Overlaps:** Because intervals are non-uniform (each band has its own position and width), linear pieces defined on overlapping intervals must be split into new, non-overlapping pieces [S1].
+4.  **Accumulation:** Accumulate the spectral radiance along the viewing ray using the standard emission-absorption integral, evaluated for the continuous spectrum [S1].
+
+**Formula:**
+The intensity update for the emission-absorption model, generalized for multiple materials, is:
+$$
+I(s + \Delta s, \lambda) = \sum_{m=1}^M \rho_m(s) E_m(\lambda) + I(s, \lambda) \left( 1 - \Delta s \sum_{m=1}^M \rho_m(s) A_m(\lambda) \right) \quad (8)
+$$
+Where:
+*   $I(s + \Delta s, \lambda)$ is the intensity at the next integration step.
+*   $\rho_m(s)$ is the scalar density of material $m$ at position $s$.
+*   $E_m(\lambda)$ is the emitted power of material $m$ at wavelength $\lambda$.
+*   $A_m(\lambda)$ is the absorption coefficient of material $m$ at wavelength $\lambda$.
+*   $\Delta s$ is the step size along the ray.
+
+**Parameters:**
+*   Step size $\Delta s$: Must be sufficiently small for the linear assumption to hold in non-axis-aligned views [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Linearity Assumption Validity:** The assumption that density and velocity vary linearly along a ray segment holds exactly only for tensor-product linear interpolation with parallel projection (viewing rays align with parametric axes) [S1]. For non-axis-aligned views, this is an approximation that remains appropriate for sufficiently small step sizes [S1].
+*   **Non-negative Intensity:** Spectral intensity must be strictly nonnegative in defined intervals [S1].
+*   **Non-overlapping Intervals:** Intervals $A_i$ must not overlap to ensure correct accumulation [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def piecewise_linear_spectrum_model(ray_samples, spectral_lines):
+    """
+    ray_samples: List of tuples (s, density, velocity) sorted by s.
+    spectral_lines: List of tuples (center_wavelength, intensity, width).
+    Returns: Accumulated spectral radiance function I(lambda).
+    """
+    # Initialize accumulated intensity function I(lambda) = 0
+    I_lambda = lambda w: 0.0
+    
+    # Iterate through ray segments
+    for i in range(len(ray_samples) - 1):
+        s_start, rho_start, v_start = ray_samples[i]
+        s_end, rho_end, v_end = ray_samples[i + 1]
+        delta_s = s_end - s_start
+        
+        # Linear interpolation parameters for density and velocity
+        # rho(s) = rho_start + (rho_end - rho_start) * (s - s_start) / delta_s
+        # v(s) = v_start + (v_end - v_start) * (s - s_start) / delta_s
+        
+        # Broaden spectral lines into trapezoidal bands based on velocity variation
+        # This step creates non-uniform intervals A_i
+        broadened_bands = []
+        for center, intensity, width in spectral_lines:
+            # Calculate Doppler shift range based on v_start and v_end
+            # The band becomes a trapezoid in wavelength space
+            # Exact calculation depends on specific Doppler formula, assumed here as broadening
+            band_start = center - width / 2
+            band_end = center + width / 2
+            # Adjust for velocity variation (simplified)
+            # In practice, split into linear pieces if intervals overlap
+            broadened_bands.append((band_start, band_end, intensity))
+        
+        # Split overlapping intervals into non-overlapping pieces
+        # This is a complex geometric operation on 1D intervals
+        non_overlapping_pieces = split_intervals(broadened_bands)
+        
+        # Accumulate radiance for each piece
+        for piece in non_overlapping_pieces:
+            start_w, end_w, piece_intensity = piece
+            # Integrate emission and absorption over the piece
+            # Since density and velocity vary linearly, E_m(lambda) and A_m(lambda) 
+            # can be approximated or integrated analytically if known.
+            # For simplicity, assume constant intensity over the small piece
+            # I_new = I_old * exp(-absorption) + emission
+            # This step requires evaluating the integral of Eq (8) over the piece
+            
+            # Placeholder for integration logic
+            # The sources do not provide the exact integration formula for the trapezoidal case
+            # but state that accumulation is more complicated than point-sampled spectra.
+            pass
+            
+    return I_lambda
+
+def split_intervals(bands):
+    """
+    Splits overlapping bands into non-overlapping pieces.
+    Returns list of (start, end, intensity) tuples.
+    """
+    # Not given in the sources. Implementation would involve sorting endpoints
+    # and merging intervals.
+    pass
+```
+
+## Subtopics
+
+### Point-Sampled Spectrum Model
+A discrete spectral representation method where the spectrum is divided into N uniform bands by point-sampling at uniform intervals. It is used to approximate spectral distribution functions for volume rendering but suffers from energy conservation loss, information loss during Doppler shifts, and accuracy issues. [Link](3468-point-sampled-spectrum-model.md)
+
+## Operating characteristics
+*   **Time Complexity:** More complicated than point-sampled spectra due to the need to split overlapping intervals [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Using a very high number of bands in discrete models increases computation drastically; the continuous model avoids this by representing exact positions and intensities [S1].
+*   **Strengths:** Ensures energy conservation and accurate Doppler shift representation by using continuous trapezoidal bands instead of discrete bins [S1].
+*   **Limitations:** The linearity assumption is an approximation for non-axis-aligned views, requiring sufficiently small step sizes [S1].
+*   **When to use:** When accurate Doppler shift representation and energy conservation are critical, and computational resources allow for the complexity of splitting overlapping intervals [S1].
+*   **When not to use:** When real-time performance is required and the scene allows for coarse discretization without significant accuracy loss [S1].
+
+## Background
+The Piecewise Linear Spectrum Model was introduced in the context of Doppler Volume Rendering for visualizing astrophysics simulations [S1]. It builds on the idea of pre-integration, where scalar values are assumed to vary linearly along segments of the ray, a technique native to graphics hardware acceleration [S1]. The method addresses the limitations of discrete binning approaches by providing a continuous spectral representation [S1].
+
+## Sources
+[S1] Doppler Volume Rendering: A Dynamic, Piecewise Linear Spectral Representation for Visualizing Astrophysics Simulations, https://albertojaspe.net/publications/2023-EVIS-doppler_volume.pdf, fetched 2026-10-28

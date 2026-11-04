@@ -1,0 +1,195 @@
+# Volumetric Light Shafts
+Volumetric Light Shafts for Unity URP using raymarching in a custom shader with main light shadow sampling. Includes a C# controller for dynamic light color, density, and quality settings. Ideal for fog beams, atmospheric lighting, and stylized god ray effects. Lightweight, customizable, and URP compatible.
+
+### VolumetricLightURPController.cs
+```
+using UnityEngine;
+
+[DisallowMultipleComponent]
+[RequireComponent(typeof(Renderer))]
+public class VolumetricLightURPController : MonoBehaviour
+{
+    [Header("References")]
+    [SerializeField] private Light directionalLight;
+
+    [Header("Settings")]
+    [SerializeField, Range(0f, 1f)] private float density = 0.5f;
+    [SerializeField, Range(16, 128)] private int stepCount = 64;
+
+    private Renderer rend;
+    private MaterialPropertyBlock propertyBlock;
+
+    private static readonly int LightPosID   = Shader.PropertyToID("_LightPos");
+    private static readonly int LightColorID = Shader.PropertyToID("_LightColor");
+    private static readonly int DensityID    = Shader.PropertyToID("_Density");
+    private static readonly int StepCountID  = Shader.PropertyToID("_StepCount");
+
+    private void Awake()
+    {
+        rend = GetComponent<Renderer>();
+        propertyBlock = new MaterialPropertyBlock();
+
+        if (directionalLight == null)
+            directionalLight = FindFirstObjectByType<Light>();
+    }
+
+    private void LateUpdate()
+    {
+        if (directionalLight == null)
+            return;
+
+        UpdateShader();
+    }
+
+    private void UpdateShader()
+    {
+        rend.GetPropertyBlock(propertyBlock);
+
+        Vector3 pos = directionalLight.transform.position;
+
+        propertyBlock.SetVector(LightPosID, new Vector4(pos.x, pos.y, pos.z, 1f));
+        propertyBlock.SetColor(LightColorID, directionalLight.color * directionalLight.intensity);
+        propertyBlock.SetFloat(DensityID, density);
+        propertyBlock.SetInt(StepCountID, stepCount);
+
+        rend.SetPropertyBlock(propertyBlock);
+    }
+
+    public void SetDensity(float value)
+    {
+        density = Mathf.Clamp01(value);
+    }
+
+    public void SetStepCount(int value)
+    {
+        stepCount = Mathf.Clamp(value, 16, 128);
+    }
+
+    public void SetLight(Light newLight)
+    {
+        directionalLight = newLight;
+    }
+}
+```
+
+### cfn.hlsl
+```
+Shader "Custom/AAA/VolumetricLightURP"
+{
+    Properties
+    {
+        _BaseColor ("Base Color", Color) = (1,1,1,1)
+        _Density ("Density", Float) = 0.5
+        _StepCount ("Step Count", Int) = 64
+        _MaxDistance ("Max Distance", Float) = 20
+        _Scattering ("Scattering", Float) = 1.2
+    }
+
+    SubShader
+    {
+        Tags
+        {
+            "RenderPipeline"="UniversalPipeline"
+            "Queue"="Transparent"
+            "RenderType"="Transparent"
+        }
+
+        Blend One One
+        ZWrite Off
+        Cull Back
+
+        Pass
+        {
+            Name "ForwardLit"
+
+            HLSLPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+
+            #pragma multi_compile _ _MAIN_LIGHT_SHADOWS
+            #pragma multi_compile _ _MAIN_LIGHT_SHADOWS_CASCADE
+            #pragma multi_compile_fragment _ _SHADOWS_SOFT
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+
+            struct Attributes
+            {
+                float4 positionOS : POSITION;
+            };
+
+            struct Varyings
+            {
+                float4 positionHCS : SV_POSITION;
+                float3 positionWS  : TEXCOORD0;
+            };
+
+            CBUFFER_START(UnityPerMaterial)
+                float4 _BaseColor;
+                float _Density;
+                int _StepCount;
+                float _MaxDistance;
+                float _Scattering;
+                float4 _LightPos;
+                float4 _LightColor;
+            CBUFFER_END
+
+            Varyings vert(Attributes IN)
+            {
+                Varyings OUT;
+
+                VertexPositionInputs pos = GetVertexPositionInputs(IN.positionOS.xyz);
+
+                OUT.positionHCS = pos.positionCS;
+                OUT.positionWS = pos.positionWS;
+
+                return OUT;
+            }
+
+            float HenyeyGreenstein(float cosTheta, float g)
+            {
+                float g2 = g * g;
+                return (1.0 - g2) / pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5);
+            }
+
+            float RayMarch(float3 rayOrigin, float3 rayDir)
+            {
+                int steps = max(_StepCount, 1);
+                float stepSize = _MaxDistance / steps;
+
+                float accum = 0.0;
+
+                for (int i = 0; i < steps; i++)
+                {
+                    float dist = i * stepSize;
+                    float3 samplePos = rayOrigin + rayDir * dist;
+
+                    float4 shadowCoord = TransformWorldToShadowCoord(samplePos);
+                    float shadow = MainLightRealtimeShadow(shadowCoord);
+
+                    float3 lightDir = normalize(_LightPos.xyz - samplePos);
+                    float phase = HenyeyGreenstein(dot(rayDir, lightDir), 0.35);
+
+                    accum += shadow * phase * _Density * stepSize;
+                }
+
+                return accum;
+            }
+
+            half4 frag(Varyings IN) : SV_Target
+            {
+                float3 camPos = GetCameraPositionWS();
+                float3 rayDir = normalize(IN.positionWS - camPos);
+
+                float lightAmount = RayMarch(camPos, rayDir);
+
+                float3 finalColor = _LightColor.rgb * lightAmount * _Scattering;
+
+                return half4(finalColor, saturate(lightAmount));
+            }
+
+            ENDHLSL
+        }
+    }
+}
+```

@@ -1,0 +1,184 @@
+Xodot Game Engine. Contribute to CryDot42/XoDot development by creating an account on GitHub.
+
+GPU foliage culling: add per-camera occlusion and frustum culling by CryDot42 · Pull Request #19 · CryDot42/XoDot · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+CryDot42
+commented
+Sep 30, 2026
+Copy link
+Copy Markdown
+Owner
+What problem(s) does this PR solve?
+Enhances GPU-based foliage culling to support per-camera view frustum and occlusion buffer (HZB) culling, matching the renderer's culling behavior. Previously, foliage instances were only culled once per frame based on the LOD camera's view. Now they are culled separately for each camera drawn in the scenario, using that camera's frustum and occlusion buffer.
+Additionally, when the landscape's LOD is frozen, foliage cells outside the frozen camera's view are hidden (only shadows rendered), consistent with how landscape patches behave.
+Additional information
+Key Changes
+GPU Culling Pipeline Refactoring:
+Split run() into run_lod() (once per frame, classifies LOD levels and emits shadow list) and per-camera emission via a renderer callback
+Added set_outputs() to decouple output setup from culling execution
+Added set_view_settings() to configure the LOD camera view for frozen LOD scenarios
+Introduced _emit() helper to handle instance emission for a specific list (main/shadow) and camera view
+View and Occlusion Support:
+New LandscapeFoliageViewParams struct (560 bytes, std140) containing frustum planes, camera matrices, projection, and HZB mip layout
+Added _upload_occlusion() to transfer the viewport's occlusion buffer (HZB) to GPU storage
+Added _draw_view() callback invoked by the renderer for each camera, handling per-camera culling
+Occlusion test in shader (is_occluded()) matches RendererSceneOcclusionCull::HZBuffer logic
+Shader Updates (landscape_foliage_cull.glsl):
+MODE_CLASSIFY: Simplified to only classify LOD levels (frustum culling removed, now per-camera)
+MODE_EMIT: Added frustum and occlusion culling for main list; shadow list emits all instances within cull distance
+New uniforms: view frustum planes, camera matrices, projection, HZB buffer with mip metadata
+Shared counters for frustum/occlusion culled instances per list
+CPU-Side View Culling:
+Added _update_view() to track the LOD camera's frustum in landscape space
+Added _is_in_view() for AABB frustum testing
+Added _update_view_culling() to hide cells outside the frozen LOD camera's view
+Cell out_of_view flag controls visibility: out-of-view cells only render shadows
+Statistics and Lifecycle:
+Stats struct now includes frustum_culled and occlusion_culled counts
+Changed shared_users counter to a LocalVector<LandscapeFoliageGPU*> for proper multi-instance tracking
+Added _camera_drawn() static callback registered with the renderer
+Async readback of counters via _stats_received() callback
+Memory and Resource Management:
+Per-instance HZB buffer slots (2 buffers for double-buffering)
+View parameters uniform buffer per foliage instance
+Proper cleanup in _free_entry() and _free_gpu()
+Testing
+Existing tests updated and new test case added:
+test_landscape_foliage.h: Updated frozen LOD test to verify cells_out_of_view stat
+New test "Culling with the frozen view of the camera" validates that cells outside the frozen camera's frustum are hidden while their shadows remain visible
+Documentation
+Updated README.md (Russian) and LandscapeFoliage3D.xml to document:
+Per-camera culling behavior
+Frozen LOD view culling (cells hidden like landscape patches)
+GPU culling now includes occlusion buffer testing
+Update order prioritizes cells in view, then nearest cells
+https://claude.ai/code/session_01NGRSEZ2vfQrgUEtHGtQHTJ
+claude
+added 5 commits
+September 30, 2026 08:44
+Landscape: cull the foliage by the occlusion buffer and view of every…
+…
+cce04ab
+```
+… camera
+
+GPU indirect rendering (LandscapeFoliage3D.gpu_indirect):
+- the levels of detail and the shadow lists are still chosen once per frame
+  for the camera of the LOD of the landscape, but the main lists are now
+  culled for every camera drawn, just before it is drawn: the renderer calls
+  back (RenderingMethod::camera_callback_add()) once the occlusion buffer of
+  the viewport is up to date for the camera,
+- the bounding sphere of every instance is tested against the view frustum of
+  the camera and against the occlusion buffer of its viewport (HZB, the same
+  test as HZBuffer::_is_occluded(), the buffer is uploaded once per camera):
+  the terrain, buildings and the foliage itself hide the instances behind
+  them (gpu_occlusion_culling), every viewport sees its own instances,
+- while the LOD of the landscape is frozen, the last view of its camera is
+  kept, with its occlusion buffer,
+- the main lists have stable bounds (every cell, only growing), and the
+  renderer no longer records the changes of shadow-only instances: their
+  bounds changing when the camera moved made the HZB distrust the depth
+  buffer around the camera,
+- the capacity of the outputs follows the most instances of every camera and
+  only shrinks after 2 s mostly unused (no dropped instances when turning
+  around), the MultiMeshes are handed to the GPU before they're freed,
+- statistics: instances culled by the view frustum and by occlusion.
+
+Chunked rendering:
+- while the LOD of the landscape is frozen, the cells out of the view of its
+  camera are hidden like its patches (only their shadows are drawn),
+- the cells in the view of the camera are updated first.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NGRSEZ2vfQrgUEtHGtQHTJ
+```
+Keep HZB occlusion culling working behind foliage while the camera moves
+…
+dbb8b61
+```
+Any update of an instance (a MultiMesh reallocated with another instance
+count, its bounds set again, a batch freed) made the renderer distrust the
+depth buffer where it was for up to 8 frames. The foliage cells sorted per
+instance are updated every meter of camera movement, and the cells switching
+levels of detail free a batch, so a band of cells at every LOD and cull
+distance kept disabling HZB occlusion culling for everything behind them:
+draw calls went back to the level without occlusion culling as soon as the
+camera moved.
+
+- RenderingServer.INSTANCE_FLAG_HZB_STABLE_CONTENT: for instances that change
+  what they draw while staying in place, only moving, resizing or hiding them
+  invalidates the depth buffers for HZB occlusion culling,
+- the foliage sets it on the batches of the cells and on the indirect
+  MultiMeshes of the GPU culling,
+- the batch of a level of a cell is emptied instead of freed while the cell is
+  drawn (a MultiMesh without instances draws nothing).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NGRSEZ2vfQrgUEtHGtQHTJ
+```
+Landscape: document why the foliage batches keep the HZB of the rende…
+…
+d0ae046
+```
+…rer valid
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NGRSEZ2vfQrgUEtHGtQHTJ
+```
+Landscape: cull the foliage hidden by the terrain with its horizon
+…
+0878c93
+```
+The occlusion culling of the renderer (HZB) relies on a depth buffer of a few
+frames ago reprojected into the camera: when the camera moves, the edges of
+the objects and the silhouettes of the hills stop occluding, and most of the
+culling is lost. What the terrain hides is now culled without depth buffer:
+
+- LandscapeHorizon: the horizon of the terrain seen from a point, the
+  steepest elevation of the terrain closer than every distance (64 rings) in
+  every azimuth (1024), marched through the LOD tree of the landscape on a few
+  threads. Conservative: the lowest height of the nodes covering each sample,
+  minus margins for the geometric error of the LOD and the micro detail, the
+  nodes with a hole or outside of the terrain hide nothing,
+- Landscape3D::get_horizon(): built again when the camera moves or the
+  terrain changes, up to the cull distance of the foliage, none below the
+  terrain or with an orthogonal camera; LandscapeData::get_hole_cells() keeps
+  a mask of the patches with holes,
+- LandscapeFoliage3D.terrain_occlusion_culling (on by default): the cells
+  hidden from the camera of the landscape only draw their shadows (tested in
+  frame_pre_draw with the camera of the frame), the GPU culling tests every
+  instance against the horizon in the views of that camera, statistics,
+- the renderer no longer stops trusting the depth buffer in front of an
+  instance that changed or disappeared (only where the depth isn't nearer
+  than it): foliage hidden behind a hill doesn't disable the HZB of the hill.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NGRSEZ2vfQrgUEtHGtQHTJ
+```
+Landscape: robust expectations in the terrain culling test, format
+…
+2980bb8
+```
+A cell next to the top of the ridge is just at the level of its horizon (with
+the margin for the geometric error of the LOD): only the cells of the first
+32 m are asserted to be hidden from the other side.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NGRSEZ2vfQrgUEtHGtQHTJ
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

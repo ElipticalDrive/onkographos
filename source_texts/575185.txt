@@ -1,0 +1,179 @@
+# humanoid-scene
+
+**Phone video → a geometrically coherent 3D Gaussian Splatting scene you can orbit in the browser — in one command.**
+
+[![CI](https://github.com/SpacerexSoul/humanoid-scene/actions/workflows/ci.yml/badge.svg)](https://github.com/SpacerexSoul/humanoid-scene/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](pyproject.toml)
+
+`humanoid-scene` turns a short, casual phone video of a small indoor area into
+posed cameras, a dense point cloud, and a trained 3D Gaussian Splatting scene —
+then serves it in a `viser` browser viewer. The geometry is **feed-forward**
+(one pass of a pretrained model, no COLMAP), and only the per-scene Gaussians are
+optimised.
+
+<p align="center">
+  <img src="docs/assets/input_frame.png" width="45%" alt="input video frame"/>
+  <img src="docs/assets/sample_render.png" width="45%" alt="reconstructed novel view"/>
+</p>
+<p align="center"><sub>Left: an input frame. Right: a novel view rendered from the reconstruction (committed <code>synthetic</code> CPU example — see <a href="#results">Results</a>).</sub></p>
+
+> A live orbit GIF from a real capture goes here once recorded — see [`docs/capture.md`](docs/capture.md).
+
+## What this is
+
+You hand it a 15–30 second clip. It samples sharp frames, predicts camera poses
+and a dense pointmap with a feed-forward model (VGGT), seeds 3D Gaussians from
+that pointmap, optimises them against the frames, and writes a splat scene plus
+honest novel-view metrics. The result is a representation you can spin around in
+a browser, export, or evaluate.
+
+## Demo
+
+The repository ships a tiny worked example under [`data/sample/`](data/sample)
+and its pre-baked output under [`outputs/sample/`](outputs/sample): camera
+parameters, a point cloud, trained Gaussians, three novel-view renders, and a
+metrics file. The example uses the weights-free `synthetic` backend so it runs
+anywhere (no GPU, no model download). Point the viewer at it directly:
+
+```bash
+humanoid-scene view outputs/sample
+```
+
+## Pipeline
+
+```
+phone video
+  └─ sample sharp, evenly-spaced frames  (Laplacian-variance blur filter)
+      └─ feed-forward geometry: cameras + intrinsics + dense pointmap  (VGGT)
+          └─ seed 3D Gaussians from the pointmap  (colour + kNN scale)
+              └─ optimise Gaussians vs frames  (gsplat, L1 + D-SSIM)
+                  └─ novel-view renders + PSNR/SSIM on held-out frames
+                      └─ viser browser viewer
+
+  optional --with-semantics:
+    frames ─ open-vocabulary segmentation ─┐
+                                            └─ lift labels onto Gaussians
+                                               (project + vote across views)
+                                               └─ colour-by-class in the viewer
+```
+
+```mermaid
+flowchart LR
+  V[phone video] --> F[frame sampling]
+  F --> G[VGGT: cameras + pointmap]
+  G --> I[seed Gaussians]
+  I --> T[gsplat training]
+  T --> R[renders + metrics]
+  T --> W[viser viewer]
+  F -. --with-semantics .-> S[open-vocab segmentation]
+  S --> L[lift labels to Gaussians]
+  T --> L
+  L --> W
+```
+
+## Quickstart
+
+**Reproduce the committed example on CPU (no GPU, no weights):**
+
+```bash
+pip install -e .
+humanoid-scene reconstruct data/sample/demo.mp4 --out outputs/demo \
+    --model synthetic --device cpu --frames 16 --iters 200
+humanoid-scene view outputs/demo
+```
+
+Add `--with-semantics` to lift open-vocabulary labels onto each Gaussian; the
+viewer then offers a **colour-by-class** toggle.
+
+**Full-fidelity reconstruction on a GPU (VGGT + gsplat):**
+
+```bash
+pip install -e ".[recon]"          # plus CUDA torch + VGGT weights, see docs/install.md
+humanoid-scene reconstruct path/to/your_capture.mp4 --out outputs/scene
+humanoid-scene view outputs/scene
+```
+
+Runs end to end on a single **NVIDIA A6000 / A100 / H100 (CUDA 12.x)**; training
+a small scene is a few minutes. `reconstruct --help` lists every knob (frame
+count, iterations, seed, device). See [`docs/install.md`](docs/install.md) for
+GPU setup and [`docs/capture.md`](docs/capture.md) for how to film a good clip.
+
+## Why this approach
+
+- **One command, one representation.** No COLMAP database, no manual masking — a
+  single CLI call goes from `.mp4` to an orbit-able splat scene.
+- **Feed-forward geometry beats classical SfM on phone clips.** A pretrained
+  model predicts globally consistent cameras and a dense pointmap in one pass;
+  it does not diverge on blank walls or glossy surfaces the way incremental
+  bundle adjustment does, and it runs in seconds.
+- **Gaussian Splatting for visual quality.** Sharp, view-dependent renders that a
+  Poisson mesh of the raw points can't match — and it seeds naturally from the
+  feed-forward pointmap.
+- **Honest, reproducible metrics.** 10% of frames are held out; PSNR/SSIM are
+  reported on them, with per-stage runtime. Every random seed is configurable
+  (default `0`).
+- **Semantics that respect geometry.** With `--with-semantics`, open-vocabulary
+  masks are lifted onto Gaussians by projecting each one into every view and
+  taking a majority vote — so a label only sticks where the geometry agrees, not
+  floating onto the wrong surface.
+- **Runs without a GPU for development.** A pure-PyTorch soft-splat fallback, a
+  weights-free geometry backend, and a synthetic segmentation keep the whole
+  pipeline — and CI — runnable on CPU, so the code is testable end to end.
+
+The full rationale (why VGGT over MASt3R/DUSt3R, why 3DGS over NeRF/Poisson) is
+in [`docs/design.md`](docs/design.md).
+
+## Results
+
+The committed example (`outputs/sample/`) is produced by the **weights-free
+`synthetic` backend on CPU** so anyone can reproduce it bit-for-bit without a GPU
+or downloads. It exercises the entire pipeline and writes real metrics:
+
+| metric | value |
+| --- | --- |
+| PSNR (held-out) | 17.2 dB |
+| SSIM (held-out) | 0.69 |
+| Gaussians | 12,288 |
+| frames used | 16 (14 train / 2 val) |
+| training | 150 iters, ~11 s on CPU |
+
+These numbers come from coarse synthetic geometry — they validate the plumbing,
+not the visual ceiling. **The full-fidelity path** swaps in `--model vggt` on a
+real capture and the `gsplat` CUDA rasteriser; drop your GPU run's PSNR and a
+render here. Reproduce the table with `humanoid-scene eval outputs/sample`.
+
+The committed example also runs the semantic branch: `outputs/sample/labels.json`
+holds a per-Gaussian class id, and the viewer's colour-by-class toggle uses it.
+Labels come from the coarse synthetic segmentation here; CLIPSeg / Grounding DINO
+sharpen them on a GPU.
+
+## What I'd do next
+
+- **Adaptive densification and pruning** in the training loop (clone/split on
+  high view-space gradient, cull transparent/oversized Gaussians) — the single
+  biggest quality lever still on the table.
+- **Swap VGGT for MASt3R-Long when poses drift on >100-frame captures**, behind
+  the existing pluggable backend, and add a global-alignment refinement pass.
+- **Sharper semantic masks**: the semantic branch already lifts open-vocabulary
+  labels onto Gaussians; swap the synthetic/CLIPSeg segmentation for Grounding
+  DINO + SAM2 to get crisp instance masks before lifting.
+- **Mesh export** (TSDF/Poisson → `mesh.glb`) for users who want a normal 3D file.
+- **A COLMAP + Poisson comparison harness** (`scripts/compare_against_colmap.py`)
+  to quantify the simplicity/quality win side by side.
+
+## Acknowledgements
+
+This project stands on excellent upstream work:
+
+- **VGGT** — feed-forward cameras + pointmaps ([facebookresearch/vggt](https://github.com/facebookresearch/vggt)).
+- **gsplat** — CUDA Gaussian Splatting rasteriser, Apache-2.0 ([nerfstudio-project/gsplat](https://github.com/nerfstudio-project/gsplat)).
+- **viser** — browser 3D viewer, Apache-2.0 ([nerfstudio-project/viser](https://github.com/nerfstudio-project/viser)).
+- **CLIPSeg / Hugging Face Transformers** — open-vocabulary segmentation for the semantic branch.
+- **DUSt3R / MASt3R** — the feed-forward stereo line that inspired this design.
+- **COLMAP** — the classical SfM baseline this is measured against.
+
+## Author
+
+**Krishna Dattani** — [github.com/SpacerexSoul](https://github.com/SpacerexSoul).
+Released under the [MIT License](LICENSE).

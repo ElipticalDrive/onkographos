@@ -1,0 +1,140 @@
+# Deferred Filtering Architecture for Compressed Volumes
+
+Also called: Deferred Filtering, GPU-Accelerated Deferred Filtering Architecture
+
+## Overview
+Deferred Filtering is a rendering architecture that performs high-quality shading of massive volumetric datasets by coordinating visibility- and resolution-aware adaptive data loading with GPU-accelerated per-frame data decompression, deblocking, and rendering [S1, S3, unofficial]. It solves the problem of blocking artifacts inherent in block-based compression methods (e.g., at low bit-rates) and the memory bandwidth limitations of decoding entire datasets [S1, S3, unofficial]. Unlike in-loop deblocking, which requires modification of the encoding method, this approach uses a post-loop strategy that supports multiple pluggable compression techniques without altering the compressed data format [S1, S3, unofficial]. It differs from prior single-resolution slice-based methods by generalizing deferred filtering to multi-resolution settings, combining levels of detail (LOD) with adaptive loading and visibility culling [S1, S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Compressed volume data stored in a volume octree of coarse bricks, subdivided into smaller compressed blocks [S1, S3, unofficial].
+*   **Output:** A high-quality shaded image accumulated in the frame buffer [S1, S3, unofficial].
+
+**Data Structures:**
+1.  **Volume Octree:** Coarse bricks containing compressed blocks [S1, S3, unofficial].
+2.  **Compressed Brick Cache:** Stores active bricks on the GPU in compressed form, managed via an LRU-cache [S1, S3, unofficial].
+3.  **Index Texture:** A 3D texture containing the 3D indices of data positions inside the compressed brick cache for each non-empty brick. It is created at each frame by the adaptive loader [S1, S3, unofficial].
+4.  **Offset/Scale Texture:** Same dimensions as the Index Texture, containing offset and scale information to map data into proper output positions in the decode buffer [S1, S3, unofficial].
+5.  **Decode Buffer:** A temporary buffer storing decoded blocks for a specific slab [S1, S3, unofficial].
+6.  **Filter Buffer:** A 3D texture storing filtered versions of decoded blocks, allowing hardware trilinear interpolation [S1, S3, unofficial].
+7.  **Slabs:** Thick slices of the volume orthogonal to the main viewing direction, used to manage datasets exceeding GPU memory [S1, S3, unofficial].
+
+**Parameters:**
+*   **Single Resolution per Frame:** The method assumes a single volume sampling rate for the entire volume to simplify the pipeline and avoid intra-level data filtering [S1, S3, unofficial].
+*   **Slab Width:** Proportional to the width of the deblocking filter to ensure sufficient boundary elements are available for texture fetches [S3, unofficial].
+
+**Algorithm Steps:**
+1.  **LOD Selection:** At each frame, select a global desired level of detail based on the current average projected voxel size of the volume dataset. This is determined by projecting the voxel size from the point of the bounding sphere closest to the camera [S1, S3, unofficial].
+2.  **Adaptive Refinement:** Incrementally upload visible bricks to the GPU. Discard bricks not visible due to transfer function or viewing frustum culling [S1, S3, unofficial]. Maintain all active bricks in the LRU-cache in compressed form [S1, S3, unofficial].
+3.  **Resolution Determination:** Determine the rendering resolution based on the finest level of all active bricks after refinement [S1, unofficial].
+4.  **Slab Subdivision:** Subdivide the working set into axis-aligned thick slabs of compressed blocks, orthogonal to the viewing direction [S1, S3, unofficial].
+5.  **Index Texture Creation:** Create the Index Texture for the current frame, mapping non-empty bricks to their positions in the compressed brick cache [S1, S3, unofficial].
+6.  **Slab Processing Loop:** For each slab, perform the following sequence:
+    a.  **Decoding:** Decode active bricks using the Index Texture. Use the Offset/Scale Texture to identify which data must be decompressed in a particular output position. Handle transient situations where bricks are at different LODs by expanding data to the rendering resolution using data duplication [S1, S3, unofficial]. Decompression uses three different kernels for the three main axes to handle transformations required to write data into the proper position of the Decode Buffer [S1, unofficial].
+    b.  **Deblocking (Filtering):** Perform deblocking as a filtering stage before final rendering. The Filter Buffer dimensions are proportional to the deblocking filter width, containing boundary elements around currently rendered samples [S1, S3, unofficial]. The filter is implemented using GPU kernels (e.g., Bézier filter) that compute weights and perform separable filtering along X, Y, and Z axes using shared memory [S1, unofficial]. The final intensity $I_f(t_v)$ of a voxel $v$ is the average of its three filtered values (one for each axis) [S1, S3, unofficial].
+    c.  **Rendering:** Perform sampling and gradient computation with trilinear interpolation on the deblocked data in the Filter Buffer to produce a high-quality shaded image. Use the Index Texture for empty space skipping during accelerated raycasting traversal [S1, S3, unofficial].
+    d.  **Accumulation:** Accumulate the results of the slab into the output frame buffer in front-to-back order [S1, S3, unofficial].
+7.  **Interleaving:** Interleave decoding, deblocking, and rendering in a pipeline fashion. Ensure deblocking has access to one slice of fully decoded neighboring blocks, and rendering has access to two slices of fully deblocked voxels along the viewing direction [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Global variables
+octree: VolumeOctree # Coarse bricks with compressed blocks
+gpu_cache: LRU_Cache # Stores compressed bricks
+index_texture: Texture3D # Maps brick indices
+offset_scale_texture: Texture3D # Maps data positions
+decode_buffer: Buffer3D # Temporary decoded data
+filter_buffer: Texture3D # Filtered data for trilinear sampling
+slab_width: int # Proportional to deblocking filter width
+
+def deferred_filtering_render(camera, transfer_function):
+    # 1. LOD Selection
+    projected_voxel_size = project_voxel_size_from_camera(camera)
+    lod_level = select_lod_level(projected_voxel_size)
+    
+    # 2. Adaptive Refinement
+    visible_bricks = []
+    for brick in octree.traverse(lod_level):
+        if is_visible(brick, camera, transfer_function):
+            if brick not in gpu_cache:
+                gpu_cache.load(brick) # Upload compressed brick
+            visible_bricks.append(brick)
+    
+    if not visible_bricks:
+        return empty_image()
+
+    # 3. Resolution Determination
+    rendering_resolution = get_max_lod_level(visible_bricks)
+    
+    # 4. Slab Subdivision
+    slabs = subdivide_volume_into_slabs(visible_bricks, slab_width, camera.view_direction)
+    
+    # 5. Index Texture Creation
+    update_index_texture(index_texture, gpu_cache, visible_bricks)
+    update_offset_scale_texture(offset_scale_texture, visible_bricks, rendering_resolution)
+    
+    # 6. Process Slabs
+    frame_buffer = initialize_frame_buffer()
+    for slab in slabs:
+        # 6a. Decoding
+        decode_slab(slab, index_texture, offset_scale_texture, decode_buffer, rendering_resolution)
+        
+        # 6b. Deblocking
+        deblock_slab(decode_buffer, filter_buffer)
+        
+        # 6c. Rendering
+        slab_image = render_slab(filter_buffer, index_texture, camera, transfer_function)
+        
+        # 6d. Accumulation
+        accumulate_front_to_back(frame_buffer, slab_image)
+        
+    return frame_buffer
+
+def decode_slab(slab, index_tex, offset_tex, decode_buf, resolution):
+    # Decode active bricks into decode buffer
+    # Handle LOD transitions by duplicating data if needed
+    for brick in slab.bricks:
+        data = gpu_cache.read(brick)
+        offset = offset_tex.read(brick.index)
+        decode_buf.write(data, offset, resolution)
+
+def deblock_slab(decode_buf, filter_buf):
+    # Apply separable filtering (e.g., Bézier) along X, Y, Z
+    # Uses shared memory for efficiency
+    # Final intensity I_f(tv) = average(filtered_X, filtered_Y, filtered_Z)
+    filter_kernel_x(decode_buf, temp_buf_x)
+    filter_kernel_y(temp_buf_x, temp_buf_y)
+    filter_kernel_z(temp_buf_y, filter_buf)
+
+def render_slab(filter_tex, index_tex, camera, tf):
+    # Raycasting with empty space skipping using index_tex
+    # Trilinear interpolation using filter_tex
+    return raycast(filter_tex, index_tex, camera, tf)
+```
+
+## Subtopics
+
+### [Compression Domain Rendering](960-compression-domain-rendering.md)
+Reconstructs volumetric data on the GPU per-fragment using dependent texture fetches to retrieve difference vectors from codebook textures and add them to mean values. It minimizes data transfer between main memory and GPU memory by leveraging GPU texture hardware for parallel reconstruction of compressed vector-quantized data.
+
+### [Stripe-based On-the-fly Decoding](5363-stripe-based-on-the-fly-decoding.md)
+A general approach for applying sequential data compression schemes to blocks of data, decoded on-the-fly by the GPU in a single render pass by decomposing blocks into parallel stripes.
+
+## Operating characteristics
+*   **Time Complexity:** Real-time performance is achieved on standard graphics PCs for massive datasets (e.g., 256GB turbulence simulation compressed to <2GB) [S1, S3, unofficial]. The complexity is dominated by the adaptive loading, decoding, and filtering per frame.
+*   **Memory Complexity:** The method manages datasets exceeding GPU memory by subdividing them into slabs. Only the current slab's decoded and filtered data, plus the compressed brick cache, reside in GPU memory [S1, S3, unofficial].
+*   **Performance:** Demonstrated real-time performance on static and dynamic datasets [S1, S3, unofficial].
+*   **Strengths:** Reduces blocking artifacts without modifying the encoder; supports multiple compression methods; handles massive datasets via slabs and LOD; exploits GPU hardware filtering and trilinear interpolation [S1, S3, unofficial].
+*   **Limitations:** Originally proposed as a single-resolution system, which limits the size of the volume dataset if not generalized to multi-resolution [S1, S2, S3, unofficial]. Requires careful management of slab boundaries and LOD transitions [S1, unofficial].
+*   **When to use:** High-quality shading of massive, block-compressed volumetric datasets where blocking artifacts are visible and GPU memory is limited.
+*   **When not to use:** When the compression method does not produce block-based artifacts, or when intra-level data filtering is required (though the generalized version mitigates this) [S1, S3, unofficial].
+
+## Background
+The Deferred Filtering Architecture was introduced by F. Marton, José A. Iglesias Guitián, Jose Díaz, and Enrico Gobbetti in the paper "Real-time Deblocked GPU Rendering of Compressed Volumes" (2014) [S1, S3, unofficial]. It addresses the problem of blocking artifacts in block-transform coding, which are particularly noticeable at low bit-rates [S1, S3, unofficial]. The method generalizes prior deferred filtering strategies, which were limited to single-resolution systems, by integrating multi-resolution LOD, adaptive loading, and visibility culling [S1, S2, S3, unofficial]. It uses a novel deblocking filter based on rational Bézier curves to smooth discontinuities at block boundaries while preserving features [S1, S3, unofficial]. The architecture has been evaluated on large static and dynamic datasets, including a 512^4 turbulence simulation [S1, S3, unofficial].
+
+## Sources
+[S1] Real-time Deblocked GPU Rendering of Compressed Volumes, https://doi.org/10.2312/vmv.20141290, fetched 2026-10-26 (unofficial)
+[S2] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27 (unofficial)
+[S3] PDF Real-time deblocked GPU rendering of compressed volumes, https://www.crs4.it/vic/data/papers/vmv2014-volume-deblocking.pdf, fetched 2026-10-27 (unofficial)

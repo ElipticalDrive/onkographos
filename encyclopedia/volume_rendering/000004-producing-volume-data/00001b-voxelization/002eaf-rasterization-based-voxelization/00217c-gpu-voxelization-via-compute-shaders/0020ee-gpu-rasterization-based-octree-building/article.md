@@ -1,0 +1,279 @@
+# GPU Rasterization-based Octree Building
+
+Also called: GPU-based Mesh Voxelization, Hierarchical Voxelization, Octree Build, Octree Generation from Voxel Data, Rasterization Octree Construction, Real-time Mesh Voxelization and Octree Building, Real-time Voxelization
+
+## Overview
+GPU Rasterization-based Octree Building is a technique for constructing sparse voxel octrees directly on the GPU by exploiting the rasterization pipeline to identify occupied leaf nodes [S2, S3]. It solves the problem of efficiently generating hierarchical voxel data for fully dynamic scenes by rasterizing geometry from multiple orthogonal directions to eliminate boundary holes inherent in single-pass methods [S3]. Unlike sibling methods that may require pre-processing or specific primitive types, this approach handles any hardware-supported rasterizable geometry in a single geometry submission pass, leveraging 32-bit integer textures and bitwise operations for high performance [S3]. It differs from [GPU Voxelization via Compute Shaders](2549-gpu-voxelization-via-compute-shaders.md) by using rasterization fragments to drive the octree traversal rather than a purely compute-based atomic accumulation, and from [GPU Mesh Voxelization (Schwarz & Seidel 2010)](1633-gpu-mesh-voxelization-schwarz-seidel-2010.md) by explicitly building the hierarchical octree structure during the rasterization phase rather than just filling a flat voxel grid.
+
+## How it works
+The method constructs an octree representation of the voxel world by traversing from leaf level to root, setting bits in a storage buffer to indicate occupied octants [S1, unofficial]. It supports fully dynamic scenes by building the octree once for static parts and updating it interactively for moving objects [S2].
+
+### Inputs and Outputs
+**Inputs:**
+*   Triangle mesh geometry (static and dynamic).
+*   Scene bounds and resolution parameters.
+*   A 3D texture of voxel data (optional, used for filtering or ray marching context, see [S1, unofficial]).
+
+**Outputs:**
+*   An octree structure stored in a global buffer, where nodes are allocated via atomic counters.
+*   Leaf values (bricks) stored in a shared brick buffer.
+
+### Data Structures
+The implementation relies on specific buffer layouts and texture formats.
+
+1.  **Voxel Texture (`voxels`):** A 3D texture of type `texture_3d<u32>` [S1, unofficial].
+    *   Each texel stores 4 voxels packed into 32 bits.
+    *   Each voxel is 8 bits.
+    *   Access requires bit-shifting based on the local position within the texel [S1, unofficial].
+2.  **Octree Buffer (`octreeBuffer`):** An array of `atomic<u32>` [S1, unofficial].
+    *   Stores the occupancy bits of the octree nodes.
+    *   Accessed via linear indexing calculated from world coordinates and octree level [S1, unofficial].
+3.  **Scene Data (`sceneData`):** Uniform buffer containing:
+    *   `worldWidth`: Total width of the voxel world.
+    *   `octantSize`: Size of the root octant.
+    *   `screenFilter`: Filter mode for visualization (not part of core build).
+4.  **Node Buffer:** A global shared buffer for allocating node structures. Nodes are allocated using an atomic increment of a global shared counter [S3].
+5.  **Brick Buffer:** A shared buffer for leaf values, allocated similarly to nodes [S3].
+6.  **Thread List:** A global list for deferred execution of threads that encounter mutex contention [S3].
+
+### Algorithm Steps
+
+#### 1. Initialization
+Initialize traversal variables based on scene parameters [S1, unofficial]:
+*   `baseDim = sceneData.worldWidth / sceneData.octantSize`
+*   `texWidth = 256u` (fixed for the implementation in [S1, unofficial])
+*   `texHeight = baseDim`
+*   `level = 0u`
+*   `octSize = sceneData.octantSize`
+
+#### 2. Rasterization Passes
+The mesh is rasterized three times, along the three main axes of the scene [S3].
+*   **Viewport Resolution:** Set to the maximum octree level resolution (e.g., $512 \times 512$ for a $512^3$ octree) [S3].
+*   **Depth Test:** Disabled to prevent early culling, ensuring at least one fragment shader thread is generated per potentially existing leaf node [S3].
+
+#### 3. Fragment Shader / Compute Shader Entry Point
+Each thread corresponds to a potential leaf node position. The entry point uses a workgroup size of $(8, 4, 8)$ [S1, unofficial].
+
+**Step 3.1: Early Exit Check**
+If the voxel at the current position is empty, exit immediately [S1, unofficial]:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+if GetVoxel(id) == 0u:
+    return
+```
+*Note: `GetVoxel` extracts the 8-bit value from the packed 32-bit texture [S1, unofficial].*
+
+**Step 3.2: Octree Traversal**
+Traverse the octree from the root to the leaf level [S3].
+Loop through octree levels [S1, unofficial]:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+while True:
+    octantPos = id / octSize
+    dimAtLevel = baseDim >> level
+    
+    # Check if position exceeds current level dimensions
+    if any(octantPos >= vec3<u32>(dimAtLevel)):
+        break
+    
+    # Calculate linear index in octree buffer
+    zOffset = (sceneData.worldWidth / sceneData.octantSize) * level
+    texZ = octantPos.z + zOffset
+    linearIndex = (texZ * texHeight + octantPos.y) * texWidth + octantPos.x
+    
+    # Calculate bit position within the 32-bit word
+    wordIndex = linearIndex / 4u
+    byteInWord = linearIndex % 4u
+    bitOffset = byteInWord * 8u
+    
+    # Set the bit using atomicOr
+    atomicOr(&octreeBuffer[wordIndex], 1u << bitOffset)
+    
+    level += 1u
+    octSize *= 2u
+```
+
+**Step 3.3: Node Subdivision and Allocation**
+When a node needs subdivision (determined by the traversal logic and occupancy) [S3]:
+1.  Allocate a set of $2 \times 2 \times 2$ sub-nodes in the global shared node buffer using an atomic increment of a global shared counter [S3].
+2.  Write the address of the new sub-nodes to the 'child' pointer of the subdivided node [S3].
+
+**Step 3.4: Mutex Handling**
+Use a per-node mutex to ensure subdivision is performed only by the first thread, preventing incoherent structures from parallel conflicts [S3].
+*   Threads that cannot proceed due to mutex contention put themselves in the global thread list for deferred execution [S3].
+
+**Step 3.5: Leaf Value Writing**
+Write values in leaves directly inside the brick associated with the nodes [S3].
+*   Allocate bricks similarly to nodes inside a shared brick buffer [S3].
+
+#### 4. Deferred Execution
+At the end of the rasterization pass, deferred threads are re-run (in a vertex shader) and values written in the tree [S3].
+*   Repeat deferred passes as long as the global thread list is not empty [S3].
+*   This mechanism avoids expensive active waiting loops [S3].
+
+#### 5. Dynamic Update
+For animated objects:
+1.  Rasterize animated objects every frame [S3].
+2.  New voxels cannot overwrite existing static parts [S3].
+3.  Static elements are stored at the end of the buffers to allow fast clearing every frame and prevent overwriting [S3].
+
+### Pseudocode
+The following pseudocode combines the traversal logic from [S1, unofficial] with the structural allocation and deferred execution strategy from [S3]. It assumes a fragment shader context where `id` is the global invocation ID or fragment coordinate.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Global Buffers
+octreeBuffer: array<atomic<u32>>
+nodeBuffer: array<Node>
+brickBuffer: array<Brick>
+threadList: array<ThreadTask>
+nodeCounter: atomic<u32>
+brickCounter: atomic<u32>
+mutexBuffer: array<atomic<u32>> # Per-node mutex
+
+# Scene Data
+sceneData: {
+    worldWidth: u32,
+    octantSize: u32,
+    baseDim: u32,
+    texWidth: u32 = 256,
+    texHeight: u32
+}
+
+# Helper: Get Voxel Value from Packed 3D Texture
+function GetVoxel(voxelPos: vec3<u32>) -> u8:
+    # Load from texture at (voxelPos.x >> 1, voxelPos.y, voxelPos.z >> 1)
+    packed = textureLoad(voxelTexture, vec3<u32>(voxelPos.x >> 1, voxelPos.y, voxelPos.z >> 1))
+    # Shift count based on local position
+    shiftCount = (voxelPos.x & 0x1) | ((voxelPos.z & 0x1) << 1)
+    # Mask and extract 8-bit value
+    mask = 255u << (shiftCount << 3u)
+    return (packed & mask) >> (shiftCount << 3u)
+
+# Helper: Allocate Node
+function AllocateNode() -> u32:
+    return atomicAdd(&nodeCounter, 1u)
+
+# Helper: Allocate Brick
+function AllocateBrick() -> u32:
+    return atomicAdd(&brickCounter, 1u)
+
+# Main Fragment Shader / Compute Shader Entry
+function ComputeMain(id: vec3<u32>):
+    # 1. Early Exit
+    if GetVoxel(id) == 0u:
+        return
+
+    # 2. Initialize Traversal
+    baseDim = sceneData.worldWidth / sceneData.octantSize
+    texWidth = 256u
+    texHeight = baseDim
+    level = 0u
+    octSize = sceneData.octantSize
+    
+    currentPos = id
+    currentLevelPos = id
+    
+    # 3. Traverse and Build Octree
+    while level < MAX_OCTREE_LEVEL:
+        dimAtLevel = baseDim >> level
+        
+        # Check bounds
+        if any(currentLevelPos >= vec3<u32>(dimAtLevel)):
+            break
+            
+        # Calculate Linear Index in Octree Buffer
+        zOffset = (sceneData.worldWidth / sceneData.octantSize) * level
+        texZ = currentLevelPos.z + zOffset
+        linearIndex = (texZ * texHeight + currentLevelPos.y) * texWidth + currentLevelPos.x
+        
+        # Calculate Bit Position
+        wordIndex = linearIndex / 4u
+        byteInWord = linearIndex % 4u
+        bitOffset = byteInWord * 8u
+        
+        # Set Bit
+        atomicOr(&octreeBuffer[wordIndex], 1u << bitOffset)
+        
+        # Check if subdivision is needed (simplified logic: assume if we are at leaf or need children)
+        # In practice, this depends on the specific node structure and whether children exist.
+        # For this method, we assume the rasterization triggers subdivision for occupied leaves.
+        
+        # Subdivision Logic
+        if needs_subdivision(currentLevelPos, level):
+            # Mutex Check
+            mutexId = calculate_mutex_id(currentLevelPos, level)
+            if atomicCompareExchange(&mutexBuffer[mutexId], 0u, 1u) == 0u:
+                # First thread allocates children
+                childAddr = AllocateNode()
+                # Write child pointer to parent node (implementation detail: node structure layout)
+                write_child_pointer(currentLevelPos, level, childAddr)
+                
+                # Allocate bricks for children if they are leaves
+                if level == MAX_OCTREE_LEVEL - 1:
+                    for i in 0..7:
+                        brickAddr = AllocateBrick()
+                        write_brick_pointer(childAddr, i, brickAddr)
+                        # Write voxel data to brick
+                        write_voxel_data(brickAddr, i, GetVoxel(currentPos))
+            else:
+                # Mutex Contention: Defer execution
+                task = ThreadTask(currentPos, level)
+                threadList.append(task)
+                return # Exit current thread
+        
+        # Move to next level
+        level += 1u
+        octSize *= 2u
+        currentLevelPos = currentLevelPos / 2u # Move to parent for next iteration? 
+        # Note: The traversal in [S1, unofficial] uses 'id' divided by octSize, which effectively tracks the leaf position
+        # relative to the current level's grid.
+        
+# Deferred Execution Pass (Vertex Shader)
+function DeferredPass():
+    while not threadList.empty():
+        task = threadList.pop()
+        # Re-run logic for the task
+        # This may generate new deferred tasks if mutexes are still contended
+        # Or complete the operation if the first thread has finished
+        pass
+```
+
+### Parameters
+*   **Viewport Resolution:** Corresponds to the max octree level (e.g., $512 \times 512$) [S3].
+*   **Extensions:** `NV_shader_buffer_load` and `NV_shader_buffer_store` are used for CUDA-like video memory pointers and atomic operations in OpenGL shaders [S3].
+*   **Workgroup Size:** $(8, 4, 8)$ [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Mutex Contention:** Active waiting loops are too expensive. A global thread list is required for deferred execution [S3].
+*   **Boundary Holes:** Single-direction rasterization causes holes. Rasterizing three times along the main axes solves this [S3].
+*   **Overwriting Static Data:** Dynamic updates must not overwrite static parts. Static elements are stored at the end of buffers to allow fast clearing [S3].
+*   **Precision:** Bit manipulation in `atomicOr` requires careful calculation of `wordIndex`, `byteInWord`, and `bitOffset` to avoid race conditions on the same 32-bit word [S1, unofficial].
+
+## Subtopics
+
+### [GPU Octree Voxelization via Triangle-AABB Intersection](2713-gpu-octree-voxelization-via-triangle-aabb-intersection.md)
+This method constructs an octree from triangle meshes by recursively subdividing nodes and querying GPU-accelerated CUDA kernels for geometric intersection and signed distance calculations. It differs from fully GPU-side octree builds by performing the recursive subdivision logic on the CPU while offloading expensive geometric queries (bounding box computation, intersection tests, and signed distance calculations) to parallel CUDA kernels.
+
+### [Hierarchical Binary-Scene Voxelization](3295-hierarchical-binary-scene-voxelization.md)
+Hierarchical Binary-Scene Voxelization is a robust, real-time method for computing a multi-resolution binary volumetric representation (octree) of a scene directly on the GPU. It solves the problem of generating voxel data for fully dynamic scenes by rasterizing geometry from three orthogonal directions and unioning the results, thereby eliminating the boundary holes inherent in single-direction rasterization methods like Eisemann and D´ecoret. Unlike sibling methods that may require pre-processing or specific primitive types, this approach handles any hardware-supported rasterizable geometry in a single geometry submission pass, leveraging 32-bit integer textures and bitwise operations for high performance.
+
+## Operating characteristics
+*   **Time Complexity:** The rasterization pass is $O(N)$ where $N$ is the number of fragments generated, which corresponds to the number of potentially occupied leaf nodes. Deferred execution adds overhead proportional to the number of mutex conflicts.
+*   **Memory Complexity:** The octree buffer size is proportional to the number of nodes in the octree. The node and brick buffers are allocated dynamically via atomic counters.
+*   **Performance:** Real-time performance is achieved by leveraging the GPU rasterization pipeline and atomic operations [S2, S3].
+*   **Strengths:** Supports fully dynamic scenes, handles any rasterizable geometry, eliminates boundary holes, and is efficient on GPU hardware [S2, S3].
+*   **Limitations:** Requires extensions for atomic buffer operations (e.g., `NV_shader_buffer_load`) [S3]. Deferred execution can add latency if there is high contention.
+*   **When to Use:** Real-time indirect illumination, dynamic scenes, sparse voxel octrees [S2].
+*   **When Not to Use:** Static scenes where offline precomputation is acceptable, or hardware without support for atomic buffer operations.
+
+## Background
+The method was introduced in the paper "Interactive Indirect Illumination Using Voxel Cone Tracing" by Schwarz et al. (2011) [S2, S3]. It was developed to enable real-time indirect illumination by efficiently building and filtering a sparse voxel octree from triangle meshes. The key contribution was the real-time mesh voxelization and octree-building algorithm that exploits the GPU rasterization pipeline [S2]. The method supports fully dynamic scenes by updating the octree interactively with moving objects or dynamic modifications [S2]. The implementation in [S1, unofficial] provides a WebGPU-based reference for the underlying voxel ray marching and octree traversal logic.
+
+## Sources
+[S1] jamestkiernan/webgpu-voxel-raymarching, https://github.com/jamestkiernan/webgpu-voxel-raymarching, fetched 2026-10-24 (unofficial)
+[S2] Interactive Indirect Illumination Using Voxel Cone Tracing, https://doi.org/10.1111/j.1467-8659.2011.02063.x, fetched 2026-10-26
+[S3] PDF Interactive Indirect Illumination Using Voxel Cone Tracing, https://research.nvidia.com/sites/default/files/publications/GIVoxels-pg2011-authors.pdf, fetched 2026-10-27

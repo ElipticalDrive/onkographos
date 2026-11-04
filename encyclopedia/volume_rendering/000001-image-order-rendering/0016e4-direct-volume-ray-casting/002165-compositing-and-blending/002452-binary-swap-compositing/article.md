@@ -1,0 +1,137 @@
+# Binary Swap Compositing
+
+Also called: MPI Binary-Swap, Parallel Binary-Swap Compositing, Parallel Image Merging
+
+## Overview
+Binary Swap Compositing is a parallel image compositing algorithm used to merge front-to-back compositing results from multiple MPI ranks into a final image [S1, S2, unofficial]. It solves the problem of combining partial render results from spatially partitioned volumetric data by performing a hierarchical reduction along the depth (Z) axis of the data decomposition [S1, unofficial]. Unlike sequential compositing or global all-reduce approaches, it uses a logarithmic number of communication steps to merge results, making it scalable for large distributed-memory systems [S1, unofficial]. It is distinct from Local Pixel Merging, which handles overlapping ray segments via k-way merging, whereas Binary Swap assumes non-overlapping depth partitions that are merged in a fixed binary tree structure [S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The local composite color ($C_{local}$) and opacity ($\alpha_{local}$) images computed by the current rank for its assigned sub-volume. The global decomposition dimensions: $P_X$ (ranks in X), $P_Y$ (ranks in Y), $P_Z$ (ranks in Z). The current rank's global ID. An MPI communicator.
+*   **Output:** The final composite color ($C_{final}$) and opacity ($\alpha_{final}$) images for the pixels assigned to this rank.
+
+**Data Structures:**
+*   `local_composite_color`: A 2D array of shape $(H, W, 3)$ storing RGB values.
+*   `local_composite_opacity`: A 2D array of shape $(H, W)$ storing opacity values in $[0, 1]$.
+*   `pair[level][j][2]`: A 3D array used in some implementations to store the pairing graph. `level` ranges from $0$ to $\lceil \log_2(P_Z) \rceil - 1$. `j` is the local Z-index of the rank. `pair[l][j][0]` stores the partner's local Z-index, and `pair[l][j][1]` stores the role (0 for sender/first, 1 for receiver/second) [S1, unofficial]. Note: The XOR-based implementation described below implicitly defines this graph without explicitly storing it [S2, unofficial].
+
+**Algorithm Steps:**
+1.  **Decomposition Mapping:** Determine the current rank's coordinates $(p_x, p_y, p_z)$ in the 3D grid of ranks:
+    $$ p_x = \lfloor \text{rank} / (P_Y \cdot P_Z) \rfloor \pmod{P_X} $$
+    $$ p_y = \lfloor \text{rank} / P_Z \rfloor \pmod{P_Y} $$
+    $$ p_z = \text{rank} \pmod{P_Z} $$
+    [S2, unofficial]
+
+2.  **Binary Tree Construction (Implicit):** The compositing partners are determined by the binary representation of the depth index $p_z$. In each step $k$ (where $k$ is the bit position, $0 \le k < \lceil \log_2 P_Z \rceil$), a rank with index $p_z$ pairs with a partner having index $p_z \oplus 2^k$ [S2, unofficial]. This forms a binary reduction tree along the Z-axis [S1, unofficial].
+
+3.  **Iterative Merging:** For each step $k$ from $0$ to $\lceil \log_2 P_Z \rceil - 1$:
+    a. Calculate the step size: $step = 2^k$.
+    b. Calculate the partner's Z-index: $p_{z,partner} = p_z \oplus step$.
+    c. Calculate the partner's global rank:
+       $$ rank_{partner} = p_x \cdot P_Y \cdot P_Z + p_y \cdot P_Z + p_{z,partner} $$
+       [S2, unofficial]
+    d. **Communication:**
+       *   If $rank_{partner} < P_X \cdot P_Y \cdot P_Z$ (valid partner):
+           *   If $rank > rank_{partner}$: The current rank sends its `local_composite_color` and `local_composite_opacity` to $rank_{partner}$ [S2, unofficial].
+           *   If $rank < rank_{partner}$: The current rank receives `recv_color` and `recv_opacity` from $rank_{partner}$ [S2, unofficial].
+           *   [G] If $rank == rank_{partner}$, skip communication (self).
+    e. **Compositing (Receiver Side):**
+       *   If the current rank received data (i.e., it was the "second" in the pair, or simply if it performed a receive):
+           *   Calculate remaining opacity: $\alpha_{rem} = 1 - \alpha_{local}$.
+           *   Update color: $C_{local} \leftarrow C_{local} + C_{recv} \cdot \alpha_{rem}$.
+           *   Update opacity: $\alpha_{local} \leftarrow \alpha_{local} + \alpha_{recv} \cdot \alpha_{rem}$.
+           *   Clip $\alpha_{local}$ to $[0, 1]$.
+           *   [G] Note: In a standard binary swap *reduction*, typically only one side accumulates. The code in [S2, unofficial] shows both sides potentially updating if they receive, but logically, in a reduction tree, the "receiver" (higher rank in the example, or role 1) accumulates the "sender's" (role 0) result. The specific logic in [S2, unofficial] assigns the role based on rank ID comparison. If $rank > rank_{partner}$, it sends. If $rank < rank_{partner}$, it receives and composites. Thus, the lower-rank rank accumulates the higher-rank rank's data? No, [S2, unofficial] says: "If partner_rank > rank... Send... Else... Recv... Update". So if $rank < partner$, $rank$ receives from $partner$ and updates. This means the lower-ID rank accumulates the higher-ID rank's contribution. This is a specific implementation choice [S2, unofficial].
+    f. **Early Termination (Optional):** If $\alpha_{local} \ge 0.98$ (or a similar threshold), the ray is effectively opaque, and further compositing may be skipped for that pixel [S2, unofficial].
+
+4.  **Final Output:** After $\lceil \log_2 P_Z \rceil$ steps, `local_composite_color` and `local_composite_opacity` contain the final result for the pixels assigned to this rank.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def binary_swap_compositing(local_color, local_opacity, PX, PY, PZ, rank, comm):
+    """
+    Performs binary swap compositing along the Z-axis of the rank grid.
+    
+    Args:
+        local_color: numpy array (H, W, 3), current rank's composite color.
+        local_opacity: numpy array (H, W), current rank's composite opacity.
+        PX, PY, PZ: int, dimensions of the MPI process grid.
+        rank: int, global MPI rank.
+        comm: MPI Communicator.
+        
+    Returns:
+        final_color: numpy array (H, W, 3)
+        final_opacity: numpy array (H, W)
+    """
+    # 1. Determine coordinates
+    pz = rank % PZ
+    py = (rank // PZ) % PY
+    px = (rank // (PY * PZ)) % PX
+    
+    # 2. Determine number of levels
+    # log2(PZ) steps. If PZ is not power of 2, higher levels will have invalid partners.
+    import math
+    num_levels = math.ceil(math.log2(PZ)) if PZ > 1 else 0
+    
+    for level in range(num_levels):
+        step = 1 << level  # 2^level
+        partner_pz = pz ^ step
+        partner_rank = px * PY * PZ + py * PZ + partner_pz
+        
+        # Check if partner is valid (within PZ bounds)
+        if partner_pz < PZ:
+            # Determine role: Lower rank receives from higher rank in this implementation [S2, unofficial]
+            if rank < partner_rank:
+                # Receive from partner
+                recv_color = comm.recv(source=partner_rank, tag=level)
+                recv_opacity = comm.recv(source=partner_rank, tag=level)
+                
+                # Composite received data into local data
+                # Front-to-back: C_new = C_local + C_recv * (1 - alpha_local)
+                remaining_opacity = 1.0 - local_opacity
+                local_color = local_color + recv_color * remaining_opacity[:, :, None]
+                local_opacity = local_opacity + recv_opacity * remaining_opacity
+                
+                # Clip opacity
+                local_opacity = np.clip(local_opacity, 0.0, 1.0)
+                
+            else:
+                # Send to partner
+                comm.send(local_color, dest=partner_rank, tag=level)
+                comm.send(local_opacity, dest=partner_rank, tag=level)
+                
+    return local_color, local_opacity
+```
+
+**Parameters:**
+*   $P_Z$: Number of ranks along the Z-axis. Must be a power of 2 for the simple XOR pairing logic to work without gaps or overlaps [S1, unofficial]. If not a power of 2, the XOR logic still works but some ranks may have no partner in higher levels, effectively pruning the tree [S2, unofficial].
+*   Threshold: Optional opacity threshold (e.g., 0.98) for early termination [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Non-Power-of-2 Ranks:** If $P_Z$ is not a power of 2, the `log2` calculation and pairing logic may result in invalid partners or unvisited ranks if not handled carefully [S1, unofficial]. The XOR method naturally handles non-powers of 2 by producing partners outside the valid range ($partner\_pz \ge P_Z$), which are simply skipped [S2, unofficial].
+*   **Precision:** Accumulating opacity and color can suffer from floating-point precision errors over many levels. Clipping opacity to $[0, 1]$ helps prevent values $>1$ [S2, unofficial].
+*   **Synchronization:** MPI Send/Recv are blocking. Ensure that senders and receivers are matched correctly to avoid deadlocks. The rank-ID based role assignment ensures symmetry [S2, unofficial].
+
+## Subtopics
+
+### Local Pixel Merging (LPM)
+Local Pixel Merging is a variant used when the projection areas of local subvolumes overlap on the image screen, requiring a global merge of ray-segment lists [S3, unofficial]. Unlike Binary Swap, which merges pre-composited images from non-overlapping depth partitions, LPM handles overlapping contributions by performing a k-way merge of sorted ray-segment lists using a binary heap [S3, unofficial]. It involves three steps: Pixel Assignment (PA), Ray-Segment Migration (RSM), and Local Pixel Merging (LPM) [S3, unofficial]. It is chosen when the data decomposition leads to overlapping pixel contributions, whereas Binary Swap is chosen for non-overlapping depth-partitioned data [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(\log P_Z)$ communication steps [S1, unofficial]. Each step involves sending/receiving images of size $H \times W \times 4$ (RGBA).
+*   **Memory Complexity:** $O(H \cdot W)$ per rank for storing the local composite image [S2, unofficial].
+*   **Performance:** Scales well with the number of ranks as long as the communication bandwidth is sufficient. The logarithmic reduction minimizes the total communication volume compared to all-to-all approaches [S1, unofficial].
+*   **Strengths:** Simple implementation, low communication overhead, scalable for large $P_Z$ [S1, unofficial].
+*   **Limitations:** Requires $P_Z$ to be a power of 2 for optimal pairing (or careful handling of non-powers) [S1, unofficial]. Assumes non-overlapping depth partitions; not suitable for overlapping subvolumes without modification (see LPM) [S3, unofficial].
+*   **When to Use:** When the volumetric data is partitioned along the depth axis (Z) and ranks can be arranged in a grid where Z-partitions are non-overlapping [S1, unofficial].
+*   **When Not to Use:** When the decomposition leads to significant overlap in pixel projections (use LPM) [S3, unofficial].
+
+## Background
+Binary Swap Compositing was developed as part of parallel volume rendering systems using MPI to achieve scalable scientific visualization [S1, unofficial]. It is based on the principle of parallel image merging using a binary tree reduction [S1, unofficial]. The method is commonly implemented in C++ with MPI for high-performance computing environments [S1, unofficial]. It is a standard technique in distributed memory volume rendering to combine partial results from ray casting [S2, unofficial].
+
+## Sources
+[S1] rishit-AI/parallel-volume-rendering-with-binary-swap, https://github.com/rishit-AI/parallel-volume-rendering-with-binary-swap, fetched 2026-10-27 (unofficial)
+[S2] jhadivyanshu24/Parallel-3D-Volume-Rendering-with-MPI-CS677, https://github.com/jhadivyanshu24/Parallel-3D-Volume-Rendering-with-MPI-CS677, fetched 2026-10-27 (unofficial)
+[S3] Parallel direct volume rendering of unstructured grids based on object-space decomposition, http://hdl.handle.net/11693/17897, fetched 2026-10-26 (unofficial)

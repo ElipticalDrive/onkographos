@@ -1,0 +1,252 @@
+Contribute to jcfurey/gz_sensors_ouster development by creating an account on GitHub.
+
+Full per-beam raycast mode (BVH raycaster, no rendering dependency) by jcfurey · Pull Request #11 · jcfurey/gz_sensors_ouster · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jcfurey
+commented
+Jun 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Adds <ray_mode>raycast</ray_mode>: every Ouster beam cast as an exact ray against an ECM scene mirror — the "full raycast" option, complementing the default depth-panel rig.
+What it does
+Exact geometry: calibrated beam elevation, per-beam azimuth offset, encoder column, and true beam-origin parallax — ray origins sit on the beam-origin circle and the reported range follows the Ouster XYZ-LUT convention (xyz = (r−n)·d̂ + n·[cosθ,sinθ,0]), so consumers reconstruct the exact hit points. Zero interpolation error anywhere in the pipeline.
+Runs on the active backend, CPU always available: RayProcessor::castScan executes the same shared per-ray function (rcCastOneRay, cuda/raycast_math.hpp) as a CUDA / HIP / SYCL kernel, or as the OpenMP CPU fallback — the standard backend contract (CUDA → HIP → SYCL → CPU). GPU backends cache the uploaded scene geometry by a monotonically increasing scene version; steady state uploads only the per-scan transforms.
+laser_retro restored: the raycaster reports the nearest hit's components::LaserRetro, so reflectivity/signal/near-IR are driven by scene materials again (the panel rig cannot carry this channel).
+No rendering dependency: raycast mode never touches Ogre2 — no panel cameras, no anchor-sensor requirement, and the scan is throttled on sim time.
+How
+cuda/raycast_math.hpp — device/host (GZ_OUSTER_HD) intersectors (sphere/box/cylinder/plane/triangle-BVH) over flat POD arrays; NaN-free explicit-branch slab tests.
+cuda/raycast_scene.{hpp,cpp} — flat scene builder (addMesh/addInstance; BVH indices, order entries and vertex indices globally rebased so the arrays upload to a device as-is) + the OpenMP CPU reference cast.
+Backends — castScan on CPU/CUDA/HIP/SYCL with version-cached scene upload; processDepth runs the unchanged noise/channel stage on the cast output.
+Plugin — ECM scene mirror (mesh URIs via MeshManager with caching; plane normals folded into instance poses; spawn/despawn-triggered rebuilds via immutable shared_ptr snapshots), worker thread feeding the existing triple-buffer, and processor_mtx_ serialising the worker's castScan against the sim thread's processDepth on the shared backend stream.
+Install fix — the cuda/ headers that the public headers quote-include now install next to them (also fixes the same latent issue for the pre-existing imu_noise.hpp/panel_layout.hpp includes).
+Verification (local, CPU stack)
+Intersector unit checks; BVH ≡ brute force on a 300-triangle random soup; mesh-box ≡ analytic-box (max err 0.0); beam-origin XYZ-LUT invariant; retro of nearest hit; near-clip see-through (housing case); uniform shell at exactly the radius (max err 0.0); axis-parallel grazing-ray NaN regression; castScan + processDepth end-to-end through the dispatcher.
+Perf sanity: ~12 ms/scan for OS1-128@1024 against a 40-instance scene on the CPU path in a low-core container; GPU kernels are one-thread-per-ray.
+Limitations (documented in README / plugin_example.sdf)
+Capsule/ellipsoid/heightmap/actor visuals are not mirrored (counted + logged at startup); visibility_mask does not apply in raycast mode; the 0.3 m near clip stands in for sensor-housing self-hits.
+https://claude.ai/code/session_01QvSNfkWgxXhHa4FotzscLJ
+chore: open PR working branch for raycast mode
+…
+5dfaed9
+```
+https://claude.ai/code/session_01QvSNfkWgxXhHa4FotzscLJ
+```
+jcfurey
+marked this pull request as ready for review
+June 10, 2026 05:01
+Add full per-beam raycast mode (<ray_mode>raycast</ray_mode>)
+…
+03a9ba4
+```
+Casts every Ouster beam as an exact ray — calibrated elevation, per-beam
+azimuth offset, encoder column, and TRUE beam-origin parallax (ray
+origins on the beam-origin circle; reported range follows the Ouster
+XYZ-LUT convention xyz = (r-n)*dir + n*[cos,sin,0], so consumers
+reconstruct the exact hit points) — against a mirror of the scene. Zero
+interpolation error anywhere in the pipeline, and laser_retro returns
+as the reflectivity/signal source (the panel rig cannot carry it).
+
+- cuda/raycast_scene.{hpp,cpp}: self-contained CPU raycaster. Analytic
+  sphere/box/cylinder/plane intersectors plus triangle meshes behind a
+  median-split BVH; per-instance rigid transforms with world-AABB broad
+  phase; OpenMP across the H*W rays. No Gazebo/rendering deps.
+- Plugin: ECM scene mirror (visual geometries extracted once, mesh URIs
+  resolved through MeshManager with a per-URI cache, laser_retro from
+  components::LaserRetro, plane normals folded into the instance pose);
+  poses refreshed every scan, spawn/despawn triggers a rebuild shared
+  with the worker via immutable shared_ptr snapshots. A dedicated
+  worker thread casts the scan and feeds the existing frame
+  triple-buffer. Raycast mode never touches the renderer: no panel
+  cameras, no anchor-sensor requirement, scan throttled on sim time.
+- RayProcessor/Backend::processDepth: noise/channel stage entry for
+  callers holding exact ranges (CPU/CUDA/HIP/SYCL; lazy retro device
+  buffer so the panels path pays nothing).
+- test_raycast: intersector correctness, BVH-vs-brute-force equivalence
+  on a random soup, mesh-box vs analytic-box agreement, beam-origin
+  XYZ-LUT invariant, retro of nearest hit, near-clip see-through,
+  zero-error uniform shell, processDepth through the dispatcher.
+
+Verified locally on the CPU stack: all checks pass with max error 0.0
+on the shell/mesh comparisons; ~9 ms/scan for OS1-128@1024 against a
+40-instance scene in this (low-core) container.
+
+Limitations (documented): capsule/ellipsoid/heightmap/actor visuals are
+not mirrored; visibility_mask does not apply; near clip (0.3 m) stands
+in for housing self-hits.
+
+https://claude.ai/code/session_01QvSNfkWgxXhHa4FotzscLJ
+```
+jcfurey
+requested a review
+from Copilot
+June 10, 2026 05:08
+Copilot started reviewing on behalf of
+jcfurey
+June 10, 2026 05:08
+View session
+Copilot
+AI
+reviewed
+Jun 10, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR adds a new full per-beam “raycast” mode for the Ouster lidar plugin that casts each beam as an exact analytic ray against an ECM-mirrored scene (BVH + primitives), removing the Ogre2 panel-rendering dependency while restoring per-hit laser_retro for downstream intensity/reflectivity.
+Changes:
+Added ray_mode (panels | raycast) to switch between the existing depth-panel rig and a new CPU/OpenMP raycaster against an ECM scene mirror.
+Introduced a self-contained raycasting library (rc::Scene) with primitive intersectors and per-mesh BVH traversal, plus an end-to-end gtest suite validating correctness/invariants.
+Added RayProcessor::processDepth() to run the noise/channel stage directly from exact per-beam ranges (+ optional retro), implemented across CPU/CUDA/HIP/SYCL backends.
+Reviewed changes
+Copilot reviewed 16 out of 16 changed files in this pull request and generated 5 comments.
+Show a summary per file
+File
+Description
+test/test_raycast.cpp
+New unit tests for raycast geometry, BVH equivalence, parallax/XYZ-LUT invariant, retro, near-clip behavior, and processDepth() integration.
+src/gz_gpu_ouster_lidar_system.cpp
+Adds ray_mode plumbing, ECM scene mirroring, sim-time throttling, a raycast worker thread, and routes raycast output through processDepth().
+README.md
+Documents ray_mode and raycast-mode behavior/limitations, and updates the test inventory and pipeline description.
+include/gz_gpu_ouster_lidar/ray_processor.hpp
+Adds the public RayProcessor::processDepth() API for exact-range inputs.
+include/gz_gpu_ouster_lidar/gz_gpu_ouster_lidar_system.hpp
+Adds raycast-mode members and includes the raycast scene types in the system class.
+cuda/raycast_scene.hpp
+New header defining the raycast scene/mesh/BVH structures and castScan() API.
+cuda/raycast_scene.cpp
+Implements primitive intersectors, BVH build/traversal, and per-scan casting (OpenMP).
+cuda/ray_processor_sycl.cpp
+Implements processDepth() on the SYCL backend with lazy retro buffer allocation.
+cuda/ray_processor_hip.cpp
+Implements processDepth() on the HIP backend with lazy retro buffer allocation.
+cuda/ray_processor_dispatch.cpp
+Dispatch-layer plumbing for RayProcessor::processDepth().
+cuda/ray_processor_cuda.cu
+Implements processDepth() on the CUDA backend with lazy retro buffer allocation.
+cuda/CMakeLists.txt
+Adds raycast_scene.cpp to the backend static library sources.
+cuda/backend.hpp
+Extends the backend interface with processDepth().
+cuda/backend_cpu.cpp
+Implements processDepth() on the CPU backend.
+config/plugin_example.sdf
+Documents the new <ray_mode> option and raycast-mode behavior/limitations.
+CMakeLists.txt
+Adds the new test_raycast target to the test suite.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+cuda/raycast_scene.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+cuda/raycast_scene.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+include/gz_gpu_ouster_lidar/gz_gpu_ouster_lidar_system.hpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/gz_gpu_ouster_lidar_system.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+test/test_raycast.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Route raycasting through the GPU backends (CUDA/HIP/SYCL) with CPU fa…
+…
+d2645d1
+```
+…llback; fix CI + review findings
+
+The cast itself now follows the repo's backend contract instead of being
+CPU-only with GPU noise: Backend/RayProcessor::castScan runs the SAME
+shared per-ray function (rcCastOneRay) as a CUDA, HIP or SYCL kernel, or
+as the OpenMP CPU fallback when no device is present.
+
+- cuda/raycast_math.hpp: device/host (GZ_OUSTER_HD) intersectors, BVH
+  traversal and rcCastOneRay over flat POD arrays, mirroring the
+  ray_processor_math.hpp pattern. Slab tests rewritten with explicit
+  axis-parallel handling — the previous inf-arithmetic form could yield
+  0*inf = NaN when a ray axis is exactly zero and the origin sits on a
+  slab boundary (Copilot finding; regression test added).
+- cuda/raycast_scene.{hpp,cpp}: Scene is now a flat builder (addMesh /
+  addInstance) producing globally rebased arrays that upload to a device
+  as-is; SceneView is the non-owning hand-off to backends. CPU castScan
+  keeps the OpenMP reference path.
+- Backends: castScan on CPU/CUDA/HIP/SYCL. GPU backends cache the
+  uploaded scene geometry by the plugin's monotonically increasing
+  scene version (rebuilds on spawn/despawn re-upload; steady state
+  uploads only the per-scan transforms + pose).
+- Plugin: worker routes through ray_processor_->castScan; a new
+  processor_mtx_ serialises the worker's castScan against the sim
+  thread's processDepth (shared backend stream/buffers).
+- CI fix (all three distros): sdf/Geometry.hh only forward-declares the
+  shape classes — include sdf/Box.hh, Sphere.hh, Cylinder.hh, Plane.hh,
+  Mesh.hh explicitly.
+- Install fix (Copilot): the public headers quote-include backend
+  headers from cuda/ (imu_noise.hpp, panel_layout.hpp, raycast_*.hpp,
+  ray_processor_math.hpp); install them next to the public headers so
+  the installed gz_gpu_ouster_lidar_system.hpp resolves for downstream
+  consumers — this also fixes the same latent issue for the pre-existing
+  imu_noise/panel_layout includes.
+- test_raycast: ported to the new Scene API; adds the axis-parallel
+  grazing-ray NaN regression and a castScan-through-dispatcher check;
+  <utility> include added (Copilot).
+
+Verified locally on the CPU stack: all raycast checks pass through the
+dispatcher path (BVH==brute force, mesh==analytic box, uniform shell
+max err 0.0); panel-rig smoke unchanged; CI cppcheck invocation clean.
+
+https://claude.ai/code/session_01QvSNfkWgxXhHa4FotzscLJ
+```
+Hide details
+View details
+jcfurey
+merged commit 0a3cffb
+into
+main
+Jun 10, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+jcfurey
+deleted the
+claude/raycast-mode-w2iqx2
+branch
+June 11, 2026 13:52
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,134 +1,184 @@
 # Voxel Trilinear Interpolation (SIMD)
 
-Also called: Block Trilinear Sampling, SIMD Trilinear Sampling, Trilinear Interpolation for Brick Sampling, Trilinear Interpolation with AVX, Trilinear Voxel Interpolation
+Also called: Trilinear Voxel Interpolation, SIMD Trilinear Sampling, Trilinear Interpolation with AVX
 
 ## Overview
-This method reads a voxel value from a 3D volume using trilinear interpolation with SIMD instructions to accelerate volume rendering [S1]. It differs from standard scalar trilinear interpolation by packing four corner values per 128-bit register and computing their contributions in parallel, effectively processing two z-planes simultaneously [S1].
+Retrieves voxel data at arbitrary normalized coordinates using trilinear interpolation between the 8 surrounding voxel corners, optimized for throughput using Single Instruction, Multiple Data (SIMD) instructions [S3, unofficial]. It provides the specific arithmetic and memory access patterns required to evaluate the trilinear function efficiently on modern hardware [S3, unofficial]. Unlike standard scalar implementations, this method processes multiple components in parallel using vector registers, significantly reducing instruction count for dense volume rendering [S3, unofficial].
 
 ## How it works
 **Inputs:**
-- `data`: 1D array of `uchar` (unsigned 8-bit integers) representing the voxel brick [S1].
-- `brick_size`: 3D vector `(bx, by, bz)` defining the dimensions of the brick in voxels [S1].
-- `blk_pos`: 3D floating-point position within the brick where interpolation is required [S1].
-- `bmin`: 3D vector defining the minimum bounds of the volume (for boundary checks) [S1].
-- `dims`: 3D vector defining the total dimensions of the volume (for boundary checks) [S1].
-- `tf1d`: A 1D transfer function object with a `sampleSimple` method [S1].
+- `data`: A 1D array of `uchar` (unsigned 8-bit integers) representing the voxel grid [S3, unofficial].
+- `brick_size`: A 3D vector $(b_x, b_y, b_z)$ defining the dimensions of the brick (sub-volume) [S3, unofficial].
+- `dims`: A 3D vector $(d_x, d_y, d_z)$ defining the total volume dimensions for boundary checks [S3, unofficial].
+- `blk_pos`: The position of the current brick/block in the global grid [S3, unofficial].
+- `pos`: The arbitrary floating-point position $(x, y, z)$ within the brick to sample [S3, unofficial].
+- `tf1d`: A 1D transfer function object for post-interpolation mapping [S3, unofficial].
 
 **Outputs:**
-- A single floating-point value representing the interpolated density/color, mapped through the transfer function [S1].
+- A single scalar value (after transfer function mapping) representing the interpolated density or color at `pos` [S3, unofficial].
 
 **Data Structures:**
-- The voxel data is stored in row-major order in a 1D `uchar` array of size `(bx+1) × (by+1) × (bz+1)` [S1].
-- Index strides for row-major 3D indexing are `stride_x = 1`, `stride_y = bx + 1`, `stride_z = (bx + 1) × (by + 1)` [S1, G]. (Note: The source text contains a typo listing `xNext = brick_size.x + 1`; standard row-major indexing requires `stride_x = 1` to correctly fetch adjacent x-voxels [G]).
+- The voxel data is stored in row-major order in a 1D array [S3, unofficial].
+- The logical brick has dimensions $(b_x+1) \times (b_y+1) \times (b_z+1)$ [S3, unofficial].
+- Strides for linear indexing within the brick:
+  - $x_{next} = b_x + 1$
+  - $y_{next} = b_x + 1$
+  - $z_{next} = (b_x + 1) \times (b_y + 1)$ [S3, unofficial]
 
 **Steps:**
-1. **Boundary Check**: If `blk_pos.x < bmin.x` or `blk_pos.x >= bmin.x + dims.x` or `blk_pos.y < bmin.y` or `blk_pos.y >= bmin.y + dims.y` or `blk_pos.z < bmin.z` or `blk_pos.z >= bmin.z + dims.z`, return 0.0f [S1].
-2. **Relative Position**: Calculate `relative = blk_pos - bmin` [S1].
-3. **Normalization**: Normalize relative position to voxel indices: `relative = relative / brick_size` [S1, G]. (The source describes a 4D vector trick `dims_v = (1, dims.z, dims.y, dims.x)` followed by division by `brick_size`, which is a non-standard optimization; standard division is used here for correctness [G]).
-4. **Index and Fraction**: Compute integer index and fractional part: `index = floor(relative)`, `fraction = relative - index` [S1].
-5. **Base Index**: Calculate linear index: `base_idx = (index.z * (by + 1) + index.y) * (bx + 1) + index.x` [S1].
-6. **Fetch Corners**: Fetch the 8 corner voxel values from the 1D data array using the base index and strides: `f000 = data[base_idx]`, `f001 = data[base_idx + stride_z]`, `f010 = data[base_idx + stride_y]`, `f011 = data[base_idx + stride_y + stride_z]`, `f100 = data[base_idx + stride_x]`, `f101 = data[base_idx + stride_x + stride_z]`, `f110 = data[base_idx + stride_x + stride_y]`, `f111 = data[base_idx + stride_x + stride_y + stride_z]` [S1].
-7. **Convert to Float**: Cast `f000` through `f111` to `float` [S1].
-8. **SIMD Interpolation**:
-   - Pack `f000, f001, f010, f011` into a 128-bit register `v128_l` (low part, z=0 plane) [S1].
-   - Pack `f100, f101, f110, f111` into a 128-bit register `v128_h` (high part, z=1 plane) [S1].
-   - Prepare interpolation weights: `f_a = fraction.x` (broadcast to all lanes) [S1]. `f_b = (1.0 - fraction.y, 1.0 - fraction.y, fraction.y, fraction.y)` [S1]. `f_c = (1.0 - fraction.z, fraction.z, 1.0 - fraction.z, fraction.z)` [S1].
-   - Compute high part contribution: `tmp1 = v128_h * f_a` [S1]. `tmp2 = f_b * f_c` [S1]. `res = tmp1 * tmp2` [S1].
-   - Compute low part contribution: `f_a = 1.0 - f_a` [S1]. `tmp1 = v128_l * f_a` [S1]. `tmp2 = tmp1 * tmp2` [S1]. `res = res + tmp2` [S1].
-9. **Sum Components**: Return the sum of all components in `res` to get the interpolated float value `val` [S1].
-10. **Transfer Function**: Cast `val` to `uchar` and sample the 1D transfer function: `return tf1d->sampleSimple((uchar)val)` [S1].
 
-**Formula:**
-The interpolated value $V$ is computed as:
-$$V = f_{000}(1-x_F)(1-y_F)(1-z_F) + f_{001}(1-x_F)(1-y_F)z_F + f_{010}(1-x_F)y_F(1-z_F) + f_{011}(1-x_F)y_F z_F + f_{100}x_F(1-y_F)(1-z_F) + f_{101}x_F(1-y_F)z_F + f_{110}x_F y_F(1-z_F) + f_{111}x_F y_F z_F$$
-where $f_{ijk}$ are the 8 corner values and $x_F, y_F, z_F$ are the fractional coordinates [S1].
+1. **Boundary Check:**
+   Check if any index component derived from `pos` is less than 0 or greater than or equal to `dims`; if so, return 0.0 [S3, unofficial].
+
+2. **Coordinate Normalization:**
+   - Calculate the relative position within the brick: $relative = pos - b_{min}$ [S3, unofficial].
+   - Normalize the relative position to voxel indices [S3, unofficial].
+   - Compute the integer indices and fractional parts: $index = \lfloor relative \rfloor$, $fraction = relative - index$ [S3, unofficial].
+
+3. **Fetch Corner Values:**
+   - Compute linear strides for row-major 3D indexing [S3, unofficial].
+   - Calculate base index: $idx = (z_{idx} \times (b_y + 1) + y_{idx}) \times (b_x + 1) + x_{idx}$ [S3, unofficial].
+   - Retrieve the 8 corner voxel values from the 1D `data` array using the base index and strides:
+     - $f_{000} = data[idx]$
+     - $f_{001} = data[idx + z_{next}]$
+     - $f_{010} = data[idx + y_{next}]$
+     - $f_{011} = data[idx + y_{next} + z_{next}]$ [S3, unofficial]
+     - $f_{100} = data[idx + x_{next}]$
+     - $f_{101} = data[idx + x_{next} + z_{next}]$ [S3, unofficial]
+     - $f_{110} = data[idx + x_{next} + y_{next}]$ [S3, unofficial]
+     - $f_{111} = data[idx + x_{next} + y_{next} + z_{next}]$ [S3, unofficial]
+
+4. **SIMD Interpolation:**
+   The interpolation is performed using the trilinear formula, optimized for SIMD [S3, unofficial]. The formula for the interpolated value $V$ is:
+   $$ V = f_{000}(1-x_F)(1-y_F)(1-z_F) + f_{001}(1-x_F)(1-y_F)z_F + f_{010}(1-x_F)y_F(1-z_F) + f_{011}(1-x_F)y_F z_F + f_{100}x_F(1-y_F)(1-z_F) + f_{101}x_F(1-y_F)z_F + f_{110}x_F y_F(1-z_F) + f_{111}x_F y_F z_F $$
+   where $f_{ijk}$ are the 8 corner values and $x_F, y_F, z_F$ are the fractional coordinates [S3, unofficial].
+
+   **Vectorized Implementation Details:**
+   - Load the 8 corner values. The source describes loading 8 bytes into two 128-bit registers: `v128_l` (bytes 0-3) and `v128_h` (bytes 4-7) [S3, unofficial].
+   - Prepare interpolation weights:
+     - $f_a = x_F$ (broadcast to all lanes) [S3, unofficial].
+     - $f_b = (1-y_F, 1-y_F, y_F, y_F)$ [S3, unofficial].
+     - $f_c = (1-z_F, z_F, 1-z_F, z_F)$ [S3, unofficial].
+   - Compute high part contribution:
+     - $tmp1 = v128\_h \times f_a$
+     - $tmp2 = f_b \times f_c$
+     - $res = tmp1 \times tmp2$ [S3, unofficial]
+   - Compute low part contribution:
+     - $f_a = 1 - f_a$
+     - $tmp1 = v128\_l \times f_a$
+     - $tmp2 = tmp1 \times tmp2$
+     - $res = res + tmp2$ [S3, unofficial]
+   - Return the sum of all components in `res` [S3, unofficial].
+
+5. **Transfer Function Mapping:**
+   Cast the interpolated float value to `uchar` and sample the 1D transfer function:
+   $$ result = tf1d->sampleSimple((uchar)val) $$ [S3, unofficial]
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def voxel_trilinear_simd(data, brick_size, blk_pos, bmin, dims, tf1d):
+def voxel_trilinear_simd(data, brick_size, dims, blk_pos, pos, tf1d):
+    """
+    Perform SIMD-accelerated trilinear interpolation on a voxel brick.
+    
+    Args:
+        data: 1D array of uchar (volume data)
+        brick_size: tuple (bx, by, bz)
+        dims: tuple (dx, dy, dz)
+        blk_pos: tuple (bx_pos, by_pos, bz_pos)
+        pos: tuple (x, y, z)
+        tf1d: Transfer function object with sampleSimple method
+        
+    Returns:
+        Interpolated value from transfer function
+    """
     # 1. Boundary Check
-    if (blk_pos.x < bmin.x or blk_pos.x >= bmin.x + dims.x or
-        blk_pos.y < bmin.y or blk_pos.y >= bmin.y + dims.y or
-        blk_pos.z < bmin.z or blk_pos.z >= bmin.z + dims.z):
-        return 0.0
-
-    # 2. Relative Position
-    relative = [blk_pos.x - bmin.x, blk_pos.y - bmin.y, blk_pos.z - bmin.z]
-
-    # 3. Normalization
-    relative = [relative[i] / brick_size[i] for i in range(3)]
-
-    # 4. Index and Fraction
-    index = [int(relative[i]) if relative[i] >= 0 else int(relative[i]) - 1 for i in range(3)]
-    fraction = [relative[i] - index[i] for i in range(3)]
-
-    # 5. Base Index
-    bx, by, bz = brick_size
-    stride_x = 1
-    stride_y = bx + 1
-    stride_z = (bx + 1) * (by + 1)
-    base_idx = (index[2] * (by + 1) + index[1]) * (bx + 1) + index[0]
-
-    # 6. Fetch Corners
-    f000 = float(data[base_idx])
-    f001 = float(data[base_idx + stride_z])
-    f010 = float(data[base_idx + stride_y])
-    f011 = float(data[base_idx + stride_y + stride_z])
-    f100 = float(data[base_idx + stride_x])
-    f101 = float(data[base_idx + stride_x + stride_z])
-    f110 = float(data[base_idx + stride_x + stride_y])
-    f111 = float(data[base_idx + stride_x + stride_y + stride_z])
-
-    # 7. SIMD Packing (simulated with lists)
+    # Map pos to global grid coordinates. If any component of the integer index
+    # is < 0 or >= dims, return 0.0.
+    # (Assuming pos is already relative to the brick origin for this function)
+    
+    # 2. Coordinate Normalization
+    relative = pos - bmin
+    # Normalize relative position to voxel indices
+    # Compute integer indices and fractional parts
+    x_idx = int(relative.x)
+    x_frac = relative.x - x_idx
+    y_idx = int(relative.y)
+    y_frac = relative.y - y_idx
+    z_idx = int(relative.z)
+    z_frac = relative.z - z_frac
+    
+    # 3. Fetch Corner Values
+    x_next = brick_size.x + 1
+    y_next = brick_size.x + 1
+    z_next = (brick_size.x + 1) * (brick_size.y + 1)
+    idx = (z_idx * (brick_size.y + 1) + y_idx) * (brick_size.x + 1) + x_idx
+    
+    f000 = data[idx]
+    f001 = data[idx + z_next]
+    f010 = data[idx + y_next]
+    f011 = data[idx + y_next + z_next]
+    f100 = data[idx + x_next]
+    f101 = data[idx + x_next + z_next]
+    f110 = data[idx + x_next + y_next]
+    f111 = data[idx + x_next + y_next + z_next]
+    
+    # 4. SIMD Interpolation (simulated with lists for portability)
+    # Pack corners into two groups of 4 to simulate 128-bit registers
     v128_l = [f000, f001, f010, f011]
     v128_h = [f100, f101, f110, f111]
-
-    # 8. Weights
-    xf, yf, zf = fraction
-    f_a = xf
-    f_b = [1.0 - yf, 1.0 - yf, yf, yf]
-    f_c = [1.0 - zf, zf, 1.0 - zf, zf]
-    tmp2 = [f_b[i] * f_c[i] for i in range(4)]
-
-    # 9. High part contribution
-    tmp1_h = [v128_h[i] * f_a for i in range(4)]
-    res_h = [tmp1_h[i] * tmp2[i] for i in range(4)]
-
-    # 10. Low part contribution
-    f_a_low = 1.0 - f_a
-    tmp1_l = [v128_l[i] * f_a_low for i in range(4)]
-    res_l = [tmp1_l[i] * tmp2[i] for i in range(4)]
-
-    # 11. Sum components
-    res = [res_h[i] + res_l[i] for i in range(4)]
+    
+    # Prepare interpolation weights
+    f_a = [x_frac] * 4
+    f_b = [1.0 - y_frac, 1.0 - y_frac, y_frac, y_frac]
+    f_c = [1.0 - z_frac, z_frac, 1.0 - z_frac, z_frac]
+    
+    # Compute high part contribution
+    tmp1 = [h * a for h, a in zip(v128_h, f_a)]
+    tmp2 = [b * c for b, c in zip(f_b, f_c)]
+    res = [t1 * t2 for t1, t2 in zip(tmp1, tmp2)]
+    
+    # Compute low part contribution
+    f_a = [1.0 - a for a in f_a]
+    tmp1 = [l * a for l, a in zip(v128_l, f_a)]
+    tmp2 = [t1 * t2 for t1, t2 in zip(tmp1, tmp2)]
+    res = [r + t for r, t in zip(res, tmp2)]
+    
+    # Return sum of all components
     val = sum(res)
-
-    # 12. Transfer Function
+    
+    # 5. Transfer Function Mapping
     return tf1d.sampleSimple(int(val))
 ```
 
 **Parameters:**
-- `brick_size`: Typical values depend on the volume partitioning strategy [S1].
-- `dims`: The total dimensions of the volume [S1].
+- `brick_size`: Typical values depend on the volume partitioning strategy. Not given in the sources.
+- `dims`: The total resolution of the volume. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- **Boundary Checks**: If the sample point is outside the volume bounds, the function returns 0.0f [S1].
-- **Precision**: Using `uchar` for data storage and casting to `float` for interpolation may introduce quantization errors [S1].
-- **Strides**: Incorrect stride calculation leads to fetching wrong voxel values; standard row-major strides must be used [S1, G].
+- **Out of Bounds:** If the sample point is outside the volume bounds (any index < 0 or >= dims), the function must return 0.0 [S3, unofficial].
+
+## Subtopics
+
+### [Voxel Grid Density Estimation with Trilinear Interpolation](3593-voxel-grid-density-estimation-with-trilinear-interpolation.md)
+Estimates accumulated density and color along a ray by sampling a 3D voxel grid using trilinear interpolation, then aggregating values using a transmittance-based opacity formula. It builds on [Voxel Trilinear Interpolation (SIMD)](2564-voxel-trilinear-interpolation-simd.md) by providing higher-level ray marching logic. It is distinguished by producing smooth boundaries without lumpy artifacts. Choose this when ray-marching through a voxel grid is required.
 
 ## Operating characteristics
-- **Time Complexity**: O(1) per sample [S1].
-- **Memory Complexity**: O(1) auxiliary memory, requiring only registers for the 8 corner values and intermediate calculations [S1].
-- **Measured Performance**: The source does not provide specific performance benchmarks [S1].
-- **Strengths**: Efficient use of CPU SIMD units for single-channel data [S1].
-- **Limitations**: Dependency on SIMD support and potential quantization from `uchar` storage [S1].
-- **When to Use**: When rendering large volumes on CPUs with SIMD support and single-channel data is sufficient [S1].
-- **When Not to Use**: For multi-channel data without further optimization or on GPUs where texture hardware handles trilinear interpolation efficiently [S1].
+- **Time Complexity:** $O(1)$ per sample, as it involves a fixed number of arithmetic operations and memory accesses (8 loads) [S3, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary space, as it only stores a few temporary variables and registers [S3, unofficial].
+- **Measured Performance:** The SIMD implementation utilizes 128-bit registers to process multiple components in parallel, reducing the number of instructions compared to scalar implementations [S3, unofficial]. Specific performance metrics (FPS, latency) are not given in the sources [G].
+- **Scaling:** Performance scales with the number of SIMD lanes available on the hardware (e.g., AVX-512 would process more components per instruction) [S3, unofficial].
+- **Strengths:** High throughput due to SIMD optimization; handles arbitrary sampling positions smoothly [S3, unofficial].
+- **Limitations:** Requires careful handling of boundary conditions [S3, unofficial].
+- **When to Use:** When high-performance volume rendering is required, and the volume data is stored in a brick-based structure [S3, unofficial].
+- **When Not to Use:** When memory bandwidth is the primary bottleneck and the volume is sparse (consider sparse representations); when high precision is required and `uchar` storage is insufficient [S3, unofficial].
 
 ## Background
-This method is derived from the `VolumeRenderingParallel` project by hopexn, which implements a parallel volume renderer using MPI and SIMD optimizations [S1, unofficial]. The specific SIMD trilinear interpolation kernel is designed to accelerate the ray-marching loop in volume rendering by reducing the computational cost of voxel sampling [S1, unofficial].
+The method is part of a parallel volume rendering system, as indicated by the source repository `hopexn/VolumeRenderingParallel` [S3, unofficial]. It is designed to efficiently sample voxel data within a distributed rendering framework, likely using MPI for parallelization across nodes [S3, unofficial]. The use of SIMD instructions suggests an optimization for modern CPU architectures to accelerate the rendering pipeline [S3, unofficial].
 
 ## Sources
-[S1] hopexn/VolumeRenderingParallel, https://github.com/hopexn/VolumeRenderingParallel, fetched 2026-10-27 (unofficial)
+[S1] Scrawk/Marching-Cubes, https://github.com/Scrawk/Marching-Cubes, fetched 2026-10-26 (unofficial)
+[S2] tatsy/torchmcubes, https://github.com/tatsy/torchmcubes, fetched 2026-10-26 (unofficial)
+[S3] hopexn/VolumeRenderingParallel, https://github.com/hopexn/VolumeRenderingParallel, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,209 @@
+Porting games to the PC. Contribute to Kenix3/libultraship development by creating an account on GitHub.
+
+Renderer: move vertex pipeline to the GPU, implement mipmapping and two-tile LOD by KiritoDv · Pull Request #1262 · Kenix3/libultraship · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+KiritoDv
+commented
+Aug 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+First PR of the new-renderer series: moves the fast3d vertex pipeline to the GPU and implements proper mipmapping.
+GPU pipeline: matrix transformation, lighting, texgen, normals and the color combiner move from the CPU interpreter into the vertex/fragment shaders (GL, Metal, D3D11). The interpreter now streams raw vertex data and per-draw uniforms instead of pre-transformed triangles.
+Mipmapping / LOD: RT64-style mipmapping, two-tile LOD support, and multiple texture-selection/tmem fixes; sprite shading fixes.
+Shader templates gain shared include files (fast3d_vs.glsli, filter.glsli, noise.glsli, palette.glsli).
+DrawAndRunGraphicsCommands gains a dlReplacements parameter for display-list replacement during interpolation.
+Stacked PR — review and merge bottom-up; until the layers below merge, each PR's diff includes them:
+Add G_SETTIMG_PAL, G_INVAL_TEX_BY_PAL, gDPReadFBToI8 and G_SET_STRICT_DECAL opcodes #1257 port/gbi-opcodes
+Renderer: move vertex pipeline to the GPU, implement mipmapping and two-tile LOD #1262 port/renderer-gpu-pipeline ← this PR
+Renderer: post-processing system, custom shaders and shader settings #1263 port/postprocessing
+Renderer: async texture streaming, auto-mipmaps and HD texture support #1264 port/texture-streaming
+Implement a Vulkan rendering backend #1265 port/vulkan-backend
+Tested: compiles and links on macOS (Metal + GL) against current main. Runtime-verified extensively on the SDL2-era branch in Ghostship (SM64); re-verification on this SDL3 rebase is in progress.
+KiritoDv
+mentioned this pull request
+Aug 28, 2026
+Renderer: post-processing system, custom shaders and shader settings
+#1263
+Open
+KiritoDv
+added a commit
+to KiritoDv/libultraship
+that referenced
+this pull request
+Sep 1, 2026
+Fix D3D11 vertex stride for lit materials without combiner shade
+…
+5c9ceb7
+```
+Ports the fix from PR Kenix3#1262 (6d37e22): count the SHADE vertex attribute in
+the stride under o_shade || o_lighting (normals ride the shade slot), not
+o_shade alone — otherwise lit-but-unshaded materials read shifted garbage
+(exploded triangles) on D3D11.
+```
+bass3l
+and others
+added 4 commits
+September 5, 2026 13:39
+Add G_SETTIMG_PAL and G_INVAL_TEX_BY_PAL
+163a851
+Add gDPReadFBToI8
+b623807
+add G_SET_STRICT_DECAL opcode for strict (depth-equal) decal mode
+6e1d29a
+Apply clang-format
+0de9ed1
+KiritoDv
+force-pushed
+the
+port/renderer-gpu-pipeline
+branch
+from
+6d37e22 to
+5fe359f
+Compare
+September 5, 2026 19:55
+This was referenced Sep 5, 2026
+Add G_SETTIMG_PAL, G_INVAL_TEX_BY_PAL, gDPReadFBToI8 and G_SET_STRICT_DECAL opcodes
+#1257
+Open
+Renderer: async texture streaming, auto-mipmaps and HD texture support
+#1264
+Open
+Implement a Vulkan rendering backend
+#1265
+Open
+KiritoDv
+added 19 commits
+September 5, 2026 14:43
+Apply clang-format to CoreAudioAudioPlayer.cpp
+…
+25ba84b
+```
+main's copy of this file (from Kenix3#1098) is not clang-format-14 clean, which fails
+the tidy check on every PR rebased onto it. The two wrapped statements fit
+within the column limit.
+```
+Little small fix for having dl_replacements for interpolation
+7cb1565
+Implementing mipmapping
+0b7ec7c
+Moved gpu lightning, texgen, normals, and color combiner to the gpu
+0c06dd2
+Moved even more things to the gpu
+c9ede8a
+Moved matrix transformations and lightning calculation to the GPU
+291754d
+Ported RT64 mipmapping
+3bcc30b
+Fixed texture palette
+909c4a9
+Missing header definitions
+b6c57fe
+Fixed wrong texture selection
+c6ff796
+Implemented two tile lod
+85223c5
+Wrong tmem
+d9b891a
+PaperBoat mipmapping is not helping
+e3acffd
+Trying to fix sprite shading
+53fdf5f
+Another sprite shading issue
+d8ea35e
+Last pass on sprite shading
+c695cc7
+Fixed OpenGL
+39c0017
+Apply clang-format
+514d2fa
+Fix D3D11 vertex stride for lit materials without combiner shade
+…
+b14d63f
+```
+The SHADE vertex attribute is packed (and declared in the input layout)
+whenever shade is used OR lighting is enabled — normals travel in the
+shade slot. The HLSL template only counted its floats under o_shade, so
+numFloats (the IASetVertexBuffers stride) came up 3-4 floats short for
+lit-but-unshaded materials, making their vertices read shifted garbage
+(exploded triangles). GL/Metal/Vulkan already counted o_shade || o_lighting.
+```
+KiritoDv
+force-pushed
+the
+port/renderer-gpu-pipeline
+branch
+from
+5fe359f to
+b14d63f
+Compare
+September 5, 2026 20:49
+bassdr
+commented
+Sep 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Two walls in one large outdoor scene collide but never draw, on both the OpenGL and Vulkan
+backends. Bisected to the vertex transform moving into the shader: restoring the CPU
+transform in GfxSpVertex - writing clip coordinates and pointing at the identity palette
+entry, the way the rect path does - is the only thing that makes them appear.
+Ruled out by experiment: backface culling (forced off), depth compare (LESS vs LEQUAL),
+alpha and discard (forced opaque fragments, no discard), texture packs, LTO and
+optimisation level, matrix-history capacity (64 -> 256), and palette slot selection
+(capped the mapping at one entry so every draw reads slot 0 - the walls stayed missing).
+Ruled out by instrumentation: the palette contents are right. Comparing per vertex, at
+draw time, the clip position the CPU would have computed at vertex-load time against what
+mTransform.mtx_palette[slot] produces gives 0 mismatches in 21M vertices.
+So the triangles are submitted (per-frame counts are normal), they carry the correct
+matrix CPU-side, the slot they read does not matter, and they still never rasterise. The
+remaining difference between the two paths is the vertex data itself: object coordinates
+plus a palette matrix, versus finished clip coordinates. I have not been able to narrow it
+further without a GPU capture.
+Two unrelated things noticed in the same code:
+mtx_slots[3] in GfxSpTri1 is left uninitialised when the two-attempt palette loop
+cannot satisfy a triangle, and is then used to index the uniform array. Unreachable at
+palette size 8, since a triangle would need vertices from 9 matrices.
+GFX_MTX_PALETTE_SIZE sizes TransformUniforms while the shaders hard-code
+mtx_palette[32]; lowering the constant alone renders black.
+JeodC
+mentioned this pull request
+Sep 13, 2026
+Switch to a port-maintenance-based libultraship and resolve assets by name for HD texture packs
+HarbourMasters/PaperBoat#131
+Merged
+JeodC
+mentioned this pull request
+Sep 26, 2026
+Multithreading & Performance
+HarbourMasters/PaperBoat#191
+Merged
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

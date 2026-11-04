@@ -1,0 +1,219 @@
+# Adaptive Refinement for Volume Rendering
+
+Also called: Adaptive Refinement Volume Rendering, Image-order adaptive refinement, Interactive Adaptive Refinement, Feedback-based Adaptive Refinement
+
+## Overview
+Adaptive Refinement for Volume Rendering is an image-order technique that balances rendering quality and performance by iteratively refining the image resolution based on local visual error [S2, unofficial][S3]. It solves the problem of high computational cost in volume ray-casting by casting rays non-uniformly, focusing computational effort on regions with high color variation (edges, silhouettes) while interpolating homogeneous regions [S2, unofficial][S3]. Unlike brute-force ray tracing which casts rays from every pixel immediately, this method starts with a coarse approximation and incrementally adds rays, allowing for interactive frame rates during exploration [S3]. It distinguishes itself from [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by operating on explicit voxel grids with FEM-based error control rather than neural field approximations, and from [Adaptive Sampling](1385-adaptive-sampling.md) by using a hierarchical quadtree structure for screen-space subdivision rather than stochastic jittering [S2, unofficial][S3].
+
+## How it works
+The method operates as a reactive control loop or an iterative convergence process. Two primary implementations exist: a FEM-based GPU approach [S2, unofficial] and a hierarchical CPU-based approach [S3]. Both share the core logic of estimating error, marking regions for refinement, and reconstructing the image.
+
+### Inputs and Outputs
+**Inputs:**
+*   Scalar field dataset (voxels with color and opacity).
+*   Camera parameters (view matrix, projection).
+*   Transfer function (mapping scalar values to color/opacity).
+*   Target frame rate (for feedback loop) or convergence criteria [S1][S2, unofficial].
+*   Parameters: `romax` (max region size), `romin` (min region size), `epsilon` (error threshold) [S3]; or `m` (number of cells to refine) [S2, unofficial].
+
+**Outputs:**
+*   Rendered image frame.
+*   Error map (indicating regions needing refinement) [S3].
+
+### Data Structures
+1.  **Quadtree (CPU/GPU):** Stores image regions as quadratic cells. Each leaf node represents a cell that can be subdivided into four children [S2, unofficial].
+2.  **F Array (Error/Ray Density Map):** A 2D array of flags. `F(u,v) = 1` indicates a ray has been traced at pixel `(u,v)`; `0` indicates it has not. In [S3], this is visualized as white (ray-traced) and black (interpolated) pixels [S3].
+3.  **G Array (Interpolation Flag):** A 2D array of flags. `G(u,v) = 1` indicates the color at `(u,v)` has been interpolated [S3].
+4.  **Heap (Marking):** A data structure storing quadtree leaves sorted by estimated error contribution, used to select the top `m` cells for refinement [S2, unofficial].
+5.  **Error Texture (GPU):** A 1D single-channel floating-point texture storing error values for new quadtree leaves, read back to main memory for marking [S2, unofficial].
+
+### Formulas
+The volume rendering integral for a ray parametrized by arc length $w^x$ of length $L^x$ is [S2, unofficial]:
+$$ I(x) = \int_0^{L^x} E(w^x) \exp\left(-\int_0^t A(w^x) ds\right) dt $$
+where $E$ is emission and $A$ is absorption.
+
+The approximation error is measured using the $L^2$ error norm [S2, unofficial]:
+$$ \boldsymbol{\eta} = \|u - u_n\|_S := \left( \int_S (u - u_n)^2 dx \right)^{\frac{1}{2}} $$
+where $u$ is the exact solution on the viewport $S$ and $u_n$ is the approximative solution.
+
+The nodal interpolant is given by [S2, unofficial]:
+$$ \mathcal{I}_n(u) = \sum_{q \in \mathcal{Q}} u(q) \Phi_q $$
+where $\mathcal{Q}$ is the set of evaluation points and $\Phi_q$ are basis functions.
+
+The approximative solution function is [S2, unofficial]:
+$$ u_n = \sum_{q \in \mathcal{Q}} I_h(q) \Phi_q $$
+where $I_h(q)$ is the approximation of the volume rendering integral at point $q$.
+
+The total approximation error is bounded by [S2, unofficial]:
+$$ \boldsymbol{\eta} = \|\boldsymbol{u} - \boldsymbol{u}_n\|_S \leq \|\boldsymbol{u} - \mathcal{I}_n(\boldsymbol{u})\|_S + \|\mathcal{I}_n(\boldsymbol{u}) - \boldsymbol{u}_n\|_S $$
+
+The local error contribution on each cell $T \in \mathcal{T}_n$ is estimated by comparing two subsequent approximations [S2, unofficial]:
+$$ \eta_{V_n}^T \approx \|u_{n-1} - u_n\|_T = \left( \int_T (u_{n-1} - u_n)^2 dx \right)^{\frac{1}{2}} $$
+
+This integral is solved numerically using a Gaussian quadrature rule with $N=3$ points [S2, unofficial]:
+$$ \eta_{V_n}^T \approx \sum_{i=1}^N \phi(x_i) w_i $$
+
+Relative $L^2$ error is defined as [S2, unofficial]:
+$$ \eta_{rel} = \|u - u_n\|_S / \|u\|_S $$
+
+### Parameters
+*   **romax:** Maximum size of square regions for ray tracing/interpolation. Range: $1 \le \text{romax} \le R$ (image side length). Typical initial value: 16 [S3].
+*   **romin:** Minimum size of square regions. Subdivision stops when region size reaches `romin`. Range: $1 \le \text{romin} \le \text{romax}$. Typical initial value: 2 [S3].
+*   **epsilon (e):** Threshold for local color difference. If the range of colors in a region is less than `e`, no further processing is performed. Value: $e > 0$. Typical initial value: 16–32 [S3].
+*   **m:** Fixed number of cells to mark for refinement in each iteration. Typical value: 1000 [S2, unofficial].
+*   **p:** Polynomial degree for interpolation during reconstruction. Fixed value: 2 (bilinear/quadratic) [S2, unofficial].
+*   **W:** Number of evenly spaced locations along a ray where data is resampled.
+*   **target_frame_rate:** Desired frame rate budget. Typical value: 10 fps [S1].
+*   **error_threshold:** Maximum allowable visual error metric. Typical value: 1 pixel per texel [S1].
+
+### Steps
+The algorithm proceeds in iterations. The following pseudocode combines the hierarchical structure of [S3] with the error estimation and marking logic of [S2, unofficial]. Note that [S2, unofficial] uses a GPU-based FEM estimator and heap marking, while [S3] uses a corner-difference heuristic and recursive subdivision.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+# R: image side length in pixels
+# romax, romin, epsilon: Level-of-detail parameters
+# F: 2D array of flags, initialized to 0
+# G: 2D array of flags, initialized to 0
+# C: 2D array of colors, initialized to 0
+
+def AdaptiveRefinement(R, romax, romin, epsilon):
+    # Loop until fully refined or convergence criteria met
+    while romax > 1:
+        
+        # 1. Ray Tracing Phase
+        # Divide image into square regions of size romax
+        for v in range(0, R, romax):
+            for u in range(0, R, romax):
+                RayTraceRegion(u, v, romax, romin, epsilon)
+        
+        # 2. Interpolation Phase
+        # Form intermediate image by interpolating between computed rays
+        InterpolateImage(romax)
+        
+        # 3. Display
+        DisplayImage()
+        
+        # 4. Clear Interpolated Colors
+        # Prepare for next iteration: clear interpolated colors but keep ray-traced ones
+        for v in range(R):
+            for u in range(R):
+                if F[u, v] == 0:  # If no ray was traced
+                    C[u, v] = 0
+                    G[u, v] = 0
+        
+        # 5. Increment Level-of-Detail
+        romax = Nextromax(romax)
+        romin = Nextromin(romin)
+        epsilon = Nexte(epsilon)
+
+def RayTraceRegion(u, v, w, wmin, e):
+    # Cast rays from the four corner pixels of the current region
+    for j in range(0, w, w):
+        for i in range(0, w, w):
+            pixel_u = u + i
+            pixel_v = v + j
+            if pixel_u < R and pixel_v < R and F[pixel_u, pixel_v] == 0:
+                RayTrace(pixel_u, pixel_v)
+                F[pixel_u, pixel_v] = 1
+    
+    # Check if subdivision is needed
+    if w > wmin and Difference(u, v, w, e):
+        # Divide region into four subregions
+        for j in range(0, w/2, w/2):
+            for i in range(0, w/2, w/2):
+                RayTraceRegion(u + i, v + j, w/2, wmin, e)
+
+def Difference(u, v, w, e):
+    # Check if the range of intensity values for any color component
+    # of the colors at the four corners of the region exceeds epsilon
+    corners = [
+        C[u, v],
+        C[u + w, v],
+        C[u, v + w],
+        C[u + w, v + w]
+    ]
+    for component in [R, G, B]:
+        max_val = max(c[component] for c in corners)
+        min_val = min(c[component] for c in corners)
+        if max_val - min_val > e:
+            return True
+    return False
+
+def InterpolateImage(romax):
+    # Divide image into square regions of size romax
+    for v in range(0, R, romax):
+        for u in range(0, R, romax):
+            InterpolateRegion(u, v, romax)
+
+def InterpolateRegion(u, v, w):
+    # Interpolate colors at midpoints of sides and center
+    for j in range(0, w, w/2):
+        for i in range(0, w, w/2):
+            pixel_u = u + i
+            pixel_v = v + j
+            if pixel_u < R and pixel_v < R and F[pixel_u, pixel_v] == 0 and G[pixel_u, pixel_v] == 0:
+                Interpolate(u, v, w, pixel_u, pixel_v)
+                G[pixel_u, pixel_v] = 1
+    
+    # Recurse if region is larger than 2x2 pixels
+    if w/2 > 1:
+        for j in range(0, w/2, w/2):
+            for i in range(0, w/2, w/2):
+                InterpolateRegion(u + i, v + j, w/2)
+
+def Interpolate(u, v, w, target_u, target_v):
+    # Compute color using linear interpolation (boundary midpoints)
+    # or bi-linear interpolation (region centers)
+    # Implementation depends on position relative to region corners
+    pass
+
+def RayTrace(u, v):
+    # Cast ray from pixel (u, v)
+    # Resample data at W evenly spaced locations
+    # Tri-linearly interpolate from 8 surrounding voxels
+    # Composite with fully opaque background
+    pass
+```
+
+**FEM-Based Variation (GPU):**
+In the implementation described in [S2, unofficial], the steps differ slightly:
+1.  **Estimate Error:** Compute $\eta_T$ for each new quadtree leaf using the FEM estimator (Equation 9) and Gaussian quadrature.
+2.  **Mark Cells:** Use a heap to select the $m$ cells with the biggest impact on total error. Cost: $O(m \log n)$.
+3.  **Refine:** Create four new quadtree leaves per marked cell. Generate up to 5 evaluation points per new leaf (1 center, 4 edge midpoints).
+4.  **Compute Integral:** Perform ray casting for new evaluation points. Use **Step Doubling** for error control: compute color with step size $h$ and two steps of $h/2$. If squared difference < error bound, accept and increase $h$; otherwise, decrease $h$ and repeat.
+5.  **Reconstruct:** Render $u_n$ to screen using polynomial degree $p=2$ interpolation on a uniform grid.
+
+### Edge Cases and Pitfalls
+*   **Manual Parameter Selection:** Choosing `romax`, `romin`, and `epsilon` manually can lead to sub-optimal presentation. High `romax` misses features; high `romin` poorly resolves features; high `epsilon` ignores features [S3].
+*   **Latency:** Reactive feedback (monitoring frame rate) introduces scheduling latency. Proactive scheduling using system timing parameters (e.g., fill rates) is recommended [S1].
+*   **Interactivity Interruption:** The loop is interrupted whenever the camera moves or transfer function changes to guarantee interactivity [S2, unofficial].
+*   **Precision:** The error estimation relies on numerical integration (Gaussian quadrature). Insufficient points may lead to inaccurate error estimates [S2, unofficial].
+*   **Degenerate Input:** Linear regions with strong slopes may be unnecessarily refined by variance-based estimators (like Levoy's), but the FEM hierarchical estimator handles these better by recognizing good approximation in linear regions [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time grows linearly with dataset size for full ray tracing, but adaptive refinement reduces effective cost by casting fewer rays in smooth regions [S3]. Marking complexity is $O(m \log n)$ where $m$ is the number of marked cells and $n$ is the number of leaves [S2, unofficial].
+*   **Memory Complexity:** Requires storage for the quadtree, error maps (F, G arrays), and intermediate color buffers. The quadtree is stored on the CPU, while error estimation and raycasting are offloaded to the GPU in modern implementations [S2, unofficial].
+*   **Measured Performance:**
+    *   [S2, unofficial]: On a CT Head dataset (256x256x225), 7 iterations were needed for an approximation error of $10^{-2}$ with $m=1000$. A single iteration took 20–40 ms for screen resolutions 512x512 and 2048x2048 respectively, on an Intel Core 2 Duo 3.0 GHz and NVIDIA GeForce 8800GT.
+    *   [S3]: On a Cytochrome B5 dataset (123x123x123), Frame 1 took 4.6 seconds with 3,870 rays (20% coverage). Frame 4 took 25.7 seconds total with 19,289 rays (100% coverage). On a Sun 4/280, subsequent images appeared at intervals of approximately five seconds each.
+    *   [S1]: Tested on a GeForce3 GPU. Frame rate fluctuated above the 10 fps budget, and the system successfully added cells to reduce error below 1 pixel/texel.
+*   **Strengths:** Faster convergence than uniform discretization (fewer rays for desired quality) [S2, unofficial]. Allows interactive frame rates by focusing computational effort only where necessary [S3]. Handles discontinuities better than p-adaptive methods [S2, unofficial].
+*   **Limitations:** Requires careful tuning of level-of-detail parameters [S3]. Reactive feedback may cause latency [S1]. Interactivity is interrupted on camera/transfer function changes [S2, unofficial].
+*   **When to Use:** Interactive exploration of large volume datasets where immediate feedback is required, and the scene is static or changes slowly [S1, S3].
+*   **When Not to Use:** When offline rendering with maximum quality is required (uniform ray casting may be simpler and more predictable), or when the scene changes rapidly (interactivity interruption overhead) [S2, unofficial].
+
+## Background
+*   **Origin:** The concept of adaptive refinement in volume rendering was introduced by [Lev90] (Levoy), who proposed adaptive image-space subdivision combined with progressive image generation [S2, unofficial][S3].
+*   **Development:**
+    *   [S3] (1988): Presented an image-order volume rendering algorithm that adaptively refines image quality over time, using recursive bi-linear interpolation and hierarchical subdivision.
+    *   [S1] (2002): Demonstrated an interactive volume rendering system for unstructured grids using a reactive feedback loop to maintain frame rate while bounding visual error.
+    *   [S2, unofficial] (2011): Introduced a GPU-based implementation using Finite Element Method (FEM) theory for error estimation, focusing on h-adaptivity and step doubling for ray integration error control.
+*   **Usage:** Used in interactive visualization of molecular graphics, medical imaging (CT scans), and scientific data (CFD datasets) [S2, unofficial][S3]. Implemented in C++ and OpenGL/GLSL requiring Shader Model 4.0 GPU [S2, unofficial].
+
+## Sources
+[S1] Interactive Visualization of Unstructured Grids Using Hierarchical 3D ..., https://web.eecs.umich.edu/~jjcorso/pubs/leven02unstructgrid.pdf, fetched 2026-10-27
+[S2] Adaptive Screen-Space Sampling for Volume Ray-Casting, https://webdoc.sub.gwdg.de/ebook/serien/ah/ZIB/ZR_11_04.pdf, fetched 2026-10-27 (unofficial)
+[S3] Volume Rendering by Adaptive Refinement, https://www.cs.unc.edu/techreports/88-030.pdf, fetched 2026-10-29

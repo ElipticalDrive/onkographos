@@ -1,0 +1,2196 @@
+arXiv:2407.13726v1 [cs.PL] 18 Jul 2024
+Compressing Structured Tensor Algebra
+MAHDI GHORBANI∗ , University of Edinburgh, UK
+EMILIEN BAUER∗ , University of Edinburgh, UK
+TOBIAS GROSSER, University of Cambridge, UK
+AMIR SHAIKHHA, University of Edinburgh, UK
+Tensor algebra is a crucial component for data-intensive workloads such as machine learning and scientific
+computing. As the complexity of data grows, scientists often encounter a dilemma between the highly
+specialized dense tensor algebra and efficient structure-aware algorithms provided by sparse tensor algebra.
+In this paper, we introduce DASTAC, a framework to propagate the tensors’s captured high-level structure
+down to low-level code generation by incorporating techniques such as automatic data layout compression,
+polyhedral analysis, and affine code generation. Our methodology reduces memory footprint by automatically
+detecting the best data layout, heavily benefits from polyhedral optimizations, leverages further optimizations,
+and enables parallelization through MLIR. Through extensive experimentation, we show that DASTAC achieves
+1 to 2 orders of magnitude speedup over TACO, a state-of-the-art sparse tensor compiler, and StructTensor, a
+state-of-the-art structured tensor algebra compiler, with a significantly lower memory footprint.
+Additional Key Words and Phrases: Sparse Tensors, Compiler Optimization, Barvinok Algorithm, MLIR
+1
+INTRODUCTION
+Tensor algebra is a fundamental component in several data-intensive workloads, such as signal
+processing [De Lathauwer and De Moor 1998; Muti and Bourennane 2007; Nion and Sidiropoulos
+2010], machine learning [Sidiropoulos et al. 2017], computer vision [Panagakis et al. 2021], quantum
+chemistery [Khoromskaia and Khoromskij 2018; Mutlu et al. 2019], and bioinformatics [Terán et al.
+2019]. Numerous lines of research have attempted to specialize and enhance the performance of
+the tensor algebra computations either through hardware level (e.g., tensor accelerators [Gondimalla et al. 2019; Hegde et al. 2019; Jia et al. 2021] and TPUs [Jouppi et al. 2023]), or software
+level (e.g., tuned tensor kernels [Dongarra et al. 1990; Wang et al. 2014] and compilation based
+optimizations [Gareev et al. 2018]).
+As the complexity of the data grows, scientists often face a trade-off between highly tuned
+and specialized frameworks provided for dense tensor algebra computation and efficient and
+flexible algorithms provided for sparse tensor algebra that leverage the sparsity of input tensors.
+Dense tensor algebra frameworks [Baghdadi et al. 2019; Grosser et al. 2012; Mullapudi et al. 2015;
+Vasilache et al. 2018] support a rich set of compile-time optimizations such as vectorization, tiling,
+and parallelization. This is thanks to well-known memory access patterns and efficient utilization
+of contiguous memory, despite not knowing the actual data.
+Computations over structured tensor algebras are at the core of several important workloads.
+The structure is an expression of static information on the sparsity and redundancy of the tensors. Sparsity information defines the symbolic set of indices of non-zero values (e.g., diagonal)
+while redundancy defines a symbolic mapping from the set of indices of repetitive elements to
+their unique equivalent (e.g., symmetric). Structured matrices have many applications in machine
+learning [Khamis et al. 2020] and deep learning [Kissel and Diepold 2023]. Diagonal structure used
+in the ACDC layer [Moczulski et al. 2016], tridiagonal weight matrices mentioned by [Dumitras
+and Kossentini 2000], and structured neural network pruning for large language models [Wang
+* These authors contributed equally to this work
+Authors’ addresses: Mahdi Ghorbani∗ , Mahdi.Ghorbani@ed.ac.uk, University of Edinburgh, Edinburgh, UK; Emilien Bauer∗ ,
+Emilien.Bauer@ed.ac.uk, University of Edinburgh, Edinburgh, UK; Tobias Grosser, tobias.grosser@cst.cam.ac.uk, University
+of Cambridge, Cambridge, UK; Amir Shaikhha, amir.shaikhha@ed.ac.uk, University of Edinburgh, Edinburgh, UK.
+2
+Mahdi Ghorbani, Emilien Bauer, Tobias Grosser, Amir Shaikhha
+✓
+Structure-Aware
+Algorithm
+✘
+Sub-optimal
+Low-level Code
+Sparse
+Layout
+Sparse Tensor Frameworks
+✘
+✓
+Sub-optimal
+Algorithm
+Dense
+Layout
+Specialized
+Low-level Code
+Dense Tensor Frameworks
+✓
+Structure-Aware
+Algorithm
+✓
+Specialized
+Low-level Code
+Asind
+Compressed
+Dense Layout
++
+Static
+Indexing Code
+DASTAC
+Fig. 1. Comparison of tensor processing frameworks. DASTAC is the first code generation framework that
+combines the algorithmic optimizations known from sparse tensor algebras with performance-optimized
+low-level code known from decades of tuning dense tensors.
+et al. 2020] are examples of applications of matrices with simple structures. Furthermore, more
+intricate structures such as hyper triangular for covariance matrices [Ghorbani et al. 2023] and the
+butterfly structure used for neural network training [Chen et al. 2022] are examples of structured
+tensor applications.
+Sparse tensor algebra frameworks [Chou and Amarasinghe 2022; Ghorbani et al. 2023; Spampinato
+and Püschel 2016; Virtanen et al. 2020] provide asymptotically improved algorithms by leveraging
+the sparsity structure of the data with efficient memory storage requirements and better scalability.
+However, unlike dense counterparts, sparse frameworks cannot leverage the full computation
+power of the hardware. This is due to irregular data structures, leading to less predictable memory
+access patterns and making it challenging to fully leverage the same level of optimizations as their
+dense counterparts.
+In this paper, we introduce DASTAC, a framework that propagates the high-level structural
+information of tensor computations down to the low-level highly tuned code generation (cf. Figure 1).
+DASTAC leverages a novel symbolic indexing method that compresses an input structured tensor
+into a densely packed vector representation. In contrast to well-established sparse data layouts like
+CSR, CSC, or COO, which involve indirect accesses and incur index storage overhead, our method
+employs efficient direct symbolic index computations. This direct indexing not only diminishes
+the overall memory footprint but also opens up opportunities for vectorization. These advantages
+become more important in scenarios where memory bandwidth is the main bottleneck in program
+efficiency, as is the case on many widespread contemporary hardware, such as CPUs and GPUs.
+DASTAC achieves the densely assembled data layout by relying on a well-established mathematical foundation: the polyhedral model. First, DASTAC uses StructTensor to capture and
+propagate the structure throughout the tensor algebra computation and then proceeds to apply
+polyhedral set and map optimizations over the captured structure. Second, DASTAC proceeds to
+find a densely packed data layout for the tensors involved in the computation and compress them
+automatically by a novel symbolic indexing algorithm, leading to better cache locality and less
+memory footprint. Finally, DASTAC generates structure-aware low-level code for CPU using the
+affine dialect of MLIR [Lattner et al. 2021], enabling effective optimizations at different levels of
+abstraction. Consequently, DASTAC brings out the best of both dense and sparse tensor algebra
+worlds together by relying on polyhedral analysis, memory, and complexity efficacy of sparse
+tensor algebra alongside specialization and compile-time optimization of dense tensor algebra
+based on polyhedral and compiler optimizations.
+Specifically, we make the following contributions:
+• We introduce DASTAC, the first framework that integrates the best of both sparse and dense
+tensor algebra worlds (Section 3). The algorithmic improvements are achieved by leveraging the
+structure of tensors and this structure is progressively lowered down to the machine-level code.
+Compressing Structured Tensor Algebra
+3
+• DASTAC introduces a densely assembled data layout that enables low-level specialization opportunities (Section 4). The central technique is a novel static indexing algorithm that maps the
+indices of the input tensor to a contiguous memory buffer.
+• We provide a progressive code generation algorithm (Section 5). First, the tensor computations
+are translated to affine operations provided out-of-the-box by the MLIR framework. Subsequently,
+at the next stages, the MLIR framework allows DASTAC to benefit from optimizations such as
+code motion, common subexpression elimination and parallelization.
+• We experimentally evaluate DASTAC against state-of-the-art tensor algebra frameworks and
+show that leveraging structure while benefiting from our proposed compressed data layout and
+polyhedral optimizations leads to better performance both sequentially and on multi-threaded
+scenarios (Section 6). We show that DASTAC achieves 1 to 2 orders of magnitude speedup over
+the TACO sparse tensor compiler and StructTensor, a state-of-the-art structured tensor algebra
+compiler, with a significantly lower memory footprint. We also show that frameworks such as
+Polygeist cannot recover the optimizations offered by DASTAC.
+2
+BACKGROUND ON STRUCTURED TENSOR ALGEBRA
+Matrices and tensors can have several structures, such as diagonal, tridiagonal, symmetric, and
+triangular. Leveraging such structures can improve the computational cost of tensor operations
+by orders of magnitude. For example, leveraging the matrix structure in sparse matrix-vector
+multiplication (SpMV), where the matrix is diagonal, can lower the computational complexity from
+𝑂 (𝑛 2 ) to 𝑂 (𝑛).
+Tensor structures can be classified into two categories: 1) sparsity patterns and 2) redundancy
+patterns. The sparsity patterns refer to structures such as diagonals where zero and non-zero values
+are distinguished. Structures with redundancy pattern refers to structures such as symmetry, with
+unique and repetitive elements. The tensor can be reconstructed using the unique values and a
+mapping from the indices of redundant elements to the unique ones.
+STUR [Ghorbani et al. 2023] is the StructTensor’s unified intermediate representation used
+for representing both arithmetic and structural information. StructTensor relies on structure
+inference for tensor computations in the form of unique sets, redundancy maps, and compressed
+tensors. We explain each component of STUR and how it works using a running example.
+Unique set. It represents the non-zero and unique (non-repetitive) values of the input tensor and
+corresponds to capturing the sparsity pattern. For example, the unique set of an 𝑛 × 𝑛 diagonal
+matrix 𝑀 represented as 𝑀𝑈 is as follows:
+𝑀𝑈 := {(𝑥, 𝑦) | (0 ≤ 𝑥 < 𝑛) ∧ (0 ≤ 𝑦 < 𝑛) ∧ (𝑥 = 𝑦)}
+Any set representation can be shown in the form of tensor computation over a boolean domain by
+replacing ∧ with ∗ and ∨ with +. Therefore, the unique set can be represented as follows:
+𝑀𝑈 (𝑥, 𝑦) := (0 ≤ 𝑥 < 𝑛) ∗ (0 ≤ 𝑦 < 𝑛) ∗ (𝑥 = 𝑦)
+Redundancy map. It provides the mapping from redundant elements to their corresponding
+unique elements and corresponds to capturing the redundancy pattern. For example, the unique
+set and redundancy map for an 𝑛 × 𝑛 symmetric matrix 𝑉 are as follows:
+𝑉𝑈 (𝑥, 𝑦) := (0 ≤ 𝑥 < 𝑛) ∗ (0 ≤ 𝑦 < 𝑛) ∗ (𝑥 ≤ 𝑦)
+𝑉𝑅 (𝑥, 𝑦, 𝑥 ′, 𝑦 ′ ) := (0 ≤ 𝑥 < 𝑛) ∗ (0 ≤ 𝑦 < 𝑛) ∗ (𝑥 > 𝑦) ∗ (𝑥 ′ = 𝑦) ∗ (𝑦 ′ = 𝑥)
+Here we are assuming that the lower triangular part of the matrix is the unique part, and the upper
+triangular part of it is repetitive. Variables 𝑥, 𝑦 represent the iteration space, and the mapping from
+the upper triangular to the lower triangular part is represented through variables 𝑥 ′, 𝑦 ′ . So this
+representation means 𝑥 and 𝑦 values must be swapped to have access to the unique elements.
+Structure inference. Now imagine the example of sparse matrix-matrix element-wise multiplication where the operands are the aforementioned matrices, 𝑀 and 𝑉 . To perform this multiplication
+4
+Mahdi Ghorbani, Emilien Bauer, Tobias Grosser, Amir Shaikhha
+while leveraging the structure, STUR applies the program reasoning rules [Ghorbani et al. 2023]
+to infer this computation’s output structure and compressed iteration space. For the mentioned
+example, the computation and the inferred output structure after simplification are:
+𝑇 (𝑥, 𝑦) := 𝑀 (𝑥, 𝑦) ∗ 𝑉 (𝑥, 𝑦)
+𝑇𝑈 (𝑥, 𝑦) := (0 ≤ 𝑥 < 𝑛) ∗ (0 ≤ 𝑦 < 𝑛) ∗ (𝑥 = 𝑦)
+𝑇𝑅 (𝑥, 𝑦, 𝑥 ′, 𝑦 ′ ) := ∅
+Compressed tensor. It is used for code generation and contains the structural information (the
+unique set and redundancy map) and the arithmetic operation over tensors using STUR’s syntax.
+The computation over sets and arithmetic is written using the same intermediate representation
+(STUR) for structure inference purposes but is treated separately in the code generation process.
+StructTensor internally separates the structural information and arithmetic parts. The structural
+information is used to generate loops while the arithmetic part generates the computational code
+inside the loop nests. For example, matrix 𝑇 will have the following compressed tensor:
+𝑇𝐶 (𝑥, 𝑦) := (0 ≤ 𝑥 < 𝑛) ∗ (0 ≤ 𝑦 < 𝑛) ∗ (𝑥 = 𝑦) ∗ 𝑀 (𝑥, 𝑦) ∗ 𝑉 (𝑥, 𝑦)
+This means that in this computation, the iterators 𝑥, 𝑦 should iterate between 0 and 𝑛 and must be
+equal to each other. The arithmetic operation that they perform inside the loop nests is 𝑀 (𝑥, 𝑦) ∗
+𝑉 (𝑥, 𝑦). Note that compressed tensor here refers to a tensor that has the structural information,
+hence, the iteration space can be compressed using this information. The tensor data layout itself
+is not compressed here. StructTensor generates the following code:
+for ( int x = 0; x < n ; ++ x ) {
+int y = x ;
+T (x , y ) = M (x , y ) * V (x , y ) ;
+}
+The first 2 lines are generated by the structural information and the third line is generated because
+of the arithmetic part of the compressed tensor.
+State-of-the-Art. StructTensor [Ghorbani et al. 2023] introduces the STUR intermediate language with the program reasoning rules to infer structures. As a final step, StructTensor provides
+C++ code that performs the computation over the compressed iteration space. StructTensor
+outperforms sparse and dense tensor algebra competitors by leveraging and propagating the
+compile-time-known structures throughout the computation.
+Limitations. Even though StructTensor infers the structure, it relies on an uncompressed dense
+representation of tensors that contains zero and repetitive elements. Alternatively, StructTensor
+requires the user to specify a compact data layout manually, but it is limited to only data layout for
+inputs. The outputs are still stored in an uncompressed dense format. However, StructTensor
+cannot capture this compressed output data layout. Furthermore, the generated C++ code relies
+on the low-level compiler (e.g., Clang or GCC) for further optimizations. Thus, one cannot benefit
+from the more advanced optimizations not supported directly by the compiler (e.g., parallelization).
+DASTAC solves both limitations by relying on the mathematical foundation of the polyhedral
+model. First, it uses a novel symbolic indexing algorithm to densely pack the input and output
+tensors. Second, benefitting from the progressive lowering between intermediate languages (dialects) provided by the MLIR framework, it applies additional compiler optimizations, including
+parallelization and vectorization.
+3
+OVERVIEW
+In this section, we describe the overall architecture of DASTAC (cf. Figure 2).
+Input. DASTAC uses STUR as its intermediate language, as it relies on StructTensor [Ghorbani
+et al. 2023] for the structure inference as the first step. STUR can express generalized Einsum
+Compressing Structured Tensor Algebra
+5
+Section 2
+Input Structure
+Section 4
+Structured
+Computation
+Tensor Algebra
+StructTensor
+Access Patterns
+Structured
+Computation
+Iteration Space
+Section 5
+Symbolic
+Indexing
+Iteration Space
+Compressed
+Code Generation
+Symbolic
+Indexing
+Progressive
+Lowering
+Fig. 2. DASTAC architecture overview.
+𝐴(𝑖, 𝑗, 𝑘) := 𝐵(𝑖, 𝑗, 𝑙) ∗ 𝐶 (𝑘, 𝑙)
+𝐶𝑈 (𝑘, 𝑙) := (0 ≤ 𝑘) ∗ (𝑘 < 𝑃) ∗ (0 ≤ 𝑙) ∗ (𝑙 < 𝑄)
+𝐵𝑈 (𝑖, 𝑗, 𝑙) := (𝑖 ≤ 𝑗) ∗ (0 ≤ 𝑖) ∗ (𝑖 < 𝑀) ∗ (0 ≤ 𝑗) ∗ ( 𝑗 < 𝑁 ) ∗ (0 ≤ 𝑙) ∗ (𝑙 < 𝑄)
+𝐴𝐶 (𝑖, 𝑗, 𝑘) := 𝐶 (𝑘, 𝑙) ∗ 𝐵(𝑖, 𝑗, 𝑙) ∗ (0 ≤ 𝑙) ∗ (𝑄 > 𝑙)
+∗ (𝑖 ≤ 𝑗) ∗ (𝑁 > 𝑗) ∗ (0 ≤ 𝑖) ∗ (𝑀 > 𝑖) ∗ (0 ≤ 𝑘) ∗ (𝑃 > 𝑘)
+Fig. 3. The TTM running example where the first tensor has an upper half cube structure. 𝐴𝐶 represents its
+optimized structured computation.
+expressions as a sum of products (SoP). As an example, Figure 3 shows the STUR representation of
+the tensor times matrix (TTM) computation with an upper half cube structure.
+Structure inference. DASTAC proceeds to propagate the input structure throughout the computation by applying program reasoning rules provided by StructTensor. The output structure and
+compressed computation are inferred during this stage. DASTAC uses the inferred compressed
+domain by StructTensor as input. For the running example, the output structure is as follows:
+𝐴𝑈 (𝑖, 𝑗, 𝑘) := 𝐵𝑈 (𝑖, 𝑗, 𝑙) ∗ 𝐶𝑈 (𝑘, 𝑙)
+Structure Optimizations. DASTAC improves the structured tensor computation by applying
+structure optimizations. StructTensor provides a set of optimizations such as inlining and logical
+simplifications (e.g., set idempotence and addition/multiplication identity optimizations) on the
+output structure and compressed computation. A polyhedral tool such as isl [Verdoolaege 2010] can
+easily support and apply the aforementioned optimizations alongside further polyhedral set optimizations. Therefore, relying on polyhedral tools can reduce the development cost while increasing
+the robustness. For these reasons, DASTAC relies on isl for further structure optimizations. Figure 3
+shows the structured computation for the running example after applying structure optimizations.
+Data Layout Compression. DASTAC leverages the statically known sparsity structure to assemble a densely packed buffer, aiming for cache-friendliness and vectorization opportunities. Our
+compression technique consists of a symbolic indexing function, mapping each original tensor
+index to a linear index of unique and non-zero values. For example, the inferred compressed index
+of 𝐵 in our running example Figure 3 is:
+
+
+
+
+1
+1
+2
+𝑃𝐵 (𝑖, 𝑗, 𝑙) =
+− +𝑁 𝑄 ·𝑖 − ·𝑄 ·𝑖 +𝑄 · 𝑗 +𝑙
+2
+2
+In this expression, the division operator is rational, 𝑄 and 𝑁 correspond to the dimensions in
+Figure 3. Compression and decompression can then be achieved by iterating over the accessed
+indices and copying the data in and out of the compressed buffer.
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+6
+Mahdi Ghorbani, Emilien Bauer, Tobias Grosser, Amir Shaikhha
+scf.parallel (%arg7) = (%c0) to (%7)
+step (%c1) {
+%8 = muli %arg7, %c-1 : index
+%9 = muli %8, %arg6 : index
+%10 = muli %arg7, %c2 : index
+%11 = muli %10, %arg4 : index
+%12 = muli %11, %arg6 : index
+%13 = addi %9, %12 : index
+%14 = muli %arg7, %arg7 : index
+%15 = muli %14, %c-1 : index
+%16 = muli %15, %arg6 : index
+%17 = addi %13, %16 : index
+%18 = muli %8, %arg3 : index
+%19 = muli %10, %arg3 : index
+%20 = muli %19, %arg4 : index
+%21 = addi %18, %20 : index
+%22 = muli %15, %arg3 : index
+%23 = addi %21, %22 : index
+scf.for %arg8 = %arg7 to %arg4 step %c1 {
+%24 = muli %arg8, %c2 : index
+%25 = muli %24, %arg6 : index
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+%26 = addi %17, %25 : index
+%27 = muli %24, %arg3 : index
+%28 = addi %23, %27 : index
+scf.for %arg9 = %c0 to %arg6 step %c1 {
+%29 = muli %arg9, %c2 : index
+%30 = addi %26, %29 : index
+%31 = divui %30, %c2 : index
+%32 = muli %arg9, %arg3 : index
+scf.for %arg10 = %c0 to %arg3 step %c1 {
+%33 = load %alloc[%31] : memref<?xf64>
+%34 = addi %32, %arg10 : index
+%35 = load %alloc_0[%34] : memref<?xf64>
+%36 = muli %arg10, %c2 : index
+%37 = addi %28, %36 : index
+%38 = divui %37, %c2 : index
+%39 = load %alloc_1[%38] : memref<?xf64>
+%40 = mulf %35, %39 fastmath<fast> : f64
+%41 = addf %33, %40 fastmath<fast> : f64
+store %41, %alloc[%31] : memref<?xf64>
+}}}}
+Fig. 4. The compressed kernel code only consists of cheap arithmetic operations, loops, and loads and stores
+on data. In particular, no index and offset values are loaded from memory such that all memory bandwidth is
+available for the actual compute workload
+Progressive Code Generation. DASTAC then proceeds to code generation. It leverages isl’s
+Abstract Syntax Tree (AST) generation feature, taking a union of iteration domains and optional
+validity dependencies and returns an AST enforcing those conditions. This AST is then used to
+generate code in the Affine dialect, a polyhedral-based intermediate representation defined in the
+MLIR framework. We drive the compilation from this IR down to executable code through MLIR’s
+provided passes to generate low-level code implementing the used affine operations, simplify the
+polynomials computation and hoist each part as high as possible in the loop nest, and parallelize
+the computation by mapping to OpenMP runtime calls. Finally, the resulting LLVM IR is passed to
+Clang, which provides auto-vectorization and profits from the new opportunities to do so offered
+by this densely packed data layout representation.
+4
+DATA LAYOUT COMPRESSION
+In this section, we present our method for data layout compression using a novel symbolic indexing
+algorithm, enabling a densely packed representation of the structured sparse tensor elements. This
+method relies on a symbolic and linear indexing of the values used in a computation. As opposed to
+well-established sparse data layouts, such as CSR, CSC, or COO, that incur access indirections and
+index storage overhead, our method uses direct symbolic index computations. This direct indexing
+simultaneously reduces the global memory footprint and opens vectorization opportunities, two
+excellent properties when memory bandwidth is a significant constraint on the program efficiency,
+as is the case on many widespread contemporary hardware, such as CPUs and GPUs.
+DASTAC starts the compression process from a tensor computation expressed in STUR (e.g.,
+Figure 3). DASTAC restricts itself to the STUR rules expressed with quasi-affine expressions (affine
+expressions augmented with modulos). This enables the implementation to leverage mature tools
+to infer this compressed indexing efficiently.
+Compressing Structured Tensor Algebra
+7
+Algorithm 1 Symbolic Indexing Algorithm
+1: function SymbolicIndexing(Dp , 𝑇 )
+2:
+Ap ← AccessMapping(Dp,𝑇 )
+3:
+Bp,i ← LocalOrdering(Ap,𝑇 )
+4:
+𝑇𝑖𝑛𝑑𝑒𝑥 (i, p) ← SymbolicCount(Bp,i )
+5:
+return PiecewiseFusion(𝑇𝑖𝑛𝑑𝑒𝑥 )
+6: end function
+To sidestep combinatorial complexity, DASTAC only works with individual summands of a rule.
+Take for example the following rule:
+𝑂 ( 𝑗) := 𝐴(𝑖, 𝑗) ∗ (𝑖 = 1) ∗ (0 ≤ 𝑗 < 𝑁 ) + 𝐴(𝑖, 𝑗) ∗ (𝑖 = 3) ∗ (0 ≤ 𝑗 < 𝑁 )
+DASTAC will first infer linear indices for 𝑂 ( 𝑗) and 𝐴(𝑖, 𝑗) over the first region, where 𝑖 = 1. Only
+then does it move on to the 𝑖 = 3 region. In the second region, with 𝑖 = 3, a disjoint region of
+𝐴 is read from, so a second compressed buffer is inferred for this region. On the other hand, the
+same region of 𝑂 is being written to; DASTAC thus "deduplicates" the compressed buffer by simply
+reusing the one infered for the first region.
+This design decision avoids compile-time costly generalization of the process and is found to
+work effectively on many motivated cases. However, in all generality, this yields two limitations.
+First, some values might be duplicated in different compressed buffers, potentially leading to a
+suboptimal memory footprint reduction in some specific cases. Second, the output compression is
+only used when output regions are equal (as in the above example) or disjoint, as any other case
+would potentially lead to partial results being spread across multiple buffers, requiring further
+computation overhead to have the right values in each buffer.
+Symbolic Indexing Algorithm. At this stage, DASTAC uses our symbolic indexing algorithm
+(Algorithm 1) to infer a compressed indexing function. The algorithm takes two inputs. The first
+input is Dp which is an ordered iteration space, where the parameter p defines symbols such as
+dimension information. In other words, Dp represents the set of iterator values with which the
+tensor access 𝑇 is used. By ordered we mean a sequential execution of the computation. The second
+input denoted by 𝑇 , is the considered tensor access in the form of a function from an iteration to
+the indices used in this access. The described process in Algorithm 1 is illustrated using buffer A of
+our example in Figure 3.
+Iteration space extraction. To apply Algorithm 1, we define the iteration space of the summand
+at hand, taking all comparisons of the considered STUR summand. For our running example in
+Figure 3, the iteration space is:
+D𝑄,𝑁 ,𝑀,𝑃 := {(𝑖, 𝑗, 𝑘, 𝑙) ∈ Z4 | 0 ≤ 𝑖 < 𝑀, 𝑖 ≤ 𝑗 < 𝑁 , 0 ≤ 𝑘 < 𝑃, 0 ≤ 𝑙 < 𝑄 }
+Here, symbols correspond to the boundary information of dimensions (𝑄, 𝑁 , 𝑀, 𝑃). By restricting
+STUR to affine expressions, one can observe that this set is a polyhedron by construction.
+Because we define the iteration space from a high-level representation, we control the order of
+the dimensions; we simply order them based on their appearance in the rule, ensuring the first
+iterators are used to index the output, with the last one of them indexing contiguous elements.
+Access mapping. For each buffer, we define its access map using the access variables used in the
+STUR expression. By construction, those are affine maps. The corresponding map for buffer 𝐵 in
+Figure 3 is as follows:
+𝑎𝐵 (𝑖, 𝑗, 𝑘, 𝑙) = (𝑖, 𝑗, 𝑙)
+→
+−
+→ −
+−
+→
+→ −
+−
+→
+𝑚
+𝑛
+→ := 𝑎 (D −
+→ ) = { 𝑗 ∈ Z | ∃𝑖 ∈ Z : 𝑎 · 𝑖 = 𝑗 , C · 𝑖 + 𝑐 ≥ 0}
+A −
+𝐵, 𝑝
+𝐵
+𝑝
+𝐵
+8
+Mahdi Ghorbani, Emilien Bauer, Tobias Grosser, Amir Shaikhha
+𝑗
+𝑖
+0
+1
+2
+...
+𝑖 (𝑖+1)
+2
+?
+𝑗
+𝑖 (𝑖+1)
+2 + 𝑗
+𝑛(𝑛+1)
+2
+Fig. 5. Illustration of the affine symbolic indexing method, ensuring a dense packing and memory compression.
+We apply this mapping on the above iteration space, yielding the set of accessed indices:
+𝐵
+3
+A𝑄,𝑁
+(1)
+,𝑀,𝑃 = 𝑎 𝐵 (DQ,N,M,P ) = {(𝑖, 𝑗, 𝑙) ∈ Z | 0 ≤ 𝑖 < 𝑀, 𝑖 ≤ 𝑗 < 𝑁 , 0 ≤ 𝑙 < 𝑄 }
+Preceding Accesses. We proceed to define an order on this accessed domain, using the access map
+to respect the iteration order. This order is similar to the lexicographic order, only using indices in
+their iteration domain order. For the map 𝑎(𝑖, 𝑗, 𝑘, 𝑙) = (𝑘, 𝑗, 𝑙), this order will be:
+𝑎(𝑖 ′, 𝑗 ′, 𝑘 ′, 𝑙 ′ ) < 𝑎(𝑖, 𝑗, 𝑘, 𝑙) ⇐⇒ 𝑗 ′ < 𝑗 ∨ 𝑗 ′ = 𝑗 ∧ 𝑘 ′ < 𝑘 ∨ 𝑗 ′ = 𝑗 ∧ 𝑘 ′ = 𝑘 ∧ 𝑙 ′ < 𝑙
+We use the set of iterators used in the access map in their initial order:
+Applying this order to the accessed domain, we define the preceding access domain as the set of
+all accessed indices preceding a symbolic index. For our running examples, this yields:
+𝐵
+′ ′ ′
+𝐵
+′
+P𝑄,𝑁
+,𝑀,𝑃,𝑖,𝑗,𝑙 = {(𝑖 , 𝑗 , 𝑙 ) ∈ A𝑄,𝑁 ,𝑀,𝑃 | 𝑖 < 𝑖}
+𝐵
+′
+′
+∪ {(𝑖 ′, 𝑗 ′, 𝑙 ′ ) ∈ A𝑄,𝑁
+,𝑀,𝑃 | 𝑖 = 𝑖 ∧ 𝑗 < 𝑗 }
+𝐵
+′
+′
+′
+∪ {(𝑖 ′, 𝑗 ′, 𝑙 ′ ) ∈ A𝑄,𝑁
+,𝑀,𝑃 | 𝑖 = 𝑖 ∧ 𝑗 = 𝑗 ∧ 𝑙 < 𝑙 }
+Access domain linearization. Finally, we can synthesize a mapping from a current iteration to
+the desired compressed linear index by counting the number of effective accesses preceding this
+iteration, that is, counting the number of elements of Ap,i . The Barvinok algorithm [Verdoolaege
+et al. 5 01] is a method for counting the number of integer points within a parametric polyhedron, returning a piecewise quasi-polynomial (a generalization of polynomials having periodic
+coefficients) of the polyhedron’s parameters.
+We can thus use this algorithm, implemented in isl, on the preceding access domain and obtain a
+linear indexing of the accessed domains element, following our chosen order:
+𝐵
+𝑃𝐵 = #Pp,i
+Piecewise Polynomial Simplification. In general, the counting algorithm yields a piece-wise
+quasi-polynomial, which could have a different expression on distinct subsets of the counted set. In
+practice, it often yields special cases at boundaries, that are not desirable for simple code generation.
+For example, when counting the preceding accesses for a triangle as illustrated in Figure 5, the
+resulting piecewise polynomial is:
+(
+1
+𝑖 + 12 𝑖 2 + 𝑗 if 𝑗 > 0
+𝑃 = 12
+(2)
+1 2
+if 𝑗 = 0
+2𝑖 + 2𝑖
+We apply a piecewise polynomial fusion algorithm presented in Algorithm 2 to simplify the
+expression of this polynomial. Let us apply this algorithm to our example. We name the two regions
+as 𝐷 and 𝐷 ′ , and their corresponding polynomials as 𝑃 and 𝑃 ′ : 𝑃 = 12 𝑖 + 12 𝑖 2 + 𝑗, 𝑃 ′ = 12 𝑖 + 12 𝑖 2 .
+Following line 4 of Algorithm 2, we have 𝑃 − 𝑃 ′ = 𝑗. Restricting this difference to 𝐷 ′ : 𝑗 = 0, we
+Compressing Structured Tensor Algebra
+9
+Algorithm 2 Piecewise QuasiPolynomial Fusion Algorithm
+1: function PiecewiseFusion(𝑇𝑖𝑛𝑑𝑒𝑥 )
+2:
+for all (𝐷, 𝑃) in 𝑇𝑖𝑛𝑑𝑒𝑥 do
+3:
+for all (𝐷 ′, 𝑃 ′ ) in 𝑇𝑖𝑛𝑑𝑒𝑥 − (𝐷, 𝑃) do
+4:
+if (𝑃 − 𝑃 ′ )| 𝐷 ′ = 0 then
+𝐷 ← 𝐷 ∪ 𝐷′
+𝑇𝑖𝑛𝑑𝑒𝑥 ← 𝑇𝑖𝑛𝑑𝑒𝑥 − (𝐷 ′, 𝑃 ′ )
+end if
+end for
+end for
+return 𝑇𝑖𝑛𝑑𝑒𝑥
+11: end function
+5:
+6:
+7:
+8:
+9:
+10:
+func.func @plus10(%x : index) -> index {
+%10 = arith.constant 10 : index
+%ret = arith.addi %x, %10 : index
+func.return %ret
+}
+Fig. 6. Example function in MLIR IR.
+have (𝑃 − 𝑃 ′ )| 𝐷 ′ = 0; in other words, 𝑃 is equal to 𝑃 ′ on the latter’s domain. We thus remove the
+special case on this domain (line 6), only keeping 𝑃 on the union of 𝐷 and 𝐷 ′ , yielding a single
+polynomial expressive enough for the whole buffer:
+1
+1
+𝑃 = 𝑖 + 𝑖2 + 𝑗
+2
+2
+The computed compressed index for buffer 𝐴 in Figure 3 is as follows:
+
+
+
+
+1
+1
+𝑃𝐵 (𝑖, 𝑗, 𝑙) =
+− 𝑄 + 𝑄 · 𝑁 · 𝑖 − 𝑄 · 𝑖2 + 𝑄 · 𝑗 + 𝑘
+2
+2
+In this example, one is expressive enough for the whole buffer; we can thus safely ignore the
+conditions, knowing by construction we will not index any value out of those bounds.
+An interesting side-effect of our design is that the generated piece-wise quasi-polynomials are
+readily expressed in a form where the slowest varying indices are evaluated the deepest in the
+expression, making it amenable to effective loop-invariant code hoisting. For example, in 𝑃𝐵 , the
+most product-intensive term (− 21 𝑄 + 𝑄 · 𝑁 ) can be hoisted of all loops in the computation, as it
+only depends on the sizes of the tensors.
+As our experimental results show, our symbolic indexing algorithm significantly reduces the
+memory footprint. Furthermore, we observed performance improvements thanks to improved
+cache locality and enabling vectorization opportunities. Finally, we have not observed significant
+performance overhead caused by the index computation time on the selected motivated cases.
+5
+PROGRESSIVE CODE GENERATION
+Finally, STUR starts generating code using the MLIR framework. It has been chosen as a compiler
+for this work for its ability to express high-level Intermediate Representation (IR) and lower it
+progressively to LLVM IR, a low-level IR that the CLang compiler can compile down to binary.
+This enables MLIR to provide many optimizations at a high level, where the information needed to
+apply them safely is still present.
+10
+Mahdi Ghorbani, Emilien Bauer, Tobias Grosser, Amir Shaikhha
+mark: parallel
+iter: i , init: 0 , cond: i < min(N,M) , inc: 1
+iter: j , init: i , cond: j < N , inc: 1
+iter: k , init: 0 , cond: k < P , inc: 1
+iter: l , init: 0 , cond: l < Q , inc: 1
+S0[i, j, k, l]
+.
+−→
+affine.parallel %i = 0 to min(%N, %M) {
+affine.for %j = %i to %N {
+affine.for %k = 0 to %P {
+affine.for %l = 0 to %Q {
+S0(i, j, k, l);
+}}}}
+Fig. 7. The translation of ISL AST to MLIR’s Affine loops.
+5.1
+MLIR Background
+MLIR [Lattner et al. 2021] is a compiler framework successfully applied in the development of
+compilers in deep learning [Abadi et al. 2015; Paszke et al. 2019], fully-homomorphic encryption [Govindarajan and Moses 2020], and hardware design [Eldridge et al. 2021; Majumder and
+Bondhugula 2021]. It also opens opportunities, such as compiling our high-level IR down to GPU
+kernels or other targets rather than generating specialized code and reinventing the wheel, but this
+has been left as future work.
+MLIR IR elementary objects are Operations, Values, Regions, and Attributes. Values represent
+runtime values and are constrained by the Static Single-Assignment (SSA) form: they can only be
+assigned once, at definition time. Operations may take values as input and may define new values as
+output. They can be augmented through attributes, representing various compile-time information.
+Finally, Operations may contain Regions, which include lists of Operations and possibly entry
+arguments: Values defined in the region and taking their runtime value from the operation.
+An example is given in Figure 6. func.func is an Operation representing a function definition.
+It has a Region representing its body and a function type. In its region, arith.constant is an
+operation only defining a value from a compile-time known value and type. arith.addi takes this
+value and the function’s argument and returns its sum in a new value. Finally, func.return only
+consumes this value to represent returning it from the function.
+MLIR implements this idea of mixing levels of abstraction through dialects: collections of operations and types that represent some level of abstraction but can be combined in a program to allow
+progressive lowering of different parts in a controllable manner. Operations names are prefixed by
+their dialect’s name: in Figure 6, arith and func were used.
+5.2
+Affine code generation
+Parallelization. DASTAC drives ISL to generate an AST expressing parallelism over the outermost
+index if it is not a reduction. We believe that parallel code generation is a benefit of our densely
+packed data layout; while similar compaction could be achieved by simple linear indices increments
+judiciously placed in the loop nest, those would effectively result in loop-carried dependencies,
+and necessitate further analysis or treatment to parallelize correctly. DASTAC’s symbolic indexing,
+on the other hand, only depends on current iterators and symbols of the computation; once
+inferred, it stays a correct mapping however loops are parallelised or further transformed. Thus,
+parallelism, loop transformations, and compression usage in the generated code become completely
+orthogonal. Our experiments demonstrate the effectiveness of our compression scheme with simple
+parallelization (cf. Section 6.2).
+Control Flow Code Generation. The first step is obtaining an Abstract Syntax Tree (AST) scanning
+the iteration domain from ISL; an example is in Figure 7. By construction, this AST is guaranteed
+to have affine bounds and increments. DASTAC uses MLIR’s affine dialect, which expresses affine
+loops, affine conditions, and affine accesses, to generate IR at the closest abstraction level from its
+internal one. The main benefit of this approach is that DASTAC does not need to re-implement
+Compressing Structured Tensor Algebra
+S0[ i ,
+j,
+k,
+l]
+A(i, j, k) :=
+C(k, l) ∗ B(i, j, l)
+11
+%si = affine.apply affine_map< (i,j,k,l)->(i) >(\%i, \%j, \%k, \%l)
+%sj = affine.apply affine_map< (i,j,k,l)->(j) >(\%i, \%j, \%k, \%l)
+−→ %sk = affine.apply affine_map< (i,j,k,l)->(k) >(\%i, \%j, \%k, \%l)
+%sl = affine.apply affine_map< (i,j,k,l)->(l) >(\%i, \%j, \%k, \%l)
+%lastval = affine.load %A[%si, %sj, %sl] : memref<?x?x?xf64>
+%factor1 = affine.load %C[%sk, %sl] : memref<?x?xf64>
+−→ %factor2 = affine.load %B[%si, %sj, %sk] : memref<?x?x?xf64>
+%prod = arith.mulf %factor1, %factor2 : f64
+%newval = arith.addf %lastval, %prod : f64
+affine.store %A[%si, %sj, %sl] : memref<?x?x?xf64>
+Fig. 8. ISL’s schedule is naturally translated to affine maps application and the input computation to accesses
+and arithmetic.
+A(i, j, k) :=
+C(k, l) ∗ B(i, j, l)
+%A_C_i = func.call @A_P(%si, %sj, %sl, %Q, %N)
+%B_C_i = func.call @B_P(%si, %sj, %sk, %Q, %N)
+%C_C_i = func.call @C_P(%sk, %sl, %N)
+%lastval = memref.load %A_C[%A_C_i] : memref<?x?x?xf64>
+−→ %factor1 = memref.load %C_C[%C_C_i] : memref<?x?xf64>
+%factor2 = memref.load %B_C[%B_C_i] : memref<?x?x?xf64>
+%prod = arith.mulf %factor1, %factor2 : f64
+%newval = arith.addf %lastval, %prod : f64
+memref.store %A_C[%A_C_i] : memref<?x?x?xf64>
+Fig. 9. Using our symbolic indexing, compressed indexing is natural to switch to from dense indexing.
+the basics: it simply translates affine expressions from ISL’s to MLIR’s representation and defines
+loops using those. MLIR is equipped to lower those expressions to arithmetic computations and has
+advanced infrastructure to simplify those computations at a lower level. Finally, DASTAC generates
+code corresponding to each statement. For the computation expressed in the STUR language, that
+means loading each designated value from the right-hand side, multiplying them, and adding that
+product to the loaded left-hand side value. Memory accesses are translated in two steps to simplify
+the usage of the compressed indexing polynomial, as explained below.
+Uncompressed Compute Code Generation. The first step is to apply ISL’s schedule, an affine
+mapping from the current iteration to the values to pass to the statement. In the example given in
+Figure 4, this schedule is the identity 𝜃 (𝑖, 𝑗, 𝑘, 𝑙) = (𝑖, 𝑗, 𝑘, 𝑙).
+MLIR’s affine dialect provides an operation to apply a given affine mapping to a list of indices,
+affine.apply, so we use it to define new values corresponding to the scheduled access variables.
+It then remains to generate the product and accumulation code from the corresponding accesses in
+the input STUR rule, using MLIR’s basic arithmetic operations. THis is all illustrated in Figure 8
+Compressed Compute Code Generation. Because the inferred compression polynomial is
+indexing a linear contiguous buffer by directly mapping indices of the original tensor to the
+corresponding compressed index, generating compressed compute code can be done independently
+of any control flow; it suffices to generate accesses to the compressed buffers using the inferred
+polynomial. This is illustrated in Figure 9, where those polynomials are represented as function
+calls. The attentive reader might notice that we switched from affine.load to memref.load. Both
+representing a load operation, the affine variant restricts the access indices to affine expressions of
+iterators and symbols. Our usage of quasipolynomials breaks this constraint. Here, MLIR’s capacity
+to mix abstractions is helping because this doesn’t forbid the usage of affine loops and maps where
+still applicable.
+12
+5.3
+Mahdi Ghorbani, Emilien Bauer, Tobias Grosser, Amir Shaikhha
+Progressive Lowering
+The final step is progressively translating and optimizing this high-level representation to LLVM
+IR through MLIR. The result of the optimizations is illustrated in Figure 4. The critical steps are as
+follows (cf. Section 6 for the exact pipeline).
+Function inling. The first optimization DASTAC applies is MLIR’s function inlining, inline.
+This is done to expose the quasi-polynomials arithmetic directly in the loop nest, allowing to
+share computations and hoisting of different parts as high as possible, amortizing their theoretical
+computational cost.
+Lowering Affine. The first conversion to execute is from affine operations to arithmetic operations,
+implementing them through the lower-affine pass exposed by MLIR. This will expand all affine
+map applications, loop bounds, conditions, and accesses to as many basic arithmetic operations as
+necessary to correctly implement them.
+Generic Optimizations. CSE is directly applied to the resulting IR. Amongst the different affine
+and quasipolynomial expressions used in the computation, all expressed on the same iterators and
+symbols, there are potentially a lot of common sub-expressions. By applying it directly at this level,
+we allow more opportunities than expecting another lower-level compiler to analyze simplification
+safety again. The subsequent critical optimization is canonicalization, a collection of individual
+standard optimizations. In this case, we are primarily interested in its constant folding in case any
+opportunity is open.
+Loop Invariant Code Motion. Finally, DASTAC uses loop-invariant-code-motion to hoist all
+arithmetic operations as high as possible in the loop nest, leaving only minimal iteration arithmetic
+in the innermost loop to maximize auto-vectorization opportunities.
+6
+EXPERIMENTAL RESULTS
+In this section, we experimentally evaluate our system on a set of application-driven selected
+kernels. We study the following questions:
+• How does DASTAC perform compared to the state-of-the-art tensor algebra frameworks in
+single- and multi-threaded environments?
+• How does the automatic memory compression impact the allocated memory footprint? How do
+different compression levels improve performance?
+• Can DASTAC support complicated structures (e.g., block butterfly factor matrix [Chen et al.
+2022])? How does the structure’s complexity impact the compression, run time, and compilation
+time?
+• How does DASTAC scale on various numbers of threads in comparison to state-of-the-art tensor
+algebra frameworks?
+• What is the impact of applying various optimizations compared to the StructTensor? Can
+state-of-the-art backends (e.g., Polygeist) recover DASTAC’s optimizations?
+6.1
+Experimental Setup
+We use a server running Ubuntu 22.04 LTS equipped with a 10-core 2.2 GHz Intel Xeon Silver 4210
+CPU with one thread per core and 220 GB of main memory. The server has 32 KB, 1 MB, and 13.8
+MB of level 1, 2, and 3 cache, respectively. All C++ code is compiled with Clang 18.0.0 using the
+following flags:
+− s t d = c ++17 −O3 −fopenmp − f f a s t −math − f t r e e − v e c t o r i z e −march= n a t i v e −mtune= n a t i v e
+MLIR code is lowered with the pass pipeline:
+b u i l t i n . module ( c a n o n i c a l i z e , c s e , a f f i n e − expand − i n d e x − ops , lower − a f f i n e , f i n a l i z e −memref − to − llvm ,
+c a n o n i c a l i z e , c s e , l o o p − i n v a r i a n t − code − motion , c o n v e r t − a r i t h − to − llvm , c o n v e r t − s c f − to −openmp , c a n o n i c a l i z e ,
+Compressing Structured Tensor Algebra
+13
+Table 1. Information on the kernels used for the end-to-end benchmarks.
+Kernel
+TTM
+𝐴(𝑖, 𝑗, 𝑘 ) := 𝐵 (𝑖, 𝑗, 𝑙 ) ∗ 𝐶 (𝑘, 𝑙 )
+THP
+𝐴(𝑖, 𝑗, 𝑘 ) := 𝐵 (𝑖, 𝑗, 𝑘 ) ∗ 𝐶 (𝑖, 𝑗, 𝑘 )
+MTTKRP
+𝐴(𝑖, 𝑗 ) := 𝐵 (𝑖, 𝑘, 𝑙 ) ∗ 𝐶 (𝑘, 𝑗 ) ∗ 𝐷 (𝑙, 𝑗 )
+SpMV
+𝐴(𝑖 ) := 𝐵 (𝑖, 𝑗 ) ∗ 𝐶 ( 𝑗 )
+Polynomial Regression Degree-D
+𝐴2 , . . . , 𝐴2𝐷 where
+𝐴𝑘 (𝑖 1 , . . . , 𝑖𝑘 ) := 𝐵 (𝑥, 𝑖 1 ) ∗ . . . ∗ 𝐵 (𝑥, 𝑖𝑘 )
+Structure of 𝐵
+Diagonal (plane)
+Fixed 𝑗
+Upper half cube (UHC)
+Diagonal (plane)
+Fixed 𝑖
+Fixed 𝑗
+Diagonal
+Fixed 𝑗 & UHC
+Fixed 𝑗
+Leslie
+Upper triangular
+Diagonal
+Dense, First Dimension Size = 100000
+Dense, First Dimension Size = 10000
+Dense, First Dimension Size = 2000
+Name
+TTM_DP
+TTM_J
+TTM_UT
+THP_DP
+THP_I
+THP_J
+MTT_D
+MTT_JUT
+MTT_J
+SpMV_L
+SpMV_UT
+SpMV_D
+PR2
+PR3
+PR4
+Compile Time (s)
+0.31
+0.31
+0.35
+0.32
+0.30
+0.30
+0.30
+0.33
+0.33
+0.30
+0.30
+0.28
+0.47
+1.76
+43.18
+c o n v e r t − s c f − to − c f , c o n v e r t − func − to − llvm , c o n v e r t − c f − to − llvm , c o n v e r t −openmp− to − llvm , r e c o n c i l e − u n r e a l i z e d − c a s t s )
+DASTAC does not use tiling, as we did not observe a major benefit (cf. Section 6.6).
+As a competitor, we use Polygeist [Moses et al. 2021] to activate out-of-the-box MLIR code
+generation, polyhedral optimizations (e.g., tiling), and parallelization on top of StructTensor,
+since StructTensor lacks such optimizations as it is. Polygeist is shown to have a better single- and
+multi-threaded performance [Moses et al. 2021] compared to other tools such as Pluto [Bondhugula
+et al. 2008] and Polly [Grosser et al. 2012]. Polygeist transforms a C code generated based on the
+inferred structure by StructTensor to MLIR with the following lowering pipeline:
+−− c a n o n i c a l i z e −− c s e −− a f f i n e − expand − i n d e x − ops −− a f f i n e − p a r a l l e l i z e −− a f f i n e − l o o p − t i l e −− a f f i n e − l o o p −
+i n v a r i a n t − code − motion −− c a n o n i c a l i z e −− c s e −− lower − a f f i n e −− l o o p − i n v a r i a n t − code − motion −− c o n v e r t − s c f − to −
+openmp −− c o n v e r t − p o l y g e i s t − to − l l v m −− c a n o n i c a l i z e −− c s e −− l o o p − i n v a r i a n t − code − motion −− c a n o n i c a l i z e −− c s e
+The lowered code goes through Clang with identical flags to generate executable binary files.
+For all experiments, the average run time of three runs is reported, as the numbers were stable.
+All experiments are evaluated using a warm cache. Cache counters are measured using PAPI
+7.1 [Laboratory 2023]. As the competitors, we use the latest version of TACO1 [Kjolstad et al. 2017],
+NumPy 1.26.0 [Harris et al. 2020], PyTorch 2.0 [Paszke et al. 2019], and TensorFlow 2.14.0 [Abadi
+et al. 2015] with the XLA backend. All the Python frameworks are run using Python 3.10.13. A dense
+implementation of the kernels does not leverage any structure and has been shown to perform
+worse than both sparse and dense tensor algebra frameworks [Ghorbani et al. 2023]; hence, we do
+not evaluate DASTAC against it.
+Table 1 shows kernel information (including the ones used in StructTensor [Ghorbani et al.
+2023]) with their structure, compilation time (time required for generating MLIR code using
+DASTAC), and the name we used for them on the plots. This experimental setup has been used
+previously for StructTensor [Ghorbani et al. 2023], a state-of-the-art structured tensor compiler.
+All the experiments except for the three kernels SpMV_D, SpMV_L, and MTT_D fit in the cache.
+Table 2 lists the kernels used in our experiments and their input structure representation. For TACO,
+we picked the best data layout according to the input structure for each kernel (cf. Table 2).
+6.2
+End-to-End Experiments
+In this subsection, we evaluated the performance of DASTAC against the best alternative of
+StructTensor (w/ and w/o manual input data layout compression), TACO with the best structure
+for each kernel, and the best run time of Polygeist applied on the output of StructTensor (w/ and
+1 https://github.com/tensor-compiler/taco/tree/2b8ece4c230a5f
+14
+Mahdi Ghorbani, Emilien Bauer, Tobias Grosser, Amir Shaikhha
+Table 2. Tensor kernels for DASTAC evaluation. In MTT_J, 𝑗 is fixed for 𝐷. In MTT_D, 𝑙 = 𝑗 too.
+Kernel
+TTM_DP
+TTM_J
+TTM_UT
+THP_DP
+THP_I
+THP_J
+MTT_D
+MTT_JUT
+MTT_J
+SpMV_L
+SpMV_UT
+SpMV_D
+𝐵𝑈 in STUR
+(0 ≤ 𝑖 < 𝑛𝑖 ) ∗ (𝑖 = 𝑗 ) ∗ (0 ≤ 𝑙 < 𝑛𝑙 )
+(0 ≤ 𝑖 < 𝑛𝑖 ) ∗ ( 𝑗 = 𝐽 ) ∗ (0 ≤ 𝑙 < 𝑛𝑙 )
+(0 ≤ 𝑖 < 𝑛𝑖 ) ∗ (𝑖 ≤ 𝑗 < 𝑛 𝑗 ) ∗ (0 ≤ 𝑙 < 𝑛𝑙 )
+(0 ≤ 𝑖 < 𝑛𝑖 ) ∗ (𝑖 = 𝑗 ) ∗ (0 ≤ 𝑙 < 𝑛𝑙 )
+(𝑖 = 𝐼 ) ∗ (0 ≤ 𝑗 < 𝑛 𝑗 ) ∗ (0 ≤ 𝑙 < 𝑛𝑙 )
+(0 ≤ 𝑖 < 𝑛𝑖 ) ∗ ( 𝑗 = 𝐽 ) ∗ (0 ≤ 𝑙 < 𝑛𝑙 )
+(𝑖 = 𝑘 = 𝑙 ) ∗ (0 ≤ 𝑖 < 𝑛𝑖 )
+(0 ≤ 𝑖 < 𝑘 ) ∗ (0 ≤ 𝑘 < 𝑛𝑘 ) ∗ (0 ≤ 𝑙 < 𝑛𝑙 )
+(0 ≤ 𝑖 < 𝑛𝑖 ) ∗ (0 ≤ 𝑘 < 𝑛𝑘 ) ∗ (0 ≤ 𝑙 < 𝑛𝑙 )
+(𝑖 = 0) ∗ (0 ≤ 𝑗 < 𝑛 𝑗 ) + (1 ≤ 𝑖 < 𝑛𝑖 ) ∗ ( 𝑗 = 𝑖 − 1)
+(0 ≤ 𝑖 < 𝑛𝑖 ) ∗ (𝑖 ≤ 𝑗 < 𝑛 𝑗 )
+(0 ≤ 𝑖 < 𝑛𝑖 ) ∗ (𝑖 = 𝑗 )
+TACO Data Layout
+(𝐷, 𝑆, 𝐷 ) ∗ (𝐷, 𝐷 ) → (𝐷, 𝑆, 𝐷 )
+(𝐷, 𝑆, 𝐷 ) ∗ (𝐷, 𝐷 ) → (𝐷, 𝑆, 𝐷 )
+(𝐷, 𝑆, 𝐷 ) ∗ (𝐷, 𝐷 ) → (𝐷, 𝑆, 𝐷 )
+(𝐷, 𝑆, 𝐷 ) ∗ (𝐷, 𝐷, 𝐷 ) → (𝐷, 𝑆, 𝐷 )
+(𝑆, 𝐷, 𝐷 ) ∗ (𝐷, 𝐷, 𝐷 ) → (𝑆, 𝐷, 𝐷 )
+(𝐷, 𝑆, 𝐷 ) ∗ (𝐷, 𝐷, 𝐷 ) → (𝐷, 𝑆, 𝐷 )
+(𝐷, 𝑆, 𝑆 ) ∗ (𝐷, 𝐷 ) ∗ (𝐷, 𝑆 ) → (𝐷, 𝑆 )
+(𝐷, 𝑆, 𝐷 ) ∗ (𝐷, 𝐷 ) ∗ (𝐷, 𝑆 ) → (𝐷, 𝑆 )
+(𝐷, 𝐷, 𝐷 ) ∗ (𝐷, 𝐷 ) ∗ (𝐷, 𝑆 ) → (𝐷, 𝑆 )
+(𝐷, 𝑆 ) ∗ (𝐷 ) → (𝐷 )
+(𝐷, 𝑆 ) ∗ (𝐷 ) → (𝐷 )
+(𝐷, 𝑆 ) ∗ (𝐷 ) → (𝐷 )
+w/o manual input and output data compression, w/ and w/o tiling) on all the kernels (cf. Table 2) in
+single- and multi-threaded environments.
+The number of floating point operations (FLOPs) is computed by multiplying the number of
+structure-aware iterations for each kernel by the summation of the number of additions and multiplications in that kernel. We used the structure-aware FLOPs since all the systems are leveraging
+the structure. We set a timeout of ten seconds for all frameworks. All the dense frameworks timed
+out on all kernels except SpMV with an upper triangular structure and half of TTM with an upper
+triangular structure. Therefore, we do not include them in any of the figures. The missing points
+for TACO are due to timeout (for polynomial regression kernels) or segmentation fault because of
+excessive memory allocation (other kernels). On MTT_D, all competitors had a segmentation fault
+(excessive memory allocation) for sizes bigger than 120000.
+Multi-Thread. Figure 10 compares the performance of each framework’s best version. Static
+schedule is used for all the experiments. We only show the single-threaded performance results for
+systems that do not support parallelism (TACO2 for all kernels except SpMV and StructTensor).
+As shown in Figure 10, DASTAC performs significantly better than all the competitors while running
+on multi threads. Overall, compared to the competitors, DASTAC can get up to 50× performance
+enhancement.
+In all scenarios, StructTensor stands in second place from the performance perspective despite
+lacking parallelization. This shows the importance of capturing data structure and having an
+efficient algorithm that leverages this information. TACO’s code cannot be parallelized on any of
+the kernels, except SpMV, which leads to slower performance. Polygeist automatic parallelization
+fails to parallelize the code in most cases. The reason behind it is discussed in Section 6.5. In the
+polynomial regression kernels, TACO times out, Polygeist parallelization descales, and StructTensor is running on a single thread; hence, their performance is significantly diminished. DASTAC
+outperforms them by leveraging the flexibility and efficacy of sparse tensor algebra algorithms and
+merging them with optimizations and specializations provided by dense tensor algebra through
+polyhedral techniques. Combined with parallelization, these techniques lead to up to 1 to 2 orders
+of magnitude performance boost compared to structure-aware competitors.
+Single-Thread. Figure 11 represents the performance of all frameworks running on a single thread.
+DASTAC performs on par or outperforms all competitors in almost all cases while running on
+a single thread. TACO and StructTensor achieve closely to DASTAC since they also leverage
+the structure. However, DASTAC manages to outperform them in most cases (by up to 1 order of
+magnitude) by having a better memory layout, leading to better cache locality and vectorization.
+The downward slope on some kernels (e.g., TTM_DP and TTM_J) is due to increased cache
+miss rate (from 0.2% to 12.6% for TTM_DP and from 0.2% to 13.2% for TTM_J) by increasing the
+2 TACO parallelization problem is mentioned in this GitHub issue: The link is removed due to anonymization.
+Compressing Structured Tensor Algebra
+StructTensor
+GFLOP/s
+50
+15
+StructTensor + Polygeist
+GFLOP/s
+50
+TTM: Diagonal
+TACO
+DASTAC
+GFLOP/s
+TTM: Fixed j
+TTM: Upper Trinagular
+30
+40
+40
+25
+30
+30
+20
+20
+20
+10
+10
+0
+0
+15
+10
+1000
+1100
+1200
+1300
+Dimension Size
+GFLOP/s
+THP: Digonal
+1400
+6
+5
+1000
+1100
+1200
+1300
+Dimension Size
+GFLOP/s
+THP: Fixed i
+1400
+0
+400
+450
+500
+550
+Dimension Size
+GFLOP/s
+THP: Fixed j
+6
+6
+4
+4
+2
+2
+2
+0
+0
+4
+1000
+1100
+1200
+1300
+Dimension Size
+1400
+GFLOP/s MTTKRP: i < k & Fixed j
+1000
+1100
+1200
+1300
+Dimension Size
+GFLOP/s
+MTTKRP: Diagonal
+1400
+1000
+GFLOP/s
+12
+1100
+1200
+1300
+Dimension Size
+1400
+MTTKRP: Fixed j
+20
+10
+15
+15
+8
+10
+6
+4
+10
+5
+5
+0
+120000 130000 140000 150000 160000
+Dimension Size
+0
+2
+0
+0
+600
+1000
+1100
+1200
+1300
+Dimension Size
+GFLOP/s
+1400
+GFLOP/s
+SpMV: Leslie
+1000
+1100
+1200
+1300
+Dimension Size
+1400
+GFLOP/sSpMV: Upper Triangular
+SpMV: Diagonal
+8
+20
+15.0
+12.5
+15
+6
+10.0
+10
+4
+7.5
+5.0
+5
+2
+2.5
+0
+120000 130000 140000 150000 160000
+Dimension Size
+GFLOP/s
+0.0
+120000 130000 140000 150000 160000
+Dimension Size
+GFLOP/s
+PR2
+12.5
+25
+10.0
+20
+7.5
+15
+5.0
+10
+2.5
+5
+0.0
+6
+8
+10
+12
+Dimension Size
+14
+0
+0
+35000
+37500 40000 42500
+Dimension Size
+GFLOP/s
+PR3
+45000
+PR4
+15
+10
+5
+6
+8
+10
+12
+Dimension Size
+14
+0
+6
+8
+10
+12
+Dimension Size
+14
+Fig. 10. Performance comparison of various frameworks on ten threads on several structured tensor kernels.
+In almost all cases, DASTAC shows significantly better performance in comparison with all other competitors.
+size (cache miss rate is measured through PAPI for all experiments, but not shown due to space
+constraints). The generated code by Polygeist fails to outperform DASTAC despite leveraging
+the structure, manual data layout compression, and having out-of-the-box polyhedral and MLIR
+optimizations. This shows that using Polygeist to recover affine structure from a lower-level code
+and applying such optimizations out-of-the-box without a higher-level analysis does not benefit
+the performance.
+16
+Mahdi Ghorbani, Emilien Bauer, Tobias Grosser, Amir Shaikhha
+StructTensor
+GFLOP/s
+StructTensor + Polygeist
+GFLOP/s
+TTM: Diagonal
+5
+5
+4
+4
+3
+3
+2
+2
+1
+1
+0
+0
+TACO
+DASTAC
+GFLOP/s TTM: Upper Trinagular
+TTM: Fixed j
+6
+4
+2
+1000
+1100
+1200
+1300
+Dimension Size
+GFLOP/s
+1400
+1000
+1100
+1200
+1300
+Dimension Size
+GFLOP/s
+THP: Digonal
+1400
+0
+0.8
+0.8
+0.6
+0.6
+0.6
+0.4
+0.4
+0.4
+0.2
+0.2
+0.2
+0.0
+0.0
+GFLOP/s
+1100
+1200
+1300
+Dimension Size
+1400
+1000
+GFLOP/s
+MTTKRP: i < k & Fixed j
+1100
+1200
+1300
+Dimension Size
+1400
+1.5
+1100
+1200
+1300
+Dimension Size
+MTTKRP: Fixed j
+1.5
+1.0
+0.5
+0.5
+1000
+1100
+1200
+1300
+Dimension Size
+GFLOP/s
+1400
+SpMV: Leslie
+0.5
+0.0
+120000 130000 140000 150000 160000
+Dimension Size
+0.0
+GFLOP/s
+GFLOP/s
+SpMV: Diagonal
+2.0
+1.5
+1100
+1200
+1300
+Dimension Size
+SpMV: Upper Triangular
+0.5
+0.5
+0.0
+120000 130000 140000 150000 160000
+Dimension Size
+0.0
+120000 130000 140000 150000 160000
+Dimension Size
+0.0
+35000
+GFLOP/s
+4
+GFLOP/s
+GFLOP/s
+0.5
+PR2
+PR3
+12
+3
+2
+1
+8
+10
+12
+Dimension Size
+14
+10
+8
+8
+6
+6
+4
+4
+0
+37500 40000 42500
+Dimension Size
+45000
+PR4
+12
+10
+2
+6
+1400
+1.0
+1.0
+1.0
+1000
+1.5
+1.5
+0
+1400
+2.0
+1.0
+1.0
+0.0
+1000
+2.5
+1.5
+2.0
+0.0
+600
+THP: Fixed j
+GFLOP/s
+MTTKRP: Diagonal
+2.0
+2.5
+450
+500
+550
+Dimension Size
+GFLOP/s
+THP: Fixed i
+0.8
+1000
+400
+2
+6
+8
+10
+12
+Dimension Size
+14
+0
+6
+8
+10
+12
+Dimension Size
+14
+Fig. 11. Performance comparison of various frameworks on one thread on several structured tensor kernels.
+In all cases, DASTAC performs on par or better than StructTensor (w/ and w/o Polygeist).
+6.3
+Memory Compression
+Impact of Compression on Memory Footprint. We evaluate the impact of the memory compression technique used by DASTAC in comparison to an implementation without compression and
+StructTensor’s manual input compression on six different structures: 1) TTM_UT, 2) SpMV_UT,
+3) SpMV_L, 4) TTM_J, 5) THP_DP, and 6) MTT_D (cf. Table 2). We calculate the allocated memory
+for each structured kernel based on the number of elements allocated for all input and output
+tensors. The implementation without compression allocates memory for all the elements of the
+tensors. StructTensor reduces the allocated memory to unique elements of the input based on the
+Compressing Structured Tensor Algebra
+17
+Compression Rate
+107
+106
+2.5e7
+No Compression
+StructTensor
+DASTAC
+105
+104
+1e4
+6.67e3
+2.5e3 2.5e3
+5e3
+103
+102
+101
+100
+1.33
+1
+2
+1
+2
+2
+TTM: Upper Triangular SpMV: Upper Triangular
+2
+1
+1
+SpMV: Leslie
+TTM: Fixed j
+1
+1.5
+1
+THP: Diagonal
+MTTKRP: Diagonal
+Fig. 12. Evaluation of compression impact on memory footprint of DASTAC and StructTensor against
+an implementation with no compression. The dimension size for all kernels is 10000. DASTAC reaches the
+maximum compression on all tensors for each kernel, while StructTensor often does a sub-optimal job.
+Speed-up
+Comparison of the Impact of Different Compression Levels on DASTAC
+61
+101
+DASTAC (w/o Compression)
+DASTAC (w/ Input Compression)
+DASTAC (w/ Input & Output Compression)
+38.538.7
+25
+8.1
+2.6 2.7
+100
+24.3
+23.8 24
+10.8
+0.9
+TTM_DP
+TTM_J
+TTM_UT
+1.2 1.3
+1.2 1.3
+1.2 1.3
+THP_DP
+THP_I
+THP_J
+MTT_JIK
+2.6 2.7
+MTT_D
+MTT_J
+SpMV_L SpMV_UT SpMV_D
+PR2
+PR3
+PR4
+Fig. 13. Evaluation of the impact of different levels of compression on the performance of DASTAC.
+structure and all output elements. DASTAC has a better understanding of compression based on
+the compressed tensor computation and keeps only the elements required for tensor computation
+in both inputs and output. Therefore, even if a tensor is dense, but some of its elements are not
+used in the computation, DASTAC compresses the tensor so that unused elements are not stored.
+All dimensions for all kernels are considered to be 10000. The compression rate on the y-axis
+of Figure 12 is the memory allocated by the implementation without compression divided by the
+memory allocated by other systems. The higher compression rate leads to less memory complexity.
+Most elements are unique in kernels such as TTM_UT and SpMV_UT; therefore, the compression
+rate is low. Kernels such as SpMV_UT and SpMV_L only need the input tensors to be compressed
+since all the output elements are available and unique; hence, StructTensor and DASTAC have the
+same compression rate. In all other cases, input and output tensors require compression in an ideal
+scenario. In several kernels, there are unique elements that are not used in the tensor computation
+(e.g., MTT_D). Since DASTAC performs computationally structure-aware compression on these
+kernels, DASTAC’s compression rate is significantly higher than StructTensor.
+Impact of Different Levels of Compression. Figure 13 shows that each level of compression
+improves the performance for the majority of kernels. Compressing the input has no impact on
+polynomial regression cases since the input is fully dense. In TTM cases, compression cannot
+improve the cache locality and the cache miss rate stays the same even after compression, hence,
+the performance is similar to uncompressed code.
+In the tensor computations where the input compression significantly reduces the memory
+footprint, which leads to a significantly better cache miss rate, output compression has a minimal
+impact. On the other hand, in tensor expressions where the input is dense or compression over
+only the input cannot improve the cache accesses significantly, output compression has a larger
+impact on enhancing the performance.
+18
+Mahdi Ghorbani, Emilien Bauer, Tobias Grosser, Amir Shaikhha
+...
+GFLOP/s
+0.8
+Cache Miss Rate (%)
+100
+102
+80
+0.6
+60
+0.4
+40
+0.2
+20
+0.0
+0
+20 21 22 23 24 25 26 27 28 29 210
+Number of Summands
+Compile Time (s)
+w/o Compression
+w/ Compression
+101
+100
+20 21 22 23 24 25 26 27 28 29 210
+Number of Summands
+20 21 22 23 24 25 26 27 28 29 210
+Number of Summands
+Fig. 14. Evaluation of connection between compression impact and the number of summands using DASTAC.
+A scaled version of the used structure for this experiment is shown on top.
+6.4
+Impact of Structure’s Complexity on Compression
+In this section, we introduce four new complex structures to study the impact of structure complexity
+on DASTAC’s compression technique: 1) strided diagonal to study the impact of the number of
+summands in a tensor operation, 2) block butterfly factor matrix to study the impact of the number
+of the polyhedrals in the structure, 3) strided band to study the impact of distance of elements, and
+4) sub-triangular to study the impact of density.
+Number of Summands in Tensor Computation and Compression. To measure the connection
+between these two factors (cf. Figure 14), we consider the following tensor computation:
+Í𝑝
+𝑤
+𝑤
+𝐴(𝑖, 𝑘) :=
+𝑤=1 𝐵 (𝑖, 𝑗) ∗ 𝐶 (𝑖, 𝑘)
+where 𝐵 and 𝐶 have a strided diagonal structure with a random stride. In other words:
+𝐵𝑈𝑤 (𝑖, 𝑗) := (0 ≤ 𝑖 < 𝑁 ) ∗ (0 ≤ 𝑗 < 𝑁 ) ∗ (( 𝑗 − 𝑖)%𝑁 = 𝑠𝐵𝑤 )
+The size 𝑁 is fixed to 214 here, and the stride 𝑠𝐵𝑤 is selected randomly for each tensor. The output
+of each of these multiplications is a strided diagonal with stride 𝑠𝐵𝑤 + 𝑠𝐶𝑤 . We vary the number
+of summands from 1 to 210 in powers of 2. More summands result in longer compilation time.
+Generating code for the compressed version takes longer than without compression since the
+compression indexing should be computed for more summands. For the compressed version, as
+the size increases, the number of elements fitting in the cache decreases since the compression
+cannot compensate anymore; therefore, the cache miss rate goes from almost 0 to almost 100%.
+The performance starts dropping on the same size that the cache miss rate starts increasing.
+The generated code without compression has a consistent cache miss rate around 60%, and its
+performance is also consistently low. This is due to not caching because of high sparsity.
+Number of Polyhedrals and Compression. To measure the connection between these two
+factors (cf. Figure 15), we considered a SpMV computation where the matrix dimension is 214 and
+has a block butterfly factor matrix [Chen et al. 2022]. The structure is as follows:
+𝐵𝑈 (𝑥, 𝑦) := (0 ≤ 𝑖 < 𝑏) ∗ (0 ≤ 𝑗 < 𝑏) ∗ (0 ≤ 𝑠 < 𝑘/2) ∗ (0 ≤ 𝑐 < 2) ∗ (0 ≤ 𝑑 < 2)∗
+𝑑∗𝑏∗𝑘
+(0 ≤ 𝑟 < 𝑛𝑘 ) ∗ (𝑥 = 𝑟 ∗ 𝑘 ∗ 𝑏 + ( 𝑐∗𝑏∗𝑘
+2 ) + 𝑏 ∗ 𝑠 + 𝑖) ∗ (𝑦 = 𝑟 ∗ 𝑘 ∗ 𝑏 + ( 2 ) + 𝑏 ∗ 𝑠 + 𝑗)
+10
+4
+Matrix 𝐵 is an 𝑛𝑏 × 𝑛𝑏 matrix. We set 𝑛 = 2 and 𝑏 = 2 . To vary the number of polyhedrals, we
+unroll this unique set over the variables 𝑐, 𝑑, and 𝑠 and write it as a summation/union format. We
+also change the value of 𝑘 from 2 to 210 in powers of two. This way, the matrix size and density
+stay exactly the same. However, the underlying structure and the number of polyhedrals change.
+Therefore, we can measure the impact of changing the number of polyhedrals alone without other
+factors interfering. The number of polyhedrals is 2𝑘. Increasing the number of polyhedrals increases
+Compressing Structured Tensor Algebra
+GFLOP/s
+19
+Cache Miss Rate (%)
+Compile Time (ms)
+60
+5
+4
+w/o Compression
+w/ Compression
+102
+50
+40
+3
+101
+30
+2
+20
+1
+10
+0
+0
+22
+23
+24 25 26 27 28 29 210
+Number of Polyhedrals
+100
+22
+23
+24 25 26 27 28 29 210
+Number of Polyhedrals
+22
+23
+24 25 26 27 28 29 210
+Number of Polyhedrals
+Fig. 15. Evaluation of connection between compression impact and the number of polyhedrals using DASTAC.
+A scaled version of the used structure for this experiment is shown on top.
+GFLOP/s
+6
+5
+Cache Miss Rate (%)
+w/o Compression
+w/ Compression
+60
+4
+40
+3
+2
+20
+1
+0
+20 21 22 23 24 25 26 27 28 29 210 211 212 213 214 215 216
+Stride
+0
+20 21 22 23 24 25 26 27 28 29 210 211 212 213 214 215 216
+Stride
+Fig. 16. Evaluation of connection between compression impact and stride of the matrix using DASTAC. A
+scaled version of the used structure for this experiment is shown on top.
+the compilation time for compressed and uncompressed code generation with a similar slope. The
+cache miss rate for the compressed version increases by increasing the number of polyhedrals
+since the data is compressed in several buffers rather than fewer contiguous buffers; hence the
+performance drops. The cache miss rate and performance are consistent for the uncompressed
+version. The cache miss rate is lower than the compressed version because the iteration space
+already traverses 𝑏 × 𝑏 blocks, and compression disrupts the contiguous nature of the buffer.
+Distance of Elements and Compression. To measure the connection between these two factors
+(cf. Figure 16), we considered a SpMV computation where the matrix dimension is 216 and has a
+strided band matrix structure. The structure is as follows:
+𝐵𝑈 (𝑖, 𝑗) := (0 ≤ 𝑖 < 𝑁 ) ∗ ( 𝑗 = 𝑖) + (0 ≤ 𝑖 < 𝑁 ) ∗ ( 𝑗 − 𝑖 = 𝑠) + (0 ≤ 𝑖 < 𝑁 ) ∗ (𝑖 − 𝑗 = 𝑠)
+We vary the stride 𝑠 from 1 (tridiagonal) to 216 (diagonal). By increasing 𝑠, the number of elements
+is reduced but their distance is increased. The compressed version mostly fits in the cache and is
+only impacted by the number of elements. The fewer the elements, the higher the performance
+and the lower the cache miss rate for the compressed version. The uncompressed version’s cache
+miss rate increases as the distance of the elements increases. However, when the distance reaches
+beyond 212 , the impact of the decrease in the number of elements helps the cache miss rate to drop.
+Both versions reach maximum performance when the matrix is diagonal.
+20
+Mahdi Ghorbani, Emilien Bauer, Tobias Grosser, Amir Shaikhha
+GFLOP/s
+Cache Miss Rate (%)
+100
+6
+5
+80
+4
+60
+3
+w/o Compression
+w/ Compression
+40
+2
+20
+1
+0
+26
+27
+28
+29
+210
+211
+Triangle Size
+212
+213
+214
+0
+26
+27
+28
+29
+210
+211
+Triangle Size
+212
+213
+214
+Fig. 17. Evaluation of connection between compression impact and the density of the matrix using DASTAC.
+A scaled version of the used structure for this experiment is shown on top.
+Density and Compression. To measure the connection between these two factors (cf. Figure 17),
+we considered a SpMV computation where the matrix dimension is 214 and has a sub-triangular
+structure, meaning that the shape is triangular but only contains a subset of a upper triangular
+matrix. The structure is as follows:
+𝐵𝑈 (𝑖, 𝑗) := (0 ≤ 𝑖 < 𝑁 ) ∗ (0 ≤ 𝑗 < 𝑁 ) ∗ ( 𝑗 − 𝑖 ≥ 𝑁 − 𝑘)
+Here, 𝑘 is the size of the triangle. We vary 𝑘 from 26 to 214 in powers of two. Up to 𝑘 = 29 , the
+density is low enough to keep all the elements in the cache for the compressed version. Both cases
+have their best performance on 𝑘 = 29 . After that point, the density and number of elements become
+larger, hence the compression technique starts losing its benefit compared to uncompressed code.
+They finally merge into the same cache miss rate and the same performance when the matrix is
+upper triangular (𝑘 = 214 ).
+6.5
+Parallelization Scalability
+We evaluate the DASTAC’s ability to scale on all kernels mentioned in Table 2 by varying the
+number of threads from one to ten (cf. Figure 18). A considerably large size is selected for all kernels
+to ensure that the frameworks do not timeout or generate errors (e.g., segmentation fault). The
+scaling factor on the y-axis shows the speed-up of each framework compared to running them
+sequentially. As shown in Figure 18, DASTAC can scale almost linearly in most cases by increasing
+the number of threads. In nearly all cases, DASTAC scales on par or better than state-of-the-art
+tensor algebra frameworks. In several THP, MTTKRP, and SpMV kernels, DASTAC reaches an
+almost linear speed-up compared to running it on one thread. TACO only parallelizes on SpMV
+kernels. StructTensor and All other kernels of TACO can not be run in parallel; therefore, they do
+not scale by varying the number of threads. Only DASTAC can consistently scale up on all kernels.
+PyTorch fails to scale on polynomial regression kernels, NumPy fails to scale on THP kernels, and
+TensorFlow fails to scale on SpMV_UT and SpMV_D. Polygeist does not scale or even de-scales on
+the majority of kernels. The automatic parallelization provided by Polygeist leads to parallelizing
+inner loops and not the outer loops on a majority of kernels. This increases overhead while running
+on more threads, which leads to a decrease in performance. Furthermore, the code generated by
+Polygeist for SpMV_D kernel shows an abnormal behavior on the lower number of threads, which
+appeared on a range of sizes.
+Compressing Structured Tensor Algebra
+Linear
+StructTensor
+Speed-up
+21
+StructTensor + Polygeist
+Speed-up
+TTM: Diagonal
+TACO
+NumPy
+PyTorch
+TTM: Fixed j
+10
+10
+10
+8
+8
+8
+6
+6
+6
+4
+4
+4
+2
+2
+1
+2
+Speed-up
+3 4 5 6 7 8
+Number of Threads
+9
+10
+2
+3 4 5 6 7 8
+Number of Threads
+9
+10
+1
+10
+10
+8
+8
+8
+6
+6
+6
+4
+4
+4
+2
+2
+2
+3 4 5 6 7 8
+Number of Threads
+9
+10
+2
+3 4 5 6 7 8
+Number of Threads
+9
+10
+1
+Speed-up
+10
+10
+10
+8
+8
+8
+10
+9
+10
+9
+10
+THP: Fixed j
+3 4 5 6 7 8
+Number of Threads
+MTTKRP: Fixed j
+6
+4
+4
+2
+2
+2
+Speed-up
+MTTKRP: Diagonal
+6
+4
+9
+0
+1
+Speed-upMTTKRP: i < k & Fixed j
+6
+3 4 5 6 7 8
+Number of Threads
+2
+0
+1
+2
+Speed-up
+THP: Fixed i
+10
+0
+MLIR
+2
+1
+Speed-up
+THP: Digonal
+TensorFlow
+Speed-up TTM: Upper Trinagular
+2
+0
+1
+2
+Speed-up
+3 4 5 6 7 8
+Number of Threads
+9
+10
+1
+2
+Speed-up
+SpMV: Leslie
+3 4 5 6 7 8
+Number of Threads
+9
+10
+1
+10
+10
+8
+8
+8
+6
+6
+6
+4
+4
+2
+2
+2
+3 4 5 6 7 8
+Number of Threads
+Speed-upSpMV: Upper Triangular
+SpMV: Diagonal
+10
+4
+2
+0
+1
+2
+Speed-up
+3 4 5 6 7 8
+Number of Threads
+9
+10
+1
+2
+Speed-up
+PR2
+3 4 5 6 7 8
+Number of Threads
+9
+10
+1
+Speed-up
+PR3
+10
+10
+10
+8
+8
+8
+6
+6
+6
+4
+4
+4
+2
+2
+2
+3 4 5 6 7 8
+Number of Threads
+9
+10
+3 4 5 6 7 8
+Number of Threads
+9
+10
+9
+10
+PR4
+2
+0
+1
+2
+1
+2
+3 4 5 6 7 8
+Number of Threads
+9
+10
+0
+1
+2
+3 4 5 6 7 8
+Number of Threads
+Fig. 18. Comparison of the speed-up scaling of various frameworks on different numbers of threads on
+several structured tensor operation kernels. In almost all cases, DASTAC scales on par or better than the
+state-of-the-art tensor algebra frameworks.
+6.6
+Polygeist Performance Using the Structure
+Figure 19 shows that manually compressing both input and output almost always improves the
+performance, except for the cases with a hyper triangular structure, where the compression damages
+locality. Converting the manually compressed code to Polygeist is usually not helpful and in several
+cases, it causes performance degradation by removing the existing optimization opportunities for
+22
+Mahdi Ghorbani, Emilien Bauer, Tobias Grosser, Amir Shaikhha
+Speed-up
+Compression Impact Comparison Across Various Systems
+2.7
+101
+StructTensor (w/ Manual Input Compression)
+StructTensor (w/ Manual Input & Output Compression)
+StructTensor + Polygeist (w/ Manual Input & Output Compression)
+DASTAC (w/ Automatic Input & Output Compression)
+100
+0.80.8
+0.3
+TTM_DP
+0.3
+TTM_J
+9.9
+6.9
+4.3
+2.22.2
+0.90.9
+0.8
+0.80.8
+0.8
+0.4
+0.4
+0.3
+0.3
+TTM_UT
+THP_DP
+THP_I
+THP_J
+0.3
+0.2
+MTT_JIK
+MTT_D
+0.2
+MTT_J
+0.2
+SpMV_L
+SpMV_UT
+SpMV_D
+PR2
+PR3
+PR4
+Fig. 19. Evaluation of the impact of different systems’ compression techniques on the performance.
+Speed-up
+1.5
+Tiling Impact Comparison
+1.4
+StructTensor + Polygeist (w/o Tiling)
+StructTensor + Polygeist (w/ Tiling)
+1.0
+0.7
+0.5
+0.0
+0.4
+TTM_DP
+TTM_J
+TTM_UT
+THP_DP
+THP_I
+THP_J
+MTT_JIK
+MTT_D
+MTT_J
+SpMV_L SpMV_UT SpMV_D
+PR2
+PR3
+PR4
+Fig. 20. Evaluation of the impact of Polygeist automatic tiling on the performance.
+Clang. DASTAC automatically compresses both input and output based on the iteration space and
+the compression algorithm almost always enhances the performance over all other competitors.
+Impact of Automatic Tiling Using Polygeist. Figure 20 shows that out-of-the-box tiling provided
+by Polygeist does not enhance the performance. Polygeist relies on MLIR compile pass to tile the
+generated code. However, the out-of-the-box tiling has no impact on the majority of the cases. In
+cases such as SpMV_D and SpMV_L, the iteration space is one-dimensional, and tiling decreases
+the performance.
+7
+RELATED WORK
+In this section, we elaborate on the research that has been done on dense and sparse (unstructured
+and structured) tensor algebra, as well as data layout compression.
+Dense Tensor Algebra. Tensor Comprehension [Vasilache et al. 2018] provides optimized code
+for CUDA kernels by designing a polyhedral-based JIT compiler. TensorFlow [Abadi et al. 2015]
+and PyTorch [Paszke et al. 2019] are deep learning frameworks providing efficient CPU and GPU
+code for tensor operation kernels. NumPy [Harris et al. 2020] is a fundamental tool for numerical
+computing, providing optimized code for dense tensor algebra computations. TVM [Chen et al. 2018]
+proposes a compiler to address machine learning-specific challenges, making it portable to various
+hardware devices. All of these systems generate significantly efficient code for dense tensor algebra
+computations. However, they lack leveraging the structure of the underlying data. isl [Verdoolaege
+2010] and CLooG [Bastoul 2004] are generic polyhedral-based frameworks that provide advanced
+loop optimizations and scheduling and are capable of efficient affine code generation, but they are
+not full-fledged compiler frameworks and thus lack the ability to densely pack the data layout.
+Unstructured Sparse Tensor Algebra. The sparse polyhedral framework [Strout et al. 2018]
+combines the support for sparse tensor algebra with polyhedral techniques. TACO [Chou et al.
+2018; Kjolstad et al. 2017] proposes a generic way to handle computation over sparse tensor algebra.
+SDQL [Schleich et al. 2023; Shaikhha et al. 2024, 2022] uses a functional language to compile sparse
+tensor programs. JAX [Bradbury et al. 2018] is a high-performance computing tool relying on
+the MLIR [Lattner et al. 2021] infrastructure with preliminary support for sparse tensor algebra.
+SciPy [Virtanen et al. 2020] is an algebraic library supporting a variety of kernels supporting both
+sparse and dense tensor algebra. A DSL to capture sparsity structure for recursive, pointer-based
+data structures and perform optimized computation on them is provided in [Chou and Amarasinghe
+Compressing Structured Tensor Algebra
+23
+2022]. Recent work on Register Tiling [Wilkinson et al. 2023] relies on low-level optimizations to
+better exploit compute resources in those cases, but focuses on SpMM only. Those frameworks
+capture dynamic sparsity nicely. However, they spend extra memory storage to store indexing and
+go through indirect accesses for computation. DASTAC automatically compresses the tensor data
+and uses the most efficient data layout. Moreover, DASTAC has direct access to tensor elements by
+relying on the symbolic polynomial index rather than reading it from an auxiliary array.
+Given the interdependencies between the optimal data layout and the target architecture details,
+recent work has focused on composability [Ye et al. 2023] and interoperability [Bansal et al. 2023]
+of such transformations to autotune an optimal scheme. These techniques are complementary to
+our proposed compression technique; exposing symbolic indexing as a composable transformation
+and augmenting search spaces with its usage is worth exploring in further work.
+Structured Tensor Algebra. LGen [Spampinato and Püschel 2016] proposes a polyhedral-based
+algorithm to capture structure on small-scale fixed-size linear algebra computations and generate
+faster code. EGGS [Tang et al. 2020] unrolls the computation tree to specialize the computation
+over the sparse data. Sympiler [Cheshmi et al. 2017] performs compile-time symbolic analysis to
+produce optimized code for a set of linear algebra kernels. A method to capture the unstructured
+sparsity of matrices in a sparse way to generate polyhedral-based efficient code for the SpMV kernel
+is proposed in [Augustine et al. 2019]. All the mentioned works are specialized in structured linear
+algebra and leverage a limited set of operations. However, they are not usable for higher-order
+tensors and lack a proper automatic data layout compression, and thus are not suitable competitors.
+StructTensor [Ghorbani et al. 2023] captures the structure of tensor algebra computation and
+propagates it throughout the computation, leading to efficient C++ code generation. However,
+StructTensor’s support for data layout is limited to inputs and requires the user to provide it
+manually. StructTensor does not support an automatic data layout compression despite inferring
+the structure. Moreover, StructTensor does not leverage specialized dense tensor algebra computation and relies on the underlying compiler for optimizations, even though it lowers the problem
+of structured tensor algebra computation to dense tensor algebra computation. Finch [Ahrens
+et al. 2024, 2023] supports unstructured and structured sparsity but shares similar limitations.
+DASTAC supports structured computation over higher-order tensors. Furthermore, DASTAC packs
+the structured data densely using a symbolic indexing algorithm and enables leveraging polyhedraland affine-based optimizations.
+Data Layout Compression. Tiramisu [Baghdadi et al. 2019] proposes a polyhedral compiler
+producing efficient and portable sparse tensor algebra code by introducing several optimizations,
+including a hardware-specific data layout transformation on both CPU and GPU. Polyhedralbased techniques to infer a data layout transformation with a better locality suitable for stencil
+computation over dense tensor algebra are provided in [Henretty et al. 2013]. PolyMage [Mullapudi
+et al. 2015] utilizes polyhedral techniques to transform the data layout of intermediate computation
+results and generates affine code for it. All the aforementioned frameworks propose and utilize
+advanced data layout transformation techniques for enhancing the data locality most suitably for
+the underlying hardware or based on the computation graph. However, they are only permuting the
+data without compressing based on the structure of the data. DASTAC automatically infers a data
+transformation to densely pack the sparse data and provides a compressed data layout for the input,
+intermediate, and output data. A method using the Barvinok counting algorithm [Verdoolaege et al.
+5 01] to index iterations in a parallel loop nest to collapse them for coarser parallelism through
+OpenMP is proposed in [Clauss et al. 2017]. However, this approach does not compress the data and
+is much more costly compared to DASTAC since it computes the inverse of a quasi-polynomial.
+24
+8
+Mahdi Ghorbani, Emilien Bauer, Tobias Grosser, Amir Shaikhha
+CONCLUSION
+In this paper, we introduce DASTAC, the first code generation framework combining algorithmic
+optimizations known from sparse tensor algebra frameworks with performance-optimized low-level
+code known from decades of tuning dense tensors. The central design behind DASTAC is a novel
+symbolic indexing algorithm to compress the structured tensor data into a contiguous memory
+buffer. This algorithm relies on the well-established mathematical foundation of polyhedral models,
+enabling additional optimizations such as optimal conditional placements and parallelization. Our
+experimental results show that the compressed data layout by DASTAC achieves state-of-the-art
+memory consumption and sequential/parallel execution run time. In the future, we plan to target
+architectures such as GPU with applications such as sparse neural networks that can benefit from
+our proposed algorithm for densely packing tensor data. We also plan to consider other structured
+data including graphs.
+ACKNOWLEDGEMENT
+This work was supported by the Engineering and Physical Sciences Research Council (EPSRC)
+grant EP/W007940/1 and partly funded by a gift from RelationalAI. The authors thank Huawei for
+their support of the distributed data management and processing laboratory at the University of
+Edinburgh.
+REFERENCES
+Martín Abadi, Ashish Agarwal, Paul Barham, Eugene Brevdo, Zhifeng Chen, Craig Citro, Greg S. Corrado, Andy Davis,
+Jeffrey Dean, Matthieu Devin, Sanjay Ghemawat, Ian Goodfellow, Andrew Harp, Geoffrey Irving, Michael Isard, Yangqing
+Jia, Rafal Jozefowicz, Lukasz Kaiser, Manjunath Kudlur, Josh Levenberg, Dandelion Mané, Rajat Monga, Sherry Moore,
+Derek Murray, Chris Olah, Mike Schuster, Jonathon Shlens, Benoit Steiner, Ilya Sutskever, Kunal Talwar, Paul Tucker,
+Vincent Vanhoucke, Vijay Vasudevan, Fernanda Viégas, Oriol Vinyals, Pete Warden, Martin Wattenberg, Martin Wicke,
+Yuan Yu, and Xiaoqiang Zheng. 2015. TensorFlow: Large-Scale Machine Learning on Heterogeneous Systems. https:
+//www.tensorflow.org/ Software available from tensorflow.org.
+Willow Ahrens, Teodoro Fields Collin, Radha Patel, Kyle Deeds, Changwan Hong, and Saman P. Amarasinghe. 2024. Finch:
+Sparse and Structured Array Programming with Control Flow. CoRR abs/2404.16730 (2024). https://doi.org/10.48550/
+ARXIV.2404.16730 arXiv:2404.16730
+Willow Ahrens, Daniel Donenfeld, Fredrik Kjolstad, and Saman P. Amarasinghe. 2023. Looplets: A Language for Structured
+Coiteration. In Proceedings of the 21st ACM/IEEE International Symposium on Code Generation and Optimization, CGO
+2023, Montréal, QC, Canada, 25 February 2023- 1 March 2023, Christophe Dubach, Derek Bruening, and Ben Hardekopf
+(Eds.). ACM, 41–54. https://doi.org/10.1145/3579990.3580020
+Travis Augustine, Janarthanan Sarma, Louis-Noël Pouchet, and Gabriel Rodríguez. 2019. Generating piecewise-regular code
+from irregular structures. In Proceedings of the 40th ACM SIGPLAN Conference on Programming Language Design and
+Implementation, PLDI 2019, Phoenix, AZ, USA, June 22-26, 2019, Kathryn S. McKinley and Kathleen Fisher (Eds.). ACM,
+625–639. https://doi.org/10.1145/3314221.3314615
+Riyadh Baghdadi, Jessica Ray, Malek Ben Romdhane, Emanuele Del Sozzo, Abdurrahman Akkas, Yunming Zhang, Patricia
+Suriana, Shoaib Kamil, and Saman Amarasinghe. 2019. Tiramisu: A polyhedral compiler for expressing fast and portable
+code. In 2019 IEEE/ACM International Symposium on Code Generation and Optimization (CGO). IEEE, 193–205.
+Manya Bansal, Olivia Hsu, Kunle Olukotun, and Fredrik Kjolstad. 2023. Mosaic: An Interoperable Compiler for Tensor
+Algebra. Proc. ACM Program. Lang. 7, PLDI, Article 122 (jun 2023), 26 pages. https://doi.org/10.1145/3591236
+Cédric Bastoul. 2004. Code Generation in the Polyhedral Model Is Easier Than You Think. In 13th International Conference
+on Parallel Architectures and Compilation Techniques (PACT 2004), 29 September - 3 October 2004, Antibes Juan-les-Pins,
+France. IEEE Computer Society, 7–16. https://doi.org/10.1109/PACT.2004.10018
+Uday Bondhugula, Albert Hartono, J Ramanujam, and P Sadayappan. 2008. Pluto: A practical and fully automatic polyhedral
+program optimization system. In Proceedings of the ACM SIGPLAN 2008 Conference on Programming Language Design
+and Implementation (PLDI 08), Tucson, AZ (June 2008). Citeseer.
+James Bradbury, Roy Frostig, Peter Hawkins, Matthew James Johnson, Chris Leary, Dougal Maclaurin, George Necula,
+Adam Paszke, Jake VanderPlas, Skye Wanderman-Milne, and Qiao Zhang. 2018. JAX: composable transformations of
+Python+NumPy programs. http://github.com/google/jax
+Compressing Structured Tensor Algebra
+25
+Beidi Chen, Tri Dao, Kaizhao Liang, Jiaming Yang, Zhao Song, Atri Rudra, and Christopher Ré. 2022. Pixelated Butterfly:
+Simple and Efficient Sparse training for Neural Network Models. In The Tenth International Conference on Learning
+Representations, ICLR 2022, Virtual Event, April 25-29, 2022. OpenReview.net. https://openreview.net/forum?id=Nfl-iXay7R
+Tianqi Chen, Thierry Moreau, Ziheng Jiang, Lianmin Zheng, Eddie Yan, Haichen Shen, Meghan Cowan, Leyuan Wang,
+Yuwei Hu, Luis Ceze, et al. 2018. {TVM}: An automated {End-to-End} optimizing compiler for deep learning. In 13th
+USENIX Symposium on Operating Systems Design and Implementation (OSDI 18). 578–594.
+Kazem Cheshmi, Shoaib Kamil, Michelle Mills Strout, and Maryam Mehri Dehnavi. 2017. Sympiler: Transforming Sparse
+Matrix Codes by Decoupling Symbolic Analysis. In Proceedings of the International Conference for High Performance
+Computing, Networking, Storage and Analysis (Denver, Colorado) (SC ’17). Association for Computing Machinery, New
+York, NY, USA, Article 13, 13 pages. https://doi.org/10.1145/3126908.3126936
+Stephen Chou and Saman Amarasinghe. 2022. Compilation of dynamic sparse tensor algebra. Proceedings of the ACM on
+Programming Languages 6, OOPSLA2 (2022), 1408–1437.
+Stephen Chou, Fredrik Kjolstad, and Saman P. Amarasinghe. 2018. Format abstraction for sparse tensor algebra compilers.
+Proc. ACM Program. Lang. 2, OOPSLA (2018), 123:1–123:30. https://doi.org/10.1145/3276493
+Philippe Clauss, Ervin Altintas, and Matthieu Kuhn. 2017. Automatic collapsing of non-rectangular loops. In 2017 IEEE
+International Parallel and Distributed Processing Symposium (IPDPS). IEEE, 778–787.
+Lieven De Lathauwer and Bart De Moor. 1998. From matrix to tensor: Multilinear algebra and signal processing. In Institute
+of mathematics and its applications conference series, Vol. 67. Citeseer, 1–16.
+J. J. Dongarra, Jeremy Du Croz, Sven Hammarling, and I. S. Duff. 1990. A Set of Level 3 Basic Linear Algebra Subprograms.
+ACM Trans. Math. Softw. 16, 1 (mar 1990), 1–17. https://doi.org/10.1145/77626.79170
+Adriana Dumitras and Faouzi Kossentini. 2000. Feedforward neural network design with tridiagonal symmetry constraints.
+IEEE Trans. Signal Process. 48, 5 (2000), 1446–1454. https://doi.org/10.1109/78.839989
+Schuyler Eldridge, Prithayan Barua, Aliaksei Chapyzhenka, Adam Izraelevitz, Jack Koenig, Chris Lattner, Andrew Lenharth,
+George Leontiev, Fabian Schuiki, Ram Sunder, et al. 2021. MLIR as hardware compiler infrastructure. In Workshop on
+Open-Source EDA Technology (WOSET).
+Roman Gareev, Tobias Grosser, and Michael Kruse. 2018. High-performance generalized tensor operations: A compileroriented approach. ACM Transactions on Architecture and Code Optimization (TACO) 15, 3 (2018), 1–27.
+Mahdi Ghorbani, Mathieu Huot, Shideh Hashemian, and Amir Shaikhha. 2023. Compiling Structured Tensor Algebra. Proc.
+ACM Program. Lang. 7, OOPSLA2, Article 229 (oct 2023), 30 pages. https://doi.org/10.1145/3622804
+Ashish Gondimalla, Noah Chesnut, Mithuna Thottethodi, and TN Vijaykumar. 2019. SparTen: A sparse tensor accelerator for
+convolutional neural networks. In Proceedings of the 52nd Annual IEEE/ACM International Symposium on Microarchitecture.
+151–165.
+Sanath Govindarajan and William S. Moses. 2020. SyFER-MLIR: Integrating Fully Homomorphic Encryption Into the MLIR
+Compiler Framework.
+Tobias Grosser, Armin Größlinger, and Christian Lengauer. 2012. Polly - Performing Polyhedral Optimizations on a Low-Level
+Intermediate Representation. Parallel Process. Lett. 22 (2012). https://api.semanticscholar.org/CorpusID:18533155
+Charles R. Harris, K. Jarrod Millman, Stéfan J. van der Walt, Ralf Gommers, Pauli Virtanen, David Cournapeau, Eric Wieser,
+Julian Taylor, Sebastian Berg, Nathaniel J. Smith, Robert Kern, Matti Picus, Stephan Hoyer, Marten H. van Kerkwijk,
+Matthew Brett, Allan Haldane, Jaime Fernández del Río, Mark Wiebe, Pearu Peterson, Pierre Gérard-Marchant, Kevin
+Sheppard, Tyler Reddy, Warren Weckesser, Hameer Abbasi, Christoph Gohlke, and Travis E. Oliphant. 2020. Array
+programming with NumPy. Nature 585, 7825 (Sept. 2020), 357–362. https://doi.org/10.1038/s41586-020-2649-2
+Kartik Hegde, Hadi Asghari-Moghaddam, Michael Pellauer, Neal Crago, Aamer Jaleel, Edgar Solomonik, Joel Emer, and
+Christopher W Fletcher. 2019. Extensor: An accelerator for sparse tensor algebra. In Proceedings of the 52nd Annual
+IEEE/ACM International Symposium on Microarchitecture. 319–333.
+Tom Henretty, Richard Veras, Franz Franchetti, Louis-Noël Pouchet, Jagannathan Ramanujam, and Ponnuswamy Sadayappan.
+2013. A stencil compiler for short-vector simd architectures. In Proceedings of the 27th international ACM conference on
+International conference on supercomputing. 13–24.
+Liancheng Jia, Zizhang Luo, Liqiang Lu, and Yun Liang. 2021. Tensorlib: A spatial accelerator generation framework for
+tensor algebra. In 2021 58th ACM/IEEE Design Automation Conference (DAC). IEEE, 865–870.
+Norm Jouppi, George Kurian, Sheng Li, Peter Ma, Rahul Nagarajan, Lifeng Nai, Nishant Patil, Suvinay Subramanian, Andy
+Swing, Brian Towles, et al. 2023. Tpu v4: An optically reconfigurable supercomputer for machine learning with hardware
+support for embeddings. In Proceedings of the 50th Annual International Symposium on Computer Architecture. 1–14.
+Mahmoud Abo Khamis, Hung Q. Ngo, XuanLong Nguyen, Dan Olteanu, and Maximilian Schleich. 2020. Learning Models
+over Relational Data Using Sparse Tensors and Functional Dependencies. ACM Trans. Database Syst. 45, 2 (2020), 7:1–7:66.
+https://doi.org/10.1145/3375661
+26
+Mahdi Ghorbani, Emilien Bauer, Tobias Grosser, Amir Shaikhha
+Venera Khoromskaia and Boris N Khoromskij. 2018. Tensor numerical methods in quantum chemistry. Walter de Gruyter
+GmbH & Co KG.
+Matthias Kissel and Klaus Diepold. 2023. Structured Matrices and Their Application in Neural Networks: A Survey. New
+Gener. Comput. 41, 3 (2023), 697–722. https://doi.org/10.1007/S00354-023-00226-1
+Fredrik Kjolstad, Shoaib Kamil, Stephen Chou, David Lugato, and Saman Amarasinghe. 2017. The Tensor Algebra Compiler.
+Proc. ACM Program. Lang. 1, OOPSLA, Article 77 (Oct. 2017), 29 pages. https://doi.org/10.1145/3133901
+Innovative Computing Laboratory. 2023. The Performance Application Programming Interface (PAPI). https://icl.utk.edu/
+papi/
+Chris Lattner, Mehdi Amini, Uday Bondhugula, Albert Cohen, Andy Davis, Jacques Pienaar, River Riddle, Tatiana Shpeisman,
+Nicolas Vasilache, and Oleksandr Zinenko. 2021. MLIR: Scaling Compiler Infrastructure for Domain Specific Computation.
+In 2021 IEEE/ACM International Symposium on Code Generation and Optimization (CGO). IEEE, 2–14. https://doi.org/10.
+1109/CGO51591.2021.9370308
+Kingshuk Majumder and Uday Bondhugula. 2021. HIR: An mlir-based intermediate representation for hardware accelerator
+description. arXiv preprint arXiv:2103.00194 (2021).
+Marcin Moczulski, Misha Denil, Jeremy Appleyard, and Nando de Freitas. 2016. ACDC: A Structured Efficient Linear Layer.
+In 4th International Conference on Learning Representations, ICLR 2016, San Juan, Puerto Rico, May 2-4, 2016, Conference
+Track Proceedings, Yoshua Bengio and Yann LeCun (Eds.). http://arxiv.org/abs/1511.05946
+William S. Moses, Lorenzo Chelini, Ruizhe Zhao, and Oleksandr Zinenko. 2021. Polygeist: Raising C to Polyhedral MLIR. In
+Proceedings of the ACM International Conference on Parallel Architectures and Compilation Techniques (Virtual Event)
+(PACT ’21). Association for Computing Machinery, New York, NY, USA, 12 pages.
+Ravi Teja Mullapudi, Vinay Vasista, and Uday Bondhugula. 2015. Polymage: Automatic optimization for image processing
+pipelines. ACM SIGARCH Computer Architecture News 43, 1 (2015), 429–443.
+Damien Muti and Salah Bourennane. 2007. Survey on tensor signal algebraic filtering. Signal Processing 87, 2 (2007),
+237–249.
+Erdal Mutlu, Karol Kowalski, and Sriram Krishnamoorthy. 2019. Toward generalized tensor algebra for ab initio quantum
+chemistry methods. In Proceedings of the 6th ACM SIGPLAN International Workshop on Libraries, Languages and Compilers
+for Array Programming. 46–56.
+Dimitri Nion and Nicholas D Sidiropoulos. 2010. Tensor algebra and multidimensional harmonic retrieval in signal processing
+for MIMO radar. IEEE Transactions on Signal Processing 58, 11 (2010), 5693–5705.
+Yannis Panagakis, Jean Kossaifi, Grigorios G Chrysos, James Oldfield, Mihalis A Nicolaou, Anima Anandkumar, and Stefanos
+Zafeiriou. 2021. Tensor methods in computer vision and deep learning. Proc. IEEE 109, 5 (2021), 863–890.
+Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin,
+Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas Kopf, Edward Yang, Zachary DeVito, Martin Raison, Alykhan
+Tejani, Sasank Chilamkurthy, Benoit Steiner, Lu Fang, Junjie Bai, and Soumith Chintala. 2019. PyTorch: An Imperative
+Style, High-Performance Deep Learning Library. In Advances in Neural Information Processing Systems 32. Curran
+Associates, Inc., 8024–8035. http://papers.neurips.cc/paper/9015-pytorch-an-imperative-style-high-performance-deeplearning-library.pdf
+Maximilian Schleich, Amir Shaikhha, and Dan Suciu. 2023. Optimizing tensor programs on flexible storage. Proceedings of
+the ACM on Management of Data 1, 1 (2023), 1–27.
+Amir Shaikhha, Mathieu Huot, and Shideh Hashemian. 2024. A Tensor Algebra Compiler for Sparse Differentiation. In
+IEEE/ACM International Symposium on Code Generation and Optimization, CGO 2024, Edinburgh, United Kingdom, March
+2-6, 2024, Tobias Grosser, Christophe Dubach, Michel Steuwer, Jingling Xue, Guilherme Ottoni, and ernando Magno
+Quintão Pereira (Eds.). IEEE, 1–12. https://doi.org/10.1109/CGO57630.2024.10444787
+Amir Shaikhha, Mathieu Huot, Jaclyn Smith, and Dan Olteanu. 2022. Functional collection programming with semi-ring
+dictionaries. Proc. ACM Program. Lang. 6, OOPSLA1 (2022), 1–33. https://doi.org/10.1145/3527333
+Nicholas D Sidiropoulos, Lieven De Lathauwer, Xiao Fu, Kejun Huang, Evangelos E Papalexakis, and Christos Faloutsos.
+2017. Tensor decomposition for signal processing and machine learning. IEEE Transactions on signal processing 65, 13
+(2017), 3551–3582.
+Daniele G. Spampinato and Markus Püschel. 2016. A basic linear algebra compiler for structured matrices. In Proceedings of
+the 2016 International Symposium on Code Generation and Optimization, CGO 2016, Barcelona, Spain, March 12-18, 2016,
+Björn Franke, Youfeng Wu, and Fabrice Rastello (Eds.). ACM, 117–127. https://doi.org/10.1145/2854038.2854060
+Michelle Mills Strout, Mary W. Hall, and Catherine Olschanowsky. 2018. The Sparse Polyhedral Framework: Composing
+Compiler-Generated Inspector-Executor Code. Proc. IEEE 106, 11 (2018), 1921–1934. https://doi.org/10.1109/JPROC.2018.
+2857721
+Xuan Tang, Teseo Schneider, Shoaib Kamil, Aurojit Panda, Jinyang Li, and Daniele Panozzo. 2020. EGGS: Sparsity-Specific
+Code Generation. Comput. Graph. Forum 39, 5 (2020), 209–219. https://doi.org/10.1111/cgf.14080
+Compressing Structured Tensor Algebra
+27
+Julio E Terán, Yovani Marrero-Ponce, Ernesto Contreras-Torres, César R García-Jacas, Ricardo Vivas-Reyes, Enrique Terán,
+and F Javier Torres. 2019. Tensor algebra-based geometrical (3D) biomacro-molecular descriptors for protein research:
+Theory, applications and comparison with other methods. Scientific Reports 9, 1 (2019), 11391.
+Nicolas Vasilache, Oleksandr Zinenko, Theodoros Theodoridis, Priya Goyal, Zachary DeVito, William S. Moses, Sven
+Verdoolaege, Andrew Adams, and Albert Cohen. 2018. Tensor Comprehensions: Framework-Agnostic High-Performance
+Machine Learning Abstractions. CoRR abs/1802.04730 (2018). arXiv:1802.04730 http://arxiv.org/abs/1802.04730
+Sven Verdoolaege. 2010. isl: An Integer Set Library for the Polyhedral Model. In Mathematical Software – ICMS 2010,
+Komei Fukuda, Joris van der Hoeven, Michael Joswig, and Nobuki Takayama (Eds.). Springer Berlin Heidelberg, Berlin,
+Heidelberg, 299–302.
+Sven Verdoolaege, Rachid Seghir, Kristof Beyls, Vincent Loechner, and Maurice Bruynooghe. 2007-05-01. Counting integer
+points in parametric polytopes using Barvinok’s rational functions. , 37 - 66 pages.
+Pauli Virtanen, Ralf Gommers, Travis E Oliphant, Matt Haberland, Tyler Reddy, David Cournapeau, Evgeni Burovski, Pearu
+Peterson, Warren Weckesser, Jonathan Bright, et al. 2020. SciPy 1.0: fundamental algorithms for scientific computing in
+Python. Nature methods 17, 3 (2020), 261–272.
+Endong Wang, Qing Zhang, Bo Shen, Guangyong Zhang, Xiaowei Lu, Qing Wu, Yajuan Wang, Endong Wang, Qing Zhang,
+Bo Shen, et al. 2014. Intel math kernel library. High-Performance Computing on the Intel® Xeon Phi™: How to Fully Exploit
+MIC Architectures (2014), 167–188.
+Ziheng Wang, Jeremy Wohlwend, and Tao Lei. 2020. Structured Pruning of Large Language Models. In Proceedings of
+the 2020 Conference on Empirical Methods in Natural Language Processing, EMNLP 2020, Online, November 16-20, 2020,
+Bonnie Webber, Trevor Cohn, Yulan He, and Yang Liu (Eds.). Association for Computational Linguistics, 6151–6162.
+https://doi.org/10.18653/V1/2020.EMNLP-MAIN.496
+Lucas Wilkinson, Kazem Cheshmi, and Maryam Mehri Dehnavi. 2023. Register Tiling for Unstructured Sparsity in Neural
+Network Inference. Proc. ACM Program. Lang. 7, PLDI, Article 188 (jun 2023), 26 pages. https://doi.org/10.1145/3591302
+Zihao Ye, Ruihang Lai, Junru Shao, Tianqi Chen, and Luis Ceze. 2023. SparseTIR: Composable Abstractions for Sparse
+Compilation in Deep Learning. In Proceedings of the 28th ACM International Conference on Architectural Support for
+Programming Languages and Operating Systems, Volume 3 (<conf-loc>, <city>Vancouver</city>, <state>BC</state>,
+<country>Canada</country>, </conf-loc>) (ASPLOS 2023). Association for Computing Machinery, New York, NY, USA,
+660–678. https://doi.org/10.1145/3582016.3582047

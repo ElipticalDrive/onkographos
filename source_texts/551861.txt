@@ -1,0 +1,110 @@
+Fast, hierarchical, sparse Voxel Grid. Contribute to facontidavide/Bonxai development by creating an account on GitHub.
+
+feat(core): CompactStorage, a VoxelGrid storage policy for sparse data by MarcelSoler · Pull Request #74 · facontidavide/Bonxai · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+MarcelSoler
+commented
+Oct 16, 2026
+Copy link
+Copy Markdown
+VoxelGrid takes a third template parameter that selects how nodes hold their children:
+```
+Bonxai::VoxelGrid<float> grid(0.075);  // DenseStorage, as today
+Bonxai::VoxelGrid<float, Bonxai::StaticShape<>, Bonxai::CompactStorage> compact(0.075);
+```
+Why. A leaf of 8^3 cells allocates 512 values whether one cell is on or all of them. On LiDAR surface maps few are: on 42 submaps of a SLAM map of an industrial site (7.5 cm voxels, 29.9 M cells), a leaf has 15 cells on, 3 % of 512.
+What. The OpenVDB node, a mask plus values, packed:
+a leaf is its mask and an array of exactly as many values as bits on; the value of bit n is at the number of bits on below n, which the mask keeps per 64-bit word so that it is one popcount away;
+an inner node is its mask and its leaves by value, in the same order: no shared_ptr and no allocation per leaf;
+root map, accessors and API are the ones of DenseStorage: setValue, value, setCellOn/Off, isCellOn, forEachCell, activeCellsCount, memUsage, clear, releaseUnusedMemory.
+Both leaf types have find, insert, insertOrAssign and erase, the per-cell operations the accessors used to spell out, so each accessor method keeps one path for both storages; the inner nodes and the grid-wide loops differ by if constexpr. Adding a leaf moves its siblings within their node, so it bumps the cache epoch that already tells the accessors that the nodes they cached were released.
+benchmark_bonxai (this repository's benchmark and clouds, Release, Google Benchmark 1.8.3, median of 5, g++ 13, Intel Core Ultra 7 255H):
+DenseStorage, main vs this branch: every benchmark within 1 %.
+CompactStorage vs DenseStorage on the branch, table_scene_mug_rgb / room_scan:
+memory: 18.7x / 15.5x less
+Create: 1.9x / 2.4x the time
+Update: 1.6x / 1.5x the time
+IterateAllCells: -45 % / -41 %
+with -mpopcnt: Create 1.6x / 2.3x, Update 1.26x / 1.26x
+These clouds make small grids (1 to 4.5 MB dense) that stay in the cache, with many points per cell: the case where compact storage only adds work.
+A large map (the 42 submaps above, each in its own grid, StaticShape<2,3>, g++ 13 -O2, best of 2 runs; main first, CompactStorage second; the same cells in both):
+float values:
+memory: 4338 MB vs 303 MB memUsage() (14x less)
+insert: 1354 ms vs 1335 ms (-1 %)
+random reads: 1262 ms vs 537 ms (-57 %)
+forEachCell: 233 ms vs 90 ms (-61 %)
+28-byte values (mean, normal, count):
+memory: 27.8 GB vs 0.99 GB memUsage() (28x less); all 42 grids held at once: RSS 16.8 GB vs 1.0 GB
+insert: 4592 ms vs 2004 ms (-56 %)
+random reads: 1599 ms vs 1418 ms (-11 %)
+forEachCell: 405 ms vs 138 ms (-66 %)
+DenseStorage on this branch, same maps: identical memory, times within 1 %, except the 28-byte insert, 7 % faster than main; I have not looked into why.
+Trade-offs
+Each access ranks the cell in its leaf, and turning a cell on or off reallocates the values of its leaf: O(cells on in the leaf). Small grids updated over and over pay for it (above), and solid volumes most: filling a 64^3 cube takes 8.9 ms instead of 0.7 ms, for the same memory. DenseStorage stays the default and the choice there; the README says so.
+A pointer from value() is valid until a cell of the same leaf is turned on or off.
+setCellOff destroys the value instead of hiding it. What the API returns does not change: turning the cell back on writes the default, as SetCellOffKeepsTheValueButHidesTheCell already expects.
+StaticShape only, with leaves and inner nodes of 32^3 at most; Serialize() and allocateLeafGrid() are not supported yet. DataT needs a default constructor, as for DenseStorage, and a noexcept move assignment. Each is a compile-time error with a message.
+Creating a leaf invalidates the caches of all the accessors of the grid: their next access goes through the root map once.
+Without a popcount instruction (x86-64 without -mpopcnt), the masks count bits with a SWAR sum rather than libgcc's popcount call.
+Mask::FindLowestOn and Mask::CountOn become public, for the new fixed-size StaticMask.
+Tests. compact_storage_test.cpp: random edits against a dense grid for three shapes, through two accessors and a reader that move each other's leaves; the three ways a cached leaf can move, each of which reads freed memory without the epoch bump; a counting non-trivial type, constructed and destroyed exactly once per cell; a binary grid; memory on a surface; the rank and count of StaticMask against a plain count, both ways of counting bits against popcount. The whole suite passes with -DBONXAI_SANITIZE=ON and in Release, with and without -mpopcnt, and pre-commit passes.
+The maps are not public. The benchmark_bonxai comparison of the two storages is a templated copy of Create, Update and IterateAllCells; I can add it to bonxai_core/benchmark if that helps review.
+Marcel Soler
+added 2 commits
+October 16, 2026 23:56
+feat(core): CompactStorage, a VoxelGrid storage policy for sparse data
+…
+2795e88
+```
+A leaf allocates a value for each of its cells, on or off. On LiDAR
+surface maps a leaf of 8^3 cells has about 15 cells on, so most of the
+memory holds cells that are off.
+
+VoxelGrid takes a third template parameter, the storage policy.
+DenseStorage, the default, is the current layout. CompactStorage packs
+nodes the way OpenVDB masks them: a leaf is its mask and an array of
+exactly as many values as bits on, an inner node its mask and its
+leaves by value, both in bit order. Both leaves have find, insert and
+erase, so each accessor method keeps a single path.
+
+Adding a leaf moves its siblings, so it bumps the cache epoch that
+already tells the accessors their cached nodes were released.
+
+Without a popcount instruction (x86-64 without -mpopcnt) the masks
+count bits with a SWAR loop of fixed length: libgcc's popcount, called
+for every word below the cell, made lookups up to 26 % slower.
+```
+perf(core): CompactStorage counts the bits below a cell in O(1)
+…
+d3d8275
+```
+Every access to a compact leaf ranks the cell in its mask. Counting
+the words below it, up to 8 per leaf, made small grids that are
+updated over and over up to 4x slower than DenseStorage. The mask now
+keeps the number of bits on before each of its words, 16 bytes per
+leaf, so a rank is a single popcount.
+
+DenseStorage's setValue went through insert() and then assigned on a
+branch of its own, which mispredicts when many points fall in the same
+cell: benchmark_bonxai's Create was 23-28 % slower than main.
+insertOrAssign() keeps it the single store it is on main.
+```
+MarcelSoler
+closed this
+Oct 17, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

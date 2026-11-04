@@ -1,0 +1,292 @@
+# Normal Shading
+
+Also called: Absolute Normal Visualization, Clamped Normal Visualization
+
+## Overview
+Normal Shading is a visualization technique that maps surface normals to a color space by taking the absolute value of each normal component and clamping the result to the range $[0, 1]$ [S1, unofficial]. It serves as a diagnostic tool to inspect the orientation and continuity of surface normals derived from signed distance fields (SDFs) in ray marching algorithms [S1, unofficial]. Unlike Lambertian shading, which computes lighting intensity, Normal Shading directly visualizes the geometric derivative information without applying a lighting model [S1, unofficial].
+
+## How it works
+**Inputs:**
+- $\mathbf{n}$: The surface normal vector at the hit point, typically normalized such that $|\mathbf{n}| = 1$.
+
+**Outputs:**
+- $N_{vis}$: A color vector (RGB) where each channel corresponds to the clamped absolute value of the respective normal component.
+
+**Data Structures:**
+- The normal $\mathbf{n}$ is a 3D vector $(n_x, n_y, n_z)$.
+- The output is a 3D vector $(r, g, b)$ representing the color channels.
+
+**Steps:**
+1. Compute the absolute value of each component of the normal vector $\mathbf{n}$:
+   $$ |n_i| = |n_i| \quad \text{for } i \in \{x, y, z\} $$
+2. Clamp each absolute component to the range $[0, 1]$. Since $\mathbf{n}$ is a unit vector, $|n_i| \in [0, 1]$, so the clamp operation is technically redundant for valid normals but ensures robustness against numerical errors or non-unit inputs [S1, unofficial].
+   $$ c_i = \max(0, \min(1, |n_i|)) $$
+3. Assign the clamped components to the color channels:
+   $$ N_{vis} = (c_x, c_y, c_z) $$
+
+**Formula:**
+$$ N_{vis} = \max(0, \min(1, |\mathbf{n}|)) $$
+where $|\mathbf{n}|$ denotes the element-wise absolute value of the vector $\mathbf{n}$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def normal_shading(surface_normals: Tensor) -> Tensor:
+    """
+    Visualizes surface normals by taking the absolute value of each component
+    and clamping to [0, 1].
+    
+    Args:
+        surface_normals: A tensor of shape (..., 3) containing surface normal vectors.
+        
+    Returns:
+        A tensor of shape (..., 3) containing the visualized normal colors.
+    """
+    # Take absolute value of each component
+    abs_normals = surface_normals.abs()
+    
+    # Clamp values to [0, 1]
+    # Note: For unit vectors, abs() is already in [0, 1], but clamp ensures
+    # robustness against numerical noise or non-normalized inputs.
+    clamped_normals = abs_normals.clamp(0, 1)
+    
+    return clamped_normals
+```
+
+**Edge Cases and Pitfalls:**
+- **Non-unit normals:** If the input normal is not normalized, the absolute values may exceed 1 before clamping, or the relative proportions may be distorted. The clamp operation handles values $>1$ by saturating them to 1, which can obscure the true magnitude if the normal was significantly unnormalized [S1, unofficial].
+- **Zero normals:** If the normal is $(0, 0, 0)$, the output is $(0, 0, 0)$ (black). This may occur in degenerate geometry or at singularities.
+
+## Subtopics
+
+### [Spin Shader](1959-spin-shader.md)
+The Spin Shader visualizes surface geometry by mapping surface normals and camera orientation to a cyclic color field, mimicking spin-1/2 behavior where a 360-degree rotation reverses the texture orientation. It is chosen when one needs to visualize the spin orientation of objects relative to the camera, leveraging quaternion-based rotation tracking to maintain continuity across complex 3D rotations.
+
+### [Normal Integrator](4451-normal-integrator.md)
+The Normal Integrator renders the surface normal as a color by mapping the normal vector components from $[-1, 1]$ to $[0, 1]$ using a linear transformation (typically $c_i = \frac{n_i + 1}{2}$). It is chosen when the signed direction of the normal is important (e.g., distinguishing between front-facing and back-facing surfaces) rather than just the absolute orientation.
+
+### Laplacian Shading
+Laplacian Shading visualizes the surface Laplacian by normalizing the Laplacian values to $[-1, 1]$, flipping the sign, mapping to $[0, 1]$, and applying gamma correction [S1, unofficial]. It is used to inspect the curvature or smoothness of the SDF, as the Laplacian relates to the second derivative of the distance field.
+
+**Formula:**
+$$ L_{vis} = \left( \frac{-\frac{\Delta}{\max(|\Delta|)} + 1}{2} \right)^{1/2.33} $$
+where $\Delta$ is the surface Laplacian, and the result is clamped to $[0, 1]$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def laplacian_shading(surface_laplacian: Tensor) -> Tensor:
+    """
+    Visualizes the surface Laplacian with normalization, sign flip, and gamma correction.
+    
+    Args:
+        surface_laplacian: A tensor of shape (..., 1) or (..., 3) containing Laplacian values.
+        
+    Returns:
+        A tensor of shape (..., 1) or (..., 3) containing the visualized Laplacian colors.
+    """
+    # Normalize to [-1, 1]
+    max_abs = surface_laplacian.abs().max()
+    if max_abs == 0:
+        return surface_laplacian  # Avoid division by zero
+    
+    normalized = surface_laplacian.div(max_abs)
+    
+    # Flip sign and map to [0, 1]
+    # -normalized ranges from [-1, 1] to [1, -1]
+    # Add 1: ranges from [0, 2]
+    # Divide by 2: ranges from [0, 1]
+    mapped = normalized.mul(-1).add(1).div(2)
+    
+    # Clamp to [0, 1]
+    clamped = mapped.clamp(0, 1)
+    
+    # Apply gamma correction (gamma = 2.33)
+    gamma_corrected = clamped.pow(1 / 2.33)
+    
+    return gamma_corrected
+```
+
+### Tangent Space Visualization
+Tangent Space Visualization projects the surface normal onto the sensor plane and visualizes the resulting 2D vector using domain coloring techniques [S1, unofficial]. It is chosen when analyzing the tangential components of the normal relative to the camera view, which can reveal subtle geometric features or alignment issues.
+
+**Steps:**
+1. Let $e_\alpha$ and $e_\beta$ be an orthonormal basis for the sensor plane, and $v_p$ be the unit vector from pixel $p$ to the focal point.
+2. Project the surface normal $N_p$ onto the sensor plane:
+   $$ T_p = N_p - (N_p \cdot v_p)v_p $$
+3. Express $T_p$ in the basis $e_\alpha, e_\beta$ as $T_p = \alpha e_\alpha + \beta e_\beta$. The result is a vector $(\alpha, \beta)$ where $\alpha^2 + \beta^2 \leq 1$.
+4. Treat $(\alpha, \beta)$ as a complex number $\alpha + i\beta$ and apply domain coloring techniques to visualize the result [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def tangent_space_visualization(
+    surface_normals: Tensor,
+    camera_orientation_conj: Tensor,
+    ray_directions: Tensor,
+    cyclic_colourmap: Tensor,
+    degree: int
+) -> Tensor:
+    """
+    Visualizes the tangent space projection of surface normals using domain coloring.
+    
+    Args:
+        surface_normals: Tensor of shape (..., 3) containing surface normals.
+        camera_orientation_conj: Tensor of shape (..., 4) containing conjugate quaternions for camera orientation.
+        ray_directions: Tensor of shape (..., 3) containing ray directions from pixel to focal point.
+        cyclic_colourmap: Tensor of shape (N, 3) containing the cyclic color map.
+        degree: int, the degree of the cyclic color map.
+        
+    Returns:
+        Tensor of shape (..., 3) containing the visualized tangent space colors.
+    """
+    # Normalize ray directions to get v_p
+    v_p = ray_directions / ray_directions.norm(dim=-1, keepdim=True)
+    
+    # Project normal onto sensor plane: T_p = N_p - (N_p . v_p) * v_p
+    dot_product = (surface_normals * v_p).sum(dim=-1, keepdim=True)
+    T_p = surface_normals - dot_product * v_p
+    
+    # Compute orthonormal basis e_alpha, e_beta for the sensor plane
+    # This requires constructing a basis from the camera orientation and ray direction.
+    # For simplicity, we assume a standard basis construction or use the provided
+    # camera_orientation_conj to derive the basis.
+    # Note: The exact construction of e_alpha and e_beta depends on the camera model.
+    # Here we assume a simplified approach where we project onto a plane perpendicular to v_p.
+    
+    # To express T_p in the basis e_alpha, e_beta, we need to define these vectors.
+    # A common approach is to use the camera's up and right vectors, adjusted for the ray direction.
+    # For this implementation, we will assume a simplified projection where we just
+    # compute the components in a local coordinate system.
+    
+    # Let's assume we have a way to get the basis vectors e_alpha and e_beta.
+    # In a real implementation, these would be derived from the camera orientation.
+    # For the sake of this pseudocode, we will assume e_alpha and e_beta are available
+    # or computed from the camera orientation.
+    
+    # Compute alpha and beta components
+    # alpha = T_p . e_alpha
+    # beta = T_p . e_beta
+    # This requires the basis vectors. We will assume they are computed elsewhere.
+    # For a complete implementation, one would construct the basis from the camera's
+    # orientation quaternion and the ray direction.
+    
+    # Placeholder for basis construction
+    # e_alpha, e_beta = compute_basis(camera_orientation_conj, v_p)
+    
+    # For the purpose of this example, we will assume a simplified projection
+    # where we just use the components of T_p in a local frame.
+    # This is a simplification and may not be accurate for all camera models.
+    
+    # Let's assume we have a function to compute the basis
+    e_alpha, e_beta = compute_orthonormal_basis(camera_orientation_conj, v_p)
+    
+    alpha = (T_p * e_alpha).sum(dim=-1, keepdim=True)
+    beta = (T_p * e_beta).sum(dim=-1, keepdim=True)
+    
+    # Apply domain coloring
+    colors = domain_colouring(alpha, beta, cyclic_colourmap, degree)
+    
+    return colors
+
+def compute_orthonormal_basis(camera_orientation_conj: Tensor, v_p: Tensor) -> Tuple[Tensor, Tensor]:
+    """
+    Computes an orthonormal basis (e_alpha, e_beta) for the sensor plane
+    given the camera orientation and ray direction.
+    
+    Args:
+        camera_orientation_conj: Tensor of shape (..., 4) containing conjugate quaternions.
+        v_p: Tensor of shape (..., 3) containing ray directions.
+        
+    Returns:
+        Tuple of tensors e_alpha and e_beta, each of shape (..., 3).
+    """
+    # Convert quaternion to rotation matrix or use quaternion operations to get basis vectors
+    # This is a simplified implementation. In practice, one would use the camera's
+    # up and right vectors, transformed by the camera orientation.
+    
+    # Assume we have a function to get the camera's up and right vectors in world space
+    # up_world, right_world = get_camera_vectors(camera_orientation_conj)
+    
+    # For this example, we will assume a simple basis construction
+    # where e_alpha is the right vector and e_beta is the up vector,
+    # adjusted to be perpendicular to v_p.
+    
+    # This is a placeholder and needs to be implemented based on the specific camera model.
+    # For now, we will return a dummy basis.
+    # In a real implementation, this would involve quaternion-to-matrix conversion
+    # and vector transformations.
+    
+    # Dummy implementation for pseudocode completeness
+    # e_alpha = torch.tensor([1.0, 0.0, 0.0])
+    # e_beta = torch.tensor([0.0, 1.0, 0.0])
+    
+    # A more realistic approach would be:
+    # 1. Get the camera's forward vector (negative of ray direction in camera space)
+    # 2. Get the camera's up and right vectors in camera space
+    # 3. Transform these vectors to world space using the camera orientation
+    # 4. Project them onto the plane perpendicular to v_p
+    
+    # For the sake of this example, we will assume a simplified basis
+    # where e_alpha and e_beta are orthogonal to v_p and each other.
+    
+    # This is a complex operation and requires careful implementation.
+    # We will leave this as a placeholder for the actual implementation.
+    
+    # Return dummy values to satisfy the type signature
+    # In a real implementation, this function would be fully defined.
+    raise NotImplementedError("Basis computation requires specific camera model details.")
+
+def domain_colouring(
+    real_part: Tensor,
+    imag_part: Tensor,
+    cyclic_colourmap: Tensor,
+    degree: int
+) -> Tensor:
+    """
+    Applies domain coloring to a complex number represented by real and imaginary parts.
+    
+    Args:
+        real_part: Tensor of shape (..., 1) containing the real part.
+        imag_part: Tensor of shape (..., 1) containing the imaginary part.
+        cyclic_colourmap: Tensor of shape (N, 3) containing the cyclic color map.
+        degree: int, the degree of the cyclic color map.
+        
+    Returns:
+        Tensor of shape (..., 3) containing the colored output.
+    """
+    # Compute the angle of the complex number
+    angle = torch.atan2(imag_part, real_part)
+    
+    # Normalize angle to [0, 1]
+    normalized_angle = angle.div(math.tau).add(0.5)
+    
+    # Scale by degree and map to color map index
+    cmap_index = normalized_angle.mul(degree).multiply(cyclic_colourmap.shape[0]).floor().long().remainder(cyclic_colourmap.shape[0])
+    
+    # Get the color from the cyclic color map
+    colours = cyclic_colourmap[cmap_index, :]
+    
+    # Compute the brightness (magnitude of the complex number)
+    brightness = torch.stack([real_part, imag_part], dim=-1).pow(2).sum(dim=-1, keepdim=True).pow(1 / 2)
+    
+    # Multiply brightness by color
+    return brightness.mul(colours)
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per pixel, as it involves only element-wise absolute value and clamp operations.
+- **Memory Complexity:** $O(1)$ additional memory per pixel, as it does not require storing intermediate data structures beyond the input normal.
+- **Strengths:** Simple to implement, fast to compute, and effective for debugging normal continuity and orientation in SDF rendering [S1, unofficial].
+- **Limitations:** Does not provide lighting information, so it is not suitable for final rendering. It only visualizes the absolute orientation, losing signed information about the normal direction [S1, unofficial].
+- **When to use:** During development and debugging of SDF shaders to verify that normals are correctly computed and continuous across geometry boundaries [S1, unofficial].
+- **When not to use:** For final image synthesis, where lighting models like Lambertian shading are required [S1, unofficial].
+
+## Background
+Normal Shading is part of a collection of geometrically motivated shaders used in ray marching algorithms for rendering signed distance fields (SDFs) [S1, unofficial]. The technique is implemented in the `kyle-rosa/ray_marching` repository, which provides a differentiable ray marching framework in PyTorch [S1, unofficial]. The repository includes a constructive geometry system for building SDFs, ray marching operations, and various shaders for visualizing geometric properties [S1, unofficial]. The use of PyTorch allows for differentiability, enabling gradient-based optimization of scene parameters based on rendered pixel values [S1, unofficial].
+
+## Sources
+[S1] kyle-rosa/ray_marching, https://github.com/kyle-rosa/ray_marching, fetched 2026-10-26 (unofficial)

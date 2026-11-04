@@ -1,0 +1,191 @@
+A production-grade 3D game engine in C17 and Vulkan 1.3: data-oriented, GPU-driven, built for native 4K at 240 FPS on mid-range hardware. - feat(render): contact shadows, a march in the occlusion's pass (ADR-0076) by SugalAbubaker · Pull Request #150 · SugalAbubaker/nepheline
+
+feat(render): contact shadows, a march in the occlusion's pass (ADR-0076) by SugalAbubaker · Pull Request #150 · SugalAbubaker/nepheline · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+SugalAbubaker
+commented
+Nov 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+ADR-0076. Stacked on #149. Screen-space contact shadows for the sun (CLAUDE.md §8.6 stage 6, ADR-0041).
+The sun's map already matches its texels to the pixels, so what it misses is what its own offset hides: a receiver looks up its shadow 1.5 texels off along its normal, lifted above anything lower. On Bistro's street that shows as lit gaps under window bars, along kerbs and beside leaves.
+A march in the occlusion's pass (ao.comp sun_blocked), which has the depth, plane and jitter in hand: 4 steps over 24 pixels' widths at the pixel's distance, as the map's texels are (NphRenderView.contact_shadow, r.contact_shadow). The pass is compiled with and without it, and a frame without the sun's map takes the variant without.
+What blocks: a depth in front of the marched point by more than half a pixel's change in the pixel's own plane, which is exact in reverse-Z depth at any angle, and by no more than 0.6 of the march's length.
+The answer is one bit, in the sign of the raw occlusion's distance and then of the denoised occlusion, which the resolves fetch anyway. No memory, no fetch, no descriptor.
+Image, against the sun's rays (--rt-shadows)
+Share of pixels brighter than the rays by over 16 levels, by over 48, and darker by over 16. Single captures, each about 0.04 of a point either way.
+View
+Without
+With
+Bistro street
+2.232 %, 0.529 %, 0.400 %
+1.987 %, 0.458 %, 0.391 %
+Bistro terrace
+1.523 %, 0.518 %, 0.242 %
+1.259 %, 0.405 %, 0.296 %
+Bistro hedge
+1.691 %, 0.798 %, 0.299 %
+1.352 %, 0.594 %, 0.348 %
+Cost (native 4K, RTX 3060 Ti, Profile)
+Frame in ms, mean; the march off and on in this build, interleaved, two rounds of 240 frames, a scene a process (2026-11-03):
+View
+Without
+With
+ao
+Bistro street
+6.86
+7.00
+0.87 to 1.01
+Bistro street_walk
+6.94
+7.06
+0.88 to 1.00
+Bistro street_turn
+7.13
+7.25
+0.87 to 1.00
+Bistro terrace
+7.44
+7.56
+0.88 to 1.01
+Bistro hedge
+7.06
+7.18
+0.87 to 1.01
+City street
+6.34
+6.43
+0.88 to 0.97
+City street_walk
+6.40
+6.49
+0.88 to 0.96
+City street_sprint
+6.55
+6.64
+0.88 to 0.96
+City street_turn
+6.34
+6.48
+0.88 to 1.01
+City crossing
+6.40
+6.51
+0.85 to 0.96
+City park
+7.50
+7.62
+0.89 to 1.02
+City rooftop
+9.47
+9.53
+0.64 to 0.69
+The interior has no sun, so no march: against #149's build, interleaved, its occlusion pass is unchanged (0.842 against 0.844 ms) and its resolve takes 0.01 to 0.02 ms for the occlusion's sign. Frames +0.012 to +0.029 ms.
+DRAM: no new memory. The march reads the depths the pass reads already; the pass's declared reads stay 44.6 MB.
+The §10.4 "Shadows" line goes from about 0.40 ms to about 0.55 ms, over by 0.15 ms: to be won back with the rest of the frame in Phase 14's last task.
+Budgets: the synthetic scenes' shadows_*.gpu.ao, and the reference scenes' bistro_* and city_* .gpu.ao from the runs above (reference_scenes-2026-11-03-contact-…json). Nothing else moved past its 5 %.
+Tried and not taken
+Numbers in ADR-0076: longer marches (48 pixels: wrongly dark outweighs the gain), six steps (no gain clear of the noise, +0.09 ms), a reach stretched where the sun grazes the surface (false shadows behind railings, or no clear gain with its thickness held).
+Not fixed here: where the sun grazes a wall the map's texels stretch across it, and Bistro's cornices throw shadows in stairs that the rays do not show. The march only smooths them near the contact. A map level chosen by the receiver's slope would answer that, at up to four times the pages on such walls.
+Tests
+Contact.* (7): against rays cast by the test, a bar too low for the map is found (253 of 429 hidden pixels lit without, 128 with) and a lit pixel in 15,000 goes dark; a plane does not shadow itself at a grazing angle with the sun on all four sides; something far in front does not shadow; the occlusion is byte for byte the same, triangles and voxels. 13 of 16 planted faults caught; the other three change no image (two guards that save time, and the bound on the length).
+Debug with validation on the RTX: Contact, Ao, Frame, Gi, taa, Vsm, vsm, Shadows, VoxelGpu, Many, Restir, reference, and the runtime's Engine. Format, layering, GCC and tidy clean. The golden scenes have no occlusion, so no march.
+🤖 Generated with Claude Code
+SugalAbubaker
+and others
+added 4 commits
+November 2, 2026 18:32
+feat(render): contact shadows, a march in the occlusion's pass (ADR-0…
+…
+b6a4f5b
+```
+…076)
+
+The sun's map matches its texels to the pixels, so what it misses is what its own offset hides:
+a receiver looks up its shadow 1.5 texels off along its normal, lifted above anything lower. On
+Bistro's street that shows as lit gaps under window bars, along kerbs and beside leaves.
+
+Each pixel now looks towards the sun through the depths, in the ambient occlusion's pass, which
+has its depth, plane and jitter in hand: 4 steps over 24 pixels' widths at its distance
+(NphRenderView.contact_shadow, r.contact_shadow), as the map's texels are. A surface blocks if it
+stands in front of the marched point by more than half a pixel's change in the pixel's own plane,
+which is exact in reverse-Z depth at any angle, and by no more than 0.6 of the march's length.
+
+The answer is one bit, in the sign of the raw occlusion's distance and then of the denoised
+occlusion, which the resolves fetch anyway: no memory, no fetch, no descriptor.
+
+Against the sun's rays, what is wrongly lit by over 16 levels goes down: Bistro's street 2.23 % to
+1.99 % of the pixels, terrace 1.52 % to 1.26 %, hedge 1.69 % to 1.35 %; wrongly dark up by at most
+0.05 % of them. Frame on the street 6.88 to 7.02 ms, the occlusion's pass 0.875 to 1.01 ms. The
+code with no march costs that pass 0.02 ms, which the interior, with no sun, pays for nothing.
+
+The city is not measured with it yet (the run was stopped for lack of memory), and the reference
+budgets are not re-based. The synthetic scenes with a shadowed sun are.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(benchmarks): only the occlusion's budgets move with the contact s…
+…
+1d82097
+```
+…hadows
+
+The re-base took every shadows_* entry from a run without the grids, whose slots raise rt accel
+in the full run CI makes: shadows_moving's rt accel read 0.329 ms against a budget of 0.241. The
+march moves the occlusion's pass alone, so that alone is re-based.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+perf(render): contact shadows' march in a variant of its own; budgets…
+…
+2f1823d
+```
+… from a full run (ADR-0076)
+
+The occlusion's pass is compiled with the march and without it, and a frame without the sun's
+map takes the second: the interior, which has no sun, paid 0.035 ms of the pass for the march's
+code, and now pays nothing there (0.842 against 0.844 ms against #149's build, interleaved).
+
+The march's cost re-measured on Bistro and the city, interleaved, two rounds a scene, a scene a
+process (the run stopped for lack of memory on 11-02, re-run): 0.09 to 0.14 ms on the streets and
+the park, 0.06 ms on the rooftop, all of it in the occlusion's pass. The reference scenes'
+occlusion budgets from those runs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+style(render): the ao variant's comment on one line
+…
+ed73321
+```
+clang-format's check failed on #150: the comment ran past 100 columns.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+SugalAbubaker
+mentioned this pull request
+Nov 3, 2026
+feat(render): reflections from the radiance cache's cells (ADR-0077)
+#151
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

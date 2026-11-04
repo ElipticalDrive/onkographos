@@ -1,23 +1,48 @@
 # Multi-Material Distance Fields
 
-Also called: Color-Coded SDFs, SDF with Material Data
+Also called: Augmented SDF signature, Color-Coded SDFs, Material-Augmented Signed Distance Function, SDF with Material Data, SDF with material ID
 
 ## Overview
-Multi-Material Distance Fields associate material properties with geometric primitives by returning a vector containing both the distance value and the material identifier from the scene's `map()` function [S1, unofficial]. This extends standard ray marching to enable distinct visual identification of objects within a combined scene without altering the underlying distance field logic [S1, unofficial].
+Multi-Material Distance Fields extend standard Signed Distance Functions (SDFs) to return both a geometric distance and a material identifier, enabling per-object material assignment within Constructive Solid Geometry (CSG) scenes [S1, unofficial][S2, unofficial]. Unlike sibling operators like [SDF Smooth Union](1817-sdf-smooth-union.md) which focus on geometric blending, this method preserves the sharp boolean logic of CSG while propagating shading data, allowing the renderer to determine surface color based on the closest object's material ID rather than just its depth [S1, unofficial][S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Ray origin $ro$, ray direction $rd$, maximum march steps, and a Color Ramp texture [S1, unofficial].
-*   **Output:** A final pixel color determined by the material ID of the closest hit surface [S1, unofficial].
+*   **Input:** A position vector $p$ in world space [S1, unofficial].
+*   **Output:** A pair $(d, m)$, where $d$ is the signed distance to the nearest surface and $m$ is the material identifier (e.g., an integer index or a normalized color value) associated with that surface [S1, unofficial][S2, unofficial].
 
 **Data Structures:**
-*   **Multi-Material Point:** A 2D vector where the `x` component is the signed distance value $d$ and the `y` component is the material identifier $m$ (e.g., a normalized color index) [S1, unofficial].
+The scene is represented as a CSG tree [S1, unofficial]. Each leaf node contains:
+1.  An SDF function $SDF_i(p)$ returning a scalar distance [S1, unofficial].
+2.  A material identifier $M_i$ [S1, unofficial].
 
-**Algorithm Steps:**
-1.  **Define Primitive Mappers:** Each geometric primitive returns a 2D vector where `x` is the standard SDF distance and `y` is a constant material ID [S1, unofficial].
-2.  **Combine Fields:** Use the Union operator to merge primitives [S1, unofficial]. The operator compares only the `x` components to determine the closest surface, but returns the entire 2D vector of the winning primitive [S1, unofficial].
-3.  **Ray Marching:** Initialize ray distance $t = 0$ [S1, unofficial]. For each step, calculate world position $p = ro + rd \cdot t$, sample the combined scene $d = \text{map}(p)$, check for intersection if $d.x < \epsilon$ (e.g., $0.001$), and advance $t \leftarrow t + d.x$ otherwise [S1, unofficial].
-4.  **Shading:** Upon hit, extract the material ID from $d.y$, sample a Color Ramp texture using $d.y$ as the coordinate to retrieve the final color, and compute lighting based on the surface normal and retrieved color [S1, unofficial].
+In shader implementations, the output is typically a `float2` (or `vec2`) [S2, unofficial]:
+*   `x` component: Distance $d$ [S2, unofficial].
+*   `y` component: Material data $m$ (e.g., color index or direct color value) [S2, unofficial].
+
+**Algorithm:**
+The evaluation is recursive [S1, unofficial]. For a leaf node, the SDF is evaluated directly [S1, unofficial]. For internal nodes (Union, Intersection, Difference), the results of the left and right children are combined [S1, unofficial]. The combination logic compares the distance components ($d$) to determine the closest surface, then selects the corresponding material component ($m$) from the winning child [S1, unofficial].
+
+1.  **Leaf Evaluation:**
+    For a leaf node with SDF function $f$ and material ID $m_{leaf}$:
+    $$ (d, m) = (f(p), m_{leaf}) $$ [S1, unofficial].
+
+2.  **Union Operation:**
+    Given left result $(d_a, m_a)$ and right result $(d_b, m_b)$:
+    *   If $d_a \le d_b$: Return $(d_a, m_a)$ [S1, unofficial].
+    *   Else: Return $(d_b, m_b)$ [S1, unofficial].
+    *   *Logic:* The union takes the minimum distance [S1, unofficial]. The material of the closest object is preserved [S1, unofficial][S2, unofficial].
+
+3.  **Intersection Operation:**
+    Given left result $(d_a, m_a)$ and right result $(d_b, m_b)$:
+    *   If $d_a \ge d_b$: Return $(d_a, m_a)$ [S1, unofficial].
+    *   Else: Return $(d_b, m_a)$ [S1, unofficial].
+    *   *Logic:* The intersection takes the maximum distance (deepest inside both) [S1, unofficial]. The material is taken from the left child ($m_a$) if the left child is the limiting factor ($d_a \ge d_b$), otherwise it takes the right child's distance but *still* uses the left child's material [S1, unofficial]. *Note: Standard CSG intersection usually implies the material of the object being intersected into, but the provided source explicitly assigns $m_a$ in the else case* [S1, unofficial].
+
+4.  **Difference Operation:**
+    Given left result $(d_a, m_a)$ and right result $(d_b, m_b)$:
+    *   If $d_a \ge -d_b$: Return $(d_a, m_a)$ [S1, unofficial].
+    *   Else: Return $(-d_b, m_a)$ [S1, unofficial].
+    *   *Logic:* Difference is $A \setminus B$ [S1, unofficial]. If the left object is closer to the surface (or outside the right object), keep left material [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -25,65 +50,75 @@ Multi-Material Distance Fields associate material properties with geometric prim
 ```python
 import math
 
-class Vec2:
-    def __init__(self, x, y): self.x, self.y = x, y
-class Vec3:
-    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
+def evaluate_material_sdf(tree: dict, p: tuple) -> tuple:
+    if tree['type'] == 'leaf':
+        sdf_func = tree['sdf_func']
+        material = tree['material']
+        distance = sdf_func(p)
+        return (distance, material)
+    
+    left_tree = tree['left']
+    right_tree = tree['right']
+    operation = tree['op']
+    
+    d_a, m_a = evaluate_material_sdf(left_tree, p)
+    d_b, m_b = evaluate_material_sdf(right_tree, p)
+    
+    if operation == 'union':
+        if d_a <= d_b:
+            return (d_a, m_a)
+        else:
+            return (d_b, m_b)
+    elif operation == 'intersection':
+        if d_a >= d_b:
+            return (d_a, m_a)
+        else:
+            return (d_b, m_a)
+    elif operation == 'difference':
+        if d_a >= -d_b:
+            return (d_a, m_a)
+        else:
+            return (-d_b, m_a)
+    else:
+        raise ValueError(f"Unknown operation: {operation}")
 
-def sd_box(p, h):
-    q = Vec3(abs(p.x)-h.x, abs(p.y)-h.y, abs(p.z)-h.z)
-    return math.sqrt(max(q.x,0)**2 + max(q.y,0)**2 + max(q.z,0)**2) + min(max(q.x, max(q.y, q.z)), 0)
-
-def sd_sphere(p, r):
-    return math.sqrt(p.x**2 + p.y**2 + p.z**2) - r
-
-def sd_torus(p, r):
-    q = math.sqrt(p.x**2 + p.z**2) - r.x
-    return math.sqrt(q**2 + p.y**2) - r.y
-
-def opU(d1, d2):
-    return d1 if d1.x < d2.x else d2
-
-def map_torus(p): return Vec2(sd_torus(p, Vec2(1.0, 0.2)), 0.5)
-def map_box(p): return Vec2(sd_box(Vec3(p.x+3, p.y, p.z), Vec3(0.75, 0.5, 0.5)), 0.25)
-def map_sphere(p): return Vec2(sd_sphere(Vec3(p.x-3, p.y, p.z), 1.0), 0.75)
-
-def map_scene(p):
-    ret = opU(map_torus(p), map_box(p))
-    return opU(ret, map_sphere(p))
-
-def sample_color_ramp(mat_id):
-    # Simplified texture lookup mapping material ID to RGB
-    return (mat_id, 1.0 - mat_id, 0.5)
-
-def compute_lighting(p, rd, color):
-    # Simplified diffuse lighting calculation
-    return (color[0]*0.8, color[1]*0.8, color[2]*0.8)
-
-def raymarch(ro, rd):
-    t = 0.0
+def raymarch_material_scene(scene_tree: dict, ray_origin: tuple, ray_direction: tuple, color_ramp: list) -> tuple:
     max_steps = 64
-    hit_mat = -1.0
-    for _ in range(max_steps):
-        p = Vec3(ro.x + rd.x*t, ro.y + rd.y*t, ro.z + rd.z*t)
-        d = map_scene(p)
-        if d.x < 0.001:
-            hit_mat = d.y
+    t = 0.0
+    hit_material = None
+    
+    for i in range(max_steps):
+        p = (
+            ray_origin[0] + ray_direction[0] * t,
+            ray_origin[1] + ray_direction[1] * t,
+            ray_origin[2] + ray_direction[2] * t
+        )
+        
+        d, m = evaluate_material_sdf(scene_tree, p)
+        
+        if d < 0.001:
+            hit_material = m
             break
-        t += d.x
-    if hit_mat >= 0:
-        color = sample_color_ramp(hit_mat)
-        return compute_lighting(p, rd, color)
-    return (0.0, 0.0, 0.0)
+            
+        t += d
+        
+    if hit_material is not None:
+        if isinstance(hit_material, (int, float)) and hit_material < len(color_ramp):
+            color = color_ramp[hit_material]
+        else:
+            color = hit_material if isinstance(hit_material, tuple) else (1.0, 1.0, 1.0)
+        return (*color, 1.0)
+    else:
+        return (0.0, 0.0, 0.0, 1.0)
 ```
 
 **Parameters:**
-*   **ColorRamp:** A uniform `sampler2D` texture mapping material IDs to colors [S1, unofficial].
-*   **Threshold:** A small epsilon value (e.g., $0.001$) for determining intersection [S1, unofficial].
+*   **ColorRamp:** A texture or array mapping material IDs (the $y$-component of the map output) to colors [S2, unofficial].
+*   **Max Steps:** Typically 64 or more, depending on scene complexity and required precision [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Material ID Precision:** Material IDs are discrete, causing sharp visual changes at boundaries between materials [G]. Using integer IDs mapped to discrete texture coordinates is often more robust than continuous floats [G].
-*   **Normal Calculation:** Normals must be computed carefully to avoid blending across material boundaries if physically based rendering is desired [G].
+*   **Precision:** Comparing floating-point distances $d_a$ and $d_b$ for equality can be unstable. Using a small epsilon for the hit condition ($d < 0.001$) is standard [S2, unofficial].
+*   **Intersection/Difference Material Logic:** The specific material assignment in Intersection and Difference operations (always taking $m_a$ from the left child in the source code) is a design choice [S1, unofficial].
 
 ## Subtopics
 
@@ -91,13 +126,15 @@ def raymarch(ro, rd):
 A data structure that holds surface shading information, including color, physical properties, and texture descriptors, accessible from both host and device code. It distinguishes itself by explicitly separating geometric displacement (via `heightmapTex`) from shading calculations and by managing texture projection modes and normal deflection scaling.
 
 ## Operating characteristics
-*   **Time Complexity:** Identical to standard SDF ray marching, $O(N)$ where $N$ is the number of march steps [G]. The overhead of returning and comparing 2D vectors is negligible [G].
-*   **Memory Complexity:** Minimal increase; only the material ID needs to be stored per primitive [G].
-*   **Strengths:** Enables complex, multi-colored scenes with smooth boolean operations without requiring explicit mesh generation or texture mapping on the geometry itself [G].
-*   **Limitations:** Limited to a finite number of materials determined by the precision of the material ID storage and the resolution of the Color Ramp [G]. Cannot represent continuous material variation across a single object's surface unless the SDF itself encodes that variation [G].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Enables complex multi-material scenes with CSG operations without requiring multiple render passes or complex shader branching for material selection. Shadows are straightforward to calculate using the depth buffer and the same SDF [S1, unofficial].
+*   **Limitations:** Material boundaries are sharp (discrete). The material assignment logic in Intersection/Difference is fixed by the tree structure (left-child dominance in the provided implementation), which may not match all artistic requirements [S1, unofficial].
 
 ## Background
-This technique was popularized by Inigo Quilez in his articles on distance functions and raymarching, specifically demonstrating how to extend the `map()` function to return material data alongside distance [S1, unofficial]. It is widely used in GLSL raymarching demos and shader art to create visually rich scenes from simple geometric primitives [S1, unofficial].
+The technique was popularized in the context of real-time raymarching shaders, notably by Jamie Wong and Iñigo Quilez [S2, unofficial]. It allows for the creation of complex, multi-colored geometric scenes using simple SDF primitives and CSG operations [S2, unofficial]. The approach is detailed in tutorials on raymarching signed distance functions [S1, unofficial][S2, unofficial].
 
 ## Sources
-[S1] Raymarching Distance Fields: Concepts and Implementation, https://adrianb.io/2016/10/01/raymarching.html, fetched 2026-10-27 (unofficial)
+[S1] sungiant/sdf, https://github.com/sungiant/sdf, fetched 2026-10-26 (unofficial)
+[S2] Raymarching Distance Fields: Concepts and Implementation ..., https://adrianb.io/2016/10/01/raymarching.html, fetched 2026-10-27 (unofficial)

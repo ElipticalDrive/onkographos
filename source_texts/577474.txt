@@ -1,0 +1,477 @@
+From Codex review thread on PR #924 (refs #921). Verified at 4293cd3523e. Claim, verified structurally: the pre-upscale hook (render_forward_clustered.cpp "Gaussian Splats Pre-Upscale" block) composites splat color into the internal buff...
+
+GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes · Issue #929 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes #929
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#1039
+Closed
+GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes#929
+#1039
+Copy link
+Labels
+program:prod-readyProduction-readiness program (audit 2026-07-07)Production-readiness program (audit 2026-07-07)
+Milestone
+Continuation M3: Renderer Parity and Recovery
+Description
+klausi3D
+opened on Aug 16, 2026
+Issue body actions
+From Codex review thread on PR #924 (refs #921). Verified at 4293cd3523e.
+Claim, verified structurally: the pre-upscale hook (render_forward_clustered.cpp "Gaussian Splats Pre-Upscale" block) composites splat color into the internal buffer that TAA/FSR2/MetalFX-temporal then consume. gaussian_splat_renderer.cpp builds its render projection from the raw p_render_data->scene_data->cam_projection (copied at ~2361, used at ~2388 with only a flip_y adjustment) and never applies scene_data->taa_jitter; ordinary geometry renders with the jitter-corrected projection, and FSR2 is explicitly handed the jitter right below the hook (render_forward_clustered.cpp:2700). The temporal pass therefore receives splat pixels at unjittered positions while being told the frame is jittered — expected symptom: subpixel swimming/blur of splats relative to meshes under TAA/FSR2/MFX.
+Relation to #924's named residual risk: same temporal-quality cluster as the missing motion vectors / reactive mask / depth write-back (deferred ladder steps). The FSR2 motion burst in the visual package (C:\Projects\godotGS-remediation\phase2\gpu001-visual\runs\gpu001fix__v3_fsr2_100_dtTrue) is the existing material where a human may already see it.
+Remedy: render splats with the same jitter-corrected projection meshes use (apply taa_jitter to render_projection when running in the pre-upscale phase, mirroring RenderSceneDataRD::get_cam_projection()), before compositing into the temporal input.
+Cost: renderer-math change — requires real-scan visual validation including motion capture on jitter-active configs; interacts with the sort/cull view state (verify the cull signature does not need the jitter — pure subpixel offset should not, but that must be checked, not assumed). Belongs with the temporal-quality follow-up work, not in #924 at disposition.
+refs #921
+Activity
+Next
+klausi3D
+added
+program:prod-readyProduction-readiness program (audit 2026-07-07)Production-readiness program (audit 2026-07-07)
+on Aug 23, 2026
+klausi3D
+added this to the Continuation M3: Renderer Parity and Recovery milestone on Aug 23, 2026
+klausi3D
+added 2 commits that reference this issue on Sep 5, 2026
+docs/governance: correct the alpha envelope and the derived alpha blo…
+...
+b920d0c
+docs/governance: define the two-stage release acceptance bar (#360) (#…
+...
+2efc7b5
+klausi3D commented on Sep 17, 2026
+klausi3D
+on Sep 17, 2026
+OwnerAuthor
+More actions
+Assessment at b915afc51c5 (current origin/master; top two commits #999 and #1009)
+Re-verified against master, not the 4293cd3523e snapshot this issue was filed at. No production code was changed and no PR was opened.
+Headline: it reproduces, it is now measured and attributed to the jitter specifically — and the title is half wrong. Splats swim under FSR2. Under TAA they do not swim at all; they are bit-stable and simply never antialiased.
+1. Does it still reproduce at current master, and exactly how?
+1.1 The structural defect is unchanged
+modules/gaussian_splatting/renderer/gaussian_splat_renderer.cpp:2373 still copies p_render_data->scene_data->cam_projection raw, and :2400-2402 still builds the GPU projection by flipping one sign and nothing else:
+```
+// Apply flip_y only; gaussian pipeline uses linear view-space depth.
+Projection render_projection = cam_projection;
+if (get_view_state().using_scene_data && p_render_data && p_render_data->scene_data && p_render_data->scene_data->flip_y) {
+    render_projection.columns[1][1] = -render_projection.columns[1][1];
+}
+```
+grep -c taa_jitter modules/gaussian_splatting/ → 0. Not one reference in the whole module.
+git log -L 2396,2404 shows that block last changed 2026-03-31 (4813d2f7962). Neither #999 nor #1009 touches it — the only edit to this file between them is the painterly cache invalidation inside _on_painterly_material_changed() (invalidate_cached_render() at :2049).
+Worth recording, because it will mislead the next reader: gaussian_splat_renderer.h:377 documents the field as
+```
+Projection render_projection; // GPU projection with depth/jitter correction applied.
+```
+The comment asserts a jitter correction the code has never applied. (:376 correctly says cull_projection is "no jitter".)
+1.2 Runtime measurement
+Binary: godotgs-windows-x86_64-nightly-20260917, the optimized Windows editor (optimize=speed_trace); startup banner v4.5.rc.custom_build.5dfeb44b5, and its BUILD-INFO.txt pins it to commit 5dfeb44b5b4 — master minus exactly #999 and #1009, neither of which touches the projection path or the FSR2 block (diff above).
+GPU: NVIDIA GeForce RTX 3090, Vulkan driver 1.4.325. Renderer: forward_plus.
+Scene: one real-scan GaussianSplatNode3D (Cabin in the forest.ply, 31,208 visible splats, quality/preset = 2) plus a high-frequency checker-textured unshaded box, both in one 960×540 SubViewport (own_world_3d, transparent_bg = false), static camera (near 0.05, far 200), static content.
+Pins: the rig's project.godot pins nothing under [gaussian_splatting], so composite/depth_test runs at its shipped default true (modules/gaussian_splatting/core/gaussian_splat_manager.cpp:998) and per_splat_depth_clip at its shipped default true (:1002). This is deliberately not the QA project, which pins composite/depth_test=false (tests/examples/godot/test_project/project.godot:41), lighting/indirect_sh_scale=0.0 (:60) and use_rgba8_framebuffer=true (:59) — the masked configuration that hid GPU-001 twice.
+Method: 24 consecutive captured frames per config after a 64-frame warm-up, for {none, taa, fsr2@1.0, fsr2@0.5}; metric is the mean/max per-channel difference between consecutive frames over a splat-only mask (264,185 px) and a mesh-only mask (45,802 px) derived from reference captures. The mesh is the in-frame control — same frame, same stage, same capture path, but drawn with the engine's jitter-corrected projection.
+Ran under the shared heavy lock with CI idle (Release Builds / Baseline QA / Production Gates had all drained); the lock was acquired cleanly, no stale lock was broken.
+config
+scale
+raster path
+SPLAT mean Δ
+SPLAT max Δ
+MESH mean Δ
+MESH max Δ
+none
+1.00
+other
+0.000
+0
+0.000
+0
+taa
+1.00
+other
+0.002
+14
+0.310
+59
+fsr2
+1.00
+other
+1.089
+104
+2.365
+123
+fsr2
+0.50
+other
+1.409
+136
+2.180
+220
+(Δ = per-channel LSB, 0–255, averaged over consecutive-frame pairs in the mask.)
+Path proof before any pixel was scored (#997's lesson — a toggle that silently degrades plus an oracle the degraded path also satisfies proves nothing): the none row is exactly 0 in both regions, so the rig is deterministic and the splat pipeline is frame-invariant; and the mesh control is non-zero in every temporal config's engage window (taa 0.443, fsr2@1.0 7.731, fsr2@0.5 12.051), so each stage demonstrably ran. "Stable", "never engaged" and "swimming" stay three distinguishable outcomes.
+1.3 The attribution: the splat instability locks to the jitter phase exactly
+The mesh control turned out to be saturated under FSR2 — a 2-px checker is near-Nyquist, the worst case for temporal reconstruction, so its ~2.2–2.4 delta is not a clean floor. The decisive evidence is not the ratio; it is the periodicity.
+Per-pair splat-region delta over the 24-frame FSR2 @1.0 window:
+```
+1.17  0.84  1.31  0.98  0.92  1.68  0.70  1.14
+1.17  0.84  1.31  0.98  0.92  1.69  0.70  1.14
+1.17  0.84  1.30  0.98  0.92  1.68  0.70
+```
+The same eight values, three times, to ±0.01. Autocorrelation at lag 8 = +1.00 (next best: lag 11 at +0.57). The engine's jitter phase length at scaling_3d_scale = 1.0 is 8 * (target/render)² = 8 (servers/rendering/renderer_viewport.cpp:252-260).
+At scale = 0.5 the phase is 32, longer than the 24-frame window, and — as that predicts — no period is detectable there (best lag 3 at only +0.37). The absence corroborates the model rather than contradicting it.
+The chain that makes this an attribution rather than a correlation:
+The splat raster output is frame-invariant: the none row is 0.000/0 across 23 consecutive pairs.
+It is invariant to taa_frame_count too — the one other frame % phase quantity GS shaders read (shaders/includes/gs_lighting_common.glsl:72,116,148 → gs_directional_shadow.glsl), also period-8 under FSR2 and set at renderer_scene_cull.cpp:2696. Under TAA, taa_frame_count cycles 0–15 and the splat region still measures 0.002 mean / spread 0.001–0.002, i.e. bit-stable. So it is not the driver.
+Therefore the FSR2 variation is introduced downstream of the splat raster, by the resolve, and it is locked to the FSR2 jitter phase. The only per-frame quantity FSR2 is handed is params.jitter (render_forward_clustered.cpp:2713).
+That is taa_jitter, and nothing else.
+1.4 Why FSR2 and not TAA
+FSR2 is told the jitter and compensates for it, in two places:
+thirdparty/amd-fsr2/shaders/ffx_fsr2_common.h:431-437, ComputeHrPosFromLrPos():
+FfxFloat32x2 fSrcJitteredPos = FfxFloat32x2(iPxLrPos) + 0.5f - Jitter();
+thirdparty/amd-fsr2/shaders/ffx_fsr2_accumulate.h:219-220, InitParams():
+const FfxFloat32x2 fLrUvJittered = fHrUv + Jitter() / RenderSize(); — and that UV is what samples the input colour.
+FSR2 assumes every low-res texel was sampled at pixel_centre − jitter and undoes that offset. Splat texels were not sampled there, so the splat layer is reconstructed displaced by exactly +Jitter() low-res pixels, changing every frame along the Halton sequence, while the meshes beside it are placed correctly.
+Godot's TAA never receives the jitter at all. Its entire push constant is servers/rendering/renderer_rd/shaders/effects/taa_resolve.glsl:50-55 → {vec2 resolution; float disocclusion_threshold; float disocclusion_scale;}. grep -n jitter taa_resolve.glsl returns exactly one hit, a comment at :329. Godot's TAA gets its antialiasing purely by accumulating jittered frames; it never un-jitters anything. With a constant input and zero velocity its blend converges to a fixed point — which is precisely the measured 0.002.
+So the accurate statement of the defect is:
+stage
+static camera (measured)
+moving camera (not measured)
+FSR2, MetalFX-temporal
+swims — 1.09–1.41 mean Δ, up to 136 on a single channel, locked to the jitter phase
+swims and ghosts
+TAA
+stable (0.002) but never antialiased, unlike every mesh in the frame
+ghosts (no motion vectors)
+none
+correct (0.000)
+correct
+MetalFX (render_forward_clustered.cpp:2730-2758) is #ifdef METAL_MFXTEMPORAL_ENABLED, macOS only; on the alpha's platforms only FSR2 and TAA are reachable.
+1.5 Magnitude, predicted and observed
+Predicted purely from the engine's constants — renderer_scene_cull.cpp:50-60 (get_halton_value, returns r*2−1) → :2689-2695 (jitter = camera_jitter_array[frame % phase] / p_viewport_size) → renderer_viewport.cpp:252-260 → render_forward_clustered.cpp:2699 (fJitter = taa_jitter * internal_size * 0.5). Splat misplacement equals +fJitter low-res pixels, scaled to output by DisplaySize/RenderSize:
+config
+phase
+predicted misplacement (output px)
+predicted worst frame-to-frame jump
+measured splat mean Δ
+FSR2, scale 1.0, 960×540
+8
+up to 0.500
+0.875 px
+1.089
+FSR2, scale 0.67 "Quality", 1920×1080
+17
+up to 0.747
+1.353 px
+not run
+FSR2, scale 0.5, 960×540
+32
+up to 1.000
+1.938 px
+1.409
+Directionally consistent: halving the scale doubles the predicted output displacement and raises the measured deviation-from-window-mean from 0.78 to 1.07 (+37%) and the peak single-channel swing from 104 to 136. Not a clean proportionality — the metric is a colour difference, not a displacement — so I am not claiming one.
+1.6 What still needs human eyes
+The numbers prove the splat layer moves, how much, and that the jitter drives it. Whether ~1 LSB mean with 104–136 peak swings on splat silhouettes reads as "slight shimmer" or "unacceptable" is a judgement on real-scan content in motion, and it is not mine to make. 132 PNGs are on disk and #929 already names existing material: C:\Projects\godotGS-remediation\phase2\gpu001-visual\runs\gpu001fix__v3_fsr2_100_dtTrue. The moving-camera case was not measured at all — the rig is static-camera only by design, so everything said here about ghosting is code-reading, not measurement.
+1.7 Jitter is one of four missing temporal inputs
+modules/gaussian_splatting/shaders/viewport_blit.glsl reads the scene depth for its depth test (:120-135) and writes only u_destination_image — a single imageStore at :215, the file's only write. The painterly composite likewise declares one output, layout(location = 0) out vec4 out_color (shaders/painterly_composite.glsl:21), and draws into a colour-only framebuffer from framebuffer_cache->get_cache(scene_color) (interfaces/painterly_renderer.cpp:1332) — no depth attachment, no gl_FragDepth.
+An exhaustive grep of modules/gaussian_splatting/ for velocity / motion_vector / reactive returns zero writes to any engine buffer (only streaming camera-speed heuristics, core/streaming_visibility_controller.cpp:1145-1166).
+So of the four things render_forward_clustered.cpp:2683-2764 feeds the temporal stages — colour, depth, velocity, reactive mask — splats supply colour only, at an unjittered position.
+docs/architecture/render-pipeline.md:149-153 already names three of the four:
+Residual risk (named, not covered by the six-config oracle). Splats publish no motion vectors, no FSR2 reactive-mask contribution, and no depth write-back (viewport_blit.glsl writes color only) […]
+#929 is the fourth item and that paragraph does not mention it. Fixing the paragraph is part of the disposition whichever option wins.
+On raster_output.depth, as it stands today rather than as older issues describe it: render_pipeline_stages.cpp:2782 assigns r_output.depth = renderer->get_painterly_depth_texture(), resolved at gaussian_splat_renderer.cpp:2064-2091 to the tile rasterizer's own depth texture. That is the GS-internal depth the composite tests against the scene depth — it is not written back into rb->get_depth_texture(). #1009-era work made it valid; it did not make it visible to FSR2.
+2. Mechanism, with file:line at current master
+Where the engine puts the jitter. servers/rendering/renderer_rd/storage_rd/render_scene_data_rd.cpp:39-45:
+```
+Projection RenderSceneDataRD::get_cam_projection() const {
+    Projection correction;
+    correction.set_depth_correction(flip_y);
+    correction.add_jitter_offset(taa_jitter);
+    return correction * cam_projection;
+}
+```
+and the same three lines again at :60-65 (get_view_projection) and :82-86 (the UBO every ordinary shader reads, with taa_jitter mirrored at :112-113).
+core/math/projection.cpp:932-935 — add_jitter_offset writes columns[3][0] += x; columns[3][1] += y; on the correction matrix, which left-multiplies, so the engine projection is J · D · cam_projection with J = identity plus that translation. Worked numerically against a Godot set_perspective matrix (75° fovy, 16:9, 0.05/200), the only non-zero entries of J·P − P are:
+```
+columns[2][0] delta = -jitter.x
+columns[2][1] delta = -jitter.y
+columns[0][0], columns[1][1], columns[2][3] : unchanged, bit-identical
+resulting NDC offset at z = -0.5, -5.0, -100.0 : (+jitter.x, +jitter.y) in all three
+```
+So it is a constant NDC translation of exactly taa_jitter, independent of depth, leaving untouched the two diagonal entries the shaders derive focal length from. Both halves matter in §3.
+Where it would have to enter for splats. gaussian_splat_renderer.cpp:2400-2402, immediately after the flip. Not via set_depth_correction — GS deliberately skips the engine's reverse-Z/remap-Z because the gaussian pipeline carries linear view-space depth (:2399 says so) — but as the jitter factor alone:
+```
+Projection jitter_correction;                              // identity
+jitter_correction.add_jitter_offset(scene_data->taa_jitter);
+render_projection = jitter_correction * render_projection; // == J · (flip · cam_projection)
+```
+Self-gating, for free: renderer_scene_cull.cpp:2681-2696 default-constructs Vector2 jitter; and only assigns it inside if (p_jitter_phase_count > 0), and renderer_viewport.cpp:252-260 leaves the phase count at 0 unless temporal scaling or TAA is on. So scene_data->taa_jitter is exactly (0,0) whenever no temporal stage is active and the expression is the identity in every other configuration. Source the value from scene_data->taa_jitter; do not generate an independent sequence — see §3.2.
+What the temporal passes expect. render_forward_clustered.cpp:2683-2764, immediately after the GS hook at :2658-2681:
+FSR2 (:2684-2729): params.color :2704, params.depth :2705, params.velocity :2706, params.reactive :2707, params.jitter :2713.
+TAA (:2759-2763): the shader binds colour :44, depth :45, velocity :46, last-velocity :47, history :48.
+What splats supply today: the colour texture only, unjittered.
+3. Blast radius
+The decisive structural fact: render_projection is the single matrix uploaded to the GPU for the splat pipeline, and it is not the one used for culling or cache keying. renderer/tile_render_stages.cpp:251-262:
+```
+const Projection &projection_gpu = p_params.render_projection;   // :251
+...  params.projection_matrix[...]                                // :252-256
+const Projection inv_projection_gpu = projection_gpu.inverse();   // :257
+```
+while :278-279 takes near_plane/far_plane from the unjittered p_params.projection.
+The three projections (render_pipeline_stages.cpp:1062-1064) and their consumers:
+consumer
+projection
+verdict
+GPU/CPU cull, frustum planes, cull UBOs
+cull_projection, re-derived from the unjittered projection (gaussian_splat_renderer.cpp:588-595)
+unaffected
+_compute_cull_config_signature (render_pipeline_stages.cpp:694-741)
+zero occurrences of "projection" in the whole function
+unaffected
+depth sort keys
+view-space z only — compute/depth_compute.glsl:202-203, depth = -view_pos.z; its UBO has no projection matrix
+unaffected
+conic / Jacobian / cov2d / subpixel-cull hysteresis
+focal_x/y from projection_matrix[0][0]/[1][1] (shaders/tile_binning.glsl:567-568) — entries the jitter provably does not touch (§2)
+unaffected
+shadow pass
+builds both projections locally from p_light_projection with p_render_data == nullptr (gaussian_splat_renderer.cpp:1982-1995)
+unaffected, provided the jitter stays in render_scene_instance and is not pushed down into render_sorted_splats / _prepare_render_frame_context / build_cull_projection, all three shared with the shadow path
+tile binning grid — clip_pos = params.projection_matrix * view_pos (tile_binning.glsl:541), screen_pos :557-558, bbox, tile range, tile half of the global sort key
+render_projection
+affected, and correctly so. Binning and raster share one matrix, so "confine it to the raster transform" is not an available option. This is the same per-frame re-binning that already happens on any camera motion.
+painterly raster
+same TileRenderer::RenderParams (interfaces/painterly_renderer.cpp:1710-1711)
+follows automatically
+3.1 The render cache — a correctness trap, but not a performance cost
+render_pipeline_stages.cpp:2603 calls can_reuse_cached_render(..., p_input.projection, ...) — the unjittered one — and output_compositor.cpp:176 does an exact Projection compare on it; the signature is written back with the same unjittered value (update_render_cache_signature(..., raster_input.projection, ...) at :1909-1910, output_compositor.cpp:209).
+So a jitter confined to render_projection would not invalidate the cache. Wherever reuse is live, the raster stage is skipped (render_pipeline_stages.cpp:1835, "Raster skipped: reused cached render" at :1861-1864) and the same texture — carrying one frozen jitter value — is re-composited every frame. The fix would silently do nothing, while still looking correct to any test that only inspects the projection matrix. Any jitter change must carry the jitter into the reuse key.
+But the feared cost is not there. I expected losing static-camera reuse to be the price of Option B. It is not, at shipped defaults: _is_per_splat_clip_expected() (render_pipeline_stages.cpp:234-249) returns true whenever per_splat_depth_clip is on — its shipped default is true (core/gaussian_splat_manager.cpp:1002) — and there is a valid single-view scene depth, and :2598-2600 then refuses reuse outright for non-painterly frames. The code comment at :2590-2597 says so in as many words: "static-camera reuse is lost while the feature is on in scenes with a valid scene depth."
+Measured, not inferred: all four configs in §1.2 reported raster_path = other, never cached. The static-camera render cache never engaged once, at shipped defaults, in any of them.
+3.2 The composite depth test gets better, not worse
+viewport_blit.glsl:120-135 compares GS depth against the engine scene depth at matching pixel coordinates; painterly_composite.glsl:76-80 and the per-splat clip in includes/tile_raster_common.glsl:62-69 do the same. Godot's opaque depth buffer is jittered whenever TAA/FSR2 is on (render_scene_data_rd.cpp:82-86). So today, with a temporal stage active, GS depth and scene depth already sit in different subpixel frames — up to half a pixel of silhouette misregistration in the shipped-default depth test. Applying the same taa_jitter aligns them. A differently-scaled or opposite-signed one would make it worse; this is the strongest reason to take the value verbatim.
+3.3 A smaller one worth a look
+shaders/tile_resolve.glsl:276 reconstructs a GS view position with params.inv_projection_matrix but an unjittered pixel-centre uv (:172, uv = (vec2(coord) + 0.5) / viewport_size), feeding lighting and shadow lookups (:211, :221, :231). With a jittered inverse that picks up a subpixel bias. Almost certainly invisible; not zero.
+3.4 Screenshots, QA baselines and guards
+tests/visual_baselines/ holds exactly one image (composite_hazard_256x256.png), used by a non-temporal case; no QA baseline is captured under TAA or FSR2, so none of them move. The only guard on this seam, tests/ci/check_gs_pre_upscale_hook.py, watches 7 files (:76-82) and gaussian_splat_renderer.cpp is not among them; it never mentions taa_jitter, cam_projection or render_projection. It would neither catch nor block this change — unless a change also renames one of its seven literal anchors in render_forward_clustered.cpp (:112-118), which its docstring (:62-65) requires be updated in the same commit rather than weakened.
+4. Options
+Option A — full temporal integration
+Jitter + render-cache key + depth write-back into rb->get_depth_texture() + per-pixel motion vectors + FSR2 reactive-mask contribution.
+Cost: large. Motion vectors need per-pixel world reconstruction from GS depth reprojected with the previous view-projection; the module caches no previous-frame camera state at all today. Depth and velocity write-back means new attachments/dispatches at the seam, i.e. edits in servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp → R3, ADR, two independent reviews, CODEOWNER.
+Risk: high. Depth write-back changes what every later depth consumer sees; a wrong velocity is worse than none — it smears confidently.
+User sees: splats behaving like geometry under TAA/FSR2. The disclosure disappears.
+Option B — jitter, plus the cache key
+Cost: small. ~3 lines at gaussian_splat_renderer.cpp:2400-2402 and the reuse-key change at render_pipeline_stages.cpp:2603 / output_compositor.cpp:176,209. R2. The R2 evidence bar ("Real-scan visual validation for rendering-math changes") is now reachable — the rig in §1.2 exists and is validated. Performance cost ≈ 0 at shipped defaults, because the cache it would invalidate is already disabled there (§3.1, measured).
+Risk: low and mostly confined. No cull, sort, Jacobian, near/far or shadow impact (§3). It repairs a known misregistration (§3.2). Residual unknowns: tile_resolve.glsl:276 (§3.3), and the cache-key edit touches a path used by every frame.
+User sees: on a static camera, FSR2 swimming gone and splats finally antialiased by TAA/FSR2 like the meshes. On a moving camera they still ghost — no motion vectors. The §8 disclosure is still required, shorter.
+Option C — mark splats temporally excluded (reactive mask)
+Cost: medium, and it has no TAA analogue — taa_resolve.glsl has no reactive input, so it fixes FSR2 and does nothing for TAA.
+Risk: a quality trade, not a fix. A fully reactive region gets no temporal accumulation, so splats stay aliased by construction, permanently, and at FSR2's low internal resolution visibly softer than today.
+User sees: no swimming, but splats permanently rougher than the meshes beside them, with no path to improvement. Rejected — it trades a fixable defect for an unfixable one.
+Option D — disclose under §8 only
+Cost: a §8.1 row, the missing fourth item in docs/architecture/render-pipeline.md:149-153, and re-deciding GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes #929's §11 entry. R0.
+Risk: we ship a measured, cheap-to-fix artefact and tell users not to hit it.
+User sees: correct at Godot defaults (use_taa=false, scaling_3d_mode=bilinear, scale 1.0); a documented limitation with a workaround otherwise.
+Recommendation: B and D together — land the jitter, and disclose the ghosting that remains. Not D alone, not A for the alpha.
+I went into this expecting to recommend D alone, on the reasoning that B cannot remove the disclosure so it is not an alpha-shaped trade. The measurement changed that, in exactly the way I had written down in advance that it would:
+The cost objection to B was the static-camera render cache. That cache is already disabled at shipped defaults, and all four measured configs confirm it never engaged (§3.1). B is close to free.
+The artefact is no longer inferred. It is measured at 1.09–1.41 mean Δ with 104–136 peak single-channel swings, and attributed to the jitter specifically by a period-8 lock with autocorrelation +1.00 (§1.3), with taa_frame_count ruled out by the TAA control.
+The R2 evidence bar for B was unreachable because nothing here could render FSR2. That rig now exists and is validated against a known-SHA optimized binary.
+A three-line, self-gating change that removes a measured artefact at ~zero cost, with the evidence to prove it, should be made. It does not discharge the disclosure — moving-camera ghosting needs motion vectors, which do not exist — so D ships alongside it, scoped down to what actually remains. A stays as the post-alpha program.
+What would change my mind:
+If the maintainer puts TAA or FSR2 explicitly inside the §10.1 alpha envelope. §10.1 says "Forward+, single view" and is silent on temporal stages. If they are in-envelope, disclosure is not available and A becomes alpha work.
+If the human visual pass says ~1 LSB mean is imperceptible on real-scan content. Then B is not urgent and D alone is right. That call is §1.6 and is not mine.
+If the cache-key edit turns out to be invasive — if carrying the jitter into can_reuse_cached_render cannot be done without perturbing the non-temporal path, B loses its "close to free" property and the balance swings back to D.
+If a moving-camera capture shows ghosting so severe that the static-camera fix is cosmetic next to it, B is rearranging deck chairs and the honest answer is D plus a prioritised A.
+5. Implementation plan
+Ordered, PR-sized, each independently reviewable.
+Step 1 — the rig. R1 (tests/**). The gate on everything after it.
+Extend tests/examples/godot/test_project/scenes/qa/qa_composite_production_defaults.gd: add use_taa and SCALING_3D_MODE_FSR2 rows to _configs (:100-104) — today :181 only ever sets SCALING_3D_MODE_BILINEAR — and retain a sequence of frames per config instead of the single accepted frame it keeps (:225-233). Port the §1.2/§1.3 oracle.
+Must not be vacuous. #997's shape is directly reachable: use_taa = true on a viewport that cannot run TAA is silently a no-op, and "no difference between frames" is then indistinguishable from "correctly stable". Three assertions, all before pixels are scored: (a) the no-temporal config's consecutive-frame delta is exactly 0; (b) the mesh control's delta is non-zero in every temporal config's engage window, proving the stage ran; (c) the splat-region signal's autocorrelation at the engine's jitter-phase lag — the §1.3 measurement — is the oracle, not an absolute threshold. Two independent separations, per the qa_composite_depth_occlusion.gd:24-56 precedent.
+Land it demonstrating RED at base — the period-8 lock is present today and must be. A new test green on the unfixed tree is the bug.
+Pin discipline: the QA project pins composite/depth_test=false (project.godot:41); these configs must flip it to the shipped true at runtime and restore it as :178/:294-302 do, and the runner requires config-mutating scenes to run last (qa_test_runner.gd:26-38). Note its use_rgba8_framebuffer=true (:59) differs from my rig.
+Step 2 — the render-cache key. R2 (renderer/**).
+Carry the jitter into can_reuse_cached_render / update_render_cache_signature. Standalone value: this is the mechanism that would silently neuter step 3. Unit-testable with no GPU — modules/gaussian_splatting/tests/test_renderer_pipeline.h:5304-5313 already drives can_reuse_cached_render directly; add a case asserting reuse is refused when only the jitter differs. Fails when reverted: that case sees reuse granted. Because reuse is already off at shipped defaults (§3.1), measure the frame-time delta in a configuration where reuse is live (per_splat_depth_clip=false) so the cost is characterised rather than assumed — optimize=speed_trace, not a dev build.
+Step 3 — the jitter. R2 (renderer/**).
+gaussian_splat_renderer.cpp:2400-2402, from scene_data->taa_jitter, kept inside render_scene_instance so the shadow path (:1982-1995) cannot see it. Fix the false comment at gaussian_splat_renderer.h:377 in the same commit.
+Tests: a C++ case asserting render_projection == J · flip · cam_projection for non-zero taa_jitter and bit-identical to today for zero (the primitive itself is already covered upstream at tests/core/math/test_projection.h:239-253); plus the step-1 rig flipping to green. Fails when reverted: the matrix compare fails, and the rig's splat-region autocorrelation at lag 8 returns to +1.00.
+Evidence: real-scan visual validation including an FSR2 motion capture, per renderer/AGENTS.md and R2. Also re-check tile_resolve.glsl:276 (§3.3) and confirm tests/ci/check_cull_signature_parity.py still passes — it should, since build_cull_projection re-derives from the unjittered p_projection.
+Step 4 — the disclosure. R0. Ships with step 3, not instead of it. §8.1 row scoped to what remains after the jitter lands (moving-camera ghosting, no motion vectors / depth write-back / reactive mask); add the fourth item to docs/architecture/render-pipeline.md:149-153; re-decide #929's §11 entry.
+Step 5 — depth write-back (R3, ADR first), then motion vectors and the reactive mask (R3). The post-alpha program that ends the §8.1 row.
+Common to every step: anchor to an immutable base SHA; check_gs_pre_upscale_hook.py stays green, and if step 5 moves any of its seven anchors in render_forward_clustered.cpp (:112-118) they get updated, never relaxed.
+6. Unknowns and decision points for the maintainer
+Are TAA and FSR2 inside the Public Alpha envelope? release-acceptance-bar.md §10.1 says "Forward+, single view" and is silent. This chooses between "B+D now" and "A is alpha work". Nobody but the maintainer can answer it.
+Does GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes #929 keep blocking the alpha? Its §11 entry (release-acceptance-bar.md:310) reads "Blocked on the GPU-001: splats absent under viewport scaling and FSR2 with composite depth_test=true (default) — composite writes an already-consumed buffer #921 disposition" — that disposition was made and landed (Option B pre-upscale hook, gaussian_splatting: composite splats at the pre-upscale seam so scaled/temporal viewports present them (GPU-001, Option B) (refs #921) #924). The entry cannot stay as written; it needs re-deciding either way.
+Is ~1 LSB mean with 104–136 peak swings acceptable to ship? (§1.6.) A human visual call on real-scan content in motion. It decides whether B is urgent or merely correct.
+Is the static-camera fix worth landing without the moving-camera half? B fixes the measured case and leaves ghosting. Half a fix plus an honest disclosure, versus one disclosure covering both — a product judgement, not a technical one.
+Should GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes #929, transparent_bg viewports are fully opaque under TAA or FSR2: both stages hardcode alpha=1.0 (upstream Godot + thirdparty, not splat-specific) #989 and the three residuals in render-pipeline.md:149-153 merge into one "splats are not temporally integrated" disclosure? One seam, one workaround. Five entries describing one limitation reads as five bugs.
+Not measured by me: the moving camera (the rig is static-camera by design), MetalFX (macOS only), multiview, Forward Mobile, and any GPU other than an RTX 3090.
+Separately filed
+The change surface here exposed an unrelated policy gap: modules/gaussian_splatting/interfaces/** is in neither the R2 glob list in .agentic/policy.json nor the renderStreamingPrefixes GPU-evidence list at .github/workflows/gaussian_production_gates.yml:165-169, so output_compositor.cpp, gpu_culler.cpp, gpu_sorting_pipeline.cpp, tile_rasterizer.cpp and painterly_renderer.cpp all classify R1 — no GPU evidence, no real-scan visual validation, no GPU reviewer. Verified with python scripts/agentic/classify_change.py. Filed as #1017; not fixed here.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+klausi3D commented on Sep 17, 2026
+klausi3D
+on Sep 17, 2026
+OwnerAuthor
+More actions
+Implemented as #1026, based on b915afc51c5, head c07fb978d99.
+Steps 1-4 of the assessment's plan land together in one PR, because the rig must be red at base and a red QA scene cannot land on master on its own.
+One correction to the assessment, found by verification: the proposed oracle — the splat region's autocorrelation at the engine's jitter phase — does not discriminate. Measured on the same captures, the correctly-jittered mesh control autocorrelates +1.000 at lag 8 as well. FSR2's resolve is phase-periodic under a static camera whether or not the layer feeding it is jittered, so a gate built on it would have been red before and after. The periodicity remains the right attribution and is recorded as a diagnostic; the rig's oracle is instead the Lucas-Kanade sub-pixel displacement of the splat region against its own window-mean frame, which is gradient-normalised and therefore comparable across content.
+Real scan, static camera, my own optimize=speed_trace builds of b915afc51c5 (which reproduce your nightly's table to three decimals) and of the fix:
+config
+splat displacement, BASE
+splat displacement, AFTER
+mesh control (unchanged)
+none
+0.0000 px
+0.0000 px
+0.0000 px
+taa
+0.0000 px
+0.0156 px
+0.0151 → 0.0152 px
+fsr2 @1.0
+0.2525 px
+0.0900 px
+0.0100 → 0.0099 px
+fsr2 @0.5
+0.3603 px
+0.0927 px
+0.0046 → 0.0046 px
+The TAA row going from 0.0000 to 0.0156 px is the intended effect, not a regression: splats were bit-stable under TAA because they were never jittered, i.e. never antialiased, and they now sit at parity with the mesh control.
+Your §6 question 3 — whether the artefact is acceptable to ship — was answered by the maintainer putting TAA and FSR2 inside the alpha envelope, which is now recorded in §10.1. Question 2 is answered: this entry is re-decided in §11. Question 1's other half, the moving-camera ghosting, is filed as #1025 (needs-adr) with the design sketch and disclosed under §8.1; it has still never been measured, and measuring it is that issue's first task.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+klausi3D
+added 9 commits that reference this issue on Sep 17, 2026
+docs: address self-review findings on the limitations and internal-cl…
+...
+2ca3c96
+gaussian_splatting: render splats with the engine's TAA jitter, and k…
+...
+65132c9
+docs: correct what the candidate gate actually enforces, and name the…
+...
+1bc4d2e
+gaussian_splatting: render splats with the engine's TAA jitter, and k…
+...
+c340b25
+gaussian_splatting: render splats with the engine's TAA jitter, and k…
+...
+e280274
+docs: re-measure the ledger cost after #1025 was labelled, and record…
+...
+cbeb37c
+docs: address self-review findings on the limitations and internal-cl…
+...
+8e637b8
+docs: record the TAA/FSR2 motion residual and the get_statistics cras…
+...
+0182d92
+docs: address self-review findings on the limitations and internal-cl…
+...
+0859ba9
+6 remaining items
+Load more
+klausi3D
+added 6 commits that reference this issue on Sep 20, 2026
+qa: record the post-cleanup displacement observations in the gate's c…
+...
+b9e307f
+docs: correct the #929 residual disclosure to what #1025 measured, an…
+...
+78fb806
+gaussian_splatting: render splats with the engine's TAA jitter, and k…
+...
+7c16775
+docs: address self-review findings on the limitations and internal-cl…
+...
+45a65bf
+docs: record the TAA/FSR2 motion residual and the get_statistics cras…
+...
+c999d48
+docs: state the alpha's API promise, its real limitations, and fix do…
+...
+bc77ce3
+klausi3D commented on Sep 20, 2026
+klausi3D
+on Sep 20, 2026
+OwnerAuthor
+More actions
+Closing: fixed for the static camera, residual accepted and split out
+The jitter half is fixed and merged in #1026 (Refs #929, no closing keyword — closing by hand as the acceptance bar's §11 item 5 prescribes).
+What was fixed. The splat projection ignored scene_data->taa_jitter, so FSR2 un-jittered an input that had never been jittered. Measured on a real scan with a static camera, splat displacement between consecutive frames:
+config
+before
+after
+no temporal stage
+0.0000 px
+0.0000 px (bit-identical)
+TAA
+0.0000 px
+0.0156 px (now antialiases, at parity with the mesh control's 0.0152)
+FSR2 @1.0
+0.2525 px
+0.0900 px
+FSR2 @0.5
+0.3603 px
+0.0927 px
+Gated by a QA temporal-stability phase proven red on the unfixed build (0.305 px against a 0.15 px ceiling) and green after, with the base-side check re-run after a machine-contention cleanup.
+What remains. The moving-camera half is tracked as #1025 and has now been measured for the first time: under TAA a ≈1.5 px trail that does not grow with camera speed; under FSR2, none at all. The maintainer accepted it as a disclosed public-alpha limitation under the §10.1 exception: #1025 (comment)
+Two findings from that work worth carrying forward: the composite already feeds FSR2's reactive mask through the destination alpha, which is why FSR2 stays clean and is a trap for anyone editing that alpha (#1036); and velocity write-back does not depend on depth write-back, contrary to what this issue and #1025 originally stated.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+klausi3D
+closed this as completedon Sep 20, 2026
+klausi3D
+added 5 commits that reference this issue on Sep 20, 2026
+docs: answer both reviews on the #1025 acceptance recording (#1025, #929
+...
+f65b421
+docs: record the #1025 acceptance and make the 8.1 row a real disclos…
+...
+6f45520
+release-gate: make #1025's accepted alpha limitation visible to the c…
+...
+24eb769
+docs+release-gate: address the #1068 review of the #54 acceptance record
+...
+5758eaa
+docs+release-gate: record #54's acceptance as a public-alpha limitati…
+...
+af74949
+klausi3D
+added a commit that references this issue on Oct 5, 2026
+gaussian_splatting: key cached-render reuse on every raster input; do…
+...
+9434592
+klausi3D
+added a commit that references this issue on Oct 14, 2026
+gaussian_splatting: harden audited render, streaming and CI contracts (…
+...
+d4ab7a7
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+program:prod-readyProduction-readiness program (audit 2026-07-07)Production-readiness program (audit 2026-07-07)
+Projects
+No projects
+Milestone
+Continuation M3: Renderer Parity and RecoveryNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

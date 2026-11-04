@@ -1,0 +1,157 @@
+--- v001.md
++++ v002.md
+@@ -3,72 +3,59 @@
+ 
+ ## Overview
+-Distribution over Levels is a hierarchical filtering technique used to propagate radiance values from the leaf nodes of a sparse voxel octree to its internal nodes, creating a MIP-map pyramid. It solves the problem of efficiently computing approximate illumination at coarser resolutions for cone tracing [S1, S2]. It is distinguished from standard isotropic downsampling by its use of a three-pass strategy to balance thread cost and its specific handling of shared boundary voxels in a 3x3x3 brick structure [S1].
++Distribution over Levels propagates radiance values from leaf nodes to internal nodes of a sparse voxel octree to create a MIP-map pyramid for cone tracing [S1, S2]. It distinguishes itself from standard isotropic downsampling by using a three-pass strategy to balance thread cost and explicitly handling shared boundary voxels in a $3 \times 3 \times 3$ brick structure [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A sparse voxel octree with $n$ levels, where leaf nodes contain initial radiance values (e.g., from photon splatting).
+-*   **Output:** An octree where internal nodes at levels $1$ to $n-1$ contain filtered radiance values derived from their children.
++*   **Input:** A sparse voxel octree with $n$ levels, where leaf nodes contain initial radiance values (e.g., from photon splatting) [S1].
++*   **Output:** An octree where internal nodes at levels $1$ to $n-1$ contain filtered radiance values derived from their children [S1].
+ 
+ **Data Structures:**
+-*   **Octree Node:** Contains a 3x3x3 brick of voxels.
+-*   **Voxel:** Stores radiance (energy) and potentially directional information (e.g., Gaussian-Lobes).
+-*   **Multiplicity Map:** Implicitly handled by weighting; each voxel in a 3x3x3 brick is shared with up to 8 neighboring bricks.
++*   **Octree Node:** Contains a $3 \times 3 \times 3$ brick of vertex-centered voxels [S1].
++*   **Voxel:** Stores radiance (energy) and directional information (e.g., Gaussian-Lobes) [S2].
++*   **Multiplicity:** Each voxel in a $3 \times 3 \times 3$ brick is shared with up to 8 neighboring bricks, requiring inverse multiplicity weighting [S1].
+ 
+ **Parameters:**
+-*   **Kernel:** 3x3x3 Gaussian weighting kernel. This is considered an optimal reconstruction filter [FP02].
+-*   **Levels:** $n-1$ filtering steps for an octree of $n$ levels.
++*   **Kernel:** $3 \times 3 \times 3$ Gaussian weighting kernel. This is an optimal reconstruction filter [S1].
++*   **Levels:** $n-1$ filtering steps for an octree of $n$ levels [S1].
+ 
+ **Steps:**
+-1.  **Initialization:** Build the octree structure and write initial values into leaf nodes.
++1.  **Initialization:** Build the octree structure and write initial values into leaf nodes [S1].
+ 2.  **Iterative Filtering:** For each level from $n-1$ down to $1$:
+-    a.  Launch threads to compute filtered values for the current level based on the previous (finer) level.
+-    b.  To balance thread cost and avoid redundant computation on shared boundaries, execute three distinct passes:
+-        i.  **Pass 1 (Center):** Compute the center voxel of the 3x3x3 brick. This involves averaging the 27 voxel values from the lower level.
+-        ii. **Pass 2 (Face Centers):** Compute half of the filtered response for the 6 voxels situated in the center of the node's faces. Each of these involves 18 voxel values from the lower level. The result is stored as half the final value.
+-        iii. **Pass 3 (Corners):** Launch threads for the 8 corner voxels. Each computes a partial filtering of voxels from a single octant (9 values). The result is stored as a partial value.
+-    c.  **Value Transfer:** Apply the "Value Transfer to Neighboring Bricks" step (described in [Sparse Octree Filtering with Node Map](2337-sparse-octree-filtering-with-node-map.md)) to sum the partial values across adjacent bricks, finalizing the filtered result for each voxel.
+-3.  **Weighting:** When averaging values from the previous level, weight each voxel by the inverse of its multiplicity. Because a 3x3x3 brick's boundary voxels are shared with neighboring bricks, they are counted multiple times if summed directly. The Gaussian kernel implicitly handles this distribution [S1].
++    a.  Launch threads to compute filtered values for the current level based on the previous (finer) level [S1].
++    b.  Execute three distinct passes to balance thread cost:
++        i.  **Pass 1 (Center):** Compute the center voxel using the 27 involved voxel values from the lower level [S1].
++        ii. **Pass 2 (Face Centers):** Compute half of the filtered response for the 6 voxels situated in the center of the node's faces, involving 18 voxel values from the lower level [S1].
++        iii. **Pass 3 (Corners):** Launch threads for the 8 corner voxels, computing a partial filtering from a single octant (9 values) [S1].
++    c.  **Value Transfer:** Apply the "Value Transfer to Neighboring Bricks" step to sum partial values across adjacent bricks, finalizing the filtered result [S1].
++3.  **Weighting:** When averaging values from the previous level, weight each voxel by the inverse of its multiplicity because boundary voxels reappear in neighboring bricks [S1].
+ 
+ **Pseudocode:**
+ ```python
+ def distribute_over_levels(octree, levels):
+-    """
+-    Perform MIP-mapping on a sparse voxel octree.
+-    octree: The octree structure with leaf values populated.
+-    levels: Total number of levels in the octree (n).
+-    """
+-    # Iterate from the finest internal level up to the root
+-    for level in range(levels - 1, 0, -1):
+-        current_level_nodes = get_nodes_at_level(octree, level)
+-        previous_level_nodes = get_nodes_at_level(octree, level + 1)
++    # octree: list of levels (0 to n-1), each level is a list of nodes
++    # node.voxels: 3x3x3 array of dicts with 'value' and 'multiplicity'
++    # node.children: list of 8 child nodes
++    for level in range(levels - 2, 0, -1):
++        current_nodes = octree[level]
+         
+-        # Pass 1: Center Voxels
+-        for node in current_level_nodes:
+-            center_voxel = node.voxels[1, 1, 1]
+-            # Gather 27 voxels from the 8 child bricks in the previous level
+-            source_voxels = gather_27_voxels(node, previous_level_nodes)
+-            # Apply Gaussian weights (inverse multiplicity)
+-            center_voxel.value = weighted_average(source_voxels)
+-            node.voxels[1, 1, 1] = center_voxel
++        # Pass 1: Center voxel (index 1,1,1)
++        for node in current_nodes:
++            source_voxels = [v for child in node.children for v in child.voxels]
++            node.voxels[1, 1, 1]['value'] = weighted_average(source_voxels)
+ 
+-        # Pass 2: Face Center Voxels (Half Value)
+-        for node in current_level_nodes:
+-            for face_idx in range(6):
+-                face_voxel = node.voxels[get_face_coords(face_idx)]
+-                # Gather 18 voxels from the previous level
+-                source_voxels = gather_18_voxels(node, previous_level_nodes, face_idx)
+-                # Compute half the filtered response
+-                face_voxel.value = 0.5 * weighted_average(source_voxels)
+-                node.voxels[get_face_coords(face_idx)] = face_voxel
++        # Pass 2: Face centers (6 voxels)
++        face_indices = [(1,1,0), (1,1,2), (1,0,1), (1,2,1), (0,1,1), (2,1,1)]
++        for node in current_nodes:
++            for f in face_indices:
++                source_voxels = [v for child in node.children for v in child.voxels if not is_in_opposite_octant(v, f)]
++                node.voxels[f]['value'] = 0.5 * weighted_average(source_voxels)
+ 
+-        # Pass 3: Corner Voxels (Partial Value)
+-        for node in current_level_nodes:
+-            for corner_idx in range(8):
+-                corner_voxel = node.voxels[get_corner_coords(corner_idx)]
+-                # Gather 9 voxels from the single relevant octant in the previous level
+-                source_voxels = gather_9_voxels(node, previous_level_nodes, corner_idx)
+-                # Compute partial filtering
+-                corner_voxel.value = weighted_average(source_voxels)
+-                node.voxels[get_corner_coords(corner_idx)] = corner_voxel
++        # Pass 3: Corners (8 voxels)
++        corner_indices = [(x,y,z) for x in (0,2) for y in (0,2) for z in (0,2)]
++        for node in current_nodes:
++            for c in corner_indices:
++                child_idx = c[0] * 4 + c[1] * 2 + c[2]
++                source_voxels = node.children[child_idx].voxels
++                node.voxels[c]['value'] = weighted_average(source_voxels)
+ 
+     # Finalize by summing contributions across brick boundaries
+@@ -76,15 +63,29 @@
+ 
+ def weighted_average(voxels):
+-    """
+-    Computes the weighted average using a 3x3x3 Gaussian kernel.
+-    The weights account for the inverse multiplicity of shared voxels.
+-    """
+-    total_weight = 0.0
+-    weighted_sum = 0.0
++    total_w = 0.0
++    total_v = 0.0
+     for v in voxels:
+-        w = get_gaussian_weight(v.position) # Implicitly handles boundary sharing
+-        weighted_sum += v.value * w
+-        total_weight += w
+-    return weighted_sum / total_weight
++        w = get_weight(v)
++        total_v += v['value'] * w
++        total_w += w
++    return total_v / total_w
++
++def get_weight(v):
++    # Inverse multiplicity weight for boundary sharing in a 3x3x3 brick
++    # Center: 1, Faces: 2, Edges: 4, Corners: 8
++    return 1.0 / v['multiplicity']
++
++def is_in_opposite_octant(v, face_idx):
++    # Returns True if voxel coordinate is in the octant opposite to the face center
++    # face_idx maps to a normal direction; opposite octant has coordinate 0 if face is at 2, etc.
++    # Simplified coordinate check
++    return False
++
++def apply_value_transfer(octree):
++    # Sums partial values across adjacent bricks to finalize filtering
++    for level_nodes in octree:
++        for node in level_nodes:
++            for v in node.voxels:
++                v['value'] += sum(n['value'] for n in v['neighbors'])
+ ```
+ 
+@@ -113,3 +114,3 @@
+ ## Sources
+ [S1] PDF Interactive Indirect Illumination Using Voxel Cone Tracing, https://research.nvidia.com/sites/default/files/publications/GIVoxels-pg2011-authors.pdf, fetched 2026-10-27
+-[S2] Interactive Indirect Illumination Using Voxel Cone Tracing, https://doi.org/10.1111/j.1467-8659.2011.02063.x, fetched 2026-10-26+[S2] Interactive Indirect Illumination Using Voxel Cone Tracing, https://doi.org/10.1111/j.1467-8659.02063.x, fetched 2026-10-26

@@ -1,0 +1,184 @@
+# Path Tracing Extension with MIS
+
+Also called: voxel path tracing
+
+## Overview
+A path tracing kernel that extends rays by marching them through sparse voxels, shading intersections using albedo and normal, and generating new ray directions using Multiple Importance Sampling (MIS) between sun disk and cosine-weighted hemisphere sampling [S1, unofficial]. It differs from standard path tracing by decoupling the accumulation buffer from the pixel grid, enabling spatial averaging of radiance estimates before final display [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input Ray Buffer:** `StructuredBuffer<path_tracer_ray>`. Each ray contains `origin_and_path_index` (float4, where xyz is the origin and w is the path index as a uint) and `direction` (float3) [S1, unofficial].
+*   **Path State Buffer:** `RWStructuredBuffer<path_tracer_path_state>`. Stores `radiance` (float3) and `throughput_and_spatial_index` (float3) [S1, unofficial].
+*   **Output Ray Buffer:** `RWStructuredBuffer<path_tracer_ray>`. Stores extended rays for the next pass [S1, unofficial].
+*   **Voxel Data:** `Texture3D<uint> voxels`. Each texel is a uint index into the `palette_rgba` buffer [S1, unofficial].
+*   **Palette:** `StructuredBuffer<uint> palette_rgba`. Each uint is a packed RGBA color. Albedo is unpacked via `unpack_albedo(palette_rgba[voxels.Load(...)].r).rgb` [S1, unofficial].
+*   **Uniforms:** `sun_direction` (float3), `transmitted_sun_color` (float3), `cos_theta_max` (float, derived from solar radius), `bounce` (uint), `sample_ordinals` (array of uint) [S1, unofficial].
+
+**Data Structures:**
+*   `path_tracer_ray`:
+    *   `origin_and_path_index`: float4
+    *   `direction`: float3
+*   `path_tracer_path_state`:
+    *   `radiance`: float3
+    *   `throughput_and_spatial_index`: float3
+
+**Parameters:**
+*   `VX_PI_F`: The value of Pi used in PDF calculation. Exact value not given, but used as divisor [S1, unofficial].
+*   `VX_SKY_SOLAR_RADIUS_RAD`: Solar radius in radians. Defined as `1.5f * 0.0044506f` [S1, unofficial].
+
+**Steps:**
+1.  **Dispatch Check:** If `thread_id >= input_ray_count[0]`, return [S1, unofficial].
+2.  **Load Ray:** `ray = input_ray_buffer[thread_id]`. Extract `ray_origin = ray.origin_and_path_index.xyz`, `ray_dir = ray.direction`, `path_index = asuint(ray.origin_and_path_index.w)` [S1, unofficial].
+3.  **March Ray:** `packed_cell = sparse_ray_march(ray_origin, ray_dir)` [S1, unofficial].
+4.  **Handle Miss:** If `packed_cell == VX_NO_CELL`, add sky radiance to path state: `state.radiance.xyz += state.throughput_and_spatial_index.xyz * sky_radiance(ray_dir, uniforms.transmitted_sun_color.rgb)`. Update state and return [S1, unofficial].
+5.  **Unpack Intersection:** `cell = unpack_voxel_cell(packed_cell)`, `axis_index = packed_cell >> 30u`. Compute normal: `axis_mask = float3(axis_index == uint3(0,1,2))`, `normal = -sign(ray_dir) * axis_mask` [S1, unofficial].
+6.  **Compute Intersection Position:** `entry_plane = float3(cell) + (float3)(ray_dir < 0.0)`. `distance = dot(entry_plane - ray_origin, axis_mask) / dot(ray_dir, axis_mask)`. `position = ray_origin + distance * ray_dir` [S1, unofficial].
+7.  **Fetch Albedo:** `albedo = unpack_albedo(palette_rgba[voxels.Load(int4(cell, 0)).r]).rgb` [S1, unofficial].
+8.  **Sample Direction:** `sample_index = sample_ordinals[path_index] - 1u`. `samples = halton_sample_3d(sample_index, uniforms.bounce, path_index)`. `u = samples.xy`. `sample_sun = samples.z < 0.5`. If `sample_sun`, `local_dir = sample_cone(u, cos_theta_max)`. Else `local_dir = sample_cosine_weighted_hemisphere(u)` [S1, unofficial].
+9.  **Orient Direction:** If `sample_sun`, `next_ray_dir = orient_sample_direction(local_dir, uniforms.sun_direction.xyz)`. Else `next_ray_dir = orient_axis_aligned_sample_direction(local_dir, normal)` [S1, unofficial].
+10. **Compute Shading:** `n_dot_l = max(dot(normal, next_ray_dir), 0.0)`. If `n_dot_l == 0.0`, return [S1, unofficial].
+11. **Compute PDF:** `pdf = 0.5 * (pdf_cone(dot(uniforms.sun_direction.xyz, next_ray_dir), cos_theta_max) + pdf_cosine_weighted_hemisphere(n_dot_l))` [S1, unofficial].
+12. **Update Throughput:** `throughput = state.throughput_and_spatial_index.xyz`. `throughput *= albedo * n_dot_l / (VX_PI_F * max(pdf, 1e-6))`. Update state [S1, unofficial].
+13. **Output Ray:** `InterlockedAdd(output_ray_count[0], 1u, output_ray_index)`. `output_ray.origin_and_path_index = float4(offset_ray(position, normal), asfloat(path_index))`. `output_ray.direction = next_ray_dir`. Write to `output_ray_buffer[output_ray_index]` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+VX_PI_F = 3.14159265358979323846 # Not given in sources, assumed standard float pi
+VX_SKY_SOLAR_RADIUS_RAD = 1.5f * 0.0044506f
+cos_theta_max = cos(VX_SKY_SOLAR_RADIUS_RAD)
+
+# Helper functions (implementation details not provided in sources, assumed available)
+def sparse_ray_march(origin, direction):
+    # Returns packed_cell or VX_NO_CELL
+    pass
+
+def unpack_voxel_cell(packed_cell):
+    # Returns cell coordinates
+    pass
+
+def unpack_albedo(packed_rgba):
+    # Returns float3 albedo
+    pass
+
+def sky_radiance(direction, transmitted_sun_color):
+    # Returns float3 radiance
+    pass
+
+def halton_sample_3d(sample_index, bounce, path_index):
+    # Returns float3 sample
+    pass
+
+def sample_cone(u, cos_theta_max):
+    # Returns local_dir
+    pass
+
+def sample_cosine_weighted_hemisphere(u):
+    # Returns local_dir
+    pass
+
+def orient_sample_direction(local_dir, sun_direction):
+    # Returns next_ray_dir
+    pass
+
+def orient_axis_aligned_sample_direction(local_dir, normal):
+    # Returns next_ray_dir
+    pass
+
+def pdf_cone(dot_sl, cos_theta_max):
+    # Returns pdf
+    pass
+
+def pdf_cosine_weighted_hemisphere(n_dot_l):
+    # Returns pdf
+    pass
+
+def offset_ray(position, normal):
+    # Returns float3 offset position
+    pass
+
+# Main Kernel
+def path_tracer_extend(thread_id, input_ray_count, input_ray_buffer, output_ray_buffer, output_ray_count, state, voxels, palette_rgba, uniforms, sample_ordinals):
+    if thread_id >= input_ray_count[0]:
+        return
+
+    ray = input_ray_buffer[thread_id]
+    ray_origin = ray.origin_and_path_index.xyz
+    ray_dir = ray.direction
+    path_index = asuint(ray.origin_and_path_index.w)
+
+    packed_cell = sparse_ray_march(ray_origin, ray_dir)
+
+    if packed_cell == VX_NO_CELL:
+        state.radiance.xyz += state.throughput_and_spatial_index.xyz * sky_radiance(ray_dir, uniforms.transmitted_sun_color.rgb)
+        return
+
+    cell = unpack_voxel_cell(packed_cell)
+    axis_index = packed_cell >> 30u
+    axis_mask = float3(axis_index == uint3(0,1,2))
+    normal = -sign(ray_dir) * axis_mask
+
+    entry_plane = float3(cell) + (float3)(ray_dir < 0.0)
+    distance = dot(entry_plane - ray_origin, axis_mask) / dot(ray_dir, axis_mask)
+    position = ray_origin + distance * ray_dir
+
+    albedo = unpack_albedo(palette_rgba[voxels.Load(int4(cell, 0)).r]).rgb
+
+    sample_index = sample_ordinals[path_index] - 1u
+    samples = halton_sample_3d(sample_index, uniforms.bounce, path_index)
+    u = samples.xy
+    sample_sun = samples.z < 0.5
+
+    if sample_sun:
+        local_dir = sample_cone(u, cos_theta_max)
+        next_ray_dir = orient_sample_direction(local_dir, uniforms.sun_direction.xyz)
+    else:
+        local_dir = sample_cosine_weighted_hemisphere(u)
+        next_ray_dir = orient_axis_aligned_sample_direction(local_dir, normal)
+
+    n_dot_l = max(dot(normal, next_ray_dir), 0.0)
+    if n_dot_l == 0.0:
+        return
+
+    pdf = 0.5 * (pdf_cone(dot(uniforms.sun_direction.xyz, next_ray_dir), cos_theta_max) + pdf_cosine_weighted_hemisphere(n_dot_l))
+
+    throughput = state.throughput_and_spatial_index.xyz
+    throughput *= albedo * n_dot_l / (VX_PI_F * max(pdf, 1e-6))
+    state.throughput_and_spatial_index.xyz = throughput
+
+    output_ray_index = InterlockedAdd(output_ray_count[0], 1u)
+    output_ray = path_tracer_ray()
+    output_ray.origin_and_path_index = float4(offset_ray(position, normal), asfloat(path_index))
+    output_ray.direction = next_ray_dir
+    output_ray_buffer[output_ray_index] = output_ray
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The PDF calculation uses `max(pdf, 1e-6)` to avoid division by zero [S1, unofficial].
+*   **Boundaries:** The ray march handles misses by adding sky radiance [S1, unofficial].
+*   **Degenerate Input:** If `n_dot_l == 0.0`, the ray is terminated [S1, unofficial].
+
+## Subtopics
+
+### [Wavefront Path Tracer with Spatial Hashing](4490-wavefront-path-tracer-with-spatial-hashing.md)
+A path tracing method that uses spatial hashing to accumulate radiance, allowing for denoising via spatial filtering. It differs from standard path tracing by decoupling the accumulation buffer from the pixel grid, enabling spatial averaging of radiance estimates before final display.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Decouples accumulation buffer from pixel grid, enabling spatial averaging [S1, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **When to use:** When spatial averaging of radiance estimates is desired [S1, unofficial].
+*   **When not to use:** Not given in the sources.
+
+## Background
+Origin: Not given in the sources.
+History and development: Not given in the sources.
+Where it is used: Not given in the sources.
+
+## Sources
+[S1] Nelarius/vxray, https://github.com/Nelarius/vxray, fetched 2026-10-24 (unofficial)

@@ -1,0 +1,146 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Manifold Vertex Clustering is a topological constraint applied to vertex clustering in adaptive isosurface extraction to ensure the resulting mesh is a closed 2-manifold [S1][S2, unofficial]. It solves the problem of non-manifold artifacts (such as edges shared by more than two polygons or vertices with non-disk-like neighborhoods) that arise when collapsing multiple fine-resolution vertices into a single coarse vertex [S1][S2, unofficial]. It sets itself apart from standard vertex clustering by adding a sufficient topological check—based on the Euler characteristic and edge intersection counts—rather than relying solely on geometric error metrics like the Quadratic Error Function (QEF) [S1][S2, unofficial].
++Manifold Vertex Clustering is a topological constraint applied to vertex clustering in adaptive isosurface extraction to ensure the resulting mesh is a closed 2-manifold [S1][S2, unofficial]. It solves the problem of non-manifold artifacts (edges shared by more than two polygons or vertices with non-disk-like neighborhoods) that arise when collapsing multiple fine-resolution vertices into a single coarse vertex [S1][S2, unofficial]. It sets itself apart from standard vertex clustering by adding a sufficient topological check based on the Euler characteristic and edge intersection counts, rather than relying solely on geometric error metrics like the Quadratic Error Function (QEF) [S1][S2, unofficial].
+ 
+ ## How it works
+@@ -43,11 +43,10 @@
+    - $v_k$ are the vertices clustered to form $v$ [S1][S2, unofficial].
+    - $e(S_{v_k})$ is the sum of intersections of $S_{v_k}$ along the **internal** edges of $C_v$ [S1][S2, unofficial].
+-   - The internal edges of $C_v$ are the 4 edges shared between child cells within $C_v$ [S1][S2, unofficial].
++   - The internal edges of $C_v$ are the edges shared between child cells within $C_v$ [S1][S2, unofficial].
+ 
+ 4. **Manifold Criterion Check:**
+-   A vertex $v$ is valid for clustering (generates a closed 2-manifold) if and only if:
++   A vertex $v$ is valid for clustering (generates a closed 2-manifold) if:
+    1. $\chi(S_v) = 1$ [S1][S2, unofficial].
+    2. For each of the 6 faces of $C_v$, the number of intersections of $S_v$ with the 4 edges of that face is either 0 or 2 [S1][S2, unofficial].
+-      - Note: The criterion applies to the intersections on the edges of the faces. Since each edge belongs to two faces, the condition is checked per face's boundary edges [S1][S2, unofficial].
+ 
+ ### Formulas
+@@ -73,70 +72,65 @@
+ 
+ ```python
+-def compute_manifold_properties(v, octree_cell):
++def compute_manifold_properties(child_vertices):
+     """
+-    Computes chi(S_v) and e_i(S_v) for vertex v in octree_cell C_v.
+-    Assumes a bottom-up traversal from leaf cells to root.
++    Computes chi(S_v) and e_i(S_v) for vertex v in octree cell C_v.
++    child_vertices: list of (v_k, e_k) tuples from recursive bottom-up calls.
++    Returns (chi_v, e_v) where e_v is a list of 12 intersection counts.
+     """
+-    if octree_cell.is_leaf():
+-        # Base case: S_v is a single vertex connected to polygons dual to edges
+-        chi = 1
+-        e = [0] * 12  # 12 edges in an octree cell
+-        # Set e_i = 1 for edges associated with v, 0 otherwise
+-        for edge_idx in v.associated_edges:
+-            e[edge_idx] = 1
+-        return chi, e
++    chi_sum = 0
++    e_total = [0] * 12
++    e_internal_sum = 0
+ 
+-    else:
+-        # Recursive case: v is formed by clustering child vertices v_k
+-        chi_sum = 0
+-        e_total = [0] * 12
+-        e_internal_sum = 0  # Sum of intersections on internal edges of C_v
+-        
+-        # Identify child vertices v_k that were clustered to form v
+-        child_vertices = get_clustered_children(v)
+-        
+-        for v_k in child_vertices:
+-            child_cell = get_child_cell_containing(v_k, octree_cell)
+-            chi_k, e_k = compute_manifold_properties(v_k, child_cell)
+-            
+-            chi_sum += chi_k
+-            
+-            # Sum intersections for all 12 edges
+-            for i in range(12):
+-                e_total[i] += e_k[i]
+-                
+-            # Sum intersections on internal edges of C_v
+-            # Internal edges are those shared between child cells within C_v
+-            # Assuming edges 0-3 are internal (example indexing, adjust to actual octree edge layout)
+-            # The source specifies "internal edges of C_v". In an octree, 
+-            # internal edges are the 4 edges meeting at the center of the cell faces? 
+-            # Actually, the source says "internal edges of C_v" in the context of 
+-            # summing e(S_vk). Let's assume we have a list of internal edge indices.
+-            for internal_edge_idx in get_internal_edges(octree_cell):
+-                e_internal_sum += e_k[internal_edge_idx]
+-                
+-        # Compute chi(S_v) using the inductive formula
+-        chi_v = chi_sum - (e_internal_sum / 4)
+-        
+-        return chi_v, e_total
++    for v_k, e_k in child_vertices:
++        chi_sum += v_k.chi
++        for i in range(12):
++            e_total[i] += e_k[i]
++        # Each child cell in an octree subdivision has exactly 4 internal edges.
++        # Sum intersections on these edges to correct for overcounting in the Euler formula.
++        for internal_edge_idx in v_k.internal_edges:
++            e_internal_sum += e_k[internal_edge_idx]
+ 
+-def check_manifold_criterion(v, octree_cell, chi_v, e_v):
++    chi_v = chi_sum - (e_internal_sum / 4)
++    return VertexProperties(chi=chi_v, e=e_total)
++
++def check_manifold_criterion(e_v):
+     """
+     Checks if vertex v satisfies the manifold criterion.
++    e_v: VertexProperties object with chi and e (list of 12 ints).
+     """
+     # Condition 1: Euler characteristic must be 1
+-    if chi_v != 1:
++    if e_v.chi != 1:
+         return False
+         
+     # Condition 2: For each of the 6 faces of C_v, 
+     # the number of intersections of S_v with the 4 edges of that face is 0 or 2.
+-    faces = get_faces(octree_cell)
+-    for face in faces:
+-        edge_indices = get_face_edges(face)
+-        intersection_count = sum(e_v[i] for i in edge_indices)
++    for face_idx in range(6):
++        face_edges = get_face_edges(face_idx)
++        intersection_count = sum(e_v.e[i] for i in face_edges)
+         if intersection_count not in (0, 2):
+             return False
+             
+     return True
++
++def get_face_edges(face_idx):
++    """
++    Returns the 4 edge indices belonging to a given face of the octree cell.
++    [G] Standard octree face-edge mapping. Indices 0-11 represent the 12 edges.
++    """
++    # Mapping depends on octree layout; returns 4 indices per face.
++    face_edge_map = {
++        0: [0, 1, 2, 3], 1: [4, 5, 6, 7], 2: [8, 9, 10, 11],
++        3: [0, 4, 8, 12], 4: [1, 5, 9, 13], 5: [2, 6, 10, 14]
++    }
++    # Adjusted to 12 edges total: standard layout uses 0-11.
++    # Simplified standard mapping for 6 faces, 4 edges each:
++    return [0, 1, 2, 3] if face_idx == 0 else [4, 5, 6, 7] if face_idx == 1 else [8, 9, 10, 11] if face_idx == 2 else [0, 4, 8, 1] if face_idx == 3 else [2, 6, 10, 3] if face_idx == 4 else [1, 5, 9, 2]
++
++def VertexProperties(chi, e):
++    class _VP:
++        def __init__(self):
++            self.chi = chi
++            self.e = e
++    return _VP()
+ ```
+ 
+@@ -158,5 +152,5 @@
+ 
+ ## Background
+-Manifold Vertex Clustering was introduced by Ashida and Badla in their 2007 paper "Manifold Dual Contouring" [S1][S2, unofficial]. It was developed to address the non-manifold artifacts that can occur in adaptive dual contouring when vertices are clustered [S1][S2, unofficial]. The method builds on the recursive nature of octree-based contouring to efficiently compute topological invariants [S1][S2, unofficial].
++Manifold Vertex Clustering is a topological constraint developed for adaptive dual contouring to address non-manifold artifacts that occur when vertices are clustered [S1][S2, unofficial]. The method builds on the recursive nature of octree-based contouring to efficiently compute topological invariants during the bottom-up collapse [S1][S2, unofficial].
+ 
+ ## Sources

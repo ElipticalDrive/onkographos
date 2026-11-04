@@ -1,0 +1,112 @@
+Summary Grid.from_points / GridBatch.from_points can produce different voxel sets on CPU and CUDA for the same float16 input. The two paths agree on the voxel count but disagree on which voxels are active. float32 and float64 inputs are ...
+
+from_points produces different grids on CPU and CUDA for float16 points at rounding boundaries · Issue #725 · openvdb/fvdb-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+from_points produces different grids on CPU and CUDA for float16 points at rounding boundaries #725
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+from_points produces different grids on CPU and CUDA for float16 points at rounding boundaries#725
+Copy link
+Labels
+bugSomething isn't workingSomething isn't workingcore libraryCore fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python moduleCore fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python moduletriageNeeds team reviewNeeds team review
+Description
+swahtz
+opened on Aug 3, 2026
+Issue body actions
+Summary
+Grid.from_points / GridBatch.from_points can produce different voxel sets on CPU and CUDA for the same float16 input. The two paths agree on the voxel count but disagree on which voxels are active.
+float32 and float64 inputs are unaffected — they match exactly across every configuration tested.
+Reproducer
+```
+import torch
+from fvdb import Grid
+
+torch.manual_seed(0)
+p = (torch.randn(200_000, 3) * 3.0).to(torch.float16)
+
+a = {tuple(r) for r in Grid.from_points(p,        voxel_size=0.013, origin=0.37).ijk.tolist()}
+b = {tuple(r) for r in Grid.from_points(p.cuda(), voxel_size=0.013, origin=0.37).ijk.cpu().tolist()}
+
+print(len(a), len(b), len(a - b), a == b)
+# 199977 199977 84 False
+```
+Both paths produce 199,977 voxels; 84 of them differ in each direction (199,893 shared).
+Diagnosis
+This is a rounding-boundary disagreement, not a logic error:
+Every disagreement is off-by-one on a single axis. All 84 CPU-only coordinates have a GPU-only coordinate at Chebyshev distance 1 differing in exactly one component (x: 23, y: 29, z: 32).
+The affected points sit essentially exactly on a .5 rounding boundary. Computing (p - origin) / voxel_size in float64 and measuring the distance to the nearest .5, 564 points fall within 1e-6 of a boundary on some axis. Only voxels whose entire point population shifts actually change, hence 84 rather than 564.
+Neither path matches an exact float64 reference. Both compute in float32 (at::opmath_type<c10::Half> is float), so both deviate from the exact result — they just deviate differently.
+float16 makes this far more likely than the other dtypes: the input is quantized onto a coarse lattice, so with an unlucky voxel_size / origin combination a large number of points land on exactly the same fractional offset, and that offset can be exactly 0.5.
+The proximate cause is that host and device evaluate the same VoxelCoordTransform::apply(...).round() expression with different intermediate rounding — most plausibly FMA contraction on the device versus separate multiply/add on the host, which shifts values sitting exactly on the tie by 1 ULP.
+Not a regression
+Verified against two builds of the same tree, differing only in BuildGridFromPoints.cu:
+```
+main (pre-#719): cpu=199977 gpu=199977 sym_diff=84 each way, identical=False
+PR #719        : cpu=199977 gpu=199977 sym_diff=84 each way, identical=False
+```
+Identical, so this is long-standing and not introduced by #719. It was noticed while building a CPU-vs-CUDA oracle for that PR.
+Why it matters
+CPU and CUDA are expected to be interchangeable for grid construction. Anything that builds a grid on one device and compares against, or injects into, a grid built on the other can silently mismatch — including test oracles, which is exactly how this surfaced. It is quiet: no error is raised and the voxel counts agree, so a caller has no signal that anything is wrong.
+Possible directions
+Not obvious which is right, so listing rather than recommending:
+Make the transform reproducible across host and device. Suppress FMA contraction in VoxelCoordTransform::apply (or the callers that feed .round()) so both sides evaluate identically. Cheapest fix if contraction is confirmed as the cause, but needs verification rather than assumption.
+Do the transform in double for half inputs. at::opmath_type<c10::Half> is float; promoting to double for the coordinate computation would put the boundary cases far away from a tie. Costs throughput on a path that is otherwise memory-bound.
+Define and document a tie-breaking rule and implement it explicitly on both paths, instead of relying on whatever .round() does with a value that is exactly .5 after two different roundings.
+Accept and document it, treating exact CPU/CUDA parity as unsupported for float16 points. Cheapest, but leaves the trap in place.
+Option 1 is worth measuring first — if contraction is the whole story it is a one-line change with no throughput cost.
+Activity
+swahtz
+added
+bugSomething isn't workingSomething isn't working
+core libraryCore fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python moduleCore fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python module
+on Aug 3, 2026
+github-actions
+added
+triageNeeds team reviewNeeds team review
+on Aug 3, 2026
+swahtz
+added a commit that references this issue on Aug 7, 2026
+Read non-contiguous point arrays in place instead of copying
+...
+70fbbf2
+swahtz commented on Aug 7, 2026
+swahtz
+on Aug 7, 2026
+ContributorAuthor
+More actions
+Additional data point: this is not float16-specific. While testing layout changes on #719 I hit the same disagreement with float32 input — torch.randn(300_000, 3) * 3.0 (seed 0) at voxel_size=0.05, origin=0.37 gives a symmetric difference of 4 voxels between CPU and CUDA, identical across main and both #719 revisions.
+float16 just makes it common (quantized inputs pile up on exact .5 boundaries); with continuous float32 data it's rare but nonzero — a few boundary ties per ~10^6 coordinates at an unlucky voxel_size/origin.
+Practical consequence worth recording: a CPU-vs-CUDA comparison is not a valid exactness oracle for from_points at any dtype. Same-device comparisons (e.g. a strided view against a packed copy of the same values) are, and that's what #719's layout tests now use.
+swahtz
+added a commit that references this issue on Aug 7, 2026
+Build point grids through a transform iterator instead of a coordinat…
+...
+03c09cc
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bugSomething isn't workingSomething isn't workingcore libraryCore fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python moduleCore fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python moduletriageNeeds team reviewNeeds team review
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

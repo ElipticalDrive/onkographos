@@ -1,0 +1,132 @@
+--- v001.md
++++ v002.md
+@@ -1,12 +1,9 @@
+ # Ray Point Sampling
+-
+-
+ ## Overview
+-Ray Point Sampling generates query points along camera rays for volume rendering by discretizing the ray segment between near and far clipping planes using a fixed step distance. It serves as the bridge between ray-box intersection logic and density/color evaluation, ensuring points are sampled within the defined voxel grid bounds. It differs from its parent [Ray-Bounding Box Intersection and Sampling Preparation](2364-ray-bounding-box-intersection-and-sampling-preparation.md) by performing the actual coordinate generation and masking, and from [Random Point Sampling in Bounds](3914-random-point-sampling-in-bounds.md) by using deterministic, structured grid spacing rather than stochastic sampling.
+-
++Ray Point Sampling generates query points along camera rays for volume rendering by discretizing the ray segment between near and far clipping planes using a fixed step distance [S1, unofficial]. It performs the actual coordinate generation and masking after ray-box intersection, differing from its parent [Ray-Bounding Box Intersection and Sampling Preparation](2364-ray-bounding-box-intersection-and-sampling-preparation.md) [G]. It uses deterministic, structured grid spacing rather than the stochastic sampling of [Random Point Sampling in Bounds](3914-random-point-sampling-in-bounds.md) [G].
+ ## How it works
+ **Inputs:**
+-- `rays_o`: Ray origins, shape $(H, W, 3)$ or flattened $(N, 3)$. Must be contiguous [S1, unofficial].
+-- `rays_d`: Ray directions, shape $(H, W, 3)$ or flattened $(N, 3)$. Must be contiguous [S1, unofficial].
++- `rays_o`: Ray origins, shape $(H, W, 3)$ or flattened $(N, 3)$.
++- `rays_d`: Ray directions, shape $(H, W, 3)$ or flattened $(N, 3)$.
+ - `xyz_min`: Bounding box minimum coordinates, shape $(3,)$.
+ - `xyz_max`: Bounding box maximum coordinates, shape $(3,)$.
+@@ -20,7 +17,4 @@
+ - `ray_id`: Ray indices for each point, shape $(N, M)$.
+ - `step_id`: Step indices for each point, shape $(N, M)$.
+-- `mask_inbbox`: Boolean mask $(N, M)$ indicating points inside the bounding box.
+-- `t_min`, `t_max`: Valid parameter ranges for each ray.
+-- `N_steps`: Number of valid steps per ray.
+ 
+ **Data Structures:**
+@@ -28,9 +22,9 @@
+ 
+ **Steps:**
+-1. **Compute Step Distance:** Calculate the physical step distance:
++1. **Make Inputs Contiguous:** Ensure `rays_o` and `rays_d` are contiguous in memory [S1, unofficial].
++2. **Compute Step Distance:** Calculate the physical step distance:
+    $$ \text{stepdist} = \text{stepsize} \times \text{voxel\_size} $$
+    [S1, unofficial]
+-
+-2. **Generate Candidate Points:** Call the CUDA kernel `sample_pts_on_rays` with inputs `rays_o`, `rays_d`, `xyz_min`, `xyz_max`, `near`, `far`, and `stepdist`. This kernel computes:
++3. **Generate Candidate Points:** Call the sampling routine with inputs `rays_o`, `rays_d`, `xyz_min`, `xyz_max`, `near`, `far`, and `stepdist`. This computes:
+    - `ray_pts`: Points along rays starting from `near` with spacing `stepdist`.
+    - `mask_outbbox`: Boolean mask for points outside the bounding box.
+@@ -40,62 +34,55 @@
+    - `t_min`, `t_max`: The parameter range $[t_{min}, t_{max}]$ for the ray segment within the bounding box.
+    [S1, unofficial]
+-
+-3. **Filter Points:** Compute the inverse mask for points inside the bounding box:
++4. **Filter Points:** Compute the inverse mask for points inside the bounding box:
+    $$ \text{mask\_inbbox} = \neg \text{mask\_outbbox} $$
+    [S1, unofficial]
+-
+-4. **Apply Mask:** Filter `ray_pts`, `ray_id`, and `step_id` using `mask_inbbox`. Points failing the mask are typically set to zero or ignored in subsequent density queries.
+-   [S1, unofficial]
+-
+-5. **Return Results:** Return `ray_pts`, `ray_id`, `step_id`, and associated metadata.
+-   [S1, unofficial]
++5. **Apply Mask:** Filter `ray_pts`, `ray_id`, and `step_id` using `mask_inbbox` [S1, unofficial].
++6. **Return Results:** Return `ray_pts`, `ray_id`, `step_id` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def ray_point_sampling(rays_o, rays_d, xyz_min, xyz_max, near, far, stepsize, voxel_size):
+-    # Ensure inputs are contiguous tensors [S1, unofficial]
+-    rays_o = torch.as_tensor(rays_o).contiguous()
+-    rays_d = torch.as_tensor(rays_d).contiguous()
+-    
++    # Ensure inputs are contiguous arrays [S1, unofficial]
++    rays_o = contiguous_array(rays_o)
++    rays_d = contiguous_array(rays_d)
+     # Calculate physical step distance [S1, unofficial]
+     stepdist = stepsize * voxel_size
+-    
+     # Default far clip if not specified [S1, unofficial]
+     if far is None:
+         far = 1e9
+-        
+-    # Call CUDA kernel to generate points and masks [S1, unofficial]
+-    # Returns: ray_pts, mask_outbbox, ray_id, step_id, N_steps, t_min, t_max
+-    ray_pts, mask_outbbox, ray_id, step_id, N_steps, t_min, t_max = \
+-        sample_pts_on_rays_cuda(rays_o, rays_d, xyz_min, xyz_max, near, far, stepdist)
+-        
++    # Generate candidate points along rays [S1, unofficial]
++    ray_pts, mask_outbbox, ray_id, step_id, N_steps, t_min, t_max = sample_pts_on_rays(
++        rays_o, rays_d, xyz_min, xyz_max, near, far, stepdist
++    )
+     # Filter points inside bounding box [S1, unofficial]
+     mask_inbbox = ~mask_outbbox
+-    
+     # Apply mask to coordinates and indices [S1, unofficial]
+-    # Note: In implementation, this might involve masking the tensor or 
+-    # creating a valid list of indices. The source returns the masked arrays.
+-    ray_pts_valid = ray_pts[mask_inbbox]
+-    ray_id_valid = ray_id[mask_inbbox]
+-    step_id_valid = step_id[mask_inbbox]
+-    
+-    return ray_pts_valid, ray_id_valid, step_id_valid, t_min, t_max, N_steps
++    ray_pts = ray_pts[mask_inbbox]
++    ray_id = ray_id[mask_inbbox]
++    step_id = step_id[mask_inbbox]
++    # Return filtered results [S1, unofficial]
++    return ray_pts, ray_id, step_id
++
++def contiguous_array(arr):
++    # Standard memory layout guarantee [G]
++    return arr if arr.flags.contiguous else arr.copy()
++
++def sample_pts_on_rays(rays_o, rays_d, xyz_min, xyz_max, near, far, stepdist):
++    # The sources do not give the kernel internals; standard ray marching computes points at t = near + k * stepdist, checks bbox, and returns masks/indices [G]
++    ...
+ ```
+-
+ ## Subtopics
+ 
+ ### Fine-stage Points Sampling
+-This variant is used in the fine stage of Direct Voxel Grid Optimization. It modifies the standard sampling by first filtering out rays that do not intersect with known free space. For each ray, the near and far bounds ($t_{near}$ and $t_{far}$) are adjusted to the exact endpoints of the ray-box intersection. A critical pitfall is that $t_{near}$ must not be adjusted if the ray origin $x_0$ is already inside the bounding box [S2]. This ensures correct sampling bounds when the camera is inside the volume.
++This variant is used in the fine stage of Direct Voxel Grid Optimization [S2]. It modifies the standard sampling by first filtering out rays that do not intersect with known free space [S2]. For each ray, the near and far bounds ($t_{near}$ and $t_{far}$) are adjusted to the exact endpoints of the ray-box intersection [S2]. A critical pitfall is that $t_{near}$ must not be adjusted if the ray origin $x_0$ is already inside the bounding box [S2]. This ensures correct sampling bounds when the camera is inside the volume [S2].
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(N \cdot M)$ where $N$ is the number of rays and $M$ is the number of steps per ray. The CUDA kernel performs this in parallel.
+-**Memory Complexity:** $O(N \cdot M \cdot 3)$ for storing point coordinates, plus overhead for masks and indices.
+-**Performance:** The method is highly parallelizable on GPU. The use of contiguous tensors and CUDA kernels minimizes CPU-GPU transfer overhead [S1, unofficial].
+-**Strengths:** Deterministic sampling ensures consistent coverage. The bounding box filtering reduces unnecessary density queries for empty space.
+-**Limitations:** Fixed step size may lead to aliasing or insufficient resolution if `stepsize` is not tuned to the `voxel_size`. Points outside the bounding box are discarded, which may require careful handling of rays that barely miss the box.
+-
++**Time Complexity:** $O(N \cdot M)$ where $N$ is the number of rays and $M$ is the number of steps per ray. The CUDA kernel performs this in parallel [G].
++**Memory Complexity:** $O(N \cdot M \cdot 3)$ for storing point coordinates, plus overhead for masks and indices [G].
++**Performance:** The method is highly parallelizable on GPU [G].
++**Strengths:** Deterministic sampling ensures consistent coverage [G]. The bounding box filtering reduces unnecessary density queries for empty space [G].
++**Limitations:** Fixed step size may lead to aliasing or insufficient resolution if `stepsize` is not tuned to the `voxel_size` [G]. Points outside the bounding box are discarded, which may require careful handling of rays that barely miss the box [G].
+ ## Background
+-Ray Point Sampling is a core component of neural volume rendering pipelines, specifically referenced in the implementation of Direct Voxel Grid Optimization (DVGO) [S2] and its reference implementation [S1, unofficial]. It enables efficient evaluation of voxel-based radiance fields by providing structured query points along rays.
+-
++Ray Point Sampling is a core component of neural volume rendering pipelines, specifically referenced in the implementation of Direct Voxel Grid Optimization (DVGO) [S2] and its reference implementation [S1, unofficial]. It enables efficient evaluation of voxel-based radiance fields by providing structured query points along rays [S1, unofficial][S2].
+ ## Sources
+ [S1] gkouros/ref-dvgo, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 (unofficial)

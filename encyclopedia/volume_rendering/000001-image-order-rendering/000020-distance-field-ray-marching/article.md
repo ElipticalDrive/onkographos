@@ -6,18 +6,18 @@ Also called: Sphere tracing
 Distance-field ray marching (commonly known as sphere tracing) is a rendering method that finds surfaces by moving along a ray in repeated steps, using a signed distance field (SDF) to choose each step size adaptively, avoiding the tradeoff of fixed-step marching [S1, unofficial]. Unlike naive fixed-step marching which uses a constant increment, sphere tracing uses the SDF value as the step size, ensuring the step is as large as possible without risk of overshooting [S7, unofficial]. Unlike traditional rasterization, the visible shape is defined mathematically by a scene function, not by a triangle mesh [S2, unofficial].
 
 ## Shared principles
-The method renders geometry by shooting a ray through each pixel and repeatedly querying a Signed Distance Function (SDF) [S2, unofficial]. An SDF is a formula that, given any point $p$ in space, returns the distance from $p$ to the nearest surface [S1, unofficial][S10, unofficial][S14, unofficial]. The sign indicates position: negative inside, positive outside, zero exactly on the surface [S1, unofficial][S14, unofficial][S20, unofficial].
+The method renders geometry by shooting a ray through each pixel and repeatedly querying a Signed Distance Function (SDF) [S2, unofficial]. An SDF is a formula that, given any point $p$ in space, returns the distance from $p$ to the nearest surface [S1, unofficial][S10][S14, unofficial]. The sign indicates position: negative inside, positive outside, zero exactly on the surface [S1, unofficial][S14, unofficial][S20, unofficial].
 
-The core loop initializes a ray with an origin point $ro$ and a normalized direction vector $v$ [S1, unofficial][S10, unofficial][S12, unofficial]. It maintains a current position $p$ (initially $ro$) [S10, unofficial]. In each iteration:
-1. The SDF is evaluated at $p$ to get the distance $d$ to the nearest surface [S1, unofficial][S10, unofficial].
+The core loop initializes a ray with an origin point $ro$ and a normalized direction vector $v$ [S1, unofficial][S10][S12, unofficial]. It maintains a current position $p$ (initially $ro$) [S10]. In each iteration:
+1. The SDF is evaluated at $p$ to get the distance $d$ to the nearest surface [S1, unofficial][S10].
 2. If $d < 0$, the ray has penetrated the surface; the algorithm returns a hit [S6, unofficial].
 3. If $d \le \text{HIT\_THRESHOLD}$ (a small value such as 0.001), the ray has hit the surface [S1, unofficial][S3, unofficial]. The loop terminates.
-4. Otherwise, the position is advanced: $p \leftarrow p + d \cdot v$ [S10, unofficial]. This step size is guaranteed not to overshoot the surface because $d$ is the distance to the nearest surface [S2, unofficial].
+4. Otherwise, the position is advanced: $p \leftarrow p + d \cdot v$ [S10]. This step size is guaranteed not to overshoot the surface because $d$ is the distance to the nearest surface [S2, unofficial].
 5. The loop continues while the step count is less than $\text{MAX\_STEPS}$ [S1, unofficial][S7, unofficial].
 
 If the loop terminates without a hit (e.g., $t$ exceeds a maximum range or $\text{MAX\_STEPS}$ is reached), the ray misses [S1, unofficial].
 
-The scene is defined by combining primitive SDFs. For a sphere of radius $r$ centered at $c$, the distance function is $d(p) = \|p - c\| - r$ [S1, unofficial][S19, unofficial][S20, unofficial]. Union of two objects with distance fields $d1$ and $d2$ is $iso(p) = \min(d1(p), d2(p))$ [S1, unofficial][S10, unofficial][S19, unofficial][S20, unofficial]. Intersection is $iso(p) = \max(d1(p), d2(p))$ [S1, unofficial][S10, unofficial][S19, unofficial][S20, unofficial]. Subtraction of object $d2$ from $d1$ is $iso(p) = \max(d1(p), -d2(p))$ [S1, unofficial][S10, unofficial][S19, unofficial][S20, unofficial].
+The scene is defined by combining primitive SDFs. For a sphere of radius $r$ centered at $c$, the distance function is $d(p) = \|p - c\| - r$ [S1, unofficial][S19, unofficial][S20, unofficial]. Union of two objects with distance fields $d1$ and $d2$ is $iso(p) = \min(d1(p), d2(p))$ [S1, unofficial][S10][S19, unofficial][S20, unofficial]. Intersection is $iso(p) = \max(d1(p), d2(p))$ [S1, unofficial][S10][S19, unofficial][S20, unofficial]. Subtraction of object $d2$ from $d1$ is $iso(p) = \max(d1(p), -d2(p))$ [S1, unofficial][S10][S19, unofficial][S20, unofficial].
 
 Parameters include $\text{MAX\_STEPS}$ (a safety cap, typically 32 to 128 depending on implementation [S1, unofficial][S4, unofficial]) and $\text{HIT\_THRESHOLD}$ (epsilon) [S1, unofficial][S12, unofficial]. A maximum range or accumulated travel distance limit can also bound rays that miss [S1, unofficial].
 
@@ -77,7 +77,7 @@ Extends sphere tracing for Fractal Brownian Motion noise using a BVH to compute 
 Performs real-time GPU volume rendering by marching through a 3D scalar field (e.g., smoke density) to compute color and transparency. Chosen for volumetric effects like fog, clouds, or medical data.
 
 ## Background
-The technique was introduced as 'Sphere Tracing' by John C. Hart in 1994 in 'Sphere tracing: a geometric method for the antialiased ray tracing of implicit surfaces' [S8].
+The technique was introduced as 'Sphere Tracing' by John C. Hart in 1994 in 'Sphere tracing: a geometric method for the antialiased ray tracing of implicit surfaces' [S8, unofficial].
 It became widely used in 4k intros released in 2009, specifically in productions like 'Frequency' by xt95 and 'Potatro' [S17, unofficial].
 
 ## Sources
@@ -87,6 +87,6 @@ It became widely used in 4k intros released in 2009, specifically in productions
 [S4] Potatro, RayMarching and DistanceFields : a story of SphereTracing | xoofx, https://xoofx.github.io/blog/2009/10/12/potatro-and-raymarching-story-of.html, fetched 2026-10-29 (unofficial)
 [S6] OmerNYU/Kaboom_Diffusion, https://github.com/OmerNYU/Kaboom_Diffusion, fetched 2026-10-26 (unofficial)
 [S7] Ray Marching: Signed Distance Fields, Sphere Tracing, and SDF Shading, https://tutorials.tektite.studio/ray-marching/, fetched 2026-10-27 (unofficial)
-[S8] (PDF) Sphere Tracing: A Geometric Method for the Antialiased Ray ..., https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27
-[S10] An Introduction to Raymarching - Maxime Garcia, https://typhomnt.github.io/teaching/ray_tracing/raymarching_intro/, fetched 2026-10-27 (unofficial)
+[S8] (PDF) Sphere Tracing: A Geometric Method for the Antialiased Ray ..., https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27 (unofficial)
+[S10] An Introduction to Raymarching - Maxime Garcia, https://typhomnt.github.io/teaching/ray_tracing/raymarching_intro/, fetched 2026-10-27
 [S17] Potatro, RayMarching and DistanceFields : a story of SphereTracing | xoofx, https://xoofx.github.io/blog/2009/10/12/potatro-and-raymarching-story-of.html, fetched 2026-10-29 (unofficial)

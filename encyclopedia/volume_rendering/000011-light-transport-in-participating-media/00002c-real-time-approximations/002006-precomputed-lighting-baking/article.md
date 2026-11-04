@@ -1,0 +1,122 @@
+# Precomputed Lighting (Baking)
+
+Also called: Baking Lighting, Baking the lighting, Direct Lighting Caching, Precomputed Light Transmissivity, Precomputed Transfer Function
+
+## Overview
+Precomputed Lighting (Baking) is a technique to accelerate volumetric rendering by pre-computing the lighting term ($L_i$) and storing it in the grid's voxels, allowing the renderer to skip evaluating $L_i$ at each raymarching step on the camera ray [S1, S3, unofficial]. It approximates volumetric shadows by precalculating illumination for each voxel center, enabling trilinear interpolation at render time [S2, unofficial]. Unlike [Voxel Cone Tracing](1454-voxel-cone-tracing.md) which computes lighting dynamically during traversal, this method is view-independent but scene and light source dependent [S2, unofficial]. It is primarily mentioned for reference and historical reasons rather than current practical utility [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel grid representing the participating medium (density field), light source positions, and light intensities.
+*   **Output:** A 3D voxel grid (or texture) storing the pre-computed direct lighting term ($L_i$) for each voxel.
+
+**Data Structures:**
+*   **Lighting Cache:** A 3D texture or grid with dimensions $N_x \times N_y \times N_z$.
+*   **Resolution:** The cache resolution can be lower than the actual voxel resolution because light is inherently blurry [S3, unofficial].
+*   **Memory Layout:** Data is typically stored in memory such that iterating over $x$ first, then $y$, then $z$ ensures sequential access, minimizing cache misses [S1, unofficial].
+
+**Steps:**
+1.  **Pre-pass (Baking Pass):**
+    *   Iterate through every voxel in the grid.
+    *   For each voxel center, calculate the direct lighting contribution ($L_i$) from all light sources. This involves determining visibility (shadowing) from the voxel center to the light sources [S1, S2, S3, unofficial].
+    *   Store the calculated $L_i$ value in the corresponding voxel of the lighting cache [S1, S3, unofficial].
+2.  **Main Pass (Rendering):**
+    *   Perform standard volumetric raymarching.
+    *   For each sample point along the camera ray, retrieve the pre-computed $L_i$ value from the lighting cache via trilinear interpolation [S2, unofficial].
+    *   Use this interpolated $L_i$ value in the rendering equation instead of evaluating the lighting term directly [S1, S3, unofficial].
+    *   [G] Note: Some implementations may perform a few real light sample steps before sampling the cache to handle high-frequency lighting details, though the core definition relies on full pre-computation [S3, unofficial].
+
+**Formulas:**
+The rendering equation for a sample point $x$ along a ray is modified to use the pre-computed term:
+$$ L_o(x, \omega_o) = \int_{\Omega} f_r(x, \omega_i, \omega_o) L_i(x, \omega_i) d\omega_i $$
+Where $L_i(x, \omega_i)$ is retrieved from the cache rather than computed via ray tracing or shadow maps [S1, S2, unofficial].
+
+**Parameters:**
+*   **Cache Resolution:** Can be lower than the actual voxel resolution [S3, unofficial]. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Re-baking:** The technique requires re-baking whenever the lighting or the simulation changes [S1, unofficial].
+*   **Performance:** The baking pass still takes significant time, offsetting some rendering gains [S1, unofficial].
+*   **Blurriness:** Since light is blurry, lower resolution caches are acceptable, but excessive downsampling may lose shadow detail [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pre-pass: Baking
+def bake_lighting(grid, lights):
+    # grid: 3D array of density values
+    # lights: list of light source definitions (position, intensity)
+    # lighting_cache: 3D array to store Li
+    
+    for z in range(grid.resolution_z):
+        for y in range(grid.resolution_y):
+            for x in range(grid.resolution_x):
+                voxel_center = grid.get_position(x, y, z)
+                
+                # Calculate direct lighting for this voxel
+                li = 0.0
+                for light in lights:
+                    # Check visibility from voxel_center to light
+                    # This typically involves a secondary raymarch or shadow map lookup
+                    is_visible = check_shadow(voxel_center, light.position)
+                    
+                    if is_visible:
+                        # Compute direct illumination contribution
+                        # Distance attenuation and cosine factor would be applied here
+                        contribution = compute_direct_light(voxel_center, light)
+                        li += contribution
+                
+                lighting_cache.set_value(x, y, z, li)
+
+# Main Pass: Rendering
+def render_volumetric(grid, lighting_cache, camera):
+    for each pixel in screen:
+        ray = camera.generate_ray(pixel)
+        color = vec3(0.0)
+        transmittance = 1.0
+        
+        while transmittance > 0.01 and ray.t < max_distance:
+            sample_pos = ray.get_position()
+            
+            # Retrieve pre-computed lighting via trilinear interpolation
+            li = lighting_cache.interpolate(sample_pos)
+            
+            # Get density at sample point
+            density = grid.sample(sample_pos)
+            
+            # Accumulate color
+            # Note: Standard volume rendering equation uses Li here
+            scattering = density * step_size * li
+            color += transmittance * scattering
+            transmittance *= exp(-density * step_size)
+            
+            ray.t += step_size
+            
+        set_pixel_color(pixel, color)
+```
+
+## Subtopics
+
+### [Hybrid Preshading with Postclassification](2171-hybrid-preshading-with-postclassification.md)
+Hybrid Preshading with Postclassification is a real-time volume rendering optimization that decouples classification from shading to balance visual fidelity and performance. Unlike pure preclassification/preshading which risks artifacts without opacity-weighted interpolation, or pure postclassification/postshading which is computationally expensive, this method performs classification after interpolation (postclassification) but shading before interpolation (preshading). It builds on [Precomputed Lighting (Baking)](2169-precomputed-lighting-baking.md) by precomputing lighting contributions for a discrete set of surface normals, allowing the renderer to apply shading via texture lookup during the raymarching step while retaining the visual benefits of post-classification.
+
+### [Pre-computation](2330-pre-computation.md)
+Pre-computation is a technique used in volume rendering to accelerate the evaluation of light transport in participating media by calculating and storing intermediate radiance variables as voxel data. It solves the problem of redundant per-voxel integration during ray marching by pre-calculating terms such as direct radiance ($L_{ri}$), diffusion radiance ($L_{0d}, \vec{L}_{1d}$), and their density derivatives, allowing the renderer to reuse these values instead of recomputing them for every camera ray. Unlike [Hybrid Preshading with Postclassification](2171-hybrid-preshading-with-postclassification.md), which may handle post-classification differently, this method explicitly pre-computes the diffusion components via a solver to enable efficient derivative-based shading.
+
+## Operating characteristics
+*   **Time Complexity:** The baking pass is $O(N \cdot L)$ where $N$ is the number of voxels and $L$ is the number of light sources. The rendering pass is $O(R)$ where $R$ is the number of ray samples, with a constant-time texture lookup for lighting.
+*   **Memory Complexity:** $O(N)$ for the lighting cache.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Significantly speeds up the rendering pass by eliminating per-sample lighting calculations [S1, unofficial].
+*   **Limitations:** Requires re-baking for any change in lighting or geometry [S1, unofficial]. The baking pass itself is expensive [S1, unofficial]. View-independent, so it cannot handle dynamic view-dependent effects like specular highlights from the camera perspective if they depend on the view vector in the lighting calculation (though direct lighting is generally view-independent) [S2, unofficial].
+*   **When to use:** Static scenes with static lighting where rendering performance is critical and baking time is acceptable [S1, unofficial].
+*   **When not to use:** Dynamic scenes with moving lights or geometry [S1, unofficial].
+
+## Background
+Origin: Mentioned in various volume rendering tutorials and academic lectures as a historical optimization technique [S1, S2, S3, unofficial]. It is often compared to deep shadow maps, which store density as a function of distance rather than just depth [S1, unofficial].
+
+## Sources
+[S1] Volume Rendering Based On 3D Voxel Grids, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-voxel-grids.html, fetched 2026-10-24 (unofficial)
+[S2] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)
+[S3] Volumetric Cloud Rendering - Jack Tollenaar, https://www.jacktollenaar.top/articles/clouds.html, fetched 2026-10-29 (unofficial)

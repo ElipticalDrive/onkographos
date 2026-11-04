@@ -1,0 +1,276 @@
+My journey of developing a current-gen 3D game engine with Metal-cpp and Vulkan - perf: volumetric fog optimization with froxels by painfulexistence · Pull Request #82 · painfulexistence/project-vapor
+
+perf: volumetric fog optimization with froxels by painfulexistence · Pull Request #82 · painfulexistence/project-vapor · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+painfulexistence
+commented
+Jul 20, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Replaces the per-pixel volumetric fog raymarch with a froxel (frustum voxel) grid-based approach that decouples fog cost from screen resolution. Adds support for multiple overlapping fog volumes (global height fog + bounded AABB banks) that blend by density weight in the grid. Implements a three-stage pipeline: injection (compute), scattering integration (compute), and composite (fragment).
+Key Changes
+Architecture
+Froxel grid: 160×90×64 3D texture with exponential depth distribution (more slices near camera)
+Three-stage pipeline:
+froxelInjection (compute): Per-froxel, blend every fog volume's density/scattering, light the medium (sun + PSSM shadow, tile-culled point/spot/rect lights), write in-scatter + extinction
+scatteringIntegration (compute): March each froxel column front-to-back, accumulate scattering + transmittance
+volumetricFogFragment (fragment): Sample integrated volume at pixel's depth slice, composite: scene * transmittance + in-scatter
+Volume blending: Densities add (extinction is additive); albedo/phase-g/ambient are density×blendWeight-weighted averages
+Data Structures
+New VolumetricFogData struct (288 bytes): camera/sun/grid/temporal/wind globals, distinct from legacy FogRenderData
+New VolumetricFogVolumeGPU struct (96 bytes): per-volume bounds, density params, albedo/phase/noise, wind speed
+VolumetricFogComponent now supports bounded AABB volumes (position ± halfExtent × scale) in addition to global height fog
+VolumetricFogSystem gathers all enabled components into a list pushed each frame
+Shader Implementation
+Metal (3d_volumetric_fog.metal): Complete froxel kernels + fallback simpleFogFragment raymarch
+Vulkan (FroxelInject.comp, FroxelIntegrate.comp, FroxelFogComposite.frag): GLSL twins with identical binding layout
+Shared (VolumetricFog.frag): Updated raymarch to support multi-volume blending; falls back to legacy single-volume when volumeCount == 0
+Renderer Integration
+Metal: VolumetricFogPass executes inject → integrate → composite in one compute encoder with barriers
+Vulkan: Compute passes wired through RHI (barriers, storage texture transitions)
+Both backends share light-set params (cluster grid, spot/rect counts) via push constants
+Froxel resources (grids, globals buffer, pipelines) allocated on both backends; Metal uses them, Vulkan keeps raymarch as fallback
+RHI Enhancements
+computeBarrier(): Serializes compute dispatches (Metal tracked hazard, Vulkan VkMemoryBarrier)
+computeStorageTextureBarrier(): Transitions storage texture layout between compute and fragment (Vulkan only)
+setComputeSampledTexture(): Handles depth texture aspect correctly (COLOR vs DEPTH for PSSM sampling)
+Scene Configuration
+Example scene updated: global height fog enabled + bounded fog bank entity demonstrating volume blending
+Implementation Details
+Froxel reconstruction uses camera's own invProj/invView for exact depth-slice alignment with composite
+Wind-animated value-noise modulates density per-volume (windSpeed already folds in global wind strength)
+AABB volumes soft-fade over edgeFalloff distance at each face
+Lighting mirrors simpleFogFragment conventions (sun + PSSM cascade tap for shafts, tile-culled point/spot/rect lights)
+Temporal jitter support via frameIndex (setup for TAA, not yet wired)
+Backward compatible: empty volume list disables froxel
+https://claude.ai/code/session_01LT4SmDfPvazJZBVryA6e4B
+claude
+added 9 commits
+July 19, 2026 15:35
+feat: froxel volumetric fog with bounded volumes + volume blend
+…
+aaa64a8
+```
+Complete the scaffolded froxel fog path and generalize the fog system from a
+single global volume to a blended list of volumes (global height fog plus
+bounded AABB "fog banks").
+
+ECS / system:
+- VolumetricFogComponent gains bounded/halfExtent/edgeFalloff/blendWeight/albedo.
+  Each enabled component is now one fog volume.
+- VolumetricFogSystem gathers ALL enabled components (not just the first), bakes
+  each bounded volume's world AABB from its transform, and pushes the whole list
+  via the new IRenderer::setVolumetricFogVolumes (replacing setVolumetricFog).
+
+Native Metal renderer (froxel grid):
+- Wire up the previously-scaffolded froxel path: inject (compute) -> integrate
+  (compute) -> composite. Injection blends every volume at each froxel (additive
+  density, density-weighted albedo/phase-g/ambient) and lights the medium with
+  the sun (PSSM shadow tap for light shafts) plus the tile-culled point/spot/rect
+  set. Two 3D textures (grid + integrated volume) and a per-volume buffer added.
+- Fix a latent MSL/C++ VolumetricFogData layout mismatch (missing tail pads) that
+  the froxel path now depends on; repurpose _pad4 -> volumeCount.
+- simpleFogFragment kept byte-identical as a runtime-selectable raymarch fallback.
+
+RHI renderer (default; Vulkan + Metal):
+- setVolumetricFogVolumes uploads the volume list; VolumetricFog.frag (Vulkan)
+  blends bounded volumes + densities in its raymarch. Metal-via-RHI keeps the
+  single global volume.
+
+Demo: main.json shows a global haze plus a bounded fog bank (blend).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LT4SmDfPvazJZBVryA6e4B
+```
+feat: froxel volumetric fog on the RHI Metal path
+…
+67794fe
+```
+The froxel path previously landed only in the deprecated native Metal renderer;
+move it to the RHI renderer (the one actually used) on the Metal backend,
+reusing the same 3d_volumetric_fog.metal kernels via the RHI compute API.
+
+- Add froxel resources to the RHI Renderer: a VolumetricFogData globals buffer
+  (distinct from the FogRenderData the raymarch uses), the froxel grid +
+  integrated-volume 3D textures (Storage|Sampled, RGBA16F), the inject/integrate
+  compute pipelines (makeNamedCompute on the .metal kernels), and the froxel
+  composite fullscreen pipeline (volumetricFogFragment).
+- Rework Renderer::volumetricFogPass: on Metal, run inject (compute) -> integrate
+  (compute) -> composite sampling the integrated volume; ping-pong colorRT. Falls
+  back to the fullscreen raymarch when the froxel resources are absent, so the
+  Vulkan backend keeps its raymarch (which already blends bounded volumes) until
+  the .comp twins land.
+- ImGui: a "Volumetric Fog" panel exposes the froxel/raymarch toggle.
+
+Bindings mirror the native wiring exactly (compute buffers 0-8 + textures 0-1,
+composite textures 0-2 + buffers 0-1). The two compute dispatches share one
+serial compute pass, so Metal orders them and barriers the grid automatically.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LT4SmDfPvazJZBVryA6e4B
+```
+refactor: drop unused froxel composite shader-handle members
+…
+4c93bae
+```
+makeMetalPass returns only the pipeline, so fogFroxelCompositeVS/FS were never
+assigned (independent review flagged them as dead). The inject/integrate compute
+shader handles stay — those are populated and own the kernel lifetimes.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LT4SmDfPvazJZBVryA6e4B
+```
+feat: froxel volumetric fog on the RHI Vulkan path
+…
+8898e3d
+```
+Bring the froxel grid to the Vulkan backend so both RHI backends share it (the
+RHI is the shipping renderer; native Metal is deprecated). Adds GLSL twins of the
+.metal kernels — FroxelInject.comp / FroxelIntegrate.comp (set0 storage buffers,
+set1 image3D, set2 sampled shadow, push-constant light params) and
+FroxelFogComposite.frag (samples the integrated 3D volume, Vulkan ZO depth) — and
+creates the Vulkan inject/integrate compute + composite pipelines.
+
+volumetricFogPass's froxel path is now backend-agnostic: the gate no longer
+requires Metal, and the shadow map binds via setComputeTexture on Metal (inline
+sampler) vs setComputeSampledTexture on Vulkan (combined sampler for textureLod).
+computeBarrier() fences the froxel-grid write->read on Vulkan (a no-op on Metal's
+serial encoder). Vulkan keeps the fullscreen raymarch as the fallback when the
+froxel pipelines are unavailable.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LT4SmDfPvazJZBVryA6e4B
+```
+docs: DEVLOG — froxel fog runs on the RHI renderer (both backends)
+…
+b2eeff8
+```
+Reflect that the froxel path lives on the RHI renderer for Metal and Vulkan, not
+the deprecated native Metal renderer.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LT4SmDfPvazJZBVryA6e4B
+```
+fix: correct Vulkan froxel binding range + compute→sample barrier
+…
+0c05556
+```
+Review of the Vulkan froxel path surfaced three issues:
+
+- BLOCKER: FroxelInject bound the fog-volume SSBO at set 0 binding 8, but Vulkan
+  compute has only 8 storage-buffer slots (0-7) — setComputeBuffer(8) silently
+  no-ops and the pipeline layout lacks the binding (validation error). Vulkan's
+  light params ride a push constant (not a descriptor), so binding 7 is free:
+  move FogVolumeBuf to b7 and bind it there on Vulkan (Metal keeps [[buffer(8)]],
+  its b7 is the light-params bytes).
+
+- BLOCKER: the integrated volume is written by the integrate compute pass in
+  GENERAL layout, then sampled by the composite — with no barrier and no layout
+  transition (graphics setTexture, called inside the render pass, can't do
+  either). Add RHI::prepareTextureForSampling (Vulkan: GENERAL ->
+  SHADER_READ_ONLY_OPTIMAL + the write->read dependency; no-op on Metal) and call
+  it between endComputePass and the composite.
+
+- Latent: setComputeSampledTexture hardcoded the COLOR aspect while the froxel
+  inject binds the Depth32Float PSSM map — derive the aspect from the format
+  (a COLOR barrier on a depth image is a validation error).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LT4SmDfPvazJZBVryA6e4B
+```
+fix: include graphics_effects.hpp in the RHI renderer (froxel build b…
+…
+e37a2a8
+```
+…reak)
+
+renderer.cpp uses VolumetricFogData and VolumetricFogVolumeGPU (the froxel
+kernel / volume-packing layouts, defined in graphics_effects.hpp) but never
+included that header — the RHI renderer otherwise uses the render_data.hpp
+*RenderData structs. CI caught it as ~20 cascading "undeclared identifier"
+errors on both macOS and Ubuntu (and the unit-test link, via libVapor). Add the
+include; graphics_effects.hpp coexists with graphics.hpp already (the native
+renderer's TU includes both), so no collision.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LT4SmDfPvazJZBVryA6e4B
+```
+Merge origin/main into claude/fog-volume-optimization-pm6i3t
+…
+5a7eb6c
+```
+Integrates main's meshlet shading, clustered light culling, weather system, and
+glossy RT reflection with the froxel volumetric fog work.
+
+Conflict resolutions:
+- systems.hpp (VolumetricFogSystem): kept the froxel multi-volume gather and
+  folded in main's additions — exclude<InactiveComponent> on the view and the
+  weather fogDensityMul multiplier (applied per volume's density).
+- renderer.hpp: kept setVolumetricFogVolumes (replaces the old setVolumetricFog,
+  already dropped from IRenderer) alongside main's new setClouds / setIBLIntensity.
+- main.json: kept the fog demo (global haze + bounded Fog Bank) and added main's
+  weather component to the Sky entity.
+
+Post-merge adaptation:
+- FroxelInject.comp: main grew the Cluster struct (appended spot/rect index
+  tails), changing its array stride. Updated the .comp's inline Cluster struct to
+  match so tiles[tileIdx] indexes correctly; the froxel still loops-all spots/
+  rects like VolumetricFog.frag, so it only reads lightCount/lightIndices. The
+  Metal froxel uses Cluster from 3d_common.metal (already updated by main), so it
+  needed no change.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LT4SmDfPvazJZBVryA6e4B
+```
+chore: disable demo fog by default; trim stale/verbose fog comments
+…
+fd31a8b
+```
+- main.json: both volumetricFog components default to enabled:false (examples).
+- Drop the froxel toggle's Metal-only ImGui branch (both backends run froxel now)
+  and fix a few comments left stale by the Vulkan froxel + merge (Metal-only /
+  "until .comp twins land").
+```
+painfulexistence
+changed the title
+Froxel volumetric fog: grid-based light scattering with volume blending
+feat: volumetric fog optimization with froxels
+Jul 22, 2026
+Hide details
+View details
+painfulexistence
+merged commit 9361810
+into
+main
+Jul 22, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+painfulexistence
+deleted the
+claude/fog-volume-optimization-pm6i3t
+branch
+July 22, 2026 12:29
+painfulexistence
+changed the title
+feat: volumetric fog optimization with froxels
+perf: volumetric fog optimization with froxels
+Jul 22, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

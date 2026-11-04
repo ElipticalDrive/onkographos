@@ -1,0 +1,214 @@
+# Frequency Domain Volume Rendering with Sinc Resampling
+
+Also called: FD method, Fourier volume rendering, Frequency Domain Volume Rendering with Shear-Warp Factorization, Frequency domain based method, Resampling in the Frequency Domain
+
+## Overview
+Frequency Domain Volume Rendering with Sinc Resampling is a direct volume ray casting technique that performs resampling (zooming and shearing) in the frequency domain using Fourier transforms to avoid blurring artifacts associated with spatial domain interpolation, particularly for large zoom factors [S1, unofficial]. It exploits signal processing ideas such as the shifting theorem, the packing theorem, and the derivative theorem to achieve the best theoretical quality by using the ideal interpolation filter (sinc) [S1, unofficial]. Unlike standard spatial domain filters (e.g., B-spline, Catmull-Rom) or methods that zoom the intermediate image, this method resamples every volume slice in object space before projection, ensuring perfect reconstruction if the sampling meets Nyquist criteria [S1, unofficial].
+
+## How it works
+The method integrates frequency-domain resampling into the Shear-Warp factorization pipeline. It transforms the volume to the frequency domain, applies shifts and zooms via zero-padding and phase multiplication, and transforms back to the spatial domain for compositing and warping.
+
+### Inputs and Outputs
+*   **Input:** 3D volume dataset $V(i,j,k)$ with dimensions $I \times J \times K$.
+*   **Output:** 2D rendered image buffer of size $N \times N$.
+
+### Data Structures
+*   **Volume Data:** Real-valued array $V$.
+*   **Frequency Domain Data:** Complex-valued array $\hat{V}$. Due to the Hermitian symmetry of real functions, memory can be optimized to store only half the spectrum [S1, unofficial].
+*   **Intermediate Image:** 2D array storing color and transparency (density) values.
+
+### Parameters
+*   **Sampling distance in k-direction ($s$):** Controls the resolution along the view axis. Typical value: 0.05 [S1, unofficial].
+*   **Zoom factor:** Applied in $i$ and $j$ directions. Typical values: 10.0 or 20.0 [S1, unofficial].
+*   **Image buffer size ($N$):** $N = \sqrt{3} \cdot z \cdot M$, where $M$ is the maximal volume extension (max of $i, j, k$ resolution) and $z$ is the scene scale factor [S1, unofficial].
+
+### Algorithm Steps
+
+1.  **Global Fourier Transform:**
+    Compute the 3D Discrete Fourier Transform (DFT) of the volume $V$ to obtain $\hat{V}(u,v,w)$.
+    $$ \hat{V} = \text{FFT3D}(V) $$
+
+2.  **Gradient Estimation (Optional but recommended for lighting):**
+    *   Create three copies of $V$.
+    *   Compute their 3D DFTs.
+    *   Apply the derivative theorem: multiply by $i \cdot 2\pi u$, $i \cdot 2\pi v$, and $i \cdot 2\pi w$ respectively in the frequency domain to compute partial derivatives.
+    *   Compute the Inverse 3D DFT to get gradient components $\nabla V_x, \nabla V_y, \nabla V_z$.
+    *   Combine gradients at the compositing stage for lighting [S1, unofficial].
+
+3.  **Shear-Warp Factorization Setup:**
+    Calculate shear coefficients $(s_i, s_j)$ and translation values $(t_i, t_j)$ based on the viewing direction [Lac95]. The displacement of the $k$-th slice in $i$ and $j$ directions is denoted $a_{ik}$ and $a_{jk}$.
+
+4.  **Resampling in k-direction (Zoom/Scale):**
+    *   Calculate the desired sampling distance $s'$ in the $k$-direction.
+    *   Determine the new number of samples $K'$ using the relationship:
+        $$ \frac{s'}{s} = \frac{K}{K'} \implies K' = \frac{sK}{s'} $$
+    *   Round $K'$ to the closest integer $K_{0 \text{ pad}}$. If $K_{0 \text{ pad}} > 50$, the deviation from the desired sampling distance is below $\pm 1.0\%$ [S1, unofficial].
+    *   Zero-pad $\hat{V}$ in the $w$-direction (frequency domain corresponding to $k$) to size $K_{0 \text{ pad}}$.
+    *   Perform an Inverse Fourier Transform (IFFT) in the $k$-direction only. The $i$ and $j$ directions remain in the frequency domain.
+
+5.  **Resampling in i and j-directions (Zoom):**
+    *   Determine desired slice resolution $(I_0, J_0)$.
+    *   Calculate required padding $I_{0 \text{ pad}}$ and $J_{0 \text{ pad}}$ to achieve the new period.
+    *   Zero-pad the data in the $u$ and $v$ directions (frequency domain corresponding to $i$ and $j$). If $I_{0 \text{ pad}} > 50$ and $J_{0 \text{ pad}} > 50$, the zoom factor deviation is below $\pm 1.0\%$ [S1, unofficial].
+
+6.  **Shearing (Split Shift):**
+    The total shift $a_{xk}$ (for $x \in \{i, j\}$) is split into:
+    *   $a_{xkSD}$: Spatial domain component (integer multiple of voxel lengths).
+    *   $a_{xkFD}$: Frequency domain component (fraction of a voxel length).
+    
+    *   **Frequency Domain Shift:** Apply the shifting theorem to $\hat{V}$ by multiplying by phase shifts $e^{-i 2\pi a_{xkFD} \cdot \text{freq}}$ to achieve the fractional shift. This limits wrapping effects caused by the periodic assumption of the DFT [S1, unofficial].
+    *   **Spatial Domain Shift:** Perform an Inverse Fourier Transform in the $i$ and $j$ directions. Apply the integer shift $a_{xkSD}$ by moving the slice data in the spatial domain. This completes the transformation to sheared object space [S1, unofficial].
+
+7.  **Compositing:**
+    *   Apply transfer functions to the resampled slices.
+    *   Composite slices along the $k$-axis into a 2D intermediate image using the "over" operator [PD84].
+    *   Integrate gradient-based lighting information if computed [S1, unofficial].
+
+8.  **Warping:**
+    *   Apply a 2D warping transformation to the intermediate image to produce the final image.
+    *   Transform pixel coordinates from image space to sheared-object space using the inverse warping matrix.
+    *   Interpolate pixel values from the intermediate image using a higher-order spatial domain filter (e.g., Catmull-Rom spline) to maintain high quality [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def frequency_domain_volume_rendering(volume, view_params):
+    """
+    volume: 3D array (I, J, K)
+    view_params: dict containing shear_coeffs, translation, zoom_factors, sampling_distance_k
+    """
+    # 1. Global Fourier Transform
+    # V_hat is complex, shape (I, J, K)
+    V_hat = fftn(volume)
+    
+    # 2. Gradient Estimation (if lighting is required)
+    # Compute gradients in frequency domain
+    # Note: This requires 3 FFTs or careful handling of symmetry
+    grad_x_hat = V_hat * (1j * 2 * pi * freq_u)
+    grad_y_hat = V_hat * (1j * 2 * pi * freq_v)
+    grad_z_hat = V_hat * (1j * 2 * pi * freq_w)
+    
+    grad_x = ifftn(grad_x_hat).real
+    grad_y = ifftn(grad_y_hat).real
+    grad_z = ifftn(grad_z_hat).real
+    
+    # 3. Shear-Warp Setup
+    s_i, s_j = view_params['shear_coeffs']
+    t_i, t_j = view_params['translation']
+    zoom_i, zoom_j = view_params['zoom_factors']
+    s_k = view_params['sampling_distance_k']
+    
+    # 4. Resampling in k-direction
+    # Calculate new K size
+    K = volume.shape[2]
+    s = calculate_sampling_distance_k(volume, view_params) # Eq 1 context
+    s_prime = s_k # Desired sampling distance
+    K_prime = round((s * K) / s_prime)
+    
+    # Zero-pad in k-direction (frequency domain)
+    V_hat = zero_pad(V_hat, axis=2, new_size=K_prime)
+    
+    # IFFT in k-direction only
+    # Shape becomes (I, J, K_prime)
+    V_spatial_k = ifft(V_hat, axis=2).real
+    
+    # 5. Resampling in i and j-directions
+    I = volume.shape[0]
+    J = volume.shape[1]
+    
+    # Calculate new sizes based on zoom
+    I_prime = round(I * zoom_i)
+    J_prime = round(J * zoom_j)
+    
+    # Zero-pad in i and j directions (frequency domain)
+    # Note: V_spatial_k is currently in mixed domain (k is spatial, i,j are freq)
+    # We need to pad the frequency components i and j
+    V_hat_ij = zero_pad(V_spatial_k, axis=0, new_size=I_prime)
+    V_hat_ij = zero_pad(V_hat_ij, axis=1, new_size=J_prime)
+    
+    # 6. Shearing
+    # Split shifts for each slice k
+    intermediate_image = zeros((N, N)) # N from params
+    
+    for k in range(K_prime):
+        # Get current slice in mixed domain (i,j freq, k spatial)
+        slice_freq = V_hat_ij[:, :, k]
+        
+        # Calculate shift for this slice
+        shift_i = s_i * k + t_i
+        shift_j = s_j * k + t_j
+        
+        # Split shift into integer (SD) and fractional (FD) parts
+        shift_i_sd = floor(shift_i)
+        shift_i_fd = shift_i - shift_i_sd
+        
+        shift_j_sd = floor(shift_j)
+        shift_j_fd = shift_j - shift_j_sd
+        
+        # Apply fractional shift in frequency domain (Phase shift)
+        # Phase shift formula: exp(-i * 2 * pi * shift * freq)
+        freq_u = fftfreq(I_prime)
+        freq_v = fftfreq(J_prime)
+        U, V = meshgrid(freq_u, freq_v) # Careful with grid orientation
+        
+        phase_i = exp(-1j * 2 * pi * shift_i_fd * U)
+        phase_j = exp(-1j * 2 * pi * shift_j_fd * V)
+        
+        slice_freq_shifted = slice_freq * phase_i * phase_j
+        
+        # IFFT in i and j directions
+        slice_spatial = ifft2(slice_freq_shifted).real
+        
+        # Apply integer shift in spatial domain
+        slice_spatial = shift_slice(slice_spatial, shift_i_sd, shift_j_sd)
+        
+        # Compositing: Blend into intermediate image
+        # Apply transfer function and lighting using gradients
+        # This step depends on specific transfer function implementation
+        composite_slice = apply_transfer_function(slice_spatial, grad_x[:,:,k], grad_y[:,:,k], grad_z[:,:,k])
+        
+        # Add to intermediate image (simplified accumulation)
+        intermediate_image += composite_slice
+        
+    # 7. Warping
+    # Apply 2D warping to intermediate image
+    final_image = warp(intermediate_image, view_params['warp_matrix'])
+    
+    return final_image
+
+def calculate_sampling_distance_k(volume, view_params):
+    # Eq 1: s = d_k * sqrt(v'_so,i^2 + v'_so,j^2 + v'_so,k^2)
+    # This calculates the original sampling distance in the view direction
+    pass
+```
+
+### Edge Cases and Pitfalls
+*   **Aliasing:** Data not sampled alias-free (not meeting Nyquist criteria) will show strong ringing artifacts [S1, unofficial].
+*   **Discontinuities:** Data whose periodic extension introduces discontinuities requires special care, such as mirrored extension [S1, unofficial].
+*   **Zoom Precision:** Zooming is limited by discrete padding steps. If padding sizes are small (<50), deviation can exceed 1.0% [S1, unofficial].
+*   **Memory:** High memory consumption due to 3D FFTs. Mitigated by exploiting Hermitian symmetry [S1, unofficial].
+*   **Performance:** Non-interactive in current implementations due to global gradient estimation and full image calculation even for zoomed regions of interest [S1, unofficial].
+
+## Subtopics
+
+### [Frequency Domain Depth Cueing via Impulse Shifting](862-frequency-domain-depth-cueing-via-impulse-shifting.md)
+Applies distance-based attenuation entirely in the frequency domain by modifying the interpolation filter, avoiding expensive spatial convolution.
+
+### [Ideal Low-Pass Filter (Rect Filter)](2085-ideal-low-pass-filter-rect-filter.md)
+The theoretical basis for the sinc filter, suppressing spectral replicas for exact reconstruction.
+
+## Operating characteristics
+*   **Time Complexity:** Proportional to the number of volume slices and the cost of 3D FFTs. Higher than spatial domain zooming in the warping stage [S1, unofficial].
+*   **Memory Complexity:** High, due to storing complex frequency domain data. Can be reduced by half using Hermitian symmetry [S1, unofficial].
+*   **Quality:** Superior to standard spatial domain filtering (linear, B-spline, Catmull-Rom), especially for zoom factors > 2.0 and reproducing spikes [S1, unofficial]. Lowest RMS error in zooming and displacement tests [S1, unofficial].
+*   **Limitations:** Not interactive; sensitive to aliasing artifacts; requires careful handling of boundary conditions [S1, unofficial].
+*   **When to use:** High-quality offline rendering of well-sampled (Nyquist-compliant) volume data where artifact-free zooming is critical.
+*   **When not to use:** Real-time applications, or data with significant aliasing/noise without pre-filtering.
+
+## Background
+The method was developed by researchers at Simon Fraser University and published in 2005 [S1, unofficial]. It builds on the Shear-Warp factorization [Lac95] and applies signal processing theorems (shifting, packing, derivative) to volume rendering. It addresses the blurring artifacts of spatial domain interpolation by using the ideal sinc filter in the frequency domain.
+
+## Sources
+[S1] High-Quality Volume Rendering with Resampling in the Frequency Domain, https://doi.org/10.2312/vissym/eurovis05/085-092, fetched 2026-10-26 (unofficial)

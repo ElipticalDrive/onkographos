@@ -1,0 +1,104 @@
+Solid Angle: December 2009
+Tuesday, December 22, 2009
+More Stencil States for Light Volume Rendering
+A while back I wrote a short entry on stencil states for light volumes. The method I posted works but relies on using a zfail stencil operation. Shortly after, I quickly discovered that it ran considerably slower on ATI cards than on the original Nvidia card I had been writing on, and have been meaning to post an update.
+On certain hardware, using anything but Keep in zfail can disable early stencil -- specifically, ATI PC hardware, and this caused quite a slowdown.
+The solution I figured out (and I'm sure others have) was to switch to a method which only relies on stencil pass operations:
+AlphaBlendEnable = false
+StencilEnable = true
+ColorWriteChannels = None
+DepthBufferEnable = true
+StencilDepthBufferFail = Keep
+// render frontfaces so that any pixel in back of them have stencil decremented
+CullMode = CounterClockwise
+StencilFunction = Always
+// If a pixel is in back of the volume frontface, then it is potentially inside the volume
+StencilPass = Increment;
+// render volume
+// render backfaces so that only pixels in back of the backface have stencil decremented
+CullMode = Clockwise
+// pass stencil test if reference value < buffer, so we only process pixels marked above.
+// Reference value is 0. This is not strictly necessary but an optimization
+StencilFunction = Less
+// If a pixel is back of the volume backface, then it is outside of the volume, and should not be considered
+StencilPass = Decrement
+// render volume
+AlphaBlendEnable = true
+ColorWriteChannels = RGB
+// only process pixels with 0 < buffer
+StencilFunction = Less
+// zero out pixels for so we don't need a separate clear for next volume
+StencilPass = Zero
+//render a screen space rectangle scissored to the projection of the light volume
+There is a problem with this method -- if the light volume intersects the near plane, it won't work, because the portion of the light volume in front of the near plane will never increment the stencil buffer.
+My solution to this was pretty simple -- if the light volume intersects the near plane, I use the zfail method from the earlier post. Otherwise, I use the stencil pass operation. For most lights, we're using the fastest path on both the major brands of cards. I briefly scanned some papers and articles on shadow volumes (a very similar problem), hoping to find an alternate way to cap volumes intersecting the near plane, but didn't see anything that looked particularly easy to implement or would necessarily perform that well, and this method got performance on ATIs and Nvidias mostly on par.
+What about two-sided stencil? This is a mode in DX9 where you can render both backfaces and frontfaces in one pass, with separate stencil operations on each. Because the stencil increment/decrement operations wrap around (i.e. decrementing 0 becomes 255, incrementing 255 becomes 0), ordering doesn't really matter (although you have to make the StencilFunction Always on both). I did some quick tests using two sided stencil and my initial results showed it was actually slower than rendering both passes separately. I didn't spend much time on it so it is possible that I simply screwed something up, and plan to revisit it at some point.
+Posted by
+Steve
+at
+9:30 AM
+1 comment:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+deferred lighting,
+game programming
+Saturday, December 12, 2009
+Screen Space Spherical Harmonic Lighting
+A while ago Jon Greenberg brought up the idea of accumulating lighting in screen space using spherical harmonics, in a blog entry entitled "Has anyone tried this before?"
+I've been doing deferred lighting experiments in XNA, and decided to give this technique a try. Please note I'm not doing any antialiasing and all screenshots are the definition of "programmer art" cobbled together from various freely available assets.
+Screenshots show full resolution deferred lighting on top and the screen space SH technique at the bottom in the Sponza Atrium by Marko Dabrovic:
+The technique was pretty simple to get up and going, and produces some interesting results. The above images are with 27 point lights, 3 spot lights, and 1 directional. The directional is the only light evaluated at full resolution per-pixel, in the apply lighting stage.
+The basic idea is to use a quarter-sized lighting buffer (thus, in this case, 640x360) to accumulate 4-coefficient spherical harmonics. The nice thing is you only need the depth information to do so. I used 3 FP16 buffers to accumulate the SH constants. Points and spots are evaluated by rendering the light geometry into the scene and evaluating the SH coefficients for the light direction via cube map lookup, and then attenuating as normal. For the directional light, I evaluate that in the apply lighting shader. I'm not rendering any shadows.
+For diffuse lighting, it works pretty well, although due to the low number of SH coefficients, you will get some lighting wrapping around onto backfaces, which in practice just tends to give you "softer" lighting. That may or may not be desirable.
+Even though the lighting buffer is quarter-sized, you don't really lose any normal detail since SH accumulates the lighting from all directions. In my test scene, the earth models are the only ones with normal maps (deferred on the left, SH on the right)
+I found that when you upsample the lighting buffer during the apply lighting stage naively, you would get halos around the edges of objects. I fixed this using a bilateral filter aware of depth discontinuities.
+I was able to fake specular by extracting a dominant light direction from the SH, dotting that with the half vector, raising to the specular power, and multiplying that times the diffuse lighting result. It doesn't really give you great results, but it looks specular-ish. I tried using the lighting looked up at the reflected view vector but found that gave worse results.
+Performance-wise, in my little XNA program, which I'd hardly call optimized, the SH lighting is about the same as deferred lighting when I store specular luminance instead of a specular lighting color in the lighting buffer. Here's some screen shots showing 388 lights (384 points, 3 spots, and 1 directional):
+Note that there is at least one major optimization that could be performed when I'm calculating the SH coefficients for a light. Currently, my SH lookup cube map is in world space, but my light vectors are calculated in view space for points and spots. This causes me to make a matrix multiplication against the inverse view matrix in all the lighting shaders. This could probably be sped up quite a bit by calculating the SH lookup cubemap in view space each frame.
+All in all, it is an interesting technique. I'm not very happy with the specular results at all, and the softness of the lighting could be a benefit or a drawback depending on the look you are going for. Jon also points out that the lighting calculations could easily be moved to the CPU on some platforms, since they only depend on depth information. I'm probably not going to explore the technique much further but thought I'd post what I'd found from the limited investigation I did.
+Posted by
+Steve
+at
+4:11 PM
+14 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+deferred lighting,
+graphics,
+spherical harmonics,
+XNA
+Friday, December 4, 2009
+A Production Irradiance Volume Implementation Described
+On a previous title I worked on, the dynamic lighting system we had could best be described as "an emergency hack." We found ourselves approaching an E3 demo without a viable dynamic lighting system -- the one in the engine we were licensing required re-rendering geometry for each light. Even using a completely separate lighting rig for dynamic objects (with a much smaller number of lights), this was not practical on the hardware and ran too slow. The engine in question would eventually have a much better dynamic lighting system, but that would not come for some time, and we needed something that worked right away.
+The solution was to limit the number of lights that could affect dynamic objects and render 3 lights in a single pass. The three lights were chosen based on the strength of their contribution at the object's center point, and hysteresis was used to avoid light popping. Shadows darkened the scene instead of blocking a specific light, which is an old technique, but worked "well enough."
+I was never very happy with this solution, but it was good enough for us to ship with. It was too difficult for artists to light dynamic and static objects consistently due to the separate lighting rigs, and often the dynamic lighting would not match the static lighting very well. Dynamic lights did not take occlusion into account so you could often get bleeding through walls, which would require painful light placement and light channel tweaking.
+After that project shipped, I very much wanted to make a better system that would solve most of the problems. I wanted consistent results between static and dynamic lighting, I wanted a single lighting rig, and I wanted a better shadowing solution.
+A colleague on another title at the same studio was getting some good results with spherical harmonic-based lighting, albeit in a completely different genre. I had also recently read Natalya Tatarchuk's Irradiance Volumes for Games presentation, and I felt that this was a viable approach that would help achieve my goals.
+The way it worked is artists placed arbitrary irradiance volumes in the map. An irradiance volume stores a point cloud of spherical harmonic samples describing incoming light. In the paper, they use an octree to store these samples, but I found that was not desirable since you had to subdivide in all three axes simultaneously -- thus if you needed more sampling detail in X and Z you were forced to also subdivide in Y. Our levels weren't very vertical, so those extra samples in Y were unnecessary and just took up memory.
+Instead, I used a kd-tree, which allowed me to stop subdividing an axis once it had reached an artist-specified minimum resolution.
+Another problem was what heuristic to use for choosing a sample set. The original paper used a GPU-based solution that rendered depth to determine if a cell contained geometry, and if so, subdivided. The idea is that places with geometry are going to have more lighting variation. The preexisting static lighting pipeline I was working in did not lend itself to GPU-based solution, so I did a similar approach using a CPU-side geometry database to determine if cells contained geometry. In practice, it was pretty fast.
+I would subdivide in a breadth-first manner until either I hit an artist-controlled minimum sampling resolution or we hit the memory budget for that irradiance volume. This allowed me to have a fixed memory budget for my irradiance data, and basically the technique would produce as much detail as would fit in that budget for the volume. I also rendered a preview of the sampling points the heuristic would produce, allowing artists to visualize this before actually building lighting.
+Once I had a set of points, I sent it off to Beast to calculate both direct and indirect lighting at each sample point. Once I had the initial SH dataset, I performed some postprocessing.
+The first step was to window the lighting samples to reduce ringing artifacts (see Peter Pike Sloan's Stupid Spherical Harmonic Tricks). The amount of windowing was exposed to artists as a "smoothing parameter". I had set up the toolchain so in the editor, I stored both the original Beast-produced SH samples (which took a minute or so to generate), and the postprocessed values. This allowed the artists to change various postprocessing variables without recomputing the lighting, allowing for faster iteration.
+What I did is remove redundant lighting samples. Within the KD-tree, the lighting samples are arranged as a series of 3D boxes -- finding the lighting at any arbitrary point within each box is done via trilinear interpolation. Because of the hierarchical nature of the KD-tree, each level split its box into two along one of the three axes. What I would do is compare the value at a "leaf" box point with the interpolated value from the parent box -- if the difference between these two SH coefficient sets was within a certain threshold, I would remove the leaf sample. After this process is done, we are only storing lighting samples for areas that actually have varying lighting.
+Samples were referenced by index into a sample array at each node of the KD-tree, which allowed me to further combine samples that were nearly identical. Finally, I encoded the sample coefficients as FP16s, to further save on memory. I was later going to revisit this encoding, as it had some decoding expense at runtime, and there probably were cheaper, better options out there.
+At runtime, each dynamically lit object would keep track of what irradiance volume it was in when it moved. Transitions between volumes were handled by having the artists make the volumes overlap when placing them -- since the sample data would essentially be the same in the areas of overlap, when you transitioned there would be no pop.
+A dynamically lit object would not just sample one point for lighting, but several. I would take the object's bounding box, shrink it by a fixed percentage, and sample the centers of each face. I would also sample the center point. Dynamic lights would be added into the SH coefficient set analytically. I then extracted a dominant directional light from the SH set, and constructed a linear (4 coefficient) SH gradient + center sample. Rendering a directional light + a linear SH set achieves results similar to rendering a full 9 coefficient set, and is much faster on the GPU. Bungie used this same trick on Halo 3.
+The gradient allowed me to get a first order approximation of changing lighting across the dynamic object, which was a big improvement in the quality of the lighting and really helped make the dynamic lighting consistent with the static lighting. Evaluating a 4 SH gradient + directional light was about the same cost as if I'd evaluated a full 9 coefficient SH on the GPU, but produced much higher quality.
+The SH set for a dynamic object was constructed on another thread, and only happened if the object moved or its set of dynamic lights changed. This allowed us to support rendering a large number of dynamic objects.
+Sometimes the kd-tree subdivision heuristic would not generate high enough detail of sampling for a specific area -- for these cases I allowed the artists to place "irradiance detail volumes", which allowed the artists to override the sampling parameters for specific area of the irradiance volume - either forcing more detail, or using a smaller minimum sample resolution.
+Finally, for shadows, in outdoor areas we used a cascaded shadow map solution for the sun, and for interior areas, supported spotlights that cast shadows. The artists had to be careful placing these spotlights as we could not support a large number of shadow casting lights simultaneously. At the time we were rendering these lights as a separate geometry pass, but I had plans to support one shadow casting light + the SH lighting in a single pass.
+The end result was for anything car-sized or smaller, with statically placed lights using the same lighting rig as produced the lightmaps, you would have a very difficult time telling which objects were static and which were dynamic. One interesting side effect that was technically a "bug" but actually helped produce good results was the fact that samples underneath the floor would almost always be black, since no light reached them. When constructing the gradient, these samples would usually be used for the bottom face of the bounding box. In practice, though, this just made the object gradually get a little darker toward the floor -- which was not unpleasant, helped ground the object in the scene, and was kind of fake AO. In ShaderX 7, the article about Crackdown's lighting describes a similar AO hack, although theirs was intentional. But we decided to keep the happy accident.
+The biggest issue with the system was it didn't deal very well with very large dynamic objects, since a single gradient is not enough if your object spans tens of irradiance volume cells. For that game this wasn't a huge problem, but it might be for other games. Additionally, it still didn't solve the problem of things like muzzle flashes requiring multiple passes of geometry for statically lit items, and at the time I was starting to look to deferred lighting approaches to use for transient, high-frequency dynamic lights in general.
+The artists were very happy with the lighting, particularly on characters, and we were producing good results. But at about this time, the plug on the project was pulled and I was shifted off to other duties, and eventually the company would go bankrupt and I would move on to 2K Boston. But I felt that lighting approach was viable in a production environment, and I've since seen other games making presentations on various irradiance volume systems.
+Posted by
+Steve
+at
+3:06 PM
+5 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Newer Posts
+Older Posts
+Home
+Subscribe to:
+Posts (Atom)

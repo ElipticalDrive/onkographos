@@ -1,0 +1,168 @@
+# Exterior-Face Ray Casting
+
+Also called: Visible Exterior Face Rendering
+
+## Overview
+Exterior-Face Ray Casting is a parallel volume rendering technique for unstructured grids that restricts ray casting to visible exterior faces of subvolumes [S1, unofficial]. It solves the problem of efficiently traversing irregular, partitioned data domains by identifying which boundary faces are visible from the current viewpoint, projecting them to screen space, and casting rays only through these regions [S1, unofficial]. Unlike general traversal methods that may enter and exit internal boundaries, this method leverages the associativity of compositing to process segments independently, making it suitable for distributed-memory architectures [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Unstructured grid data (elements, nodes, connectivity) [S1, unofficial].
+*   Scalar field values associated with nodes or elements [S1, unofficial].
+*   Transfer function (mapping scalar values to color and opacity) [S1, unofficial].
+*   Camera parameters (eye position, viewing direction) [G].
+*   Screen resolution and viewport [G].
+
+**Outputs:**
+*   Final image (pixel colors and opacities) [G].
+
+### Data Structures
+*   **Element Connectivity:** Adjacency information defining which elements share faces [S1, unofficial].
+*   **Exterior Face List:** A list of faces belonging to the boundary of the subvolume [S1, unofficial]. Each face includes vertex indices and a normal vector [S1, unofficial].
+*   **Visible Face List:** A subset of the exterior face list containing only faces visible from the current eye position [S1, unofficial].
+*   **Screen Polygons:** Convex polygons in screen coordinates resulting from the orthographic projection of visible exterior faces [S1, unofficial].
+
+### Steps
+
+1.  **View-Independent Preprocessing:**
+    *   Determine connectivity between elements [S1, unofficial].
+    *   Identify all exterior faces of the subvolume [S1, unofficial].
+    *   Calculate face normals for all exterior faces [S1, unofficial].
+    *   This step is performed once after data distribution [S1, unofficial].
+
+2.  **View-Dependent Preprocessing:**
+    *   When the viewing position changes, search the exterior face list [S1, unofficial].
+    *   Extract all visible faces from the set of exterior faces based on the current eye position and face normals [S1, unofficial].
+    *   Orthographically project these visible exterior faces onto the screen to produce a set of convex polygons in screen coordinates, defining the exact screen area for casting rays [S1, unofficial].
+
+3.  **Ray Casting Loop:**
+    *   Iterate through each visible exterior face [S1, unofficial].
+    *   Cast rays from the eye through the screen pixels covered by the projected face polygon [S1, unofficial].
+    *   A ray enters the data domain through an exterior face and marches element by element using connectivity information until it exits the domain through another exterior face [S1, unofficial].
+    *   Note: Due to irregular shapes and partitioning, a ray may enter and exit multiple exterior faces [S1, unofficial].
+
+4.  **Segmentation:**
+    *   Break the ray path into segments based on element boundaries [S1, unofficial].
+    *   Because compositing is associative, segments can be processed independently [S1, unofficial].
+
+5.  **Sampling and Integration:**
+    *   For each segment (entry $a$ to exit $b$), compute the intensity contribution [S1, unofficial].
+    *   **Fixed Sampling Implementation:** Precompute a fixed step size $dt$ [S1, unofficial]. Sample at least one additional point $c$ between entering point $a$ and leaving point $b$ [S1, unofficial]. Use the Trapezoid rule to calculate the value of the interval between sample points [S1, unofficial].
+    *   **Adaptive Sampling (Alternative):** For linear elements with function $f(x,y,z)$, the sample rate $r$ can be defined as:
+        $$ r = \frac{|f(P(b)) - f(P(a))|}{b - a} \cdot k $$
+        where $P(t) = P(0) + td$, $P(0)$ is the ray start, $d$ is the direction, and $k$ is a constant representing the sampling rate for a unit change in function value [S1, unofficial]. However, fixed sampling is often preferred for simplicity and performance [S1, unofficial].
+    *   **Gaussian Quadrature Approximation:** For linear elements, approximate intensity by computing the value at the middle of the segment [S1, unofficial]. For quadratic elements, sample two points; for cubic, three points, based on Gaussian Quadrature principles (approximating a polynomial of degree $2n-1$ with $n$ points) [S1, unofficial].
+
+6.  **Color/Opacity Mapping:**
+    *   At each sample point, interpolate the function value [S1, unofficial].
+    *   Use the interpolated value to obtain color and opacity from a look-up table (transfer function) [S1, unofficial].
+
+7.  **Compositing:**
+    *   Compute the intensity $I(a, b)$ of a ray segment from entry $a$ to exit $b$ using the formula:
+        $$ I(a, b) = \int_a^b e^{-\int_a^t \alpha(s) ds} I(t) dt $$
+        where $\alpha$ is the attenuation coefficient and $I(t)$ is the intensity at point $t$ [S1, unofficial].
+    *   Composite the intensity values of all sample points along the ray front-to-back to form the final image value [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def exterior_face_ray_casting(grid, transfer_function, eye_position, screen_width, screen_height, pixel_size):
+    # Step 1: View-Independent Preprocessing
+    exterior_faces = []
+    face_to_elements = {}
+    for elem in grid.elements:
+        for face_idx in elem.faces:
+            face_to_elements.setdefault(face_idx, []).append(elem)
+    for face_idx, elems in face_to_elements.items():
+        if len(elems) == 1:
+            face = Face(face_idx, elems[0].nodes)
+            face.normal = normalize(cross(elems[0].nodes[1] - elems[0].nodes[0], elems[0].nodes[2] - elems[0].nodes[0]))
+            exterior_faces.append(face)
+
+    # Step 2: View-Dependent Preprocessing
+    visible_faces = []
+    view_dir = normalize(eye_position - grid.origin)
+    for face in exterior_faces:
+        if dot(face.normal, view_dir) > 0:
+            visible_faces.append(face)
+
+    screen_polygons = []
+    for face in visible_faces:
+        # [G] Project face vertices to screen coordinates and form convex polygon
+        screen_polygons.append(project_orthographic(face, eye_position, screen_width, screen_height, pixel_size))
+
+    lx, ly, lz = compute_bounding_box_sizes(grid)
+    ne = len(grid.elements)
+    dt = (lx + ly + lz) / ne
+
+    final_image = [[(0.0, 0.0, 0.0) for _ in range(screen_width)] for _ in range(screen_height)]
+
+    # Step 3 & 4: Ray Casting Loop
+    for polygon in screen_polygons:
+        for py, px in polygon.pixel_coords:
+            ray_origin = eye_position
+            ray_dir = normalize(pixel_coords_to_direction(py, px, eye_position, screen_width, screen_height, pixel_size))
+            # [G] Trace ray through elements using connectivity; returns list of (entry_t, exit_t)
+            segments = trace_ray_through_elements(ray_origin, ray_dir, grid)
+
+            segment_results = []
+            for a, b in segments:
+                samples = []
+                t = a
+                while t < b:
+                    next_t = min(t + dt, b)
+                    p1 = ray_origin + t * ray_dir
+                    p2 = ray_origin + next_t * ray_dir
+                    val1 = interpolate_scalar(grid, p1)
+                    val2 = interpolate_scalar(grid, p2)
+                    samples.append((t, val1, next_t, val2))
+                    t = next_t
+
+                seg_color = [0.0, 0.0, 0.0]
+                seg_opacity = 0.0
+                for t1, v1, t2, v2 in samples:
+                    c1, o1 = transfer_function(v1)
+                    c2, o2 = transfer_function(v2)
+                    interval_len = t2 - t1
+                    seg_color[0] += (c1[0] + c2[0]) * interval_len / 2.0
+                    seg_color[1] += (c1[1] + c2[1]) * interval_len / 2.0
+                    seg_color[2] += (c1[2] + c2[2]) * interval_len / 2.0
+                    seg_opacity += (o1 + o2) * interval_len / 2.0
+                segment_results.append((seg_color, seg_opacity))
+
+            final_color = composite_front_to_back(segment_results)
+            final_image[py][px] = final_color
+
+    return final_image
+```
+
+### Parameters
+*   **Fixed Sampling Interval ($dt$):** Estimated as $dt = \frac{l_x + l_y + l_z}{n_e}$, where $l_x, l_y, l_z$ are bounding box sizes and $n_e$ is the total number of elements [S1, unofficial].
+*   **Adaptive Constant ($k$):** A constant defining the sampling rate for a unit change of function value in the adaptive sampling formula [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Degenerate Elements:** Irregular shapes and partitioning can result in concavities and holes [S1, unofficial]. Rays may enter and exit multiple exterior faces [S1, unofficial]. Connectivity information is crucial for correct traversal [S1, unofficial].
+*   **Performance:** Adaptive sampling increases rendering time significantly [S1, unofficial]. Fixed sampling is often used despite potentially oversampling large elements with constant values [S1, unofficial].
+*   **Precision:** The integration of intensity involves nested integrals [S1, unofficial]. Numerical approximation (Trapezoid rule, Gaussian Quadrature) is necessary as analytic solutions are often impossible due to non-polynomial transfer functions [S1, unofficial].
+
+## Operating characteristics
+
+*   **Time Complexity:** Dominated by ray traversal and sampling [S1, unofficial]. Adaptive sampling adds overhead; fixed sampling is simpler but may use more samples than necessary [S1, unofficial].
+*   **Memory Complexity:** Requires storage for element connectivity, exterior faces, and visible face lists [S1, unofficial]. Parallel implementation distributes data to processors, requiring local preprocessing [S1, unofficial].
+*   **Strengths:** Efficient for distributed computing by minimizing communication during ray casting (local traversal) [S1, unofficial]. Handles irregular, unstructured grids well [S1, unofficial].
+*   **Limitations:** Preprocessing (finding visible faces) must be repeated for every view change [S1, unofficial]. Adaptive sampling is expensive [S1, unofficial].
+*   **When to Use:** Parallel volume rendering of unstructured grids on distributed-memory architectures where view changes are not extremely frequent or preprocessing cost is acceptable [S1, unofficial].
+
+## Background
+
+*   **Origin:** The method is described in "Parallel Volume Ray-Casting for Unstructured-Grid Data on Distributed-Memory Architectures" (DTIC ADA301855) [S1, unofficial].
+*   **History:** It addresses the challenges of rendering unstructured grids, which often have irregular shapes, concavities, and holes, especially when partitioned for parallel processing [S1, unofficial].
+*   **Usage:** Applied in scientific visualization for large-scale unstructured grid data on distributed systems [S1, unofficial].
+
+## Sources
+
+[S1] DTIC ADA301855: Parallel Volume Ray-Casting for Unstructured-Grid Data on Distributed-Memory Architectures., https://archive.org/details/DTIC_ADA301855, fetched 2026-10-26 (unofficial)

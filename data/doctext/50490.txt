@@ -1,0 +1,3081 @@
+This project contains a fast implementation of Dual Contouring -- or more accurately a simplified version of the algorithm. No octree is constructed, instead a regular grid is contoured (much like the leaf node grid in the original DC algorithm) & the resulting mesh is simplified using my mesh simplifier. Additionally the demo project implements the "super primitive" density function which is a single function which can be configured to represent a wide variety of volumes.
+
+The demo makes use of my SIMD QEF implementation both for the voxel vertex placement and for the mesh simplification vertex placement. I've included the latest code for both the mesh simplifier and the SIMD QEF directly in the project.
+
+The demo depends on Dear ImGui, SDL2, GLM and GLEW. I don't think the particular version matters, the demo project expects these to exist in the solution directory.
+
+A pre-compiled x64 executable is included with the SDL2 and glew DLLs.
+
+The controls are:
+	- hold left mouse and drag to rotate the view
+	- use the mouse wheel to zoom in/out
+	- press F1 to render a wireframe
+
+Send any questions to nick.gildea@gmail.com or @ngildea85 on Twitter
+
+![Example](https://github.com/nickgildea/fast_dual_contouring/blob/master/example.png)
+
+### fast_dc.cpp
+```
+//
+// Written by Nick Gildea (2017)
+// Public Domain
+//
+
+#include "fast_dc.h"
+
+#include "ng_mesh_simplify.h"
+#include "qef_simd.h"
+
+#include <glm/glm.hpp>
+#include <stdint.h>
+
+// ----------------------------------------------------------------------------
+
+// TODO the winding field could be packed into the normal vec as the unused w component
+struct EdgeInfo
+{
+	vec4 pos;
+	vec4 normal;
+	bool winding = false;
+};
+
+// Ideally we'd use https://github.com/greg7mdp/sparsepp but fall back to STL
+#ifdef HAVE_SPARSEPP
+
+	#include <sparsepp/spp.h>
+
+	using EdgeInfoMap = spp::sparese_hash_map<uint32_t, EdgeInfo>;
+	using VoxelIDSet = spp::sparse_hash_set<uint32_t>;
+	using VoxelIndexMap = spp::sparese_hash_map<uint32_t, int>;
+
+#else
+
+	#include <unordered_map>
+	#include <unordered_set>
+
+	using EdgeInfoMap = std::unordered_map<uint32_t, EdgeInfo>;
+	using VoxelIDSet = std::unordered_set<uint32_t>;
+	using VoxelIndexMap = std::unordered_map<uint32_t, int>;
+
+#endif
+
+// ----------------------------------------------------------------------------
+
+using glm::ivec4;
+using glm::vec4;
+using glm::vec3;
+using glm::vec2;
+
+#ifdef _MSC_VER
+#define ALIGN16 __declspec(align(16))
+#else
+#define ALIGN16 __attribute__((aligned(16))
+#endif
+
+// ----------------------------------------------------------------------------
+
+const int VOXEL_GRID_SIZE = 128;
+const float VOXEL_GRID_OFFSET = (float)VOXEL_GRID_SIZE / 2.f;
+
+// ----------------------------------------------------------------------------
+
+static const vec4 AXIS_OFFSET[3] = 
+{ 
+	vec4(1.f, 0.f, 0.f, 0.f),
+	vec4(0.f, 1.f, 0.f, 0.f),
+	vec4(0.f, 0.f, 1.f, 0.f)
+};
+
+// ----------------------------------------------------------------------------
+
+static const ivec4 EDGE_NODE_OFFSETS[3][4] = 
+{
+	{ ivec4(0), ivec4(0, 0, 1, 0), ivec4(0, 1, 0, 0), ivec4(0, 1, 1, 0) },
+	{ ivec4(0), ivec4(1, 0, 0, 0), ivec4(0, 0, 1, 0), ivec4(1, 0, 1, 0) },
+	{ ivec4(0), ivec4(0, 1, 0, 0), ivec4(1, 0, 0, 0), ivec4(1, 1, 0, 0) },
+};
+
+// ----------------------------------------------------------------------------
+
+// The two lookup tables below were calculated by expanding the IDs into 3d coordinates
+// performing the calcuations in 3d space and then converting back into the compact form 
+// and subtracting the base voxel ID. Use of this lookup table means those calculations 
+// can be avoided at run-time.
+
+const uint32_t ENCODED_EDGE_NODE_OFFSETS[12] =
+{
+	0x00000000,
+	0x00100000,
+	0x00000400,
+	0x00100400,
+	0x00000000,
+	0x00000001,
+	0x00100000,
+	0x00100001,
+	0x00000000,
+	0x00000400,
+	0x00000001,
+	0x00000401,
+};
+
+const uint32_t ENCODED_EDGE_OFFSETS[12] =
+{
+	0x00000000,
+	0x00100000,
+	0x00000400,
+	0x00100400,
+	0x40000000,
+	0x40100000,
+	0x40000001,
+	0x40100001,
+	0x80000000,
+	0x80000400,
+	0x80000001,
+	0x80000401,
+};
+
+// ----------------------------------------------------------------------------
+
+// The "super primitve" -- use the parameters to configure different shapes from a single function
+// see https://www.shadertoy.com/view/MsVGWG
+
+float sdSuperprim(vec3 p, vec4 s, vec2 r) 
+{
+	const vec3 d = glm::abs(p) - vec3(s);
+
+	float q = glm::length(vec2(glm::max(d.x + r.x, 0.f), glm::max(d.y + r.x, 0.f)));
+	q += glm::min(-r.x, glm::max(d.x,d.y));
+    q = (glm::abs((q + s.w)) - s.w);
+
+    return glm::length(vec2(glm::max(q + r.y,0.f), 
+		glm::max(d.z + r.y, 0.f))) + glm::min(-r.y, glm::max(q, d.z));
+}
+
+// ----------------------------------------------------------------------------
+
+float Density(const SuperPrimitiveConfig& config, const vec4& p)
+{
+	const float scale = 32.f;
+	return sdSuperprim(vec3(p) / scale, vec4(config.s), vec2(config.r)) * scale;
+}
+
+// ----------------------------------------------------------------------------
+
+uint32_t EncodeVoxelUniqueID(const ivec4& idxPos)
+{
+	return idxPos.x | (idxPos.y << 10) | (idxPos.z << 20);
+}
+
+// ----------------------------------------------------------------------------
+
+ivec4 DecodeVoxelUniqueID(const uint32_t id)
+{
+	return ivec4(
+		id & 0x3ff,
+		(id >> 10) & 0x3ff,
+		(id >> 20) & 0x3ff,
+		0);
+}
+
+// ----------------------------------------------------------------------------
+
+uint32_t EncodeAxisUniqueID(const int axis, const int x, const int y, const int z)
+{
+	return (x << 0) | (y << 10) | (z << 20) | (axis << 30);
+}
+
+// ----------------------------------------------------------------------------
+
+float FindIntersection(const SuperPrimitiveConfig& config, const vec4& p0, const vec4& p1)
+{
+	const int FIND_EDGE_INFO_STEPS = 16;
+	const float FIND_EDGE_INFO_INCREMENT = 1.f / FIND_EDGE_INFO_STEPS;
+
+	float minValue = FLT_MAX;
+	float currentT = 0.f;
+	float t = 0.f;
+	for (int i = 0; i < FIND_EDGE_INFO_STEPS; i++)
+	{
+		const vec4 p = glm::mix(p0, p1, currentT);
+		const float	d = glm::abs(Density(config, p));
+		if (d < minValue)
+		{
+			t = currentT;
+			minValue = d;
+		}
+
+		currentT += FIND_EDGE_INFO_INCREMENT;
+	}
+
+	return t;
+}
+
+// ----------------------------------------------------------------------------
+
+static void FindActiveVoxels(
+	const SuperPrimitiveConfig& config,
+	VoxelIDSet& activeVoxels,
+	EdgeInfoMap& activeEdges)
+{
+	for (int x = 0; x < VOXEL_GRID_SIZE; x++)
+	for (int y = 0; y < VOXEL_GRID_SIZE; y++)
+	for (int z = 0; z < VOXEL_GRID_SIZE; z++)
+	{
+		const ivec4 idxPos(x, y, z, 0);
+		const vec4 p = vec4(x - VOXEL_GRID_OFFSET, y - VOXEL_GRID_OFFSET, z - VOXEL_GRID_OFFSET, 1.f);
+
+		for (int axis = 0; axis < 3; axis++)
+		{
+			const vec4 q = p + AXIS_OFFSET[axis];
+
+			const float pDensity = Density(config, p);
+			const float qDensity = Density(config, q);
+
+			const bool zeroCrossing = 
+				pDensity >= 0.f && qDensity < 0.f ||
+			    pDensity < 0.f && qDensity >= 0.f;
+			if (!zeroCrossing)
+			{
+				continue;
+			}
+
+			const float t = FindIntersection(config, p, q);
+			const vec4 pos = vec4(glm::mix(glm::vec3(p), glm::vec3(q), t), 1.f);
+
+			const float H = 0.001f;
+			const auto normal = glm::normalize(vec4(
+				Density(config, pos + vec4(H, 0.f, 0.f, 0.f)) - Density(config, pos - vec4(H, 0.f, 0.f, 0.f)), 
+				Density(config, pos + vec4(0.f, H, 0.f, 0.f)) - Density(config, pos - vec4(0.f, H, 0.f, 0.f)), 
+				Density(config, pos + vec4(0.f, 0.f, H, 0.f)) - Density(config, pos - vec4(0.f, 0.f, H, 0.f)), 
+				0.f));
+
+			EdgeInfo info;
+			info.pos = pos;
+			info.normal = normal;
+			info.winding = pDensity >= 0.f;
+
+			const auto code = EncodeAxisUniqueID(axis, x, y, z);
+			activeEdges[code] = info;
+
+			const auto edgeNodes = EDGE_NODE_OFFSETS[axis];
+			for (int i = 0; i < 4; i++)
+			{
+				const auto nodeIdxPos = idxPos - edgeNodes[i];
+				const auto nodeID = EncodeVoxelUniqueID(nodeIdxPos);
+				activeVoxels.insert(nodeID);
+			}
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+static void GenerateVertexData(
+	const VoxelIDSet& voxels,
+	const EdgeInfoMap& edges,
+	VoxelIndexMap& vertexIndices,
+	MeshBuffer* buffer)
+{
+	MeshVertex* vert = &buffer->vertices[0];
+
+	int idxCounter = 0;
+	for (const auto& voxelID: voxels)
+	{
+		ALIGN16 vec4 p[12];
+		ALIGN16 vec4 n[12];
+
+		int idx = 0;
+		for (int i = 0; i < 12; i++)
+		{
+			const auto edgeID = voxelID + ENCODED_EDGE_OFFSETS[i];				
+			const auto iter = edges.find(edgeID);
+
+			if (iter != end(edges))
+			{
+				const auto& info = iter->second;
+				const vec4 pos = info.pos;
+				const vec4 normal = info.normal;
+
+				p[idx] = pos;
+				n[idx] = normal;
+				idx++;
+			}
+		}
+
+		ALIGN16 vec4 nodePos;
+		qef_solve_from_points_4d(&p[0].x, &n[0].x, idx, &nodePos.x);
+
+		vec4 nodeNormal;
+		for (int i = 0; i < idx; i++)
+		{
+			nodeNormal += n[i];
+		}
+		nodeNormal *= (1.f / (float)idx);
+
+		vertexIndices[voxelID] = idxCounter++;
+
+		buffer->numVertices++;
+		vert->xyz = nodePos;
+		vert->normal = nodeNormal;
+		vert++;
+	}
+
+}
+
+// ----------------------------------------------------------------------------
+
+static void GenerateTriangles(
+	const EdgeInfoMap& edges,
+	const VoxelIndexMap& vertexIndices,
+	MeshBuffer* buffer)
+{
+	MeshTriangle* tri = &buffer->triangles[0];
+
+	for (const auto& pair: edges)
+	{
+		const auto& edge = pair.first;
+		const auto& info = pair.second;
+
+		const ivec4 basePos = DecodeVoxelUniqueID(edge);
+		const int axis = (edge >> 30) & 0xff;
+
+		const int nodeID = edge & ~0xc0000000;
+		const uint32_t voxelIDs[4] = 
+		{
+			nodeID - ENCODED_EDGE_NODE_OFFSETS[axis * 4 + 0],
+			nodeID - ENCODED_EDGE_NODE_OFFSETS[axis * 4 + 1],
+			nodeID - ENCODED_EDGE_NODE_OFFSETS[axis * 4 + 2],
+			nodeID - ENCODED_EDGE_NODE_OFFSETS[axis * 4 + 3],
+		};
+
+		// attempt to find the 4 voxels which share this edge
+		int edgeVoxels[4];
+		int numFoundVoxels = 0;
+		for (int i = 0; i < 4; i++)
+		{
+			const auto iter = vertexIndices.find(voxelIDs[i]);
+			if (iter != end(vertexIndices))
+			{
+				edgeVoxels[numFoundVoxels++] = iter->second;
+			}
+		}
+
+		// we can only generate a quad (or two triangles) if all 4 are found
+		if (numFoundVoxels < 4)
+		{
+			continue;
+		}
+
+		if (info.winding)
+		{
+			tri->indices_[0] = edgeVoxels[0];
+			tri->indices_[1] = edgeVoxels[1];
+			tri->indices_[2] = edgeVoxels[3];
+			tri++;
+
+			tri->indices_[0] = edgeVoxels[0];
+			tri->indices_[1] = edgeVoxels[3];
+			tri->indices_[2] = edgeVoxels[2];
+			tri++;
+		}
+		else
+		{
+			tri->indices_[0] = edgeVoxels[0];
+			tri->indices_[1] = edgeVoxels[3];
+			tri->indices_[2] = edgeVoxels[1];
+			tri++;
+
+			tri->indices_[0] = edgeVoxels[0];
+			tri->indices_[1] = edgeVoxels[2];
+			tri->indices_[2] = edgeVoxels[3];
+			tri++;
+		}
+
+		buffer->numTriangles += 2;
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+MeshBuffer* GenerateMesh(const SuperPrimitiveConfig& config)
+{
+	VoxelIDSet activeVoxels;
+	EdgeInfoMap activeEdges;
+
+	FindActiveVoxels(config, activeVoxels, activeEdges);
+
+	MeshBuffer* buffer = new MeshBuffer;
+	buffer->vertices = (MeshVertex*)malloc(activeVoxels.size() * sizeof(MeshVertex));
+	buffer->numVertices = 0;
+
+	VoxelIndexMap vertexIndices;
+	GenerateVertexData(activeVoxels, activeEdges, vertexIndices, buffer);
+
+	buffer->triangles = (MeshTriangle*)malloc(2 * activeEdges.size() * sizeof(MeshTriangle));
+	buffer->numTriangles = 0;
+	GenerateTriangles(activeEdges, vertexIndices, buffer);
+
+	printf("mesh: %d %d\n", buffer->numVertices, buffer->numTriangles);
+
+	return buffer;
+}
+
+// ----------------------------------------------------------------------------
+
+SuperPrimitiveConfig ConfigForShape(const SuperPrimitiveConfig::Type& type)
+{
+	SuperPrimitiveConfig config;
+	switch (type)
+	{
+		default:
+		case SuperPrimitiveConfig::Cube:
+			config.s = vec4(1.f);
+			config.r = vec2(0.f);
+			break;
+			
+		case SuperPrimitiveConfig::Cylinder:
+			config.s = vec4(1.f);
+			config.r = vec2(1.f, 0.f);
+			break;
+
+		case SuperPrimitiveConfig::Pill:
+			config.s = vec4(1.f, 1.f, 2.f, 1.);
+			config.r = vec2(1.f);
+			break;
+
+		case SuperPrimitiveConfig::Corridor:
+			config.s = vec4(1.f, 1.f, 1.f, 0.25f);
+			config.r = vec2(0.1f);
+			break;
+
+		case SuperPrimitiveConfig::Torus:
+			config.s = vec4(1.f, 1.f, 0.25f, 0.25f);
+			config.r = vec2(1.f, 0.25f);
+			break;
+	}
+
+	return config;
+}
+
+// ----------------------------------------------------------------------------
+```
+
+### fast_dc.h
+```
+#ifndef 	HAS_DC_H_BEEN_INCLUDED
+#define		HAS_DC_H_BEEN_INCLUDED
+
+#include	"ng_mesh_simplify.h"
+
+struct SuperPrimitiveConfig
+{
+	enum Type
+	{
+		Cube,
+		Cylinder,
+		Pill,
+		Corridor,
+		Torus,
+	};
+
+	glm::vec4 s;
+	glm::vec2 r;
+};
+
+SuperPrimitiveConfig ConfigForShape(const SuperPrimitiveConfig::Type& type);
+MeshBuffer* GenerateMesh(const SuperPrimitiveConfig& config);
+
+#endif //	HAS_DC_H_BEEN_INCLUDED
+```
+
+### ng_mesh_simplify.cpp
+```
+//
+// Public domain
+//
+
+#include	"ng_mesh_simplify.h"
+
+#define QEF_INCLUDE_IMPL
+#include	"qef_simd.h"
+
+#include	<stdint.h>
+#include	<algorithm>
+#include	<random>
+
+// ----------------------------------------------------------------------------
+
+namespace {
+
+const int COLLAPSE_MAX_DEGREE = 16;
+const int MAX_TRIANGLES_PER_VERTEX = COLLAPSE_MAX_DEGREE;
+
+template <typename T>
+class LinearBuffer
+{
+public:
+
+	LinearBuffer(const int capacity)
+	{
+		base_ = static_cast<T*>(ng_alloc(sizeof(T) * capacity));
+		end_ = base_ + capacity;
+	}
+
+	~LinearBuffer()
+	{
+		ng_free(base_);
+	}
+
+	void swap(LinearBuffer<T>& other)
+	{
+		std::swap(base_, other.base_);
+		std::swap(end_, other.end_);
+		std::swap(size_, other.size_);
+	}
+
+	void clear()
+	{
+		size_ = 0;
+	}
+
+	int size() const
+	{
+		return size_;
+	}
+
+	void copy(const T* data, const int count)
+	{
+		memcpy(base_, data, sizeof(T) * count);
+		size_ = count;
+	}
+
+	void resize(const int size, const T& value)
+	{
+		size_ = size;
+		for (int i = 0; i < size; i++)
+		{
+			base_[i] = value;
+		}
+	}
+
+	void push_back(const T& value)
+	{
+		base_[size_++] = value;
+	}
+
+	T* begin() const { return base_; }
+	T* end() const { return base_ + size_; }
+
+	const T& operator[](const int idx) const { return base_[idx]; }
+	T& operator[](const int idx) { return base_[idx]; }
+
+
+private:
+
+	LinearBuffer() = delete;
+	LinearBuffer(const LinearBuffer&) = delete;
+	LinearBuffer(LinearBuffer&&) = delete;
+	LinearBuffer& operator=(const LinearBuffer&) = delete;
+	LinearBuffer& operator=(LinearBuffer&&) = delete;
+
+	T* base_ = nullptr;
+	T* end_ = nullptr;
+	int size_ = 0;
+};
+
+template <typename T>
+T* begin(const LinearBuffer<T>& buf)
+{
+	return buf.begin();
+}
+
+template <typename T>
+T* end(const LinearBuffer<T>& buf)
+{
+	return buf.end();
+}
+
+// ----------------------------------------------------------------------------
+
+union Edge
+{
+	Edge(uint32_t _minIndex, uint32_t _maxIndex)
+		: min_(_minIndex)
+		, max_(_maxIndex)
+	{
+	}
+
+	uint64_t idx_ = 0;
+	struct { uint32_t min_, max_; };
+};
+
+}
+
+// ----------------------------------------------------------------------------
+
+static inline int min(const int x, const int y)
+{
+	return x < y ? x : y;
+}
+
+static inline int max(const int x, const int y)
+{
+	return x > y ? x : y;
+}
+
+static inline void vec4_set(vec4& r, const vec4& x)
+{
+	r[0] = x[0];
+	r[1] = x[1];
+	r[2] = x[2];
+	r[3] = x[3];
+}
+
+static inline void vec4_add(vec4& r, const vec4& x, const vec4& y)
+{
+	r[0] = x[0] + y[0];
+	r[1] = x[1] + y[1];
+	r[2] = x[2] + y[2];
+	r[3] = x[3] + y[3];
+}
+
+static inline void vec4_sub(vec4& r, const vec4& x, const vec4& y)
+{
+	r[0] = x[0] - y[0];
+	r[1] = x[1] - y[1];
+	r[2] = x[2] - y[2];
+	r[3] = x[3] - y[3];
+}
+
+static inline void vec4_scale(vec4& r, const float scale)
+{
+	r[0] *= scale;
+	r[1] *= scale;
+	r[2] *= scale;
+	r[3] *= scale;
+}
+
+static inline float vec4_dot(const vec4& x, const vec4& y)
+{
+	return x[0] * y[0] + x[1] * y[1] + x[2] * y[2] + x[3] * y[3];
+}
+
+static inline float vec4_length2(const vec4& x)
+{
+	return vec4_dot(x, x);
+}
+
+// ----------------------------------------------------------------------------
+
+static void BuildCandidateEdges(
+	const LinearBuffer<MeshVertex>& vertices,
+	const LinearBuffer<MeshTriangle>& triangles,
+	LinearBuffer<Edge>& edges)
+{
+	for (int i = 0; i < triangles.size(); i++)
+	{
+		const int* indices = triangles[i].indices_;
+		edges.push_back(Edge(min(indices[0], indices[1]), max(indices[0], indices[1])));
+		edges.push_back(Edge(min(indices[1], indices[2]), max(indices[1], indices[2])));
+		edges.push_back(Edge(min(indices[0], indices[2]), max(indices[0], indices[2])));
+	}
+
+	std::sort(begin(edges), end(edges), 
+		[](const Edge& lhs, const Edge& rhs) { return lhs.idx_ < rhs.idx_; });
+
+	LinearBuffer<Edge> filteredEdges(edges.size());
+	LinearBuffer<bool> boundaryVerts(vertices.size());
+	boundaryVerts.resize(vertices.size(), false);
+
+	Edge prev = edges[0];
+	int count = 1;
+	for (int idx = 1; idx < edges.size(); idx++)
+	{
+		const Edge curr = edges[idx];
+		if (curr.idx_ != prev.idx_)
+		{
+			if (count == 1)
+			{
+				boundaryVerts[prev.min_] = true;
+				boundaryVerts[prev.max_] = true;
+			}
+			else 
+			{
+				filteredEdges.push_back(prev);
+			}
+
+			count = 1;
+		}
+		else
+		{
+			count++;
+		}
+
+		prev = curr;
+	}
+
+	edges.clear();
+	for (Edge& edge: filteredEdges)
+	{
+		if (!boundaryVerts[edge.min_] && !boundaryVerts[edge.max_])
+		{
+			edges.push_back(edge);
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+static int FindValidCollapses(
+	const MeshSimplificationOptions& options,
+	const LinearBuffer<Edge>& edges,
+	const LinearBuffer<MeshVertex>& vertices,
+	const LinearBuffer<MeshTriangle>& tris,
+	const LinearBuffer<int>& vertexTriangleCounts,
+	LinearBuffer<int>& collapseValid, 
+	LinearBuffer<int>& collapseEdgeID, 
+	LinearBuffer<vec4>& collapsePosition,
+	LinearBuffer<vec4>& collapseNormal)
+{
+	int validCollapses = 0;
+
+	std::mt19937 prng;
+	prng.seed(42);
+
+	const int numRandomEdges = edges.size() * options.edgeFraction;
+	std::uniform_int_distribution<int> distribution(0, (int)(edges.size() - 1));
+
+	LinearBuffer<int> randomEdges(numRandomEdges);
+	for (int i = 0; i < numRandomEdges; i++)
+	{
+		const int randomIdx = distribution(prng);
+		randomEdges.push_back(randomIdx);
+	}
+
+	// sort the edges to improve locality
+	std::sort(begin(randomEdges), end(randomEdges));
+
+	LinearBuffer<float> minEdgeCost(vertices.size());
+	minEdgeCost.resize(vertices.size(), FLT_MAX);
+
+	for (int i: randomEdges)
+	{
+		const Edge& edge = edges[i];
+		const auto& vMin = vertices[edge.min_];
+		const auto& vMax = vertices[edge.max_];
+
+		// prevent collapses along edges
+		const float cosAngle = vec4_dot(vMin.normal, vMax.normal);
+		if (cosAngle < options.minAngleCosine)
+		{
+			continue;
+		}
+
+		vec4 delta;
+		vec4_sub(delta, vMax.xyz, vMin.xyz);
+		const float edgeSize = vec4_length2(delta);
+		if (edgeSize > (options.maxEdgeSize * options.maxEdgeSize))
+		{
+			continue;
+		}
+
+		const int degree = vertexTriangleCounts[edge.min_] + vertexTriangleCounts[edge.max_];
+		if (degree > COLLAPSE_MAX_DEGREE)
+		{
+			continue;
+		}
+
+		__declspec(align(16)) float pos[4];
+		MeshVertex data[2] = { vMin, vMax };
+
+		float error = qef_solve_from_points_4d_interleaved(&data[0].xyz[0], sizeof(MeshVertex) / sizeof(float), 2, pos);
+		if (error > 0.f)
+		{
+			error = 1.f / error;
+		}
+
+		// avoid vertices becoming a 'hub' for lots of edges by penalising collapses
+		// which will lead to a vertex with degree > 10
+		const int penalty = max(0, degree - 10);
+		error += penalty * (options.maxError * 0.1f);
+
+		if (error > options.maxError)
+		{
+			continue;
+		}
+
+		collapseValid.push_back(i);
+
+		vec4_add(collapseNormal[i], vMin.normal, vMax.normal);
+		vec4_scale(collapseNormal[i], 0.5f);
+
+		vec4_set(collapsePosition[i], vec4(pos[0], pos[1], pos[2], 1.f));
+
+		if (error < minEdgeCost[edge.min_])
+		{
+			minEdgeCost[edge.min_] = error;
+			collapseEdgeID[edge.min_] = i;
+		}
+
+		if (error < minEdgeCost[edge.max_])
+		{
+			minEdgeCost[edge.max_] = error;
+			collapseEdgeID[edge.max_] = i;
+		}
+
+		validCollapses++;
+	}
+
+	return validCollapses;
+}
+
+// ----------------------------------------------------------------------------
+
+static void CollapseEdges(
+	const LinearBuffer<int>& collapseValid,
+	const LinearBuffer<Edge>& edges,
+	const LinearBuffer<int>& collapseEdgeID,
+	const LinearBuffer<vec4>& collapsePositions,
+	const LinearBuffer<vec4>& collapseNormal,
+	LinearBuffer<MeshVertex>& vertices,
+	LinearBuffer<int>& collapseTarget)
+{
+	int countCollapsed = 0, countCandidates = 0;
+	for (int i: collapseValid)
+	{
+		countCandidates++;
+
+		const Edge& edge = edges[i];
+		if (collapseEdgeID[edge.min_] == i && collapseEdgeID[edge.max_] == i)
+		{
+			countCollapsed++;
+
+			collapseTarget[edge.max_] = edge.min_;
+			vec4_set(vertices[edge.min_].xyz, collapsePositions[i]);
+			vec4_set(vertices[edge.min_].normal, collapseNormal[i]);
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+static int RemoveTriangles(
+	const LinearBuffer<MeshVertex>& vertices,
+	const LinearBuffer<int>& collapseTarget,
+	LinearBuffer<MeshTriangle>& tris,
+	LinearBuffer<MeshTriangle>& triBuffer,
+	LinearBuffer<int>& vertexTriangleCounts)
+{
+	int removedCount = 0;
+
+	vertexTriangleCounts.clear();
+	vertexTriangleCounts.resize(vertices.size(), 0);
+
+	triBuffer.clear();
+
+	for (auto& tri: tris)
+	{
+		for (int j = 0; j < 3; j++)
+		{
+			const int t = collapseTarget[tri.indices_[j]];
+			if (t != -1)
+			{
+				tri.indices_[j] = t;
+			}
+		}
+
+		if (tri.indices_[0] == tri.indices_[1] ||
+			tri.indices_[0] == tri.indices_[2] ||
+			tri.indices_[1] == tri.indices_[2])
+		{
+			removedCount++;
+
+			continue;
+		}
+
+		const int* indices = tri.indices_;
+		for (int index = 0; index < 3; index++)
+		{
+			vertexTriangleCounts[indices[index]] += 1;
+		}
+
+		triBuffer.push_back(tri);
+	}
+
+	tris.swap(triBuffer);
+	return removedCount;
+}
+
+// ----------------------------------------------------------------------------
+
+static void RemoveEdges(
+	const LinearBuffer<int>& collapseTarget,
+	LinearBuffer<Edge>& edges,
+	LinearBuffer<Edge>& edgeBuffer)
+{
+	edgeBuffer.clear();
+	for (auto& edge: edges)
+	{
+		int t = collapseTarget[edge.min_];
+		if (t != -1)
+		{
+			edge.min_ = t;
+		}
+
+		t = collapseTarget[edge.max_];
+		if (t != -1)
+		{
+			edge.max_ = t;
+		}
+
+		if (edge.min_ != edge.max_)
+		{
+			edgeBuffer.push_back(edge);
+		}
+	}
+
+	edges.swap(edgeBuffer);
+}			
+
+// ----------------------------------------------------------------------------
+
+static void CompactVertices(
+	LinearBuffer<MeshVertex>& vertices,
+	MeshBuffer* meshBuffer)
+{
+	LinearBuffer<bool> vertexUsed(vertices.size());
+	vertexUsed.resize(vertices.size(), false);
+
+	for (int i = 0; i < meshBuffer->numTriangles; i++)
+	{
+		MeshTriangle& tri = meshBuffer->triangles[i];
+
+		vertexUsed[tri.indices_[0]] = true;
+		vertexUsed[tri.indices_[1]] = true;
+		vertexUsed[tri.indices_[2]] = true;
+	}
+
+	LinearBuffer<MeshVertex> compactVertices(vertices.size());
+	LinearBuffer<int> remappedVertexIndices(vertices.size());
+	remappedVertexIndices.resize(vertices.size(), -1);
+
+	for (int i = 0; i < vertices.size(); i++)
+	{
+		if (vertexUsed[i])
+		{
+			remappedVertexIndices[i] = compactVertices.size();
+			vec4_set(vertices[i].normal, vertices[i].normal);
+			compactVertices.push_back(vertices[i]);
+		}
+	}
+
+	for (int i = 0; i < meshBuffer->numTriangles; i++)
+	{
+		MeshTriangle& tri = meshBuffer->triangles[i];
+		
+		for (int j = 0; j < 3; j++)
+		{
+			const int updatedIndex = remappedVertexIndices[tri.indices_[j]];
+			tri.indices_[j] = updatedIndex;
+		}
+	}
+
+	vertices.swap(compactVertices);
+}
+
+// ----------------------------------------------------------------------------
+
+void ngMeshSimplifier(
+	MeshBuffer* mesh,
+	const vec4& worldSpaceOffset,
+	const MeshSimplificationOptions& options)
+{
+	if (mesh->numTriangles < 100 || mesh->numVertices < 100)
+	{
+		return;
+	}
+
+	LinearBuffer<MeshVertex> vertices(mesh->numVertices);
+	vertices.copy(&mesh->vertices[0], mesh->numVertices);
+
+	LinearBuffer<MeshTriangle> triangles(mesh->numTriangles);
+	triangles.copy(&mesh->triangles[0], mesh->numTriangles);
+
+	for (MeshVertex& v: vertices)
+	{
+		vec4_sub(v.xyz, v.xyz, worldSpaceOffset);
+	}
+
+	mesh->numVertices = 0;
+	mesh->numTriangles = 0;
+
+	LinearBuffer<Edge> edges(triangles.size() * 3);
+	BuildCandidateEdges(vertices, triangles, edges);
+
+	LinearBuffer<vec4> collapsePosition(edges.size());
+	LinearBuffer<vec4> collapseNormal(edges.size());
+	LinearBuffer<int> collapseValid(edges.size());
+	LinearBuffer<int> collapseEdgeID(vertices.size());
+	LinearBuffer<int> collapseTarget(vertices.size());
+
+	LinearBuffer<Edge> edgeBuffer(edges.size());
+	LinearBuffer<MeshTriangle> triBuffer(triangles.size());
+
+	// per vertex
+	LinearBuffer<int> vertexTriangleCounts(vertices.size());
+	vertexTriangleCounts.resize(vertices.size(), 0);
+
+	{
+		for (int j = 0; j < triangles.size(); j++)
+		{
+			const int* indices = triangles[j].indices_;
+
+			for (int index = 0; index < 3; index++)
+			{
+				vertexTriangleCounts[indices[index]] += 1;
+			}
+		}
+	}
+
+	const int targetTriangleCount = triangles.size() * options.targetPercentage;
+
+	int iterations = 0;
+	while (triangles.size() > targetTriangleCount &&
+	       iterations++ < options.maxIterations)
+	{
+		collapseEdgeID.resize(vertices.size(), -1);
+		collapseTarget.resize(vertices.size(), -1);
+
+		collapseValid.clear();
+
+		const int countValidCollapse = FindValidCollapses(
+			options,
+			edges, vertices, triangles, vertexTriangleCounts, collapseValid, 
+			collapseEdgeID, collapsePosition, collapseNormal);
+		if (countValidCollapse == 0)
+		{
+			break;
+		}
+
+		CollapseEdges(collapseValid, edges,
+			collapseEdgeID, collapsePosition, collapseNormal, vertices, 
+			collapseTarget);
+
+		RemoveTriangles(vertices, collapseTarget, triangles, triBuffer, vertexTriangleCounts);
+		RemoveEdges(collapseTarget, edges, edgeBuffer);
+	}
+
+	mesh->numTriangles = 0;
+	for (int i = 0; i < triangles.size(); i++)
+	{
+		mesh->triangles[mesh->numTriangles].indices_[0] = triangles[i].indices_[0];
+		mesh->triangles[mesh->numTriangles].indices_[1] = triangles[i].indices_[1];
+		mesh->triangles[mesh->numTriangles].indices_[2] = triangles[i].indices_[2];
+		mesh->numTriangles++;
+	}
+
+	CompactVertices(vertices, mesh);
+
+	mesh->numVertices = vertices.size();
+	for (int i = 0; i < vertices.size(); i++)
+	{
+		vec4_add(vertices[i].xyz, vertices[i].xyz, worldSpaceOffset);
+
+		vec4_set(mesh->vertices[i].xyz, vertices[i].xyz);
+		vec4_set(mesh->vertices[i].normal, vertices[i].normal);
+		vec4_set(mesh->vertices[i].colour, vertices[i].colour);
+	}
+}
+```
+
+### ng_mesh_simplify.h
+```
+#ifndef		HAS_SIMD_MESH_SIMPLIFY_H_BEEN_INCUDED
+#define		HAS_SIMD_MESH_SIMPLIFY_H_BEEN_INCUDED
+
+//
+// Release under unlicense, public domain
+//
+
+#include <stdlib.h>
+#include <glm/glm.hpp>
+
+// ----------------------------------------------------------------------------
+
+// Change these definitions to suit your project
+#if 0
+using vec4 = float[4];
+#else
+using vec4 = glm::vec4;
+#endif
+
+// ----------------------------------------------------------------------------
+
+// The algorithm with alloc chunks of memory
+// override these to point to your engine's allocators, etc
+#define ng_alloc malloc
+#define ng_free free
+
+// ----------------------------------------------------------------------------
+
+struct MeshSimplificationOptions
+{
+	// Each iteration involves selecting a fraction of the edges at random as possible 
+	// candidates for collapsing. There is likely a sweet spot here trading off against number 
+	// of edges processed vs number of invalid collapses generated due to collisions 
+	// (the more edges that are processed the higher the chance of collisions happening)
+	float edgeFraction = 0.125f;
+
+	// Stop simplfying after a given number of iterations
+	int maxIterations = 10;
+
+	// And/or stop simplifying when we've reached a percentage of the input triangles
+	float targetPercentage = 0.05f;
+
+	// The maximum allowed error when collapsing an edge (error is calculated as 1.0/qef_error)
+	float maxError = 1.f;
+
+	// Useful for controlling how uniform the mesh is (or isn't)
+	float maxEdgeSize = 0.5f;
+
+	// If the mesh has sharp edges this can used to prevent collapses which would otherwise be used
+	float minAngleCosine = 0.8f;
+};
+
+// ----------------------------------------------------------------------------
+
+struct MeshVertex
+{
+	vec4 xyz, normal, colour;
+};
+
+// ----------------------------------------------------------------------------
+
+struct MeshTriangle
+{
+	int indices_[3];
+};
+
+// ----------------------------------------------------------------------------
+
+class MeshBuffer
+{
+public:
+
+	static void initialiseVertexArray();
+
+	MeshVertex*   vertices = nullptr;
+	int           numVertices = 0;
+
+	MeshTriangle* triangles = nullptr;
+	int           numTriangles = 0;
+};
+
+// ----------------------------------------------------------------------------
+
+// The MeshBuffer instance will be edited in place
+void ngMeshSimplifier(
+	MeshBuffer* mesh,
+	const vec4& worldSpaceOffset,
+	const MeshSimplificationOptions& options);
+
+// ----------------------------------------------------------------------------
+
+#endif	//	HAS_SIMD_MESH_SIMPLIFY_H_BEEN_INCUDED
+```
+
+### qef_simd.h
+```
+#ifndef		HAS_QEF_SIMD_H_BEEN_INCLUDED
+#define		HAS_QEF_SIMD_H_BEEN_INCLUDED
+
+//
+// Quadric Error Function / Singluar Value Decomposition SSE2 implementation
+// Public domain
+//
+// Input is a set of positions / vertices of a surface and the surface normals
+// at these positions (i.e. Hermite data). A "best fit" position is calculated
+// from these positions along with an error value.
+//
+// Exmaple use cases:
+//   - placing a vertex inside a voxel/node for algorithms like Dual Contouring
+//     (the positions and normals corresponding to edge/isosurface intersections)
+//   - placing the vertex resulting from collapsing an edge when simplifying a mesh
+//     (the positions and normals of the collapsed edge should be supplied)
+//
+// Usage:
+// 
+// SSE registers:
+//
+//	__m128 position[2] = { ... };
+//	__m128 normal[2] = { ... };
+//	__m128 solvedPos;
+//	float error = qef_solve_from_points(position, normal, 2, &solvedPos);
+//
+// 4D vectors:
+//
+//	__declspec(align(16)) float positions[2 * 4] = { ... };
+//	__declspec(align(16)) float normals[2 * 4] = { ... };
+//	__declspec(align(16)) float solved[4];
+//	float error = qef_solve_from_points_4d(positions, normals, 2, solvedPos);
+//
+// 3D vectors (or struct with 3 float members, e.g. glm::vec3):
+//
+//	glm::vec3 positions[2] = { ... };
+//	glm::vec3 normals[2] = { ... };
+//	glm::vec3 solvedPos;
+//	float error = qef_solve_from_points_3d(&positions[0].x, &normals[0].x, 2, &solvedPos.x);
+//
+
+#include	<xmmintrin.h>
+#include	<immintrin.h>
+
+const int QEF_MAX_INPUT_COUNT = 12;
+
+// Ideally the data would already be in SSE registers & returned in a SEE register
+float qef_solve_from_points(
+	const __m128* positions,
+	const __m128* normals,
+	const int count,
+	__m128* solved_position);
+
+// Expects 4d vectors contiguous in memory for the positions/normals
+// Addresses pointed to by positions, normals and solved_position MUST be 16 byte aligned
+// Writes result to 4d vector.
+float qef_solve_from_points_4d(
+	const float* positions,
+	const float* normals,
+	const int count,
+	float* solved_position);
+
+float qef_solve_from_points_4d_interleaved(
+	const float* data,
+	const size_t stride,
+	const int count,
+	float* solved_position);
+
+// Expects 3d vectors contiguous in memory for the positions/normals
+// No alignment requirements.
+// Writes result to 3d vector.
+float qef_solve_from_points_3d(
+	const float* positions,
+	const float* normals,
+	const int count,
+	float* solved_position);
+
+
+#ifdef QEF_INCLUDE_IMPL
+
+union Mat4x4
+{
+	float	m[4][4];
+	__m128	row[4];
+};
+
+#define SVD_NUM_SWEEPS 5
+const float PSUEDO_INVERSE_THRESHOLD = 0.001f;
+
+// ----------------------------------------------------------------------------
+
+static inline __m128 vec4_abs(const __m128& x)
+{
+	static const __m128 mask = _mm_set1_ps(-0.f);
+	return _mm_andnot_ps(mask, x);
+}
+
+// ----------------------------------------------------------------------------
+
+static inline float vec4_dot(const __m128& a, const __m128& b)
+{
+	// apparently _mm_dp_ps isn't well implemented in hardware so this "basic" version is faster
+	__m128 mul = _mm_mul_ps(a, b);
+	__m128 s0  = _mm_shuffle_ps(mul, mul, _MM_SHUFFLE(2, 3, 0, 1));
+	__m128 add = _mm_add_ps(mul, s0);
+	__m128 s1  = _mm_shuffle_ps(add, add, _MM_SHUFFLE(0, 1, 2, 3));
+	__m128 res = _mm_add_ps(add, s1);
+	return _mm_cvtss_f32(res);
+}
+
+// ----------------------------------------------------------------------------
+
+static inline __m128 vec4_mul_m4x4(const __m128& a, const Mat4x4& B)
+{
+	auto bob = _mm_shuffle_ps(a, a, 0x00);
+	
+	__m128 result = _mm_mul_ps(_mm_shuffle_ps(a, a, 0x00), B.row[0]);
+	result = _mm_add_ps(result, _mm_mul_ps(_mm_shuffle_ps(a, a, 0x55), B.row[1]));
+	result = _mm_add_ps(result, _mm_mul_ps(_mm_shuffle_ps(a, a, 0xaa), B.row[2]));
+	result = _mm_add_ps(result, _mm_mul_ps(_mm_shuffle_ps(a, a, 0xff), B.row[3]));
+	return result;
+}
+
+// ----------------------------------------------------------------------------
+
+static inline __m256 avx_vec4_mul_m4x4(const __m256& a, const Mat4x4& B)
+{
+	__m256 result;
+	result = _mm256_mul_ps(_mm256_shuffle_ps(a, a, 0x00), _mm256_broadcast_ps(&B.row[0]));
+	result = _mm256_add_ps(result, _mm256_mul_ps(_mm256_shuffle_ps(a, a, 0x55), _mm256_broadcast_ps(&B.row[1])));
+	result = _mm256_add_ps(result, _mm256_mul_ps(_mm256_shuffle_ps(a, a, 0xaa), _mm256_broadcast_ps(&B.row[2])));
+	result = _mm256_add_ps(result, _mm256_mul_ps(_mm256_shuffle_ps(a, a, 0xff), _mm256_broadcast_ps(&B.row[3])));
+
+	return result;
+}
+
+// ----------------------------------------------------------------------------
+
+static void m4x4_mul_m4x4(Mat4x4& out, const Mat4x4& A, const Mat4x4& B)
+{
+	out.row[0] = vec4_mul_m4x4(A.row[0], B);
+	out.row[1] = vec4_mul_m4x4(A.row[1], B);
+	out.row[2] = vec4_mul_m4x4(A.row[2], B);
+	out.row[3] = vec4_mul_m4x4(A.row[3], B);
+}
+
+
+// ----------------------------------------------------------------------------
+
+static void givens_coeffs_sym(__m128& c_result, __m128& s_result, const Mat4x4& vtav, const int a, const int b)
+{
+	__m128 simd_pp = _mm_set_ps(
+		0.f,
+		vtav.row[a].m128_f32[a],
+		vtav.row[a].m128_f32[a],
+		vtav.row[a].m128_f32[a]);
+
+	__m128 simd_pq = _mm_set_ps(
+		0.f,
+		vtav.row[a].m128_f32[b],
+		vtav.row[a].m128_f32[b],
+		vtav.row[a].m128_f32[b]);
+
+	__m128 simd_qq = _mm_set_ps(
+		0.f,
+		vtav.row[b].m128_f32[b],
+		vtav.row[b].m128_f32[b],
+		vtav.row[b].m128_f32[b]);
+
+	static const __m128 zeros = _mm_set1_ps(0.f);
+	static const __m128 ones  = _mm_set1_ps(1.f);
+	static const __m128 twos  = _mm_set1_ps(2.f);
+
+	// tau = (a_qq - a_pp) / (2.f * a_pq);
+	__m128 pq2 = _mm_mul_ps(simd_pq, twos);
+	__m128 qq_sub_pp = _mm_sub_ps(simd_qq, simd_pp);
+	__m128 tau = _mm_div_ps(qq_sub_pp, pq2);
+
+	// stt = sqrt(1.f + tau * tau);
+	__m128 tau_sq = _mm_mul_ps(tau, tau);
+	__m128 tau_sq_1 = _mm_add_ps(tau_sq, ones);
+	__m128 stt = _mm_sqrt_ps(tau_sq_1);
+	
+	// tan = 1.f / ((tau >= 0.f) ? (tau + stt) : (tau - stt));
+	__m128 tan_gt = _mm_add_ps(tau, stt);
+	__m128 tan_lt = _mm_sub_ps(tau, stt);
+	__m128 tan_cmp = _mm_cmpge_ps(tau, zeros);
+	__m128 tan_cmp_gt = _mm_and_ps(tan_cmp, tan_gt);
+	__m128 tan_cmp_lt = _mm_andnot_ps(tan_cmp, tan_lt);
+	__m128 tan_inv = _mm_or_ps(tan_cmp_gt, tan_cmp_lt);
+	__m128 tan = _mm_div_ps(ones, tan_inv);
+
+	// c = rsqrt(1.f + tan * tan);
+	__m128 tan_sq = _mm_mul_ps(tan, tan);
+	__m128 tan_sq_1 = _mm_add_ps(ones, tan_sq);
+	__m128 c = _mm_rsqrt_ps(tan_sq_1);
+
+	// s = tan * c;
+	__m128 s = _mm_mul_ps(tan, c);
+
+	// if pq == 0.0: c = 1.f, s = 0.f
+	__m128 pq_cmp = _mm_cmpeq_ps(simd_pq, zeros);
+
+	__m128 c_true = _mm_and_ps(pq_cmp, ones);
+	__m128 c_false = _mm_andnot_ps(pq_cmp, c);
+	c_result = _mm_or_ps(c_true, c_false);
+
+	__m128 s_true = _mm_and_ps(pq_cmp, zeros);
+	__m128 s_false = _mm_andnot_ps(pq_cmp, s);
+	s_result = _mm_or_ps(s_true, s_false);
+}
+
+// ----------------------------------------------------------------------------
+
+static void rotateq_xy(Mat4x4& vtav, const __m128& c, const __m128& s, const int a, const int b)
+{
+	__m128 u = _mm_set_ps(
+		0.f,
+		vtav.row[a].m128_f32[a],
+		vtav.row[a].m128_f32[a],
+		vtav.row[a].m128_f32[a]);
+
+	__m128 v = _mm_set_ps(
+		0.f,
+		vtav.row[b].m128_f32[b],
+		vtav.row[b].m128_f32[b],
+		vtav.row[b].m128_f32[b]);
+
+	__m128 A = _mm_set_ps(
+		0.f,
+		vtav.row[a].m128_f32[b],
+		vtav.row[a].m128_f32[b],
+		vtav.row[a].m128_f32[b]);
+
+	static const __m128 twos = _mm_set1_ps(2.f);
+
+	__m128 cc = _mm_mul_ps(c, c);
+	__m128 ss = _mm_mul_ps(s, s);
+	
+	// mx = 2.0 * c * s * A;
+	__m128 c2 = _mm_mul_ps(twos, c);
+	__m128 c2s = _mm_mul_ps(c2, s);
+	__m128 mx = _mm_mul_ps(c2s, A);
+
+	// x = cc * u - mx + ss * v;
+	__m128 x0 = _mm_mul_ps(cc, u);
+	__m128 x1 = _mm_sub_ps(x0, mx);
+	__m128 x2 = _mm_mul_ps(ss, v);
+	__m128 x  = _mm_add_ps(x1, x2);
+
+	// y = ss * u + mx + cc * v;
+	__m128 y0 = _mm_mul_ps(ss, u);
+	__m128 y1 = _mm_add_ps(y0, mx);
+	__m128 y2 = _mm_mul_ps(cc, v);
+	__m128 y  = _mm_add_ps(y1, y2);
+
+
+	vtav.row[a].m128_f32[a] = x.m128_f32[0];
+	vtav.row[b].m128_f32[b] = y.m128_f32[0];
+}
+
+// ----------------------------------------------------------------------------
+
+static void rotate_xy(Mat4x4& vtav, Mat4x4& v, float c, float s, const int& a, const int& b) 
+{
+	 __m128 simd_u = _mm_set_ps(
+		vtav.row[0].m128_f32[3-b],
+		v.row[2].m128_f32[a],
+		v.row[1].m128_f32[a],
+		v.row[0].m128_f32[a]);
+
+	__m128 simd_v = _mm_set_ps(
+		vtav.row[1-a].m128_f32[2],
+		v.row[2].m128_f32[b],
+		v.row[1].m128_f32[b],
+		v.row[0].m128_f32[b]);
+
+	__m128 simd_c = _mm_load1_ps(&c);
+	__m128 simd_s = _mm_load1_ps(&s);
+
+	__m128 x0 = _mm_mul_ps(simd_c, simd_u);
+	__m128 x1 = _mm_mul_ps(simd_s, simd_v);
+	__m128 x = _mm_sub_ps(x0, x1);
+
+	__m128 y0 = _mm_mul_ps(simd_s, simd_u);
+	__m128 y1 = _mm_mul_ps(simd_c, simd_v);
+	__m128 y = _mm_add_ps(y0, y1);
+
+	v.row[0].m128_f32[a] = x.m128_f32[0];
+	v.row[1].m128_f32[a] = x.m128_f32[1];
+	v.row[2].m128_f32[a] = x.m128_f32[2];
+	vtav.row[0].m128_f32[3-b] = x.m128_f32[3];
+
+	v.row[0].m128_f32[b] = y.m128_f32[0];
+	v.row[1].m128_f32[b] = y.m128_f32[1];
+	v.row[2].m128_f32[b] = y.m128_f32[2];
+	vtav.row[1-a].m128_f32[2] = y.m128_f32[3];
+
+	vtav.row[a].m128_f32[b] = 0.f;
+}
+
+// ----------------------------------------------------------------------------
+
+static __m128 svd_solve_sym(Mat4x4& v, const Mat4x4& a) 
+{
+	Mat4x4 vtav = a;
+
+	for (int i = 0; i < SVD_NUM_SWEEPS; ++i) 
+	{
+		__m128 c, s;
+
+		if (vtav.row[0].m128_f32[1] != 0.f)
+		{
+			givens_coeffs_sym(c, s, vtav, 0, 1);
+			rotateq_xy(vtav, c, s, 0, 1);
+			rotate_xy(vtav, v, c.m128_f32[1], s.m128_f32[1], 0, 1);
+			vtav.row[0].m128_f32[1] = 0.f;
+		}
+
+		if (vtav.row[0].m128_f32[2] != 0.f)
+		{
+			givens_coeffs_sym(c, s, vtav, 0, 2);
+			rotateq_xy(vtav, c, s, 0, 2);
+			rotate_xy(vtav, v, c.m128_f32[1], s.m128_f32[1], 0, 2);
+			vtav.row[0].m128_f32[2] = 0.f;
+		}
+
+		if (vtav.row[1].m128_f32[2] != 0.f)
+		{
+			givens_coeffs_sym(c, s, vtav, 1, 2);
+			rotateq_xy(vtav, c, s, 1, 2);
+			rotate_xy(vtav, v, c.m128_f32[2], s.m128_f32[2], 1, 2);
+			vtav.row[1].m128_f32[2] = 0.f;
+		}
+	}
+
+	return _mm_set_ps(
+		0.f,
+		vtav.row[2].m128_f32[2],
+		vtav.row[1].m128_f32[1],
+		vtav.row[0].m128_f32[0]);
+}
+
+// ----------------------------------------------------------------------------
+
+static inline __m128 svd_invdet(const __m128& x)
+{
+	static const __m128 ones = _mm_set1_ps(1.f);
+	static const __m128 tol = _mm_set1_ps(PSUEDO_INVERSE_THRESHOLD);
+
+	__m128 abs_x = vec4_abs(x);
+	__m128 one_over_x = _mm_div_ps(ones, x);
+	__m128 abs_one_over_x = vec4_abs(one_over_x);
+	__m128 min_abs = _mm_min_ps(abs_x, abs_one_over_x);
+	__m128 cmp = _mm_cmpge_ps(min_abs, tol);
+	return _mm_and_ps(cmp, one_over_x);
+}
+
+// ----------------------------------------------------------------------------
+
+static void svd_pseudoinverse(Mat4x4& o, const __m128& sigma, const Mat4x4& v)
+{
+	const __m128 invdet = svd_invdet(sigma);
+
+	Mat4x4 m;
+	m.row[0] = _mm_mul_ps(v.row[0], invdet);
+	m.row[1] = _mm_mul_ps(v.row[1], invdet);
+	m.row[2] = _mm_mul_ps(v.row[2], invdet);
+	m.row[3] = _mm_set1_ps(0.f);
+
+	o.row[0].m128_f32[0] = vec4_dot(m.row[0], v.row[0]);
+	o.row[0].m128_f32[1] = vec4_dot(m.row[1], v.row[0]);
+	o.row[0].m128_f32[2] = vec4_dot(m.row[2], v.row[0]);
+	o.row[0].m128_f32[3] = 0.f;
+
+	o.row[1].m128_f32[0] = vec4_dot(m.row[0], v.row[1]);
+	o.row[1].m128_f32[1] = vec4_dot(m.row[1], v.row[1]);
+	o.row[1].m128_f32[2] = vec4_dot(m.row[2], v.row[1]);
+	o.row[1].m128_f32[3] = 0.f;
+
+	o.row[2].m128_f32[0] = vec4_dot(m.row[0], v.row[2]);
+	o.row[2].m128_f32[1] = vec4_dot(m.row[1], v.row[2]);
+	o.row[2].m128_f32[2] = vec4_dot(m.row[2], v.row[2]);
+	o.row[2].m128_f32[3] = 0.f;
+
+	o.row[3] = m.row[3];
+}
+
+// ----------------------------------------------------------------------------
+
+
+static void svd_solve_ATA_ATb(const Mat4x4& ATA, const __m128& ATb, __m128& x)
+{
+	Mat4x4 V;
+	V.row[0] = _mm_set_ps(0.f, 0.f, 0.f, 1.f);
+	V.row[1] = _mm_set_ps(0.f, 0.f, 1.f, 0.f);
+	V.row[2] = _mm_set_ps(0.f, 1.f, 0.f, 0.f);
+	V.row[3] = _mm_set_ps(0.f, 0.f, 0.f, 0.f);
+
+	const __m128 sigma = svd_solve_sym(V, ATA);
+
+	// A = UEV^T; U = A / (E*V^T)
+	Mat4x4 Vinv;
+	svd_pseudoinverse(Vinv, sigma, V);
+	x = vec4_mul_m4x4(ATb, Vinv);
+}
+
+
+// ----------------------------------------------------------------------------
+
+void qef_simd_add(
+	const __m128& p, const __m128& n,
+	Mat4x4& ATA, 
+	__m128& ATb,
+	__m128& pointaccum)
+{
+	__m128 nX = _mm_mul_ps(_mm_shuffle_ps(n, n, _MM_SHUFFLE(0, 0, 0, 0)), n);
+	__m128 nY = _mm_mul_ps(_mm_shuffle_ps(n, n, _MM_SHUFFLE(1, 1, 1, 1)), n);
+	__m128 nZ = _mm_mul_ps(_mm_shuffle_ps(n, n, _MM_SHUFFLE(2, 2, 2, 2)), n);
+
+	ATA.row[0] = _mm_add_ps(ATA.row[0], nX);
+	ATA.row[1] = _mm_add_ps(ATA.row[1], nY);
+	ATA.row[2] = _mm_add_ps(ATA.row[2], nZ);
+
+	const float d = vec4_dot(p, n);
+	__m128 x = _mm_set_ps(0.f, d, d, d);
+	x = _mm_mul_ps(x, n);
+	ATb = _mm_add_ps(ATb, x);
+	pointaccum = _mm_add_ps(pointaccum, p);
+}
+
+// ----------------------------------------------------------------------------
+
+float qef_simd_calc_error(const Mat4x4& A, const __m128& x, const __m128& b)
+{
+	__m128 tmp =  vec4_mul_m4x4(x, A);
+	tmp = _mm_sub_ps(b, tmp);
+
+	return vec4_dot(tmp, tmp);
+}
+
+// ----------------------------------------------------------------------------
+
+float qef_simd_solve(
+	const Mat4x4& ATA, 
+	const __m128& ATb,
+	const __m128& pointaccum,
+	__m128& x)
+{
+	const __m128 masspoint = _mm_div_ps(pointaccum, _mm_set1_ps(pointaccum.m128_f32[3]));
+
+	__m128 p = vec4_mul_m4x4(masspoint, ATA);
+	p = _mm_sub_ps(ATb, p);
+
+	svd_solve_ATA_ATb(ATA, p, x);
+
+	const float error = qef_simd_calc_error(ATA, x, ATb);
+	x = _mm_add_ps(x, masspoint);
+		
+	return error;
+}
+
+// ----------------------------------------------------------------------------
+
+float qef_solve_from_points(
+	const __m128* positions,
+	const __m128* normals,
+	const int count,
+	__m128* solved_position) 
+{
+	__m128 pointaccum = _mm_set1_ps(0.f);
+	__m128 ATb = _mm_set1_ps(0.f);
+
+	Mat4x4 ATA;
+	ATA.row[0] = _mm_set1_ps(0.f);
+	ATA.row[1] = _mm_set1_ps(0.f);
+	ATA.row[2] = _mm_set1_ps(0.f);
+	ATA.row[3] = _mm_set1_ps(0.f);
+	
+	for (int i = 0; i < count && i < QEF_MAX_INPUT_COUNT; i++)	
+	{
+		qef_simd_add(positions[i], normals[i], ATA, ATb, pointaccum);
+	}
+
+	__declspec(align(16)) float x[4];
+	_mm_store_ps(x, ATb);
+	_mm_set_ps(0.f, x[2], x[1], x[0]);
+	
+	return qef_simd_solve(ATA, ATb, pointaccum, *solved_position);
+}
+
+// ----------------------------------------------------------------------------
+
+float qef_solve_from_points_4d(
+	const float* positions,
+	const float* normals,
+	const int count,
+	float* solved_position)
+{
+	if (count < 2 || count > QEF_MAX_INPUT_COUNT)
+	{
+		solved_position[0] = solved_position[1] = solved_position[2] = solved_position[3] = 0.f;
+		return 0.f;
+	}
+
+	__m128 p[QEF_MAX_INPUT_COUNT];
+	__m128 n[QEF_MAX_INPUT_COUNT];
+	for (int i = 0; i < count; i++)
+	{
+		p[i] = _mm_load_ps(&positions[i * 4]);
+		n[i] = _mm_load_ps(&normals[i * 4]);
+	}
+
+	__m128 solved;
+	const float error = qef_solve_from_points(p, n, count, &solved);
+	_mm_store_ps(solved_position, solved);
+	return error;
+}
+
+// ----------------------------------------------------------------------------
+
+float qef_solve_from_points_4d_interleaved(
+	const float* data,
+	const size_t stride,
+	const int count,
+	float* solved_position)
+{
+	if (count < 2 || count > QEF_MAX_INPUT_COUNT)
+	{
+		solved_position[0] = solved_position[1] = solved_position[2] = solved_position[3] = 0.f;
+		return 0.f;
+	}
+
+	__m128 p[QEF_MAX_INPUT_COUNT];
+	__m128 n[QEF_MAX_INPUT_COUNT];
+	for (int i = 0; i < count; i++)
+	{
+		p[i] = _mm_load_ps(&data[(i * stride) + 0]);
+		n[i] = _mm_load_ps(&data[(i * stride) + 4]);
+	}
+
+	__m128 solved;
+	const float error = qef_solve_from_points(p, n, count, &solved);
+	_mm_store_ps(solved_position, solved);
+	return error;
+}
+
+// ----------------------------------------------------------------------------
+
+float qef_solve_from_points_3d(
+	const float* positions,
+	const float* normals,
+	const int count,
+	float* solved_position)
+{
+	if (count < 2 || count > QEF_MAX_INPUT_COUNT)
+	{
+		solved_position[0] = solved_position[1] = solved_position[2] = solved_position[3] = 0.f;
+		return 0.f;
+	}
+
+	__m128 p[QEF_MAX_INPUT_COUNT];
+	__m128 n[QEF_MAX_INPUT_COUNT];
+	for (int i = 0; i < count; i++)
+	{
+		const float* pos = &positions[i * 3];
+		const float* nrm = &normals[i * 3];
+		p[i] = _mm_set_ps(1.f, pos[2], pos[1], pos[0]);
+		n[i] = _mm_set_ps(0.f, nrm[2], nrm[1], nrm[0]);
+	}
+
+	__m128 solved;
+	const float error = qef_solve_from_points(p, n, count, &solved);
+
+	solved_position[0] = solved.m128_f32[0];
+	solved_position[1] = solved.m128_f32[1];
+	solved_position[2] = solved.m128_f32[2];
+	return error;
+}
+
+
+
+#endif // QEF_INCLUDE_IMPL
+
+
+#endif	//	HAS_QEF_SIMD_H_BEEN_INCLUDED
+```
+
+### demo/glsl_program.cpp
+```
+#include "glsl_program.h"
+#include <fstream>
+#include <sstream>
+
+// ----------------------------------------------------------------------------
+
+GLSLProgram::GLSLProgram()
+	: program_(0)
+{
+}
+
+// ----------------------------------------------------------------------------
+
+GLSLProgram::~GLSLProgram()
+{
+	if (program_ > 0)
+	{
+		glDeleteProgram(program_);
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::initialise()
+{
+	program_ = glCreateProgram();
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+void GLSLProgram::printShaderInfo(GLuint shader) const
+{
+	int maxLength = 0;
+	glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &maxLength);
+
+	static char buffer[2048];
+	int length = 0;
+	glGetShaderInfoLog(shader, maxLength, &length, buffer);
+
+	printf("%s\n", buffer);
+}
+
+// ----------------------------------------------------------------------------
+
+void GLSLProgram::printProgramInfo(GLuint program) const
+{
+	int maxLength = 0;
+	glGetProgramiv(program, GL_INFO_LOG_LENGTH, &maxLength);
+
+	static char buffer[2048];
+	int length = 0;
+	glGetProgramInfoLog(program, maxLength, &length, buffer);
+
+	printf("%s\n", buffer);
+}
+
+// ----------------------------------------------------------------------------
+
+void GLSLProgram::prependLine(const std::string& line)
+{
+	header_ += line;
+	header_ += "\n";
+}
+
+// ----------------------------------------------------------------------------
+
+bool loadFile(const std::string& path, std::string& data)
+{
+	std::ifstream file(path.c_str());
+	std::stringstream fileData;
+	fileData << file.rdbuf();
+	file.close();
+
+	data = fileData.str();
+
+	return true; 
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::compileShader(GLSLShaderTypes type, const std::string& filePath)
+{
+	std::string data;
+	if (!loadFile(filePath.c_str(), data))
+	{
+		printf("Error: could not load file %s\n", filePath.c_str());
+		return false;
+	}
+
+	const GLchar* inputCode[] = { header_.c_str(), data.c_str() };
+
+	const GLenum glShaderType = type == ShaderType_Vertex ? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER;
+	const GLuint shader = glCreateShader(glShaderType);
+	glShaderSource(shader, 2, inputCode, NULL);
+	glCompileShader(shader);
+
+	GLint status = 0;
+	glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+	if (status == GL_FALSE)
+	{
+		printShaderInfo(shader);
+		return false;
+	}
+
+	glAttachShader(program_, shader);
+	shaders_.push_back(shader);
+
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::link()
+{
+	if (shaders_.empty())
+	{
+		return true;
+	}
+
+	glLinkProgram(program_);
+	printProgramInfo(program_);
+
+	if (GLenum err = glGetError() != GL_NO_ERROR)
+	{
+		printf("GLSLProgram: err=%d\n", err);
+		return false;
+	}
+
+	GLint status = 0;
+	glGetProgramiv(program_, GL_LINK_STATUS, &status);
+	if (status == GL_FALSE)
+	{
+		return false;
+	}
+
+	for (size_t i = 0; i < shaders_.size(); i++)
+	{
+		glDetachShader(program_, shaders_[i]);
+		glDeleteShader(shaders_[i]);
+	}
+
+	shaders_.clear();
+
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+GLuint GLSLProgram::getId() const
+{
+	return program_;
+}
+
+// ----------------------------------------------------------------------------
+
+const GLint GLSLProgram::getUniformLocation(const std::string& name)
+{
+	const auto iter = uniformLocations_.find(name);	
+	if (iter == end(uniformLocations_))
+	{
+		const GLint location = glGetUniformLocation(program_, name.c_str());
+		uniformLocations_[name] = location;
+	}
+
+	return uniformLocations_[name];
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::getSubroutineIndex(const std::string& name, GLuint& uniform)
+{
+	// TODO hardcoded to fragment shaders
+	uniform = glGetSubroutineIndex(program_, GL_FRAGMENT_SHADER, name.c_str());
+	return uniform != GL_INVALID_INDEX;
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::setUniform(const std::string& name, const glm::mat4& uniform)
+{
+	const GLint location = getUniformLocation(name);
+	if (location == -1)
+	{
+		return false;
+	}
+
+	glUniformMatrix4fv(location, 1, GL_FALSE, glm::value_ptr(uniform));
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::setUniform(const std::string& name, const glm::mat3& uniform)
+{
+	const GLint location = getUniformLocation(name);
+	if (location == -1)
+	{
+		return false;
+	}
+
+	glUniformMatrix3fv(location, 1, GL_FALSE, glm::value_ptr(uniform));
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::setUniform(const std::string& name, const glm::vec4& uniform)
+{
+	const GLint location = getUniformLocation(name);
+	if (location == -1)
+	{
+		return false;
+	}
+
+	glUniform4fv(location, 1, glm::value_ptr(uniform));
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::setUniform(const std::string& name, const glm::vec3& uniform)
+{
+	const GLint location = getUniformLocation(name);
+	if (location == -1)
+	{
+		return false;
+	}
+
+	glUniform3fv(location, 1, glm::value_ptr(uniform));
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::setUniformFloat(const std::string& name, const float uniform)
+{
+	const GLint location = getUniformLocation(name);
+	if (location == -1)
+	{
+		return false;
+	}
+
+	glUniform1f(location, uniform);
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::setUniformInt(const std::string& name, const GLuint uniform)
+{
+	const GLint location = getUniformLocation(name);
+	if (location == -1)
+	{
+		return false;
+	}
+
+	glUniform1i(location, uniform);
+	return true;
+}
+```
+
+### demo/glsl_program.h
+```
+#ifndef		HAS_GLSL_PROGRAM_H_BEEN_INCLUDED
+#define		HAS_GLSL_PROGRAM_H_BEEN_INCLUDED
+
+#include <GL/glew.h>
+#include <SDL.h>
+#include <SDL_opengl.h>
+#include <vector>
+#include <glm/glm.hpp>
+#include <glm/ext.hpp>
+#include <unordered_map>
+
+enum GLSLShaderTypes
+{
+	ShaderType_Vertex,
+	ShaderType_Fragment
+};
+
+class GLSLProgram
+{
+public:
+
+	GLSLProgram();
+	virtual ~GLSLProgram();
+
+	virtual bool initialise();
+	void prependLine(const std::string& line);
+
+	bool compileShader(GLSLShaderTypes type, const std::string& filePath);
+	bool link();
+
+	GLuint getId() const;
+	bool getUniform(const std::string& name, glm::mat4& uniform);
+	bool getSubroutineIndex(const std::string& name, GLuint& uniform);
+
+	bool setUniform(const std::string& name, const glm::mat4& uniform);
+	bool setUniform(const std::string& name, const glm::mat3& uniform);
+	bool setUniform(const std::string& name, const glm::vec4& uniform);
+	bool setUniform(const std::string& name, const glm::vec3& uniform);
+
+	// NB: overloading deliberately avoided here to prevent problems with literals
+	// being converted, e.g. with an integer setUniform func setUniform("bob", 1.f)
+	// will call the variant, which can be very confusing (although it does generate a warning)
+	bool setUniformFloat(const std::string& name, const float uniform);
+	bool setUniformInt(const std::string& name, const GLuint uniform);
+
+private:
+
+	void printShaderInfo(GLuint shader) const;
+	void printProgramInfo(GLuint program) const;
+
+	GLuint					program_;
+	std::vector<GLuint>		shaders_;
+	std::string				header_;
+
+	// Hash the locations of the uniforms to prevent glGet calls during frames
+	typedef std::unordered_map<std::string, GLint> UniformLocations;
+	UniformLocations		uniformLocations_;
+
+	const GLint getUniformLocation(const std::string& name);
+};
+
+#endif	//	HAS_GLSL_PROGRAM_H_BEEN_INCLUDED
+```
+
+### demo/imgui_handlers.cpp
+```
+// ImGui SDL2 binding with OpenGL with the render stuff lifted from the GL3 sample
+// https://github.com/ocornut/imgui
+
+#include	"imgui_handlers.h"
+
+// Data
+static double       g_Time = 0.0f;
+static bool         g_MousePressed[3] = { false, false, false };
+static float        g_MouseWheel = 0.0f;
+static GLuint       g_FontTexture = 0;
+static int          g_ShaderHandle = 0, g_VertHandle = 0, g_FragHandle = 0;
+static int          g_AttribLocationTex = 0, g_AttribLocationProjMtx = 0;
+static int          g_AttribLocationPosition = 0, g_AttribLocationUV = 0, g_AttribLocationColor = 0;
+static unsigned int g_VboHandle = 0, g_VaoHandle = 0, g_ElementsHandle = 0;
+
+void ImGui_ImplSdl_RenderDrawLists(ImDrawData* draw_data)
+{
+    // Backup GL state
+    GLint last_program, last_texture, last_array_buffer, last_element_array_buffer, last_vertex_array;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &last_program);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &last_array_buffer);
+    glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &last_element_array_buffer);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &last_vertex_array);
+
+    // Setup render state: alpha-blending enabled, no face culling, no depth testing, scissor enabled
+    glEnable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_SCISSOR_TEST);
+    glActiveTexture(GL_TEXTURE0);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    // Handle cases of screen coordinates != from framebuffer coordinates (e.g. retina displays)
+    ImGuiIO& io = ImGui::GetIO();
+    float fb_height = io.DisplaySize.y * io.DisplayFramebufferScale.y;
+    draw_data->ScaleClipRects(io.DisplayFramebufferScale);
+
+    // Setup orthographic projection matrix
+    const float ortho_projection[4][4] =
+    {
+        { 2.0f/io.DisplaySize.x, 0.0f,                   0.0f, 0.0f },
+        { 0.0f,                  2.0f/-io.DisplaySize.y, 0.0f, 0.0f },
+        { 0.0f,                  0.0f,                  -1.0f, 0.0f },
+        {-1.0f,                  1.0f,                   0.0f, 1.0f },
+    };
+    glUseProgram(g_ShaderHandle);
+    glUniform1i(g_AttribLocationTex, 0);
+    glUniformMatrix4fv(g_AttribLocationProjMtx, 1, GL_FALSE, &ortho_projection[0][0]);
+    glBindVertexArray(g_VaoHandle);
+
+    for (int n = 0; n < draw_data->CmdListsCount; n++)
+    {
+        const ImDrawList* cmd_list = draw_data->CmdLists[n];
+        const ImDrawIdx* idx_buffer_offset = 0;
+
+        glBindBuffer(GL_ARRAY_BUFFER, g_VboHandle);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)cmd_list->VtxBuffer.size() * sizeof(ImDrawVert), (GLvoid*)&cmd_list->VtxBuffer.front(), GL_STREAM_DRAW);
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_ElementsHandle);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)cmd_list->IdxBuffer.size() * sizeof(ImDrawIdx), (GLvoid*)&cmd_list->IdxBuffer.front(), GL_STREAM_DRAW);
+
+        for (const ImDrawCmd* pcmd = cmd_list->CmdBuffer.begin(); pcmd != cmd_list->CmdBuffer.end(); pcmd++)
+        {
+            if (pcmd->UserCallback)
+            {
+                pcmd->UserCallback(cmd_list, pcmd);
+            }
+            else
+            {
+                glBindTexture(GL_TEXTURE_2D, (GLuint)(intptr_t)pcmd->TextureId);
+                glScissor((int)pcmd->ClipRect.x, (int)(fb_height - pcmd->ClipRect.w), (int)(pcmd->ClipRect.z - pcmd->ClipRect.x), (int)(pcmd->ClipRect.w - pcmd->ClipRect.y));
+                glDrawElements(GL_TRIANGLES, (GLsizei)pcmd->ElemCount, GL_UNSIGNED_SHORT, idx_buffer_offset);
+            }
+            idx_buffer_offset += pcmd->ElemCount;
+        }
+    }
+
+    // Restore modified GL state
+    glUseProgram(last_program);
+    glBindTexture(GL_TEXTURE_2D, last_texture);
+    glBindBuffer(GL_ARRAY_BUFFER, last_array_buffer);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, last_element_array_buffer);
+    glBindVertexArray(last_vertex_array);
+    glDisable(GL_SCISSOR_TEST);
+	glDisable(GL_BLEND);
+}
+
+static const char* ImGui_ImplSdl_GetClipboardText()
+{
+	return SDL_GetClipboardText();
+}
+
+static void ImGui_ImplSdl_SetClipboardText(const char* text)
+{
+    SDL_SetClipboardText(text);
+}
+
+bool ImGui_ImplSdl_ProcessEvent(SDL_Event* event)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    switch (event->type)
+    {
+    case SDL_MOUSEWHEEL:
+        {
+            if (event->wheel.y > 0)
+                g_MouseWheel = 1;
+            if (event->wheel.y < 0)
+                g_MouseWheel = -1;
+            return true;
+        }
+    case SDL_MOUSEBUTTONDOWN:
+        {
+            if (event->button.button == SDL_BUTTON_LEFT) g_MousePressed[0] = true;
+            if (event->button.button == SDL_BUTTON_RIGHT) g_MousePressed[1] = true;
+            if (event->button.button == SDL_BUTTON_MIDDLE) g_MousePressed[2] = true;
+            return true;
+        }
+    case SDL_TEXTINPUT:
+        {
+            ImGuiIO& io = ImGui::GetIO();
+            io.AddInputCharactersUTF8(event->text.text);
+            return true;
+        }
+    case SDL_KEYDOWN:
+    case SDL_KEYUP:
+        {
+            int key = event->key.keysym.sym & ~SDLK_SCANCODE_MASK;
+            io.KeysDown[key] = (event->type == SDL_KEYDOWN);
+            io.KeyShift = ((SDL_GetModState() & KMOD_SHIFT) != 0);
+            io.KeyCtrl = ((SDL_GetModState() & KMOD_CTRL) != 0);
+            io.KeyAlt = ((SDL_GetModState() & KMOD_ALT) != 0);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ImGui_ImplSdl_CreateDeviceObjects()
+{
+	// Backup GL state
+    GLint last_texture, last_array_buffer, last_vertex_array;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &last_array_buffer);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &last_vertex_array);
+
+    const GLchar *vertex_shader =
+        "#version 330\n"
+        "uniform mat4 ProjMtx;\n"
+        "in vec2 Position;\n"
+        "in vec2 UV;\n"
+        "in vec4 Color;\n"
+        "out vec2 Frag_UV;\n"
+        "out vec4 Frag_Color;\n"
+        "void main()\n"
+        "{\n"
+        "	Frag_UV = UV;\n"
+        "	Frag_Color = Color;\n"
+        "	gl_Position = ProjMtx * vec4(Position.xy,0,1);\n"
+        "}\n";
+
+    const GLchar* fragment_shader =
+        "#version 330\n"
+        "uniform sampler2D Texture;\n"
+        "in vec2 Frag_UV;\n"
+        "in vec4 Frag_Color;\n"
+        "out vec4 Out_Color;\n"
+        "void main()\n"
+        "{\n"
+        "	Out_Color = Frag_Color * texture( Texture, Frag_UV.st);\n"
+        "}\n";
+
+    g_ShaderHandle = glCreateProgram();
+    g_VertHandle = glCreateShader(GL_VERTEX_SHADER);
+    g_FragHandle = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(g_VertHandle, 1, &vertex_shader, 0);
+    glShaderSource(g_FragHandle, 1, &fragment_shader, 0);
+    glCompileShader(g_VertHandle);
+    glCompileShader(g_FragHandle);
+    glAttachShader(g_ShaderHandle, g_VertHandle);
+    glAttachShader(g_ShaderHandle, g_FragHandle);
+    glLinkProgram(g_ShaderHandle);
+
+    g_AttribLocationTex = glGetUniformLocation(g_ShaderHandle, "Texture");
+    g_AttribLocationProjMtx = glGetUniformLocation(g_ShaderHandle, "ProjMtx");
+    g_AttribLocationPosition = glGetAttribLocation(g_ShaderHandle, "Position");
+    g_AttribLocationUV = glGetAttribLocation(g_ShaderHandle, "UV");
+    g_AttribLocationColor = glGetAttribLocation(g_ShaderHandle, "Color");
+
+    glGenBuffers(1, &g_VboHandle);
+    glGenBuffers(1, &g_ElementsHandle);
+
+    glGenVertexArrays(1, &g_VaoHandle);
+    glBindVertexArray(g_VaoHandle);
+    glBindBuffer(GL_ARRAY_BUFFER, g_VboHandle);
+    glEnableVertexAttribArray(g_AttribLocationPosition);
+    glEnableVertexAttribArray(g_AttribLocationUV);
+    glEnableVertexAttribArray(g_AttribLocationColor);
+
+#define OFFSETOF(TYPE, ELEMENT) ((size_t)&(((TYPE *)0)->ELEMENT))
+    glVertexAttribPointer(g_AttribLocationPosition, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert), (GLvoid*)OFFSETOF(ImDrawVert, pos));
+    glVertexAttribPointer(g_AttribLocationUV, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert), (GLvoid*)OFFSETOF(ImDrawVert, uv));
+    glVertexAttribPointer(g_AttribLocationColor, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(ImDrawVert), (GLvoid*)OFFSETOF(ImDrawVert, col));
+#undef OFFSETOF
+
+	{
+	    ImGuiIO& io = ImGui::GetIO();
+	
+		// Build texture atlas
+		unsigned char* pixels;
+		int width, height;
+		io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);   // Load as RGBA 32-bits for OpenGL3 demo because it is more likely to be compatible with user's existing shader.
+
+		// Create OpenGL texture
+		glGenTextures(1, &g_FontTexture);
+		glBindTexture(GL_TEXTURE_2D, g_FontTexture);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+
+		// Store our identifier
+		io.Fonts->TexID = (void *)(intptr_t)g_FontTexture;
+
+		// Cleanup (don't clear the input data if you want to append new fonts later)
+		io.Fonts->ClearInputData();
+		io.Fonts->ClearTexData();
+	}
+
+    // Restore modified GL state
+    glBindTexture(GL_TEXTURE_2D, last_texture);
+    glBindBuffer(GL_ARRAY_BUFFER, last_array_buffer);
+    glBindVertexArray(last_vertex_array);
+
+    return true;
+}
+
+void    ImGui_ImplSdl_InvalidateDeviceObjects()
+{
+    if (g_FontTexture)
+    {
+        glDeleteTextures(1, &g_FontTexture);
+        ImGui::GetIO().Fonts->TexID = 0;
+        g_FontTexture = 0;
+    }
+}
+
+bool    ImGui_ImplSdl_Init(SDL_Window *window)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    io.KeyMap[ImGuiKey_Tab] = SDLK_TAB;                     // Keyboard mapping. ImGui will use those indices to peek into the io.KeyDown[] array.
+    io.KeyMap[ImGuiKey_LeftArrow] = SDL_SCANCODE_LEFT;
+    io.KeyMap[ImGuiKey_RightArrow] = SDL_SCANCODE_RIGHT;
+    io.KeyMap[ImGuiKey_UpArrow] = SDL_SCANCODE_UP;
+    io.KeyMap[ImGuiKey_DownArrow] = SDL_SCANCODE_DOWN;
+    io.KeyMap[ImGuiKey_PageUp] = SDL_SCANCODE_PAGEUP;
+    io.KeyMap[ImGuiKey_PageDown] = SDL_SCANCODE_PAGEDOWN;
+    io.KeyMap[ImGuiKey_Home] = SDL_SCANCODE_HOME;
+    io.KeyMap[ImGuiKey_End] = SDL_SCANCODE_END;
+    io.KeyMap[ImGuiKey_Delete] = SDLK_DELETE;
+    io.KeyMap[ImGuiKey_Backspace] = SDLK_BACKSPACE;
+    io.KeyMap[ImGuiKey_Enter] = SDLK_RETURN;
+    io.KeyMap[ImGuiKey_Escape] = SDLK_ESCAPE;
+    io.KeyMap[ImGuiKey_A] = SDLK_a;
+    io.KeyMap[ImGuiKey_C] = SDLK_c;
+    io.KeyMap[ImGuiKey_V] = SDLK_v;
+    io.KeyMap[ImGuiKey_X] = SDLK_x;
+    io.KeyMap[ImGuiKey_Y] = SDLK_y;
+    io.KeyMap[ImGuiKey_Z] = SDLK_z;
+	
+    io.RenderDrawListsFn = ImGui_ImplSdl_RenderDrawLists;   // Alternatively you can set this to NULL and call ImGui::GetDrawData() after ImGui::Render() to get the same ImDrawData pointer.
+    io.SetClipboardTextFn = ImGui_ImplSdl_SetClipboardText;
+    io.GetClipboardTextFn = ImGui_ImplSdl_GetClipboardText;
+	
+#ifdef _WIN32
+	SDL_SysWMinfo wmInfo;
+	SDL_VERSION(&wmInfo.version);
+	SDL_GetWindowWMInfo(window, &wmInfo);
+    io.ImeWindowHandle = wmInfo.info.win.window;
+#endif
+
+    return true;
+}
+
+void ImGui_ImplSdl_Shutdown()
+{
+    ImGui_ImplSdl_InvalidateDeviceObjects();
+    ImGui::Shutdown();
+}
+
+void ImGui_ImplSdl_NewFrame(SDL_Window *window)
+{
+    if (!g_FontTexture)
+        ImGui_ImplSdl_CreateDeviceObjects();
+
+    ImGuiIO& io = ImGui::GetIO();
+
+    // Setup display size (every frame to accommodate for window resizing)
+    int w, h;
+	SDL_GetWindowSize(window, &w, &h);
+    io.DisplaySize = ImVec2((float)w, (float)h);
+
+    // Setup time step
+	Uint32	time = SDL_GetTicks();
+	double current_time = time / 1000.0;
+    io.DeltaTime = g_Time > 0.0 ? (float)(current_time - g_Time) : (float)(1.0f/60.0f);
+    g_Time = current_time;
+
+    // Setup inputs
+    // (we already got mouse wheel, keyboard keys & characters from glfw callbacks polled in glfwPollEvents())
+    int mx, my;
+    Uint32 mouseMask = SDL_GetMouseState(&mx, &my);
+    if (SDL_GetWindowFlags(window) & SDL_WINDOW_MOUSE_FOCUS)
+    	io.MousePos = ImVec2((float)mx, (float)my);   // Mouse position, in pixels (set to -1,-1 if no mouse / on another screen, etc.)
+    else
+    	io.MousePos = ImVec2(-1,-1);
+   
+	io.MouseDown[0] = g_MousePressed[0] || (mouseMask & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;		// If a mouse press event came, always pass it as "mouse held this frame", so we don't miss click-release events that are shorter than 1 frame.
+	io.MouseDown[1] = g_MousePressed[1] || (mouseMask & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0;
+	io.MouseDown[2] = g_MousePressed[2] || (mouseMask & SDL_BUTTON(SDL_BUTTON_MIDDLE)) != 0;
+    g_MousePressed[0] = g_MousePressed[1] = g_MousePressed[2] = false;
+
+    io.MouseWheel = g_MouseWheel;
+    g_MouseWheel = 0.0f;
+
+    // Hide OS mouse cursor if ImGui is drawing it
+    SDL_ShowCursor(io.MouseDrawCursor ? 0 : 1);
+
+    // Start the frame
+    ImGui::NewFrame();
+}
+```
+
+### demo/imgui_handlers.h
+```
+#ifndef		HAS_IMGUI_HANDLERS_H_BEEN_INCLUDED
+#define		HAS_IMGUI_HANDLERS_H_BEEN_INCLUDED
+
+#include	"sdl_wrapper.h"
+#include	<imgui.h>
+
+#if 1
+
+// ImGui SDL2 binding with OpenGL
+// https://github.com/ocornut/imgui
+
+struct SDL_Window;
+typedef union SDL_Event SDL_Event;
+
+IMGUI_API bool        ImGui_ImplSdl_Init(SDL_Window *window);
+IMGUI_API void        ImGui_ImplSdl_Shutdown();
+IMGUI_API void        ImGui_ImplSdl_NewFrame(SDL_Window *window);
+IMGUI_API bool        ImGui_ImplSdl_ProcessEvent(SDL_Event* event);
+
+// Use if you want to reset your rendering device without losing ImGui state.
+IMGUI_API void        ImGui_ImplSdl_InvalidateDeviceObjects();
+IMGUI_API bool        ImGui_ImplSdl_CreateDeviceObjects();
+
+#else
+bool ImGui_Init(SDL_Window* window, bool install_callbacks);
+void ImGui_Shutdown();
+void ImGui_NewFrame();
+void ImGui_MouseButtonCallback(SDL_Window* window, const SDL_MouseButtonEvent& event);
+void ImGui_ScrollCallback(SDL_Window* window, const SDL_MouseWheelEvent& event);
+void ImGui_KeyCallback(SDL_Window* window, const SDL_KeyboardEvent& event);
+void ImGui_CharCallback(SDL_Window* window, unsigned int c);
+#endif
+
+#endif	//	HAS_IMGUI_HANDLERS_H_BEEN_INCLUDED
+```
+
+### demo/main.cpp
+```
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <GL\glew.h>
+#include <SDL.h>
+#include <SDL_opengl.h>
+#include <glm\glm.hpp>
+
+#include "glsl_program.h"
+#include "mesh.h"
+#include "qef_simd.h"
+#include "ng_mesh_simplify.h"
+
+#include <imgui.h>
+#include "imgui_handlers.h"
+
+#include "fast_dc.h"
+
+// ----------------------------------------------------------------------------
+
+void HandleMouseMove(const SDL_MouseMotionEvent& e, float& rotateXAxis, float& rotateYAxis)
+{
+	if (e.state & SDL_BUTTON_LMASK)
+	{
+		rotateXAxis += (float)e.yrel * 0.5f;
+		rotateYAxis += (float)e.xrel * 0.5f;
+
+		rotateXAxis = glm::min(80.f, rotateXAxis);
+		rotateXAxis = glm::max(-80.f, rotateXAxis);
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+void HandleMouseWheel(const SDL_MouseWheelEvent& e, float& distance)
+{
+	distance += -e.y * 10.f;
+}
+
+// ----------------------------------------------------------------------------
+
+void HandleKeyPress(const SDL_KeyboardEvent& e, bool& drawWireframe)
+{
+	if (e.type != SDL_KEYUP)
+	{
+		return;
+	}
+
+	switch (e.keysym.sym)
+	{
+	case SDLK_F1:
+		drawWireframe = !drawWireframe;
+		break;
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+struct ViewerOptions
+{
+	float meshScale = 1.f;
+	bool drawWireframe = false;
+	bool refreshModel = false;
+};
+
+bool GUI_DrawFrame(
+	SDL_Window* window, 
+	ViewerOptions& viewerOpts, 
+	MeshSimplificationOptions& options, 
+	SuperPrimitiveConfig& primConfig)
+{
+	ImGui::GetIO().MouseDrawCursor = false;
+	ImGui_ImplSdl_NewFrame(window);
+	SDL_ShowCursor(1);
+
+	{
+		ImGui::Begin("Options");
+		
+		if (ImGui::CollapsingHeader("Mesh Simplification Options"))
+		{
+			ImGui::SliderFloat("Random Edge Fraction", &options.edgeFraction, 0.f, 1.f);
+			ImGui::SliderInt("Max Iterations", &options.maxIterations, 1, 100);
+			ImGui::SliderFloat("Target Triangle Percentage", &options.targetPercentage, 0.f, 1.f, "%.3f", 1.5f);
+			ImGui::SliderFloat("Max QEF Error", &options.maxError, 0.f, 10.f, "%.3f", 1.5f);
+			ImGui::SliderFloat("Max Edge Size", &options.maxEdgeSize, 0.f, 10.f);
+			ImGui::SliderFloat("Min Angle Cosine", &options.minAngleCosine, 0.f, 1.f);
+		}
+
+		if (ImGui::CollapsingHeader("Super Primitive Config"))
+		{
+			if (ImGui::Button("Cube"))
+			{
+				primConfig = ConfigForShape(SuperPrimitiveConfig::Cube);
+			}
+
+			ImGui::SameLine();
+			if (ImGui::Button("Torus"))
+			{
+				primConfig = ConfigForShape(SuperPrimitiveConfig::Torus);
+			}
+
+			ImGui::SameLine();
+			if (ImGui::Button("Cylinder"))
+			{
+				primConfig = ConfigForShape(SuperPrimitiveConfig::Cylinder);
+			}
+
+			ImGui::SameLine();
+			if (ImGui::Button("Pill"))
+			{
+				primConfig = ConfigForShape(SuperPrimitiveConfig::Pill);
+			}
+
+			ImGui::SameLine();
+			if (ImGui::Button("Corridor"))
+			{
+				primConfig = ConfigForShape(SuperPrimitiveConfig::Corridor);
+			}
+
+			ImGui::SliderFloat4("S", &primConfig.s.x, 0.f, 2.f);
+			ImGui::SliderFloat2("R", &primConfig.r.x, 0.f, 1.f);
+		}
+
+		if (ImGui::CollapsingHeader("Viewer Options"))
+		{
+			ImGui::SliderFloat("Mesh Scale", &viewerOpts.meshScale, 1.f, 5.f, "%.3f", 1.2f);
+			if (ImGui::RadioButton("Draw Wireframe", viewerOpts.drawWireframe))
+			{
+				viewerOpts.drawWireframe = !viewerOpts.drawWireframe;
+			}
+		}
+
+		if (ImGui::Button("Refresh"))
+		{
+			viewerOpts.refreshModel = true;
+		}
+
+		ImGui::End();
+	}
+
+	// Rendering
+	ImGuiIO& io = ImGui::GetIO();
+	glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
+	ImGui::Render();
+
+	return io.WantCaptureMouse || io.WantCaptureKeyboard;	
+}
+
+// ----------------------------------------------------------------------------
+
+void DrawFrame(
+	GLSLProgram& program, 
+	const std::vector<Mesh>& meshes, 
+	const glm::vec3& pos, 
+	const glm::vec3& fwd, 
+	const bool drawWireframe, 
+	const float meshScale)
+{
+	glClearColor(0.3f, 0.3f, 0.3f, 0.f);
+	glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+
+	glEnable(GL_DEPTH_TEST);
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
+
+	glm::mat4 projection = glm::perspective(60.f, 16.f/9.f, 0.1f, 500.f);
+	glm::mat4 modelview = glm::lookAt(pos + fwd, glm::vec3(0.f), glm::vec3(0.f, 1.f, 0.f));
+
+	glUseProgram(program.getId());
+
+	int offset = -1 * (meshes.size() / 2);
+	for (int i = 0; i < meshes.size(); i++)
+	{
+		const Mesh& mesh = meshes[i];
+		glm::mat4 model = glm::translate(glm::mat4(1.f), (float)offset++ * glm::vec3(meshScale / 2.f, 0.f, 0.f));
+		program.setUniformInt("useUniformColour", 0);
+		program.setUniform("MVP", projection * modelview * model);
+
+		glBindVertexArray(mesh.vertexArrayObj_);
+		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+		glDrawElements(GL_TRIANGLES, mesh.numIndices_, GL_UNSIGNED_INT, (void*)0);
+
+		if (drawWireframe)
+		{
+			glm::mat4 wireframe = glm::translate(model, 0.08f * -fwd);
+
+			program.setUniform("MVP", projection * modelview * wireframe);
+			program.setUniformInt("useUniformColour", 1);
+			program.setUniform("colour", glm::vec4(1));
+			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+			glDrawElements(GL_TRIANGLES, mesh.numIndices_, GL_UNSIGNED_INT, (void*)0);
+
+			glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+		}
+	}
+
+	glBindVertexArray(0);
+	glUseProgram(0);
+}
+
+// ----------------------------------------------------------------------------
+
+Mesh CreateGLMesh(MeshBuffer* buffer, const float meshScale, const MeshSimplificationOptions& options)
+{
+	printf("Simplify iteration: error=%f\n", options.maxError);
+
+	MeshBuffer* simplfiedMesh = new MeshBuffer;
+	simplfiedMesh->numVertices = buffer->numVertices;
+	simplfiedMesh->vertices = (MeshVertex*)malloc(sizeof(MeshVertex) * buffer->numVertices);
+	for (int i = 0; i < buffer->numVertices; i++)
+	{
+		simplfiedMesh->vertices[i].xyz[0] = buffer->vertices[i].xyz[0];
+		simplfiedMesh->vertices[i].xyz[1] = buffer->vertices[i].xyz[1];
+		simplfiedMesh->vertices[i].xyz[2] = buffer->vertices[i].xyz[2];
+		simplfiedMesh->vertices[i].xyz[3] = 1.f;
+
+		simplfiedMesh->vertices[i].normal[0] = buffer->vertices[i].normal[0];
+		simplfiedMesh->vertices[i].normal[1] = buffer->vertices[i].normal[1];
+		simplfiedMesh->vertices[i].normal[2] = buffer->vertices[i].normal[2];
+		simplfiedMesh->vertices[i].normal[3] = 0.f;
+
+		simplfiedMesh->vertices[i].colour[0] = buffer->vertices[i].colour[0];
+		simplfiedMesh->vertices[i].colour[1] = buffer->vertices[i].colour[1];
+		simplfiedMesh->vertices[i].colour[2] = buffer->vertices[i].colour[2];
+		simplfiedMesh->vertices[i].colour[3] = buffer->vertices[i].colour[3];
+
+		simplfiedMesh->vertices[i].xyz[0] *= meshScale;
+		simplfiedMesh->vertices[i].xyz[1] *= meshScale;
+		simplfiedMesh->vertices[i].xyz[2] *= meshScale;
+		simplfiedMesh->vertices[i].xyz[3] = 1.f;
+	}
+
+	simplfiedMesh->numTriangles = buffer->numTriangles;
+	simplfiedMesh->triangles = (MeshTriangle*)malloc(sizeof(MeshTriangle) * buffer->numTriangles);
+	memcpy(&simplfiedMesh->triangles[0], &buffer->triangles[0], sizeof(buffer->triangles[0]) * buffer->numTriangles);
+
+	vec4 offset;
+	offset[0] = 0.f;
+	offset[1] = 0.f;
+	offset[2] = 0.f;
+	offset[3] = 0.f;
+
+	ngMeshSimplifier(simplfiedMesh, offset, options);
+
+	Mesh mesh;
+	mesh.initialise();
+	mesh.uploadData(simplfiedMesh);
+
+	delete simplfiedMesh;
+	return mesh;
+}
+
+// ----------------------------------------------------------------------------
+
+int main(int argc, char** argv)
+{
+	if (SDL_Init(SDL_INIT_EVERYTHING) < 0)
+	{
+		printf("Error: SDL_Init failed: %s\n", SDL_GetError());
+		return EXIT_FAILURE;
+	}
+
+	const int SCREEN_W = 1920;
+	const int SCREEN_H = 1080;
+
+	SDL_Window* window = SDL_CreateWindow("MeshSimpl", 100, 100, SCREEN_W, SCREEN_H, SDL_WINDOW_OPENGL);
+	if (!window)
+	{
+		printf("Error: SDL_CreateWindow failed: %s\n", SDL_GetError());
+		return EXIT_FAILURE;
+	}
+
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+
+	SDL_GLContext context = SDL_GL_CreateContext(window);
+	if (!context)
+	{
+		printf("Error: SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+		return EXIT_FAILURE;
+	}
+
+	SDL_GL_MakeCurrent(window, context);
+
+	glewExperimental = true;
+	if (glewInit() != GLEW_OK)
+	{
+		printf("Error: glewInit failed\n");
+		return EXIT_FAILURE;
+	}
+
+	glViewport(0, 0, SCREEN_W, SCREEN_H);
+
+	// getting an (suprious?) error from glew here, just ignore
+	glGetError();
+
+	printf("----------------------------------------------------------------\n");
+	printf("The controls are:\n");
+	printf("	- hold left mouse and drag to rotate the view\n");
+	printf("	- use the mouse wheel to zoom in/out\n");
+	printf("	- press F1 to render a wireframe\n");
+	printf("	- press F2 to regenerate the octree using a new error threshold (and generate a new mesh)\n");
+	printf("----------------------------------------------------------------\n");
+	printf("\n\n");
+
+	printf("OpenGL version: %s\n", glGetString(GL_VERSION));
+	printf("OpenGL shading version: %s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
+
+	GLSLProgram program;
+	if (!program.initialise() ||
+		!program.compileShader(ShaderType_Vertex, "shader.vert") ||
+		!program.compileShader(ShaderType_Fragment, "shader.frag") ||
+		!program.link())
+	{
+		printf("Error: failed to create GLSL program\n");
+		return EXIT_FAILURE;
+	}
+
+	// octreeSize must be a power of two!
+	const int octreeSize = 64;
+
+	float rotateX = -60.f, rotateY = 0.f;
+	float distance = 100.f;
+	MeshSimplificationOptions options;
+	ViewerOptions viewerOpts;
+	Uint32 lastFrameTime = 0;
+
+	viewerOpts.meshScale = 1.f;
+	options.maxEdgeSize = 2.5f;
+
+	SuperPrimitiveConfig primConfig = ConfigForShape(SuperPrimitiveConfig::Cube);
+	MeshBuffer* meshBuffer = GenerateMesh(primConfig);
+
+	auto mesh = CreateGLMesh(meshBuffer, viewerOpts.meshScale, options);
+	std::vector<Mesh> meshes{mesh};
+
+	ImGui_ImplSdl_Init(window);
+
+	bool quit = false;
+	bool guiHasFocus = false;
+	while (!quit)
+	{
+		SDL_Event event;
+
+		while (SDL_PollEvent(&event))
+		{
+			if (guiHasFocus)
+			{
+				ImGui_ImplSdl_ProcessEvent(&event);
+				continue;
+			}
+
+			switch (event.type)
+			{
+			case SDL_QUIT:
+				quit = true;
+				break;
+
+			case SDL_MOUSEMOTION:
+				HandleMouseMove(event.motion, rotateX, rotateY);
+				break;
+
+			case SDL_MOUSEWHEEL:
+				HandleMouseWheel(event.wheel, distance);
+				break;
+
+			case SDL_KEYUP:
+				HandleKeyPress(event.key, viewerOpts.drawWireframe);
+				break;
+
+			case SDL_KEYDOWN:
+				break;
+			}
+		}
+
+		if ((SDL_GetTicks() - lastFrameTime) < 33)
+		{
+			continue;
+		}
+
+		lastFrameTime = SDL_GetTicks();
+
+		// calculate the forward vector and then use that find the camera position
+		glm::vec3 dir(0.f, 0.f, 1.f);
+		dir = glm::rotateX(dir, rotateX);
+		dir = glm::rotateY(dir, rotateY);
+
+		glm::vec3 position = dir * distance;
+		DrawFrame(program, meshes, position, -dir, viewerOpts.drawWireframe, viewerOpts.meshScale);
+
+		guiHasFocus = GUI_DrawFrame(window, viewerOpts, options, primConfig);
+
+		SDL_GL_SwapWindow(window);
+
+		if (viewerOpts.refreshModel)
+		{
+			viewerOpts.refreshModel = false;
+
+			free(meshBuffer->vertices);
+			free(meshBuffer->triangles);
+			delete meshBuffer;
+
+			meshBuffer = GenerateMesh(primConfig);
+			mesh = CreateGLMesh(meshBuffer, viewerOpts.meshScale, options);
+
+			meshes.clear();
+			meshes.push_back(mesh);
+		}
+	}
+
+	for (auto& mesh: meshes)
+	{
+		mesh.destroy();
+	}
+
+	ImGui_ImplSdl_Shutdown();
+
+	SDL_GL_DeleteContext(context);
+	SDL_Quit();
+
+	return EXIT_SUCCESS;
+}
+
+// ----------------------------------------------------------------------------
+```
+
+### demo/mesh.cpp
+```
+#include	"mesh.h"
+
+#include	<stdio.h>
+#include	<algorithm>
+#include	<fstream>
+
+#include	<glm/ext.hpp>
+using namespace glm;
+
+// ----------------------------------------------------------------------------
+
+void Mesh::initialise()
+{
+	glGenVertexArrays(1, &vertexArrayObj_);
+	glGenBuffers(1, &vertexBuffer_);
+	glGenBuffers(1, &indexBuffer_);
+
+	glBindVertexArray(vertexArrayObj_);
+	glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer_);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffer_);
+
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(MeshVertex), 0);
+	
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(MeshVertex), (void*)(sizeof(glm::vec4) * 1));
+	
+	glEnableVertexAttribArray(2);
+	glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(MeshVertex), (void*)(sizeof(glm::vec4) * 1));
+
+	glBindVertexArray(0);
+}
+
+// ----------------------------------------------------------------------------
+
+void Mesh::uploadData(const MeshBuffer* buffer)
+{
+	if (!buffer)
+	{
+		return;
+	}
+
+	glBindVertexArray(vertexArrayObj_);
+
+	glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer_);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(MeshVertex) * buffer->numVertices, &buffer->vertices[0], GL_STATIC_DRAW);
+
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffer_);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(MeshTriangle) * buffer->numTriangles, &buffer->triangles[0], GL_STATIC_DRAW);
+
+	printf("Mesh: %d vertices\n", buffer->numVertices);
+	numIndices_ = 3 * buffer->numTriangles;
+
+	glBindVertexArray(0);
+}
+
+// ----------------------------------------------------------------------------
+
+void Mesh::destroy()
+{
+	glDeleteBuffers(1, &indexBuffer_);
+	glDeleteBuffers(1, &vertexBuffer_);
+	glDeleteVertexArrays(1, &vertexArrayObj_);
+}
+```
+
+### demo/mesh.h
+```
+#ifndef		HAS_MESH_H_BEEN_INCLUDED
+#define		HAS_MESH_H_BEEN_INCLUDED
+
+#include	"ng_mesh_simplify.h"
+
+#include	<vector>
+#include	<GL/glew.h>
+#include	<SDL_opengl.h>
+
+// ----------------------------------------------------------------------------
+
+class Mesh
+{
+public:
+
+	void initialise();
+	void uploadData(const MeshBuffer* buffer);
+	void destroy();
+
+	GLuint vertexArrayObj_ = 0;
+	GLuint vertexBuffer_ = 0;
+	GLuint indexBuffer_ = 0;
+	int	numIndices_ = 0;
+};
+
+// ----------------------------------------------------------------------------
+
+MeshBuffer* LoadMeshFromFile(const std::string& filename);
+
+// ----------------------------------------------------------------------------
+
+#endif	//	HAS_MESH_H_BEEN_INCLUDED
+```
+
+### demo/sdl_wrapper.h
+```
+#ifndef		HAS_SDL_WRAPPER_H_BEEN_INCLUDED
+#define		HAS_SDL_WRAPPER_H_BEEN_INCLUDED
+
+#include	<GL/glew.h>
+#include	<SDL.h>
+#include	<SDL_syswm.h>
+#include	<SDL_opengl.h>
+
+// these are #define'd and not undef'd which causes problems with cl.hpp
+#undef __SSE__
+#undef __SSE2__
+
+// also left defined
+#undef near
+#undef far
+
+#endif	//	HAS_SDL_WRAPPER_H_BEEN_INCLUDED
+```
+
+### demo/shader.frag
+```
+#version 330
+
+smooth in vec3 vertexColour;
+smooth in vec3 vertexNormal;
+
+uniform int useUniformColour;
+uniform vec4 colour;
+
+void main()
+{
+	if (useUniformColour > 0)
+	{
+		gl_FragColor = colour;
+	}
+	else
+	{	
+		vec3 lightDir = -normalize(vec3(0, -5, 30));
+		float d = dot(vertexNormal, -lightDir);
+		d = max(0.6, d);
+		gl_FragColor = vec4(vertexColour, 1) * d;
+	}
+}
+```
+
+### demo/shader.vert
+```
+#version 330
+
+layout(location=0) in vec3 position;
+layout(location=1) in vec3 normal;
+
+uniform mat4 MVP;
+smooth out vec3 vertexColour;
+smooth out vec3 vertexNormal;
+
+void main()
+{
+	vertexColour = vec3(.5f, 0.5f, 0.5f) * (vec3(0.5f) + (vec3(0.5f) * normal));
+	vertexNormal = normal;
+
+	gl_Position = MVP * vec4(position, 1);
+}
+```

@@ -1,0 +1,224 @@
+# Volume Rendering Pipeline
+
+Also called: CRIO Process, Classification, Reflection, Illumination, Opacity, Rendering Stages, Shading and Classification Pipeline, VolumeRenderer forward method
+
+## Overview
+The volume rendering pipeline is a standard implementation structure for direct volume rendering that processes scalar field data into a 2D image through a sequence of six distinct stages: data traversal, interpolation, gradient computation, classification, shading, and compositing [S1, S3, unofficial]. Unlike methods that fit geometric primitives to the data, this pipeline forms images by directly shading each sample and projecting it onto the picture plane, treating volume samples as semi-transparent clouds that act as both absorbers and emitters [S2, S3, unofficial][S4, unofficial]. It is distinguished from sibling pipelines like [Plug-and-Play Ray Marching and Rendering](981-plug-and-play-ray-marching-and-rendering.md) by its explicit separation of shading (color calculation) and classification (opacity calculation) into independent steps, ensuring undistorted visualization of 3-D shape [S2, S3, unofficial].
+
+## How it works
+The pipeline operates on a 3D scalar field and produces a 2D image. The core data structures are arrays of scalar values, prepared values, voxel colors, and voxel opacities.
+
+**Inputs:**
+*   Acquired scalar values $f_0(x_i)$ at voxel locations $x_i = (x_i, y_j, z_k)$ [S3, unofficial].
+*   Ray bundle defined by observer eyepoint and image pixel coordinates [S2, S3, unofficial].
+*   Number of sample locations $K$ along each ray [S2, S3, unofficial].
+
+**Outputs:**
+*   Final pixel color $C_\lambda(u,v)$ and opacity $\alpha(u,v)$ for each pixel $(u,v)$ [S2, S3, unofficial].
+
+**Data Structures:**
+1.  **Acquired Values:** Array $f_0$ of scalar densities/intensities at grid points.
+2.  **Prepared Values:** Array $f_1$ after data preparation (corrections, enhancements) [S3, unofficial].
+3.  **Voxel Colors:** Array $c_\lambda(x_i)$ where $\lambda \in \{r, g, b\}$, computed from $f_1$ via shading [S3, unofficial].
+4.  **Voxel Opacities:** Array $\alpha(x_i)$, computed from $f_1$ via classification [S3, unofficial].
+5.  **Sample Colors/Opacities:** Vectors $c_\lambda(\tilde{x}_i)$ and $\alpha(\tilde{x}_i)$ for $K$ sample points along a ray [S3, unofficial].
+
+**Steps:**
+
+1.  **Data Traversal:** Traverse the 3D scalar field organization to identify samples along light rays. This discretizes the continuous volume rendering integral [S1, unofficial].
+2.  **Data Preparation:** Apply corrections (e.g., for non-orthogonal grids, patient motion) and enhancements to $f_0(x_i)$ to produce prepared values $f_1(x_i)$ [S3, unofficial].
+3.  **Interpolation:** Interpolate values from the scalar field at sampling positions that differ from grid points. This is often done during ray casting via tri-linear interpolation from the eight closest voxels [S1, unofficial][S3, unofficial].
+4.  **Gradient Computation:** Compute the gradient of the scalar field at sample positions to add visual cues for directional lighting or Phong shading [S1, unofficial].
+5.  **Shading:** Input $f_1(x_i)$ into a shading model to yield voxel colors $c_\lambda(x_i)$ [S3, unofficial].
+6.  **Classification:** Input $f_1(x_i)$ into a classification procedure to yield voxel opacities $\alpha(x_i)$. This maps scalar properties to optical properties like emitted color, reflected color, and opacity [S3, unofficial][S4, unofficial].
+7.  **Ray Casting and Resampling:** Cast rays from the observer eyepoint. For each ray, compute sample colors and opacities by resampling the voxel databases at $K$ evenly spaced locations $\tilde{x}_i = (x_0 + j \frac{d}{K})$ along the ray and tri-linearly interpolating from the eight closest voxels [S2, S3, unofficial].
+8.  **Compositing:** Composite colors and opacities back-to-front along viewing rays. A fully opaque background of color $c_{bkg,\lambda}$ is draped behind the dataset. The transparency formula is applied iteratively [S2, S3, unofficial].
+
+**Formulas:**
+
+The compositing step uses the transparency formula for each sample $i$ along the ray:
+$$ C_{out, \lambda}(\tilde{u}_i) = C_{in, \lambda}(\tilde{u}_i)(1 - \alpha(\tilde{x}_i)) + c_\lambda(\tilde{x}_i)\alpha(\tilde{x}_i) $$
+Where:
+*   $C_{out, \lambda}(\tilde{u}_i)$ is the color of the ray as it leaves sample location $\tilde{x}_i$.
+*   $C_{in, \lambda}(\tilde{u}_i)$ is the color of the ray as it enters sample location $\tilde{x}_i$.
+*   $c_\lambda(\tilde{x}_i)$ is the color of the sample at $\tilde{x}_i$.
+*   $\alpha(\tilde{x}_i)$ is the opacity of the sample at $\tilde{x}_i$.
+*   $\lambda \in \{r, g, b\}$ [S3, unofficial].
+
+The final pixel color $C_\lambda(u,v)$ is the result of this iterative compositing starting from the background [S3, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_rendering_pipeline(acquired_values, voxel_grid, ray_bundle, K):
+    """
+    Implements the standard volume rendering pipeline.
+    
+    Args:
+        acquired_values: 3D array of scalar values f0(xi).
+        voxel_grid: Structure defining voxel locations and spacing.
+        ray_bundle: Collection of rays, each with origin and direction.
+        K: Number of evenly spaced sample locations along each ray.
+        
+    Returns:
+        image_colors: 2D array of final pixel colors.
+        image_opacities: 2D array of final pixel opacities.
+    """
+    
+    # Step 2: Data Preparation
+    # Apply corrections (non-orthogonal grids, motion, contrast) to acquired_values
+    prepared_values = data_preparation(acquired_values)
+    
+    # Step 5: Shading
+    # Compute voxel colors from prepared values
+    voxel_colors = compute_shading(prepared_values)
+    
+    # Step 6: Classification
+    # Compute voxel opacities from prepared values
+    voxel_opacities = compute_classification(prepared_values)
+    
+    # Initialize output images
+    image_colors = zeros_like(ray_bundle.pixel_coords)
+    image_opacities = zeros_like(ray_bundle.pixel_coords)
+    
+    # Background setup
+    background_color = [1.0, 1.0, 1.0] # Fully opaque white background [S3, unofficial]
+    background_opacity = 1.0
+    
+    # Step 7 & 8: Ray Casting, Resampling, and Compositing
+    for ray in ray_bundle:
+        # Generate K evenly spaced sample locations along the ray
+        sample_locations = generate_sample_locations(ray.origin, ray.direction, K)
+        
+        # Initialize ray color and transmittance
+        ray_color = background_color
+        ray_opacity = background_opacity
+        
+        # Composite back-to-front
+        # Note: Back-to-front means starting from the farthest sample
+        for i in range(K - 1, -1, -1):
+            x_tilde = sample_locations[i]
+            
+            # Tri-linear interpolation from voxel databases
+            # Find 8 closest voxels in voxel_colors and voxel_opacities
+            c_sample = tri_linear_interpolate(voxel_colors, x_tilde)
+            alpha_sample = tri_linear_interpolate(voxel_opacities, x_tilde)
+            
+            # Apply transparency formula
+            # Cout = Cin * (1 - alpha) + c * alpha
+            new_ray_color = ray_color * (1 - alpha_sample) + c_sample * alpha_sample
+            new_ray_opacity = ray_opacity * (1 - alpha_sample) + alpha_sample
+            
+            ray_color = new_ray_color
+            ray_opacity = new_ray_opacity
+            
+        # Store result for the pixel corresponding to this ray
+        pixel_idx = ray.pixel_index
+        image_colors[pixel_idx] = ray_color
+        image_opacities[pixel_idx] = ray_opacity
+
+    return image_colors, image_opacities
+
+def data_preparation(values):
+    """
+    Applies corrections and enhancements to scalar values.
+    Includes correction for non-orthogonal sampling grids, patient motion,
+    contrast enhancement, and interpolation of additional samples.
+    """
+    # Implementation details depend on specific data type (e.g., CT, MRI)
+    # [S3, unofficial]
+    return corrected_values
+
+def compute_shading(prepared_values):
+    """
+    Inputs prepared values into a shading model to yield voxel colors.
+    May use gradients for Phong shading or directional lighting.
+    """
+    # Gradient computation is often part of this or a preceding step
+    gradients = compute_gradients(prepared_values)
+    colors = apply_shading_model(prepared_values, gradients)
+    return colors
+
+def compute_classification(prepared_values):
+    """
+    Inputs prepared values into a classification procedure to yield voxel opacities.
+    Maps scalar properties to optical properties (opacity, emitted/reflected color).
+    """
+    opacities = apply_transfer_function(prepared_values)
+    return opacities
+
+def compute_gradients(values):
+    """
+    Computes the gradient of the scalar field at sample positions.
+    Typically approximated by central differences.
+    """
+    # Central difference approximation
+    grad_x = values[1:, :, :] - values[:-1, :, :]
+    grad_y = values[:, 1:, :] - values[:, :-1, :]
+    grad_z = values[:, :, 1:] - values[:, :, :-1]
+    return grad_x, grad_y, grad_z
+
+def tri_linear_interpolate(data_grid, point):
+    """
+    Interpolates value at 'point' from the 8 closest voxels in 'data_grid'.
+    """
+    # Standard tri-linear interpolation logic
+    pass
+
+def generate_sample_locations(origin, direction, K):
+    """
+    Generates K evenly spaced locations along the ray.
+    x_j = (x_0 + j * d / K)
+    """
+    locations = []
+    for j in range(K):
+        t = j * (ray_length / K)
+        locations.append(origin + direction * t)
+    return locations
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Tri-linear interpolation and compositing are sensitive to floating-point precision, especially with many samples [S2, S3, unofficial].
+*   **Boundaries:** Handling rays that do not intersect the volume or intersect only partially requires careful boundary checks during traversal [S1, unofficial].
+*   **Degenerate Input:** Non-orthogonal sampling grids require specific corrections during data preparation to avoid artifacts [S3, unofficial].
+
+## Subtopics
+
+### Data Traversal
+Efficiently visiting voxels along rays based on grid topology (regular, irregular, hierarchical). Chosen when memory bandwidth is a bottleneck. See [Rendering Pipelines and Passes](1411-rendering-pipelines-and-passes.md).
+
+### Interpolation
+Reconstructing continuous signals from discrete samples (e.g., tri-linear, higher-order kernels). Chosen when smoothness is critical. See [Rendering Pipelines and Passes](1411-rendering-pipelines-and-passes.md).
+
+### Gradient Computation
+Calculating surface normals from scalar fields for shading. Chosen when lighting effects are desired. See [Rendering Pipelines and Passes](1411-rendering-pipelines-and-passes.md).
+
+### Classification
+Mapping scalar values to optical properties via transfer functions. Chosen when specific tissue/feature isolation is needed. See [Rendering Pipelines and Passes](1411-rendering-pipelines-and-passes.md).
+
+### Shading
+Computing color based on lighting models (Phong, etc.). Chosen when realistic lighting is required. See [Rendering Pipelines and Passes](1411-rendering-pipelines-and-passes.md).
+
+### Compositing
+Blending samples back-to-front using the transparency formula. Chosen for accurate alpha blending. See [Rendering Pipelines and Passes](1411-rendering-pipelines-and-passes.md).
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot K)$, where $N$ is the number of pixels (rays) and $K$ is the number of samples per ray [S2, S3, unofficial].
+*   **Memory Complexity:** $O(V)$ for storing the volume data, where $V$ is the number of voxels, plus $O(K)$ per ray for temporary storage [S2, S3, unofficial].
+*   **Measured Performance:** Performance depends heavily on hardware and traversal efficiency. Object-order methods (like this pipeline) can be cache-unfriendly if not optimized [S1, unofficial].
+*   **Strengths:** Direct visualization without geometric fitting; separation of shading and classification allows flexible material definition; handles semi-transparent data well [S2, S3, unofficial].
+*   **Limitations:** Computationally expensive for high-resolution volumes due to $K$ samples per ray; interpolation artifacts if $K$ is too low; sensitive to transfer function design [S2, S3, unofficial].
+*   **When to Use:** When accurate representation of internal structures and transparency is required, and computational resources allow for per-pixel ray casting [S2, S3, unofficial].
+*   **When Not to Use:** When real-time performance on very large volumes is critical without hardware acceleration; when geometric primitives are sufficient [S2, S3, unofficial].
+
+## Background
+The volume rendering pipeline was formalized in the late 1980s. A key early description was presented by Levoy at the SPIE Medical Imaging II conference in January 1988 [S3, unofficial]. The pipeline structure, distinguishing six stages (data traversal, interpolation, gradient computation, classification, shading, and compositing), is commonly referenced in literature such as Engel [S1, unofficial]. The term "CRIO" (Classification, Reflection, Illumination, Opacity) was used in parallel feed-forward algorithms to describe the conceptual treatment of samples as reflective, light-emitting clouds [S4, unofficial]. The pipeline assumes each sample acts as both an absorber and an emitter [S5, unofficial].
+
+## Sources
+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
+[S2] DTIC ADA193649: Rendering of Surfaces from Volume Data,, https://archive.org/details/DTIC_ADA193649, fetched 2026-10-26 (unofficial)
+[S3] [PDF] Display of Surfaces from Volume Data, https://graphics.stanford.edu/papers/volume-cga88/volume.pdf, fetched 2026-10-26 (unofficial)
+[S4] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
+[S5] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)

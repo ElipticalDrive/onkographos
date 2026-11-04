@@ -1,0 +1,131 @@
+# Multi-Material Quad Vertex Index Mapping
+
+Also called: Edge-based Quad Indexing, MMCellFlag Edge Mapping
+
+## Overview
+Multi-Material Quad Vertex Index Mapping maps a cell edge type to a four-element vertex index array defining a quadrilateral primitive [S1, unofficial]. It resolves vertex connectivity for a quad face using pointer arithmetic on a cell array, building on [Uniform Grid Adjacent Cell Indexing](2992-uniform-grid-adjacent-cell-indexing.md) which computes adjacent cell linear indices [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Current cell vertex index (`base_index`), grid strides `length` and `area`, and an edge type identifier (one of 12 defined types).
+*   **Output:** A 4-element integer array `quadVtxIndices` containing the vertex indices for the quadrilateral.
+
+**Data Structures:**
+*   `base_index`: Linear vertex index of the current cell.
+*   `length`: Primary stride (cells along the X-axis).
+*   `area`: Secondary stride (cells along the Z-axis, typically `length * height`) [S1, unofficial].
+*   `quadVtxIndices`: Array of 4 integers.
+
+**Edge Types:**
+The method handles 12 specific edge types: `LeftBottomEdge`, `RightBottomEdge`, `BackBottomEdge`, `FrontBottomEdge`, `LeftTopEdge`, `RightTopEdge`, `BackTopEdge`, `FrontTopEdge`, `LeftBackEdge`, `RightBackEdge`, `LeftFrontEdge`, `RightFrontEdge` [S1, unofficial].
+
+**Algorithm:**
+`quadVtxIndices[0]` is always the current cell's vertex index. The remaining three indices are computed by adding or subtracting offsets (`1`, `area`, `length`) to the current cell's base index to locate adjacent cells' vertex indices [S1, unofficial]. The exact sign/direction mapping assumes a standard orthogonal grid layout [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_quad_vertex_indices(base_index, edge_type, length, area):
+    """
+    Computes the 4 vertex indices for a quad based on the edge type.
+    
+    Args:
+        base_index (int): Vertex index of the current cell.
+        edge_type (str): One of the 12 defined edge types.
+        length (int): Grid stride along the Y-axis.
+        area (int): Grid stride along the Z-axis.
+        
+    Returns:
+        list[int]: A list of 4 vertex indices [v0, v1, v2, v3].
+    """
+    quad_vtx_indices = [0, 0, 0, 0]
+    
+    # v0 is always the current cell's vertex index
+    quad_vtx_indices[0] = base_index
+    
+    # Compute v1, v2, v3 based on edge type using offsets ±1, ±length, ±area
+    if edge_type == "LeftBottomEdge":
+        quad_vtx_indices[1] = base_index - 1
+        quad_vtx_indices[2] = base_index - length
+        quad_vtx_indices[3] = base_index - 1 - length
+    elif edge_type == "RightBottomEdge":
+        quad_vtx_indices[1] = base_index + 1
+        quad_vtx_indices[2] = base_index - length
+        quad_vtx_indices[3] = base_index + 1 - length
+    elif edge_type == "BackBottomEdge":
+        quad_vtx_indices[1] = base_index - length
+        quad_vtx_indices[2] = base_index - area
+        quad_vtx_indices[3] = base_index - length - area
+    elif edge_type == "FrontBottomEdge":
+        quad_vtx_indices[1] = base_index - length
+        quad_vtx_indices[2] = base_index + area
+        quad_vtx_indices[3] = base_index - length + area
+    elif edge_type == "LeftTopEdge":
+        quad_vtx_indices[1] = base_index - 1
+        quad_vtx_indices[2] = base_index + length
+        quad_vtx_indices[3] = base_index - 1 + length
+    elif edge_type == "RightTopEdge":
+        quad_vtx_indices[1] = base_index + 1
+        quad_vtx_indices[2] = base_index + length
+        quad_vtx_indices[3] = base_index + 1 + length
+    elif edge_type == "BackTopEdge":
+        quad_vtx_indices[1] = base_index + length
+        quad_vtx_indices[2] = base_index - area
+        quad_vtx_indices[3] = base_index + length - area
+    elif edge_type == "FrontTopEdge":
+        quad_vtx_indices[1] = base_index + length
+        quad_vtx_indices[2] = base_index + area
+        quad_vtx_indices[3] = base_index + length + area
+    elif edge_type == "LeftBackEdge":
+        quad_vtx_indices[1] = base_index - 1
+        quad_vtx_indices[2] = base_index - area
+        quad_vtx_indices[3] = base_index - 1 - area
+    elif edge_type == "RightBackEdge":
+        quad_vtx_indices[1] = base_index + 1
+        quad_vtx_indices[2] = base_index - area
+        quad_vtx_indices[3] = base_index + 1 - area
+    elif edge_type == "LeftFrontEdge":
+        quad_vtx_indices[1] = base_index - 1
+        quad_vtx_indices[2] = base_index + area
+        quad_vtx_indices[3] = base_index - 1 + area
+    elif edge_type == "RightFrontEdge":
+        quad_vtx_indices[1] = base_index + 1
+        quad_vtx_indices[2] = base_index + area
+        quad_vtx_indices[3] = base_index + 1 + area
+    else:
+        # Pitfall: Unrecognized edge type degenerates to a zero-area quad
+        quad_vtx_indices[1] = base_index
+        quad_vtx_indices[2] = base_index
+        quad_vtx_indices[3] = base_index
+        
+    return quad_vtx_indices
+```
+
+**Parameters:**
+*   `length`: Grid width in cells.
+*   `area`: Grid depth multiplied by width (or equivalent 2D stride) in cells.
+*   Typical values depend on the grid resolution [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Unrecognized Edge Type:** If an edge type not in the 12 defined types is passed, the method degenerates to a zero-area quad by setting `quadVtxIndices[1]`, `quadVtxIndices[2]`, and `quadVtxIndices[3]` to the current cell's vertex index [S1, unofficial].
+*   **Boundary Conditions:** The parent method handles boundaries by returning `kBadIndex`; this method relies on caller-provided valid indices or pre-checked bounds, as the source does not detail internal boundary handling [S1, unofficial].
+
+## Subtopics
+
+### Chunkless Indexing
+Eliminates per-chunk index data by using one shared quad buffer for the entire world mesh [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** O(1) per edge type lookup.
+*   **Memory Complexity:** O(1) additional memory for the output array.
+*   **Performance:** Specific performance metrics for this method in isolation are not given in the sources.
+*   **Strengths:** Direct pointer arithmetic, minimal branching, and straightforward offset calculations.
+*   **Limitations:** Requires valid pre-checked indices to avoid out-of-bounds access; silently degenerates on invalid input.
+
+## Background
+The method is part of the SurfaceNets multi-material implementation for generating surfaces from voxel data [S1, unofficial].
+
+## Sources
+[S1] sarahfrisken/surfaceNets-multi-material, https://github.com/sarahfrisken/surfaceNets-multi-material, fetched 2026-10-27 (unofficial)
+[S2] DanielWLiu07/voxel-engine, https://github.com/DanielWLiu07/voxel-engine, fetched 2026-10-26 (unofficial)

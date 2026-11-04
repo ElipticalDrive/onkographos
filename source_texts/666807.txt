@@ -1,0 +1,262 @@
+Full WebGPU sky system based on the Unreal Engine sky by Sébastien Hillaire - fix(ap): haze seen from above the atmosphere by DennisSmolek · Pull Request #46 · pmndrs/sky
+
+fix(ap): haze seen from above the atmosphere by DennisSmolek · Pull Request #46 · pmndrs/sky · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+DennisSmolek
+commented
+Oct 2, 2026
+Copy link
+Copy Markdown
+Member
+Follow-up to #45: the 100 km+ side finding. Three commits:
+1. The AP volume starts at the top of the atmosphere
+When the camera is above the atmosphere, Hillaire's RenderCameraVolumePS starts each froxel's march where the ray enters it. He also shortens the march by the distance skipped (tMaxMax -= LengthToAtmosphere, RenderSkyRayMarching.hlsl:685–701).
+What we did before: every voxel marched its full camera distance starting from the entry point. Voxels still in vacuum stored haze, and the ground looked washed out, with a seam at the coverage edge.
+The port: faithful, except for one deviation. A voxel that ends before the ray reaches the atmosphere stores "no haze" (0, 0, 0, 0) rather than his fully opaque (0, 0, 0, 1).
+Mean 8-bit difference to the per-pixel raymarch, policy 'ap', demo 05:
+Camera
+Before
+After
+150 km
+16.9
+3.4
+300 km, pitch −70
+31.3
+6.0
+400 km
+8.4
+1.8
+The default 'auto' policy raymarches above 100 km, so it is pixel-identical before and after.
+2. The raymarch fallback measures depth from the top of the atmosphere
+The raymarch passed the camera-relative distance as the march length, but started the march at the atmosphere entry. Geometry above the ground seen from space got haze from beyond itself. The fix matches Hillaire's tDepth, measured from the moved start.
+On a 15 km cone seen from 150–300 km, the raymarch had over-hazed by about 70%. It now agrees with the AP path to within 0.006–0.009 alpha:
+Camera
+Mean alpha, before
+After
+AP path
+150 km
+0.248
+0.148
+0.141
+300 km
+0.253
+0.150
+0.144
+300 km, pitch −70
+0.151
+0.086
+0.077
+A 0.2% snap to the ground sphere (above the atmosphere only). ref:verify caught a regression without it: depth-buffer precision in Bruneton's 2,700 km and 12,000 km views cost 11–12% of the ground haze. The snap restores those views exactly.
+3. The slice refinement packs its steps toward the surface
+A new 'quadraticEnd' sample distribution, the mirror of Hillaire's quadratic spacing. It has the same step count and cost.
+Slice-locked error, peak-to-peak:
+Altitude
+Before
+After
+25 km
+0.0026
+0.0024
+75 km
+0.0051
+0.0044
+150 km, 'ap'
+0.0090
+0.0076
+300 km, 'ap'
+0.0140
+0.0109
+The #45 table does not regress.
+Faint rings remain only under forced 'ap' above 100 km, about 1% in haze strength. apRefineSteps: 8 halves them at about +0.5 ms. The haze guide says so in plain words. The default 'auto' doesn't use the volume there.
+Checks
+Pixel-identical to main (max 0):
+demos 03, 05, C2, C3 and 22
+the planet page at 200 m
+'auto' and the raymarch at 10 and 75 km
+verify-haze-shadows: passes (the same ±1 FPS-overlay row as main).
+ref:verify: passes; one view-5 probe 0.968 → 0.967.
+Parity pages and the gate: pass (194 tests).
+Cost: within noise for all three.
+Docs: a "From space" paragraph in docs/guides/haze.mdx, and the CLAUDE.md note.
+BEGIN_COMMIT_OVERRIDE
+fix(ap): start the froxel march at the top of the atmosphere when the camera is above it
+fix(haze): measure the raymarch fallback's depth from the top of the atmosphere
+fix(haze): pack the slice refinement's steps toward the surface
+END_COMMIT_OVERRIDE
+DennisSmolek
+and others
+added 3 commits
+October 2, 2026 17:19
+fix(ap): start the froxel march at the top of the atmosphere when the…
+…
+fafc765
+```
+… camera is above it
+
+Port of RenderCameraVolumePS (RenderSkyRayMarching.hlsl:685-701). When the
+camera is above the atmosphere, the march starts where the ray enters it
+(moveToTopAtmosphere, as before), and now also:
+  - shortens the voxel's march by the skipped distance
+    (tMaxMax = max(0, tMaxMax - LengthToAtmosphere));
+  - stores no haze for voxels that end before the ray enters the atmosphere.
+Before, every voxel marched its full camera distance from the entry point,
+so voxels still in vacuum held haze and every slice past the entry held
+roughly the whole-path value. Inside the atmosphere the skipped length is
+exactly 0, so the LUT is unchanged there.
+
+Deviation: his two early-outs return (0, 0, 0, 1), i.e. opacity 1. With
+his premultiplied blend that would black out anything in front of the
+atmosphere. We store (0, 0, 0, 0), as we already do for rays that miss it.
+
+Above 100 km in 'ap' policy, mean |8-bit diff| to the per-pixel raymarch,
+1280x720, before -> after:
+  - 150 km, pitch -30: 16.9 -> 3.4
+  - 300 km, pitch -30: 15.3 -> 3.1
+  - 300 km, pitch -70: 31.3 -> 6.0
+  - 400 km, pitch -20:  8.4 -> 1.8
+The old LUT over-hazed: washed-out ground plus a seam at the 1024 km
+coverage edge.
+
+Two caveats, both measured:
+  - Slice bands of 0.009 (150 km) to 0.014 (300 km) in alpha now show in
+    'ap'. The bug had flattened each froxel ray's haze profile, which hid
+    the #5 interpolation error up there. The refinement's four uniform
+    steps under-sample the dense end of each descending segment: 8 steps
+    give 0.009 and 16 give 0.006 at 300 km. 8x build steps change nothing.
+  - With apRefineSteps: 0, 'ap' above 100 km reads worse than before
+    (2.5-4.3 -> 6.5-18.7), because the correct profile exposes the
+    plain interpolation error.
+Default 'auto' raymarches above 100 km and is pixel-identical before and
+after (150, 300, 400 km).
+
+Verification:
+  - Ground-level and sub-100 km views are pixel-identical: demos 03, 05,
+    C2, C3, 22, and the planet page at 200 m and 75 km. Demo 07 is a timed
+    cinematic: its run-to-run noise (max 28) exceeds the before/after diff.
+  - verify-haze-shadows passes. The only flag is 2 px in the inspector
+    overlay row, as on main.
+  - ref:verify passes. Sections 1-4 are byte-identical; only the
+    path-tracer table moves, by its own noise.
+  - Parity pages pass.
+  - Cost: not measurable. Frame time at 300 km 'ap' and at ground level is
+    within burst noise either way.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+fix(haze): measure the raymarch fallback's depth from the top of the …
+…
+caa8053
+```
+…atmosphere
+
+From above the atmosphere, the haze raymarch starts at the atmosphere top
+but marched the camera-relative distance, so it ran past the surface by
+the vacuum it had skipped. Ground pixels hid this because the march stops
+at the ground sphere; anything standing above the ground got the air
+behind it.
+
+Hillaire's RenderRayMarchingPS moves WorldPos to the atmosphere top (:377),
+and IntegrateScatteredLuminance measures the depth-buffer distance from
+that moved position (tDepth, :67). The march length is now the
+camera-relative distance minus the skipped length.
+
+That exposes depth-buffer precision. The old overshoot always ended at the
+ground sphere, so it never depended on it. Bruneton's space views in
+ref:verify (2,700 and 12,000 km, standard depth) read 11-12 % less haze on
+the ground with the plain subtraction (probes 0.964 -> 0.844 and
+1.013 -> 0.903). So above the atmosphere, a surface within 0.2 % of the
+ground sphere's distance is taken to be the ground. That restores those
+views exactly, and is only 0.6 km at 300 km. Inside the atmosphere the
+skipped length is exactly 0 and the snap is off, so nothing changes below
+100 km.
+
+Measured on a 15 km cone (demo 05, hooked page), mean alpha over the
+cone's pixels:
+
+  camera               raymarch before   raymarch after   AP path (LUT + refinement)
+  150 km, pitch -30        0.248             0.148             0.141
+  300 km, pitch -30        0.253             0.150             0.144
+  300 km, pitch -70        0.151             0.086             0.077
+
+The raymarch over-hazed the cone by ~70 %. It now agrees with the
+independent AP estimate within 0.006-0.009. In 'auto' above 100 km only
+the cone's pixels change (0.2-1.1 % of the frame); the ground is
+unchanged, including a straight-down view from 12,000 km.
+
+Ground level, and 'auto' and raymarch at 10 and 75 km, are pixel-identical.
+Cost: within burst noise (5.59 -> 5.70 ms median at 300 km, 1920x1080).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+fix(haze): pack the slice refinement's steps toward the surface
+…
+5039097
+```
+The AP slice refinement marches the last stretch of each pixel's ray. Seen
+from above, the dense air sits at the far end of that stretch, by the
+surface. Its steps now follow a new 'quadraticEnd' distribution on the TSL
+integrator: segment ends at (1 - (1 - s/N)^2) * tMax, the mirror image of
+Hillaire's quadratic spacing. Same step count, same cost. It stays
+continuous across slices, because the two estimates are still blended by
+slice phase.
+
+Slice-locked error, peak-to-peak in AP alpha against the per-pixel
+raymarch, binned by slice phase, at the default 4 steps:
+
+  altitude   equal steps   end-packed
+  10 km        0.0025        0.0025
+  25 km        0.0026        0.0024
+  50 km        0.0030        0.0025
+  75 km        0.0051        0.0044
+  150 km       0.0090        0.0076   ('ap' policy)
+  300 km       0.0140        0.0109   ('ap' policy)
+
+This does not make the 150/300 km bands go away at 4 steps. They are not
+just step spacing:
+  - end-packed 8 steps gives 0.0046 / 0.0069; 12 steps gives
+    0.0036 / 0.0054;
+  - 8x LUT build steps change nothing;
+  - anchoring the refinement one slice further back made it worse.
+8 steps costs +0.5 ms at 300 km (1920x1080), so the default stays 4. Above
+100 km the default 'auto' policy raymarches and never reads the volume; the
+haze guide says how to trade cost for those rings with apRefineSteps.
+
+Verification:
+  - Ground level is pixel-identical: demos 03, 05, C2, C3, 22, and the
+    hooked planet page at 200 m in 'auto' and 'ap'.
+  - verify-haze-shadows passes, apart from 9 px in the inspector overlay
+    row (as on main).
+  - ref:verify passes. Sections 1-4 match the previous run except one
+    view-5 ground probe, 0.968 -> 0.967 (its camera is above 1 km, where
+    the refinement runs).
+  - Parity pages pass.
+  - Cost: unchanged (1.76 vs 1.78 ms median at 300 km 'ap'; 1.28 vs
+    1.31 ms at 25 km).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Hide details
+View details
+DennisSmolek
+merged commit 481db51
+into
+main
+Oct 3, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

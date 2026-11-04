@@ -1,0 +1,58 @@
+# Covariance Factorisation
+
+Also called: RQ Decomposition for Covariance, Rotation and Scale Parameterization
+
+## Overview
+Covariance Factorisation parameterizes the 3D Gaussian covariance matrix by decomposing it into unconstrained rotation and scale components, ensuring the resulting matrix remains positive semi-definite (PSD) during gradient-based optimization [S1, unofficial]. This approach distinguishes itself from direct covariance optimization by decoupling geometric shape (scale) from orientation (rotation), allowing stable unconstrained gradient descent without requiring projection steps to enforce PSD constraints [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Unconstrained optimization variables representing rotation and scale.
+*   **Output:** A $3 \times 3$ symmetric positive semi-definite covariance matrix $\Sigma$.
+
+**Data Structures:**
+The method relies on two primary parameter sets per Gaussian primitive:
+1.  **Scale ($s$):** A vector of 3 values representing the standard deviations along the principal axes.
+2.  **Rotation ($R$):** A representation of orientation, typically derived from a quaternion or rotation matrix parameters.
+
+**Steps:**
+1.  **Parameterize Scale:** The scale parameters are optimized directly. To ensure physical plausibility and numerical stability, the diagonal elements of the resulting covariance are often constrained. Specifically, the standard deviation $\sigma$ is parameterized as $\sigma_{min} + \text{softplus}(x)$, where $x$ is the unconstrained optimization variable and $\sigma_{min}$ is a floor value [S2, unofficial].
+2.  **Parameterize Rotation:** The rotation parameters are optimized unconstrained. These are converted into a rotation matrix $R$ (or quaternion) representing the orientation of the Gaussian ellipsoid.
+3.  **Reconstruct Covariance:** The covariance matrix $\Sigma$ is reconstructed from the scale and rotation parameters. The standard reconstruction formula is:
+    $$ \Sigma = R S S^T R^T $$
+    where $S$ is a diagonal matrix containing the scale values. This factorization guarantees that $\Sigma$ is positive semi-definite by construction, as it is formed by the product of a matrix and its transpose scaled by positive values [S1, unofficial].
+
+**Formulas:**
+*   **Covariance Reconstruction:** $\Sigma = R \cdot \text{diag}(s)^2 \cdot R^T$ [S1, unofficial].
+*   **Scale Floor:** $\sigma_i = \sigma_{min} + \text{softplus}(s_i)$ [S2, unofficial].
+    *   $\sigma_{min} = 1/\sqrt{12}$ voxels [S2, unofficial].
+    *   $\text{softplus}(x) = \ln(1 + e^x)$ [S2, unofficial].
+
+**Parameters:**
+*   **$\sigma_{min}$:** Minimum standard deviation, set to $1/\sqrt{12}$ voxels. This value represents the standard deviation of a uniform voxel, ensuring no splat is narrower than a voxel’s own spread [S2, unofficial].
+*   **$a_{max}$:** A configurable maximum amplitude bound. Amplitudes are made non-negative by a softplus activation and upper-bounded by $a_{max}$ [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Scales:** If scale parameters approach zero, the Gaussian becomes singular. The $\sigma_{min}$ floor prevents this [S2, unofficial].
+*   **Rotation Singularities:** Standard Euler angle parameterizations can suffer from gimbal lock. Quaternions or RQ decomposition are preferred for stable optimization [S1, unofficial].
+*   **Precision:** The reconstruction $R S S^T R^T$ must be computed with sufficient precision to maintain symmetry. Numerical noise may break exact symmetry, requiring a symmetrization step ($\Sigma = (\Sigma + \Sigma^T)/2$) before use in rendering [G].
+
+## Subtopics
+
+### Cholesky Parameterisation for Gaussian Splats
+A method to parameterize the covariance matrix using Cholesky decomposition to guarantee positive-definiteness by construction [S2, unofficial]. It stores $D(D+1)/2$ elements per splat (6 for 3D) [S2, unofficial]. The diagonal of the covariance is parameterised as $\sigma_{min} + \text{softplus}(\cdot)$, where $\sigma_{min} = 1/\sqrt{12}$ voxels, ensuring no splat is narrower than a voxel’s own spread [S2, unofficial]. Amplitudes are made non-negative by a softplus activation and upper-bounded by a configurable maximum $a_{max}$ [S2, unofficial]. This variant is chosen when strict positive-definiteness is required without relying on rotation-scale factorization, potentially offering a more compact representation for certain optimization landscapes [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The reconstruction of $\Sigma$ from $R$ and $S$ is $O(1)$ per Gaussian (constant time for fixed dimension 3).
+*   **Memory Complexity:** Stores 3 scale values and 3 rotation parameters (e.g., quaternion) per Gaussian, totaling 6 values, compared to 6 values for the full symmetric covariance matrix. However, the rotation parameters may require more bits for precision [S1, unofficial][S2, unofficial].
+*   **Strengths:** Ensures PSD property automatically, simplifying optimization by removing constraints. Compatible with standard unconstrained optimizers like Adam [S1, unofficial].
+*   **Limitations:** The separation of rotation and scale can lead to non-intuitive gradients if the scale is very small or rotation is near singularities. The Cholesky variant requires careful handling of the diagonal floor [S2, unofficial].
+*   **When to use:** Standard 3D Gaussian Splatting pipelines where stable optimization is critical [S1, unofficial].
+*   **When not to use:** If memory is extremely tight and the overhead of rotation parameterization is prohibitive, or if the scene has extreme anisotropy that makes rotation-scale decoupling unstable [G].
+
+## Background
+Originating from the 3D Gaussian Splatting (3DGS) framework, this method was introduced to enable fast, high-quality rendering of radiance fields [S1, unofficial]. The factorization of the covariance into rotation and scale was identified as one of the four key components making 3DGS viable, alongside spherical-harmonic colour, EWA projection, and tile-based rasterization [S1, unofficial]. The Cholesky parameterization variant has been explored in specialized applications such as microscopy and scientific data visualization (e.g., Luxar) to handle multidimensional data with strict positivity constraints [S2, unofficial].
+
+## Sources
+[S1] An Architectural Review of the 3D Gaussian Splatting Rendering Pipeline, https://doi.org/10.5281/zenodo.21739653, fetched 2026-10-26 (unofficial)
+[S2] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)

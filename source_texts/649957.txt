@@ -1,0 +1,1840 @@
+Heterogeneous programming in Julia. Contribute to JuliaGPU/KernelAbstractions.jl development by creating an account on GitHub.
+
+Add tiles by maleadt · Pull Request #864 · JuliaGPU/KernelAbstractions.jl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+maleadt
+commented
+Oct 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Tiles give @kernel a grouping below the workgroup: a kernel constructed with a tile width
+divides each workgroup into tiles of N consecutive work-items (by @index(Local, Linear)), like CUDA's
+tiled_partition<N>, whose work-items exchange values without going through local memory.
+```
+@kernel function f(out, x)
+    t = @tile()               # Tile{N}: t.index (tile within the workgroup), t.lane
+    v = tile_reduce(t, +, x[@index(Global, Linear)])
+    t.lane == 1 && (out[@index(Tile)] = v)
+end
+k = f(backend; tile = 16)
+k(out, x; ndrange = 16 * ntiles)
+```
+No declaration, a width at construction: f(backend; tile = N), also with a static
+workgroup size and ndrange. What sets a kernel with tiles apart is the width, which the host
+needs for the launch geometry, so that's the only switch. A kernel that uses @tile() or
+@index(Tile) has to get one: @kernel notes the use, and construction rejects a missing
+width. There is no default, since the sub-group width W differs between back ends (32 or
+64 on AMD); width-agnostic kernels pass tile = KernelInterface.sub_group_size(backend).
+A width that follows a run-time parameter (DGSEM's polynomial degree) works the same way.
+tile_width(kernel) returns the width on the host, tile_width(t) in the kernel, where it
+is a constant; it is a type parameter of Kernel and reaches the device through
+CompilerMetadata.
+Tiles are a capability. Tiles of N work-items need a power-of-two N ≤ W; a
+workgroup can hold any number of them, and they diverge independently, also where several
+share a sub-group (KernelInterface.supports_partitionable_subgroups, KernelInterface: sub-group shuffles, votes, reductions and scans #831).
+supports_tiles(backend, N) reports whether a backend provides that, and constructing a
+kernel it doesn't support throws, with the reason. There is no fallback.
+Back end
+Tiles
+CUDA, AMDGPU, oneAPI, OpenCL.jl on Intel GPUs
+any power of two N ≤ W (W is 32 or 64)
+Metal
+any power of two N ≤ 32; the narrow tile_barrier is a SIMD-group-scope fence that relies on Apple GPUs executing SIMD-groups in lock-step (KernelInterface: sub-group shuffles, votes and segments Metal.jl#998)
+KernelAbstractions' PoCL back end, OpenCL.jl on PoCL or Intel's CPU runtime
+none: their sub-groups can't diverge from each other (on PoCL, sub-group operations are work-group barriers)
+An earlier version of this PR gave narrow tiles a workgroup each where segments couldn't
+diverge, with a tiles_per_workgroup query. That leaked into user code (the DGSEM
+benchmarks in DGSEM benchmarks: variants with tiles (#864) #874 had to query it to choose the number of elements per workgroup), and
+didn't help: unpacked narrow tiles were 1.7–2x slower than packed ones on CUDA, behind the
+local-memory kernels, and on PoCL every tile operation is a work-group barrier, 2–7x slower
+than local memory. Kernels that should also run on the CPU need a variant without tiles,
+as with oneDPL, AdaptiveCpp or Kokkos.
+Launch: the workgroup has a multiple of N work-items, and every tile is entirely
+inside or outside of the ndrange. N-D ndranges work, e.g. (4, 4, nelements) in workgroups
+of (4, 4, k), and are launched on a 1-D grid so that tiles stay on sub-groups. Automatic
+sizing picks a valid shape. Construction and launch check the geometry before compiling.
+Operations, taking the tile so that helper functions can use them: tile_shfl,
+tile_shfl_{up,down,xor}, tile_any/all/ballot, ordered tile_reduce, tile_scan,
+tile_exclusive_scan, tile_barrier. They need control flow that is uniform over the tile
+only: tiles can diverge, loop differently or return. They lower to KernelInterface's
+sub-group operations with a width of N. @index(Tile) numbers tiles workgroup by
+workgroup.
+@kernel passes what it finds in a kernel's body (use of tiles or collectives) as methods
+of the kernel's own function, so that this also works for kernels in a local scope and in
+precompiled packages with overloaded kernels.
+Documented in the manual under Tiles and Choosing the tile width, plus a new section, Choosing how work-items communicate, that compares local memory, the workgroup collectives, tiles and KernelInterface kernels. The 0.10 release notes have an entry.
+Tested with the KernelAbstractions testsuite on PoCL (tiles throw), CUDA (RTX 5080), AMDGPU
+(gfx1036) and Metal (M1 and M3). Stacked on #830.
+maleadt
+added this pull request to stack #834
+October 10, 2026 17:41
+github-actions
+Bot
+commented
+Oct 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Benchmark Results
+Show table
+main
+23d70e6...
+main / 23d70e6...
+const/@Const/Float32/262144
+0.637 ± 0.023 ms
+0.63 ± 0.02 ms
+1.01 ± 0.048
+const/@Const/Float32/65536
+0.228 ± 0.0064 ms
+0.208 ± 0.017 ms
+1.1 ± 0.097
+const/@Const/Float64/262144
+0.841 ± 0.023 ms
+0.834 ± 0.025 ms
+1.01 ± 0.041
+const/@Const/Float64/65536
+0.368 ± 0.014 ms
+0.369 ± 0.018 ms
+0.997 ± 0.062
+const/unmarked/Float32/262144
+2.3 ± 0.019 ms
+2.31 ± 0.016 ms
+0.994 ± 0.011
+const/unmarked/Float32/65536
+0.628 ± 0.022 ms
+0.634 ± 0.024 ms
+0.99 ± 0.051
+const/unmarked/Float64/262144
+3.11 ± 0.013 ms
+3.11 ± 0.014 ms
+1 ± 0.0062
+const/unmarked/Float64/65536
+0.812 ± 0.013 ms
+0.829 ± 0.023 ms
+0.978 ± 0.032
+dgsem/2D/Float32/fluxdiff/element
+0.56 ± 0.021 ms
+0.554 ± 0.021 ms
+1.01 ± 0.055
+dgsem/2D/Float32/fluxdiff/node E=8
+0.801 ± 0.0045 ms
+0.786 ± 0.018 ms
+1.02 ± 0.025
+dgsem/2D/Float32/fluxdiff/node halfsweep E=8
+0.583 ± 0.023 ms
+0.574 ± 0.013 ms
+1.01 ± 0.046
+dgsem/2D/Float32/fluxdiff/node halfsweep v-last E=8
+0.61 ± 0.03 ms
+0.6 ± 0.014 ms
+1.02 ± 0.056
+dgsem/2D/Float32/weak/element
+0.218 ± 0.0093 ms
+0.2 ± 0.014 ms
+1.09 ± 0.09
+dgsem/2D/Float32/weak/element private
+0.214 ± 0.013 ms
+0.22 ± 0.016 ms
+0.974 ± 0.091
+dgsem/2D/Float32/weak/node localmem E=1
+0.189 ± 0.026 ms
+0.189 ± 0.0034 ms
+1 ± 0.14
+dgsem/2D/Float32/weak/node localmem E=8
+0.185 ± 0.0026 ms
+0.209 ± 0.028 ms
+0.883 ± 0.12
+dgsem/2D/Float32/weak/node localmem v-last E=1
+0.274 ± 0.021 ms
+0.253 ± 0.013 ms
+1.09 ± 0.1
+dgsem/2D/Float32/weak/node localmem v-last E=8
+0.249 ± 0.015 ms
+0.248 ± 0.024 ms
+1 ± 0.11
+dgsem/2D/Float32/weak/node recompute E=8
+0.502 ± 0.02 ms
+0.503 ± 0.02 ms
+0.998 ± 0.056
+dgsem/2D/Float64/fluxdiff/element
+0.604 ± 0.021 ms
+0.602 ± 0.022 ms
+1 ± 0.051
+dgsem/2D/Float64/fluxdiff/node E=8
+0.79 ± 0.011 ms
+0.797 ± 0.014 ms
+0.991 ± 0.023
+dgsem/2D/Float64/fluxdiff/node halfsweep E=8
+0.641 ± 0.023 ms
+0.61 ± 0.039 ms
+1.05 ± 0.077
+dgsem/2D/Float64/fluxdiff/node halfsweep v-last E=8
+0.639 ± 0.023 ms
+0.622 ± 0.013 ms
+1.03 ± 0.043
+dgsem/2D/Float64/weak/element
+0.235 ± 0.0042 ms
+0.234 ± 0.018 ms
+1.01 ± 0.079
+dgsem/2D/Float64/weak/element private
+0.249 ± 0.014 ms
+0.234 ± 0.013 ms
+1.06 ± 0.083
+dgsem/2D/Float64/weak/node localmem E=1
+0.194 ± 0.013 ms
+0.194 ± 0.015 ms
+1 ± 0.1
+dgsem/2D/Float64/weak/node localmem E=8
+0.188 ± 0.0076 ms
+0.186 ± 0.0021 ms
+1.01 ± 0.043
+dgsem/2D/Float64/weak/node localmem v-last E=1
+0.263 ± 0.023 ms
+0.263 ± 0.015 ms
+0.999 ± 0.1
+dgsem/2D/Float64/weak/node localmem v-last E=8
+0.26 ± 0.02 ms
+0.265 ± 0.024 ms
+0.981 ± 0.12
+dgsem/2D/Float64/weak/node recompute E=8
+0.651 ± 0.022 ms
+0.646 ± 0.016 ms
+1.01 ± 0.042
+dgsem/3D/Float32/fluxdiff/element
+1.92 ± 0.0079 ms
+1.92 ± 0.0085 ms
+0.999 ± 0.0061
+dgsem/3D/Float32/fluxdiff/node E=2
+3.28 ± 0.03 ms
+3.31 ± 0.041 ms
+0.993 ± 0.015
+dgsem/3D/Float32/fluxdiff/node halfsweep E=1
+2.37 ± 0.013 ms
+2.39 ± 0.066 ms
+0.989 ± 0.028
+dgsem/3D/Float32/fluxdiff/node halfsweep v-last E=1
+2 ± 0.029 ms
+2.04 ± 0.021 ms
+0.983 ± 0.017
+dgsem/3D/Float32/weak/element
+0.668 ± 0.019 ms
+0.668 ± 0.013 ms
+1 ± 0.034
+dgsem/3D/Float32/weak/element private
+0.7 ± 0.019 ms
+0.701 ± 0.021 ms
+0.998 ± 0.041
+dgsem/3D/Float32/weak/node localmem E=1
+0.682 ± 0.02 ms
+0.681 ± 0.019 ms
+1 ± 0.041
+dgsem/3D/Float32/weak/node localmem E=2
+0.741 ± 0.035 ms
+0.759 ± 0.033 ms
+0.977 ± 0.062
+dgsem/3D/Float32/weak/node localmem v-last E=1
+0.921 ± 0.016 ms
+0.905 ± 0.021 ms
+1.02 ± 0.03
+dgsem/3D/Float32/weak/node localmem v-last E=2
+1.01 ± 0.033 ms
+1.04 ± 0.0025 ms
+0.966 ± 0.031
+dgsem/3D/Float32/weak/node recompute E=2
+2.08 ± 0.014 ms
+2.09 ± 0.0053 ms
+0.993 ± 0.007
+dgsem/3D/Float32/weak/slab E=1
+2.7 ± 0.01 ms
+2.9 ± 0.015 ms
+0.929 ± 0.0059
+dgsem/3D/Float32/weak/slab E=8
+5.48 ± 0.041 ms
+5.54 ± 0.026 ms
+0.989 ± 0.0088
+dgsem/3D/Float32/weak/slab double-buffered E=1
+1.58 ± 0.011 ms
+1.64 ± 0.012 ms
+0.965 ± 0.0099
+dgsem/3D/Float32/weak/slab double-buffered E=8
+2.12 ± 0.041 ms
+2.02 ± 0.022 ms
+1.05 ± 0.023
+dgsem/3D/Float32/weak/slab double-buffered v-last E=1
+1.63 ± 0.011 ms
+1.66 ± 0.01 ms
+0.987 ± 0.0093
+dgsem/3D/Float32/weak/slab double-buffered v-last E=8
+2.19 ± 0.013 ms
+2.12 ± 0.013 ms
+1.03 ± 0.0088
+dgsem/3D/Float32/weak/slab v-last E=1
+2.75 ± 0.054 ms
+2.88 ± 0.0099 ms
+0.954 ± 0.019
+dgsem/3D/Float32/weak/slab v-last E=8
+5.6 ± 0.019 ms
+5.56 ± 0.032 ms
+1.01 ± 0.0067
+dgsem/3D/Float64/fluxdiff/element
+2 ± 0.02 ms
+2 ± 0.018 ms
+1 ± 0.013
+dgsem/3D/Float64/fluxdiff/node E=2
+3.01 ± 0.054 ms
+3.05 ± 0.0094 ms
+0.99 ± 0.018
+dgsem/3D/Float64/fluxdiff/node halfsweep E=1
+2.2 ± 0.009 ms
+2.25 ± 0.034 ms
+0.977 ± 0.015
+dgsem/3D/Float64/fluxdiff/node halfsweep v-last E=1
+2.16 ± 0.0068 ms
+2.15 ± 0.0077 ms
+1 ± 0.0048
+dgsem/3D/Float64/weak/element
+0.823 ± 0.0098 ms
+0.834 ± 0.0048 ms
+0.987 ± 0.013
+dgsem/3D/Float64/weak/element private
+0.852 ± 0.0038 ms
+0.869 ± 0.0059 ms
+0.98 ± 0.008
+dgsem/3D/Float64/weak/node localmem E=1
+0.718 ± 0.02 ms
+0.739 ± 0.012 ms
+0.972 ± 0.032
+dgsem/3D/Float64/weak/node localmem E=2
+0.776 ± 0.011 ms
+0.81 ± 0.024 ms
+0.959 ± 0.031
+dgsem/3D/Float64/weak/node localmem v-last E=1
+0.909 ± 0.004 ms
+0.932 ± 0.0088 ms
+0.975 ± 0.01
+dgsem/3D/Float64/weak/node localmem v-last E=2
+1.04 ± 0.0044 ms
+1.04 ± 0.03 ms
+1.01 ± 0.029
+dgsem/3D/Float64/weak/node recompute E=2
+2.24 ± 0.043 ms
+2.22 ± 0.012 ms
+1.01 ± 0.02
+dgsem/3D/Float64/weak/slab E=1
+2.74 ± 0.051 ms
+2.9 ± 0.055 ms
+0.945 ± 0.025
+dgsem/3D/Float64/weak/slab E=8
+6.28 ± 0.015 ms
+6.21 ± 0.035 ms
+1.01 ± 0.0062
+dgsem/3D/Float64/weak/slab double-buffered E=1
+1.61 ± 0.034 ms
+1.61 ± 0.031 ms
+1 ± 0.029
+dgsem/3D/Float64/weak/slab double-buffered E=8
+2.1 ± 0.0088 ms
+2.15 ± 0.008 ms
+0.976 ± 0.0055
+dgsem/3D/Float64/weak/slab double-buffered v-last E=1
+1.64 ± 0.014 ms
+1.66 ± 0.0095 ms
+0.988 ± 0.01
+dgsem/3D/Float64/weak/slab double-buffered v-last E=8
+2.14 ± 0.051 ms
+2.14 ± 0.012 ms
+0.999 ± 0.024
+dgsem/3D/Float64/weak/slab v-last E=1
+2.78 ± 0.01 ms
+2.94 ± 0.032 ms
+0.947 ± 0.011
+dgsem/3D/Float64/weak/slab v-last E=8
+6.26 ± 0.023 ms
+6.22 ± 0.011 ms
+1.01 ± 0.0041
+launch/3D static workgroup, dynamic ndrange
+11 ± 0.58 μs
+11.5 ± 0.5 μs
+0.954 ± 0.065
+launch/3D static workgroup, static ndrange
+10.9 ± 0.64 μs
+10.4 ± 0.6 μs
+1.04 ± 0.086
+launch/dynamic workgroup, dynamic ndrange
+16.4 ± 5.1 μs
+11.7 ± 0.29 μs
+1.4 ± 0.43
+launch/dynamic workgroup, dynamic ndrange, workgroupsize given
+13.3 ± 4.4 μs
+11.8 ± 4.4 μs
+1.12 ± 0.56
+launch/static workgroup, dynamic ndrange
+14.9 ± 14 μs
+10.5 ± 0.51 μs
+1.42 ± 1.3
+launch/static workgroup, static ndrange
+10.6 ± 0.53 μs
+11.8 ± 1.6 μs
+0.898 ± 0.13
+narrow workgroup/masked/W=16
+0.726 ± 0.018 ms
+0.733 ± 0.027 ms
+0.991 ± 0.044
+narrow workgroup/masked/W=4
+0.68 ± 0.027 ms
+0.689 ± 0.03 ms
+0.986 ± 0.058
+narrow workgroup/unmasked/W=16
+0.436 ± 0.019 ms
+0.437 ± 0.018 ms
+0.997 ± 0.059
+narrow workgroup/unmasked/W=4
+0.433 ± 0.018 ms
+0.431 ± 0.017 ms
+1 ± 0.057
+partition/dynamic workgroup, dynamic ndrange
+0.0587 ± 0.011 μs
+0.0586 ± 0.013 μs
+1 ± 0.28
+partition/static workgroup, dynamic ndrange
+0.0676 ± 0.012 μs
+0.0661 ± 0.012 μs
+1.02 ± 0.26
+partition/static workgroup, static ndrange
+1.55 ± 0.01 ns
+1.55 ± 0.01 ns
+1 ± 0.0091
+saxpy/default/Float16/1024
+22.1 ± 12 μs
+26.4 ± 12 μs
+0.835 ± 0.58
+saxpy/default/Float16/1048576
+1.46 ± 0.02 ms
+1.46 ± 0.028 ms
+0.999 ± 0.024
+saxpy/default/Float16/16384
+0.0376 ± 0.00083 ms
+0.0376 ± 0.00099 ms
+1 ± 0.034
+saxpy/default/Float16/2048
+18.4 ± 2 μs
+18.4 ± 11 μs
+1 ± 0.62
+saxpy/default/Float16/256
+11.5 ± 0.21 μs
+11.3 ± 0.51 μs
+1.02 ± 0.05
+saxpy/default/Float16/262144
+0.411 ± 0.02 ms
+0.407 ± 0.018 ms
+1.01 ± 0.067
+saxpy/default/Float16/32768
+0.0951 ± 0.012 ms
+0.0975 ± 0.011 ms
+0.975 ± 0.16
+saxpy/default/Float16/4096
+0.0322 ± 0.012 ms
+20.8 ± 11 μs
+1.55 ± 1
+saxpy/default/Float16/512
+11.9 ± 0.52 μs
+24.3 ± 15 μs
+0.491 ± 0.31
+saxpy/default/Float16/64
+12.2 ± 13 μs
+11.3 ± 0.58 μs
+1.08 ± 1.1
+saxpy/default/Float16/65536
+0.147 ± 0.016 ms
+0.14 ± 0.016 ms
+1.05 ± 0.16
+saxpy/default/Float32/1024
+17 ± 12 μs
+14.7 ± 0.66 μs
+1.16 ± 0.83
+saxpy/default/Float32/1048576
+0.877 ± 0.045 ms
+0.862 ± 0.035 ms
+1.02 ± 0.066
+saxpy/default/Float32/16384
+29.2 ± 1.3 μs
+29 ± 15 μs
+1.01 ± 0.53
+saxpy/default/Float32/2048
+16.7 ± 1.1 μs
+17.1 ± 1.2 μs
+0.977 ± 0.094
+saxpy/default/Float32/256
+11.3 ± 4.6 μs
+11.1 ± 0.41 μs
+1.02 ± 0.42
+saxpy/default/Float32/262144
+0.249 ± 0.019 ms
+0.248 ± 0.022 ms
+1 ± 0.12
+saxpy/default/Float32/32768
+0.0433 ± 0.048 ms
+0.0414 ± 0.023 ms
+1.04 ± 1.3
+saxpy/default/Float32/4096
+30.1 ± 0.91 μs
+18.4 ± 0.7 μs
+1.63 ± 0.079
+saxpy/default/Float32/512
+12.6 ± 4.7 μs
+10.3 ± 4.4 μs
+1.22 ± 0.69
+saxpy/default/Float32/64
+11.4 ± 0.6 μs
+23.5 ± 7.6 μs
+0.487 ± 0.16
+saxpy/default/Float32/65536
+0.112 ± 0.019 ms
+0.102 ± 0.021 ms
+1.1 ± 0.29
+saxpy/default/Float64/1024
+26.4 ± 0.98 μs
+15.9 ± 0.64 μs
+1.66 ± 0.091
+saxpy/default/Float64/1048576
+1.19 ± 0.14 ms
+1.12 ± 0.14 ms
+1.06 ± 0.18
+saxpy/default/Float64/16384
+0.032 ± 0.0037 ms
+0.0368 ± 0.016 ms
+0.869 ± 0.38
+saxpy/default/Float64/2048
+17.2 ± 0.58 μs
+16.9 ± 0.59 μs
+1.02 ± 0.05
+saxpy/default/Float64/256
+14.5 ± 1.9 μs
+13.7 ± 4.3 μs
+1.06 ± 0.36
+saxpy/default/Float64/262144
+0.26 ± 0.035 ms
+0.263 ± 0.038 ms
+0.989 ± 0.2
+saxpy/default/Float64/32768
+0.048 ± 0.012 ms
+0.0454 ± 0.049 ms
+1.06 ± 1.2
+saxpy/default/Float64/4096
+29.2 ± 0.83 μs
+18.8 ± 0.85 μs
+1.55 ± 0.083
+saxpy/default/Float64/512
+14.7 ± 2 μs
+14.8 ± 2.1 μs
+0.992 ± 0.2
+saxpy/default/Float64/64
+12.1 ± 13 μs
+11 ± 0.29 μs
+1.1 ± 1.2
+saxpy/default/Float64/65536
+0.114 ± 0.019 ms
+0.105 ± 0.017 ms
+1.09 ± 0.25
+saxpy/static workgroup=(1024,)/Float16/1024
+15.9 ± 13 μs
+15.3 ± 0.7 μs
+1.04 ± 0.83
+saxpy/static workgroup=(1024,)/Float16/1048576
+1.47 ± 0.024 ms
+1.48 ± 0.027 ms
+0.997 ± 0.024
+saxpy/static workgroup=(1024,)/Float16/16384
+0.0379 ± 0.016 ms
+0.0373 ± 0.00059 ms
+1.02 ± 0.43
+saxpy/static workgroup=(1024,)/Float16/2048
+17.6 ± 1.3 μs
+17.3 ± 1.1 μs
+1.02 ± 0.1
+saxpy/static workgroup=(1024,)/Float16/256
+19.5 ± 14 μs
+11.5 ± 0.18 μs
+1.69 ± 1.2
+saxpy/static workgroup=(1024,)/Float16/262144
+0.416 ± 0.02 ms
+0.412 ± 0.02 ms
+1.01 ± 0.069
+saxpy/static workgroup=(1024,)/Float16/32768
+0.096 ± 0.018 ms
+0.0963 ± 0.0094 ms
+0.997 ± 0.21
+saxpy/static workgroup=(1024,)/Float16/4096
+20.8 ± 0.47 μs
+20.7 ± 0.56 μs
+1 ± 0.035
+saxpy/static workgroup=(1024,)/Float16/512
+25.4 ± 15 μs
+11.5 ± 0.21 μs
+2.21 ± 1.3
+saxpy/static workgroup=(1024,)/Float16/64
+11.8 ± 0.55 μs
+11.4 ± 0.22 μs
+1.03 ± 0.052
+saxpy/static workgroup=(1024,)/Float16/65536
+0.143 ± 0.016 ms
+0.143 ± 0.015 ms
+0.999 ± 0.15
+saxpy/static workgroup=(1024,)/Float32/1024
+17.1 ± 12 μs
+14.5 ± 0.77 μs
+1.18 ± 0.83
+saxpy/static workgroup=(1024,)/Float32/1048576
+0.86 ± 0.042 ms
+0.853 ± 0.057 ms
+1.01 ± 0.084
+saxpy/static workgroup=(1024,)/Float32/16384
+29.1 ± 1.4 μs
+28.8 ± 14 μs
+1.01 ± 0.48
+saxpy/static workgroup=(1024,)/Float32/2048
+27.7 ± 10 μs
+26.9 ± 0.83 μs
+1.03 ± 0.39
+saxpy/static workgroup=(1024,)/Float32/256
+12.3 ± 15 μs
+11.5 ± 0.54 μs
+1.06 ± 1.3
+saxpy/static workgroup=(1024,)/Float32/262144
+0.244 ± 0.019 ms
+0.244 ± 0.02 ms
+1 ± 0.11
+saxpy/static workgroup=(1024,)/Float32/32768
+0.0425 ± 0.0025 ms
+0.0416 ± 0.0018 ms
+1.02 ± 0.076
+saxpy/static workgroup=(1024,)/Float32/4096
+19 ± 11 μs
+18.4 ± 0.59 μs
+1.03 ± 0.59
+saxpy/static workgroup=(1024,)/Float32/512
+14.7 ± 4.3 μs
+15 ± 15 μs
+0.976 ± 1
+saxpy/static workgroup=(1024,)/Float32/64
+12.4 ± 13 μs
+16.8 ± 13 μs
+0.738 ± 0.97
+saxpy/static workgroup=(1024,)/Float32/65536
+0.0999 ± 0.013 ms
+0.115 ± 0.017 ms
+0.87 ± 0.17
+saxpy/static workgroup=(1024,)/Float64/1024
+16.1 ± 0.69 μs
+16 ± 0.55 μs
+1 ± 0.055
+saxpy/static workgroup=(1024,)/Float64/1048576
+1.14 ± 0.14 ms
+1.11 ± 0.12 ms
+1.03 ± 0.17
+saxpy/static workgroup=(1024,)/Float64/16384
+0.0326 ± 0.0037 ms
+30.5 ± 3.2 μs
+1.07 ± 0.16
+saxpy/static workgroup=(1024,)/Float64/2048
+17.2 ± 0.56 μs
+25.4 ± 9.1 μs
+0.676 ± 0.24
+saxpy/static workgroup=(1024,)/Float64/256
+26.1 ± 16 μs
+14.9 ± 7.1 μs
+1.75 ± 1.4
+saxpy/static workgroup=(1024,)/Float64/262144
+0.259 ± 0.033 ms
+0.263 ± 0.032 ms
+0.984 ± 0.17
+saxpy/static workgroup=(1024,)/Float64/32768
+0.0629 ± 0.049 ms
+0.044 ± 0.004 ms
+1.43 ± 1.1
+saxpy/static workgroup=(1024,)/Float64/4096
+28.4 ± 9.4 μs
+19.2 ± 1.1 μs
+1.48 ± 0.5
+saxpy/static workgroup=(1024,)/Float64/512
+15.4 ± 2.2 μs
+14.8 ± 1.5 μs
+1.04 ± 0.18
+saxpy/static workgroup=(1024,)/Float64/64
+11.7 ± 0.38 μs
+11.6 ± 0.27 μs
+1.01 ± 0.04
+saxpy/static workgroup=(1024,)/Float64/65536
+0.115 ± 0.021 ms
+0.109 ± 0.02 ms
+1.05 ± 0.27
+time_to_load
+0.516 ± 0.0061 s
+0.519 ± 0.00079 s
+0.993 ± 0.012
+main
+23d70e6...
+main / 23d70e6...
+const/@Const/Float32/262144
+9 allocs: 0.203 kB
+9 allocs: 0.203 kB
+1
+const/@Const/Float32/65536
+9 allocs: 0.203 kB
+9 allocs: 0.203 kB
+1
+const/@Const/Float64/262144
+9 allocs: 0.203 kB
+9 allocs: 0.203 kB
+1
+const/@Const/Float64/65536
+9 allocs: 0.203 kB
+9 allocs: 0.203 kB
+1
+const/unmarked/Float32/262144
+9 allocs: 0.203 kB
+9 allocs: 0.203 kB
+1
+const/unmarked/Float32/65536
+9 allocs: 0.203 kB
+9 allocs: 0.203 kB
+1
+const/unmarked/Float64/262144
+9 allocs: 0.203 kB
+9 allocs: 0.203 kB
+1
+const/unmarked/Float64/65536
+9 allocs: 0.203 kB
+9 allocs: 0.203 kB
+1
+dgsem/2D/Float32/fluxdiff/element
+6 allocs: 0.109 kB
+10 allocs: 0.219 kB
+0.5
+dgsem/2D/Float32/fluxdiff/node E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float32/fluxdiff/node halfsweep E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float32/fluxdiff/node halfsweep v-last E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float32/weak/element
+10 allocs: 0.219 kB
+10 allocs: 0.219 kB
+1
+dgsem/2D/Float32/weak/element private
+10 allocs: 0.219 kB
+10 allocs: 0.219 kB
+1
+dgsem/2D/Float32/weak/node localmem E=1
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float32/weak/node localmem E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float32/weak/node localmem v-last E=1
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float32/weak/node localmem v-last E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float32/weak/node recompute E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float64/fluxdiff/element
+10 allocs: 0.219 kB
+10 allocs: 0.219 kB
+1
+dgsem/2D/Float64/fluxdiff/node E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float64/fluxdiff/node halfsweep E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float64/fluxdiff/node halfsweep v-last E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float64/weak/element
+10 allocs: 0.219 kB
+10 allocs: 0.219 kB
+1
+dgsem/2D/Float64/weak/element private
+10 allocs: 0.219 kB
+10 allocs: 0.219 kB
+1
+dgsem/2D/Float64/weak/node localmem E=1
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float64/weak/node localmem E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float64/weak/node localmem v-last E=1
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float64/weak/node localmem v-last E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/2D/Float64/weak/node recompute E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float32/fluxdiff/element
+10 allocs: 0.219 kB
+10 allocs: 0.219 kB
+1
+dgsem/3D/Float32/fluxdiff/node E=2
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float32/fluxdiff/node halfsweep E=1
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float32/fluxdiff/node halfsweep v-last E=1
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float32/weak/element
+10 allocs: 0.219 kB
+10 allocs: 0.219 kB
+1
+dgsem/3D/Float32/weak/element private
+10 allocs: 0.219 kB
+10 allocs: 0.219 kB
+1
+dgsem/3D/Float32/weak/node localmem E=1
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float32/weak/node localmem E=2
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float32/weak/node localmem v-last E=1
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float32/weak/node localmem v-last E=2
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float32/weak/node recompute E=2
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float32/weak/slab E=1
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float32/weak/slab E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float32/weak/slab double-buffered E=1
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float32/weak/slab double-buffered E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float32/weak/slab double-buffered v-last E=1
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float32/weak/slab double-buffered v-last E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float32/weak/slab v-last E=1
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float32/weak/slab v-last E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float64/fluxdiff/element
+10 allocs: 0.219 kB
+10 allocs: 0.219 kB
+1
+dgsem/3D/Float64/fluxdiff/node E=2
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float64/fluxdiff/node halfsweep E=1
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float64/fluxdiff/node halfsweep v-last E=1
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float64/weak/element
+10 allocs: 0.219 kB
+10 allocs: 0.219 kB
+1
+dgsem/3D/Float64/weak/element private
+10 allocs: 0.219 kB
+10 allocs: 0.219 kB
+1
+dgsem/3D/Float64/weak/node localmem E=1
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float64/weak/node localmem E=2
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float64/weak/node localmem v-last E=1
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float64/weak/node localmem v-last E=2
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float64/weak/node recompute E=2
+13 allocs: 0.391 kB
+13 allocs: 0.391 kB
+1
+dgsem/3D/Float64/weak/slab E=1
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float64/weak/slab E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float64/weak/slab double-buffered E=1
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float64/weak/slab double-buffered E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float64/weak/slab double-buffered v-last E=1
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float64/weak/slab double-buffered v-last E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float64/weak/slab v-last E=1
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+dgsem/3D/Float64/weak/slab v-last E=8
+10 allocs: 0.234 kB
+10 allocs: 0.234 kB
+1
+launch/3D static workgroup, dynamic ndrange
+9 allocs: 0.219 kB
+9 allocs: 0.219 kB
+1
+launch/3D static workgroup, static ndrange
+9 allocs: 0.219 kB
+9 allocs: 0.219 kB
+1
+launch/dynamic workgroup, dynamic ndrange
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+launch/dynamic workgroup, dynamic ndrange, workgroupsize given
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+launch/static workgroup, dynamic ndrange
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+launch/static workgroup, static ndrange
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+narrow workgroup/masked/W=16
+9 allocs: 0.203 kB
+9 allocs: 0.203 kB
+1
+narrow workgroup/masked/W=4
+9 allocs: 0.203 kB
+9 allocs: 0.203 kB
+1
+narrow workgroup/unmasked/W=16
+9 allocs: 0.203 kB
+9 allocs: 0.203 kB
+1
+narrow workgroup/unmasked/W=4
+9 allocs: 0.203 kB
+9 allocs: 0.203 kB
+1
+partition/dynamic workgroup, dynamic ndrange
+2 allocs: 0.0625 kB
+2 allocs: 0.0625 kB
+1
+partition/static workgroup, dynamic ndrange
+2 allocs: 32 B
+2 allocs: 32 B
+1
+partition/static workgroup, static ndrange
+0 allocs: 0 B
+0 allocs: 0 B
+saxpy/default/Float16/1024
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float16/1048576
+12 allocs: 0.25 kB
+12 allocs: 0.25 kB
+1
+saxpy/default/Float16/16384
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float16/2048
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float16/256
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+saxpy/default/Float16/262144
+12 allocs: 0.25 kB
+12 allocs: 0.25 kB
+1
+saxpy/default/Float16/32768
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float16/4096
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float16/512
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float16/64
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+saxpy/default/Float16/65536
+12 allocs: 0.25 kB
+12 allocs: 0.25 kB
+1
+saxpy/default/Float32/1024
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float32/1048576
+12 allocs: 0.25 kB
+12 allocs: 0.25 kB
+1
+saxpy/default/Float32/16384
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float32/2048
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float32/256
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+saxpy/default/Float32/262144
+12 allocs: 0.25 kB
+12 allocs: 0.25 kB
+1
+saxpy/default/Float32/32768
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float32/4096
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float32/512
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float32/64
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+saxpy/default/Float32/65536
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float64/1024
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float64/1048576
+12 allocs: 0.25 kB
+12 allocs: 0.25 kB
+1
+saxpy/default/Float64/16384
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float64/2048
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float64/256
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+saxpy/default/Float64/262144
+12 allocs: 0.25 kB
+12 allocs: 0.25 kB
+1
+saxpy/default/Float64/32768
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float64/4096
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float64/512
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/default/Float64/64
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+saxpy/default/Float64/65536
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float16/1024
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float16/1048576
+12 allocs: 0.25 kB
+12 allocs: 0.25 kB
+1
+saxpy/static workgroup=(1024,)/Float16/16384
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float16/2048
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float16/256
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+saxpy/static workgroup=(1024,)/Float16/262144
+12 allocs: 0.25 kB
+12 allocs: 0.25 kB
+1
+saxpy/static workgroup=(1024,)/Float16/32768
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float16/4096
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float16/512
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float16/64
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+saxpy/static workgroup=(1024,)/Float16/65536
+12 allocs: 0.25 kB
+12 allocs: 0.25 kB
+1
+saxpy/static workgroup=(1024,)/Float32/1024
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float32/1048576
+12 allocs: 0.25 kB
+12 allocs: 0.25 kB
+1
+saxpy/static workgroup=(1024,)/Float32/16384
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float32/2048
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float32/256
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+saxpy/static workgroup=(1024,)/Float32/262144
+12 allocs: 0.25 kB
+12 allocs: 0.25 kB
+1
+saxpy/static workgroup=(1024,)/Float32/32768
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float32/4096
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float32/512
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float32/64
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+saxpy/static workgroup=(1024,)/Float32/65536
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float64/1024
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float64/1048576
+12 allocs: 0.25 kB
+12 allocs: 0.25 kB
+1
+saxpy/static workgroup=(1024,)/Float64/16384
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float64/2048
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float64/256
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+saxpy/static workgroup=(1024,)/Float64/262144
+12 allocs: 0.25 kB
+12 allocs: 0.25 kB
+1
+saxpy/static workgroup=(1024,)/Float64/32768
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float64/4096
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float64/512
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+saxpy/static workgroup=(1024,)/Float64/64
+5 allocs: 0.0938 kB
+5 allocs: 0.0938 kB
+1
+saxpy/static workgroup=(1024,)/Float64/65536
+8 allocs: 0.141 kB
+8 allocs: 0.141 kB
+1
+time_to_load
+0.2 k allocs: 11.8 kB
+0.2 k allocs: 11.8 kB
+1
+Benchmark Plots
+A plot of the benchmark results have been uploaded as an artifact to the workflow run for this PR.
+Go to "Actions"->"Benchmark a pull request"->[the most recent run]->"Artifacts" (at the bottom).
+maleadt
+force-pushed
+the
+tb/ka-tiles
+branch
+from
+183e42c to
+c5b02cf
+Compare
+October 10, 2026 18:57
+vchuravy
+reviewed
+Oct 10, 2026
+View reviewed changes
+vchuravy
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Very neat. One comment on the "magic number"
+Comment thread
+docs/src/kernels.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+maleadt
+force-pushed
+the
+tb/ka-tiles
+branch
+from
+c5b02cf to
+677881c
+Compare
+October 10, 2026 21:18
+maleadt
+changed the title
+Add tiles: @kernel tile=N
+Add tiles: @kernel tile and @kernel tile=N
+Oct 10, 2026
+vchuravy
+commented
+Oct 10, 2026
+Copy link
+Copy Markdown
+Member
+I tried tiles on DGSEM volume integral kernels as in Trixi.jl (tensor-product elements with Nq = 4 nodes per direction, so a 2D element has 16 nodes and a 3D slab 16, and a 2D element maps onto one tile). The benchmarks used c5b02cf with CUDA.jl's vc/ki-subgroup-ops (cff88d481) on a Quadro RTX 4000 (sm_75), and PoCL. Inside Trixi, a tile version of the 2D flux differencing half sweep was the fastest kernel I measured. I checked that the points below still apply to the current head (677881c); the new configurable widths address what I would have said about passing the width as a parameter.
+1. Several sub-group-sized-or-smaller tiles per workgroup (N < W). tiles_per_workgroup(CUDABackend(), 16) == 1, so tile = 16 (one 2D element) launches 16-thread workgroups. Compared with packing two elements into a 32-wide tile by hand, that is 188 vs. 135 µs for the weak form and 631 vs. 334 µs for the flux-differencing half sweep (Float32, 65536 elements). The shuffles already take the width into account. What is missing for N < W are segmented versions of the collectives:
+tile_reduce/tile_scan: an xor butterfly over the masks N/2…1 (shfl_up with width for the scan);
+tile_ballot: shift and mask the sub-group ballot by the tile's lane offset;
+tile_any/tile_all: from the segmented ballot;
+tile_barrier: the sub-group barrier suffices.
+With these, tiles_per_workgroup(backend, N) could return typemax(Int) for every power-of-two N ≤ W on backends with independent sub-groups, like CUDA's tiled_partition<N>.
+2. N-D ndrange / tile shape. Tiles need a 1-D ndrange. DG kernels are naturally written with @index(Global, NTuple) over (Nq, Nq, nelements). With tiles, the decomposition into (slot in tile, i, j, element) and the handling of padding lanes have to be written by hand. Two options:
+accept an N-D ndrange where the workgroup covers the leading dimensions completely (workgroupsize[1:end-1] == ndrange[1:end-1]), so padding only occurs in the last dimension and tiles are runs of the linear local index;
+or a shaped tile, e.g. tile = (4, 4), with Cartesian lanes and tile_shfl(t, x, (l, j)).
+When Nq² does not divide the tile width (Nq = 3, 5), some lanes are in range but map to no node. This works because the shuffles take the lane modulo N. Documenting that idiom (clamp the loads, guard the stores, keep all lanes in the shuffles) would help.
+3. shfl_fields / shfl_words are not inlined in larger kernels. Both are @inline @generated, but @inline on a @generated definition does not apply to the generated body, and the generated bodies carry no Expr(:meta, :inline).
+In a 3D kernel that shuffles an SVector, the LLVM IR has 32 calls to julia_shfl_fields_* with the value passed through an alloca, and SASS shows local-memory traffic (96 LDL / 52 STL).
+Swapping only the shuffle path for a component-wise one in the same kernel and the same run: 2137 µs vs. 492 µs (160 SHFL, no local memory).
+Returning Expr(:block, Expr(:meta, :inline), shfl_fields_expr(T, :val)) from the generator fixes it: the KI path then has no calls, 160 SHFL and no LDL/STL. shfl_words probably needs the same.
+I verified that locally and reverted it. The code is from Add @groupreduce and @groupscan #830's KernelInterface commits.
+4. Struct shuffles on PoCL cost one work-group barrier per field. On PoCL, an SVector{4} shuffle becomes four sub_group_shuffles, each effectively a barrier, so the tile kernels were 1.2–4x slower than the same kernels with @localmem + a barrier (e.g., 2D weak form 3989 vs. 1015 µs). Suggestions:
+shuffle an aggregate with a single exchange on backends where a shuffle is "store, barrier, load";
+or use vector shuffles (intel_sub_group_shuffle on float2/4/8/16) where cl_intel_subgroups is available;
+and document that tile shuffles are slow on the CPU backend.
+(Investigated with the assistance of Claude Code.)
+codecov
+Bot
+commented
+Oct 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 86.90176% with 52 lines in your changes missing coverage. Please review.
+✅ Project coverage is 81.91%. Comparing base (4794aae) to head (23d70e6).
+⚠️ Report is 10 commits behind head on main.
+Files with missing lines
+Patch %
+Lines
+src/tiles.jl
+66.10%
+40 Missing ⚠️
+src/KernelAbstractions.jl
+65.00%
+7 Missing ⚠️
+src/groupreduction.jl
+98.64%
+2 Missing ⚠️
+src/macros.jl
+93.33%
+2 Missing ⚠️
+src/compiler.jl
+83.33%
+1 Missing ⚠️
+Additional details and impacted files
+```
+@@            Coverage Diff             @@
+##             main     #864      +/-   ##
+==========================================
++ Coverage   80.82%   81.91%   +1.09%     
+==========================================
+  Files          26       29       +3     
+  Lines        2227     2594     +367     
+==========================================
++ Hits         1800     2125     +325     
+- Misses        427      469      +42     
+```
+☔ View full report in Codecov by Harness.
+📢 Have feedback on the report? Share it here.
+🚀 New features to boost your workflow:
+❄️ Test Analytics: Detect flaky tests, report on failures, and find test suite problems.
+This was referenced Oct 11, 2026
+Accept SPV_INTEL_subgroups SPIR-V on the CPU device again
+pocl/pocl#2394
+Merged
+[pocl] Backport upstream PR #2394
+JuliaPackaging/Yggdrasil#15073
+Merged
+maleadt
+force-pushed
+the
+tb/ka-tiles
+branch
+from
+677881c to
+214d8c3
+Compare
+October 11, 2026 10:01
+maleadt
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Member
+Author
+I let Claude rework this PR, #831, and the back-end PRs around those four points:
+1. Several narrow tiles per sub-group. Tiles narrower than the sub-group now share it, though not quite as you sketched. Tiles may diverge: a tile-uniform return, different trip counts, padding tiles that skip the body. With two tiles in a warp, that makes FULL_MASK shfl.sync/__syncwarp UB, so the sub-group barrier isn't enough. Instead:
+KernelInterface has width variants of all communication functions: sub_group_ballot/any/all(pred, width), sub_group_reduce/scan/exclusive_scan(..., width) and sub_group_barrier(width), next to the width shuffles.
+supports_independent_segments(backend) says whether only the caller's segment has to execute them.
+CUDA uses a mask per segment, like tiled_partition<N> (a constant full mask when the width is the warp size). AMD and Intel GPUs need nothing extra.
+tiles_per_workgroup(backend, N) is now an upper bound: any number on CUDA, AMD and Intel GPUs, a single narrow tile per workgroup on Metal and the CPU. Those can't do better: MSL and OpenCL have no barrier for part of a sub-group, and PoCL's sub-group operations are work-group barriers. Tiles behave the same everywhere; only performance differs.
+On an RTX 5080, a kernel like yours (ndrange (4, 4, 65536), tile=16, shuffles of an SVector{4, Float32} and a tile_reduce) takes 35.2 µs with a tile per block and 14.8 µs with 16 per block.
+2. N-D ndranges. I took your first option:
+Kernels with tiles accept an N-D ndrange, as long as every tile is entirely inside or outside of it, e.g. (4, 4, nelements) in workgroups of (4, 4, k).
+They are launched on a 1-D grid so that the tiles stay on the sub-groups.
+The automatic workgroup size picks a shape that satisfies this.
+@index(Tile) numbers the tiles workgroup by workgroup, so with tile=16 and Nq = 4 it's the element.
+No shaped tiles.
+The idiom for Nq = 3 or 5 (lanes without a node still take part in the tile operations) is in the @tile docs.
+3. Inlining. Right, with a narrower cause: @inline does apply to a generated function, except when the generator returns the body with an explicit return. The generated bodies are now marked for inlining. A shuffled SVector{5, Float32} is 5 SHFL and no local memory.
+4. Struct shuffles on PoCL. Structs are now packed into 32-bit words, with small fields sharing a word. The words go through a hook that KA's PoCL backend implements with OpSubgroupShuffleINTEL on a vector, so it's one work-group barrier per up to 16 words. PoCL 7.2 had stopped accepting SPV_INTEL_subgroups on its CPU device; pocl/pocl#2394 fixes that and will be in the next pocl_jll. Four shuffles of an SVector{4, Float32} over 4M work-items now take 1.7 ms instead of 4.6 ms. Each shuffle on the CPU is still a barrier, so @localmem and @synchronize can still be faster there.
+vchuravy
+mentioned this pull request
+Oct 11, 2026
+DGSEM benchmarks: variants with tiles (#864)
+#874
+Draft
+vchuravy
+added a commit
+that referenced
+this pull request
+Oct 11, 2026
+DGSEM benchmarks: variants with tiles
+…
+96ef92d
+```
+With a KernelAbstractions that has tiles (#864), add DGSEM kernels in
+which the N² work-items of an element (2D) or of a slab (3D) form a
+tile and exchange values with `tile_shfl` instead of `@localmem` and
+`@synchronize`: the 2D weak form, the 2D half-sweep flux differencing
+(each two-point flux computed once, cyclically, for uniform control
+flow) and the 3D slab kernel. "weak/node localmem tile_barrier" keeps
+the local memory and replaces `@synchronize` with `tile_barrier`. The
+kernels live in benchmark/dgsem_tiles.jl, which is only included if
+KernelAbstractions defines `tile_shfl`, so the suite still runs on
+versions without tiles.
+
+Assisted-by: Claude Code (Opus 5.5)
+```
+vchuravy
+mentioned this pull request
+Oct 11, 2026
+DGSEM benchmarks: a local-memory layout per backend
+#875
+Merged
+vchuravy
+added a commit
+that referenced
+this pull request
+Oct 11, 2026
+DGSEM benchmarks: variants with tiles
+…
+0fb55d6
+```
+With a KernelAbstractions that has tiles (#864), add DGSEM kernels in
+which the N² work-items of an element (2D) or of a slab (3D) form a
+tile and exchange values with `tile_shfl` instead of `@localmem` and
+`@synchronize`: the 2D weak form, the 2D half-sweep flux differencing
+(each two-point flux computed once, cyclically, for uniform control
+flow) and the 3D slab kernel. "weak/node localmem tile_barrier" keeps
+the local memory and replaces `@synchronize` with `tile_barrier`. The
+kernels live in benchmark/dgsem_tiles.jl, which is only included if
+KernelAbstractions defines `tile_shfl`, so the suite still runs on
+versions without tiles.
+
+Assisted-by: Claude Code (Opus 5.5)
+```
+vchuravy
+added a commit
+that referenced
+this pull request
+Oct 11, 2026
+DGSEM benchmarks: variants with tiles
+…
+a5c8758
+```
+With a KernelAbstractions that has tiles (#864), add DGSEM kernels in
+which the N² work-items of an element (2D) or of a slab (3D) form a
+tile and exchange values with `tile_shfl` instead of `@localmem` and
+`@synchronize`: the 2D weak form, the 2D half-sweep flux differencing
+(each two-point flux computed once, cyclically, for uniform control
+flow) and the 3D slab kernel. "weak/node localmem tile_barrier" keeps
+the local memory and replaces `@synchronize` with `tile_barrier`. The
+kernels live in benchmark/dgsem_tiles.jl, which is only included if
+KernelAbstractions defines `tile_shfl`, so the suite still runs on
+versions without tiles.
+
+Assisted-by: Claude Code (Opus 5.5)
+```
+vchuravy
+added a commit
+that referenced
+this pull request
+Oct 11, 2026
+DGSEM benchmarks: variants with tiles
+…
+74f036b
+```
+With a KernelAbstractions that has tiles (#864), add DGSEM kernels in
+which the N² work-items of an element (2D) or of a slab (3D) form a
+tile and exchange values with `tile_shfl` instead of `@localmem` and
+`@synchronize`: the 2D weak form, the 2D half-sweep flux differencing
+(each two-point flux computed once, cyclically, for uniform control
+flow) and the 3D slab kernel. "weak/node localmem tile_barrier" keeps
+the local memory and replaces `@synchronize` with `tile_barrier`. The
+kernels live in benchmark/dgsem_tiles.jl, which is only included if
+KernelAbstractions defines `tile_shfl`, so the suite still runs on
+versions without tiles.
+
+Assisted-by: Claude Code (Opus 5.5)
+```
+vchuravy
+added a commit
+that referenced
+this pull request
+Oct 11, 2026
+DGSEM benchmarks: variants with tiles
+…
+e133135
+```
+With a KernelAbstractions that has tiles (#864), add DGSEM kernels in
+which the N² work-items of an element (2D) or of a slab (3D) form a
+tile and exchange values with `tile_shfl` instead of `@localmem` and
+`@synchronize`: the 2D weak form, the 2D half-sweep flux differencing
+(each two-point flux computed once, cyclically, for uniform control
+flow) and the 3D slab kernel. "weak/node localmem tile_barrier" keeps
+the local memory and replaces `@synchronize` with `tile_barrier`. The
+kernels live in benchmark/dgsem_tiles.jl, which is only included if
+KernelAbstractions defines `tile_shfl`, so the suite still runs on
+versions without tiles.
+
+Assisted-by: Claude Code (Opus 5.5)
+```
+vchuravy
+and others
+added 2 commits
+October 12, 2026 09:16
+KernelInterface: sub-group shuffles and votes
+…
+aa64cc5
+```
+Add `shfl`, `shfl_up` and `shfl_xor` next to `shfl_down`, their variants within segments of
+a `width`, and the votes `sub_group_any`, `sub_group_all` and `sub_group_ballot`. Back ends
+implement the shuffles for their native primitive types; other primitive types are shuffled
+as `UInt32` or `UInt64` words and `isbits` structs field by field, with `supports_shuffle`
+derived accordingly.
+
+Which work-items form a sub-group stays unspecified. Back ends that form them from
+consecutive work-items report `supports_linear_subgroups`, and those whose sub-groups can
+communicate in control flow that differs between the sub-groups of a work-group report
+`supports_independent_subgroups`. The testsuite computes the expected results from the
+sub-groups that formed, so that it runs without either guarantee.
+
+The POCL back end implements the shuffles and votes with SPIRVIntrinsics, for widths of up
+to 64 so that the ballot covers every lane. PoCL forms sub-groups from consecutive
+work-items, but executes sub-group operations as work-group barriers, so it reports linear
+but not independent sub-groups.
+
+Co-authored-by: Tim Besard <tim@juliahub.com>
+```
+KernelInterface: sub-group reductions and scans
+…
+b6903d2
+```
+Add `sub_group_reduce`, `sub_group_scan` and `sub_group_exclusive_scan`, in the order of
+the lanes, for associative operators that needn't be commutative. The fallbacks are built
+on the shuffles. Back ends may implement them natively per operator and type, as long as the
+result is the documented one, except that floating-point `+` and `*` may be reassociated.
+
+The POCL back end uses PoCL's native reductions and scans where they have Julia's
+semantics: `+` on integers and floats, and `min`/`max` on integers.
+
+Co-authored-by: Tim Besard <tim@juliahub.com>
+```
+maleadt
+force-pushed
+the
+tb/ka-tiles
+branch
+from
+214d8c3 to
+7ef7426
+Compare
+October 12, 2026 07:52
+maleadt
+changed the title
+Add tiles: @kernel tile and @kernel tile=N
+Add tiles: @kernel tile
+Oct 12, 2026
+maleadt
+force-pushed
+the
+tb/ka-tiles
+branch
+from
+7ef7426 to
+5c389bb
+Compare
+October 12, 2026 08:09
+maleadt
+changed the title
+Add tiles: @kernel tile
+Add tiles
+Oct 12, 2026
+maleadt
+force-pushed
+the
+tb/ka-tiles
+branch
+from
+5c389bb to
+8569193
+Compare
+October 12, 2026 08:14
+maleadt
+force-pushed
+the
+tb/ka-tiles
+branch
+from
+8569193 to
+41fe4ff
+Compare
+October 12, 2026 08:55
+maleadt
+force-pushed
+the
+tb/ka-tiles
+branch
+from
+41fe4ff to
+3423cab
+Compare
+October 12, 2026 09:08
+maleadt
+and others
+added 7 commits
+October 12, 2026 11:42
+KernelInterface: shuffle structs as packed words
+…
+c497ccd
+```
+Structs and tuples were shuffled field by field, a shuffle per primitive
+field, so that e.g. an `NTuple{2, Float16}` took two. Pack their fields
+into `UInt32` words instead, with fields of less than 4 bytes sharing a
+word, and shuffle the words through `shfl_word_tuple`. A backend can
+implement that to exchange all words at once: on PoCL, where every
+shuffle is a work-group barrier, that would help, once its CPU device
+accepts vector shuffles from SPIR-V.
+
+The generated fallbacks also weren't inlined: `@inline` on a generated
+function doesn't apply to a body that the generator returns with an
+explicit `return`, so shuffling an `SVector` in a larger kernel left a
+call, with the value passed through memory. They now mark their bodies
+for inlining.
+```
+KernelInterface: partitionable sub-groups
+…
+9e6a0ca
+```
+Tiles narrower than a sub-group have to share it, and to be useful they
+have to be able to diverge from each other, like CUDA's
+`tiled_partition<N>`. Add the votes, collectives and barrier within
+segments of `width` lanes (the shuffles already had a `width`), and
+`supports_partitionable_subgroups`: whether a sub-group can be
+partitioned into segments that diverge independently, so that only the
+work-items of a segment have to execute these together. It extends
+`supports_independent_subgroups` to segments, and implies it.
+
+The fallbacks build on the functions without a `width`, so that they
+are correct wherever the whole sub-group executes them. Backends that
+report partitionable sub-groups have to make them work for a segment
+alone: CUDA needs a mask of the segment's lanes, other backends a ballot
+that only reports active lanes and a barrier that a segment can execute.
+OpenCL and Metal have no barrier for part of a sub-group, so there it
+takes hardware that executes a sub-group in lock-step, like Intel's and
+Apple's GPUs, and a fence. PoCL never reports it, as its sub-group
+functions are work-group barriers.
+
+The shuffles with a `width` of other types now shuffle `UInt32` words
+with a `width`, so that a backend's shuffles with a `width` handle them.
+```
+POCL: shuffle packed structs with vector shuffles
+…
+8d7ce1f
+```
+Every shuffle on PoCL is a work-group barrier, so a struct packed into
+words cost a barrier per word: tile kernels shuffling an `SVector` were
+several times slower than ones using local memory. Exchange the words
+with the vector shuffles of `SPV_INTEL_subgroups`, a barrier per up to
+16 words, which PoCL's CPU device accepts with `cl_intel_subgroups`
+since pocl/pocl#2394. Four shuffles of an `SVector{4, Float32}` over 4M
+work-items take 1.7 ms instead of 4.6 ms.
+
+KernelInterface gets `shuffle_source`, the lane a shuffle reads from,
+for backends that exchange the words with a shuffle from a lane.
+```
+[TEMP] Test the back ends' sub-group branches on Buildkite
+c46beae
+Add @groupreduce and @groupscan
+…
+ae61655
+```
+Work-group reductions and scans for `@kernel`, as collectives like `@synchronize`: they are
+statements of their own that every work-item of the workgroup reaches, and the split of the
+kernel body makes the work-items that pad a partial workgroup take part, contributing the
+neutral element without evaluating the value. The value is converted to the type of
+`neutral` before the call, so that a union-typed value doesn't split the collective, and
+`neutral` is evaluated once. The upper bound of a dynamic workgroup size is the keyword
+`groupsize`.
+
+`@groupreduce` needs a commutative operator, `@groupscan` only an associative one, in the
+order of `@index(Local, Linear)`. Both use local memory.
+
+Co-authored-by: Tim Besard <tim@juliahub.com>
+```
+Reduce sub-groups first in @groupreduce where the backend can
+…
+8fe0876
+```
+On backends with sub-groups, `@groupreduce` reduces every sub-group with
+`KernelInterface.sub_group_reduce`, which backends can implement natively, and then the
+results of the sub-groups. That only relies on the sub-group ids, so it needs neither linear
+nor independent sub-groups.
+
+KernelAbstractions picks the algorithm instead of a user-facing option: kernels that use
+collectives get the backend's sub-group capabilities in their `CompilerMetadata`, and use
+the sub-groups for types the backend can shuffle. Floating-point types need the backend's
+support for that type, since a native shuffle may be selected by type alone; other
+primitive types and structs are shuffled as packed words. Kernels without collectives don't
+query the capabilities.
+
+Co-authored-by: Tim Besard <tim@juliahub.com>
+```
+Add tiles
+…
+23d70e6
+```
+A kernel constructed with a tile width, `f(backend; tile = N)`, divides its workgroups into
+tiles of `N` consecutive work-items (by `@index(Local, Linear)`), like CUDA's
+`tiled_partition<N>`. The work-items of a tile communicate with operations that take the tile
+(`tile_shfl` and its variants, `tile_any`, `tile_all`, `tile_ballot`, `tile_reduce`,
+`tile_scan`, `tile_exclusive_scan` and `tile_barrier`), in control flow that only has to be
+uniform over the tile. `@tile()` returns the work-item's tile and lane, and `@index(Tile)` the
+global index of its tile.
+
+Tiles aren't declared in the kernel: what sets a kernel with tiles apart is its width, which
+the host needs for the launch geometry, and which is passed when the kernel is constructed.
+A kernel that uses `@tile()` or `@index(Tile)` has to get one; the `@kernel` macro notes that
+use, so that construction rejects a missing width. There is no default: the sub-group width
+differs between backends (32 or 64 on AMD GPUs), so kernels name the width they're written
+for. The width is a type parameter of `Kernel` (`tile_width(kernel)`) and reaches the device
+through the kernel's `CompilerMetadata`, where `tile_width(t)` is a constant.
+
+Tiles are a capability: a power-of-two `N` of at most the sub-group width `W`, any number of
+tiles per workgroup, and tiles that diverge independently, also where several share a
+sub-group (KernelInterface's segments). `supports_tiles(backend, N)` reports it, and
+constructing a kernel with tiles a backend doesn't support is an error. All GPU backends
+support widths up to 32. The CPU backend has no tiles, as its sub-group functions are
+work-group barriers, which can't diverge. Falling back to a tile per workgroup there would
+leak into how kernels choose their workgroup size, and be slower than a kernel using local
+memory, which is what such backends need instead.
+
+The ndrange can have several dimensions, e.g. one per index of the nodes of an element, if the
+workgroups divide it into whole tiles. Such kernels are launched on a 1-D grid, so that the
+tiles stay on the backend's sub-groups. Without an explicit workgroup size, the launch picks
+one that does; construction and launch check the geometry before compiling.
+```
+maleadt
+force-pushed
+the
+tb/ka-tiles
+branch
+from
+3423cab to
+23d70e6
+Compare
+October 12, 2026 09:43
+Base automatically changed from
+vc/groupreduce
+to
+main
+October 12, 2026 19:21
+maleadt
+added
+the
+kernels
+Writing and compiling kernels: kernel language, intrinsics, codegen, back-end interface.
+label
+Oct 19, 2026
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+kernels
+Writing and compiling kernels: kernel language, intrinsics, codegen, back-end interface.
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

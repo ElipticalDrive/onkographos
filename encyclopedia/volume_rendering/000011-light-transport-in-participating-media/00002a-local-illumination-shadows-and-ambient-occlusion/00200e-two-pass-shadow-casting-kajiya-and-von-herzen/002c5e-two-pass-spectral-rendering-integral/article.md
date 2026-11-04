@@ -1,0 +1,151 @@
+# Two-pass Spectral Rendering Integral
+
+Also called: Noordmans Spectral Shadow Algorithm, Spectral Two-Pass Shadow Casting
+
+## Overview
+The Two-pass Spectral Rendering Integral is a method for computing volumetric shadows in participating media by adapting the Kajiya and von Herzen two-pass algorithm to spectral representation [S1, unofficial]. It separates shadow computation (illumination phase) from radiance accumulation (radiation phase), allowing for the simulation of complex spectral effects such as fluorescence and phosphorescence [S1, unofficial]. It is distinguished from its parent [Two-Pass Shadow Casting (Kajiya and Von Herzen)](2196-two-pass-shadow-casting-kajiya-and-von-herzen.md) by its explicit handling of wavelength-dependent opacity and emission spectra.
+
+## How it works
+**Inputs:**
+*   Volume density field $\rho_m(x)$ for each material $m$.
+*   Spectral absorption attributes $\kappa_m(\lambda)$ for each material $m$.
+*   Incident light spectrum $I_t(x, \lambda)$ at the volume entry.
+*   Local emission spectrum $I_e(x, \lambda)$.
+*   Step size $\Delta x$.
+*   Wavelengths $\lambda$.
+
+**Outputs:**
+*   Final radiance $I_r(x, \lambda)$ for each sample point.
+
+**Data Structures:**
+*   Spectral opacity $\tau(x, \lambda)$: Computed per sample point.
+*   Transmitted light $I_t(x, \lambda)$: Accumulator for the illumination phase.
+*   Backward irradiance $I_b(x, \lambda)$: Accumulator for the radiation phase.
+*   Radiance $I_r(x, \lambda)$: Output accumulator.
+
+**Spectral Opacity Definition:**
+For a position $x$ with $M$ materials, the spectral opacity is defined as [S1, unofficial]:
+$$ \tau(x, \lambda) = \sum_{m=1}^M \rho_m(x) \cdot \kappa_m(\lambda) $$
+
+**Algorithm Steps:**
+
+1.  **Illumination Phase (Shadow Computation):**
+    Propagate light flux through the volume using discrete ray casting from front to back. For each sample step $\Delta x$ at position $x$, update the transmitted light $I_t$ [S1, unofficial]:
+    $$ I_t(x + \Delta x, \lambda) = I_t(x, \lambda) \cdot (1 - \Delta x \cdot \tau(x, \lambda)) $$
+    The resulting $I_t$ at the end of the ray represents the shadowed incident light for the radiation phase. Note that the term $(1 - \Delta x \cdot \tau(x, \lambda))$ is an approximation [S1, unofficial].
+
+2.  **Radiation Phase (Radiance Accumulation):**
+    Accumulate radiance using back-to-front ray casting. For each sample step $\Delta x$ at position $x$, update the radiance $I_r$ based on the local emission $I_e$ and the backward irradiance $I_b$ (which represents the light arriving from the previous sample in the back-to-front direction, effectively the shadowed light computed in phase 1) [S1, unofficial]:
+    $$ I_b(x+\Delta x, \lambda) = I_r(x, \lambda) = I_e(x, \lambda) + I_b(x, \lambda) \cdot (1 - \Delta x \cdot \tau(x, \lambda)) $$
+    Here, $I_b(x, \lambda)$ acts as the accumulated background/transmitted light term. The term $(1 - \Delta x \cdot \tau(x, \lambda))$ is again an approximation [S1, unofficial].
+
+**Emission Function:**
+The local emission $I_e(x, \lambda)$ is split into two components [S1, unofficial]:
+*   **Elastic Scattering:** Scattering in a chromatic medium where each material $m$ is associated with a specific spectral band, facilitating a spectral transfer function.
+*   **Inelastic Scattering:** Absorption of light at one wavelength and re-emission at another, simulating fluorescence and phosphorescence.
+
+**Pitfalls:**
+*   The term $(1 - \Delta x \cdot \tau(x, \lambda))$ used in both phases is only an approximation of the exponential attenuation $e^{-\tau \Delta x}$. For large $\tau$ or $\Delta x$, this can lead to inaccuracies [S1, unofficial].
+*   The method relies on a local illumination model (e.g., Phong) for scattered radiance from external illumination, which may not capture global illumination effects accurately [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def two_pass_spectral_rendering(volume, materials, incident_light, step_size, wavelengths):
+    """
+    volume: 3D grid of material indices or densities
+    materials: list of material objects with get_absorption(wavelength)
+    incident_light: function or array giving I_t at entry
+    step_size: float Delta x
+    wavelengths: list of lambda values
+    """
+    # Precompute spectral opacity for all voxels
+    # tau[x, y, z, w_idx] = sum(rho_m * kappa_m(lambda_w))
+    tau = compute_spectral_opacity(volume, materials, wavelengths)
+    
+    num_samples = len(wavelengths)
+    num_voxels = volume.shape[0] * volume.shape[1] * volume.shape[2]
+    
+    # Phase 1: Illumination (Front-to-Back)
+    # I_t accumulates transmitted light
+    I_t = np.zeros((num_voxels, num_samples))
+    I_t[0] = incident_light # Initial incident light at entry
+    
+    for i in range(1, num_voxels):
+        # Approximation: I_t(x + dx) = I_t(x) * (1 - dx * tau(x))
+        # Note: The source formula uses tau(x) for the step from x to x+dx
+        attenuation = 1.0 - step_size * tau[i-1] # tau at previous voxel
+        # Clamp to avoid negative values due to approximation
+        attenuation = np.maximum(attenuation, 0.0)
+        I_t[i] = I_t[i-1] * attenuation
+        
+    # Phase 2: Radiation (Back-to-Front)
+    # I_b accumulates backward irradiance (shadowed light)
+    # I_r is the final radiance
+    I_b = np.zeros((num_voxels, num_samples))
+    I_r = np.zeros((num_voxels, num_samples))
+    
+    # Initialize I_b at the back of the ray (no incoming light from behind)
+    # Assuming no background light from behind, I_b at last voxel is 0
+    # Or if there is background, it should be added here.
+    # The source implies I_b(x) is the irradiance arriving from previous sample.
+    # In back-to-front, the "previous" sample is the one further back.
+    # So I_b at the last voxel (back) is 0 (or background).
+    
+    for i in range(num_voxels - 1, -1, -1):
+        # Local emission I_e(x, lambda)
+        I_e = compute_emission(volume[i], wavelengths) # Includes elastic and inelastic
+        
+        # Attenuation factor
+        attenuation = 1.0 - step_size * tau[i]
+        attenuation = np.maximum(attenuation, 0.0)
+        
+        # I_b(x+dx) in source notation corresponds to I_b at the next voxel in back-to-front order
+        # Let's align with source: I_b(x+dx) = I_r(x) = I_e(x) + I_b(x) * (1 - dx * tau(x))
+        # This notation is confusing. Let's interpret physically:
+        # Radiance at x = Emission at x + Transmitted Radiance from behind x.
+        # Transmitted Radiance from behind = I_b_behind * (1 - dx * tau(x))
+        # So if we iterate back-to-front, let I_b_prev be the accumulated radiance from behind.
+        
+        if i == num_voxels - 1:
+            I_b_prev = 0.0 # No light from behind
+        else:
+            I_b_prev = I_r[i+1] # Radiance from the voxel further back
+            
+        I_r[i] = I_e + I_b_prev * attenuation
+        I_b[i] = I_r[i] # Store as backward irradiance for next step (which is actually the next in front-to-back, but we are going back-to-front)
+        
+    return I_r
+
+def compute_spectral_opacity(volume, materials, wavelengths):
+    tau = np.zeros((volume.shape[0], volume.shape[1], volume.shape[2], len(wavelengths)))
+    for x in range(volume.shape[0]):
+        for y in range(volume.shape[1]):
+            for z in range(volume.shape[2]):
+                mat_idx = volume[x, y, z]
+                for w_idx, lam in enumerate(wavelengths):
+                    rho = get_density(volume, x, y, z, mat_idx) # [G] Assuming density retrieval
+                    kappa = materials[mat_idx].get_absorption(lam)
+                    tau[x, y, z, w_idx] = rho * kappa
+    return tau
+
+def compute_emission(voxel_data, wavelengths):
+    # [G] Placeholder for specific emission logic based on elastic/inelastic
+    # Returns array of size len(wavelengths)
+    return np.zeros(len(wavelengths))
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot W)$, where $N$ is the number of sample points along rays and $W$ is the number of wavelengths. Two passes are required.
+*   **Memory Complexity:** $O(N \cdot W)$ for storing opacity and radiance/irradiance buffers.
+*   **Strengths:** Allows for spectral effects like fluorescence and material-specific absorption. Simple to implement as it builds on the standard two-pass approach.
+*   **Limitations:** The linear approximation $(1 - \Delta x \cdot \tau)$ can be inaccurate for high opacity or large step sizes. Relies on local illumination model for scattered light, missing global illumination effects.
+*   **When to use:** When spectral accuracy is required for shadows and emission, and global illumination is not critical or is approximated locally.
+*   **When not to use:** When high accuracy in shadow boundaries is needed with large step sizes, or when global illumination effects are significant.
+
+## Background
+The method was proposed by Noordmans et al., who adopted the Kajiya and von Herzen two-pass algorithm for volumetric shadows and adapted the notion of opacity to a spectral representation [S1, unofficial]. It is described in the context of local and global illumination in the volume rendering integral.
+
+## Sources
+[S1] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (unofficial)

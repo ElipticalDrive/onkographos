@@ -1,0 +1,196 @@
+--- v001.md
++++ v002.md
+@@ -2,87 +2,112 @@
+ Also called: Bounding Geometry Rasterization, Raster-based Bounding Box Culling, Rasterizing Bounding Geometry
+ ## Overview
+-This method exploits hardware-accelerated rasterization to skip over empty space in volume rendering, avoiding the overhead of explicit tree traversal on the GPU [S1, unofficial]. It sets itself apart from sibling methods like [Early Shader Termination](969-early-shader-termination.md) by using the fragment positions of rasterized bounding geometry faces as the start and end points for ray casting, which can lead to fewer look-ups into the empty-space skipping data structure compared to traditional octree structures [S1, unofficial].
++This method exploits hardware-accelerated rasterization to skip over empty space in volume rendering, avoiding the overhead of explicit tree traversal on the GPU [S2, unofficial]. It sets itself apart from sibling methods like [Early Shader Termination](969-early-shader-termination.md) by using the fragment positions of rasterized bounding geometry faces as the start and end points for ray casting, which can lead to fewer look-ups into the empty-space skipping data structure compared to traditional octree structures [S2, unofficial].
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Bounding geometries (e.g., bounding boxes of leaf nodes of a tree structure) [S1, unofficial].
+-- Output: Ray casting start and end points derived from fragment positions [S1, unofficial].
++- Input: Volume texture, coarse grid dimensions, threshold iso value, and bounding geometry (e.g., leaf node bounding boxes) [S1, unofficial][S2, unofficial].
++- Output: Ray casting start and end points derived from fragment positions [S1, unofficial][S2, unofficial].
+ 
+ **Data Structures:**
+-- Bounding Geometry: Typically bounding boxes of leaf nodes [S1, unofficial].
+-- Fragment Buffer: Stores fragment positions of front and back faces [S1, unofficial].
++- `gridTex`: 3D texture where each voxel contains the maximum iso value of a coarse grid cell [S1, unofficial].
++- Bounding Geometry: Triangle mesh (quads) generated at boundaries between active and inactive grid cells [S1, unofficial].
++- Depth Buffers: Offscreen buffers storing minimum and maximum depth values per fragment/pixel [S1, unofficial].
+ 
+ **Steps:**
+-1. Rasterize the bounding geometries (e.g., bounding boxes of leaf nodes) using hardware-accelerated rasterization [S1, unofficial].
+-2. Retrieve the fragment positions of the front and back faces of the rasterized bounding geometry [S1, unofficial].
+-3. Use the fragment position of the front face as the start point for ray casting [S1, unofficial].
+-4. Use the fragment position of the back face as the end point for ray casting [S1, unofficial].
+-5. Cast rays between the start and end points to sample the volume [S1, unofficial].
++1. Initialization: Generate `gridTex` by downsampling the volume texture, storing the maximum iso value per coarse cell [S1, unofficial].
++2. Thresholding: Mark a grid cell as active if its maximum iso value exceeds the threshold [S1, unofficial].
++3. Geometry Generation: For each pair of neighboring cells in `gridTex`, generate a quad if one is active and the other is inactive [S1, unofficial].
++4. First Pass: Rasterize the bounding geometry to an offscreen buffer, computing and storing the minimum and maximum depth values for each pixel [S1, unofficial].
++5. Second Pass: Rasterize the front faces of the geometry to the main buffer. Discard fragments that are not at the minimum depth value [S1, unofficial].
++6. Ray Setup: Compute the ray start and end positions from the minimum and maximum depth values stored in the first pass [S1, unofficial].
++7. Marching: Cast and march the ray through the volume using the computed start and end points [S1, unofficial].
+ 
+ **Parameters:**
+-- Not given in the sources.
++Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-- Not given in the sources.
++Not given in the sources.
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode for Rasterizing Bounding Geometry for Empty Space Skipping
+-# Note: This is a high-level representation based on the description.
+-# Actual implementation details (e.g., specific rasterization calls) are not provided in the sources.
++import math
+ 
+-def rasterize_bounding_geometry(bounding_boxes):
+-    # Rasterize the bounding boxes
+-    # This step relies on hardware-accelerated rasterization
+-    # The output is a set of fragments with positions
+-    fragments = hardware_rasterize(bounding_boxes)
+-    
+-    # Group fragments by pixel/screen location
+-    # For each pixel, we expect at least two fragments: front and back
+-    pixel_fragments = group_fragments_by_pixel(fragments)
+-    
+-    ray_data = []
+-    for pixel_id, frags in pixel_fragments.items():
+-        if len(frags) < 2:
+-            # Handle degenerate case: no valid ray segment
+-            continue
+-        
+-        # Sort fragments by depth to identify front and back faces
+-        # Assuming fragments have a 'depth' attribute
+-        sorted_frags = sort_by_depth(frags)
+-        
+-        front_face = sorted_frags[0]
+-        back_face = sorted_frags[-1]
+-        
+-        # Use fragment positions as start and end points
+-        start_point = front_face.position
+-        end_point = back_face.position
+-        
+-        ray_data.append({
+-            'pixel_id': pixel_id,
+-            'start': start_point,
+-            'end': end_point
+-        })
+-    
+-    return ray_data
++def compute_grid_tex(volume, coarse_size):
++    """Downsample volume to gridTex storing max iso per coarse cell."""
++    vx, vy, vz = len(volume), len(volume[0]), len(volume[0][0])
++    gx, gy, gz = vx // coarse_size[0], vy // coarse_size[1], vz // coarse_size[2]
++    grid_tex = [[[0.0 for _ in range(gz)] for _ in range(gy)] for _ in range(gx)]
++    for x in range(gx):
++        for y in range(gy):
++            for z in range(gz):
++                max_val = -math.inf
++                for dx in range(coarse_size[0]):
++                    for dy in range(coarse_size[1]):
++                        for dz in range(coarse_size[2]):
++                            val = volume[x*coarse_size[0]+dx][y*coarse_size[1]+dy][z*coarse_size[2]+dz]
++                            if val > max_val: max_val = val
++                grid_tex[x][y][z] = max_val
++    return grid_tex
+ 
+-def cast_rays(ray_data, volume_data):
+-    # Cast rays between start and end points
+-    for ray in ray_data:
+-        start = ray['start']
+-        end = ray['end']
+-        
+-        # Sample volume along the ray
+-        # This step is implementation-specific and not detailed in the sources
+-        samples = sample_volume_along_ray(start, end, volume_data)
+-        
+-        # Process samples (e.g., compositing)
+-        # This step is implementation-specific and not detailed in the sources
+-        process_samples(samples)
++def generate_bounding_geometry(grid_tex, threshold):
++    """Generate quads at boundaries between active and inactive cells."""
++    gx, gy, gz = len(grid_tex), len(grid_tex[0]), len(grid_tex[0][0])
++    active = [[[grid_tex[x][y][z] > threshold for z in range(gz)] for y in range(gy)] for x in range(gx)]
++    quads = []
++    for x in range(gx):
++        for y in range(gy):
++            for z in range(gz):
++                if x+1 < gx and active[x][y][z] != active[x+1][y][z]:
++                    quads.append([(x, y, z), (x+1, y, z), (x+1, y, z+1), (x, y, z+1)])
++                if y+1 < gy and active[x][y][z] != active[x][y+1][z]:
++                    quads.append([(x, y, z), (x, y+1, z), (x, y+1, z+1), (x, y, z+1)])
++                if z+1 < gz and active[x][y][z] != active[x][y][z+1]:
++                    quads.append([(x, y, z), (x, y, z+1), (x+1, y, z+1), (x+1, y, z)])
++    return quads
++
++def rasterize_first_pass(quads, width, height):
++    """First pass: compute min and max depth per pixel."""
++    min_depth = [[float('inf')] * width for _ in range(height)]
++    max_depth = [[float('-inf')] * width for _ in range(height)]
++    for quad in quads:
++        for v in quad:
++            sx, sy, sz = v[0], v[1], v[2]
++            if 0 <= sx < width and 0 <= sy < height:
++                if sz < min_depth[sy][sx]: min_depth[sy][sx] = sz
++                if sz > max_depth[sy][sx]: max_depth[sy][sx] = sz
++    return min_depth, max_depth
++
++def rasterize_second_pass(min_depth, max_depth, width, height):
++    """Second pass: render front faces, discard if not at min depth."""
++    rays = []
++    for y in range(height):
++        for x in range(width):
++            if min_depth[y][x] != float('inf'):
++                rays.append({'pixel': (x, y), 'start': min_depth[y][x], 'end': max_depth[y][x]})
++    return rays
++
++def march_ray(start, end, volume):
++    """March ray through volume."""
++    samples = []
++    steps = max(1, int(abs(end - start)))
++    for i in range(steps):
++        t = i / steps
++        depth = start + t * (end - start)
++        samples.append(volume[depth])
++    return compositing(samples)
++
++def compositing(samples):
++    """Standard alpha compositing."""
++    color = [0.0, 0.0, 0.0]
++    alpha = 0.0
++    for s in samples:
++        c, a = s.color, s.alpha
++        color = [color[i] + c[i] * (1 - alpha) for i in range(3)]
++        alpha += a * (1 - alpha)
++    return color
+ ```
+-
+ ## Subtopics
+ 
+ ### SparseLeap Rasterization
+-SparseLeap Rasterization is a variant where the occupancy geometry is generated from a lazily constructed occupancy-histogram tree. Each node in this tree has one of three occupancy classes: empty (if completely empty), non-empty (if non-empty), or unknown (if such information is not yet known) [S1, unofficial]. It utilizes rasterization hardware to avoid hierarchy traversal on the GPU by only traversing per-pixel lists of non-empty ray segments produced through rasterizing occupancy geometry [S1, unofficial]. This approach optimizes both the number of look-ups into the data structure used for empty-space skipping and the number of samples along each viewing ray [S1, unofficial]. An advantage of SparseLeap over other empty-space skipping techniques is that it is agnostic of the data structure used for managing volume data (e.g., page-table hierarchies or octrees) and can be used in conjunction with them [S1, unofficial].
++SparseLeap Rasterization is a variant where the occupancy geometry is generated from a lazily constructed occupancy-histogram tree [S2, unofficial]. Each node in this tree has one of three occupancy classes: empty (if completely empty), non-empty (if non-empty), or unknown (if such information is not yet known) [S2, unofficial]. It utilizes rasterization hardware to avoid hierarchy traversal on the GPU by only traversing per-pixel lists of non-empty ray segments produced through rasterizing occupancy geometry [S2, unofficial]. This approach optimizes both the number of look-ups into the data structure used for empty-space skipping and the number of samples along each viewing ray [S2, unofficial]. An advantage of SparseLeap over other empty-space skipping techniques is that it is agnostic of the data structure used for managing volume data (e.g., page-table hierarchies or octrees) and can be used in conjunction with them [S2, unofficial].
+ 
+ ## Operating characteristics
+@@ -91,12 +116,11 @@
+ - **Measured Performance:** Not given in the sources.
+ - **Scaling:** Not given in the sources.
+-- **Strengths:** Can lead to fewer look-ups into the empty-space skipping data structure during rendering when compared to octree structures [S1, unofficial]. Avoids hierarchy traversal on the GPU [S1, unofficial].
++- **Strengths:** Can lead to fewer look-ups into the empty-space skipping data structure during rendering when compared to octree structures [S2, unofficial]. Avoids hierarchy traversal on the GPU [S2, unofficial].
+ - **Limitations:** Not given in the sources.
+-- **When to Use:** When hardware-accelerated rasterization is available and efficient empty-space skipping is desired [S1, unofficial].
++- **When to Use:** When hardware-accelerated rasterization is available and efficient empty-space skipping is desired [S2, unofficial].
+ - **When Not to Use:** Not given in the sources.
+-
+ ## Background
+-The method was proposed by Liu et al. [LCDP13] and further utilized by Hadwiger et al. [HAAB+ 18] [S1, unofficial]. It is part of the broader effort to handle empty-space skipping and cache residency in volume rendering [S1, unofficial]. The technique is described in the context of scalable web-based volume rendering of large biomedical datasets [S1, unofficial].
+-
++The method was proposed by Liu et al. [LCDP13] and further utilized by Hadwiger et al. [HAAB+ 18] [S2, unofficial]. It is part of the broader effort to handle empty-space skipping and cache residency in volume rendering [S2, unofficial]. The technique is described in the context of scalable web-based volume rendering of large biomedical datasets [S2, unofficial].
+ ## Sources
+-[S1] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)+[S1] implement volume rendering with object order empty space skipping, https://stackoverflow.com/questions/12216008/implement-volume-rendering-with-object-order-empty-space-skipping, fetched 2026-10-26 (unofficial)
++[S2] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)

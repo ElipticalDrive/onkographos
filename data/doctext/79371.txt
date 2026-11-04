@@ -1,0 +1,584 @@
+# Morton
+  A Go library designed to implement N-dimensional coordinate encoding/decoding to/from Morton Order (Z-Order Curve).
+
+  What makes this library unique is its dynamic nature. Currently, it supports 2, 3, and 4 dimensions. The ultimate goal is for this library to support as many dimensions can fit within the type width (more on this later). It accomplishes this by generating its components at creation, rather than using static tables and hardcoded magic bits.
+
+## How Do I Use Morton?
+  Please see the examples/ directory in this repository for a succinct and simple example of how to use this library.
+
+## What Does This Library Do?
+  This library encodes and decodes N-dimensional coordinates in the context of Z-Order Curve ordering.
+
+## Morton Order/Z-Order Curve
+  This type of encoding is used for ordering data, and is accomplished by interleaving the bits of each coordinate component. In 3 dimensions, {1,1,1} becomes 0b000000111, and {2,3,4} becomes 0b100011010, and so on. Here's another way to describe the 3 dimensional Morton encoded result: 0bzyxzyxzyxzyx, hence bit interleaving.
+
+### Encoding
+  The coordinate, {n1, n2, ...}, can be encoded into a single, memory saving, unsigned integer.
+
+  Therefore, encoding an N-dimensional coordinate can have a compressive effect, where N > 1.
+
+  This library generates lookup tables for use in encoding.
+
+### Decoding
+  An encoded Z-value 0b000000001 can be decoded to reveal its N-dimensional coordinate components, which you may have guessed, is {1, n2, ..., n9}.
+
+  This library generates magic bits for decoding. This process uses several bitwise operations on the encoded number, using these generated magic bits.
+
+## Whatever For?
+  While there are many possible uses for Morton encoding, I originally wrote this as an adjunct to a voxelization project of mine.
+
+  Without getting into specifics that are out of scope here, this library is being used in that particular project to encode the position of each node. This retains the coordinate information while saving a bunch of memory, as it reduces the original unsigned integer coordinate N-vector to a single unsigned integer.
+
+### morton.go
+```
+/*
+Morton implements Z-Order Curve encoding and decoding for N-dimensions, using lookup tables and magic bits respectively.
+
+In order to supply for N-dimensions, this library generates the magic bits used in decoding.  While this library does supply for N-dimensions, because this type of ordering uses bit interleaving for encoding it is limited by the width of the uint64 type divided by the number of dimensions (i.e., uint64/3 for 3 dimensions).
+*/
+package morton
+
+import (
+	"errors"
+	"fmt"
+)
+
+// A type for working with Morton lookup tables, and subsequent encoding and decoding.
+type Morton struct {
+	Dimensions uint8
+	Table      []uint64 // flat lookup: Table[dim*tableSize + val]
+	Magic      []uint64
+	tableSize  uint32
+}
+
+// Convenience function for creating a new Morton.
+func New(dimensions uint8, size uint32) *Morton {
+	m := new(Morton)
+	m.Create(dimensions, size)
+	return m
+}
+
+// Creates lookup table and magic bits.
+func (m *Morton) Create(dimensions uint8, size uint32) {
+	m.CreateTable(dimensions, size)
+}
+
+// Creates the flat lookup table.
+func (m *Morton) CreateTable(dimensions uint8, length uint32) {
+	m.Dimensions = dimensions
+	m.Magic = MakeMagic(dimensions)
+	m.tableSize = length
+	m.Table = make([]uint64, uint32(dimensions)*length)
+	for i := uint8(0); i < dimensions; i++ {
+		start := uint32(i) * length
+		for j := uint32(0); j < length; j++ {
+			m.Table[start+j] = InterleaveBitsMagic(j, uint32(i), uint32(dimensions-1), m.Magic)
+		}
+	}
+}
+
+// Makes magic bits.
+func MakeMagic(dimensions uint8) []uint64 {
+	// Generate nth and ith bits variables
+	d := uint64(dimensions)
+	limit := 64/d + 1
+	nth := []uint64{0, 0, 0, 0, 0, 0}
+	for i := uint64(0); i < limit; i++ {
+
+		switch {
+		case i <= 32:
+			//32
+			nth[0] |= 1 << (i * d)
+			fallthrough
+		case i <= 16:
+			//16
+			nth[1] |= 3 << (i * (d << 1))
+			fallthrough
+		case i <= 8:
+			//8
+			nth[2] |= 0xf << (i * (d << 2))
+			fallthrough
+		case i <= 4:
+			//4
+			nth[3] |= 0xff << (i * (d << 3))
+			fallthrough
+		case i <= 2:
+			//2
+			nth[4] |= 0xffff << (i * (d << 4))
+			fallthrough
+		case i <= 1:
+			//1
+			nth[5] |= 0xffffff << (i * (d << 5))
+		}
+	}
+
+	return nth
+}
+
+// Decodes a Morton number.
+func (m *Morton) Decode(code uint64) []uint32 {
+	if m.Dimensions == 0 || len(m.Magic) == 0 {
+		return nil
+	}
+	result := make([]uint32, m.Dimensions)
+	m.DecodeInto(code, result)
+	return result
+}
+
+// Decodes a Morton number into a caller-provided buffer (zero allocations).
+func (m *Morton) DecodeInto(code uint64, result []uint32) {
+	if m.Dimensions == 0 || len(m.Magic) == 0 {
+		return
+	}
+	d := uint64(m.Dimensions)
+	for i := uint64(0); i < d; i++ {
+		r := (code >> i) & m.Magic[0]
+		for j := 0; j < len(m.Magic)-1; j++ {
+			r = (r ^ (r >> ((d - 1) * (1 << uint64(j))))) & m.Magic[j+1]
+		}
+		result[i] = uint32(r)
+	}
+}
+
+// Encodes a Morton number via lookup tables.
+func (m *Morton) Encode(vector []uint32) (result uint64, err error) {
+	if m.tableSize == 0 {
+		err = errors.New("no lookup table, please generate one via CreateTable()")
+		return
+	}
+
+	if len(vector) > int(m.Dimensions) {
+		err = errors.New("input vector slice length exceeds the number of dimensions, please regenerate via CreateTable()")
+		return
+	}
+
+	for k, v := range vector {
+		if v >= m.tableSize {
+			err = errors.New(fmt.Sprint("input vector component, ", k, " length exceeds the lookup table's size, please regenerate via CreateTable() and specify the appropriate table length"))
+			return
+		}
+
+		result |= m.Table[uint32(k)*m.tableSize+v]
+	}
+
+	return
+}
+
+// Interleave bits of a uint32.
+func InterleaveBits(value, offset, spread uint32) uint64 {
+	var result uint64
+
+	// Determine the minimum number of single shifts required. There's likely a better, and more efficient, way to do this.
+	n := value
+	limit := uint64(0)
+	for i := uint32(0); n != 0; i++ {
+		n = n >> 1
+		limit++
+	}
+
+	// Offset value for interleaving and reconcile types
+	v, o, s := uint64(value), uint64(offset), uint64(spread)
+	for i := uint64(0); i < limit; i++ {
+		// Interleave bits, bit by bit.
+		result |= (v & (1 << i)) << (i * s)
+	}
+	result = result << o
+
+	return result
+}
+
+// Interleave bits of a uint32 by magic.
+func InterleaveBitsMagic(value, offset, spread uint32, magic []uint64) uint64 {
+	v, o, s := uint64(value)&magic[len(magic)-1], uint64(offset), uint64(spread)
+	for i := len(magic) - 2; i >= 0; i-- {
+		j := uint64(i)
+		v = (v ^ (v << (s * (1 << j)))) & magic[j]
+	}
+	return v << o
+}
+```
+
+### morton_test.go
+```
+package morton
+
+import (
+	"fmt"
+	"testing"
+)
+
+func TestRoundTrip2D(t *testing.T) {
+	m := New(2, 1024)
+	cases := [][]uint32{
+		{0, 0},
+		{1, 0},
+		{0, 1},
+		{1, 1},
+		{1023, 9},
+		{512, 512},
+		{0, 1023},
+		{1023, 1023},
+	}
+	for _, c := range cases {
+		encoded, err := m.Encode(c)
+		if err != nil {
+			t.Fatalf("Encode(%v): %v", c, err)
+		}
+		decoded := m.Decode(encoded)
+		for i := range c {
+			if decoded[i] != c[i] {
+				t.Errorf("round-trip %v: got %v", c, decoded)
+				break
+			}
+		}
+	}
+}
+
+func TestRoundTrip3D(t *testing.T) {
+	m := New(3, 1024)
+	cases := [][]uint32{
+		{0, 0, 0},
+		{1, 1, 1},
+		{5, 3, 7},
+		{100, 200, 300},
+		{1023, 0, 0},
+		{0, 0, 1023},
+	}
+	for _, c := range cases {
+		encoded, err := m.Encode(c)
+		if err != nil {
+			t.Fatalf("Encode(%v): %v", c, err)
+		}
+		decoded := m.Decode(encoded)
+		for i := range c {
+			if decoded[i] != c[i] {
+				t.Errorf("round-trip %v: got %v", c, decoded)
+				break
+			}
+		}
+	}
+}
+
+func TestRoundTrip4D(t *testing.T) {
+	m := New(4, 512)
+	cases := [][]uint32{
+		{0, 0, 0, 0},
+		{1, 1, 1, 1},
+		{511, 472, 103, 7},
+		{0, 0, 0, 511},
+		{511, 0, 0, 0},
+	}
+	for _, c := range cases {
+		encoded, err := m.Encode(c)
+		if err != nil {
+			t.Fatalf("Encode(%v): %v", c, err)
+		}
+		decoded := m.Decode(encoded)
+		for i := range c {
+			if decoded[i] != c[i] {
+				t.Errorf("round-trip %v: got %v", c, decoded)
+				break
+			}
+		}
+	}
+}
+
+func TestKnownValues2D(t *testing.T) {
+	m := New(2, 4)
+	tests := []struct {
+		coords []uint32
+		want   uint64
+	}{
+		{[]uint32{0, 0}, 0},
+		{[]uint32{1, 0}, 1},
+		{[]uint32{0, 1}, 2},
+		{[]uint32{1, 1}, 3},
+		{[]uint32{3, 3}, 0xf},
+	}
+	for _, tt := range tests {
+		got, err := m.Encode(tt.coords)
+		if err != nil {
+			t.Fatalf("Encode(%v): %v", tt.coords, err)
+		}
+		if got != tt.want {
+			t.Errorf("Encode(%v) = %d, want %d", tt.coords, got, tt.want)
+		}
+	}
+}
+
+func TestKnownValues3D(t *testing.T) {
+	m := New(3, 2)
+	tests := []struct {
+		coords []uint32
+		want   uint64
+	}{
+		{[]uint32{0, 0, 0}, 0},
+		{[]uint32{1, 0, 0}, 1},
+		{[]uint32{0, 1, 0}, 2},
+		{[]uint32{0, 0, 1}, 4},
+		{[]uint32{1, 1, 1}, 7},
+	}
+	for _, tt := range tests {
+		got, err := m.Encode(tt.coords)
+		if err != nil {
+			t.Fatalf("Encode(%v): %v", tt.coords, err)
+		}
+		if got != tt.want {
+			t.Errorf("Encode(%v) = %d, want %d", tt.coords, got, tt.want)
+		}
+	}
+}
+
+func TestEncodeZeroCoordinates(t *testing.T) {
+	m := New(2, 4)
+	got, err := m.Encode([]uint32{0, 0})
+	if err != nil {
+		t.Fatalf("Encode({0,0}): %v", err)
+	}
+	if got != 0 {
+		t.Errorf("Encode({0,0}) = %d, want 0", got)
+	}
+}
+
+func TestEncodeErrorNoTables(t *testing.T) {
+	m := &Morton{}
+	_, err := m.Encode([]uint32{1, 2})
+	if err == nil {
+		t.Error("expected error for Encode with no tables")
+	}
+}
+
+func TestEncodeErrorVectorTooLong(t *testing.T) {
+	m := New(2, 4)
+	_, err := m.Encode([]uint32{1, 2, 3})
+	if err == nil {
+		t.Error("expected error for vector longer than dimensions")
+	}
+}
+
+func TestEncodeErrorValueTooLarge(t *testing.T) {
+	m := New(2, 4)
+	_, err := m.Encode([]uint32{5, 0})
+	if err == nil {
+		t.Error("expected error for value exceeding table size")
+	}
+}
+
+func TestDecodeZeroDimensions(t *testing.T) {
+	m := &Morton{}
+	result := m.Decode(42)
+	if result != nil {
+		t.Errorf("Decode with zero dimensions: got %v, want nil", result)
+	}
+}
+
+func TestDecodeEmptyMagic(t *testing.T) {
+	m := &Morton{Dimensions: 2}
+	result := m.Decode(42)
+	if result != nil {
+		t.Errorf("Decode with empty magic: got %v, want nil", result)
+	}
+}
+
+func TestNewConvenience(t *testing.T) {
+	m := New(3, 16)
+	if m.Dimensions != 3 {
+		t.Errorf("New dimensions = %d, want 3", m.Dimensions)
+	}
+	if len(m.Table) != 3*16 {
+		t.Errorf("New table length = %d, want %d", len(m.Table), 3*16)
+	}
+	if len(m.Magic) == 0 {
+		t.Error("New magic is empty")
+	}
+}
+
+func TestMakeMagicLength(t *testing.T) {
+	for d := uint8(2); d <= 8; d++ {
+		magic := MakeMagic(d)
+		if len(magic) != 6 {
+			t.Errorf("MakeMagic(%d) length = %d, want 6", d, len(magic))
+		}
+	}
+}
+
+func TestInterleaveBitsVsMagic(t *testing.T) {
+	cases := []struct {
+		name       string
+		dimensions uint8
+		values     []uint32
+	}{
+		{"2D", 2, []uint32{0, 1, 5, 42, 255, 1023}},
+		{"3D", 3, []uint32{0, 1, 5, 42, 255, 1023}},
+		{"4D", 4, []uint32{0, 1, 5, 42, 255, 511}},
+		{"5D", 5, []uint32{0, 1, 5, 42, 255, 511}},
+		{"6D", 6, []uint32{0, 1, 5, 42, 255, 511}},
+	}
+
+	for _, tc := range cases {
+		magic := MakeMagic(tc.dimensions)
+		spread := uint32(tc.dimensions - 1)
+
+		t.Run(tc.name, func(t *testing.T) {
+			for _, offset := range []uint32{0, 1} {
+				for _, v := range tc.values {
+					got := InterleaveBits(v, offset, spread)
+					gotMagic := InterleaveBitsMagic(v, offset, spread, magic)
+
+					if got != gotMagic {
+						t.Errorf("value=%d offset=%d spread=%d:\n  InterleaveBits:      %064b\n  InterleaveBitsMagic: %064b",
+							v, offset, spread, got, gotMagic)
+					} else {
+						t.Logf("value=%d offset=%d spread=%d: MATCH %064b",
+							v, offset, spread, got)
+					}
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkNew(b *testing.B) {
+	for _, dims := range []uint8{2, 3, 4, 5, 6} {
+		b.Run(fmt.Sprintf("%dD", dims), func(b *testing.B) {
+			for b.Loop() {
+				New(dims, 1024)
+			}
+		})
+	}
+}
+
+func BenchmarkInterleaveBits(b *testing.B) {
+	for _, dims := range []uint8{2, 3, 4, 5, 6} {
+		spread := uint32(dims - 1)
+		b.Run(fmt.Sprintf("%dD", dims), func(b *testing.B) {
+			for b.Loop() {
+				InterleaveBits(255, 0, spread)
+			}
+		})
+	}
+}
+
+func BenchmarkInterleaveBitsMagic(b *testing.B) {
+	for _, dims := range []uint8{2, 3, 4, 5, 6} {
+		spread := uint32(dims - 1)
+		magic := MakeMagic(dims)
+		b.Run(fmt.Sprintf("%dD", dims), func(b *testing.B) {
+			for b.Loop() {
+				InterleaveBitsMagic(255, 0, spread, magic)
+			}
+		})
+	}
+}
+
+func BenchmarkEncode(b *testing.B) {
+	for _, dims := range []uint8{2, 3, 4, 5, 6} {
+		coords := make([]uint32, dims)
+		for i := range coords {
+			coords[i] = 42
+		}
+		m := New(dims, 1024)
+		b.Run(fmt.Sprintf("%dD", dims), func(b *testing.B) {
+			for b.Loop() {
+				m.Encode(coords)
+			}
+		})
+	}
+}
+
+func BenchmarkDecodeInto(b *testing.B) {
+	for _, dims := range []uint8{2, 3, 4, 5, 6} {
+		m := New(dims, 1024)
+		coords := make([]uint32, dims)
+		for i := range coords {
+			coords[i] = 42
+		}
+		code, _ := m.Encode(coords)
+		result := make([]uint32, dims)
+		b.Run(fmt.Sprintf("%dD", dims), func(b *testing.B) {
+			for b.Loop() {
+				m.DecodeInto(code, result)
+			}
+		})
+	}
+}
+
+func BenchmarkDecode(b *testing.B) {
+	for _, dims := range []uint8{2, 3, 4, 5, 6} {
+		m := New(dims, 1024)
+		coords := make([]uint32, dims)
+		for i := range coords {
+			coords[i] = 42
+		}
+		code, _ := m.Encode(coords)
+		b.Run(fmt.Sprintf("%dD", dims), func(b *testing.B) {
+			for b.Loop() {
+				m.Decode(code)
+			}
+		})
+	}
+}
+
+func TestMaxBitWidth2D(t *testing.T) {
+	// 2D: 64/2 = 32 bits per dimension, max value 2^32-1
+	// Use a smaller table but test that encoding works at boundary
+	m := New(2, 2)
+	got, err := m.Encode([]uint32{1, 1})
+	if err != nil {
+		t.Fatalf("Encode at bit boundary: %v", err)
+	}
+	decoded := m.Decode(got)
+	if decoded[0] != 1 || decoded[1] != 1 {
+		t.Errorf("bit boundary round-trip: got %v, want [1 1]", decoded)
+	}
+}
+```
+
+### examples/simple.go
+```
+/*
+Morton library example
+*/
+package main
+
+import (
+	"fmt"
+
+	"github.com/Jsewill/morton"
+)
+
+func main() {
+	//Create a new Morton
+	m := new(morton.Morton)
+	//Generate Tables and Magic bits
+	m.Create(2, 1024)
+
+	//Create arbitrary coordinates
+	c := []uint32{1023, 9}
+
+	//Encode aforementioned coordinates
+	e, err := m.Encode(c)
+
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	fmt.Printf("Coordinates: %v\n", c)
+	fmt.Printf("Encoded Coordinates: %v\n", e)
+	fmt.Printf("Decoded Coordinates: %v\n", m.Decode(e))
+
+	// 4D example
+	m4 := morton.New(4, 512)
+	c4 := []uint32{511, 472, 103, 7}
+	e4, err := m4.Encode(c4)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	fmt.Printf("\n4D Coordinates: %v\n", c4)
+	fmt.Printf("4D Encoded Coordinates: %v\n", e4)
+	fmt.Printf("4D Decoded Coordinates: %v\n", m4.Decode(e4))
+}
+```

@@ -1,0 +1,466 @@
+Convert 3D meshes to signed distance fields (SDF) with MeshLib – a C++/Python library for fast SDF generation, collision detection, and volumetric processing.
+
+Mesh to SDF (Signed Distance Field) Library for Python & C++Skip to main content
+Published: 2025-07-13
+Updated: 2026-09-15
+MeshLib Team
+Post rating: 5.0
+What is an SDF?
+Signed Distance Fields (SDFs or distance volumes) are scalar fields most often stored as 3D voxel grids. Each voxel here records the shortest or unsigned or signed distance to a target surface. The value is negative inside the closed surface, zero on it, and positive outside. This makes SDFs ideal for various geometric queries.
+Why Convert a Mesh to an SDF?
+Converting a mesh to an SDF unlocks a set of operations and smooth shape edits
+Offsets. One is free to grow or shrink a whole object by an exact distance (e.g., adding a uniform 2 mm shell everywhere), without causing the mesh to fold over itself.
+Double‑offset blending, i.e., inflating each part, deflating their union, and obtaining seamless fillets or organic morphs.
+Booleans by simple min/max of two fields. You can add, cut, or overlap models reliably because the math happens on a tidy voxel grid rather than the raw triangles.
+Closed‑mesh re-meshing, i.e., rebuilding a watertight surface for already closed inputs at any chosen detail level (open meshes first need hole‑aware sign assignment).
+Algorithms to Compute SDF
+Before we dive into the nuts and bolts below, remember the end‑game: you compute a mesh signed distance grid, so that every point in space knows exactly how far it sits from your model. That single dataset then powers everything from offsets to rebuilds. And if you are calculating a mesh creating signed distance field for mesh boolean work, too, the same grid lets you union, intersect, or subtract shapes with one-line min/max math.
+Now, let’s explore the options:
+Per‑voxel nearest‑surface query (voxel scan + BVH). We march through each candidate voxel and ask a BVH‑accelerated ‘closest‑triangle distance?’. You can compare it with looping over a 3D spreadsheet and writing down how far every little cube is from the model.
+Sign assignment. After unsigned distances are known, vote inside vs. outside with winding numbers or ray hits or flood‑fill the signs. Think of colouring voxels red for ‘inside’ and blue for “outside,” then spreading that colour through the grid.
+GPU‑parallel voxel scan: Run the same nearest‑surface query, but split the work across thousands of GPU threads for big speed‑ups. Effectively, the graphics card measures all cubes at once instead of the CPU doing them one‑by‑one.
+Sparse / adaptive grids. Store fine voxels only near the surface and keep coarse blocks elsewhere to cut memory and compute. In other words, save detail where the action is and skip the empty air.
+How to Create SDF from 3D Mesh with MeshLib?
+MeshLib gives you several flexible ways to get mesh signed distance data, depending on your geometry and downstream needs.
+There are several types of volumes:
+VDB grids. These are based on the OpenVDB library which tells MeshLib how to assign ‘inside’ vs ‘outside’ labels during volume creation. These store only useful voxels, as sparse grids, which is good for SDFs.
+Simple voxels (existing as raw data)
+Functional volume which stores nothing, while being able to process your distance calculation queries.
+Sparse volumeDense volumeFunction volume
+Sparse volume
+Objective:
+meshToDistanceVdbVolume(), converts a mesh (or a part of it) into a sparse distance field using OpenVDB. It builds a tree-structured signed or unsigned distance grid, storing only active voxels. i.e., those near the surface, which makes it memory-efficient. For signed distances, the input mesh must be closed. The function returns a VdbVolume.
+Applications:
+Great for large or complex models, especially when working with, say, ray-marched rendering or any workflow that benefits from fast queries but does not need every voxel stored. Think of this as your go-to option for scalable, production-grade SDF generation.
+Code examples:
+PythonC++
+```
+from meshlib import mrmeshpy as mm
+
+mesh = mm.loadMesh("mesh.stl")
+
+params = mm.MeshToVolumeParams()
+params.surfaceOffset = 3 # 3 voxel layers around surface will be active
+params.type = mm.MeshToVolumeParams.Type.Signed if mesh.topology.isClosed() else mm.MeshToVolumeParams.Type.Unsigned
+params.voxelSize = mm.Vector3f.diagonal(mm.suggestVoxelSize(mesh,1e7)) # voxel size to have approximately 10mln voxels
+voxelsShift = mm.AffineXf3f()
+params.outXf = voxelsShift # shift of voxels to original mesh
+vdbVolume = mm.meshToDistanceVdbVolume(mesh,params)
+
+gSettings = mm.GridToMeshSettings()
+gSettings.voxelSize = params.voxelSize
+gSettings.isoValue = 0.5 # in voxels measure
+offMesh = mm.gridToMesh(vdbVolume.data,gSettings)
+offMesh.transform(voxelsShift) # shift out mesh to initial mesh position
+
+mm.saveMesh(offMesh,"out_mesh.stl")
+```
+```
+#include "MRMesh/MRMeshLoad.h"
+#include "MRMesh/MRMeshSave.h"
+#include "MRMesh/MRMesh.h"
+#include "MRVoxels/MRVDBConversions.h"
+#include "MRVoxels/MROffset.h"
+#include "MRVoxels/MRVoxelsVolume.h"
+#include <iostream>
+
+int main()
+{
+    auto meshLoadRes = MR::MeshLoad::fromAnySupportedFormat( "mesh.stl" );
+    if ( !meshLoadRes.has_value() )
+    {
+        std::cerr << meshLoadRes.error();
+        return 1;
+    }
+    auto params = MR::MeshToVolumeParams();
+    params.surfaceOffset = 3; // voxel layers around surface will be active
+    params.type = meshLoadRes->topology.isClosed() ? MR::MeshToVolumeParams::Type::Signed : MR::MeshToVolumeParams::Type::Unsigned;
+    params.voxelSize = MR::Vector3f::diagonal( MR::suggestVoxelSize( *meshLoadRes, 1e7f ) );
+    MR::AffineXf3f voxelShift;
+    params.outXf = &voxelShift; // shift of voxels to original mesh
+    auto vdbVolumeRes = MR::meshToDistanceVdbVolume( *meshLoadRes, params );
+
+    if ( !vdbVolumeRes.has_value() )
+    {
+        std::cerr << vdbVolumeRes.error();
+        return 1;
+    }
+
+    auto gSettings = MR::GridToMeshSettings();
+    gSettings.voxelSize = params.voxelSize;
+    gSettings.isoValue = 0.5f; // in voxels measure
+    auto offMeshRes = MR::gridToMesh( vdbVolumeRes->data, gSettings );
+
+    if ( !offMeshRes.has_value() )
+    {
+        std::cerr << offMeshRes.error();
+        return 1;
+    }
+
+    auto saveRes = MR::MeshSave::toAnySupportedFormat( *offMeshRes, "out_mesh.stl" );
+    if ( !saveRes.has_value() )
+    {
+        std::cerr << saveRes.error();
+        return 1;
+    }
+    return 0;
+}
+```
+Dense volume
+Objective:
+meshToDistanceVolume() builds a dense 3D grid where every single voxel contains a signed distance value (or unsigned, you parameterize this via MeshToDistanceVolumeParams::SignedDistanceToMeshOptions::signMode). Namely, it returns a simple volume, with each voxel recorded. It is ideal when you need full data access, say, for simulation, remeshing, or exporting the volume to machine learning models or image slices.
+Applications:
+This one is a match for small to medium-sized meshes, i.e., where performance and memory use are not bottlenecks. If you seek exact voxel-by-voxel control or intend to apply marching cubes directly, this is the cleanest path.
+Code examples:
+PythonC++
+```
+from meshlib import mrmeshpy as mm
+from meshlib import mrcudapy as mc
+
+mesh = mm.loadMesh("mesh.stl")
+
+oneDimVoxelSize = mm.suggestVoxelSize(mesh,1e7)
+originAndDims = mm.calcOriginAndDimensions(mesh.computeBoundingBox(),oneDimVoxelSize)
+
+params = mm.MeshToDistanceVolumeParams()
+params.vol.voxelSize = mm.Vector3f.diagonal(oneDimVoxelSize) # voxel size to have approximately 10mln voxels
+params.vol.origin = originAndDims.origin
+params.vol.dimensions = originAndDims.dimensions
+
+params.dist.maxDistSq = (3*oneDimVoxelSize)**2 # 3 voxel layers with valid distance
+params.dist.nullOutsideMinMax = True # do not calculate values too far
+params.dist.signMode = mm.SignDetectionMode.HoleWindingRule # not the fastest but most robust in case of holes and self-intersections
+
+if mc.isCudaAvailable():
+    params.fwn = mc.FastWindingNumber(mesh)
+
+simpleVolume = mm.meshToDistanceVolume(mesh,params)
+
+mcParams = mm.MarchingCubesParams()
+mcParams.lessInside = True # as far as we use SDF (this value should be false for Density volumes)
+mcParams.origin = params.vol.origin
+mcParams.iso = oneDimVoxelSize * 0.5 # half of voxel offset
+
+offMesh = mm.marchingCubes(simpleVolume,mcParams)
+
+mm.saveMesh(offMesh,"out_mesh.stl")
+```
+```
+#include "MRMesh/MRMeshLoad.h"
+#include "MRMesh/MRMeshSave.h"
+#include "MRMesh/MRMesh.h"
+#include "MRMesh/MRMeshFwd.h"
+#include "MRVoxels/MRMeshToDistanceVolume.h"
+#include "MRVoxels/MROffset.h"
+#include "MRVoxels/MRCalcDims.h"
+#include "MRCuda/MRCudaBasic.h"
+#include "MRCuda/MRCudaFastWindingNumber.h"
+#include "MRVoxels/MRMarchingCubes.h"
+#include <iostream>
+
+int main()
+{
+    auto meshLoadRes = MR::MeshLoad::fromAnySupportedFormat( "mesh.stl" );
+    if ( !meshLoadRes.has_value() )
+    {
+        std::cerr << meshLoadRes.error();
+        return 1;
+    }
+
+    float oneDimVoxelSize = MR::suggestVoxelSize( *meshLoadRes, 1e7f );
+    auto originAndDims = MR::calcOriginAndDimensions( meshLoadRes->computeBoundingBox(), oneDimVoxelSize );
+
+    auto params = MR::MeshToDistanceVolumeParams();
+    params.vol.voxelSize = MR::Vector3f::diagonal( oneDimVoxelSize ); // voxel size to have approximately 10mln voxels
+    params.vol.origin = originAndDims.origin;
+    params.vol.dimensions = originAndDims.dimensions;
+
+    params.dist.maxDistSq = MR::sqr( 3 * oneDimVoxelSize ); // 3 voxel layers with valid distance
+    params.dist.nullOutsideMinMax = true; // do not calculate values too far
+    params.dist.signMode = MR::SignDetectionMode::HoleWindingRule; // not the fastest but most robust in case of holes and self - intersections
+
+    if ( MR::Cuda::isCudaAvailable() )
+        params.fwn = std::make_shared<MR::Cuda::FastWindingNumber>( *meshLoadRes );
+
+    auto simpleVolumeRes = MR::meshToDistanceVolume( *meshLoadRes, params );
+
+    if ( !simpleVolumeRes.has_value() )
+    {
+        std::cerr << simpleVolumeRes.error();
+        return 1;
+    }
+
+    auto mcParams = MR::MarchingCubesParams();
+    mcParams.lessInside = true; // as far as we use SDF( this value should be false for Density volumes )
+    mcParams.origin = params.vol.origin;
+    mcParams.iso = oneDimVoxelSize * 0.5f; // half of voxel offset
+
+    auto offMeshRes = MR::marchingCubes( *simpleVolumeRes, mcParams );
+
+    if ( !offMeshRes.has_value() )
+    {
+        std::cerr << offMeshRes.error();
+        return 1;
+    }
+
+    auto saveRes = MR::MeshSave::toAnySupportedFormat( *offMeshRes, "out_mesh.stl" );
+    if ( !saveRes.has_value() )
+    {
+        std::cerr << saveRes.error();
+        return 1;
+    }
+    return 0;
+}
+```
+Function volume
+Objective:
+meshToDistanceFunctionVolume() stores nothing. It returns a function, which, in turn, will return a distance. The convenience is that no memory is needed. Concurrently, you will spend computational power on each query.
+Applications:
+One can opt for meshToDistanceFunctionVolume() when memory is tight, however, powerful CPU/GPU cycles are available. Also, this might be an option when you require a handful of distance queries rather than millions.
+Code examples:
+PythonC++
+```
+from meshlib import mrmeshpy as mm
+from meshlib import mrcudapy as mc
+
+mesh = mm.loadMesh("mesh.stl")
+
+oneDimVoxelSize = mm.suggestVoxelSize(mesh,1e7)
+originAndDims = mm.calcOriginAndDimensions(mesh.computeBoundingBox(),oneDimVoxelSize)
+
+params = mm.MeshToDistanceVolumeParams()
+params.vol.voxelSize = mm.Vector3f.diagonal(oneDimVoxelSize) # voxel size to have approximately 10mln voxels
+params.vol.origin = originAndDims.origin
+params.vol.dimensions = originAndDims.dimensions
+
+params.dist.maxDistSq = (3*oneDimVoxelSize)**2 # 3 voxel layers with valid distance
+params.dist.nullOutsideMinMax = True # do not calculate values too far
+params.dist.signMode = mm.SignDetectionMode.HoleWindingRule # not the fastest but most robust in case of holes and self-intersections
+
+if mc.isCudaAvailable():
+    params.fwn = mc.FastWindingNumber(mesh)
+
+functionVolume = mm.meshToDistanceFunctionVolume(mesh,params)
+
+mcParams = mm.MarchingCubesParams()
+mcParams.lessInside = True # as far as we use SDF (this value should be false for Density volumes)
+mcParams.origin = params.vol.origin
+mcParams.iso = oneDimVoxelSize * 0.5 # half of voxel offset
+
+offMesh = mm.marchingCubes(functionVolume,mcParams)
+
+mm.saveMesh(offMesh,"out_mesh.stl")
+```
+```
+#include "MRMesh/MRMeshLoad.h"
+#include "MRMesh/MRMeshSave.h"
+#include "MRMesh/MRMesh.h"
+#include "MRMesh/MRMeshFwd.h"
+#include "MRVoxels/MRMeshToDistanceVolume.h"
+#include "MRVoxels/MROffset.h"
+#include "MRVoxels/MRCalcDims.h"
+#include "MRCuda/MRCudaBasic.h"
+#include "MRCuda/MRCudaFastWindingNumber.h"
+#include "MRVoxels/MRMarchingCubes.h"
+#include <iostream>
+
+int main()
+{
+    auto meshLoadRes = MR::MeshLoad::fromAnySupportedFormat( "mesh.stl" );
+    if ( !meshLoadRes.has_value() )
+    {
+        std::cerr << meshLoadRes.error();
+        return 1;
+    }
+
+    float oneDimVoxelSize = MR::suggestVoxelSize( *meshLoadRes, 1e7f );
+    auto originAndDims = MR::calcOriginAndDimensions( meshLoadRes->computeBoundingBox(), oneDimVoxelSize );
+
+    auto params = MR::MeshToDistanceVolumeParams();
+    params.vol.voxelSize = MR::Vector3f::diagonal( oneDimVoxelSize ); // voxel size to have approximately 10mln voxels
+    params.vol.origin = originAndDims.origin;
+    params.vol.dimensions = originAndDims.dimensions;
+
+    params.dist.maxDistSq = MR::sqr( 3 * oneDimVoxelSize ); // 3 voxel layers with valid distance
+    params.dist.nullOutsideMinMax = true; // do not calculate values too far
+    params.dist.signMode = MR::SignDetectionMode::HoleWindingRule; // not the fastest but most robust in case of holes and self - intersections
+
+    if ( MR::Cuda::isCudaAvailable() )
+        params.fwn = std::make_shared<MR::Cuda::FastWindingNumber>( *meshLoadRes );
+
+    auto functionVolume = MR::meshToDistanceFunctionVolume( *meshLoadRes, params );
+
+    auto mcParams = MR::MarchingCubesParams();
+    mcParams.lessInside = true; // as far as we use SDF( this value should be false for Density volumes )
+    mcParams.origin = params.vol.origin;
+    mcParams.iso = oneDimVoxelSize * 0.5f; // half of voxel offset
+
+    auto offMeshRes = MR::marchingCubes( functionVolume, mcParams );
+
+    if ( !offMeshRes.has_value() )
+    {
+        std::cerr << offMeshRes.error();
+        return 1;
+    }
+
+    auto saveRes = MR::MeshSave::toAnySupportedFormat( *offMeshRes, "out_mesh.stl" );
+    if ( !saveRes.has_value() )
+    {
+        std::cerr << saveRes.error();
+        return 1;
+    }
+    return 0;
+}
+```
+Before
+After
+Step-by-Step Mesh to SDF conversion flow
+A. Load the mesh
+C. Make your choice, what volume you need
+D. Adjust meshToVolumeParams or meshToDistanceVolumeParams
+E. Run the conversion and use the field, calling the function
+MeshLib: Library for Mesh to SDF
+MeshLib will help you as a highly functional modern C++ library, featuring official API bindings for Python, C, C#, and JavaScript. This versatility makes it easy to integrate into any geometry pipeline, whether you are building tools, simulations, or custom viewers. All in all, MeshLib library allows you to rely on the Laplacian approach with an ideal balance.
+If you are looking for a mesh signed distance field generator that works, MeshLib gives you native tools to create robust SDFs from triangle meshes.
+Voxel Guide: Size, Distance, Types
+Play Video
+Get started with setup and bindings:
+Python Setup Guide
+C++ Setup Guide
+Language Support and Compatibility
+C++: fully supported on all systems with no limitations.
+Python: compatible with Python 3.8 to 3.13 across platforms:
+Windows: Python 3.8–3.13
+macOS: Python 3.8–3.13 (except 3.8 on macOS x64)
+Linux: Python 3.8–3.13 on any manylinux_2_31+ system
+You can employ MeshLib’s Python bindings to quickly implement a signed distance function mesh workflow in just a few lines of code.
+Explore the full source code, prebuilt modules, and examples in the GitHub repository for converting a mesh to a signed distance field.
+Whether you are prototyping in Python or embedding SDF tools into a C++ engine, MeshLib offers a flexible and high-performance foundation for any signed distance function mesh project.
+The Full List of Mesh File Formats We Support
+FormatImportTexture SupportColor SupportExport
+STLYesNoNoYes
+OBJYesYesYesYes
+OFFYesNoNoYes
+DXFYesNoNoYes
+STEPYesNoNoNo
+STPYesNoYesNo
+CTMYesNoYesYes
+3MFYesYesYesNo
+MODELYesNoNoNo
+PLYYesNoYesYes
+GLTFYesYesYesYes
+What our customers say
+Massimo Ivani
+CEO, Medialab
+«Our application is a medical device, so we have to be able to trust the SDK behind it. We built a lot of internal tests before switching, and MeshLib gave us the precision we had before at twice the speed…»
+Read full review →
+Ruedger Rubbert
+Chief Technology Officer, Brius Technologies Inc
+With MeshInspector MeshLib we were able to automate many of our workflow processes, thanks to its advanced, modern, and efficient dental and geometry oriented algorithms, covering many of our orthodontic-related tasks: CT and intraoral scan segmentation, voxel and Boolean operations, editing, aligning, visualization, inspection, and import/export of mesh objects. We use the versatile MeshInspector MeshLib API, both in production and R&D for fast prototyping and testing of our ideas.
+Read full review →
+Mariusz Hermansdorfer
+Head of Computational Design at Henning Larsen Architechts
+Over the past year, MeshLib has transformed my approach to design and analysis in landscape architecture and architecture projects. This powerful library excels in critical areas, such as geometry processing, interactive booleans, point cloud manipulation, and curve offsetting. These features enhance design workflows, allowing for dynamic modifications, efficient terrain modeling, stormwater flow analysis, and advanced wind flow visualiiza…
+Read full review →
+Gal Cohen
+CTO, customed.ai
+MeshLib has been a game-changer for our company, providing all the essential operations we need to handle meshes and create highly accurate personal surgical instruments (PSIs), which are our primary products. After extensive research and comparison, MeshLib stands out as the best solution on the market. Their team is exceptionally professional and knowledgeable. Collaborating with them has been an absolute pleasure—they respond to any issues we encounter promptly and always deliver effective solutions. Their commitment to customer support and technical excellence is truly unmatched.
+Read full review →
+HeonJae Cho, DDS, MSD, PhD
+Chief Executive Officer, 3DONS INC
+MeshLib SDK helped us achieve faster and more accurate calculation results and outperformed any other Mesh Processing library that we evaluated. For us in digital dentistry, it was a game-changer. Mesh processing operations, such as inspecting and editing the mesh to create dental devices for the treatment plan, are crucial. MeshInspector support liberated our team from technical constraints so we concentrated on creating exactly what we wanted. I highly recommend incorporating the MeshLib into your software arsenal.
+Read full review →
+Thomas Tong
+Founder, Polyga
+When we set out to develop our new PointKit scanning platform, we chose MeshInspector’s MeshLib as the foundation. That partnership let us accelerate development, ship new features faster, and get to market months sooner than we could have on our own. The MeshInspector team has been outstanding — quick answers, deep technical know-how, and genuine enthusiasm for our success. We simply wouldn’t be where we are today without their support.
+Read full review →
+Read all reviews
+Join companies switching to next-gen geometry algorithms.
+Try MeshLib now
+Booleans, mesh repair, decimation and ICP — in your browser, as JavaScript and WebAssembly. No install, no sign-up.
+Open live demo
+Or install the SDK — free to evaluate
+PythonC++C#CJavaScript
+pip install meshlibCopiedC++Setup guide · binaries or CMakedotnet add package MeshLibCopiedCSetup guide · binaries, MeshLibC2JSnpm i @meshinspector/meshlibCopied
+Documentation · Licensing · Talk to us
+MeshLib Team
+Core Developers
+MeshLib Team, official authors of MeshInspector App and MeshLib SDK, leverages over 20 years of 3D data-processing and mathematical expertise to deliver high-performance, plug-and-play algorithms that simplify even the most complex mesh workflows.
+Post rating
+5.0out of 53 ratings
+Share post
+Summarize this article with:
+We value your privacy
+We use cookies to enhance your experience, analyze traffic, and personalize content and ads. By clicking “Accept All,” you consent to our use of cookies.
+Your browser is sending a Global Privacy Control signal, so we treat it as an opt-out of advertising: “Accept All” leaves the Advertisement category off. You can still turn it on yourself under Customize.
+Cookie Policy |Privacy Policy |Terms of Use
+CustomizeReject AllAccept All
+Customize Consent Preferences
+We use cookies to help you navigate efficiently and perform certain functions. You will find detailed information about all cookies under each consent category below.
+The cookies that are categorized as "Necessary" are stored on your browser as they are essential for enabling the basic functionalities of the site.
+We also use third-party cookies that help us analyze how you use this website, store your preferences, and provide the content and advertisements that are relevant to you. These cookies will only be stored in your browser with your prior consent.
+You can choose to enable or disable some or all of these cookies but disabling some of them may affect your browsing experience.
+Show more
+Your browser is sending a Global Privacy Control signal, so we treat it as an opt-out of advertising: “Accept All” leaves the Advertisement category off. You can still turn it on yourself under Customize.
+To learn more about how Google processes personal information, visit: Google privacy policy
+NecessaryAlways Active
+Necessary cookies are required to enable the basic features of this site, such as providing secure log-in or adjusting your consent preferences. These cookies do not store any personally identifiable data.
+CookieDurationDescription
+meshlib_cookie_consent1 yearStores your cookie consent choice for this site (policy version, timestamp and categories).
+doxygen_* (local storage or cookie)Session to 10 yearsDocumentation pages only: remember the position, width and state of the navigation sidebar. Set by the documentation generator and never sent anywhere.
+prefers-dark-mode-in-light-mode, prefers-light-mode-in-dark-mode (local storage)PersistentDocumentation pages only: remember the theme you picked with the light and dark switch.
+FunctionalEnable Functional cookies
+Functional cookies help perform certain functionalities like sharing the content of the website on social media platforms, collecting feedback, and other third-party features.
+No cookies to display.
+AnalyticsEnable Analytics cookies
+Analytical cookies are used to understand how visitors interact with the website. These cookies help provide information on metrics such as the number of visitors, bounce rate, traffic source, etc.
+CookieDurationDescription
+_ga2 yearsGoogle Analytics: registers a unique ID used to generate statistical data on how you use the website.
+_ga_*2 yearsGoogle Analytics 4: persists session state for the property.
+_clck1 yearMicrosoft Clarity: persists the Clarity user ID and preferences, unique to this site.
+_clsk1 dayMicrosoft Clarity: connects multiple page views by a user into a single session recording.
+CLID1 yearMicrosoft Clarity (clarity.ms): identifies the first time Clarity saw this user on any site using Clarity.
+MUID13 monthsMicrosoft (bing.com, clarity.ms): identifies unique web browsers visiting Microsoft sites; used for advertising, site analytics and operational purposes.
+ANONCHK10 minutesMicrosoft Clarity (clarity.ms): indicates whether MUID is transferred to ANID; Clarity does not use ANID, so this is always 0.
+MR7 daysMicrosoft (bing.com, clarity.ms): indicates whether to refresh MUID.
+SMSessionMicrosoft Clarity (clarity.ms): used in synchronizing MUID across Microsoft domains.
+mp_51875322b58ddf1523d499cc7d1c80a2_mixpanel1 yearMixpanel: stores the anonymous distinct ID and super properties used for product analytics events.
+hubspotutk6 monthsHubSpot: keeps track of a visitor's identity; passed to HubSpot on form submissions and used when deduplicating contacts.
+__hstc6 monthsHubSpot: main cookie for tracking visitors; contains the domain, initial and last visit timestamps and the session count.
+__hssc30 minutesHubSpot: keeps track of sessions to determine whether the session number should be incremented.
+__hssrcSessionHubSpot: set whenever the session cookie changes, to determine whether the visitor has restarted their browser.
+__cf_bm30 minutesCloudflare, on behalf of HubSpot (hubspot.com, hs-scripts.com, hs-analytics.net, hs-banner.com): bot management, telling people from automated traffic.
+SRM_B13 monthsMicrosoft (bing.com): browser identifier paired with MUID, set during Microsoft Clarity's cross-domain sync.
+__mpq_51875322b58ddf1523d499cc7d1c80a2_ev (local storage)PersistentMixpanel: queue of analytics events waiting to be sent.
+PerformanceEnable Performance cookies
+Performance cookies are used to understand and analyze the key performance indexes of the website which helps in delivering a better user experience for the visitors.
+No cookies to display.
+AdvertisementEnable Advertisement cookies
+Advertisement cookies are used to provide visitors with customized advertisements based on the pages you visited previously and to analyze the effectiveness of the ad campaigns.
+CookieDurationDescription
+_fbp90 daysMeta Pixel: first-party browser identifier used to attribute and measure Facebook and Instagram ads.
+_fbc90 daysMeta Pixel: stores the click identifier (fbclid) from a Meta ad that led to this site.
+fr90 daysMeta (facebook.com): used to deliver, measure and improve the relevance of ads.
+_gcl_au90 daysGoogle Ads: conversion linker; stores ad-click information for conversion attribution.
+_gcl_aw90 daysGoogle Ads: stores the Google Ads click identifier (gclid) for conversion attribution.
+_gcl_dc90 daysGoogle Ads: stores the DoubleClick click identifier (dclid) for conversion attribution.
+IDE13 monthsGoogle DoubleClick (doubleclick.net): used for ad delivery, measurement and retargeting.
+test_cookie15 minutesGoogle DoubleClick (doubleclick.net): checks whether the browser supports cookies.
+NID6 monthsGoogle (google.com): contains a unique ID used by Google to remember preferences and for ad personalization.
+bcookie1 yearLinkedIn (linkedin.com): browser identifier cookie to uniquely identify devices accessing LinkedIn and detect abuse.
+bscookie1 yearLinkedIn (linkedin.com): remembers that a logged-in LinkedIn member is verified by two-factor authentication.
+lidc24 hoursLinkedIn (linkedin.com): facilitates data center selection.
+li_gc6 monthsLinkedIn (linkedin.com): stores guests' consent regarding the use of cookies for non-essential purposes.
+li_sugr90 daysLinkedIn (linkedin.com): used to make a probabilistic match of a user's identity.
+li_fat_id30 daysLinkedIn: member indirect identifier used for conversion tracking, retargeting and analytics.
+UserMatchHistory30 daysLinkedIn (linkedin.com): used for the ID sync process; stores the last sync time to avoid repeating it.
+AnalyticsSyncHistory30 daysLinkedIn (linkedin.com): stores the time a sync took place with the lms_analytics cookie.
+ln_or1 dayLinkedIn: determines whether Oribi analytics can be carried out on this domain.
+apolloAnonId (local storage)PersistentApollo website tracker: anonymous visitor identifier and event queue kept in browser local storage, not in a cookie.
+__cf_bm30 minutesCloudflare, on behalf of LinkedIn, Apollo.io and HubSpot Ads (linkedin.com, apollo.io, hsadspixel.net): bot management, telling people from automated traffic.
+68c4578a29a1ad0011d47ef7_eventQueue, 68c4578a29a1ad0011d47ef7_canTrack (local storage)PersistentApollo.io: queue of visitor events waiting to be sent, and whether tracking is allowed.
+lastExternalReferrer, lastExternalReferrerTime (local storage)PersistentMeta Pixel: the last external site that referred you here and when, used for ad attribution.
+OthersEnable Others cookies
+Other cookies are those that are being identified and have not been classified into any category as yet.
+No cookies to display.
+Reject AllSave My PreferencesAccept All

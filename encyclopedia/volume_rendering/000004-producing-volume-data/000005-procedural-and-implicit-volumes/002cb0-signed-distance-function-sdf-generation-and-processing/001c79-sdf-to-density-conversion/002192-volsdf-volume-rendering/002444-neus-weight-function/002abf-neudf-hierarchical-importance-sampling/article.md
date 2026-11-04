@@ -1,0 +1,185 @@
+# NeUDF Hierarchical Importance Sampling
+
+Also called: NeUDF sampling, ws(t)
+
+## Overview
+NeUDF Hierarchical Importance Sampling is a two-stage sampling strategy used in the NeUDF framework to reconstruct surfaces from Unsigned Distance Functions (UDFs) using differentiable volume rendering. It solves the problem of unbalanced gradient magnitudes in UDF regularization by decoupling the sampling distribution from the rendering distribution. Unlike the rendering weight function which concentrates weight *before* the surface intersection to handle open surfaces, this method employs a specially-tailored sampling weight function $w_s(t)$ that distributes weights to achieve well-balanced Eikonal loss regularization across the entire space. It builds on [NeuS Weight Function](3238-neus-weight-function.md) but modifies the sampling density to prevent the UDF gradient quality from being hampered by the asymmetry inherent in UDF-based rendering.
+
+## How it works
+The method samples 128 points per ray in two stages: an initial uniform sampling stage followed by a hierarchical importance sampling stage. It uses a view-invariant sampling density derived from the UDF value itself, distinct from the rendering density.
+
+**Inputs:**
+- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
+- UDF network output $f(\mathbf{x})$ (unsigned distance).
+- Transformation function $\Psi$ (e.g., sigmoid or similar mapping from distance to density parameter).
+- Positional encoding $p(t)$ for the sample point along the ray.
+- Parameters $s$ and $b$ for the sampling density function.
+
+**Outputs:**
+- A set of 128 sample points $\{t_i\}$ along the ray.
+- Normalized sampling weights $\{w_s''(t_i)\}$ used for gradient computation and regularization.
+
+**Data Structures:**
+- Sample points: Array of floats $t_i$ representing distance along the ray.
+- Weights: Array of floats $w_s''(t_i)$ summing to 1.
+
+**Parameters:**
+- $s$: Scaling factor for sampling density. Starts at $0.05$. Changes every sampling step $z$ with rate $2^{z-1}$.
+- $b$: Controls the intensity of the density function at $x=0$.
+- Initial samples: 64 points.
+- Importance samples: 64 points (32 per importance sampling pass, performed twice).
+- Outside points: 32 random points if no masks are provided.
+
+**Formulas:**
+The sampling density $\tau_s(t)$ is defined as:
+$$ \tau_s(t) = \zeta_s \circ \Psi \circ p(t) $$
+where $\zeta_s(d)$ is a monotonically decreasing function satisfying $\zeta_s(d) > 0$ and $\zeta'_s(d) < 0$ for all $d > 0$. The specific form used is:
+$$ \zeta_s(d) = \frac{s e^{-sd}}{(1 + e^{-sd})^2} $$
+Note: The source text mentions parameter $b$ controls intensity at $x=0$, but the explicit formula provided uses $s$. The constraint $\zeta_s(d) > 0$ and decreasing nature ensures view-invariance and positive correlation with UDF value.
+
+The sampling weight function $w_s(t)$ is:
+$$ w_s(t) = \tau_s(t) e^{-\int_0^t \tau_s(u) du} $$
+
+To stabilize gradients, the weight for the $i$-th sample is modified by neighbor maximization:
+$$ w'_s(t_i) = \max\{w_s(t_{i+k}) \mid k \in \{-1, 0, 1\}\} $$
+
+The weights are normalized:
+$$ w_s''(t_i) = \frac{w'_s(t_i)}{\sum_{j=0}^{n-1} w'_s(t_j)} $$
+
+**Steps:**
+1. **Uniform Sampling:** Sample 64 points uniformly along the ray within the bounding volume.
+2. **Compute Sampling Density:** For each point $t_i$, compute $p(t_i)$, apply $\Psi$, then apply $\zeta_s$ to get $\tau_s(t_i)$.
+3. **Compute Raw Sampling Weights:** Calculate $w_s(t_i)$ using the exponential integral term. The integral $\int_0^t \tau_s(u) du$ is approximated numerically (e.g., cumulative sum of $\tau_s$ multiplied by step size) or computed analytically if $\tau_s$ allows.
+4. **Neighbor Maximization:** For each $i$, compute $w'_s(t_i) = \max(w_s(t_{i-1}), w_s(t_i), w_s(t_{i+1}))$, handling boundary conditions (e.g., clamping indices or using only available neighbors).
+5. **Normalization:** Compute $w_s''(t_i)$ by dividing $w'_s(t_i)$ by the sum of all $w'_s(t_j)$.
+6. **Importance Sampling (Pass 1):** Use $w_s''(t_i)$ as a probability distribution to sample 32 new points.
+7. **Importance Sampling (Pass 2):** Repeat steps 2-5 for the combined set or just the new points? The source says "hierarchically conduct importance sampling on top of the sampling weight... for another 64 points" and "conduct the importance sampling for two times, and each time 32 points are sampled." This implies two passes of 32 points each, totaling 64 importance samples. The exact combination with the initial 64 is not explicitly detailed, but the total is 128.
+8. **Outside Points:** If no masks are provided, sample 32 points randomly outside the unit sphere.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def zeta_s(d, s, b):
+    """
+    Sampling density function.
+    Note: Source formula uses s, mentions b controls intensity at 0.
+    Assuming standard form from source: s * exp(-s*d) / (1 + exp(-s*d))^2
+    If b is distinct, it might scale the result. Source is ambiguous on b's exact role in formula vs s.
+    We implement the explicit formula given.
+    """
+    # Using the explicit formula from source: zeta_s(d) = s * e^(-sd) / (1 + e^(-sd))^2
+    # Parameter b is mentioned but not in the explicit equation. 
+    # We assume b might be a multiplier or part of a different variant not fully detailed.
+    # For implementation based strictly on the equation:
+    exp_term = np.exp(-s * d)
+    return s * exp_term / ((1 + exp_term) ** 2)
+
+def compute_sampling_weights(t, p_func, psi_func, s, b):
+    """
+    Compute normalized sampling weights ws''(t) for a set of points t.
+    """
+    # 1. Compute tau_s(t)
+    # p(t) is positional encoding, psi is transformation
+    p_vals = p_func(t)
+    psi_vals = psi_func(p_vals)
+    tau_s = zeta_s(psi_vals, s, b)
+    
+    # 2. Compute cumulative integral of tau_s for the exponential term
+    # Approximate integral using trapezoidal rule or simple sum
+    # Assuming t is sorted
+    dt = np.diff(t, prepend=0)
+    # Cumulative sum of tau_s * dt
+    integral_tau = np.cumsum(tau_s * dt)
+    
+    # 3. Compute raw sampling weight ws(t)
+    # ws(t) = tau_s(t) * exp(-integral_0^t tau_s(u) du)
+    ws = tau_s * np.exp(-integral_tau)
+    
+    # 4. Neighbor maximization
+    # w'_s(ti) = max(ws(ti-1), ws(ti), ws(ti+1))
+    ws_shifted_right = np.roll(ws, 1)
+    ws_shifted_left = np.roll(ws, -1)
+    
+    # Handle boundaries: for i=0, max(ws[0], ws[1]); for i=n-1, max(ws[n-2], ws[n-1])
+    # Using roll with default fill (wrap) is incorrect for boundaries.
+    # Correct boundary handling:
+    ws_prime = np.zeros_like(ws)
+    ws_prime[0] = np.max(ws[0:2])
+    ws_prime[-1] = np.max(ws[-2:])
+    ws_prime[1:-1] = np.maximum.reduce([ws[:-2], ws[1:-1], ws[2:]])
+    
+    # 5. Normalization
+    ws_normalized = ws_prime / np.sum(ws_prime)
+    
+    return ws_normalized, tau_s
+
+def hierarchical_importance_sampling(ray_origin, ray_direction, udf_net, p_func, psi_func, s, b, num_initial=64, num_importance_passes=2, points_per_pass=32):
+    """
+    Perform NeUDF hierarchical importance sampling.
+    """
+    # 1. Uniform sampling
+    t_uniform = np.linspace(0, 1.0, num_initial) # Assuming normalized ray length or specific bounds
+    # In practice, bounds are determined by ray-box intersection
+    
+    # 2. Compute weights for uniform samples
+    # Note: p_func and psi_func need to be defined based on the specific NeUDF implementation
+    ws_uniform, _ = compute_sampling_weights(t_uniform, p_func, psi_func, s, b)
+    
+    all_t = t_uniform.copy()
+    
+    # 3. Importance sampling passes
+    for _ in range(num_importance_passes):
+        # Sample new points based on ws_uniform
+        # Use cumulative distribution function for sampling
+        cdf = np.cumsum(ws_uniform)
+        cdf /= cdf[-1]
+        
+        # Generate random numbers
+        rand_vals = np.random.rand(points_per_pass)
+        
+        # Interpolate to find t values
+        t_new = np.interp(rand_vals, cdf, t_uniform)
+        
+        # Add new points to the set
+        all_t = np.concatenate([all_t, t_new])
+        
+        # Re-sort and re-compute weights for the new set?
+        # The source says "hierarchically conduct importance sampling on top of the sampling weight ws(t)"
+        # It implies the weights are used to select points. 
+        # The final set of 128 points is used for rendering.
+        
+    # 4. Outside points
+    # If no masks, add 32 random points outside unit sphere
+    # This requires a mask check or flag. Assuming no masks for this example.
+    # Implementation of "outside unit sphere" sampling is specific to the scene setup.
+    
+    return all_t
+```
+
+**Edge Cases and Pitfalls:**
+- If both rendering and sampling functions employ the same weights, the Eikonal loss regularization on UDF gradients leads to highly unbalanced gradient magnitudes on the two sides of the surface, hampering UDF quality [S1].
+- The parameter $s$ changes dynamically during training, which requires careful handling of the density function's shape over time.
+- Boundary conditions for the neighbor maximization step must be handled explicitly to avoid index errors or incorrect max operations.
+
+## Subtopics
+
+### Importance Points Sampling
+A specially-tailored sampling weight function $w_s(t)$ designed to achieve well-balanced regularization (Eikonal loss) all over the space by distributing more weights before intersection points, unlike the rendering weight. It uses a monotonically decreasing function $\zeta_s(d)$ to create a view-invariant sampling density. The parameter $s$ starts at 0.05 and changes every sampling step $z$ with rate $2^{z-1}$. The parameter $b$ in $\zeta_s(d)$ controls the intensity at $x=0$. This method is chosen when UDF reconstruction requires balanced gradient magnitudes on both sides of the surface, preventing the unbalanced regularization issues seen when using the same weights for rendering and sampling.
+
+## Operating characteristics
+- **Time Complexity:** The method adds overhead due to the two-stage sampling and the computation of the sampling density and weights. The importance sampling requires sorting or CDF construction, which is $O(N \log N)$ or $O(N)$ depending on implementation.
+- **Memory Complexity:** Stores weights and intermediate values for all sample points. For 128 points per ray, this is minimal.
+- **Measured Performance:** The method enables high-fidelity open surface reconstruction with differentiable volume rendering. It is used in the NeUDF framework, trained with ADAM optimizer.
+- **Strengths:** Balances Eikonal loss regularization, improving UDF quality. Handles open surfaces effectively by decoupling sampling from rendering weights.
+- **Limitations:** Requires careful tuning of parameters $s$ and $b$. The dynamic change of $s$ adds complexity to the training process.
+- **When to use:** When reconstructing open surfaces from UDFs and needing balanced gradient regularization.
+- **When not to use:** When computational resources are extremely limited and the overhead of importance sampling is prohibitive, or when closed surfaces are guaranteed and simpler sampling suffices.
+
+## Background
+NeUDF Hierarchical Importance Sampling was introduced in the NeUDF paper (2023) by the authors of "NeUDF: Leaning Neural Unsigned Distance Fields with Volume Rendering". It addresses limitations in previous UDF-based rendering methods like NeuS, specifically the issue of unbalanced gradient magnitudes in UDF regularization. The method builds on the NeuS weight function but adapts it for UDFs by introducing a separate sampling weight function.
+
+## Sources
+[S1] NeUDF: Leaning Neural Unsigned Distance Fields with Volume Rendering, https://doi.org/10.1109/cvpr52729.2023.00031, fetched 2026-10-26

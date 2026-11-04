@@ -1,0 +1,242 @@
+# GSplat Skinning Data Loading
+
+Also called: GsplatSkinMatrix, Skinning via StructuredBuffers, Skinning via Textures
+
+## Overview
+This method computes the final transformation matrix for a splat by blending up to four bone matrices weighted by skin weights, then applying a reference inverse transform [S1, unofficial]. It supports two storage backends: Texture2D arrays for GPU compatibility and portability, or StructuredBuffers for direct access [S1, unofficial]. It enables skeletal animation of Gaussian splats by transforming their position, covariance, and optionally surface normal [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   `sourceId`: The unique identifier for the splat (uint).
+*   `modelCenter`: The splat's center position in model space (float3).
+*   `covariance`: The splat's covariance matrix, stored as two components `covA` and `covB` (float3).
+*   `modelNormal`: (Optional) The splat's surface normal in model space (float3).
+*   `_GsplatSkinningEnabled`: A global boolean flag (int) indicating if skinning is active.
+
+**Outputs:**
+*   `transformedCenter`: The skinned position (float3).
+*   `transformedCovariance`: The skinned covariance components `covA` and `covB` (float3).
+*   `transformedNormal`: (Optional) The skinned normal (float3).
+
+### Data Structures
+
+The method uses one of two storage backends.
+
+**Texture2D Backend:**
+*   `_GsplatSkinIndexTexture`: `Texture2D<float4>`. Stores bone indices. Width stored in `_GsplatSkinIndexTextureWidth`.
+*   `_GsplatSkinWeightTexture`: `Texture2D<float4>`. Stores bone weights. Width stored in `_GsplatSkinWeightTextureWidth`.
+*   `_GsplatSkinReferenceTexture`: `Texture2D<float4>`. Stores reference inverse matrices. Width stored in `_GsplatSkinReferenceTextureWidth`.
+*   `_GsplatSkinBoneTexture`: `Texture2D<float4>`. Stores bone matrices. Width stored in `_GsplatSkinBoneTextureWidth`.
+
+**StructuredBuffer Backend:**
+*   `_GsplatSkinWeights`: `StructuredBuffer<GsplatSkinWeight>`.
+    *   `GsplatSkinWeight` struct:
+        *   `boneIndices`: `uint4`
+        *   `boneWeights`: `float4`
+*   `_GsplatSkinReferenceRows`: `StructuredBuffer<float4>`.
+*   `_GsplatSkinBoneRows`: `StructuredBuffer<float4>`.
+
+### Coordinate Mapping (Texture2D Backend)
+When using textures, linear indices must be converted to 2D coordinates:
+$$
+\text{coord} = \left( \text{index} \pmod{\text{width}}, \left\lfloor \frac{\text{index}}{\text{width}} \right\rfloor \right)
+$$
+where `width` is the specific texture's width [S1, unofficial].
+
+### Algorithm Steps
+
+1.  **Check Enable Flag:** If `_GsplatSkinningEnabled` is 0, return inputs unchanged [S1, unofficial].
+2.  **Load Skin Data:**
+    *   Calculate `indexOffset = sourceId * 4`.
+    *   Load four texels from `_GsplatSkinIndexTexture` at `indexOffset` through `indexOffset + 3`. Decode each to form `skin.boneIndices` (`uint4`) [S1, unofficial].
+    *   Load one texel from `_GsplatSkinWeightTexture` at `sourceId` to form `skin.boneWeights` (`float4`) [S1, unofficial].
+3.  **Compute Skin Matrix:**
+    *   Initialize `currentMatrix` to zero.
+    *   For each bone index $i \in \{0, 1, 2, 3\}$:
+        *   Let $b = \text{skin.boneIndices}[i]$.
+        *   Load bone matrix $M_b$ from `_GsplatSkinBoneTexture` (or `_GsplatSkinBoneRows`) using $b$ [S1, unofficial].
+        *   Let $w = \text{skin.boneWeights}[i]$.
+        *   Add $w \times M_b$ to `currentMatrix`.
+    *   Load reference inverse matrix $M_{ref}^{-1}$ from `_GsplatSkinReferenceTexture` (or `_GsplatSkinReferenceRows`) using `sourceId` [S1, unofficial].
+        *   Note: For Texture2D backend, the reference texture stores 3 rows; the 4th row is implicitly $(0, 0, 0, 1)$ [S1, unofficial].
+    *   Compute final skin matrix: $M_{skin} = M_{ref}^{-1} \times \text{currentMatrix}$ [S1, unofficial].
+4.  **Transform Position:**
+    *   $p' = M_{skin} \times (modelCenter, 1)^T$.
+    *   `transformedCenter` = $p'.xyz$ [S1, unofficial].
+5.  **Transform Covariance:**
+    *   Extract deformation matrix $D$ ($3 \times 3$) from the first three rows of $M_{skin}$ [S1, unofficial].
+    *   Reconstruct source covariance $C_{src}$ ($3 \times 3$) from `covA` and `covB` [S1, unofficial].
+    *   Compute deformed covariance: $C_{def} = D \times C_{src} \times D^T$ [S1, unofficial].
+    *   Extract `transformedCovariance` components `covA` and `covB` from $C_{def}$ [S1, unofficial].
+6.  **Transform Normal (Optional):**
+    *   $n' = D \times modelNormal$.
+    *   `transformedNormal` = normalize($n'$) [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def GsplatLoadSkinWeight(sourceId):
+    """
+    Loads skin weight data for a given splat ID.
+    Returns a structure with boneIndices (uint4) and boneWeights (float4).
+    """
+    # Determine backend based on global context or parameter
+    # This pseudocode assumes Texture2D backend for explicit indexing logic
+    # as described in the source. StructuredBuffer would use direct indexing.
+    
+    index_offset = sourceId * 4
+    
+    # Load bone indices from Texture2D
+    # GsplatDecodeTextureUInt handles the uint4 decoding from texels
+    bone_indices = uint4(
+        GsplatDecodeTextureUInt(_GsplatSkinIndexTexture, GsplatSkinTextureCoord(index_offset, _GsplatSkinIndexTextureWidth)),
+        GsplatDecodeTextureUInt(_GsplatSkinIndexTexture, GsplatSkinTextureCoord(index_offset + 1, _GsplatSkinIndexTextureWidth)),
+        GsplatDecodeTextureUInt(_GsplatSkinIndexTexture, GsplatSkinTextureCoord(index_offset + 2, _GsplatSkinIndexTextureWidth)),
+        GsplatDecodeTextureUInt(_GsplatSkinIndexTexture, GsplatSkinTextureCoord(index_offset + 3, _GsplatSkinIndexTextureWidth))
+    )
+    
+    # Load bone weights from Texture2D
+    bone_weights = _GsplatSkinWeightTexture[GsplatSkinTextureCoord(sourceId, _GsplatSkinWeightTextureWidth)]
+    
+    return SkinData(bone_indices, bone_weights)
+
+def GsplatLoadBoneMatrix(bone_index):
+    """
+    Loads a 4x4 bone matrix from the bone texture/buffer.
+    """
+    matrix_offset = bone_index * 4
+    
+    # Load 4 rows (texels) for the 4x4 matrix
+    row0 = _GsplatSkinBoneTexture[GsplatSkinTextureCoord(matrix_offset, _GsplatSkinBoneTextureWidth)]
+    row1 = _GsplatSkinBoneTexture[GsplatSkinTextureCoord(matrix_offset + 1, _GsplatSkinBoneTextureWidth)]
+    row2 = _GsplatSkinBoneTexture[GsplatSkinTextureCoord(matrix_offset + 2, _GsplatSkinBoneTextureWidth)]
+    row3 = _GsplatSkinBoneTexture[GsplatSkinTextureCoord(matrix_offset + 3, _GsplatSkinBoneTextureWidth)]
+    
+    return float4x4(row0, row1, row2, row3)
+
+def GsplatLoadReferenceInverse(source_id):
+    """
+    Loads the reference inverse matrix for a splat.
+    """
+    matrix_offset = source_id * 3
+    
+    # Load 3 rows
+    row0 = _GsplatSkinReferenceTexture[GsplatSkinTextureCoord(matrix_offset, _GsplatSkinReferenceTextureWidth)]
+    row1 = _GsplatSkinReferenceTexture[GsplatSkinTextureCoord(matrix_offset + 1, _GsplatSkinReferenceTextureWidth)]
+    row2 = _GsplatSkinReferenceTexture[GsplatSkinTextureCoord(matrix_offset + 2, _GsplatSkinReferenceTextureWidth)]
+    
+    # 4th row is implicit
+    row3 = float4(0.0, 0.0, 0.0, 1.0)
+    
+    return float4x4(row0, row1, row2, row3)
+
+def GsplatSkinMatrix(source_id):
+    """
+    Computes the final skin matrix for a splat.
+    """
+    skin_data = GsplatLoadSkinWeight(source_id)
+    
+    current_matrix = float4x4(0.0)
+    
+    for i in range(4):
+        bone_idx = skin_data.bone_indices[i]
+        bone_weight = skin_data.bone_weights[i]
+        
+        bone_matrix = GsplatLoadBoneMatrix(bone_idx)
+        
+        current_matrix += bone_weight * bone_matrix
+        
+    ref_inverse = GsplatLoadReferenceInverse(source_id)
+    
+    # Final skin matrix is reference inverse * weighted sum of bones
+    skin_matrix = ref_inverse * current_matrix
+    
+    return skin_matrix
+
+def GsplatTransformCovariance(covariance, transform_3x3):
+    """
+    Transforms a covariance matrix C by a deformation matrix D.
+    deformed = D * C * D^T
+    """
+    # Reconstruct 3x3 matrix from covA and covB
+    # Assuming standard packing: covA = [0,0, 0,1, 0,2], covB = [1,1, 1,2, 2,2]
+    # Or similar symmetric packing. The source implies reconstruction is possible.
+    C_src = ReconstructCovariance3x3(covariance)
+    
+    D = transform_3x3
+    C_def = D * C_src * transpose(D)
+    
+    return ExtractCovarianceComponents(C_def)
+
+def ApplySkinning(model_center, covariance, model_normal, source_id):
+    """
+    Main entry point for skinning a splat.
+    """
+    if _GsplatSkinningEnabled == 0:
+        return model_center, covariance, model_normal
+        
+    skin_matrix = GsplatSkinMatrix(source_id)
+    
+    # Transform Position
+    pos_homogeneous = float4(model_center, 1.0)
+    transformed_pos_homogeneous = skin_matrix * pos_homogeneous
+    transformed_center = transformed_pos_homogeneous.xyz
+    
+    # Transform Covariance
+    # Extract 3x3 deformation matrix from the first 3 rows of skin_matrix
+    deformation_matrix = float3x3(
+        skin_matrix[0].xyz,
+        skin_matrix[1].xyz,
+        skin_matrix[2].xyz
+    )
+    
+    transformed_covariance = GsplatTransformCovariance(covariance, deformation_matrix)
+    
+    # Transform Normal (Optional)
+    transformed_normal = normalize(deformation_matrix * model_normal)
+    
+    return transformed_center, transformed_covariance, transformed_normal
+```
+
+### Parameters
+*   `_GsplatSkinningEnabled`: Integer flag (0 or 1). Default behavior when 0 is no-op [S1, unofficial].
+*   `sourceId`: Unique splat identifier.
+*   Bone weights: Typically sum to 1.0, but the algorithm sums weighted matrices regardless [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Skinning Disabled:** If `_GsplatSkinningEnabled` is 0, all skinning functions return immediately without modifying inputs [S1, unofficial].
+*   **Reference Matrix Construction:** When using the Texture2D backend, the reference inverse matrix is stored with only 3 rows. The 4th row must be explicitly set to $(0, 0, 0, 1)$ to form a valid $4 \times 4$ matrix [S1, unofficial].
+*   **Covariance Reconstruction:** The source covariance matrix must be correctly reconstructed from `covA` and `covB` components before transformation. The result must be re-extracted into `covA` and `covB` [S1, unofficial].
+*   **Precision:** Matrix multiplications involve floating-point operations. Precision issues may arise with very small or very large bone weights, though standard float32 is implied [S1, unofficial].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time:** Constant time $O(1)$ per splat, involving a fixed number of texture/buffer loads (up to 13 texels for Texture2D backend: 4 indices, 1 weight, 4 bone rows, 3 reference rows) and matrix multiplications.
+*   **Memory:** Depends on the backend.
+    *   Texture2D: 4 textures. Each bone index consumes 4 texels. Each source consumes 1 texel for weights and 3 texels for reference inverse. Bone matrices consume 4 texels each.
+    *   StructuredBuffer: Direct indexing avoids coordinate conversion overhead but may have different memory alignment requirements [S1, unofficial].
+
+### Measured Performance
+Not given in the sources.
+
+### Scaling
+Scales linearly with the number of splats. The cost per splat is constant regardless of scene complexity, as it depends only on the splat's local skin data [S1, unofficial].
+
+### Strengths and Limitations
+*   **Strengths:** Supports skeletal animation for Gaussian splats. Texture2D backend offers GPU portability. StructuredBuffer backend offers direct access.
+*   **Limitations:** Limited to 4 bones per splat. Requires pre-computed skin weights and bone matrices. Texture2D backend requires coordinate conversion [S1, unofficial].
+
+### When to Use
+Use when skeletal animation of Gaussian splats is required. Choose Texture2D backend for maximum GPU compatibility. Choose StructuredBuffer backend for potentially simpler memory access patterns if the hardware supports it efficiently [S1, unofficial].
+
+## Background
+This method is part of the UnitySplats project by ARLOOPA, specifically designed for Gaussian Splatting in Unity. It enables dynamic skinning of splats, allowing them to deform with skeletal animations [S1, unofficial].
+
+## Sources
+
+[S1] arloopa/UnitySplats, https://github.com/arloopa/UnitySplats, fetched 2026-10-27 (unofficial)

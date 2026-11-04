@@ -1,0 +1,108 @@
+# WebGPU Voxel Ray Tracing Renderer
+
+Also called: DDA voxel grid traversal, WebGPU-based ray tracing renderer
+
+## Overview
+A WebGPU compute shader-based ray tracer for voxel models that replaces a rasterizer [S1, unofficial]. It casts rays per pixel, traverses a 3D voxel grid using DDA, applies directional lighting with diffuse shading, and generates hard shadows via shadow rays [S1, unofficial]. It sets itself apart from its parent [Voxel Shadow Raycasting with DDA](2410-voxel-shadow-raycasting-with-dda.md) by implementing the entire rendering pipeline (primary rays, shading, and shadow rays) within a WebGPU compute shader, rather than relying on a GLSL rasterizer with DDA for shadow calculation only [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel grid (dense or sparse), a project palette of block colors, lighting parameters (sun direction, intensity, ambient light), and camera state.
+*   **Output:** A 2D image buffer rendered to the canvas [S1, unofficial].
+
+**Data Structures:**
+*   **Uniform Buffer:** Expanded to 128 bytes to store lighting parameters [S1, unofficial].
+*   **Storage Buffer:** Contains the project palette for retrieving block colors [S1, unofficial].
+*   **Voxel Data:** Gathered from the voxel engine into a flat buffer [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Initialization:** The renderer checks for WebGPU support. If unavailable, it displays a fallback background [S1, unofficial].
+2.  **Primary Ray Casting:** For each pixel, a primary ray is cast into the scene [S1, unofficial].
+3.  **Voxel Traversal:** The 3D voxel grid is traversed using the Digital Differential Analyzer (DDA) algorithm to find the first intersecting voxel [S1, unofficial].
+4.  **Diffuse Shading:** If a voxel is hit, diffuse shading is calculated using the dot product of the surface normal ($N$) and the light direction ($L$) [S1, unofficial].
+5.  **Shadow Raycasting:** Shadow rays are cast by performing DDA traversal from the hit point toward the sun direction to determine occlusion [S1, unofficial].
+6.  **Color Retrieval:** Block colors are retrieved from the storage buffer containing the project palette [S1, unofficial].
+7.  **Ground Plane:** A ground plane with grid lines is rendered, which receives shadows [S1, unofficial].
+8.  **Background:** A subtle sky gradient background is rendered [S1, unofficial].
+9.  **Blitting:** The compute shader output is blitted to the canvas using a fullscreen triangle render pass [S1, unofficial].
+
+**Formulas:**
+*   **Diffuse Shading:** $I_{diffuse} = \max(0, N \cdot L)$ [S1, unofficial].
+*   **Sun Direction:** Calculated from Sun Azimuth ($\theta$) and Sun Elevation ($\phi$) [S1, unofficial].
+
+**Parameters:**
+*   **Sun Azimuth:** Horizontal angle of the sun, range 0 to 360 degrees [S1, unofficial].
+*   **Sun Elevation:** Vertical angle of the sun, range 5 to 90 degrees [S1, unofficial].
+*   **Sun Intensity:** Brightness of the directional light source [S1, unofficial].
+*   **Ambient Light Intensity:** Intensity of the ambient light component [S1, unofficial].
+*   **Shadow Strength:** Intensity/opacity of the shadows [S1, unofficial].
+*   **Sun Color:** Presets include Warm, White, Cool, Gold, Pink [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **WebGPU Availability:** WebGPU is not available in headless CI environments, so the canvas shows a fallback background instead of rendering [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# WebGPU Voxel Ray Tracing Renderer Pseudocode
+# Note: This is a high-level representation of the compute shader logic.
+# Actual implementation uses WGSL.
+
+fn render_pixel(pixel_x, pixel_y, camera, voxel_grid, palette, lighting):
+    # 1. Cast primary ray
+    ray = camera.get_ray(pixel_x, pixel_y)
+    
+    # 2. Traverse voxel grid using DDA
+    hit_point, hit_normal, hit_voxel_id = dda_traverse(ray, voxel_grid)
+    
+    # 3. Calculate color
+    if hit_voxel_id is not None:
+        # Retrieve block color from palette
+        base_color = palette[hit_voxel_id]
+        
+        # Calculate diffuse shading
+        # N is hit_normal, L is lighting.sun_direction
+        diffuse_factor = max(0, dot(hit_normal, lighting.sun_direction))
+        
+        # Apply shadow rays
+        # Cast ray from hit_point towards sun
+        is_shadowed = dda_traverse_shadow(hit_point, lighting.sun_direction, voxel_grid)
+        
+        if is_shadowed:
+            diffuse_factor = 0.0
+            
+        # Combine lighting
+        final_color = base_color * (lighting.ambient_intensity + diffuse_factor * lighting.sun_intensity)
+    else:
+        # Render background (sky gradient)
+        final_color = get_sky_gradient(ray.direction)
+        
+    return final_color
+
+fn dda_traverse(ray_origin, ray_direction, voxel_grid):
+    # Standard Amanatides-Woo DDA traversal
+    # Returns first intersecting voxel's point, normal, and ID
+    # Implementation details inherited from [Voxel Shadow Raycasting with DDA](2410-voxel-shadow-raycasting-with-dda.md)
+    pass
+
+fn dda_traverse_shadow(origin, direction, voxel_grid):
+    # DDA traversal from origin in direction
+    # Returns true if an opaque voxel is hit before reaching light
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of pixels and the average number of voxels traversed per ray [S1, unofficial].
+*   **Memory Complexity:** Linear with respect to the size of the voxel grid and the palette [S1, unofficial].
+*   **Performance:** Performance depends on the hardware's WebGPU support and the complexity of the voxel scene [S1, unofficial].
+*   **Strengths:** Real-time lighting and shadows in a voxel environment; interactive controls for lighting parameters [S1, unofficial].
+*   **Limitations:** Requires WebGPU support; not available in headless environments [S1, unofficial].
+*   **When to use:** When real-time voxel rendering with dynamic lighting and shadows is required in a web browser [S1, unofficial].
+*   **When not to use:** In headless CI environments or browsers without WebGPU support [S1, unofficial].
+
+## Background
+The WebGPU Voxel Ray Tracing Renderer was developed as part of the LunaVoxel project [S1, unofficial]. It was introduced as an alternative to the existing Three.js rasterizer, accessible via a dedicated Render tab in the header navigation [S1, unofficial]. The implementation includes directional lighting, shadow rays, and interactive controls [S1, unofficial]. It was authored by tfritzy and merged in February 2026 [S1, unofficial].
+
+## Sources
+[S1] Add WebGPU ray tracing renderer with lighting and render tab, https://github.com/tfritzy/LunaVoxel/pull/177, fetched 2026-10-25 (unofficial)

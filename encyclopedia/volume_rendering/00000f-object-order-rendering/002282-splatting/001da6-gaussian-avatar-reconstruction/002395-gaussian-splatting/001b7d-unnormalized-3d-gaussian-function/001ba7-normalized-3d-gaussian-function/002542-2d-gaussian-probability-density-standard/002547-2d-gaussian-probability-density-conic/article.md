@@ -1,0 +1,59 @@
+# 2D Gaussian Probability Density (Conic)
+
+Also called: 2D Gaussian Probability Density from Conic and Rescale
+
+## Overview
+Computes the unnormalized probability density of a 2D Gaussian at a query point `xy` given its mean, conic matrix components, and a rescaling factor [S1, unofficial]. The conic matrix represents the inverse covariance matrix [S1, unofficial]. It differs from the [Standard](3466-2d-gaussian-probability-density-standard.md) variant by operating directly on the conic components and an explicit rescaling factor rather than a full covariance matrix [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `xy`: A 2D point $(x, y)$ representing the query location [S1, unofficial].
+- `gaussian_mean`: A 2D vector $(\mu_x, \mu_y)$ representing the Gaussian center [S1, unofficial].
+- `conic_and_rescale`: A 4-component vector containing the conic matrix elements and the rescaling factor [S1, unofficial].
+
+**Outputs:**
+- `p`: The unnormalized probability density value at `xy` [S1, unofficial].
+
+**Data Structures:**
+The `conic_and_rescale` parameter layout maps to $C_{00}$, $C_{01}$, $C_{11}$, and $R$ respectively [S1, unofficial].
+
+**Steps:**
+1. Compute the difference vector $\Delta \mathbf{x}$ between the query point and the Gaussian mean: $\Delta x = xy.x - gaussian\_mean.x$, $\Delta y = xy.y - gaussian\_mean.y$ [S1, unofficial].
+2. Compute the exponent using the conic matrix components: $E = -0.5 (\Delta x^2 C_{00} + \Delta y^2 C_{11}) - \Delta x \Delta y C_{01}$ [S1, unofficial].
+3. Apply the exponential and rescale: $p = \exp(E) \cdot R$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_2d_gaussian_pdf_conic(xy, gaussian_mean, conic_and_rescale):
+    dx = xy[0] - gaussian_mean[0]
+    dy = xy[1] - gaussian_mean[1]
+    C00 = conic_and_rescale[0]
+    C01 = conic_and_rescale[1]
+    C11 = conic_and_rescale[2]
+    R = conic_and_rescale[3]
+    exponent = -0.5 * (dx * dx * C00 + dy * dy * C11) - dx * dy * C01
+    return math.exp(exponent) * R
+```
+
+**Parameters:**
+- $R$: The rescaling factor [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Precision, boundaries, and degenerate input handling are not specified in the sources.
+
+## Subtopics
+
+### 2D Gaussian Evaluation
+Computes the exponent term of the 2D Gaussian probability density function at given 2D points for rasterization or shading [S2, unofficial]. It operates on batches of points and means [S2, unofficial]. Definition: Computes $P = -\frac{1}{2} (\mathbf{x}_m^T C_{2D}^{-1} \mathbf{x}_m)$, where $\mathbf{x}_m$ is the difference vector and $C_{2D}^{-1}$ is the inverse covariance matrix [S2, unofficial]. Steps: 1. Compute difference vector: $\mathbf{x}_m = \text{points}_{2D} - \text{means}_{2D}$ [S2, unofficial]. 2. Reshape for batched matrix multiplication: $\mathbf{x}_m^{\text{col}} = \mathbf{x}_m.\text{unsqueeze}(-1)$, $\mathbf{x}_m^{\text{row}} = \mathbf{x}_m.\text{unsqueeze}(-2)$ [S2, unofficial]. 3. Compute inverse covariance: $C_{2D}^{-1} = \text{cov}_{2D}.\text{inverse}()$, unsqueezed for broadcasting [S2, unofficial]. 4. Compute quadratic form: $P = -0.5 \cdot (\mathbf{x}_m^{\text{row}} @ C_{2D}^{-1} @ \mathbf{x}_m^{\text{col}}).\text{squeeze}(-1).\text{squeeze}(-1)$ [S2, unofficial]. When to choose: Use this variant when working with batched tensor operations (e.g., in PyTorch) and when the covariance matrix is available directly rather than its inverse [S2, unofficial].
+
+## Operating characteristics
+
+## Background
+
+## Sources
+[S1] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
+[S2] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)

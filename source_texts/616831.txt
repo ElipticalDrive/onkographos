@@ -1,0 +1,245 @@
+Writes of data already compressed in memory (e.g. zfp compressed array data) Reads of data without decompressing (e.g. instantiate ZFP compressed array) Writes from or reads to GPU memory including threaded acceleration for the ZFP compr...
+
+Other ZFP features to consider supporting · Issue #32 · llnl/H5Z-ZFP · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Other ZFP features to consider supporting #32
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Other ZFP features to consider supporting#32
+Copy link
+Labels
+Component - C LibraryPriority - Major 🔼Type - New Feature
+Description
+markcmiller86
+opened on Jun 27, 2019
+Issue body actions
+Writes of data already compressed in memory (e.g. zfp compressed array data)
+Reads of data without decompressing (e.g. instantiate ZFP compressed array)
+Writes from or reads to GPU memory including threaded acceleration for the ZFP compression
+Will apps want to write directly from GPU mem or read directly into GPU mem
+More scalar types (half precision / quad precision)
+Posits? posithub.org
+zero dimensional arrays (single scalar per block)
+Activity
+lferraro commented on Oct 22, 2019
+lferraro
+on Oct 22, 2019
+More actions
+Hi Mark, I've a branch to support multi threaded compression operations of the plugin. This relies on the OpenMP Parallel Execution policy of the ZFP library.
+If this ZFP feature could be of any interest for next plugin release, we can discuss the details and how to control the parameters from the HDF5 plugin initialization.
+markcmiller86 commented on Oct 22, 2019
+markcmiller86
+on Oct 22, 2019
+MemberAuthor
+More actions
+Cool. Can you send me the link(s) to the branch?
+I am pretty much a thread newbie. I know MPI well, but don't have much experience with threads or OpenMP. I am guessing one parameter to control needs to be the number of threads the caller wants the plugin to be allowed to use. Another, may be to avoid thread creation/destruction overheads on multiple instantiations of the plugin for different datasets that would maybe allow the caller to give the plugin the specific, already created, threads to use? I dunno.
+lferraro commented on Oct 22, 2019
+lferraro
+on Oct 22, 2019
+More actions
+Hi Mark,
+you can find my multi_thread_support branch of your HDF5-ZFP repository in my GitHub repository. I just managed to push there the local changes I was working on during last few days.
+I am guessing one parameter to control needs to be the number of threads the caller wants
+In current implementation, the number of spawned threads are controlled by the OMP_NUM_THREADS environment variable, but the number of actual threads involved in the compression is decreased until each thread would deal with a long enough chunk. This choice, which can be modified, prevents overhead of using too many threads on too small buffers. The parameter min_stream_size_per_thread is currently set to 256K bytes, but can be changed and set during plugin initialization.
+avoid thread creation/destruction overheads on multiple instantiations of the plugin for different datasets
+As far as I know, HDF5 do not really support multi-threaded operations (if compiled with threadsafe support, it just serialize operations called from different threads). If I understand well your indication, multiple instantiations of the plugin will be probably made by different MPI processes or, if in a multi-threaded region, serialized by the library itself.
+markcmiller86 commented on Oct 22, 2019
+markcmiller86
+on Oct 22, 2019
+MemberAuthor
+More actions
+Great. Thanks @lferraro. Just took a peek. Looks like you currently have implemented the compression (write) only. Is that correct? Have you tested/played with it much? Can you propose a test mode we can add to H5Z-ZFP's test suite? If I am jumping the gun, lemme know. Just interested in understanding the work ahead.
+lindstro commented on Oct 22, 2019
+lindstro
+on Oct 22, 2019
+Member
+More actions
+@markcmiller86 zfp does not (yet) support OpenMP decompression. For other than fixed-rate mode, this will require encoding additional information on where in the variable-rate stream blocks reside. We are actively working on parallel decompression, but we likely won't see support for this for another year.
+markcmiller86 commented on Oct 23, 2019
+markcmiller86
+on Oct 23, 2019
+Last edited by markcmiller86
+MemberAuthor
+More actions
+Thanks @lindstro for explanation.
+Regarding plugin properties to control threading. From the code, it looks like there are potentially two or three new controls...
+minimum size of stream per thread
+number of threads to use
+chunking size
+Is this an HDF5 chunking size? If so, the filter already accomdates that by normal HDF5 dataset chunking properties
+A challenge here is that up to this point, the filter controls have been mutually exclusive. So, the generic interface which uses CPP macros to set cd_nelmts and cd_values for instantiating the filter generically now also needs to include logic that may, optionally, include thread stream size and thread count. Its not difficult...just a new way to encode data into the cd_nelmts and cd_values arrays.
+We could define
+```
+H5Pset_zfp_omp_thread_count(n, cd_nelmts, cd_values);
+H5Pset_zfp_omp_thread_min_size(min, cd_nelmts, cd_values);
+```
+which will insert values for n and min into cd_values[6] iff cd_nelmts>=7 and cd_values[7] iff cd_nelms>=8.
+For the real properties, this is more easily handled by extending the definition of h5z_zfp_props_t and then add similar functions to set threading parameters as above.
+lferraro commented on Oct 23, 2019
+lferraro
+on Oct 23, 2019
+Last edited by lferraro
+More actions
+... Just took a peek. Looks like you currently have implemented the compression (write) only. Is that correct?
+As @lindstro clarified, decompression can be performed in parallel with fixed rate mode only.
+Have you tested/played with it much?
+I've developed this branch last week. I've tested this solution with some of our applications in our HPC environment, registering good scaling speedups for our needs. It was during those tests that I decided to go with the minimum size of stream per thread control which prevents misusage of the feature in an easy automated controlled manner.
+Can you propose a test mode we can add to H5Z-ZFP's test suite?
+Yes, sure. I can add a regression test for this in my next commit. The final compressed stream is independent of execution policy or the number of used threads. We can enforce some tests for this, reporting also achieved speedups.
+... Just interested in understanding the work ahead.
+Next step is the implementation of the execution policy control in the filter setup, for both generic and properties interfaces. The execution policy (serial, openmp or CUDA) is independent with respect the selected compression mode. This should be stressed and enforced in some way with the API of the plugin initialization. What about something like the following for the generic interface ...
+```
+H5Pset_zfp_exec_serial(size_t cd_nelmts, unsigned int *cd_vals); // the default, no required parameter
+H5Pset_zfp_exec_openmp(size_t num_threads, size_t min_size_per_thread, size_t cd_nelmts, unsigned int *cd_vals);
+H5Pset_zfp_exec_cuda(size_t cd_nelmts, unsigned int *cd_vals); // no required parameter
+```
+We can safely drop the chunk size and scheduling control execution parameters for the moment since I consider them too much fine tuning features for an HDF5 user in this first release. We can add support for them in the future if users ask for it.
+markcmiller86 commented on Oct 23, 2019
+markcmiller86
+on Oct 23, 2019
+MemberAuthor
+More actions
+Since this makes sense only for rate mode, I wonder if the relevant params here should be folded into existing rate setting interface or a new interface for rate defined like so...
+```
+#define H5Z_ZFP_EXEC_SERIAL ((size_t)-1)
+#define H5Z_ZFP_EXEC_OPENMP ((size_t)-2)
+#define H5Z_ZFP_EXEC_CUDA ((size_t) -3)
+
+H5Pset_zfp_rate_cdata(double rate, size_t exec_policy, size_t num_threads, size_t min_size_per_thread, size_t cd_nelmts, unsigned int *cd_vals);
+```
+With the above approach, we can make the macro a varargs macro and detect the old interface and new interface users because the second arg will either be a small positive number (for old interface) or a large positive number (for new interface). Alternatively, I'd just define a new interface...
+```
+#define H5Z_ZFP_EXEC_SERIAL 1
+#define H5Z_ZFP_EXEC_OPENMP 2
+#define H5Z_ZFP_EXEC_CUDA 3
+
+H5Pset_zfp_rate_and_exec_cdata(double rate, int exec_policy, size_t num_threads, size_t min_size_per_thread, size_t cd_nelmts, unsigned int *cd_vals);
+```
+lindstro commented on Oct 24, 2019
+lindstro
+on Oct 24, 2019
+Member
+More actions
+@markcmiller86 Just to be sure we're on the same page, parallel (de)compression makes sense for all compression modes, although currently not all combinations are supported. Thanks to @LennartNoordsij, we now have an OpenMP implementation of variable-rate decompression also, but this mode requires storage of an additional (possibly very small) index that records offsets into the stream. You and I should discuss how to record this additional metadata in H5Z-ZFP without breaking backward compatibility.
+I wanted to point this out so that the design you and @lferraro agree on does not fundamentally limit parallel (de)compression support to fixed-rate mode. In particular, zfp 0.5.5 already supports OpenMP compression (but not decompression) for all compression modes.
+👍React with 👍3Reacted by Luca Ferraro, Steven van der Vlugt and LennartNoordsij
+markcmiller86 commented on Oct 24, 2019
+markcmiller86
+on Oct 24, 2019
+MemberAuthor
+More actions
+Ah, ok. Now I understand. So, these new parameters really do need to be wholly split out from other parts of the interface for setting compression params.
+lferraro commented on Oct 24, 2019
+lferraro
+on Oct 24, 2019
+More actions
+... parallel (de)compression makes sense for all compression modes, although currently not all combinations are supported.
+Exactly. That's way I suggested to add independent interfaces with respect compression mode.
+Thanks to @LennartNoordsij, we now have an OpenMP implementation of variable-rate decompression also...
+@lindstro do you have a working branch with this feature? When do you think this new feature will be released? What is required to implement in the HDF5-ZFP plugin to support it?
+@markcmiller86 what do you think of my suggested global interface to select the execution mode in plugin setup?
+lindstro commented on Oct 24, 2019
+lindstro
+on Oct 24, 2019
+Member
+More actions
+@lferraro We do have such an experimental branch, though we're still iterating with @LennartNoordsij on the API. It's possible/likely that the API will take a different form when this capability is eventually released.
+Supporting block indexing in the zfp command-line tool will require underlying changes to the zfp compressed format. It would make sense to bundle those changes with others that we have planned, but those will take at least another year to implement. That said, I think we have some flexibility in how we incorporate the changes necessary for parallel decompression in H5Z-ZFP, so that could likely happen much sooner.
+lferraro commented on Oct 29, 2019
+lferraro
+on Oct 29, 2019
+More actions
+@markcmiller86 do you agree with the following APIs to select the execution mode?
+Global interface for dynamically loaded HDF5 plugin :
+```
+H5Pset_zfp_exec_serial_cdata(size_t cd_nelmts, unsigned int *cd_vals); // the default, no required parameter
+H5Pset_zfp_exec_openmp_cdata(size_t num_threads, size_t min_size_per_thread, size_t cd_nelmts, unsigned int *cd_vals);
+H5Pset_zfp_exec_cuda_cdata(size_t cd_nelmts, unsigned int *cd_vals); // no required parameter
+```
+Properties Interface for dataset creation property list:
+```
+herr_t  H5Pset_zfp_exec_serial(hid_t dcpl_id); // the default, no required parameter
+herr_t  H5Pset_zfp_exec_openmp(size_t num_threads, size_t min_size_per_thread, hid_t dcpl_id);
+herr_t  H5Pset_zfp_exec_cuda(hid_t dcpl_id); // no required parameter
+```
+How can we proceed? Do you want me to implement these interfaces in my branch or do you prefer to work on it?
+markcmiller86 commented on Oct 29, 2019
+markcmiller86
+on Oct 29, 2019
+MemberAuthor
+More actions
+do you agree with the following APIs to select the execution mode?
+Yes
+Do you want me to implement these interfaces in my branch or do you prefer to work on it?
+Sure
+markcmiller86 commented on Apr 8, 2020
+markcmiller86
+on Apr 8, 2020
+MemberAuthor
+More actions
+@lferraro apologies for letting this languish. I guess I either didn't close the loop here or didn't continue tracking work on your branch. Can you update me as to status at this point?
+lferraro commented on Apr 10, 2020
+lferraro
+on Apr 10, 2020 via email
+More actions
+Dear Mark, I'm really sorry. I didn't make any progress in my branch due to
+a lot of work I had in the last months. Currently, I'm about to finish, so
+I hope I can get back to the branch and finalize it. If I am right, in
+order to complete the work, we need to implement the APIs to select the
+execution mode and add some regression tests for the multi-threaded plugin.
+I think I can start working on it starting from the 20th of April, but If
+you are in a hurry or if you want to take care of implementing this stuff
+by your own, of course you can go on.
+…
+On Wed, Apr 8, 2020 at 10:39 PM Mark C. Miller ***@***.***> wrote:
+@lferraro <https://github.com/lferraro> apologies for letting this
+languish. I guess I either didn't close the loop here or didn't continue
+tracking work on your branch. Can you update me as to status at this point?
+—
+You are receiving this because you were mentioned.
+Reply to this email directly, view it on GitHub
+<#32 (comment)>, or
+unsubscribe
+<https://github.com/notifications/unsubscribe-auth/AB7FWUW2WH7QXUHT4WI6Y6TRLTOJRANCNFSM4H3XM27A>
+.
+markcmiller86 commented on Apr 10, 2020
+markcmiller86
+on Apr 10, 2020
+MemberAuthor
+More actions
+@lferraro ... absolutely no worries! I just wanted to check in and see if you still plan/want to continue work on this. It sounds like you do and I fully welcome the help 😄 . I will try to remember to touch base in another few weeks. Take care and stay safe.
+brtnfld
+added
+Type - New Feature
+Component - C Library
+Priority - Major 🔼
+on Feb 16, 2023
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+Component - C LibraryPriority - Major 🔼Type - New Feature
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

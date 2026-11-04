@@ -1,0 +1,192 @@
+Efficient library for large-scale multimodal (speech and video) datasets with native SQL querying capabilities. - Block-sparse read-through cache for S3-backed shards (3-tier WSS3Shard) by jpc · Pull Request #91 · HumeAI/wsds
+
+Block-sparse read-through cache for S3-backed shards (3-tier WSS3Shard) by jpc · Pull Request #91 · HumeAI/wsds · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jpc
+commented
+Sep 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Stacked on #96 (formerly #90; only for a shared tests.py; the library changes are independent). Rebased after #86/#87 landed; #89 became unnecessary — main now guards string columns itself. Ports the block cache from jpc/audio-fetch-perf onto main's async/presigned S3 reader.
+What it does
+"cache": true in an S3 .wsds-link turns on a local block cache. Every 128 KiB block a read touches is persisted in a sparse mirror <partition>/<subdir>/<shard>.wsds.sparse next to the shard's other column files, so the next read of those bytes — by this process, another worker, or another node — is a pread, not a range GET. The mirror is sized to the object but only physically holds fetched blocks (footprint = working set; a 10.7 GB shard with one 5 s segment read costs 2.5 MB on disk).
+WSS3Shard decides per shard at open:
+a full local .wsds at the shard's column path under the dataset root is always preferred;
+with cache on, CachedS3FileReader: mirrored blocks served locally, a run of missing blocks fetched as one coalesced range and persisted in the background;
+otherwise plain S3FileReader (unchanged).
+Pieces
+pupyarrow/block_cache.py — mirror format (data blocks + presence bytes + footer), BlockCache.read_range, one process-wide persister thread with group commit, fcntl-locked exactly-once fills across nodes, fsync before the presence byte; per-worker access logs; offline compaction helpers. The reader owns its mirror fd (closed with the reader), so fd count tracks live shards.
+pupyarrow/file_reader.py — CachedFileReader(inner_factory, size_fn, root, name): a cache in front of any FileReader; the inner reader is built lazily on the first miss. CachedS3FileReader(client, bucket, key, root, …) is the S3 spelling, over main's S3FileReader (presigned/aiobotocore) so it inherits its retries and the presigned fast path. Also mirror_name(), FileReader.close() dropping the read buffers, LocalFileReader.path, and _IOLoop.run raising instead of deadlocking when re-entered from its own thread (found while porting: building a client from inside a read coroutine hung forever).
+ws_s3_shard.py — _LazyS3Client: a fully mirrored or local shard never builds an S3 client (dominant cost of opening a cached shard; ~0.3 MB retained per client otherwise). WSDS_SKIP_S3=1 refuses S3 outright (train from the local cache only). WSS3Shard.close() — without it, evicting a shard from the open-shard cache freed nothing.
+ws_shard.py — WSShardInterface.close() no-op default so WSDataset.close()/eviction work for every shard class (on main today WSDataset.close() raises AttributeError on a WSS3Shard).
+cache_evict.py / cachectl.py (wsds-cache entry point) — global-LRU eviction to a target size from the access logs (cold mirrors unlinked, partially hot ones compacted via atomic rename), per-dataset policy files, a systemd user timer.
+Async path (found while rebasing onto the current main)
+main's _locate_batch now gathers all batch headers of a shard concurrently (WSS3Shard._batch_row_counts → FeatherFile.async_record_batch → reader.async_read) on any random access past the verified prefix. With the cache reader inheriting the base _async_read_impl (sync _raw_read in the loop's default executor), every one of those reads parked an executor worker on _IOLoop.run, and aiohttp's DNS lookup — which uses the same executor — could never run: every connect timed out (reproduced: 186 s of timeouts on a deep read; a fresh process read the same range in 0.6 s). CachedFileReader now implements _async_read_impl natively (BlockCache.async_read_range: hits served inline, misses awaited on inner._async_read_impl; the one-off HEAD / client build moved to a worker thread). Verified cold against B2: a deep access gathering 50 batch headers = 52 fetches / 8.5 MB, warm re-read 0 fetches, identical audio; unit test with a fake async inner.
+Testing
+BlockCacheTest (fake backend, no S3): coalesced cold fetch → mirror hit from a second reader; read_end + object size from the mirror footer (no HEAD); inner reader never built when mirrored; eviction scan of the mirror layout; CachedS3FileReader surface.
+Real B2, 10.7 GB shard, temp cache root: cold 5 s segment = 3 GETs / 2.46 MB, client built; warm re-read = 0 GETs, no client built, identical samples; delivery-index catalog partitions (already mirrored) read with 0 fetches.
+Full suite: the 6 doctest failures are pre-existing on main (need local datasets).
+Overlaps #87 only in intent (client sharing): _LazyS3Client defers create_s3_client, so it composes with #87's per-process sharing when that lands.
+🤖 Generated with Claude Code
+bestrq A/B (the "verify against the training repo" check)
+scripts/bench_loader.py from the BEST-RQ repo (loader only, the exact training read path: shard_visit → sequential_from → keyed links → catalog → block cache), local20-500k filtered_vad, 6 workers, active_loaders=4, 120 s steady window, one cpu node, the two arms interleaved twice:
+arm
+crops/s
+worker produce ms/crop
+peak anon MB (7 procs)
+shard opens / 1k crops
+this stack (#89→#91→#90→#92)
+283.9, 290.3
+11.9, 11.1
+6236, 6703
+14.4, 14.1
+jpc/audio-fetch-perf (the branch this was ported from)
+279.9, 289.4
+11.4, 11.1
+6601, 6272
+14.4, 14.4
+Same throughput, memory and open rate within run-to-run noise. bestrq needed a 3-hunk compat patch in _plan.py for main-based wsds (LocalFileReader.path/_fd instead of _file; the block cache handle is reader.block_cache, since main's FileReader._cache is its async range cache; resolve the lazy S3 client via reader.client before handing it to a reader) — written as fallbacks so the same bestrq runs against both.
+jpc
+force-pushed
+the
+jpc/block-cache
+branch
+2 times, most recently
+from
+beb4739 to
+143285c
+Compare
+September 24, 2026 15:51
+jpc
+mentioned this pull request
+Sep 24, 2026
+Process-global open-shard LRU with visit pinning; negative shard cache
+#92
+Open
+jpc
+force-pushed
+the
+jpc/block-cache
+branch
+from
+143285c to
+a3a7d4e
+Compare
+September 24, 2026 19:20
+jpc
+changed the base branch from
+jpc/s3-shard-string-columns
+to
+main
+September 24, 2026 19:20
+jpc
+marked this pull request as ready for review
+September 24, 2026 19:20
+jpc
+mentioned this pull request
+Sep 24, 2026
+WSS3Shard/WSModalShard: fix reading string columns (incl. __key__)
+#89
+Closed
+Block-sparse read-through cache for S3-backed shards (3-tier WSS3Shard)
+…
+590cfc1
+```
+`"cache": true` in an S3 .wsds-link turns on a local block cache: every
+128 KiB block an S3 shard read touches is persisted in a sparse mirror
+`<partition>/<subdir>/<shard>.wsds.sparse` next to the shard's other column
+files, so the next read of those bytes -- by this process, another worker,
+or another node -- is a pread, not a range GET. The mirror is sized to the
+object but only physically holds fetched blocks (footprint = working set).
+
+WSS3Shard now decides per shard at open:
+  1. a FULL local .wsds at the shard's column path is always preferred;
+  2. with cache on, CachedS3FileReader: mirrored blocks served locally,
+     a run of missing blocks fetched as ONE coalesced range and persisted
+     in the background (one process-wide persister thread, group commit,
+     fcntl-locked exactly-once fills, fsync before the presence byte);
+  3. otherwise plain S3FileReader.
+
+- pupyarrow/block_cache.py: the mirror format, BlockCache.read_range and
+  its async twin async_read_range, the shared persister, per-worker access
+  logs (for LRU eviction) and the offline compaction helpers. The reader
+  OWNS its mirror fd (closed with the reader), so fds track live shards,
+  not every shard ever touched.
+- pupyarrow/file_reader.py: CachedFileReader(inner_factory, size_fn, root,
+  name) -- a cache in front of ANY FileReader, built on main's async
+  S3FileReader (presigned/aiobotocore); CachedS3FileReader is the S3
+  spelling; mirror_name(); FileReader.close() drops the read buffers;
+  LocalFileReader.path; _IOLoop.run raises instead of deadlocking when
+  re-entered from the loop thread. The async path (_async_read_impl, used
+  by FeatherFile.async_record_batch and the gathered batch-header scan of
+  _locate_batch) AWAITS misses on the inner reader: running the sync read
+  in the loop's default executor parked one worker per batch on the loop
+  and starved the loop's own DNS lookups -> every connect timed out.
+- ws_s3_shard.py: _LazyS3Client -- a fully mirrored or local shard never
+  builds an S3 client (create_s3_client is shared per process since #87);
+  WSDS_SKIP_S3=1 refuses S3 access outright (training from the local cache
+  only); WSS3Shard.close() releases the reader -- without it eviction from
+  the open-shard cache freed nothing.
+- ws_shard.py: WSShardInterface.close() no-op default, so WSDataset.close()
+  and eviction can close every shard class.
+- cache_evict.py / cachectl.py (`wsds-cache`): global-LRU eviction to a
+  target size from the access logs (cold mirrors unlinked, partially hot
+  ones compacted with an atomic rename), per-dataset policy files, a
+  systemd user timer.
+- tests: fake backend -- coalesced cold fetch, mirror hit from a second
+  reader, size from the mirror footer (no HEAD), inner reader never built
+  when mirrored, concurrent async misses awaited / async hits without an
+  inner reader, eviction scan of the mirror layout.
+
+Measured against a 10.7 GB B2 shard: cold 5 s segment = 3 GETs / 2.46 MB,
+the same segment from the mirror = 0 GETs, no client built, identical
+samples; mirror 2.5 MB real. A deep random access (50 batch headers
+gathered concurrently) cold: 52 fetches / 8.5 MB, warm: 0 fetches.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+jpc
+force-pushed
+the
+jpc/block-cache
+branch
+from
+a3a7d4e to
+590cfc1
+Compare
+September 25, 2026 01:14
+jpc
+changed the base branch from
+main
+to
+jpc/keyed-column-links
+September 25, 2026 01:14
+This was referenced Sep 25, 2026
+WSKeyedColumnShard: link columns by __key__ + per-partition .wsds-link override
+#90
+Merged
+WSKeyedColumnShard: link columns by __key__ + per-partition .wsds-link override
+#96
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,100 @@
+Contribute to glenpi/zig-raytracing development by creating an account on GitHub.
+
+Fix latent bugs and rewrite in idiomatic Zig by glenpi · Pull Request #6 · glenpi/zig-raytracing · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+glenpi
+commented
+Jul 29, 2026
+Copy link
+Copy Markdown
+Owner
+Follow-up to a read-through of the whole codebase. The ray-tracing maths was all correct — I checked every formula against the book (the h = -b/2 form of the quadratic, reflect/refract, Schlick, the u/v/w basis, viewport_v's sign, pixel00_loc, defocus radius, gamma + the 255.999/clamp interaction). What this PR fixes is three latent bugs plus a pile of C++-isms the translation carried over.
+The rendered image is bit-identical to main. Verified by rendering the same scene at 200x112 / 20 samples / depth 10 before and after (cmp clean). Every change below is behaviour-preserving except the three fixes, which are unreachable from the current scene config.
+Bugs
+Metal.fuzz was unclamped (material.zig). The book enforces fuzz <= 1 in a constructor; a Zig struct literal has no constructor, so nothing held the invariant. Above 1 the jitter dominates the reflection, dot(scattered, normal) > 0 fails for nearly every ray, and the metal silently renders black instead of rough. Clamped with @min(self.fuzz, 1) on use. Not hit today because main.zig feeds randomDouble() ∈ [0,1).
+@intFromFloat ran before its guard (camera.zig:63). image_height was computed from image_width / aspect_ratio and only then clamped with @max(1, ...) — but a zero, negative or NaN aspect_ratio is illegal behaviour at the cast, so the guard on the next line could never fire. aspect_ratio is a public field. Now std.math.lossyCast(u32, ...), which saturates and maps NaN to 0, with the @max(1, ...) still after it.
+const rand = prng.random() at container scope (util.zig:7). This works — I checked, 1M samples give mean 0.50013 — but only because &prng on a container-level var happens to be a comptime-known address. It's a comptime pointer into mutable global state, and it breaks confusingly the moment the global moves into a struct or becomes const. Now called per use; the global is documented as the reason the renderer can't be threaded.
+Idiom
+Vec3 is now @Vector(3, f64). + - * /, @abs, @sqrt, @select and @reduce work directly, so most of the method bodies in vec3.zig disappear and call sites read as arithmetic instead of a.subtract(b.multiply(t)).
+hit() and scatter() return optionals instead of writing through out-params and returning bool. That was the C++ shape; it's also what forced every var rec: HitRecord = undefined in the render path, all of which are now gone.
+Deleted rtweekend.zig. A literal translation of the book's umbrella header — it gave every type a second name (rtweekend.Sphere vs hittable.Sphere) and re-exported infinity/pi that already live in std.math. main.zig was its only consumer and now imports its four types directly.
+Added build.zig / build.zig.zon, moved sources to src/. zig build run -Doptimize=ReleaseFast > image.ppm replaces the raw build-exe line in the README, and zig build test comes free.
+var x = undefined + if/else replaced with if-expressions (ri and direction in Dielectric, sphere_material in the scene builder); manual a += 1 at the bottom of a 45-line while body replaced with for (0..22); the three identical world.add(...) calls hoisted out of their branches.
+getRay took *Camera without mutating and was called as a free function; rayColor never touched self at all. Both fixed. if (depth <= 0) on a u32 is now == 0.
+Dead code removed: Interval.size/contains/empty/universe, HittableList.clear, Vec3.randomOnHemisphere, rtweekend.infinity/pi, color.zig's duplicate Color alias. Zero references each.
+Stale comments fixed: camera.zig said "forward by focal_length" (it's focus_dist, and focal_length hasn't existed since the defocus chapter) and described center as "at the origin" (it's lookfrom); rayColor's doc claimed the depth cap "models energy loss from repeated bounces" — it doesn't, it truncates and biases deep paths dark.
+Tests
+28 tests, none previously (zig build test). They cover vector math, gamma/quantisation incl. the NaN and out-of-range paths, interval bounds, sphere intersection incl. inside-hits and misses, closest-hit selection across overlapping spheres, each material's scatter behaviour, camera basis orthonormality, sub-pixel jitter staying inside its pixel, and regression tests for the fuzz clamp and the degenerate aspect_ratio.
+Not done
+render() is still single-threaded — 1200x675x500 is 405M primary rays. Row-parallel std.Thread is the obvious next win, but it needs per-thread PRNG state first, which is exactly what the util.zig global blocks. Left a ponytail: marker there rather than widening this PR.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01BG9vfRVkaP3SBBjiE6oK8h
+Fix latent bugs and rewrite in idiomatic Zig
+…
+55a3c51
+```
+Behaviour-preserving: the rendered PPM is bit-identical to the previous
+code at matching settings, verified against a 200x112 / 20-sample render.
+
+Bug fixes:
+
+- Metal.fuzz was unclamped. The book enforces fuzz <= 1 in a constructor,
+  which a Zig struct literal doesn't have, so a larger value silently
+  absorbed nearly every ray and rendered the metal black. Clamped on use.
+- Camera.initialize() called @intFromFloat on image_width / aspect_ratio
+  before the @max(1, ...) guard, so a zero, negative or NaN aspect_ratio
+  was illegal behaviour rather than something the guard could catch. Uses
+  std.math.lossyCast now.
+- util.zig cached prng.random() in a container-level const, which forces
+  the compiler to take the address of a mutable global at comptime. It
+  works today but breaks confusingly if the global ever moves or becomes
+  const; call it per use instead.
+
+Idiom:
+
+- Vec3 is now @vector(3, f64), so + - * / @abs @sqrt work directly and
+  most of vec3.zig's method bodies go away.
+- hit() and scatter() return optionals instead of writing through out
+  params and returning bool, which removes every `undefined` local in the
+  render path.
+- Deleted rtweekend.zig. It was a literal translation of the book's
+  umbrella header and gave every type a second name; main.zig, its only
+  consumer, imports its four types directly.
+- Added build.zig / build.zig.zon and moved sources under src/.
+- Replaced `var x = undefined` + if/else with if-expressions, manual loop
+  increments with `for (0..n)`, and hoisted the three identical
+  world.add() calls in the scene builder out of their branches.
+- Dropped dead code: Interval.size/contains/empty/universe,
+  HittableList.clear, Vec3.randomOnHemisphere, rtweekend.infinity/pi.
+- Fixed stale comments (focal_length, camera at origin, and the claim
+  that the depth cap models energy loss — it just biases deep paths dark).
+
+Tests: 28 covering vector math, gamma/quantisation, interval bounds,
+sphere intersection incl. inside hits and misses, closest-hit selection,
+each material's scatter behaviour, camera basis derivation, sub-pixel
+jitter bounds, and the two bug fixes above. `zig build test`.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01BG9vfRVkaP3SBBjiE6oK8h
+```
+glenpi
+merged commit c0d9297
+into
+main
+Jul 30, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

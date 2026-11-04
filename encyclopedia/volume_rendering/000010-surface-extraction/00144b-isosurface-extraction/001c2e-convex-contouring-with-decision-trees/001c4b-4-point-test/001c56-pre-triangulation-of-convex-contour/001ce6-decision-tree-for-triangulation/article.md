@@ -3,37 +3,37 @@
 Also called: 4-point test decision tree
 
 ## Overview
-A pre-computed structure used to distinguish the correct triangulation from all possible triangulations in set $S$ by performing a minimal set of 4-point tests [S1]. It builds on [Pre-triangulation of Convex Contour](1226-pre-triangulation-of-convex-contour.md) by resolving the remaining ambiguity in the convex contour patches. Unlike [Marching Cubes](52-marching-cubes.md), which relies on a static lookup table for all cases, this method uses a dynamic traversal of a decision tree to select the triangulation that ensures the resulting surface is manifold and crack-less [S1].
+A pre-computed structure used to distinguish the correct triangulation from all possible triangulations in set $S$ by performing a minimal set of 4-point tests [S1]. It builds on [Pre-triangulation of Convex Contour](1226-pre-triangulation-of-convex-contour.md) by resolving the remaining ambiguity in the convex contour patches [S1]. Unlike [Marching Cubes](52-marching-cubes.md), which relies on a static lookup table for all cases, this method uses a dynamic traversal of a decision tree to select the triangulation that ensures the resulting surface is manifold and crack-less [S1].
 
 ## How it works
 **Inputs:**
-- A set of candidate triangulations $S$ for a specific convex contour patch.
-- Edge intersection points on the edges of the cubic cell.
-- A pre-computed decision tree structure for the specific patch type and sign configuration.
+- A set of candidate triangulations $S$ for a specific convex contour patch [S1].
+- Edge intersection points on the edges of the cubic cell [S1].
+- A pre-computed decision tree structure for the specific patch type and sign configuration [S1].
 
 **Outputs:**
-- A single unique triangulation from set $S$.
+- A single unique triangulation from set $S$ [S1].
 
 **Data Structures:**
-The decision tree is a binary tree where each node represents a 4-point test.
-- **Node:** Contains indices of four vertices $(v_1, v_2, v_3, v_4)$. The first three vertices define a triangle, and the fourth is the test point.
-- **Leaf:** Contains the indices of the edges forming the selected triangulation.
+The decision tree is a binary tree where each node represents a 4-point test [S1].
+- **Node:** Contains indices of four vertices $(v_1, v_2, v_3, v_4)$ [S1]. The first three vertices define a triangle, and the fourth is the test point [S1].
+- **Leaf:** Contains the indices of the edges forming the selected triangulation [S1].
 
 **Algorithm:**
-1. Start at the root of the decision tree corresponding to the current patch.
-2. Perform a 4-point test using the vertices $(v_1, v_2, v_3, v_4)$ specified at the current node.
-3. Determine the position of $v_4$ relative to the triangle formed by $v_1, v_2, v_3$.
-   - If $v_4$ lies on the front-facing side of the triangle (defined by the order $v_1 \to v_2 \to v_3$), traverse to the left child.
-   - Otherwise, traverse to the right child.
-4. Repeat steps 2-3 until a leaf node is reached.
-5. Return the triangulation stored at the leaf node.
+1. Start at the root of the decision tree corresponding to the current patch [S1].
+2. Perform a 4-point test using the vertices $(v_1, v_2, v_3, v_4)$ specified at the current node [S1].
+3. Determine the position of $v_4$ relative to the triangle formed by $v_1, v_2, v_3$ [S1].
+   - If $v_4$ lies on the front-facing side of the triangle (defined by the order $v_1 \to v_2 \to v_3$), traverse to the left child [S1].
+   - Otherwise, traverse to the right child [S1].
+4. Repeat steps 2-3 until a leaf node is reached [S1].
+5. Return the triangulation stored at the leaf node [S1].
 
 **Formula:**
-The 4-point test determines the orientation of point $v_4$ with respect to the plane defined by $v_1, v_2, v_3$. Let $\mathbf{n}$ be the normal vector of the triangle $(v_1, v_2, v_3)$:
+The 4-point test determines the orientation of point $v_4$ with respect to the plane defined by $v_1, v_2, v_3$ [S1]. Let $\mathbf{n}$ be the normal vector of the triangle $(v_1, v_2, v_3)$:
 $$ \mathbf{n} = (v_2 - v_1) \times (v_3 - v_1) $$
 The test checks the sign of the dot product:
 $$ d = \mathbf{n} \cdot (v_4 - v_1) $$
-If $d > 0$ (assuming standard right-handed coordinate system and front-face definition), the point is on the front-facing side [S1].
+If $d > 0$, the point is on the front-facing side [S1].
 
 **Parameters:**
 - Maximum depth of decision trees: 5 [S1].
@@ -42,8 +42,7 @@ If $d > 0$ (assuming standard right-handed coordinate system and front-face defi
 - Average number of point-face trials: $\le 2$ [S1].
 
 **Edge Cases and Pitfalls:**
-- The definition of "front-facing" depends on the winding order of the triangle vertices. Consistency in vertex ordering is required across all tests [S1].
-- Precision errors in floating-point calculations may affect the sign of $d$ when $v_4$ is nearly coplanar with the triangle. [G] A small epsilon threshold or robust geometric predicates should be used to handle degenerate cases.
+- Precision errors in floating-point calculations may affect the sign of $d$ when $v_4$ is nearly coplanar with the triangle [G]. A small epsilon threshold or robust geometric predicates should be used to handle degenerate cases [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -54,55 +53,55 @@ def traverse_decision_tree(node, edge_intersections):
     Traverses a decision tree to find the correct triangulation.
     
     Args:
-        node: The current node in the decision tree.
-              If node is a leaf, it contains a list of edge indices.
-              If node is an internal node, it contains a tuple (v1, v2, v3, v4)
-              representing indices into edge_intersections.
-        edge_intersections: List of 3D points representing intersections on cell edges.
+        node: A DecisionTreeNode instance.
+              Leaf nodes have attribute `triangulation_edges` (list of edge indices).
+              Internal nodes have attribute `test_vertices` (tuple of 4 edge indices).
+              Internal nodes also have `left_child` and `right_child`.
+        edge_intersections: List of 12 3D points, one for each edge of the cubic cell.
         
     Returns:
         A list of edge indices representing the triangulation.
     """
     # Check if current node is a leaf
-    if is_leaf(node):
+    if hasattr(node, 'triangulation_edges'):
         return node.triangulation_edges
     
     # Internal node: perform 4-point test
     v1_idx, v2_idx, v3_idx, v4_idx = node.test_vertices
     
-    v1 = edge_intersections[v1_idx]
-    v2 = edge_intersections[v2_idx]
-    v3 = edge_intersections[v3_idx]
-    v4 = edge_intersections[v4_idx]
+    # Map edge indices to intersection points
+    p1 = edge_intersections[v1_idx]
+    p2 = edge_intersections[v2_idx]
+    p3 = edge_intersections[v3_idx]
+    p4 = edge_intersections[v4_idx]
     
-    # Calculate normal of triangle (v1, v2, v3)
-    normal = cross_product(subtract(v2, v1), subtract(v3, v1))
+    # Calculate normal of triangle (p1, p2, p3) explicitly
+    n_x = (p2[0] - p1[0]) * (p3[1] - p1[1]) - (p2[1] - p1[1]) * (p3[0] - p1[0])
+    n_y = (p2[1] - p1[1]) * (p3[2] - p1[2]) - (p2[2] - p1[2]) * (p3[1] - p1[1])
+    n_z = (p2[2] - p1[2]) * (p3[0] - p1[0]) - (p2[0] - p1[0]) * (p3[2] - p1[2])
     
-    # Check if v4 is on the front-facing side
-    # Front-facing if dot(normal, v4 - v1) > 0
-    if dot_product(normal, subtract(v4, v1)) > 0:
+    # Check if p4 is on the front-facing side
+    dot = n_x * (p4[0] - p1[0]) + n_y * (p4[1] - p1[1]) + n_z * (p4[2] - p1[2])
+    if dot > 0:
         return traverse_decision_tree(node.left_child, edge_intersections)
     else:
         return traverse_decision_tree(node.right_child, edge_intersections)
-
-def is_leaf(node):
-    return hasattr(node, 'triangulation_edges')
 ```
 
 ## Subtopics
 
 ### Look-up table (LUT) for convex contouring
-A table containing 256 entries, one for each sign configuration of a cubic cell, storing pre-computed decision trees for each patch [S1]. It allows for fast retrieval of the decision trees by the signs at the cell corners [S1]. Each entry is a list of triangulations and 4-point tests traversed from the decision tree in pre-order. Each non-leaf node contains a 4-point test (represented by indices of the four vertices). Each leaf node stores a triangulation (represented by indices of the edges on which intersections lie) [S1]. This structure enables the contouring process to be performed in two steps: look up the decision trees by sign configuration, then perform 4-point tests on specified edge intersections until arriving at a single triangulation [S1].
+A table containing 256 entries, one for each sign configuration of a cubic cell, storing pre-computed decision trees for each patch [S1]. It allows for fast retrieval of the decision trees by the signs at the cell corners [S1]. Each entry is a list of triangulations and 4-point tests traversed from the decision tree in pre-order [S1]. Each non-leaf node contains a 4-point test (represented by indices of the four vertices) [S1]. Each leaf node stores a triangulation (represented by indices of the edges on which intersections lie) [S1]. This structure enables the contouring process to be performed in two steps: look up the decision trees by sign configuration, then perform 4-point tests on specified edge intersections until arriving at a single triangulation [S1].
 
 ## Operating characteristics
-- **Time Complexity:** The number of 4-point tests is bounded by the depth of the decision tree. Maximum depth is 5, average is 1.88 [S1]. This is generally faster than evaluating all possible triangulations or using more complex geometric checks.
-- **Memory Complexity:** The LUT stores 256 entries. Each entry contains the decision tree structure for the patches in that sign configuration. The size is constant and small enough to fit in cache [S1].
+- **Time Complexity:** The number of 4-point tests is bounded by the depth of the decision tree [S1]. Maximum depth is 5, average is 1.88 [S1].
+- **Memory Complexity:** The LUT stores 256 entries [S1]. Each entry contains the decision tree structure for the patches in that sign configuration [S1].
 - **Performance:** The method ensures manifold and crack-less contours [S1]. It is suitable for real-time navigation applications, as demonstrated in the source [S1].
-- **Strengths:** Guarantees topological correctness (manifoldness) by distinguishing the correct triangulation from all others in set $S$ [S1]. Pre-computation allows for efficient runtime performance.
-- **Limitations:** Requires pre-computation of decision trees for all patch types and sign configurations. The method is specific to convex contouring and may not be directly applicable to other surface extraction methods without modification.
+- **Strengths:** Guarantees topological correctness (manifoldness) by distinguishing the correct triangulation from all others in set $S$ [S1]. Pre-computation allows for efficient runtime performance [S1].
+- **Limitations:** Requires pre-computation of decision trees for all patch types and sign configurations [S1]. The method is specific to convex contouring and may not be directly applicable to other surface extraction methods without modification [S1].
 
 ## Background
-The method was introduced in the paper "Convex contouring of volumetric data" [S1]. It was developed to address the issues of non-manifold surfaces and cracks in isosurface extraction from volumetric data. The approach leverages the convexity of the negative space inside each non-empty cell to localize collision detection and ensure topological consistency [S1]. It is used in real-time navigation applications involving volumetric data generated by scan-conversion of polygonal models [S1].
+The method was introduced in the paper "Convex contouring of volumetric data" [S1]. It was developed to address the issues of non-manifold surfaces and cracks in isosurface extraction from volumetric data [S1]. The approach leverages the convexity of the negative space inside each non-empty cell to localize collision detection and ensure topological consistency [S1]. It is used in real-time navigation applications involving volumetric data generated by scan-conversion of polygonal models [S1].
 
 ## Sources
 [S1] Convex contouring of volumetric data, https://doi.org/10.1007/s00371-003-0216-0, fetched 2026-10-28

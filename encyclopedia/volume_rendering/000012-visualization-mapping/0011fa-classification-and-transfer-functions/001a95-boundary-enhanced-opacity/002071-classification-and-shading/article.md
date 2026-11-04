@@ -1,0 +1,126 @@
+# Classification and Shading
+
+Also called: Color Ramp Shading, Gradient-based Opacity Modulation, Gradient-based Volume Shading, Intensity Window Shading, Shading and Gradients
+
+## Overview
+Classification and Shading maps raw volume intensity values to colors and opacities to produce a visual representation of the data. It solves the problem of translating scalar field values into perceptible visual cues by applying intensity windows, color ramps, and lighting models. It differs from its parent [Boundary-Enhanced Opacity](795-boundary-enhanced-opacity.md) by focusing on direct value-to-color mapping and lighting simulation rather than solely emphasizing boundaries via gradient magnitude scaling. It is distinct from [Silhouette Enhancement](796-silhouette-enhancement.md) which focuses on edge detection, and [Isovalue Contour Surface Classification](1328-isovalue-contour-surface-classification.md) which extracts surfaces.
+
+## How it works
+**Inputs:**
+- Volume data buffer containing scalar intensity values $x(i, j, k)$.
+- Optional segmentation index buffer $segment\_index(i, j, k)$.
+- Parameters: $IntensityMin$, $IntensityMax$, $ColorRampTexture$ (2D texture), $SegmentColors$ (array of colors).
+
+**Outputs:**
+- Final color $C$ and opacity $\alpha$ for each voxel or sample point.
+
+**Data Structures:**
+- `VolBuffer`: Structured buffer of floats, indexed linearly.
+- `ColorRampTexture`: 2D texture mapping intensity [0,1] to RGBA.
+- `SegmentColors`: Array of RGBA colors indexed by segment ID.
+
+**Steps:**
+
+1. **Gradient Estimation:**
+   Estimate the gradient $\nabla x(i, j, k)$ using central finite differences [S1, unofficial][S2].
+   $$
+   \nabla x(i, j, k) = \frac{1}{2} \begin{bmatrix} x(i+1, j, k) - x(i-1, j, k) \\ x(i, j+1, k) - x(i, j-1, k) \\ x(i, j, k+1) - x(i, j, k-1) \end{bmatrix}
+   $$
+   [S1, unofficial]
+
+2. **Opacity Calculation (Gradient-Based):**
+   Calculate opacity $\alpha(i, j, k)$ based on the normalized gradient magnitude and a scalar function $g(x)$ [S1, unofficial].
+   $$
+   \alpha(i, j, k) = \frac{|\nabla x(i, j, k)|}{|\nabla x(i, j, k)|_g} \cdot g(x(i, j, k))
+   $$
+   where $|\nabla x(i, j, k)|_g$ is the maximum gradient magnitude in the volume (or a normalization constant), and $g()$ is a scalar piecewise linear function defining material interest [S1, unofficial].
+   [G] If $g(x)$ is not provided, a default step function or linear ramp based on $IntensityMin/Max$ may be used.
+
+3. **Intensity Normalization:**
+   Compute normalized intensity $unitIntensity$ for color mapping [S2].
+   $$
+   unitIntensity = \text{saturate}\left( \frac{intensity - IntensityMin}{IntensityMax - IntensityMin} \right)
+   $$
+   where $\text{saturate}(v) = \max(0, \min(1, v))$ [S2].
+
+4. **Color Mapping:**
+   - **Simple Shading:** Set color $C$ to grayscale based on $unitIntensity$ [S2].
+     $$
+     C = (unitIntensity, unitIntensity, unitIntensity, 1)
+     $$
+   - **Color Ramp Shading:** Sample the $ColorRampTexture$ at $UV = (unitIntensity, 0)$ [S2].
+     $$
+     C_{base} = \text{tex2d}(ColorRampTexture, (unitIntensity, 0))
+     $$
+
+5. **Segmentation Modulation (Optional):**
+   If segmentation indices are present, modulate the color by the segment-specific color [S2].
+   $$
+   C_{final} = C_{base} \cdot SegmentColors[segment\_index]
+   $$
+   [G] The alpha channel of $C_{final}$ is typically derived from the opacity $\alpha$ calculated in Step 2, or retained from $C_{base}$ if opacity is handled separately.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def classify_and_shade(intensity, segment_index, grad_mag, grad_mag_max, g_func, 
+                       intensity_min, intensity_max, color_ramp_texture, segment_colors):
+    # Step 2: Opacity
+    # Note: grad_mag_max is precomputed or passed as parameter
+    alpha = (grad_mag / grad_mag_max) * g_func(intensity)
+    
+    # Step 3: Normalization
+    unit_intensity = clamp((intensity - intensity_min) / (intensity_max - intensity_min), 0.0, 1.0)
+    
+    # Step 4: Color Mapping
+    # Simple shading
+    color = vec4(unit_intensity, unit_intensity, unit_intensity, 1.0)
+    
+    # Color ramp shading (preferred for color)
+    color = color_ramp_texture.sample(unit_intensity, 0.0)
+    
+    # Step 5: Segmentation
+    if segment_index is not None:
+        seg_color = segment_colors[segment_index]
+        color.rgb *= seg_color.rgb
+        # Alpha is usually controlled by the opacity model, not the segment color alpha
+        # unless specified otherwise. Here we keep the computed alpha.
+        
+    return color, alpha
+```
+
+**Edge Cases:**
+- **Boundary Conditions:** Gradient estimation at volume boundaries requires handling out-of-bounds accesses (e.g., clamping or mirroring) [S1, unofficial].
+- **Zero Gradient:** If $|\nabla x| = 0$, opacity becomes 0 (transparent) unless $g(x)$ compensates. This may hide homogeneous regions.
+- **Normalization:** $|\nabla x|_g$ must be consistent across the volume to ensure correct opacity scaling [S1, unofficial].
+
+## Subtopics
+
+### [Gradient-Based Boundary Classification](2571-gradient-based-boundary-classification.md)
+Classifies voxels as reflecting or ambient based on gradient magnitude and data value context. Choose when probabilistic surface detection is needed.
+
+### [Silhouette Enhancement](796-silhouette-enhancement.md)
+Enhances edges for better shape perception. Choose when silhouette clarity is prioritized over material shading.
+
+### [Isovalue Contour Surface Classification](1328-isovalue-contour-surface-classification.md)
+Extracts surfaces at specific intensity thresholds. Choose when discrete surface extraction is required.
+
+### [Boundary Emphasis Slider](5644-boundary-emphasis-slider.md)
+Interactive control over boundary visibility. Choose for user-adjustable visualization.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ for $N$ voxels, assuming constant-time gradient estimation and texture lookup.
+- **Memory Complexity:** $O(N)$ for volume data, plus storage for gradient buffers if precomputed.
+- **Performance:** Fast for direct volume rendering (DVR) as it avoids complex ray marching for shading. Texture sampling can be a bottleneck on older hardware.
+- **Strengths:** Simple to implement, supports color ramps and segmentation, provides realistic lighting cues via gradient-based opacity.
+- **Limitations:** Opacity depends on gradient magnitude, which may be noisy. Homogeneous regions become transparent. Requires careful tuning of $IntensityMin/Max$ and $g(x)$.
+- **When to Use:** General-purpose volume visualization, medical imaging (MRI/CT), when material differentiation is needed.
+- **When Not to Use:** When homogeneous regions must be visible regardless of gradient, or when precise surface extraction is required.
+
+## Background
+Originated in early volume rendering research for direct visualization of scalar fields. The gradient-based opacity model was formalized in the 1990s [S1, unofficial][S2]. The intensity window and color ramp techniques are standard in medical imaging software (e.g., Microsoft Mixed Reality tools) [S2]. The method builds on [Boundary-Enhanced Opacity](795-boundary-enhanced-opacity.md) by adding color mapping and segmentation support.
+
+## Sources
+[S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
+[S2] Volume rendering - Mixed Reality | Microsoft Learn, https://learn.microsoft.com/en-us/windows/mixed-reality/develop/native/volume-rendering, fetched 2026-10-27

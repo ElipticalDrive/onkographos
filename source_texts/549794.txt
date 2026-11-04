@@ -1,0 +1,202 @@
+Hybrid Raytracer for ECE379K. Contribute to Mikail-Sadic-UT/Ray-Tracer development by creating an account on GitHub.
+
+trace: add intersection, brute-force queries, and BruteQuery by Mikail-Sadic-UT · Pull Request #21 · Mikail-Sadic-UT/Ray-Tracer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Mikail-Sadic-UT
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Stacked on #20. Until #20 merges, this diff also shows its two commits; review from
+41f4307 (trace: add sphere and watertight triangle intersection) onward.
+Ray-primitive intersection and brute-force queries per INTERFACES §5 and §6:
+src/trace/intersect.hpp: intersect_sphere (stable quadratic with PBRT v4's accurate
+discriminant, so distant spheres don't cancel to "tangent") and intersect_triangle (watertight,
+PBRT v4 6.5.3, including the double edge-function fallback). Both report hits in
+(tmin, t_hi].
+src/trace/brute.hpp: brute_closest, brute_any, BruteQuery, and detail::accept (the
+frozen acceptance rule, reusable by BVH traversal so the two match exactly).
+docs/CONTRACT_NOTES.md: note W4, .cu sources for CUDA-only test targets in tests/.
+Deliberate departures from PBRT's triangle test, worth a close look (details in the commit message):
+explicit fmaf in the shear and scaled distance; an exact interval test on the returned t
+instead of PBRT's scaled range test (which can reject by one ulp a distance it just returned,
+breaking the t_hi tie rule); no conservative deltaT rejection (our contract uses the open
+interval, and offset_ray_origin handles self-intersection).
+Unblocks Po's brute-force CPU image (render_pixel<BruteQuery, NormalShading>) and the GPU smoke
+image once NormalShading lands.
+Closes #19
+Tests
+test_trace (CPU, in CI): exact dyadic examples for every frozen rule (hits, misses, tangent,
+inside, distant sphere, both windings, degenerate, shared edge, vertex, tmin/tmax/t_hi
+boundaries, sphere-triangle and shared-edge ties, empty scene, double fallback, BruteQuery
+forwarding) plus 11 fixed-seed property loops (1000 cases each), including a double-precision
+sphere reference, brute_closest vs a reference minimum, array reordering, and watertight quads
+and fans.
+test_trace_brute_header.cpp: trace/brute.hpp compiles on its own; BruteQuery layout.
+test_trace_device (CUDA builds only): one kernel runs every trace function on fixed rays and
+compares with the host; a second generates rays with camera_ray and traces them in the same
+kernel.
+Mutation check: deliberately breaking the t_hi bound, edge inclusion, the discriminant, the tie
+rule, the tmax bound, and brute_any's triangle loop each fails tests.
+Laptop (WSL2, GCC 13.3, CUDA 13.3, RTX 4070): CPU-only ctest 88/88; CUDA sm_89 ctest 93/93
+including test_trace_device.
+GPU checked (only if render code changed): CUDA build compiles; if a GPU path exists,
+paste the rt_compare summary for a known scene: no GPU render path yet; test_trace_device passes on the RTX 4070 (sm_89)
+Changes docs/INTERFACES.md: approved by each affected owner, version line bumped
+Adds, changes, or removes a stub or workaround, or lands code a stub stands in for:
+register in docs/ROADMAP.md updated
+(WORKFLOW.md "Stubs and local workarounds")
+Developed on a reference environment (WSL Ubuntu 24.04 or Vista); if not, commits carry
+Developed-on: / Needs-check: trailers (WORKFLOW.md "Development environment")
+Not a reference environment, but verified on Vista (recommended): node, commit, ctest result: ______
+Mikail-Sadic-UT
+added 7 commits
+November 2, 2026 22:49
+trace: add Hit record and RT_MISS_PRIM
+…
+4586d69
+```
+Add src/trace/hit.hpp with the 16-byte Hit record from INTERFACES
+section 5 and the miss constant RT_MISS_PRIM (0xFFFFFFFF). The header
+is declarations only, so Arek can write NormalShading and shade_hit
+against the real type before the intersection code lands.
+
+BruteQuery is left out on purpose. It will live in trace/brute.hpp
+next to brute_closest and brute_any, so no translation unit can name
+it without also seeing the inline definitions it calls (required for
+device code without -rdc).
+
+Signed-off-by: Mikail Sadic <mikail.sadic@utexas.edu>
+```
+tests: add test_trace with Hit layout checks
+…
+2982bc6
+```
+Register test_trace in tests/trace.cmake. It checks the Hit member
+offsets and size and the RT_MISS_PRIM value. test_trace.cpp includes
+trace/hit.hpp first, so the header is also checked to compile on its
+own.
+
+Signed-off-by: Mikail Sadic <mikail.sadic@utexas.edu>
+```
+trace: add sphere and watertight triangle intersection
+…
+41f4307
+```
+Add src/trace/intersect.hpp with intersect_sphere and
+intersect_triangle per INTERFACES section 5. Both report a hit iff a
+root lies in (tmin, t_hi], so callers can pass t_hi = best.t and let
+equal distances reach the tie rule.
+
+The sphere test uses the contract's stable root formula with PBRT v4's
+accurate discriminant, 4a(r - |f|)(r + |f|), because b*b - 4ac cancels
+to zero for distant spheres (a unit sphere 1e4 away looks tangent).
+
+The triangle test follows PBRT v4 6.5.3 (Woop et al. 2013), including
+the double recomputation when an edge function is exactly 0, with
+three deliberate changes for reviewers:
+- The shear and scaled distance use explicit fmaf, so a shared vertex
+  transforms to identical bits on every compiler, CPU and GPU.
+- The interval is tested exactly on the returned t instead of PBRT's
+  scaled range test, which can reject by one ulp a distance this same
+  function just returned and so break the t_hi tie rule.
+- PBRT's conservative deltaT rejection is dropped. Our contract defines
+  hits by the open interval alone, and offset_ray_origin handles
+  self-intersection.
+
+Signed-off-by: Mikail Sadic <mikail.sadic@utexas.edu>
+```
+trace: add brute-force queries and BruteQuery
+…
+374aa55
+```
+Add src/trace/brute.hpp with brute_closest, brute_any, and the
+BruteQuery tracing query from INTERFACES section 6. The acceptance rule
+lives in detail::accept, so BVH traversal can reuse it and match brute
+force exactly, including the lowest-PrimRef tie-break.
+
+BruteQuery is defined after the functions it forwards to, so no
+translation unit can name it without the inline definitions it calls.
+
+Signed-off-by: Mikail Sadic <mikail.sadic@utexas.edu>
+```
+tests: add intersection and brute-force tests
+…
+a5694b5
+```
+Extend test_trace with exact (dyadic) examples for every frozen rule:
+sphere hit, miss, tangent, inside, distant; triangle hit, miss, both
+windings, degenerate, shared edge, vertex; the tmin, tmax, and t_hi
+boundaries; sphere-triangle and shared-edge ties; empty scenes; the
+double fallback; and BruteQuery forwarding.
+
+Add fixed-seed property loops (1000 cases each): the sphere against a
+double reference, inside rays, re-reporting at t_hi, triangle hit
+points and barycentrics, two-sidedness, degenerate triangles, the
+acceptance fold, brute_closest against a reference minimum, array
+reordering, any-hit agreement, and watertight quads and fans. Failing
+cases print their inputs as hex floats.
+
+test_trace_brute_header.cpp includes trace/brute.hpp first, so the
+header is checked to compile on its own.
+
+Signed-off-by: Mikail Sadic <mikail.sadic@utexas.edu>
+```
+tests: add CUDA device check for trace functions
+…
+a14c891
+```
+Add test_trace_device, built only with RT_ENABLE_CUDA. One kernel runs
+intersect_sphere, intersect_triangle, brute_closest, brute_any, and
+BruteQuery on fixed rays and compares every result with the host. Hit
+flags and prims must match exactly; t and barycentrics get small
+absolute tolerances for FMA contraction differences.
+
+A second kernel generates camera rays with camera_ray and traces them
+with brute_closest in the same kernel, covering the camera-plus-trace
+half of the GPU smoke path. A host-only test guards that the sampled
+pixels stay clear of silhouettes and edges, so the tolerances cannot
+change which primitive is hit.
+
+Signed-off-by: Mikail Sadic <mikail.sadic@utexas.edu>
+```
+docs: add contract note W4 for CUDA test sources
+…
+b338f7b
+```
+INTERFACES section 0 lists .cu sources only for src/gpu, src/optix, and
+apps/hello_cuda, but CUDA-only test targets in tests/ need them too.
+tests/test_trace_device.cu is the first. Record the gap and the
+one-line clarification to make when section 0 is next edited.
+
+Signed-off-by: Mikail Sadic <mikail.sadic@utexas.edu>
+```
+Mikail-Sadic-UT
+added
+the
+core
+Required deliverable (Core tier)
+label
+Nov 3, 2026
+Mikail-Sadic-UT
+self-assigned this
+Nov 3, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+core
+Required deliverable (Core tier)
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

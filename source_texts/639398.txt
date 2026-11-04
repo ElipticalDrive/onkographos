@@ -1,0 +1,135 @@
+Context The current full-quality mesher uses greedy meshing over X/Y/Z slices and already avoids emitting hidden faces. However the slice mask mainly records whether a cell was already consumed. During width/height expansion of each cand...
+
+[Meshing/Performance] Build explicit face-key masks to reduce repeated voxel/material work in greedy meshing · Issue #106 · gkehren/ft_vox · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Meshing/Performance] Build explicit face-key masks to reduce repeated voxel/material work in greedy meshing #106
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#116
+Closed
+[Meshing/Performance] Build explicit face-key masks to reduce repeated voxel/material work in greedy meshing#106
+#116
+Copy link
+Description
+gkehren
+opened on Sep 4, 2026
+Issue body actions
+Context
+The current full-quality mesher uses greedy meshing over X/Y/Z slices and already avoids emitting hidden faces. However the slice mask mainly records whether a cell was already consumed.
+During width/height expansion of each candidate quad, the mesher repeatedly re-evaluates:
+voxel type on both sides of the face;
+whether each side belongs to the current chunk;
+transparency compatibility;
+face ownership/direction;
+biome-color compatibility;
+neighbor-shell sampling.
+These checks are repeated for many candidate cells during greedy rectangle growth. MeshBuild is currently one of the largest worker costs at roughly ~2.8 ms/chunk in the reference benchmark.
+Problem
+The greedy merge phase recomputes the semantic identity of a face many times instead of materializing that identity once per slice cell.
+This increases:
+voxel/shell loads;
+branches;
+repeated TextureManager::isTransparent() / material-policy checks;
+biome-color lookups;
+lambda/call overhead in the hottest nested loops.
+The current mask cannot answer the simple question: "is the adjacent cell exactly the same mergeable face?" without recomputing the face.
+Proposed implementation
+Build a compact FaceKey plane for each slice, then perform greedy rectangle merging by comparing keys.
+Conceptual representation:
+```
+struct FaceKey {
+    uint8_t blockType;
+    uint8_t normal;
+    uint16_t flags;
+    uint32_t tint;
+};
+```
+Exact packing is flexible; consider a single 32/64-bit integer if all merge-relevant properties fit.
+A zero/sentinel key means "no visible face".
+Phase 1 — face classification
+For each slice cell, evaluate the two adjacent voxels once and produce either:
+no face;
+a key describing the visible face that belongs to this chunk.
+The key must include every property that forbids merging, such as:
+block/face texture identity;
+normal/direction;
+transparency class where relevant;
+biome tint value or tint identity;
+any other render/material property that must remain constant across a merged quad.
+Do not include AO/light in the key if those are intentionally sampled only at final quad corners and do not prevent merging under current visual semantics.
+Phase 2 — greedy rectangle merge
+The width/height search should then operate mostly on:
+```
+key == originKey && !consumed
+```
+instead of re-sampling both voxels and re-running material logic for each expansion probe.
+Workspace
+Use bounded thread-local/reusable face-key scratch sized for the largest slice. Avoid heap allocation per slice/chunk.
+This should integrate with the occupancy metadata issue so empty Y sections/ranges are not classified at all.
+Acceptance criteria
+Each potential slice face is semantically classified at most once per mask build, rather than re-evaluated during every width/height probe.
+Greedy width/height expansion compares compact merge keys instead of repeatedly sampling both neighboring voxels.
+No new per-chunk/slice heap churn after worker scratch warmup.
+Opaque/water face visibility, transparency boundaries and biome-tint boundaries remain correct.
+AO/light output remains visually/bitwise consistent where the existing contract requires it.
+Chunk-edge occlusion through neighbor data remains correct.
+Mesh output is deterministic across runs/workers.
+Add tests for merge/non-merge boundaries: different block types, transparent pairs, water, biome tint transitions and chunk borders.
+[Performance/Memory] Add resident-memory, allocator and draw-call telemetry to the benchmark #101 MeshBuild sub-timers demonstrate a measurable reduction in face classification/greedy merge CPU cost, or the PR documents why the approach is not beneficial.
+Vertex/index count does not increase unexpectedly for representative chunks.
+Benchmark plan
+Use a fixed corpus of generated chunks representing:
+plains/desert (simple surface);
+forest/jungle (high foliage complexity);
+mountain/caves;
+water/coast;
+edited/noisy chunk.
+Report median/p95 mesh time per corpus plus end-to-end streaming benchmark. Do not rely only on one seed-average.
+Priority
+P1 — MeshBuild is currently the dominant background worker cost; this targets repeated work inside its hottest loops without changing rendering architecture.
+Activity
+gkehren
+closed this as completedin #116on Sep 5, 2026
+gkehren
+added 5 commits that reference this issue on Sep 5, 2026
+fix(mesh): classify section-seam faces with whole-chunk ownership rules
+...
+6c61acb
+feat(chunk): split full-quality meshes into 16^3 sections for localiz…
+...
+64d56b3
+feat(physics): add player collisions, gravity and swimming
+...
+2f1bde9
+test(docs): refresh post-rebase physics validation
+...
+3cf1938
+feat(physics): add player collisions, gravity and swimming (#118)
+...
+d677d9d
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

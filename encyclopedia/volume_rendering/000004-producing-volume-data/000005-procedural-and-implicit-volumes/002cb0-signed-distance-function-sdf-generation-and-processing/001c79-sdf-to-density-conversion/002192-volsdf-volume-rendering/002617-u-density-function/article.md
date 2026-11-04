@@ -1,0 +1,142 @@
+# U-density Function
+
+Also called: NeUDF rendering weight function, NeUDF weight, U-density, cumulative distribution function of U-density
+
+## Overview
+The U-density function is a rendering weight function designed for Unsigned Distance Fields (UDF) to ensure globally unbiased volume rendering [S1]. It solves the "volume-surface gap" inherent in naive extensions of Signed Distance Field (SDF) techniques to UDFs, specifically preventing redundant floating faces and irregular noises caused by improper weight distribution [S1]. Unlike the NeuS weight function, which violates the unbiased property for UDFs by allowing weight leakage to invisible surfaces, the U-density function concentrates rendering weight near the first surface intersection, ensuring the final color is derived solely from the visible surface geometry [S1].
+
+## How it works
+The method converts a UDF value into a density profile that drives volume rendering, ensuring that the accumulated opacity converges to 1.0 exactly at the surface intersection while remaining 0.0 for points far from the surface.
+
+### Inputs and Outputs
+*   **Input**: A ray $r$ defined by origin $o$ and direction $v$, sampled at discrete points $t_i$ along the ray. At each point, the UDF network $\Psi$ outputs a distance value $d = \Psi(p(t))$, where $p(t) = o + tv$.
+*   **Output**: A rendering weight $w_r(t)$ for each sample point, used in alpha-compositing to compute the final pixel color.
+
+### Data Structures
+*   **Ray Samples**: A list of distances $t$ along the ray.
+*   **UDF Values**: A list of scalar distances $d_i = \Psi(p(t_i))$ retrieved from the neural network.
+*   **Transformation Function**: $\varsigma_r(d)$, a parametric function mapping distance to cumulative probability.
+
+### Formulas and Definitions
+The rendering weight $w_r(t)$ is defined as:
+$$w_r(t) = \tau_r(t) e^{-\int_0^t \tau_r(u) du}$$
+where $\tau_r(t)$ is the density derived from the UDF [S1].
+
+The density $\tau_r(t)$ is calculated using the derivative of a transformed UDF:
+$$\tau_r(t) = \left| \frac{\frac{\partial(\varsigma_r \circ \Psi \circ p)}{\partial t}(t)}{\varsigma_r \circ \Psi \circ p(t)} \right|$$
+Here, $\circ$ denotes function composition, $\Psi$ is the UDF network, $p(t)$ is the ray position, and $\varsigma_r$ is the transformation function [S1].
+
+The transformation function $\varsigma_r(d)$ must satisfy the following constraints for all $d > 0$:
+1.  $\varsigma_r(0) = 0$
+2.  $\lim_{d \rightarrow +\infty} \varsigma_r(d) = 1$
+3.  $\varsigma'_r(d) > 0$ (strictly increasing)
+4.  $\varsigma''_r(d) < 0$ (concave) [S1]
+
+The specific form of $\varsigma_r(d)$ used in the source is:
+$$\varsigma_r(d) = \frac{r d}{1 + r d}$$
+where $r$ is a learnable parameter [S1].
+
+### Parameters
+*   **$r$**: A learnable parameter controlling the distribution of the density. It determines how sharply the weight concentrates near the surface.
+    *   **Initial Value**: $0.05$ [S1].
+
+### Numbered Steps
+1.  **Sample Ray**: Discretize the ray into $N$ points $t_1, \dots, t_N$.
+2.  **Query UDF**: For each point $t_i$, compute the unsigned distance $d_i = \Psi(p(t_i))$.
+3.  **Transform Distance**: Compute the transformed value $s_i = \varsigma_r(d_i) = \frac{r d_i}{1 + r d_i}$.
+4.  **Compute Density**: Calculate the density $\tau_r(t_i)$. Since $\varsigma_r$ is a function of $d$, and $d$ is a function of $t$, use the chain rule:
+    $$\tau_r(t_i) = \left| \frac{\varsigma'_r(d_i) \cdot \frac{\partial d_i}{\partial t_i}}{\varsigma_r(d_i)} \right|$$
+    Where $\frac{\partial d_i}{\partial t_i}$ is the gradient of the UDF along the ray direction, computed via automatic differentiation of $\Psi$ with respect to $p(t_i)$, projected onto $v$.
+    *Note: The source defines $\tau_r(t)$ generally as the absolute ratio of the derivative of the composition to the composition itself [S1]. In implementation, this requires the gradient of the network output.*
+5.  **Compute Weight**: Calculate the weight $w_r(t_i)$ using the exponential integral approximation (see Pseudocode).
+6.  **Composite**: Accumulate colors using standard alpha compositing with the computed weights.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def sigma_r(d, r):
+    """
+    Transformation function for UDF.
+    Constraints: sigma(0)=0, limit->1, increasing, concave.
+    """
+    return (r * d) / (1 + r * d)
+
+def sigma_r_prime(d, r):
+    """
+    Derivative of sigma_r with respect to d.
+    d/dd (rd / (1 + rd)) = r / (1 + rd)^2
+    """
+    denom = 1 + r * d
+    return r / (denom * denom)
+
+def compute_udf_density(udf_value, udf_gradient_along_ray, r):
+    """
+    Computes tau_r(t) = | (d/dt sigma(r(d))) / sigma(r(d)) |
+    By chain rule: d/dt sigma(d(t)) = sigma'(d) * d/dt(d)
+    """
+    if udf_value <= 0:
+        # Guard against division by zero or negative distances if not strictly positive
+        # In UDF, d >= 0. If d=0, sigma(0)=0, leading to division by zero.
+        # The limit as d->0 of sigma'(d)/sigma(d) is 1/d? 
+        # sigma(d) ~ rd, sigma'(d) ~ r. Ratio ~ 1/d.
+        # This suggests density becomes very high near surface, which is desired.
+        # Implementation detail: clamp or handle singularity.
+        # Source implies d>0 for constraints. At d=0, weight concentrates.
+        return float('inf') 
+    
+    s = sigma_r(udf_value, r)
+    s_prime = sigma_r_prime(udf_value, r)
+    
+    # udf_gradient_along_ray is |grad(d) . v|
+    # The formula uses absolute value of the derivative w.r.t t
+    numerator = abs(s_prime * udf_gradient_along_ray)
+    denominator = s
+    
+    if denominator == 0:
+        return float('inf')
+        
+    return numerator / denominator
+
+def render_weight(udf_value, udf_gradient_along_ray, r, prev_transmittance):
+    """
+    Computes the weight w_r(t) for a sample point.
+    w_r(t) = tau(t) * exp(- integral_0^t tau(u) du)
+    The term exp(- integral_0^t tau(u) du) is the transmittance T(t).
+    T(t) = T(t_prev) * exp(- tau(t) * delta_t)
+    """
+    tau = compute_udf_density(udf_value, udf_gradient_along_ray, r)
+    
+    # Approximate integral over the segment delta_t
+    # Note: The source uses continuous integral. In discrete sampling,
+    # we update transmittance.
+    # T(t) = T(t_prev) * exp(-tau * delta_t)
+    # Weight w(t) = tau * T(t)
+    
+    # However, the source formula w_r(t) = tau(t) e^{-int_0^t tau}
+    # implies w(t) is the probability density of the first hit at t.
+    
+    return tau * prev_transmittance
+```
+*Note: The pseudocode above highlights the singularity at $d=0$. In practice, the integral of $\tau$ over the surface region converges to 1, meaning the transmittance drops to 0. The density $\tau$ itself behaves like a Dirac delta approximation. The source notes that $\varsigma_r(d)$ is the cumulative distribution function, so $\tau_r(t)$ is its derivative (PDF). The implementation must handle the numerical stability of $\tau$ near $d=0$ [S1].*
+
+### Edge Cases and Pitfalls
+*   **Division by Zero**: $\varsigma_r(0) = 0$. If a sample point lies exactly on the surface ($d=0$), the denominator in $\tau_r(t)$ becomes 0. The density approaches infinity, which is mathematically correct for a surface representation but requires numerical care (e.g., clamping or using the limit behavior) during integration [S1].
+*   **Naive Sigmoid Extension**: Using a standard Sigmoid function (as in NeuS) violates $\varsigma_r(0)=0$ because $\text{Sigmoid}(0) = 0.5$. This leads to a non-zero accumulated density before the surface, causing bias, redundant floating faces, and irregular noises [S1].
+*   **Negative Distances**: UDFs are non-negative. The constraints apply for $d > 0$.
+
+## Operating characteristics
+*   **Time Complexity**: Dominated by the neural network inference for $\Psi$ and its gradient computation. The density calculation is $O(1)$ per sample.
+*   **Memory Complexity**: $O(1)$ auxiliary memory per ray sample.
+*   **Strengths**: Guarantees global unbiased rendering for UDFs. Prevents color mixing from invisible surfaces ($c_m, c_n$). Eliminates floating artifacts common in naive UDF extensions.
+*   **Limitations**: Requires gradient computation of the UDF network, which can be computationally expensive. The singularity at the surface requires careful numerical integration or sampling strategies (e.g., importance sampling near the surface) [S1].
+*   **When to Use**: When rendering with Unsigned Distance Fields and unbiased surface reconstruction is required.
+*   **When Not to Use**: When using Signed Distance Fields (SDFs) where other methods (like NeuS's SDF-specific weight) may be more appropriate, or when computational budget is extremely tight and gradient computation is prohibitive [S1].
+
+## Background
+The U-density function was introduced in the paper "NeUDF: Learning Neural Unsigned Distance Fields with Volume Rendering" [S1]. It was developed to address the limitations of applying SDF-based neural rendering techniques (like NeuS) directly to UDFs. The authors observed that naive extensions violate the unbiased property due to the different value domains of SDFs and UDFs. The method builds on the concept of volume rendering but adapts the weight function to the specific properties of UDFs, ensuring that the rendering process converges to the correct surface geometry without artifacts [S1].
+
+## Sources
+[S1] NeUDF: Leaning Neural Unsigned Distance Fields with Volume Rendering, https://doi.org/10.1109/cvpr52729.2023.00031, fetched 2026-10-26

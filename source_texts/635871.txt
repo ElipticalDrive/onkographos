@@ -1,0 +1,164 @@
+Two independent observations from building a FOV reslice on top of bifti.resample (as of 7ffa0a6, so after #20). Happy to split them into two issues, and happy to send a PR for either — I have both implemented locally. 1. Falling back to...
+
+resample: the oblique path is silently approximate, and a per-tissue weight can't be batched · Issue #23 · mrx-org/bifti-phantoms · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+resample: the oblique path is silently approximate, and a per-tissue weight can't be batched #23
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#32
+Closed
+resample: the oblique path is silently approximate, and a per-tissue weight can't be batched#23
+#32
+Copy link
+Description
+mzaiss
+opened on Sep 15, 2026
+Issue body actions
+Two independent observations from building a FOV reslice on top of bifti.resample
+(as of 7ffa0a6, so after #20). Happy to split them into two issues, and happy to
+send a PR for either — I have both implemented locally.
+1. Falling back to midpoint quadrature is invisible to the caller
+Resampler.build chooses between two algorithms with materially different
+accuracy. Axis-aligned targets get the separable box average, which the module
+docstring rightly calls exact — three 1-D contractions, no quadrature error, no
+substep cap. Oblique targets fall back to midpoint quadrature over the output
+voxel's parallelepiped, and _oblique_substeps caps the sample count at
+max_substeps (default 8) regardless of how many source voxels the footprint
+actually spans.
+Nothing in the returned Resampler or in the resampled array says which path ran,
+and no warning is emitted:
+```
+src_affine, src_shape = affine([1, 1, 1], [0, 0, 0]), (8, 8, 8)
+c, s = 0.8, 0.6  # 37 degrees about z
+oblique = [[2 * c, -2 * s, 0, 1], [2 * s, 2 * c, 0, 1], [0, 0, 2, 0.5]]
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    r = Resampler.build(src_affine, src_shape, oblique, [4, 4, 4])
+
+# kind: oblique   substeps: (2, 2, 2)   warnings: []
+```
+The cap is the part that actually costs accuracy. One substep per source voxel the
+footprint spans is the point at which the quadrature stops missing source data, so
+a capped axis is knowingly under-sampled and still aliases. Reslicing a 64x64x8,
+1 mm volume onto a 37-degree-rotated grid 8x coarser in x and y (so 8 substeps are
+needed per axis), measured against max_substeps=64 as ground truth:
+max_substeps
+substeps used
+max abs error
+as % of mean
+RMS
+2
+(2, 2, 2)
+0.183
+59.7%
+0.057
+4
+(4, 4, 2)
+0.048
+15.7%
+0.017
+8
+(8, 8, 2)
+0.000
+0.0%
+0.000
+That is white noise, i.e. the worst case; a real phantom is much smoother and will
+do better. But the default cap of 8 is reached by ordinary geometry — a 1 mm
+phantom resliced to an oblique 10 mm-thick slice wants 10 substeps along the slice
+axis and silently gets 8 — and the caller has two easy remedies available
+(align the grid, or raise max_substeps) if only they knew to apply one.
+warn_grid_mismatch already establishes that this module warns when it has to
+downgrade its own rule, so my suggestion is the matching one: warn from the oblique
+branch of Resampler.build, and distinguish "oblique, sampled fully at N substeps"
+from "oblique and capped below the footprint span, raise max_substeps". The
+separable path must stay silent or the warning becomes noise on every normal load.
+This needs _oblique_substeps to also report whether the cap bit — it's private,
+so no API change.
+2. resample_weighted can't take one weight per channel
+resample_weighted accepts (C, X, Y, Z) data with a 3-D weight shared across
+channels, which is exactly right for B1+/B1-: many coil channels, one density.
+But a phantom NIfTI's 4th dimension is the tissue index (NIFTI.md), and each
+tissue has its own density. So the array a loader most wants to push through one
+contraction — a whole T1.nii, each tissue weighted by its own density — is the
+one shape that doesn't fit, because weight is unconditionally given a singleton
+channel axis and forced to broadcast. The failure is an einsum-level error rather
+than a clear rejection:
+```
+data = rng.random((3, *src_shape))
+weight = density_weight(rng.random((3, *src_shape)))   # one density per tissue
+
+r.weight_sum(weight)
+# RuntimeError: contracted dimensions need to match, but first has size 8
+#               in dim 1 and second has size 3 in dim 1
+```
+So a caller resampling a 4-D file has to loop and do one contraction per tissue.
+The total contraction work is roughly the same either way (the batched call just
+carries fewer channels), so this is not a big performance argument — but it does
+force the loop, and it means the natural on-disk layout is the one layout the API
+can't consume.
+Suggestion: route weight and weight_sum through a small helper that leaves a
+3-D weight broadcasting exactly as today and lets a 4-D weight line up
+channel-for-channel, with weight_sum returning one denominator per channel for a
+4-D weight, and anything else raising ValueError instead of broadcasting into
+something silently wrong. Fully backwards compatible — a weight stacked identically
+per channel gives the same answer as the shared 3-D one.
+One caveat worth documenting if you take it: density_weight's epsilon derives from
+the peak of whatever it's handed, so weighting a stack as a whole and weighting each
+tissue separately differ at the ~1e-5 level. That gap is the weighting's own
+sensitivity to epsilon, not a bug in the batching, but it does mean the two routes
+aren't bit-identical.
+Activity
+J-Endres
+added 5 commits that reference this issue on Oct 28, 2026
+python: warn when resampling falls back to oblique quadrature
+...
+7576414
+python: accept one weight per channel in resample_weighted
+...
+fb42f92
+rust: warn when resampling falls back to oblique quadrature
+...
+98a72b4
+julia: warn when resampling falls back to oblique quadrature
+...
+02f2da4
+matlab: warn when resampling falls back to oblique quadrature
+...
+f2ae600
+J-Endres
+closed this as completedin #32on Oct 28, 2026
+J-Endres
+added a commit that references this issue on Oct 28, 2026
+Merge pull request #32 from mrx-org:fix_reslicing
+...
+This issue will close once commit 33a0830 is merged into the 'main' branch.
+33a0830
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

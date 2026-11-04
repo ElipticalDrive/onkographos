@@ -1,0 +1,294 @@
+--- v001.md
++++ v002.md
+@@ -1,7 +1,5 @@
+ # Differentiable Radiative Rasterization
+-
+-
+ ## Overview
+-Differentiable Radiative Rasterization (DRR) is a GPU-friendly rasterization process implemented in CUDA that renders novel X-ray projections from radiative Gaussian point clouds [S1]. It solves the problem of differentiable rendering for X-ray imaging by projecting 3D Gaussians to a 2D detector plane and accumulating radiation intensity per pixel, allowing gradients to flow back to Gaussian parameters (position, covariance, opacity, and radiation intensity) [S1]. Unlike standard optical Gaussian Splatting which uses alpha compositing for color, DRR sums the radiation intensities of intersection points weighted by the Gaussian probability density, tailored for the physics of X-ray attenuation [S1]. It builds on [3D Gaussian Splatting Differentiable Rasterizer](2813-3d-gaussian-splatting-differentiable-rasterizer.md) but adapts the projection and accumulation steps for X-ray geometry.
++Differentiable Radiative Rasterization (DRR) is a GPU-friendly rasterization process implemented in CUDA that renders novel X-ray projections from radiative Gaussian point clouds [S1]. It solves the problem of differentiable rendering for X-ray imaging by projecting 3D Gaussians to a 2D detector plane and accumulating radiation intensity per pixel, allowing gradients to flow back to Gaussian parameters (position, covariance, opacity, and radiation intensity) [S1]. Unlike standard optical Gaussian Splatting which uses alpha compositing for color, DRR sums the radiation intensities of intersection points weighted by the Gaussian probability density, tailored for the physics of X-ray attenuation [S1].
+ 
+ ## How it works
+@@ -17,10 +15,6 @@
+ 
+ **Data Structures:**
+-- **Gaussian Point Cloud:** A list of $N_p$ Gaussians. Each Gaussian $i$ stores:
+-  - $\boldsymbol{\mu}_i$: 3D center position.
+-  - $\boldsymbol{\Sigma}_i$: $3\times3$ covariance matrix.
+-  - $\alpha_i$: Scalar opacity.
+-  - $\mathbf{f}_i$: Feature vector for radiation intensity calculation [S1].
+-- **Tiles:** The 2D image plane is partitioned into non-overlapping tiles. Each tile maintains a list of indices of Gaussians that overlap its bounding box in screen space [S1].
++- **Gaussian Point Cloud:** A list of $N_p$ Gaussians. Each Gaussian $i$ stores $\boldsymbol{\mu}_i$, $\boldsymbol{\Sigma}_i$, $\alpha_i$, and $\mathbf{f}_i$ [S1].
++- **Tiles:** The 2D image plane is partitioned into non-overlapping tiles. Each tile maintains a sorted list of indices of Gaussians that overlap its screen-space bounding box [S1].
+ 
+ **Steps:**
+@@ -44,7 +38,6 @@
+ 
+    The Jacobian $\mathbf{J}_i$ is defined as:
+-   $$ \mathbf{J}_i = \begin{bmatrix} \frac{L_{SD}}{t_z} & 0 & -\frac{L_{SD}}{t_z^2} \frac{t_y}{t_z} \\ 0 & \frac{L_{SD}}{t_z} & -\frac{L_{SD}}{t_z^2} \frac{t_y}{t_z} \\ 0 & 0 & 0 \end{bmatrix} $$
+-   *Note: The source text [S1] contains a formatting error in the matrix layout, listing terms as $\frac{L_{SD}}{t_z^2} \frac{t_y}{t_z^2}$ in the notes but the context of standard projective Jacobians and the visual structure of the source equation (9) suggests the term is likely $\frac{t_y}{t_z}$ or similar scaling. However, strictly following the source text's explicit formula in the notes: $-\frac{L_{SD}}{t_z^2} \frac{t_y}{t_z^2}$. We retain the source's explicit notation for implementation fidelity, noting the potential typo.* [S1].
+-   Here, $L_{SD}$ is the distance between the X-ray source and detector, and $t_y, t_z$ are components of $\mathbf{t}_i$ [S1].
++   $$ \mathbf{J}_i = \begin{bmatrix} \frac{L_{SD}}{t_z} & 0 & -\frac{L_{SD} t_y}{t_z^2} \\ 0 & \frac{L_{SD}}{t_z} & -\frac{L_{SD} t_y}{t_z^2} \\ 0 & 0 & 0 \end{bmatrix} $$
++   *Note: The source text [S1] contains a formatting error in the matrix layout, listing terms as $-\frac{L_{SD}}{t_z^2} \frac{t_y}{t_z^2}$. The standard projective geometry form $-\frac{L_{SD} t_y}{t_z^2}$ is used here for correctness [G].* Here, $L_{SD}$ is the distance between the X-ray source and detector, and $t_y, t_z$ are components of $\mathbf{t}_i$ [S1].
+ 
+ 3. **Obtain 2D Covariance:**
+@@ -62,5 +55,5 @@
+    $$ P(\mathbf{x}|\boldsymbol{\mu}_i, \boldsymbol{\Sigma}_i) = \exp\left(-\frac{1}{2}(\mathbf{x} - \boldsymbol{\mu}_i)^\top \boldsymbol{\Sigma}_i^{-1}(\mathbf{x} - \boldsymbol{\mu}_i)\right) $$
+    [S1].
+-   The radiation intensity contribution $\mathbf{i}_j$ of the $j$-th intersection point $\mathbf{x}_j$ is derived from the Gaussian's opacity $\alpha_j$, the probability $P(\mathbf{x}_j | \boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j)$, and the inherent point features $\mathbf{f}_j$ (fitted via inner product with basis weights, though the exact feature-to-intensity function is not detailed in the provided text, it is implied that $\mathbf{i}_j$ is the radiation intensity of $\mathbf{x}_j$) [S1].
++   The radiation intensity contribution $\mathbf{i}_j$ of the $j$-th intersection point $\mathbf{x}_j$ is derived from the Gaussian's opacity $\alpha_j$, the probability $P(\mathbf{x}_j | \boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j)$, and the inherent point features $\mathbf{f}_j$ [S1].
+    The total intensity $I(p)$ at pixel $p$ is the sum of contributions from all overlapping Gaussians:
+    $$ I(p) = \sum_{j \in \mathcal{N}} \mathbf{i}_j $$
+@@ -98,22 +91,14 @@
+     
+     # Step 1: Project centers to image coordinates
+-    # Transform to camera coordinates
+-    # Homogeneous coordinates for mu
+-    mu_homo = np.hstack([g['mu'], 1.0]) for g in gaussians] # (N, 4)
+-    t_homo = M_ext @ mu_homo.T # (4, N)
+-    t = t_homo[:3, :].T # (N, 3)
++    mu_homo = np.column_stack([g['mu'] for g in gaussians], np.ones(N)) # (N, 4)
++    t_homo = (M_ext @ mu_homo.T).T # (N, 4)
++    t = t_homo[:, :3] # (N, 3)
+     
+     # Project to image coordinates
+-    # Note: M_int is 4x3, t_homo is (N, 4). We need to handle dimensions carefully.
+-    # The source says u_homo = M_int @ t_homo. 
+-    # If M_int is 4x3 and t_homo is 4x1, result is 4x1.
+-    # For batch: M_int @ t.T -> (4, N).
+-    u_homo = M_int @ t.T # (4, N)
+-    u = u_homo[:2, :].T # (N, 2), image coordinates
++    u_homo = (M_int @ t.T).T # (N, 4)
++    u = u_homo[:, :2] # (N, 2), image coordinates
+     
+     # Step 2: Transform Covariance
+-    # Compute W_i
+-    sin_phi = math.sin(phi)
+-    cos_phi = math.cos(phi)
++    sin_phi, cos_phi = math.sin(phi), math.cos(phi)
+     W = np.array([
+         [-sin_phi, cos_phi, 0],
+@@ -125,32 +110,20 @@
+     for i in range(N):
+         Sigma_i = gaussians[i]['Sigma']
+-        t_i = t[i]
+-        tz = t_i[2]
+-        ty = t_i[1]
+-        
+-        # Compute J_i
+-        # Source formula: J_i = [[L_SD/tz, 0, -L_SD/tz^2 * ty/tz^2], ...]
+-        # Note: The source text has a potential typo in the exponent of tz in the numerator term.
+-        # We follow the explicit text: -L_SD/tz^2 * ty/tz^2
+-        term = - (L_SD / (tz**2)) * (ty / (tz**2))
++        ty, tz = t[i, 1], t[i, 2]
++        
++        # Compute J_i (corrected from source's formatting error)
+         J = np.array([
+-            [L_SD / tz, 0, term],
+-            [0, L_SD / tz, term],
++            [L_SD / tz, 0, -L_SD * ty / (tz ** 2)],
++            [0, L_SD / tz, -L_SD * ty / (tz ** 2)],
+             [0, 0, 0]
+         ])
+         
+         # Sigma_prime = J @ W @ Sigma @ W.T @ J.T
+-        Sigma_prime = J @ W @ Sigma_i @ W.T @ J.T
+-        Sigma_prime_list.append(Sigma_prime)
++        Sigma_prime_list.append(J @ W @ Sigma_i @ W.T @ J.T)
+         
+     # Step 3: Obtain 2D Covariance
+-    Sigma_2d_list = []
+-    for Sigma_prime in Sigma_prime_list:
+-        # Skip third row and column
+-        Sigma_2d = Sigma_prime[:2, :2]
+-        Sigma_2d_list.append(Sigma_2d)
++    Sigma_2d_list = [Sp[:2, :2] for Sp in Sigma_prime_list]
+         
+     # Step 4: Tile Assignment
+-    # Create tiles
+     num_tiles_x = int(math.ceil(image_width / tile_size))
+     num_tiles_y = int(math.ceil(image_height / tile_size))
+@@ -158,22 +131,16 @@
+     
+     for i in range(N):
+-        u_i = u[i]
++        ux, uy = u[i]
+         Sigma_2d_i = Sigma_2d_list[i]
+         
+-        # Determine bounding box in pixels
+-        # Approximate bounding box using 2 sigma
+-        # Eigenvalues of Sigma_2d
++        # Determine bounding box in pixels (approx 2 sigma)
+         eigvals = np.linalg.eigvals(Sigma_2d_i)
+         max_std = math.sqrt(max(eigvals)) * 2.0
+         
+-        min_x = max(0, int(u_i[0] - max_std))
+-        max_x = min(image_width - 1, int(u_i[0] + max_std))
+-        min_y = max(0, int(u_i[1] - max_std))
+-        max_y = min(image_height - 1, int(u_i[1] + max_std))
+-        
+-        tile_x_min = min_x // tile_size
+-        tile_x_max = max_x // tile_size
+-        tile_y_min = min_y // tile_size
+-        tile_y_max = max_y // tile_size
++        min_x, max_x = int(ux - max_std), int(ux + max_std)
++        min_y, max_y = int(uy - max_std), int(uy + max_std)
++        
++        tile_x_min, tile_x_max = max(0, min_x // tile_size), min(num_tiles_x - 1, max_x // tile_size)
++        tile_y_min, tile_y_max = max(0, min_y // tile_size), min(num_tiles_y - 1, max_y // tile_size)
+         
+         for ty in range(tile_y_min, tile_y_max + 1):
+@@ -182,11 +149,7 @@
+                 
+     # Step 5: Sorting
+-    # Sort Gaussians in each tile by distance to detector (tz)
+     for ty in range(num_tiles_y):
+         for tx in range(num_tiles_x):
+-            tile_gaussians = tiles[ty][tx]
+-            # Sort by t[i][2]
+-            tile_gaussians.sort(key=lambda idx: t[idx][2])
+-            tiles[ty][tx] = tile_gaussians
++            tiles[ty][tx].sort(key=lambda idx: t[idx, 2])
+             
+     # Step 6: Intensity Calculation
+@@ -197,102 +160,25 @@
+             tile_gaussians = tiles[ty][tx]
+             
+-            # Determine pixel range for this tile
+-            y_start = ty * tile_size
+-            y_end = min((ty + 1) * tile_size, image_height)
+-            x_start = tx * tile_size
+-            x_end = min((tx + 1) * tile_size, image_width)
++            y_start, y_end = ty * tile_size, min((ty + 1) * tile_size, image_height)
++            x_start, x_end = tx * tile_size, min((tx + 1) * tile_size, image_width)
+             
+             for y in range(y_start, y_end):
+                 for x in range(x_start, x_end):
+-                    # Check if pixel (x,y) is inside the Gaussian's 2D projection
+-                    # This is expensive to do naively for every pixel. 
+-                    # In a real CUDA implementation, this is done via rasterization of the ellipse.
+-                    # Here we approximate by checking if the pixel is within the bounding box 
+-                    # and potentially inside the ellipse.
+-                    
+-                    # For simplicity in this Python pseudocode, we assume all Gaussians 
+-                    # in the tile contribute to all pixels in the tile, 
+-                    # which is incorrect but follows the "sum over N ordered points overlapping the pixel" logic 
+-                    # if we assume the tile assignment is the only filter.
+-                    # A correct implementation would check if (x,y) is inside the ellipse defined by u_i and Sigma_2d_i.
+-                    
+-                    # Correct approach:
+                     total_intensity = 0.0
+                     for idx in tile_gaussians:
+-                        u_i = u[idx]
+-                        Sigma_2d_i = Sigma_2d_list[idx]
++                        v = np.array([x - u[idx, 0], y - u[idx, 1]])
+                         
+-                        # Check if pixel (x,y) is inside the ellipse
+-                        # Vector from center to pixel
+-                        v = np.array([x - u_i[0], y - u_i[1]])
+-                        
+-                        # Mahalanobis distance squared
++                        # Check if pixel is inside the 2D Gaussian ellipse
+                         try:
+-                            dist_sq = v @ np.linalg.inv(Sigma_2d_i) @ v
++                            dist_sq = v @ np.linalg.inv(Sigma_2d_list[idx]) @ v
+                         except np.linalg.LinAlgError:
+                             dist_sq = float('inf')
+                             
+                         if dist_sq <= 4.0: # 2 sigma threshold
+-                            # Calculate probability
+-                            mu_i = gaussians[idx]['mu']
+-                            Sigma_i = gaussians[idx]['Sigma']
+-                            
+-                            # We need the 3D intersection point x_j.
+-                            # The source says x_j is the j-th intersection 3D point of the X-ray landing on pixel p.
+-                            # In X-ray geometry, the ray is from source through pixel p.
+-                            # The intersection with the Gaussian is approximated by the center projection or ray-Gaussian intersection.
+-                            # The source uses P(x_j | mu, Sigma). 
+-                            # If we assume x_j is the point on the ray closest to mu_i or the projection of mu_i onto the ray?
+-                            # The source formula for I(p) sums i_j, where i_j is radiation intensity of x_j.
+-                            # And sigma_j = alpha_j * P(x_j | mu_j, Sigma_j).
+-                            # It seems the "probability" term acts as the weight.
+-                            
+-                            # Let's assume x_j is the 3D point corresponding to the pixel p along the ray.
+-                            # For a pinhole camera model, the ray direction can be computed.
+-                            # However, the source does not provide the exact formula for x_j.
+-                            # It defines P(x | mu, Sigma) generally.
+-                            # In the context of rasterization, often the center mu_i is used if it's close, 
+-                            # or the intersection is computed.
+-                            # Given the lack of detail on x_j, we use the probability at the projected center 
+-                            # as a proxy, or assume x_j is the point on the ray.
+-                            # Let's use the probability at the projected center for the weight, 
+-                            # and the feature-based intensity for the magnitude.
+-                            
+-                            # Probability at the 3D center mu_i? Or at the intersection?
+-                            # The source says "P(x_j | mu_j, Sigma_j)".
+-                            # If we assume the Gaussian is thin, x_j ~ mu_i projected.
+-                            # Let's calculate P at mu_i for simplicity, as x_j is not explicitly defined.
+-                            # Actually, the standard 3DGS uses the 2D probability.
+-                            # Here, the source defines P in 3D.
+-                            
+-                            # Let's calculate the 3D probability at the center mu_i.
+-                            # This is a simplification.
+-                            try:
+-                                diff = mu_i - mu_i # 0 vector? No, x_j is the intersection.
+-                                # If x_j is not defined, we cannot compute P(x_j).
+-                                # However, the source table shows sigma_j = alpha_j * P(x_j | mu_j, Sigma_j).
+-                                # And I(p) = sum i_j.
+-                                # It is likely that i_j = alpha_j * P(x_j | mu_j, Sigma_j) * intensity_from_features.
+-                                # Let's assume x_j is the 3D point on the ray.
+-                                # Without the ray equation, we cannot compute x_j.
+-                                # We will assume the probability is evaluated at the center mu_i for the purpose of this pseudocode,
+-                                # noting that this is a gap [G].
+-                                diff = mu_i - mu_i # Placeholder for x_j - mu_i
+-                                # This is incorrect. 
+-                                # Let's use the 2D probability as a proxy for the weight, as is common in splatting.
+-                                # P_2d = exp(-0.5 * v @ Sigma_2d_inv @ v)
+-                                P_2d = math.exp(-0.5 * dist_sq)
+-                                
+-                                # Radiation intensity from features
+-                                # The source says "inner product between a learnable vector ... and a set of basis weights".
+-                                # We don't have the basis weights. We assume the intensity is stored or computed from f.
+-                                # Let's assume i_j = alpha_j * P_2d * intensity(f_j).
+-                                # Since intensity(f_j) is not defined, we assume it's 1 or part of the feature.
+-                                # Let's assume the "radiation intensity" i_j is simply alpha_j * P_2d.
+-                                
+-                                i_j = gaussians[idx]['alpha'] * P_2d
+-                                total_intensity += i_j
+-                            except:
+-                                pass
++                            # Probability weight sigma_j = alpha_j * P(x_j | mu_j, Sigma_j)
++                            # x_j is the intersection point; evaluated at projected center as proxy [G]
++                            P_2d = math.exp(-0.5 * dist_sq)
++                            i_j = gaussians[idx]['alpha'] * P_2d
++                            total_intensity += i_j
+                     I[y, x] = total_intensity
+                     
+@@ -301,20 +187,20 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** The Jacobian calculation involves division by $t_z^2$ and $t_z^3$ (implicitly in the term $\frac{t_y}{t_z^2}$). If $t_z$ is close to zero, numerical instability occurs. Gaussians with $t_z \le 0$ (behind the camera/source) should be discarded [S1].
+-- **Boundaries:** The bounding box calculation for tile assignment must be clamped to the image boundaries [S1].
++- **Precision:** The Jacobian calculation involves division by $t_z$ and $t_z^2$. If $t_z$ is close to zero, numerical instability occurs. Gaussians with $t_z \le 0$ (behind the camera/source) should be discarded [G].
++- **Boundaries:** The bounding box calculation for tile assignment must be clamped to the image boundaries [G].
+ - **Degenerate Input:** If $\boldsymbol{\Sigma}_i$ is singular, the inverse in the probability calculation will fail. Regularization or checking for positive definiteness is required [G].
+ - **X-ray Geometry:** The definition of the intersection point $\mathbf{x}_j$ is not explicitly detailed in the source beyond being the "intersection 3D point of the X-ray landing on pixel p". Implementers must define the ray equation from the X-ray source through the pixel to find $\mathbf{x}_j$ for the probability evaluation [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear in the number of Gaussians $N_p$ and the number of pixels, assuming efficient tile-based culling. The sorting step is $O(N_p \log N_p)$ per tile.
+-- **Memory Complexity:** $O(N_p)$ to store Gaussian parameters and tile lists.
++- **Time Complexity:** $O(N_p \log N_p)$ for sorting, plus linear tile assignment and pixel blending [S1].
++- **Memory Complexity:** $O(N_p)$ to store Gaussian parameters and tile lists [S1].
+ - **Measured Performance:** The forward and backward processes of the X-Gaussian model (which uses DRR) are much faster than those of the original 3DGS due to the avoidance of complex spherical harmonic (SH) function computations [S1].
+ - **Strengths:** GPU-friendly CUDA implementation; fast rendering for X-ray novel view synthesis; differentiable for optimization of Gaussian parameters [S1].
+ - **Limitations:** Specific to X-ray imaging geometry; requires accurate knowledge of $L_{SD}$ and $\phi$; relies on the ACUI initialization strategy for camera calibration and Gaussian placement [S1].
+-- **When to use:** When rendering novel X-ray projections from a radiative Gaussian point cloud.
+-- **When not to use:** For standard optical RGB rendering; when X-ray source parameters are unknown.
++- **When to use:** When rendering novel X-ray projections from a radiative Gaussian point cloud [S1].
++- **When not to use:** For standard optical RGB rendering; when X-ray source parameters are unknown [S1].
+ 
+ ## Background
+-Differentiable Radiative Rasterization (DRR) was introduced in the paper "Radiative Gaussian Splatting for Efficient X-Ray Novel View Synthesis" [S1]. It is part of the X-Gaussian framework, which adapts 3D Gaussian Splatting for X-ray imaging. The method was developed to enable efficient training and rendering of X-ray projections without running Structure-from-Motion (SfM) algorithms, using a custom Angle-pose Cuboid Uniform Initialization (ACUI) strategy [S1].
++Differentiable Radiative Rasterization (DRR) was introduced in the paper "Radiative Gaussian Splatting for Efficient X-Ray Novel View Synthesis" [S1]. It is part of the X-Gaussian framework, which adapts 3D Gaussian Splatting for X-ray imaging [S1]. The method was developed to enable efficient training and rendering of X-ray projections without running Structure-from-Motion (SfM) algorithms, using a custom Angle-pose Cuboid Uniform Initialization (ACUI) strategy [S1].
+ 
+ ## Sources

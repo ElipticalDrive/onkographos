@@ -1,0 +1,227 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method constructs a static Sparse Voxel Octree (SVO) from a set of 3D points or voxels by converting them to Z-order (Morton) codes, sorting them for spatial locality, and recursively partitioning the sorted array into octree nodes and leaf voxels [S1, unofficial]. It differs from dynamic insertion methods by pre-sorting all points into Morton order, which guarantees spatial locality and allows $O(1)$ range queries via binary search instead of tree traversal during construction [S1, unofficial]. Unlike the [Brute Force SVO Construction](1704-brute-force-svo-construction.md) which inserts nodes individually, this approach builds the hierarchy in a single pass over the sorted data, and unlike the [Optimized Version](1900-sparse-voxel-octree-construction-optimized-version.md) which may use complex queue merging, this basic version relies on recursive binary search ranges within the sorted array.
++This method constructs a static Sparse Voxel Octree (SVO) from a set of 3D points or voxels by converting them to Z-order (Morton) codes, sorting them for spatial locality, and recursively partitioning the sorted array into octree nodes and leaf voxels [S1, unofficial]. It differs from dynamic insertion methods by pre-sorting all points into Morton order, which guarantees spatial locality and allows $O(1)$ range queries via binary search instead of tree traversal during construction [S1, unofficial].
+ 
+ ## How it works
+@@ -38,5 +38,4 @@
+     Calculate margin: $\text{margin} = (\text{vec3}(\text{max\_extent}) - \text{extent}) \times 0.5$.
+     Shift bounds: $\text{min\_bound} \leftarrow \text{min\_bound} - \text{margin}$.
+-    *(Note: This ensures the bounding box is cubic, centered at the original min_bound adjusted by margin.)*
+ 
+ 3.  **Compute Grid Scale**:
+@@ -47,5 +46,4 @@
+     For each point $p$:
+     $$ \text{grid\_pos} = \lfloor (p - \text{min\_bound}) \times \text{scale} \rfloor $$
+-    *(Note: Implementation uses `glm::uvec3` truncation.)*
+ 
+ 5.  **Clamp Grid Coordinates**:
+@@ -64,5 +62,5 @@
+ 
+ 8.  **Recursive Construction**:
+-    Call `insert_children_recursive(min_bound, 0, N, 0)`, where $N$ is the number of unique Morton codes.
++    Call `insert_children_recursive(min_bound, 0, N, 1)`, where $N$ is the number of unique Morton codes.
+     
+     **Function `insert_children_recursive(min_coord, start_index, end_index, depth)`:**
+@@ -73,5 +71,5 @@
+     
+     *   **Recursive Step**:
+-        1.  Compute `half_size` for the current depth: $\text{half\_size} = 1 \ll (\text{max\_depth} - \text{depth} - 1)$.
++        1.  Compute `half_size` for the current depth: $\text{half\_size} = 1 \ll (\text{max\_depth} - \text{depth})$.
+         2.  Initialize `occupancy_mask = 0`.
+         3.  For each octant $i$ from 0 to 7:
+@@ -109,6 +107,7 @@
+     # 2. Equalize Aspect Ratio
+     extent = max_bound - min_bound
+-    max_extent = max(extent)
+-    margin = (vec3(max_extent) - extent) * 0.5
++    max_extent = max(extent.x, extent.y, extent.z)
++    margin = vec3(max_extent) - extent
++    margin = margin * 0.5
+     min_bound = min_bound - margin
+ 
+@@ -118,7 +117,10 @@
+     # 4. Convert to Grid Coordinates and Clamp
+     grid_positions = []
++    limit = (1 << max_depth) - 1
+     for p in points:
+         gp = floor((p - min_bound) * scale)
+-        gp = min(gp, vec3((1 << max_depth) - 1))
++        gp.x = min(gp.x, limit)
++        gp.y = min(gp.y, limit)
++        gp.z = min(gp.z, limit)
+         grid_positions.append(gp)
+ 
+@@ -149,7 +151,23 @@
+         return m
+ 
++    def lower_bound(arr, val, lo, hi):
++        while lo < hi:
++            mid = (lo + hi) // 2
++            if arr[mid] < val:
++                lo = mid + 1
++            else:
++                hi = mid
++        return lo
++
++    def upper_bound(arr, val, lo, hi):
++        while lo < hi:
++            mid = (lo + hi) // 2
++            if arr[mid] <= val:
++                lo = mid + 1
++            else:
++                hi = mid
++        return lo
++
+     def octant_offset(i):
+-        # Returns vec3 offset for octant i (0-7)
+-        # Octant 0: (0,0,0), 1: (1,0,0), 2: (0,1,0), 3: (1,1,0), etc.
+         x = (i >> 2) & 1
+         y = (i >> 1) & 1
+@@ -160,30 +178,13 @@
+         if depth == max_depth:
+             # Create leaf nodes
+-            # Note: In this basic version, each unique morton code at max depth is a leaf
+-            # However, the source implies a single node per recursive call.
+-            # If multiple voxels map to the same leaf node (same grid pos), they are merged.
+-            # Since we deduplicated morton codes, each entry in morton_codes[start_idx:end_idx]
+-            # corresponds to a unique grid position.
+-            # But wait: the source says "add voxel to children_voxels[depth]".
+-            # It seems each leaf node might contain multiple voxels? 
+-            # Or each leaf node is a single voxel? 
+-            # The layout says octree_voxel is 4 bytes (RGB). 
+-            # If multiple points map to the same grid pos, they were deduplicated.
+-            # So each leaf node corresponds to one grid position.
+-            
+-            # Create voxel
+             voxel_idx = len(voxels)
+             voxels.append([0, 0, 0, 0]) # Placeholder RGB
+-            
+-            # Create node
+-            node_info = 0
+-            node_info |= (1 << 8) # is_leaf flag
++            node_info = (1 << 8) # is_leaf flag
+             node_child_ptr = voxel_idx
+-            
+             node_idx = len(nodes)
+             nodes.append([node_info, node_child_ptr])
+             return node_idx
+ 
+-        half_size = 1 << (max_depth - depth - 1)
++        half_size = 1 << (max_depth - depth)
+         occupancy_mask = 0
+         child_indices = []
+@@ -193,24 +194,9 @@
+             child_max = child_min + half_size - 1
+             
+-            # Binary search for range
+             m_min = encode_morton(child_min.x, child_min.y, child_min.z)
+             m_max = encode_morton(child_max.x, child_max.y, child_max.z)
+             
+-            # lower_bound for m_min in morton_codes[start_idx:end_idx]
+-            # upper_bound for m_max in morton_codes[start_idx:end_idx]
+-            
+-            # Python bisect module logic:
+-            # We need to search within the slice morton_codes[start_idx:end_idx]
+-            # But bisect works on the whole list. We can use key or adjust indices.
+-            # For simplicity, assume we have a helper or use bisect_left/right with offset.
+-            
+-            # Find start index in the global list
+-            # Since morton_codes is sorted, we can search in the whole list and clamp to [start_idx, end_idx)
+-            # But the recursive call passes start_idx and end_idx relative to the current scope?
+-            # No, the source uses `morton_points.begin() + start_index`.
+-            # So we search in the global list.
+-            
+-            range_start = bisect_left(morton_codes, m_min, lo=start_idx, hi=end_idx)
+-            range_end = bisect_right(morton_codes, m_max, lo=range_start, hi=end_idx)
++            range_start = lower_bound(morton_codes, m_min, start_idx, end_idx)
++            range_end = upper_bound(morton_codes, m_max, range_start, end_idx)
+             
+             if range_start < range_end:
+@@ -221,71 +207,7 @@
+                 child_indices.append(None)
+ 
+-        # Create internal node
+         node_info = occupancy_mask
+-        # is_leaf is 0 for internal nodes
+-        
+-        # Store children pointers
+-        # The source layout has `child_ptr` as a single uint32.
+-        # This implies the children are stored in a specific way.
+-        # Usually, SVOs store children in a compact array or use the `child_ptr` to point to the first child.
+-        # The source says: `uint32_t child_ptr (index into nodes or voxels arrays)`.
+-        # If it's an internal node, `child_ptr` likely points to the first child node.
+-        # But how are 8 children stored?
+-        # The source notes say: `insert_children_recursive` stores result in `children_nodes[depth]`.
+-        # And `octree_node` has `child_ptr`.
+-        # This suggests that `child_ptr` might point to a block of 8 nodes?
+-        # Or maybe the `child_ptr` is only for the first child, and siblings are linked?
+-        # No, standard SVOs often pack children.
+-        # Given the 8-byte node size (2 uint32s), and 8 children, it's likely:
+-        # `info` = occupancy mask + is_leaf.
+-        # `child_ptr` = index of the first child.
+-        # The children are stored contiguously in the `nodes` array.
+-        # So if `child_ptr` points to index K, then children 0-7 are at K, K+1, ... K+7?
+-        # But only occupied children are created?
+-        # The source says: "If range is valid... recurse... store result in children_nodes[depth]".
+-        # This implies we create nodes for all 8 octants? Or only occupied ones?
+-        # "occupancy_mask |= (1 << i)".
+-        # If we only create nodes for occupied octants, how do we map occupancy bit to child index?
+-        # Standard approach: `child_ptr` points to the first occupied child? No, that's complex.
+-        # Another approach: `child_ptr` points to a block of 8 nodes, but only occupied ones are valid?
+-        # Or `child_ptr` points to the first child, and the children are stored in order 0-7,
+-        # but empty children are skipped?
+-        # Let's look at the layout again: `octree_node` is 8 bytes.
+-        # If `child_ptr` is an index, and we have 8 children, we need 8 indices.
+-        # 8 * 4 bytes = 32 bytes. We only have 4 bytes for `child_ptr`.
+-        # This implies `child_ptr` points to a *single* node, which is the root of a subtree?
+-        # No, it's an octree.
+-        # Maybe the `child_ptr` is an index into a *separate* array of children?
+-        # Or maybe the `child_ptr` is an index into the `nodes` array, and the children are stored
+-        # in a specific order, and we use the occupancy mask to know which ones are valid?
+-        # If `child_ptr` points to the first child, and children are stored contiguously,
+-        # then child i is at `child_ptr + i`.
+-        # But if some children are empty, do we still allocate space?
+-        # The source says: "If range is valid... recurse". It doesn't say "else create empty node".
+-        # So empty children are not created.
+-        # This means `child_ptr` cannot simply point to a contiguous block of 8.
+-        # Perhaps `child_ptr` points to a *list* of children?
+-        # But the node is only 8 bytes.
+-        # Let's re-read: `uint32_t child_ptr (index into nodes or voxels arrays)`.
+-        # Maybe the `nodes` array is sparse?
+-        # Or maybe `child_ptr` is an index into a *separate* array of child pointers?
+-        # The source doesn't specify a separate array.
+-        # Let's assume the standard compact SVO layout:
+-        # `info` = occupancy mask + is_leaf.
+-        # `child_ptr` = index of the first child.
+-        # The children are stored in the `nodes` array.
+-        # But if children are not contiguous, how do we find child i?
+-        # We might need to count occupied bits before i.
+-        # This is a common optimization.
+-        # So, `child_ptr` points to the first occupied child.
+-        # To find child i, we count the number of set bits in `occupancy_mask` before bit i,
+-        # and add that to `child_ptr`.
+-        
+         node_idx = len(nodes)
+         nodes.append([node_info, 0]) # Placeholder for child_ptr
+-        
+-        # We need to store the child indices.
+-        # Since we can't store 8 indices in 4 bytes, we must use the counting method.
+-        # So `child_ptr` will store the index of the first occupied child.
+         
+         occupied_children = [c for c in child_indices if c is not None]
+@@ -293,10 +215,9 @@
+             nodes[node_idx][1] = occupied_children[0]
+         else:
+-            # Should not happen if occupancy_mask is 0, but handle it
+             nodes[node_idx][1] = 0
+ 
+         return node_idx
+ 
+-    root_idx = insert_children_recursive(min_bound, 0, n, 0)
++    root_idx = insert_children_recursive(min_bound, 0, n, 1)
+     return nodes, voxels
+ ```

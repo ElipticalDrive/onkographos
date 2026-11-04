@@ -1,0 +1,694 @@
+# Butterfly Swarm — art from pure mathematics
+
+There is no 3D model here. No mesh, no textures, no artwork of any kind. The butterflies exist only as a set of equations, evaluated independently for every pixel, every frame. Change a coefficient and the creature changes shape.
+
+<p align="center">
+  <img src="poster.jpg" width="380" alt="Poster: a glowing orange butterfly backlit in a dark forest, beneath three equations describing the ray, the span coordinate and the delayed wingbeat">
+</p>
+
+Built with [Manim Community](https://www.manim.community/) and an original GLSL fragment shader. Manim keeps the clock and typesets the mathematics; the GPU solves the geometry.
+
+<p align="center">
+  <img src="docs/preview.jpg" width="300" alt="Still frame: a monarch-patterned butterfly with black veins and white margin spots, glowing against dark green woodland">
+</p>
+
+The rendered animation is committed as [`butterflies.mp4`](butterflies.mp4) — 1080x1920, 60 fps, 10 seconds.
+
+## How a picture comes out of an equation
+
+Nothing is ever *drawn*. Instead, each pixel asks a question about space.
+
+**1. Every pixel casts a ray.** A pixel is a direction looking out from the camera, so the points it can see form a line:
+
+$$p(s) = o + s\,\hat{r}$$
+
+**2. A function answers "how far to the nearest surface?"** This is a *signed distance field*. `sdWing`, `sdBody` and `sdAntenna` each take a point in 3D space and return the distance to that part of the animal. Nothing is stored — the shape is defined entirely by the arithmetic.
+
+**3. The ray walks forward by whatever distance is safe**, repeatedly, until that distance falls near zero. This is *ray marching*, and it makes the image a solved equation rather than a rasterised object.
+
+## The wing problem
+
+A jellyfish bell is a blob, and blobs are easy. A butterfly wing is a **thin sheet that bends while it flaps**, which is much harder: the surface is different at every instant, so it cannot simply be looked up.
+
+The trick is to work backwards. Flapping is a rotation about the body's long axis, and rotation about that axis leaves the distance from it **unchanged**:
+
+$$\mathrm{span} = \lVert p_{xy} \rVert$$
+
+So `span` is a coordinate the flap cannot disturb — it labels how far out along the wing a point sits, no matter where the wing currently is. That makes it safe to *un-bend* the point: rotate it back by the local flap angle, and evaluate a simple flat wing shape in the resulting plane.
+
+```glsl
+float span = length(p.xy);
+vec2  q    = rot(-flapAngle(span, t, phase)) * p.xy;
+```
+
+The wing outline is then just two rounded triangles in 2D — a forewing and a hindwing, kept separate so a notch survives between them.
+
+Because the un-bending transform is not rigid, distances in that flattened space are slightly overstated, so the marcher takes deliberately conservative steps. Trading a little speed for correctness here is what stops rays tunnelling through the membrane.
+
+## How the mathematics creates life
+
+**The wing bends because the tip is late.** The flap angle samples the stroke at a *delayed* phase further out along the span:
+
+$$\theta = \Theta\!\left(t - \lambda\,\mathrm{span}\right)$$
+
+Nothing models elasticity, yet the wing visibly flexes: the root leads, the tip trails, and the membrane appears to whip through the stroke. One subtraction buys the entire effect.
+
+**The stroke is asymmetric.** A real butterfly snaps the downstroke and coasts the recovery. A sine wave spends equal time on both and looks mechanical, so the cycle spends 36% of its time going down and 64% coming back:
+
+```glsl
+x < 0.36 ? smoothstep(0.0, 1.0, x / 0.36)
+         : 1.0 - smoothstep(0.0, 1.0, (x - 0.36) / 0.64)
+```
+
+**Backlighting does the rest.** Wings are thin enough to transmit light, so the shader adds a term that brightens as the surface turns *away* from the sun while the camera looks *toward* it. That single term is why the swarm glows against the dark canopy instead of looking like painted card.
+
+**The dorsal axis is anchored toward the camera.** Deriving orientation from velocity alone is more physical, but leaves butterflies edge-on and lifeless most of the time. Each one keeps a camera-facing bias, varied per individual, and its heading lives in the remaining freedom.
+
+## Running it
+
+Requires [`uv`](https://docs.astral.sh/uv/), `ffmpeg`, and a driver supporting OpenGL 3.3.
+
+```powershell
+uv sync
+.\render.ps1
+```
+
+Roughly one minute of rendering per 10 seconds of output on integrated graphics. Options:
+
+```powershell
+.\render.ps1 -Duration 15 -StartTime 4 -Fps 30 -OutFile study.mp4
+```
+
+Single frames are near-instant, which is the sane way to iterate on a shader:
+
+```powershell
+uv run python preview.py 1            # one frame at t=1
+uv run python preview.py 1.0 2.4 3.8  # contact sheet across a wingbeat
+```
+
+## Colour, measured rather than guessed
+
+`palette.py` reports mean RGB across the shadow, midtone and highlight bands of an image.
+
+```powershell
+uv run python palette.py preview.png
+```
+
+Two measured problems shaped the final look:
+
+- **Gamma lifts near-black hard.** A woodland that looked correctly dark in linear values came out at `rgb(24, 50, 39)` in the shadows and the butterflies stopped glowing. Background values had to drop roughly fourfold before the subject read as luminous.
+- **Tonemapping desaturates the brightest colour.** Exponential tonemapping compresses the dominant channel hardest, so vivid orange drifted to tan exactly where the wing was brightest. A chroma-preserving step after the tonemap restores it:
+
+```glsl
+float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+col = clamp(mix(vec3(lum), col, 1.32), 0.0, 1.0);
+```
+
+## The poster
+
+[`poster.jpg`](poster.jpg) composites a rendered frame with the governing equations typeset by Manim's `MathTex`.
+
+```powershell
+uv run manim -s -r 1080,1920 -o poster poster.py Poster
+```
+
+This step needs LaTeX, since `MathTex` shells out to it — the animation itself does not. On Windows:
+
+```powershell
+winget install --id MiKTeX.MiKTeX --exact --scope user
+initexmf --set-config-value "[MPM]AutoInstall=1"
+```
+
+The `AutoInstall` line matters: without it MiKTeX blocks on an interactive prompt the first time Manim requests a package.
+
+## Things worth knowing if you fork this
+
+| Where | Controls |
+| --- | --- |
+| `SWARM` | position and scale; index 0 is the hero |
+| `FLAP_HZ` | wingbeat rate |
+| `TIP_LAG` | how much the wing bends during a stroke |
+| `wingOutline` | forewing and hindwing silhouettes |
+| `wingColour` | veins, margin, spots, apex |
+| `face` in the march loop | how strongly each butterfly turns toward the camera |
+
+- **The camera lives in GLSL**, so Manim's own camera does not move it. Manim supplies the timeline: a `ValueTracker` feeds the `u_time` uniform, and the GPU re-evaluates every equation per pixel per frame.
+- **`Shader.set_uniform` swallows unknown names silently.** A typo, or a uniform the compiler optimised away, fails without complaint. Verify by rendering two timestamps and diffing them.
+- **`renderer = opengl` in `manim.cfg` is ignored** — the OpenGL renderer must be selected with the `--renderer=opengl` CLI flag, which `render.ps1` passes. Resolution and frame rate in the config file *are* honoured.
+- **Manim's OpenGL renderer draws meshes after mobjects**, so a full-screen shader quad paints over any text. `poster.py` sidesteps this by baking the frame to an image first.
+- Manim's shader API is experimental, so the dependency is pinned. Re-check shader compilation and a short export before upgrading.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
+
+### butterflies.frag
+```
+#version 330
+
+uniform vec2 u_resolution;
+uniform float u_time;
+out vec4 frag_color;
+
+const float PI  = 3.14159265359;
+const float TAU = 6.28318530718;
+
+const int   SWARM_SIZE  = 6;
+const int   MARCH_STEPS = 130;
+
+const float FLAP_HZ  = 1.35;
+const float TIP_LAG  = 0.135;   // stroke phase delay per unit of span: makes the wing bend
+const float WING_Z   = 0.05;    // wings hinge at the thorax
+
+// xyz = centre of the flight path, w = scale. Index 0 is the hero.
+const vec4 SWARM[6] = vec4[6](
+    vec4(-0.15,  0.10,  0.45, 0.82),
+    vec4( 1.85,  1.30, -2.60, 0.52),
+    vec4(-2.05,  1.85, -4.30, 0.44),
+    vec4( 1.45, -1.95, -5.20, 0.50),
+    vec4(-1.75,  2.55, -7.80, 0.36),
+    vec4( 2.20, -0.95, -9.20, 0.34)
+);
+
+const vec3 AMBER_BRIGHT = vec3(1.00, 0.35, 0.020);
+const vec3 AMBER_DEEP   = vec3(0.52, 0.075, 0.004);
+const vec3 INK          = vec3(0.030, 0.014, 0.010);
+const vec3 CREAM        = vec3(1.00, 0.93, 0.80);
+const vec3 SUNCOL       = vec3(1.00, 0.78, 0.36);
+const vec3 SUN          = vec3(-0.42, 0.60, -0.68);
+
+float hash11(float n) { return fract(sin(n * 127.1 + 31.7) * 43758.5453); }
+
+mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+float smin(float a, float b, float k) {
+    float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+// Downstroke is quick and powerful, recovery is slower: a sine reads mechanical.
+float stroke(float x) {
+    x = fract(x);
+    return x < 0.36 ? smoothstep(0.0, 1.0, x / 0.36)
+                    : 1.0 - smoothstep(0.0, 1.0, (x - 0.36) / 0.64);
+}
+
+float flapAngle(float span, float t, float phase) {
+    return mix(-0.80, 1.32, stroke(t * FLAP_HZ + phase - span * TIP_LAG));
+}
+
+// Rotation about the body axis preserves length(p.xy), so it serves as the span
+// coordinate, and un-rotating by the local flap angle flattens the bent wing.
+vec3 toWingSpace(vec3 p, float t, float phase) {
+    float span = length(p.xy);
+    vec2 q = rot(-flapAngle(span, t, phase)) * p.xy;
+    return vec3(q.x, q.y, p.z - WING_Z);
+}
+
+// Forewing and hindwing as separate rounded triangles, so a notch survives between them.
+float sdTriangle(vec2 p, vec2 p0, vec2 p1, vec2 p2) {
+    vec2 e0 = p1 - p0, e1 = p2 - p1, e2 = p0 - p2;
+    vec2 v0 = p - p0, v1 = p - p1, v2 = p - p2;
+    vec2 q0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);
+    vec2 q1 = v1 - e1 * clamp(dot(v1, e1) / dot(e1, e1), 0.0, 1.0);
+    vec2 q2 = v2 - e2 * clamp(dot(v2, e2) / dot(e2, e2), 0.0, 1.0);
+    float s = sign(e0.x * e2.y - e0.y * e2.x);
+    vec2 d = min(min(vec2(dot(q0, q0), s * (v0.x * e0.y - v0.y * e0.x)),
+                     vec2(dot(q1, q1), s * (v1.x * e1.y - v1.y * e1.x))),
+                     vec2(dot(q2, q2), s * (v2.x * e2.y - v2.y * e2.x)));
+    return -sqrt(d.x) * sign(d.y);
+}
+
+float wingOutline(vec2 w) {
+    float fore = sdTriangle(w, vec2(0.05, 0.22), vec2(0.09, -0.14), vec2(0.80, 0.26)) - 0.100;
+    float hind = sdTriangle(w, vec2(0.05, -0.03), vec2(0.58, -0.18), vec2(0.24, -0.42)) - 0.105;
+    float d = min(fore, hind);
+    d += 0.011 * sin(19.0 * atan(w.y - 0.02, w.x - 0.04)) * smoothstep(-0.10, 0.01, d);
+    return d;
+}
+
+float sdWing(vec3 p, float t, float phase) {
+    vec3 v = toWingSpace(p, t, phase);
+    if (v.x < -0.06) return 1e5;
+    vec2 w = vec2(v.x, v.z);
+    float outline = wingOutline(w);
+    float thickness = mix(0.0035, 0.0105, smoothstep(0.0, 0.12, -outline));
+    float camber = 0.055 * v.x * v.x;
+    float slab = abs(v.y - camber) - thickness;
+    vec2 e = vec2(outline, slab);
+    return min(max(outline, slab), 0.0) + length(max(e, 0.0));
+}
+
+float sdBody(vec3 p) {
+    float z = clamp(p.z, -0.38, 0.30);
+    float u = (z + 0.38) / 0.68;
+    float r = 0.034 * (1.0 - 0.55 * u * u)
+            + 0.021 * exp(-pow((u - 0.66) / 0.13, 2.0))
+            + 0.008;
+    return length(vec3(p.x, p.y * 1.12, p.z - z)) - r;
+}
+
+float sdAntenna(vec3 p) {
+    p.x = abs(p.x);
+    float u = clamp((p.z - 0.27) / 0.36, 0.0, 1.0);
+    vec3 c = vec3(0.048 + 0.150 * u, 0.030 + 0.215 * u * u, 0.27 + 0.36 * u);
+    return length(p - c) - mix(0.0045, 0.014, smoothstep(0.78, 1.0, u));
+}
+
+// x = distance, y = material (0 wing, 1 body)
+vec2 mapButterfly(vec3 p, float t, float phase) {
+    vec3 m = vec3(abs(p.x), p.y, p.z);
+    float wing = sdWing(m, t, phase);
+    float body = min(sdBody(p), sdAntenna(p));
+    return wing < body ? vec2(wing, 0.0) : vec2(body, 1.0);
+}
+
+vec3 butterflyNormal(vec3 p, float t, float phase) {
+    vec2 e = vec2(0.0018, 0.0);
+    return normalize(vec3(
+        mapButterfly(p + e.xyy, t, phase).x - mapButterfly(p - e.xyy, t, phase).x,
+        mapButterfly(p + e.yxy, t, phase).x - mapButterfly(p - e.yxy, t, phase).x,
+        mapButterfly(p + e.yyx, t, phase).x - mapButterfly(p - e.yyx, t, phase).x
+    ));
+}
+
+vec3 wingColour(vec2 w, float outline, float tint) {
+    float inside = -outline;
+    vec2 root = w - vec2(0.04, 0.02);
+    float ang = atan(root.y, root.x);
+    float rad = length(root);
+
+    vec3 field = mix(AMBER_DEEP, AMBER_BRIGHT, smoothstep(0.04, 0.66, rad));
+    field = mix(field, field * vec3(1.06, 0.82, 0.55), tint);
+
+    float veins = pow(abs(sin(ang * 6.0 + 0.30)), 16.0);
+    veins = max(veins, pow(abs(sin(ang * 12.0 + 0.30)), 26.0) * 0.75);
+    veins = max(veins, pow(abs(sin(rad * 19.0)), 30.0) * 0.32);
+    veins *= smoothstep(0.02, 0.10, rad);
+
+    float margin = 1.0 - smoothstep(0.018, 0.105, inside);
+    float band = smoothstep(0.020, 0.042, inside) * (1.0 - smoothstep(0.062, 0.092, inside));
+    float inner = band * smoothstep(0.55, 0.92, sin(ang * 26.0));
+    float outer = (1.0 - smoothstep(0.004, 0.022, inside)) * smoothstep(0.72, 0.96, sin(ang * 26.0));
+    float apex = smoothstep(0.50, 0.92, w.x) * smoothstep(0.02, 0.30, w.y);
+
+    vec3 col = field;
+    col = mix(col, INK, clamp(veins, 0.0, 1.0) * 0.95);
+    col = mix(col, INK, margin * 0.98);
+    col = mix(col, INK, apex * 0.55);
+    col = mix(col, CREAM, max(inner, outer) * 0.95);
+    return col;
+}
+
+vec3 flightPath(int i, float t) {
+    vec4 data = SWARM[i];
+    float fi = float(i);
+    float ph = fi * 2.399963;
+    float sp = 0.55 + 0.30 * hash11(fi + 3.0);
+    float amp = (i == 0) ? 0.55 : 1.0;
+    return data.xyz + amp * vec3(
+        0.42 * sin(t * 0.37 * sp + ph) + 0.16 * sin(t * 0.91 * sp + ph * 1.7),
+        0.30 * sin(t * 0.53 * sp + ph * 1.3) + 0.11 * sin(t * 1.27 * sp + ph),
+        0.35 * sin(t * 0.29 * sp + ph * 0.8)
+    );
+}
+
+vec3 background(vec3 rd, vec2 uv) {
+    float h = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
+    float s = max(dot(rd, normalize(SUN)), 0.0);
+
+    // Values look tiny, but gamma lifts near-black hard; anything larger washes out.
+    vec3 col = mix(vec3(0.0008, 0.0028, 0.0022), vec3(0.0018, 0.0078, 0.0060),
+                   smoothstep(-0.20, 0.95, h));
+    // Warm bounce off the forest floor, so the lower frame is dark but not dead.
+    col += vec3(0.0030, 0.0026, 0.0010) * smoothstep(0.45, -0.35, rd.y);
+    col += vec3(0.0045, 0.0110, 0.0055) * pow(s, 1.8);
+    col += SUNCOL * pow(s, 6.0) * 0.10;
+    col += SUNCOL * pow(s, 130.0) * 0.80;
+
+    vec2 d = rd.xy - normalize(SUN).xy;
+    float a = atan(d.y, d.x);
+    float shafts = pow(0.5 + 0.5 * sin(a * 11.0 + u_time * 0.07), 5.0)
+                 * pow(0.5 + 0.5 * sin(a * 23.0 - u_time * 0.05), 3.0);
+    col += SUNCOL * shafts * pow(s, 2.0) * 0.075;
+
+    return col * (1.0 - 0.42 * smoothstep(0.30, 1.40, length(uv)));
+}
+
+void main() {
+    vec2 uv = (2.0 * gl_FragCoord.xy - u_resolution) / u_resolution.y;
+    float t = u_time;
+    vec3 sun = normalize(SUN);
+
+    vec3 ro = vec3(0.0, 0.35, 4.60);
+    ro.xz = rot(0.05 * sin(t * 0.09)) * ro.xz;
+    vec3 fw = normalize(vec3(0.0, 0.35, 0.0) - ro);
+    vec3 rt = normalize(cross(fw, vec3(0.0, 1.0, 0.0)));
+    vec3 upv = cross(rt, fw);
+    vec3 rd = normalize(fw * 1.85 + rt * uv.x + upv * uv.y);
+
+    vec3 col = background(rd, uv);
+    float dither = hash11(gl_FragCoord.x * 7.1 + gl_FragCoord.y * 13.3) * 0.02;
+
+    for (int i = 0; i < SWARM_SIZE; i++) {
+        float fi = float(i);
+        float phase = fi * 0.37 + hash11(fi + 11.0);
+        float scale = SWARM[i].w;
+
+        vec3 origin = flightPath(i, t);
+        vec3 vel = flightPath(i, t + 0.06) - flightPath(i, t - 0.06);
+
+        // Anchor the dorsal axis toward the camera, then let the heading live in the wing
+        // plane. Deriving the frame from velocity alone leaves the hero edge-on and lifeless.
+        float face = (i == 0) ? 0.86 : 0.34 + 0.40 * hash11(fi + 21.0);
+        vec3 bup = normalize(mix(vec3(0.0, 1.0, 0.0), normalize(ro - origin), face));
+        vec3 planar = vel - bup * dot(vel, bup);
+        vec3 bfwd = length(planar) > 1e-4 ? normalize(planar) : normalize(cross(bup, vec3(1.0, 0.0, 0.0)));
+        vec3 bright = normalize(cross(bup, bfwd));
+        bup = cross(bfwd, bright);
+
+        // Bank into the turn, and pitch a little against each downstroke.
+        float roll = 0.42 * sin(t * 0.53 + fi * 1.9);
+        float c = cos(roll), s = sin(roll);
+        vec3 r2 = bright * c + bup * s;
+        vec3 u2 = bup * c - bright * s;
+        mat3 basis = mat3(r2, u2, bfwd);
+
+        vec3 o = ((ro - origin) * basis) / scale;
+        vec3 d = rd * basis;
+
+        float b = dot(o, d);
+        float disc = b * b - dot(o, o) + 1.45 * 1.45;
+        if (disc < 0.0) continue;
+        float sq = sqrt(disc);
+        float tmax = -b + sq;
+        if (tmax <= 0.0) continue;
+
+        float travel = max(-b - sq, 0.0) + dither;
+        float hit = -1.0;
+        vec3 hp = vec3(0.0);
+        float mat = 0.0;
+
+        for (int k = 0; k < MARCH_STEPS; k++) {
+            if (travel > tmax) break;
+            vec3 p = o + d * travel;
+            vec2 h = mapButterfly(p, t, phase);
+            if (h.x < 0.0022) { hit = travel; hp = p; mat = h.y; break; }
+            // The un-bend transform is not rigid, so step conservatively.
+            travel += clamp(h.x * 0.62, 0.0035, 0.22);
+        }
+        if (hit < 0.0) continue;
+
+        vec3 n = butterflyNormal(hp, t, phase);
+        vec3 shade;
+
+        if (mat < 0.5) {
+            vec3 v = toWingSpace(vec3(abs(hp.x), hp.y, hp.z), t, phase);
+            vec2 w = vec2(v.x, v.z);
+            float outline = wingOutline(w);
+            vec3 base = wingColour(w, outline, hash11(fi + 5.0) * 0.35);
+
+            float lambert = 0.22 + 0.78 * max(dot(n, sun), 0.0);
+            // A thin membrane lit from the far side is why butterflies glow when backlit.
+            float through = max(-dot(n, sun), 0.0);
+            float back = pow(max(dot(rd, sun), 0.0), 2.2);
+            float rim = pow(1.0 - abs(dot(n, -d)), 3.0);
+
+            shade = base * (lambert + 0.18);
+            shade += base * through * back * 6.0;
+            shade += base * through * 0.60;
+            shade += mix(SUNCOL, AMBER_BRIGHT, 0.55) * rim * 0.24;
+            shade += SUNCOL * pow(max(dot(reflect(-sun, n), -d), 0.0), 28.0) * 0.14;
+        } else {
+            float lambert = 0.25 + 0.75 * max(dot(n, sun), 0.0);
+            float fuzz = 0.5 + 0.5 * sin(hp.z * 180.0) * sin(hp.x * 150.0);
+            shade = vec3(0.070, 0.042, 0.032) * lambert * (0.8 + 0.3 * fuzz);
+            shade += SUNCOL * pow(1.0 - abs(dot(n, -d)), 2.5) * 0.55;
+        }
+
+        float dist = length(ro - origin);
+        float haze = exp(-0.055 * max(dist - 2.0, 0.0));
+        col = mix(background(rd, uv), shade, haze);
+    }
+
+    for (int m = 0; m < 45; m++) {
+        float seed = float(m);
+        vec3 pos = vec3(
+            (hash11(seed + 13.0) - 0.5) * 14.0,
+            mod(hash11(seed + 41.0) * 11.0 + t * 0.10, 11.0) - 4.5,
+            hash11(seed + 79.0) * 12.0 - 8.0
+        );
+        vec3 rel = pos - ro;
+        float along = dot(rel, rd);
+        if (along < 0.0) continue;
+        float off = length(rel - along * rd);
+        float r = 0.011 + along * 0.0016;
+        col += SUNCOL * exp(-off * off / (r * r)) * 0.42;
+    }
+
+    col = vec3(1.0) - exp(-col * 1.35);
+    // Tonemapping compresses the dominant channel hardest, so bright orange drifts to tan.
+    float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    col = clamp(mix(vec3(lum), col, 1.32), 0.0, 1.0);
+    col = max(col - vec3(0.006, 0.008, 0.007), vec3(0.0));
+    frag_color = vec4(pow(col, vec3(1.0 / 2.2)), 1.0);
+}
+```
+
+### butterflies.py
+```
+"""Manim supplies the timeline; GLSL supplies the perspective 3D scene."""
+
+import math
+import os
+from pathlib import Path
+
+import numpy as np
+from manim import Scene, ValueTracker, config, linear
+from manim.constants import RendererType
+from manim.renderer.shader import Mesh, Shader
+
+VERTEX_SHADER = """
+#version 330
+in vec2 in_position;
+void main() {
+    gl_Position = vec4(in_position, 0.0, 1.0);
+}
+"""
+
+
+def make_swarm(context, width: int, height: int) -> Mesh:
+    fragment = Path(__file__).with_name("butterflies.frag").read_text(encoding="utf-8")
+    shader = Shader(
+        context,
+        source={"vertex_shader": VERTEX_SHADER, "fragment_shader": fragment},
+    )
+    vertices = np.zeros(6, dtype=[("in_position", np.float32, (2,))])
+    vertices["in_position"] = [
+        (-1, -1), (1, -1), (1, 1), (-1, -1), (1, 1), (-1, 1)
+    ]
+    shader.set_uniform("u_resolution", (float(width), float(height)))
+    shader.set_uniform("u_time", 0.0)
+    return Mesh(shader, vertices, use_depth_test=False)
+
+
+class ButterflySwarm(Scene):
+    def construct(self):
+        if config.renderer != RendererType.OPENGL:
+            raise RuntimeError("This scene requires --renderer=opengl.")
+        duration = float(os.environ.get("BFLY_DURATION", "10"))
+        start_time = float(os.environ.get("BFLY_START", "0"))
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError("BFLY_DURATION must be a finite positive number.")
+        if not math.isfinite(start_time):
+            raise ValueError("BFLY_START must be finite.")
+
+        swarm = make_swarm(self.renderer.context, config.pixel_width, config.pixel_height)
+        clock = ValueTracker(start_time)
+
+        def update_time(mesh, dt):
+            mesh.shader.set_uniform("u_time", clock.get_value())
+
+        swarm.add_updater(update_time)
+        self.add(swarm, clock)
+        self.play(clock.animate.set_value(start_time + duration), run_time=duration, rate_func=linear)
+```
+
+### palette.py
+```
+"""Sample the dominant colours of a reference frame to match its palette."""
+
+import sys
+
+import numpy as np
+from PIL import Image
+
+
+def main(path: str) -> None:
+    image = np.asarray(Image.open(path).convert("RGB"), dtype=np.float32)
+    flat = image.reshape(-1, 3)
+    luma = flat @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+
+    bands = {
+        "background (darkest 40%)": luma <= np.percentile(luma, 40),
+        "midtone glow (70-92%)": (luma > np.percentile(luma, 70)) & (luma <= np.percentile(luma, 92)),
+        "highlight (top 2%)": luma >= np.percentile(luma, 98),
+    }
+    for name, mask in bands.items():
+        mean = flat[mask].mean(axis=0)
+        normalized = mean / max(mean.max(), 1e-6)
+        print(f"{name:26s} rgb=({mean[0]:5.1f},{mean[1]:5.1f},{mean[2]:5.1f})  "
+              f"normalized=({normalized[0]:.3f}, {normalized[1]:.3f}, {normalized[2]:.3f})")
+
+    bright = flat[luma >= np.percentile(luma, 85)]
+    hue_ratio = bright[:, 0] / np.maximum(bright[:, 2], 1e-6)
+    print(f"\nbright pixels R/B ratio: mean={hue_ratio.mean():.3f} median={np.median(hue_ratio):.3f}")
+    print(f"bright pixels G/B ratio: mean={(bright[:,1]/np.maximum(bright[:,2],1e-6)).mean():.3f}")
+    print(f"overall mean rgb: {flat.mean(axis=0).round(1)}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1])
+```
+
+### poster.py
+```
+"""A 1080x1920 still: the shader render as background, the maths typeset over it.
+
+Rendered with Manim's Cairo renderer, since the shader frame is baked to an image first.
+"""
+
+from pathlib import Path
+
+import moderngl
+import numpy as np
+from manim import DOWN, UP, ImageMobject, MathTex, Scene, Text, VGroup, config
+from PIL import Image, ImageDraw, ImageFilter
+
+from butterflies import make_swarm
+
+WIDTH, HEIGHT = 1080, 1920
+BACKGROUND = Path(__file__).with_name("docs") / "poster-bg.png"
+FRAME_TIME = 1.0
+
+INK = "#FFF0DC"
+ACCENT = "#FFA23A"
+
+BLOCKS = [
+    ("Every pixel casts a ray", [r"p(s) = o + s\,\hat{r}"]),
+    ("Body spin leaves this fixed", [r"\mathrm{span} = \lVert p_{xy} \rVert"]),
+    ("So the wing tip flaps late", [r"\theta = \Theta\!\left(t - \lambda\,\mathrm{span}\right)"]),
+]
+
+# Drop the swarm into the lower half so the maths sits over empty air.
+SUBJECT_DROP = 470
+
+
+def bake_background(seconds: float, path: Path) -> None:
+    context = moderngl.create_standalone_context(require=330)
+    target = context.simple_framebuffer((WIDTH, HEIGHT))
+    target.use()
+    swarm = make_swarm(context, WIDTH, HEIGHT)
+    swarm.shader.set_uniform("u_time", seconds)
+    swarm.render()
+    pixels = np.frombuffer(target.read(), dtype=np.uint8).reshape(HEIGHT, WIDTH, 3)[::-1]
+    render = Image.fromarray(pixels.copy()).convert("RGBA")
+
+    # The top of the render is flat dark canopy, so stretching it fills the gap invisibly.
+    frame = Image.new("RGBA", (WIDTH, HEIGHT))
+    frame.paste(render.crop((0, 0, WIDTH, 4)).resize((WIDTH, SUBJECT_DROP)), (0, 0))
+    frame.paste(render.crop((0, 0, WIDTH, HEIGHT - SUBJECT_DROP)), (0, SUBJECT_DROP))
+
+    mask = Image.new("L", (WIDTH, HEIGHT), 0)
+    draw = ImageDraw.Draw(mask)
+    fade_end = 1150
+    for y in range(fade_end):
+        draw.line([(0, y), (WIDTH, y)], fill=int(120 * min((fade_end - y) / 260, 1.0)))
+    mask = mask.filter(ImageFilter.GaussianBlur(50))
+
+    scrim = Image.new("RGBA", (WIDTH, HEIGHT), (2, 6, 4, 255))
+    scrim.putalpha(mask)
+    frame.alpha_composite(scrim)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.convert("RGB").save(path)
+
+
+class Poster(Scene):
+    def construct(self):
+        bake_background(FRAME_TIME, BACKGROUND)
+
+        backdrop = ImageMobject(str(BACKGROUND))
+        backdrop.height = config.frame_height
+        self.add(backdrop)
+
+        title = Text("A butterfly made of equations", font_size=31, color=INK, weight="BOLD")
+        subtitle = Text("no mesh, no textures  ·  Manim + GLSL", font_size=19,
+                        color=ACCENT, slant="ITALIC")
+        heading = VGroup(title, subtitle).arrange(DOWN, buff=0.16)
+        heading.scale_to_fit_width(config.frame_width * 0.84)
+        heading.to_edge(UP, buff=0.85)
+
+        widest = config.frame_width * 0.86
+        blocks = VGroup()
+        for caption, equations in BLOCKS:
+            lines = VGroup(*[MathTex(e, font_size=30, color=INK) for e in equations])
+            lines.arrange(DOWN, buff=0.14)
+            if lines.width > widest:
+                lines.scale_to_fit_width(widest)
+            blocks.add(VGroup(Text(caption, font_size=17, color=ACCENT), lines).arrange(DOWN, buff=0.16))
+        blocks.arrange(DOWN, buff=0.34)
+        blocks.next_to(heading, DOWN, buff=0.42)
+
+        self.add(heading, blocks)
+
+        def band(mobject) -> str:
+            top = (config.frame_height / 2 - mobject.get_top()[1]) / config.frame_height * HEIGHT
+            bottom = (config.frame_height / 2 - mobject.get_bottom()[1]) / config.frame_height * HEIGHT
+            return f"y {top:6.0f} -> {bottom:6.0f} px"
+
+        print(f"heading  {band(heading)}")
+        print(f"blocks   {band(blocks)}   width {blocks.width:.2f} / {config.frame_width:.2f}")
+        print(f"text margins: 190 -> {HEIGHT - 330} px;  subject top approx {980 + SUBJECT_DROP - 330} px")
+```
+
+### preview.py
+```
+"""Render still frames straight from the shader, without going through Manim."""
+
+import sys
+from pathlib import Path
+
+import moderngl
+import numpy as np
+from PIL import Image
+
+from butterflies import make_swarm
+
+WIDTH, HEIGHT = 1080, 1920
+OUT = Path(__file__).with_name("preview.png")
+
+
+def main(times: list[float], out: str, scale: float) -> None:
+    context = moderngl.create_standalone_context(require=330)
+    target = context.simple_framebuffer((WIDTH, HEIGHT))
+    target.use()
+    swarm = make_swarm(context, WIDTH, HEIGHT)
+
+    tiles = []
+    for value in times:
+        swarm.shader.set_uniform("u_time", value)
+        swarm.render()
+        tiles.append(np.frombuffer(target.read(), dtype=np.uint8).reshape(HEIGHT, WIDTH, 3)[::-1])
+
+    sheet = np.concatenate(tiles, axis=1)
+    image = Image.fromarray(sheet)
+    image = image.resize((int(sheet.shape[1] * scale), int(sheet.shape[0] * scale)))
+    image.save(out)
+    print(f"{out}  tiles={len(tiles)}  std={sheet.std():.1f}  max={sheet.max()}")
+
+
+if __name__ == "__main__":
+    values = [float(arg) for arg in sys.argv[1:]] or [2.0, 5.0, 8.0]
+    main(values, str(OUT), 0.33 if len(values) > 1 else 0.5)
+```

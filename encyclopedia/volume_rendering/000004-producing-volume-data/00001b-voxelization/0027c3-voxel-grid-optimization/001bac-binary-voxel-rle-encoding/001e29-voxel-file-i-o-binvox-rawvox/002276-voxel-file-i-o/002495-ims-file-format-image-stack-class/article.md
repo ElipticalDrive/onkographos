@@ -1,0 +1,179 @@
+# IMS File Format & Image Stack Class
+
+Also called: .ims
+
+## Overview
+The IMS file format and `ims_base` class provide a mechanism for persisting and managing 3D image stacks (volumes) with typed pixel storage and extensible metadata segments [S1, unofficial]. It solves the problem of storing volumetric data where pixel types are fixed at compile time via templates and metadata is stored as typed binary segments [S1, unofficial]. It differs from generic binary voxel formats by embedding a rigid 16-byte header, supporting memory-mapped loading on Windows, and using a chunked write strategy to handle large volumes without buffer overflow [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A volume defined by width ($W$), height ($H$), and depth ($D$); a pixel type $T$; and a map of metadata segments [S1, unofficial].
+- Output: A binary file with the `.ims` extension containing the header, pixel data, and segment data [S1, unofficial].
+
+**Data Structures:**
+The file layout is strictly sequential [S1, unofficial]:
+
+1.  **File Header (16 bytes):**
+    -   Bytes 0-2: ASCII `'IMS'` [S1, unofficial].
+    -   Byte 3: Encoding version (uint8, value `1`) [S1, unofficial].
+    -   Bytes 4-7: Pixel type identifier (uint32, e.g., `0` for floats) [S1, unofficial].
+    -   Bytes 8-9: Width $W$ (uint16) [S1, unofficial].
+    -   Bytes 10-11: Height $H$ (uint16) [S1, unofficial].
+    -   Bytes 12-13: Depth $D$ (uint16) [S1, unofficial].
+    -   Bytes 14-15: Number of segments $S$ (uint16) [S1, unofficial].
+
+2.  **Pixel Data:**
+    -   Stored immediately after the header [S1, unofficial].
+    -   Layout: Images sequentially, then rows within each image [S1, unofficial].
+    -   First pixel is top-left, last is bottom-right [S1, unofficial].
+    -   Total size: $W \times H \times D \times \text{TPixelSize}$ bytes [S1, unofficial].
+
+3.  **Segments (Sequential):**
+    -   Each segment consists of a header and data [S1, unofficial].
+    -   **Segment Header (8 bytes):**
+        -   Bytes 0-3: Segment type identifier (4 ASCII chars, packed into uint32) [S1, unofficial].
+        -   Bytes 4-7: Segment data size in bytes (uint32) [S1, unofficial].
+    -   **Segment Data:**
+        -   Follows the segment header [S1, unofficial].
+        -   Size matches the uint32 value in the segment header [S1, unofficial].
+
+**Parameters:**
+-   `PixelTypeNo`: Integer identifier for the pixel type (template argument) [S1, unofficial].
+-   `TPixelSize`: Byte size of a single pixel (template argument, multiple of 1 byte) [S1, unofficial].
+-   `maxBuf`: Chunk size for writing pixel data, set to $1 \ll 30$ (1 GB) [S1, unofficial].
+
+**Steps:**
+
+**Save:**
+1.  Open file for binary writing [S1, unofficial].
+2.  Set header segment count to current map size [S1, unofficial].
+3.  Write 16-byte header [S1, unofficial].
+4.  Write pixel data in chunks of `maxBuf` until exhausted [S1, unofficial].
+5.  Iterate segment map, write 8-byte segment header, then write segment data [S1, unofficial].
+
+**Load:**
+1.  Open file with read/write access and no buffering [S1, unofficial].
+2.  Create read-only file mapping [S1, unofficial].
+3.  Map view to memory [S1, unofficial].
+4.  Parse header fields [S1, unofficial].
+5.  Allocate pixel buffer and copy mapped data [S1, unofficial].
+6.  Parse segments sequentially [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import struct
+import sys
+import mmap
+import os
+
+def save_ims(filename, width, height, depth, pixel_data, segments, pixel_size):
+    """
+    pixel_data: flat array of pixels, size W*H*D*pixel_size
+    segments: list of tuples (type_str, data_bytes)
+    pixel_size: byte size of a single pixel (TPixelSize)
+    """
+    if not (0 <= width <= 65536 and 0 <= height <= 65536 and 0 <= depth <= 65536):
+        raise ValueError("Dimensions must be within [0, 65536]")
+    
+    num_segments = len(segments)
+    # Pixel type ID is a template argument; using 0 for floats as example
+    pixel_type_id = 0 
+    
+    header = b'IMS' + struct.pack('<B', 1) + struct.pack('<I', pixel_type_id) + \
+             struct.pack('<HHH', width, height, depth) + struct.pack('<H', num_segments)
+    
+    with open(filename, 'wb') as f:
+        f.write(header)
+        
+        # Write pixel data in chunks of maxBuf (1 GB)
+        total_pixel_bytes = width * height * depth * pixel_size
+        max_buf = 1 << 30
+        offset = 0
+        while offset < total_pixel_bytes:
+            chunk_size = min(max_buf, total_pixel_bytes - offset)
+            f.write(pixel_data[offset : offset + chunk_size])
+            offset += chunk_size
+            
+        # Write segments
+        is_le = sys.byteorder == 'little'
+        for seg_type_str, seg_data in segments:
+            if len(seg_type_str) != 4:
+                raise ValueError("Segment type must be 4 chars")
+            
+            # Pack 4 ASCII chars into uint32 with endianness handling
+            if is_le:
+                seg_type_id = (ord(seg_type_str[0]) | (ord(seg_type_str[1]) << 8) | 
+                               (ord(seg_type_str[2]) << 16) | (ord(seg_type_str[3]) << 24))
+            else:
+                seg_type_id = struct.unpack('<I', seg_type_str.encode('ascii'))[0]
+                
+            seg_size = len(seg_data)
+            seg_header = struct.pack('<I', seg_type_id) + struct.pack('<I', seg_size)
+            f.write(seg_header)
+            f.write(seg_data)
+
+def load_ims(filename, pixel_size):
+    """
+    pixel_size: byte size of a single pixel (TPixelSize)
+    Returns: header_dict, pixel_data, segments
+    """
+    file_size = os.path.getsize(filename)
+    with open(filename, 'r+b') as f:
+        # Open file with read/write access and no buffering (platform-specific flags omitted for clarity)
+        # Create read-only file mapping and map view to memory
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        
+        if mm[0:3] != b'IMS':
+            raise ValueError("Invalid IMS magic")
+        if mm[3] != 1:
+            raise ValueError(f"Unsupported version {mm[3]}")
+            
+        pixel_type_id = struct.unpack_from('<I', mm, 4)[0]
+        width, height, depth = struct.unpack_from('<HHH', mm, 8)
+        num_segments = struct.unpack_from('<H', mm, 14)[0]
+        
+        # Allocate pixel buffer and copy mapped data
+        total_pixel_bytes = width * height * depth * pixel_size
+        pixel_data = mm[16 : 16 + total_pixel_bytes]
+        
+        # Parse segments sequentially
+        segments = []
+        offset = 16 + total_pixel_bytes
+        for _ in range(num_segments):
+            seg_type_id = struct.unpack_from('<I', mm, offset)[0]
+            seg_size = struct.unpack_from('<I', mm, offset + 4)[0]
+            offset += 8
+            
+            seg_data = mm[offset : offset + seg_size]
+            offset += seg_size
+            
+            # Unpack type string (assuming little-endian for simplicity, or match save logic)
+            seg_type_str = bytes([seg_type_id & 0xFF, (seg_type_id >> 8) & 0xFF, 
+                                  (seg_type_id >> 16) & 0xFF, (seg_type_id >> 24) & 0xFF]).decode('ascii')
+            segments.append((seg_type_str, seg_data))
+            
+        mm.close()
+    return {'width': width, 'height': height, 'depth': depth, 'pixel_type_id': pixel_type_id, 'num_segments': num_segments}, pixel_data, segments
+```
+
+**Edge Cases and Pitfalls:**
+-   **Dimension Validation:** Width, height, and depth must be within $[0, 65536]$ [S1, unofficial]. Values outside this range throw `std::invalid_argument` [S1, unofficial].
+-   **Windows Memory Allocation:** On Windows, the stack size must be strictly less than $1 \ll 30$ bytes [S1, unofficial]. Exceeding this triggers an assertion failure [S1, unofficial].
+-   **Endianness:** Segment type strings are packed into uint32 [S1, unofficial]. The code detects little-endian architecture via `*(uint8_t*)(&v) == 1` and uses bitwise shifts; otherwise, it uses `memcpy` [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity:** $O(W \times H \times D)$ for initialization, copying, and file I/O [S1, unofficial].
+-   **Memory Complexity:** $O(W \times H \times D)$ for the pixel buffer plus $O(S)$ for segment storage, where $S$ is the number of segments [S1, unofficial].
+-   **Strengths:** Supports memory-mapped loading on Windows for efficient access [S1, unofficial]. Handles large volumes via chunked writing [S1, unofficial]. Extensible metadata via segments [S1, unofficial].
+-   **Limitations:** Windows-specific memory mapping logic [S1, unofficial]. Rigid header structure [S1, unofficial]. Pixel type must be known at load time (template parameter in C++) [S1, unofficial].
+-   **When to Use:** Suitable for tomography image stacks and metadata management where pixel types are homogeneous and known [S1, unofficial].
+-   **When Not to Use:** When cross-platform memory mapping is required without platform-specific code [S1, unofficial]. When pixel types vary within the volume [S1, unofficial].
+
+## Background
+The IMS file format and `ims_base` class were developed as part of the chmike/FastFDK project for loading, saving, and managing tomography image stacks and metadata segments [S1, unofficial]. It provides a template-based approach to volume storage, allowing for type safety and efficient memory access [S1, unofficial].
+
+## Sources
+[S1] chmike/FastFDK, https://github.com/chmike/FastFDK, fetched 2026-10-26 (unofficial)

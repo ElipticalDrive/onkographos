@@ -1,0 +1,170 @@
+# 3D Coordinate Grid Generation
+
+Also called: Voxel Grid Point Generation, Voxel Grid Sampling, Voxel Grid Sampling for Mesh Extraction
+
+## Overview
+Generates a 3D grid of sample points within a voxel space for Signed Distance Function (SDF) evaluation [S1, unofficial]. It produces a set of 3D points forming a regular grid within a unit cube, typically excluding boundary regions to ensure samples lie strictly inside the volume [S2, unofficial]. It differs from its parent [Coordinate Grid Generation](1273-coordinate-grid-generation.md) by explicitly mapping integer grid indices to continuous 3D coordinates in world space (often [-1, 1]) using voxel size and origin parameters, rather than generating normalized 2D image coordinates.
+
+## How it works
+**Inputs:**
+- `N`: Integer resolution (number of voxels per axis).
+- `voxel_origin`: List of 3 floats representing the origin of the voxel grid. Default: `[-1, -1, -1]` [S1, unofficial].
+- `voxel_size`: Float size of each voxel. Calculated as `2.0 / (N - 1)` [S1, unofficial].
+- `transform`: Boolean flag indicating whether to apply a transformation matrix to the points. Default: `False` [S1, unofficial].
+
+**Outputs:**
+- `samples`: A tensor of shape `(N^3, 4)` or `(N^3, 3)` containing the 3D coordinates of the grid points. The fourth dimension (if present) is often initialized to zero or used for padding [S1, unofficial].
+
+**Data Structures:**
+- `overall_index`: A 1D tensor/array of integers from `0` to `N^3 - 1`.
+- `points`: A 2D array/tensor of shape `(N^3, 3)` storing the final 3D coordinates.
+
+**Steps:**
+1. **Calculate Bounds:**
+   Compute the low and high bounds for the grid coordinates to exclude boundary regions if necessary:
+   $$ \text{low} = \frac{0.5}{\text{res}} $$
+   $$ \text{high} = 1 - \frac{0.5}{\text{res}} $$
+   where `res` is `N` [S2, unofficial].
+
+2. **Generate 1D Coordinates:**
+   Create a 1D linear space (linspace) from `low` to `high` with `res` points [S2, unofficial].
+
+3. **Create 3D Meshgrid:**
+   Generate a 3D meshgrid from the 1D coordinates using `indexing='xy'` (or equivalent standard Cartesian indexing). This produces three 3D arrays `X`, `Y`, and `Z` of shape `(res, res, res)` [S2, unofficial].
+
+4. **Stack and Reshape:**
+   Stack `X`, `Y`, and `Z` into a single array and reshape it to `(-1, 3)` to flatten the grid into a list of points [S2, unofficial].
+
+   *Alternative Index-Based Method (from [S1, unofficial]):*
+   1. Initialize `samples` tensor of shape `(N^3, 4)` with zeros.
+   2. Create `overall_index` tensor from `0` to `N^3 - 1`.
+   3. Compute `x`, `y`, `z` indices from `overall_index` using integer division and modulo operations:
+      $$ z = \text{overall\_index} // (N \times N) $$
+      $$ y = (\text{overall\_index} // N) \% N $$
+      $$ x = \text{overall\_index} \% N $$
+   4. Convert indices to coordinates:
+      $$ \text{coord}_x = x \times \text{voxel\_size} + \text{voxel\_origin}[0] $$
+      $$ \text{coord}_y = y \times \text{voxel\_size} + \text{voxel\_origin}[1] $$
+      $$ \text{coord}_z = z \times \text{voxel\_size} + \text{voxel\_origin}[2] $$
+   5. If `transform` is `True`, apply `transform_points_tensor` to the coordinates [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def generate_3d_coordinate_grid(N, voxel_origin=[-1.0, -1.0, -1.0], voxel_size=None, transform=False):
+    """
+    Generates a 3D grid of sample points within a voxel space.
+    
+    Args:
+        N (int): Resolution (number of voxels per axis).
+        voxel_origin (list): Origin of the voxel grid [x, y, z].
+        voxel_size (float): Size of each voxel. If None, calculated as 2.0 / (N - 1).
+        transform (bool): Whether to apply a transformation.
+        
+    Returns:
+        np.ndarray: Array of shape (N^3, 3) containing 3D coordinates.
+    """
+    if voxel_size is None:
+        voxel_size = 2.0 / (N - 1)
+        
+    # Method 1: Meshgrid approach (excludes boundaries if low/high are used)
+    # Note: The source [S2, unofficial] suggests excluding boundaries. 
+    # If strict boundary inclusion is needed, use np.linspace(-1, 1, N)
+    
+    low = 0.5 / N
+    high = 1.0 - 0.5 / N
+    
+    # Create 1D linspace
+    x_1d = np.linspace(low, high, N)
+    y_1d = np.linspace(low, high, N)
+    z_1d = np.linspace(low, high, N)
+    
+    # Create 3D meshgrid with 'xy' indexing (standard for image-like coordinates)
+    X, Y, Z = np.meshgrid(x_1d, y_1d, z_1d, indexing='xy')
+    
+    # Stack and reshape
+    points = np.stack((X, Y, Z), axis=-1)
+    points = points.reshape(-1, 3)
+    
+    # Method 2: Index-based approach (from [S1, unofficial])
+    # This method maps indices directly to world coordinates based on origin/size
+    # It is often preferred for explicit voxel grid control.
+    
+    # Create index tensor
+    overall_index = np.arange(N**3)
+    
+    # Compute x, y, z indices
+    z_idx = overall_index // (N * N)
+    y_idx = (overall_index // N) % N
+    x_idx = overall_index % N
+    
+    # Convert to coordinates
+    coords_x = x_idx * voxel_size + voxel_origin[0]
+    coords_y = y_idx * voxel_size + voxel_origin[1]
+    coords_z = z_idx * voxel_size + voxel_origin[2]
+    
+    points_index_based = np.stack((coords_x, coords_y, coords_z), axis=-1)
+    
+    # Note: The two methods may yield slightly different coordinate ranges depending on 
+    # whether boundaries are included. The index-based method covers the full range 
+    # defined by voxel_origin and voxel_size.
+    
+    if transform:
+        # Placeholder for transformation logic [S1, unofficial]
+        # In practice, this might involve multiplying by a rotation/translation matrix
+        pass
+        
+    return points_index_based
+```
+
+**Parameters:**
+- `N`: Resolution. Typical values depend on the desired detail level (e.g., 64, 128, 256).
+- `voxel_origin`: Default `[-1, -1, -1]` [S1, unofficial].
+- `voxel_size`: Calculated as `2.0 / (N - 1)` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Exclusion:** The meshgrid method with `low/high` adjustments excludes the outermost voxels' centers if not carefully aligned with the origin. The index-based method includes all `N^3` points. Ensure consistency with downstream SDF evaluation expectations [S1, unofficial][S2, unofficial].
+- **Precision:** Using floating-point arithmetic for coordinate generation can introduce small errors. For large `N`, consider using higher precision types if exact grid alignment is critical [G].
+- **Transform Application:** If `transform` is enabled, ensure the transformation matrix is compatible with the coordinate system (e.g., homogeneous coordinates if using 4D vectors) [S1, unofficial].
+
+## Subtopics
+
+### [Grid-based Density Sampling with Blue Noise](2608-grid-based-density-sampling-with-blue-noise.md)
+A method to sample points from a 3D grid density field using stratified sampling guided by blue noise to reduce aliasing and ensure uniform distribution. It differs from sibling methods like [Coarse-to-Fine SDF Sampling](3495-coarse-to-fine-sdf-sampling-for-mesh-creation.md) by explicitly constructing a probability distribution over a voxel grid and sampling indices via multinomial distribution, rather than refining a mesh or point cloud through geometric proximity.
+
+### [Coarse-to-Fine SDF Sampling for Mesh Creation](3495-coarse-to-fine-sdf-sampling-for-mesh-creation.md)
+This method accelerates the generation of 3D meshes from implicit surface representations by reducing the number of expensive neural network inference calls required to evaluate Signed Distance Functions (SDFs). It achieves this by first computing SDF values on a coarse grid, classifying regions as clearly inside or outside the surface, and only evaluating the neural network for points near the zero-crossing boundary at full resolution. This approach builds on [3D Coordinate Grid Generation](2333-3d-coordinate-grid-generation.md) to provide the necessary sample coordinates.
+
+### Tetrahedral Grid Generation
+Generates a tetrahedral decomposition of a 3D voxel grid for mesh extraction. It initializes an output tetrahedron definition matrix `TF` of size `((nx-1) * (ny-1) * (nz-1) * 6, 4)` filled with zeros [S3, unofficial]. It iterates over grid indices `i` from `0` to `nx-2`, `j` from `0` to `ny-2`, and `k` from `0` to `nz-2`. For each cube, it calculates vertex indices `v1` through `v8` using linear indexing: `v1=i+nx*(j+ny*k)`, `v2=i+nx*(j+1+ny*k)`, `v3=(i+1)+nx*(j+ny*k)`, `v4=(i+1)+nx*(j+1+ny*k)`, `v5=i+nx*(j+ny*(k+1))`, `v6=i+nx*(j+1+ny*(k+1))`, `v7=(i+1)+nx*(j+ny*(k+1))`, `v8=(i+1)+nx*(j+1+ny*(k+1))` [S3, unofficial]. It defines 6 tetrahedra per cube by assigning vertex indices to `TF` rows: `(v1,v3,v8,v7)`, `(v1,v8,v5,v7)`, `(v1,v3,v4,v8)`, `(v1,v4,v2,v8)`, `(v1,v6,v5,v8)`, `(v1,v2,v6,v8)` [S3, unofficial]. Parallelization of the grid generation loop may cause race conditions if not handled correctly [S3, unofficial].
+
+### Mesh Creation from SDF
+Creates a mesh by sampling SDF values on a voxel grid and saving to a PLY file [S1, unofficial]. It records start time, sets the decoder to eval mode, sets `voxel_origin` to `[-1, -1, -1]` and `voxel_size` to `2.0 / (N - 1)`, gets samples using `get_samples`, and infers SDF values using `infer_samples` [S1, unofficial]. The `transform` boolean parameter controls whether to apply point transformation, defaulting to `False` [S1, unofficial].
+
+### Spherical Offset Grid Generation
+Generates a sorted list of 3D integer offsets within a cubic volume, centered at origin, representing chunks to check for loading/unloading [S4, unofficial]. It calculates grid dimension `k = (half * 2) + 1` [S4, unofficial]. It iterates `i` from `0` to `k*k*k - 1`, converts index to 3D bounds `pos = index_to_ivec3_bounds(i, k)`, centers the position `pos -= IVec3::splat((k as f32 * 0.5) as i32)`, adds to sampling offsets vector, and sorts offsets by squared distance to origin [S4, unofficial].
+
+### Plane Grid Generation
+Calculates edge vector `U` from vertex `currIndex` to `currIndex + xVerts`, edge vector `V` from vertex `currIndex` to `currIndex + xVerts + 1`, computes normal `N` as cross product of `U` and `V`, creates face with vertices `A=currIndex`, `B=currIndex+xVerts`, `C=currIndex+xVerts+1`, and initializes plane position and rotation to zero [S5, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N^3)$ to generate all points in the grid.
+- **Memory Complexity:** $O(N^3)$ to store the coordinates.
+- **Performance:** The generation is generally fast and memory-bound. For very large `N`, memory allocation for the `(N^3, 3)` tensor can become significant.
+- **Strengths:** Simple, deterministic, and covers the entire volume uniformly. Essential for voxel-based SDF evaluation.
+- **Limitations:** Does not adapt to surface complexity; generates points in empty space as well as near the surface. The meshgrid method with boundary exclusion may miss edge cases if the grid alignment is not precise.
+- **When to Use:** When a uniform sampling of the entire voxel space is required, such as for initial SDF training or dense volume rendering.
+- **When Not to Use:** When memory is constrained or when adaptive sampling (e.g., near the surface) is more efficient.
+
+## Background
+Originating from implementations in deep learning-based 3D reconstruction, such as the DeepSDF renderer and related projects [S1, unofficial], this method is a fundamental step in voxel-based implicit surface representation. It is widely used in neural field training and mesh extraction pipelines where a regular grid of query points is needed to evaluate implicit functions.
+
+## Sources
+[S1] B1ueber2y/DIST-Renderer, https://github.com/B1ueber2y/DIST-Renderer, fetched 2026-10-26 (unofficial)
+[S2] brandonyzhao/rtnf, https://github.com/brandonyzhao/rtnf, fetched 2026-10-27 (unofficial)
+[S3] mwrazam/marchingtets-reconstruction, https://github.com/mwrazam/marchingtets-reconstruction, fetched 2026-10-27 (unofficial)
+[S4] Binary Greedy Voxel Meshing Algorithm, https://github.com/TanTanDev/binary_greedy_mesher_demo, fetched 2026-10-26 (unofficial)
+[S5] mayakeele/bad-minecraft, https://github.com/mayakeele/bad-minecraft, fetched 2026-10-27 (unofficial)

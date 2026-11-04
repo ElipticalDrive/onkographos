@@ -1,0 +1,120 @@
+# SDC Training & Regularization Setup
+
+Also called: Curriculum DeepSDF Training, SDC Training Pipeline
+
+## Overview
+This method defines the self-supervised training pipeline for Self-Supervised Dual Contouring (SDC), utilizing Curriculum DeepSDF as the Deep Implicit Network (DIN) [S1]. It solves the problem of reconstructing high-fidelity meshes from single or multiple images without ground-truth 3D labels by jointly training an encoder and an implicit field [S1]. It is distinguished from standard DIN training by the late-stage application of a mesh-based regularization term that aligns the predicted Signed Distance Field (SDF) with the geometry extracted via SDC, rather than relying solely on external SDF supervision [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Rendered images of shapes from the ShapeNet dataset [S1].
+*   **Output:** A trained DIN (DeepSDF) and a ResNet-18 encoder that map image features and query points to SDF values [S1].
+
+**Data Structures:**
+*   **Query Points:** A set of 400,000 points sampled on a regular grid, specifically chosen to be close to the surface [S1].
+*   **Latent Vector:** An encoding of the input image produced by the ResNet-18 encoder [S1].
+*   **Mesh Grid:** A regular $64^3$ grid used for SDC mesh construction during regularization [S1].
+
+**Parameters:**
+*   **Total Epochs:** 2000 [S1].
+*   **Regularization Start Epoch:** 1800 (last 200 epochs) [S1].
+*   **Regularization Weight ($\epsilon$):** 10 [S1].
+*   **Optimizer:** ADAM [S1].
+*   **Hardware:** Ampere-A100 GPU [S1].
+
+**Steps:**
+1.  **Encoder Training:** Train a ResNet-18 [28] to encode the rendering of each shape into a latent vector [S1].
+2.  **Implicit Network Training:** Jointly train the ResNet-18 and DeepSDF [56] to learn the implicit surface [S1].
+    *   For each training step, sample 400,000 query points close to the surface [S1].
+    *   Concatenate the latent vector with the query point coordinates [S1].
+    *   Compute the SDF prediction and loss [S1].
+3.  **Regularization Application:** For the final 200 epochs of the 2000-epoch training run, apply the SDC regularization term [S1].
+    *   Construct a mesh using SDC on a $64^3$ grid [S1].
+    *   Sample points on a regular grid closer to the surface (as illustrated in the source's Figure 7) [S1].
+    *   Compute the discrepancy between the predicted SDF and the distances to the extracted mesh [S1].
+    *   Add the weighted regularization term ($\epsilon = 10$) to the loss function [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+model = DeepSDF()
+encoder = ResNet18()
+optimizer = Adam(model.parameters() + encoder.parameters())
+total_epochs = 2000
+reg_start_epoch = 1800
+epsilon = 10
+grid_resolution = 64
+
+# Training Loop
+for epoch in range(1, total_epochs + 1):
+    # 1. Encode Input Image
+    image = get_next_training_image() # From ShapeNet
+    latent_vector = encoder(image)
+    
+    # 2. Sample Query Points
+    # Sample 400,000 points close to the surface
+    query_points = sample_surface_close_points(count=400000)
+    
+    # 3. Forward Pass
+    # Concatenate latent vector with query points
+    inputs = concatenate(latent_vector, query_points)
+    sdf_predictions = model(inputs)
+    
+    # 4. Compute Base Loss
+    # Standard DIN loss (e.g., L1/L2 against ground truth or consistency)
+    base_loss = compute_din_loss(sdf_predictions, query_points)
+    
+    # 5. Apply Regularization (Late Stage)
+    if epoch > reg_start_epoch:
+        # Construct mesh using SDC on a 64^3 grid
+        mesh = extract_mesh_sdc(model, encoder, grid_resolution=64)
+        
+        # Sample points closer to the extracted mesh surface
+        reg_points = sample_points_near_mesh(mesh)
+        
+        # Compute SDF at regularization points
+        reg_inputs = concatenate(latent_vector, reg_points)
+        reg_sdf = model(reg_inputs)
+        
+        # Compute distance to the extracted mesh for these points
+        # Note: Exact distance function implementation depends on mesh library
+        distances_to_mesh = compute_distance_to_mesh(reg_points, mesh)
+        
+        # Compute regularization loss
+        reg_loss = compute_discrepancy(reg_sdf, distances_to_mesh)
+        
+        # Combine losses
+        total_loss = base_loss + epsilon * reg_loss
+    else:
+        total_loss = base_loss
+        
+    # 6. Backpropagate
+    optimizer.zero_grad()
+    total_loss.backward()
+    optimizer.step()
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The regularization relies on accurate mesh extraction from the $64^3$ grid; insufficient resolution may lead to noisy regularization signals [S1].
+*   **Timing:** Regularization is applied only in the last 200 epochs to allow the curriculum learning strategy to first establish the general SDF structure [S1].
+
+## Subtopics
+
+### [Deep Implicit Network (DIN) Regularizer](4781-deep-implicit-network-din-regularizer.md)
+The specific mesh-based objective used during the final training phase to ensure geometric consistency with the SDC-extracted mesh.
+
+## Operating characteristics
+*   **Time Complexity:** Training takes approximately 10 hours per shape on an Ampere-A100 GPU [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** SDC and NDC have similar inference times, while UNDC requires twice the time per shape [S1].
+*   **Strengths:** Avoids test-time optimization; produces meshes directly from a forward pass [S1].
+*   **Limitations:** Requires joint training of encoder and network; regularization is computationally expensive due to mesh extraction [S1].
+*   **When to use:** When reconstructing shapes from images without ground-truth 3D data and requiring fast inference [S1].
+
+## Background
+This method originates from the Self-Supervised Dual Contouring paper [S1]. It builds on Curriculum DeepSDF [56] and uses the ShapeNet dataset [9] for training. The approach was developed to enable self-supervised learning of implicit surfaces, leveraging the SDC method for mesh extraction [S1].
+
+## Sources
+[S1] Self-Supervised Dual Contouring, https://doi.org/10.1109/cvpr52733.2024.00448, fetched 2026-10-26

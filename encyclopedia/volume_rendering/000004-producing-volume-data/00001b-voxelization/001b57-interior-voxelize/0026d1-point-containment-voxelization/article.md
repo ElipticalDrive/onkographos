@@ -1,0 +1,180 @@
+# Point-Containment Voxelization
+
+Also called: AutoCAD Solid Voxelization, Grid-based Voxelization via Vertex Containment, VoxelizeSolid
+
+## Overview
+Point-Containment Voxelization converts a 3D solid model into a 3D grid of voxels by determining which voxels intersect the solid's volume. It achieves this by sampling the grid vertices and checking their containment against the solid's Boundary Representation (BRep). It is distinguished from sibling methods by its reliance on exact geometric containment queries for grid vertices rather than ray casting, winding numbers, or stochastic sampling.
+
+## How it works
+**Inputs:**
+- A 3D solid object with a valid Boundary Representation (BRep).
+- A `recommendedVoxelSize` (double), the user-provided suggested voxel edge length.
+
+**Outputs:**
+- A `VoxelModel` containing a 3D grid of voxels, where each voxel is marked as intersecting the solid or not.
+- Optionally, a list of new solid primitives representing the intersecting voxels.
+
+**Data Structures:**
+The method constructs two primary 3D arrays based on the grid dimensions $N$ (where $N$ is `VoxelEdgeCount`):
+
+1.  **Vertices Array**: `Vertex[N+1, N+1, N+1]`
+    -   `Point`: `Point3d` (x, y, z coordinates in world space).
+    -   `Xi`, `Yi`, `Zi`: `int` (grid indices).
+    -   `IsInside`: `bool` (result of containment test).
+
+2.  **Voxels Array**: `Voxel[N, N, N]`
+    -   `Xi`, `Yi`, `Zi`: `int` (grid indices).
+    -   `Extents`: `Extents3d` (bounding box of the voxel).
+    -   `Intersects`: `bool` (result of intersection test).
+    -   `V000` to `V111`: `Vertex` references to the 8 corner vertices.
+        -   `V000` corresponds to indices $(i, j, k)$.
+        -   `V111` corresponds to indices $(i+1, j+1, k+1)$.
+    -   `MinPoint`: Derived as `V000.Point`.
+    -   `MaxPoint`: Derived as `V111.Point`.
+
+**Algorithm Steps:**
+
+1.  **Validate Bounds**: Retrieve the bounding box (`Extents3d`) of the input solid. If the bounds are null, the method returns null immediately [S1, unofficial].
+2.  **Calculate Grid Dimensions**:
+    -   Let $L_{max}$ be the length of the longest edge of the solid's bounding box.
+    -   Compute the integer edge count $N$:
+        $$ N = \lceil L_{max} / \text{recommendedVoxelSize} \rceil $$
+    -   Compute the actual voxel edge length $E$:
+        $$ E = L_{max} / N $$
+    -   This ensures the voxels evenly fill the longest axis of the solid's extents [S1, unofficial].
+3.  **Center Grid Extents**:
+    -   Let $C$ be the center point of the solid's bounding box.
+    -   Calculate half-edge length $H$:
+        $$ H = (N \times E) / 2.0 $$
+    -   Set the grid's minimum point $P_{min}$ and maximum point $P_{max}$:
+        $$ P_{min} = C - (H, H, H) $$
+        $$ P_{max} = C + (H, H, H) $$
+4.  **Initialize Data Structures**:
+    -   Create the `Vertices` array of size $(N+1, N+1, N+1)$.
+    -   Create the `Voxels` array of size $(N, N, N)$.
+5.  **Populate Vertices**:
+    -   Iterate $i$ from $0$ to $N$, $j$ from $0$ to $N$, $k$ from $0$ to $N$.
+    -   Calculate coordinates:
+        $$ x = P_{min}.X + i \times E $$
+        $$ y = P_{min}.Y + j \times E $$
+        $$ z = P_{min}.Z + k \times E $$
+    -   Create a `Vertex` object at $(x, y, z)$ with indices $(i, j, k)$.
+6.  **Populate Voxels**:
+    -   Iterate $i$ from $0$ to $N-1$, $j$ from $0$ to $N-1$, $k$ from $0$ to $N-1$.
+    -   Create a `Voxel` object.
+    -   Link the voxel to its 8 constituent vertices from the `Vertices` array:
+        -   $V_{000} = \text{Vertices}[i, j, k]$
+        -   $V_{001} = \text{Vertices}[i, j, k+1]$
+        -   $V_{101} = \text{Vertices}[i+1, j, k+1]$
+        -   $V_{100} = \text{Vertices}[i+1, j, k]$
+        -   $V_{010} = \text{Vertices}[i, j+1, k]$
+        -   $V_{011} = \text{Vertices}[i, j+1, k+1]$
+        -   $V_{111} = \text{Vertices}[i+1, j+1, k+1]$
+        -   $V_{110} = \text{Vertices}[i+1, j+1, k]$
+    -   Set `Extents` to the box defined by $V_{000}.Point$ and $V_{111}.Point$.
+7.  **Determine Vertex Containment**:
+    -   For each vertex in the grid, query the BRep for point containment.
+    -   Let $Containment$ be the result of the containment test.
+    -   Set `vertex.IsInside` to `true` if $Containment \neq \text{Outside}$.
+    -   [G] Note: The specific definition of "Inside" vs "OnBoundary" depends on the BRep library, but typically points on the surface are considered inside or intersecting for voxelization purposes.
+8.  **Determine Voxel Intersection**:
+    -   For each voxel, check its 8 constituent vertices.
+    -   Set `voxel.Intersects` to `true` if at least one vertex has `IsInside == true`.
+9.  **Generate Output**:
+    -   Iterate through all voxels.
+    -   If `voxel.Intersects` is true, create a new solid primitive (e.g., a box) representing the voxel's extents and add it to the output model space.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def point_containment_voxelization(solid, recommended_voxel_size):
+    # 1. Validate Bounds
+    bounds = solid.get_bounds()
+    if bounds is None:
+        return None
+
+    # 2. Calculate Grid Dimensions
+    longest_edge = bounds.get_longest_edge()
+    voxel_edge_count = ceil(longest_edge / recommended_voxel_size)
+    voxel_edge_length = longest_edge / voxel_edge_count
+
+    # 3. Center Grid Extents
+    center_point = bounds.get_center()
+    half_edge_length = (voxel_edge_count * voxel_edge_length) / 2.0
+    min_point = center_point - (half_edge_length, half_edge_length, half_edge_length)
+    max_point = center_point + (half_edge_length, half_edge_length, half_edge_length)
+
+    # 4. Initialize Data Structures
+    vertices = create_3d_array(voxel_edge_count + 1, voxel_edge_count + 1, voxel_edge_count + 1)
+    voxels = create_3d_array(voxel_edge_count, voxel_edge_count, voxel_edge_count)
+
+    # 5. Populate Vertices
+    for xi in range(voxel_edge_count + 1):
+        for yi in range(voxel_edge_count + 1):
+            for zi in range(voxel_edge_count + 1):
+                x = min_point.x + xi * voxel_edge_length
+                y = min_point.y + yi * voxel_edge_length
+                z = min_point.z + zi * voxel_edge_length
+                vertices[xi, yi, zi] = Vertex(Point3d(x, y, z), xi, yi, zi)
+
+    # 6. Populate Voxels
+    for xi in range(voxel_edge_count):
+        for yi in range(voxel_edge_count):
+            for zi in range(voxel_edge_count):
+                v000 = vertices[xi, yi, zi]
+                v001 = vertices[xi, yi, zi + 1]
+                v101 = vertices[xi + 1, yi, zi + 1]
+                v100 = vertices[xi + 1, yi, zi]
+                v010 = vertices[xi, yi + 1, zi]
+                v011 = vertices[xi, yi + 1, zi + 1]
+                v111 = vertices[xi + 1, yi + 1, zi + 1]
+                v110 = vertices[xi + 1, yi + 1, zi]
+                
+                extents = Extents3d(v000.point, v111.point)
+                voxels[xi, yi, zi] = Voxel(xi, yi, zi, extents, 
+                                           v000, v001, v101, v100, 
+                                           v010, v011, v111, v110)
+
+    # 7. Determine Vertex Containment
+    brep = Brep(solid)
+    for xi in range(voxel_edge_count + 1):
+        for yi in range(voxel_edge_count + 1):
+            for zi in range(voxel_edge_count + 1):
+                vertex = vertices[xi, yi, zi]
+                containment = brep.get_point_containment(vertex.point)
+                vertex.is_inside = (containment != PointContainment.Outside)
+
+    # 8. Determine Voxel Intersection
+    for xi in range(voxel_edge_count):
+        for yi in range(voxel_edge_count):
+            for zi in range(voxel_edge_count):
+                voxel = voxels[xi, yi, zi]
+                voxel.intersects = any(v.is_inside for v in voxel.vertices)
+
+    # 9. Generate Output
+    output_voxels = []
+    for xi in range(voxel_edge_count):
+        for yi in range(voxel_edge_count):
+            for zi in range(voxel_edge_count):
+                voxel = voxels[xi, yi, zi]
+                if voxel.intersects:
+                    output_voxels.append(voxel.extents.create_box())
+    
+    return VoxelModel(voxels, output_voxels)
+```
+
+## Operating characteristics
+- **Time Complexity**: $O(N^3)$, where $N$ is `VoxelEdgeCount`. This is due to the triple nested loops required to create vertices, voxels, and check containment for every vertex in the grid [S1, unofficial].
+- **Memory Complexity**: $O(N^3)$ for storing the vertex and voxel arrays. The vertex array is $(N+1)^3$ and the voxel array is $N^3$.
+- **Strengths**: Simple to implement; leverages robust BRep containment queries provided by CAD kernels; produces a grid aligned with the object's bounding box.
+- **Limitations**: Resolution is constrained by the longest axis of the bounding box, potentially leading to wasted voxels in non-uniform shapes; does not handle concavities or holes as precisely as ray-casting or winding number methods if the solid surface passes through a voxel without touching any vertex; performance degrades rapidly with high resolution due to cubic scaling.
+- **When to use**: When working with CAD solids where BRep access is available and a coarse-to-medium resolution grid is sufficient; when exact vertex containment logic is preferred over probabilistic or ray-based approaches.
+- **When not to use**: For high-resolution rendering where ray-casting or marching cubes are more appropriate; for complex meshes where vertex containment might miss thin features that pass between vertices.
+
+## Background
+This method is implemented in the `Voxelize-AutoCAD-Solid3d` project, an unofficial tool for AutoCAD [S1, unofficial]. It is designed to convert AutoCAD `Solid3d` objects into a grid of voxels for further processing or visualization. The method relies on the `Autodesk.AutoCAD.BoundaryRepresentation` namespace to perform point containment tests.
+
+## Sources
+[S1] dmccuaig/Voxelize-AutoCAD-Solid3d, https://github.com/dmccuaig/Voxelize-AutoCAD-Solid3d, fetched 2026-10-27 (unofficial)

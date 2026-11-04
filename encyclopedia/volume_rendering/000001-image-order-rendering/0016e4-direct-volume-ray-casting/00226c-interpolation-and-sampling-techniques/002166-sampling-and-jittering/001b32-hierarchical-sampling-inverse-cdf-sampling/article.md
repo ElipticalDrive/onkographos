@@ -3,17 +3,17 @@
 Also called: Fine Sampling, Hierarchical Importance Sampling, Inverse CDF Sampling
 
 ## Overview
-Hierarchical Sampling (Inverse CDF Sampling) generates fine-grained depth samples along a ray by sampling from a probability density function (PDF) derived from coarse rendering weights [S3, S4, S5]. It uses inverse transform sampling on the cumulative distribution function (CDF) to concentrate samples in high-density regions, improving density estimation and reducing variance compared to uniform sampling [S2, S8]. It builds on [Sampling and Jittering](2516-sampling-and-jittering.md) by using importance sampling to refine coarse passes [G].
+Hierarchical Sampling (Inverse CDF Sampling) generates fine-grained depth samples along a ray by sampling from a probability density function (PDF) derived from coarse rendering weights [S3, S4, S5, unofficial]. It uses inverse transform sampling on the cumulative distribution function (CDF) to concentrate samples in high-density regions, improving density estimation and reducing variance compared to uniform sampling [S2, S8, unofficial]. It builds on [Sampling and Jittering](2516-sampling-and-jittering.md) by using importance sampling to refine coarse passes [G].
 
 ## How it works
 **Inputs:**
-*   `bins`: 1D tensor of depth coordinates or midpoints for coarse samples, shape `(N_c,)` or `(batch, N_c)` [S4, S8].
-*   `weights`: 1D tensor of unnormalized importance weights (typically volume density or opacity) corresponding to the coarse samples, shape `(N_c,)` or `(batch, N_c)` [S4, S8]. Note: leading and trailing columns are often excluded before passing to this method [S8].
-*   `N_samples`: Integer specifying the number of fine samples to generate per ray [S1, S5].
-*   `deterministic`: Boolean flag. If `True`, uses deterministic uniform spacing; otherwise uses random jitter [S1].
+*   `bins`: 1D tensor of depth coordinates or midpoints for coarse samples, shape `(N_c,)` or `(batch, N_c)` [S4, S8, unofficial].
+*   `weights`: 1D tensor of unnormalized importance weights (typically volume density or opacity) corresponding to the coarse samples, shape `(N_c,)` or `(batch, N_c)` [S4, S8, unofficial]. Note: leading and trailing columns are often excluded before passing to this method [S8, unofficial].
+*   `N_samples`: Integer specifying the number of fine samples to generate per ray [S1, S5, unofficial].
+*   `deterministic`: Boolean flag. If `True`, uses deterministic uniform spacing; otherwise uses random jitter [S1, unofficial].
 
 **Outputs:**
-*   `fine_z_vals`: 1D tensor of interpolated depth coordinates for the fine samples, shape `(N_samples,)` or `(batch, N_samples)` [S4, S8].
+*   `fine_z_vals`: 1D tensor of interpolated depth coordinates for the fine samples, shape `(N_samples,)` or `(batch, N_samples)` [S4, S8, unofficial].
 
 **Data Structures:**
 *   The method operates on 1D tensors representing the ray's depth interval [G].
@@ -22,36 +22,36 @@ Hierarchical Sampling (Inverse CDF Sampling) generates fine-grained depth sample
 
 **Steps:**
 
-1.  **Compute PDF:** Normalize the coarse weights to form a probability density function. To prevent division by zero or NaNs, add a small epsilon ($\epsilon = 10^{-5}$) to all weights before normalization [S4].
+1.  **Compute PDF:** Normalize the coarse weights to form a probability density function. To prevent division by zero or NaNs, add a small epsilon ($\epsilon = 10^{-5}$) to all weights before normalization [S4, unofficial].
     $$ \text{pdf}_i = \frac{\text{weights}_i + \epsilon}{\sum_{j} (\text{weights}_j + \epsilon)} $$
-    where $\text{weights}$ are the `coarse_weights` [S4].
+    where $\text{weights}$ are the `coarse_weights` [S4, unofficial].
 
-2.  **Compute CDF:** Calculate the cumulative distribution function by taking the cumulative sum of the PDF. Prepend a zero tensor to the CDF to represent the start of the first bin (index 0) [S7].
+2.  **Compute CDF:** Calculate the cumulative distribution function by taking the cumulative sum of the PDF. Prepend a zero tensor to the CDF to represent the start of the first bin (index 0) [S7, unofficial].
     $$ \text{cdf}_0 = 0 $$
     $$ \text{cdf}_i = \text{cdf}_{i-1} + \text{pdf}_{i-1} \quad \text{for } i > 0 $$
-    In code, this is often implemented as `cdf = torch.cat([torch.zeros_like(cdf[..., :1]), torch.cumsum(pdf, -1)], -1)` [S1, S4, S5].
+    In code, this is often implemented as `cdf = torch.cat([torch.zeros_like(cdf[..., :1]), torch.cumsum(pdf, -1)], -1)` [S1, S4, S5, unofficial].
 
-3.  **Generate Query Values:** Generate uniform random numbers $u$ in the interval $[0, 1]$ with size `N_samples` [S1, S2, S4, S5, S7].
-    *   If `deterministic` is `True`, use linearly spaced values: $u_i = \frac{i}{N_{\text{samples}}}$ for $i \in [0, N_{\text{samples}}-1]$ [S1, S4, S5, S7].
-    *   If `deterministic` is `False`, use random uniform samples: $u_i \sim \mathcal{U}(0, 1)$ [S1, S2, S4, S5, S7].
+3.  **Generate Query Values:** Generate uniform random numbers $u$ in the interval $[0, 1]$ with size `N_samples` [S1, S2, S4, S5, S7, unofficial].
+    *   If `deterministic` is `True`, use linearly spaced values: $u_i = \frac{i}{N_{\text{samples}}}$ for $i \in [0, N_{\text{samples}}-1]$ [S1, S4, S5, S7, unofficial].
+    *   If `deterministic` is `False`, use random uniform samples: $u_i \sim \mathcal{U}(0, 1)$ [S1, S2, S4, S5, S7, unofficial].
 
-4.  **Find Bin Indices:** Determine which bin in the CDF each query value $u$ falls into using binary search (`searchsorted`) [S1, S2, S4, S5, S7].
+4.  **Find Bin Indices:** Determine which bin in the CDF each query value $u$ falls into using binary search (`searchsorted`) [S1, S2, S4, S5, S7, unofficial].
     $$ \text{inds} = \text{searchsorted}(\text{cdf}, u, \text{side}=\text{'right'}) $$
-    This returns the index $k$ such that $\text{cdf}_{k-1} \le u < \text{cdf}_k$ [S1, S2, S4, S5, S7].
+    This returns the index $k$ such that $\text{cdf}_{k-1} \le u < \text{cdf}_k$ [S1, S2, S4, S5, S7, unofficial].
 
-5.  **Determine Bin Boundaries:** Identify the lower (`below`) and upper (`above`) bin indices for interpolation. Clamp these indices to valid ranges $[0, \text{len}(\text{cdf})-1]$ [S2].
+5.  **Determine Bin Boundaries:** Identify the lower (`below`) and upper (`above`) bin indices for interpolation. Clamp these indices to valid ranges $[0, \text{len}(\text{cdf})-1]$ [S2, unofficial].
     $$ \text{below} = \max(0, \text{inds} - 1) $$
     $$ \text{above} = \min(\text{len}(\text{cdf}) - 1, \text{inds}) $$
 
-6.  **Gather CDF and Depth Values:** Retrieve the CDF values and depth coordinates (`bins`, which are `coarse_z_vals`) for the lower and upper bins [S1, S4, S5, S7].
+6.  **Gather CDF and Depth Values:** Retrieve the CDF values and depth coordinates (`bins`, which are `coarse_z_vals`) for the lower and upper bins [S1, S4, S5, S7, unofficial].
     $$ \text{cdf}_{\text{below}} = \text{cdf}[\text{below}] $$
     $$ \text{cdf}_{\text{above}} = \text{cdf}[\text{above}] $$
     $$ \text{z}_{\text{below}} = \text{bins}[\text{below}] $$
     $$ \text{z}_{\text{above}} = \text{bins}[\text{above}] $$
 
-7.  **Interpolate Sample Positions:** Perform linear interpolation within the identified bin to find the final sample depth $z_{\text{sample}}$ [S1, S2, S4, S5, S7].
+7.  **Interpolate Sample Positions:** Perform linear interpolation within the identified bin to find the final sample depth $z_{\text{sample}}$ [S1, S2, S4, S5, S7, unofficial].
     $$ \text{denom} = \text{cdf}_{\text{above}} - \text{cdf}_{\text{below}} $$
-    Handle division by zero by clamping `denom` to a small value (e.g., $10^{-5}$) if it is below the threshold [S1, S4, S5, S7].
+    Handle division by zero by clamping `denom` to a small value (e.g., $10^{-5}$) if it is below the threshold [S1, S4, S5, S7, unofficial].
     $$ t = \frac{u - \text{cdf}_{\text{below}}}{\max(\text{denom}, 10^{-5})} $$
     $$ z_{\text{sample}} = \text{z}_{\text{below}} + t \cdot (\text{z}_{\text{above}} - \text{z}_{\text{below}}) $$
 
@@ -118,14 +118,14 @@ def hierarchical_sampling(bins, weights, N_samples, deterministic=True):
 ```
 
 **Parameters:**
-*   `N_samples`: Integer specifying the number of fine samples to generate per ray. Typical values are 128 or 64 [S1, S4].
-*   `deterministic`: Boolean flag. If `True`, uses deterministic linspace samples instead of random uniform samples for reproducibility [S1, S4].
-*   `perturb`: Float controlling jittering. 0 disables jittering (deterministic midpoints), 1 enables full stratified jittering. This parameter is often used in the coarse pass, but the fine pass here is strictly inverse CDF [S1].
+*   `N_samples`: Integer specifying the number of fine samples to generate per ray. Typical values are 128 or 64 [S1, S4, unofficial].
+*   `deterministic`: Boolean flag. If `True`, uses deterministic linspace samples instead of random uniform samples for reproducibility [S1, S4, unofficial].
+*   `perturb`: Float controlling jittering. 0 disables jittering (deterministic midpoints), 1 enables full stratified jittering. This parameter is often used in the coarse pass, but the fine pass here is strictly inverse CDF [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Zero Weights:** Zero weights cause division by zero during PDF normalization. Handled by adding $\epsilon = 10^{-5}$ to all weights before normalization [S1, S2, S5, S7].
-*   **Zero-Width Bins:** Zero-width bins (where `cdf_above == cdf_below`) cause division by zero during interpolation. Handled by clamping the denominator `denom` to $10^{-5}$ if it falls below that threshold [S1, S4, S5, S7].
-*   **Boundary Conditions:** Indices must be clamped to valid ranges $[0, \text{len}(\text{cdf})-1]$ to prevent out-of-bounds access [S1, S2, S4, S5, S7].
+*   **Zero Weights:** Zero weights cause division by zero during PDF normalization. Handled by adding $\epsilon = 10^{-5}$ to all weights before normalization [S1, S2, S5, S7, unofficial].
+*   **Zero-Width Bins:** Zero-width bins (where `cdf_above == cdf_below`) cause division by zero during interpolation. Handled by clamping the denominator `denom` to $10^{-5}$ if it falls below that threshold [S1, S4, S5, S7, unofficial].
+*   **Boundary Conditions:** Indices must be clamped to valid ranges $[0, \text{len}(\text{cdf})-1]$ to prevent out-of-bounds access [S1, S2, S4, S5, S7, unofficial].
 
 ## Subtopics
 
@@ -144,27 +144,27 @@ RangeFineSampler is a hierarchical sampling technique for direct volume ray cast
 *   **Memory:** Requires storage for the CDF and intermediate tensors, proportional to $O(N_c + N_f)$ [G].
 
 **Measured Performance:**
-*   Performance depends on the hardware and resolution [G]. On a single 2080 Ti, training a NeRF on a low-res scene (e.g., `fern`) takes approximately 8 hours for 200k iterations [S7].
-*   The method allows for fewer ray points while maintaining accuracy, reducing the computational load compared to uniform sampling [S1].
+*   Performance depends on the hardware and resolution [G]. On a single 2080 Ti, training a NeRF on a low-res scene (e.g., `fern`) takes approximately 8 hours for 200k iterations [S7, unofficial].
+*   The method allows for fewer ray points while maintaining accuracy, reducing the computational load compared to uniform sampling [S1, unofficial].
 
 **Scaling:**
 *   The method scales linearly with the number of rays and samples [G].
 *   It is suitable for large-scale volume rendering due to its efficiency in concentrating samples in high-density regions [G].
 
 **Strengths and Limitations:**
-*   **Strengths:** Differentiable, allowing gradients to back-propagate through the sampling process [S1]. Numerically stable with proper epsilon handling [S1, S7]. Efficient importance sampling [S1].
-*   **Limitations:** Requires coarse samples and weights as input [S4]. Performance may degrade if coarse weights are inaccurate [S1].
+*   **Strengths:** Differentiable, allowing gradients to back-propagate through the sampling process [S1, unofficial]. Numerically stable with proper epsilon handling [S1, S7, unofficial]. Efficient importance sampling [S1, unofficial].
+*   **Limitations:** Requires coarse samples and weights as input [S4, unofficial]. Performance may degrade if coarse weights are inaccurate [S1, unofficial].
 
 **When to Use:**
-*   Use when importance sampling is needed to reduce variance in volume rendering [S1].
-*   Use when differentiable sampling is required for end-to-end optimization [S1].
+*   Use when importance sampling is needed to reduce variance in volume rendering [S1, unofficial].
+*   Use when differentiable sampling is required for end-to-end optimization [S1, unofficial].
 
 **When Not to Use:**
-*   Avoid when computational resources are extremely limited and coarse weights are not available [S4].
-*   Avoid when the scene has very low density variations, making importance sampling less beneficial [S1].
+*   Avoid when computational resources are extremely limited and coarse weights are not available [S4, unofficial].
+*   Avoid when the scene has very low density variations, making importance sampling less beneficial [S1, unofficial].
 
 ## Background
-Hierarchical Sampling (Inverse CDF Sampling) originates from the NeRF (Neural Radiance Fields) paper by Mildenhall et al. [S2, S5]. It was introduced to improve the efficiency of volume rendering by concentrating samples in regions of high density [S8]. The method has been widely adopted in subsequent works, including [S1, S4, S7].
+Hierarchical Sampling (Inverse CDF Sampling) originates from the NeRF (Neural Radiance Fields) paper by Mildenhall et al. [S2, S5, unofficial]. It was introduced to improve the efficiency of volume rendering by concentrating samples in regions of high density [S8, unofficial]. The method has been widely adopted in subsequent works, including [S1, S4, S7, unofficial].
 
 ## Sources
 [S1] GreatDrake/reparameterized-volume-sampling, https://github.com/GreatDrake/reparameterized-volume-sampling, fetched 2026-10-26 (unofficial)

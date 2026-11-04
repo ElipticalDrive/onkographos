@@ -3,43 +3,43 @@
 Also called: Neumann Gradient Estimation
 
 ## Overview
-The Neumann Gradient is a 3D gradient estimation method for scalar volumes that computes the gradient vector for each voxel using a 3×3×3 neighborhood of 26 surrounding voxels [S1]. It distinguishes itself from simpler finite difference methods by employing a linear regression framework that produces nearly isotropic gradients with reduced fringing artifacts [S1].
+The Neumann Gradient is a 3D gradient estimation method for scalar volumes that computes the gradient vector for each voxel using a 3×3×3 neighborhood of 26 surrounding voxels [S1, unofficial]. It distinguishes itself from simpler finite difference methods by employing a linear regression framework that produces nearly isotropic gradients with reduced fringing artifacts [S1, unofficial].
 
 ## How it works
-The method computes the gradient vector $\nabla(x, y, z) = (\nabla_x, \nabla_y, \nabla_z)$ at voxel position $(x, y, z)$ by convolving the 26 neighboring voxel values with three specific 3×3×3 filter masks [S1]. The masks are derived from a linear regression framework [S1].
+The method computes the gradient vector $\nabla(x, y, z) = (\nabla_x, \nabla_y, \nabla_z)$ at voxel position $(x, y, z)$ by convolving the 26 neighboring voxel values with three specific 3×3×3 filter masks [S1, unofficial]. The masks are derived from a linear regression framework [S1, unofficial].
 
 **Inputs:**
-- Scalar volume data $D$ (3D array) [S1].
-- Target voxel coordinates $(x, y, z)$ [S1].
+- Scalar volume data $D$ (3D array) [S1, unofficial].
+- Target voxel coordinates $(x, y, z)$ [S1, unofficial].
 
 **Outputs:**
-- Gradient vector $\nabla(x, y, z) = (\nabla_x, \nabla_y, \nabla_z)$ [S1].
+- Gradient vector $\nabla(x, y, z) = (\nabla_x, \nabla_y, \nabla_z)$ [S1, unofficial].
 
 **Data Structures:**
-- Three 3×3×3 kernel arrays $K_x, K_y, K_z$ storing the filter weights [S1].
-- Normalization factor $C = 1/52$ [S1].
+- Three 3×3×3 kernel arrays $K_x, K_y, K_z$ storing the filter weights [S1, unofficial].
+- Normalization factor $C = 1/52$ [S1, unofficial].
 
 **Formulas:**
 The gradient components are computed by applying the filter masks to the neighborhood:
 $$ \nabla_x = \frac{1}{52} \sum_{i=-1}^{1} \sum_{j=-1}^{1} \sum_{k=-1}^{1} D(x+i, y+j, z+k) \cdot K_x[i+1][j+1][k+1] $$
 $$ \nabla_y = \frac{1}{52} \sum_{i=-1}^{1} \sum_{j=-1}^{1} \sum_{k=-1}^{1} D(x+i, y+j, z+k) \cdot K_y[i+1][j+1][k+1] $$
 $$ \nabla_z = \frac{1}{52} \sum_{i=-1}^{1} \sum_{j=-1}^{1} \sum_{k=-1}^{1} D(x+i, y+j, z+k) \cdot K_z[i+1][j+1][k+1] $$
-The source provides the kernels as explicit 3D arrays for $\nabla_x$ and as tensor products for $\nabla_y$ and $\nabla_z$ [S1]:
+The source provides the kernels as explicit 3D arrays for $\nabla_x$ and as tensor products for $\nabla_y$ and $\nabla_z$ [S1, unofficial]:
 $$ K_x = \begin{pmatrix} (-2 & 0 & 2) & (-3 & 0 & 3) & (-2 & 0 & 2) \\ (-3 & 0 & 3) & (-6 & 0 & 6) & (-3 & 0 & 3) \\ (-2 & 0 & 3) & (-3 & 0 & 3) & (-2 & 0 & 2) \end{pmatrix} $$
-where each row in the LaTeX represents a 3×3 slice along the z-axis [S1].
+where each row in the LaTeX represents a 3×3 slice along the z-axis [S1, unofficial].
 For $\nabla_y$ and $\nabla_z$, the source provides tensor product notations:
 $$ K_y = \frac{1}{52} \begin{pmatrix} 2 & 3 & 2 \\ 0 & 0 & 0 \\ -2 & -3 & -2 \end{pmatrix} \begin{pmatrix} 3 & 6 & 3 \\ 0 & 0 & 0 \\ -3 & -6 & -3 \end{pmatrix} \begin{pmatrix} 2 & 3 & 2 \\ 0 & 0 & 0 \\ -2 & -3 & -2 \end{pmatrix} $$
 $$ K_z = \frac{1}{52} \begin{pmatrix} (-2 & -3 & -2) \\ (-3 & -6 & -3) \\ (-2 & -3 & -2) \end{pmatrix} \begin{pmatrix} 0 & 0 & 0 \\ 0 & 0 & 0 \\ 0 & 0 & 0 \end{pmatrix} \begin{pmatrix} 2 & 3 & 2 \\ 3 & 6 & 3 \\ 2 & 3 & 2 \end{pmatrix} $$
 The middle matrix in $K_z$ is all zeros in the source, which is a typographical error in the original LaTeX; the intended structure is a separable 3×3×3 kernel [G]. The kernels can be expanded into 3D arrays for implementation [G].
 
 **Parameters:**
-- Normalization constant: $1/52$ [S1].
-- Neighborhood radius: 1 voxel (3×3×3 grid, 26 neighbors) [S1].
+- Normalization constant: $1/52$ [S1, unofficial].
+- Neighborhood radius: 1 voxel (3×3×3 grid, 26 neighbors) [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Boundary Conditions:** The method requires 26 neighbors [S1]. Boundary handling is not specified in the source; clamping to edge values or zero-padding are standard implementations [G].
-- **Computational Cost:** The method has considerably high computational costs due to the 26-tap 3D convolution [S1].
-- **Detail Fading:** Applying the filter to the original voxel values (which can be computed with low additional cost using intermediate results) causes fading of small details, which is typically unsuitable for real medical applications [S1].
+- **Boundary Conditions:** The method requires 26 neighbors [S1, unofficial]. Boundary handling is not specified in the source; clamping to edge values or zero-padding are standard implementations [G].
+- **Computational Cost:** The method has considerably high computational costs due to the 26-tap 3D convolution [S1, unofficial].
+- **Detail Fading:** Applying the filter to the original voxel values (which can be computed with low additional cost using intermediate results) causes fading of small details, which is typically unsuitable for real medical applications [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -58,14 +58,14 @@ def compute_neumann_gradient(volume, x, y, z, width, height, depth):
                   for dy in range(-1, 2)]
                  for dx in range(-1, 2)]
 
-    # Kernel K_x from source [S1] (3 layers along z)
+    # Kernel K_x from source [S1, unofficial] (3 layers along z)
     kx = [
         [[-2, 0, 2], [-3, 0, 3], [-2, 0, 2]],
         [[-3, 0, 3], [-6, 0, 6], [-3, 0, 3]],
         [[-2, 0, 3], [-3, 0, 3], [-2, 0, 2]]
     ]
 
-    # Kernels K_y and K_z are given as tensor products in the source [S1]
+    # Kernels K_y and K_z are given as tensor products in the source [S1, unofficial]
     # Expanded into 3D arrays for implementation [G]
     ky = [
         [[ 4,  6,  4], [ 0,  0,  0], [-4, -6, -4]],
@@ -96,15 +96,15 @@ def compute_neumann_gradient(volume, x, y, z, width, height, depth):
 ```
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources [S1]. The method requires a 26-tap 3D convolution per voxel, which the source describes as having "considerably high computational costs" [S1].
-- **Memory Complexity:** Not given in the sources [S1]. Storing the gradient volume requires one float per component per voxel [G].
-- **Performance:** Considerably high computational costs compared to central differences [S1].
-- **Strengths:** Produces nearly isotropic gradients and less fringing artifacts than other methods [S1].
-- **Limitations:** High cost; filtering for quality reduces small details, making it less suitable for medical applications where detail preservation is critical [S1].
-- **Use Cases:** High-quality rendering systems where visual accuracy is prioritized over speed [S1].
+- **Time Complexity:** Not given in the sources [S1, unofficial]. The method requires a 26-tap 3D convolution per voxel, which the source describes as having "considerably high computational costs" [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial]. Storing the gradient volume requires one float per component per voxel [G].
+- **Performance:** Considerably high computational costs compared to central differences [S1, unofficial].
+- **Strengths:** Produces nearly isotropic gradients and less fringing artifacts than other methods [S1, unofficial].
+- **Limitations:** High cost; filtering for quality reduces small details, making it less suitable for medical applications where detail preservation is critical [S1, unofficial].
+- **Use Cases:** High-quality rendering systems where visual accuracy is prioritized over speed [S1, unofficial].
 
 ## Background
-The Neumann gradient estimation method is based on linear regression and is a generalization of previous gradient estimation approaches [S1]. It was proposed by Neumann et al. [54] to achieve high gradient quality [S1]. It is used in high-quality volume rendering systems [S1].
+The Neumann gradient estimation method is based on linear regression and is a generalization of previous gradient estimation approaches [S1, unofficial]. It was proposed by Neumann et al. [54] to achieve high gradient quality [S1, unofficial]. It is used in high-quality volume rendering systems [S1, unofficial].
 
 ## Sources
-[S1] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26
+[S1] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)

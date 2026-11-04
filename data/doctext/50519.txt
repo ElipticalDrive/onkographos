@@ -1,0 +1,740 @@
+First attempt to implement [Dual Contouring](http://www.frankpetterson.com/publications/dualcontour/dualcontour.pdf)
+
+ - 2D case on a simple grid
+ - [mathjs](http://mathjs.org/) for vector/matrix manipulation
+ - [p5js](https://p5js.org) to interactively visualize the result
+
+Done:
+
+ 1. Partition space into a grid
+ 2. Add a surface function ([noise](https://github.com/josephg/noisejs)-modulated circle)
+ 3. Iterate over vertices, marking densities (solid or air)
+ 4. Iterate over edges, marking surface intercept positions and normals
+ 5. Iterate over cells, positioning vertices by [minimizing quadratic error function](https://stackoverflow.com/a/31188308)
+ 6. Iterate over cells, connecting adjacent vertices with faces (in 2d, just lines)
+ 7. Convert grid into quadtree, collapsing homogeneous regions
+
+Most of the work is done in `simplegrid.js`.
+
+Not done:
+
+ 1. Multiple materials
+ 2. Adding/removing voxels
+ 3. Mesh simplification
+
+[Interactive demo](https://AdamStone.github.io/dual-contouring-2d-grid) (only tested in Chrome)
+
+### webpack.config.js
+```
+var path = require('path')
+
+module.exports = {
+  entry: path.join(__dirname, '/src/app.js'),
+  output: {
+    path: path.join(__dirname, 'build'),
+    filename: 'bundle.js'
+  },
+  module: {
+    loaders: [{
+      test: /\.js$/,
+      exclude: /node_modules/,
+      loader: 'babel-loader'
+    }]
+  },
+  devServer: {
+    contentBase: path.join(__dirname, 'build'),
+    compress: true,
+    port: 9000
+  },
+  devtool: 'cheap-eval-source-map'
+}
+```
+
+### src/app.js
+```
+import p5 from 'p5'
+window.p5 = p5
+
+import math from 'mathjs'
+window.math = math
+
+import Planetoid from './planetoid'
+import SimpleGrid from './simplegrid'
+import QuadTree from './quadtree'
+import {Circle} from './surface'
+
+import { add, subtract, multiply, divide, square, sqrt,
+     sum, mean, matrix, zeros, transpose, inv } from 'mathjs'
+
+// grid
+const WIDTH = 512
+const HEIGHT = WIDTH
+const RESOLUTION = WIDTH / 64
+
+// circle
+const RADIUS = 125
+
+
+let mouseOrigin
+window.mousePressed = () => {
+  mouseOrigin = [mouseX, mouseY]
+}
+window.mouseReleased = () => {
+  mouseOrigin = null
+}
+
+let toggleGrid = 2
+window.keyPressed = (e) => {
+  switch(e.keyCode) {
+    case 71:
+      toggleGrid = toggleGrid === 1 ? 0 : 1
+      break
+    case 81:
+      toggleGrid = toggleGrid === 2 ? 0 : 2
+  }
+}
+
+let grid, surface, quadTree
+let surfaceOrigin = [WIDTH / 2, HEIGHT / 2 + 40]
+
+
+window.setup = () => {
+  let canvas = createCanvas(WIDTH+1, HEIGHT+1)
+  canvas.parent('canvas-container')
+
+  surface = new Planetoid(surfaceOrigin, RADIUS, WIDTH, HEIGHT)
+  grid = new SimpleGrid(WIDTH, RESOLUTION)
+  grid.addSurface(surface)
+  grid.generateMesh()
+  quadTree = QuadTree.fromGrid(grid)
+}
+
+window.draw = () => {
+  background(0)
+  if (mouseOrigin) {
+    // just reinitialize everything to move the circle
+    let mouseNow = [mouseX, mouseY]
+    let mouseDelta = subtract(mouseNow, mouseOrigin)
+    surfaceOrigin[0] += mouseDelta[0]
+    surfaceOrigin[1] += mouseDelta[1]
+    mouseOrigin = mouseNow
+
+    grid = new SimpleGrid(WIDTH, RESOLUTION)
+    grid.addSurface(surface)
+    grid.generateMesh()
+    quadTree = QuadTree.fromGrid(grid)
+  }
+
+  surface.draw()
+
+  if (toggleGrid === 1) {
+    grid.drawGrid()
+  }
+  if (toggleGrid === 2) {
+    quadTree.drawNodes()
+  }
+
+  grid.drawMesh()
+
+  noStroke()
+
+  textSize(22)
+  fill(120)
+  text('Dual contouring in 2D', 10, 25)
+
+  textSize(16)
+  fill(75)
+  text('Click and drag to move', 10, 50)
+  text('Press G to toggle grid', 10, 100)
+  text('Press Q to toggle quadtree', 10, 75)
+}
+```
+
+### src/noisemap.js
+```
+let baseRanges = {
+  'perlin2': [-Math.sqrt(2/4), Math.sqrt(2/4)],
+  'perlin3': [-Math.sqrt(3/4), Math.sqrt(3/4)],
+  'simplex2': [-1, 1],
+  'simplex3': [-1, 1]
+}
+
+class NoiseMap {
+  constructor({amplitude = 1, octaves = 3, scale = 0.005, lacunarity = 2, seed = 0, type = 'perlin2'}) {
+    this.amplitude = amplitude
+    this.octaves = octaves
+    this.scale = scale
+    this.lacunarity = lacunarity
+    this.seed = seed
+    this.type = type
+  }
+
+  get(x, y, lmin, lmax) {
+    // centered on zero
+    Noise.seed(this.seed)
+    let value = 0
+    let gradX = 0
+    let gradY = 0
+    let amplitude = this.amplitude
+    let scale = this.scale
+    for (let i = 0; i < this.octaves; i++) {
+      let n = Noise[this.type](x * scale, y * scale)
+      value += amplitude * n.value
+      gradX += amplitude * n.gradX
+      gradY += amplitude * n.gradY
+      scale *= this.lacunarity
+      amplitude /= this.lacunarity
+    }
+    // linear interpolation of the result to the requested range
+    if (lmin != null && lmax != null) {
+      // new target range
+      let rng = lmax - lmin
+
+      // shift from [this.min() -> this.max()] to [0 -> 2*this.max()]
+      value -= this.min()
+
+      // scale to target range
+      let rescaling = rng / (2*this.max())
+      value *= rescaling
+      gradX *= rescaling
+      gradY *= rescaling
+
+      // shift by target min
+      value += lmin
+    }
+    return {value, gradX, gradY}
+  }
+
+  range() {
+    if (!this._range) {
+      let min = 0
+      let max = 0
+      let amplitude = this.amplitude
+      for (let i = 0; i < this.octaves; i++) {
+        min += amplitude * baseRanges[this.type][0]
+        max += amplitude * baseRanges[this.type][1]
+
+        amplitude /= this.lacunarity
+      }
+      this._range = [min, max]
+    }
+    return this._range
+  }
+
+  min() {
+    if (!this._min) {
+      this._min = this.range()[0]
+    }
+    return this._min
+  }
+
+  max() {
+    if (!this._max) {
+      this._max = this.range()[1]
+    }
+    return this._max
+  }
+
+  draw(dx, dy) {
+    if (!this.img) {
+      let img = this.img = createImage(dx, dy)
+      img.loadPixels()
+      for (let i = 0; i < img.width; i++) {
+        for (let j = 0; j < img.height; j++) {
+          let { value, gradient } = this.get(i, j)
+          let solid = (value - this.min()) / 2 * 255
+          img.set(i, j, color(solid))
+        }
+      }
+      img.updatePixels()
+    }
+    image(this.img, 0, 0, dx, dy)
+  }
+}
+
+export default NoiseMap
+```
+
+### src/planetoid.js
+```
+import _ from 'lodash'
+import math from 'mathjs'
+
+import { add, subtract, multiply, divide, square, sqrt, sin, cos, atan2,
+     min, max, sum, mean, matrix, zeros, transpose, inv } from 'mathjs'
+
+import NoiseMap from './noisemap'
+
+
+let noiseMap = new NoiseMap({
+  octaves: 3,
+  lacunarity: 4,
+  scale: 2e-2
+})
+
+let modMin = 0
+let modMax = 100
+
+class Planetoid {
+  constructor(origin, radius, width, height, index = 1) {
+    this.origin = origin
+    this.radius = radius
+    this.width = width
+    this.height = height
+    this.index = index
+  }
+
+  // x = r cos(theta)
+  // y = r sin(theta)
+  // r = sqrt(x^2 + y^2)
+  // theta = atan2(y, x)
+
+  getHeight(theta) {
+    let [sx, sy] = [this.radius * cos(theta), this.radius * sin(theta)]
+    return this.radius + noiseMap.get(sx, sy, modMin, modMax).value
+  }
+
+  get(x, y) {  // "density" function
+    [x, y] = subtract([x, y], this.origin)
+    let d2 = sum(square([x, y]))
+    let r = this.getHeight(atan2(y, x))
+    return d2 - r*r
+  }
+
+  getIndex(x, y) {
+    return this.get(x, y) < 0 ? this.index : 0
+  }
+
+  draw() {
+    for (let i = 0; i < this.width; i+=4) {
+      for (let j = 0; j < this.height; j+=4) {
+        let index = this.getIndex(i, j)
+        if (index > 0) {
+          stroke(30)
+          fill(30)
+          point(i, j)
+        }
+      }
+    }
+  }
+}
+
+export default Planetoid
+```
+
+### src/quadtree.js
+```
+import _ from 'lodash'
+import math from 'mathjs'
+
+import { add, subtract, multiply, divide, square, sqrt, range,
+     min, max, sum, mean, matrix, zeros, transpose, inv } from 'mathjs'
+
+class QuadTree {
+  static fromGrid(grid) {
+    let recursor = (cells, origin, resolution) => {
+      if (typeof cells.size === 'function') {
+        // can potentially subdivide further
+        let n = cells.size()[0]     // number of cells
+
+        if (_.some(_.flatten(cells.toArray()))) {
+          // should further subdivide
+
+          let n2 = n / 2              // half number of cells
+          let l2 = n2 * resolution    // half total length
+          let r0 = range(0, n2)
+          let r1 = range(n2, n)
+          let quadrants = ([
+           {range: [r0, r0], origin: origin},
+           {range: [r0, r1], origin: add(origin, [0, l2])},
+           {range: [r1, r0], origin: add(origin, [l2, 0])},
+           {range: [r1, r1], origin: add(origin, [l2, l2])}
+          ])
+          let children = quadrants.map(quadrant => {
+            let subCells = cells.subset(math.index(...quadrant.range))
+            return recursor(subCells, quadrant.origin, resolution)
+          })
+          return new QuadTree(resolution * n, origin, resolution, children)
+
+        }
+        else {
+          // homogeneous region
+          return new QuadTree(resolution * n, origin, resolution)
+        }
+      }
+      else {
+        // reached the smallest grid unit
+        let leaf = new QuadTree(resolution, origin, resolution)
+        leaf.data = cells
+        return leaf
+      }
+    }
+
+    return recursor(grid.cells, grid.origin, grid.resolution)
+  }
+
+  constructor(size, origin, resolution, children = []) {
+    this.size = size
+    this.resolution = resolution
+    this.origin = origin || [0, 0]
+
+    this.children = children
+  }
+
+  drawNodes() {
+    // just the octree node squares (not the mesh)
+    stroke(color(255,255,255,15))
+    noFill()
+    rect(...this.origin, this.size, this.size)
+    this.children.forEach(subTree => subTree ? subTree.drawNodes() : null)
+  }
+
+}
+
+export default QuadTree
+```
+
+### src/simplegrid.js
+```
+import _ from 'lodash'
+import math from 'mathjs'
+
+import { add, subtract, multiply, divide, square, sqrt,
+     min, max, sum, mean, matrix, zeros, transpose, inv } from 'mathjs'
+
+let pinv = function(A) {
+  let AT = transpose(A)
+  return multiply(inv(multiply(AT, A)), AT)
+}
+
+let normalize = function(vector) {
+  return divide(vector, sqrt(sum(square(vector))))
+}
+
+const MAX_ERR = .1
+
+class SimpleGrid {
+  constructor(size, resolution, origin) {
+    this.origin = origin || [0, 0]
+    this.resolution = resolution
+    this.size = size
+    this.nCells = size / resolution
+    this.nPoints = this.nCells + 1
+    this.surfaces = []
+
+    this.points = zeros(this.nPoints, this.nPoints)
+    this.hEdges = zeros(this.nCells, this.nPoints)
+    this.vEdges = zeros(this.nPoints, this.nCells)
+    this.cells = zeros(this.nCells, this.nCells)
+
+    this.faces = []
+  }
+
+  getXY(ij) {
+    return add(this.origin, multiply(ij, this.resolution))
+  }
+
+  addSurface(surface) {
+    this.surfaces.push(surface)
+  }
+
+  generateMesh() {
+    let surface = this.surfaces[0]
+
+    this.generateGridPointData(surface)
+    this.generateGridEdgeData(surface)
+    this.generateMeshVertices(surface)
+    this.generateMeshFaces(surface)
+  }
+
+  generateGridPointData(surface) {
+    // generate material index data at grid points
+
+    let { points, origin, resolution } = this
+
+    this.points = points = points.map((v, ij) => {
+      return surface.getIndex(...this.getXY(ij))
+    })
+  }
+
+  generateGridEdgeData(surface) {
+    // generate edge intercepts and surface normals
+
+    let { points, hEdges, vEdges, origin, resolution } = this
+
+    let mapFn = function(step, e, ij) {
+      let xy = this.getXY(ij)
+
+      let v1 = points.subset(math.index(...ij))
+      let v2 = points.subset(math.index(...add(ij, step)))
+      if (v2 !== v1) {
+        // edge crosses a surface
+        // assume we don't know the form of the generator gradient,
+        // find intersection with simple binary search
+        let err = resolution  // length of iteration step
+        // iteratively get position of surface crossing
+        let sxy = [...xy]
+        let value, sign
+        while (err > MAX_ERR) {
+          value = surface.getIndex(...sxy)
+          err /= 2
+          sign = value === v2 ? -1 : 1
+          sxy = add(sxy, multiply(step, sign * err))
+        }
+        // estimate normals by finite difference
+        let d = .01
+        let dx = surface.get(...add(sxy, [d, 0])) - surface.get(...add(sxy, [-d, 0]))
+        let dy = surface.get(...add(sxy, [0, d])) - surface.get(...add(sxy, [0, -d]))
+
+        return {
+          origin: xy,
+          intercept: subtract(sxy, xy),
+          normal: normalize([dx, dy])
+        }
+      }
+      return 0
+    }
+    this.hEdges = hEdges = hEdges.map(mapFn.bind(this, [1, 0]))
+    this.vEdges = vEdges = vEdges.map(mapFn.bind(this, [0, 1]))
+  }
+
+  generateMeshVertices(surface) {
+    // generate vertex positions
+
+    let { hEdges, vEdges, cells, resolution } = this
+
+    let edgeMaps = [
+      {collection: hEdges, offset: [0, 0]},  // top horizontal edge
+      {collection: vEdges, offset: [0, 0]},  // left vertical edge
+      {collection: hEdges, offset: [0, 1]},  // bottom horizontal edge
+      {collection: vEdges, offset: [1, 0]}   // bottom vertical edge
+    ]
+    this.cells = cells.map((c, ij) => {
+      let xy = this.getXY(ij)
+
+      // get the edges for this cell
+      let edges = edgeMaps.map(cfg => {
+        let offset = add(ij, cfg.offset)
+        return cfg.collection.subset(math.index(...offset))
+      })
+
+      // just those that the surface actually crosses
+      let crossedEdges = edges.filter(e => e)
+
+      if (crossedEdges.length) {
+        // the surface crossed the cell
+
+        // get edge intercept positions relative to the cell origin
+        // (rather than relative to edge origin)
+        let rel = crossedEdges.map(edge => {
+          return {
+            normal: edge.normal,
+            intercept: subtract(add(edge.origin, edge.intercept), xy)
+          }
+        })
+
+        // *** find least squares solution by pseudoinverse ***
+        // https://stackoverflow.com/a/31188308
+
+        // mean point of intersections
+        let m = [
+          mean(rel.map(edge => edge.intercept[0])),
+          mean(rel.map(edge => edge.intercept[1]))
+        ]
+
+        // matrix of normals (one row per edge)
+        let A = matrix(rel.map(edge => edge.normal))
+
+        /* vector of dot products of normals and intercepts for each edge
+        (The intersection points are 'moved' so that the mean point becomes the origin.
+        This ensures that when there are multiple solutions to the QEF, the solution closest
+        to the mean point is chosen.) */
+        let b = rel.map(edge => multiply(edge.normal, subtract(edge.intercept, m)))
+
+        // pseudoinverse  P = (AT A)^-1 AT
+        let P = pinv(A)
+
+        // xls = Pb
+        let leastSqPosition = multiply(P, b).toArray()  // still relative to mean
+        let relativeToCell = add(leastSqPosition, m)  // make relative to cell origin
+
+        // if any coordinates landed outside the cell, surface crosses a grid point -
+        // just use the mean position as the vertex position
+        if (_.some(relativeToCell, (p) => p < 0 || p > resolution)) {
+          leastSqPosition = [0, 0] // relative to mean
+          relativeToCell = m
+        }
+
+        // r = Ax - b
+        let residual = subtract(multiply(A, leastSqPosition), b).toArray()
+
+        return {
+          edges,
+          origin: xy,
+          vertex: relativeToCell,
+          residual
+        }
+      }
+      return 0
+    })
+  }
+
+  generateMeshFaces(surface) {
+    // generate connectivity between vertices (in 3d it would be faces, 2d just lines)
+
+    // to avoid redundancy, for each cell only check right and bottom neighbors
+    this.cells.map((cell, ij) => {
+      if (cell) {
+        let [i, j] = ij
+        // if right neighbor exists and has a vertex **and right edge is crossed**
+        // (need this edge check to avoid artifacts)
+        if (i < this.nCells - 1 && cell.edges[3]) {
+          let right = this.cells.subset(math.index(...add(ij, [1, 0])))
+          if (right) {
+            this.faces.push([add(cell.origin, cell.vertex), add(right.origin, right.vertex)])
+          }
+        }
+        // if bottom neighbor exists and has a vertex **and bottom edge is crossed**
+        if (j < this.nCells - 1 && cell.edges[2]) {
+          let bottom = this.cells.subset(math.index(...add(ij, [0, 1])))
+          if (bottom) {
+            this.faces.push([add(cell.origin, cell.vertex), add(bottom.origin, bottom.vertex)])
+          }
+        }
+      }
+    })
+  }
+
+
+  drawPoints() {
+    // just the points (not mesh or grid)
+    let { origin, resolution } = this
+    this.points.forEach((solid, ij) => {
+      let xy = this.getXY(ij)
+      if (solid) {
+        fill(128)
+        noStroke()
+        ellipse(...xy, 3, 3)
+      }
+    })
+  }
+
+  drawGrid() {
+    // just the grid (not the mesh)
+    this.drawEdges()
+    this.drawCells()
+  }
+
+  drawEdges() {
+    let uniformColor = 15
+    let transitionColor = 30
+    let intersectionColor = 255
+    let normalColor = color(0, 200, 200)
+    let { origin, resolution } = this
+
+    let drawFn = function(step, edge, ij) {
+      let xy = this.getXY(ij)
+
+      if (edge) {
+        stroke(transitionColor)
+      }
+      else {
+        stroke(uniformColor)
+      }
+
+      line(...xy, ...add(xy, multiply(step, resolution)))
+
+      if (edge) {
+        let dxy = add(xy, edge.intercept)
+
+        let n = multiply(edge.normal, 10)
+        stroke(normalColor)
+
+        line(...dxy, ...add(dxy, n))
+      }
+    }
+
+    this.hEdges.forEach(drawFn.bind(this, [1, 0]))
+    this.vEdges.forEach(drawFn.bind(this, [0, 1]))
+  }
+
+  drawCells() {
+    let { origin, resolution } = this
+    this.cells.forEach((cell, ij) => {
+      if (cell) {
+        let p = add(cell.origin, cell.vertex)
+        fill(color(0, 0, 255))
+        noStroke()
+        ellipse(...p, 4, 4)
+      }
+    })
+  }
+
+  drawMesh() {
+    // just the mesh (not the grid)
+    stroke(color(255,255,255,125))
+    this.faces.forEach((face) => {
+      line(...face[0], ...face[1])
+    })
+
+//    this.cells.forEach((cell, ij) => {
+//      if (cell) {
+//        // residuals
+//        stroke(color(200,0,0))
+//        noFill()
+//        let p = add(cell.origin, cell.vertex)
+//        ellipse(...p, ...multiply(cell.residual, 1e15))
+//      }
+//    })
+  }
+}
+
+export default SimpleGrid
+```
+
+### src/surface.js
+```
+class Surface {
+  constructor(generator, origin, radius, width, height, index = 1) {
+    this.generator = generator(origin, radius)
+    this.origin = origin
+    this.radius = radius
+    this.index = index
+    this.width = width
+    this.height = height
+  }
+
+  get(x, y) {
+    return this.generator(x, y)
+  }
+
+  getIndex(x, y) {
+    return this.get(x, y) < 0 ? this.index : 0
+  }
+}
+
+let circleGenerator = (origin, r0) => {
+  return (x, y) => {
+    let [x0, y0] = origin
+    let [X, Y] = [x-x0, y-y0]
+
+    let value = (X*X + Y*Y - r0*r0)
+
+    return value
+  }
+}
+class Circle extends Surface {
+  constructor(origin, radius, width, height, index = 1) {
+    super (circleGenerator, origin, radius, width, height, index)
+  }
+
+  draw() {
+    noFill()
+    stroke(100)
+    ellipse(...this.origin, this.radius * 2, this.radius * 2)
+  }
+}
+
+export {Circle}
+export default Surface
+```

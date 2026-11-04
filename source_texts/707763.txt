@@ -1,0 +1,297 @@
+Modular node graph based noise generation library using SIMD, C++17 and templates - Perf: Simplex and SuperSimplex kernels: shorter hash chains, per-vertex 4D evaluation, vertex skips by Auburn · Pull Request #219 · Auburn/FastNoise2
+
+Perf: Simplex and SuperSimplex kernels: shorter hash chains, per-vertex 4D evaluation, vertex skips by Auburn · Pull Request #219 · Auburn/FastNoise2 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Auburn
+commented
+Oct 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Change
+Three commits, in Simplex.inl and Utils.inl. No node, setting or public API changes.
+1. Simplex 2D, 3D and 4D.
+Cell base: the integer cell comes from part 6's FloorToInt( skewed, floored ). On AVX-512 that is one round-down conversion of the skewed coordinate, so the hash chain doesn't wait for the floor. Other feature sets convert the floored value, as before.
+Vertex hashes: HashPrimes XORs the seed with the primed coordinates and multiplies. Master builds each vertex's primed coordinates with masked prime adds and hashes them from scratch. Now seed ^ xPrimed ^ yPrimed ^ ... is computed once, with one delta per axis, xPrimed ^ ( xPrimed + Primes::X ). A vertex's hash input is that base XOR the deltas of the axes it moves (picked with a select, or masked), which is the same integer. Simplex 2D on AVX-512 keeps the masked prime adds: there they are single instructions, the XORs fuse into vpternlogd, and the deltas measured 1.7% slower.
+4D, one vertex at a time: vertices 1 to 3 each go through one helper (VertexGradientRampValue: offsets, falloff and gradient of one vertex), so the offsets and masks of the three vertices are not all live at once.
+4D offsets: the offsets of vertices 1 to 3 are d - ( moved ? unskew + 1 : unskew ), one blend of two constants and one subtraction (OffsetFromVertex). Master subtracts 1 under a mask and then the unskew. SSE2 has no blendv and keeps master's two steps.
+AVX-512 4D ranks: master counts each axis's rank with 12 masked increments, which on AVX-512 are a mask-to-vector conversion and a subtraction each, after six compares and their six inverted copies. Now the six comparisons are -1/0 integers, and each is added to one rank and subtracted from the other (rankY = 1 + ( x >= y ) - ( y >= z ) - ( y >= w ), with true = -1). The same change measured 1.02 on SSE4.1, so only AVX-512 uses it.
+2. SuperSimplex 2D, 3D and 4D.
+Cell base: FloorToInt as in Simplex. In 3D and 4D the move to the closest lattice vertex adds the primes to the integer base (masked add). Master increments the float base and converts it afterwards, so the conversion and the prime multiplies had to wait for the closest-vertex search. Now they run alongside it.
+Vertex hashes: base XOR deltas as in Simplex, with a positive and a negative delta per axis.
+Direction from a sign bit: each 3D/4D vertex goes in the + or - direction depending on a comparison such as xyzNormal < zNormal. Master compares into a mask, selects +/- primes with it and builds the offset sign from it. Now the comparison is a subtraction (xyzNormal - zNormal, or xNormal + yNormal for xNormal < -yNormal). The result is negative exactly when the comparison is true (equal values give +0), so its sign bit selects the deltas with blendv, which only reads the top bit (SelectSign), and the sign bit masked out is the offset sign (SignBit). AVX-512 keeps comparing into a k mask, which is cheaper there.
+Vertex skips: the vertices at the larger lattice distance, which are in range for fewer points (the three 2-axis vertices of 8 in 3D, the four 3-axis and six 2-axis vertices of 16 in 4D), compute their falloff first and skip the hash, the gradient and the accumulation when it is 0 in every lane. Out-of-range lanes are exactly +0 after the clamp, so on SSE4.1 and AVX2 the test ORs the two native halves and checks for any set bit with one ptest, instead of a compare and a mask extraction per half (AnyInRange). 4D skips on every feature set. 3D skips below AVX-512 (kSkipOutOfRangeVertices3D): a 32-lane AVX-512 vector rarely misses a vertex in every lane, and the skips measured 0.98 to 1.01 there.
+4D at full width: the 4D kernel is a template, GenSuperSimplex4D<F, I>, called at full width. Evaluating each native half separately measured slower on every feature set: the two independent halves overlap better than their spills cost. The closest-vertex search first reduces the candidates that share a score offset in independent pairs, then merges them. Max and "the first strictly greater candidate wins" are associative, so it selects the same vertex with a shorter dependency chain.
+4D skew sum: x + y + z + w on every compiler again. Part 2 reordered it for MSVC 19.50 and later, which miscompiled master's 4D function once ScalePositions was inlined. The new function doesn't hit that: MSVC 19.51's SuperSimplex 4D matches master within its usual rounding (see Output).
+3. AVX-512 Simplex 3D masks from masked compares (MaskedGreater and kUseMaskedGreater in Utils.inl). Four of the 3D vertex masks are an AND or AND-NOT of two comparisons. AVX-512 can compare under a mask (_mm512_mask_cmp_ps_mask), so each is now one compare that takes the other comparison as its mask. In clang-cl 23's AVX-512 Simplex 3D GenFn this removes 4 kandd and 4 knotd (k-mask instructions use the same Zen 4 pipes as FMA). The masks are the same. MSVC doesn't use it: in earlier measurements this form was 0.93 with MSVC 19.44 but 1.25-1.30 with MSVC 19.51. kUseMaskedGreater is false for MSVC, and MSVC 19.51's objects are instruction-identical with and without this commit.
+Part 14 (perf-series/aarch64) turns the 3D skips off on ARM and swaps in its explicit FMA macros. Until then ARM builds take the 3D skips like SSE and AVX2, which on an Apple M1 measured 3% faster on single-octave grids but 11% slower on the MountainTerrain tree in 2D, where the branches mispredict.
+Why
+These kernels mostly wait on dependency chains and spills, not on instruction throughput: earlier profiling on Zen 4 had the AVX2 Simplex and Value bodies at 1.7 to 2 times their instruction-throughput bound. Each change shortens a chain or frees registers:
+Hash chains: in master's SuperSimplex 3D, a vertex hash is a compare, a +/- prime select and an add per moved axis, XORs with the seed and the other axes, then the multiply, all after the closest vertex is known. Now the base and the deltas are ready before the directions are decided, and a vertex hash is one blendv per moved axis (straight from the sign bit), XORs into the base and the multiply.
+Cell base: the integer cell no longer waits for the closest-vertex search (SuperSimplex) or, on AVX-512, for the floor.
+Registers: stack accesses in clang-cl 23's Simplex 4D GenFn go from 379 to 246 on SSE2, 370 to 326 on SSE4.1 and 129 to 56 on AVX-512 (AVX2 276 to 280), and SuperSimplex 4D from 899 to 766 on SSE4.1 and 899 to 834 on AVX2. MSVC 19.51's AVX-512 Simplex 4D goes from 856 instructions to 732, its AVX2 SuperSimplex 4D from 2480 to 2328.
+Vertex skips: on a grid the lanes of a vector are neighbours, so often none of them is in range of a given far vertex. A skipped 4D vertex saves its hash, its gradient decode and the multiply-adds of its contribution. On grids the 4D skips alone take SuperSimplex 4D to 0.73-0.79 of the time with clang-cl 23 and 0.73-0.84 with MSVC 19.51 (see Effect).
+Effect
+Measured on a Ryzen 9 7950X, one pinned core, nothing else running: clang-cl and MSVC under Windows, GCC and Linux clang under WSL 2 on the same machine. Both builds use FastSIMD 7aff025 and run interleaved in one process, in 3 processes with the A/B order alternating; each figure is the median of the per-process new/old time ratios (lower is faster). Two identical builds give feature-set geomeans of 0.998-1.001 and 99% of single rows within 1.5% (worst 9.1%) under Windows, and 0.999-1.005 and 2.4% under WSL, where a few single rows were 8-26% off in every process, so a lone Linux row is not evidence on its own. Part 6 (perf-series/lattice) against this branch, with clang-cl 23, MSVC 19.51 (VS 2026), GCC 16 and, for the Simplex set on grids, MSVC 19.44 (VS 2022):
+Default set: 21 generators and node trees, 2D/3D/4D, on a 16384-point uniform grid: 63 rows per feature set.
+Simplex set: 120 rows: Simplex and SuperSimplex, also at feature scale 13.7, FBm and PingPong Simplex, the MountainTerrain tree, DomainWarpSimplex and DomainWarpSuperSimplex over Simplex (first vectorisation scheme) and CellularLookup with Simplex as lookup, on the grid and on random positions (GenPositionArray, where the vertex skips rarely apply).
+SSE2
+SSE4.1
+AVX2
+AVX-512
+All
+clang-cl 23, default set, grid
+0.973
+0.973
+0.982
+0.994
+0.980
+clang-cl 23, default set without 3D domain warps, grid
+0.979
+0.975
+0.980
+0.988
+0.981
+clang-cl 23, Simplex set, grid
+0.937
+0.931
+0.956
+0.974
+0.950
+clang-cl 23, Simplex set, random positions
+0.966
+0.952
+0.975
+0.984
+0.969
+MSVC 19.51, default set, grid
+0.994
+0.983
+0.991
+0.990
+0.990
+MSVC 19.51, Simplex set, grid
+0.992
+0.954
+0.973
+0.967
+0.971
+MSVC 19.51, Simplex set, random positions
+1.012
+0.978
+0.980
+0.976
+0.986
+MSVC 19.44, Simplex set, grid
+0.979
+0.955
+0.967
+0.963
+0.966
+GCC 16, default set, grid
+0.992
+0.991
+0.989
+0.986
+0.990
+GCC 16, Simplex set, random positions
+1.009
+1.003
+0.991
+0.970
+0.993
+Grids, by generator (Simplex set, clang-cl 23 / MSVC 19.51 / MSVC 19.44):
+SSE2
+SSE4.1
+AVX2
+AVX-512
+Simplex 4D
+0.932 / 1.037 / 0.940
+0.847 / 0.992 / 0.999
+0.935 / 0.998 / 0.978
+0.971 / 0.883 / 0.874
+SuperSimplex 3D
+0.868 / 0.926 / 0.944
+0.890 / 0.820 / 0.887
+0.905 / 0.859 / 0.923
+0.963 / 1.000 / 0.983
+SuperSimplex 4D
+0.690 / 0.751 / 0.754
+0.701 / 0.758 / 0.580
+0.753 / 0.759 / 0.782
+0.749 / 0.791 / 0.794
+SuperSimplex 4D gains most, and less at feature scale 13.7 (0.719-1.001), where a vector spans more of the lattice. On random positions clang-cl 23 still gains on every feature set (0.907-0.946). The 0.580 is MSVC 19.44's SSE4.1 row, which part 6 ran slower than its SSE2 row.
+SuperSimplex 3D gains where it skips, below AVX-512. On random positions clang-cl 23 is 0.949-0.967 and MSVC 19.51 0.885 (SSE4.1) and 0.902 (AVX2), with SSE2 and AVX-512 within noise. SuperSimplex 2D only gets FloorToInt and is within noise.
+The MountainTerrain tree follows SuperSimplex: over its 12 grid rows 0.924 (clang-cl 23), 0.957 (MSVC 19.51) and 0.950 (MSVC 19.44), on random positions 0.953 and 0.984.
+Simplex 4D (commit 1) gains on every feature set with clang-cl 23, also on random positions (0.854-0.974), and most on AVX-512 with MSVC. FBm and PingPong Simplex follow it.
+Simplex 2D and 3D change only by commit 1's cell base and hash deltas, and by commit 3 on clang-cl 23's AVX-512 3D (0.973). Most grid rows are 0.975-1.018; the largest gains are MSVC 19.51's SSE4.1 3D and 2D (0.902 and 0.938) and MSVC 19.44's AVX2 3D (0.935). MSVC doesn't take commit 3, and its AVX-512 3D Simplex rows are 0.988-1.005.
+Default set, geomean of each setup's 12 rows: SuperSimplex 0.869 (clang-cl 23) and 0.884 (MSVC 19.51); Perlin, Value, White and the cellular setups 0.995-1.001.
+Domain warps over Simplex, SSE2 and SSE4.1 3D, clang-cl 23: DomainWarpSimplex and DomainWarpSuperSimplex (first scheme) are 0.737-0.935 on grids in every process, though the warp code doesn't change and their Simplex source is 1.003-1.020. Part 6 made these four rows 1.030-1.353, like the SSE domain-warp 3D rows that part 1 attributes to code placement, and this part brings them back to about part 5's time or below. They are not a gain of this part's kernels.
+What it costs:
+MSVC 19.51, SuperSimplex 4D on SSE2 and SSE4.1 at random positions: 1.111 and 1.059 (every process 1.058-1.112), 1.105 and 1.054 at feature scale 13.7, and the MountainTerrain tree in 4D 1.115 and 1.120 (one process 1.041). The 4D skips cause it (see Earlier measurements). Against master, the complete performance branch still runs SuperSimplex 4D at 1.013 (SSE2) and 1.059 (SSE4.1) on random positions (grids: 0.719 and 0.737).
+MSVC 19.51, Simplex 4D on SSE2: 1.037 on grids (every process 1.034-1.037), 1.031-1.034 at feature scale 13.7 and for FBm and PingPong Simplex, and 1.024-1.045 on random positions. Against master, the complete performance branch runs it at 0.936 on grids and 0.982 on random positions.
+clang-cl 23, domain warps over Simplex on AVX-512 3D, slower on grids in every process: DomainWarpGradient 1.096, DomainWarpSimplex 1.049-1.078 and DomainWarpSuperSimplex 1.031-1.060 (both schemes). DomainWarpSuperSimplex (first scheme) AVX2 3D is 0.999 on grids but 1.217 on random positions, slower in every process. The warp code doesn't change, Simplex itself moves much less, and the cause is not identified. Part 8 (perf-series/domain-warp), which devirtualises the warps, brings these rows back to about part 6's time.
+Small costs: six 3D cases are 1.015-1.029 on grids in every process, about the noise floor (four with clang-cl 23, two with MSVC 19.51). MSVC 19.44 has no row above 1.03.
+Code size: clang-cl 23's DLL goes from 2.754 to 2.747 MB, MSVC 19.51's stays at 2.832 MB.
+GCC 16 (x/y: grid/random positions):
+SuperSimplex 4D is 0.672-0.772 on grids, most on SSE2 and SSE4.1 (0.672 and 0.676). On random positions it is 0.949-0.992 and the MountainTerrain tree in 4D 0.940-1.005: MSVC 19.51's SSE2 and SSE4.1 loss doesn't appear. SuperSimplex 3D below AVX-512 is 0.899-0.915 on grids. Over their 12 rows SuperSimplex comes to 0.871/0.983 and the MountainTerrain tree to 0.955/0.984.
+Simplex SSE2 4D (commit 1) loses more than with MSVC 19.51: 1.096 on grids (every process 1.096-1.098), FBm Simplex 1.098/1.096, PingPong Simplex 1.074 on random positions, and DomainWarpGradient and DomainWarpSimplex over Simplex 1.026-1.045 on grids. Against master, the complete performance branch runs it at 0.962/1.025. SSE4.1 is 1.036 in 4D and 1.029 in 2D on grids (FBm Simplex 1.032 and 1.035). AVX-512 4D gains: Simplex 0.894, FBm Simplex 0.839 on grids.
+Rows where one process disagrees with the other two are not counted as effects.
+Earlier measurements, from an earlier, less controlled stage of the work, with other builds and benchmarks running on the machine. This pass has no GCC 13, Linux clang 23 or AArch64 numbers.
+Vertex skips alone (clang-cl 23 / MSVC 19.51): on grids SuperSimplex 4D 0.73-0.79 / 0.73-0.84 and SuperSimplex 3D below AVX-512 0.94-0.96 / 0.85-0.94. On random positions they were about neutral with clang-cl 23 (4D 0.95-1.02, 3D 1.02-1.03), but MSVC 19.51's SuperSimplex 4D was 1.09 (SSE2), 1.07 (SSE4.1) and 1.03-1.04 (AVX2 and AVX-512).
+Masked compares alone (commit 3, clang-cl 23): AVX-512 Simplex 3D 0.952, FBm and PingPong Simplex 0.980 and 0.983 (AVX2 control: 1.000).
+Output
+Against master built with the same FastSIMD (7aff025), in all 1212 cases (101 node setups, 4 feature sets, 2D/3D/4D). Each case covers a grid, random positions near the origin, positions up to 2e5 away, tileable output and GenSingle, with 2 seeds. At 1e-3 of the output range:
+differ at 1e-3
+bit-identical to master
+cases that change against part 6
+clang-cl 23
+0
+899 (part 6: 1156)
+281
+MSVC 19.44
+0
+966 (part 6: 1203)
+237
+MSVC 19.51
+55: part 6's 54, plus SignedSquareRoot SSE4.1 3D at 2e5 (see below)
+470 (part 6: 470)
+323
+GCC 16
+0, and one case with a single 8-bit step (see below)
+875 (part 6: 1038)
+262
+GCC 13
+0
+712 (part 6: 793)
+261
+Linux clang 23
+2, the AddDimension cases master gets wrong (part 1)
+892 (part 6: 1153)
+281
+WASM: 106 of the 1128 rows of the WASM output dump change against part 6, all from commit 1 (Simplex 4D, see below), by up to 1.5e-6 of the range (SignedSquareRoot and Modulus up to 8.1e-6). Commits 2 and 3 don't change the WASM output.
+No hash, vertex choice or gradient changes. Every difference is float rounding, up to 5e-7 of the range for Simplex and SuperSimplex themselves except with MSVC 19.51 (below):
+Simplex 4D offsets (commit 1; every compiler, SSE4.1, AVX2, AVX-512 and WASM): d - ( unskew + 1 ) with the constant folded rounds once, where master's ( d - 1 ) - unskew rounds twice. This changes the 39 cases with a Simplex source in 4D and in 2D tileable output (which samples 4D), and AddDimension in 3D (which samples 4D): 237 cases. Up to 4.0e-7 of the range for Simplex itself, 1.4e-6 for PingPong and PowFloat over Simplex, and 7.8e-5 for SignedSquareRoot, whose square root near 0 magnifies a last-bit change. SSE2 keeps master's two steps and is bit-identical. A build of commit 1 with the two-step form on every feature set is bit-identical to part 6 in all 1212 cases (clang-cl 23), so the delta hashes, FloorToInt, the per-vertex 4D evaluation and the AVX-512 ranks are exact.
+SuperSimplex (commit 2): the same operations, accumulated in a different order around the new branches under fast-math. MSVC 19.44, which doesn't reassociate them, is bit-identical. With clang (clang-cl 23 and Linux clang 23) 44 cases change: SuperSimplex at both feature scales, FBm SuperSimplex and the MountainTerrain tree, in 3D on SSE2/SSE4.1/AVX2 and in 4D and 2D on all feature sets (in 2D only the tileable output, which samples 4D, apart from the MountainTerrain tree). AVX-512 3D, which doesn't skip, is bit-identical. A build of commit 2 with every vertex evaluated is bit-identical to commit 1 on AVX2 and AVX-512, so there the branches only split clang's FMA accumulation; on SSE2 and SSE4.1, without FMA, the restructured code is also reassociated differently. GCC changes the same 4 setups on SSE2 and SSE4.1 only (24 cases). Up to 4.7e-7 of the range with clang and 2.7e-7 with GCC.
+GCC 16, ConvertRGBA8 over Simplex, SSE4.1 4D: one of the 4093 points near the origin moves by one 8-bit step (7.9e-3 of the range), because its Simplex value moved by its last bit across a quantisation step (commit 1). The complete performance branch has the same flip.
+MSVC 19.51 rounds more cases differently:
+Commit 1 also changes Simplex SSE4.1 3D, in all 39 cases with a Simplex source, and SSE4.1 2D of DomainRotate, DomainRotatePlane and AddDimension (which sample 3D). MSVC 19.51 rounds the coordinates there differently (MSVC 19.44 is bit-identical), and the difference grows with the distance from the origin: up to 7.9e-6 of the range near the origin, 1.7e-4 at 2 of the 4096 grid points, 5e-4 at 2e5. Against master, SignedSquareRoot SSE4.1 3D, which with part 6 already went past 1e-3 at 1 and 2 of the 1021 points 2e5 away, now does at 5 and 3 of them (up to 7.4e-3; part 6: 1.0e-2), and MinSmooth SSE4.1 3D at one of them (1.0e-3). Both are the far-coordinate rounding that most of part 6's 54 cases on MSVC 19.51 come from, and the complete performance branch computes both bit for bit like this part.
+Commit 2 changes the same 44 cases as clang. In 4D the skew sum is back in master's order as well, which moves SuperSimplex 4D by up to 3.4e-3 at 2e5 against commit 1. Against master, SuperSimplex 4D has the same largest differences as with part 6, at fewer points.
+Every Simplex and SuperSimplex case, at both feature scales, is bit-identical to the complete performance branch on all six toolchains. The changed cases that still differ from it run other code that later parts change (the domain warps, the MountainTerrain tree, and on MSVC 19.51 CellularLookup and PowFloat).
+No behaviour changes: a skipped vertex has a clamped falloff of 0 in every lane, so it would add 0, and the sign-bit selection picks the same direction as master's comparison.
+Testing
+Builds: clang-cl 23.1.3, MSVC 19.51 (VS 2026), MSVC 19.44 (VS 2022), GCC 16 (snapshot), GCC 13.3, clang 23.1.4 on Linux and Emscripten 6.0.12, all without new warnings (GCC 16 shows FastSIMD's four known -Wignored-attributes warnings, as on master). NEON/AARCH64 compiles with clang 23 (compile only), with the same 380 FastSIMD "__regcall is not supported for this target" warnings per file as part 6.
+Output: compared on each toolchain at 1e-3 and 1e-7 relative to the output range, against master and against part 6, as above, plus builds of commit 1 and of commits 1-2 (clang-cl 23, MSVC 19.51, GCC 16, GCC 13, Linux clang 23; WASM for commit 1) to attribute each change, and the two experiment builds described in Output. Commit 2 with every vertex evaluated was also built with MSVC 19.51, to measure the skips. Commit 3 is bit-identical to commit 2 on every toolchain.
+Random positions: every Simplex and SuperSimplex setup also measured on GenPositionArray with spatially unrelated lanes, where the vertex skips rarely apply (see Effect).
+Code: comparing clang-cl 23's objects function by function against part 6, only the Simplex and SuperSimplex GenFn and grid block functions change: 6 of 1035 functions on SSE2, 6 of 988 on SSE4.1, 6 of 987 on AVX2 and 9 of 986 on AVX-512. MSVC 19.51's objects are instruction-identical with and without commit 3.
+Other PRs
+None of the open PRs touch Simplex.inl or Utils.inl.
+Series
+Part 7 of 16 of the FastNoise2 performance series, which goes into perf one part at a time, in order. Merge it after part 6 (perf-series/lattice: width-generic gradient helpers and corner-major lattice blocks), whose FloorToInt and width-generic hash and gradient helpers it uses. Part 8 (perf-series/domain-warp: devirtualised domain warps) was built and measured on it. Part 9 (perf-series/domain-warp-simplex) applies the same vertex selection, hash deltas, skips and masked compares to the DomainWarpSimplex and DomainWarpSuperSimplex kernels, and part 14 (perf-series/aarch64) adds the ARM switch for the 3D skips.
+Previous part: #218.
+Auburn
+added 3 commits
+October 20, 2026 04:44
+Simplex kernels: delta vertex hashes, FloorToInt cell base, per-verte…
+…
+8e72656
+```
+…x 4D evaluation
+
+Simplex 2D/3D/4D with fewer dependent operations:
+- The cell base comes from FloorToInt (one round-down conversion on AVX512).
+- Vertex hashes start from one base hash ( seed ^ x ^ y ... ) and XOR in per-axis
+  prime deltas ( p ^ ( p + prime ) ) for the moved axes instead of rehashing
+  masked prime adds (2D keeps the masked adds on AVX512, where they fuse into
+  vpternlogd).
+- 4D vertex offsets subtract a selected constant (OffsetFromVertex), vertices
+  1-3 are evaluated one at a time (VertexGradientRampValue) so fewer offsets and
+  masks are live at once, and on AVX512 the rank comparisons are summed as -1/0
+  integers instead of masked increments.
+
+Output: hashes, vertices and 2D/3D values are unchanged. On SSE4.1 and up the 4D
+vertex offsets are d - ( unskew + 1 ) instead of ( d - 1 ) - unskew (SSE2 keeps
+the two-step form), so Simplex 4D and the tileable 2D grid, which samples 4D,
+round differently by up to 5e-7 of the output range.
+```
+SuperSimplex kernels: sign-bit vertex selection, delta hashes, out-of…
+…
+a774684
+```
+…-range vertex skips
+
+SuperSimplex 2D/3D/4D with fewer dependent operations:
+- The cell base comes from FloorToInt, and the 3D closest vertex moves the primed
+  base directly.
+- Vertex directions are picked from the sign bit of a score difference
+  (SelectSign/SignBit: blendv reads only the high bit, AVX512 compares to a mask).
+- Vertex hashes come from one base hash XOR per-axis prime deltas.
+- Vertices that are out of range for every lane are skipped (3D below AVX512,
+  4D everywhere); the any-in-range test ORs the clamped falloffs of both native
+  halves and tests the bits on SSE4.1/AVX2 (AnyInRange).
+- 4D runs at full width through GenSuperSimplex4D<F, I> and reduces the
+  closest-vertex candidates in independent groups.
+
+Output: the arithmetic is unchanged (MSVC 14.44 is bit identical). Compilers that
+re-associate under fast-math (clang, GCC on SSE2/SSE4.1, MSVC 14.51) sum the 3D/4D
+vertex contributions in a different order around the new branches, up to 5e-7 of
+the output range.
+```
+Simplex 3D AVX512: build the vertex masks with masked compares
+…
+c08dd41
+```
+On AVX512 each Simplex 3D vertex mask is one masked compare
+( mask & ( a >= b ) ) instead of two compares and k-register and/andn logic
+(MaskedGreater in Utils.inl). Not on MSVC (kUseMaskedGreater): MSVC 14.51
+compiles this form 25-30% slower, so MSVC keeps the previous code.
+The masks are identical, output is bit identical.
+```
+Auburn
+mentioned this pull request
+Oct 28, 2026
+Perf: Domain warp: devirtualised Warp, final-class reads, aligned kernels, static WarpFn for DomainWarpFractal
+#220
+Open
+Auburn
+force-pushed
+the
+perf-series/simplex
+branch
+from
+477d107 to
+c08dd41
+Compare
+November 3, 2026 22:00
+Auburn
+changed the base branch from
+perf
+to
+perf-series/lattice
+November 3, 2026 22:00
+Auburn
+added this pull request to stack #239
+November 3, 2026 22:01
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,114 @@
+# 3-axis rasterization voxelization
+
+Also called: 6-separating voxelization of 2D input, CNS*11 method, FBP09 method
+
+## Overview
+This method produces a 6-separating voxelization of 2D input geometry by rasterizing primitives along three axis-aligned projection directions in three separate passes [S1, unofficial]. It is designed to generate a sparser voxel set than 26-separating methods, which is sufficient and preferable when ray marching algorithms utilize 6-connected paths [S1, unofficial]. It differs from its siblings by relying on simple point-depth evaluations at pixel centers rather than complex geometric intersection tests against volumetric targets [S1, unofficial].
+
+## How it works
+**Inputs:** A set of 2D input primitives (e.g., triangles or curves) defined in 3D space.
+**Outputs:** A set of occupied voxels $S_d$ that form a 6-separating boundary.
+
+**Data Structures:**
+The output is a sparse set of voxel coordinates. No specific bit-packing is mandated by the core definition, though implementations typically use hash maps or sparse grids. The internal state for each pass involves a 2D rasterization buffer (depth buffer) aligned with the projection plane.
+
+**Steps:**
+1.  Initialize an empty set $S_d$ for the output voxels.
+2.  Define the three axis-aligned projection directions: $x$, $y$, and $z$.
+3.  For each direction $d \in \{x, y, z\}$:
+    a.  Project the input primitives onto the 2D plane perpendicular to $d$.
+    b.  Rasterize the projected primitives into a 2D grid (pixel buffer).
+    c.  For each pixel $(u, v)$ covered by the rasterization:
+        i.  Evaluate the depth $z_{prim}$ of the primitive at the center of the pixel. The "center" corresponds to the voxel face center in the projection plane.
+        ii. Determine the voxel index $k$ along the projection axis $d$ such that the voxel center is closest in depth to $z_{prim}$.
+        iii. Add the voxel at position $(u, v, k)$ (mapped to global coordinates) to $S_d$.
+4.  Return $S_d$.
+
+**Formulas:**
+Let the voxel grid have unit spacing. For a projection along axis $d$, let the pixel coordinates be $(u, v)$. The voxel center in the projection plane is $(u + 0.5, v + 0.5)$. Let $P(u, v)$ be the point on the primitive surface directly above/below this center. The depth value is $z_{prim} = P(u, v) \cdot \hat{d}$. The voxel index $k$ is:
+$$ k = \text{round}(z_{prim}) $$
+The voxel is added to the set if it is the closest voxel center to the primitive surface along the projection ray [S1, unofficial].
+
+**Parameters:**
+*   **Voxel Resolution:** Not specified in the sources.
+*   **Passes:** Exactly 3 (one per axis).
+
+**Edge Cases and Pitfalls:**
+*   **Curved Primitives:** The method produces 6-separating results even for curved primitives, relying only on point depth evaluations [S1, unofficial].
+*   **Precision:** The method requires accurate point evaluations of depth at pixel centers.
+*   **Separation Guarantee:** The 6-separation property holds because the effective intersection target is the "crosshairs" shape (connecting voxel face centers), which allows continuous paths between 6-neighbors [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxelize_3_axis(primitives, voxel_size=1.0):
+    occupied_voxels = set()
+    
+    # Define projection axes and their corresponding 2D planes
+    # Axis 0 (X): Project onto YZ plane
+    # Axis 1 (Y): Project onto XZ plane
+    # Axis 2 (Z): Project onto XY plane
+    axes = [
+        {'axis': 0, 'plane': (1, 2), 'depth_axis': 0},
+        {'axis': 1, 'plane': (0, 2), 'depth_axis': 1},
+        {'axis': 2, 'plane': (0, 1), 'depth_axis': 2}
+    ]
+    
+    for proj in axes:
+        axis_idx = proj['axis']
+        plane_indices = proj['plane']
+        depth_idx = proj['depth_axis']
+        
+        # 1. Rasterize along this axis
+        # We iterate over the bounding box of the primitives in the 2D plane
+        # For each pixel in the 2D plane:
+        for u, v in get_rasterized_pixels(primitives, plane_indices):
+            
+            # 2. Evaluate depth at pixel center
+            # Pixel center in 3D space relative to voxel grid
+            # Assuming voxel grid origin at 0,0,0 and unit spacing
+            # The 'u' and 'v' here are integer grid coordinates
+            center_2d = [0, 0, 0]
+            center_2d[plane_indices[0]] = u + 0.5
+            center_2d[plane_indices[1]] = v + 0.5
+            
+            # Find the point on the primitive closest to this 2D center along the depth axis
+            # This requires solving for the primitive intersection or evaluation
+            # For a triangle, this is a standard barycentric evaluation
+            # For a curve, this is a root finding or parameter evaluation
+            depth_val = evaluate_primitive_depth(primitives, center_2d, depth_idx)
+            
+            # 3. Determine closest voxel
+            # The voxel index along the depth axis is the rounded depth value
+            k = round(depth_val)
+            
+            # Construct the 3D voxel coordinate
+            voxel_coord = [0, 0, 0]
+            voxel_coord[plane_indices[0]] = u
+            voxel_coord[plane_indices[1]] = v
+            voxel_coord[depth_idx] = k
+            
+            occupied_voxels.add(tuple(voxel_coord))
+            
+    return occupied_voxels
+```
+
+## Subtopics
+
+### Crosshairs Intersection Target
+The geometric interpretation of this method. It uses line segments connecting voxel face centers. It is minimal for 6-separation, unlike octahedral targets which are supersets [S1, unofficial].
+*   **GPU Implementations (FBP09, CNS*11):** Specific GPU-based realizations of this method. They are equivalent to the crosshairs target and are 6-separating for curved primitives [S1, unofficial].
+
+## Operating characteristics
+**Time Complexity:** $O(N \cdot R)$, where $N$ is the number of primitives and $R$ is the number of pixels in the rasterization buffer. Three passes are required.
+**Memory Complexity:** $O(V)$, where $V$ is the number of occupied voxels.
+**Performance:** The method is efficient on GPUs due to the simplicity of rasterization and depth evaluation [S1, unofficial].
+**Strengths:** Produces a sparse, 6-separating voxel set. Works with curved primitives using only point evaluations.
+**Limitations:** Only 6-separating, not 26-separating. Requires three full rasterization passes.
+
+## Background
+The method was analyzed in the context of topological voxelization by Laine et al. [S1, unofficial]. It is equivalent to the GPU-based voxelization methods used by Forest et al. [FBP09] and Crassin et al. [CNS*11]. The theoretical basis for 6-separation relies on the work of Cohen-Or and Kaufman [COK97] regarding connected ray paths.
+
+## Sources
+[S1] A Topological Approach to Voxelization, https://research.nvidia.com/sites/default/files/pubs/2013-06_A-Topological-Approach/laine2013egsr_paper.pdf, fetched 2026-10-29 (unofficial)

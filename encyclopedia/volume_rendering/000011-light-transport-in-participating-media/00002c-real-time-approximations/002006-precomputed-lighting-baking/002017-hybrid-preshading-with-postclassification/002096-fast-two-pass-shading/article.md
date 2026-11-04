@@ -1,0 +1,109 @@
+# Fast Two-Pass Shading
+
+Also called: P-buffer shading, Two-pass shading
+
+## Overview
+Fast Two-Pass Shading is a rendering optimization that avoids redundant per-fragment computations—specifically volume texture access, classification, and lighting—by sharing intermediate results between pixels covered by the same splat [S1, unofficial][S2]. It improves rendering performance by 5%–10% on typical hardware, distinguishing itself from sibling methods like Congradient Shading by explicitly decoupling the classification/illumination step from the geometric filtering step via a P-buffer [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A slice of voxels to be rendered as splats.
+*   **Output:** A composited image of the slice.
+*   **Intermediate Data:** A P-buffer (render target) storing intermediate results for each splat.
+
+**Data Structures:**
+The P-buffer stores one entry per splat. The exact layout is not specified in the sources, but it must contain the results of:
+1.  Volume texture access.
+2.  Voxel classification (via lookup table).
+3.  Illumination computation [S1, unofficial][S2].
+
+**Numbered Steps:**
+
+1.  **First Pass (P-buffer Generation):**
+    *   Project each voxel of the current slice as a single-pixel point [S1, unofficial][S2].
+    *   For each point splat, compute:
+        *   Volume texture access.
+        *   Voxel classification.
+        *   Illumination [S1, unofficial][S2].
+    *   Store these intermediate results in the P-buffer (render target) [S1, unofficial][S2].
+
+2.  **Second Pass (Splat Rendering):**
+    *   Project the full splat geometry (covering multiple pixels, e.g., 2×2 up to 40×40 pixels depending on viewpoint) [S1, unofficial][S2].
+    *   For each fragment covered by the splat:
+        *   Perform per-fragment lighting.
+        *   Apply EWA (Elliptical Weighted Average) filtering [S1, unofficial][S2].
+        *   Reuse the intermediate results from the P-buffer via lookup [S1, unofficial][S2].
+
+3.  **Final Composition:**
+    *   Composite all splats from the slice into the final image [S1, unofficial][S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fast_two_pass_shading(slice_of_voxels):
+    # Initialize P-buffer render target
+    p_buffer = create_render_target()
+
+    # Pass 1: Compute intermediate results for each splat
+    for voxel in slice_of_voxels:
+        # Project as single-pixel point
+        point_splat = project_as_point(voxel)
+        
+        # Compute intermediate results
+        texture_sample = access_volume_texture(voxel)
+        classification = classify_voxel(texture_sample)
+        illumination = compute_illumination(classification, voxel)
+        
+        # Store in P-buffer
+        store_in_p_buffer(p_buffer, point_splat, {
+            'texture_sample': texture_sample,
+            'classification': classification,
+            'illumination': illumination
+        })
+
+    # Pass 2: Render full splats with filtering
+    for voxel in slice_of_voxels:
+        # Project full splat geometry
+        full_splat = project_full_splat(voxel)
+        
+        # Render fragments
+        for fragment in full_splat.fragments:
+            # Lookup intermediate results from P-buffer
+            intermediate = lookup_p_buffer(p_buffer, fragment.position)
+            
+            # Apply per-fragment lighting and EWA filtering
+            # Note: The sources state "per-fragment lighting" is reused,
+            # but also mention "EWA filtering". The exact combination
+            # of lighting vs filtering in pass 2 is described as
+            # "per-fragment lighting and EWA filtering" [S1, unofficial][S2].
+            final_color = apply_ewa_filtering(intermediate, fragment)
+            
+            # Composite
+            composite_into_image(final_color, fragment)
+
+    # Final composition of all splats from each slice is handled by the
+    # standard alpha blending/compositing of the fragments [S1, unofficial][S2].
+```
+
+**Edge Cases and Pitfalls:**
+*   **Context Switches:** The additional rendering pass increases the number of context switches, which can offset some performance gains [S1, unofficial][S2].
+*   **Splat Size:** Splat sizes vary from 2×2 to as many as 40×40 pixels depending on the viewpoint [S1, unofficial][S2].
+
+## Operating characteristics
+*   **Performance Improvement:** 5%–10% [S1, unofficial][S2].
+*   **Hardware:** Measured on a 2.4 GHz P4 system with 2 GB memory and an ATI 9800 Pro video card (256 MB local memory) using DirectX 9.0 SDK [S1, unofficial][S2].
+*   **Strengths:** Reduces redundant computation for pixels covered by the same splat [S1, unofficial][S2].
+*   **Limitations:** Increased context switches due to the extra pass [S1, unofficial][S2].
+*   **When to Use:** When rendering large splats (up to 40×40 pixels) where redundant texture access and classification are significant [S1, unofficial][S2].
+*   **When Not to Use:** When splats are very small (e.g., 1×1 pixel) or when context switch overhead dominates [S1, unofficial][S2].
+
+## Background
+*   **Origin:** Proposed in "Hardware-Accelerated Adaptive EWA Volume Splatting" by Wei Chen et al. [S1, unofficial][S2].
+*   **History:** Implemented with DirectX 9.0 SDK under Windows XP [S1, unofficial][S2].
+*   **Usage:** Used in volume rendering for scientific visualization, specifically for EWA volume splatting [S1, unofficial][S2].
+
+## Sources
+[S1] Hardwareaccelerated adaptive ewa volume splatting, https://core.ac.uk/works/16783031, fetched 2026-10-28 (unofficial)
+[S2] Hardware-Accelerated Adaptive EWA Volume Splatting, https://publications.ri.cmu.edu/storage/publications/pub_files/pub4/chen_wei_2004_1/chen_wei_2004_1.pdf, fetched 2026-10-27

@@ -1,0 +1,153 @@
+--- v001.md
++++ v002.md
+@@ -10,7 +10,7 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Camera view frustum parameters (near/far planes, projection matrix).
+-*   Scene lighting data (directional light direction/color, point/spot lights, sky ambient).
+-*   Fog parameters (base density, height falloff, ground height, wind vector, noise scale).
++*   Camera view frustum parameters (near/far planes, projection matrix) [S1, unofficial].
++*   Scene lighting data (directional light direction/color, point/spot lights, sky ambient) [S1, unofficial].
++*   Fog parameters (base density, height falloff, ground height, wind vector, noise scale) [S1, unofficial].
+ *   Prebaked 3D noise texture (128x128x128 tileable) [S1, unofficial].
+ *   Previous frame's froxel history (for temporal reprojection) [S1, unofficial].
+@@ -76,83 +76,60 @@
+ 
+ ```python
+-# Compute Shader: FogDensity.compute
+-# Inputs: FogVolume (RWTexture3D<float4>), fogHeight, density
+-# Output: FogVolume
++import math
+ 
+-kernel void CSMain(uint3 id : SV_DispatchThreadID) {
+-    // Height-based density injection
+-    float heightFactor = saturate(1.0 - id.y / fogHeight);
+-    float fog = density * heightFactor;
+-    
+-    // Write density to RGB, 1.0 to Alpha (extinction placeholder)
+-    FogVolume[id] = float4(fog, fog, fog, 1.0);
+-}
++def dot(v1, v2):
++    return sum(a * b for a, b in zip(v1, v2))
+ 
+-# Compute Shader: FogLighting.compute
+-# Inputs: FogVolume (RWTexture3D<float4>), lightDirection, lightColor
+-# Output: FogVolume
++def normalize(v):
++    length = math.sqrt(sum(x * x for x in v))
++    return [x / length for x in v] if length > 0.0 else v
+ 
+-kernel void CSMain(uint3 id : SV_DispatchThreadID) {
+-    // Read current density
+-    float density = FogVolume[id].r;
+-    
+-    // Approximate phase function (dot product with light direction)
+-    // Note: In production, use Henyey-Greenstein with anisotropy g
+-    float scatter = saturate(dot(normalize(float3(0, 1, 0)), -lightDirection));
+-    
+-    // Compute lighting contribution
+-    float3 lighting = lightColor * density * scatter;
+-    
+-    // Write lighting to RGB, density to Alpha
+-    FogVolume[id] = float4(lighting, density);
+-}
++def saturate(x):
++    return max(0.0, min(1.0, x))
+ 
+-# Fragment Shader: RayMarchFog
+-# Inputs: rayOrigin, rayDir, _FogVolume (Texture3D), sampler_FogVolume
+-# Output: float4
++def exp(x):
++    return math.exp(x)
+ 
+-float4 RayMarchFog(float3 rayOrigin, float3 rayDir) {
+-    float stepSize = 0.5;
+-    float3 pos = rayOrigin;
+-    float3 color = 0.0;
+-    float transmittance = 1.0;
+-    
+-    // Fixed iteration count for simplicity; production may use depth-based termination
+-    for (int i = 0; i < 64; i++) {
+-        // Sample 3D texture
+-        float4 fog = SAMPLE_TEXTURE3D(_FogVolume, sampler_FogVolume, pos);
+-        
+-        // Accumulate color
+-        color += fog.rgb * transmittance;
+-        
+-        // Update transmittance
+-        transmittance *= exp(-fog.a * stepSize);
+-        
+-        // Advance position
+-        pos += rayDir * stepSize;
+-    }
+-    
+-    return float4(color, 1.0);
+-}
++def sample_3d_texture(tex, uvw):
++    # Returns [r, g, b, a] from a 3D texture lookup
++    return tex.get(uvw)
+ 
+-# Composite Shader: VolumetricComposite
+-# Inputs: sceneColor, cameraDepth, integratedVolume, sampler_IntegratedVolume
+-# Output: finalColor
++def depth_to_froxel_z(depth, near, far):
++    # Exponential depth mapping for froxel Z coordinate
++    return near * math.exp(depth * math.log(far / near))
+ 
+-float4 VolumetricComposite(float2 uv, float depth) {
+-    // Convert camera depth to froxel Z coordinate
+-    float froxelZ = DepthToFroxelZ(depth);
+-    
+-    // Sample integrated volume
+-    float4 integrated = SAMPLE_TEXTURE3D(integratedVolume, sampler_IntegratedVolume, float3(uv, froxelZ));
+-    
+-    float transmittance = integrated.a;
+-    float3 accumulatedScatter = integrated.rgb;
+-    
+-    // Composite equation
+-    float3 finalColor = sceneColor * transmittance + accumulatedScatter;
+-    
+-    return float4(finalColor, 1.0);
+-}
++# Step 2: Inject Density
++def compute_density(FogVolume, id, fogHeight, density):
++    heightFactor = saturate(1.0 - id[1] / fogHeight)
++    fog = density * heightFactor
++    FogVolume[id] = [fog, fog, fog, 1.0]
++
++# Step 3: Scatter Lighting
++def compute_lighting(FogVolume, id, lightDirection, lightColor):
++    density = FogVolume[id][0]
++    scatter = saturate(dot(normalize([0.0, 1.0, 0.0]), [-x for x in lightDirection]))
++    lighting = [lightColor[i] * density * scatter for i in range(3)]
++    FogVolume[id] = [lighting[0], lighting[1], lighting[2], density]
++
++# Step 5: Ray Marching (Fragment Shader equivalent)
++def ray_march_fog(rayOrigin, rayDir, FogVolume, stepSize=0.5, max_steps=64):
++    pos = list(rayOrigin)
++    color = [0.0, 0.0, 0.0]
++    transmittance = 1.0
++    for _ in range(max_steps):
++        fog = sample_3d_texture(FogVolume, pos)
++        color = [color[i] + fog[i] * transmittance for i in range(3)]
++        transmittance *= exp(-fog[3] * stepSize)
++        pos = [pos[i] + rayDir[i] * stepSize for i in range(3)]
++    return [color[0], color[1], color[2], 1.0]
++
++# Step 8: Composite
++def composite(sceneColor, depth, integratedVolume, uv, near, far):
++    froxelZ = depth_to_froxel_z(depth, near, far)
++    integrated = sample_3d_texture(integratedVolume, [uv[0], uv[1], froxelZ])
++    transmittance = integrated[3]
++    accumulatedScatter = integrated[:3]
++    finalColor = [sceneColor[i] * transmittance + accumulatedScatter[i] for i in range(3)]
++    return [finalColor[0], finalColor[1], finalColor[2], 1.0]
+ ```
+ 
+@@ -185,5 +162,5 @@
+ 
+ ### When to Use
+-*   Use for atmospheric fog, mist, and smoke where dynamic lighting interaction is required but full path-traced shadows are too expensive.
++*   Use for atmospheric fog, mist, and smoke where dynamic lighting interaction is required but full path-traced shadows are too expensive [S1, S2, unofficial].
+ *   Avoid when high-fidelity, physically accurate shadowing within the volume is critical and hardware supports real-time path tracing.
+ 

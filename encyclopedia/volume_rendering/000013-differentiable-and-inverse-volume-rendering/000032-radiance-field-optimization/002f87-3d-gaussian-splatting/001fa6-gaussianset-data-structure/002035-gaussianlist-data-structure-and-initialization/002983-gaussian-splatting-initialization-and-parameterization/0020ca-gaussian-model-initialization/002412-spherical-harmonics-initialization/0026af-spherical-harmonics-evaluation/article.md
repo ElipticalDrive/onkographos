@@ -1,0 +1,173 @@
+# Spherical Harmonics Evaluation
+
+Also called: SH Evaluation, Spherical Harmonics Color Computation, harmonic
+
+## Overview
+Spherical Harmonics (SH) Evaluation computes the view-dependent RGB color of a 3D Gaussian splat by projecting its stored SH coefficients onto a viewing direction vector. It solves the problem of representing directional lighting and material properties in a differentiable, compact basis for real-time rendering. It sets itself apart from sibling methods by using hardcoded polynomial approximations of the SH basis functions to avoid expensive trigonometric calculations, enabling efficient GPU evaluation [S1, S2, S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** `spherical_harmonics`: A tensor of shape $(N, 48)$ containing the SH coefficients for $N$ Gaussians. The coefficients are stored in order of increasing degree $l$ and order $m$.
+*   **Input:** `dir`: A tensor of shape $(N, 3)$ containing normalized viewing direction vectors $(x, y, z)$ for each Gaussian.
+*   **Output:** `color`: A tensor of shape $(N, 3)$ containing the computed RGB color values.
+
+**Data Structures:**
+The SH coefficients are stored in a flat array per Gaussian. The layout follows the standard ordering:
+*   Degree 0 ($l=0$): 1 coefficient (3 channels: R, G, B). Indices 0-2.
+*   Degree 1 ($l=1$): 3 coefficients (9 channels). Indices 3-11.
+*   Degree 2 ($l=2$): 5 coefficients (15 channels). Indices 12-26.
+*   Degree 3 ($l=3$): 7 coefficients (21 channels). Indices 27-47.
+Total coefficients per Gaussian: 48.
+
+**Constants:**
+The evaluation uses pre-computed constants derived from the normalization factors of the real spherical harmonics. The specific constants used in the reference implementations are [S1, S2, S3, unofficial]:
+
+*   **Degree 0:**
+    *   $SH\_C0 = 0.28209479177387814$
+*   **Degree 1:**
+    *   $SH\_C1 = 0.48860251190291987$
+*   **Degree 2:**
+    *   $SH\_C2\_0 = 1.0925484305920792$
+    *   $SH\_C2\_1 = -1.0925484305920792$
+    *   $SH\_C2\_2 = 0.94617469575755997$
+    *   $SH\_C2\_3 = -1.0925484305920792$
+    *   $SH\_C2\_4 = 0.54627421529603959$
+*   **Degree 3:**
+    *   $SH\_C3\_0 = 0.59004358992664352$
+    *   $SH\_C3\_1 = 2.8906114426405538$
+    *   $SH\_C3\_2 = 0.45704579946446572$
+    *   $SH\_C3\_3 = 0.3731763325901154$
+    *   $SH\_C3\_4 = 0.45704579946446572$
+    *   $SH\_C3\_5 = 1.4453057213202769$
+    *   $SH\_C3\_6 = 0.59004358992664352$
+
+**Steps:**
+1.  **Normalize Direction:** Ensure the input direction vector $\mathbf{v} = (x, y, z)$ is normalized. If not, normalize it: $\mathbf{v} \leftarrow \mathbf{v} / \|\mathbf{v}\|$.
+2.  **Initialize Color:** Extract the Degree 0 coefficients ($c_0, c_1, c_2$) from indices 0-2. Initialize the color vector $\mathbf{C}$ as:
+    $$ \mathbf{C} = SH\_C0 \cdot [c_0, c_1, c_2]^T $$
+3.  **Degree 1 Contribution:** Extract coefficients $c_3 \dots c_5$ (indices 3-5). Compute the contribution using the direction components:
+    $$ \mathbf{C} \leftarrow \mathbf{C} - SH\_C1 \cdot [y \cdot c_3, -z \cdot c_4, x \cdot c_5]^T $$
+    *Note: The signs and axis mapping depend on the specific SH convention. The reference code [S1, S3, unofficial] uses:*
+    $$ \mathbf{C} \leftarrow \mathbf{C} - SH\_C1 \cdot y \cdot c_3 + SH\_C1 \cdot z \cdot c_4 - SH\_C1 \cdot x \cdot c_5 $$
+    *(Wait, let's look at S1/S3 code carefully. S1: `l1m1 = -... * y`, `l1m0 = ... * z`, `l1p1 = -... * x`. S3: `color = color - SH_C1 * y * c1 + SH_C1 * z * c2 - SH_C1 * x * c3`. Here c1, c2, c3 correspond to indices 3,4,5. So:)*
+    $$ \mathbf{C} \leftarrow \mathbf{C} + SH\_C1 \cdot [-y \cdot c_3, z \cdot c_4, -x \cdot c_5]^T $$
+4.  **Degree 2 Contribution:** Extract coefficients $c_6 \dots c_{10}$ (indices 6-10). Compute squared and mixed terms: $xx=x^2, yy=y^2, zz=z^2, xy=xy, yz=yz, xz=xz$. Update color:
+    $$ \mathbf{C} \leftarrow \mathbf{C} + SH\_C2\_0 \cdot xy \cdot c_6 + SH\_C2\_1 \cdot yz \cdot c_7 + SH\_C2\_2 \cdot (2zz - xx - yy) \cdot c_8 + SH\_C2\_3 \cdot xz \cdot c_9 + SH\_C2\_4 \cdot (xx - yy) \cdot c_{10} $$
+    *Mapping to RGB channels:* The coefficients $c_6 \dots c_{10}$ are vectors of size 3 (RGB). The scalar basis functions are multiplied by each channel.
+    $$ \mathbf{C} \leftarrow \mathbf{C} + \begin{bmatrix} SH\_C2\_0 \cdot xy \\ SH\_C2\_1 \cdot yz \\ SH\_C2\_2 \cdot (2zz - xx - yy) \\ SH\_C2\_3 \cdot xz \\ SH\_C2\_4 \cdot (xx - yy) \end{bmatrix} \otimes \begin{bmatrix} c_6 \\ c_7 \\ c_8 \\ c_9 \\ c_{10} \end{bmatrix} $$
+    *Correction based on S2/S3 code structure:* The code applies the scalar basis function to the entire RGB vector for that coefficient index.
+    $$ \mathbf{C} \leftarrow \mathbf{C} + SH\_C2\_0 \cdot xy \cdot c_6 + SH\_C2\_1 \cdot yz \cdot c_7 + SH\_C2\_2 \cdot (2zz - xx - yy) \cdot c_8 + SH\_C2\_3 \cdot xz \cdot c_9 + SH\_C2\_4 \cdot (xx - yy) \cdot c_{10} $$
+5.  **Degree 3 Contribution (Optional):** If the SH dimension is greater than 27 (i.e., Degree 3 is used), extract coefficients $c_{11} \dots c_{17}$ (indices 11-17). Update color:
+    $$ \mathbf{C} \leftarrow \mathbf{C} + SH\_C3\_0 \cdot y(3xx - yy) \cdot c_{11} + SH\_C3\_1 \cdot xyz \cdot c_{12} + SH\_C3\_2 \cdot y(4zz - xx - yy) \cdot c_{13} + SH\_C3\_3 \cdot z(2zz - 3xx - 3yy) \cdot c_{14} + SH\_C3\_4 \cdot x(4zz - xx - yy) \cdot c_{15} + SH\_C3\_5 \cdot z(xx - yy) \cdot c_{16} + SH\_C3\_6 \cdot x(xx - 3yy) \cdot c_{17} $$
+    *Note on S1/S3 code:*
+    S1: `l3m3 = ... * y * (-3.0 * x * x + y * y)` -> $y(3xx - yy)$ with sign flip? No, $-3x^2+y^2 = -(3x^2-y^2)$.
+    S3: `SH_C3_0 * y * (3.0 * xx - yy) * c9`.
+    Let's stick to the explicit formulas from S3 which are clearer:
+    $$ \mathbf{C} \leftarrow \mathbf{C} + SH\_C3\_0 \cdot y(3xx - yy) \cdot c_{11} + SH\_C3\_1 \cdot xyz \cdot c_{12} + SH\_C3\_2 \cdot y(4zz - xx - yy) \cdot c_{13} + SH\_C3\_3 \cdot z(2zz - 3xx - 3yy) \cdot c_{14} + SH\_C3\_4 \cdot x(4zz - xx - yy) \cdot c_{15} + SH\_C3\_5 \cdot z(xx - yy) \cdot c_{16} + SH\_C3\_6 \cdot x(xx - 3yy) \cdot c_{17} $$
+6.  **Bias and Clamping:** Add a bias of 0.5 to the color vector to shift the range from $[-1, 1]$ to $[0, 1]$ (or similar, depending on coefficient storage range). Clip the result to $[0.0, 1.0]$.
+    $$ \mathbf{C} \leftarrow \text{clip}(\mathbf{C} + 0.5, 0.0, 1.0) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def eval_spherical_harmonics(spherical_harmonics: Tensor, dir: Tensor) -> Tensor:
+    """
+    spherical_harmonics: (N, 48) tensor of SH coefficients
+    dir: (N, 3) tensor of normalized viewing directions
+    Returns: (N, 3) tensor of RGB colors
+    """
+    # Constants
+    SH_C0 = 0.28209479177387814
+    SH_C1 = 0.48860251190291987
+    SH_C2_0 = 1.0925484305920792
+    SH_C2_1 = -1.0925484305920792
+    SH_C2_2 = 0.94617469575755997
+    SH_C2_3 = -1.0925484305920792
+    SH_C2_4 = 0.54627421529603959
+    SH_C3_0 = 0.59004358992664352
+    SH_C3_1 = 2.8906114426405538
+    SH_C3_2 = 0.45704579946446572
+    SH_C3_3 = 0.3731763325901154
+    SH_C3_4 = 0.45704579946446572
+    SH_C3_5 = 1.4453057213202769
+    SH_C3_6 = 0.59004358992664352
+
+    # Normalize direction
+    dir = dir / (dir.norm(dim=1, keepdim=True) + 1e-8)
+    x, y, z = dir[:, 0], dir[:, 1], dir[:, 2]
+
+    # Degree 0
+    c0 = spherical_harmonics[:, 0:3]
+    color = SH_C0 * c0
+
+    # Degree 1
+    c1 = spherical_harmonics[:, 3:6]
+    color = color - SH_C1 * y.unsqueeze(1) * c1[:, 0:3] # Wait, c1 is (N,3). The formula in S3 is scalar mult.
+    # S3: color = color - SH_C1 * y * c1 + SH_C1 * z * c2 - SH_C1 * x * c3
+    # c1, c2, c3 are vectors (N,3).
+    # This implies: color += SH_C1 * (-y * c1 + z * c2 - x * c3)
+    # But c1, c2, c3 are the coefficients for m=-1, 0, 1.
+    # Let's map indices: c1 is idx 3, c2 is idx 4, c3 is idx 5.
+    color = color - SH_C1 * y.unsqueeze(1) * spherical_harmonics[:, 3:6] + \
+            SH_C1 * z.unsqueeze(1) * spherical_harmonics[:, 6:9] - \
+            SH_C1 * x.unsqueeze(1) * spherical_harmonics[:, 9:12]
+
+    # Degree 2
+    xx, yy, zz = x*x, y*y, z*z
+    xy, yz, xz = x*y, y*z, x*z
+    
+    # Coefficients c4..c8 are indices 12..27? No, 12:15, 15:18, 18:21, 21:24, 24:27
+    # S3: c4 (12:15), c5 (15:18), c6 (18:21), c7 (21:24), c8 (24:27)
+    color = color + \
+            SH_C2_0 * xy.unsqueeze(1) * spherical_harmonics[:, 12:15] + \
+            SH_C2_1 * yz.unsqueeze(1) * spherical_harmonics[:, 15:18] + \
+            SH_C2_2 * (2.0 * zz - xx - yy).unsqueeze(1) * spherical_harmonics[:, 18:21] + \
+            SH_C2_3 * xz.unsqueeze(1) * spherical_harmonics[:, 21:24] + \
+            SH_C2_4 * (xx - yy).unsqueeze(1) * spherical_harmonics[:, 24:27]
+
+    # Degree 3
+    # Check if sh_dim > 27. Assuming full 48 coeffs are present.
+    # Coefficients c9..c15 are indices 27:48
+    # S3: c9 (27:30), c10 (30:33), c11 (33:36), c12 (36:39), c13 (39:42), c14 (42:45), c15 (45:48)
+    color = color + \
+            SH_C3_0 * y.unsqueeze(1) * (3.0 * xx - yy).unsqueeze(1) * spherical_harmonics[:, 27:30] + \
+            SH_C3_1 * xy.unsqueeze(1) * z.unsqueeze(1) * spherical_harmonics[:, 30:33] + \
+            SH_C3_2 * y.unsqueeze(1) * (4.0 * zz - xx - yy).unsqueeze(1) * spherical_harmonics[:, 33:36] + \
+            SH_C3_3 * z.unsqueeze(1) * (2.0 * zz - 3.0 * xx - 3.0 * yy).unsqueeze(1) * spherical_harmonics[:, 36:39] + \
+            SH_C3_4 * x.unsqueeze(1) * (4.0 * zz - xx - yy).unsqueeze(1) * spherical_harmonics[:, 39:42] + \
+            SH_C3_5 * z.unsqueeze(1) * (xx - yy).unsqueeze(1) * spherical_harmonics[:, 42:45] + \
+            SH_C3_6 * x.unsqueeze(1) * (xx - 3.0 * yy).unsqueeze(1) * spherical_harmonics[:, 45:48]
+
+    # Bias and Clip
+    color = color + 0.5
+    color = torch.clamp(color, 0.0, 1.0)
+    
+    return color
+```
+
+## Subtopics
+
+### [Spherical Harmonics Rotation](3985-spherical-harmonics-rotation.md)
+Applies analytic rotation matrices to SH coefficients for bands l=1..4 to rotate by ±π/2 around the X-axis. Precomputed as lambda functions operating on float arrays. The minus table is the transpose (inverse) of the plus table.
+
+### [Spherical Harmonics Encoder](4390-spherical-harmonics-encoder.md)
+A neural network module that encodes a 3D direction vector into spherical harmonics coefficients up to a specified degree. It solves the problem of representing directional information (view direction) in a differentiable, basis-function expansion for view-dependent rendering.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of Gaussians. The evaluation involves a fixed number of arithmetic operations per Gaussian (approx. 50-100 FLOPs for Degree 3).
+*   **Memory Complexity:** $O(N \cdot D)$ where $D$ is the number of SH coefficients per Gaussian (48 for Degree 3).
+*   **Performance:** Highly efficient on GPUs due to the lack of trigonometric functions and the use of hardcoded constants. It is significantly faster than evaluating SH via spherical coordinates (theta, phi) and trigonometric functions [S1, S4, unofficial].
+*   **Strengths:** Real-time capable, differentiable, compact representation.
+*   **Limitations:** Degree 3 SH may introduce ringing artifacts (Gibbs phenomenon) for high-frequency view-dependent effects. Higher degrees require more memory and computation.
+*   **When to use:** Standard for 3D Gaussian Splatting to model view-dependent colors.
+*   **When not to use:** If the view-dependent effects are extremely high frequency and cannot be approximated by low-degree polynomials, or if memory is extremely constrained (use Degree 0/1).
+
+## Background
+Spherical Harmonics are a set of orthogonal functions defined on the sphere, commonly used in computer graphics to represent lighting and reflectance. In the context of 3D Gaussian Splatting, they were adopted from PlenOctrees and other neural rendering techniques to provide a compact, differentiable representation of view-dependent appearance [S4, unofficial]. The specific hardcoded polynomial evaluation method is popularized by the original 3D Gaussian Splatting implementation and its various forks [S1, S2, S3, unofficial].
+
+## Sources
+[S1] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
+[S2] thomasantony/splat, https://github.com/thomasantony/splat, fetched 2026-10-27 (unofficial)
+[S3] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)
+[S4] Total Internal Reflection, https://avishek.net/2022/12/05/pytorch-guide-plenoxels-nerf-part-2.html, fetched 2026-10-29 (unofficial)

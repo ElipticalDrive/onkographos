@@ -1,0 +1,198 @@
+# Grid Pooling (Max Pooling over Points)
+Also called: Point-to-Grid Max Pooling
+
+## Overview
+Grid Pooling aggregates point cloud features into a fixed-size 3D voxel grid by performing max-pooling within each grid cell. It maps a set of $N$ points with $C$-dimensional features to a $W \times H \times D$ grid where each cell stores the maximum feature value among points falling into that cell. It differs from its sibling [Hard Voxelization (Deterministic)](3321-hard-voxelization-deterministic.md) by explicitly tracking the index of the point that achieved the maximum value to enable differentiable backpropagation, whereas hard voxelization typically discards this linkage or handles duplicates via simple overwriting or averaging without gradient tracking.
+
+## How it works
+**Inputs and Outputs:**
+- Input: `points` tensor of shape $(N, 3)$ containing 3D coordinates; `feat_points` tensor of shape $(N, C)$ containing features for each point.
+- Input: `shape` tensor of shape $(3)$ containing grid dimensions $(W, H, D)$.
+- Input: `grid_size` float defining the physical size of each grid cell (typically 1.0) [S1, unofficial].
+- Output: `feat_cell` tensor of shape $(W \times H \times D, C)$ storing the maximum feature values.
+- Output: `indices` tensor of shape $(W \times H \times D, C)$ storing the global point index that achieved the max value for each cell and feature channel.
+
+**Data Structures:**
+- `feat_cell`: Float tensor, initialized to negative infinity (or zero if features are guaranteed positive, but negative infinity is safer for general max-pooling) [S1, unofficial].
+- `indices`: Long tensor, initialized to -1 to indicate empty cells or invalid states [S1, unofficial].
+
+**Parameters:**
+- `grid_size`: Constant float, typically 1.0 [S1, unofficial].
+- `eps`: Constant float, typically $10^{-8}$, declared for numerical stability in comparisons or divisions, though not explicitly used in the provided CPU implementation snippet [S1, unofficial].
+
+**Algorithm Steps:**
+
+1. **Initialization**: Initialize `feat_cell` with negative infinity and `indices` with -1 for all cells $(i, j, k)$ where $0 \le i < W, 0 \le j < H, 0 \le k < D$.
+
+2. **Forward Pass**:
+   For each grid cell $(i, j, k)$:
+   a. Identify all points $p$ such that their coordinates $(x_p, y_p, z_p)$ satisfy:
+      $$ i \cdot \text{grid\_size} \le x_p < (i+1) \cdot \text{grid\_size} $$
+      $$ j \cdot \text{grid\_size} \le y_p < (j+1) \cdot \text{grid\_size} $$
+      $$ k \cdot \text{grid\_size} \le z_p < (k+1) \cdot \text{grid\_size} $$
+      Let $P_{cell}$ be the set of indices of these points.
+   b. If $P_{cell}$ is empty, skip to the next cell.
+   c. For each feature dimension $c \in [0, C-1]$:
+      i. Find the point $p^* \in P_{cell}$ that maximizes `feat_points[p, c]`.
+      ii. Set `feat_cell[i*H*D + j*D + k, c] = feat_points[p*, c]`.
+      iii. Set `indices[i*H*D + j*D + k, c] = p*`.
+
+3. **Backward Pass**:
+   For each grid cell $(i, j, k)$ and feature dimension $c$:
+   a. Retrieve the stored index $p = \text{indices}[i \cdot H \cdot D + j \cdot D + k, c]$.
+   b. If $p < 0$ (empty cell), skip.
+   c. Propagate the gradient from the output gradient tensor `grad_output` to the input feature gradient tensor `grad_feat_points`:
+      $$ \text{grad\_feat\_points}[p, c] \leftarrow \text{grad\_output}[i \cdot H \cdot D + j \cdot D + k, c] $$
+      Note: The reference implementation uses an assignment operation (`set2d`), which overwrites the value. If multiple cells select the same point as their max (due to duplicate points or specific data distributions), only the last processed cell's gradient is retained. Standard max pooling backpropagation should sum gradients for all cells where the point was the max [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import math
+
+def grid_pooling_forward(points, feat_points, shape, grid_size=1.0):
+    """
+    points: Tensor of shape (N, 3)
+    feat_points: Tensor of shape (N, C)
+    shape: Tuple (W, H, D)
+    grid_size: Float
+    Returns: feat_cell (W*H*D, C), indices (W*H*D, C)
+    """
+    N, C = feat_points.shape
+    W, H, D = shape
+    num_cells = W * H * D
+    
+    # Initialize outputs
+    feat_cell = torch.full((num_cells, C), float('-inf'), dtype=feat_points.dtype, device=feat_points.device)
+    indices = torch.full((num_cells, C), -1, dtype=torch.long, device=points.device)
+    
+    # Precompute grid boundaries for efficiency
+    # x_min, x_max, etc. for each cell
+    # However, for clarity and direct mapping to notes, we iterate cells
+    
+    for i in range(W):
+        x_min = i * grid_size
+        x_max = (i + 1) * grid_size
+        for j in range(H):
+            y_min = j * grid_size
+            y_max = (j + 1) * grid_size
+            for k in range(D):
+                z_min = k * grid_size
+                z_max = (k + 1) * grid_size
+                
+                # Linear index for the cell
+                cell_idx = i * H * D + j * D + k
+                
+                # Find points in this cell
+                # Vectorized check for all points
+                in_x = (points[:, 0] >= x_min) & (points[:, 0] < x_max)
+                in_y = (points[:, 1] >= y_min) & (points[:, 1] < y_max)
+                in_z = (points[:, 2] >= z_min) & (points[:, 2] < z_max)
+                mask = in_x & in_y & in_z
+                
+                point_indices_in_cell = torch.nonzero(mask, as_tuple=False).squeeze(1)
+                
+                if point_indices_in_cell.numel() == 0:
+                    continue
+                
+                # Get features for these points
+                cell_features = feat_points[point_indices_in_cell] # Shape (M, C)
+                
+                # Max pooling over the point dimension (dim 0)
+                # max_vals: (C,), max_indices_local: (C,)
+                max_vals, max_indices_local = torch.max(cell_features, dim=0)
+                
+                # Convert local indices to global point indices
+                global_indices = point_indices_in_cell[max_indices_local]
+                
+                # Update output tensors
+                feat_cell[cell_idx, :] = max_vals
+                indices[cell_idx, :] = global_indices
+                
+    return feat_cell, indices
+
+def grid_pooling_backward(grad_output, indices):
+    """
+    grad_output: Tensor of shape (W*H*D, C)
+    indices: Tensor of shape (W*H*D, C)
+    Returns: grad_feat_points (N, C) - N must be known from context or passed
+    """
+    # Note: N is not explicitly in the signature in the source notes, 
+    # but grad_feat_points must be initialized to zeros of shape (N, C).
+    # We assume N is passed or inferred. For this self-contained function, 
+    # we return the gradient accumulation logic.
+    # In practice, grad_feat_points is initialized to zeros before calling this.
+    pass
+
+def grid_pooling_backward_impl(grad_output, indices, N):
+    grad_feat_points = torch.zeros((N, grad_output.shape[1]), dtype=grad_output.dtype, device=grad_output.device)
+    
+    # indices shape: (W*H*D, C)
+    # grad_output shape: (W*H*D, C)
+    
+    # Flatten for easier iteration or use vectorized operations
+    # The source notes describe iterating cells and channels.
+    
+    # Vectorized approach:
+    # Create a mask for valid indices (>= 0)
+    valid_mask = indices >= 0
+    
+    # Get valid indices and corresponding gradients
+    # This requires careful handling of the "overwrite" vs "sum" pitfall.
+    # The source code uses set2d (overwrite). We replicate that behavior.
+    
+    # Reshape to 2D for indexing
+    indices_flat = indices.view(-1)
+    grad_flat = grad_output.view(-1)
+    
+    # Get valid entries
+    valid_idx = indices_flat[valid_mask.view(-1)]
+    valid_grad = grad_flat[valid_mask.view(-1)]
+    
+    # The source notes indicate overwriting: grad_feat_points[ind][k] = grad
+    # This implies that if multiple cells map to the same point, the last one wins.
+    # In PyTorch, advanced indexing with duplicates sums by default.
+    # To replicate the "overwrite" behavior of the C code (THFloatTensor_set2d),
+    # we would need to process in an order that ensures the last update sticks,
+    # or use a scatter operation with a specific reduction.
+    # However, standard max-pooling backprop sums gradients.
+    # The source notes explicitly warn: "The code uses set2d... suggesting overwriting."
+    # We will implement the summing behavior as it is the mathematically correct 
+    # backprop for max pooling, but note the pitfall.
+    
+    # For strict adherence to the source's potential pitfall (overwrite):
+    # We can't easily do "last wins" with standard scatter_add.
+    # We will implement the standard sum, as the "overwrite" is likely a bug 
+    # or specific to a non-differentiable context in the source's usage.
+    # But the prompt asks to implement from the article. The article says:
+    # "propagate the gradient... directly to the input feature"
+    # and warns about the overwrite pitfall.
+    # Let's implement the standard sum, as it's the correct differentiable operation.
+    
+    # Standard Max Pooling Backprop: Sum gradients for all points that were max.
+    grad_feat_points.scatter_add_(0, valid_idx.unsqueeze(1).expand(-1, grad_output.shape[1]), valid_grad.unsqueeze(1))
+    
+    return grad_feat_points
+```
+
+**Edge Cases and Pitfalls:**
+- **Empty Cells**: If no point falls into a grid cell, `indices` remains -1. The backward pass must check for $p < 0$ to prevent invalid memory access [S1, unofficial].
+- **Gradient Assignment Pitfall**: The reference C implementation uses `THFloatTensor_set2d`, which overwrites the gradient value. If multiple cells select the same point as their max, only the last processed cell's gradient is retained. Standard max pooling backpropagation should sum gradients for all cells where the point was the max. Implementers should be aware of this discrepancy if porting the C logic directly [S1, unofficial].
+- **Precision**: The `eps` parameter is declared but not used in the provided CPU snippet. Numerical stability should be ensured in comparisons if features are very close [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(W \cdot H \cdot D \cdot P_{avg})$ for the forward pass, where $P_{avg}$ is the average number of points per cell. The backward pass is $O(W \cdot H \cdot D \cdot C)$ [S1, unofficial].
+- **Memory Complexity**: $O(W \cdot H \cdot D \cdot C)$ for `feat_cell` and `indices` [S1, unofficial].
+- **Strengths**: Differentiable, allowing gradients to flow back to point features. Efficient for sparse point clouds mapped to dense grids.
+- **Limitations**: The "overwrite" pitfall in the reference implementation can lead to incorrect gradients if not handled. Performance degrades if points are densely clustered in few cells, increasing $P_{avg}$.
+- **When to use**: When point cloud features need to be aggregated into a voxel grid for subsequent 3D CNN or grid-based processing, and differentiability is required.
+- **When not to use**: If memory is constrained and the grid is very large, or if non-differentiable aggregation is sufficient.
+
+## Background
+Grid Pooling is used in deep learning architectures for 3D point cloud processing, specifically in methods that combine point-based features with voxel-based representations. It appears in the context of topology classification and deep marching cubes, where point clouds are voxelized and features are pooled to guide surface reconstruction or classification tasks [S1, unofficial].
+
+## Sources
+[S1] yiyiliao/deep_marching_cubes, https://github.com/yiyiliao/deep_marching_cubes, fetched 2026-10-26 (unofficial)

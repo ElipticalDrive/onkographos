@@ -1,0 +1,179 @@
+# Differentiable Depth Function Forward/Backward Pass
+
+Also called: DepthFunction.backward, DepthFunction.forward
+
+## Overview
+This method implements the forward and backward passes for a differentiable depth prediction module in neural volume rendering [S1, unofficial]. It wraps the ray marching process (specifically [Ray Marching with Secant Refinement](1042-ray-marching-with-secant-refinement.md)) within a PyTorch `autograd.Function` to enable gradient flow from the rendered depth output back to the neural decoder parameters and latent codes [S1, unofficial]. It distinguishes itself by explicitly reconstructing the occupancy gradient along the ray direction to compute the depth sensitivity, allowing end-to-end training of implicit surface representations [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `ray0`: Origin of rays, shape $(N, 3)$.
+- `ray_direction`: Unit direction vectors of rays, shape $(N, 3)$.
+- `decoder`: Neural network module (implicit decoder) taking position and latent code.
+- `c`: Latent codes for each ray, shape $(N, D_c)$.
+- `n_steps`: Number of coarse sampling steps.
+- `n_secant_steps`: Number of secant refinement steps.
+- `tau`: Temperature parameter for soft thresholding.
+- `depth_range`: Tuple $(d_{min}, d_{max})$ defining the sampling interval.
+- `method`: String specifying the marching algorithm.
+- `check_cube_intersection`: Boolean flag for bounding box checks.
+- `max_points`: Maximum number of points to store.
+- `grad_output`: Gradient tensor from the loss function w.r.t the forward output, shape $(N)$.
+
+**Outputs:**
+- `d_pred`: Predicted depth values, shape $(N)$.
+- `p_pred`: Predicted 3D positions corresponding to `d_pred`, shape $(N, 3)$.
+- `mask`: Boolean mask indicating valid depth predictions, shape $(N)$.
+
+**Data Structures:**
+- `d_pred`: Float tensor. Invalid depths are set to $\infty$ or $0$ based on specific masks [S1, unofficial].
+- `p_pred`: Float tensor. Saved for backward pass [S1, unofficial].
+- `mask`: Boolean tensor. Tracks validity [S1, unofficial].
+
+**Steps:**
+
+1.  **Forward Pass:**
+    1.  Call `perform_ray_marching(ray0, ray_direction, decoder, c, n_steps, n_secant_steps, tau, depth_range, method, check_cube_intersection, max_points)` to obtain raw depth predictions `d_raw`, positions `p_raw`, and validity masks [S1, unofficial].
+    2.  Apply invalid depth handling:
+        -   If a ray fails to intersect or is invalid (`mask == 0`), set $d_{pred}[mask==0] = \infty$ [S1, unofficial].
+        -   If a ray is valid but the surface is not occupied (`mask_0_not_occupied == 0`), set $d_{pred}[mask\_0\_not\_occupied==0] = 0$ [S1, unofficial].
+    3.  Save `ray0`, `ray_direction`, `d_pred`, `p_pred`, and `c` for the backward pass [S1, unofficial].
+    4.  Return `d_pred`.
+
+2.  **Backward Pass:**
+    1.  Retrieve saved tensors: `ray0`, `ray_direction`, `d_pred`, `p_pred`, `c` [S1, unofficial].
+    2.  Enable gradient computation for `p_pred`: `p_pred.requires_grad_(True)` [S1, unofficial].
+    3.  Evaluate the decoder's occupancy logit at the predicted positions:
+        $$ f_p = \text{decoder}(p_{pred}, c, \text{only\_occupancy}=\text{True}) $$
+        Here, $f_p$ is the scalar occupancy value (logit) for each point [S1, unofficial].
+    4.  Compute the gradient of the occupancy w.r.t. the positions:
+        $$ \text{grad\_p} = \frac{\partial f_p}{\partial p_{pred}} $$
+        Shape: $(N, 3)$ [S1, unofficial].
+    5.  Compute the directional derivative along the ray direction (dot product):
+        $$ \text{grad\_p\_dot\_v} = \sum_{dim=1}^{3} (\text{grad\_p}_{:, dim} \cdot \text{ray\_direction}_{:, dim}) $$
+        Shape: $(N)$. This represents the rate of change of occupancy along the ray [S1, unofficial].
+    6.  Clamp small gradients to avoid division by zero:
+        $$ \text{grad\_p\_dot\_v}[|\text{grad\_p\_dot\_v}| < \epsilon] = \epsilon $$
+        where $\epsilon = 10^{-3}$ [S1, unofficial].
+    7.  Set gradients for invalid masks to 1 to prevent gradient flow into invalid regions:
+        $$ \text{grad\_p\_dot\_v}[mask==0] = 1 $$
+        [S1, unofficial].
+    8.  Compute the gradient w.r.t the depth output:
+        $$ \text{grad\_outputs} = - \frac{\text{grad\_output}}{\text{grad\_p\_dot\_v}} \cdot mask $$
+        Shape: $(N)$. The negative sign arises from the chain rule through the depth-position mapping [S1, unofficial].
+    9.  Compute gradient w.r.t. latent code $c$:
+        $$ \text{grad\_c} = \frac{\partial f_p}{\partial c} $$
+        Specifically, compute the gradient of $f_p$ w.r.t $c$ using `grad_outputs` as the upstream gradient [S1, unofficial].
+    10. Compute gradient w.r.t. decoder parameters $\phi$:
+        $$ \text{grad\_\phi} = \frac{\partial f_p}{\partial \phi} $$
+        Specifically, compute the gradient of $f_p$ w.r.t $\phi$ using `grad_outputs` as the upstream gradient [S1, unofficial].
+    11. Return `None` for `ray0`, `ray_direction`, `decoder`, `n_steps`, etc., and `grad_c`, `grad\_\phi` for the latent code and decoder parameters respectively [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class DepthFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, ray0, ray_direction, decoder, c, n_steps, n_secant_steps, 
+                tau, depth_range, method, check_cube_intersection, max_points, grad_output):
+        # 1. Perform Ray Marching (defined in [Ray Marching with Secant Refinement](1042-ray-marching-with-secant-refinement.md))
+        d_pred, p_pred, mask, mask_0_not_occupied = perform_ray_marching(
+            ray0, ray_direction, decoder, c, n_steps, n_secant_steps, 
+            tau, depth_range, method, check_cube_intersection, max_points
+        )
+        
+        # 2. Handle Invalid Depths
+        d_pred[mask == 0] = float('inf')
+        d_pred[mask_0_not_occupied == 0] = 0.0
+        
+        # 3. Save for Backward
+        ctx.save_for_backward(ray0, ray_direction, d_pred, p_pred, c)
+        ctx.grad_output = grad_output
+        ctx.mask = mask
+        ctx.decoder = decoder
+        return d_pred
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        ray0, ray_direction, d_pred, p_pred, c = ctx.saved_tensors
+        mask = ctx.mask
+        decoder = ctx.decoder
+        
+        # 1. Enable gradients for p_pred
+        p_pred.requires_grad_(True)
+        
+        # 2. Evaluate Occupancy
+        f_p = decoder(p_pred, c, only_occupancy=True)
+        
+        # 3. Gradient of f_p w.r.t p_pred
+        grad_p = torch.autograd.grad(
+            f_p, p_pred, grad_outputs=torch.ones_like(f_p),
+            create_graph=True, retain_graph=True
+        )[0]
+        
+        # 4. Dot product with ray direction
+        grad_p_dot_v = torch.sum(grad_p * ray_direction, dim=1)
+        
+        # 5. Clamp small gradients
+        epsilon = 1e-3
+        grad_p_dot_v = torch.where(
+            torch.abs(grad_p_dot_v) < epsilon, 
+            torch.full_like(grad_p_dot_v, epsilon), 
+            grad_p_dot_v
+        )
+        
+        # 6. Set invalid mask gradients to 1
+        grad_p_dot_v[mask == 0] = 1.0
+        
+        # 7. Compute output gradients (depth gradient)
+        grad_f_p_upstream = - (grad_output / grad_p_dot_v) * mask.float()
+        
+        # 8. Compute gradient w.r.t latent code c
+        grad_c = torch.autograd.grad(
+            f_p, c, grad_outputs=grad_f_p_upstream, retain_graph=True
+        )[0]
+        
+        # 9. Compute gradient w.r.t decoder parameters phi
+        grad_phi = torch.autograd.grad(
+            f_p, decoder.parameters(), grad_outputs=grad_f_p_upstream, retain_graph=True
+        )
+        
+        # 10. Return gradients
+        return (
+            None, None, None, grad_c, None, None, None, None, None, None, None, None
+        )
+```
+
+**Parameters:**
+- $\epsilon = 10^{-3}$: Clamping threshold for gradient stability [S1, unofficial].
+
+**Edge Cases:**
+- **Invalid Rays:** Rays that do not intersect the volume or fail to find a surface are masked out [S1, unofficial]. Their depth is set to $\infty$ or $0$, and their gradient contribution is nullified or clamped to prevent instability [S1, unofficial].
+- **Zero Gradient:** If the occupancy gradient along the ray is near zero (e.g., inside a uniform volume or far from surface), clamping prevents division by zero [S1, unofficial].
+
+## Subtopics
+
+### [Monocular Depth Predictor with Distribution Sampling](3879-monocular-depth-predictor-with-distribution-sampling.md)
+A neural network module that predicts a depth distribution for each ray from image features, sampling discrete depth values and probability density function (PDF) values to represent surface geometry. It differs from the standard [DepthPredictor](4097-depthpredictor.md) by explicitly modeling multiple surfaces and using a distribution sampler to handle the stochastic nature of depth estimation, building on the differentiable forward/backward pass of [Differentiable Depth Function Forward/Backward Pass](1047-differentiable-depth-function-forward-backward-pass.md).
+
+### [DepthPredictor](4097-depthpredictor.md)
+The `DepthPredictor` is a PyTorch `nn.Module` that implements the depth prediction pipeline for differentiable volume rendering. It integrates a distribution sampler with conversion functions to transform raw feature tensors into probabilistic depth estimates and associated opacities. It differs from sibling methods like [Monocular Depth Predictor with Distribution Sampling](3879-monocular-depth-predictor-with-distribution-sampling.md) by explicitly handling the unbinding of PDF and offset channels, sampling from the resulting discrete distribution, and computing opacity via a cumulative transmittance formulation.
+
+## Operating characteristics
+- **Time Complexity:** Dominated by the forward ray marching step, which involves $N \times (n_{steps} + n_{secant\_steps})$ decoder evaluations [S1, unofficial]. The backward pass requires an additional $N$ decoder evaluations to compute the occupancy gradient and potentially more for the latent code/decoder gradients depending on implementation [G].
+- **Memory Complexity:** Stores intermediate positions and gradients for all sampled points. The backward pass requires storing the graph for the decoder evaluation at $p_{pred}$ [G].
+- **Strengths:** Enables end-to-end training of implicit surfaces by providing gradients through the depth prediction. Handles invalid rays gracefully [S1, unofficial].
+- **Limitations:** Sensitive to the clamping parameter $\epsilon$. Requires the decoder to be differentiable. Performance depends on the efficiency of the underlying ray marching implementation [G].
+- **When to Use:** When training neural radiance fields or implicit surface representations where depth supervision is available or desired [G].
+- **When Not to Use:** If non-differentiable rendering is sufficient, or if the decoder is not differentiable [G].
+
+## Background
+This method is part of the differentiable volumetric rendering framework, specifically designed to integrate depth prediction into the training loop [S1, unofficial]. It builds upon the [Ray Marching with Secant Refinement](1042-ray-marching-with-secant-refinement.md) method to provide a differentiable interface for depth estimation [S1, unofficial]. The approach allows gradients to flow from the depth loss to the neural decoder, enabling the optimization of implicit surface representations [S1, unofficial].
+
+## Sources
+[S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)

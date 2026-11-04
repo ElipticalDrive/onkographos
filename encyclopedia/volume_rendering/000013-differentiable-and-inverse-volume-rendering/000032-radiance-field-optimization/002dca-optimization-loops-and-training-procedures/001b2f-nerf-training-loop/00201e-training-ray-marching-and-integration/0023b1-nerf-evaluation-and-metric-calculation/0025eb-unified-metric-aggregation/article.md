@@ -1,0 +1,151 @@
+# Unified Metric Aggregation
+
+Also called: Evaluation Reporting, Global and Per-view Metric Aggregation
+
+## Overview
+Unified Metric Aggregation aggregates per-view PSNR, SSIM, and LPIPS scores into global averages and per-view dictionaries for evaluation reporting [S1, unofficial]. It distinguishes itself from sibling methods like the [PSNR Evaluation Pipeline](4315-psnr-evaluation-pipeline.md) by handling multi-metric consistency and enforcing strict data validation before aggregation [S1, unofficial].
+
+## How it works
+**Inputs:**
+- List of paired paths: `(render_path, gt_path)` for each test image [S1, unofficial].
+- Iteration identifier (string, e.g., `"ours_10000"`) [S1, unofficial].
+- LPIPS intensity scale parameter (float, typically `[-1, 1]`) [S2].
+
+**Outputs:**
+- Global metrics dictionary: `{"PSNR": float, "SSIM": float, "LPIPS": float}` [S1, unofficial].
+- Per-view metrics dictionary: `{"image_name": {"PSNR": float, "SSIM": float, "LPIPS": float}}` [S1, unofficial].
+- JSON files written to disk containing the above structures [S1, unofficial].
+
+**Data Structures:**
+- `per_view_metrics`: List of tuples `(image_name, psnr, ssim, lpips)` [S1, unofficial].
+- `global_metrics`: Dictionary with keys `"PSNR"`, `"SSIM"`, `"LPIPS"` [S1, unofficial].
+
+**Steps:**
+1. Initialize `per_view_metrics` as an empty list [S1, unofficial].
+2. Iterate over each pair `(render_path, gt_path)` in the input list [S1, unofficial].
+3. Load `render_img` and `gt_img` from paths [S1, unofficial].
+4. Normalize pixel values to range `[0, 1]` [S1, unofficial].
+5. Convert images to CHW (Channel, Height, Width) tensor format [S1, unofficial].
+6. Validate that `render_img.shape == gt_img.shape` [S1, unofficial].
+7. Compute PSNR between `render_img` and `gt_img` [S1, unofficial].
+8. Compute SSIM between `render_img` and `gt_img` [S1, unofficial].
+9. Compute LPIPS between `render_img` and `gt_img` using the specified intensity scale [S1, unofficial].
+10. Validate that all computed metrics are finite (not NaN or Inf) [S1, unofficial].
+11. Append `(image_name, psnr, ssim, lpips)` to `per_view_metrics` [S1, unofficial].
+12. After the loop, compute the arithmetic mean of all PSNR, SSIM, and LPIPS values in `per_view_metrics` [S1, unofficial].
+13. Store means in `global_metrics` [S1, unofficial].
+14. Write `global_metrics` and `per_view_metrics` to JSON files keyed by the iteration identifier [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import json
+import numpy as np
+from pathlib import Path
+from PIL import Image
+from skimage.metrics import structural_similarity
+
+def load_image(path: str) -> np.ndarray:
+    return np.array(Image.open(path)).astype(np.float32) / 255.0
+
+def compute_psnr(render: np.ndarray, gt: np.ndarray) -> float:
+    mse = np.mean((render - gt) ** 2)
+    if mse == 0:
+        return float('inf')
+    return 10.0 * np.log10(1.0 / mse)
+
+def compute_ssim(render: np.ndarray, gt: np.ndarray) -> float:
+    # Standard SSIM computation [G]
+    return structural_similarity(render, gt, data_range=1.0)
+
+def compute_lpips(render: np.ndarray, gt: np.ndarray, intensity_scale: tuple = (-1, 1)) -> float:
+    # Normalize to [0, 1] if intensity_scale is [-1, 1]
+    if intensity_scale == (-1, 1):
+        render = (render + 1.0) / 2.0
+        gt = (gt + 1.0) / 2.0
+    # LPIPS computation requires a pre-trained network [G]. Not given in the sources.
+    return 0.0
+
+def unified_metric_aggregation(pairs: list, iteration_key: str, intensity_scale: tuple = (-1, 1)):
+    per_view_metrics = []
+    
+    for render_path, gt_path in pairs:
+        render_img = load_image(render_path)
+        gt_img = load_image(gt_path)
+        
+        render_img = np.transpose(render_img, (2, 0, 1))
+        gt_img = np.transpose(gt_img, (2, 0, 1))
+        
+        if render_img.shape != gt_img.shape:
+            raise ValueError(f"Shape mismatch for {render_path}")
+            
+        psnr = compute_psnr(render_img, gt_img)
+        ssim = compute_ssim(render_img, gt_img)
+        lpips = compute_lpips(render_img, gt_img, intensity_scale)
+        
+        if not (np.isfinite(psnr) and np.isfinite(ssim) and np.isfinite(lpips)):
+            print(f"Warning: Non-finite metrics for {render_path}")
+            continue
+            
+        image_name = Path(render_path).stem
+        per_view_metrics.append({
+            "image_name": image_name,
+            "PSNR": psnr,
+            "SSIM": ssim,
+            "LPIPS": lpips
+        })
+        
+    if not per_view_metrics:
+        return {}, {}
+        
+    global_psnr = np.mean([m["PSNR"] for m in per_view_metrics])
+    global_ssim = np.mean([m["SSIM"] for m in per_view_metrics])
+    global_lpips = np.mean([m["LPIPS"] for m in per_view_metrics])
+    
+    global_metrics = {
+        "PSNR": global_psnr,
+        "SSIM": global_ssim,
+        "LPIPS": global_lpips
+    }
+    
+    per_view_dict = {m["image_name"]: m for m in per_view_metrics}
+    
+    output_global = {f"ours_{iteration_key}": global_metrics}
+    output_per_view = {f"ours_{iteration_key}": per_view_dict}
+    
+    with open(f"global_metrics_{iteration_key}.json", "w") as f:
+        json.dump(output_global, f)
+    with open(f"per_view_metrics_{iteration_key}.json", "w") as f:
+        json.dump(output_per_view, f)
+        
+    return global_metrics, per_view_dict
+```
+
+**Parameters:**
+- `intensity_scale`: Range of input pixel values for LPIPS. Typical value: `[-1, 1]` [S2].
+
+**Edge Cases:**
+- Shape mismatch between render and GT images: Must be handled explicitly (skip or error) [S1, unofficial].
+- Non-finite metrics (NaN/Inf): Occurs with perfect reconstruction (PSNR=Inf) or numerical instability [S1, unofficial].
+- Empty input list: Results in empty dictionaries [S1, unofficial].
+
+## Subtopics
+
+### LPIPS Evaluation Protocol
+Evaluates perceptual similarity using Learned Perceptual Image Patch Similarity (LPIPS) [G]. It differs from PSNR/SSIM by using deep network features [G]. The evaluation uses an intensity scale parameter, typically `[-1, 1]`, to ensure consistent metric computation across variants [S2].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of test images $N$. Each image requires independent metric computation [S1, unofficial].
+- **Memory Complexity:** $O(N \cdot H \cdot W \cdot C)$ if all images are loaded simultaneously, or $O(H \cdot W \cdot C)$ if processed sequentially [S1, unofficial].
+- **Strengths:** Provides a comprehensive view of quality (pixel-level, structural, perceptual) [S1, unofficial]. Standardized JSON output facilitates comparison across experiments [S1, unofficial].
+- **Limitations:** LPIPS computation is computationally expensive compared to PSNR/SSIM [G]. Requires careful handling of input normalization [S2].
+- **When to use:** Final evaluation of NeRF variants where perceptual quality is relevant [G].
+- **When not to use:** Real-time feedback during training due to LPIPS cost [G].
+
+## Background
+Integrated into NeRF evaluation pipelines for consistent reporting of multiple metrics (PSNR, SSIM, LPIPS) across variants [S1, unofficial]. The LPIPS component is used in recent 3DGS evaluations where perceptual artifacts like "popping" are significant, necessitating correct intensity scaling for fair comparison [S2].
+
+## Sources
+[S1] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)
+[S2] Sparse Voxels Rasterization: Real-time High-fidelity Radiance Field Rendering, https://doi.org/10.1109/cvpr52734.2025.01509, fetched 2026-10-26

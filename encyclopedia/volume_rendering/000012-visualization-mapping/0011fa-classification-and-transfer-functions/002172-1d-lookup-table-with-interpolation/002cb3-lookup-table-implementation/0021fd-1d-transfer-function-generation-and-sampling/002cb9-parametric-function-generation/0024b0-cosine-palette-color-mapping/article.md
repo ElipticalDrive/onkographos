@@ -1,0 +1,89 @@
+# Cosine Palette Color Mapping
+
+Also called: Inigo Quilez Palette
+
+## Overview
+Cosine Palette Color Mapping generates a smooth, perceptually uniform color gradient from a scalar input value using a parametric cosine function. It solves the problem of mapping 1D scalar data (such as density or temperature) to RGB colors without the discontinuities of discrete colormaps. It is distinguished from sibling methods like the Gaussian Transfer Function by its analytic, periodic nature and lack of explicit peak definitions, relying instead on phase-shifted cosine waves to create distinct color bands [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- Input: A scalar value $t$, typically normalized to the range $[0, 1]$.
+- Output: An RGB color vector $\mathbf{c} \in [0, 1]^3$.
+
+**Data Structures**
+The method requires four constant vectors of size 3 (representing Red, Green, Blue channels):
+- $\mathbf{a}$: Offset vector.
+- $\mathbf{b}$: Amplitude vector.
+- $\mathbf{c}$: Frequency vector.
+- $\mathbf{d}$: Phase shift vector.
+
+**Parameters**
+The standard "Inigo Quilez" palette uses the following fixed parameters [S1, unofficial]:
+- $\mathbf{a} = (0.5, 0.5, 0.5)$
+- $\mathbf{b} = (0.5, 0.5, 0.5)$
+- $\mathbf{c} = (1.0, 1.0, 1.0)$
+- $\mathbf{d} = (0.00, 0.33, 0.67)$
+
+**Formula**
+The color $\mathbf{c}(t)$ is computed as:
+$$ \mathbf{c}(t) = \mathbf{a} + \mathbf{b} \cdot \cos\left(2\pi \cdot (\mathbf{c} \cdot t + \mathbf{d})\right) $$
+where operations are component-wise. Specifically:
+$$ c_r(t) = a_r + b_r \cos(2\pi (c_r t + d_r)) $$
+$$ c_g(t) = a_g + b_g \cos(2\pi (c_g t + d_g)) $$
+$$ c_b(t) = a_b + b_b \cos(2\pi (c_b t + d_b)) $$
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cosine_palette(t: float) -> tuple[float, float, float]:
+    """
+    Computes the Inigo Quilez cosine palette color for scalar t.
+    :param t: Scalar input, typically in [0, 1].
+    :return: RGB tuple in [0, 1].
+    """
+    # Constants from [S1, unofficial]
+    a = (0.5, 0.5, 0.5)
+    b = (0.5, 0.5, 0.5)
+    c_freq = (1.0, 1.0, 1.0)
+    d_phase = (0.00, 0.33, 0.67)
+    
+    pi_2 = 2.0 * 3.141592653589793
+    
+    r = a[0] + b[0] * cos(pi_2 * (c_freq[0] * t + d_phase[0]))
+    g = a[1] + b[1] * cos(pi_2 * (c_freq[1] * t + d_phase[1]))
+    b_val = a[2] + b[2] * cos(pi_2 * (c_freq[2] * t + d_phase[2]))
+    
+    return (r, g, b_val)
+```
+
+**Edge Cases and Pitfalls**
+- **Input Range**: The formula is periodic. If $t$ is outside $[0, 1]$, the colors will wrap around. Clamping $t$ to $[0, 1]$ is recommended for standard visualization [G].
+- **Precision**: Standard floating-point precision is sufficient. No special handling for degenerate inputs is required as the cosine function is well-behaved everywhere.
+
+## Subtopics
+
+### [Blue-Red Colormap](3921-blue-red-colormap.md)
+Normalizes depth values to $[0,1]$ and applies a custom blue-to-red colormap for visualization. This variant likely adjusts the parameters $\mathbf{a}, \mathbf{b}, \mathbf{c}, \mathbf{d}$ to restrict the color space to the blue-red spectrum, providing a specific perceptual mapping for depth data [3921-blue-red-colormap.md].
+
+## Operating characteristics
+**Time and Memory Complexity**
+- Time: $O(1)$ per sample. Requires 3 cosine evaluations, 3 multiplications, and 3 additions per channel.
+- Memory: $O(1)$ for constant parameters. No lookup table storage is required.
+
+**Measured Performance**
+Not given in the sources.
+
+**Strengths and Limitations**
+- **Strengths**: Analytic definition allows for infinite resolution without interpolation artifacts. Smooth gradients are inherent. Low memory footprint compared to LUTs.
+- **Limitations**: The color distribution is fixed by the parameters. It may not provide optimal perceptual uniformity for all data types compared to designed colormaps (e.g., viridis). The periodic nature can cause color repetition if the input range exceeds $[0, 1]$ significantly.
+
+**When to Use**
+Use when memory is constrained, or when a smooth, analytic color gradient is desired without the overhead of sampling a large LUT. Suitable for real-time volume rendering where transfer functions are evaluated per voxel.
+
+## Background
+The method was popularized by Inigo Quilez in the context of shader programming and procedural graphics [S1, unofficial]. It is widely used in GLSL-based volume rendering implementations to provide visually appealing, smooth color transitions for scalar fields.
+
+## Sources
+[S1] Show HN: Volume rendering 3D data in Three.js and GLSL, https://github.com/SuboptimalEng/volume-rendering, fetched 2026-10-26 (unofficial)
+[S2] terier/vpt, https://github.com/terier/vpt, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,178 @@
+Ray-traced renderer for Minecraft 26.2's Vulkan backend. - Render the first-person viewmodel inside the path tracer by xysgottaken2 · Pull Request #25 · xysgottaken2/Caustica
+
+Render the first-person viewmodel inside the path tracer by xysgottaken2 · Pull Request #25 · xysgottaken2/Caustica · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+xysgottaken2
+commented
+Oct 21, 2026
+Copy link
+Copy Markdown
+Owner
+Make the hand and whatever it holds part of the traced scene, so the game feels alive up close: a held block gets real parallax relief, a held lantern gets a real sun highlight, the hand reflects in water and glass, and fog and depth of field act on it. Opt in via Video Settings > Ray Tracing > Sky, Hand & Camera.
+Disabled by default (caustica.rt.viewmodelRayTracing defaults to false), so nothing changes for existing users until they opt in.
+WHAT WAS HAPPENING
+GameRenderer rendered the viewmodel in renderItemInHand: a screen-space raster pass after the world, behind a depth clear, through its own 3d-hud projection (70 degrees fixed, modulated by hand.fov-follows-camera). Caustica keeps that pass and redirects it into the UI overlay, so under the path tracer the hand was a flat, unlit decal. It was never geometry the rays could see - no POM, no specular, no reflection, no shadow, no fog, no DoF.
+HOW IT WORKS
+Capture - at the seam that already ends the scaled world and starts the hand overlay (the injection point that calls WorldRenderScaler.end), RtViewmodel.capture replays the game's own FirstPersonHandsAndItemsRenderer.submitHandsWithItems into RtEntityCollector, the collector the world entities use. Nothing about the viewmodel is reimplemented: HandRenderSelection main/off hand, the swing, the item swap slide, the hurt sway, the eating jiggle, the crossbow draw, bobbing, scoping suppression, item tints and the glint are computed by vanilla inside that call, so the captured mesh is the mesh the game would have rastered. The gates (panoramic, camera type, sleeping, HUD hidden, spectator, no player) are copied from renderItemInHand, and bobHurt/bobView are invoked through @invoker instead of copying their math.
+Space - renderItemInHand composes its pose as V^-1 * bob * model while the raster pass applies V again through the model-view stack. The two cancel, which is why the hand does not swing off screen when you turn, and it means the vertices reaching the collector are already camera-relative world offsets around the eye. The TLAS instance is therefore a pure translation by cameraPosition - rebaseOrigin. The model-view stack is deliberately untouched, and so is vanilla's projection: the 3d-hud matrix the hand was rastered through has no effect on the capture, because there is no raster draw for it to affect.
+The one real difference is projection scale. Two projections differing only in vertical scale agree on a point's image iff its view depth is scaled by the ratio of their tangents, so the hand is dollied by k = m11_level / m11_hud - the same apparent-size/distance trade a viewmodel-FOV slider makes. k is read off the matrix the rays actually use, so the sprint and zoom multiplier, the spyglass and the death/fluid factor cancel with no accounting. Second toggle (caustica.rt.viewmodelMatchHudFov, also default off) controls it; out of [0.35, 2.5] the compensation is abandoned and the hand keeps world scale.
+The dolly is applied to the captured mesh, not to the instance: positions by V^-1 Z(k) V and prim normals by the inverse-transpose, renormalised. Under an anisotropic scale the correct normal transform is not the position transform, and world.rchit rotates captured prim normals by entityO2w - the position transform. Baking it keeps entityO2w the no-op its comment documents for per-frame-built geometry, and keeps the TBN derived from positions and UVs, the captured normal and the POM relief in one consistent frame. With k == 1 the function returns immediately, so the traced mesh is bit-identical to what vanilla would have rastered.
+The three rules you asked for:
+Receives light, casts none. The instance carries a TLAS mask bit of its own, 0x08, which no ordinary ray asks for: every other instance producer in the world moved from 0xFF to 0xF7 (RtAccel.Instance's default, terrain, wear, block entities, fire, portals, particles, the RtWaterProxy pass). Shadow, GI, reflection and held-light rays cannot hit it at all, so it casts no shadow and never hides what is behind it - your shadow keeps coming from the first-person body instance, exactly as before.
+Nothing shades it into blackness. Shadow rays that start on a viewmodel surface run under CULL_VIEWMODEL_SHADOW (0xF0): terrain and ordinary entities still occlude, but the first-person body (0x01), particles (0x02), DH LODs (0x03) and the hand's own geometry (0x08) do not. Selected in one place, inside visibility(), from a payload flag the closest-hit shader sets (PAYLOAD_VIEWMODEL) - no flag threaded through every lighting, fog and volumetric call site. Because the flag rides the payload, secondary and probe rays keep their own mask even when a traced eye ray landed on the hand and continued through it.
+Layers above the world. The raster pass got away with a depth clear; a closest-hit shader cannot, so a block the arm swings through would win the hit and punch a hole in the hand. traceViewmodelOverlay re-traces a primary ray whose world hit is farther than the hand's published reach against viewmodel geometry only, at exactly one intersection, and the hit replaces the world's shading (misses roll the payload back). The bound is published through a new trailing WorldPush lane (worldPush.viewmodel, x = reach in blocks) computed from the dollied mesh, so nothing near the camera skips the pass and every other frame pays zero.
+Material identity: a per-frame TLAS rebuild with a stable BLAS address lets a reused instance skip the table lookup, so the hand would have inherited the material of the entity that last held the address (and a glowing block could have been demoted to dielectric, which the overlay pass excludes). The capture therefore always looks its material up, tagged with a new per-geometry kind flag (EntityGeom.flags bit 0, ENTITY_GEOM_VIEWMODEL) that forces the opaque model and the single-atlas path for the viewmodel instance only. A held glowstone keeps its emission and tint because the flag only rewrites the model id.
+Held torches keep lighting the world: the hand light's shadow mask was already excluding the screen-space hand overlay (0xFC), and the viewmodel's new bit has to stay out of it too, or the held block shades the hand holding it - hence 0xF4.
+SETTINGS UI
+Two toggles in Video Settings > Ray Tracing > Sky, Hand & Camera (the page that already owns hand.fov-follows-camera), with tooltips, per-page and global reset coverage, and keys in all 11 locales.
+TESTING
+Added RtViewmodelRayTracingTest, which pins the ABI the feature depends on: the mask reservation on both sides of the boundary, the geometry kind flag mirrored between Java and Slang, payload-aware shadow visibility (including that the payload is restored for secondaries), primary-only overlay with rollback, the push constant lane ordered so the generated constructor stays positional, the conditional cancellation of vanilla's submission, the seam replicating vanilla's gates, and the mixin/ABI/default-off contract. RtShaderConstantMirrorTest gained the new WorldPush lane and a flag-mirror check. The ABI table gained the rows this feature newly depends on (the whole viewmodel submission chain, so a rename fails verifyMinecraftAbi at build time rather than at 3am in a cave).
+Tested by code review only. This environment has no JDK, no Gradle, no Minecraft or Fabric dependency cache and no Vulkan ray-tracing GPU, so ./gradlew build, the test suite, the SPIR-V compile and the in-game behaviour could not be executed; shader text, brace balance, JSON/TSV parsing and every asserted marker were checked programmatically.
+xysgottaken2
+and others
+added 2 commits
+October 21, 2026 02:05
+Add the ray-traced first-person viewmodel
+…
+6b75e70
+```
+The first-person hand was the one piece of the screen the path tracer never saw: GameRenderer
+rendered it in a screen-space raster pass after the world, behind a depth clear and its own 3d-hud
+projection, and Caustica redirected that pass into the UI overlay. The hand therefore had no POM relief,
+no sun specular, no reflection in a wet floor and no interaction with fog or DoF.
+
+It is now opt-in real geometry inside the traced scene, disabled by default (caustica.rt.viewmodelRayTracing).
+
+Capture: the seam that ends the scaled world and starts the hand overlay replays vanilla's own
+FirstPersonHandsAndItemsRenderer.submitHandsWithItems into RtEntityCollector, reproducing
+renderItemInHand's gates and pose (inverse camera rotation, bobHurt, bobView) rather than
+reimplementing them, so the arm, swing, item swap, hurt tilt, bobbing, glint and item tints are
+literally the game's own submission. renderItemInHand composes V^-1 * bob * model while the raster pass
+applies V again, so the arriving vertices are already camera-relative world offsets: the TLAS instance is
+a pure translation by camera - rebaseOrigin. The HUD-vs-level projection difference becomes the one
+deliberate deviation, applied as a view-depth dolly k = m11_level / m11_hud baked into the captured
+positions and, via the inverse-transpose, into the captured prim normals - never into the instance, so
+entityO2w keeps being the no-op the hit shaders assume.
+
+The three viewmodel rules: it receives light but casts none (its own TLAS mask bit 0x08, which no
+ordinary ray asks for - the terrain default mask becomes 0xF7 accordingly); shadow rays that start on
+its surface run under CULL_VIEWMODEL_SHADOW, so the body, particles, DH and the hand itself cannot
+shade it; and traceViewmodelOverlay re-traces primary rays that stopped closer than the hand's own
+published reach against viewmodel geometry only, which is what keeps it layered above blocks instead of
+cut into them.
+
+Held torches stay lit: CULL_HAND_LIGHT 0xFC -> 0xF4, because a held block must not shadow the hand
+holding it.
+
+Everything else is unchanged by construction: with the toggle off there is no capture, no instance, no
+extra trace and no dolly, and any failure (a thrown capture, a frame that bailed before instancing, a
+submission the collector cannot reproduce such as a drawn map) falls back to vanilla's hand pass for that
+frame instead of leaving the player handless.
+
+docs/viewmodel-ray-tracing.md records the seam, the math, the three rules and the deliberate
+differences; docs/minecraft-26.3.md's isolated-capture paragraph now names the exception.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+rt: let the viewmodel overlay win wherever it covers
+…
+1e29092
+```
+The above-blocks layer was gated on the world hit's distance: it re-traced for the viewmodel only when
+the primary ray had stopped nearer than the hand's own reach. That inverts the rule it exists to
+implement. The hand is an overlay in vanilla's sense — after the depth clear, a block at 0.3 blocks does
+not outrank it — so the common case, a world hit *beyond* the hand, was precisely the case that skipped
+the re-trace: the path tracer showed the wall or the floor and the hand vanished, and the hand appeared
+only while pressing a face. Ranking the two layers by distance can never produce "always on top".
+
+The gate is gone: every primary ray inside the capture's directional cone re-traces against viewmodel
+geometry, a hit replaces the world payload unconditionally, and a miss restores it. The cost is bounded by
+direction rather than by distance, which is the one axis where a conservative bound is sound: the capture
+publishes the cone enclosing every vertex direction (worldPush.viewmodelCull, a new trailing lane), and a
+ray outside it cannot touch the hand because a triangle's directions from the eye are positive combinations
+of its vertices' directions and a convex cone is closed under those. It degrades permissively in both
+directions — the test is scaled by |rd| rather than trusting normalisation, and a capture that cannot bound
+itself (a pose wrapped around the eye, a cancelled mean, a non-finite result) publishes cos(halfAngle) = -1,
+which traces everywhere.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+xysgottaken2
+commented
+Oct 21, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Author
+Fix pushed in 1e29092 after play-testing feedback: with the toggle on, the hand appeared only while facing geometry closer than the arm, and disappeared against the sky, walls and the floor.
+The above-blocks layer was gated on the world hit's distance (re-trace for the viewmodel only when the primary ray had stopped nearer than the hand's own reach). That inverts the rule it implements: after vanilla's depth clear a block at 0.3 blocks does not outrank the hand, so the common case - a world hit beyond the hand - was exactly the case that skipped the re-trace. Ranking the two layers by distance can never produce "always on top".
+The gate is gone. Every primary ray inside the capture's directional cone re-traces against viewmodel geometry, a hit replaces the world payload unconditionally, a miss restores it. Cost is bounded by direction instead of distance, which is the one axis where a conservative bound is sound: worldPush.viewmodelCull (new trailing lane) carries the cone enclosing every captured vertex direction, and a triangle's directions from the eye are positive combinations of its vertices' directions, so a ray outside it cannot touch the hand. It degrades permissively: the test is scaled by |rd| rather than trusting normalisation, and a capture that cannot bound itself publishes cos(halfAngle) = -1, which traces everywhere.
+The regression test that had pinned the inverted behaviour now pins the opposite, as a negative assertion (the correct code is the absence of that test), plus the cone's always-trace sentinel and the same-frame provenance of both bounds. CI on this commit (JVM, ABI, JAR and the shader compile with -warnings-as-errors all) is green.
+rt: drop the ray-traced viewmodel's HUD-FOV match
+…
+6ecc515
+```
+hand.ray-traced-matches-hud-fov was the one setting in this feature that existed to undo a distortion the
+feature itself introduced: the traced hand is a world-space object, so it is projected by the level
+projection while vanilla rasterizes its hand through the separate 3d-HUD projection. The dolly scaled the
+capture's view depth by m11_level / m11_hud to put the projected image back where vanilla's sits.
+
+It goes because it should have never been a second knob. At the default 70-degree FOV the ratio is one, so
+the setting only did anything away from the default — exactly where hand.fov-follows-camera, which rescales
+the 3d-HUD projection itself, is already working on the same effect; two controls over one parameter is how
+the size ends up wrong rather than right. And the compensation was not free of side effects: scaling a
+single axis is anisotropic, so the captured prim normals needed the inverse-transpose rather than the
+transform the hit shaders apply (the reason the dolly was baked into the mesh at all), and it moved the
+surface that fog, the focal plane and the motion vectors measure, so the arm got vanilla's silhouette with a
+borrowed depth that changed on every sprint. A hand held in the world should scale like a thing held in the
+world; hand.fov-follows-camera remains the way to make it agree with the HUD projection.
+
+Removed: the setting and its comment, the video-options row and its sub-screen entry, the two lang keys in
+all eleven locales, RtViewmodel.applyHudDolly/hudDepthScale with their dolly bounds and the now-unused
+Matrix4f/Mth/Minecraft imports, and the reach/cone ordering assertion that referenced them. Nothing about
+the capture, the masks, the overlay or the motion vectors changes, and the instance keeps being a pure
+translation — which is now also why entityO2w needs no special case for the viewmodel.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+xysgottaken2
+commented
+Oct 21, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Removed in 6ecc515 at play-testing feedback: the second setting, caustica.rt.viewmodelMatchHudFov / hand.ray-traced-matches-hud-fov.
+It existed to undo a distortion the feature introduced - the traced hand is projected by the level projection while vanilla rasterizes its hand through the 3d-HUD one - by dollying the capture's view depth by m11_level / m11_hud. But at the default 70-degree FOV the ratio is one, so the setting only did anything precisely where hand.fov-follows-camera was already rescaling the same projection: two controls on one parameter, which is how the size ends up wrong rather than right. It was not free either. Scaling one axis is anisotropic, so the captured prim normals needed the inverse-transpose rather than the transform world.rchit applies to them (that is the only reason the dolly was baked into the mesh instead of the instance), and it moved the surface that fog, the focal plane and the motion vectors measure - vanilla's silhouette with a borrowed depth, changing every sprint.
+So the hand now simply has world scale, like any object held in the world, and hand.fov-follows-camera stays the single knob for matching it to the HUD projection. Dropped: the setting and its config-file comment, the video-options row and its skySettings() entry, the two lang keys in all 11 locales, RtViewmodel.applyHudDolly/hudDepthScale with the dolly bounds and the Matrix4f/Mth/Minecraft imports, and the assertion that referenced the ordering. The capture, the masks, the overlay, the cone and the motion vectors are untouched, and the instance stays a pure translation - which is now also why entityO2w needs no viewmodel special case. 17 files, +71/-221; CI green (JVM, tests, ABI, shaders with -warnings-as-errors, JAR).
+Hide details
+View details
+xysgottaken2
+merged commit fe38631
+into
+main
+Oct 21, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,93 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method enables GPU volume rendering of large, sparse volumetric datasets by combining offline fixed-rate lossy compression on the CPU (using OpenVDB) with fast, low-overhead on-the-fly decompression and sampling on the GPU (using NanoVDB) [S2, unofficial]. It solves the problem of rendering volumes that exceed single-GPU memory capacity by significantly reducing the memory footprint while maintaining random access patterns suitable for incoherent workloads like path tracing [S2, unofficial]. Unlike hierarchical space-skipping approaches which show diminishing returns with RGBA transfer functions, this method typically employs a uniform majorant grid for traversal acceleration to facilitate direct comparison with dense texture rendering [S1, S2, unofficial].
++This method enables GPU volume rendering of large, sparse volumetric datasets by combining offline fixed-rate lossy compression on the CPU (using OpenVDB) with fast, low-overhead on-the-fly decompression and sampling on the GPU (using NanoVDB) [S2, unofficial]. It solves the problem of rendering volumes that exceed single-GPU memory capacity by significantly reducing the memory footprint while maintaining random access patterns suitable for incoherent workloads like path tracing [S2, unofficial]. Unlike hierarchical space-skipping approaches which show diminishing returns with RGBA transfer functions, this method employs a uniform majorant grid for traversal acceleration to facilitate direct comparison with dense texture rendering [S1, S2, unofficial].
+ 
+ ## How it works
+@@ -20,5 +20,5 @@
+ *   **Node4 (Middle):** Span $16^3$ ($1 \ll 4$) [S3, unofficial].
+ *   **Node3 (Bottom):** Span $8^3$ ($1 \ll 3$) [S3, unofficial].
+-*   **Brick Size:** $32 \times 32 \times 32$ voxels for the standard {3,4,5} layout [S2, unofficial]. Note: Some implementations (e.g., Evolve) use $8^3$ bricks for the leaf data storage [S3, unofficial].
++*   **Brick Size:** $32 \times 32 \times 32$ voxels for the standard {3,4,5} layout [S2, unofficial].
+ 
+ #### NanoVDB Structure (GPU)
+@@ -52,5 +52,5 @@
+ 2.  **Bricking:** Divide the volume conceptually into bricks sized to match the leaf node dimensions (e.g., $32 \times 32 \times 32$) [S2, unofficial].
+ 3.  **Brick Analysis:** For each brick, compute the minimum and maximum voxel values $[lo, hi]$ [S2, unofficial].
+-4.  **Brick Sorting:** Sort bricks in ascending order of distance to $B$ (most similar first) [S2, unofficial]. Three metrics are defined [S2, unofficial]:
++4.  **Brick Sorting:** Sort bricks based on their similarity to the background value $B$ using one of the metrics $f_1$, $f_2$, or $f_3$. Bricks most similar to the background come first [S2, unofficial]. Three metrics are defined [S1, unofficial]:
+     *   $f_1 = \min(|lo - B|, |hi - B|)$ (closest point-in-range) [S1, unofficial]
+     *   $f_2 = \max(|lo - B|, |hi - B|)$ (farthest point-in-range) [S1, unofficial]
+@@ -73,20 +73,18 @@
+ def compress_volume(volume, W, H, D, quality):
+     # 1. Background Value Identification
+-    histogram = compute_histogram(volume)  # [G] Standard histogram computation
+-    background_idx = argmax(histogram)     # [G] Standard argmax
+-    B = volume.value_at(background_idx)
++    histogram = [0] * 256  # [G] Standard histogram computation for 8-bit values
++    for v in volume: histogram[v] += 1
++    B = max(range(256), key=lambda i: histogram[i])  # [G] Standard argmax
+ 
+     # 2. Bricking
+     brick_size = 32
+-    num_bricks_x = math.ceil(W / brick_size)
+-    num_bricks_y = math.ceil(H / brick_size)
+-    num_bricks_z = math.ceil(D / brick_size)
+-    num_bricks = num_bricks_x * num_bricks_y * num_bricks_z
++    nx, ny, nz = math.ceil(W / brick_size), math.ceil(H / brick_size), math.ceil(D / brick_size)
++    num_bricks = nx * ny * nz
+ 
+     # 3. Brick Analysis
+     brick_ranges = []
+-    for i in range(num_bricks):
+-        lo = i * brick_size
+-        hi = (i + 1) * brick_size
++    for brick_id in range(num_bricks):
++        lo = brick_id * brick_size
++        hi = (brick_id + 1) * brick_size
+         brick_ranges.append((lo, hi))
+ 
+@@ -99,23 +97,25 @@
+ 
+     # 5. Voxel Activation
+-    openvdb_tree = create_empty_openvdb_tree()  # [G] Standard OpenVDB tree creation
+-    
++    openvdb_tree = {}  # [G] Standard sparse dictionary/tree structure
+     # Activate extreme corners explicitly to preserve world bounds [S1, unofficial]
+-    openvdb_tree.set((0, 0, 0), volume.value_at((0, 0, 0)))
+-    openvdb_tree.set((W-1, H-1, D-1), volume.value_at((W-1, H-1, D-1)))
++    openvdb_tree[(0, 0, 0)] = volume[(0, 0, 0)]
++    openvdb_tree[(W-1, H-1, D-1)] = volume[(W-1, H-1, D-1)]
+ 
+     bricks_to_activate = int(num_bricks * quality)
+     bricks_active = 0
+-    
++
+     # Iterate from the end (least similar to background) [S2, unofficial]
+     for idx, brick_range in reversed(sorted_bricks):
+         if bricks_active >= bricks_to_activate:
+             break
+-        for voxel in get_voxels_in_brick(brick_range):  # [G] Iterate over 3D voxel coordinates in brick
+-            openvdb_tree.set(voxel, volume.value_at(voxel))
++        # [G] Iterate over 3D voxel coordinates in brick
++        for x in range(brick_range[0], brick_range[1], brick_size):
++            for y in range(brick_range[0], brick_range[1], brick_size):
++                for z in range(brick_range[0], brick_range[1], brick_size):
++                    openvdb_tree[(x, y, z)] = volume[(x, y, z)]
+         bricks_active += 1
+ 
+     # 6. Finalization
+-    prune_tree(openvdb_tree)  # [G] Standard OpenVDB pruning
++    # [G] Standard tree pruning removes empty internal nodes
+     return openvdb_tree
+ 
+@@ -145,5 +145,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Rendering performance is competitive with hardware-accelerated 3D texture sampling [S2, unofficial].
+-*   **Memory Complexity:** Significant memory savings compared to dense textures [S2, unofficial]. For the Galaxy dataset (108 GB raw), VDB achieves 14 GB at 1:8 rate [S1, unofficial]. NanoVDB overhead is ~10% for large datasets [S2, unofficial].
++*   **Memory Complexity:** Significant memory savings compared to dense textures [S2, unofficial]. NanoVDB overhead is ~10% for large datasets [S2, unofficial].
+ *   **Measured Performance:**
+     *   Galaxy dataset: VDB achieves 34.8 FPS on 1 GPU vs 18.6 FPS for dense textures on 3 GPUs [S1, unofficial].

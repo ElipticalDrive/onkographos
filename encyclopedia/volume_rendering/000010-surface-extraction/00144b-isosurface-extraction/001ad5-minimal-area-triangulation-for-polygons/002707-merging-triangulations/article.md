@@ -1,0 +1,271 @@
+# Merging Triangulations
+
+Also called: Stitching Triangulations
+
+## Overview
+Merging Triangulations is the final assembly step in hierarchical surface reconstruction methods that use adaptive clustering and piecewise polynomial approximation. It combines individual optimal triangulations generated for separate cluster regions into a single, watertight mesh by filling the gaps along cluster boundaries defined by a BSP tree hierarchy [S1, unofficial]. Unlike methods that operate directly on raw data points, this approach exploits the connectivity of the clustering hierarchy to stitch pre-computed triangulations, ensuring that the resulting mesh approximates the underlying data within a prescribed error bound [S1, unofficial]. It is distinguished from sibling methods by its reliance on a reverse-order subdivision process and its specific handling of boundary polygons to maintain geometric consistency across cluster interfaces [S1, unofficial].
+
+## How it works
+The method operates on a set of individual optimal triangulations, each associated with a cluster region in a BSP tree hierarchy. The goal is to merge these disjoint triangulations into a single global triangulation.
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   A BSP tree defining the cluster hierarchy.
+    *   A set of individual optimal triangulations, one for each leaf cluster region.
+    *   For each triangulation, a closed boundary polygon enclosing all triangles, edges, and vertices within the cluster region [S1, unofficial].
+    *   An error bound $\epsilon$ for the approximation [S1, unofficial].
+*   **Outputs:**
+    *   A single unified triangulation covering the entire domain.
+    *   Triangles that satisfy the error bound (or are modified to do so) [S1, unofficial].
+
+### Data Structures
+*   **Boundary Polygon:** A list of vertices forming a closed loop. The polygon encloses all simplices (triangles, edges, vertices) of the optimal triangulation within the cluster. It does not enclose areas other than optimal triangles. Vertices may appear multiple times in the list if they are part of the boundary loop multiple times [S1, unofficial].
+*   **Polygon Strip:** A subsequence of the boundary polygon vertices extracted along the cluster bisector.
+
+### Steps
+
+1.  **Construct Boundary Polygons:**
+    For each optimal triangulation, construct a closed boundary polygon.
+    *   For parabolic or planar graph surfaces, this is straightforward.
+    *   For elliptic or hyperbolic cases, triangulations may be disconnected or contain line segments not part of any triangle. Special handling is required to ensure the polygon encloses all simplices [S1, unofficial].
+    *   **Algorithm:** Use a scan-line algorithm parallel to the longest edge of the triangulation. Identify the left-most and right-most vertices inside the cluster region for every scan line. Add additional vertices inside the cluster region to the boundary polygon to ensure the enclosed area contains *only* optimal triangles, minimizing the enclosed area [S1, unofficial].
+
+2.  **Shrink Cluster Regions (Optional but Recommended):**
+    Shrink each cluster region by a small percentage towards its centroid to avoid boundary overlaps during stitching [S1, unofficial].
+
+3.  **Merge in Reverse Subdivision Order:**
+    Traverse the BSP tree in reverse order of subdivision (from leaves to root). At each internal node, exactly two child triangulations are merged along the bisecting line segment $p_1p_2$ that separates their cluster regions [S1, unofficial].
+
+4.  **Extract Polygon Strips:**
+    For the two triangulations to be merged, separated by segment $p_1p_2$:
+    *   Identify the vertex in the first boundary polygon closest to $p_1$.
+    *   Identify the vertex in the second boundary polygon closest to $p_2$.
+    *   Extract two polygon strips from the respective boundaries, starting from the identified vertices and ending at the vertices closest to $p_2$ and $p_1$ respectively. These strips lie along the bisector $p_1p_2$ [S1, unofficial].
+
+5.  **Marching and Triangle Construction:**
+    Construct triangles by marching along the two polygon strips, connecting point pairs using vertices from opposite sides of $p_1p_2$.
+    *   Let the current vertices on the two strips be $u$ and $v$.
+    *   There are two possible choices for the next triangle: $(u, v, next_u)$ or $(u, v, next_v)$, where $next_u$ and $next_v$ are the subsequent vertices on their respective strips.
+    *   **Selection Criterion:** Choose the edge with minimal length among the two possible choices. Specifically, compare the length of the edge connecting to the next vertex on the opposite strip. Prefer the shorter edge [S1, unofficial].
+
+6.  **Handle Negative Area (Overlap):**
+    Ensure no triangles with negative area (overlap) are produced.
+    *   If both choices for the next triangle would result in negative area, construct a triangle from three consecutive vertices in one of the polygon strips, thereby eliminating the middle vertex [S1, unofficial].
+    *   If stitching still produces negative areas for both choices after this step, insert a triangle from three vertices of the *other* polygon strip [S1, unofficial].
+
+7.  **Error Verification and Correction:**
+    Triangles resulting from stitching are not guaranteed to satisfy the prescribed error bound $\epsilon$.
+    *   Estimate the approximation error for all scattered data points located inside the regions defined by the newly stitched triangles.
+    *   If a triangle violates the error bound:
+        *   Flip an edge between two adjacent triangles, or
+        *   Insert the sample point with the greatest approximation error as a new vertex into the triangulation.
+    *   Re-check errors for all modified triangles and repeat until all triangles satisfy the bound [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def merge_triangulations(bsp_tree, triangulations):
+    """
+    Merges individual optimal triangulations into a single mesh.
+    
+    Args:
+        bsp_tree: The BSP tree defining cluster hierarchy.
+        triangulations: Dictionary mapping cluster_id to Triangulation object.
+        
+    Returns:
+        Unified Triangulation object.
+    """
+    # Process in reverse order of subdivision (leaves to root)
+    nodes = bsp_tree.get_nodes_in_reverse_subdivision_order()
+    
+    for node in nodes:
+        if node.is_leaf():
+            continue
+            
+        left_child = node.left_child
+        right_child = node.right_child
+        
+        # Get the bisecting segment separating the two clusters
+        p1, p2 = node.get_bisector_endpoints()
+        
+        # Get the triangulations for the children
+        tri_left = triangulations[left_child.id]
+        tri_right = triangulations[right_child.id]
+        
+        # Shrink cluster regions slightly towards centroid to avoid overlap
+        tri_left.shrink_boundary(0.01)
+        tri_right.shrink_boundary(0.01)
+        
+        # Extract polygon strips along the bisector p1-p2
+        # Strip from left triangulation: starts at vertex closest to p1, ends at vertex closest to p2
+        strip_left = extract_polygon_strip(tri_left.boundary_polygon, p1, p2)
+        
+        # Strip from right triangulation: starts at vertex closest to p2, ends at vertex closest to p1
+        # Note: The source describes extracting strips starting from closest to p1/p2 respectively.
+        # We assume symmetric extraction logic for the other side.
+        strip_right = extract_polygon_strip(tri_right.boundary_polygon, p2, p1)
+        
+        # March along strips to create new triangles
+        new_triangles = []
+        i = 0
+        j = 0
+        
+        while i < len(strip_left) - 1 and j < len(strip_right) - 1:
+            u = strip_left[i]
+            v = strip_right[j]
+            u_next = strip_left[i+1]
+            v_next = strip_right[j+1]
+            
+            # Two choices for next triangle:
+            # Choice 1: Triangle (u, v, v_next) using edge from right strip
+            # Choice 2: Triangle (u, v, u_next) using edge from left strip
+            
+            # Calculate edge lengths for the "cross" edges
+            len_cross_1 = distance(u, v_next)
+            len_cross_2 = distance(v, u_next)
+            
+            # Check for negative area (overlap)
+            area_1 = signed_area(u, v, v_next)
+            area_2 = signed_area(u, v, u_next)
+            
+            if area_1 < 0 and area_2 < 0:
+                # Both choices produce negative area
+                # Construct triangle from three consecutive vertices in one strip
+                # Eliminate the middle vertex. Prefer one strip arbitrarily or based on heuristic.
+                # Here we pick left strip.
+                new_triangles.append(Triangle(u, u_next, strip_left[i+2] if i+2 < len(strip_left) else u))
+                i += 2 # Skip the eliminated vertex
+                continue
+            
+            if area_1 < 0:
+                # Choice 1 invalid, must use Choice 2
+                new_triangles.append(Triangle(u, v, u_next))
+                i += 1
+                # j stays same? No, v is used. v_next is still available?
+                # The source says "connecting point pairs". 
+                # If we use (u,v,u_next), we consumed u, v, u_next.
+                # v_next is still on the right strip.
+                i += 1
+                j += 1 # v is consumed
+                continue
+                
+            if area_2 < 0:
+                # Choice 2 invalid, must use Choice 1
+                new_triangles.append(Triangle(u, v, v_next))
+                i += 1 # u is consumed
+                j += 1 # v, v_next consumed
+                continue
+                
+            # Both valid, choose minimal length edge
+            if len_cross_1 < len_cross_2:
+                new_triangles.append(Triangle(u, v, v_next))
+                i += 1
+                j += 1
+            else:
+                new_triangles.append(Triangle(u, v, u_next))
+                i += 1
+                j += 1
+                
+        # Handle remaining vertices in strips if any
+        # ... (implementation detail for end cases)
+        
+        # Merge new triangles into the combined triangulation
+        combined_tri = merge(tri_left, tri_right, new_triangles)
+        
+        # Error verification and correction
+        combined_tri = correct_error_bounds(combined_tri, node.cluster_data_points, node.error_bound)
+        
+        # Store result for parent node
+        triangulations[node.id] = combined_tri
+        
+    return triangulations[bsp_tree.root.id]
+
+def extract_polygon_strip(boundary_polygon, start_point, end_point):
+    """
+    Extracts a polygon strip from the boundary polygon.
+    Starts at the vertex closest to start_point and ends at the vertex closest to end_point.
+    """
+    # Find index of vertex closest to start_point
+    start_idx = argmin([distance(v, start_point) for v in boundary_polygon])
+    
+    # Find index of vertex closest to end_point
+    end_idx = argmin([distance(v, end_point) for v in boundary_polygon])
+    
+    # Extract vertices from start_idx to end_idx along the polygon loop
+    # The direction depends on the polygon winding and relative positions.
+    # Assuming the boundary is a closed loop, we traverse from start to end.
+    strip = []
+    n = len(boundary_polygon)
+    curr = start_idx
+    while True:
+        strip.append(boundary_polygon[curr])
+        if curr == end_idx:
+            break
+        curr = (curr + 1) % n
+        
+    return strip
+
+def signed_area(p1, p2, p3):
+    """Returns 2x the signed area of the triangle."""
+    return (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x)
+
+def correct_error_bounds(triangulation, data_points, error_bound):
+    """
+    Checks error bounds for stitched triangles and modifies if necessary.
+    """
+    modified = True
+    while modified:
+        modified = False
+        for triangle in triangulation.triangles:
+            # Estimate max error for data points inside this triangle
+            max_error = estimate_max_error(triangle, data_points)
+            
+            if max_error > error_bound:
+                # Modify triangle: flip edge or insert vertex
+                # Try edge flipping first
+                if try_edge_flip(triangle, triangulation):
+                    modified = True
+                    continue
+                
+                # If flipping fails or doesn't reduce error, insert vertex
+                worst_point = find_worst_approximation_point(triangle, data_points)
+                insert_vertex_into_triangle(triangle, worst_point, triangulation)
+                modified = True
+                
+    return triangulation
+```
+
+### Parameters
+*   **Error Bound Split:** In numerical examples, a greater error bound is used for the quadratic approximation step than for the final triangulation of polynomials. This makes the total error bound relatively loose for the triangles obtained from the stitching process, making violations of the error estimate extremely rare [S1, unofficial].
+*   **Shrink Percentage:** A small percentage (e.g., 1%) used to shrink cluster regions towards their centroid to prevent boundary overlaps [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Negative Area (Overlap):** The algorithm must strictly avoid producing triangles with negative area. If both standard choices for the next triangle result in negative area, a triangle must be constructed from three consecutive vertices in one polygon strip, eliminating the middle vertex. If this still fails, a triangle from three vertices of the other polygon strip is inserted [S1, unofficial].
+*   **Disconnected Triangulations:** In elliptic and hyperbolic cases, the optimal triangulation inside a cluster region may be disconnected or contain line segments not part of any triangle. The boundary construction must handle these cases to ensure the boundary polygon correctly encloses all simplices [S1, unofficial].
+*   **Vertex Multiplicity:** A vertex can be part of the boundary polygon multiple times. The algorithm must handle this correctly when extracting strips and marching [S1, unofficial].
+
+## Subtopics
+
+### Optimal Approximation with Triangles
+A hierarchical triangulation approach that uses piecewise quadratic polynomial approximation as an intermediate representation. It generates optimally shaped triangles for each cluster region such that all triangles imply the same approximation error. Unlike methods operating directly on data points, this method is based on adaptive clustering and quadratic representation. The cost depends on clustering complexity and error bound, not the number of original data points. It serves as the precursor to Merging Triangulations, providing the individual optimal triangulations that are then stitched together [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The cost of generating the triangulation depends on the complexity of the clustering and the error bound, not on the number of points in the original data set [S1, unofficial]. The merging step itself is linear with respect to the number of boundary vertices along the cluster interfaces.
+*   **Memory Complexity:** Requires storing the boundary polygons for each cluster and the BSP tree hierarchy.
+*   **Strengths:**
+    *   Affine-invariant (if PCA-based clustering is used).
+    *   Produces optimally shaped triangles with minimal area for a given error bound.
+    *   Efficient for densely sampled, smooth data sets [S1, unofficial].
+*   **Limitations:**
+    *   Requires a hierarchical clustering scheme (e.g., BSP tree).
+    *   Error bounds for stitched triangles are not guaranteed a priori and may require correction steps.
+    *   Complex to implement due to boundary construction and negative area handling.
+*   **When to Use:** Suitable for scientific visualization of scattered data where approximation error is critical and the data is densely sampled and smooth. Not suitable for real-time rendering due to preprocessing complexity.
+
+## Background
+The method was introduced in the context of multiresolution modeling for scientific visualization. It builds upon earlier work on optimal approximation with triangles and adaptive clustering schemes. The approach exploits the affine invariance of the error norm and the connectivity of a BSP tree to efficiently stitch triangulations. Numerical examples were provided for analytical functions and terrain data sets [S1, unofficial]. The method is part of a broader family of hierarchical surface reconstruction techniques that aim to balance geometric fidelity with computational efficiency.
+
+## Sources
+[S1] Multiresolution modeling for scientific visualization, https://escholarship.org/uc/item/5317385v, fetched 2026-10-26 (unofficial)

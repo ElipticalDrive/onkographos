@@ -1,0 +1,176 @@
+Next-Gen fluid solver for Blender. Contribute to jamespa16/flow-x development by creating an account on GitHub.
+
+Upgrade solver from WCSPH to Position Based Fluids, with surface tension by jamespa16 · Pull Request #2 · jamespa16/flow-x · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jamespa16
+commented
+Aug 21, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Replaces the explicit WCSPH solver (Tait-EOS pressure force, CFL-limited substeps) with Position Based Fluids (Macklin & Muller 2013): predict under gravity, run a fixed number of Jacobi density-constraint iterations, derive velocity from the resulting position change. The density constraint is unconditionally stable on its own, so substeps are now bounded only by a free-fall/diffusion limit instead of a stiffness-driven CFL term.
+Adds the s_corr tensile-instability correction to resist particle clustering under tension.
+Adds Morris-style (2000) color-field curvature surface tension, computed in a new pass and applied as a cohesion force alongside gravity at predict time. Reuses the existing Poly6/viscosity-Laplacian kernels rather than introducing a new kernel family (e.g. Akinci-style cohesion). Defaults to 0 (no-op) so existing scenes/caches are unaffected until enabled.
+Removes the now-unused stiffness domain property; adds Solver Iterations, Constraint Relaxation, Anti-Clustering Strength, and Surface Tension in its place.
+Updates config_hash() so any change to the new PBF/tension parameters correctly invalidates stale disk caches.
+Extends scripts/smoke_test.py with a PBF-specific convergence check (mean particle density vs. rest density), which the old smoke test had no equivalent for since WCSPH never had a density constraint to check.
+Test plan
+python3 scripts/test_marching_cubes.py passes (pure-Python regression gate, unaffected by the solver change)
+ruff check . passes
+blender --background --python scripts/smoke_test.py (needs a GPU-enabled Blender 5.2+ environment to actually exercise the compute shaders and the new PBF convergence check)
+Manual run in Blender via scripts/dev_link.py + scripts/reload_on_save.py: confirm stability over a few hundred frames, settling behavior vs. the old WCSPH solver, and (with Surface Tension > 0) visible meniscus/beading behavior with no change at 0
+Confirm the disk cache invalidates correctly on a PBF/tension parameter change (resimulates instead of silently replaying stale frames)
+🤖 Generated with Claude Code
+jamespa16
+and others
+added 3 commits
+August 21, 2026 15:58
+Replace the WCSPH solver with a Position Based Fluids pipeline
+…
+243e0ff
+```
+Predict positions under gravity, then run a fixed number of Jacobi
+density-constraint iterations (Macklin & Muller 2013) instead of an
+explicit Tait-EOS pressure force, deriving velocity from how far the
+projection actually moved each particle. The constraint is
+unconditionally stable on its own, so substeps are now bounded by a
+free-fall/diffusion limit rather than a stiffness-driven CFL term.
+
+Includes the s_corr tensile-instability correction (anti-clustering)
+since it is a small, tightly-coupled addition to the same delta pass.
+Surface tension lands separately on top of this.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+Add Morris-style surface tension
+…
+67f14b5
+```
+A color-field gradient/curvature pass (sph_normal.glsl) feeds a
+cohesion force into the predict step alongside gravity, reusing the
+Poly6 and viscosity-Laplacian kernels already in sph_common.glsl
+rather than a new kernel family. Normals are computed from the
+previous substep's post-predict grid to avoid a second grid build per
+substep, since the bitonic sort already dominates per-substep cost.
+
+Defaults to 0 (a no-op) so existing scenes and caches are unaffected
+until a user opts in via the new Surface Tension slider.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+Update README to describe the PBF pipeline
+…
+dba664e
+```
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+jamespa16
+commented
+Aug 21, 2026
+View reviewed changes
+Comment thread
+solver/sph.py
+config.stiffness,
+config.relaxation,
+),
+"f_sim": (config.viscosity, dt, GRAVITY, BOUNDARY_DAMPING),
+jamespa16
+Aug 21, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Correctness — removed viscosity force with no replacement.
+None of the new PBF shaders read f_sim.x (viscosity) — I grepped all of shaders/*.glsl for f_sim\. and only .y (dt), .z (gravity), and .w (boundary_damping) are ever referenced. The old sph_force.glsl applied an explicit viscosity force (f_viscous += viscosity * mass * (vj - vi) / dj.x * w_visc_lap(...)); that file is deleted and nothing in the new pipeline (predict/lambda/delta/velocity/xsph/finalize) reproduces it. XSPH damping remains, but XSPH's coefficient is a hardcoded constant (XSPH_EPSILON = 0.5), not driven by the user's viscosity value.
+Meanwhile domain/__init__.py's viscosity property ("Dynamic viscosity coefficient; higher is thicker and more damped") is still exposed in the UI panel, still baked into config_hash(), and still fed into f_sim here — it's now silently dead as a physical parameter. It still affects substep_dt()'s viscous_dt limit, but that only changes substep granularity, not the fluid's actual damping/thickness the description promises.
+Failure scenario: a user raises Viscosity from 0.1 to 5.0 expecting a visibly thicker/more damped fluid (per the tooltip) and sees no change in the simulated motion, because no shader force ever reads that value.
+jamespa16
+commented
+Aug 21, 2026
+View reviewed changes
+Comment thread
+solver/sph.py
+Outdated
+def _substep(dt):
+config = _state["config"]
+dispatch_1d(_bind("sph_normal", dt), config.particle_count, LOCAL_GROUP_SIZE)
+jamespa16
+Aug 21, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Efficiency — sph_normal dispatches unconditionally every substep, even though surface tension defaults to 0 (off).
+sph_normal runs a full 3x3x3 neighbor-loop compute pass over every particle each substep regardless of config.surface_tension. Its own docstring already argues that this is affordable ("a small fraction of the substep's cost next to the grid build"), but that means every scene created with the new default settings (surface tension off) still pays for this pass forever, for a normal_img value that sph_predict.glsl explicitly skips using when sigma <= 0.
+Since this is a Python-orchestrated dispatch loop (_substep(), line 480), gating it costs nothing at the GLSL level — no branch is needed in the shader itself:
+```
+if config.surface_tension > 0.0:
+    dispatch_1d(_bind("sph_normal", dt), config.particle_count, LOCAL_GROUP_SIZE)
+dispatch_1d(_bind("sph_predict", dt), config.particle_count, LOCAL_GROUP_SIZE)
+```
+normal_img is zero-initialized in _allocate(), and sph_predict.glsl already guards on mag > 1e-4, so leaving it un-updated when tension is off is safe.
+jamespa16
+and others
+added 2 commits
+August 21, 2026 16:10
+Fix dead viscosity and unconditional surface-tension pass from PR review
+…
+23a3e94
+```
+Wire the Viscosity domain property into XSPH's blend strength instead
+of a hardcoded constant, and skip the sph_normal dispatch when surface
+tension is off (the default) since sph_predict.glsl ignores it anyway.
+```
+Fix stale lambda_img on cache load and outdated grid-clear comment
+…
+51b7513
+```
+A timeline jump reset predicted_img but left lambda_img holding
+densities from the previous frame's particle configuration, so the
+next sph_normal call weighted neighbors with stale density. Zero it
+alongside predicted_img, matching _allocate()'s fresh-seed behavior.
+
+Also updates a comment in sph_cell_clear.glsl that still named the
+deleted sph_density/sph_force shaders as consumers of the empty-cell
+sentinel.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+Hide details
+View details
+jamespa16
+merged commit ca51ff1
+into
+main
+Aug 22, 2026
+1 check failed
+Uh oh!
+There was an error while loading. Please reload this page.
+jamespa16
+deleted the
+pbf-surface-tension
+branch
+August 22, 2026 14:24
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

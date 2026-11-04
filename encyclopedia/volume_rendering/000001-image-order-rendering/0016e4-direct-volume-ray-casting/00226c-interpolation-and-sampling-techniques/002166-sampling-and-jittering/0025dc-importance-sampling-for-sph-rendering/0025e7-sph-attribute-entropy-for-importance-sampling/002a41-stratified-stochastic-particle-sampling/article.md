@@ -1,0 +1,132 @@
+# Stratified Stochastic Particle Sampling
+
+Also called: Stratification of particle samples
+
+## Overview
+Stratified Stochastic Particle Sampling reduces overall sampling error in SPH rendering by selecting well-distributed particle subsets within an acceleration structure's cells [S1]. It differs from naive random discarding by enforcing a structured selection process based on cell and position importance, ensuring that the statistical properties of the particle neighborhood are preserved more accurately during ray marching [S1].
+
+## How it works
+**Inputs:**
+*   Particle set $\mathcal{P}$ organized in a uniform grid acceleration structure.
+*   Data importance grid $p_i(\mathbf{x}_c)$, precomputed for each cell center $\mathbf{x}_c$.
+*   Sampling position $\mathbf{x}$ within the volume.
+*   Probability bounds $p_{\min}$ and $p_{\max}$.
+
+**Outputs:**
+*   A subset of particles chosen from the relevant acceleration structure cells to evaluate the SPH approximation at $\mathbf{x}$.
+
+**Data Structures:**
+*   **Uniform Grid Acceleration Structure:** Stores particles. Cells are aligned with the data importance grid.
+*   **Data Importance Grid:** Stores scalar importance values $p_i(\mathbf{x}_c)$ for each cell center.
+*   **Alignment Constraint:** The acceleration structure and the data importance grid must have equal cell sizes and overlap perfectly, sharing the same center point $\mathbf{x}_c$ for any overlapping cells [S1].
+
+**Parameters:**
+*   $p_{\min}$: Minimum sampling probability bound.
+*   $p_{\max}$: Maximum sampling probability bound.
+*   Grid Resolution: Determines cell size. Optimal cell width for efficient particle access is equal to the kernel function support [S1]. Finer grids increase the stratification factor but may decrease performance [S1].
+
+**Algorithm:**
+1.  Identify all cells in the acceleration structure that contribute to the SPH approximation at the current sampling position $\mathbf{x}$. Let $\mathcal{C}(\mathbf{x})$ be the set of these cells.
+2.  For each cell $\mathbf{x}_c \in \mathcal{C}(\mathbf{x})$:
+    a. Retrieve the particle count in the cell: $N_c = |\mathcal{P}(\mathbf{x}_c)|$.
+    b. Retrieve the cell importance: $p_i(\mathbf{x}_c)$.
+    c. Compute the position importance $p_i(\mathbf{x})$ based on the sampling location relative to the particle distribution or phase [S1].
+    d. Calculate the target number of particles $n$ using the formula:
+       $$ n = p_{\min} + (p_{\max} - p_{\min}) p_i(\mathbf{x}_c) p_i(\mathbf{x}) N_c $$
+    e. Determine the integer number of particles to select: $n_{int} = \lfloor n \rfloor$.
+    f. Select $n_{int}$ particles from $\mathcal{P}(\mathbf{x}_c)$.
+    g. Select one additional particle with probability $p_{rem} = n - n_{int}$ [S1].
+3.  Aggregate the selected particles from all cells in $\mathcal{C}(\mathbf{x})$ to perform the SPH approximation.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def stratified_stochastic_sampling(particles_grid, importance_grid, x, p_min, p_max):
+    """
+    Selects particles for SPH approximation at position x using stratification.
+    
+    Args:
+        particles_grid: Uniform grid mapping cell centers to lists of particles.
+        importance_grid: Uniform grid mapping cell centers to importance values p_i(x_c).
+        x: Sampling position vector.
+        p_min: Minimum probability bound.
+        p_max: Maximum probability bound.
+        
+    Returns:
+        List of selected particles.
+    """
+    selected_particles = []
+    
+    # 1. Identify contributing cells for SPH approximation at x
+    # Note: The specific SPH kernel support determines which cells are accessed.
+    # This function assumes a helper `get_contributing_cells` exists which returns
+    # the centers of cells overlapping the kernel support at x.
+    contributing_cell_centers = get_contributing_cells(particles_grid, x)
+    
+    # Precompute position importance p_i(x)
+    # The source does not specify the exact formula for p_i(x), only that it is used.
+    # [G] Assuming a placeholder function for position importance calculation.
+    position_importance = compute_position_importance(x)
+    
+    for xc in contributing_cell_centers:
+        # 2a. Get particles in this cell
+        cell_particles = particles_grid.get_particles_at_center(xc)
+        N_c = len(cell_particles)
+        
+        if N_c == 0:
+            continue
+            
+        # 2b. Get cell importance
+        cell_importance = importance_grid.get_value_at_center(xc)
+        
+        # 2c & 2d. Calculate target number n
+        # Formula: n = p_min + (p_max - p_min) * p_i(xc) * p_i(x) * |P(xc)|
+        n = p_min + (p_max - p_min) * cell_importance * position_importance * N_c
+        
+        # 2e. Integer part
+        n_int = floor(n)
+        
+        # 2f. Select n_int particles
+        # [G] Assuming a deterministic or random selection of n_int particles from the list.
+        # To ensure reproducibility in a real implementation, a seed based on x and xc
+        # would be used. Here we simply slice or pick.
+        if n_int > 0:
+            # Simple selection: take first n_int particles. 
+            # In practice, this should be randomized or stratified within the cell.
+            selected_particles.extend(cell_particles[:n_int])
+            
+        # 2g. Probabilistic additional particle
+        remainder = n - n_int
+        if remainder > 0:
+            # Generate random number in [0, 1)
+            r = random()
+            if r < remainder:
+                # Select one additional particle. 
+                # [G] Which particle? Typically the next one or a random one.
+                # We pick the next one in the list if available, else wrap or pick random.
+                if n_int < N_c:
+                    selected_particles.append(cell_particles[n_int])
+                else:
+                    selected_particles.append(cell_particles[0]) # Fallback
+                    
+    return selected_particles
+```
+
+**Edge Cases and Pitfalls:**
+*   **Multiple Cell Access:** At each sampling position, multiple cells are accessed. The position importance $p_i(\mathbf{x})$ remains constant across all accessed cells, but the cell importance $p_i(\mathbf{x}_c)$ can differ between these cells during a single SPH approximation [S1].
+*   **Grid Alignment:** The method assumes the acceleration structure and data importance grid have equal cell sizes and perfect overlap. If they do not, the center points $\mathbf{x}_c$ will not align, breaking the assumption [S1].
+*   **Performance vs. Stratification:** Using a finer grid resolution increases the stratification factor but can decrease performance. The optimal cell width is equal to the kernel function support [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of contributing cells and particles per cell. The selection process is $O(1)$ per cell if particle lists are indexed, but the overhead of managing the grid and calculating importance adds cost.
+*   **Memory Complexity:** Requires storage for the uniform grid acceleration structure and the data importance grid. The importance grid is precomputed and stored [S1].
+*   **Strengths:** Reduces overall sampling error by ensuring well-distributed samples in the neighborhood [S1]. It avoids the variance associated with purely random discarding of particles.
+*   **Limitations:** Performance can degrade if the grid resolution is too fine. It requires precomputation of importance values [S1].
+*   **When to use:** When rendering SPH data with multi-phase interfaces where subsampling artifacts are prominent, particularly for surface shading and single scattering [S1].
+
+## Background
+The method is described in the context of stochastic volume rendering of multi-phase SPH data. It builds upon the concept of importance sampling using SPH attribute entropy [3626-sph-attribute-entropy-for-importance-sampling.md]. The technique was introduced to handle the high-frequency nature of surface shading and phase interfaces in SPH rendering [S1].
+
+## Sources
+[S1] Stochastic Volume Rendering of Multi‐Phase SPH Data, https://doi.org/10.1111/cgf.14121, fetched 2026-10-27

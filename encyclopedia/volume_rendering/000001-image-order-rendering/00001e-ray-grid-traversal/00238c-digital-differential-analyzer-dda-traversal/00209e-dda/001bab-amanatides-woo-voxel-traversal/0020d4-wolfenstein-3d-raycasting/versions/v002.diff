@@ -1,0 +1,221 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # Wolfenstein 3D Raycasting
+ 
+-Also called: 2.5D Raycasting, DDA Grid-Traversal Ray Cast, DDA Ray Casting, Digital Differential Analyzer, Digital Differential Analyzer Ray Casting, Lodev-style DDA, Raycasting Engine, Raycasting with Fisheye Correction, Wolfenstein 3D technique, Wolfenstein-style rendering
++Also called: Wolfenstein 3D technique, Wolfenstein-style rendering, Lodev-style DDA, DDA Ray Casting, Raycasting with Fisheye Correction
+ 
+ ## Overview
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A 2D grid map (e.g., `Uint8Array` or `number[][]`), player state (position `pos`, direction vector `dir`, camera plane vector `plane`), screen dimensions (`FB_W`, `FB_H`), and field of view (defined by `plane` length).
+-- **Output:** A framebuffer image with vertical wall strips and billboard sprites.
++- **Input:** A 2D grid map (`Uint8Array` or `number[][]`), player state (`posX`, `posY`, `dirX`, `dirY`, `planeX`, `planeY`), screen dimensions (`FB_W`, `FB_H`), and field of view defined by the plane vector length [S1, unofficial][S3, unofficial].
++- **Output:** A framebuffer image containing vertical wall strips and billboard sprites [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Map:** A 1D or 2D array representing the grid. Values: `0` (empty), `1-4` (wall types), `5` (sliding door) [S1, unofficial][S5, unofficial].
++- **Map:** A 1D or 2D array representing the grid. Values: `0` (empty floor), `1-4` (wall types), `5` (sliding door) [S1, unofficial][S5, unofficial].
+ - **Player:** Object with `x`, `y` (position), `dirX`, `dirY` (unit direction vector), `planeX`, `planeY` (camera plane vector perpendicular to `dir`) [S1, unofficial][S3, unofficial].
+-- **Textures:** Procedurally generated or loaded into a `Uint32Array` (e.g., 64x64 pixels) [S1, unofficial].
++- **Textures:** Procedurally generated at runtime onto a 64x64 offscreen canvas, then read into a `Uint32Array` for fast pixel access [S1, unofficial].
+ - **Z-Buffer:** A 1D array of size `FB_W` storing the perpendicular distance to the nearest wall for each screen column, used for sprite occlusion [S1, unofficial].
+ 
+@@ -27,5 +27,4 @@
+    - Calculate `cameraX = 2 * x / FB_W - 1` (ranges from -1 to 1) [S1, unofficial].
+    - Calculate ray direction:
+-     $$ \vec{r} = \vec{d} + cameraX \cdot \vec{p} $$
+      $$ rayDirX = dirX + planeX \cdot cameraX $$
+      $$ rayDirY = dirY + planeY \cdot cameraX $$
+@@ -52,6 +51,6 @@
+        - `mapY += stepY`
+        - `side = 1` (hit horizontal grid line)
+-     - Check if `map[mapY][mapX]` is a wall (non-zero). If so, break [S1, unofficial][S3, unofficial].
+-     - *Edge Case (Sliding Doors):* If the hit tile is a door (`5`), check if the ray passes through the open gap. If the ray exits the cell before reaching the midline or hits the closed part, continue traversal [S1, unofficial].
++     - Check if `map[mapY][mapX] > 0`. If so, break [S3, unofficial].
++     - *Edge Case (Sliding Doors):* If the hit tile is `5`, advance the ray to the center line of the door cell. If the ray exits the cell before reaching the midline or hits the closed part, continue traversal [S1, unofficial].
+ 
+ 3. **Calculate Perpendicular Distance:**
+@@ -87,27 +86,24 @@
+      - If `transformY <= 0.05`, skip (behind camera) [S1, unofficial].
+      - Calculate screen X: `screenX = floor((FB_W / 2) * (1 + transformX / transformY))` [S1, unofficial].
+-     - Calculate sprite size: `size = floor(FB_H / transformY)` [S1, unofficial].
++     - Calculate sprite size: `size = abs(floor(FB_H / transformY))` [S1, unofficial].
+      - For each column `x` in sprite range:
+        - If `transformY >= zbuffer[x]`, skip (occluded by wall) [S1, unofficial].
+-       - Sample texture and draw, handling transparency [S1, unofficial].
++       - Sample texture, skip if alpha < 128, shade and write to framebuffer [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def cast_ray_dda(map, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, fb_w, fb_h):
+-    # 1. Initialize camera vectors and ray direction
+-    # This function casts a single ray for a column offset.
+-    # In the full engine, this is called for each x in 0..fb_w-1
+-    # with camera_x = 2*x/fb_w - 1.
+-    pass
+-
+-def render_walls(map, player, fb_w, fb_h, textures, zbuffer):
++def cast_ray_dda(map, pos_x, pos_y, dir_x, dir_y, plane_x, plane_y, fb_w, fb_h, tex_size=64):
++    map_w = len(map[0])
++    map_h = len(map)
++    zbuffer = [0.0] * fb_w
++
+     for x in range(fb_w):
+-        camera_x = 2 * x / fb_w - 1
+-        ray_dir_x = player.dir_x + player.plane_x * camera_x
+-        ray_dir_y = player.dir_y + player.plane_y * camera_x
+-
+-        map_x = int(player.pos_x)
+-        map_y = int(player.pos_y)
++        camera_x = 2.0 * x / fb_w - 1.0
++        ray_dir_x = dir_x + plane_x * camera_x
++        ray_dir_y = dir_y + plane_y * camera_x
++
++        map_x = int(pos_x)
++        map_y = int(pos_y)
+ 
+         delta_dist_x = abs(1.0 / ray_dir_x) if ray_dir_x != 0 else 1e30
+@@ -116,19 +112,21 @@
+         if ray_dir_x < 0:
+             step_x = -1
+-            side_dist_x = (player.pos_x - map_x) * delta_dist_x
++            side_dist_x = (pos_x - map_x) * delta_dist_x
+         else:
+             step_x = 1
+-            side_dist_x = (map_x + 1 - player.pos_x) * delta_dist_x
++            side_dist_x = (map_x + 1 - pos_x) * delta_dist_x
+ 
+         if ray_dir_y < 0:
+             step_y = -1
+-            side_dist_y = (player.pos_y - map_y) * delta_dist_y
++            side_dist_y = (pos_y - map_y) * delta_dist_y
+         else:
+             step_y = 1
+-            side_dist_y = (map_y + 1 - player.pos_y) * delta_dist_y
++            side_dist_y = (map_y + 1 - pos_y) * delta_dist_y
+ 
+         hit = False
+         side = 0
+-        while not hit:
++        guard = 0
++        while not hit and guard < 128:
++            guard += 1
+             if side_dist_x < side_dist_y:
+                 side_dist_x += delta_dist_x
+@@ -139,17 +137,19 @@
+                 map_y += step_y
+                 side = 1
+-            
+-            # Check bounds and wall
+-            if map_x < 0 or map_x >= map_width or map_y < 0 or map_y >= map_height:
++
++            if map_x < 0 or map_x >= map_w or map_y < 0 or map_y >= map_h:
+                 hit = True
+                 continue
+-            
++
+             tile = map[map_y][map_x]
+-            if tile > 0:
+-                # Handle sliding doors if tile == 5
+-                # For simplicity, assume any tile > 0 is a solid wall
++            if tile == 0:
++                continue
++            if tile == 5:
++                # Sliding door logic: advance to center line, check openness
++                # Simplified: treat as wall for basic traversal [G]
+                 hit = True
+-        
+-        # Calculate perpendicular distance
++                continue
++            hit = True
++
+         if side == 0:
+             perp_dist = side_dist_x - delta_dist_x
+@@ -157,59 +157,41 @@
+             perp_dist = side_dist_y - delta_dist_y
+ 
+-        # Store in zbuffer
+         zbuffer[x] = perp_dist
+ 
+-        # Calculate line height and draw range
+         line_height = int(fb_h / perp_dist)
+         draw_start = max(0, (fb_h - line_height) // 2)
+         draw_end = min(fb_h - 1, (fb_h + line_height) // 2)
+ 
+-        # Calculate texture coordinate
+         if side == 0:
+-            wall_x = player.pos_y + perp_dist * ray_dir_y
+-        else:
+-            wall_x = player.pos_x + perp_dist * ray_dir_x
+-        wall_x -= int(wall_x) # Keep fractional part
+-
+-        # Mirror texture if needed
++            wall_x = pos_y + perp_dist * ray_dir_y
++        else:
++            wall_x = pos_x + perp_dist * ray_dir_x
++        wall_x -= int(wall_x)
++
+         if (side == 0 and ray_dir_x > 0) or (side == 1 and ray_dir_y < 0):
+-            wall_x = 1 - wall_x
+-
+-        # Draw vertical strip
+-        # ... texture sampling and drawing logic ...
+-
+-def render_sprites(sprites, player, fb_w, fb_h, textures, zbuffer):
+-    # Sort sprites by distance
+-    sprites.sort(key=lambda s: (s.x - player.pos_x)**2 + (s.y - player.pos_y)**2, reverse=True)
+-    
+-    for sprite in sprites:
+-        dx = sprite.x - player.pos_x
+-        dy = sprite.y - player.pos_y
+-        
+-        inv_det = 1.0 / (player.plane_x * player.dir_y - player.dir_x * player.plane_y)
+-        transform_x = inv_det * (player.dir_y * dx - player.dir_x * dy)
+-        transform_y = inv_det * (-player.plane_y * dx + player.plane_x * dy)
+-        
+-        if transform_y <= 0.05:
+-            continue
+-        
+-        screen_x = int((fb_w / 2) * (1 + transform_x / transform_y))
+-        size = int(abs(fb_h / transform_y))
+-        
+-        # Draw sprite columns
+-        # ... clipping against zbuffer and texture sampling ...
++            wall_x = 1.0 - wall_x
++
++        # Fixed-point vertical texture step [S1, unofficial]
++        step = tex_size / line_height
++        tex_pos = (draw_start - (fb_h - line_height) / 2) * step
++        for y in range(draw_start, draw_end + 1):
++            tex_y = int(tex_pos) & (tex_size - 1)
++            tex_pos += step
++            # Texture sampling and alpha check [G]
++            # fb[y * fb_w + x] = shade(tex[tex_y * tex_size + int(wall_x * tex_size)])
++    return zbuffer
+ ```
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(W \cdot N)$ where $W$ is screen width and $N$ is the average number of grid cells traversed per ray. DDA ensures $N$ is proportional to the distance to the wall, not the step size.
+-- **Memory Complexity:** $O(W + H_{map} \cdot W_{map})$ for the z-buffer and map storage.
+-- **Performance:** Highly efficient on CPU-only hardware. The original Wolfenstein 3D ran on 286/386 processors. Optimizations like drawing every 2nd column can double FPS with negligible visual loss on low-res displays [S5, unofficial].
+-- **Strengths:** Simple implementation, low memory footprint, no need for complex 3D math or polygon rasterization.
+-- **Limitations:** Cannot render non-rectangular geometry, slopes, or true 3D objects. Limited to a 2D grid map. Fisheye distortion must be corrected.
+-- **When to use:** Retro-style FPS games, educational demonstrations of raycasting, hardware with limited resources.
+-- **When not to use:** Modern 3D games requiring complex geometry, lighting, or shadows.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Performance:** Highly efficient on CPU-only hardware. The original Wolfenstein 3D ran on 286/386-class hardware [S1, unofficial]. Optimizations like drawing every 2nd column can double FPS with negligible visual loss on low-res displays [S5, unofficial].
++- **Strengths:** Not given in the sources.
++- **Limitations:** Not given in the sources.
++- **When to use:** Not given in the sources.
++- **When not to use:** Not given in the sources.
+ 
+ ## Background
+-Wolfenstein 3D (id Software, 1992) was one of the first first-person shooters, rendered on 286/386-class hardware without GPUs or z-buffers [S1, unofficial]. The technique was popularized by this game and later refined by the community (e.g., Lodev's tutorial) [S1, unofficial]. It is a specific application of the Digital Differential Analyzer (DDA) algorithm for grid traversal [S1, unofficial][S3, unofficial].
++Wolfenstein 3D (id Software, 1992) rendered first-person corridors on 286/386-class hardware without GPUs, z-buffers, or polygons [S1, unofficial]. The technique projects a 2D grid map into a 3D perspective viewport using one ray per screen column [S3, unofficial]. It is a specific application of the Digital Differential Analyzer (DDA) algorithm for grid traversal, popularized by Lodev's tutorial [S1, unofficial][S3, unofficial].
+ 
+ ## Sources

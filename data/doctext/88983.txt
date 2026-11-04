@@ -1,0 +1,2553 @@
+# GPU-accelerated single-pass raycaster
+
+![screenshot](https://user-images.githubusercontent.com/8300317/43370649-35fc6d96-9383-11e8-99b5-885f74435480.png)
+
+This project is a simple visualiser based on GPU-accelerated single-pass
+[volumetric raycasting](https://en.wikipedia.org/wiki/Volume_ray_casting),
+implemented in
+[GLSL](https://www.khronos.org/opengl/wiki/OpenGL_Shading_Language) and C++
+with the [Qt](https://www.qt.io/) framework. It aims to provide a basic
+skeleton for a visualiser that can be easily extended with a feature-rich GUI.
+A brief overview of the design and implementation is described in a [blog
+post](https://martinopilia.com/posts/2018/09/17/volume-raycasting.html).
+
+Three simple examples of shaders are provided for
+[isosurface](https://en.wikipedia.org/wiki/Isosurface) rendering, front-to-back
+[alpha-blending](https://en.wikipedia.org/wiki/Alpha_compositing), and [maximum
+intensity
+projection](https://en.wikipedia.org/wiki/Maximum_intensity_projection). It
+implements a simple reader for the [VTK Structured Point
+legacy](http://www.cs.utah.edu/~ssingla/Research/file-formats.pdf) file format,
+allowing to load volumes from file out-of-the-box.
+
+# Build
+
+The project can be built with [QtCreator](https://doc.qt.io/qtcreator/) or
+from the command line, with [qmake](https://doc.qt.io/qt-5/qmake-manual.html)
+```bash
+mkdir build
+cd build
+qmake ../3d_raycaster.pro
+make
+```
+
+# License
+
+The software is distributed under the MIT license.
+
+### shaders/alpha_blending.frag
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#version 130
+
+out vec4 a_colour;
+
+uniform mat4 ViewMatrix;
+uniform mat3 NormalMatrix;
+
+uniform float focal_length;
+uniform float aspect_ratio;
+uniform vec2 viewport_size;
+uniform vec3 ray_origin;
+uniform vec3 top;
+uniform vec3 bottom;
+
+uniform vec3 background_colour;
+uniform vec3 material_colour;
+uniform vec3 light_position;
+
+uniform float step_length;
+uniform float threshold;
+
+uniform sampler3D volume;
+uniform sampler2D jitter;
+
+uniform float gamma;
+
+// Ray
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+// Axis-aligned bounding box
+struct AABB {
+    vec3 top;
+    vec3 bottom;
+};
+
+// Estimate normal from a finite difference approximation of the gradient
+vec3 normal(vec3 position, float intensity)
+{
+    float d = step_length;
+    float dx = texture(volume, position + vec3(d,0,0)).r - intensity;
+    float dy = texture(volume, position + vec3(0,d,0)).r - intensity;
+    float dz = texture(volume, position + vec3(0,0,d)).r - intensity;
+    return -normalize(NormalMatrix * vec3(dx, dy, dz));
+}
+
+// Slab method for ray-box intersection
+void ray_box_intersection(Ray ray, AABB box, out float t_0, out float t_1)
+{
+    vec3 direction_inv = 1.0 / ray.direction;
+    vec3 t_top = direction_inv * (box.top - ray.origin);
+    vec3 t_bottom = direction_inv * (box.bottom - ray.origin);
+    vec3 t_min = min(t_top, t_bottom);
+    vec2 t = max(t_min.xx, t_min.yz);
+    t_0 = max(0.0, max(t.x, t.y));
+    vec3 t_max = max(t_top, t_bottom);
+    t = min(t_max.xx, t_max.yz);
+    t_1 = min(t.x, t.y);
+}
+
+// A very simple colour transfer function
+vec4 colour_transfer(float intensity)
+{
+    vec3 high = vec3(1.0, 1.0, 1.0);
+    vec3 low = vec3(0.0, 0.0, 0.0);
+    float alpha = (exp(intensity) - 1.0) / (exp(1.0) - 1.0);
+    return vec4(intensity * high + (1.0 - intensity) * low, alpha);
+}
+
+void main()
+{
+    vec3 ray_direction;
+    ray_direction.xy = 2.0 * gl_FragCoord.xy / viewport_size - 1.0;
+    ray_direction.x *= aspect_ratio;
+    ray_direction.z = -focal_length;
+    ray_direction = (vec4(ray_direction, 0) * ViewMatrix).xyz;
+
+    float t_0, t_1;
+    Ray casting_ray = Ray(ray_origin, ray_direction);
+    AABB bounding_box = AABB(top, bottom);
+    ray_box_intersection(casting_ray, bounding_box, t_0, t_1);
+
+    vec3 ray_start = (ray_origin + ray_direction * t_0 - bottom) / (top - bottom);
+    vec3 ray_stop = (ray_origin + ray_direction * t_1 - bottom) / (top - bottom);
+
+    vec3 ray = ray_stop - ray_start;
+    float ray_length = length(ray);
+    vec3 step_vector = step_length * ray / ray_length;
+
+    // Random jitter
+    ray_start += step_vector * texture(jitter, gl_FragCoord.xy / viewport_size).r;
+
+    vec3 position = ray_start;
+    vec4 colour = vec4(0.0);
+
+    // Ray march until reaching the end of the volume, or colour saturation
+    while (ray_length > 0 && colour.a < 1.0) {
+
+        float intensity = texture(volume, position).r;
+
+        vec4 c = colour_transfer(intensity);
+
+        // Alpha-blending
+        colour.rgb = c.a * c.rgb + (1 - c.a) * colour.a * colour.rgb;
+        colour.a = c.a + (1 - c.a) * colour.a;
+
+        ray_length -= step_length;
+        position += step_vector;
+    }
+
+    // Blend background
+    colour.rgb = colour.a * colour.rgb + (1 - colour.a) * pow(background_colour, vec3(gamma)).rgb;
+    colour.a = 1.0;
+
+    // Gamma correction
+    a_colour.rgb = pow(colour.rgb, vec3(1.0 / gamma));
+    a_colour.a = colour.a;
+}
+```
+
+### shaders/alpha_blending.vert
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#version 130
+
+in vec4 a_position;
+
+uniform mat4 ModelViewProjectionMatrix;
+
+void main() {
+    gl_Position = ModelViewProjectionMatrix * a_position;
+}
+```
+
+### shaders/isosurface.frag
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#version 130
+
+out vec4 a_colour;
+
+uniform mat4 ViewMatrix;
+uniform mat3 NormalMatrix;
+
+uniform float focal_length;
+uniform float aspect_ratio;
+uniform vec2 viewport_size;
+uniform vec3 ray_origin;
+uniform vec3 top;
+uniform vec3 bottom;
+
+uniform vec3 background_colour;
+uniform vec3 material_colour;
+uniform vec3 light_position;
+
+uniform float step_length;
+uniform float threshold;
+
+uniform sampler3D volume;
+uniform sampler2D jitter;
+
+uniform float gamma;
+
+// Ray
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+// Axis-aligned bounding box
+struct AABB {
+    vec3 top;
+    vec3 bottom;
+};
+
+// Estimate normal from a finite difference approximation of the gradient
+vec3 normal(vec3 position, float intensity)
+{
+    float d = step_length;
+    float dx = texture(volume, position + vec3(d,0,0)).r - intensity;
+    float dy = texture(volume, position + vec3(0,d,0)).r - intensity;
+    float dz = texture(volume, position + vec3(0,0,d)).r - intensity;
+    return -normalize(NormalMatrix * vec3(dx, dy, dz));
+}
+
+// Slab method for ray-box intersection
+void ray_box_intersection(Ray ray, AABB box, out float t_0, out float t_1)
+{
+    vec3 direction_inv = 1.0 / ray.direction;
+    vec3 t_top = direction_inv * (box.top - ray.origin);
+    vec3 t_bottom = direction_inv * (box.bottom - ray.origin);
+    vec3 t_min = min(t_top, t_bottom);
+    vec2 t = max(t_min.xx, t_min.yz);
+    t_0 = max(0.0, max(t.x, t.y));
+    vec3 t_max = max(t_top, t_bottom);
+    t = min(t_max.xx, t_max.yz);
+    t_1 = min(t.x, t.y);
+}
+
+void main()
+{
+    vec3 ray_direction;
+    ray_direction.xy = 2.0 * gl_FragCoord.xy / viewport_size - 1.0;
+    ray_direction.x *= aspect_ratio;
+    ray_direction.z = -focal_length;
+    ray_direction = (vec4(ray_direction, 0) * ViewMatrix).xyz;
+
+    float t_0, t_1;
+    Ray casting_ray = Ray(ray_origin, ray_direction);
+    AABB bounding_box = AABB(top, bottom);
+    ray_box_intersection(casting_ray, bounding_box, t_0, t_1);
+
+    vec3 ray_start = (ray_origin + ray_direction * t_0 - bottom) / (top - bottom);
+    vec3 ray_stop = (ray_origin + ray_direction * t_1 - bottom) / (top - bottom);
+
+    vec3 ray = ray_stop - ray_start;
+    float ray_length = length(ray);
+    vec3 step_vector = step_length * ray / ray_length;
+
+    // Random jitter
+    ray_start += step_vector * texture(jitter, gl_FragCoord.xy / viewport_size).r;
+
+    vec3 position = ray_start;
+    vec3 colour = pow(background_colour, vec3(gamma));
+
+    // Ray march until reaching the end of the volume
+    while (ray_length > 0) {
+
+        float intensity = texture(volume, position).r;
+
+        if (intensity > threshold) {
+
+            // Get closer to the surface
+            position -= step_vector * 0.5;
+            intensity = texture(volume, position).r;
+            position -= step_vector * (intensity > threshold ? 0.25 : -0.25);
+            intensity = texture(volume, position).r;
+
+            // Blinn-Phong shading
+            vec3 L = normalize(light_position - position);
+            vec3 V = -normalize(ray);
+            vec3 N = normal(position, intensity);
+            vec3 H = normalize(L + V);
+
+            float Ia = 0.1;
+            float Id = 1.0 * max(0, dot(N, L));
+            float Is = 8.0 * pow(max(0, dot(N, H)), 600);
+            colour = (Ia + Id) * material_colour + Is * vec3(1.0);
+
+            break;
+        }
+
+        ray_length -= step_length;
+        position += step_vector;
+    }
+
+    // Gamma correction
+    a_colour.rgb = pow(colour, vec3(1.0 / gamma));
+}
+```
+
+### shaders/isosurface.vert
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#version 130
+
+in vec4 a_position;
+
+uniform mat4 ModelViewProjectionMatrix;
+
+void main() {
+    gl_Position = ModelViewProjectionMatrix * a_position;
+}
+```
+
+### shaders/maximum_intensity_projection.frag
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#version 130
+
+out vec4 a_colour;
+
+uniform mat4 ViewMatrix;
+uniform mat3 NormalMatrix;
+
+uniform float focal_length;
+uniform float aspect_ratio;
+uniform vec2 viewport_size;
+uniform vec3 ray_origin;
+uniform vec3 top;
+uniform vec3 bottom;
+
+uniform vec3 background_colour;
+uniform vec3 material_colour;
+uniform vec3 light_position;
+
+uniform float step_length;
+uniform float threshold;
+
+uniform sampler3D volume;
+uniform sampler2D jitter;
+
+uniform float gamma;
+
+// Ray
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+// Axis-aligned bounding box
+struct AABB {
+    vec3 top;
+    vec3 bottom;
+};
+
+// Estimate normal from a finite difference approximation of the gradient
+vec3 normal(vec3 position, float intensity)
+{
+    float d = step_length;
+    float dx = texture(volume, position + vec3(d,0,0)).r - intensity;
+    float dy = texture(volume, position + vec3(0,d,0)).r - intensity;
+    float dz = texture(volume, position + vec3(0,0,d)).r - intensity;
+    return -normalize(NormalMatrix * vec3(dx, dy, dz));
+}
+
+// Slab method for ray-box intersection
+void ray_box_intersection(Ray ray, AABB box, out float t_0, out float t_1)
+{
+    vec3 direction_inv = 1.0 / ray.direction;
+    vec3 t_top = direction_inv * (box.top - ray.origin);
+    vec3 t_bottom = direction_inv * (box.bottom - ray.origin);
+    vec3 t_min = min(t_top, t_bottom);
+    vec2 t = max(t_min.xx, t_min.yz);
+    t_0 = max(0.0, max(t.x, t.y));
+    vec3 t_max = max(t_top, t_bottom);
+    t = min(t_max.xx, t_max.yz);
+    t_1 = min(t.x, t.y);
+}
+
+// A very simple colour transfer function
+vec4 colour_transfer(float intensity)
+{
+    vec3 high = vec3(1.0, 1.0, 1.0);
+    vec3 low = vec3(0.0, 0.0, 0.0);
+    float alpha = (exp(intensity) - 1.0) / (exp(1.0) - 1.0);
+    return vec4(intensity * high + (1.0 - intensity) * low, alpha);
+}
+
+void main()
+{
+    vec3 ray_direction;
+    ray_direction.xy = 2.0 * gl_FragCoord.xy / viewport_size - 1.0;
+    ray_direction.x *= aspect_ratio;
+    ray_direction.z = -focal_length;
+    ray_direction = (vec4(ray_direction, 0) * ViewMatrix).xyz;
+
+    float t_0, t_1;
+    Ray casting_ray = Ray(ray_origin, ray_direction);
+    AABB bounding_box = AABB(top, bottom);
+    ray_box_intersection(casting_ray, bounding_box, t_0, t_1);
+
+    vec3 ray_start = (ray_origin + ray_direction * t_0 - bottom) / (top - bottom);
+    vec3 ray_stop = (ray_origin + ray_direction * t_1 - bottom) / (top - bottom);
+
+    vec3 ray = ray_stop - ray_start;
+    float ray_length = length(ray);
+    vec3 step_vector = step_length * ray / ray_length;
+
+    // Random jitter
+    ray_start += step_vector * texture(jitter, gl_FragCoord.xy / viewport_size).r;
+
+    vec3 position = ray_start;
+
+    float maximum_intensity = 0.0;
+
+    // Ray march until reaching the end of the volume
+    while (ray_length > 0) {
+
+        float intensity = texture(volume, position).r;
+
+        if (intensity > maximum_intensity) {
+            maximum_intensity = intensity;
+        }
+
+        ray_length -= step_length;
+        position += step_vector;
+    }
+
+    vec4 colour = colour_transfer(maximum_intensity);
+
+    // Blend background
+    colour.rgb = colour.a * colour.rgb + (1 - colour.a) * pow(background_colour, vec3(gamma)).rgb;
+    colour.a = 1.0;
+
+    // Gamma correction
+    a_colour.rgb = pow(colour.rgb, vec3(1.0 / gamma));
+    a_colour.a = colour.a;
+}
+```
+
+### shaders/maximum_intensity_projection.vert
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#version 130
+
+in vec4 a_position;
+
+uniform mat4 ModelViewProjectionMatrix;
+
+void main() {
+    gl_Position = ModelViewProjectionMatrix * a_position;
+}
+```
+
+### src/main.cpp
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#include <QApplication>
+#include <QSurfaceFormat>
+
+#include "mainwindow.h"
+
+int main(int argc, char *argv[])
+{
+    QApplication a(argc, argv);
+    MainWindow w;
+    w.show();
+
+    return a.exec();
+}
+```
+
+### src/mainwindow.cpp
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+
+#include <QColorDialog>
+#include <QFileDialog>
+#include <QSignalBlocker>
+
+
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow {parent}
+    , ui {new Ui::MainWindow}
+{
+    ui->setupUi(this);
+
+    // Set inital values
+    ui->stepLength->valueChanged(ui->stepLength->value());
+    ui->threshold_slider->valueChanged(ui->threshold_slider->value());
+    ui->canvas->setBackground(Qt::black);
+
+    // Populate list of visualisation modes
+    for (const auto& mode : ui->canvas->getModes()) {
+        ui->mode->addItem(mode);
+    }
+    ui->mode->setCurrentIndex(0);
+
+    // Enable file drop
+    setAcceptDrops(true);
+}
+
+MainWindow::~MainWindow()
+{
+    delete ui;
+}
+
+
+/*!
+ * \brief Allow dragged files to enter the main window.
+ * \param event Drag enter event.
+ */
+void MainWindow::dragEnterEvent(QDragEnterEvent *event)
+{
+    if (event->mimeData()->hasUrls()) {
+        event->acceptProposedAction();
+    }
+}
+
+
+/*!
+ * \brief Handle drop events to load volumes.
+ * \param event Drop event.
+ */
+void MainWindow::dropEvent(QDropEvent *event)
+{
+    const QMimeData* mimeData = event->mimeData();
+
+    if (mimeData->hasUrls()) {
+        for (auto& url : mimeData->urls()) {
+            load_volume(url.toLocalFile());
+        }
+    }
+}
+
+
+/*!
+ * \brief Load a volume
+ * \param path Volume file to be loaded.
+ *
+ * Try to load the volume. Update the UI if succesfull, or prompt an error
+ * message in case of failure.
+ */
+void MainWindow::load_volume(const QString& path)
+{
+    try {
+        ui->canvas->setVolume(path);
+
+        // Update the UI
+        auto range = ui->canvas->getRange();
+        ui->threshold_spinbox->setMinimum(range.first);
+        ui->threshold_spinbox->setMaximum(range.second);
+        ui->threshold_slider->valueChanged(ui->threshold_slider->value());
+    }
+    catch (std::runtime_error& e) {
+        QMessageBox::warning(this, tr("Error"), tr("Cannot load volume ") + path + ": " + e.what());
+    }
+}
+
+/*!
+ * \brief Set the ray marching step lenght.
+ * \param arg1 Step length, as a fraction of the ray length.
+ */
+void MainWindow::on_stepLength_valueChanged(double arg1)
+{
+    ui->canvas->setStepLength(static_cast<GLfloat>(arg1));
+}
+
+/*!
+ * \brief Load a volume from file.
+ */
+void MainWindow::on_loadVolume_clicked()
+{
+    QString path = QFileDialog::getOpenFileName(this, tr("Open volume"), ".", tr("VTK images (*.vtk)"));
+    if (!path.isNull()) {
+        load_volume(path);
+    }
+}
+
+/*!
+ * \brief MainWindow::on_threshold_spinbox_valueChanged
+ * \param arg1 Threshold in image intensity value.
+ *
+ * The spinbox and the slider are mutually linked, so when the value is changed in one of them,
+ * the change is reflected on the other.
+ *
+ * The spinbox holds the threshold in image intensity value, while the slider holds a percentage.
+ */
+void MainWindow::on_threshold_spinbox_valueChanged(double arg1)
+{
+    ui->canvas->setThreshold(arg1);
+
+    QSignalBlocker(ui->threshold_slider);
+    auto range = ui->threshold_spinbox->maximum() - ui->threshold_spinbox->minimum();
+    ui->threshold_slider->setValue(100 * (arg1 - ui->threshold_spinbox->minimum()) / range);
+}
+
+/*!
+ * \brief MainWindow::on_threshold_slider_valueChanged
+ * \param value Threshold in percentage.
+ *
+ * \sa MainWindow::on_threshold_spinbox_valueChanged
+ */
+void MainWindow::on_threshold_slider_valueChanged(int value)
+{
+    auto range = ui->threshold_spinbox->maximum() - ui->threshold_spinbox->minimum();
+    auto threshold = ui->threshold_spinbox->minimum() + value / 100.0 * range;
+
+    ui->canvas->setThreshold(threshold);
+
+    QSignalBlocker(ui->threshold_spinbox);
+    ui->threshold_spinbox->setValue(threshold);
+}
+
+/*!
+ * \brief Set the visualisation mode.
+ * \param arg1 Name of the visualisation mode.
+ */
+void MainWindow::on_mode_currentTextChanged(const QString &mode)
+{
+    ui->canvas->setMode(mode);
+
+    if ("Isosurface" == mode) {
+        ui->threshold_slider->setEnabled(true);
+        ui->threshold_spinbox->setEnabled(true);
+        ui->threshold_label->setEnabled(true);
+    }
+    else {
+        ui->threshold_slider->setDisabled(true);
+        ui->threshold_spinbox->setDisabled(true);
+        ui->threshold_label->setDisabled(true);
+    }
+}
+
+
+/*!
+ * \brief Open a dialog to choose the background colour.
+ */
+void MainWindow::on_background_clicked()
+{
+    const QColor colour = QColorDialog::getColor(ui->canvas->getBackground(), this, "Select background colour");
+
+    if (colour.isValid()) {
+        ui->canvas->setBackground(colour);
+    }
+}
+```
+
+### src/mainwindow.h
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#pragma once
+
+#include <QMainWindow>
+
+namespace Ui {
+class MainWindow;
+}
+
+class MainWindow : public QMainWindow
+{
+    Q_OBJECT
+
+public:
+    explicit MainWindow(QWidget *parent = nullptr);
+    ~MainWindow();
+
+protected:
+    virtual void dragEnterEvent(QDragEnterEvent *event);
+    virtual void dropEvent(QDropEvent *event);
+
+private slots:
+
+    void load_volume(const QString& path);
+
+    void on_stepLength_valueChanged(double arg1);
+
+    void on_loadVolume_clicked();
+
+    void on_threshold_spinbox_valueChanged(double arg1);
+
+    void on_threshold_slider_valueChanged(int value);
+
+    void on_mode_currentTextChanged(const QString &arg1);
+
+    void on_background_clicked();
+
+private:
+    Ui::MainWindow *ui;
+};
+```
+
+### src/mesh.cpp
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#include "mesh.h"
+
+
+/*!
+ * \brief Create a vertex array object (VAO) with given vertices and indices.
+ * \param gl_context OpenGL context for the buffers.
+ * \param vertices Vector of vertices, as strided x-y-z coordinates.
+ * \param indices Indices for the mesh.
+ */
+Mesh::Mesh(const std::vector<GLfloat>& vertices, const std::vector<GLuint> &indices)
+    : m_vertices_count {vertices.size()}
+    , m_indices_count {indices.size()}
+{
+    initializeOpenGLFunctions();
+
+    // Generates and populates a VBO for the vertices
+    glDeleteBuffers(1, &(m_vertex_VBO));
+    glGenBuffers(1, &(m_vertex_VBO));
+    glBindBuffer(GL_ARRAY_BUFFER, m_vertex_VBO);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(vertices[0]), vertices.data(), GL_STATIC_DRAW);
+
+    // Generates and populates a VBO for the element indices
+    glDeleteBuffers(1, &(m_index_VBO));
+    glGenBuffers(1, &(m_index_VBO));
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_index_VBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(indices[0]), indices.data(), GL_STATIC_DRAW);
+
+    // Creates a vertex array object (VAO) for drawing the mesh
+    glDeleteVertexArrays(1, &(m_vao));
+    glGenVertexArrays(1, &(m_vao));
+    glBindVertexArray(m_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_vertex_VBO);
+    glEnableVertexAttribArray(POSITION);
+    glVertexAttribPointer(POSITION, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_index_VBO);
+    glBindVertexArray(0);
+}
+
+
+/*!
+ * \brief Destructor.
+ */
+Mesh::~Mesh()
+{
+}
+
+
+/*!
+ * \brief Render the mesh.
+ */
+void Mesh::paint(void)
+{
+    glBindVertexArray(m_vao);
+    glDrawElements(GL_TRIANGLES, m_indices_count, GL_UNSIGNED_INT, nullptr);
+    glBindVertexArray(0);
+}
+```
+
+### src/mesh.h
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#pragma once
+
+#include <QOpenGLExtraFunctions>
+
+/*!
+ * \brief Class to represent a mesh.
+ */
+class Mesh : protected QOpenGLExtraFunctions
+{
+public:
+    Mesh(const std::vector<GLfloat>& vertices, const std::vector<GLuint>& indices);
+    virtual ~Mesh();
+
+    void paint(void);
+
+private:
+    GLuint m_vao {0};
+    GLuint m_vertex_VBO {0};
+    GLuint m_normal_VBO {0};
+    GLuint m_index_VBO {0};
+    size_t m_vertices_count {0};
+    size_t m_indices_count {0};
+
+    enum AttributeArray {POSITION=0, NORMAL=1, TEXCOORD=2};
+};
+```
+
+### src/raycastcanvas.cpp
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#include <cstdlib>
+#include <ctime>
+#include <iostream>
+#include <vector>
+
+#include <QtWidgets>
+
+#include "raycastcanvas.h"
+
+
+/*!
+ * \brief Convert a QColor to a QVector3D.
+ * \return A QVector3D holding a RGB representation of the colour.
+ */
+QVector3D to_vector3d(const QColor& colour) {
+    return QVector3D(colour.redF(), colour.greenF(), colour.blueF());
+}
+
+
+/*!
+ * \brief Constructor for the canvas.
+ * \param parent Parent widget.
+ */
+RayCastCanvas::RayCastCanvas(QWidget *parent)
+    : QOpenGLWidget {parent}
+    , m_raycasting_volume {nullptr}
+{
+    // Register the rendering modes here, so they are available to the UI when it is initialised
+    m_modes["Isosurface"] = [&]() { RayCastCanvas::raycasting("Isosurface"); };
+    m_modes["Alpha blending"] = [&]() { RayCastCanvas::raycasting("Alpha blending"); };
+    m_modes["MIP"] = [&]() { RayCastCanvas::raycasting("MIP"); };
+}
+
+
+/*!
+ * \brief Destructor.
+ */
+RayCastCanvas::~RayCastCanvas()
+{
+    for (auto& [key, val] : m_shaders) {
+        delete val;
+    }
+    delete m_raycasting_volume;
+}
+
+
+/*!
+ * \brief Initialise OpenGL-related state.
+ */
+void RayCastCanvas::initializeGL()
+{
+    initializeOpenGLFunctions();
+
+    m_raycasting_volume = new RayCastVolume();
+    m_raycasting_volume->create_noise();
+
+    add_shader("Isosurface", ":/shaders/isosurface.vert", ":/shaders/isosurface.frag");
+    add_shader("Alpha blending", ":/shaders/alpha_blending.vert", ":/shaders/alpha_blending.frag");
+    add_shader("MIP", ":/shaders/maximum_intensity_projection.vert", ":/shaders/maximum_intensity_projection.frag");
+}
+
+
+/*!
+ * \brief Callback to handle canvas resizing.
+ * \param w New width.
+ * \param h New height.
+ */
+void RayCastCanvas::resizeGL(int w, int h)
+{
+    (void) w; (void) h;
+    m_viewportSize = {(float) scaled_width(), (float) scaled_height()};
+    m_aspectRatio = (float) scaled_width() / scaled_height();
+    glViewport(0, 0, scaled_width(), scaled_height());
+    m_raycasting_volume->create_noise();
+}
+
+
+/*!
+ * \brief Paint a frame on the canvas.
+ */
+void RayCastCanvas::paintGL()
+{
+    // Compute geometry
+    m_viewMatrix.setToIdentity();
+    m_viewMatrix.translate(0, 0, -4.0f * std::exp(m_distExp / 600.0f));
+    m_viewMatrix.rotate(m_trackBall.rotation());
+
+    m_modelViewProjectionMatrix.setToIdentity();
+    m_modelViewProjectionMatrix.perspective(m_fov, (float)scaled_width()/scaled_height(), 0.1f, 100.0f);
+    m_modelViewProjectionMatrix *= m_viewMatrix * m_raycasting_volume->modelMatrix();
+
+    m_normalMatrix = (m_viewMatrix * m_raycasting_volume->modelMatrix()).normalMatrix();
+
+    m_rayOrigin = m_viewMatrix.inverted() * QVector3D({0.0, 0.0, 0.0});
+
+    // Perform raycasting
+    m_modes[m_active_mode]();
+}
+
+
+/*!
+ * \brief Width scaled by the pixel ratio (for HiDPI devices).
+ */
+GLuint RayCastCanvas::scaled_width()
+{
+    return devicePixelRatio() * width();
+}
+
+
+/*!
+ * \brief Height scaled by the pixel ratio (for HiDPI devices).
+ */
+GLuint RayCastCanvas::scaled_height()
+{
+    return devicePixelRatio() * height();
+}
+
+
+/*!
+ * \brief Perform isosurface raycasting.
+ */
+void RayCastCanvas::raycasting(const QString& shader)
+{
+    m_shaders[shader]->bind();
+    {
+        m_shaders[shader]->setUniformValue("ViewMatrix", m_viewMatrix);
+        m_shaders[shader]->setUniformValue("ModelViewProjectionMatrix", m_modelViewProjectionMatrix);
+        m_shaders[shader]->setUniformValue("NormalMatrix", m_normalMatrix);
+        m_shaders[shader]->setUniformValue("aspect_ratio", m_aspectRatio);
+        m_shaders[shader]->setUniformValue("focal_length", m_focalLength);
+        m_shaders[shader]->setUniformValue("viewport_size", m_viewportSize);
+        m_shaders[shader]->setUniformValue("ray_origin", m_rayOrigin);
+        m_shaders[shader]->setUniformValue("top", m_raycasting_volume->top());
+        m_shaders[shader]->setUniformValue("bottom", m_raycasting_volume->bottom());
+        m_shaders[shader]->setUniformValue("background_colour", to_vector3d(m_background));
+        m_shaders[shader]->setUniformValue("light_position", m_lightPosition);
+        m_shaders[shader]->setUniformValue("material_colour", m_diffuseMaterial);
+        m_shaders[shader]->setUniformValue("step_length", m_stepLength);
+        m_shaders[shader]->setUniformValue("threshold", m_threshold);
+        m_shaders[shader]->setUniformValue("gamma", m_gamma);
+        m_shaders[shader]->setUniformValue("volume", 0);
+        m_shaders[shader]->setUniformValue("jitter", 1);
+
+        glClearColor(m_background.redF(), m_background.greenF(), m_background.blueF(), m_background.alphaF());
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        m_raycasting_volume->paint();
+    }
+    m_shaders[shader]->release();
+}
+
+
+/*!
+ * \brief Convert a mouse position into normalised canvas coordinates.
+ * \param p Mouse position.
+ * \return Normalised coordinates for the mouse position.
+ */
+QPointF RayCastCanvas::pixel_pos_to_view_pos(const QPointF& p)
+{
+    return QPointF(2.0 * float(p.x()) / width() - 1.0,
+                   1.0 - 2.0 * float(p.y()) / height());
+}
+
+
+/*!
+ * \brief Callback for mouse movement.
+ */
+void RayCastCanvas::mouseMoveEvent(QMouseEvent *event)
+{
+    if (event->buttons() & Qt::LeftButton) {
+        m_trackBall.move(pixel_pos_to_view_pos(event->pos()), m_scene_trackBall.rotation().conjugated());
+    } else {
+        m_trackBall.release(pixel_pos_to_view_pos(event->pos()), m_scene_trackBall.rotation().conjugated());
+    }
+    update();
+}
+
+
+/*!
+ * \brief Callback for mouse press.
+ */
+void RayCastCanvas::mousePressEvent(QMouseEvent *event)
+{
+    if (event->buttons() & Qt::LeftButton) {
+        m_trackBall.push(pixel_pos_to_view_pos(event->pos()), m_scene_trackBall.rotation().conjugated());
+    }
+    update();
+}
+
+
+/*!
+ * \brief Callback for mouse release.
+ */
+void RayCastCanvas::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton) {
+        m_trackBall.release(pixel_pos_to_view_pos(event->pos()), m_scene_trackBall.rotation().conjugated());
+    }
+    update();
+}
+
+
+/*!
+ * \brief Callback for mouse wheel.
+ */
+void RayCastCanvas::wheelEvent(QWheelEvent * event)
+{
+    m_distExp += event->delta();
+    if (m_distExp < -1800)
+        m_distExp = -1800;
+    if (m_distExp > 600)
+        m_distExp = 600;
+    update();
+}
+
+
+/*!
+ * \brief Add a shader.
+ * \param name Name for the shader.
+ * \param vertex Vertex shader source file.
+ * \param fragment Fragment shader source file.
+ */
+void RayCastCanvas::add_shader(const QString& name, const QString& vertex, const QString& fragment)
+{
+    m_shaders[name] = new QOpenGLShaderProgram(this);
+    m_shaders[name]->addShaderFromSourceFile(QOpenGLShader::Vertex, vertex);
+    m_shaders[name]->addShaderFromSourceFile(QOpenGLShader::Fragment, fragment);
+    m_shaders[name]->link();
+}
+```
+
+### src/raycastcanvas.h
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#pragma once
+
+#include <functional>
+#include <vector>
+
+#include <QtMath>
+
+#include <QOpenGLWidget>
+#include <QOpenGLExtraFunctions>
+#include <QOpenGLShaderProgram>
+
+#include "mesh.h"
+#include "raycastvolume.h"
+#include "trackball.h"
+#include "vtkvolume.h"
+
+/*!
+ * \brief Class for a raycasting canvas widget.
+ */
+class RayCastCanvas : public QOpenGLWidget, protected QOpenGLExtraFunctions
+{
+    Q_OBJECT
+public:
+    explicit RayCastCanvas(QWidget *parent = nullptr);
+    ~RayCastCanvas();
+
+    void setStepLength(const GLfloat step_length) {
+        m_stepLength = step_length;
+        update();
+    }
+
+    void setVolume(const QString& volume) {
+        m_raycasting_volume->load_volume(volume);
+        update();
+    }
+
+    void setThreshold(const double threshold) {
+        auto range = m_raycasting_volume ? getRange() : std::pair<double, double>{0.0, 1.0};
+        m_threshold = threshold / (range.second - range.first);
+        update();
+    }
+
+    void setMode(const QString& mode) {
+        m_active_mode = mode;
+        update();
+    }
+
+    void setBackground(const QColor& colour) {
+        m_background = colour;
+        update();
+    }
+
+    std::vector<QString> getModes(void) {
+        std::vector<QString> modes;
+        for (const auto& [key, val] : m_modes) {
+            modes.push_back(key);
+        }
+        return modes;
+    }
+
+    QColor getBackground(void) {
+        return m_background;
+    }
+
+    std::pair<double, double> getRange(void) {
+        return m_raycasting_volume->range();
+    }
+
+signals:
+    // NOPE
+
+public slots:
+    virtual void mouseMoveEvent(QMouseEvent *event);
+    virtual void mousePressEvent(QMouseEvent *event);
+    virtual void mouseReleaseEvent(QMouseEvent *event);
+    virtual void wheelEvent(QWheelEvent * event);
+
+protected:
+    void initializeGL();
+    void paintGL();
+    void resizeGL(int width, int height);
+
+private:
+
+    QMatrix4x4 m_viewMatrix;
+    QMatrix4x4 m_modelViewProjectionMatrix;
+    QMatrix3x3 m_normalMatrix;
+
+    const GLfloat m_fov = 60.0f;                                          /*!< Vertical field of view. */
+    const GLfloat m_focalLength = 1.0 / qTan(M_PI / 180.0 * m_fov / 2.0); /*!< Focal length. */
+    GLfloat m_aspectRatio;                                                /*!< width / height */
+
+    QVector2D m_viewportSize;
+    QVector3D m_rayOrigin; /*!< Camera position in model space coordinates. */
+
+    QVector3D m_lightPosition {3.0, 0.0, 3.0};    /*!< In camera coordinates. */
+    QVector3D m_diffuseMaterial {1.0, 1.0, 1.0};  /*!< Material colour. */
+    GLfloat m_stepLength;                         /*!< Step length for ray march. */
+    GLfloat m_threshold;                          /*!< Isosurface intensity threshold. */
+    QColor m_background;                          /*!< Viewport background colour. */
+
+    const GLfloat m_gamma = 2.2f; /*!< Gamma correction parameter. */
+
+    RayCastVolume *m_raycasting_volume;
+
+    std::map<QString, QOpenGLShaderProgram*> m_shaders;
+    std::map<QString, std::function<void(void)>> m_modes;
+    QString m_active_mode;
+
+    TrackBall m_trackBall {};       /*!< Trackball holding the model rotation. */
+    TrackBall m_scene_trackBall {}; /*!< Trackball holding the scene rotation. */
+
+    GLint m_distExp = -200;
+
+    GLuint scaled_width();
+    GLuint scaled_height();
+
+    void raycasting(const QString& shader);
+
+    QPointF pixel_pos_to_view_pos(const QPointF& p);
+    void create_noise(void);
+    void add_shader(const QString& name, const QString& vector, const QString& fragment);
+};
+```
+
+### src/raycastvolume.cpp
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+
+#include "raycastvolume.h"
+#include "vtkvolume.h"
+
+#include <QRegularExpression>
+
+#include <algorithm>
+#include <cmath>
+
+
+/*!
+ * \brief Create a two-unit cube mesh as the bounding box for the volume.
+ */
+RayCastVolume::RayCastVolume(void)
+    : m_volume_texture {0}
+    , m_noise_texture {0}
+    , m_cube_vao {
+          {
+              -1.0f, -1.0f,  1.0f,
+               1.0f, -1.0f,  1.0f,
+               1.0f,  1.0f,  1.0f,
+              -1.0f,  1.0f,  1.0f,
+              -1.0f, -1.0f, -1.0f,
+               1.0f, -1.0f, -1.0f,
+               1.0f,  1.0f, -1.0f,
+              -1.0f,  1.0f, -1.0f,
+          },
+          {
+              // front
+              0, 1, 2,
+              0, 2, 3,
+              // right
+              1, 5, 6,
+              1, 6, 2,
+              // back
+              5, 4, 7,
+              5, 7, 6,
+              // left
+              4, 0, 3,
+              4, 3, 7,
+              // top
+              2, 6, 7,
+              2, 7, 3,
+              // bottom
+              4, 5, 1,
+              4, 1, 0,
+          }
+      }
+{
+    initializeOpenGLFunctions();
+}
+
+
+/*!
+ * \brief Destructor.
+ */
+RayCastVolume::~RayCastVolume()
+{
+}
+
+
+/*!
+ * \brief Load a volume from file.
+ * \param File to be loaded.
+ */
+void RayCastVolume::load_volume(const QString& filename) {
+    std::vector<unsigned char> data;
+
+    QRegularExpression re {"^.*\\.([^\\.]+)$"};
+    QRegularExpressionMatch match = re.match(filename);
+
+    if (!match.hasMatch()) {
+        throw std::runtime_error("Cannot determine file extension.");
+    }
+
+    const std::string extension {match.captured(1).toLower().toStdString()};
+    if ("vtk" == extension) {
+        VTKVolume volume {filename.toStdString()};
+        volume.uint8_normalised();
+        m_size = QVector3D(std::get<0>(volume.size()), std::get<1>(volume.size()), std::get<2>(volume.size()));
+        m_origin = QVector3D(std::get<0>(volume.origin()), std::get<1>(volume.origin()), std::get<2>(volume.origin()));
+        m_spacing = QVector3D(std::get<0>(volume.spacing()), std::get<1>(volume.spacing()), std::get<2>(volume.spacing()));
+        m_range = volume.range();
+        data = volume.data();
+    }
+    else {
+        throw std::runtime_error("Unrecognised extension '" + extension + "'.");
+    }
+
+    glDeleteTextures(1, &m_volume_texture);
+    glGenTextures(1, &m_volume_texture);
+    glBindTexture(GL_TEXTURE_3D, m_volume_texture);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);  // The array on the host has 1 byte alignment
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, m_size.x(), m_size.y(), m_size.z(), 0, GL_RED, GL_UNSIGNED_BYTE, data.data());
+    glBindTexture(GL_TEXTURE_3D, 0);
+}
+
+
+/*!
+ * \brief Create a noise texture with the size of the viewport.
+ */
+void RayCastVolume::create_noise(void)
+{
+    GLint viewport[4];
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    const int width = viewport[2];
+    const int height = viewport[3];
+
+    std::srand(std::time(NULL));
+    unsigned char noise[width * height];
+
+    for (unsigned char *p = noise; p <= noise + width * height; ++p) {
+        *p = std::rand() % 256;
+    }
+
+    glDeleteTextures(1, &m_noise_texture);
+    glGenTextures(1, &m_noise_texture);
+    glBindTexture(GL_TEXTURE_2D, m_noise_texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, width, height, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, noise);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+
+/*!
+ * \brief Render the bounding box.
+ */
+void RayCastVolume::paint(void)
+{
+    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_3D, m_volume_texture);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_noise_texture);
+
+    m_cube_vao.paint();
+}
+
+
+/*!
+ * \brief Range of the image, in intensity value.
+ * \return A pair, holding <minimum, maximum>.
+ */
+std::pair<double, double> RayCastVolume::range() {
+    return m_range;
+}
+
+
+/*!
+ * \brief Scale factor to model space.
+ *
+ * Scale the bounding box such that the longest side equals 1.
+ */
+float RayCastVolume::scale_factor(void)
+{
+    auto e = m_size * m_spacing;
+    return std::max({e.x(), e.y(), e.z()});
+}
+```
+
+### src/raycastvolume.h
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#pragma once
+
+#include <QMatrix4x4>
+#include <QOpenGLExtraFunctions>
+#include <QVector3D>
+
+#include "mesh.h"
+
+/*!
+ * \brief Class for a raycasting volume.
+ */
+class RayCastVolume : protected QOpenGLExtraFunctions
+{
+public:
+    RayCastVolume(void);
+    virtual ~RayCastVolume();
+
+    void load_volume(const QString &filename);
+    void create_noise(void);
+    void paint(void);
+    std::pair<double, double> range(void);
+
+
+    /*!
+     * \brief Get the extent of the volume.
+     * \return A vector holding the extent of the bounding box.
+     *
+     * The extent is normalised such that the longest side of the bounding
+     * box is equal to 1.
+     */
+    QVector3D extent(void) {
+        auto e = m_size * m_spacing;
+        return e / std::max({e.x(), e.y(), e.z()});
+    }
+
+    /*!
+     * \brief Return the model matrix for the volume.
+     * \param shift Shift the volume by its origin.
+     * \return A matrix in homogeneous coordinates.
+     *
+     * The model matrix scales a two-unit side cube to the
+     * extent of the volume.
+     */
+    QMatrix4x4 modelMatrix(bool shift = false) {
+        QMatrix4x4 modelMatrix;
+        if (shift) {
+            modelMatrix.translate(-m_origin / scale_factor());
+        }
+        modelMatrix.scale(0.5f * extent());
+        return modelMatrix;
+    }
+
+    /*!
+     * \brief Top planes forming the AABB.
+     * \param shift Shift the volume by its origin.
+     * \return A vector holding the intercept of the top plane for each axis.
+     */
+    QVector3D top(bool shift = false) {
+        auto t = extent() / 2.0;
+        if (shift) {
+            t -= m_origin / scale_factor();
+        }
+        return t;
+    }
+
+    /*!
+     * \brief Bottom planes forming the AABB.
+     * \param shift Shift the volume by its origin.
+     * \return A vector holding the intercept of the bottom plane for each axis.
+     */
+    QVector3D bottom(bool shift = false) {
+        auto b = -extent() / 2.0;
+        if (shift) {
+            b -= m_origin / scale_factor();
+        }
+        return b;
+    }
+
+private:
+    GLuint m_volume_texture;
+    GLuint m_noise_texture;
+    Mesh m_cube_vao;
+    std::pair<double, double> m_range;
+    QVector3D m_origin;
+    QVector3D m_spacing;
+    QVector3D m_size;
+
+    float scale_factor(void);
+};
+```
+
+### src/trackball.cpp
+```
+/****************************************************************************
+**
+** Copyright (C) 2016 The Qt Company Ltd.
+** Contact: https://www.qt.io/licensing/
+**
+** This file is part of the demonstration applications of the Qt Toolkit.
+**
+** $QT_BEGIN_LICENSE:BSD$
+** Commercial License Usage
+** Licensees holding valid commercial Qt licenses may use this file in
+** accordance with the commercial license agreement provided with the
+** Software or, alternatively, in accordance with the terms contained in
+** a written agreement between you and The Qt Company. For licensing terms
+** and conditions see https://www.qt.io/terms-conditions. For further
+** information use the contact form at https://www.qt.io/contact-us.
+**
+** BSD License Usage
+** Alternatively, you may use this file under the terms of the BSD license
+** as follows:
+**
+** "Redistribution and use in source and binary forms, with or without
+** modification, are permitted provided that the following conditions are
+** met:
+**   * Redistributions of source code must retain the above copyright
+**     notice, this list of conditions and the following disclaimer.
+**   * Redistributions in binary form must reproduce the above copyright
+**     notice, this list of conditions and the following disclaimer in
+**     the documentation and/or other materials provided with the
+**     distribution.
+**   * Neither the name of The Qt Company Ltd nor the names of its
+**     contributors may be used to endorse or promote products derived
+**     from this software without specific prior written permission.
+**
+**
+** THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+** "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+** LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+** A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+** OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+** SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+** LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+** DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+** THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+** (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+** OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE."
+**
+** $QT_END_LICENSE$
+**
+****************************************************************************/
+
+#include "trackball.h"
+#include <qmath.h>
+#include <cmath>
+
+//============================================================================//
+//                                  TrackBall                                 //
+//============================================================================//
+
+TrackBall::TrackBall(TrackMode mode)
+    : m_angularVelocity(0)
+    , m_paused(false)
+    , m_pressed(false)
+    , m_mode(mode)
+{
+    m_axis = QVector3D(0, 1, 0);
+    m_rotation = QQuaternion();
+    m_lastTime = QTime::currentTime();
+}
+
+TrackBall::TrackBall(float angularVelocity, const QVector3D& axis, TrackMode mode)
+    : m_axis(axis)
+    , m_angularVelocity(angularVelocity)
+    , m_paused(false)
+    , m_pressed(false)
+    , m_mode(mode)
+{
+    m_rotation = QQuaternion();
+    m_lastTime = QTime::currentTime();
+}
+
+void TrackBall::push(const QPointF& p, const QQuaternion &)
+{
+    m_rotation = rotation();
+    m_pressed = true;
+    m_lastTime = QTime::currentTime();
+    m_lastPos = p;
+    m_angularVelocity = 0.0f;
+}
+
+void TrackBall::move(const QPointF& p, const QQuaternion &transformation)
+{
+    if (!m_pressed)
+        return;
+
+    QTime currentTime = QTime::currentTime();
+    int msecs = m_lastTime.msecsTo(currentTime);
+    if (msecs <= 20)
+        return;
+
+    switch (m_mode) {
+    case Plane:
+        {
+            QLineF delta(m_lastPos, p);
+            const float angleDelta = qRadiansToDegrees(float(delta.length()));
+            m_angularVelocity = angleDelta / msecs;
+            m_axis = QVector3D(-delta.dy(), delta.dx(), 0.0f).normalized();
+            m_axis = transformation.rotatedVector(m_axis);
+            m_rotation = QQuaternion::fromAxisAndAngle(m_axis, angleDelta) * m_rotation;
+        }
+        break;
+    case Sphere:
+        {
+            QVector3D lastPos3D = QVector3D(m_lastPos.x(), m_lastPos.y(), 0.0f);
+            float sqrZ = 1 - QVector3D::dotProduct(lastPos3D, lastPos3D);
+            if (sqrZ > 0)
+                lastPos3D.setZ(std::sqrt(sqrZ));
+            else
+                lastPos3D.normalize();
+
+            QVector3D currentPos3D = QVector3D(p.x(), p.y(), 0.0f);
+            sqrZ = 1 - QVector3D::dotProduct(currentPos3D, currentPos3D);
+            if (sqrZ > 0)
+                currentPos3D.setZ(std::sqrt(sqrZ));
+            else
+                currentPos3D.normalize();
+
+            m_axis = QVector3D::crossProduct(lastPos3D, currentPos3D);
+            float angle = qRadiansToDegrees(std::asin(m_axis.length()));
+
+            m_angularVelocity = angle / msecs;
+            m_axis.normalize();
+            m_axis = transformation.rotatedVector(m_axis);
+            m_rotation = QQuaternion::fromAxisAndAngle(m_axis, angle) * m_rotation;
+        }
+        break;
+    }
+
+
+    m_lastPos = p;
+    m_lastTime = currentTime;
+}
+
+void TrackBall::release(const QPointF& p, const QQuaternion &transformation)
+{
+    // Calling move() caused the rotation to stop if the framerate was too low.
+    move(p, transformation);
+    m_pressed = false;
+}
+
+void TrackBall::start()
+{
+    m_lastTime = QTime::currentTime();
+    m_paused = false;
+}
+
+void TrackBall::stop()
+{
+    m_rotation = rotation();
+    m_paused = true;
+}
+
+QQuaternion TrackBall::rotation() const
+{
+    if (m_paused || m_pressed)
+        return m_rotation;
+
+    QTime currentTime = QTime::currentTime();
+    float angle = m_angularVelocity * m_lastTime.msecsTo(currentTime);
+    return QQuaternion::fromAxisAndAngle(m_axis, angle) * m_rotation;
+}
+```
+
+### src/trackball.h
+```
+/****************************************************************************
+**
+** Copyright (C) 2016 The Qt Company Ltd.
+** Contact: https://www.qt.io/licensing/
+**
+** This file is part of the demonstration applications of the Qt Toolkit.
+**
+** $QT_BEGIN_LICENSE:BSD$
+** Commercial License Usage
+** Licensees holding valid commercial Qt licenses may use this file in
+** accordance with the commercial license agreement provided with the
+** Software or, alternatively, in accordance with the terms contained in
+** a written agreement between you and The Qt Company. For licensing terms
+** and conditions see https://www.qt.io/terms-conditions. For further
+** information use the contact form at https://www.qt.io/contact-us.
+**
+** BSD License Usage
+** Alternatively, you may use this file under the terms of the BSD license
+** as follows:
+**
+** "Redistribution and use in source and binary forms, with or without
+** modification, are permitted provided that the following conditions are
+** met:
+**   * Redistributions of source code must retain the above copyright
+**     notice, this list of conditions and the following disclaimer.
+**   * Redistributions in binary form must reproduce the above copyright
+**     notice, this list of conditions and the following disclaimer in
+**     the documentation and/or other materials provided with the
+**     distribution.
+**   * Neither the name of The Qt Company Ltd nor the names of its
+**     contributors may be used to endorse or promote products derived
+**     from this software without specific prior written permission.
+**
+**
+** THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+** "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+** LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+** A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+** OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+** SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+** LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+** DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+** THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+** (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+** OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE."
+**
+** $QT_END_LICENSE$
+**
+****************************************************************************/
+
+#ifndef TRACKBALL_H
+#define TRACKBALL_H
+
+#include <QtWidgets>
+
+#include <QtGui/qvector3d.h>
+#include <QtGui/qquaternion.h>
+
+class TrackBall
+{
+public:
+    enum TrackMode
+    {
+        Plane,
+        Sphere,
+    };
+    TrackBall(TrackMode mode = Sphere);
+    TrackBall(float angularVelocity, const QVector3D& axis, TrackMode mode = Sphere);
+    // coordinates in [-1,1]x[-1,1]
+    void push(const QPointF& p, const QQuaternion &transformation);
+    void move(const QPointF& p, const QQuaternion &transformation);
+    void release(const QPointF& p, const QQuaternion &transformation);
+    void start(); // starts clock
+    void stop(); // stops clock
+    QQuaternion rotation() const;
+private:
+    QQuaternion m_rotation;
+    QVector3D m_axis;
+    float m_angularVelocity;
+
+    QPointF m_lastPos;
+    QTime m_lastTime;
+    bool m_paused;
+    bool m_pressed;
+    TrackMode m_mode;
+};
+
+#endif
+```
+
+### src/vtkvolume.cpp
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#include <iostream>
+#include <fstream>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+#include <string>
+#include <limits.h>
+
+#include "vtkvolume.h"
+
+
+/*!
+ * \brief Create an empty volume.
+ */
+VTKVolume::VTKVolume()
+{
+}
+
+
+/*!
+ * \brief Create a volume from file.
+ * \param filename File to be loaded.
+ */
+VTKVolume::VTKVolume(const std::string& filename)
+{
+    load_volume(filename);
+}
+
+
+/*!
+ * \brief Destructor.
+ */
+VTKVolume::~VTKVolume()
+{
+}
+
+
+/*!
+ * \brief Check whether the architecture is little endian.
+ * \return `true` if little endian, `false` if big endian.
+ */
+static bool is_little_endian()
+{
+    union {
+        unsigned long l;
+        unsigned char c[sizeof(unsigned long)];
+    } x;
+    x.l = 1;
+    return x.c[0] == 1;
+}
+
+
+/*!
+ * \brief Invert the endianness of the input value.
+ * \param p Pointer to the first byte of an input value of size `N`.
+ */
+template<size_t N>
+void swap_byte_order(unsigned char* p)
+{
+    unsigned char tmp;
+    for (size_t i = 0; i < N / 2; ++i) {
+        tmp = p[i];
+        p[i] = p[N-i-1];
+        p[N-i-1] = tmp;
+    }
+}
+
+
+/*!
+ * \brief Check if a VTK file is binary.
+ * \param header Header lines of the file.
+ * \return `true` if binary.
+ */
+static bool is_binary(const std::vector<std::string> &header)
+{
+    for (auto it = header.begin(); it != header.end(); ++it) {
+        if (it->substr(0, 6) == "BINARY") {
+            return true;
+        }
+        else if (it->substr(0, 5) == "ASCII") {
+            return false;
+        }
+    }
+    throw VTKReadError("Cannot read file format.");
+}
+
+
+/*!
+ * \brief Read VTK data from file.
+ * \param file Stream from the open file.
+ * \param image_data Array of `unisgned char` to store the resulting data of type `T`.
+ * \param binary Whether the VTK file is binary.
+ * \param element_count Number of elements to read.
+ * \return The range of the read data.
+ */
+template<typename T>
+static void read_data(std::ifstream& file, const bool binary, const size_t element_count, std::vector<unsigned char>& image_data, std::pair<double, double>& range) {
+
+    std::vector<T> data;
+    data.resize(element_count);
+
+    if (binary) {
+        file.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(sizeof (T) * element_count));
+        if (is_little_endian() && sizeof (T) > 1) {
+            for (size_t i = 0; i < element_count; ++i) {
+                swap_byte_order<sizeof (T)>(reinterpret_cast<unsigned char*>(data.data() + i));
+            }
+        }
+    }
+    else {
+        T voxel;
+        for (size_t i = 0; i < element_count; ++i) {
+            file >> voxel;
+            data.push_back(voxel);
+        }
+    }
+
+    // Find range
+    range = {std::numeric_limits<double>::max(), std::numeric_limits<double>::min()};
+    for (size_t i = 0; i < element_count; ++i) {
+        if (data[i] > range.second) {
+            range.second = data[i];
+        }
+        if (data[i] < range.first) {
+            range.first = data[i];
+        }
+    }
+
+    size_t size = data.size() * sizeof (data[0]);
+    image_data.clear();
+    image_data.resize(size);
+    std::memcpy(image_data.data(), reinterpret_cast<char*>(data.data()), size);
+}
+
+
+/*!
+ * \brief Cast the data to `unsigned char`, and normalise its range to [0,255].
+ * \param data Input data of type `T`.
+ * \param range Range of the input data.
+ * \param normal_data Array to store the resulting normalised data.
+ * \param element_count Number of input elements.
+ */
+template<typename T>
+void cast_and_normalise(std::vector<unsigned char>& data, const std::pair<double, double>& range, std::vector<unsigned char>& normal_data, const size_t element_count) {
+    auto *p = reinterpret_cast<T*>(data.data());
+
+    // Normalise and cast
+    normal_data.clear();
+    normal_data.resize(element_count);
+    for (size_t i = 0; i < element_count; ++i) {
+        normal_data[i] = static_cast<unsigned char>(255 * (static_cast<double>(p[i]) - range.first) / (range.second - range.first));
+    }
+}
+
+
+/*!
+ * \brief Read the dimensions from a VTK header.
+ * \param header Lines of the VTK header.
+ */
+void VTKVolume::read_dimensions(const std::vector<std::string> &header)
+{
+    for (auto it = header.begin(); it != header.end(); ++it) {
+        if (it->substr(0, 10) == "DIMENSIONS") {
+            int width, height, depth;
+            if (3 != std::sscanf(it->c_str(), "%*s %d %d %d", &width, &height, &depth)) {
+                throw VTKReadError("Cannot read volume dimension.");
+            }
+            m_size = {width, height, depth};
+        }
+    }
+}
+
+
+/*!
+ * \brief Read the origin from a VTK header.
+ * \param header Lines of the VTK header.
+ */
+void VTKVolume::read_origin(const std::vector<std::string> &header)
+{
+    for (auto it = header.begin(); it != header.end(); ++it) {
+        if (it->substr(0, 6) == "ORIGIN") {
+            float ox, oy, oz;
+            if (3 != std::sscanf(it->c_str(), "%*s %f %f %f", &ox, &oy, &oz)) {
+                throw VTKReadError("Cannot read volume origin.");
+            }
+            m_origin = {ox, oy, oz};
+        }
+    }
+}
+
+
+/*!
+ * \brief Read the spacing from a VTK header.
+ * \param header Lines of the VTK header.
+ */
+void VTKVolume::read_spacing(const std::vector<std::string> &header)
+{
+    for (auto it = header.begin(); it != header.end(); ++it) {
+        if (it->substr(0, 7) == "SPACING") {
+            float sx, sy, sz;
+            if (3 != std::sscanf(it->c_str(), "%*s %f %f %f", &sx, &sy, &sz)) {
+                throw VTKReadError("Cannot read volume spacing.");
+            }
+            m_spacing = {sx, sy, sz};
+        }
+    }
+}
+
+
+/*!
+ * \brief Read the data type from a VTK header.
+ * \param header Lines of the VTK header.
+ *
+ * For the description of VTK data types, see
+ * https://www.vtk.org/wp-content/uploads/2015/04/file-formats.pdf
+ */
+void VTKVolume::read_data_type(const std::vector<std::string> &header)
+{
+    for (auto it = header.begin(); it != header.end(); ++it) {
+        if (it->substr(0, 7) == "SCALARS") {
+            char buffer[30];
+            if (1 != std::sscanf(it->c_str(), "%*s %*s %s", buffer)) {
+                throw VTKReadError("Cannot read volume data type.");
+            }
+            const std::string s(buffer);
+
+            if (s == "unsigned_char") {
+                m_datatype = DataType::Uint8;
+            }
+            else if (s == "char") {
+                m_datatype = DataType::Int8;
+            }
+            else if (s == "unsigned_short") {
+                m_datatype = DataType::Uint16;
+            }
+            else if (s == "short") {
+                m_datatype = DataType::Int16;
+            }
+            else if (s == "unsigned_int") {
+                m_datatype = DataType::Uint32;
+            }
+            else if (s == "int") {
+                m_datatype = DataType::Int32;
+            }
+            else if (s == "unsigned_long") {
+                m_datatype = DataType::Uint64;
+            }
+            else if (s == "long") {
+                m_datatype = DataType::Int64;
+            }
+            else if (s == "float") {
+                m_datatype = DataType::Float;
+            }
+            else if (s == "double") {
+                m_datatype = DataType::Double;
+            }
+            else {
+                throw VTKReadError("Unsupported volume data type.");
+            }
+        }
+    }
+}
+
+
+/*!
+ * \brief Load a volume from file.
+ * \param filename Name of the file.
+ */
+void VTKVolume::load_volume(const std::string& filename)
+{
+    // Open file
+    std::ifstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+        throw VTKReadError("Cannot open file.");
+    }
+
+    // Read VTK header
+    //
+    // # vtk DataFile Version x.x\n
+    // comment\n
+    // BINARY\n
+    // DATASET STRUCTURED_POINTS\n
+    // DIMENSIONS 128 128 128\n
+    // ORIGIN 0.0 0.0 0.0\n
+    // SPACING 1.0 1.0 1.0\n
+    // POINT_DATA 2097152\n
+    // SCALARS image_data unsigned_char\n
+    // LOOKUP_TABLE default\n
+    const size_t header_line_count = 10;
+    std::vector<std::string> header;
+    for (size_t i = 0; i < header_line_count; i++) {
+        std::string line;
+        std::getline(file, line);
+        if (line.empty()) {
+            file.close();
+            throw VTKReadError("Cannot read header, missing line " + std::to_string(i + 1) + ".");
+        }
+        else {
+            header.push_back(line);
+        }
+    }
+
+    // Check magic number
+    if (header[0].substr(0, 5) != "# vtk") {
+        file.close();
+        throw VTKReadError("Not a valid VTK file.");
+    }
+
+    // Read metadata
+    read_data_type(header);
+    read_dimensions(header);
+    read_origin(header);
+    read_spacing(header);
+
+    // Read data
+    size_t element_count = std::get<0>(m_size) * std::get<1>(m_size) * std::get<2>(m_size);
+    const bool binary = is_binary(header);
+    switch (m_datatype) {
+    case VTKVolume::DataType::Int8:
+        read_data<char>(file, binary, element_count, m_data, m_range);
+        break;
+    case VTKVolume::DataType::Uint8:
+        read_data<unsigned char>(file, binary, element_count, m_data, m_range);
+        break;
+    case VTKVolume::DataType::Int16:
+        read_data<unsigned short>(file, binary, element_count, m_data, m_range);
+        break;
+    case VTKVolume::DataType::Uint16:
+        read_data<short>(file, binary, element_count, m_data, m_range);
+        break;
+    case VTKVolume::DataType::Int32:
+        read_data<unsigned int>(file, binary, element_count, m_data, m_range);
+        break;
+    case VTKVolume::DataType::Uint32:
+        read_data<int>(file, binary, element_count, m_data, m_range);
+        break;
+    case VTKVolume::DataType::Int64:
+        read_data<unsigned long>(file, binary, element_count, m_data, m_range);
+        break;
+    case VTKVolume::DataType::Uint64:
+        read_data<long>(file, binary, element_count, m_data, m_range);
+        break;
+    case VTKVolume::DataType::Float:
+        read_data<float>(file, binary, element_count, m_data, m_range);
+        break;
+    case VTKVolume::DataType::Double:
+        read_data<double>(file, binary, element_count, m_data, m_range);
+        break;
+    }
+
+    file.close();
+}
+
+
+/*!
+ * \brief Cast the data to `unsigned char` and normalise it to [0, 255].
+ */
+void VTKVolume::uint8_normalised(void) {
+    size_t element_count = std::get<0>(m_size) * std::get<1>(m_size) * std::get<2>(m_size);
+    std::vector<unsigned char> normal_data;
+    normal_data.resize(element_count);
+
+    switch (m_datatype) {
+    case VTKVolume::DataType::Int8:
+        cast_and_normalise<char>(m_data, m_range, normal_data, element_count);
+        break;
+    case VTKVolume::DataType::Uint8:
+        cast_and_normalise<unsigned char>(m_data, m_range, normal_data, element_count);
+        break;
+    case VTKVolume::DataType::Int16:
+        cast_and_normalise<short>(m_data, m_range, normal_data, element_count);
+        break;
+    case VTKVolume::DataType::Uint16:
+        cast_and_normalise<unsigned short>(m_data, m_range, normal_data, element_count);
+        break;
+    case VTKVolume::DataType::Int32:
+        cast_and_normalise<int>(m_data, m_range, normal_data, element_count);
+        break;
+    case VTKVolume::DataType::Uint32:
+        cast_and_normalise<unsigned int>(m_data, m_range, normal_data, element_count);
+        break;
+    case VTKVolume::DataType::Int64:
+        cast_and_normalise<long>(m_data, m_range, normal_data, element_count);
+        break;
+    case VTKVolume::DataType::Uint64:
+        cast_and_normalise<unsigned long>(m_data, m_range, normal_data, element_count);
+        break;
+    case VTKVolume::DataType::Float:
+        cast_and_normalise<float>(m_data, m_range, normal_data, element_count);
+        break;
+    case VTKVolume::DataType::Double:
+        cast_and_normalise<double>(m_data, m_range, normal_data, element_count);
+        break;
+    }
+
+    m_data = std::move(normal_data);
+    m_datatype = DataType::Uint8;
+}
+```
+
+### src/vtkvolume.h
+```
+/*
+ * Copyright © 2018 Martino Pilia <martino.pilia@gmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+ * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+#pragma once
+
+#include <cstdint>
+#include <iostream>
+#include <string>
+#include <tuple>
+#include <vector>
+
+
+class VTKReadError : public std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+
+/*!
+ * \brief Represent a VTK volume.
+ *
+ * This class allows to load a VTK volume from file.
+ */
+class VTKVolume {
+
+public:
+
+    /*!
+     * \brief Create an empty volume.
+     */
+    VTKVolume(void);
+
+    /*!
+     * \brief Create a volume from file.
+     * \param filename File to be loaded.
+     */
+    VTKVolume(const std::string& filename);
+
+    /*!
+     * \brief Destructor.
+     */
+    virtual ~VTKVolume();
+
+    /*!
+     * \brief Load data from file, replacing any current data.
+     * \param filename File to be loaded.
+     */
+    void load_volume(const std::string& filename);
+
+    /*!
+     * \brief Cast the data to `unsigned char` and normalise it to [0, 255];
+     */
+    void uint8_normalised(void);
+
+    /*!
+     * \brief Pointer to the data.
+     */
+    unsigned char * data_ptr(void) {
+        return m_data.data();
+    }
+
+    /*!
+     * \brief Get a copy of the data.
+     */
+    std::vector<unsigned char> data(void) {
+        return m_data;
+    }
+
+    /*!
+     * \brief Range of the image, in intensity value.
+     * \return A pair, holding <minimum, maximum>.
+     */
+    const std::pair<double, double> range(void) const {
+        return m_range;
+    }
+
+    /*!
+     * \brief Range of the image, in intensity value.
+     * \return A pair, holding <minimum, maximum>.
+     */
+    const std::tuple<size_t, size_t, size_t> size(void) const {
+        return m_size;
+    }
+
+    /*!
+     * \brief Range of the image, in intensity value.
+     * \return A pair, holding <minimum, maximum>.
+     */
+    const std::tuple<float, float, float> origin(void) const {
+        return m_origin;
+    }
+
+    /*!
+     * \brief Range of the image, in intensity value.
+     * \return A pair, holding <minimum, maximum>.
+     */
+    const std::tuple<float, float, float> spacing(void) const {
+        return m_spacing;
+    }
+
+private:
+    enum class DataType {Int8, Uint8, Int16, Uint16, Int32, Uint32, Int64, Uint64, Float, Double};
+
+    std::tuple<size_t, size_t, size_t> m_size;    /*!< Number of voxels for each axis. */
+    std::tuple<float, float, float> m_origin;  /*!< Origin, in voxel coordinates. */
+    std::tuple<float, float, float> m_spacing; /*!< Spacing between voxels. */
+    DataType m_datatype;                          /*!< Data type. */
+    std::pair<double, double> m_range;            /*!< (min, max) of the original intensities, before normalisation. */
+    std::vector<unsigned char> m_data;            /*!< Volume data, casted to `unsigned char` and normalised to [0, 255]. */
+
+    void read_dimensions(const std::vector<std::string> &header);
+    void read_origin(const std::vector<std::string> &header);
+    void read_spacing(const std::vector<std::string> &header);
+    void read_data_type(const std::vector<std::string> &header);
+};
+```

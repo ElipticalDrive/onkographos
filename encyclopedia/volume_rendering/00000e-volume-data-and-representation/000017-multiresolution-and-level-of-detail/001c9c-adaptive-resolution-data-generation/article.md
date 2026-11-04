@@ -1,0 +1,124 @@
+# Adaptive Resolution Data Generation
+
+Also called: AR Data Generation
+
+## Overview
+Adaptive Resolution (AR) Data Generation creates a multiresolution representation of volume data by combining hierarchical subsampling with error-based pruning [S1, unofficial]. It solves the problem of storing and rendering large volumetric datasets by discarding redundant or low-detail regions, thereby reducing memory footprint and rendering time [S1, unofficial]. Unlike static multiresolution techniques that generate full MIPmaps for all levels, AR generation selectively prunes octree nodes based on a scalar variance threshold, retaining only the resolution necessary to represent data features above a specified error bound [S1, unofficial].
+
+## How it works
+**Inputs:** A uniform scalar volume dataset $V$ of resolution $N^3$ (e.g., $128^3$). A pruning threshold $\Delta$ (delta).
+**Outputs:** An octree data structure where leaf nodes store scalar values at varying resolutions, and internal nodes represent coarser aggregations.
+
+**Data Structures:**
+The method uses an octree. Each node represents a cubic region of the volume.
+- **Leaf Node:** Stores the scalar value for its region. If the node is at Level $L$, it represents a sub-volume of size $(N/2^L)^3$.
+- **Internal Node:** Represents the parent of 8 child octants. It does not store a single scalar value but serves as a container for its children.
+- **Pruning Condition:** A node is a leaf if the difference between the maximum and minimum scalar values of its constituent vertices is less than $\Delta$.
+
+**Steps:**
+1. **Generate Base Level (Level 0):** The finest resolution level contains the original $N^3$ data points. For a $128^3$ input, Level 0 is $128^3$.
+2. **Generate Coarser Levels via Subsampling:** To create Level $L+1$ from Level $L$, sample every other data point in each dimension.
+   - If Level $L$ has resolution $R^3$, Level $L+1$ has resolution $(R/2)^3$.
+   - Specifically, a point at $(x, y, z)$ in Level $L+1$ corresponds to the point at $(2x, 2y, 2z)$ in Level $L$.
+   - This process continues until the root node (Level 7 for $128^3$) is reached, which contains a single value representing the entire volume.
+3. **Construct Octree and Prune:**
+   - Build the octree hierarchy from Level 0 up to the root.
+   - For each node, calculate the error metric: the difference between the maximum and minimum scalar values of the vertices in its region.
+   - If this difference is less than $\Delta$, prune all children of the current node. The node becomes a leaf in the final structure, storing the aggregated value (or simply marking the region as uniform).
+   - If the difference is greater than or equal to $\Delta$, keep the children and recurse.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_ar_data(volume, delta):
+    """
+    volume: 3D array of shape (N, N, N)
+    delta: float, pruning threshold
+    Returns: Octree structure
+    """
+    N = volume.shape[0]
+    # Determine max levels. For 128^3, levels 0 to 7.
+    # Level L has resolution N / 2^L
+    max_level = int(math.log2(N))
+    
+    # Initialize octree root
+    root = OctreeNode(level=0, bounds=(0, 0, 0, N, N, N))
+    
+    # Recursive function to build tree and prune
+    def build_node(node, current_vol):
+        # Calculate min and max of current volume region
+        min_val = numpy.min(current_vol)
+        max_val = numpy.max(current_vol)
+        
+        # Check pruning condition
+        if (max_val - min_val) < delta:
+            # Prune: this node is a leaf, store aggregate value
+            node.value = (min_val + max_val) / 2.0 # Or store min/max
+            node.children = None
+            return
+        
+        # If not pruned, and not at finest level, create children
+        if node.level < max_level:
+            node.children = []
+            # Subsample to create 8 child volumes
+            # Child i corresponds to one of the 8 octants
+            for i in range(8):
+                # Determine bounds for child octant
+                child_bounds = get_octant_bounds(node.bounds, i)
+                # Extract sub-volume and subsample
+                # Note: In AR generation, the child volume at level L+1
+                # is derived by sampling every other point from the parent's region
+                child_vol = subsample_region(current_vol, child_bounds)
+                
+                child_node = OctreeNode(level=node.level + 1, bounds=child_bounds)
+                node.children.append(child_node)
+                build_node(child_node, child_vol)
+        else:
+            # At finest level, must be leaf
+            node.value = current_vol[0,0,0] # Representative value
+            node.children = None
+
+    # Initial call with full volume
+    build_node(root, volume)
+    return root
+
+def subsample_region(vol, bounds):
+    """
+    Extracts a sub-volume defined by bounds and subsamples it
+    by taking every other element in each dimension.
+    """
+    x0, y0, z0, x1, y1, z1 = bounds
+    # Extract sub-volume
+    sub = vol[x0:x1, y0:y1, z0:z1]
+    # Subsample: take every other element
+    # This creates the next coarser level representation
+    return sub[::2, ::2, ::2]
+```
+
+**Parameters:**
+- $\Delta$ (Delta): The threshold for pruning. Typical values depend on the data range. If data is normalized to $[0,1]$, $\Delta$ might be $0.01$ or $0.05$. Not given in the sources.
+- $N$: Base resolution. Must be a power of 2 for perfect hierarchical subsampling.
+
+**Edge Cases:**
+- If $\Delta$ is too large, the tree may prune aggressively, losing detail.
+- If $\Delta$ is too small, the tree may remain deep, offering little memory savings.
+- Boundary conditions: Subsampling must align correctly with octant boundaries.
+
+## Subtopics
+
+### [Hierarchical Voronoi Diagrams](4112-hierarchical-voronoi-diagrams.md)
+Hierarchical Voronoi Diagrams is an adaptive clustering method for the multiresolution representation of scattered data. It constructs a hierarchy of Voronoi diagrams from nested subsets of points to approximate scalar fields, building on [Adaptive Resolution Data Generation](1331-adaptive-resolution-data-generation.md) by defining approximation regions and error metrics for multiresolution representation. It differs from mesh-reduction algorithms by not requiring a grid structure, making it suitable for unstructured datasets.
+
+## Operating characteristics
+**Time Complexity:** Generating the subsampled levels is $O(N^3)$ for the finest level, with subsequent levels being $1/8$ the size. Total generation time is proportional to the size of the finest level, $O(N^3)$. Pruning requires a traversal of the octree, which is $O(M)$ where $M$ is the number of nodes in the final tree.
+**Memory Complexity:** The memory usage is proportional to the number of leaf nodes in the pruned octree. In uniform regions, memory is $O(1)$ per region. In complex regions, it approaches $O(N^3)$.
+**Performance:** Reduces memory space and rendering computation time by eliminating uninteresting (low-variance) cubes [S1, unofficial].
+**Strengths:** Simple to implement; effective for data with large uniform regions; adaptive to local detail.
+**Limitations:** Requires power-of-2 dimensions for simple subsampling; not suitable for unstructured data without modification; error metric is local and may miss global features.
+
+## Background
+The method was introduced in the context of IsoSurface Rendering of Adaptive Resolution Data [S1, unofficial]. It addresses the need for efficient visualization of scientific volume data by exploiting redundancy. The approach uses an octree structure to store the volume, with Level 0 being the finest resolution and Level 7 being the coarsest root node for a $128^3$ dataset [S1, unofficial].
+
+## Sources
+[S1] IsoSurface Rendering of Adaptive Resolution Data, https://www.cs.unh.edu/~rdb/papers/ARiso.pdf, fetched 2026-10-29 (unofficial)

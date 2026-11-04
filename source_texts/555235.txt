@@ -1,0 +1,346 @@
+Compile and explore arbitrarily large n-dimensional scientific data in the browser — points, lines, Gaussian splats and meshes, streamed from Zarr and rendered on the GPU. - Blind-spot fill: exclude held-out voxels from the donut median; docs wording fixes by royerloic · Pull Request #2671 · royerlab/luxar
+
+Blind-spot fill: exclude held-out voxels from the donut median; docs wording fixes by royerloic · Pull Request #2671 · royerlab/luxar · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+royerloic
+commented
+Sep 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Summary
+donut_median_fill now takes the median over the unmasked donut neighbours only. Before, every neighbour's original value entered the median, so at a 5 % Bernoulli mask about 74 % of held-out voxels leaked their value into a neighbour's replacement and the fitted volume was not independent of the held-out set that blind-spot cross-validation scores against. The filled volume is now invariant to the values at masked positions; voxels whose donors are all held out expand one Chebyshev shell at a time until a local unmasked donor is found. gsplat cal inherits the change (K* may shift marginally; the paper's fill-ablation experiment quantifies it).
+New tests: invariance to held-out values, masked-neighbour exclusion (hand-built 3×3×3 case), nearest-shell expansion, genuine-NaN propagation, bounded-chunk equivalence, and all-masked error.
+Docs: amplitudes are background-relative image intensities, not calibrated fluorophore concentration (README, VOLUMETRIC_BLENDING_SPEC); unsupported super-resolution/upsampling bullets removed; GSPLATS_DIMENSION_MAPPING states the displayed covariance is the marginal (not the conditional) and documents the shipped joint-Mahalanobis, shifted-Gaussian hidden-axis attenuation; GSPLATS_ZARR_FORMAT calls the Q·e(k) stamps a heuristic estimate rather than a committed quality.
+Test plan
+test_calibration.py: 112 passed against the worktree sources (new tests fail on the old fill, pass on the new)
+ruff check / ruff format / mypy clean on the changed modules
+make check-docs exit 0 in the worktree
+⚠️ Maintainers may push to this branch. Before pushing, run git fetch && git reset --hard origin/referee-fixes/blindspot-donut-exclusion, and use git push --force-with-lease (never plain --force) so those commits are not dropped.
+Blind-spot fill: exclude held-out voxels from the donut median; docs …
+…
+913a1cc
+```
+…wording fixes
+
+donut_median_fill now takes the median over the UNMASKED donut neighbours only.
+Previously every neighbour's original value entered the median, so at a 5 %
+Bernoulli mask ~74 % of held-out voxels leaked their value into a neighbour's
+replacement and the fitted volume was not independent of the held-out set the
+blind-spot cross-validation scores against (referee finding, Sept 2026). The
+filled volume is now invariant to the values at masked positions (new tests);
+voxels whose donors are all held out fall back to the unmasked median.
+
+Docs: amplitudes are background-relative image intensities, not calibrated
+fluorophore concentration (README, VOLUMETRIC_BLENDING_SPEC); drop unsupported
+super-resolution/upsampling capability bullets; GSPLATS_DIMENSION_MAPPING states
+the displayed covariance is the marginal (not the conditional) and documents the
+shipped joint-Mahalanobis shifted-Gaussian attenuation; GSPLATS_ZARR_FORMAT calls
+the Q.e(k) stamps a heuristic estimate rather than a committed quality.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+royerloic
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Reviewed at 913a1cc. I read the full masking.py, both consumers (calibration/driver.py:204 and the cal CLI in cli/gsplat_ops/fitting/calibrate.py), and checked every substantive claim in the docs edits against the shipped kernels. The core change is right — the leak is real and the fix is the correct one — but the branch is red and the fill got materially more expensive, so this needs another pass.
+What it does. donut_median_fill now medians only the unmasked donut neighbours (mask reflect-padded alongside V, held-out donors marked with NaN and dropped by nanmedian), with a global-unmasked-median fallback when every donor is held out and a hard error on an all-True mask. Four new tests. Plus a batch of doc corrections: amplitudes described as background-relative intensities rather than fluorophore concentration, the super-resolution bullets replaced, the displayed covariance documented as the marginal (not the conditional), the hidden-axis attenuation documented as it is actually implemented, and the Q·e(k) stamps re-labelled a heuristic estimate.
+I agree with the premise. The old fill let a held-out voxel's value into a neighbouring held-out voxel's replacement, so the fit target was a function of the values being scored — at 5 % Bernoulli that is 1 − 0.95²⁶ ≈ 74 % of held-out voxels, which matches the number in the PR body. Excluding them restores the invariance the blind-spot argument needs.
+critical / major
+major — test_sparse_volume_selects_on_foreground_weighted_curve fails at this head. packages/luxar/src/luxar/gsplats/tests/test_calibration.py:927. The test plan says 110 passed; I get 109 passed, 1 failed (hatch run pytest packages/luxar/src/luxar/gsplats/tests/test_calibration.py), deterministically, both in-suite and run alone. python-tests will go red.
+The failure is caused by this change, not flake. A/B on the same volume/grid, with only the fill swapped:
+```
+OLD fill: minmax [39.607, 40.823]  fg_weighted [26.007, 27.257]
+          selected signal_limited k*=60 conf=1.2501 / default conf=1.2160  -> PASS
+NEW fill: minmax [40.502, 39.894]  fg_weighted [26.922, 26.316]
+          selected plateau       k*=20 conf=0.0    / default conf=0.0     -> FAIL
+```
+At mask_fraction=0.2 on a 16³ sparse-blob volume the new fill flips both curves from rising to falling, so find_k_star returns plateau with confidence_db == 0.0 on both metrics and the last assertion (selected.confidence_db != approx(default.confidence_db)) can no longer hold. The test's intent — "the fg-weighted curve is genuinely a different curve" — is still worth keeping; it just needs a K grid / mask fraction where neither curve is degenerate (or an assertion on the curves themselves rather than on confidence_db being non-equal). Please re-tune it in this PR rather than loosening the assertion to nothing.
+major — the fill is ~2× slower and ~3× peak memory, and the docstring understates it. packages/luxar/src/luxar/gsplats/calibration/masking.py:123-134. Measured (5 % cv_mask, float32, tracemalloc peak):
+```
+128³  masked 104,599   old 0.30 s /  34.8 MiB    new 0.66 s / 107.6 MiB
+192³  masked 353,965   old 1.29 s / 117.3 MiB    new 2.49 s / 363.6 MiB
+256³  masked 837,631   old 3.04 s / 277.2 MiB    new 5.71 s / 860.0 MiB
+```
+Peak ratio is 3.10× at all three sizes and linear in masked count, so a 512³ volume extrapolates to ~6.9 GiB in this one call (vs ~2.2 GiB before) — and cal defaults to --no-auto-region (cli/gsplat_ops/fitting/commands.py:232), i.e. the whole volume, so that is the default path, not a corner. Two causes: the gather is now unconditionally float64 (2× the old V.dtype buffer), and np.nanmedian with a.shape[0] = 26 < 600 routes through numpy's _nanmedian_small, which builds a masked-array copy — that is the extra factor, and it is also where the 2× time goes.
+masking.py:74 claims the cost is "(2r+1)^D - 1 float64 values per masked voxel", which is 166 MiB at 256³ — five times under the measured 860 MiB. Fix direction: drop the NaN sentinel and keep the gather at V.dtype (or float32), pushing invalid donors to the end of a np.sort along axis 0 and selecting at (count-1)//2 / count//2 — exact median semantics, one copy, no nanmedian, no catch_warnings; and/or chunk the masked positions (e.g. 10⁶ at a time) so peak memory is bounded by chunk size instead of volume size. Either way, correct the docstring to the real figure.
+minor / nit
+minor — NaN is now overloaded as the held-out sentinel, so a genuine NaN in the data is silently dropped. masking.py:127-128. On a 3×3×3 volume of ones with V[0,0,0] = nan and only (1,1,1) held out: old fill gives nan at the centre, new fill gives 1.0. Dropping a real NaN donor is arguably nicer behaviour, but it is undocumented and it means the function can no longer distinguish "held out" from "not a number". A separate boolean validity array (which the sort-based rewrite above wants anyway) keeps the two apart and lets you decide explicitly.
+minor — "practically unreachable" is only true for an i.i.d. Bernoulli mask, and the fallback is a global constant. masking.py:67-70. The f^26 estimate assumes independent hold-outs; mask is a caller-supplied argument on a public entry point (luxar.gsplats.donut_median_fill, documented with a usage example in calibration/README.md:83). With a contiguous block mask on a 10³ volume, 29.6 % of held-out voxels landed on the fallback in my run — i.e. filled with the median of the whole unmasked volume, a large silent quality cliff. Cheapest fix that keeps invariance: widen the donut radius for just those voxels until an unmasked donor is found (still a function of unmasked values only); at minimum, note in the docstring that the estimate assumes an independent mask and warn when the fallback covers a non-trivial fraction.
+minor — the new ValueError on an all-True mask is undocumented. masking.py:113-114. Behaviour change: a fully-masked input used to return reflect-derived medians (donut_median_fill(np.ones((1,1)), np.ones((1,1),bool)) returned [[1.]], now raises). The error is the right call, but the docstring has no Raises section and the two README summaries (gsplats/README.md:702, calibration/README.md:15) do not mention it.
+nit — test_calibration.py:277 can't fail. assert 0.0 <= filled.flat[flat[-1]] <= 1.0 on a volume whose values are all 0 or 1: any median of any subset satisfies it. Assert the actual expected fill for that voxel instead, or drop the line — the useful assertion is the one above it.
+nit — masking.py:127 relies on advanced indexing always copying. V_pad[shifted].astype(np.float64, copy=False) is safe today only because shifted is a tuple of index arrays; if that ever becomes basic slicing, vals[...] = np.nan writes through into V_pad. A one-line comment (or an explicit copy=True) would pin the assumption. I confirmed no write-through happens today, including for a float64 input.
+checked and clean
+Invariance is complete, not just on the donut path: the all-donors-masked fallback also reads unmasked voxels only, so donut_median_fill output is a strict function of the unmasked set. Verified with a 30 % random mask (the new test) and independently with a contiguous block mask.
+Reflect-padding the mask alongside V is index-consistent. Hand-checked in 1D (V=[a,b,c], both mask patterns) — a reflected copy of a held-out voxel carries True, so it stays excluded. This is also implicitly gated by the new invariance test, which would fail at the volume edges if the mask weren't padded.
+Integer volumes round-trip identically to before (uint8 3³ case: 13 both ways); size-1 axes and radius >= axis length behave exactly as on the base commit; no write-through into V or V_pad.
+warnings.catch_warnings() scope is tight enough (one nanmedian call, restored on exit) — no cross-test filter leakage.
+Docs: I checked the GSPLATS_DIMENSION_MAPPING.md step 3/4 rewrite line by line against src/wasm/rust/src/gsplats_processing.rs:339-488. The discrete hard gate at discreteSteps[dim] * 0.5 with default step 1 is real (src/workers/data-worker/projection/gsplats.ts:305-323, precomputed in TS as stated); the continuous path really is one joint Mahalanobis over compute_marginal_cholesky of Σ_hh, with attenuation = max(0, (exp(-d²/2) - c)/(1 - c)), c = exp(-truncate²/2); only the amplitude is scaled, centres and the display Cholesky are emitted unattenuated; the min_amplitude || is_nan cull matches; and the TS reference kernel applies the same shifted truncation (src/wasm/typescript/gsplats-processing.ts:456-523). "Categorical/discrete axes" is accurate because Dimension.__post_init__ forces discrete=True whenever categories is set (core/dimensions.py:101-104). The marginal-vs-conditional paragraph and the "centre read directly, not shifted" note both match the code.
+make check-docs exits 0 in the worktree (warning-fatal Sphinx included). ruff check, ruff format --check, and mypy are clean on the changed module.
+Nothing filed as a follow-up issue: every finding above belongs in this PR.
+royerloic
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Reproduced the review findings locally: genuine NaN donors are currently discarded, a 6×6×6 contiguous holdout uses the global fallback for 64/216 voxels, and the median gather scales peak memory with the full masked set. I’m tightening the implementation around bounded-memory chunks and local radius expansion, with regression tests for each case.
+royerloic
+added
+the
+priority
+High priority: prioritised by the orchestrator and the fleet
+label
+Sep 9, 2026
+royerloic
+added 3 commits
+September 9, 2026 12:44
+Bound blind-spot fill memory and expand local donors
+7e2631b
+Document blind-spot fill helpers
+ebad852
+Clarify blind-spot buffer bound
+53366aa
+royerloic
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Addressed the review findings:
+Replaced the full-volume float64/nanmedian gather with an in-place, input-dtype donor sort processed in bounded chunks. Peak RSS stayed effectively flat across 64³–192³ repro volumes.
+Kept genuine NaN donors distinct from held-out donors and restored NaN propagation.
+Replaced the global fallback with per-voxel Chebyshev-shell expansion, so clustered masks use the nearest available local donors.
+Documented the all-held-out ValueError, clustered-mask behavior, and the actual working-buffer bound.
+Strengthened the masked-neighbour assertion and added regressions for local expansion, NaN propagation, and multi-chunk equivalence.
+Fixed the foreground-weighted smoke test to compare the weighted and unweighted score curves rather than two confidences that can both legitimately clamp to zero.
+Validation: 112 calibration tests passed; focused donut tests passed after the final doc correction; hatch run lint, import/layer checks, version/contract/data checks, security, native compile check, and make check-docs all passed. The exact PR suite with CI’s -n 2 --dist loadfile settings reached 14% with no failures before the local run was stopped; the pushed CI run will complete it.
+royerloic
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Pushed review fixes to referee-fixes/blindspot-donut-exclusion (head now 53366aa). Heads-up that this branch is shared — if you have local commits, run git fetch && git reset --hard origin/referee-fixes/blindspot-donut-exclusion before pushing, and use git push --force-with-lease (never plain --force), or those commits will be dropped.
+royerloic
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Second pass, at 53366aa. I re-read the whole of masking.py, both consumers (calibration/driver.py:204 and the cal CLI), the new tests, and re-verified the doc edits against the shipped kernels rather than taking last round's word for them. All seven findings from the previous pass are genuinely addressed — the rewrite is a real improvement over what I asked for, not a patch over it. What is left is three documentation-consistency items; nothing in the code.
+What changed since 913a1cc. The float64/nanmedian gather is gone. _masked_donor_medians now gathers donors into a preallocated (n_offsets, chunk) buffer in the input dtype, stamps held-out donors with a sortable-high sentinel (+inf / iinfo.max / True), sorts along the donor axis and reads the median at (count-1)//2 / count//2 — exact median semantics, one buffer, no masked-array copy. Chunking is bounded by _MAX_DONUT_BYTES (16 MiB). Genuine NaN donors are tracked in a separate has_nan flag so they stay distinct from held-out donors and still propagate. The global-median fallback is replaced by per-voxel Chebyshev-shell expansion (donut_median_fill:121-133), which keeps the fill local and keeps the invariance.
+findings
+minor — the changelog fragment still describes the fallback that was removed. changelog.d/blindspot-donut-exclusion.md:3 says "voxels whose donors are all held out fall back to the median of the unmasked volume". That is the 913a1cc behaviour; the shipped code expands the neighbourhood one Chebyshev shell at a time until a local unmasked donor appears, and test_all_donors_masked_expands_to_nearest_shell:293 asserts precisely that the result is not the global median. Fix: reword that clause to the shell expansion (a fragment is folded into CHANGELOG.md verbatim at release, so it is the one description that outlives the PR).
+nit — the tutorial's one-sentence description of the fill is now the imprecise one. docs/tutorials/gaussian_splatting.rst:349-351: "5% of voxels are masked and replaced with the median of their 26-neighbour donut before fitting. The optimiser never sees the original noisy values at those positions". The second sentence is only true because of this PR; inserting "unmasked" before "26-neighbour donut" is a one-word fix and this is the only user-facing prose that spells the fill out. The PR already edits this file (:43).
+nit — the PR description is stale in the same two places. It carries the same "fall back to the unmasked median" sentence, and the test-plan line says 110 passed (it is 112 now). Worth a quick edit so the description matches what merges.
+dropped — checked, not worth acting on
+The 26-neighbour donut still gathers reflected copies at the volume edges, so an edge voxel can see the same donor twice. Pre-existing, unchanged by this PR, and out of scope.
+donut_median_fill:132 raises RuntimeError if the expansion exhausts max_radius. I convinced myself it is unreachable (for any pair of voxels i, j the offset j − i lies exactly on Chebyshev shell k = max_d |j_d − i_d| ≤ max(shape) − 1, and the loop visits every shell up to that bound), so it is a defensive guard with no test — fine as is.
+medians is np.empty and left uninitialised for voxels with no donor at the current radius. Never read (has_donor gates every use). Not worth a change.
+The mixed Tuple[...] / tuple[...] annotation style in the module. Pre-existing, purely cosmetic.
+Nothing deferred to a follow-up issue — the three items above all belong in this PR.
+checked and clean
+Exactness of the new sort-based median. Built a per-voxel brute-force reference (expanding Chebyshev ball over the reflect-padded volume, plain np.median over unmasked donors) and compared element-wise: identical on random masks at 30–60% in 2D/3D/4D, on 10³ block masks (2:8, 1:9, 0:9), and on an anisotropic 3×40 with a 30-wide hole. Also identical to the old implementation whenever no donor is held out, across five shapes.
+The sentinel cannot collide with real data. Sorting puts every valid donor strictly before the sentinel run even when the data itself contains the sentinel value, because they compare equal. Verified: uint8 volume of all-255, int16 volume containing iinfo.max, and a float volume containing a genuine +inf all return the same median as np.median over the unmasked donors.
+NaN semantics. An unmasked NaN donor propagates (test_genuine_nan_donor_propagates); a NaN donor that is itself held out is correctly excluded and does not poison the fill; a NaN elsewhere in the volume is untouched. This is the separation I asked for.
+Memory and time are fixed, and better than I asked for. Same benchmark as last round (5% cv_mask, float32, tracemalloc peak), old vs. this head:
+```
+128³  masked 104,599   old 0.26 s /  34.8 MiB    new 0.24 s /  41.3 MiB
+192³  masked 353,965   old 0.82 s / 117.3 MiB    new 1.10 s / 116.0 MiB
+256³  masked 837,631   old 2.22 s / 277.2 MiB    new 2.60 s / 207.9 MiB
+```
+Peak is now below the old implementation at 256³ and no longer scales with the masked count in the donor buffer — the remainder is the output copy plus the reflected V/mask, which is what the docstring (masking.py:74-77) now claims. The ~1.2× time cost at 256³ is fine.
+The all-held-out ValueError is documented now — a Raises section in the docstring (masking.py:95-99), plus gsplats/README.md:702 and calibration/README.md:15, and test_every_voxel_masked_raises pins the message. The advanced-indexing write-through worry from last round is moot: donors are copied into a preallocated buffer, never written through a gathered view.
+Chunking is actually exercised. test_chunked_gather_matches_single_chunk monkeypatches _MAX_DONUT_BYTES to 208 bytes → chunk_size == 2 over ~154 masked voxels, i.e. 77 chunks. Real multi-chunk coverage, not a token one.
+Invariance holds under a clustered mask, not just a Bernoulli one: an 8³ solid block plus 5% scatter in a 16³ volume, values at masked positions perturbed by ×10³ — output byte-identical.
+Layout and dtype robustness: F-ordered input, strided non-contiguous views, read-only input, and a non-bool (uint8) mask all agree with the C-contiguous bool case; source arrays are not mutated; float64/int64/uint8/bool dtypes round-trip; size-1 axes and radius ≥ axis length behave.
+test_masked_neighbours_excluded is now discriminating. The centre has 13 zero donors and 13 one donors, one of the ones held out → 25 unmasked donors → median 0.0, vs 0.5 under the old fill. Both assertions at :276-277 are exact values now; the tautology I flagged is gone.
+The smoke-test fix is the right one. test_sparse_volume_selects_on_foreground_weighted_curve:953 now asserts the fg-weighted and unweighted curves differ rather than two confidences that can both legitimately clamp to zero — that is what the test was always trying to say. hatch run pytest .../test_calibration.py gives 112 passed at this head (was 109 passed / 1 failed last round); test_calibration_report.py, cli/tests/test_gsplat_calibrate_output.py and preprocessing/tests/test_calibration.py add 20 more, all green.
+Docs, re-verified against the code rather than the previous review. GSPLATS_DIMENSION_MAPPING.md step 3/4: the discrete hard gate at discreteSteps[dim] * 0.5 with default step 1, precomputed in TS, matches workers/data-worker/projection/gsplats.ts:303-319; the continuous path really is one joint Mahalanobis over compute_marginal_cholesky of Σ_hh with attenuation = max(0, (exp(−d²/2) − c)/(1 − c)), c = exp(−truncate²/2) (wasm/rust/src/gsplats_processing.rs:399-440); only the amplitude is scaled, centres and display Cholesky are emitted unattenuated (:449-471); the < min_amplitude || is_nan cull matches; the TS twin applies the same shifted truncation (wasm/typescript/gsplats-processing.ts:483-523). The marginal-not-conditional claim is right — compute_display_cholesky_3d:211-221 calls compute_marginal_cholesky on the display dims, no Schur complement anywhere. The amplitude/turbidity and Q·e(k) rewordings are accurate.
+ruff check, ruff format --check and mypy clean on both changed Python files; C901 clean; no new bugbear/blind-except violations (the two B905 hits in test_calibration.py are at :404 and :1292, untouched by this PR and already baselined). docs-quality, typescript-tests, tsl-parity, release-readiness and wheel-viewer are green on CI; python-tests (3.12) is still running.
+royerloic
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Taking the final documentation-consistency pass now: changelog fallback wording, tutorial donor wording, and the stale PR description/test count. I’ll re-run the affected docs and Python checks before pushing.
+Align blind-spot fill documentation
+2a60882
+royerloic
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Addressed the remaining review items in 2a60882: the changelog now describes nearest-shell expansion instead of the removed global fallback, the tutorial explicitly says the 26-neighbour donors are unmasked, and the PR description now matches the implementation and 112-test count. I also removed the stale attribution footer.\n\nValidation: hatch run pytest packages/luxar/src/luxar/gsplats/tests/test_calibration.py (112 passed), hatch run lint, import/layer checks, version/contract/data checks, security, native compile check, and make check-docs all pass.
+royerloic
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Pushed review fixes to referee-fixes/blindspot-donut-exclusion (head now 2a60882). Heads-up that this branch is shared — if you have local commits, run git fetch && git reset --hard origin/referee-fixes/blindspot-donut-exclusion before pushing, and use git push --force-with-lease (never plain --force), or those commits will be dropped.
+royerloic
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Third pass, at 2a60882. I re-read masking.py in full, the consumer (calibration/driver.py:203-204) and the cal CLI, the new tests, and the doc edits — and I re-derived the correctness and performance claims myself rather than carrying over last round's conclusions.
+Where this stands. All three items from the previous pass are addressed: the changelog fragment now describes the nearest-shell expansion instead of the removed global fallback (changelog.d/blindspot-donut-exclusion.md:3), the tutorial says "median of their unmasked 26-neighbour donut" (docs/tutorials/gaussian_splatting.rst:349-351), and the PR description matches the shipped behaviour and the 112-test count. The code is unchanged since 53366aa and I re-verified it from scratch anyway.
+One item left, and it is the last one.
+findings
+nit — the calibration package docstring still describes the pre-PR fill, and it is the version that gets published. packages/luxar/src/luxar/gsplats/calibration/__init__.py:6-11. Step 2 reads "Replace masked voxels with the median of their 3^D donut neighbourhood (centre excluded)" — the old donor set — while step 3 immediately asserts "the optimiser never sees the original noisy values at masked positions", which is the guarantee that only holds because of this PR. That module is rendered by automodule:: luxar.gsplats.calibration (docs/api/gsplats.rst:254), so this is the canonical protocol description on the API page — more prominent than the tutorial sentence we already corrected, and it is the one place left where the published docs still spell out the leaky fill. Same one-word fix: "the median of the unmasked voxels in their 3^D donut neighbourhood (centre excluded)". Worth also noting the shell expansion in a half-clause if it reads naturally, but the donor-set word is the substance.
+That is the whole list. Fix that line and this is good to land.
+dropped — checked, not worth acting on
+docs/api/gsplats.rst:250 has a pre-existing "fit each at against" typo in the section blurb. Unrelated to this change and untouched by it; not going to grow the diff for it.
+cli/gsplat_ops/fitting/calibrate.py:152 hardcodes donut radius=1 in the summary line rather than echoing donut_radius. Accurate today (the CLI never exposes the knob, so the driver default always applies) and pre-existing.
+No test pins the sentinel-collision behaviour (a real +inf / iinfo.max donor). I verified it holds and the reasoning is sound, but a regression test here would be guarding an internal implementation detail; the brute-force-equivalent behaviour is already covered by the dtype tests.
+Mixed Tuple[...] / tuple[...] annotations in the module. Pre-existing, cosmetic.
+_MAX_DONUT_BYTES bounds the donor buffer but not the per-radius np.pad of V/mask, so a pathological mask that forces a large expansion radius would grow the padded copies. Reaching a radius where that matters needs almost the whole volume held out; not a real path, and the cal default (5 % Bernoulli) never leaves radius 1.
+checked and clean
+Exactness, against an independent reference. I wrote a per-voxel brute force (expanding Chebyshev shells over the reflect-padded volume, plain np.median over the unmasked donors) and compared element-wise across 76 cases: shapes (6,6), (5,5,5), (4,4,4,3), (3,40), (1,7,7), (9,) × mask fractions 5/30/60 % × dtypes float32/float64/uint8/int16, plus four block masks including 10³ with 2:8, 1:9, 0:9 and a 3×40 with a 30-wide hole. Zero mismatches. Radius 2 and 3 also match a hand-rolled donut reference.
+The sentinel cannot corrupt a median. A float volume containing genuine +inf donors and an int16 volume that is entirely iinfo.max both return the same median as np.median over the unmasked donors — values equal to the sentinel are interchangeable in the sort, so the index-based selection still lands on the right value.
+NaN semantics are the separation asked for. An unmasked NaN donor propagates; a NaN donor that is itself held out is excluded and does not poison the fill; a NaN elsewhere is untouched.
+Chunking really is equivalent. _MAX_DONUT_BYTES forced to 1, 104, 200 and 312 bytes on a 16³/40 %-mask case gives byte-identical output to the unchunked run. The in-tree test_chunked_gather_matches_single_chunk drives ~77 chunks, so this is genuinely exercised in CI too.
+Invariance holds under a clustered mask, not just Bernoulli: a 6³ solid block plus 5 % scatter in a 12³ volume, values at masked positions replaced with values ×10⁵ — output byte-identical.
+Termination. The RuntimeError at masking.py:132 is unreachable: for any two voxels the offset lies on Chebyshev shell k = max_d |j_d − i_d| ≤ max(shape) − 1, the loop visits every shell up to max_radius, and the padded index stays inside V_pad and resolves to the original (unpadded) voxel. Confirmed with a 10³ volume masked everywhere except (0,0,0) — 9 expansions, correct fill.
+Layout / robustness: F-ordered, strided-view and read-only inputs all agree with the C-contiguous case; the source V and mask are not mutated; bool dtype works; the empty-mask and all-masked guards are ordered correctly, so 0-d and size-0 inputs never reach max(V.shape).
+Performance, re-measured here (5 % cv_mask, float32, tracemalloc peak), old implementation vs this head:
+```
+128³  masked 104,599   old 0.26 s /  32.4 MiB    new 0.27 s /  41.3 MiB
+192³  masked 353,965   old 0.91 s / 109.2 MiB    new 1.04 s / 116.0 MiB
+256³  masked 837,631   old 2.07 s / 258.0 MiB    new 2.42 s / 207.9 MiB
+```
+Peak is below the old implementation at 256³ and no longer scales with the masked count in the donor buffer, which is what masking.py:74-77 now claims. ~1.17× time at 256³ is fine.
+Tests. hatch run pytest .../gsplats/tests/test_calibration.py → 112 passed at this head; test_calibration_report.py + cli/tests/test_gsplat_calibrate_output.py → 13 more, green. test_sparse_volume_selects_on_foreground_weighted_curve:953 now asserts the fg-weighted and unweighted curves differ, which is what the test was always trying to say and is stronger than the two-confidences comparison it replaced. The exclusion is mutation-covered: reverting it fails both test_fill_invariant_to_heldout_values and test_masked_neighbours_excluded.
+Docs, re-checked against the code. GSPLATS_DIMENSION_MAPPING.md step 4: the discrete hard gate is real and precomputed in TS; the continuous path is one joint Mahalanobis over compute_marginal_cholesky of Σ_hh with attenuation = max(0, (exp(−d²/2) − c)/(1 − c)), c = exp(−truncate²/2) (wasm/rust/src/gsplats_processing.rs:398-441); only the amplitude is scaled while centres and the display Cholesky are emitted unattenuated (:453-471); the < min_amplitude || is_nan cull matches. The marginal-not-conditional claim in step 3 is right. The 0.6 energy-release threshold in GSPLATS_ZARR_FORMAT.md matches ENERGY_RELEASE_THRESHOLD (scene/lod-display-gate.ts:294, used at :361 for upgrades). The amplitude/turbidity and Q·e(k) rewordings are accurate.
+ruff check, ruff format --check and mypy clean on both changed Python files. CI at this head: go-launcher, release-readiness, tsl-parity, wheel-viewer green; python-tests (3.12), docs-quality and typescript-tests still running when I looked — I ran the touched Python suites locally instead.
+Nothing deferred to a follow-up issue.
+royerloic
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Confirmed the remaining API-doc inconsistency and corrected the published calibration protocol wording to specify unmasked donut donors. The 112-test calibration suite, Ruff checks for the touched module, and the full warning-fatal docs gate are green; I’m doing the final diff check before pushing.
+docs(gsplats): clarify blind-spot donor set
+c964238
+royerloic
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Pushed c964238 with the final review fix: the canonical luxar.gsplats.calibration package documentation now states that masked voxels are filled from unmasked donut neighbours, matching the implementation and the blind-spot independence guarantee. Validation: hatch run pytest packages/luxar/src/luxar/gsplats/tests/test_calibration.py (112 passed), Ruff check and format check for the touched module, and make check-docs (documentation ratchet, TypeDoc warning ratchet, and warning-fatal Sphinx build) all pass.
+royerloic
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Pushed review fixes to referee-fixes/blindspot-donut-exclusion (head now c964238). Heads-up that this branch is shared — if you have local commits, run git fetch && git reset --hard origin/referee-fixes/blindspot-donut-exclusion before pushing, and use git push --force-with-lease (never plain --force), or those commits will be dropped.
+royerloic
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Fourth pass, at c964238. The only code delta since 2a60882 is the calibration/__init__.py docstring, but I re-derived the whole change from scratch rather than carrying over the previous rounds' conclusions: full read of masking.py, the consumer (calibration/driver.py:203-204) and the cal CLI, the new tests, and every substantive doc claim re-checked against the shipped kernels.
+Where this stands. The last item from the previous pass is fixed: packages/luxar/src/luxar/gsplats/calibration/__init__.py:7-8 now reads "the median of the unmasked voxels in their 3^D donut neighbourhood (centre excluded)", so the published protocol description on the API page (automodule:: luxar.gsplats.calibration, docs/api/gsplats.rst:254) matches step 3's independence guarantee and the implementation. That closes out all eleven findings raised across the three earlier passes.
+No findings. Nothing left for a fix round — this is good to land.
+what I checked, independently, at this head
+Exactness against an independent reference. Wrote a per-voxel brute force (expanding Chebyshev shells over the reflect-padded volume, plain np.median over the unmasked donors) and compared element-wise over 232 cases: shapes (6,6), (5,5,5), (4,4,4,3), (3,40), (1,7,7), (9,), (2,2,2), (1,1,5), (10,1) × mask fractions 5/30/60 % × dtypes float32/float64/uint8/int16/bool × radius 1 and 2. Zero mismatches. The sort-index selection ((count-1)//2 / count//2 at masking.py:176-180) is exact median semantics on every one of them, including the even-count averaging and the 1D / size-1-axis shapes.
+The sentinel cannot corrupt a median. A float32 volume with genuine +inf donors returns the same value as np.median over the unmasked donors; an int16 volume that is entirely iinfo.max returns 32767. Values equal to the sentinel are interchangeable under the sort, so the index-based pick still lands on the right value.
+NaN stays separate from held-out. An unmasked NaN donor propagates (has_nan at masking.py:170, test_genuine_nan_donor_propagates); a NaN donor that is itself held out is excluded and the fill comes out 1.0 rather than NaN; a NaN elsewhere in the volume is untouched. Note the sort puts NaN after the +inf sentinel run, so the index pick alone would not be safe here — the has_nan override at :181 is what makes it correct, and it is exercised.
+Termination. Swept "all but one voxel held out" across (2,), (5,), (1,5), (1,1,5), (2,2), (3,3), (3,40), (1,7,7), (4,4,4), (2,3,4,5) and (10,10,10) with the surviving voxel at index 0, middle and last — 33/33 filled with exactly the surviving value, no RuntimeError. masking.py:132 stays a defensive guard, masking.py:120's max(V.shape) - 1 bound is right, and np.pad(..., mode="reflect") copes with a pad width larger than the axis (radius=10 on a 3×3 gives the correct 4.0).
+Chunking is equivalent, including on the expansion path. _MAX_DONUT_BYTES forced to 1, 8, 104 and 1000 bytes on a 16³ volume carrying both a 9³ solid block and 5 % scatter (so both the radius-1 pass and the shell passes chunk) gives byte-identical output to the unchunked run. In-tree, test_chunked_gather_matches_single_chunk drives ~77 chunks, so CI exercises it too.
+Invariance to the held-out values holds under a clustered mask, not just Bernoulli. 7³ solid block plus 5 % scatter in a 12³ volume, values at masked positions replaced by values ×10⁵ → output byte-identical. The reflect-padded mask is what makes this hold at the edges, including the radius ≥ 2 case where a masked voxel can see reflected copies of itself.
+Layout / robustness. F-ordered, strided non-contiguous view, read-only input and a non-bool (uint8) mask all agree with the C-contiguous bool case; V and mask are not mutated; float16 round-trips; 0-d and size-0 inputs return cleanly (the empty-mask guard at :111 runs before anything touches max(V.shape)).
+Performance and memory, re-measured here (5 % cv_mask, float32, tracemalloc peak), base 77648af vs this head:
+```
+128³  masked 104,599   old 0.20 s /  34.8 MiB    new 0.18 s /  41.3 MiB
+192³  masked 353,965   old 0.52 s / 117.3 MiB    new 0.43 s / 116.0 MiB
+256³  masked 837,631   old 1.20 s / 277.2 MiB    new 1.14 s / 207.9 MiB
+```
+Peak is below the old implementation at 256³ and no longer scales with the masked count inside the donor buffer, which is what masking.py:74-77 claims. Time is at parity. The 2×/3× regression from the first pass is genuinely gone, on the default cal path (--no-auto-region, whole volume).
+Mutation coverage of the actual fix. Reverting the exclusion fails both test_fill_invariant_to_heldout_values and test_masked_neighbours_excluded; the latter's two assertions at :276-277 are exact expected values (0.0 and 1.0 against the old fill's 0.5), not the tautology flagged in the first pass. test_all_donors_masked_expands_to_nearest_shell:293 pins that the result is not the removed global median.
+The smoke-test fix is the right one. test_sparse_volume_selects_on_foreground_weighted_curve:953 now asserts the fg-weighted and unweighted score curves differ instead of comparing two confidences that can both legitimately clamp to 0 dB — that is what the test was always trying to say, and it still fails if the weighted metric collapsed onto the unweighted one.
+Tests. hatch run pytest packages/luxar/src/luxar/gsplats/tests/test_calibration.py → 112 passed at this head. test_calibration_report.py + cli/tests/test_gsplat_calibrate_output.py → 13 more, green. luxar/gsplats/preprocessing/calibration.py does not touch the fill, so it is unaffected.
+Docs, re-verified against the code. GSPLATS_DIMENSION_MAPPING.md step 4's new Rust excerpt matches wasm/rust/src/gsplats_processing.rs:398-450 line for line — discrete gate first, marginal Cholesky of Σ_hh over the continuous hidden dims, one joint Mahalanobis, attenuation = max(0, (exp(−d²/2) − c)/(1 − c)) with c = exp(−truncate²/2), amplitude-only scaling with centres and display Cholesky emitted unattenuated (:453-471), and the < min_amplitude || is_nan cull. The discrete hard gate at discreteSteps[dim] * 0.5 (default step 1) really is precomputed in TS (workers/data-worker/projection/gsplats.ts:305-323). The TS reference kernel applies the same shifted truncation (wasm/typescript/gsplats-processing.ts:483-524). Step 3's marginal-not-conditional claim is right — compute_display_cholesky_3d:211-221 calls compute_marginal_cholesky on the display dims, no Schur complement anywhere. The 0.6 energy-release threshold in GSPLATS_ZARR_FORMAT.md matches ENERGY_RELEASE_THRESHOLD (scene/lod-display-gate.ts:294, used at :361 on upgrades). The amplitude/turbidity and Q·e(k) rewordings are accurate, and the changelog fragment plus the tutorial sentence now describe the shipped behaviour.
+Gates. ruff check, ruff format --check and mypy clean on the changed Python files; make check-docs (completeness + TypeDoc ratchets + warning-fatal Sphinx) exits 0 in a fresh worktree at this head. CI: release-readiness, wheel-viewer, go-launcher, tsl-parity green; python-tests (3.12), docs-quality and typescript-tests still running when I looked, so I ran the touched suites and the docs gate locally instead. No .github/ changes; nothing that fetches or executes anything.
+dropped — checked, not worth acting on
+docs/api/gsplats.rst:250 has a pre-existing "fit each at against" typo in the section blurb immediately above the automodule we just corrected. Tempting, but it is untouched by this diff and not worth another ~80-minute CI round.
+An int64 volume with values above 2⁵³ loses a unit of precision through the float64 median. Identical on the base implementation (np.median also promotes to float64), so pre-existing, and no image volume reaches it.
+The working-buffer note at masking.py:74-77 omits the float64 medians / has_donor arrays (9 bytes per pending voxel, ~60 MiB at 512³ / 5 %). Measured peak is still below the old implementation, so the claim is not misleading.
+Reflect padding lets an edge voxel see the same donor twice. Pre-existing, unchanged by this PR.
+On an expansion pass the reflect pad width grows with the radius, so an offset on a shell ≤ r can map to a different real voxel than it did under the narrower pad. Only reachable when an entire local neighbourhood is held out, does not affect invariance, and the shell actually used is still the nearest one carrying an unmasked donor.
+masking.py:132's RuntimeError has no test. Verified unreachable (33/33 all-but-one-masked cases above), so it stays a defensive guard.
+Mixed Tuple[...] / tuple[...] annotations in the module. Pre-existing, cosmetic.
+Nothing deferred to a follow-up issue.
+royerloic
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Took a last full pass at c964238 before landing. This fixes a real leak in the blind-spot cross-validation: the donut fill previously let held-out values reach the fitter through neighbouring fills (~74% of held-out voxels at the default 5% mask), so K* was scored against a target that wasn't independent of the held-out set. The shipped fill is now a strict function of the unmasked voxels — sentinel-sorted exact medians in bounded chunks, genuine NaN kept distinct and propagating, clustered masks resolved by nearest-shell expansion — and memory/time are at or below the old implementation. I re-read masking.py and the consumers, re-ran the calibration suite here (112 passed), and confirmed the docs corrections match the shipped kernels. Every finding from the earlier rounds is addressed; nothing left. Good to merge once CI finishes.
+royerloic
+enabled auto-merge (squash)
+September 9, 2026 22:01
+Hide details
+View details
+royerloic
+merged commit 3c72130
+into
+dev
+Sep 9, 2026
+14 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+royerloic
+deleted the
+referee-fixes/blindspot-donut-exclusion
+branch
+September 9, 2026 22:56
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+priority
+High priority: prioritised by the orchestrator and the fleet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

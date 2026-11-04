@@ -1,0 +1,1842 @@
+### TimeCalculation.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+import vtkmodules.all as vtk
+from vtkmodules.util.numpy_support import vtk_to_numpy
+from mpi4py import MPI
+import time
+
+
+
+#   For fastest results, use either 3 or 4 or 5 processes........
+
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+
+def vtkToNumpy(data):
+    temp = vtk_to_numpy(data.GetPointData().GetScalars())
+    dims = data.GetDimensions()
+    component = data.GetNumberOfScalarComponents()
+    if component == 1:
+        numpy_data = temp.reshape(dims[2], dims[1], dims[0])
+        numpy_data = numpy_data.transpose(2,1,0)
+    elif component == 3 or component == 4:
+        if dims[2] == 1: # a 2D RGB image
+            numpy_data = temp.reshape(dims[1], dims[0], component)
+            numpy_data = numpy_data.transpose(0, 1, 2)
+            numpy_data = np.flipud(numpy_data)
+        else: 
+            raise RuntimeError('unknown type')
+    return numpy_data
+
+
+def transferFunction(x):
+	
+	r = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+	g = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  1.0*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+	b = 0.1*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  1.0*np.exp( -(x - -3.0)**2/0.5 )
+	a = 0.6*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) + 0.01*np.exp( -(x - -3.0)**2/0.5 )
+	
+	return r,g,b,a
+
+def transform_array(data, view_axis):
+    if view_axis not in ('x', 'y', 'z'):
+        raise ValueError("Invalid view_axis. Use 'x', 'y', or 'z'.")
+
+    if view_axis == 'x':	# View along the x-axis
+        transformed_data = np.transpose(data, (1, 2, 0))
+    elif view_axis == 'y':	# View along the y-axis
+        transformed_data = np.transpose(data, (0, 2, 1))
+    else:	# View along the z-axis
+        transformed_data = np.transpose(data, (2 ,1, 0))
+
+    return transformed_data
+
+
+def main():
+    start_time = time.time()  # Start recording time
+
+    """ Volume Rendering """
+    reader = vtk.vtkXMLImageDataReader()
+    reader.SetFileName('C:/Users/91629/Desktop/c461c9be74570373fed4dc81358e566c5a0c62085c2fac8369b773e95a5d7d32_Isabel_Pressure_Largevti_/Isabel_Pressure_Large.vti')  # dataset file path
+    reader.Update()
+    original_data = reader.GetOutput()
+    original_array = vtkToNumpy(original_data)  # convert vti to numpy array
+    camera_grid = transform_array(original_array, 'z')  # input orientation as x, y, z
+
+
+    #  Split the data among n processes..........
+    a = camera_grid.shape
+    # print(a)
+    sizee = a
+    p1 = (int)(a[2] // size) * rank
+    p2 = (int)(((a[2] // size) * (rank + 1)) - 1)     #  Saranya Pal
+    # print(p1,p2,rank)
+    camera_grid = camera_grid[:, :, p1:p2]
+
+    image = np.zeros((camera_grid.shape[1], camera_grid.shape[2], 3))
+
+
+    #  Transfer Function........
+    for dataslice in camera_grid:
+        r, g, b, a = transferFunction(np.log(dataslice))
+        image[:, :, 0] = a * r + (1 - a) * image[:, :, 0]
+        image[:, :, 1] = a * g + (1 - a) * image[:, :, 1]
+        image[:, :, 2] = a * b + (1 - a) * image[:, :, 2]
+
+    
+    
+    # comm.Gather(image, Comb, root=0)
+    if rank != 0 :
+        comm.Send(image, dest=0)
+    else :
+        total_data = image
+        total_data = np.concatenate((total_data, image), 1)
+        for k in range(1,size):
+            comm.Recv(image, source=k)
+            # print(k)
+            total_data = np.concatenate((total_data, image), 1)
+        # print(p,sizee[2])
+        total_data = total_data[:,p2:(p2+sizee[2]),:]
+
+    if rank == 0: 
+        intensity = 1
+        total_data = total_data * intensity
+
+
+        end_time = time.time()  # Stop recording time
+        execution_time = end_time - start_time  # Calculate execution time
+        print()
+        print()
+        print()
+        print(f"The execution time required with {size} processes is: {execution_time} seconds")
+
+
+        plt.figure(figsize=(4, 4), dpi=80)
+        plt.imshow(total_data)
+        plt.axis('off')
+        plt.show()
+       
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### VolumeRendering.py
+```
+import numpy as np
+import tkinter as tk
+from tkinter import ttk
+from mpi4py import MPI
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import vtkmodules.all as vtk
+from vtkmodules.util.numpy_support import vtk_to_numpy
+
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+class DraggablePoint:
+    def __init__(self, ax, x, y):
+        self.ax = ax
+        self.point, = ax.plot(x, y, 'ro', markersize=8, picker=5)
+        self.dragging = False
+        self.offset = (0, 0)
+        self.connect()
+
+    def connect(self):
+        self.cid_press = self.point.figure.canvas.mpl_connect('pick_event', self.on_pick)
+        self.cid_release = self.point.figure.canvas.mpl_connect('button_release_event', self.on_release)
+        self.cid_motion = self.point.figure.canvas.mpl_connect('motion_notify_event', self.on_motion)
+
+    def on_pick(self, event):
+        if event.artist == self.point:
+            self.dragging = True
+            self.offset = (self.point.get_xdata() - event.xdata, self.point.get_ydata() - event.ydata)
+
+    def on_release(self, event):
+        self.dragging = False
+
+    def on_motion(self, event):
+        if self.dragging:
+            if event.xdata is not None and event.ydata is not None:
+                self.point.set_xdata(event.xdata + self.offset[0])
+                self.point.set_ydata(event.ydata + self.offset[1])
+                self.point.figure.canvas.draw()
+
+class PointManipulationApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Point Manipulation App")
+
+        self.points_values = None
+
+        self.create_widgets()
+
+    def create_widgets(self):
+        self.fig, self.ax = plt.subplots()
+        self.ax.set_xlim(-5000, 2600)
+        self.ax.set_ylim(0, 1)
+        self.ax.set_xlabel("X")
+        self.ax.set_ylabel("Y")
+
+        self.points = [DraggablePoint(self.ax, 0, 0.2),
+                       DraggablePoint(self.ax, 0.3, 0.7),
+                       DraggablePoint(self.ax, 0.6, 0.3),
+                       DraggablePoint(self.ax, 0.9, 0.8)]
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+
+        apply_button = ttk.Button(self.root, text="Apply", command=self.apply_changes)
+        apply_button.pack()
+
+    def apply_changes(self):
+        self.points_values = [(point.point.get_xdata().item(), point.point.get_ydata().item()) for point in self.points]
+        print(self.points_values)
+        self.root.destroy()
+
+    def get_points_values(self):
+        return self.points_values
+
+def vtkToNumpy(data):
+    temp = vtk_to_numpy(data.GetPointData().GetScalars())
+    dims = data.GetDimensions()
+    component = data.GetNumberOfScalarComponents()
+    if component == 1:
+        numpy_data = temp.reshape(dims[2], dims[1], dims[0])
+        numpy_data = numpy_data.transpose(2,1,0)
+    elif component == 3 or component == 4:
+        if dims[2] == 1: # a 2D RGB image
+            numpy_data = temp.reshape(dims[1], dims[0], component)
+            numpy_data = numpy_data.transpose(0, 1, 2)
+            numpy_data = np.flipud(numpy_data)
+        else: 
+            raise RuntimeError('unknown type')
+    return numpy_data
+
+def color_tf(x):
+    r = 1.0*np.exp( -(x - 7.5)**2/1.0 ) +  0.8*np.exp( -(x - 2.0)**2/0.1 ) +  0.8*np.exp( -(x - -3.0)**2/0.5 )
+    g = 0.10*np.exp( -(x - 9.0)**2/1.0 ) +  0.01*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 ) 
+    b = 0.1*np.exp( -(x - 9.0)**2/1.0 ) +  1.0*np.exp( -(x - 3.0)**2/0.1 ) +  1.0*np.exp( -(x - -3.0)**2/0.5 )
+    return r,g,b
+
+def opacity_tf(x_values, opacitytf):
+    a_values = []
+    for x in x_values.flat:
+        opacity = opacitytf.GetValue(x)
+        a_values.append(opacity)
+
+    return np.array(a_values).reshape(x_values.shape)
+
+def transform_array(data, view_axis):
+    if view_axis not in ('x', 'y', 'z', '-x', '-y', '-z'):
+        raise ValueError("Invalid view_axis. Use 'x', 'y', or 'z'.")
+
+    if view_axis == 'x':	# View along the x-axis
+        transformed_data = np.transpose(data, (1, 2, 0))
+    elif view_axis == 'y':	# View along the y-axis
+        transformed_data = np.transpose(data, (0, 2, 1))
+    else:	# View along the z-axis
+        transformed_data = np.transpose(data, (2, 0, 1))
+        transformed_data = np.flip(transformed_data, axis=0)
+        transformed_data = np.flip(transformed_data, axis=1)
+        transformed_data = np.rot90(transformed_data, k=1, axes=(1, 2))
+
+    return transformed_data
+
+
+
+def main():
+    if rank == 0:
+        root = tk.Tk()
+        app = PointManipulationApp(root)
+        root.mainloop()
+        opacity_values = app.get_points_values()
+        # temp = opacity_values
+    else:
+        opacity_values = [(-5000,1.0), (-2500,0.75), (1300, 0.25), (2600,0.0)]
+        # opacity_values = [(-5000,0.0), (-2500,0.1), (1300, 0.25), (2600,1.0)]
+
+
+    """ Volume Rendering """
+
+    reader = vtk.vtkXMLImageDataReader() 
+    reader.SetFileName('./datasets/Isabel_Pressure_Large.vti')  # dataset file path
+    reader.Update()
+    original_data = reader.GetOutput()
+    original_array = vtkToNumpy(original_data)  # convert vti to numpy array
+    camera_grid = transform_array(original_array, 'z')  # input orientation as x, y, z
+    # print([np.max(camera_grid), np.min(camera_grid)]) #[2593.9722, -4930.2305]
+
+    #  Split the data among n processes...
+    a = camera_grid.shape
+    sizee = a
+    p1 = (int)(a[2] // size) * rank
+    p2 = (int)(((a[2] // size) * (rank + 1)) - 1) 
+    camera_grid = camera_grid[:, :, p1:p2]
+    image = np.zeros((camera_grid.shape[1], camera_grid.shape[2], 3))
+
+    #  Transfer Function...
+    opacitytf = vtk.vtkPiecewiseFunction()
+    opacitytf.AddPoint(opacity_values[0][0], opacity_values[0][1])
+    opacitytf.AddPoint(opacity_values[1][0], opacity_values[1][1])
+    opacitytf.AddPoint(opacity_values[2][0], opacity_values[2][1])
+    opacitytf.AddPoint(opacity_values[3][0], opacity_values[3][1])
+
+    #   Apply transfer function...
+    for dataslice in camera_grid:
+        r, g, b = color_tf(np.log(dataslice))
+        a = opacity_tf(np.log(dataslice), opacitytf)
+        image[:, :, 0] = a * r + (1 - a) * image[:, :, 0]
+        image[:, :, 1] = a * g + (1 - a) * image[:, :, 1]
+        image[:, :, 2] = a * b + (1 - a) * image[:, :, 2]
+
+    # comm.Gather(image, Comb, root=0)
+    if rank != 0 :
+        comm.Send(image, dest=0)
+    else :
+        total_data = image
+        total_data = np.concatenate((total_data, image), 1)
+        for k in range(1,size):
+            comm.Recv(image, source=k)
+            total_data = np.concatenate((total_data, image), 1)
+        total_data = total_data[:,p2:(p2+sizee[2]),:]
+
+    #   Display final image...
+    if rank == 0 : 
+        intensity = 1
+        total_data = total_data * intensity
+        plt.figure(figsize=(8,8), dpi=360)
+        plt.imshow(total_data)
+        plt.axis('off')
+        plt.show()
+
+if __name__ == "__main__":
+    main()
+```
+
+### hosts.py
+```
+import socket
+
+def is_reachable(host, port=80, timeout=1):
+    try:
+        socket.create_connection((host, port), timeout)
+        return True
+    except (socket.timeout, socket.error):
+        return False
+
+def generate_reachable_hosts(start_ip, end_ip, port=80, timeout=1):
+    reachable_hosts = []
+
+    # Convert IP ranges to integers for easier iteration
+    start_ip_int = int(socket.inet_aton(start_ip).hex(), 16)
+    end_ip_int = int(socket.inet_aton(end_ip).hex(), 16)
+
+    for ip_int in range(start_ip_int, end_ip_int + 1):
+        current_ip = socket.inet_ntoa(bytes.fromhex(hex(ip_int)[2:]))
+        if is_reachable(current_ip, port, timeout):
+            reachable_hosts.append(current_ip)
+
+    return reachable_hosts
+
+# Example usage: Generate a list of reachable hosts in a specific IP range
+start_ip = "172.27.19.1"
+end_ip = "172.27.19.60"
+reachable_hosts = generate_reachable_hosts(start_ip, end_ip)
+
+print("Reachable hosts:")
+for host in reachable_hosts:
+    print(host)
+```
+
+### scratch_code/Parallel Conversion.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+import vtkmodules.all as vtk
+from vtkmodules.util.numpy_support import vtk_to_numpy
+from mpi4py import MPI
+
+
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+
+def vtkToNumpy(data):
+    temp = vtk_to_numpy(data.GetPointData().GetScalars())
+    dims = data.GetDimensions()
+    component = data.GetNumberOfScalarComponents()
+    if component == 1:
+        numpy_data = temp.reshape(dims[2], dims[1], dims[0])
+        numpy_data = numpy_data.transpose(2,1,0)
+    elif component == 3 or component == 4:
+        if dims[2] == 1: # a 2D RGB image
+            numpy_data = temp.reshape(dims[1], dims[0], component)
+            numpy_data = numpy_data.transpose(0, 1, 2)
+            numpy_data = np.flipud(numpy_data)
+        else: 
+            raise RuntimeError('unknown type')
+    return numpy_data
+
+
+def transferFunction(x):
+    r = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+    g = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  1.0*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+    b = 0.1*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  1.0*np.exp( -(x - -3.0)**2/0.5 )
+    a = 0.6*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) + 0.01*np.exp( -(x - -3.0)**2/0.5 )
+    return r,g,b,a
+
+def tF(x):
+    colorFunc = vtk.vtkLookupTable()
+    colorFunc.SetRange(-200,200)
+    colorFunc.SetNumberOfColors(256)
+    colorFunc.SetHueRange(0.0, 0.667)
+    colorFunc.Build()
+    col = [0,0,0]
+    colorFunc.GetColor(x,col)
+    
+    opacityFunc = vtk.vtkPiecewiseFunction()
+    opacityFunc.AddPoint(-200, 1.0)
+    opacityFunc.AddPoint(200, 0.0)
+    opacity = opacityFunc.GetValue(0)
+    
+    return col[0], col[1], col[2], opacity
+
+def transform_array(data, view_axis):
+    if view_axis not in ('x', 'y', 'z'):
+        raise ValueError("Invalid view_axis. Use 'x', 'y', or 'z'.")
+
+    if view_axis == 'x':	# View along the x-axis
+        transformed_data = np.transpose(data, (1, 2, 0))
+    elif view_axis == 'y':	# View along the y-axis
+        transformed_data = np.transpose(data, (0, 2, 1))
+    else:	# View along the z-axis
+        transformed_data = np.transpose(data, (2 ,1, 0))
+
+    return transformed_data
+
+
+def main():
+    """ Volume Rendering """
+    reader = vtk.vtkXMLImageDataReader()
+    reader.SetFileName('Isabel_Pressure_Large.vti')  # dataset file path
+    reader.Update()
+    original_data = reader.GetOutput()
+    original_array = vtkToNumpy(original_data)  # convert vti to numpy array
+    camera_grid = transform_array(original_array, 'z')  # input orientation as x, y, z
+
+    #  Split the data among n processes...
+    a = camera_grid.shape
+    p1 = (int)(a[2] // size) * rank
+    if size != rank+1 :
+        p2 = (int)(a[2] // size) * (rank + 1)
+    else :
+        p2 = (int)(a[2])
+    camera_grid = camera_grid[:, :, p1:p2]
+    image = np.zeros((camera_grid.shape[1], camera_grid.shape[2], 3))
+
+    #  Transfer Function...
+    for dataslice in camera_grid:
+        r, g, b, a = transferFunction(np.log(dataslice))
+        image[:, :, 0] = a * r + (1 - a) * image[:, :, 0]
+        image[:, :, 1] = a * g + (1 - a) * image[:, :, 1]
+        image[:, :, 2] = a * b + (1 - a) * image[:, :, 2]
+
+    #   Combining images...
+    all_images = comm.gather(image, root=0)
+    if rank == 0:
+        combined_image = np.concatenate(all_images, axis=2)
+        plt.figure(figsize=(4, 4), dpi=80)
+        plt.imshow(combined_image)
+        plt.axis('off')
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### scratch_code/fullrayc.py
+```
+import sys
+import vtkmodules.all as vtk
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QSlider, QLabel, QPushButton
+from PyQt5.QtCore import Qt
+
+class TransferFunctionGUI(QMainWindow):
+    def __init__(self, volume_mapper):
+        super().__init__()
+        self.volume_mapper = volume_mapper
+        self.initUI()
+
+    def initUI(self):
+        self.volume = vtk.vtkVolume()
+        self.volume.SetMapper(self.volume_mapper)
+        # Create the main window
+        self.setGeometry(100, 100, 400, 200)
+        self.setWindowTitle("Transfer Function GUI")
+
+        # Create a central widget
+        central_widget = QWidget(self)
+        self.setCentralWidget(central_widget)
+
+        # Create layout for the central widget
+        layout = QVBoxLayout()
+
+        # Create sliders for color and opacity
+        self.color_slider = QSlider(Qt.Horizontal)
+        self.color_slider.setRange(0, 255)
+        self.color_slider.setValue(128)
+        self.color_slider.valueChanged.connect(self.updateColorTransferFunction)
+        layout.addWidget(QLabel("Color"))
+        layout.addWidget(self.color_slider)
+
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setRange(0, 255)
+        self.opacity_slider.setValue(128)
+        self.opacity_slider.valueChanged.connect(self.updateOpacityTransferFunction)
+        layout.addWidget(QLabel("Opacity"))
+        layout.addWidget(self.opacity_slider)
+
+        # Create a button to apply changes
+        apply_button = QPushButton("Apply")
+        apply_button.clicked.connect(self.applyChanges)
+        layout.addWidget(apply_button)
+
+        central_widget.setLayout(layout)
+
+    def updateColorTransferFunction(self):
+        self.color_value = self.color_slider.value() / 255.0
+        # Modify the color transfer function based on the slider value
+
+    def updateOpacityTransferFunction(self):
+        self.opacity_value = self.opacity_slider.value() / 255.0
+        # Modify the opacity transfer function based on the slider value
+
+    def applyChanges(self):
+        print(self.opacity_value)
+        print(self.color_value)
+        # No need to apply changes in this integration; changes are applied immediately in updateColorTransferFunction and updateOpacityTransferFunction.
+        ctf = self.volume.GetProperty().GetRGBTransferFunction()
+        ctf.RemoveAllPoints()
+        ctf.AddRGBPoint(0.0, 0.0, 0.0, 0.0)
+        ctf.AddRGBPoint(1.0, self.color_value, self.color_value, self.color_value)
+        self.volume_mapper.Update()
+
+        otf = self.volume.GetProperty().GetScalarOpacity()
+        otf.RemoveAllPoints()
+        otf.AddPoint(0, 0.0)
+        otf.AddPoint(255, self.opacity_value)
+        self.volume_mapper.Update()
+
+
+
+def main():
+    # Create the VTK volume rendering components
+    reader = vtk.vtkXMLImageDataReader()
+    reader.SetFileName(r'C:\Users\adeel\Downloads\datavtk\Isabel_Pressure_Large.vti')  # Replace with your dataset file
+    reader.Update()
+
+    volume_mapper = vtk.vtkSmartVolumeMapper()
+    volume_mapper.SetInputData(reader.GetOutput())
+
+    volume_property = vtk.vtkVolumeProperty()
+    volume_property.SetScalarOpacityUnitDistance(1)
+    volume_property.ShadeOff()
+    volume_property.SetInterpolationTypeToLinear()
+
+    volume = vtk.vtkVolume()
+    volume.SetMapper(volume_mapper)
+    volume.SetProperty(volume_property)
+
+    renderer = vtk.vtkRenderer()
+    renderer.SetBackground(0.1, 0.1, 0.1)
+
+    render_window = vtk.vtkRenderWindow()
+    render_window.AddRenderer(renderer)
+
+    render_window_interactor = vtk.vtkRenderWindowInteractor()
+    render_window_interactor.SetRenderWindow(render_window)
+
+    # Create the transfer function GUI and pass the volume mapper
+    app = QApplication(sys.argv)
+    window = TransferFunctionGUI(volume_mapper)
+    window.show()
+
+    # Add the volume to the renderer
+    renderer.AddVolume(volume)
+    renderer.ResetCamera()
+
+    render_window.Render()
+    render_window_interactor.Start()
+
+if __name__ == '__main__':
+    main()
+```
+
+### scratch_code/newrayc copy.py
+```
+import vtkmodules.all as vtk
+import numpy as np
+from vtkmodules.vtkRenderingCore import vtkColorTransferFunction
+from vtkmodules.vtkCommonDataModel import vtkPiecewiseFunction
+from vtkmodules.util.numpy_support import vtk_to_numpy
+
+def vtkToNumpy(data):
+    temp = vtk_to_numpy(data.GetPointData().GetScalars())
+    dims = data.GetDimensions()
+    component = data.GetNumberOfScalarComponents()
+    if component == 1:
+        numpy_data = temp.reshape(dims[2], dims[1], dims[0])
+        numpy_data = numpy_data.transpose(2,1,0)
+    elif component == 3 or component == 4:
+        if dims[2] == 1: # a 2D RGB image
+            numpy_data = temp.reshape(dims[1], dims[0], component)
+            numpy_data = numpy_data.transpose(0, 1, 2)
+            numpy_data = np.flipud(numpy_data)
+        else:
+            raise RuntimeError('unknow type')
+    return numpy_data
+
+reader = vtk.vtkXMLImageDataReader()
+reader.SetFileName('foot.vti')  # dataset file 
+reader.Update()
+
+data = reader.GetOutput()
+dataarray = data.GetPointData().GetArray(0)
+# print(dataarray)
+
+arr = vtk_to_numpy(dataarray)
+
+print(arr.size)
+# print(arr[84374999])
+
+nparr = vtkToNumpy(data)
+print(nparr.shape)
+print(nparr[1][2])
+
+# # Transfer function - iska GUI bnana hai
+# opacityTransferFunction = vtkPiecewiseFunction()
+# opacityTransferFunction.AddPoint(20, 0.0)
+# opacityTransferFunction.AddPoint(255, 0.2)
+
+# colorTransferFunction = vtkColorTransferFunction()
+# colorTransferFunction.AddRGBPoint(0.0, 0.0, 0.0, 0.0)
+# colorTransferFunction.AddRGBPoint(64.0, 1.0, 0.0, 0.0)
+# colorTransferFunction.AddRGBPoint(128.0, 0.0, 0.0, 1.0)
+# colorTransferFunction.AddRGBPoint(192.0, 0.0, 1.0, 0.0)
+# colorTransferFunction.AddRGBPoint(255.0, 0.0, 0.2, 0.0)
+
+
+# volume_mapper = vtk.vtkSmartVolumeMapper()
+# volume_mapper.SetInputData(reader.GetOutput())
+
+
+# volume_property = vtk.vtkVolumeProperty()
+# volume_property.SetColor(colorTransferFunction)
+# volume_property.SetScalarOpacity(opacityTransferFunction)
+# volume_property.SetScalarOpacityUnitDistance(1)
+# volume_property.ShadeOff()
+# volume_property.SetInterpolationTypeToLinear()
+
+
+# volume = vtk.vtkVolume()
+# volume.SetMapper(volume_mapper)
+# volume.SetProperty(volume_property)
+
+
+# renderer = vtk.vtkRenderer()
+# renderer.SetBackground(0.1, 0.1, 0.1)
+
+
+# render_window = vtk.vtkRenderWindow()
+# render_window.SetWindowName("Ray Casting Example")
+# render_window.AddRenderer(renderer)
+
+
+# render_window_interactor = vtk.vtkRenderWindowInteractor()
+# render_window_interactor.SetRenderWindow(render_window)
+
+
+# renderer.AddVolume(volume)
+# renderer.ResetCamera()
+# render_window.Render()
+# render_window_interactor.Start()
+```
+
+### scratch_code/pvr01.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+import vtkmodules.all as vtk
+from vtkmodules.util.numpy_support import vtk_to_numpy
+from mpi4py import MPI
+
+
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+
+def vtkToNumpy(data):
+    temp = vtk_to_numpy(data.GetPointData().GetScalars())
+    dims = data.GetDimensions()
+    component = data.GetNumberOfScalarComponents()
+    if component == 1:
+        numpy_data = temp.reshape(dims[2], dims[1], dims[0])
+        numpy_data = numpy_data.transpose(2,1,0)
+    elif component == 3 or component == 4:
+        if dims[2] == 1: # a 2D RGB image
+            numpy_data = temp.reshape(dims[1], dims[0], component)
+            numpy_data = numpy_data.transpose(0, 1, 2)
+            numpy_data = np.flipud(numpy_data)
+        else: 
+            raise RuntimeError('unknown type')
+    return numpy_data
+
+
+def transferFunction(x):
+	
+	r = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+	g = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  1.0*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+	b = 0.1*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  1.0*np.exp( -(x - -3.0)**2/0.5 )
+	a = 0.6*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) + 0.01*np.exp( -(x - -3.0)**2/0.5 )
+	
+	return r,g,b,a
+
+def transform_array(data, view_axis):
+    if view_axis not in ('x', 'y', 'z'):
+        raise ValueError("Invalid view_axis. Use 'x', 'y', or 'z'.")
+
+    if view_axis == 'x':	# View along the x-axis
+        transformed_data = np.transpose(data, (1, 2, 0))
+    elif view_axis == 'y':	# View along the y-axis
+        transformed_data = np.transpose(data, (0, 2, 1))
+    else:	# View along the z-axis
+        transformed_data = np.transpose(data, (2 ,1, 0))
+
+    return transformed_data
+
+
+def main():
+    """ Volume Rendering """
+    reader = vtk.vtkXMLImageDataReader()
+    reader.SetFileName('Isabel_Pressure_Large.vti')  # dataset file path
+    reader.Update()
+    original_data = reader.GetOutput()
+    original_array = vtkToNumpy(original_data)  # convert vti to numpy array
+    camera_grid = transform_array(original_array, 'z')  # input orientation as x, y, z
+
+    #  Split the data among n processes..........
+    a = camera_grid.shape
+    p1 = (int)(a[2] // size) * rank
+    if size != rank+1 :
+        p2 = (int)(a[2] // size) * (rank + 1)
+    else :
+        p2 = (int)(a[2])
+    camera_grid = camera_grid[:, :, p1:p2]
+    image = np.zeros((camera_grid.shape[1], camera_grid.shape[2], 3))
+
+    #  Transfer Function........
+    for dataslice in camera_grid:
+        r, g, b, a = transferFunction(np.log(dataslice))
+        image[:, :, 0] = a * r + (1 - a) * image[:, :, 0]
+        image[:, :, 1] = a * g + (1 - a) * image[:, :, 1]
+        image[:, :, 2] = a * b + (1 - a) * image[:, :, 2]
+
+    # combined_image = np.empty((camera_grid.shape[1], camera_grid.shape[2], 3), dtype=np.float32)
+    # # combined_image = None
+    # if rank == 0:
+    #     combined_image = np.empty((image.shape[0], image.shape[1], 3), dtype=np.float32)
+    # comm.Gather(image, combined_image, root=0)
+    all_images = comm.gather(image, root=0)
+    # if rank == 0:
+    # plt.figure(figsize=(4, 4), dpi=80)
+    # plt.imshow(image)
+    # plt.axis('off')
+    # plt.show()
+    if rank == 0:
+        combined_image = np.concatenate(all_images, axis=2)
+        plt.figure(figsize=(4, 4), dpi=80)
+        plt.imshow(combined_image)
+        plt.axis('off')
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### scratch_code/pvr02.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+import vtkmodules.all as vtk
+from vtkmodules.util.numpy_support import vtk_to_numpy
+from mpi4py import MPI
+# from transfer01 import all
+
+
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+
+def vtkToNumpy(data):
+    temp = vtk_to_numpy(data.GetPointData().GetScalars())
+    dims = data.GetDimensions()
+    component = data.GetNumberOfScalarComponents()
+    if component == 1:
+        numpy_data = temp.reshape(dims[2], dims[1], dims[0])
+        numpy_data = numpy_data.transpose(2,1,0)
+    elif component == 3 or component == 4:
+        if dims[2] == 1: # a 2D RGB image
+            numpy_data = temp.reshape(dims[1], dims[0], component)
+            numpy_data = numpy_data.transpose(0, 1, 2)
+            numpy_data = np.flipud(numpy_data)
+        else: 
+            raise RuntimeError('unknown type')
+    return numpy_data
+
+def tF(x):
+    r = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+    g = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  1.0*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+    b = 0.1*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  1.0*np.exp( -(x - -3.0)**2/0.5 )
+    a = 0.6*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) + 0.01*np.exp( -(x - -3.0)**2/0.5 )
+    return r,g,b,a
+
+def transferFunction(x_values):
+    color_func = vtk.vtkColorTransferFunction()
+    color_func.SetRange(-5000, 2600)
+
+    # Specify the number of values to build the transfer function
+    color_func.NumberOfValues = 256
+    color_func.HueRange = [0.0, 0.667]
+
+    color_func.AddRGBPoint(-5000, 0.0, 0.0, 1.0)
+    color_func.AddRGBPoint(-2500, 0.0, 1.0, 0.0)
+    color_func.AddRGBPoint(0, 1.0, 0.0, 0.0)
+    color_func.AddRGBPoint(2500, 1.0, 1.0, 0.0)
+    color_func.AddRGBPoint(5000, 1.0, 0.0, 1.0)
+
+    color_func.Build()
+
+    opacity_func = vtk.vtkPiecewiseFunction()
+    opacity_func.AddPoint(-5000, 1.0)
+    opacity_func.AddPoint(2600, 0.0)
+
+    # Initialize arrays to store r, g, b, and opacity values
+    r_values, g_values, b_values, a_values = [], [], [], []
+
+    # Apply transfer functions to each element in the input array
+    for x in x_values.flat:
+        col = [0, 0, 0]
+        color_func.GetColor(x, col)
+        opacity = opacity_func.GetValue(x)
+
+        # Append values to the respective arrays
+        r_values.append(col[0])
+        g_values.append(col[1])
+        b_values.append(col[2])
+        a_values.append(opacity)
+
+    return (
+        np.array(r_values).reshape(x_values.shape),
+        np.array(g_values).reshape(x_values.shape),
+        np.array(b_values).reshape(x_values.shape),
+        np.array(a_values).reshape(x_values.shape),
+    )
+
+
+
+def transform_array(data, view_axis):
+    if view_axis not in ('x', 'y', 'z'):
+        raise ValueError("Invalid view_axis. Use 'x', 'y', or 'z'.")
+
+    if view_axis == 'x':	# View along the x-axis
+        transformed_data = np.transpose(data, (1, 2, 0))
+    elif view_axis == 'y':	# View along the y-axis
+        transformed_data = np.transpose(data, (0, 2, 1))
+    else:	# View along the z-axis
+        transformed_data = np.transpose(data, (2 ,1, 0))
+
+    return transformed_data
+
+
+
+def main():
+    """ Volume Rendering """
+    reader = vtk.vtkXMLImageDataReader()
+    reader.SetFileName('Isabel_Pressure_Large.vti')  # dataset file path
+    reader.Update()
+    original_data = reader.GetOutput()
+    original_array = vtkToNumpy(original_data)  # convert vti to numpy array
+    camera_grid = transform_array(original_array, 'z')  # input orientation as x, y, z
+
+
+    #  Split the data among n processes..........
+    a = camera_grid.shape
+    # print(a)
+    sizee = a
+    p1 = (int)(a[2] // size) * rank
+    p2 = (int)(((a[2] // size) * (rank + 1)) - 1)     #  Saranya Pal
+    # print(p1,p2,rank)
+    camera_grid = camera_grid[:, :, p1:p2]
+
+    image = np.zeros((camera_grid.shape[1], camera_grid.shape[2], 3))
+
+
+    #  Transfer Function........
+    for dataslice in camera_grid:
+        r, g, b, a = transferFunction(np.log(dataslice))
+        image[:, :, 0] = a * r + (1 - a) * image[:, :, 0]
+        image[:, :, 1] = a * g + (1 - a) * image[:, :, 1]
+        image[:, :, 2] = a * b + (1 - a) * image[:, :, 2]
+
+    
+    
+    # comm.Gather(image, Comb, root=0)
+    if rank != 0 :
+        comm.Send(image, dest=0)
+    else :
+        total_data = image
+        total_data = np.concatenate((total_data, image), 1)
+        for k in range(1,size):
+            comm.Recv(image, source=k)
+            total_data = np.concatenate((total_data, image), 1)
+        total_data = total_data[:,p2:(p2+sizee[2]),:]
+
+
+    if rank == 0 : 
+        intensity = 1
+        total_data = total_data * intensity
+        plt.figure(figsize=(4, 4), dpi=80)
+        plt.imshow(total_data)
+        plt.axis('off')
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### scratch_code/pvr03.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+import vtkmodules.all as vtk
+from vtkmodules.util.numpy_support import vtk_to_numpy
+from mpi4py import MPI
+
+
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+
+def vtkToNumpy(data):
+    temp = vtk_to_numpy(data.GetPointData().GetScalars())
+    dims = data.GetDimensions()
+    component = data.GetNumberOfScalarComponents()
+    if component == 1:
+        numpy_data = temp.reshape(dims[2], dims[1], dims[0])
+        numpy_data = numpy_data.transpose(2,1,0)
+    elif component == 3 or component == 4:
+        if dims[2] == 1: # a 2D RGB image
+            numpy_data = temp.reshape(dims[1], dims[0], component)
+            numpy_data = numpy_data.transpose(0, 1, 2)
+            numpy_data = np.flipud(numpy_data)
+        else: 
+            raise RuntimeError('unknown type')
+    return numpy_data       
+    # min_val = numpy_data.min()
+    # max_val = numpy_data.max()
+    # normalized_data = ((numpy_data - min_val) / (max_val - min_val) * 2 - 1)*50000
+    # return normalized_data
+
+def tF(x):
+    r = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+    g = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  1.0*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+    b = 0.1*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  1.0*np.exp( -(x - -3.0)**2/0.5 )
+    a = 0.6*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) + 0.01*np.exp( -(x - -3.0)**2/0.5 )
+    return r,g,b,a
+
+def tF_new(x_values):
+    r_values, g_values, b_values, a_values = [], [], [], []
+    # color_func = vtk.vtkColorTransferFunction()
+    # color_func.SetColorSpaceToRGB()
+    # color_func.SetRange(-5000, 2600)
+
+    # color_func.AddRGBPoint(-5000, 0.01, 1.0, 0.0)
+    # color_func.AddRGBPoint(-2500, 0.03, 1.0, 0.0)
+    # color_func.AddRGBPoint(0, 0.0, 0.05, 0.0)
+    # color_func.AddRGBPoint(1300, 0.08, 0.0, 0.0)
+    # color_func.AddRGBPoint(2600, 0.1, 0.0, 0.0)
+
+    colorTransferFunction = vtk.vtkColorTransferFunction()
+    # colorTransferFunction.SetRange(-100.0,100.0)
+    # colorTransferFunction.AddRGBPoint(-100.0, 0.0, 0.2, 0.0)
+    # colorTransferFunction.AddRGBPoint(-50.0, 0.0, 0.0, 0.5)
+    # colorTransferFunction.AddRGBPoint(0.0, 0.0, 0.0, 0.0)
+    # colorTransferFunction.AddRGBPoint(50.0, 0.5, 0.0, 0.0)
+    # colorTransferFunction.AddRGBPoint(100.0, 1.0, 0.0, 0.0)
+
+    scalar_min = -5000
+    scalar_max = 2600
+
+    # Add RGB points to the transfer function
+    for x in np.linspace(scalar_min, scalar_max, 100):
+        r = 1.0 * np.exp(-(x - 9.0)**2 / 1.0) + 0.1 * np.exp(-(x - 3.0)**2 / 0.1) + 0.1 * np.exp(-(x + 3.0)**2 / 0.5)
+        g = 1.0 * np.exp(-(x - 9.0)**2 / 1.0) + 1.0 * np.exp(-(x - 3.0)**2 / 0.1) + 0.1 * np.exp(-(x + 3.0)**2 / 0.5)
+        b = 0.1 * np.exp(-(x - 9.0)**2 / 1.0) + 0.1 * np.exp(-(x - 3.0)**2 / 0.1) + 1.0 * np.exp(-(x + 3.0)**2 / 0.5)
+        a = 0.6 * np.exp(-(x - 9.0)**2 / 1.0) + 0.1 * np.exp(-(x - 3.0)**2 / 0.1) + 0.01 * np.exp(-(x + 3.0)**2 / 0.5)
+        
+        colorTransferFunction.AddRGBPoint(x, r, g, b)
+
+    opacity_func = vtk.vtkPiecewiseFunction()
+    opacity_func.AddPoint(-5000.0, 1.0)
+    opacity_func.AddPoint(2600.0, 0.0)
+
+    #   apply transfer function...
+    for x in x_values.flat:
+        col = [0, 0, 0]
+        colorTransferFunction.GetColor(x, col)
+        opacity = opacity_func.GetValue(x)
+        r_values.append(col[0])
+        g_values.append(col[1])
+        b_values.append(col[2])
+        a_values.append(opacity)
+
+    return (
+        np.array(r_values).reshape(x_values.shape),
+        np.array(g_values).reshape(x_values.shape),
+        np.array(b_values).reshape(x_values.shape),
+        np.array(a_values).reshape(x_values.shape),
+    )
+
+def newtf(x_values, colortf, opacitytf):
+    #   apply transfer function...
+    r_values, g_values, b_values, a_values = [], [], [], []
+    for x in x_values.flat:
+        col = [0, 0, 0]
+        colortf.GetColor(x, col)
+        opacity = opacitytf.GetValue(x)
+        r_values.append(col[0])
+        g_values.append(col[1])
+        b_values.append(col[2])
+        a_values.append(opacity)
+
+    return np.array(r_values).reshape(x_values.shape), np.array(g_values).reshape(x_values.shape), np.array(b_values).reshape(x_values.shape), np.array(a_values).reshape(x_values.shape)
+
+def transform_array(data, view_axis):
+    if view_axis not in ('x', 'y', 'z'):
+        raise ValueError("Invalid view_axis. Use 'x', 'y', or 'z'.")
+
+    if view_axis == 'x':	# View along the x-axis
+        transformed_data = np.transpose(data, (1, 2, 0))
+    elif view_axis == 'y':	# View along the y-axis
+        transformed_data = np.transpose(data, (0, 2, 1))
+    else:	# View along the z-axis
+        transformed_data = np.transpose(data, (2 ,1, 0))
+
+    return transformed_data
+
+
+
+def main():
+    """ Volume Rendering """
+    reader = vtk.vtkXMLImageDataReader()
+    reader.SetFileName('Isabel_Pressure_Large.vti')  # dataset file path
+    reader.Update()
+    original_data = reader.GetOutput()
+    original_array = vtkToNumpy(original_data)  # convert vti to numpy array
+    camera_grid = transform_array(original_array, 'z')  # input orientation as x, y, z
+    # print([np.max(camera_grid), np.min(camera_grid)]) #[2593.9722, -4930.2305]
+
+    #  Split the data among n processes..........
+    a = camera_grid.shape
+    sizee = a
+    p1 = (int)(a[2] // size) * rank
+    p2 = (int)(((a[2] // size) * (rank + 1)) - 1)     #  Saranya Pal
+    camera_grid = camera_grid[:, :, p1:p2]
+    image = np.zeros((camera_grid.shape[1], camera_grid.shape[2], 3))
+
+    #  Transfer Function........
+    colortf = vtk.vtkLookupTable()
+    colortf.SetRange(-5000,2600)
+    colortf.SetNumberOfColors(256)
+    colortf.SetHueRange(0.33, 0.667)
+    colortf.Addrgbpoint
+    colortf.Build()
+    # for x in np.linspace(-5000, 2600, 50):
+    #     r = 1.0 * np.exp(-(x - 9.0)**2 / 1.0) + 0.1 * np.exp(-(x - 3.0)**2 / 0.1) + 0.1 * np.exp(-(x + 3.0)**2 / 0.5)
+    #     g = 1.0 * np.exp(-(x - 9.0)**2 / 1.0) + 1.0 * np.exp(-(x - 3.0)**2 / 0.1) + 0.1 * np.exp(-(x + 3.0)**2 / 0.5)
+    #     b = 0.1 * np.exp(-(x - 9.0)**2 / 1.0) + 0.1 * np.exp(-(x - 3.0)**2 / 0.1) + 1.0 * np.exp(-(x + 3.0)**2 / 0.5)
+    #     a = 0.6 * np.exp(-(x - 9.0)**2 / 1.0) + 0.1 * np.exp(-(x - 3.0)**2 / 0.1) + 0.01 * np.exp(-(x + 3.0)**2 / 0.5)
+    #     colortf.AddRGBPoint(x, r, g, b)
+
+    opacitytf = vtk.vtkPiecewiseFunction()
+    opacitytf.AddPoint(-5000.0, 0.8)
+    opacitytf.AddPoint(2600.0, 0.2)
+
+
+    for dataslice in camera_grid:
+        r, g, b, a = newtf(np.log(dataslice), colortf, opacitytf)
+        image[:, :, 0] = a * r + (1 - a) * image[:, :, 0]
+        image[:, :, 1] = a * g + (1 - a) * image[:, :, 1]
+        image[:, :, 2] = a * b + (1 - a) * image[:, :, 2]
+
+    # comm.Gather(image, Comb, root=0)
+    if rank != 0 :
+        comm.Send(image, dest=0)
+    else :
+        total_data = image
+        total_data = np.concatenate((total_data, image), 1)
+        for k in range(1,size):
+            comm.Recv(image, source=k)
+            total_data = np.concatenate((total_data, image), 1)
+        total_data = total_data[:,p2:(p2+sizee[2]),:]
+
+    #   Display final image...
+    if rank == 0 : 
+        intensity = 1
+        total_data = total_data * intensity
+        plt.figure(figsize=(8,8), dpi=360)
+        plt.imshow(total_data)
+        plt.axis('off')
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### scratch_code/pvr04.py
+```
+import numpy as np
+import tkinter as tk
+from tkinter import ttk
+import matplotlib.pyplot as plt
+import vtkmodules.all as vtk
+from vtkmodules.util.numpy_support import vtk_to_numpy
+from mpi4py import MPI
+from transfer03 import PointManipulationApp
+
+
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+
+def vtkToNumpy(data):
+    temp = vtk_to_numpy(data.GetPointData().GetScalars())
+    dims = data.GetDimensions()
+    component = data.GetNumberOfScalarComponents()
+    if component == 1:
+        numpy_data = temp.reshape(dims[2], dims[1], dims[0])
+        numpy_data = numpy_data.transpose(2,1,0)
+    elif component == 3 or component == 4:
+        if dims[2] == 1: # a 2D RGB image
+            numpy_data = temp.reshape(dims[1], dims[0], component)
+            numpy_data = numpy_data.transpose(0, 1, 2)
+            numpy_data = np.flipud(numpy_data)
+        else: 
+            raise RuntimeError('unknown type')
+    return numpy_data
+
+def color_tf(x):
+    r = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+    g = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  1.0*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+    b = 0.1*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  1.0*np.exp( -(x - -3.0)**2/0.5 )
+    # a = 0.6*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) + 0.01*np.exp( -(x - -3.0)**2/0.5 )
+    return r,g,b
+
+def opacity_tf(x_values, opacitytf):
+    a_values = []
+    for x in x_values.flat:
+        opacity = opacitytf.GetValue(x)
+        a_values.append(opacity)
+
+    return np.array(a_values).reshape(x_values.shape)
+
+def transform_array(data, view_axis):
+    if view_axis not in ('x', 'y', 'z'):
+        raise ValueError("Invalid view_axis. Use 'x', 'y', or 'z'.")
+
+    if view_axis == 'x':	# View along the x-axis
+        transformed_data = np.transpose(data, (1, 2, 0))
+    elif view_axis == 'y':	# View along the y-axis
+        transformed_data = np.transpose(data, (0, 2, 1))
+    else:	# View along the z-axis
+        transformed_data = np.transpose(data, (2 ,1, 0))
+
+    return transformed_data
+
+
+
+def main():
+    root = tk.Tk()
+    app = PointManipulationApp(root)
+    root.mainloop()
+    opacity_values = app.get_points_values()
+
+    """ Volume Rendering """
+    reader = vtk.vtkXMLImageDataReader()
+    reader.SetFileName('Isabel_Pressure_Large.vti')  # dataset file path
+    reader.Update()
+    original_data = reader.GetOutput()
+    original_array = vtkToNumpy(original_data)  # convert vti to numpy array
+    camera_grid = transform_array(original_array, 'z')  # input orientation as x, y, z
+    # print([np.max(camera_grid), np.min(camera_grid)]) #[2593.9722, -4930.2305]
+
+    #  Split the data among n processes..........
+    a = camera_grid.shape
+    sizee = a
+    p1 = (int)(a[2] // size) * rank
+    p2 = (int)(((a[2] // size) * (rank + 1)) - 1)     #  Saranya Pal
+    camera_grid = camera_grid[:, :, p1:p2]
+    image = np.zeros((camera_grid.shape[1], camera_grid.shape[2], 3))
+
+    #  Transfer Function...
+    opacitytf = vtk.vtkPiecewiseFunction()
+    opacitytf.AddPoint(-5000.0, 1.0)
+    opacitytf.AddPoint(2600.0, 0.0)
+
+    #   apply transfer function...
+    for dataslice in camera_grid:
+        r, g, b = color_tf(np.log(dataslice))
+        a = opacity_tf(np.log(dataslice), opacitytf)
+        image[:, :, 0] = a * r + (1 - a) * image[:, :, 0]
+        image[:, :, 1] = a * g + (1 - a) * image[:, :, 1]
+        image[:, :, 2] = a * b + (1 - a) * image[:, :, 2]
+
+    # comm.Gather(image, Comb, root=0)
+    if rank != 0 :
+        comm.Send(image, dest=0)
+    else :
+        total_data = image
+        total_data = np.concatenate((total_data, image), 1)
+        for k in range(1,size):
+            comm.Recv(image, source=k)
+            total_data = np.concatenate((total_data, image), 1)
+        total_data = total_data[:,p2:(p2+sizee[2]),:]
+
+    #   Display final image...
+    if rank == 0 : 
+        intensity = 1
+        total_data = total_data * intensity
+        plt.figure(figsize=(8,8), dpi=360)
+        plt.imshow(total_data)
+        plt.axis('off')
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### scratch_code/rayc.py
+```
+import vtkmodules.all as vtk
+
+# Step 1: Create a VTK reader and read the dataset
+reader = vtk.vtkXMLImageDataReader()
+reader.SetFileName(r'C:\Users\adeel\Downloads\datavtk\Isabel_Pressure_Large.vti')  # Replace with your dataset file
+reader.Update()
+
+# Step 2: Create a volume mapper and actor
+volume_mapper = vtk.vtkSmartVolumeMapper()
+volume_mapper.SetInputData(reader.GetOutput())
+
+volume_property = vtk.vtkVolumeProperty()
+volume_property.SetScalarOpacityUnitDistance(1)
+volume_property.ShadeOff()
+volume_property.SetInterpolationTypeToLinear()
+
+volume = vtk.vtkVolume()
+volume.SetMapper(volume_mapper)
+volume.SetProperty(volume_property)
+
+# Step 3: Set up the renderer and render window
+renderer = vtk.vtkRenderer()
+renderer.SetBackground(0.1, 0.1, 0.1)
+
+render_window = vtk.vtkRenderWindow()
+render_window.SetWindowName("Ray Casting Example")
+render_window.AddRenderer(renderer)
+
+# Step 4: Create a render window interactor
+render_window_interactor = vtk.vtkRenderWindowInteractor()
+render_window_interactor.SetRenderWindow(render_window)
+
+# Step 5: Add the volume to the renderer and start rendering
+renderer.AddVolume(volume)
+renderer.ResetCamera()
+
+# Customize ray casting properties if needed (e.g., transfer functions)
+
+# Start rendering
+render_window.Render()
+render_window_interactor.Start()
+```
+
+### scratch_code/scratchray.py
+```
+import vtkmodules.all as vtk
+import numpy as np
+from vtkmodules.vtkRenderingCore import vtkColorTransferFunction
+from vtkmodules.vtkCommonDataModel import vtkPiecewiseFunction
+from vtkmodules.util.numpy_support import vtk_to_numpy
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+
+def vtkToNumpy(data):
+    temp = vtk_to_numpy(data.GetPointData().GetScalars())
+    dims = data.GetDimensions()
+    component = data.GetNumberOfScalarComponents()
+    if component == 1:
+        numpy_data = temp.reshape(dims[2], dims[1], dims[0])
+        numpy_data = numpy_data.transpose(2,1,0)
+    elif component == 3 or component == 4:
+        if dims[2] == 1: # a 2D RGB image
+            numpy_data = temp.reshape(dims[1], dims[0], component)
+            numpy_data = numpy_data.transpose(0, 1, 2)
+            numpy_data = np.flipud(numpy_data)
+        else:
+            raise RuntimeError('unknow type')
+    return numpy_data
+
+reader = vtk.vtkXMLImageDataReader()
+reader.SetFileName('foot.vti')  # dataset file 
+reader.Update()
+
+data = reader.GetOutput()
+nparr = vtkToNumpy(data)
+volume_data = nparr
+
+# Define the camera parameters (orthographic projection)
+width, height = 256, 256  # Image dimensions
+near_plane = 0.0
+far_plane = 1.0
+fov = 90  # Field of view in degrees (orthographic projection)
+
+# Define a simple transfer function (mapping scalar values to color and opacity)
+# def transfer_function(scalar_value):
+#     # Example: Map scalar values to grayscale color and constant opacity
+    # return scalar_value, scalar_value, scalar_value, 0.5
+
+def transfer_function(x):
+  
+  """Transfer Function returns r,g,b,a values as a function of density x"""
+  r = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+  g = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  1.0*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+  b = 0.1*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  1.0*np.exp( -(x - -3.0)**2/0.5 )
+  a = 0.6*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) + 0.01*np.exp( -(x - -3.0)**2/0.5 )
+  return r,g,b,a
+
+# Create an empty image
+output_image = np.zeros((height, width, 4), dtype=np.uint8)
+
+# Ray casting algorithm
+for y in range(height):
+    for x in range(width):
+        # Compute the ray direction in world coordinates (orthographic projection)
+        ray_dir = np.array([0, 0, 1])  # Along the positive Z-axis
+
+        # Compute the ray origin in world coordinates (center of the near plane)
+        ray_origin = np.array([x / width, y / height, near_plane])
+
+        # Initialize color and opacity
+        pixel_color = np.array([0.0, 0.0, 0.0, 0.0])
+
+        # Perform ray traversal through the volume
+        for z in np.linspace(near_plane, far_plane, volume_data.shape[2], endpoint=False):
+            # Convert ray origin to voxel coordinates
+            voxel_coord = ray_origin * volume_data.shape - 0.5  # Centered at (0.5, 0.5, 0.5)
+            voxel_coord = np.floor(voxel_coord).astype(int)
+
+            # Sample scalar value from the volume (no interpolation)
+            scalar_value = volume_data[voxel_coord[0], voxel_coord[1], voxel_coord[2]]
+
+            # Apply the transfer function
+            color_and_opacity = transfer_function(scalar_value)
+
+            # Composite color and opacity along the ray (simple over operator)
+            # pixel_color[0:3] = pixel_color[0:3] + (1 - pixel_color[3]) * color_and_opacity[0:3] * color_and_opacity[3]
+            pixel_color[0:3] = pixel_color[0:3] + (1 - pixel_color[3]) * np.array(color_and_opacity[0:3]) * color_and_opacity[3]
+
+            pixel_color[3] = pixel_color[3] + (1 - pixel_color[3]) * color_and_opacity[3]
+
+        # Store the computed color in the output image
+        output_image[y, x] = (np.clip(pixel_color * 255, 0, 255)).astype(np.uint8)
+
+
+# Display the rendered image using Matplotlib
+plt.imshow(output_image[:, :, 0:3])  # Display RGB channels
+plt.axis('off')
+plt.show()
+
+
+# Optionally, save the rendered image to a file using Pillow (PIL)
+# output_pil_image = Image.fromarray(output_image[:, :, 0:3])
+# output_pil_image.save('ray_casting_output.png')
+```
+
+### scratch_code/scratchray02.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+import h5py as h5
+# from scipy.interpolate import interpn
+import vtkmodules.all as vtk
+from vtkmodules.vtkRenderingCore import vtkColorTransferFunction
+from vtkmodules.vtkCommonDataModel import vtkPiecewiseFunction
+from vtkmodules.util.numpy_support import vtk_to_numpy
+
+"""
+Create Your Own Volume Rendering (With Python)
+Philip Mocz (2020) Princeton Univeristy, @PMocz
+
+Simulate the Schrodinger-Poisson system with the Spectral method
+"""
+
+def vtkToNumpy(data):
+    temp = vtk_to_numpy(data.GetPointData().GetScalars())
+    dims = data.GetDimensions()
+    component = data.GetNumberOfScalarComponents()
+    if component == 1:
+        numpy_data = temp.reshape(dims[2], dims[1], dims[0])
+        numpy_data = numpy_data.transpose(2,1,0)
+    elif component == 3 or component == 4:
+        if dims[2] == 1: # a 2D RGB image
+            numpy_data = temp.reshape(dims[1], dims[0], component)
+            numpy_data = numpy_data.transpose(0, 1, 2)
+            numpy_data = np.flipud(numpy_data)
+        else:
+            raise RuntimeError('unknow type')
+    return numpy_data
+
+
+def transferFunction(x):
+	
+	r = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+	g = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  1.0*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+	b = 0.1*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  1.0*np.exp( -(x - -3.0)**2/0.5 )
+	a = 0.6*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) + 0.01*np.exp( -(x - -3.0)**2/0.5 )
+	
+	return r,g,b,a
+
+
+""" Volume Rendering """
+reader = vtk.vtkXMLImageDataReader()
+reader = vtk.vtkXMLImageDataReader()
+reader.SetFileName('foot.vti')  # dataset file 
+reader.Update()
+data = reader.GetOutput()
+datacube = vtkToNumpy(data)
+
+# Datacube Grid
+Nx, Ny, Nz = datacube.shape
+x = np.linspace(-Nx/2, Nx/2, Nx)
+y = np.linspace(-Ny/2, Ny/2, Ny)
+z = np.linspace(-Nz/2, Nz/2, Nz)
+points = (x, y, z)
+
+# Do Volume Rendering at Different Veiwing Angles
+Nangles = 1
+for i in range(Nangles):
+	
+	print('Rendering Scene ' + str(i+1) + ' of ' + str(Nangles) + '.\n')
+
+	# Camera Grid / Query Points -- rotate camera view
+	angle = np.pi/2 * i / Nangles
+	N = 180
+	c = np.linspace(-N/2, N/2, N)
+	qx, qy, qz = np.meshgrid(c,c,c)
+	qxR = qx
+	qyR = qy * np.cos(angle) - qz * np.sin(angle) 
+	qzR = qy * np.sin(angle) + qz * np.cos(angle)
+	qi = np.array([qxR.ravel(), qyR.ravel(), qzR.ravel()]).T
+	
+	# Interpolate onto Camera Grid
+	# camera_grid = interpn(points, datacube, qi, method='linear').reshape((N,N,N))
+	camera_grid = datacube
+	
+	# Do Volume Rendering
+	image = np.zeros((camera_grid.shape[1],camera_grid.shape[2],3))
+
+	for dataslice in camera_grid:
+		r,g,b,a = transferFunction(np.log(dataslice))
+		image[:,:,0] = a*r + (1-a)*image[:,:,0]
+		image[:,:,1] = a*g + (1-a)*image[:,:,1]
+		image[:,:,2] = a*b + (1-a)*image[:,:,2]
+	
+	image = np.clip(image,0.0,1.0)
+	
+	# Plot Volume Rendering
+	plt.figure(figsize=(4,4), dpi=80)
+	plt.imshow(image)
+	plt.axis('off')
+	plt.show()
+	
+	# Save figure
+	# plt.savefig('volumerender' + str(i) + '.png',dpi=240,  bbox_inches='tight', pad_inches = 0)
+
+
+
+# Plot Simple Projection -- for Comparison
+# plt.figure(figsize=(4,4), dpi=80)
+
+# plt.imshow(np.log(np.mean(datacube,0)), cmap = 'viridis')
+# plt.clim(-5, 5)
+# plt.axis('off')
+
+# Save figure
+# plt.savefig('projection.png',dpi=240,  bbox_inches='tight', pad_inches = 0)
+# plt.show()
+```
+
+### scratch_code/scratchray03.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+import vtkmodules.all as vtk
+from vtkmodules.vtkRenderingCore import vtkColorTransferFunction
+from vtkmodules.vtkCommonDataModel import vtkPiecewiseFunction
+from vtkmodules.util.numpy_support import vtk_to_numpy
+
+
+def vtkToNumpy(data):
+    temp = vtk_to_numpy(data.GetPointData().GetScalars())
+    dims = data.GetDimensions()
+    component = data.GetNumberOfScalarComponents()
+    if component == 1:
+        numpy_data = temp.reshape(dims[2], dims[1], dims[0])
+        numpy_data = numpy_data.transpose(2,1,0)
+    elif component == 3 or component == 4:
+        if dims[2] == 1: # a 2D RGB image
+            numpy_data = temp.reshape(dims[1], dims[0], component)
+            numpy_data = numpy_data.transpose(0, 1, 2)
+            numpy_data = np.flipud(numpy_data)
+        else:
+            raise RuntimeError('unknow type')
+    return numpy_data
+
+
+def transferFunction(x):
+	
+	r = 1.0*np.exp( -(x - 9.0)**2/1.0 ) +  1.0*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+	g = 0.10*np.exp( -(x - 9.0)**2/1.0 ) +  1.0*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+	b = 0.1*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  1.0*np.exp( -(x - -3.0)**2/0.5 )
+	a = 0.6*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) + 0.01*np.exp( -(x - -3.0)**2/0.5 )
+	
+	return r,g,b,a
+
+def transform_array(data, view_axis):
+    if view_axis not in ('x', 'y', 'z'):
+        raise ValueError("Invalid view_axis. Use 'x', 'y', or 'z'.")
+
+    if view_axis == 'x':	# View along the x-axis
+        transformed_data = np.transpose(data, (1, 2, 0))
+    elif view_axis == 'y':	# View along the y-axis
+        transformed_data = np.transpose(data, (0, 2, 1))
+    else:	# View along the z-axis (no transformation needed)
+        transformed_data = np.transpose(data, (2 ,1, 0))
+
+    return transformed_data
+
+
+def main():
+    """ Volume Rendering """
+    reader = vtk.vtkXMLImageDataReader()
+    reader.SetFileName('Isabel_Pressure_Large.vti')  # dataset file 
+    reader.Update()
+    original_data = reader.GetOutput()
+    original_array = vtkToNumpy(original_data)
+    camera_grid = transform_array(original_array, 'z')
+    image = np.zeros((camera_grid.shape[1], camera_grid.shape[2], 3))
+
+    for dataslice in camera_grid:
+        r, g, b, a = transferFunction(np.log(dataslice))
+        image[:, :, 0] = a * r + (1 - a) * image[:, :, 0]
+        image[:, :, 1] = a * g + (1 - a) * image[:, :, 1]
+        image[:, :, 2] = a * b + (1 - a) * image[:, :, 2]
+
+    plt.figure(figsize=(4, 4), dpi=80)
+    plt.imshow(image)
+    plt.axis('off')
+    plt.show()
+
+if __name__ == "__main__":
+    main()
+```
+
+### scratch_code/scratchray04.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+import vtkmodules.all as vtk
+from vtkmodules.util.numpy_support import vtk_to_numpy
+
+
+def vtkToNumpy(data):
+    temp = vtk_to_numpy(data.GetPointData().GetScalars())
+    dims = data.GetDimensions()
+    component = data.GetNumberOfScalarComponents()
+    if component == 1:
+        numpy_data = temp.reshape(dims[2], dims[1], dims[0])
+        numpy_data = numpy_data.transpose(2,1,0)
+    elif component == 3 or component == 4:
+        if dims[2] == 1: # a 2D RGB image
+            numpy_data = temp.reshape(dims[1], dims[0], component)
+            numpy_data = numpy_data.transpose(0, 1, 2)
+            numpy_data = np.flipud(numpy_data)
+        else:
+            raise RuntimeError('unknown type')
+    return numpy_data
+
+
+def transferFunction(x):
+	
+	r = 1.0*np.exp( -(x - 7.5)**2/1.0 ) +  0.1*np.exp( -(x - 2.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+	g = 0.10*np.exp( -(x - 9.0)**2/1.0 ) +  1.0*np.exp( -(x - 3.0)**2/0.1 ) +  0.1*np.exp( -(x - -3.0)**2/0.5 )
+	b = 0.1*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) +  1.0*np.exp( -(x - -3.0)**2/0.5 )
+	a = 0.6*np.exp( -(x - 9.0)**2/1.0 ) +  0.1*np.exp( -(x - 3.0)**2/0.1 ) + 0.01*np.exp( -(x - -3.0)**2/0.5 )
+	
+	return r,g,b,a
+
+def transform_array(data, view_axis):
+    if view_axis not in ('x', 'y', 'z'):
+        raise ValueError("Invalid view_axis. Use 'x', 'y', or 'z'.")
+
+    if view_axis == 'x':	# View along the x-axis
+        transformed_data = np.transpose(data, (1, 2, 0))
+    elif view_axis == 'y':	# View along the y-axis
+        transformed_data = np.transpose(data, (0, 2, 1))
+    else:	# View along the z-axis
+        transformed_data = np.transpose(data, (2 ,1, 0))
+
+    return transformed_data
+
+
+def main():
+    """ Volume Rendering """
+    reader = vtk.vtkXMLImageDataReader()
+    reader.SetFileName('Isabel_Pressure_Large.vti')  # dataset file path
+    # reader.SetFileName('foot.vti')  # dataset file 
+    reader.Update()
+    original_data = reader.GetOutput()
+    original_array = vtkToNumpy(original_data)  # convert vti to numpy array
+    camera_grid = transform_array(original_array, 'z')  # input orientation as x, y, z
+    image = np.zeros((camera_grid.shape[1], camera_grid.shape[2], 3))
+
+    for dataslice in camera_grid:
+        r, g, b, a = transferFunction(np.log(dataslice))
+        image[:, :, 0] = a * r + (1 - a) * image[:, :, 0]
+        image[:, :, 1] = a * g + (1 - a) * image[:, :, 1]
+        image[:, :, 2] = a * b + (1 - a) * image[:, :, 2]
+
+    plt.figure(figsize=(4, 4), dpi=80)
+    plt.imshow(image)
+    plt.axis('off')
+    plt.show()
+
+if __name__ == "__main__":
+    main()
+```
+
+### scratch_code/tempCodeRunnerFile.py
+```
+Isabel_Pressure_Large
+```
+
+### scratch_code/transfer03.py
+```
+import tkinter as tk
+from tkinter import ttk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.pyplot as plt
+
+class DraggablePoint:
+    def __init__(self, ax, x, y):
+        self.ax = ax
+        self.point, = ax.plot(x, y, 'ro', markersize=8, picker=5)
+        self.dragging = False
+        self.offset = (0, 0)
+        self.connect()
+
+    def connect(self):
+        self.cid_press = self.point.figure.canvas.mpl_connect('pick_event', self.on_pick)
+        self.cid_release = self.point.figure.canvas.mpl_connect('button_release_event', self.on_release)
+        self.cid_motion = self.point.figure.canvas.mpl_connect('motion_notify_event', self.on_motion)
+
+    def on_pick(self, event):
+        if event.artist == self.point:
+            self.dragging = True
+            self.offset = (self.point.get_xdata() - event.xdata, self.point.get_ydata() - event.ydata)
+
+    def on_release(self, event):
+        self.dragging = False
+
+    def on_motion(self, event):
+        if self.dragging:
+            if event.xdata is not None and event.ydata is not None:
+                self.point.set_xdata(event.xdata + self.offset[0])
+                self.point.set_ydata(event.ydata + self.offset[1])
+                self.point.figure.canvas.draw()
+
+class PointManipulationApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Point Manipulation App")
+
+        self.points_values = None
+
+        self.create_widgets()
+
+    def create_widgets(self):
+        # Create Matplotlib figure and axis
+        self.fig, self.ax = plt.subplots()
+        self.ax.set_xlim(-1, 1)
+        self.ax.set_ylim(0, 1)
+        self.ax.set_xlabel("X")
+        self.ax.set_ylabel("Y")
+
+        # Create draggable points
+        self.points = [DraggablePoint(self.ax, 0, 0.2),
+                       DraggablePoint(self.ax, 0.3, 0.7),
+                       DraggablePoint(self.ax, 0.6, 0.3),
+                       DraggablePoint(self.ax, 0.9, 0.8)]
+
+        # Embed Matplotlib figure in Tkinter window
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+
+        # Apply button
+        apply_button = ttk.Button(self.root, text="Apply", command=self.apply_changes)
+        apply_button.pack()
+
+    def apply_changes(self):
+        # Get the values of the four points and store them in a list
+        self.points_values = [(point.point.get_xdata().item(), point.point.get_ydata().item()) for point in self.points]
+        self.root.destroy()  # Close the Tkinter window
+
+    def get_points_values(self):
+        return self.points_values
+
+def main():
+    root = tk.Tk()
+    app = PointManipulationApp(root)
+    root.mainloop()
+
+    # Access points_values after Tkinter window is closed
+    points_values = app.get_points_values()
+    print("Points:", points_values)
+
+if __name__ == "__main__":
+    main()
+```
+
+### scratch_code/volumeren.py
+```
+# noinspection PyUnresolvedReferences
+import vtkmodules.vtkInteractionStyle
+from vtkmodules.vtkCommonColor import vtkNamedColors
+from vtkmodules.vtkIOXML import vtkXMLImageDataReader  # Import vtkXMLImageDataReader for .vti format
+from vtkmodules.vtkRenderingCore import (
+    vtkColorTransferFunction,
+    vtkRenderWindow,
+    vtkRenderWindowInteractor,
+    vtkRenderer,
+    vtkVolume,
+    vtkVolumeProperty
+)
+from vtkmodules.vtkRenderingVolume import vtkFixedPointVolumeRayCastMapper
+from vtkmodules.vtkCommonDataModel import vtkPiecewiseFunction
+
+
+def main():
+    fileName = get_program_parameters()
+
+    colors = vtkNamedColors()
+
+    # Create the standard renderer, render window, and interactor.
+    ren1 = vtkRenderer()
+    renWin = vtkRenderWindow()
+    renWin.AddRenderer(ren1)
+    iren = vtkRenderWindowInteractor()
+    iren.SetRenderWindow(renWin)
+
+    # Create the reader for the .vti data.
+    reader = vtkXMLImageDataReader()
+    reader.SetFileName(fileName)
+    # reader = vtkXMLImageDataReader()
+    # reader.SetFileName(fileName)
+
+    # Create transfer mapping scalar value to opacity.
+    opacityTransferFunction = vtkPiecewiseFunction()
+    opacityTransferFunction.AddPoint(20, 0.0)
+    opacityTransferFunction.AddPoint(255, 0.2)
+
+    # Create transfer mapping scalar value to color.
+    colorTransferFunction = vtkColorTransferFunction()
+    colorTransferFunction.AddRGBPoint(0.0, 0.0, 0.0, 0.0)
+    colorTransferFunction.AddRGBPoint(64.0, 1.0, 0.0, 0.0)
+    colorTransferFunction.AddRGBPoint(128.0, 0.0, 0.0, 1.0)
+    colorTransferFunction.AddRGBPoint(192.0, 0.0, 1.0, 0.0)
+    colorTransferFunction.AddRGBPoint(255.0, 0.0, 0.2, 0.0)
+
+    # The property describes how the data will look.
+    volumeProperty = vtkVolumeProperty()
+    volumeProperty.SetColor(colorTransferFunction)
+    volumeProperty.SetScalarOpacity(opacityTransferFunction)
+    volumeProperty.ShadeOn()
+    volumeProperty.SetInterpolationTypeToLinear()
+
+    # The mapper / ray cast function know how to render the data.
+    volumeMapper = vtkFixedPointVolumeRayCastMapper()
+    volumeMapper.SetInputConnection(reader.GetOutputPort())
+
+    # The volume holds the mapper and the property and
+    # can be used to position/orient the volume.
+    volume = vtkVolume()
+    volume.SetMapper(volumeMapper)
+    volume.SetProperty(volumeProperty)
+
+    ren1.AddVolume(volume)
+    ren1.SetBackground(colors.GetColor3d('Wheat'))
+    ren1.GetActiveCamera().Azimuth(45)
+    ren1.GetActiveCamera().Elevation(30)
+    ren1.ResetCameraClippingRange()
+    ren1.ResetCamera()
+
+    renWin.SetSize(600, 600)
+    renWin.SetWindowName('SimpleRayCast')
+    renWin.Render()
+
+    iren.Start()
+
+def get_program_parameters():
+    import argparse
+    description = 'Volume rendering of a high potential iron protein.'
+    epilogue = '''
+    This is a simple volume rendering example that uses a vtkFixedPointVolumeRayCastMapper.
+    '''
+    parser = argparse.ArgumentParser(description=description, epilog=epilogue,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('filename', help='Isabel_Pressure_Large.vti')  # Specify the .vti filename here
+    args = parser.parse_args()
+    return args.filename
+
+if __name__ == '__main__':
+    main()
+```

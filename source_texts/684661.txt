@@ -1,0 +1,300 @@
+Contribute to arbobendik/FlexCudaPT development by creating an account on GitHub.
+
+feat(textures): read each image the materials read from a hardware texture, filtered linearly in hardware by arbobendik · Pull Request #56 · arbobendik/FlexCudaPT · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+arbobendik
+commented
+Nov 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Hardware textures, steps T2a–T2d of the texture plan: every image the materials read becomes a GPU texture. On CUDA that is a cuArray with texture objects; on Vulkan, a bindless VkImage. Linear reads are filtered in hardware.
+The stack renders 7–9% faster than main on both backends. Every step before T2d is exact.
+Commits
+Commit
+Step
+Lines
+feat(textures): pipe each image the materials read apart from the texels
+T2a
++56 / −37
+chore(test): find each image the materials read apart from the texels, by its index
+T2a test
++4
+feat(textures): read each image the materials read from a texture
+T2b+c
++181 / −28
+feat(textures): look each image read's texture up once, in its filter, and its closest texel only for closest reads
+lookup
++22 / −19
+feat(textures): filter each image the materials read linearly in hardware
+T2d
++93 / −49
+T2a: images apart
+Each image the materials read is piped as its own array and found through a table, by its index (bit 31 of the texture's height).
+The SCENE header gains an eleventh count, the number of images, after instancing's ten. The record grows to 608 bytes (RECORD_STRIDE).
+An empty texel entry, such as a UV-space bake's empty tile list, shares its first slot with the next entry. It is classed as no image.
+T2b+c: textures
+CUDA: one cuArray and texture object per image: FLOAT×4 or UNSIGNED_INT8×4, read as integers, point-filtered and clamped. texel() fetches the texel at its centre and decodes it as main does.
+Vulkan: the shim stands in for the same driver calls with a VkImage per array (R32G32B32A32_UINT or R8G8B8A8_UINT), uploaded through the staging buffer.
+One bindless descriptor set holds up to 65536 sampled images.
+renderer.slang reads them with an exact Load through NonUniformResourceIndex.
+Device creation requires runtimeDescriptorArray, shaderSampledImageArrayNonUniformIndexing and descriptorBindingPartiallyBound, and fails plainly without them.
+The exporter pipes each image's width and height; the loader frees textures with the scene and counts them in the memory stats.
+Lookup
+An image read looks its texture up once, in its filter, instead of once per tap.
+Linear and cubic reads no longer fetch the closest texel first. Main fetched it and then overwrote it.
+T2d: hardware linear
+CUDA: each image gets a second texture object, filtering linearly with normalized coordinates and an address mode by its extension (wrap, clamp, border, mirror). RGBA8 is read normalized, and decoded from sRGB in hardware before filtering where the image is sRGB.
+Vulkan: mutable-format images get a float view (UNORM or SRGB for RGBA8, SFLOAT for floats) in a second bindless array, with four immutable samplers by extension.
+Both: linear reads of images take one hardware fetch. Tables and bake-only images keep the software path.
+Test change: make test's node check 'Image Texture' reads a 1×1 image linearly under CLIP and compares it with Cycles. The hardware's 8-bit filter weights give 0.3203125 where the exact value is 0.4 × 0.8 = 0.32. Its four linear reads of that test image are now compared at 2^-8, one step of those weights; nothing else was loosened.
+Speed
+Main aacfc42, so Classroom is from before #54. ABBA against main, with viewport_bench at 480×270, 10 redraws, ReSTIR on and 7 bounces. A warm-up hold compiles each build's pipelines first. Classroom rows are 4 + 4 runs, tokyo 2 + 2, and every pair of ranges is apart.
+Scene
+Device
+main
+this stack
+change
+Classroom
+OptiX
+81.50 ms
+74.33 ms
+−8.8%
+Classroom
+Vulkan
+134.47 ms
+123.97 ms
+−7.8%
+tokyo
+OptiX
+43.30 ms
+40.20 ms
+−7.2%
+tokyo
+Vulkan
+75.45 ms
+70.50 ms
+−6.6%
+On their own, T2a and T2b+c were slower than main: up to +2.5% and +5.6%. The lookup commit recovered most of that, and T2d turns it into a gain.
+Exactness
+Run on main aacfc42 and 2da60fc, before this rebase onto f249ca4. #54 and #55 change only the exporter's emitted keys and Jacobian memos, not image piping. The verifier reruns the gates on f249ca4. Classroom's results are from before #54, which changed its programs (227 bakes instead of 230).
+Every comparison renders at 240×135 and 16 spp, with Blender on one thread. Blender's threads change MikkTSpace tangents in their last bits from run to run; with one thread, renders repeat bit for bit on both backends.
+Step
+Vulkan
+OptiX
+T2a
+identical on the showcase scene, tokyo, Classroom, Monster and BMW27
+identical on the same five
+T2b+c, lookup
+identical on all five
+the default builds differ by FMA contraction only: with --fmad=false in both builds, all five are identical
+Contraction differences fall under Bendik's standing compiler-rounding rule.
+Flat Archviz is no byte gate. Its export varies even on one thread: UVs by 1–2 ulps on 2202 triangles, and tangents reversed on some. Two runs of main differ there by 30017 pixels. T2a's and T2b+c's renders are byte-identical to a main run whose export coincided.
+Quality of T2d
+1024 spp, against main aacfc42 (Classroom from before #54), beside a seed build of main whose random numbers differ (per-pixel p99):
+Scene
+OptiX: stack / seed floor
+Vulkan: stack / seed floor
+the showcase scene
+0.171 / 0.805
+0.228 / 1.252
+tokyo
+0.063 / 0.087
+0.075 / 0.104
+Classroom
+0.018 / 0.042
+0.023 / 0.043
+Monster
+0.117 / 0.220
+0.117 / 0.220
+The stack is under the floor everywhere.
+Gates
+make test passes on each step's tip on f249ca4: T2a, T2b+c, lookup and T2d.
+On main with T2a's test alone, make test fails at 'images apart' (measured on bd31c64).
+Intel iGPU: not a test target (Bendik).
+Evidence: ws1 .agent/evidence/ (stack/, t2a/, t2bc/, t2d/, fmad/, determinism/findings.md).
+arbobendik
+added 5 commits
+November 1, 2026 11:59
+feat(textures): pipe each image the materials read apart from the tex…
+…
+5ff68db
+```
+…els, into its own array the shaders read by its index
+```
+chore(test): find each image the materials read apart from the texels…
+…
+4dd2bd5
+```
+…, by its index
+```
+feat(textures): read each image the materials read from a texture, a …
+…
+b74aab3
+```
+…CUDA texture object or a bindless Vulkan image, whole texels as before
+```
+feat(textures): look each image read's texture up once, in its filter…
+…
+189450b
+```
+…, and its closest texel only for closest reads
+```
+feat(textures): filter each image the materials read linearly in hard…
+…
+31e0ab7
+```
+…ware, by its extension, RGBA8 decoded from sRGB before
+```
+arbobendik
+commented
+Nov 1, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Verification (ws3) of 31e0ab7: PASS per commit, with one robustness finding for T2d's Vulkan shim
+History. The merge base is origin/main f249ca4, and the branch has only this PR's five commits. Every Blender run
+was in a 20 GB scope without swap, with no cap kills. Every GPU gate ran on NVIDIA only, OptiX and Vulkan.
+How exactness was gated:
+Byte identity, blender -b -t 1, 256 px, 16 spp, ReSTIR off and on; the showcase scene, tokyo, Classroom, Monster
+and BMW27; against main f249ca4.
+For OptiX after T2a, a pair built with make NVCC="nvcc --fmad=false" (main against the step). Contraction is
+confirmed off in the PTX: fma.rn drops from 8521 to 4697, the explicit fma calls.
+Flat Archviz is no byte gate. It was judged against two runs of main.
+5ff68db feat(textures), T2a: PASS
+make test on 5ff68db itself: exit 0, 1660 s.
+Review: the remap gives three sides: 0 the texels, 1 bake-only (bit 30), 2 an image by its index (bit 31,
+through side << 30).
+Bake-only images stay bake-only, as that test comes first.
+Tables, keyed by node rather than tuple, stay in the texels.
+An empty entry, sharing its first slot with the next, is no image.
+The update path reuses the relocated entries: textures = dict(self.shape[2]) is the dict the full export updated
+in place.
+Identity (4dd2bd5's build, the same code): Vulkan and OptiX default builds each bit-identical on 10 of 10 pairs.
+4dd2bd5 chore(test): PASS
+make test: exit 0, 299 s.
+Must fail: main f249ca4 with this test.py fails at images apart.
+b74aab3 feat(textures), T2b+c: PASS
+make test: exit 0, 1635 s.
+Review:
+CUDA reads point-filtered, unnormalized tex2D at texel centres: float arrays as floats, UNSIGNED_INT8 as raw
+bytes. The software wrap puts x and y in range first.
+Vulkan does an exact Load of R32G32B32A32_UINT or R8G8B8A8_UINT, through NonUniformResourceIndex.
+The shim uploads row runs through the 64 MiB staging buffer. Rows of at most 16384 × 16 B fit, and after the first
+run the layout moves from SHADER_READ_ONLY, keeping earlier rows.
+Descriptor writes can't race a launch, since run() waits on its fence. With PARTIALLY_BOUND, a freed place
+keeping a stale view is legal while unread.
+Memory accounting adds and subtracts the same bytes. AGENTS.md: no findings.
+Identity:
+Vulkan bit-identical on 10/10 pairs.
+OptiX without contraction (main --fmad=false against this commit --fmad=false): 10/10.
+Flat Archviz is within main's own spread. With ReSTIR off, main against main reads max |d| 0.0156 with 20.2% of
+pixels identical, and main against this commit 0.0156 with 20.3%. With ReSTIR on, main against main reads 0.0625
+with 9.4%, and main against this commit 0.0020 with 97.0%.
+189450b feat(textures), the lookup: PASS
+make test: exit 0, 1627 s.
+Review: the texture handle loads once per read, and the closest-texel fetch, which main overwrote for linear and
+cubic reads, happens only for closest reads. It's exact by construction.
+Identity: Vulkan 10/10, OptiX without contraction 10/10, and Flat Archviz within main's spread, as for b74aab3.
+31e0ab7 feat(textures), T2d: PASS, with a finding to fix
+make test: exit 0, 1649 s.
+Review:
+Extensions map to WRAP, CLAMP, BORDER (transparent black) and MIRROR, with normalized coordinates, which CUDA's
+wrap and mirror require.
+Hardware mirror repeats the edge texel, as main's 2·width − 1 − x does.
+CU_TRSF_SRGB and Vulkan's SRGB view decode before filtering, as main does, and only RGBA8 images carry the flag.
+Main's software path applies nothing else to a packed texel (no alpha association), so the hardware computes the
+same function, up to its 8-bit filter weights and its sRGB decode.
+Cubic reads, tables and bake-only images keep the software path.
+The MUTABLE_FORMAT UINT images viewed as UNORM, SRGB or SFLOAT stay within their compatibility classes.
+The tolerance: the four asserts loosened to 2^-8 are exactly the four reads of image in 'Image Texture', whose
+interpolation stays Linear. The last one changes only other to Closest. Nothing else was loosened.
+Against main's seed floor (frames + 7919; 256 px, 1024 spp, ReSTIR off, blender -b -t 1): inside the floor on
+all 8 pairs, with no bias.
+Scene
+OptiX: PR mean|d| / p99 / bias
+floor
+Vulkan: PR mean|d| / p99 / bias
+floor
+the showcase scene
+0.0019 / 0.020 / +0.02%
+0.0567 / 0.890 / +0.12%
+0.0019 / 0.019 / +0.04%
+0.0566 / 0.890 / +0.17%
+tokyo
+0.0015 / 0.014 / −0.03%
+0.0250 / 0.225 / −0.02%
+0.0014 / 0.013 / −0.03%
+0.0250 / 0.225 / −0.02%
+Classroom
+0.0119 / 0.225 / +0.03%
+0.0712 / 0.695 / −0.33%
+0.0118 / 0.225 / +0.04%
+0.0711 / 0.678 / −0.32%
+Monster
+0.0086 / 0.087 / +0.03%
+0.1040 / 0.710 / −0.05%
+0.0078 / 0.083 / −0.01%
+0.1042 / 0.703 / +0.01%
+Finding, robustness, not blocking on NVIDIA: the shim samples an R32G32B32A32_SFLOAT view with a linear
+sampler. The Vulkan spec doesn't require VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT for 32-bit float formats,
+and cuCtxCreate doesn't check it. On a device without it, the result is undefined rather than the plain failure the
+three descriptor features get. Suggested: check optimalTilingFeatures for that format in cuCtxCreate, and fail
+plainly or keep float images on the software path. Unmeasured on non-NVIDIA hardware, which is out of testing.
+Cost of the stack (tip against main; one hold of 130 s, entirely in the performance profile; 480×270, 10
+redraws, ReSTIR on, bounces 7; trace medians, ABBA × 1). Every run of the stack is below every run of main:
+Scene
+OptiX
+Vulkan
+Classroom
+70.05 → 62.30 ms (−11.1%)
+107.85 → 96.70 ms (−10.3%)
+tokyo
+36.65 → 33.95 ms (−7.4%)
+61.45 → 55.45 ms (−9.8%)
+Evidence: .agent/pr56/ (maketest-*.log, ident-vulkan.log, ident-optix.log, ident-fmad.log,
+ident-fmad2.log, ident-flat.log, ident-flat2.log, fid-optix.log, fid-vulkan.log, ab56.log, build.sh's
+fma counts).
+Hide details
+View details
+arbobendik
+merged commit 31e0ab7
+into
+main
+Nov 1, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+arbobendik
+deleted the
+feat/hardware-textures
+branch
+November 1, 2026 19:04
+arbobendik
+mentioned this pull request
+Nov 1, 2026
+fix(vulkan): fail plainly on a device that cannot filter float images linearly, as on one without the texture features
+#57
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,342 @@
+Problem The Cartesi Machine emulator uses backing files for memory ranges (flash drives, RAM, etc.) and maps these files to When a sparse file is given as a backing image, the emulator does not take advantage of its sparseness: holes are...
+
+Thin provisioning (sparse memory ranges and backing files) · Issue #371 · cartesi/machine-emulator · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Thin provisioning (sparse memory ranges and backing files) #371
+New issue
+Copy link
+New issue
+Copy link
+Open
+Feature
+Open
+Thin provisioning (sparse memory ranges and backing files)#371
+Feature
+Copy link
+Assignees
+Labels
+enhancementNew feature or requestNew feature or requestepic
+Description
+diegonehab
+opened on Mar 26, 2026
+Issue body actions
+Problem
+The Cartesi Machine emulator uses backing files for memory ranges (flash drives, RAM, etc.) and maps these files to
+When a sparse file is given as a backing image, the emulator does not take advantage of its sparseness: holes are indistinguishable from zero-filled regions during initialization, and freed blocks inside a guest never become holes in the backing file on the host. This wastes both disk space and initialization time.
+We propose to:
+Read side: When loading a sparse backing file, skip holes during initialization (avoid page faults and unnecessary hashing).
+Write side: When memory pages become zero (e.g., because a guest filesystem freed blocks), convert them back into holes in the backing file.
+Proper use of sparse files would allow us to define a Cartesi Machine with truly massive, initially zeroed-out drives without any impact on emulator performance and host resource usage.
+This, in turn, would allow applications that can grow their guest state essentially indefinitely, and even applications that only temporarily use additional guest/host space.
+Hash-Tree-Based Hole Punching
+Detection of holes at run-time
+During hash tree updates, the emulator already iterates over dirty pages and calls is_pristine() on each one to detect all-zero pages (using SIMD-optimized checks). Pages that are pristine receive precomputed hashes rather than being hashed from their contents. This is existing behavior.
+The key insight is that we can piggyback on this existing mechanism. When a dirty page is detected as pristine during a hash tree update, we additionally call fallocate(FALLOC_FL_PUNCH_HOLE) on the corresponding region of the backing file. This converts the zero-filled region into a hole, making the file sparse.
+This approach works for all memory ranges in the emulator, not just flash drives. Any backing file for any memory range (RAM, flash drives, CMIO buffers, etc.) benefits automatically. The emulator does not need to know why a page became zero. It simply observes the zeros during the hash tree update it was already performing. There is no added cost: the is_pristine() check is already happening, and fallocate is only called for pages that are both dirty and pristine.
+In practice, the main beneficiary is flash drives (pmem-backed), since they carry filesystem data where blocks are frequently allocated and freed. RAM backing files also benefit when large zero regions appear. CMIO buffers are typically small enough that the optimization has minimal impact on them.
+Read-side optimization
+On the read side, the emulator will use lseek with SEEK_HOLE/SEEK_DATA to build a map of data vs. hole regions in the backing file before initialization. Hole regions are known to be zero, so the emulator can skip them entirely: no page faults, no memory reads, no hashing. They receive pristine hashes directly.
+Write-side optimization
+When the emulator stores a machine to disk, it writes the contents of each memory range to a file. The existing create_file() already preserves sparsity by checking is_pristine() on each page and skipping the write for zero pages. However, this still reads every page to perform the check, causing page faults for hole regions that the read-side optimization carefully avoided. The fix is to use the hash-tree again to identify and skip hole regions entirely when writing, without touching the memory at all. The ftruncate that sets the output file size already ensures skipped regions remain holes.
+Guest-side options for generating zeros
+For memory ranges under direct user control (e.g., application data in RAM), writing zeros is sufficient. The hash tree will detect the pristine pages and punch holes automatically.
+For filesystems, however, the situation is different. When a filesystem frees blocks (e.g., when files are deleted), it typically only updates its metadata without zeroing the freed blocks. The stale data remains in memory and the hash tree will not detect those pages as pristine. The filesystem must be made to write zeros when it discards blocks. The following options all result in zero pages that the hash tree detects, ordered from most to least preferred:
+Without DAX
+Device mapper target on pmem: A small custom DM target sits on top of the pmem block device. It passes reads and writes through to pmem, but intercepts REQ_OP_DISCARD bios and zeros the underlying memory. No kernel driver patches required. fstrim and blkdiscard work through standard block layer infrastructure.
+Patch the pmem driver: The Linux nd_pmem driver (drivers/nvdimm/pmem.c) does not currently support REQ_OP_DISCARD. A small patch adds discard support to pmem_submit_bio() where the discard handler zeros the memory region. After this patch, fstrim and blkdiscard work and produce zero pages.
+With DAX (not currently available)
+DAX (CONFIG_FS_DAX) is not enabled in the current Cartesi kernel configuration because DAX support is still questionable even in recent kernels. These options are listed here for completeness, for when DAX support becomes available.
+pmem with DAX: When DAX is enabled, the pmem driver's pmem_dax_zero_page_range() callback already writes zeros to memory. The filesystem calls this through the DAX path when it needs to zero blocks (e.g., during fallocate(FALLOC_FL_PUNCH_HOLE)). No pmem patch is needed.
+DAXFS: DAXFS is a filesystem that mounts directly on physical memory (no block device layer). When DAXFS is merged, we could patch it to implement fallocate/punch_hole and zero freed pages directly. No pmem driver or block layer involvement at all.
+HTIF-Based Optimization
+The hash-tree-based approach requires the guest to write zeros to memory for every discarded block. This works correctly but is expensive in emulated CPU cycles: the guest must execute store instructions for every byte being zeroed, and the emulator must interpret each one.
+This cost can be eliminated by notifying the emulator directly. Instead of writing zeros, the guest sends a message through the HTIF telling the emulator to zero a memory range. The emulator then zeros the host memory directly (a fast host-side memset or even faster by punching a hole in the backing file for shared mapping, or remaping zeros over a private one, see below).
+Injecting the optimization for filesystem operations
+For filesystem-triggered discards, the optimization is injected at the same point where the hash-tree-based approach would write zeros. Instead of zeroing all memory directly, the guest-side component optimizes this by using an SBI call, which OpenSBI routes to HTIF.
+Coverage across memory types
+The hash-tree-based approach is automatic for all memory ranges because it detects zeros regardless of their origin. The HTIF-based optimization, however, only works where the notification path has been wired up. Each memory type gets HTIF support through the interface it already exposes:
+Flash drives (pmem): A device mapper target intercepts REQ_OP_DISCARD bios and issues HTIF zero commands. Filesystems trigger this via fstrim or -o discard.
+Persistent memory (UIO): A custom UIO driver implements .fallocate so userspace can call fallocate(FALLOC_FL_PUNCH_HOLE) on the /dev/uioN fd.
+RAM: The kernel's page reporting infrastructure (CONFIG_PAGE_REPORTING) notifies a driver when pages are freed back to the buddy allocator. The driver issues HTIF zero commands automatically, with no application involvement.
+All three paths share a core kernel helper that decomposes a physical address range into aligned HTIF zero commands via SBI ecalls.
+HTIF Mechanism
+A single HTIF command zeros a naturally aligned, power-of-two-sized region of physical memory. The minimum clear size is 64KB, which amortizes the overhead of the SBI ecall and HTIF round-trip.
+Encoding
+The HTIF tohost register is 64 bits:
+Device (8 bits): a new device that zeroes physical memory
+Command (8 bits): n, meaning the clear size is 2^n * 64KB
+Reason + Data (48 bits): the starting physical address, split across the existing REASON field (bits 47:32) and DATA field (bits 31:0), which must be aligned to the clear size
+The entire region must fit inside the same PMA address range.
+Emulator behavior
+When the emulator receives this command, it:
+Zeros the specified region in host memory by either:
+a. For shared mapping, punching a holes in the backing file for the zeroed region via fallocate(FALLOC_FL_PUNCH_HOLE).
+b. For a private mapping, remap the zeroed region with MAP_ANONYMOUS|MAP_FIXED.
+Marks the corresponding pages as dirty and pristine in the hash tree.
+Clearing arbitrary regions
+To zero an arbitrary region that is not naturally aligned or whose size is not a power-of-two multiple of 64KB, the guest decomposes it into a sequence of operations. The region may have a misaligned head and/or tail smaller than 64KB, which the guest clears itself via memset. The interior is covered by HTIF commands using chunks that grow in size up to the largest naturally aligned power-of-two that fits, then shrink back down toward the end.
+For example, to clear a 500KB region starting at address 0xD000 (52KB, i.e. 12KB below the next 64KB boundary):
+memset the first 12KB (below 64KB alignment boundary)
+HTIF clear 64KB
+HTIF clear 128KB
+HTIF clear 256KB
+memset the final 40KB (remainder below 64KB)
+Implementation in the emulator
+A new zero_memory(uint64_t paddr, int log2_size, uint64_t pma_index) method is added to i_state_access, following the same pattern as read_memory_word/write_memory_word where the caller resolves the PMA and passes its index. Unlike write_memory_with_padding (which writes data followed by zero padding), zero_memory is a dedicated zeroing operation that can be optimized to skip backing file holes entirely. The write_memory_with_padding method stays untouched.
+The zero_memory method is implemented in each state access class:
+state_access (direct execution): forwards to machine::zero_memory(), the central implementation that finds the PMA, uses the backing file's hole map to skip already-zero regions, and zeros only data regions.
+record_step_state_access (step recording): records the zero range (address and size), forwards to machine::zero_memory(), does not call touch_page() for pages in the range. Pages already touched before zero_memory are already in the log. The zero range is stored in the log so that get_sibling_hashes_impl() can refine the tree at the zero range boundaries, ensuring the sibling hashes needed for replay are captured. See Part 7 for details.
+replay_step_state_access (step replay): zeros logged pages within the range and replaces sibling hashes within the range with pristine hashes at the appropriate levels. See Part 7 for details.
+The HTIF zero device also operates through the microarchitecture bridge. The machine_uarch_bridge_state_access issues a new ECALL (ua_zero_memory_ECALL), which uarch_step dispatches to i_uarch_state_access::zero_memory(). All signatures include pma_index. The uarch state access classes (uarch_state_access, uarch_record_state_access, uarch_replay_state_access, collect_uarch_cycle_hashes_state_access) each implement do_zero_memory(), following the same pattern as write_tlb and mark_dirty_page. The non-replay implementations forward to machine::zero_memory().
+Implementation Plan
+Part 1: OS sparse file utilities
+Modify: src/os-features.h
+Add HAVE_PUNCH_HOLE - defined on Linux (has fallocate) and macOS (has fcntl(F_PUNCHHOLE)). Higher-level code doesn't care about the mechanism.
+Modify: src/os.h
+Add void punch_hole(int fd, uint64_t offset, uint64_t length) - guarded by HAVE_PUNCH_HOLE, platform-specific
+Add data_regions_view data_regions(int fd, uint64_t length) - always available (unconditional). Lazy view usable in range-based for loops: for (auto [offset, length] : os::data_regions(fd, len)). Iterator calls lseek(SEEK_DATA/SEEK_HOLE) on each advance. Falls back to yielding a single (0, length) region on platforms without SEEK_HOLE/SEEK_DATA. No allocation.
+Add hole_regions_view hole_regions(int fd, uint64_t length) - same lazy iterator pattern but for holes. Seeks SEEK_HOLE then SEEK_DATA. Falls back to yielding nothing on unsupported platforms. Used by Part 3 read-side to find pages to pre-mark as clean/pristine.
+Modify: src/os.cpp
+punch_hole: platform-specific (fallocate on Linux, fcntl(F_PUNCHHOLE) on macOS), only compiled under HAVE_PUNCH_HOLE
+data_regions: unconditional, uses lseek(SEEK_HOLE/SEEK_DATA) with fallback to full-file region
+hole_regions: unconditional, uses lseek(SEEK_HOLE/SEEK_DATA) with fallback to empty region
+Part 2: Expose backing file descriptor and add address_range::zero_memory()
+src/os-mapped-memory.h - Add int get_backing_fd() const noexcept (returns m_backing_fd on HAVE_MMAP, -1 otherwise). Still needed by Parts 3, 4, and 5 for querying the hole/data layout via os::hole_regions() and os::data_regions().
+src/address-range.h:
+Add non-virtual int get_backing_fd() const noexcept that calls do_get_backing_fd(), and protected virtual int do_get_backing_fd() const noexcept { return -1; }
+Add non-virtual void zero_memory(uint64_t offset, uint64_t length) that calls do_zero_memory(offset, length), and protected virtual void do_zero_memory(uint64_t offset, uint64_t length) with a default that does a plain memset to zero.
+src/memory-address-range.h:
+Override do_get_backing_fd() to delegate to m_mapped.get_backing_fd()
+Override do_zero_memory(offset, length): for shared mappings, call os::punch_hole(fd, offset, length) on the backing file — the mmap reflects the zeros automatically. For private mappings, call mmap(MAP_ANONYMOUS | MAP_FIXED) over the range, replacing the existing pages so that subsequent reads fault in fresh zeroed pages without touching the backing file.
+Part 3: Read side - skip holes during init
+Pre-mark hole pages as clean with pristine hashes before the first update_hash_tree(), avoiding page faults entirely for hole regions. This extends the optimization suggested by the existing TODO in memory-address-range.cpp (which considers pre-initializing newly created backing stores as clean) to the more general case of any sparse backing file with holes.
+How it works:
+DPT constructor prepares the tree (all leaves dirty) but does NOT call set_initialized()
+During hash tree init, for each address range: check dpt.is_initialized(). If not:
+a. Iterate os::hole_regions(fd, length) to find hole intervals via lseek(SEEK_HOLE/SEEK_DATA) (cheap kernel metadata, no I/O)
+b. For each page in a hole region:
+Write pristine page hash into DHT leaf via node_hash_view(offset, HASH_TREE_LOG2_PAGE_SIZE)
+Mark clean in DPT via mark_clean_page_and_up(offset) (propagates upward: parent becomes clean when both children are clean)
+c. Walk DHT bottom-up level by level. At each level, for nodes that are clean in the DPT (both children are clean/pristine), write the pristine hash for that level. Nodes still dirty (at least one data-page descendant) are left for the normal update_dense_trees() to handle later.
+d. Call dpt.set_initialized()
+When update_hash_tree() later runs, it only iterates dirty pages = data regions. No page faults for holes. update_dense_trees() only visits inner nodes above data pages.
+On subsequent loads, dpt.is_initialized() is already true (from stored file), scan is skipped.
+Modify:
+src/dirty-page-tree.h - Make is_initialized() and set_initialized() public. Remove set_initialized() call from constructor.
+src/hash-tree.cpp - Add a method (e.g., init_pristine_holes) that, for each address range with a backing fd and uninitialized DPT: scans for holes, writes pristine hashes at leaf level, marks clean in DPT, then walks the DHT bottom-up writing pristine hashes at inner nodes where both children are pristine, and finally calls set_initialized(). Called from hash tree constructor. The hash tree already has m_pristine_hashes (indexed by level) and access to all address ranges.
+Part 4: Write side - hole punching in hash tree update
+When dirty pages are detected as pristine during hash tree update, coalesce and punch holes in the backing file.
+Integration point: hash_tree::update(), inside if (update_succeeded), before clean() calls. At this point the DHT is fully updated and the DPT still knows which pages were dirty.
+Algorithm (for each changed address range with shared backing file):
+Iterate dirty pages left-to-right in the DPT. For each dirty page whose DHT hash equals the pristine hash:
+While this node is a left child and its right sibling is also pristine in the DHT (regardless of dirty status - DHT is fully up-to-date): move up a level.
+Punch a single hole at the (possibly coalesced) size. Skip all remaining dirty pages covered by this hole.
+Modify:
+src/hash-tree.cpp (update) - add hole-punching pass between update and clean
+src/hash-tree.h - any needed interface changes (e.g., access to pristine hashes for comparison)
+Part 5: Sparse-aware file writing
+os::create_file() in os-filesystem.cpp already preserves sparsity by skipping pwrite for pristine pages. However, it still reads every page to call is_pristine(), causing page faults for hole regions we carefully avoided on the read side. The previous idea of using os::data_regions(fd) to skip holes only works for shared mappings, because private mappings may have dirty pages that diverged from the backing file's hole layout.
+The approach instead is to use the hash tree (DHT), which works regardless of mapping type. Before storing, the hash tree must be up to date (call update_hash_tree() first). Then, when writing each address range to disk:
+Walk the DHT leaves. For each page whose DHT hash equals the pristine page hash, skip it (don't write, don't read the memory).
+To skip even larger regions without checking every leaf: walk up the DHT from pristine leaves. If a node's hash equals the pristine hash for its level, the entire subtree is zero — skip the whole range in one step. This is the same coalescing idea as Part 4, but applied to file writing instead of hole punching.
+For non-pristine pages, pwrite them to the output file as before.
+ftruncate already ensures the output file has the correct size, so skipped regions remain holes.
+Modify:
+src/os-filesystem.h / src/os-filesystem.cpp - Add a DHT-aware overload of create_file (or modify the existing one) that accepts the DHT and pristine hashes, skipping pristine regions by walking the tree instead of reading memory.
+src/machine.cpp (store_address_range) - Update hash tree before storing, pass DHT to create_file.
+Part 6: HTIF zero device and i_state_access::zero_memory()
+New HTIF device (device=3) that zeros a power-of-two aligned region of physical memory. Implemented via a new zero_memory(uint64_t paddr, int log2_size, uint64_t pma_index) method in i_state_access, where paddr is aligned to 2^log2_size. The caller resolves the PMA and passes its index, following the same pattern as read_memory_word/write_memory_word. This is a dedicated zeroing operation. write_memory_with_padding stays untouched.
+Encoding: Device=3, Command=n (clear size = 2^(n+16) bytes), Reason+Data (48 bits) = physical address
+src/htif-defines.h - Add #define HTIF_DEV_ZERO_DEF 3
+src/htif-constants.h - Add HTIF_DEV_ZERO enum
+src/i-state-access.h - Add zero_memory(paddr, log2_size, pma_index) that calls derived().do_zero_memory(paddr, log2_size, pma_index)
+src/i-device-state-access.h - Add virtual read_pma(index) method (so HTIF handlers can find PMAs), add virtual zero_memory(paddr, log2_size, pma_index) method
+src/device-state-access.h - Implement read_pma and zero_memory by delegating to m_a
+src/htif-address-range.cpp - Add htif_zero() handler:
+Decode: paddr = (HTIF_REASON_FIELD(tohost) << 32) | HTIF_DATA_FIELD(tohost), log2_size = cmd + 16
+Find the PMA using find_pma (from find-pma.h) via the new a->read_pma(), obtaining pma_index
+Validate: paddr aligned to 2^log2_size, region fits within that PMA. If validation fails, return execute_status::failure so interpret sees the failure from write_device and reports it, same as any other invalid device write
+Call a->zero_memory(paddr, log2_size, pma_index)
+src/state-access.h - Implement do_zero_memory(paddr, log2_size, pma_index) by forwarding to m_m.zero_memory(paddr, log2_size, pma_index).
+src/machine.h / src/machine.cpp - Add machine::zero_memory(uint64_t paddr, int log2_size, uint64_t pma_index) as the central implementation. Uses pma_index to find the address range and delegates to address_range::zero_memory(offset, length), which handles shared vs. private mappings internally (see Part 2). Used by the various i_state_access and i_uarch_state_access implementations, following the same pattern as machine::write_unverified_tlb().
+uarch/uarch-ecall.h / uarch/uarch-ecall.c - Add ua_zero_memory_ECALL(uint64_t paddr, uint64_t log2_size, uint64_t pma_index) that issues an ECALL to the host.
+uarch/machine-uarch-bridge-state-access.h - Implement do_zero_memory() by calling ua_zero_memory_ECALL(paddr, log2_size, pma_index).
+src/uarch-solidity-compat.h - Add zeroMemoryECALL(a, paddr, log2_size, pma_index) wrapper that calls a.zero_memory(paddr, log2_size, pma_index), following the pattern of markDirtyPageECALL, writeTlbECALL, etc.
+src/uarch-step.h - Handle the new ECALL by calling zeroMemoryECALL(a, paddr, log2_size, pma_index).
+src/i-uarch-state-access.h - Add zero_memory(paddr, log2_size, pma_index) that calls derived().do_zero_memory(paddr, log2_size, pma_index).
+src/uarch-state-access.h - Implement do_zero_memory(paddr, log2_size, pma_index) by forwarding to m_m.zero_memory(paddr, log2_size, pma_index).
+src/uarch-record-state-access.h - Implement do_zero_memory(paddr, log2_size, pma_index): logs the access + forwards to m_m.zero_memory(paddr, log2_size, pma_index).
+src/uarch-replay-state-access.h - Implement do_zero_memory(paddr, log2_size, pma_index): verifies from the log.
+src/collect-uarch-cycle-hashes-state-access.h - Implement do_zero_memory(paddr, log2_size, pma_index) as needed.
+Part 7: Step log support for zero_memory
+Problem
+The step log's tree structure is determined by which pages are in the log. The top-down traversal (get_sibling_hashes_impl during recording, compute_root_hash_impl during replay) recurses into ranges that contain logged pages and emits sibling hashes for ranges that don't. When zero_memory zeroes a region, we don't want to log every page in that region. But the zeroed region may be smaller than the sibling node the traversal would normally emit for that area, so we can't simply replace a sibling with a pristine hash — the sibling might cover more than the zeroed region.
+Solution: zero ranges as a second source of tree refinement
+Zero ranges (naturally aligned, power-of-two-sized) always correspond to nodes in the binary tree. We store them in the log alongside pages. Both the recording and replay traversals use page indices and zero ranges to determine tree structure. Zero ranges force the traversal to split at their boundaries, even when no logged pages are present, producing sibling hashes at the right granularity.
+Log structure change
+Add a zero_ranges array to the step log binary format, after the existing siblings:
+```
+[existing header: root_hash_before, mcycle_count, root_hash_after, hash_function]
+[page_count][pages...]
+[sibling_count][siblings...]
+[zero_range_count]                                                        // NEW
+[(page_index: uint64, log2_page_count: uint8, root_sibling_index: uint64), ...]  // NEW, sorted by page_index
+```
+Each zero range entry stores page_index, log2_page_count, and root_sibling_index. The root_sibling_index field is scratch space, like the page hash field in page entries: the log allocates room for it, but replay overwrites it with the correct value derived from the verified traversal. The recording side can write any value (e.g., zero).
+Recording
+record_step_state_access::do_zero_memory(paddr, log2_size, pma_index):
+Records (paddr >> AR_LOG2_PAGE_SIZE, log2_size - AR_LOG2_PAGE_SIZE) in the zero ranges list.
+Forwards to m_m.zero_memory(paddr, log2_size, pma_index) to actually zero memory.
+Does NOT call touch_page() for pages in the range. Pages already touched before zero_memory are already in the log with their original (pre-zero) contents. Pages touched after zero_memory will be logged with zero contents.
+Modified get_sibling_hashes_impl(): The traversal gains a next_zero iterator over the sorted zero ranges, in addition to the existing next_page iterator. At each node:
+Exact match: If this node exactly matches the next zero range:
+If no logged pages within: emit one sibling hash for the whole range, advance next_zero.
+If logged pages within: advance next_zero, then fall through to recursion. The recursion refines the zero range's subtree, producing sub-siblings that capture the internal structure around the logged pages.
+No pages, no zeros in range: Emit one sibling hash (unchanged from today).
+Otherwise: Recurse into left and right halves. This is triggered when the range contains logged pages, or when it contains a zero range that doesn't match exactly (forcing a split at the zero range boundary).
+Replay
+Modified compute_root_hash_impl(): Mirrors the recording traversal exactly, using the same next_zero iterator logic. This ensures the replay traversal constructs the same tree shape and consumes pages, siblings, and zero ranges in the same order. When the traversal reaches a zero range node, it writes the current next_sibling value into the entry's root_sibling_index field — same pattern as the page hash scratch area.
+replay_step_state_access::do_zero_memory(paddr, log2_size, pma_index): First, look up the zero range entry matching (paddr, log2_size). If no matching entry exists, the log is invalid — throw an error (same as "too few sibling hashes in log"). Then, two steps:
+Zero logged pages: For each page in the log within [page_index, page_index + page_count): memset its data to zero and set its hash to the pristine page hash.
+Replace sub-siblings with pristine hashes: Read root_sibling_index from the zero range entry (written by compute_root_hash_impl during initial root hash verification). Walk the tree within the zero range using page indices to determine structure and replace each encountered sibling with the pristine hash for its level:
+```
+replace_siblings_with_pristine(page_index, log2_page_count, &next_page, &next_sibling):
+    page_count = 1 << log2_page_count
+    end = page_index + page_count
+    has_pages = (next_page < total && pages[next_page].index < end)
+
+    if !has_pages:
+        // Sub-range has no logged pages — it is a sibling, replace with pristine
+        siblings[next_sibling] = pristine_hashes[log2_page_count + AR_LOG2_PAGE_SIZE]
+        next_sibling++
+        return
+
+    if log2_page_count > 0:
+        replace_siblings_with_pristine(page_index, log2_page_count - 1, ...)
+        replace_siblings_with_pristine(page_index + (page_count >> 1), log2_page_count - 1, ...)
+    else:
+        // Leaf: logged page already zeroed in step 1
+        if pages[next_page].index == page_index:
+            next_page++
+        else:
+            // Leaf with no logged page — sibling, replace with pristine
+            siblings[next_sibling] = pristine_page_hash
+            next_sibling++
+```
+Correctness
+Initial root hash verification (first compute_root_hash): Uses original page data and original sibling hashes. Pages within the zero range that were logged before zero_memory contribute to the tree normally — their hashes are verified through the tree structure. Sub-ranges within the zero range that have no logged pages use sibling hashes representing the original state. The computed root hash matches. As a side effect, the correct root_sibling_index values are written into the zero range entries.
+After do_zero_memory: Logged pages within the range are zeroed and their hashes set to pristine. Sub-siblings within the range are replaced with pristine hashes at the appropriate levels. All data within the zero range now hashes to pristine.
+Final root hash computation (second compute_root_hash): Uses the modified pages and siblings. The zero range's subtree correctly hashes to the pristine hash for its level. The rest of the tree is unchanged. The computed root hash matches the expected post-step hash.
+Files
+src/record-step-state-access.h - Add m_zero_ranges list, implement do_zero_memory(), modify get_sibling_hashes_impl() and get_sibling_hashes() to pass and consume zero ranges, write zero ranges in finish().
+src/replay-step-state-access.h - Parse zero ranges from log, add find_zero_range() (binary search by page_index, throws if not found), modify compute_root_hash_impl() to use zero ranges for tree structure and write root_sibling_index into entries, implement do_zero_memory() with replace_siblings_with_pristine().
+Part 8: Core HTIF zero helper
+A kernel module that exports a helper function for zeroing physical memory via HTIF. All other kernel-side parts (page reporting driver, DM target, UIO driver) call this shared helper.
+Interface:
+void cartesi_htif_zero(phys_addr_t paddr, size_t length) - zeros the physical memory range [paddr, paddr+length) via HTIF
+Implementation:
+Decomposes the range into the power-of-two aligned sequence described in "Clearing arbitrary regions": memset for the sub-64KB head and tail, SBI ecalls for the interior chunks (growing then shrinking powers of two)
+Issues one legacy SBI call per chunk, which OpenSBI encodes into the HTIF tohost register
+Files (in the Linux kernel tree, not the emulator):
+New built-in module exporting cartesi_htif_zero via EXPORT_SYMBOL
+Part 9: Page reporting driver for RAM
+A driver that uses the kernel's page reporting infrastructure (CONFIG_PAGE_REPORTING, mm/page_reporting.c) to automatically zero freed RAM pages via HTIF. When the buddy allocator accumulates free high-order pages, the reporting subsystem calls the driver's callback with a scatterlist of free pages. The driver translates each entry to a physical address and calls the core helper from Part 8.
+This is the same mechanism that virtio-balloon uses (with VIRTIO_BALLOON_F_REPORTING) to tell a hypervisor that guest pages are free and their backing memory can be reclaimed. Here, instead of notifying a hypervisor, we issue HTIF zero commands so the emulator can punch holes in the RAM backing file.
+No application involvement, no syscall -- the kernel handles it automatically for all memory that flows through the page allocator.
+Implementation:
+Call page_reporting_register() with a callback that iterates the scatterlist and calls cartesi_htif_zero(page_to_phys(page), page_size) for each entry
+Files (in the Linux kernel tree, not the emulator):
+New built-in driver, depends on CONFIG_PAGE_REPORTING and the Part 8 helper
+Part 10: Device mapper target on pmem
+A small custom device mapper target that sits on top of the pmem block device. It passes reads and writes through to pmem unchanged, but intercepts REQ_OP_DISCARD bios and uses the core kernel helper from Part 8 to issue HTIF zero commands. This allows standard Linux filesystem discard operations (fstrim, blkdiscard, and mount-time -o discard) to transparently reclaim backing file space through the emulator's thin provisioning, without any kernel driver patches.
+Implementation:
+A built-in driver implementing struct dm_target with .map and .io_hints callbacks
+.map callback: for REQ_OP_DISCARD bios, translate the bio's sector offset to a physical address (pmem_start + bio->bi_sector * 512), then call the core kernel helper from Part 8. For all other bio types, pass through to the underlying pmem device.
+.io_hints callback: advertise discard support with page-size (4KB) discard_granularity. The core helper handles the decomposition: memset for sub-64KB head/tail, HTIF for aligned interior chunks. The filesystem doesn't need to know about the 64KB HTIF minimum.
+Files (in the Linux kernel tree, not the emulator):
+New built-in driver under drivers/md/
+Depends on the exported helper from Part 8
+Part 11: Custom UIO driver for persistent memory
+A custom UIO driver that replaces generic-uio for persistent memory ranges. It provides the standard UIO mmap/read/write/poll interface, plus two additions: .fallocate for HTIF-accelerated discard and .llseek for size discovery.
+Why not generic-uio: The generic-uio driver (used by the initial UIO implementation in uio.md) has no .fallocate or meaningful .llseek in its file_operations. Adding these requires a custom driver.
+Device tree change: Change the compatible string from generic-uio (as set up by uio.md) to ctsi-persistent-memory:
+```
+fdt.begin_node_num("uio", m.start);
+fdt.prop_string("compatible", "ctsi-persistent-memory");
+fdt.prop_u64_list<2>("reg", {m.start, m.length});
+fdt.prop_string("ctsi,label", m.label);
+fdt.end_node();
+```
+Note: cmio buffer nodes (if Option B was chosen in uio.md) remain generic-uio -- they don't need fallocate or llseek.
+.fallocate: Supports FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE. Translates the file offset to a physical address within the memory range and calls cartesi_htif_zero() from Part 8. Userspace calls:
+```
+int fd = open("/dev/uioN", O_RDWR);
+fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, len);
+```
+.llseek: Supports SEEK_SET, SEEK_CUR, and SEEK_END. SEEK_END resolves to the memory range length, so lseek(fd, 0, SEEK_END) returns the size -- matching pmem block device behavior where userspace can discover the size via lseek. This is useful for the memoryrange / persistentmemory guest utility as an alternative to reading /run/cartesi-label/.
+Files (in the Linux kernel tree, not the emulator):
+New built-in driver under drivers/uio/
+Depends on the exported helper from Part 8
+Implementation order
+Parts 1+2 (OS utilities + expose fd) - foundation, no behavioral change
+Part 3 (read-side optimization)
+Part 4 (write-side hole punching)
+Part 5 (sparse-aware file writing)
+Parts 6+7 (HTIF zero device + step log support)
+Part 8 (core HTIF zero helper)
+Parts 9+10+11 (page reporting driver, DM target, UIO driver) - all depend on Part 8, independent of each other
+Activity
+github-project-automation
+moved this to Todo in Machine Uniton Mar 26, 2026
+github-project-automation
+added this to Machine Uniton Mar 26, 2026
+diegonehab
+self-assigned this
+on Mar 26, 2026
+diegonehab
+added
+enhancementNew feature or requestNew feature or request
+epic
+on Mar 26, 2026
+diegonehab
+added the
+Feature
+issue type on Mar 26, 2026
+diegonehab
+added this to the v0.21.0 milestone on Mar 26, 2026
+diegonehab
+changed the title [-]Thin Provisioning for the Cartesi Machine Emulator[/-] [+]Thin provisioning[/+] on Mar 28, 2026
+diegonehab
+changed the title [-]Thin provisioning[/-] [+]Thin provisioning (sparse memory ranges and backing files)[/+] on Mar 29, 2026
+diegonehab
+marked this as blocked on Mar 31, 2026
+NVRAM support #370
+edubart
+removed this from the v0.21.0 milestone on Apr 14, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+diegonehab
+Labels
+enhancementNew feature or requestNew feature or requestepic
+Type
+Feature
+Projects
+Machine Unit
+Status
+Todo
+Show more project fields
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

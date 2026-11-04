@@ -1,0 +1,145 @@
+# Voxel Block Shape & Culling Configuration
+
+Also called: Block trait interface, Shape enum system
+
+## Overview
+This method defines a trait-based configuration system for voxel mesh generation that specifies block geometry, transparency culling behavior, and lighting values per block type [S1, unofficial]. It solves the problem of rigid, single-boolean transparency flags by allowing distinct rendering paths for opaque, transparent, and fluid blocks [S1, unofficial]. Unlike [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) which treats all non-air blocks uniformly, this system distinguishes between fluids (requiring bespoke shaders) and see-through solids (requiring alpha blending) [S1, unofficial].
+
+## How it works
+**Inputs:** A block type identifier (e.g., `MyBlock` enum) and the face orientation being processed.
+**Outputs:** A `CullMode` enum, a `Shape` enum, and a lighting value (`u8` or `f32`).
+
+**Data Structures:**
+The core configuration is implemented via a trait interface. Key fields include:
+*   `block`: The specific block type.
+*   `cull_mode()`: Returns the culling strategy.
+*   `shape()`: Returns the geometric primitive.
+*   `light()`: Returns the lighting intensity.
+
+**Culling Modes:**
+1.  `Empty`: The block is air; no geometry is generated.
+2.  `Opaque`: Standard face culling; shared faces between identical opaque blocks are culled.
+3.  `TransparentMerged(T)`: Culls shared faces between two transparent blocks if their `TransparentGroup` values are equal. This mode does not replace `PartialEq` for greedy meshing logic [S1, unofficial].
+4.  `TransparentUnmerged`: No culling of shared faces between transparent blocks; all visible faces are rendered.
+
+**Shape Geometry:**
+Blocks are mapped to specific `Shape` variants. Common variants include:
+*   `WholeBlock`: A standard cube.
+*   `Cross(CrossInfo)`: Used for thin structures like chains. Defined by an `AlignedFace` (e.g., `PosZ`) and a `stretch` value (e.g., `0`) [S1, unofficial].
+
+**Lighting:**
+Lighting values are assigned per block and sometimes per face. Values range from `0.0` (Air) to `14.0` (Lamp). For example, `Cactus` lighting varies by face: `11.0` for `PosY`, `12.0` for `NegY`, and `10.0` otherwise [S1, unofficial].
+
+**Pitfalls:**
+*   Setting `FLUID_ENABLED` to `true` without implementing the corresponding fluid shape logic causes a debug assertion failure rather than silently rendering fluids as cubes [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_block_config(block_type: Enum) -> BlockConfig:
+    """
+    Returns the culling mode, shape, and lighting for a given block type.
+    """
+    if block_type == MyBlock.Air:
+        return BlockConfig(
+            cull_mode=CullMode.Empty,
+            shape=Shape.WholeBlock, # Or None, as air generates no mesh
+            light=0.0
+        )
+    
+    if block_type in [MyBlock.Cobblestone, MyBlock.Clay, MyBlock.CobbleSlab, MyBlock.Debug, MyBlock.Lamp]:
+        return BlockConfig(
+            cull_mode=CullMode.Opaque,
+            shape=Shape.WholeBlock,
+            light=get_light_value(block_type)
+        )
+    
+    if block_type == MyBlock.Glass:
+        return BlockConfig(
+            cull_mode=CullMode.TransparentMerged(T=()), # Empty tuple as group ID
+            shape=Shape.WholeBlock,
+            light=2.0
+        )
+    
+    if block_type in [MyBlock.Cactus, MyBlock.SugarCane, MyBlock.Cobweb, MyBlock.Shrub, 
+                      MyBlock.Ladder, MyBlock.Rail, MyBlock.ChainY, MyBlock.ChainX, 
+                      MyBlock.ChainZ, MyBlock.Leaves]:
+        return BlockConfig(
+            cull_mode=CullMode.TransparentUnmerged,
+            shape=get_shape_for_block(block_type),
+            light=get_light_value(block_type)
+        )
+    
+    # Default fallback
+    return BlockConfig(
+        cull_mode=CullMode.Opaque,
+        shape=Shape.WholeBlock,
+        light=1.0
+    )
+
+def get_shape_for_block(block_type: Enum) -> Shape:
+    if block_type == MyBlock.ChainY:
+        return Shape.Cross(CrossInfo(face=AlignedFace.PosY, stretch=0))
+    elif block_type == MyBlock.ChainX:
+        return Shape.Cross(CrossInfo(face=AlignedFace.PosX, stretch=0))
+    elif block_type == MyBlock.ChainZ:
+        return Shape.Cross(CrossInfo(face=AlignedFace.PosZ, stretch=0))
+    else:
+        return Shape.WholeBlock
+
+def get_light_value(block_type: Enum, face: Face = None) -> float:
+    if block_type == MyBlock.Clay:
+        return 1.0
+    if block_type == MyBlock.Glass:
+        return 2.0
+    if block_type == MyBlock.Leaves:
+        return 3.0
+    if block_type == MyBlock.SugarCane:
+        return 4.0
+    if block_type == MyBlock.Cobweb:
+        return 5.0
+    if block_type == MyBlock.Shrub:
+        return 6.0
+    if block_type == MyBlock.Ladder:
+        return 7.0
+    if block_type == MyBlock.Rail:
+        return 8.0
+    if block_type == MyBlock.Debug:
+        return 9.0
+    if block_type == MyBlock.Cactus:
+        if face == Face.Aligned(AlignedFace.PosY):
+            return 11.0
+        elif face == Face.Aligned(AlignedFace.NegY):
+            return 12.0
+        else:
+            return 10.0
+    if block_type in [MyBlock.ChainY, MyBlock.ChainX, MyBlock.ChainZ]:
+        return 13.0
+    if block_type == MyBlock.Lamp:
+        return 14.0
+    if block_type == MyBlock.Air:
+        return 0.0
+    return 1.0 # Default
+```
+
+## Subtopics
+
+### [Three-Valued Opacity Classification for Meshing](4414-three-valued-opacity-classification-for-meshing.md)
+A classification system for block IDs into three mutually exclusive layers: 'opaque', 'water', and 'transparentSolid'. It solves the insufficiency of a single boolean 'transparent' flag by distinguishing between fluids (water) requiring bespoke shaders and see-through solids (glass/leaves) requiring alpha blending. Unlike a boolean transparent flag which collapses water and glass/leaves into one category, this three-valued model allows water to use a bespoke shader (ripple, refraction) while glass/leaves use the ordinary block atlas with alpha blending.
+
+### Ramp Shape Geometry
+A shape representing a sloped block face, composed of a slope quad (2 triangles) and two side triangles (left and right) [S2, unofficial]. Instance creation iterates visible faces: if the face is Left, Right, Top, or Front, `drawSlope` is set to `true` and tints are assigned (`tints[0]` for Top/Front, `tints[1]` for Left, `tints[2]` for Right). If a specific tint is `Vector3.One`, it falls back to another face's tint. Instances are added for the slope, left triangle, and right triangle using respective shape IDs and tints. If the face is Back or Bottom, an instance is added using `cubeBackFaceShapeID` or `cubeBottomFaceShapeID` [S2, unofficial]. The slope vertices are: `(0,1,0)` UV[0], `(0,0,1)` UV[1], `(1,1,0)` UV[2], `(1,1,0)` UV[3], `(0,0,1)` UV[4], `(1,0,1)` UV[5]. The left triangle vertices are: `(0,0,1)` UV[0], `(0,1,0)` UV[1], `(0,0,0)` UV[2]. The right triangle vertices are: `(1,0,0)` UV[0], `(1,1,0)` UV[1], `(1,0,1)` UV[2] [S2, unofficial].
+
+### Fluid Surface Stitching
+A mesh generation technique where fluid columns share a surface height field with neighbors, stitching surfaces when fluid IDs match [S1, unofficial]. Two adjacent fluid blocks join their surfaces only when their `FluidInfo::id` (u8) values are equal [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+This method originates from the `finnbear/voxmesh` repository [S1, unofficial] and the `rarefushion/Cubic-Grid_Voxel_Renderer` project [S2, unofficial]. It is used in voxel-based game engines and terrain renderers to optimize mesh generation by reducing overdraw and supporting complex block geometries like slopes and fluids.
+
+## Sources
+[S1] finnbear/voxmesh, https://github.com/finnbear/voxmesh, fetched 2026-10-26 (unofficial)
+[S2] rarefushion/Cubic-Grid_Voxel_Renderer, https://github.com/rarefushion/Cubic-Grid_Voxel_Renderer, fetched 2026-10-27 (unofficial)

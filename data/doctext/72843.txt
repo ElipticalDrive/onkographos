@@ -1,0 +1,1415 @@
+# Ossium
+
+A volume rendering application to display 3D volumes created from DICOM files in the browser, using WebGPU. Two rendering techniques are implemented: Multi-Planar Reformatting (MPR) using maximum intensity projection and Shaded Volume Rendering (SVR) using Blinn-Phong lighting. Ossium requires a [WebGPU-enabled](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status) browser to run.
+
+Below is an example of Ossium running on a volume of a human brain, avaliable under the `assets/` folder.
+
+![MPR](assets/brain.png)
+
+## Installation and Usage
+
+Clone the repository and install the dependencies:
+```sh
+git clone https://github.com/fraserlove/ossium.git
+yarn install
+```
+Build ossium and start the development server:
+```sh
+yarn build && yarn dev
+```
+The application runs on port `8080` and can be accessed in the browser by going to `http://localhost:8080`.
+
+### Generating a Transfer Function
+
+The transfer function is a 1D texture that maps the intensity values of the volume to colours. It is stored in a file with the `.tf` extension.
+
+To generate a transfer function, run the following command:
+```sh
+python scripts/tf_generator.py
+```
+This will generate a transfer function file with the default settings. The transfer function can then be loaded into the application using the `Load Transfer Function` button in the GUI.
+
+### Keybindings
+
+| Action | Controls |
+|--------|----------|
+| Rotate | `Left Click` + Drag |
+| Pan | `Right Click` + Drag |
+| Zoom | `Vertical Scroll` |
+| Cine | `Horizontal Scroll` |
+| Change Light Direction | `Control` + `Left Click` + Drag (SVR only) |
+
+### webpack.config.js
+```
+const path = require('path');
+
+module.exports = {
+    entry: './src/main.ts',
+    output: {
+        filename: 'bundle.js',
+        path: path.resolve(__dirname, 'dist'),
+    },
+    module: {
+        rules: [
+            {
+                test: /\.ts$/,
+                use: 'ts-loader',
+                exclude: /node_modules/
+            },
+            {
+                test: /\.(wgsl|vs|fs)$/,
+                loader: 'ts-shader-loader'
+            }
+        ]
+    },
+    resolve: {
+        extensions: ['.ts', '.js'],
+        fallback: {
+            fs: false,
+            path: false
+        }
+    },
+    devServer: {
+        static: {
+            directory: path.resolve(__dirname, '.'),
+        },
+        hot: true,
+        open: true,
+    },
+}
+```
+
+### scripts/tf_generator.py
+```
+import struct
+import numpy as np
+import matplotlib.pyplot as plt
+from typing import Dict, List, Optional
+
+class TransferFunction:
+    MAGIC_NUMBER = b'TF01'  # Magic number to identify the transfer function file format
+    
+    def __init__(self) -> None:
+        self.n_colours: int = 0
+        self._data: Optional[bytes] = None
+
+    def save(self, output_filename: str) -> None:
+        """Create a new transfer function file"""
+        with open(output_filename, 'wb') as f:
+            # Write magic number
+            f.write(TransferFunction.MAGIC_NUMBER)
+            # Write header
+            f.write(struct.pack('I', self.n_colours))
+            # Write colour data
+            f.write(self._data)
+
+    @classmethod
+    def create(cls, colours: np.ndarray) -> 'TransferFunction':
+        """
+        Create a transfer function from a numpy array of RGBA colours
+        
+        Args:
+            colours: numpy array of shape (n, 4) with float32 values
+            
+        Returns:
+            A new TransferFunction instance
+        """
+        tf = cls()
+        tf.n_colours = len(colours)
+        tf._data = colours.astype(np.float32).tobytes()
+        return tf
+    
+    def plot(self, output_path: Optional[str] = None) -> None:
+        """
+        Plot a visualisation of the transfer function
+        
+        Args:
+            output_path: if provided, save the plot to this path
+        """
+        # Convert bytes back to numpy array
+        colours = np.frombuffer(self._data, dtype=np.float32).reshape(self.n_colours, 4)
+        
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 8), gridspec_kw={'height_ratios': [1, 3]})
+        
+        # Plot the colour map
+        # Create a 2D array where each row is the same colour
+        colour_map = np.zeros((50, self.n_colours, 3))
+        for i in range(self.n_colours):
+            colour_map[:, i, :] = colours[i, :3]  # RGB values
+        
+        ax1.imshow(colour_map, aspect='auto', extent=[0, self.n_colours, 0, 1])
+        ax1.set_yticks([])
+        ax1.set_title('Colour Map')
+        
+        # Plot the RGBA components
+        x = np.arange(self.n_colours)
+        ax2.plot(x, colours[:, 0], 'r-', label='Red')
+        ax2.plot(x, colours[:, 1], 'g-', label='Green')
+        ax2.plot(x, colours[:, 2], 'b-', label='Blue')
+        ax2.plot(x, colours[:, 3], 'k--', label='Alpha')
+        ax2.set_xlabel('Intensity Value')
+        ax2.set_ylabel('Component Value')
+        ax2.set_title('RGBA Components')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        if output_path:
+            plt.savefig(output_path)
+        
+        plt.show()
+
+def create_basic_tf(n_colours: int = 8192, output_path: str = 'basic.tf') -> None:
+    """
+    Create a transfer function for basic visualisation
+    
+    Args:
+        n_colours: number of colours in the transfer function (default 8192)
+        output_path: where to save the transfer function file (default 'basic.tf')
+    
+    The transfer function is designed to show only blood vessels and bone:
+    - Air/Background: fully transparent
+    - Soft tissue: fully transparent
+    - Skin: fully transparent
+    - Blood vessels: bright red, semi-transparent
+    - Bone: white/ivory, mostly opaque
+    """
+    
+    # Create array for colours
+    colours = np.zeros((n_colours, 4), dtype=np.float32)
+    
+    # Define key density points and their RGBA values
+    # Values are normalized to [0, 1]
+    key_points: Dict[int, List[float]] = {
+        #      r    g    b    a
+        0:    [0.0, 0.0, 0.0, 0.0], # Air
+        4100: [0.0, 0.0, 0.0, 0.0],
+        4140: [1.0, 0.0, 0.0, 0.4], # Blood
+        4150: [0.0, 0.0, 0.0, 0.0],
+        4200: [0.9, 0.9, 0.7, 0.9], # Bone
+    }
+    
+    # Interpolate between key points
+    points = sorted(key_points.keys())
+    for i in range(len(points)-1):
+        start_idx = points[i]
+        end_idx = points[i+1]
+        start_colour = key_points[start_idx]
+        end_colour = key_points[end_idx]
+        
+        # Linear interpolation between key points
+        for idx in range(start_idx, end_idx + 1):
+            if idx < n_colours:
+                t = (idx - start_idx) / (end_idx - start_idx)
+                colours[idx] = np.array(start_colour) * (1-t) + np.array(end_colour) * t
+    
+    # Fill in any remaining indices with the last colour
+    if points[-1] < n_colours - 1:
+        colours[points[-1]+1:] = key_points[points[-1]]
+    
+    tf = TransferFunction.create(colours)
+    tf.save(output_path)
+    tf.plot()
+
+if __name__ == '__main__':
+    create_basic_tf()
+```
+
+### shaders/mpr.wgsl
+```
+diagnostic(off, derivative_uniformity);
+
+struct Uniforms {
+    transform: mat4x4<f32>,
+    windowWidth: f32,
+    windowLevel: f32,
+};
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var volumeTexture: texture_3d<f32>;
+@group(0) @binding(2) var volumeSampler: sampler;
+
+@vertex
+fn vert_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32> {
+    // Create full-screen triangle using vertex index, using points: (-1,3), (-1,-1), and (3,-1)
+    // which is larger than the screen space (-1 to 1), which is more efficient than using two triangles.
+    var pos = array<vec2<f32>, 3>(
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(-1.0,  3.0)
+    );
+    return vec4<f32>(pos[idx], 0.0, 1.0);
+}
+
+// Calculates the intersection points of a ray with an axis-aligned bounding box
+// Algorithm - https://education.siggraph.org/static/HyperGraph/raytrace/rtinter3.htm
+fn ray_box_intersection(bboxMin: vec3<f32>, bboxMax: vec3<f32>, pos: vec3<f32>, dir: vec3<f32>) -> vec2<f32> {
+    var inv_dir = 1 / dir;                    // Inverse of ray direction
+    var bot = inv_dir * (bboxMin - pos);      // Distances to minimum bounds
+    var top = inv_dir * (bboxMax - pos);      // Distances to maximum bounds
+    var rmin = min(top, bot);                 // Nearest intersection for each axis
+    var rmax = max(top, bot);                 // Farthest intersection for each axis
+    var near = max(rmin.x, max(rmin.y, rmin.z)); // Entry point - maximum of minimum intersections
+    var far = min(rmax.x, min(rmax.y, rmax.z));  // Exit point - minimum of maximum intersections
+    return vec2<f32>(near, far);
+}
+
+fn intensity(sample: vec4<f32>) -> f32 {
+    return (sample.x + sample.y * 255) / 256; // Convert from RG8 format to normalised 16-bit value
+}
+
+@fragment
+fn frag_main(@builtin(position) coord: vec4<f32>) -> @location(0) vec4<f32> {
+    var size = vec3<f32>(textureDimensions(volumeTexture));
+    var maxIntensity: f32 = 0;
+
+    // Calculate ray origin and direction in volume space
+    var pos = uniforms.transform * vec4<f32>(coord.xy, 0.0, 1.0); // Ray origin
+    var dir = uniforms.transform * vec4<f32>(0.0, 0.0, 1.0, 0.0); // Ray direction
+    
+    // Find intersection with volume bounds
+    var intersect = ray_box_intersection(vec3<f32>(0.0), size, pos.xyz, dir.xyz);
+    var near = max(0, i32(intersect.x)); // Entry point (clamp to 0 if outside)
+    var far = i32(intersect.y);          // Exit point
+    
+    // Iterate through all slices of the volume
+    for (var k = near; k <= far; k++) {
+        // Transform current pixel and slice position using the MPR transformation matrix
+        var transformed = uniforms.transform * vec4<f32>(coord.xy, f32(k), 1.0);
+        // Normalise coordinates to 0-1 range for texture sampling
+        var coords = transformed.xyz / size;
+        // Sample the volume at the current position
+        var sample = textureSample(volumeTexture, volumeSampler, coords);
+        var sampleIntensity = intensity(sample);
+        // Track the maximum intensity encountered along the ray
+        maxIntensity = max(maxIntensity, sampleIntensity);
+    }
+    
+    // Apply window width/level adjustment to the maximum intensity
+    var out = (maxIntensity - (uniforms.windowLevel + uniforms.windowWidth / 2)) / uniforms.windowWidth;
+    return vec4<f32>(out, out, out, 1); // Return adjusted intensity as a grayscale color
+}
+```
+
+### shaders/svr.wgsl
+```
+diagnostic(off, derivative_uniformity);
+
+struct Uniforms {
+    transform: mat4x4<f32>,
+    lightPos: vec3<f32>,
+    lightColour: vec3<f32>,
+    diffuse: f32,
+    specular: f32,
+    ambient: f32,
+    tfSize: f32,
+};
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var volumeTexture: texture_3d<f32>;
+@group(0) @binding(2) var volumeSampler: sampler;
+@group(0) @binding(3) var tfTexture: texture_1d<f32>;
+
+@vertex
+fn vert_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32> {
+    // Create full-screen triangle using vertex index, using points: (-1,3), (-1,-1), and (3,-1)
+    // which is larger than the screen space (-1 to 1), which is more efficient than using two triangles.
+    var pos = array<vec2<f32>, 3>(
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(-1.0,  3.0)
+    );
+    return vec4<f32>(pos[idx], 0.0, 1.0);
+}
+
+// Calculates the intersection points of a ray with an axis-aligned bounding box
+// Algorithm - https://education.siggraph.org/static/HyperGraph/raytrace/rtinter3.htm
+fn ray_box_intersection(bboxMin: vec3<f32>, bboxMax: vec3<f32>, pos: vec3<f32>, dir: vec3<f32>) -> vec2<f32> {
+    var inv_dir = 1 / dir;                    // Inverse of ray direction
+    var bot = inv_dir * (bboxMin - pos);      // Distances to minimum bounds
+    var top = inv_dir * (bboxMax - pos);      // Distances to maximum bounds
+    var rmin = min(top, bot);                 // Nearest intersection for each axis
+    var rmax = max(top, bot);                 // Farthest intersection for each axis
+    var near = max(rmin.x, max(rmin.y, rmin.z)); // Entry point - maximum of minimum intersections
+    var far = min(rmax.x, min(rmax.y, rmax.z));  // Exit point - minimum of maximum intersections
+    return vec2<f32>(near, far);
+}
+
+fn intensity(sample: vec4<f32>) -> f32 {
+    return (sample.x + sample.y * 255) / 256; // Convert from RG8 format to normalised 16-bit value
+}
+
+fn normal(pos: vec3<f32>) -> vec3<f32> {
+    var size = vec3<f32>(textureDimensions(volumeTexture));
+    
+    // Calculate small offset for sampling
+    let offset = 1.0 / size;
+    
+    // Calculate gradient using central differences along each axis
+    var delta: vec3<f32>;
+    delta.x = intensity(textureSample(volumeTexture, volumeSampler, pos + vec3<f32>(offset.x, 0.0, 0.0))) - 
+              intensity(textureSample(volumeTexture, volumeSampler, pos - vec3<f32>(offset.x, 0.0, 0.0)));
+    delta.y = intensity(textureSample(volumeTexture, volumeSampler, pos + vec3<f32>(0.0, offset.y, 0.0))) - 
+              intensity(textureSample(volumeTexture, volumeSampler, pos - vec3<f32>(0.0, offset.y, 0.0)));
+    delta.z = intensity(textureSample(volumeTexture, volumeSampler, pos + vec3<f32>(0.0, 0.0, offset.z))) - 
+              intensity(textureSample(volumeTexture, volumeSampler, pos - vec3<f32>(0.0, 0.0, offset.z)));
+    return normalize(delta);
+}
+
+@fragment
+fn frag_main(@builtin(position) coord: vec4<f32>) -> @location(0) vec4<f32> {
+    var size = vec3<f32>(textureDimensions(volumeTexture));
+    var accColour = vec4<f32>(0.0, 0.0, 0.0, 0.0);  // Accumulated color (RGBA)
+    let shininess = 10.0;  // Shininess factor for specular calculation
+
+    // Calculate ray origin and direction in volume space
+    var pos = uniforms.transform * vec4<f32>(coord.xy, 0.0, 1.0); // Ray origin
+    var dir = uniforms.transform * vec4<f32>(0.0, 0.0, 1.0, 0.0); // Ray direction
+    
+    // Find intersection with volume bounds
+    var intersect = ray_box_intersection(vec3<f32>(0.0), size, pos.xyz, dir.xyz);
+    var near = max(0, i32(intersect.x)); // Entry point (clamp to 0 if outside)
+    var far = i32(intersect.y);          // Exit point
+
+    // Ray marching loop
+    for (var k = near; k <= far; k++) {
+        var ray_pos = pos.xyz + f32(k) * dir.xyz;  // Current position along the ray
+        // Scale down transformed coordinates to fit within 0->1 range
+        var coords = ray_pos / size;
+
+        let val = intensity(textureSample(volumeTexture, volumeSampler, coords));
+        var norm = normal(coords); 
+        
+        // Look up color in transfer function
+        let tfIndex = i32(val * uniforms.tfSize);
+        var colour = textureLoad(tfTexture, tfIndex, 0);
+
+        // Blinn-Phong lighting
+        var lightDir = normalize(uniforms.lightPos - coords);
+        var viewDir = normalize(coords);
+        var halfDir = normalize(lightDir + viewDir);
+        
+        var diffuse = max(0.0, dot(norm, lightDir)) * uniforms.diffuse;
+        var specular = pow(max(0.0, dot(norm, halfDir)), shininess) * uniforms.specular;
+        var ambient = uniforms.ambient;
+        var litColor = uniforms.lightColour * (colour.rgb * (diffuse + ambient) + specular);
+        colour = vec4<f32>(litColor, colour.a);
+
+        // Front-to-back composition
+        var alpha = (1.0 - accColour.a) * colour.a;
+        accColour = vec4<f32>(
+            accColour.rgb + alpha * colour.rgb,  // Blend colors based on alpha
+            accColour.a + alpha                  // Accumulate alpha
+        );
+
+        if (accColour.a >= 0.95) { break; }
+    }
+
+    return accColour;  // Return the final composited color
+}
+```
+
+### src/camera.ts
+```
+import { mat4, vec3 } from 'gl-matrix';
+import { Volume } from '../types/volume';
+
+export class Camera {
+    private _forward: vec3 = vec3.fromValues(0, 0, 1);
+    private _up: vec3 = vec3.fromValues(0, 1, 0);
+
+    private _position: vec3 = vec3.fromValues(0, 0, 0);
+    private _zoom: vec3 = vec3.fromValues(1, 1, 1);
+
+    private _view: mat4 = mat4.create();
+
+    private _lightDir: vec3 = vec3.fromValues(0, 1, 0);
+
+    private volumeCentre: vec3;
+    private volumeScale: vec3;
+    
+    /**
+     * Creates a new camera for volume visualization
+     * @param volumeBounds The bounds of the volume
+     * @param volumeScale The scale of the volume
+     */
+    constructor(volumeBounds: number[], volumeScale: number[]) {
+        const bounds = vec3.fromValues(...(volumeBounds as [number, number, number]));
+        this.volumeScale = vec3.fromValues(...(volumeScale as [number, number, number]));
+        this.volumeCentre = vec3.scale(vec3.create(), bounds, 0.5);
+        this._position = vec3.fromValues(0, 0, -vec3.length(bounds));
+    }
+
+    public get lightDir(): vec3 { return this._lightDir; }
+    
+    /**
+     * Returns the view matrix
+     * @returns The current view matrix
+     */
+    public get view(): mat4 { 
+        const right = vec3.create();
+        vec3.cross(right, this._up, this._forward);
+        vec3.normalize(right, right);
+
+        // Camera rotation matrix
+        const rotation = mat4.transpose(mat4.create(), mat4.fromValues(
+            right[0], this._up[0], this._forward[0], 0,
+            right[1], this._up[1], this._forward[1], 0,
+            right[2], this._up[2], this._forward[2], 0,
+            0, 0, 0, 1));
+
+        this._view = mat4.create();
+        mat4.multiply(this._view, mat4.fromTranslation(mat4.create(), this._position), this._view);
+        mat4.multiply(this._view, mat4.fromScaling(mat4.create(), this._zoom), this._view);
+        mat4.multiply(this._view, rotation, this._view);
+        mat4.multiply(this._view, mat4.fromTranslation(mat4.create(), this.volumeCentre), this._view);
+        mat4.multiply(this._view, mat4.fromScaling(mat4.create(), this.volumeScale), this._view);
+        return this._view; 
+    }
+
+    /**
+     * Updates the camera position in the xy-plane
+     * @param delta Change in position [dx, dy]
+     */
+    public set pan(delta: [number, number]) {
+        this._position[0] -= delta[0];
+        this._position[1] -= delta[1];
+    }
+
+    /**
+     * Updates the camera zoom
+     * @param delta Change in zoom
+     */
+    public set zoom(delta: number) { 
+        if (this._zoom[0] - delta > 0) {
+            this._zoom[0] -= delta;
+            this._zoom[1] -= delta;
+        }
+    }
+
+    /**
+     * Updates the camera orientation
+     * @param delta Change in rotation [dx, dy]
+     */
+    public set rotation(delta: [number, number]) {
+        // Calculate right vector
+        const right = vec3.create();
+        vec3.cross(right, this._forward, this._up);
+        
+        // Rotate around up vector (y-axis)
+        const rotY = mat4.fromRotation(mat4.create(), delta[0], this._up);
+        vec3.transformMat4(this._forward, this._forward, rotY);
+        
+        // Rotate around right vector (x-axis)
+        const rotX = mat4.fromRotation(mat4.create(), delta[1], right);
+        vec3.transformMat4(this._up, this._up, rotX);
+        vec3.transformMat4(this._forward, this._forward, rotX);
+    }
+
+    /**
+     * Updates the light direction
+     * @param delta Change in light direction [dx, dy]
+     */
+    public set lighting(delta: [number, number]) {
+        // Rotate around y-axis for horizontal movement
+        const rotX = mat4.fromRotation(mat4.create(), delta[0], [0, 1, 0]);
+        
+        // Rotate around x-axis for vertical movement
+        const rotY = mat4.fromRotation(mat4.create(), delta[1], [1, 0, 0]);
+        
+        vec3.transformMat4(this._lightDir, this._lightDir, rotX);
+        vec3.transformMat4(this._lightDir, this._lightDir, rotY);
+    }
+
+    /**
+     * Centres the camera on the volume
+     * @param size The dimensions of the canvas [width, height]
+     */
+    public recentre(size: [number, number]): void {  
+        this._position[0] = -size[0] / 2;
+        this._position[1] = -size[1] / 2;
+    }
+}
+```
+
+### src/controller.ts
+```
+import { Camera } from './camera';
+
+export class Controller {
+    private camera: Camera;
+    private display: HTMLCanvasElement;
+    private activeButton: number | null = null;
+    private activeKey: string | null = null;
+
+    // Sensitivity parameters
+    private readonly ZOOM_FACTOR: number = 0.0025;
+    private readonly ROTATION_FACTOR: number = 0.0025;
+    private readonly LIGHT_FACTOR: number = 0.0025;
+    private readonly PAN_FACTOR: number = 1;
+
+    /**
+     * Creates a new controller for camera interaction
+     * @param display Canvas element to attach events to
+     * @param camera Camera to control
+     */
+    constructor(display: HTMLCanvasElement, camera: Camera) {
+        this.display = display;
+        this.camera = camera;
+
+        // Disable context menu on right-click (default behaviour)
+        this.display.oncontextmenu = (e) => e.preventDefault();
+
+        this.display.addEventListener('wheel', this.mouseWheel.bind(this), { passive: false });
+        this.display.addEventListener('mousedown', this.mouseDown.bind(this), false);
+        this.display.addEventListener('mouseup', this.mouseUp.bind(this), false);
+        this.display.addEventListener('mousemove', this.mouseMove.bind(this), false);
+
+        document.addEventListener('keydown', this.keyDown.bind(this), false);
+        document.addEventListener('keyup', this.keyUp.bind(this), false);
+    }
+
+    private mouseWheel(e: WheelEvent): void {
+        e.preventDefault(); // Prevent page scrolling
+        this.camera.zoom = e.deltaY * this.ZOOM_FACTOR;
+    }
+
+    private mouseDown(e: MouseEvent): void {
+        this.display.requestPointerLock() // Hide cursor
+        this.activeButton = e.button;
+    }
+
+    private mouseUp(e: MouseEvent): void {
+        document.exitPointerLock(); // Restore cursor
+        this.activeButton = null;
+    }
+
+    private mouseMove(e: MouseEvent): void {
+        const dx = e.movementX;
+        const dy = e.movementY;
+        
+        switch (this.activeButton) {
+            case 0: // Left button
+                switch (this.activeKey) {
+                    case 'Control':
+                        this.camera.lighting = [dx * this.LIGHT_FACTOR, dy * this.LIGHT_FACTOR];
+                        break;
+                    default:
+                        this.camera.rotation = [dx * this.ROTATION_FACTOR, dy * this.ROTATION_FACTOR];
+                        break;
+                }
+                break;
+            case 2: // Right button
+                this.camera.pan = [dx * this.PAN_FACTOR, dy * this.PAN_FACTOR];
+                break;
+        }
+    }
+
+    private keyDown(e: KeyboardEvent): void { this.activeKey = e.key; }
+    private keyUp(e: KeyboardEvent): void { this.activeKey = null; }
+}
+```
+
+### src/engine.ts
+```
+import { Volume } from '../types/volume';
+import { TransferFunction } from '../types/transfer_function';
+import { Renderer } from './renderer';
+import { RendererMPR } from './mpr';
+import { RendererSVR } from './svr';
+import { GlobalGUI } from './gui';
+
+export class Engine {
+    private _volume: Volume;
+    private _transferFunction: TransferFunction;
+    private _volumeIDs: string[] = [];
+    private _transferFunctionIDs: string[] = [];
+    private _adapter: GPUAdapter;
+    private _device: GPUDevice;
+    private _queue: GPUQueue;
+
+    private _containers = new Map<number, HTMLDivElement>();
+    private _windows = new Map<number, HTMLCanvasElement>();
+    private _contexts = new Map<number, GPUCanvasContext>();
+    
+    private _renderers = new Map<number, Renderer>();
+    private _settings: GlobalGUI;
+
+    constructor() {
+        this._volume = new Volume();
+        this._transferFunction = new TransferFunction();
+        this._settings = new GlobalGUI(this);
+
+        // Add window resize handler
+        window.onresize = () => this._device && this.resize();
+        
+        this.initWebGPU();
+        
+        const run = () => {
+            this.render();
+            requestAnimationFrame(run);
+        }
+        requestAnimationFrame(run);
+    }
+
+    public get volume(): Volume { return this._volume; }
+    public get transferFunction(): TransferFunction { return this._transferFunction; }
+    public get volumeIDs(): string[] { return this._volumeIDs; }
+    public get transferFunctionIDs(): string[] { return this._transferFunctionIDs; }
+    public get device(): GPUDevice { return this._device; }
+    public get queue(): GPUQueue { return this._queue; }
+    public get displayFormat(): GPUTextureFormat { return navigator.gpu.getPreferredCanvasFormat(); }
+    public container(id: number): HTMLDivElement { return this._containers.get(id); }
+    public window(id: number): HTMLCanvasElement { return this._windows.get(id); }
+    public context(id: number): GPUCanvasContext { return this._contexts.get(id); }
+
+    /**
+     * Loads a volume from files
+     * @param files Files containing volume data
+     */
+    public async loadVolume(files: File[], folderName: string): Promise<void> {
+        try {
+            const volume = new Volume(folderName);
+            await volume.load(files);
+            this._volume = volume;
+            
+            if (!this._volumeIDs.includes(volume.name)) {
+                this._volumeIDs.push(volume.name);
+            }
+            
+            console.log(`Loaded Volume ${this._volume.name}`);
+        } catch (error) {
+            console.error('Failed to load volume:', error);
+        }
+    }
+
+    /**
+     * Loads a transfer function from a file
+     * @param file File containing transfer function data
+     */
+    public async loadTransferFunction(file: File): Promise<void> {
+        try {
+            const tf = new TransferFunction(file.name);
+            await tf.load(file);
+            this._transferFunction = tf;
+            
+            if (!this._transferFunctionIDs.includes(tf.name)) {
+                this._transferFunctionIDs.push(tf.name);
+            }
+            
+            console.log(`Loaded Transfer Function ${this._transferFunction.name}`);
+        } catch (error) {
+            console.error('Failed to load transfer function:', error);
+        }
+    }
+
+    /**
+     * Creates a new window for rendering
+     * @param renderID Unique ID for the renderer
+     * @returns The created canvas element
+     */
+    public newWindow(renderID: number): HTMLCanvasElement {
+        const container = document.createElement('div');
+        container.id = 'container';
+        this._containers.set(renderID, container);
+
+        const canvas = document.createElement('canvas');
+        this._windows.set(renderID, canvas);
+
+        const context = canvas.getContext('webgpu');
+        if (!context) {
+            throw new Error('Failed to get WebGPU context');
+        }
+        
+        context.configure({ 
+            device: this.device, 
+            format: this.displayFormat,
+            alphaMode: 'premultiplied' 
+        });
+        
+        this._contexts.set(renderID, context);
+            
+        container.appendChild(canvas);
+        document.body.appendChild(container);
+        return canvas;
+    }
+
+    /**
+     * Removes a window and its associated resources
+     * @param id ID of the window to remove
+     */
+    public removeWindow(id: number): void {
+        const container = this._containers.get(id);
+        if (container) {
+            container.remove();
+            this._containers.delete(id);
+            this._windows.delete(id);
+            this._contexts.delete(id);
+        }
+    }
+
+    /**
+     * Resizes a window to the specified dimensions
+     * @param id ID of the window to resize
+     * @param size New dimensions [width, height]
+     */
+    public resizeWindow(id: number, size: number[]): void {
+        const window = this._windows.get(id);
+        if (window) {
+            window.width = size[0];
+            window.height = size[1];
+        }
+    }
+
+    /**
+     * Initialises WebGPU
+     * @returns True if initialisation was successful, false otherwise
+     */
+    public async initWebGPU(): Promise<boolean> {
+        try {
+            this._adapter = await navigator.gpu.requestAdapter();
+            if (!this._adapter) {
+                throw new Error('No GPU adapter found');
+            }
+            
+            // Check adapter limits and request higher buffer size limit
+            const adapterLimits = this._adapter.limits;
+            const requiredLimits = {
+                maxStorageBufferBindingSize: adapterLimits.maxStorageBufferBindingSize,
+                maxBufferSize: adapterLimits.maxStorageBufferBindingSize
+            };
+            
+            this._device = await this._adapter.requestDevice({
+                requiredLimits: requiredLimits
+            });
+            
+            this._queue = this._device.queue;
+            console.log('Initialised WebGPU.');
+            return true;
+        }
+        catch(error) {
+            console.error(error);
+            console.log('WebGPU Not Supported.');
+            return false;
+        }
+    }
+
+    // Add renderer management methods
+    public render(): void {
+        for (const renderer of this._renderers.values()) {
+            renderer.render();
+        }
+    }
+
+    public addMPR(renderID?: number): void {
+        this.addRenderer(new RendererMPR(this, renderID));
+    }
+
+    public addSVR(renderID?: number): void {
+        this.addRenderer(new RendererSVR(this, renderID));
+    }
+
+    private async addRenderer(renderer: Renderer, renderID?: number): Promise<void> {
+        if (renderID != undefined) {
+            this._renderers.set(renderID, renderer);
+        } else {
+            this._renderers.set(renderer.id, renderer);
+        }
+        this.resize();
+        await renderer.start();
+    }
+
+    public destroyRenderer(rendererID: number): void {
+        this.removeWindow(rendererID);
+        this._renderers.delete(rendererID);
+        this.resize();
+    }
+
+    public resize(): void {
+        for (const renderer of this._renderers.values()) {
+            renderer.resize([window.innerWidth / this._renderers.size, window.innerHeight]);
+        }
+    }
+
+    public reloadRenderer(rendererID: number): void {
+        console.log('Resetting renderer ' + rendererID + '...');
+        const renderer = this._renderers.get(rendererID);
+        if (renderer) {
+            renderer.reset();
+        }
+        console.log('Reset Renderer.');
+    }
+
+    public reloadAllRenderers(): void {
+        console.log('Resetting all renderers...');
+        for (const renderer of this._renderers.values()) {
+            renderer.reset();
+        }
+    }
+}
+```
+
+### src/gui.ts
+```
+import { GUI } from 'lil-gui';
+import { Engine } from './engine';
+
+export class GlobalGUI {
+    protected gui: GUI;
+
+    constructor(engine: Engine) {
+        this.gui = new GUI({ title: 'Settings', width: 250, autoPlace: false });
+        this.gui.domElement.id = 'gui-global';
+        document.body.appendChild(this.gui.domElement);
+
+        this.setup(engine);
+    }
+
+    private setup(engine: Engine): void {
+        // Volume loading
+        const volumeInput = this.fileInput('.dcm', true, true);
+        this.gui.add({ loadDICOM: () => volumeInput.click() }, 'loadDICOM').name('Load Volume');
+        volumeInput.onchange = async (e: Event) => {
+            const files = (e.target as HTMLInputElement).files;
+            if (!files?.length) return;
+            
+            const folderName = files[0].webkitRelativePath.split('/')[0];
+            await engine.loadVolume(Array.from(files), folderName);
+            engine.reloadAllRenderers();
+        };
+
+        // Transfer function loading
+        const tfInput = this.fileInput('.tf', false, false);
+        this.gui.add({ loadTF: () => tfInput.click() }, 'loadTF').name('Load Transfer Function');
+        tfInput.onchange = async (e: Event) => {
+            const files = (e.target as HTMLInputElement).files;
+            if (!files?.length) return;
+            
+            await engine.loadTransferFunction(files[0]);
+            engine.reloadAllRenderers();
+        };
+
+        this.gui.add({ addMPR: () => engine.addMPR() }, 'addMPR').name('Add MPR');
+        this.gui.add({ addSVR: () => engine.addSVR() }, 'addSVR').name('Add SVR');
+    }
+
+    /**
+     * Creates a file input element
+     * @param accept The file types to accept
+     * @param multiple Whether to allow multiple files
+     * @param directory Whether to allow directory selection
+     * @returns The created file input element
+     */
+    private fileInput(accept: string, multiple: boolean, directory: boolean): HTMLInputElement {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = accept;
+        input.style.display = 'none';
+        
+        if (multiple) input.multiple = true;
+        if (directory) input.webkitdirectory = true;
+        
+        document.body.appendChild(input);
+        return input;
+    }
+}
+
+export abstract class RendererGUI {
+    protected gui: GUI;
+
+    constructor(title: string, renderID: number, engine: Engine) {
+        this.gui = new GUI({ title: title, width: 250, autoPlace: false });
+        this.gui.domElement.id = 'gui';
+        engine.container(renderID).appendChild(this.gui.domElement);
+    }
+
+    public abstract get settings(): Float32Array;
+}
+
+export class MPRGUI extends RendererGUI {
+    private windowWidth: number = 0.018;
+    private windowLevel: number = 0.498;
+
+    constructor(renderID: number, engine: Engine) {
+        super('MPR', renderID, engine);
+        this.gui.add(this, 'windowWidth', 0, 0.05, 0.0001).name('Window Width');
+        this.gui.add(this, 'windowLevel', 0.48, 0.52, 0.0001).name('Window Level');
+        this.gui.add({ destroy: () => engine.destroyRenderer(renderID) }, 'destroy').name('Delete');
+    }
+
+    public get settings(): Float32Array { 
+        return new Float32Array([this.windowWidth, this.windowLevel]); 
+    }
+}
+
+export class SVRGUI extends RendererGUI {
+    private diffuse: number = 1;
+    private specular: number = 0.5;
+    private ambient: number = 0.3;
+    private lightColour: number[] = [1, 1, 1];
+
+    constructor(renderID: number, engine: Engine) {
+        super('SVR', renderID, engine);
+        this.gui.add(this, 'diffuse', 0, 1).name('Diffuse');
+        this.gui.add(this, 'specular', 0, 1).name('Specular');
+        this.gui.add(this, 'ambient', 0, 1).name('Ambient');
+        this.gui.addColor(this, 'lightColour').name('Light Colour');
+        this.gui.add({ destroy: () => engine.destroyRenderer(renderID) }, 'destroy').name('Delete');
+    }
+
+    public get settings(): Float32Array {
+        return new Float32Array([...this.lightColour, this.diffuse, this.specular, this.ambient]); 
+    }
+}
+```
+
+### src/main.ts
+```
+import { Engine } from './engine';
+
+async function main(): Promise<void> {
+    const engine = new Engine();
+}
+
+main();
+```
+
+### src/mpr.ts
+```
+import { Renderer } from './renderer';
+import { MPRGUI } from './gui';
+import mpr from '../shaders/mpr.wgsl';
+import { Engine } from './engine';
+
+export class RendererMPR extends Renderer {
+    constructor(engine: Engine, renderID?: number) {
+        super(engine, renderID);
+        this.gui = new MPRGUI(this.renderID, engine);
+        this._shaderCode = mpr;
+    }
+
+    protected get uniformData(): Float32Array {
+        // Aligned to 16 bytes (20 floats = 80 bytes)
+        // https://www.w3.org/TR/WGSL/#alignment-and-size
+        const uniformData = new Float32Array(20);
+        uniformData.set(this.camera.view, 0);
+        uniformData.set(this.gui.settings, 16);
+        return uniformData;
+    }
+}
+```
+
+### src/renderer.ts
+```
+import { Engine } from './engine';
+import { Camera } from './camera';
+import { Controller } from './controller';
+import { RendererGUI } from './gui';
+
+export abstract class Renderer {
+    protected engine: Engine;
+    protected camera: Camera;
+    protected controller: Controller;
+    protected gui: RendererGUI;
+
+    protected renderID: number;
+
+    protected uniformBuffer: GPUBuffer;
+    protected volumeTexture: GPUTexture;
+    protected sampler: GPUSampler;
+
+    protected bindGroupEntries: GPUBindGroupEntry[];
+    protected bindGroupLayoutEntries: GPUBindGroupLayoutEntry[];
+
+    protected bindGroupLayout: GPUBindGroupLayout;
+    protected bindGroup: GPUBindGroup;
+    protected pipeline: GPURenderPipeline;
+
+    protected commandEncoder: GPUCommandEncoder;
+    protected renderPassDescriptor: GPURenderPassDescriptor;
+
+    protected _shaderCode: string;
+
+    constructor(engine: Engine, renderID?: number) {
+        this.renderID = renderID ?? Date.now();
+        this.engine = engine;
+        const volume = this.engine.volume;
+        this.camera = new Camera(volume.bounds, volume.scale);
+        this.controller = new Controller(this.engine.newWindow(this.renderID), this.camera);
+
+        this.bindGroupEntries = [];
+        this.bindGroupLayoutEntries = [];
+    }
+
+    public get id(): number { return this.renderID; }
+    public get shaderCode(): string { return this._shaderCode; }
+    protected abstract get uniformData(): Float32Array;
+
+    public start(): void {
+        this.initPipelineLayouts();
+        this.initPipelines();
+        this.initBuffers();
+        this.initResources();
+        this.initBindGroup();
+    }
+
+    protected initPipelineLayouts(): void {
+        this.bindGroupLayoutEntries.push({ 
+            binding: 0, 
+            visibility: GPUShaderStage.FRAGMENT, 
+            buffer: { type: 'uniform' } 
+        });
+        this.bindGroupLayoutEntries.push({ 
+            binding: 1,
+            visibility: GPUShaderStage.FRAGMENT, 
+            texture: { sampleType: 'float', viewDimension: '3d' } 
+        });
+        this.bindGroupLayoutEntries.push({ 
+            binding: 2, 
+            visibility: GPUShaderStage.FRAGMENT, 
+            sampler: { type: 'filtering' } 
+        });
+
+        this.bindGroupLayout = this.engine.device.createBindGroupLayout({
+            entries: this.bindGroupLayoutEntries
+        });
+    }
+
+    private initPipelines(): void {
+        const shaderModule = this.engine.device.createShaderModule({ code: this.shaderCode });
+
+        this.pipeline = this.engine.device.createRenderPipeline({
+            layout: this.engine.device.createPipelineLayout({
+                bindGroupLayouts: [this.bindGroupLayout]
+            }),
+            vertex: {
+                module: shaderModule,
+                entryPoint: 'vert_main'
+            },
+            fragment: {
+                module: shaderModule,
+                entryPoint: 'frag_main',
+                targets: [{ format: this.engine.displayFormat }]
+            }
+        });
+    }
+
+    private initBuffers(): void {
+        // Create uniform buffer
+        this.uniformBuffer = this.engine.device.createBuffer({
+            size: this.uniformData.byteLength,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+    }
+
+    protected initResources(): void {
+        this.sampler = this.engine.device.createSampler({
+            magFilter: 'linear',
+            minFilter: 'linear'
+        });
+
+        const volume = this.engine.volume;
+        const bytesPerRow = volume.size[0] * volume.bytesPerVoxel;
+
+        // Create 3D texture for volume data
+        this.volumeTexture = this.engine.device.createTexture({
+            size: volume.size,
+            format: 'rg8unorm', // 16-bit - red(low bits), green(high bits)
+            usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+            dimension: '3d'
+        });
+
+        // Upload volume data to texture
+        const imageDataLayout = {
+            offset: 0,
+            bytesPerRow: bytesPerRow,
+            rowsPerImage: volume.size[1]
+        };
+
+        this.engine.queue.writeTexture(
+            { texture: this.volumeTexture },
+            volume.data,
+            imageDataLayout,
+            volume.size
+        );
+
+        // Setup render pass descriptor
+        this.renderPassDescriptor = {
+            colorAttachments: [{
+                view: undefined, // set in render loop
+                clearValue: [0.0, 0.0, 0.0, 1.0],
+                loadOp: 'clear',
+                storeOp: 'store'
+            }]
+        };
+    }
+
+    protected initBindGroup(): void {
+        this.bindGroupEntries = [];
+        this.bindGroupEntries.push({ binding: 0, resource: { buffer: this.uniformBuffer } });
+        this.bindGroupEntries.push({ binding: 1, resource: this.volumeTexture.createView() });
+        this.bindGroupEntries.push({ binding: 2, resource: this.sampler });
+
+        this.bindGroup = this.engine.device.createBindGroup({
+            layout: this.bindGroupLayout,
+            entries: this.bindGroupEntries
+        });
+    }
+
+    public render(): void {
+        this.commandEncoder = this.engine.device.createCommandEncoder();
+        this.renderPassDescriptor.colorAttachments[0].view = this.engine.context(this.renderID).getCurrentTexture().createView();
+        
+        // Execute render pass
+        const passEncoder = this.commandEncoder.beginRenderPass(this.renderPassDescriptor);
+        this.engine.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData);
+        passEncoder.setPipeline(this.pipeline);
+        passEncoder.setBindGroup(0, this.bindGroup);
+        passEncoder.draw(3);
+        passEncoder.end();
+        
+        this.engine.queue.submit([this.commandEncoder.finish()]);
+    }
+
+    public resize(size: [number, number]): void {
+        this.camera.recentre(size);
+        this.engine.resizeWindow(this.renderID, size);
+    }
+
+    public reset(): void {
+        this.camera = new Camera(this.engine.volume.bounds, this.engine.volume.scale);
+        this.controller = new Controller(this.engine.window(this.renderID), this.camera);
+        
+        this.bindGroupEntries = [];
+        this.bindGroupLayoutEntries = [];
+        
+        this.initPipelineLayouts();
+        this.initPipelines();
+        this.initBuffers();
+        this.initResources();
+        this.initBindGroup();
+    }
+}
+```
+
+### src/svr.ts
+```
+import { Renderer } from './renderer';
+import { SVRGUI } from './gui';
+import svr from '../shaders/svr.wgsl';
+import { Engine } from './engine';
+
+export class RendererSVR extends Renderer {
+
+    private transferFunctionTexture: GPUTexture;
+
+    constructor(engine: Engine, renderID?: number) {
+        super(engine, renderID);
+        this.gui = new SVRGUI(this.renderID, engine);
+        this._shaderCode = svr;
+    }
+
+    protected initPipelineLayouts(): void {
+        this.bindGroupLayoutEntries.push({
+            binding: 3,
+            visibility: GPUShaderStage.FRAGMENT,
+            texture: { sampleType: 'unfilterable-float', viewDimension: '1d' }
+        });
+        super.initPipelineLayouts();
+    }
+
+    protected initResources(): void {
+        super.initResources();
+
+        // Calculate dimensions for transfer function texture
+        const tf = this.engine.transferFunction;
+        
+        this.transferFunctionTexture = this.engine.device.createTexture({
+            size: tf.size,
+            format: 'rgba32float',
+            usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+            dimension: '1d'
+        });
+
+        // Calculate bytesPerRow (4 bytes per component * 4 components * size[0])
+        const bytesPerRow = tf.size[0] * 4 * 4;
+        
+        const imageDataLayout = {
+            offset: 0,
+            bytesPerRow: bytesPerRow,
+            rowsPerImage: 1
+        };
+
+        this.engine.queue.writeTexture(
+            { texture: this.transferFunctionTexture },
+            tf.data,
+            imageDataLayout,
+            tf.size
+        );
+    }
+
+    protected initBindGroup(): void {
+        this.bindGroupEntries = [];
+        this.bindGroupEntries.push({ binding: 0, resource: { buffer: this.uniformBuffer } });
+        this.bindGroupEntries.push({ binding: 1, resource: this.volumeTexture.createView() });
+        this.bindGroupEntries.push({ binding: 2, resource: this.sampler });
+        this.bindGroupEntries.push({ binding: 3, resource: this.transferFunctionTexture.createView() });
+
+        this.bindGroup = this.engine.device.createBindGroup({
+            layout: this.bindGroupLayout,
+            entries: this.bindGroupEntries
+        });
+    }
+
+    protected get uniformData(): Float32Array {
+        // Aligned to 16 bytes (28 floats = 112 bytes)
+        // https://www.w3.org/TR/WGSL/#alignment-and-size
+        const uniformData = new Float32Array(28);
+        uniformData.set(this.camera.view, 0);
+        uniformData.set(this.camera.lightDir, 16);
+        uniformData.set(this.gui.settings, 20);
+        uniformData.set(this.engine.transferFunction.size, 26);
+        return uniformData;
+    }
+}
+```
+
+### types/shader.d.ts
+```
+declare module '*.wgsl';
+declare module '*.glsl';
+declare module '*.vs';
+declare module '*.fs';
+```
+
+### types/transfer_function.ts
+```
+export class TransferFunction {
+    private _name: string;
+    private _size: number;
+    private _data: ArrayBuffer;
+    
+    // Identifies the transfer function file format
+    public readonly MAGIC_NUMBER = 'TF01';
+    
+    constructor(name?: string) {
+        this._name = name || '';
+        this._size = 1;
+        this._data = new ArrayBuffer(0);
+    }
+
+    public get name(): string { return this._name; }
+    public get size(): number[] { return [this._size]; }
+    public get data(): ArrayBuffer { return this._data; }
+
+    public async load(file: File): Promise<void> {
+        const buffer = await file.arrayBuffer();
+        const view = new DataView(buffer);
+        
+        // Check magic number 'TF01'
+        const magic = new TextDecoder().decode(buffer.slice(0, 4));
+        if (magic !== this.MAGIC_NUMBER) {
+            throw new Error('Invalid transfer function');
+        }
+
+        // Read size of transfer function (4 bytes after magic number)
+        this._size = view.getUint32(4, true);
+        
+        // Store the remaining data (color data)
+        this._data = buffer.slice(8); // Skip magic number and size
+    }
+}
+```
+
+### types/volume.ts
+```
+import * as daikon from 'daikon';
+
+export class Volume {
+    private _name: string;
+    private _size: number[];
+    private _bytesPerVoxel: number;
+    private _signed: boolean;
+    private _scale: number[];
+    private _data: ArrayBuffer;
+
+    constructor(name?: string) {
+        this._name = name || '';
+        this._size = [1, 1, 1];
+        this._bytesPerVoxel = 2;
+        this._signed = false;
+        this._scale = [1, 1, 1];
+        this._data = new ArrayBuffer(0);
+    }
+
+    public get name(): string { return this._name; }
+    public get size(): number[] { return this._size; }
+    public get bytesPerVoxel(): number { return this._bytesPerVoxel; }
+    public get signed(): boolean { return this._signed; }
+    public get scale(): number[] { return this._scale; }
+    public get data(): ArrayBuffer { return this._data; }
+    public get bounds(): number[] { return this._size.map((s, i) => s / this._scale[i]); }
+
+    /**
+     * Loads a Volume from a set of DICOM files
+     * @param files Array of DICOM files to load
+     * @throws Error if no files provided or format is invalid
+     */
+    public async load(files: File[]): Promise<void> {
+        if (!files.length) throw new Error('No DICOM files provided');
+
+        const series = new daikon.Series();
+        
+        // Load all files into the series
+        for (const file of files) {
+            const buffer = await file.arrayBuffer();
+            const image = daikon.Series.parseImage(new DataView(buffer));
+            
+            if (image?.hasPixelData()) {
+                series.addImage(image);
+            }
+        }
+        
+        series.buildSeries();
+        
+        if (!series.images.length) throw new Error('No valid DICOM images found');
+        
+        // Extract volume properties
+        const firstImage = series.images[0];
+        this._size = [firstImage.getRows(), firstImage.getCols(), series.images.length];
+        this._bytesPerVoxel = firstImage.getBitsAllocated() / 8;
+        this._signed = firstImage.getPixelRepresentation() === 1;
+
+        if (this._bytesPerVoxel !== 2) throw new Error(`Unsupported bytes per voxel: ${this._bytesPerVoxel}`);
+        
+        // Calculate scale factors from voxel dimensions
+        const pixelSpacing = firstImage.getPixelSpacing() || [1, 1];
+        const sliceThickness = firstImage.getSliceThickness() || 1;
+        this._scale = [pixelSpacing[0], pixelSpacing[1], sliceThickness];
+        
+        // Create volume data buffer
+        const totalVoxels = this._size[0] * this._size[1] * this._size[2];
+        const volumeData = new Uint16Array(totalVoxels);
+        const shift = 2 ** 15;
+        
+        // Process each slice
+        for (let i = 0; i < series.images.length; i++) {
+            const image = series.images[i];
+            const pixelData = image.getInterpretedData();
+            const sliceSize = this._size[0] * this._size[1];
+            const sliceOffset = i * sliceSize;
+            
+            const rescaleSlope = image.getDataScaleSlope() || 1;
+            const rescaleIntercept = image.getDataScaleIntercept() || 0;
+            
+            // Apply rescaling to each voxel
+            for (let j = 0; j < sliceSize; j++) {
+                volumeData[sliceOffset + j] = Math.round(rescaleSlope * pixelData[j] + shift);
+            }
+        }
+
+        this._data = volumeData.buffer;
+    }
+}
+```

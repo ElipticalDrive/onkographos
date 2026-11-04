@@ -1,0 +1,112 @@
+# Arc Signed Distance Function
+
+Also called: SDF Arc, sdArc
+
+## Overview
+The Arc Signed Distance Function computes the signed distance to a 3D arc shape, defined as a tube of radius `arc_tube_radius` running along a circular arc [S1, unofficial]. It is distinguished from the [Capsule Signed Distance Function](2439-capsule-signed-distance-function.md) by its curved trajectory and from the [Torus](1731-sdf-primitives.md) by its limited angular aperture [G].
+
+## How it works
+**Inputs:**
+*   `p`: Query point in 3D space (`Vec3`) [S1, unofficial].
+*   `depth`: A global Z-coordinate value used to define the plane of the arc [S1, unofficial].
+*   `arc_center`: Center of the arc's circular path (`Vec3`) [S1, unofficial].
+*   `orientation_angle`: Angle of the arc's starting position in degrees [S1, unofficial].
+*   `apature_angle`: Total angular width of the arc in degrees [S1, unofficial].
+*   `ra`: Radius of the circle defining the arc path [S1, unofficial].
+*   `rb`: Radius of an inner circle, used for interesting shapes [S1, unofficial].
+*   `arc_tube_radius`: Radius of the tube running along the arc [S1, unofficial].
+
+**Data Structures:**
+The `Arc` struct contains the following fields [S1, unofficial]:
+*   `Vec3 arc_center`
+*   `float arc_tube_radius`
+*   `float orientation_angle`
+*   `float apature_angle`
+*   `float sca_cos`
+*   `float sca_sin`
+*   `float scb_cos`
+*   `float scb_sin`
+*   `float ra`
+*   `float rb`
+The constructor precomputes sine and cosine values for the orientation and aperture angles [S1, unofficial].
+
+**Steps:**
+1.  **Construct Position:** Create a 3D position vector from the query point `p`, replacing its Z-component with the global `depth` [S1, unofficial].
+    $$ \text{pos} = (p.x, p.y, \text{depth}) $$
+2.  **Translate:** Shift the position relative to the arc center [S1, unofficial].
+    $$ \text{pos} = \text{pos} - \text{arc\_center} $$
+3.  **Rotate:** Rotate the position into the arc's local coordinate system using the precomputed sine and cosine of the orientation angle [S1, unofficial].
+    $$ x = \text{pos}.x \cdot \text{sca\_cos} - \text{pos}.y \cdot \text{sca\_sin} $$
+    $$ y = \text{pos}.x \cdot \text{sca\_sin} + \text{pos}.y \cdot \text{sca\_cos} $$
+    $$ \text{pos}.x = x, \quad \text{pos}.y = y $$
+4.  **Symmetry:** Take the absolute value of the X component to exploit symmetry across the arc's central axis [S1, unofficial].
+    $$ \text{pos}.x = |\text{pos}.x| $$
+5.  **Project Distance:** Compute the distance to the infinite circular ring defined by radii `ra` and `rb` [S1, unofficial].
+    $$ k = \begin{cases} \text{pos}.x \cdot \text{scb\_sin} + \text{pos}.y \cdot \text{scb\_cos} & \text{if } \text{scb\_cos} \cdot \text{pos}.x > \text{scb\_sin} \cdot \text{pos}.y \\ \sqrt{\text{pos}.x^2 + \text{pos}.y^2 + \text{pos}.z^2} & \text{otherwise} \end{cases} $$
+    $$ \text{project\_distance} = \sqrt{\text{pos}.x^2 + \text{pos}.y^2 + \text{pos}.z^2 + ra^2 - 2 \cdot ra \cdot k} - rb $$
+6.  **Final Distance:** Combine the project distance with the Z-axis deviation (from `depth`) and subtract the tube radius [S1, unofficial].
+    $$ \text{distance} = \sqrt{\text{project\_distance}^2 + p.z^2} - \text{arc\_tube\_radius} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class Vec3:
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+    def __sub__(self, other):
+        return Vec3(self.x - other.x, self.y - other.y, self.z - other.z)
+    def dot(self, other):
+        return self.x * other.x + self.y * other.y + self.z * other.z
+
+def sd_arc(p: Vec3, depth: float, arc: 'Arc') -> float:
+    # 1. Construct position vector using global depth
+    pos = Vec3(p.x, p.y, depth)
+    
+    # 2. Translate by arc center
+    pos = pos - arc.arc_center
+    
+    # 3. Rotate by orientation angle
+    x = pos.x * arc.sca_cos - pos.y * arc.sca_sin
+    y = pos.x * arc.sca_sin + pos.y * arc.sca_cos
+    pos.x = x
+    pos.y = y
+    
+    # 4. Take absolute value of x
+    pos.x = abs(pos.x)
+    
+    # 5. Compute intermediate value k
+    if arc.scb_cos * pos.x > arc.scb_sin * pos.y:
+        k = pos.x * arc.scb_sin + pos.y * arc.scb_cos
+    else:
+        k = math.sqrt(pos.x * pos.x + pos.y * pos.y + pos.z * pos.z)
+        
+    # 6. Compute project distance to the ring
+    project_distance = math.sqrt(pos.dot(pos) + arc.ra * arc.ra - 2.0 * arc.ra * k) - arc.rb
+    
+    # 7. Compute final distance including Z deviation
+    return math.sqrt(project_distance * project_distance + p.z * p.z) - arc.arc_tube_radius
+```
+
+**Parameters:**
+*   `ra`: Radius of the circle defining the arc path. Typical value varies by instance (e.g., 1.75) [S1, unofficial].
+*   `rb`: Radius of an inner circle. Default is 0.0 [S1, unofficial].
+*   `arc_tube_radius`: Radius of the tube running along the arc [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Angle Conversion:** The constructor must convert `orientation_angle` and `apature_angle` from degrees to radians by multiplying by $\pi/180.0$ [S1, unofficial].
+*   **Precision:** The source code utilizes a fast square root approximation (`FT::sqrt`) which may introduce minor precision errors compared to standard `sqrt` [S1, unofficial].
+*   **Aperture Logic:** The conditional check for `k` determines if the point lies within the angular span of the arc [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The Arc Signed Distance Function originates from the `SDF-Sphere-Tracing` repository [S1, unofficial]. The implementation details, including the fast trigonometric approximations and SSE optimizations referenced in the source comments, originate from fast C++ math libraries often used in graphics programming [S1, unofficial].
+
+## Sources
+[S1] AlerianEmperor/SDF-Sphere-Tracing, https://github.com/AlerianEmperor/SDF-Sphere-Tracing, fetched 2026-10-26 (unofficial)

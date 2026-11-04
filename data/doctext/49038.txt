@@ -1,0 +1,812 @@
+For the math, check out [Inigo Quilez's articles](https://iquilezles.org/www/index.htm).
+
+![Geometric primitives and boolean operators](primitives.png)
+![Mandelbulb fractal](mandelbulb.png)
+
+### src/camera.rs
+```
+use super::sampling;
+use glam::Vec3;
+
+pub struct Ray {
+    pub origin: Vec3,
+    pub direction: Vec3,
+}
+
+pub struct Camera {
+    position: Vec3,
+    left: Vec3,
+    forward: Vec3,
+    up: Vec3,
+    focal_length: f32,
+    aspect_ratio: f32,
+    focus_dist: f32,
+    aperture: f32,
+}
+
+impl Camera {
+    pub fn new(
+        position: Vec3,
+        look_at: Vec3,
+        up: Vec3,
+        angle_of_view: f32,
+        aspect_ratio: f32,
+        aperture: f32,
+    ) -> Self {
+        let focal_length = 0.5 / (0.5 * angle_of_view).tan();
+        let forward = (look_at - position).normalize();
+        let left = forward.cross(up).normalize();
+        let up = left.cross(forward);
+        let focus_dist = (look_at - position).length();
+        Self {
+            position,
+            left,
+            forward,
+            up,
+            focal_length,
+            aspect_ratio,
+            focus_dist,
+            aperture,
+        }
+    }
+
+    pub fn get_ray(&self, x: f32, y: f32) -> Ray {
+        let (dx, dy) = sampling::uniform_disk();
+        let offset = 0.5 * self.aperture * (dx * self.left + dy * self.up);
+
+        let origin = self.position + offset;
+
+        let direction = (self.focus_dist
+            * (x / self.focal_length * self.left
+                + y / (self.focal_length * self.aspect_ratio) * self.up
+                + self.forward)
+            - offset)
+            .normalize();
+
+        Ray { origin, direction }
+    }
+}
+```
+
+### src/main.rs
+```
+mod camera;
+mod ppm;
+mod renderer;
+mod sampling;
+mod scene1;
+mod scene2;
+mod sdf;
+
+use std::env;
+use std::time::Instant;
+
+const WIDTH: i32 = 800;
+const HEIGHT: i32 = 600;
+const SAMPLE_COUNT: i32 = 100;
+const ASPECT_RATIO: f32 = WIDTH as f32 / HEIGHT as f32;
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    let now = Instant::now();
+
+    let scene_name = &(args[1])[..];
+
+    let scene = match scene_name {
+        "scene1" => scene1::create_scene(ASPECT_RATIO),
+        "scene2" => scene2::create_scene(ASPECT_RATIO),
+        _ => panic!("Scene \"{}\" not found.", scene_name),
+    };
+
+    let pixels = renderer::render(WIDTH, HEIGHT, SAMPLE_COUNT, &scene);
+
+    let output_path = format!("{}.ppm", scene_name);
+
+    match ppm::export_ppm(output_path.as_str(), &pixels) {
+        Ok(()) => {}
+        Err(error) => {
+            println!("{}", error)
+        }
+    }
+
+    println!(
+        "Rendering time: {:.1} s",
+        now.elapsed().as_micros() as f32 / 1_000_000.0
+    );
+}
+```
+
+### src/ppm.rs
+```
+use glam::Vec3;
+use std::fs::File;
+use std::io::{prelude::*, BufWriter};
+
+const GAMMA_INV: f32 = 1.0 / 2.2;
+
+fn gamma_encode(pixel: Vec3) -> Vec3 {
+    pixel.clamp(Vec3::ZERO, Vec3::ONE).powf(GAMMA_INV)
+}
+
+pub fn export_ppm(path: &str, pixels: &Vec<Vec<Vec3>>) -> Result<(), std::io::Error> {
+    const MAX_PIXEL_VALUE: f32 = 255.0;
+
+    let width = pixels[0].len();
+    let height = pixels.len();
+
+    let file = File::create(path).unwrap();
+    let mut writer = BufWriter::new(file);
+
+    writeln!(
+        writer,
+        "P3\n{width} {height}\n{max_pixel_value}\n",
+        width = width,
+        height = height,
+        max_pixel_value = MAX_PIXEL_VALUE
+    )?;
+
+    for row in pixels {
+        for pixel in row {
+            let pixel = MAX_PIXEL_VALUE * gamma_encode(*pixel);
+            writeln!(writer, "{:.0} {:.0} {:.0}", pixel.x, pixel.y, pixel.z)?;
+        }
+    }
+
+    writer.flush()
+}
+```
+
+### src/renderer.rs
+```
+use super::camera::*;
+use super::sampling;
+use super::sdf::*;
+use glam::Vec3;
+use rand::Rng;
+use rayon::prelude::*;
+
+const MAX_BOUNCES: i32 = 4;
+
+pub struct Scene {
+    pub camera: Camera,
+    pub map: Box<dyn SdfMap>,
+    pub background_color: Box<dyn Fn(Vec3) -> Vec3 + Sync>,
+}
+
+fn cast_ray(scene: &Scene, mut origin: Vec3, mut direction: Vec3) -> Vec3 {
+    let mut acc = Vec3::ONE;
+    let mut bounces = 0;
+
+    loop {
+        if bounces > MAX_BOUNCES {
+            acc = Vec3::ZERO;
+            break;
+        }
+
+        match scene.map.ray_intersection(origin, direction) {
+            Some(hit_info) => match hit_info.material {
+                Material::Lambertian { color } => {
+                    acc = color * acc;
+                    let normal = scene.map.normal(hit_info.position);
+                    origin = hit_info.position + 2.0 * SURFACE_DIST * normal;
+                    direction = sampling::cos_weighted_hemisphere(normal);
+                }
+                Material::Emissive { color } => {
+                    acc = color * acc;
+                    break;
+                }
+                Material::Specular {
+                    color,
+                    specularity,
+                    fuzziness,
+                } => {
+                    let normal = scene.map.normal(hit_info.position);
+                    origin = hit_info.position + 2.0 * SURFACE_DIST * normal;
+                    if rand::random::<f32>() < specularity {
+                        let specular = direction - 2.0 * direction.dot(normal) * normal;
+                        direction = (specular + fuzziness * sampling::uniform_ball()).normalize();
+
+                        if direction.dot(normal) < 0.0 {
+                            acc = Vec3::ZERO;
+                            break;
+                        }
+                    } else {
+                        acc = color * acc;
+                        direction = sampling::cos_weighted_hemisphere(normal);
+                    }
+                }
+            },
+            None => {
+                acc = (scene.background_color)(direction) * acc;
+                break;
+            }
+        };
+
+        bounces += 1;
+    }
+
+    acc
+}
+
+pub fn render(width: i32, height: i32, sample_count: i32, scene: &Scene) -> Vec<Vec<Vec3>> {
+    (0..height)
+        .into_par_iter()
+        .map(|i| {
+            let mut rng = rand::thread_rng();
+            (0..width)
+                .map(|j| {
+                    (0..sample_count)
+                        .map(|_| {
+                            let x =
+                                -0.5 + (j as f32 + rng.gen::<f32>() - 0.5) / (width as f32 - 1.0);
+                            let y =
+                                0.5 - (i as f32 + rng.gen::<f32>() - 0.5) / (height as f32 - 1.0);
+                            let ray = scene.camera.get_ray(x, y);
+                            cast_ray(scene, ray.origin, ray.direction)
+                        })
+                        .reduce(|u, v| u + v)
+                        .unwrap()
+                        / sample_count as f32
+                })
+                .collect()
+        })
+        .collect()
+}
+```
+
+### src/sampling.rs
+```
+use glam::{vec3, Vec3};
+use rand::Rng;
+
+pub fn uniform_disk() -> (f32, f32) {
+    let mut rng = rand::thread_rng();
+    let mut x: f32;
+    let mut y: f32;
+
+    loop {
+        x = 2.0 * rng.gen::<f32>() - 1.0;
+        y = 2.0 * rng.gen::<f32>() - 1.0;
+
+        if x * x + y * y <= 1.0 {
+            return (x, y);
+        }
+    }
+}
+
+pub fn uniform_ball() -> Vec3 {
+    let mut rng = rand::thread_rng();
+    let mut x: f32;
+    let mut y: f32;
+    let mut z: f32;
+
+    loop {
+        x = 2.0 * rng.gen::<f32>() - 1.0;
+        y = 2.0 * rng.gen::<f32>() - 1.0;
+        z = 2.0 * rng.gen::<f32>() - 1.0;
+
+        if x * x + y * y + z * z <= 1.0 {
+            return vec3(x, y, z);
+        }
+    }
+}
+
+pub fn cos_weighted_hemisphere(normal: Vec3) -> Vec3 {
+    let (x, y) = uniform_disk();
+    let z = (1.0 - x * x - y * y).sqrt();
+    let e1 = if normal.x != 0.0 {
+        vec3(normal.y, -normal.x, 0.0).normalize()
+    } else {
+        vec3(0.0, -normal.z, normal.y).normalize()
+    };
+    let e2 = Vec3::cross(e1, normal);
+    x * e1 + y * e2 + z * normal
+}
+```
+
+### src/scene1.rs
+```
+use super::camera;
+use super::renderer;
+use super::sdf::*;
+
+use glam::{vec3, Vec3};
+use std::f32::consts::PI;
+
+pub fn create_scene(aspect_ratio: f32) -> renderer::Scene {
+    fn background_color(direction: Vec3) -> Vec3 {
+        if direction.dot(vec3(1.0, 0.0, 0.5).normalize()) > 0.95 {
+            15.0 * vec3(1.0, 0.85, 0.75)
+        } else {
+            0.5 * vec3(0.4, 0.7, 1.0)
+        }
+    }
+
+    let camera = camera::Camera::new(
+        vec3(0.0, -12.0, 8.0),
+        vec3(0.0, -1.0, 1.5),
+        Vec3::Z,
+        0.15 * PI,
+        aspect_ratio,
+        0.1,
+    );
+
+    let ground = plane(Vec3::Z)
+        .subtract(
+            sphere(0.04)
+                .repeat(vec3(0.2, 0.2, 1.0))
+                .rotate(Vec3::Z, 0.05 * PI),
+        )
+        .material(Material::Lambertian {
+            color: Vec3::splat(0.6),
+        });
+
+    let frame = {
+        let thickness = 0.9;
+
+        cuboid(Vec3::ONE)
+            .subtract(
+                cuboid(vec3(thickness, 100.0, thickness))
+                    .merge(cuboid(vec3(100.0, thickness, thickness)))
+                    .merge(cuboid(vec3(thickness, thickness, 100.0))),
+            )
+            .rotate(Vec3::Z, -0.1 * PI)
+            .position(vec3(-1.5, 0.0, 1.0))
+            .material(Material::Lambertian {
+                color: Vec3::splat(0.075),
+            })
+    };
+
+    let tube = torus(1.5, 0.37)
+        .shell(0.03)
+        .subtract(plane(vec3(-1.0, 1.0, 0.0).normalize()))
+        .position(vec3(2.0, 0.0, 0.4))
+        .material(Material::Lambertian {
+            color: Vec3::splat(0.3),
+        });
+
+    let map: Box<dyn SdfMap> = Box::new(ground.merge(frame).merge(tube));
+
+    let background_color = Box::new(background_color);
+
+    renderer::Scene {
+        camera,
+        map,
+        background_color,
+    }
+}
+```
+
+### src/scene2.rs
+```
+use super::camera;
+use super::renderer;
+use super::sdf::*;
+
+use glam::{vec3, Vec3};
+use std::f32::consts::PI;
+
+pub fn create_scene(aspect_ratio: f32) -> renderer::Scene {
+    fn background_color(direction: Vec3) -> Vec3 {
+        if direction.dot(vec3(1.0, 0.0, 0.5).normalize()) > 0.95 {
+            15.0 * vec3(1.0, 0.85, 0.75)
+        } else {
+            0.5 * vec3(0.4, 0.7, 1.0)
+        }
+    }
+
+    let camera = camera::Camera::new(
+        vec3(0.0, -6.0, 4.0),
+        vec3(0.0, -1.0, 1.5),
+        Vec3::Z,
+        0.15 * PI,
+        aspect_ratio,
+        0.075,
+    );
+
+    let ground = plane(Vec3::Z).material(Material::Lambertian {
+        color: Vec3::splat(0.5),
+    });
+
+    let mandelbulb = Mandelbulb
+        .rotate(Vec3::Z, 0.25 * PI)
+        .position(Vec3::Z)
+        .material(Material::Lambertian {
+            color: Vec3::splat(0.25),
+        });
+
+    let map: Box<dyn SdfMap> = Box::new(ground.merge(mandelbulb));
+
+    let background_color = Box::new(background_color);
+
+    renderer::Scene {
+        camera,
+        map,
+        background_color,
+    }
+}
+```
+
+### src/sdf.rs
+```
+use glam::{swizzles::Vec3Swizzles, vec2, vec3, Quat, Vec3};
+
+pub const SURFACE_DIST: f32 = 0.001;
+const MAX_DIST: f32 = 30.0;
+const MAX_STEPS: i32 = 1000;
+
+#[derive(Clone, Copy, Debug)]
+pub enum Material {
+    Lambertian {
+        color: Vec3,
+    },
+    Emissive {
+        color: Vec3,
+    },
+    Specular {
+        color: Vec3,
+        specularity: f32,
+        fuzziness: f32,
+    },
+}
+
+pub struct DistInfo {
+    pub distance: f32,
+    pub material: Material,
+}
+
+pub trait Mergeable: Copy {
+    fn merge<Other>(&self, other: Other) -> Union<Self, Other> {
+        Union {
+            sdf1: *self,
+            sdf2: other,
+        }
+    }
+}
+
+impl<T: Copy> Mergeable for T {}
+
+pub trait Sdf: Sync + Copy {
+    fn dist(&self, p: Vec3) -> f32;
+
+    fn evert(&self) -> Eversion<Self> {
+        Eversion { sdf: *self }
+    }
+
+    fn round(&self, r: f32) -> Round<Self> {
+        Round { sdf: *self, r }
+    }
+
+    fn repeat(&self, period: Vec3) -> Repeat<Self> {
+        Repeat { sdf: *self, period }
+    }
+
+    fn position(&self, offset: Vec3) -> Translation<Self> {
+        Translation { sdf: *self, offset }
+    }
+
+    fn rotate(&self, axis: Vec3, angle: f32) -> Rotation<Self> {
+        Rotation {
+            sdf: *self,
+            q: Quat::from_axis_angle(axis, -angle),
+        }
+    }
+
+    fn smooth_union<Other>(&self, k: f32, other: Other) -> SmoothUnion<Self, Other> {
+        SmoothUnion {
+            sdf1: *self,
+            sdf2: other,
+            k,
+        }
+    }
+
+    fn subtract<Other>(&self, other: Other) -> Difference<Self, Other> {
+        Difference {
+            sdf1: *self,
+            sdf2: other,
+        }
+    }
+
+    fn shell(&self, thickness: f32) -> Shell<Self> {
+        Shell {
+            sdf: *self,
+            thickness,
+        }
+    }
+
+    fn material(&self, material: Material) -> SdfObject<Self> {
+        SdfObject {
+            sdf: *self,
+            material,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Mandelbulb;
+
+impl Sdf for Mandelbulb {
+    fn dist(&self, p: Vec3) -> f32 {
+        // Adapted from https://www.shadertoy.com/view/ltfSWn.
+        let mut w = p;
+        let mut m = w.dot(w);
+        let mut dz = 1.0;
+
+        for _ in 0..4 {
+            dz = 8.0 * m.powf(3.5) * dz + 1.0;
+
+            w = {
+                let r = w.length();
+                let b = 8.0 * (w.y / r).acos();
+                let a = 8.0 * (w.x / w.z).atan();
+                p + r.powf(8.0) * vec3(b.sin() * a.sin(), b.cos(), b.sin() * a.cos())
+            };
+
+            m = w.dot(w);
+
+            if m > 256.0 {
+                break;
+            }
+        }
+
+        0.25 * m.ln() * m.sqrt() / dz
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Sphere {
+    pub radius: f32,
+}
+
+impl Sdf for Sphere {
+    fn dist(&self, p: Vec3) -> f32 {
+        p.length() - self.radius
+    }
+}
+
+pub fn sphere(radius: f32) -> Sphere {
+    Sphere { radius }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Torus {
+    pub radius1: f32,
+    pub radius2: f32,
+}
+
+impl Sdf for Torus {
+    fn dist(&self, p: Vec3) -> f32 {
+        vec2(p.xy().length() - self.radius1, p.z).length() - self.radius2
+    }
+}
+
+pub fn torus(radius1: f32, radius2: f32) -> Torus {
+    Torus { radius1, radius2 }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Cuboid {
+    pub dimensions: Vec3,
+}
+
+impl Sdf for Cuboid {
+    fn dist(&self, p: Vec3) -> f32 {
+        let p = p.abs() - self.dimensions;
+        p.max(Vec3::ZERO).length() + p.x.max(p.y).max(p.z).min(0.0)
+    }
+}
+
+pub fn cuboid(dimensions: Vec3) -> Cuboid {
+    Cuboid { dimensions }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Plane {
+    pub normal: Vec3,
+}
+
+impl Sdf for Plane {
+    fn dist(&self, p: Vec3) -> f32 {
+        self.normal.dot(p)
+    }
+}
+
+pub fn plane(normal: Vec3) -> Plane {
+    Plane { normal }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Eversion<S> {
+    sdf: S,
+}
+
+impl<S: Sdf> Sdf for Eversion<S> {
+    fn dist(&self, p: Vec3) -> f32 {
+        -self.sdf.dist(p)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Round<S> {
+    sdf: S,
+    r: f32,
+}
+
+impl<S: Sdf> Sdf for Round<S> {
+    fn dist(&self, p: Vec3) -> f32 {
+        self.sdf.dist(p) - self.r
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Repeat<S> {
+    sdf: S,
+    period: Vec3,
+}
+
+impl<S: Sdf> Sdf for Repeat<S> {
+    fn dist(&self, p: Vec3) -> f32 {
+        let p = p - self.period * (p / self.period + 0.5).floor();
+        self.sdf.dist(p)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Translation<S> {
+    sdf: S,
+    offset: Vec3,
+}
+
+impl<S: Sdf> Sdf for Translation<S> {
+    fn dist(&self, p: Vec3) -> f32 {
+        self.sdf.dist(p - self.offset)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Rotation<S> {
+    sdf: S,
+    q: Quat,
+}
+
+impl<S: Sdf> Sdf for Rotation<S> {
+    fn dist(&self, p: Vec3) -> f32 {
+        self.sdf.dist(self.q.mul_vec3(p))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Union<S1, S2> {
+    pub sdf1: S1,
+    pub sdf2: S2,
+}
+
+impl<S1: Sdf, S2: Sdf> Sdf for Union<S1, S2> {
+    fn dist(&self, p: Vec3) -> f32 {
+        self.sdf1.dist(p).min(self.sdf2.dist(p))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SmoothUnion<S1, S2> {
+    sdf1: S1,
+    sdf2: S2,
+    k: f32,
+}
+
+impl<S1: Sdf, S2: Sdf> Sdf for SmoothUnion<S1, S2> {
+    fn dist(&self, p: Vec3) -> f32 {
+        let d1 = self.sdf1.dist(p);
+        let d2 = self.sdf2.dist(p);
+        let h1 = (0.5 + 0.5 * (d2 - d1) / self.k).clamp(0.0, 1.0);
+        let h2 = 1.0 - h1;
+        h1 * d1 + h2 * d2 - self.k * h1 * h2
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Difference<S1, S2> {
+    sdf1: S1,
+    sdf2: S2,
+}
+
+impl<S1: Sdf, S2: Sdf> Sdf for Difference<S1, S2> {
+    fn dist(&self, p: Vec3) -> f32 {
+        self.sdf1.dist(p).max(-self.sdf2.dist(p))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Shell<S> {
+    sdf: S,
+    thickness: f32,
+}
+
+impl<S: Sdf> Sdf for Shell<S> {
+    fn dist(&self, p: Vec3) -> f32 {
+        self.sdf.dist(p).abs() - self.thickness
+    }
+}
+
+pub struct HitInfo {
+    pub position: Vec3,
+    pub material: Material,
+}
+
+pub trait SdfMap: Sync {
+    fn dist(&self, p: Vec3) -> f32;
+
+    fn distinfo(&self, p: Vec3) -> DistInfo;
+
+    fn normal(&self, p: Vec3) -> Vec3 {
+        let dx = vec3(SURFACE_DIST, 0.0, 0.0);
+        let dy = dx.yxy();
+        let dz = dx.yyx();
+
+        let x = self.dist(p + dx) - self.dist(p - dx);
+        let y = self.dist(p + dy) - self.dist(p - dy);
+        let z = self.dist(p + dz) - self.dist(p - dz);
+
+        vec3(x, y, z).normalize()
+    }
+
+    fn ray_intersection(&self, origin: Vec3, direction: Vec3) -> Option<HitInfo> {
+        let mut acc = 0.0;
+        let mut steps = 0;
+        let mut position;
+        let mut dist;
+
+        loop {
+            position = origin + acc * direction;
+            dist = self.dist(position);
+            acc += dist;
+            steps += 1;
+            if dist < SURFACE_DIST {
+                return Some(HitInfo {
+                    position: origin + acc * direction,
+                    material: self.distinfo(origin + acc * direction).material,
+                });
+            } else if acc > MAX_DIST || steps > MAX_STEPS {
+                return None;
+            }
+        }
+    }
+}
+
+impl<S1: SdfMap, S2: SdfMap> SdfMap for Union<S1, S2> {
+    fn dist(&self, p: Vec3) -> f32 {
+        self.sdf1.dist(p).min(self.sdf2.dist(p))
+    }
+
+    fn distinfo(&self, p: Vec3) -> DistInfo {
+        let distinfo1 = self.sdf1.distinfo(p);
+        let distinfo2 = self.sdf2.distinfo(p);
+
+        if distinfo1.distance < distinfo2.distance {
+            distinfo1
+        } else {
+            distinfo2
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SdfObject<S: Sdf> {
+    sdf: S,
+    material: Material,
+}
+
+impl<S: Sdf> SdfMap for SdfObject<S> {
+    fn dist(&self, p: Vec3) -> f32 {
+        self.sdf.dist(p)
+    }
+
+    fn distinfo(&self, p: Vec3) -> DistInfo {
+        DistInfo {
+            distance: self.sdf.dist(p),
+            material: self.material,
+        }
+    }
+}
+```

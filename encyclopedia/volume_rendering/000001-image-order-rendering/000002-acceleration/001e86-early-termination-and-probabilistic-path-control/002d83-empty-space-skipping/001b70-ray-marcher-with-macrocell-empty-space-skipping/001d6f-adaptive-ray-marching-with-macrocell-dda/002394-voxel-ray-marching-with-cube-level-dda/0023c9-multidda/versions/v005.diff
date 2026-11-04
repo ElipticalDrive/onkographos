@@ -1,0 +1,206 @@
+--- v004.md
++++ v005.md
+@@ -4,99 +4,109 @@
+ 
+ ## Overview
+-MultiDDA is an acceleration method for volume rendering that performs incremental Digital Differential Analyzer (DDA) traversal over a two-level hierarchical grid to skip empty space more efficiently than a flat grid [S1, S2, unofficial]. It builds on [Voxel Ray Marching with Cube-Level DDA](3069-voxel-ray-marching-with-cube-level-dda.md) by replacing the single-level voxel traversal with a nested approach: a coarse traversal over "bricks" (8³ voxel blocks) followed by a fine traversal over individual voxels only within occupied bricks [S1, S2, unofficial]. It differs from its parent by explicitly decoupling the empty-space skipping logic into a separate coarse grid layer, whereas the parent uses a fixed-size cube-level DDA that may not align with the data structure's logical blocks [S1, S2, unofficial].
++MultiDDA is an acceleration method for volume rendering that performs incremental Digital Differential Analyzer (DDA) traversal over a two-level hierarchical grid to skip empty space more efficiently than a flat grid [S1, S2, unofficial]. It builds on [Voxel Ray Marching with Cube-Level DDA](3069-voxel-ray-marching-with-cube-level-dda.md) by replacing the single-level voxel traversal with a nested approach: a coarse traversal over "bricks" (8³ voxel blocks) followed by a fine traversal over individual voxels only within occupied bricks [S1, S2, unofficial]. It differs from its parent by introducing a dedicated coarse occupancy grid layer, whereas the parent uses a flat voxel grid traversal without hierarchical skipping [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Ray origin $O$, ray direction $D$, inverse direction $D^{-1}$, brick grid dimensions $B_{ext}$, brick size $S_b = 8$, voxel grid texture $V$, brick grid texture $Br$.
+-- Output: Index of the first occupied voxel along the ray, or 0 if empty.
++- Input: Ray origin $O$, ray direction $D$, inverse direction $D^{-1}$, brick grid dimensions $B_{ext}$, brick size $S_b = 8$, voxel grid texture $V$, brick grid texture $Br$ [S2, unofficial].
++- Output: Index of the first occupied voxel along the ray, or 0 if empty [S2, unofficial].
+ 
+ **Data Structures:**
+-1.  **Brick Grid:** `Texture3D<uint> bricks` [S2, unofficial]. Each texel corresponds to an $8 \times 8 \times 8$ block of voxels. A value $>0$ indicates the brick is occupied; $0$ indicates empty.
+-2.  **Voxel Grid:** `Texture3D<uint> voxels` [S2, unofficial]. Stores the actual voxel data (e.g., density, color index).
++1. **Brick Grid:** `Texture3D<uint> bricks` [S2, unofficial]. Each texel corresponds to an $8 \times 8 \times 8$ block of voxels [S2, unofficial]. A value $>0$ indicates the brick is occupied; $0$ indicates empty [S2, unofficial].
++2. **Voxel Grid:** `Texture3D<uint> voxels` [S2, unofficial]. Stores the actual voxel data (e.g., density, color index) [S2, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Initialize Coarse DDA:** Calculate the initial brick cell $C_b$ and step parameters ($t_{next}$, $t_{delta}$, $step\_dir$) for the brick grid based on ray origin and direction, similar to standard voxel DDA [S2, unofficial].
+-2.  **Coarse Traversal Loop:** Iterate through the brick grid. The loop bound is typically $3 \times B_{ext}$ to ensure the ray exits the volume [S2, unofficial].
+-    a.  **Boundary Check:** If $C_b$ is outside $[min\_brick\_cell, max\_brick\_cell]$, return 0 [S2, unofficial].
+-    b.  **Occupancy Test:** Sample `bricks[C_b]`. If the value is 0, the brick is empty.
+-    c.  **Advance Coarse DDA:** Update $C_b$ using the DDA step logic:
++1. **Initialize Coarse DDA:** Calculate the initial brick cell $C_b$ and step parameters ($t_{next}$, $t_{delta}$, $step\_dir$) for the brick grid based on ray origin and direction, similar to standard voxel DDA [S2, unofficial].
++2. **Coarse Traversal Loop:** Iterate through the brick grid. The loop bound is typically $3 \times B_{ext}$ to ensure the ray exits the volume [S2, unofficial].
++    a. **Boundary Check:** If $C_b$ is outside $[min\_brick\_cell, max\_brick\_cell]$, return 0 [S2, unofficial].
++    b. **Occupancy Test:** Sample `bricks[C_b]` [S2, unofficial]. If the value is 0, the brick is empty.
++    c. **Advance Coarse DDA:** Update $C_b$ using the DDA step logic:
+         $$ axis\_mask = step(t_{next}, \min(t_{next.yzx}, t_{next.zxy})) $$
+         $$ t_{next} += axis\_mask \cdot t_{delta} $$
+         $$ C_b += int3(axis\_mask) \cdot step\_dir $$
+-    d.  **Fine Traversal:** If `bricks[C_b] > 0`, call `trace_brick(O, D, D^{-1}, t_{delta}, C_b, V)` [S2, unofficial].
+-        i.  Inside `trace_brick`, perform a standard DDA traversal within the $8 \times 8 \times 8$ local coordinates of the brick.
+-        ii. If an occupied voxel is found, return its global index.
+-        iii. If the brick is traversed without finding an occupied voxel, continue the coarse loop.
+-3.  **Return:** If the loop completes without finding a voxel, return 0.
++    d. **Fine Traversal:** If `bricks[C_b] > 0`, call `trace_brick(O, D, D^{-1}, t_{delta}, C_b, V)` [S2, unofficial].
++        i. Inside `trace_brick`, perform a standard DDA traversal within the $8 \times 8 \times 8$ local coordinates of the brick [S2, unofficial].
++        ii. If an occupied voxel is found, return its global index [S2, unofficial].
++        iii. If the brick is traversed without finding an occupied voxel, continue the coarse loop [S2, unofficial].
++3. **Return:** If the loop completes without finding a voxel, return 0 [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def multi_dda(O, D, D_inv, brick_grid_ext, voxels, bricks):
+-    # Initialize coarse DDA state for brick grid
+-    # Note: Exact initialization depends on ray-box intersection logic
+-    # Assuming standard DDA setup for a grid of size brick_grid_ext
+-    brick_cell = int3(floor(O / 8.0)) # Assuming brick size is 8
+-    t_delta = float3(abs(D_inv) * 8.0) # Step size in t for one brick
+-    t_next = float3(0.0)
+-    step_dir = int3(sign(D))
++    # Vector helpers
++    def step(a, b):
++        return [1.0 if x < y else 0.0 for x, y in zip(a, b)]
++    def min_vec(a, b):
++        return [min(x, y) for x, y in zip(a, b)]
++    def sign(x):
++        return 1 if x > 0 else (-1 if x < 0 else 0)
++    def floor_val(x):
++        import math
++        return math.floor(x)
++
++    # Initialize coarse DDA state
++    brick_cell = [floor_val(O[0] / 8.0), floor_val(O[1] / 8.0), floor_val(O[2] / 8.0)]
++    t_delta = []
++    t_next = []
++    step_dir = []
+     
+-    # Adjust t_next for initial brick
+-    # This is a simplified representation; actual DDA requires precise t_max calculations
+-    # [G] Standard DDA initialization: calculate t_max for each axis at entry point
+     for axis in range(3):
+-        if D[axis] > 0:
+-            t_next[axis] = (brick_cell[axis] + 1 - O[axis] / D[axis]) * abs(D_inv[axis])
++        if D[axis] == 0:
++            t_delta.append(float('inf'))
++            t_next.append(float('inf'))
++            step_dir.append(0)
+         else:
+-            t_next[axis] = (brick_cell[axis] - O[axis] / D[axis]) * abs(D_inv[axis])
++            t_delta.append(abs(D_inv[axis]) * 8.0)
++            step_dir.append(sign(D[axis]))
++            if D[axis] > 0:
++                t_next.append((brick_cell[axis] + 1 - O[axis] / D[axis]) * abs(D_inv[axis]))
++            else:
++                t_next.append((brick_cell[axis] - O[axis] / D[axis]) * abs(D_inv[axis]))
+ 
+     for i in range(3 * brick_grid_ext):
+         # Boundary check
+-        if any(brick_cell < 0) or any(brick_cell >= brick_grid_ext):
++        if any(b < 0 or b >= brick_grid_ext for b in brick_cell):
+             return 0
+ 
+-        # Check if brick is occupied
+-        # [G] Assuming bricks is a 3D texture lookup
+-        brick_val = bricks[brick_cell]
+-        
++        # Occupancy test
++        brick_val = bricks[brick_cell[0]][brick_cell[1]][brick_cell[2]]
+         if brick_val > 0:
+-            # Trace inside the brick
+-            # Local coordinates relative to brick origin
+-            local_origin = O - float3(brick_cell) * 8.0
+-            # Re-normalize DDA for the brick's local space
+-            # [G] The direction and inverse direction remain the same, 
+-            # but t_delta and t_next must be reset for the 8x8x8 space
+-            local_t_delta = abs(D_inv) * 8.0 # Step for one voxel
+-            local_t_next = float3(0.0)
+-            local_cell = int3(floor(local_origin / 1.0)) # Voxel coordinates
++            # Fine traversal inside brick
++            local_origin = [O[0] - brick_cell[0] * 8.0, O[1] - brick_cell[1] * 8.0, O[2] - brick_cell[2] * 8.0]
++            local_t_delta = []
++            local_t_next = []
++            local_cell = []
+             
+-            # Reset t_next for local DDA
+             for axis in range(3):
+-                if D[axis] > 0:
+-                    local_t_next[axis] = (local_cell[axis] + 1 - local_origin[axis] / D[axis]) * abs(D_inv[axis])
++                if D[axis] == 0:
++                    local_t_delta.append(float('inf'))
++                    local_t_next.append(float('inf'))
+                 else:
+-                    local_t_next[axis] = (local_cell[axis] - local_origin[axis] / D[axis]) * abs(D_inv[axis])
++                    local_t_delta.append(abs(D_inv[axis]) * 8.0)
++                    local_cell.append(floor_val(local_origin[axis]))
++                    if D[axis] > 0:
++                        local_t_next.append((local_cell[axis] + 1 - local_origin[axis] / D[axis]) * abs(D_inv[axis]))
++                    else:
++                        local_t_next.append((local_cell[axis] - local_origin[axis] / D[axis]) * abs(D_inv[axis]))
+ 
+-            # Inner DDA loop for the brick
+-            for j in range(8 * 8 * 8): # Max voxels in brick
+-                if any(local_cell < 0) or any(local_cell >= 8):
++            for j in range(8 * 8 * 8):
++                if any(c < 0 or c >= 8 for c in local_cell):
+                     break
+-                
+-                # Check voxel occupancy
+-                voxel_val = voxels[local_cell]
++                voxel_val = voxels[local_cell[0]][local_cell[1]][local_cell[2]]
+                 if voxel_val > 0:
+-                    return voxel_val # Or return index/color
++                    return voxel_val
+                 
+                 # Advance local DDA
+-                axis_mask = step(local_t_next, min(local_t_next.yzx, local_t_next.zxy))
+-                local_t_next += axis_mask * local_t_delta
+-                local_cell += int3(axis_mask) * step_dir
+-            
+-            # If we exit the inner loop without finding a voxel, continue outer loop
+-            # [G] No need to update brick_cell here, it happens at the end of outer loop
+-        
++                perm1 = [local_t_next[1], local_t_next[2], local_t_next[0]]
++                perm2 = [local_t_next[2], local_t_next[0], local_t_next[1]]
++                axis_mask = step(local_t_next, min_vec(perm1, perm2))
++                local_t_next = [local_t_next[k] + axis_mask[k] * local_t_delta[k] for k in range(3)]
++                local_cell = [local_cell[k] + int(axis_mask[k]) * step_dir[k] for k in range(3)]
++
+         # Advance coarse DDA
+-        axis_mask = step(t_next, min(t_next.yzx, t_next.zxy))
+-        t_next += axis_mask * t_delta
+-        brick_cell += int3(axis_mask) * step_dir
++        perm1 = [t_next[1], t_next[2], t_next[0]]
++        perm2 = [t_next[2], t_next[0], t_next[1]]
++        axis_mask = step(t_next, min_vec(perm1, perm2))
++        t_next = [t_next[k] + axis_mask[k] * t_delta[k] for k in range(3)]
++        brick_cell = [brick_cell[k] + int(axis_mask[k]) * step_dir[k] for k in range(3)]
+ 
+     return 0
+@@ -104,5 +114,5 @@
+ 
+ **Parameters:**
+-- `brick_grid_ext`: Side length of the brick grid. [S2, unofficial]
++- `brick_grid_ext`: Side length of the brick grid [S2, unofficial].
+ - Brick size: Fixed at $8 \times 8 \times 8$ voxels in the primary implementation [S1, S2, unofficial].
+ 
+@@ -117,15 +127,16 @@
+ A three-level hierarchical traversal method that separates traversal into draining the current I1 DDA, stepping the I2 DDA, and advancing to the next root entry. It differs from MultiDDA by managing three distinct node types (I2, I1, leaf) rather than two levels of DDA loops.
+ 
++### Rasterized Brick AABB Depth Buffer
++A hybrid rendering technique where camera-facing brick faces are rasterized into a depth buffer [S2, unofficial]. Ray tracing uses this depth buffer to determine the ray origin for DDA, allowing it to skip empty space much faster [S2, unofficial]. Quads are regenerated every frame to support dynamic voxel grids [S2, unofficial]. Tighter fitting (4x4x4) improves performance when close to the model surface; looser (8x8x8) is better when viewing from afar [S2, unofficial]. Performance uplift: sponza-1024-1 FPS +28.99%, sponza-1024-2 FPS +36.64% [S2, unofficial].
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(N_{bricks} + N_{voxels\_in\_occupied\_bricks})$ in the worst case, but significantly reduced in sparse scenes.
+-- **Memory Complexity:** Requires storage for both the voxel grid and the brick grid. The brick grid adds overhead but allows for faster empty-space skipping [S1, S2, unofficial].
+-- **Performance:**
+-    - In sparse scenes (e.g., sponza-256-2), MultiDDA provides significant speedups: FPS increased by +184.93% and walltime decreased by -82.73% compared to naive DDA [S2, unofficial].
+-    - In dense scenes (e.g., sponza-256-1), the impact is minimal: FPS increased by only +0.04% [S2, unofficial].
+-- **Strengths:** Simple to implement, effective for scenes with large empty spaces, improves throughput for incoherent rays by ~30-50% compared to flat DDA [S1, unofficial].
++- **Time Complexity:** $O(N_{bricks} + N_{voxels\_in\_occupied\_bricks})$ in the worst case, but significantly reduced in sparse scenes [S2, unofficial].
++- **Memory Complexity:** Requires storage for both the voxel grid and the brick grid [S2, unofficial].
++- **Performance:** In sparse scenes (e.g., sponza-256-2), MultiDDA provides significant speedups: FPS increased by +184.93% and walltime decreased by -82.73% compared to naive DDA [S2, unofficial]. In dense scenes (e.g., sponza-256-1), the impact is minimal: FPS increased by only +0.04% [S2, unofficial].
++- **Strengths:** Simple to implement, effective for scenes with large empty spaces [S1, S2, unofficial].
+ - **Limitations:** Suffers from SIMD divergence due to nested loops, less effective in dense scenes or with poor brick granularity [S1, S2, unofficial].
+ 
+ ## Background
+-MultiDDA was developed as part of the VoxelRT project, an experimental voxel rendering framework [S1, unofficial]. It was introduced in July 2026 as a "2-level DDA" optimization to improve empty-space skipping performance over a flat voxel grid [S2, unofficial]. The method is a direct response to the limitations of naive DDA in sparse volumes, leveraging the hierarchical nature of voxel data to skip large empty regions [S1, S2, unofficial].
++MultiDDA was developed as part of the VoxelRT project, an experimental voxel rendering framework [S1, unofficial]. It was introduced in commit ed4004c on 2026-07-24 as a "2-level DDA" optimization to improve empty-space skipping performance over a flat voxel grid [S2, unofficial]. The method is a direct response to the limitations of naive DDA in sparse volumes, leveraging the hierarchical nature of voxel data to skip large empty regions [S1, S2, unofficial].
+ 
+ ## Sources

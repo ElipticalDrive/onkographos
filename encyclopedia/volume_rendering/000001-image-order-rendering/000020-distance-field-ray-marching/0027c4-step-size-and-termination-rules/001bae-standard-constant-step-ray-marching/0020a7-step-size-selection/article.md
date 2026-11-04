@@ -1,0 +1,152 @@
+# Step Size Selection
+
+Also called: Constant step marching, Fixed-step volume rendering, Ray Marching with Fixed Step Count, Simple ray marching, Step Size Determination, Step Size Heuristic
+
+## Overview
+Step Size Selection determines the distance between consecutive samples along a ray during volume rendering, balancing rendering speed against the accuracy of the Riemann sum approximation of the volume integral [S1, unofficial]. Unlike adaptive methods that vary step length based on local density or distance fields, this method uses a fixed number of steps or a constant step size, simplifying implementation but requiring careful heuristic selection to avoid aliasing or missed features [S3, unofficial]. It is a core component of [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md), where the step size dictates the sampling density relative to the projected pixel size and scene scale [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Camera field of view ($fov$) in degrees or radians [S1, unofficial].
+- Image width ($W$) in pixels [S1, unofficial].
+- Ray entry distance ($t_{min}$) and exit distance ($t_{max}$) along the ray [S1, unofficial].
+- Fixed number of steps ($N$) or target step size ($\Delta t$) [S1, unofficial][S3, unofficial].
+- 3D texture data (density/opacity) and sampler configuration [S3, unofficial].
+
+**Outputs:**
+- Accumulated color and opacity for the pixel [S3, unofficial].
+
+**Data Structures:**
+- **Uniforms:** Contains the inverse Model-View-Projection matrix ($M^{-1}$) for ray generation [S3, unofficial].
+- **Texture:** 3D texture ($T$) storing scalar density values, typically in range $[0, 1]$ [S3, unofficial].
+- **Sampler:** Linear or nearest-neighbor sampler for texture interpolation [S3, unofficial].
+- **Ray State:** Current position ($rayPos$), step vector ($step$), and accumulator ($result$) [S3, unofficial].
+
+**Parameters:**
+- $fov$: Field of view angle. Typically provided in degrees in code, converted to radians for trigonometric functions [S1, unofficial].
+- $t_{min}$: Distance to the volume entry point [S1, unofficial].
+- $t_{max}$: Distance to the volume exit point [S1, unofficial].
+- $N$: Fixed number of steps. A common value is 64 [S3, unofficial].
+- $\Delta t$: Step size. Typical values depend on scene scale (e.g., 1 or 2 for a 100-unit room) [S1, unofficial].
+
+**Formulas:**
+1.  **Projected Pixel Width (Heuristic):** To estimate an appropriate step size based on perspective, calculate the projected width of a single pixel at the entry point $t_{min}$ [S1, unofficial]:
+    $$
+    projPixWidth = 2 \cdot \tan\left(\frac{fov_{rad}}{2 \cdot W}\right) \cdot t_{min}
+    $$
+    where $fov_{rad} = fov_{deg} \cdot \pi / 180$ [S1, unofficial].
+2.  **Step Vector (Fixed Count):** If using a fixed number of steps $N$, the step vector is computed as:
+    $$
+    step = \frac{far - near}{N}
+    $$
+    where $near$ and $far$ are the 3D positions of the entry and exit points [S3, unofficial].
+3.  **Linear Interpolation (Optional):** For perspective-correct sampling, one can compute $projPixWidth$ at both $t_{min}$ and $t_{max}$ and linearly interpolate the step size along the ray [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Ray Generation:** Transform screen-space vertices (e.g., a full-screen quad) using the inverse MVP matrix to obtain the ray origin ($near$) and a point on the ray ($far$) [S3, unofficial]. Normalize by the $w$-component to get NDC coordinates [S3, unofficial].
+2.  **Step Calculation:** Compute the step vector using the fixed number of steps $N$ and the distance between $near$ and $far$ [S3, unofficial]. Alternatively, set $\Delta t$ based on the projected pixel width heuristic [S1, unofficial].
+3.  **Initialization:** Set $rayPos = near$ and accumulator $result = 0.0$ [S3, unofficial].
+4.  **Loop:** Iterate $i$ from $0$ to $N-1$:
+    a.  **Coordinate Mapping:** Map $rayPos$ from world/NDC space to texture coordinates. For a unit cube $[-1, 1]$, use:
+        $$
+        texCoord = (rayPos + 1.0) \cdot 0.5
+        $$
+        [S3, unofficial]
+    b.  **Sampling:** Sample the 3D texture at $texCoord$. Extract the density (e.g., red channel) and normalize by $N$ and any scaling factor (e.g., 4.0) [S3, unofficial]:
+        $$
+        sample = \frac{T(texCoord).r \cdot 4.0}{N}
+        $$
+        [S3, unofficial]
+    c.  **Boundary Check:** Verify if $rayPos$ is within the volume bounds (e.g., $[-1, 1]$ in all dimensions) [S3, unofficial].
+    d.  **Compositing:** If inside the volume and $result < 1.0$, accumulate using front-to-back alpha blending:
+        $$
+        result += (1.0 - result) \cdot sample
+        $$
+        Otherwise, add 0.0 [S3, unofficial].
+    e.  **Advance:** Update $rayPos = rayPos + step$ [S3, unofficial].
+5.  **Output:** Return the final accumulated color with alpha 1.0 [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def step_size_selection_ray_march(near, far, fov_deg, image_width, num_steps, texture_func, scale_factor=4.0):
+    """
+    Performs fixed-step ray marching with step size selection based on projected pixel size.
+    
+    Args:
+        near: list[float], ray origin (entry point)
+        far: list[float], ray point at exit distance
+        fov_deg: float, field of view in degrees
+        image_width: int, width of the image in pixels
+        num_steps: int, fixed number of steps (e.g., 64)
+        texture_func: callable, function(coord) -> float, 3D texture sampler
+        scale_factor: float, density amplification factor (default 4.0)
+        
+    Returns:
+        list[float], accumulated color [R, G, B, A]
+    """
+    # 1. Compute step vector
+    step = [(far[i] - near[i]) / num_steps for i in range(3)]
+    
+    # 2. Initialize ray state
+    ray_pos = list(near)
+    result = 0.0
+    
+    # 3. Optional: Compute projected pixel width for validation/heuristic
+    # fov_rad = fov_deg * 3.141592653589793 / 180.0
+    # proj_pix_width = 2.0 * math.tan(fov_rad / (2.0 * image_width)) * math.sqrt(sum(x*x for x in near))
+    
+    for i in range(num_steps):
+        # 4. Map position to texture coordinates (assuming unit cube [-1, 1])
+        tex_coord = [(ray_pos[j] + 1.0) * 0.5 for j in range(3)]
+        
+        # 5. Check bounds (strict inequality as per source)
+        inside = all(p < 1.0 for p in ray_pos) and all(p > -1.0 for p in ray_pos)
+        
+        if inside and result < 1.0:
+            # 6. Sample texture
+            # Note: Source uses red channel and multiplies by scale_factor
+            density = texture_func(tex_coord)
+            sample_contribution = (density * scale_factor) / num_steps
+            
+            # 7. Front-to-back compositing
+            result += (1.0 - result) * sample_contribution
+        
+        # 8. Advance ray
+        ray_pos = [ray_pos[j] + step[j] for j in range(3)]
+        
+    return [result, result, result, 1.0]
+```
+
+**Edge Cases and Pitfalls:**
+- **Aliasing:** If the step size is too large, small frequency features (e.g., clouds, smoke details) are missed, causing a filtering issue [S1, unofficial].
+- **Shadow Misses:** Large step sizes may cause rays to skip over small solid objects casting shadows on the volume [S1, unofficial].
+- **Boundary Exclusion:** Using strict inequalities ($<$ and $>$) for bounds $[-1, 1]$ may exclude points exactly at the boundary. However, since rays typically start inside or on the boundary, this mainly affects the last few samples outside the volume [S3, unofficial].
+- **Data Scaling:** Texture data is assumed to be in $[0, 1]$. The multiplication by 4.0 in the sample step suggests the data may need amplification or represents a specific density scale [S3, unofficial].
+- **Uniform Media:** For uniform media, the step size can be fixed proportional to the medium's optical thickness or voxel resolution to ensure consistent sampling [S2].
+
+## Subtopics
+
+### [Raycasting Step Size & Aspect Ratio Normalization](3734-raycasting-step-size-aspect-ratio-normalization.md)
+Computes normalized step sizes and a scaling factor to map arbitrary volume dimensions and aspect ratios into a unit cube coordinate system for uniform ray marching.
+
+### [Adaptive Step Size Calculation](4671-adaptive-step-size-calculation.md)
+Determines step size dynamically based on local density or distance field gradients to optimize sampling density.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ per pixel, where $N$ is the fixed number of steps. Independent of scene complexity or density variation [S3, unofficial].
+- **Memory Complexity:** $O(1)$ per ray, excluding the 3D texture storage.
+- **Performance:** Fast and predictable due to fixed iteration count, suitable for real-time applications [S3, unofficial]. However, it may waste samples in empty regions or undersample dense regions compared to adaptive methods [S3, unofficial].
+- **Strengths:** Simple implementation, no branching for step size calculation, predictable memory usage [S3, unofficial].
+- **Limitations:** Requires heuristic tuning for different scene scales [S1, unofficial].
+- **When to Use:** Uniform media, simple volumes, or when implementation simplicity is prioritized over optimal sampling [S2][S3, unofficial].
+- **When Not to Use:** Complex scenes with high dynamic range in density, or when memory/bandwidth constraints require adaptive skipping [S3, unofficial].
+
+## Background
+The concept of fixed-step ray marching for volume rendering originated in early computer graphics literature as a straightforward method for integrating volume density along rays [S1, unofficial]. The heuristic of using the projected pixel size to determine step size was introduced to mitigate aliasing by ensuring that the sampling rate matches the spatial frequency of the image [S1, unofficial]. This method is widely used in real-time rendering, including WebGL and WebGPU samples, due to its simplicity and hardware friendliness [S3, unofficial].
+
+## Sources
+[S1] The Ray-Marching Algorithm, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/ray-marching-algorithm.html, fetched 2026-10-25 (unofficial)
+[S2] Volume ray casting — Grokipedia, https://grokipedia.com/page/Volume_ray_casting, fetched 2026-10-26
+[S3] sample/volumeRenderingTexture3D/volume.wgsl, https://github.com/webgpu/webgpu-samples/blob/4181da1b/sample/volumeRenderingTexture3D/volume.wgsl, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,168 @@
+# Hierarchical Traversal
+
+Also called: Kay & Kajiya Hierarchy Traversal, Kay-Kajiya traversal, Octree Hierarchical Traversal, Octree Navigation, Octree Node Activity Check
+
+## Overview
+Hierarchical Traversal is a ray-intersection algorithm that accelerates volume rendering by navigating a spatial hierarchy (such as an Octree or Sparse Voxel Octree) to skip empty space and reduce the number of ray-casting steps [S1, S5, unofficial]. It solves the performance bottleneck of non-hierarchical voxel traversal, where every voxel along a ray must be visited, by allowing the ray to "leap" over large empty regions [S1, unofficial]. Unlike its siblings, it operates on a recursive tree structure where higher-level cells cover a $2 \times 2$ area of the level below, enabling larger steps through empty space [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, and a hierarchical data structure (e.g., Octree or SVO) where each node represents a spatial region [S1, S3, unofficial].
+*   **Output:** A sequence of active nodes or leaves intersected by the ray, or a boolean indicating if any active descendant exists [S6, unofficial].
+
+**Data Structures:**
+The hierarchy is typically stored as an array of nodes [S3, unofficial].
+*   **Node Layout:** Each node contains metadata indicating its type (Branch, Leaf, Empty, Full) and, for branches, indices to its 8 children [S1, S3, unofficial]. In BVH implementations, nodes are packed with center coordinates, radius, and child indices in 16-byte alignment [S3, unofficial]. Leaf nodes are identified by setting the high bit (0x80000000) of the child indices, with a missing sibling indicated by an empty node index (0) [S3, unofficial].
+*   **SVO Specifics:** In a Sparse Voxel Octree (SVO), only the highest level is saved initially, and nodes are subdivided on demand to represent the original grid [S1, unofficial].
+*   **Activity Check:** A node is "active" if it contains data or has active descendants [S6, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialize:** Start at the root node of the hierarchy [S3, unofficial].
+2.  **Intersection Test:** Determine if the ray intersects the bounding volume of the current node. If not, terminate traversal for this branch [S4, unofficial].
+3.  **Node Evaluation:**
+    *   If the node is **Empty** or **Full** (and no surface detail is needed), return a status indicating no further traversal is needed for this branch [S6, unofficial].
+    *   If the node is a **Leaf**, process it (e.g., sample volume data) [S3, unofficial].
+    *   If the node is a **Branch**, determine which of its 8 children are intersected by the ray [S3, unofficial].
+4.  **Descend:**
+    *   If the path to the root is empty, return the root cell [S4, unofficial].
+    *   Iterate through the path octants. For each octant, if the current cell is a Branch, retrieve its children index, access the specific child in the children vector, and update the current pointer to that child [S3, unofficial].
+    *   If it is not a Branch, return the current cell [S3, unofficial].
+5.  **Recursive Activity Check (Optional Optimization):** To avoid traversing empty subtrees, a recursive function can determine if a node or any of its descendants are marked as active [S6, unofficial]:
+    *   If node is null, return false [S6, unofficial].
+    *   If `node->isActive` is true, return true [S6, unofficial].
+    *   Iterate through 8 children; if a child exists and `isNodeActive(child)` returns true, return true [S6, unofficial].
+    *   If no active child found, return false [S6, unofficial].
+6.  **Termination:** Return true if the minimum intersection distance $t$ is less than a maximum threshold (e.g., 10000.0), otherwise return false [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_hierarchy(ray_origin, ray_direction, hierarchy):
+    """
+    Traverses a hierarchical grid (Octree/SVO) to find active nodes/leaves.
+    Returns True if an active node/leaf is found within max_t, False otherwise.
+    """
+    stack = [0]  # Initialize stack pointer at root
+    max_t = 10000.0
+    
+    while stack:
+        node_idx = stack.pop()
+        if node_idx == 0:  # EMPTY_NODE_IDX
+            continue
+            
+        node = hierarchy.nodes[node_idx]
+        
+        # 1. Intersection Test
+        if not ray_intersects_bbox(ray_origin, ray_direction, node.bbox_min, node.bbox_max):
+            continue
+            
+        # 2. Node Evaluation
+        if node.is_empty:
+            continue
+        if node.is_full:
+            return True  # Full node implies active data
+            
+        if node.is_leaf:
+            return True  # Process leaf (e.g., sample volume)
+            
+        # 3. Descend: Iterate through path octants
+        for child_idx in node.children_indices:
+            if child_idx == 0:
+                continue
+            child_node = hierarchy.nodes[child_idx]
+            if ray_intersects_bbox(ray_origin, ray_direction, child_node.bbox_min, child_node.bbox_max):
+                stack.append(child_idx)
+                
+    return False  # Termination: path empty or no active node found
+
+def ray_intersects_bbox(origin, direction, bbox_min, bbox_max):
+    """Standard slab method for ray-AABB intersection [G]."""
+    t_min = (bbox_min[0] - origin[0]) / direction[0]
+    t_max = (bbox_max[0] - origin[0]) / direction[0]
+    if t_min > t_max: t_min, t_max = t_max, t_min
+    for i in range(1, 3):
+        t_min = max(t_min, (bbox_min[i] - origin[i]) / direction[i])
+        t_max = min(t_max, (bbox_max[i] - origin[i]) / direction[i])
+        if t_min > t_max: return False
+    return t_max >= 0 and t_min <= 10000.0
+```
+
+**Parameters:**
+*   **Maximum Depth:** Limits recursion depth to prevent stack overflow or excessive traversal [S1, unofficial].
+*   **Stopping Depth:** In two-pass variants, the depth relative to leaves where the first traversal stops (e.g., depth=3) [S9].
+*   **Resolution:** The method dynamically adjusts the first and second step resolutions without modifying or moving data [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The transition between the two levels is calculated in floating point arithmetic, requiring high precision for correctness [S2, unofficial].
+*   **Boundary Voxels:** Special handling is required for rays hitting the boundary of the volume or the hierarchy [S2, unofficial].
+*   **Empty Nodes:** Leaf nodes are identified by setting the high bit (0x80000000) of the child indices in BVHNode. If a leaf is the last element and has no sibling, its right_child is set to empty_node_idx (0) [S3, unofficial].
+
+## Subtopics
+
+### [Leaf Collection](899-leaf-collection.md)
+Leaf Collection extracts terminal nodes from a hierarchical spatial structure into a linear list for batch processing [G]. It decouples traversal from ray-casting, differing from methods like [Hierarchical Digital Differential Analyzer (HDDA)](1122-hierarchical-digital-differential-analyzer-hdda.md) that integrate traversal into rasterization [G].
+
+### [Point Plane Test Traversal](982-point-plane-test-traversal.md)
+A traversal algorithm for TET-AMR refinement trees that identifies the child tetrahedron containing a sample point by performing plane tests against the midpoints of the parent tetrahedron's edges.
+
+### [Mesh BVH](1062-mesh-bvh.md)
+Mesh BVH is a GPU-accelerated bounding volume hierarchy designed for triangle meshes to perform efficient distance queries, serving as the geometric backend for signed distance field (SDF) representations in volume rendering pipelines. It enables fast evaluation of point-to-mesh distance, closest point location, and topological properties (sign, winding number) required for ray-marching or grid-based rendering. Unlike hierarchical voxel traversals that operate on implicit grid structures, this method operates directly on explicit triangle geometry, making it suitable for high-frequency surface details that would be prohibitive to store in a dense or even sparse voxel grid.
+
+### [Hierarchical Digital Differential Analyzer (HDDA)](1122-hierarchical-digital-differential-analyzer-hdda.md)
+The Hierarchical Digital Differential Analyzer (HDDA) is a specialized ray traversal algorithm for sparse voxel grids (specifically VDB structures) that performs multi-resolution leapfrogging to efficiently determine intersected voxels or tiles. It solves the problem of slow ray traversal in deep, sparse hierarchies by leveraging the fixed compile-time tree configuration to inline and collapse vertical navigation overhead. Unlike standard DDA which steps voxel-by-voxel, HDDA leaps across empty space at multiple resolution levels, making it distinct from [Leaf Collection](899-leaf-collection.md) (which collects leaves first) and [Point Plane Test Traversal](982-point-plane-test-traversal.md) (which uses geometric tests per node).
+
+### [Multi-Resolution Rendering with K-D Tree](1942-multi-resolution-rendering-with-k-d-tree.md)
+Multi-resolution rendering with K-D Tree is a hierarchical volume rendering technique that accelerates image-order ray casting by storing approximations of the underlying data within K-D tree nodes. It solves the performance bottleneck of rendering large, high-resolution datasets by allowing the renderer to skip detailed traversal when the data within a spatial region can be represented by a simple model within a user-specified error threshold. Unlike wavelet-based methods which store only detail coefficients, this method stores a complete model for each region, enabling fast "preview" images and adaptive detail. It builds on [Hierarchical Traversal](896-hierarchical-traversal.md) and differs from siblings such as [Leaf Collection](899-leaf-collection.md), [Point Plane Test Traversal](982-point-plane-test-traversal.md), [Mesh BVH](1062-mesh-bvh.md), [Hierarchical Digital Differential Analyzer (HDDA)](1122-hierarchical-digital-differential-analyzer-hdda.md), [VolumeHDDA](2353-volumehdda.md), [Coarse Mesh Traversal](3062-coarse-mesh-traversal.md), [Node Omission in Ray-Tree Traversal](3305-node-omission-in-ray-tree-traversal.md), and [Adaptive Out-of-Core Single-Pass GPU Raycasting](3440-adaptive-out-of-core-single-pass-gpu-raycasting.md) by using explicit nodal error bounds and trilinear corner models rather than plane tests, leaf collections, or coarse meshes.
+
+### VolumeHDDA
+VolumeHDDA is a specialized Hierarchical Digital Differential Analyzer (HDDA) designed for ray traversal against volume trees, specifically optimized for leaf node processing [S1, S2, unofficial].
+
+### [Coarse Mesh Traversal](3062-coarse-mesh-traversal.md)
+Coarse Mesh Traversal via BVH uses a Bounding Volume Hierarchy (BVH) built over the coarse tetrahedral mesh to efficiently locate the coarse element containing a sample point.
+*   **Steps:** Build a triangle BVH over the coarse mesh by inserting four triangular faces facing outside for every coarse element. Trace rays into the BVH using OptiX Wrapper Library (OWL) hit and miss functions. The hit function returns the hit point and the coarse tetrahedron ID. The miss function reports no intersection with BVH faces.
+*   **Comparison:** Unlike element marching which uses connectivity, point location querying skips coarse elements not being sampled and allows varying refinement levels in the coarse mesh.
+
+### [Node Omission in Ray-Tree Traversal](3305-node-omission-in-ray-tree-traversal.md)
+Node omission is an optimization for hierarchical ray-tree traversal that prevents adding child nodes to the traversal stack if it is known they will not intersect the current ray, reducing the number of intersection tests. It sets itself apart from sibling methods like [Leaf Collection](899-leaf-collection.md) and [Point Plane Test Traversal](982-point-plane-test-traversal.md) by operating on the spatial relationship between the ray's entry/exit parameters and the node's bounding box midpoints, rather than relying on leaf-level data structures or plane-based splitting planes.
+
+### [Adaptive Out-of-Core Single-Pass GPU Raycasting](3440-adaptive-out-of-core-single-pass-gpu-raycasting.md)
+This method enables interactive rendering of multi-gigabyte scalar volumes on desktop hardware by combining an out-of-core octree data structure with a single-pass, stackless GPU raycasting algorithm. It solves the memory capacity and bandwidth bottlenecks of in-core rendering by maintaining a view- and transfer-function-dependent working set of volumetric bricks in GPU memory, while the rest of the dataset remains on disk. Unlike separate block rendering techniques that suffer from boundary artifacts and cannot support refractive or global illumination models, this approach performs the entire volume traversal and compositing in a single fragment shader pass, adapting sampling density to the local brick resolution.
+
+### Surface Descendant Check
+*   **Steps:** If the cell is a Leaf, return whether it has a sign change. If it is a Branch, recursively check if any of its children have a surface descendant. If it is Empty or Full, return false [S4, unofficial].
+
+### Perspective-Correct AMR Patch Traversal
+*   **Definition:** A hybrid CPU-GPU traversal strategy where the CPU traverses the KD-tree of AMR patches back-to-front, and the GPU traverses cells within a patch. Sub-patches are generated to ensure perspective-correct sorting of cells relative to the observer [S8].
+*   **Steps:** CPU traverses the KD-tree hierarchy in back-to-front fashion, choosing the appropriate order at each internal node until a leaf node (patch) is found [S8]. Vertex shader modifies each index according to the current observer position to generate proper cell ordering, ensuring perspective-correct sorting [S8].
+
+### Two-Pass Hierarchy Traversal
+*   **Definition:** A traversal optimization for spatial hierarchies that reduces traversal time by 30% by splitting the traversal into two steps with a stopping depth in the first step [S9].
+*   **Steps:** Step 1: Traverse the hierarchy down to a specific stopping depth relative to the leaves (e.g., depth=3 means stopping 3 levels above the leaves) [S9]. Step 2: Traverse the remaining lower part of the hierarchy for the nodes identified in Step 1 [S9].
+*   **Parameters:** Stopping depth: The depth relative to the leaves where the first traversal stops. A depth of 3 produces a set of trees of depth 3 [S9].
+*   **Pitfalls:** If the stopping depth is 0 (descend through entire hierarchy), the second step cost is null, and performance equals the direct implementation [S9].
+*   **Comparison:** Compared to naive direct implementation, this method reduces computation time. At optimal stopping depth (3), it reduces time by 15% for the two-pass method alone, and up to 30% when combined with tile sharing [S9].
+*   **Usage:** Used in the GPU implementation of the point-based rendering algorithm for participating media [S9].
+
+## Operating characteristics
+*   **Time Complexity:** $O(\log N)$ in the best case for empty space, where $N$ is the number of voxels, as the tree height is logarithmic [G]. In the worst case (fully occupied), it approaches $O(N)$ but with a smaller constant factor due to larger steps [S1, unofficial].
+*   **Memory Complexity:** Depends on the storage format. SVOs store only the highest level initially and subdivide on demand, reducing memory overhead compared to dense grids [S1, unofficial].
+*   **Performance:** Hierarchical traversal can reduce the number of steps significantly. For example, in a specific SVO example, non-hierarchical traversal took 11 steps to intersect an occupied voxel, while hierarchical SVO traversal took 5 steps [S1, unofficial]. Results show a five-fold reduction in time compared to a single-step implementation [S2, unofficial].
+*   **Strengths:** Efficiently skips empty space; suitable for sparse data; reduces memory bandwidth usage by accessing only relevant nodes [G].
+*   **Limitations:** Overhead of tree traversal; complex to implement efficiently on GPU due to divergent branching; performance degrades if the hierarchy is unbalanced or data is dense [G].
+*   **When to Use:** Sparse volumes, large datasets with significant empty space, real-time rendering where memory bandwidth is a bottleneck [G].
+*   **When Not to Use:** Dense volumes where most voxels are occupied, as the overhead of tree traversal may outweigh the benefits [G].
+
+## Background
+Hierarchical Traversal was introduced by Tim Kay and James T. Kajiya in 1986 as part of their work on ray tracing complex scenes [S5, unofficial]. They presented a new algorithm for speeding up ray-object intersection calculations using a hierarchy of extents that fit convex hulls tightly [S5, unofficial]. The technique demonstrated that scenes with hundreds of thousands of objects could be ray traced several times faster than other published algorithms at the time [S5, unofficial]. In the context of volume rendering, this concept was adapted to hierarchical grid structures like Octrees and Sparse Voxel Octrees (SVOs) to accelerate ray casting through volumetric data [S1, unofficial].
+
+## Sources
+[S1] versal algorithm for ray tracing Hur man gör en hierarkisk ..., https://kth.diva-portal.org/smash/get/diva2:2069409/FULLTEXT01.pdf, fetched 2026-10-25 (unofficial)
+[S2] Discrete Ray-Tracing of Huge Voxel Spaces - doczz.net, https://doczz.net/doc/7276913/discrete-ray-tracing-of-huge-voxel-spaces, fetched 2026-10-25 (unofficial)
+[S3] mxbrt/svo, https://github.com/mxbrt/svo, fetched 2026-10-26 (unofficial)
+[S4] narnia-ai-mason/isomesh, https://github.com/narnia-ai-mason/isomesh, fetched 2026-10-27 (unofficial)
+[S5] (PDF) Axis‐Normalized Ray‐Box Intersection - ResearchGate, https://www.researchgate.net/publication/390921688_Axis-Normalized_Ray-Box_Intersection, fetched 2026-10-30 (unofficial)
+[S6] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)
+[S7] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)
+[S8] High-Quality, Semi-Analytical Volume Rendering for AMR ..., https://people.freedesktop.org/~marcheu/vis09-amr.pdf, fetched 2026-10-26
+[S9] Point-Based Rendering for Homogeneous Participating Media with Refractive Boundaries, https://doi.org/10.1109/TVCG.2017.2768525, fetched 2026-10-26

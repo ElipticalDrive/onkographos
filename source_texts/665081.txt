@@ -1,0 +1,224 @@
+A custom ray-tracing engine for blender that allows the plug in of custom materials and custom ray tracing methods for astrophysically based ray tracing. - fix(pkg156): gate pkg120 two-sided-MIS emissive leg on enableNEE (naive-mode wavefront parity) by HendrikGC02 · Pull Request #537 · HendrikGC02/Astroray
+
+fix(pkg156): gate pkg120 two-sided-MIS emissive leg on enableNEE (naive-mode wavefront parity) by HendrikGC02 · Pull Request #537 · HendrikGC02/Astroray · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+HendrikGC02
+commented
+Aug 1, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+The visible-band CPU/GPU SSIM gate (test_visible_band_cpu_gpu_ssim) renders the naive multiwavelength_path_tracer route (enableNEE=false). pkg120 (#534) added a two-sided-MIS BSDF-ray-hits-emitter w_B leg to the GPU wavefront intersectPathSlot that was not gated on enableNEE, so it fired in naive mode. The w_B leg is only valid as the complement of the NEE light-sampling leg (Veach 1997 §9.2); with no NEE it diverged the GPU bright from the CPU oracle (MultiwavelengthPathTracer::pathTrace, which accumulates emission only on bounce==0||wasSpecular).
+Fix: gate the emissive else branch on enableNEE, threaded through intersectPathSlot / stageIntersectQueuedKernel / launchStageIntersectQueued and the dense / restir / snapshot callers. Naive mode now matches the CPU oracle and the pre-pkg120 wavefront. The NEE path (path_tracer, enableNEE=true) is byte-unchanged.
+Measured (RTX 5070 Ti, 48×48 parity scene)
+depth-4 GPU/CPU mean-ratio
+SSIM(8192)
+base (post-pkg120)
+[1.020, 1.012, 1.018]
+0.9953
+this PR
+[1.014, 1.007, 1.014]
+0.9955
+Restores the pre-pkg120 dossier baseline ([1.015, 1.007, 1.014]).
+Residual survived pkg120 — root cause of the remainder
+The remaining ~1.4% is not transport:
+Black background ⇒ whole image black on both legs (the camera never sees the down-facing light quad; all illumination is ambient env-miss).
+Neutral grey background ⇒ channel-asymmetric ratio [1.013, 1.007, 1.014] from a neutral input color ⇒ RGB→spectral upsampling parity gap (CPU RGBAlbedoSpectrum/RGBIlluminantSpectrum vs GPU tables) on the first post-bounce use.
+This is pkg153's R-drift shared mechanism (same scene family, own quarantined bisect). This fix does not move it (it only removes the light-quad w_B term, which is zero under the black-bg control).
+Gate disposition
+0.998 is unreachable without the pkg153 upsampling-parity fix. Per contract point 3 the gate stays at 0.995; the residual decomposition is escalated to the architect. Not re-pinned to 0.998.
+Acceptance criteria
+Per-bounce diff isolation (contract pt 1): convicted the pkg120 w_B leg; remainder localized to RGB→spectral upsampling via black-bg / neutral-bg controls.
+Fix convicted term with citation, CPU is oracle (contract pt 2).
+[~] Restore SSIM to 0.998 (contract pt 3): unreachable — gate kept at 0.995, escalated to architect (not re-pinned unilaterally).
+pkg153 R-drift interaction reported (contract pt 4): fix does not move it; remainder IS that mechanism.
+Tests
+test_gpu_multiwavelength.py (6) + test_pkg120_two_sided_mis.py (3) — all pass (NEE path unchanged).
+Wavefront parity sweep (pkg55 reference/oracles/session-n1, pkg157 firefly clamp, pkg159 cryptomatte, restir validation, pkg55-c3 nonvisible) — 34 pass.
+Build (RTX 5070 Ti, build_cuda_worktree.bat)
+```
+[100%] Linking CXX shared module astroray.cp313-win_amd64.pyd
+[100%] Built target astroray
+[ 95%] Built target astroray_core_impl
+[100%] Built target astroray_test_helpers
+[build_cuda_worktree] Build succeeded
+```
+🤖 Generated with Claude Code
+HendrikGC02
+and others
+added 2 commits
+August 2, 2026 09:25
+fix(pkg156): gate pkg120 two-sided-MIS emissive leg on enableNEE
+…
+0cbfa53
+```
+The pkg120 two-sided-MIS BSDF-ray-hits-emitter w_B leg in the GPU wavefront
+intersectPathSlot was applied unconditionally, including the naive route
+(multiwavelength_path_tracer => enableNEE=false). The w_B leg is only valid
+as the complement of the NEE light-sampling leg (Veach 1997 §9.2); with no
+NEE it diverged the GPU bright from the CPU oracle
+(MultiwavelengthPathTracer::pathTrace, which accumulates emission only on
+bounce==0||wasSpecular). This grew the visible-band bounce-2 residual to
+depth-4 [1.020,1.012,1.018]/SSIM 0.9953.
+
+Gate the else branch on enableNEE (threaded through intersectPathSlot,
+stageIntersectQueuedKernel, launchStageIntersectQueued and the dense /
+restir / snapshot callers). Naive mode now matches the oracle and the
+pre-pkg120 wavefront; the NEE path (path_tracer, enableNEE=true) is
+byte-unchanged (pkg120 gates stay green).
+
+Measured (RTX 5070 Ti): depth-4 GPU/CPU ratio -> [1.014,1.007,1.014];
+SSIM(8192) 0.9955. The remaining ~1.4% residual is an RGB->spectral
+upsampling parity gap (channel-asymmetric even under a neutral grey
+background; black background renders fully black on both legs) = pkg153's
+R-drift shared mechanism. 0.998 is unreachable here, so the gate stays at
+0.995 with the residual decomposition escalated to the architect.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs(pkg156): record PR #537 in spec status
+…
+155a76a
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+HendrikGC02
+commented
+Aug 1, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Hardware verification (RTX 5070 Ti) — independent, bound to 155a76a4
+Driver 610.47, CUDA 12.8, OptiX 9.1.0, OIDN 2.4.1. Worktree HEAD verified == 155a76a445e638aadbdd9ee3a8e54998c3e7fa45. Clean foreground rebuild, fresh .pyd confirmed.
+Gate
+Result
+Measured
+test_visible_band_cpu_gpu_ssim (pkg156-owned)
+PASS
+SSIM 0.99549097; ratio [1.0143244, 1.0066499, 1.014184] — matches implementer's claim exactly
+pkg120 3 gates (test_pkg120_two_sided_mis.py)
+PASS
+all 3 green
+multiwavelength suite (6 gates)
+PASS
+all green
+wavefront bit-identity suites (6 material types)
+PASS
+max diff = 0.0, diverging fields = 0
+test_cpu_to_gpu_threshold_gate
+PASS
+PostRR p99.9=0.0, PostIntersect ULP=32 p99.9=2.17e-06
+test_post_nee_mis_gate (C2 PostNEE_MIS)
+PASS
+Tier2 max residual 7.47e-08 (tol 1e-05)
+pkg89 dedicated-NEE (3 params)
+PASS
+WF/CPU ~0.997
+perf ceiling
+PASS
+0.819s vs 1.0s
+3x pkg153-quarantined env gates
+FAIL (pre-existing, expected)
+same magnitude/R-dominant pattern as pkg153's tracked history — unrelated to this PR's enableNEE gating
+Visual: naive-mode CPU/GPU render pair at 128x128/2048spp — matching brightness, no fireflies, no NaN, no banding, no over-bright emissive quad. Max abs diff 0.042, mean 0.00079.
+Verdict: PASS, bound to 155a76a4. Full table + build log in the spec's new "Hardware verification 2026-08-02" section.
+docs(pkg156): record HW verification 2026-08-02 (PR #537, RTX 5070 Ti)
+…
+dbcc393
+```
+Independent verifier PASS bound to 155a76a; full gate table, wavefront
+bit-identity results, and visual-inspection summary appended to the spec.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+HendrikGC02
+commented
+Aug 1, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+HW PASS binds to 155a76a4 (the SHA verified above). Doc-only commit dbcc393 (spec "Hardware verification 2026-08-02" section) pushed after the verification run — no code changes, verified nothing behind the PASS moved.
+Verification artifacts (logs + PNGs) moved out of the worktree to C:/Users/hgcom/AppData/Local/Temp/claude/pkg156-artifacts/ — not committed to the branch.
+Merge origin/main into pkg156; resolve pkg156 spec conflict (docs-only)
+…
+30e4cff
+```
+Conflict was confined to the pkg156 spec markdown
+(.astroray_plan/packages/pkg156-wavefront-naive-bounce2-brightness-residual.md),
+caused by main commit 99065b1 (architect "BLOCKED-ON pkg168" disposition)
+rewriting the Status line + disposition section that PR #537 also edited.
+
+Resolution (team-lead-approved): keep BOTH sections verbatim — the PR's
+"Hardware verification 2026-08-02" table + PASS verdict bound to 155a76a,
+AND main's architect "Residual decomposition + BLOCKED-ON pkg168" section.
+Status line rewritten to the merged truth: partial fix shipped in PR #537,
+gate stays 0.995, 0.998 restoration BLOCKED-ON pkg168. The 0.998-blocker
+cross-reference repointed to pkg168 as canonical (Status line + Outcome pt4),
+with pkg153 kept as a see-also shared-mechanism link.
+
+No code touched: all pkg156 GPU/test files (gpu_wavefront_state.h,
+gpu_wavefront_snapshot.cu, stage_advance.cu, stage_restir.cu,
+test_gpu_multiwavelength.py) are byte-identical to the HW-PASS SHA
+155a76a; git diff vs that SHA for those
+files is empty, so the HW PASS binding still covers the merged head.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Hide details
+View details
+HendrikGC02
+merged commit e2bfd84
+into
+main
+Aug 2, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+HendrikGC02
+added a commit
+that referenced
+this pull request
+Aug 2, 2026
+docs(pkg156): record PR #537 ship in STATUS + dayrun; both follow-ups…
+…
+db9b1fd
+```
+… dispatched
+
+pkg156 fixes a real pkg120 regression (unconditional two-sided-MIS leg in
+naive mode) by gating on enableNEE, restoring SSIM 0.9955. Gate honestly
+kept at 0.995, not re-pinned to 0.998 - remaining residual is pkg168's
+upsampling-parity mechanism (BLOCKED-ON marker in the spec). pkg169 and
+pkg168 both now in flight.
+```
+HendrikGC02
+mentioned this pull request
+Aug 2, 2026
+test(pkg168): CPU↔GPU RGB→spectral upsampling A/B — verdict TABLES CLEAN
+#539
+Merged
+3 of 5 tasks
+HendrikGC02
+deleted the
+pkg156-wavefront-naive-bounce2-residual
+branch
+October 3, 2026 09:43
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

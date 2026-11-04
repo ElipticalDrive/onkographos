@@ -1,0 +1,151 @@
+# Mip-NeRF Optimization and Activation Details
+
+Also called: JaxNeRF Training Procedure, Mip-NeRF Misc. Changes
+
+## Overview
+This article defines the specific implementation details for training mip-NeRF and JaxNeRF, focusing on activation functions, input encoding structures, and learning rate scheduling [S1]. These changes are designed to improve training stability and robustness, particularly against catastrophic failure modes, without significantly altering the model's accuracy or speed [S1]. Unlike standard NeRF implementations, this method removes identity concatenation from the MLP input and employs shifted and widened activation functions to handle edge cases in density and color prediction [S1].
+
+## How it works
+The method modifies the standard NeRF training loop through four key components: input encoding structure, density activation, color activation, and learning rate scheduling [S1].
+
+### Inputs and Outputs
+*   **Inputs:** Ray parameters (origin, direction), integrated positional encoding (IPE) features, and iteration index $i$ [S1].
+*   **Outputs:** Density $\tau$ and color $c$ for the ray segment [S1].
+
+### Data Structures
+*   **Integrated Positional Encoding (IPE):** The MLP input consists solely of the IPE features derived from the ray's mean and covariance [S1]. The original position and view direction are **not** concatenated with the encoding [S1].
+*   **View Direction Encoding:** The ray direction $d$ is normalized, then processed with a standard positional encoding function with $L=4$ frequencies [S1].
+
+### Numbered Steps
+
+1.  **Input Preparation:**
+    *   Compute the IPE features for the ray segment [S1].
+    *   Pass these IPE features as the sole input to the MLP [S1].
+
+2.  **Density Prediction ($\tau$):**
+    *   The MLP produces a raw output value $x_\tau$ [S1].
+    *   Apply the **shifted softplus** activation to obtain density:
+        $$ \tau = \log(1 + \exp(x_\tau - 1)) $$
+    *   This is equivalent to initializing the bias of the density output layer to $-1$, ensuring initial $\tau$ values are small [S1].
+
+3.  **View Direction Injection:**
+    *   Normalize the ray direction $d$ [S1].
+    *   Apply positional encoding with $L=4$ to $d$ [S1].
+    *   Inject these encoded view directions into the **last layer** of the MLP [S1]. This injection occurs after $\tau$ is predicted but before the final color $c$ is predicted [S1].
+
+4.  **Color Prediction ($c$):**
+    *   The MLP produces a raw output value $x_c$ [S1].
+    *   Apply the **widened sigmoid** activation to obtain color:
+        $$ c = \frac{1 + 2\epsilon}{1 + \exp(-x_c)} - \epsilon $$
+    *   Use $\epsilon = 0.001$ [S1]. This allows the output to saturate slightly outside the $[0, 1]$ range [S1].
+
+5.  **Optimization Loop:**
+    *   Use the Adam optimizer [S1].
+    *   Apply the learning rate schedule defined in the "Learning Rate Schedule" section below [S1].
+
+### Formulas
+
+**Density Activation:**
+$$ \tau = \log(1 + \exp(x - 1)) $$
+*   $x$: Raw MLP output for density [S1].
+*   Purpose: Prevents catastrophic failure where the MLP emits negative values everywhere, which would result in zero gradients for $\tau$ and halt optimization [S1].
+
+**Color Activation:**
+$$ c = \frac{1 + 2\epsilon}{1 + \exp(-x)} - \epsilon, \quad \epsilon = 0.001 $$
+*   $x$: Raw MLP output for color [S1].
+*   Purpose: Avoids optimization failure when explaining black or white pixels by allowing saturation slightly outside $[0, 1]$ [S1].
+
+**Learning Rate Schedule:**
+$$ \eta_i = \left( \lambda_w + (1 - \lambda_w) \sin\left(\frac{\pi}{2} \operatorname{clip}\left(\frac{i}{n_w}, 0, 1\right)\right) \right) \times \left( \exp\left( (1 - \frac{i}{n}) \log(\eta_0) + \frac{i}{n} \log(\eta_n) \right) \right) $$
+*   $i$: Current iteration index [S1].
+*   $n$: Total number of iterations ($1,000,000$) [S1].
+*   $n_w$: Warmup iterations ($2,500$) [S1].
+*   $\eta_0$: Initial learning rate ($5 \cdot 10^{-4}$) [S1].
+*   $\eta_n$: Final learning rate ($5 \cdot 10^{-6}$) [S1].
+*   $\lambda_w$: Warmup scale factor, annealed from $0.01$ to $1$ during the warmup period [S1].
+
+### Parameters
+*   **Optimizer:** Adam [S1].
+*   **Total Iterations ($n$):** 1,000,000 [S1].
+*   **Batch Size:** 4096 [S1].
+*   **Warmup Iterations ($n_w$):** 2,500 [S1].
+*   **Initial Learning Rate ($\eta_0$):** $5 \cdot 10^{-4}$ [S1].
+*   **Final Learning Rate ($\eta_n$):** $5 \cdot 10^{-6}$ [S1].
+*   **Warmup Scale Factor Range:** $\lambda_w$ annealed from $0.01$ to $1$ during warmup [S1].
+*   **View Direction PE Frequencies ($L$):** 4 [S1].
+
+### Edge Cases and Pitfalls
+*   **Negative Density:** Using standard ReLU for density can cause the MLP to emit negative values everywhere, leading to zero gradients and optimization failure [S1]. The shifted softplus prevents this [S1].
+*   **Black/White Pixel Saturation:** Standard sigmoid saturation can cause training to fail when trying to explain extreme pixel values [S1]. The widened sigmoid mitigates this [S1].
+*   **Identity Concatenation:** Concatenating original position/view direction with IPE is unnecessary and complicates the formalization of IPE features [S1]. Removing it simplifies the method without performance loss [S1].
+*   **Alternative PE:** Concatenating positional encodings of mean and covariance square roots is sensitive to $L$ hyperparameters and less compact than IPE [S1]. IPE is preferred [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def positional_encoding(x, L=4):
+    """Standard positional encoding [G]."""
+    scales = np.array([2.0 ** i for i in range(L)])
+    x_expanded = np.expand_dims(x, axis=-1) * scales
+    return np.concatenate([np.sin(x_expanded), np.cos(x_expanded)], axis=-1).flatten()
+
+def shifted_softplus(x):
+    """Density activation: log(1 + exp(x - 1)) [S1]."""
+    return np.log(1.0 + np.exp(x - 1.0))
+
+def widened_sigmoid(x, epsilon=0.001):
+    """Color activation: (1 + 2*eps)/(1 + exp(-x)) - eps [S1]."""
+    return (1.0 + 2.0 * epsilon) / (1.0 + np.exp(-x)) - epsilon
+
+def compute_learning_rate(i, n=1000000, n_w=2500, eta_0=5e-4, eta_n=5e-6):
+    """Learning rate schedule [S1]."""
+    clip_val = min(max(i / n_w, 0.0), 1.0)
+    lambda_start = 0.01
+    warmup_factor = lambda_start + (1.0 - lambda_start) * math.sin(math.pi / 2.0 * clip_val)
+    log_eta = (1.0 - i / n) * math.log(eta_0) + (i / n) * math.log(eta_n)
+    return warmup_factor * math.exp(log_eta)
+
+def mip_nerf_forward(mlp, ipe_features, ray_direction):
+    """Forward pass following mip-NeRF activation and injection rules [S1]."""
+    # Step 1: Input is solely IPE features
+    # Step 2: Density prediction
+    raw_tau = mlp(ipe_features)
+    tau = shifted_softplus(raw_tau)
+
+    # Step 3: View direction handling
+    d_norm = ray_direction / np.linalg.norm(ray_direction)
+    view_pe = positional_encoding(d_norm, L=4)
+
+    # Step 4: Color prediction with view injection
+    # The view PE is injected into the last layer before color prediction [S1]
+    # Architecture-specific view injection implementation required
+    raw_c = mlp_forward_view_dependent(ipe_features, view_pe)
+    c = widened_sigmoid(raw_c)
+
+    return tau, c
+```
+
+## Subtopics
+
+### [Mip-NeRF 360 Optimization Setup](3426-mip-nerf-360-optimization-setup.md)
+Defines specific hyperparameters, network architectures, and loss functions for Mip-NeRF 360, using a multi-stage proposal sampling strategy and Charbonnier loss to stabilize optimization of unbounded, anti-aliased radiance fields.
+
+## Operating characteristics
+*   **Training Time:** Mip-NeRF is 13x faster to train than a brute-force supersampling baseline (16 rays/pixel) [S1].
+*   **Evaluation Time:** Mip-NeRF is 16x faster to evaluate than the supersampling baseline [S1].
+*   **Quality:** Mip-NeRF outperforms the 16x supersampling baseline in quality metrics (PSNR, SSIM, LPIPS) [S1].
+*   **Stability:** The activation functions and learning rate schedule improve training stability, particularly with large learning rates, though the core accuracy remains similar to standard NeRF [S1].
+*   **Memory:** The removal of identity concatenation makes the IPE features more compact, reducing memory usage compared to concatenated PE approaches [S1].
+
+## Background
+*   **Origin:** This method is described in the "Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields" paper [S1].
+*   **Development:** These "miscellaneous" changes were identified to simplify the method and increase robustness during optimization, particularly for ablations and fair comparisons with JaxNeRF [S1].
+*   **Usage:** Used in the training of mip-NeRF and JaxNeRF models [S1].
+
+## Sources
+[S1] Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00580, fetched 2026-10-26

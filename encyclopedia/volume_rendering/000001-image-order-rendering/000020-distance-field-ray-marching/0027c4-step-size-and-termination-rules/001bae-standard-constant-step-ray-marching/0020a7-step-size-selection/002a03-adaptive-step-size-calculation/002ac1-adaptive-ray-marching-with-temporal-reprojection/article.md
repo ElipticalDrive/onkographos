@@ -1,0 +1,167 @@
+# Adaptive Ray Marching with Temporal Reprojection
+
+Also called: HZL Fluid Effects Studio volume renderer, field mode shading
+
+## Overview
+This method performs volume rendering by combining adaptive ray marching with temporal accumulation to reduce noise and flickering in animated scenes. It builds on [Adaptive Step Size Calculation](4671-adaptive-step-size-calculation.md) by using density thresholds to vary step size, and extends standard ray marching by reprojection of the previous frame's color and alpha into the current frame's screen space. It is distinct from sibling methods like [Ray Marching with Adaptive Step Count and Cone Sampling](4808-ray-marching-with-adaptive-step-count-and-cone-sampling.md) by relying on spatial reprojection rather than cone-based filtering for temporal stability.
+
+## How it works
+**Inputs:**
+- Ray origin and direction.
+- Volume density field (accessed via ray marching).
+- `stepSize`: Base step length.
+- `densityScale`: Scaling factor for density in opacity calculation.
+- `absorption`: Absorption coefficient multiplier.
+- `adaptiveSteppingEnabled`: Boolean flag.
+- `historyTexture`: Previous frame's accumulated color and alpha buffer.
+- `historyWeight`: Base weight for temporal blending.
+- `emittedLight`: Emissive contribution per unit step.
+- `smokeColor`: Base color of the volume.
+- `fieldMode`: Integer switch (0-7) for color mapping logic [S1, unofficial].
+
+**Outputs:**
+- Final accumulated color (`accumulated.rgb`) and alpha (`accumulated.a`).
+
+**Data Structures:**
+- `accumulated`: A vector or struct holding `rgb` (float3) and `a` (float). Initialized to zero.
+- `history`: Sampled from `historyTexture` at reprojected UV coordinates. Holds `rgb` and `a`.
+- `representativePosition`: World or view space position of the current ray step, used for reprojection.
+
+**Parameters:**
+- `stepSize`: Base step length.
+- `densityScale`: Scaling factor.
+- `absorption`: Absorption multiplier.
+- `adaptiveSteppingEnabled`: Boolean.
+- `historyWeight`: Base blend weight.
+- `emissionStrength`: Multiplier for emitted light (used in `emittedLight` calculation) [S1, unofficial].
+- `fieldMode`: Integer (0-7) [S1, unofficial].
+
+**Steps:**
+1. Initialize `accumulated.rgb` and `accumulated.a` to zero.
+2. Loop through ray steps:
+   a. Compute `currentStep`. If `adaptiveSteppingEnabled` is true and current `density < 0.004`, set `currentStep = stepSize * 4.0`. Otherwise, `currentStep = stepSize`.
+   b. Calculate opacity:
+      $$opacity = 1.0 - \exp(-density \cdot densityScale \cdot currentStep \cdot absorption \cdot 4.0)$$
+   c. Update accumulated color:
+      $$accumulated.rgb \leftarrow accumulated.rgb + (1.0 - accumulated.a) \cdot (opacity \cdot smokeColor + emittedLight \cdot currentStep)$$
+   d. Update accumulated alpha:
+      $$accumulated.a \leftarrow accumulated.a + (1.0 - accumulated.a) \cdot opacity$$
+   e. If `accumulated.a > 0.985`, break the loop.
+   f. Increment `distanceAlongRay` by `currentStep`.
+3. If `accumulated.a < 0.002`, discard the fragment (do not write to color buffer).
+4. If `temporalEnabled` is true and `foundVolume` is true:
+   a. Project `representativePosition` to previous clip space.
+   b. Compute UV coordinates from previous clip space.
+   c. Clamp UV to `[0.0, 1.0]`.
+   d. Sample `historyTexture` at clamped UV to get `history`.
+   e. Compute `responsiveWeight`:
+      $$responsiveWeight = historyWeight \cdot (1.0 - |history.a - accumulated.a|)$$
+   f. Blend:
+      $$accumulated = mix(accumulated, history, clamp(responsiveWeight, 0.0, 0.95))$$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_ray_marching_with_temporal_reprojection(ray_origin, ray_direction, volume_sampler, history_texture, camera_state, params):
+    # Initialize accumulation
+    accumulated_rgb = vec3(0.0)
+    accumulated_a = 0.0
+    
+    # Parameters
+    step_size = params.stepSize
+    density_scale = params.densityScale
+    absorption = params.absorption
+    adaptive_enabled = params.adaptiveSteppingEnabled
+    history_weight = params.historyWeight
+    emitted_light = params.emittedLight # Pre-calculated or per-step
+    smoke_color = params.smokeColor
+    field_mode = params.fieldMode
+    
+    # Temporal reprojection state
+    temporal_enabled = params.temporalEnabled
+    found_volume = False
+    
+    # Ray marching loop
+    distance_along_ray = 0.0
+    while True:
+        # Get density at current position
+        density = volume_sampler.sample(ray_origin + ray_direction * distance_along_ray)
+        
+        # Adaptive step size
+        if adaptive_enabled and density < 0.004:
+            current_step = step_size * 4.0
+        else:
+            current_step = step_size
+            
+        # Opacity calculation
+        # Note: The source formula includes a *4.0 factor in the exponent
+        opacity = 1.0 - exp(-density * density_scale * current_step * absorption * 4.0)
+        
+        # Color accumulation
+        accumulated_rgb += (1.0 - accumulated_a) * (opacity * smoke_color + emitted_light * current_step)
+        
+        # Alpha accumulation
+        accumulated_a += (1.0 - accumulated_a) * opacity
+        
+        # Termination
+        if accumulated_a > 0.985:
+            found_volume = True
+            break
+            
+        distance_along_ray += current_step
+        
+        # Safety break for max steps (not specified in source, but implied by loop)
+        # [G] Assuming a max step count or distance limit is required to prevent infinite loops.
+        # Not given in the sources.
+        
+    # Discard transparent fragments
+    if accumulated_a < 0.002:
+        return None # Discard
+        
+    # Temporal reprojection
+    if temporal_enabled and found_volume:
+        # Project representative position to previous frame's clip space
+        # [G] representativePosition is assumed to be the world/view position at the last sampled point.
+        # Previous clip space projection requires previous camera matrices.
+        prev_clip_pos = project_to_previous_clip_space(ray_origin + ray_direction * distance_along_ray, camera_state.previous_view_projection)
+        
+        # Compute UV
+        if prev_clip_pos.w > 0.0:
+            prev_uv = prev_clip_pos.xy / prev_clip_pos.w
+            prev_uv = vec2(clamp(prev_uv.x, 0.0, 1.0), clamp(prev_uv.y, 0.0, 1.0))
+            
+            # Sample history
+            history = history_texture.sample(prev_uv)
+            
+            # Responsive weight
+            responsive_weight = history_weight * (1.0 - abs(history.a - accumulated_a))
+            
+            # Blend
+            blend_factor = clamp(responsive_weight, 0.0, 0.95)
+            accumulated_rgb = mix(accumulated_rgb, history.rgb, blend_factor)
+            accumulated_a = mix(accumulated_a, history.a, blend_factor)
+            
+    return vec4(accumulated_rgb, accumulated_a)
+```
+
+**Edge Cases and Pitfalls:**
+- **Temporal Reprojection Bounds:** If the previous frame projection has `w <= 0.0`, the UV calculation is invalid. Clamp UV to `[0.0, 1.0]` to avoid sampling outside bounds [S1, unofficial].
+- **Ghosting:** Mitigated by scaling `historyWeight` with `(1.0 - abs(history.a - accumulated.a))` and clamping the blend factor to `[0.0, 0.95]` [S1, unofficial].
+- **Transparent Pixels:** Fragments with final opacity below `0.002` are discarded to avoid rendering transparent pixels [S1, unofficial].
+- **Field Mode:** The `fieldMode` parameter (0-7) controls smoke color mapping logic via conditional branches, but the specific logic is not detailed in the sources [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of ray steps. Adaptive stepping reduces steps in low-density regions, potentially improving performance.
+- **Memory Complexity:** O(1) for ray marching state. O(W*H) for the history texture buffer.
+- **Performance:** Not given in the sources.
+- **Strengths:** Reduces temporal noise and flickering through reprojection. Adaptive stepping optimizes performance in sparse volumes.
+- **Limitations:** Requires valid previous frame data and camera matrices for reprojection. Ghosting can occur if reprojection is inaccurate or if the responsive weight calculation is not tuned correctly.
+- **When to Use:** Real-time volume rendering in animated scenes where temporal coherence is important.
+- **When Not to Use:** Static scenes where temporal accumulation is unnecessary, or scenes with large camera movements where reprojection is unreliable.
+
+## Background
+This method is associated with the HZL Fluid Effects Studio volume renderer, as seen in the GitHub repository `pvasbob/HZL-fluidEffectsStudio` [S1, unofficial]. It appears to be an implementation detail within this specific software, combining adaptive ray marching with temporal accumulation techniques common in real-time rendering.
+
+## Sources
+[S1] HZL-fluidEffectsStudio, https://github.com/pvasbob/HZL-fluidEffectsStudio, fetched 2026-10-27 (unofficial)

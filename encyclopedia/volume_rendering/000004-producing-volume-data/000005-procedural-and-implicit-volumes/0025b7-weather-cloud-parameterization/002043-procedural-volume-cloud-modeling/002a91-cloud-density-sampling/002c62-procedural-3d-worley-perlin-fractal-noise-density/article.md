@@ -1,0 +1,186 @@
+# Procedural 3D Worley-Perlin Fractal Noise Density
+
+Also called: Billowy fractal cumulus noise, Inverted Worley FBM Cloud Density, Multi-Octave Inverted Worley FBM
+
+## Overview
+Generates billowy cloud shapes by synthesizing cloud density $\rho(\mathbf{x})$ procedurally using inverted Worley fractal Brownian motion (FBM), vertical gradient attenuation, and coverage thresholding [S1, unofficial]. It differs from standard Perlin-based cloud noise by using the distance-to-nearest-cell metric of Worley noise, inverted to create bright, puffy "billowy" structures characteristic of cumulus clouds, rather than the smooth, turbulent gradients of Perlin noise [S1, unofficial].
+
+## How it works
+**Inputs:**
+- World position $\mathbf{x} = (x, y, z)$ [S1, unofficial].
+- Cloud volume bounds: `cloudBottom` and `cloudTop` (Y-coordinates) [S1, unofficial].
+- Cloud coverage parameter `coverage` (float, typically 0.52) [S1, unofficial].
+- Extinction coefficient $\sigma_t$ (float, typically 0.035–0.04) [S1, unofficial].
+- FBM parameters: `octaves` (default 3), `scale` (default 0.0008) [S1, unofficial].
+
+**Outputs:**
+- Cloud density $\rho(\mathbf{x})$ [S1, unofficial].
+
+**Data Structures:**
+No persistent data structures are required; the method is stateless and procedural [S1, unofficial].
+
+**Steps:**
+1. **Height Culling:** Check if the world Y-coordinate $y$ is within `[cloudBottom, cloudTop]`. If $y < \text{cloudBottom}$ or $y > \text{cloudTop}$, return density $0.0$ [S1, unofficial].
+2. **Coordinate Scaling:** Scale the input coordinates by `scale` to define the base frequency of the noise field [S1, unofficial].
+3. **Inverted Worley FBM Calculation:** Compute the base noise value using multi-octave inverted Worley noise (see `worleyFBM` pseudocode below) [S1, unofficial].
+4. **Height Gradient:** Compute the normalized height $h$ relative to the cloud layer bounds, then apply a sinusoidal gradient to attenuate density at the top and bottom edges [S1, unofficial].
+5. **Coverage Thresholding:** Subtract the inverse coverage term from the gradient-scaled noise to define the cloud base [S1, unofficial].
+6. **Normalization and Clamping:** Normalize the result by the coverage parameter and clamp to $[0, \infty)$ [S1, unofficial].
+7. **Extinction Scaling:** Multiply the final density by $\sigma_t$ to obtain the volumetric extinction coefficient [S1, unofficial].
+
+**Formulas:**
+The normalized height $h$ is defined as:
+$$ h = \frac{y - \text{cloudBottom}}{\text{cloudTop} - \text{cloudBottom}} $$
+
+The final density $\rho(\mathbf{x})$ is:
+$$ \rho(\mathbf{x}) = \max\left(0, \frac{\text{FBM}(\mathbf{x}) \cdot \sin(\pi h) - (1 - \text{coverage})}{\text{coverage}}\right) \cdot \sigma_t $$
+
+Where $\text{FBM}(\mathbf{x})$ is the multi-octave inverted Worley noise value [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def worley3D(x: float, y: float, z: float) -> float:
+    """
+    Computes the distance to the nearest cell center in Worley noise.
+    Uses a 3x3 grid of integer lattice points around the input coordinate.
+    """
+    # Determine the integer grid cell containing the point
+    ix = math.floor(x)
+    iy = math.floor(y)
+    iz = math.floor(z)
+    
+    min_dist_sq = float('inf')
+    
+    # Iterate over the 3x3x3 neighborhood of cells
+    for dx in range(-1, 2):
+        for dy in range(-1, 2):
+            for dz in range(-1, 2):
+                # Generate a pseudo-random vector for the cell center
+                # Using a simple hash function for determinism
+                cell_x = ix + dx
+                cell_y = iy + dy
+                cell_z = iz + dz
+                
+                # Hash function to get a random vector in [0, 1)^3
+                # This is a placeholder for a specific hash implementation;
+                # standard Worley implementations use a pre-computed lattice or hash.
+                # For implementation from text, we assume a deterministic hash H.
+                rx = hash_3d(cell_x, cell_y, cell_z)
+                ry = hash_3d(cell_y, cell_z, cell_x)
+                rz = hash_3d(cell_z, cell_x, cell_y)
+                
+                # Distance from point to cell center
+                dist_sq = (x - rx)**2 + (y - ry)**2 + (z - rz)**2
+                if dist_sq < min_dist_sq:
+                    min_dist_sq = dist_sq
+                    
+    return math.sqrt(min_dist_sq)
+
+def hash_3d(x: int, y: int, z: int) -> float:
+    """
+    Simple deterministic hash to generate a float in [0, 1).
+    """
+    # Using a standard integer hash and mapping to float
+    h = x * 374761393 + y * 668265263 + z * 1274126177
+    h = (h ^ (h >> 13)) * 1274126177
+    h = h ^ (h >> 16)
+    return abs(h % 10000) / 10000.0
+
+def worleyFBM(x: float, y: float, z: float, octaves: int = 3) -> float:
+    """
+    Computes multi-octave inverted Worley FBM.
+    """
+    sum_val = 0.0
+    freq = 1.0
+    amp = 1.0
+    total_amp = 0.0
+    
+    for i in range(octaves):
+        # Compute inverted Worley value: 1.0 - distance
+        w = 1.0 - worley3D(x * freq, y * freq, z * freq)
+        
+        # Add to sum weighted by amplitude
+        sum_val += w * amp
+        
+        # Accumulate total amplitude for normalization
+        total_amp += amp
+        
+        # Update frequency and amplitude for next octave
+        freq *= 2.0
+        amp *= 0.5
+        
+    # Return normalized sum
+    if total_amp == 0:
+        return 0.0
+    return sum_val / total_amp
+
+def compute_cloud_density(x: float, y: float, z: float, 
+                          cloud_bottom: float, cloud_top: float, 
+                          coverage: float, sigma_t: float,
+                          scale: float = 0.0008, octaves: int = 3) -> float:
+    """
+    Computes the final cloud density using Procedural 3D Worley-Perlin Fractal Noise.
+    """
+    # Step 1: Height Culling
+    if y < cloud_bottom or y > cloud_top:
+        return 0.0
+    
+    # Step 2: Coordinate Scaling
+    sx = x * scale
+    sy = y * scale
+    sz = z * scale
+    
+    # Step 3: Base Noise
+    base_noise = worleyFBM(sx, sy, sz, octaves)
+    
+    # Step 4: Height Gradient
+    h_norm = (y - cloud_bottom) / (cloud_top - cloud_bottom)
+    height_grad = math.sin(math.pi * h_norm)
+    
+    # Step 5: Raw Density
+    raw_density = (base_noise * height_grad) - (1.0 - coverage)
+    
+    # Step 6: Normalization and Clamping
+    # Avoid division by zero
+    epsilon = 1e-4
+    normalized_density = max(0.0, raw_density / (coverage + epsilon))
+    
+    # Step 7: Extinction Scaling
+    return normalized_density * sigma_t
+```
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** The normalization step divides by `coverage`. If `coverage` is 0, the result is undefined. A small epsilon ($10^{-4}$) is added to the denominator [S1, unofficial].
+- **Height Normalization:** If `cloudBottom` equals `cloudTop`, the height normalization $h$ is undefined. This should be prevented by input validation [S1, unofficial].
+- **Precision:** Worley noise involves square roots and distance calculations. Using single-precision floats may introduce minor artifacts in the noise field, but is generally acceptable for real-time rendering [S1, unofficial].
+- **Boundary Conditions:** The height gradient $\sin(\pi h)$ naturally goes to 0 at $h=0$ and $h=1$, ensuring smooth falloff at cloud boundaries [S1, unofficial].
+
+## Subtopics
+
+### Worley Noise
+A cell-based noise function that uses the distance to the nearest seed point. It produces cellular, puffy structures ideal for clouds [S1, unofficial].
+
+### Fractal Brownian Motion (FBM)
+A technique of summing multiple octaves of noise at different frequencies and amplitudes to create detailed, self-similar structures [S1, unofficial].
+
+### Inverted Worley
+Subtracting the Worley distance from 1.0 transforms the dark "cells" into bright "puffs," matching the visual appearance of cumulus clouds [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(O \cdot N^3)$ per sample, where $O$ is the number of octaves and $N$ is the neighborhood size (typically $3^3=27$ for Worley) [S1, unofficial].
+- **Memory Complexity:** $O(1)$, as the method is procedural and requires no texture lookups or data structures [S1, unofficial].
+- **Performance:** The method is computationally expensive per sample due to the hash function and distance calculations in Worley noise. However, it is efficient in terms of memory bandwidth compared to texture-based methods [S1, unofficial].
+- **Strengths:** Produces realistic, billowy cloud shapes; fully procedural and resolution-independent; no texture memory required [S1, unofficial].
+- **Limitations:** Computationally intensive; lacks the fine-scale turbulence of Perlin noise; requires careful tuning of coverage and height parameters [S1, unofficial].
+- **When to Use:** Real-time volumetric cloud rendering where procedural generation is preferred over texture-based approaches [S1, unofficial].
+
+## Background
+The method is derived from the "volumetric-clouds-wgsl" repository by nff747, which implements a real-time volumetric cloud renderer using WebGPU [S1, unofficial]. The use of inverted Worley noise for cloud density is a known technique in computer graphics, popularized by its ability to generate "billowy" structures [S1, unofficial]. The specific combination of Worley FBM, height gradient, and coverage thresholding is presented in this repository as a practical implementation for real-time rendering [S1, unofficial].
+
+## Sources
+[S1] nff747/volumetric-clouds-wgsl, https://github.com/nff747/volumetric-clouds-wgsl, fetched 2026-10-27 (unofficial)

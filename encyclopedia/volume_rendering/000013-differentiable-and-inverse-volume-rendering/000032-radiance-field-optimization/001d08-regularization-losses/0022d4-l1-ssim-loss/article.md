@@ -1,0 +1,180 @@
+# L1+SSIM Loss
+Also called: 3D Gaussian Splatting Training Loss, Photometric Loss, Training Loss
+
+## Overview
+L1+SSIM Loss is a composite photometric objective used to optimize radiance fields (specifically 3D Gaussian Splatting) by minimizing the difference between rendered images and ground-truth photographs. It combines a pixel-wise L1 error term with a structural similarity (SSIM) term to balance color accuracy with perceptual sharpness. It differs from pure MSE-based losses by being less sensitive to outliers and from pure SSIM losses by retaining strict pixel-level fidelity, addressing the blurring artifacts common in differentiable volume rendering [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A batch of camera poses $\pi$, viewing presets $T$ (e.g., material parameters or lighting conditions), and reference RGB images $\mathbf{I}$. The model parameters $\mathcal{G}$ (Gaussian positions, covariances, colors, opacities, and conditioning factors) are optimized.
+*   **Outputs:** A scalar loss value $\mathcal{L}$ and gradients with respect to $\mathcal{G}$, $\pi$, and $T$.
+
+**Data Structures:**
+*   **Reference Image $\mathbf{I}$:** A 2D tensor of shape $(H, W, 3)$ containing normalized RGB values.
+*   **Rendered Image $\hat{\mathbf{I}}$:** A 2D tensor of shape $(H, W, 3)$ produced by the differentiable renderer $\mathcal{R}$.
+*   **SSIM Window:** A local neighborhood window of size $K \times K$ (typically $11 \times 11$) used for structural similarity calculation [S1, unofficial].
+
+**Parameters:**
+*   $\lambda_s$ (or $\lambda$): Weight for the SSIM term. Default value is $0.2$ [S1, S2, unofficial].
+*   $\mathcal{L}_1$: Mean Absolute Error (MAE) between rendered and reference images.
+*   $\text{SSIM}(\cdot, \cdot)$: Structural Similarity Index Measure [S1, unofficial].
+
+**Formulas:**
+The rendered image is computed as:
+$$ \hat{\mathbf{I}} = \mathcal{R}(\mathcal{G}; \pi, T) $$
+
+The total loss is a weighted sum:
+$$ \mathcal{L} = (1 - \lambda_s) \mathcal{L}_1(\hat{\mathbf{I}}, \mathbf{I}) + \lambda_s (1 - \text{SSIM}(\hat{\mathbf{I}}, \mathbf{I})) $$
+
+Where:
+*   $\mathcal{L}_1(\hat{\mathbf{I}}, \mathbf{I}) = \frac{1}{HW} \sum_{h,w} \sum_{c \in \{R,G,B\}} | \hat{\mathbf{I}}_{h,w,c} - \mathbf{I}_{h,w,c} |$
+*   $\text{SSIM}(\hat{\mathbf{I}}, \mathbf{I})$ is the mean SSIM over the image, computed by sliding a window across both images and averaging the local SSIM scores [S1, S2, unofficial].
+
+**Steps:**
+1.  **Render:** For each camera pose $\pi$ and preset $T$ in the batch, render the image $\hat{\mathbf{I}}$ using the current Gaussian parameters $\mathcal{G}$ via the tile rasterizer $\mathcal{R}$ [S1, unofficial].
+2.  **Compute L1:** Calculate the mean absolute RGB error between $\hat{\mathbf{I}}$ and the reference $\mathbf{I}$ [S1, unofficial].
+3.  **Compute SSIM:** Calculate the Structural Similarity Index between $\hat{\mathbf{I}}$ and $\mathbf{I}$ [S1, unofficial].
+4.  **Combine:** Compute the weighted loss using $\lambda_s = 0.2$ [S1, S2, unofficial].
+5.  **Backpropagate:** Compute gradients of $\mathcal{L}$ with respect to $\mathcal{G}$, $\pi$, and $T$ using automatic differentiation through the compositing process [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def l1_ssim_loss(rendered_image, reference_image, lambda_s=0.2):
+    """
+    Compute the L1+SSIM loss for volume rendering optimization.
+    
+    Args:
+        rendered_image (Tensor): Shape (H, W, 3), normalized RGB.
+        reference_image (Tensor): Shape (H, W, 3), normalized RGB.
+        lambda_s (float): Weight for SSIM term. Default 0.2.
+        
+    Returns:
+        Tensor: Scalar loss value.
+    """
+    # 1. Compute L1 Loss (Mean Absolute Error)
+    # L1 = mean(|rendered - reference|)
+    l1_loss = torch.mean(torch.abs(rendered_image - reference_image))
+    
+    # 2. Compute SSIM Loss
+    # SSIM is typically computed using a sliding window (e.g., 11x11)
+    # We use the standard implementation from torchvision or similar
+    # Note: SSIM returns a value between -1 and 1, where 1 is perfect match.
+    # We want to minimize (1 - SSIM), so higher SSIM means lower loss.
+    ssim_value = compute_ssim(rendered_image, reference_image)
+    ssim_loss = 1.0 - ssim_value
+    
+    # 3. Combine Losses
+    # L = (1 - lambda_s) * L1 + lambda_s * (1 - SSIM)
+    total_loss = (1.0 - lambda_s) * l1_loss + lambda_s * ssim_loss
+    
+    return total_loss
+
+def compute_ssim(img1, img2, window_size=11, size_average=True):
+    """
+    Compute Structural Similarity Index.
+    Simplified implementation for clarity.
+    """
+    # Constants for stability
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+    
+    # Convert to float if necessary
+    img1 = img1.float()
+    img2 = img2.float()
+    
+    # Apply Gaussian window
+    window = create_gaussian_window(window_size, channels=3)
+    
+    # Compute local means
+    mu1 = F.conv2d(img1, window, padding=window_size//2)
+    mu2 = F.conv2d(img2, window, padding=window_size//2)
+    
+    # Compute local variances and covariance
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+    
+    sigma1_sq = F.conv2d(img1 * img1, window, padding=window_size//2) - mu1_sq
+    sigma2_sq = F.conv2d(img2 * img2, window, padding=window_size//2) - mu2_sq
+    sigma12 = F.conv2d(img1 * img2, window, padding=window_size//2) - mu1_mu2
+    
+    # Compute SSIM index
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
+               ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+    
+    if size_average:
+        return ssim_map.mean()
+    else:
+        return ssim_map
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Ensure images are normalized to $[0, 1]$ or $[-1, 1]$ consistently before computing L1 and SSIM to avoid scale mismatches [S1, unofficial].
+*   **Boundaries:** SSIM computation near image borders requires padding or window truncation to avoid artifacts [S1, unofficial].
+*   **Degenerate Input:** If the rendered image is completely black or white, SSIM may become unstable; add small constants ($C_1, C_2$) for numerical stability [S1, unofficial].
+
+## Subtopics
+
+### [Total Variation Regularization](860-total-variation-regularization.md)
+Adds spatial smoothness constraints to reduce noise. Choose when the scene has large uniform regions.
+
+### [Efficient O(N) Distortion Loss](1051-efficient-o-n-distortion-loss.md)
+Optimizes ray sampling to reduce artifacts. Choose when ray marching is the bottleneck.
+
+### [MSE Loss and PSNR Conversion](1651-mse-loss-and-psnr-conversion.md)
+Standard pixel-wise loss. Choose when PSNR is the primary metric and sharpness is less critical.
+
+### [Perceptual Loss Training](2000-perceptual-loss-training.md)
+Uses deep features for perceptual quality. Choose for high-level texture fidelity.
+
+### [Second-Order Chamfer Distance](2170-second-order-chamfer-distance.md)
+Geometric loss for point clouds. Choose when geometry alignment is prioritized over photometry.
+
+### [Color-Corrected Error Metrics](2737-color-corrected-error-metrics.md)
+Adjusts for color space differences. Choose when lighting or color calibration varies.
+
+### [Model Regularization](2912-model-regularization.md)
+General regularization techniques. Choose to prevent overfitting.
+
+### [Visibility-Based Photometric Loss](2917-visibility-based-photometric-loss.md)
+Masks out occluded regions. Choose when visibility estimation is available.
+
+### [Uncertainty Prediction Loss](2961-uncertainty-prediction-loss.md)
+Incorporates uncertainty estimates. Choose for robust optimization.
+
+### [Data Consistency Loss](2976-data-consistency-loss.md)
+Ensures consistency across views. Choose for multi-view consistency.
+
+### [Regularised Gaussian Fitting Loss](3104-regularised-gaussian-fitting-loss.md)
+Regularizes Gaussian parameters. Choose for stability in Gaussian Splatting.
+
+### [Total Loss Function](4177-total-loss-function.md)
+Combines multiple losses. Choose for comprehensive optimization.
+
+### [Joint Optimization with Loss Functions](4506-joint-optimization-with-loss-functions.md)
+Optimizes multiple parameters simultaneously. Choose for complex scenes.
+
+### [Forplane Optimization Losses](4672-forplane-optimization-losses.md)
+Specific to Forplane representations. Choose for Forplane-based rendering.
+
+### [Geometric and Normal Alignment Losses](4970-geometric-and-normal-alignment-losses.md)
+Aligns geometry and normals. Choose when geometric accuracy is critical.
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the rendering step $\mathcal{R}$ and the SSIM computation. SSIM is $O(H \cdot W \cdot K^2)$ where $K$ is the window size. L1 is $O(H \cdot W)$.
+*   **Memory Complexity:** $O(H \cdot W)$ for storing intermediate images and gradients.
+*   **Measured Performance:** With $\lambda_s = 0.2$, it typically yields higher perceptual quality (SSIM) than pure L1, while maintaining better pixel accuracy than pure SSIM [S1, S2, unofficial].
+*   **Scaling:** Scales linearly with image resolution and number of Gaussians.
+*   **Strengths:** Balances color accuracy and sharpness; robust to outliers; widely adopted in 3D Gaussian Splatting [S1, S2, unofficial].
+*   **Limitations:** SSIM computation can be slow; sensitive to $\lambda_s$ choice; may not preserve fine high-frequency details as well as perceptual losses [S1, S2, unofficial].
+*   **When to Use:** Standard photometric optimization for Gaussian Splatting and radiance fields [S1, S2, unofficial].
+*   **When Not to Use:** When geometric accuracy is more important than photometry; when real-time performance is critical and SSIM is too slow.
+
+## Background
+The L1+SSIM loss was introduced in the context of 3D Gaussian Splatting to address the blurring artifacts associated with MSE losses [S2, unofficial]. It was further adopted in appearance-controllable Gaussian proxies for medical volume rendering, where it optimizes standard photometric loss through a conditioned renderer [S1, unofficial]. The SSIM component is based on the work by Wang et al. (2004) [S1, unofficial].
+
+## Sources
+[S1] FactorSplat: Appearance-Controllable Gaussian Proxies for Medical Volume Rendering, https://doi.org/10.48550/arxiv.2610.02382, fetched 2026-10-26 (unofficial)
+[S2] An Architectural Review of the 3D Gaussian Splatting Rendering Pipeline, https://doi.org/10.5281/zenodo.21739653, fetched 2026-10-26 (unofficial)

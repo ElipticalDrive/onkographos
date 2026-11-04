@@ -1,0 +1,104 @@
+# Lambertian Lighting in SDF
+
+Also called: Diffuse Lighting Model, Dot Product Lighting, Lambert Shading, Lambertian Diffuse, Lambertian Lighting
+
+## Overview
+Lambertian Lighting in SDF computes diffuse illumination for surfaces defined by Signed Distance Fields by evaluating the dot product between the surface normal and the light direction [S2, S3, unofficial]. It solves the problem of shading ray-marched geometry without explicit mesh topology by deriving normals via finite differences and applying a standard Lambertian model in world space [S3, unofficial]. Unlike [Sphere Tracing Basics](52-sphere-tracing-basics.md), which returns a flat base color on hit, this method integrates a light direction and color to produce a shaded result [S3, unofficial].
+
+## How it works
+**Inputs:**
+- Surface position $P$ in world space.
+- Surface normal $N$ (normalized).
+- Light direction $L$ (normalized).
+- Light color $C_{light}$.
+- Base material color $C_{base}$.
+- Ambient intensity $I_{ambient}$ (optional, typically small constant).
+- Light intensity $I_{light}$ (optional, scalar multiplier).
+
+**Outputs:**
+- Final pixel color $C_{final}$.
+
+**Data Structures:**
+- Vectors are 3-component floating-point values.
+- Normals and light directions are unit vectors.
+
+**Steps:**
+1. **Compute Surface Normal:** If not provided by the SDF evaluator, compute $N$ using central finite differences of the SDF function $d(x,y,z)$ at position $P$:
+   $$ N = \text{normalize}\left( \begin{bmatrix} d(P + \epsilon, 0, 0) - d(P - \epsilon, 0, 0) \\ d(P, \epsilon, 0) - d(P, -\epsilon, 0) \\ d(P, 0, \epsilon) - d(P, 0, -\epsilon) \end{bmatrix} \right) $$
+   where $\epsilon$ is a small step size [G].
+2. **Compute Light Direction:** Determine the vector from the surface to the light source. If the light is directional, $L$ is constant. If point light at position $P_{light}$:
+   $$ L = \text{normalize}(P_{light} - P) $$
+3. **Calculate Diffuse Term:** Compute the dot product of the normal and light direction, clamping negative values to zero to prevent back-face illumination:
+   $$ \text{diff} = \max(0.0, \text{dot}(N, L)) $$
+   [S2, S3, unofficial].
+4. **Combine Lighting:** Multiply the base color by the ambient term and the diffuse term scaled by light intensity and color:
+   $$ C_{final} = C_{base} \times (I_{ambient} + \text{diff} \times I_{light}) \times C_{light} $$
+   [S1, unofficial]. If ambient is omitted, $I_{ambient} = 0$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lambertian_lighting_sdf(P, N, L, C_base, C_light, I_ambient=0.1, I_light=1.0):
+    """
+    Compute Lambertian diffuse lighting for an SDF surface.
+    
+    Args:
+        P: vec3, surface position in world space
+        N: vec3, normalized surface normal
+        L: vec3, normalized light direction (from surface to light)
+        C_base: vec3, base material color
+        C_light: vec3, light color
+        I_ambient: float, ambient intensity multiplier
+        I_light: float, light intensity multiplier
+        
+    Returns:
+        vec3, final color
+    """
+    # Step 3: Calculate diffuse term, clamping negative values to zero
+    diff = max(dot(N, L), 0.0)
+    
+    # Step 4: Combine lighting
+    # Note: S1 uses (ambient + diff * lightIntensity) * lightColor
+    # S3 uses saturate(dot(N, L)) * LightColor0, implicitly assuming base color is multiplied outside
+    # We follow S1's structure for completeness with ambient
+    color = C_base * (I_ambient + diff * I_light) * C_light
+    
+    return color
+```
+
+**Parameters:**
+- $\epsilon$ (finite difference step): Not given in the sources. [G] Typical value: $10^{-4}$ to $10^{-3}$ world units, depending on scene scale.
+- $I_{ambient}$: Not given in the sources. [G] Typical value: $0.1$ to $0.3$.
+- $I_{light}$: Not given in the sources. [G] Typical value: $1.0$.
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Normals:** If the SDF is not differentiable at the hit point (e.g., sharp edges in constructive solid geometry), finite differences may produce incorrect normals. This results in incorrect shading. [G] Mitigation: Use analytical normals if available, or smooth unions.
+- **Precision:** Small $\epsilon$ can lead to numerical noise in the normal calculation. Large $\epsilon$ can cause aliasing in the shading gradient. [G]
+- **Back-face Lighting:** The $\max(0.0, \dots)$ clamp prevents light from shining through the surface if the normal is inverted or if the ray hits the back face of a thin shell.
+
+## Subtopics
+
+### [Sphere Tracing with Shading](3812-sphere-tracing-with-shading.md)
+This method extends sphere tracing by computing diffuse lighting on surfaces defined by Signed Distance Fields (SDFs). It solves the problem of rendering shaded geometry without explicit mesh topology by deriving surface normals via finite differences and applying a Lambertian lighting model in world space. Unlike [Sphere Tracing Basics](52-sphere-tracing-basics.md), which returns a flat base color on hit, this method integrates a light direction and color to produce a shaded result.
+
+### [Phong Shading with Shadows](4356-phong-shading-with-shadows.md)
+Calculates diffuse and specular lighting using the Phong model, modulated by shadow factors.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per pixel per light source, assuming the SDF evaluation and normal computation are $O(1)$. The cost is dominated by the SDF evaluation during ray marching, not the lighting calculation itself.
+- **Memory Complexity:** $O(1)$ auxiliary memory. No additional data structures are required beyond the input vectors.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Linear with the number of light sources. Each additional light requires an additional dot product and multiplication.
+- **Strengths:** Simple to implement; computationally inexpensive; provides physically plausible diffuse shading for SDFs without requiring mesh generation.
+- **Limitations:** Does not account for shadows (unless combined with shadow ray marching); does not account for specular highlights or other BRDF effects; normal estimation via finite differences can be noisy or inaccurate at sharp features.
+- **When to use:** Real-time rendering of SDF-based geometry where performance is critical and simple diffuse shading is sufficient.
+- **When not to use:** When accurate shadows, specular highlights, or complex material interactions are required.
+
+## Background
+The Lambertian reflectance model was introduced by Johann Heinrich Lambert in the 18th century [S3, unofficial]. In the context of computer graphics and SDFs, it is commonly implemented using the dot product of the surface normal and light direction, often referred to as "N·L" shading [S3, unofficial]. The specific implementation details for sphere tracing with shading, including the use of Unity's built-in light variables, are documented in Ronja's Shader Tutorials [S3, unofficial]. The technique is widely used in real-time ray marching demos and shaders [S1, S3, unofficial].
+
+## Sources
+[S1] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
+[S2] JamesRicher/TerminalSignedDistanceFieldRenderer, https://github.com/JamesRicher/TerminalSignedDistanceFieldRenderer, fetched 2026-10-27 (unofficial)
+[S3] Sphere Tracing and Ray Marching, https://deepwiki.com/ronja-tutorials/ShaderTutorials/5-sphere-tracing-and-ray-marching, fetched 2026-10-27 (unofficial)

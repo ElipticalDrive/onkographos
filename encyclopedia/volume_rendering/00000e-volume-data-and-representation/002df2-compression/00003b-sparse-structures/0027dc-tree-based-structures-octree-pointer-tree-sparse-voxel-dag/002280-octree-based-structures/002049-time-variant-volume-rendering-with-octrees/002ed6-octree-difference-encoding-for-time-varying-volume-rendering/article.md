@@ -1,0 +1,178 @@
+# Octree-Difference Encoding for Time-Varying Volume Rendering
+
+Also called: Octree-Difference Encoding with Tree Merging, compressed volume rendering, twd-renderer encoding
+
+## Overview
+This method improves rendering rates for time-varying volume data by compressing the dataset using quantization and octree-difference encoding, allowing the renderer to skip transparent or uniform blocks [S1, S2, unofficial]. It sets itself apart from standard sparse structures by explicitly exploiting temporal coherence: identical subtrees at consecutive time steps are merged, and the rendering engine is restructured to perform selective rendering based on this merged tree representation [S1, S2, unofficial]. Unlike baseline renderers that process full volumes, this approach reduces I/O costs and inter-frame delay by up to 90% [S1, S2, unofficial].
+
+## How it works
+The method consists of an encoding phase and a rendering phase. The encoding phase prepares a compressed, temporally coherent data structure. The rendering phase traverses this structure, skipping nodes that represent transparent or uniform space.
+
+### Inputs and Outputs
+*   **Input:** A sequence of volume datasets $V_t$ for time steps $t = 0, \dots, N-1$. Each $V_t$ is a 3D grid of voxels.
+*   **Output:** A compressed, merged octree structure (compositing tree) and the ability to render frames with reduced computational cost.
+
+### Data Structures
+The core data structure is an **Octree** where each node represents a block of voxels.
+*   **Node Types:**
+    *   **Leaf Node:** Represents a uniform block of voxels. Stores the representative value (from quantization) and metadata indicating transparency or uniformity.
+    *   **Internal Node:** Represents a subdivision of space. Contains pointers to its 8 children.
+*   **Tree Merging:** If the octree structure and voxel values of a subtree at time $t$ are identical to the corresponding subtree at time $t-1$, the subtree at $t$ is merged with $t-1$. This avoids storing redundant data and allows the renderer to skip recomputation [S1, S2, unofficial].
+*   **Minimum Renderable Block:** The renderer is configured to stop at a minimum depth, corresponding to an 8-voxel block [S1, S2, unofficial]. Nodes smaller than this (1-voxel or 8-voxel merges) are not useful for rendering performance gains because a single voxel change forces re-rendering of surrounding voxels [S1, S2, unofficial].
+
+### Steps
+
+#### 1. Quantization
+The raw volume data is quantized to reduce precision and increase uniformity, facilitating compression.
+*   **Methods:** Uniform, Non-Uniform I, Non-Uniform II, or Adaptive [S1, S2, unofficial].
+*   **Selection:** The choice depends on dataset statistics. For example, Uniform quantization yields 98% compression for the Jets dataset, while Non-Uniform II yields 98% for the Thermal dataset [S1, S2, unofficial]. Non-Uniform I performs poorly on Shear flow (-7% saving) [S1, S2, unofficial].
+*   **Error:** Quantization error is typically less than 1% for the studied datasets [S1, S2, unofficial].
+
+#### 2. Octree-Difference Encoding
+The quantized data is encoded into an octree.
+*   **Spatial Coherence:** Neighboring voxels with similar values are fused into macro voxels (leaf nodes) [S1, S2, unofficial].
+*   **Temporal Coherence:** Subtrees at consecutive time steps are compared. If identical, they are merged [S1, S2, unofficial].
+*   **Encoding Cost:** On a SUN Ultra Sparc, quantization takes ~0.5 seconds per time step, and octree-difference encoding takes 3-5 seconds per time step [S1, S2, unofficial]. For 100 time steps, total encoding takes 5-10 minutes [S1, S2, unofficial].
+
+#### 3. Building the Compositing Tree
+The encoded data is organized into a compositing tree. This tree structure supports the selective rendering strategy [S1, S2, unofficial].
+
+#### 4. Selective Rendering
+During rendering, the tree is traversed.
+*   **Transparent Space:** If a node represents transparent space, it is skipped entirely [S1, S2, unofficial].
+*   **Uniform Space:** If a node represents uniform space, it is rendered as a block without ray marching [S1, S2, unofficial].
+*   **Non-Uniform Space:** If a node represents non-uniform space, standard ray marching is performed [S1, S2, unofficial].
+*   **Optimization:** The renderer uses front-to-back compositing to encourage early termination of rays [S1, S2, unofficial].
+*   **Configuration:** The renderer can be configured to stop at any depth in the tree and render immediately. The minimum number of nodes rendered is an 8-voxel block [S1, S2, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def encode_time_varying_volume(volumes):
+    """
+    Encodes a sequence of volume datasets using quantization and octree-difference encoding.
+    volumes: List of 3D arrays, where volumes[t] is the volume at time step t.
+    Returns: A list of merged octree structures, one for each time step (or merged references).
+    """
+    encoded_trees = []
+    prev_tree = None
+    
+    for t, volume in enumerate(volumes):
+        # Step 1: Quantize
+        # Choose quantization method based on dataset statistics (e.g., Uniform, Non-Uniform II)
+        # [G] Implementation detail: Apply chosen quantization map to volume
+        quantized_volume = apply_quantization(volume, method=get_quantization_method(volume))
+        
+        # Step 2: Build Octree
+        # Fuse neighboring voxels with similar values into macro voxels
+        current_tree = build_octree(quantized_volume)
+        
+        # Step 3: Tree Merging (Temporal Coherence)
+        # If current_tree is identical to prev_tree, merge them
+        # [G] Implementation detail: Compare tree structure and leaf values
+        if prev_tree is not None and trees_are_identical(current_tree, prev_tree):
+            merged_tree = merge_trees(current_tree, prev_tree)
+            encoded_trees.append(merged_tree)
+        else:
+            encoded_trees.append(current_tree)
+            
+        prev_tree = current_tree
+        
+    return encoded_trees
+
+def render_time_varying_volume(encoded_trees, transfer_function, opacity_map):
+    """
+    Renders frames from the encoded trees using selective rendering.
+    encoded_trees: List of octree structures (or merged references).
+    transfer_function: Maps voxel values to color and opacity.
+    opacity_map: Defines opacity thresholds for skipping transparent blocks.
+    Returns: Rendered image for the current time step.
+    """
+    # [G] Implementation detail: Determine current time step t
+    current_tree = encoded_trees[current_time_step]
+    
+    # Initialize image buffer
+    image = create_empty_image()
+    
+    # Step 4: Selective Rendering via Tree Traversal
+    for ray in rays_for_image(image):
+        color = (0.0, 0.0, 0.0, 0.0) # Initial transparent color
+        accumulated_opacity = 0.0
+        
+        # Traverse the tree along the ray
+        node = traverse_tree(current_tree, ray)
+        
+        while node is not None:
+            if node.is_leaf():
+                # Check if node represents transparent space
+                if is_transparent(node.value, opacity_map):
+                    # Skip rendering transparent blocks
+                    node = get_next_node_in_ray(node, ray)
+                    continue
+                
+                # Check if node represents uniform space
+                if is_uniform(node.value):
+                    # Render as a block without ray marching
+                    # [G] Implementation detail: Compute color for the block
+                    block_color = compute_uniform_block_color(node.value, transfer_function)
+                    # Front-to-back compositing
+                    color = composite_front_to_back(color, block_color, node.opacity)
+                    accumulated_opacity += node.opacity
+                    if accumulated_opacity >= 1.0:
+                        break # Early termination
+                else:
+                    # Non-uniform space: Ray march through the block
+                    # [G] Implementation detail: Sample voxels within the block
+                    for sample in ray_samples_within_block(node, ray):
+                        val = sample_value(sample, node)
+                        c, a = transfer_function(val)
+                        color = composite_front_to_back(color, c, a)
+                        accumulated_opacity += a
+                        if accumulated_opacity >= 1.0:
+                            break
+            else:
+                # Internal node: Continue traversal to children
+                node = get_next_node_in_ray(node, ray)
+                
+        set_pixel(image, ray, color)
+        
+    return image
+```
+
+### Parameters
+*   **Minimum Renderable Block Size:** 8 voxels [S1, S2, unofficial]. The renderer can be configured to stop at any depth, but the minimum number of nodes rendered is an 8-voxel block [S1, S2, unofficial].
+*   **Image Size:** Timing measurements were conducted at 128x128 pixels [S1, S2, unofficial].
+*   **Quantization Method:** Varies by dataset (Uniform, Non-Uniform I, Non-Uniform II, Adaptive) [S1, S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Small Block Compression:** Compression resulting from merging 1-voxel or 8-voxel blocks is not useful for rendering performance. A single voxel change causes surrounding voxels to be re-rendered, negating the benefit [S1, S2, unofficial].
+*   **Overhead vs. Gain:** Datasets with many small matching blocks and few large matching blocks (e.g., turbulent shear flow with non-uniform quantization) incur overhead from the octree structure that exceeds the gains from compression, leading to slower rendering than baseline [S1, S2, unofficial].
+*   **Compression Threshold:** If data are compressed by less than 50%, unless many large subtrees were merged, little rendering performance gain can be obtained [S2, unofficial].
+*   **Opacity Dependence:** Optimizations such as moving past transparent blocks and early termination are highly dependent on opacity maps. Using different opacity maps can dramatically change rendering times [S1, S2, unofficial].
+
+## Subtopics
+
+### Selective Rendering
+A rendering strategy tailored to tree structures that allows efficient rendering by reusing partial images built from subtrees that have not changed between time steps [S1, unofficial]. It restructures a ray-casting volume renderer to efficiently render encoded data and performs selective rendering based on the tree representation to reduce I/O costs [S1, unofficial]. This strategy is a key component of the twd-renderer, enabling the majority of the speedup observed in time-varying sequences [S1, S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Encoding takes ~0.5 seconds per time step for quantization and 3-5 seconds for octree-difference encoding on a SUN Ultra Sparc [S1, S2, unofficial]. For 100 time steps, total encoding takes 5-10 minutes [S1, S2, unofficial]. Rendering time depends on the number of large matching blocks (4096 voxels or larger) [S1, S2, unofficial].
+*   **Memory Complexity:** Compression rates vary by dataset and quantization method. For example, Jets dataset achieves 98% compression with Uniform quantization, while Shear flow achieves 91% [S1, S2, unofficial].
+*   **Measured Performance:**
+    *   **Turbulent Jet Flow:** First image rendered in 2.65 seconds, subsequent images at an average of 0.55 seconds. This represents an 80% increase in rendering rate between first and consecutive images and an 88% increase in overall rendering rate [S1, S2, unofficial].
+    *   **Heart Dataset:** 93% increase in overall rendering rate [S1, S2, unofficial].
+    *   **Turbulent Shear Flow:** Rendering time increases with non-uniform quantization due to many small matching blocks [S1, S2, unofficial]. At time step 30 with uniform quantization, the number of 32768-voxel blocks increases, causing an immediate response in rendering time [S2, unofficial].
+*   **Scaling:** Rendering at 256x256 requires approximately two to three times as long as rendering at 128x128 [S1, S2, unofficial].
+*   **Strengths:** Significant reduction in storage space (up to 90%) and inter-frame delay (up to 90%) [S1, S2, unofficial]. High rendering rate improvements for datasets with large uniform/transparent regions and high compression rates [S1, S2, unofficial].
+*   **Limitations:** Overhead from octree structure can exceed gains for datasets with many small matching blocks [S1, S2, unofficial]. Performance is highly dependent on opacity maps and transfer functions [S1, S2, unofficial]. Compression must be high (>50%) and involve large blocks to be effective [S2, unofficial].
+*   **When to Use:** Time-varying volume data with high spatial and temporal coherence, large uniform/transparent regions, and high compression rates [S1, S2, unofficial].
+*   **When Not to Use:** Datasets with many small matching blocks and few large matching blocks, or when compression rate is low (<50%) without large subtree merges [S1, S2, unofficial].
+
+## Background
+The method was developed for the 'twd-renderer' for time-varying volume data visualization [S2, unofficial]. It builds on the concept of using octree compression to fit multiple timesteps into main memory, overcoming GPU memory and bus bandwidth limitations [Parent]. The technique was presented in a 1998 NASA Technical Report and DTIC document [S1, S2, unofficial]. The research demonstrated that combining spatial compression (octree) and temporal compression (tree merging) could achieve tremendous savings in storage and rendering time, justifying interactive visualization of time-varying data [S1, S2, unofficial].
+
+## Sources
+[S1] NASA Technical Reports Server (NTRS) 19980217078: Efficient Encoding and Rendering of Time-Varying Volume Data, https://archive.org/details/NASA_NTRS_Archive_19980217078, fetched 2026-10-26 (unofficial)
+[S2] DTIC ADA349761: Efficient Encoding and Rendering of Time-Varying Volume Data, https://archive.org/details/DTIC_ADA349761, fetched 2026-10-26 (unofficial)

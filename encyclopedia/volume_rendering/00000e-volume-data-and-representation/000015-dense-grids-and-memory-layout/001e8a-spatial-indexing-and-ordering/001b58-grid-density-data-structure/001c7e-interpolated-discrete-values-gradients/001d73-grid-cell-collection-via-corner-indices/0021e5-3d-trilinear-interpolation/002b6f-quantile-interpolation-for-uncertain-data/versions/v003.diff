@@ -1,0 +1,98 @@
+--- v002.md
++++ v003.md
+@@ -57,7 +57,7 @@
+ ```python
+ def interpolate_quantile_density(Pr_vertices, alpha, beta, gamma):
+-    """Computes the interpolated probability density for a single quantile index j.
+-    Pr_vertices: list of 8 floats, Pr_i = Pr(Q_ij) for i in 1..8
+-    Returns: Pr(Q_j) for the interpolated point.
++    """Computes the interpolated probability density for a single quantile index j [S1].
++    Pr_vertices: list of 8 floats, Pr_i = Pr(Q_ij) for i in 1..8 [S1]
++    Returns: Pr(Q_j) for the interpolated point [S1].
+     """
+     Pr1, Pr2, Pr3, Pr4, Pr5, Pr6, Pr7, Pr8 = Pr_vertices
+@@ -93,9 +93,20 @@
+     return numerator / denominator
+ 
++def trilinear_interpolate(v000, v001, v010, v011, v100, v101, v110, v111, alpha, beta, gamma):
++    """Standard trilinear interpolation for scalar values like mean intensities [G]."""
++    c00 = v000 * (1-alpha) + v100 * alpha
++    c01 = v001 * (1-alpha) + v101 * alpha
++    c10 = v010 * (1-alpha) + v100 * alpha # Note: v100 reused in source logic, corrected to v110 below
++    c10 = v010 * (1-alpha) + v110 * alpha
++    c11 = v011 * (1-alpha) + v111 * alpha
++    t0 = c00 * (1-beta) + c10 * beta
++    t1 = c01 * (1-beta) + c11 * beta
++    return t0 * (1-gamma) + t1 * gamma
++
+ def ray_march_quantile_volume(ray_origin, ray_direction, step_size, grid_quantiles, grid_means, grid_size, qval, tf_sample):
+     """
+-    grid_quantiles: L x M x N array, each element is a list of q densities.
+-    grid_means: L x M x N array, each element is a list of q mean intensities.
+-    tf_sample(intensity) -> (color_rgb, opacity_float)
++    grid_quantiles: L x M x N array, each element is a list of q densities [G]
++    grid_means: L x M x N array, each element is a list of q mean intensities [G]
++    tf_sample(intensity) -> (color_rgb, opacity_float) [G]
+     """
+     color = [0.0, 0.0, 0.0]
+@@ -122,10 +133,10 @@
+         # Since w_k = qval / Pr(Q_k), p = qval^2 * sum(1/Pr(Q_k))
+         # However, the source defines Pr(x=m_j) = (qval * w_j) / sum(qval * w_k)
+-        # which simplifies to w_j / sum(w_k).
++        # which simplifies to w_j / sum(w_k) [S1].
+         sum_widths = 0.0
+         weighted_color = [0.0, 0.0, 0.0]
+         
+         for j in range(len(grid_quantiles[0][0][0])):
+-            # Extract densities for j-th quantile from 8 vertices
++            # Extract densities for j-th quantile from 8 vertices [G]
+             Pr_vertices = [
+                 grid_quantiles[0][0][0][j], grid_quantiles[0][0][1][j],
+@@ -139,14 +150,16 @@
+             sum_widths += w_j
+             
+-            # Get mean intensity for this quantile at interpolated point
+-            m_j = interpolate_quantile_density([grid_means[0][0][0][j], grid_means[0][0][1][j],
+-                                                grid_means[0][1][0][j], grid_means[0][1][1][j],
+-                                                grid_means[1][0][0][j], grid_means[1][0][1][j],
+-                                                grid_means[1][1][0][j], grid_means[1][1][1][j]], alpha, beta, gamma)
++            # Get mean intensity for this quantile at interpolated point via standard trilinear interpolation [G]
++            m_j = trilinear_interpolate(
++                grid_means[0][0][0][j], grid_means[0][0][1][j],
++                grid_means[0][1][0][j], grid_means[0][1][1][j],
++                grid_means[1][0][0][j], grid_means[1][0][1][j],
++                grid_means[1][1][0][j], grid_means[1][1][1][j], alpha, beta, gamma
++            )
+             
+             # Sample Transfer Function
+             c_j, o_j = tf_sample(m_j)
+             
+-            # Weight by discrete probability Pr(x=m_j) = w_j / sum_widths
++            # Weight by discrete probability Pr(x=m_j) = w_j / sum_widths [S1]
+             prob = w_j / sum_widths
+             weighted_color[0] += c_j[0] * prob
+@@ -154,9 +167,19 @@
+             weighted_color[2] += c_j[2] * prob
+             
+-        # Accumulate into ray
+-        color[0] += weighted_color[0] * o_j * (1.0 - opacity)
+-        color[1] += weighted_color[1] * o_j * (1.0 - opacity)
+-        color[2] += weighted_color[2] * o_j * (1.0 - opacity)
+-        opacity += o_j * (1.0 - opacity)
++        # Accumulate into ray using standard front-to-back compositing [G]
++        cell_opacity = sum(w_j / sum_widths * o_j for w_j, o_j in zip([qval/interpolate_quantile_density([grid_quantiles[x][y][z][j] for x in (0,1) for y in (0,1) for z in (0,1)] for j in range(len(grid_quantiles[0][0][0]))], [tf_sample(trilinear_interpolate(*[grid_means[x][y][z][j] for x in (0,1) for y in (0,1) for z in (0,1)], alpha, beta, gamma)[1] for j in range(len(grid_quantiles[0][0][0])))]))
++        # Simplified opacity accumulation for clarity:
++        cell_opacity = 0.0
++        for j in range(len(grid_quantiles[0][0][0])):
++            Pr_vertices = [grid_quantiles[x][y][z][j] for x in (0,1) for y in (0,1) for z in (0,1)]
++            w_j = qval / interpolate_quantile_density(Pr_vertices, alpha, beta, gamma)
++            m_j = trilinear_interpolate(*[grid_means[x][y][z][j] for x in (0,1) for y in (0,1) for z in (0,1)], alpha, beta, gamma)
++            _, o_j = tf_sample(m_j)
++            cell_opacity += (w_j / sum_widths) * o_j
++            
++        color[0] += weighted_color[0] * cell_opacity * (1.0 - opacity)
++        color[1] += weighted_color[1] * cell_opacity * (1.0 - opacity)
++        color[2] += weighted_color[2] * cell_opacity * (1.0 - opacity)
++        opacity += cell_opacity * (1.0 - opacity)
+         
+         if opacity >= 0.99:

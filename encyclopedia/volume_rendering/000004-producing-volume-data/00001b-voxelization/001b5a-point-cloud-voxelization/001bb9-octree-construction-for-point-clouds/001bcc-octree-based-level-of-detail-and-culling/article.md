@@ -172,4 +172,4 @@ This method is described in the context of a point cloud rendering engine using 
 
 ## Sources
 
-[S1] arminkz/PointCloudRendering, https://github.com/arminkz/PointCloudRendering, fetched 2026-10-28 [S1, unofficial]
+[S1] arminkz/PointCloudRendering, https://github.com/arminkz/PointCloudRendering, fetched 2026-10-28 (unofficial)

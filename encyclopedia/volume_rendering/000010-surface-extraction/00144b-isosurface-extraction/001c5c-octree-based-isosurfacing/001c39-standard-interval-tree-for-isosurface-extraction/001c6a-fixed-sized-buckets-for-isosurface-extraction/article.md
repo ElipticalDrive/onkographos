@@ -1,0 +1,126 @@
+# Fixed-Sized Buckets for Isosurface Extraction
+
+Also called: Fixed-Sized Buckets, Isosurface Extraction Using Fixed-Sized Buckets, SpanQuad, SpanQuad method, Waters-Co-Joy Method
+
+## Overview
+Fixed-Sized Buckets is an output-optimal algorithm for accelerated isosurface extraction from volumetric data sets [S1, unofficial]. It identifies active cells (cells intersected by the isosurface) with work proportional to the output size rather than the input size, using a logical 2D array data structure to sort cells by intensity ranges [S1, unofficial]. It sets itself apart from its parent [Standard Interval Tree for Isosurface Extraction](1230-standard-interval-tree-for-isosurface-extraction.md) by using a simpler array-based structure that avoids tree traversal overhead, and from siblings like [Interval Table for Isosurface Extraction](4357-interval-table-for-isosurface-extraction.md) by relying on two-pass sorting rather than interval merging [S1, unofficial].
+
+## How it works
+**Inputs:** An array $R$ of $N$ cell records, where each record contains a handle to the cell, its minimum intensity value ($min$), and its maximum intensity value ($max$). A user-defined bucket size $B$. An isovalue $q$.
+**Outputs:** A list of active cells intersected by the isosurface defined by $q$.
+
+**Data Structures:**
+The method maintains a logical 2D array implemented as a 1D array `m_cells` of `Record` structs.
+*   `struct Record`: Contains `CellHandle cell`, `Type min`, and `Type max`. `Type` depends on the data precision (e.g., float, int) [S1, unofficial].
+*   `m_cells`: Stores all $N$ records. The array is divided into buckets of size $B$.
+*   `m_min_dict`: An array of size `num_buckets` storing the `min` value of the last cell in each bucket. This acts as a lookup table to quickly identify active buckets [S1, unofficial].
+*   `m_last_bkt`: The index of the last bucket.
+*   `m_last_bkt_len`: The number of cells in the last bucket (which may be smaller than $B$) [S1, unofficial].
+
+**Construction:**
+1.  **Sort by Min:** Sort all $N$ records in `m_cells` by their `min` value in ascending order [S1, unofficial].
+2.  **Calculate Buckets:** Compute `num_buckets = N / B + 1`. Set `m_last_bkt = num_buckets - 1` and `m_last_bkt_len = N - m_last_bkt * B` [S1, unofficial].
+3.  **Build Min-Dictionary:** For each bucket $i$ from $0$ to `m_last_bkt - 1`, set `m_min_dict[i]` to the `min` value of the last cell in that bucket (index $(i+1)*B - 1$). Set `m_min_dict[m_last_bkt]` to the `min` value of the last cell in the entire array (index $N-1$) [S1, unofficial].
+4.  **Sort by Max:** Within each bucket, resort the records by their `max` value in descending order. For full buckets ($i < m\_last\_bkt$), sort $B$ cells starting at `m_cells[i*B]`. For the last bucket, sort `m_last_bkt_len` cells starting at `m_cells[m_last_bkt*B]` [S1, unofficial].
+
+**Full Extraction:**
+Given isovalue $q$:
+1.  **Outer Loop (Active Buckets):** Iterate through buckets $c_0, c_1, \dots$ using `m_min_dict`. A bucket $c_i$ trivially satisfies the min-criterion if `m_min_dict[i] >= q`. Let $c_a$ be the final active bucket where `m_min_dict[a] < q`. All buckets $c_0 \dots c_{a-1}$ satisfy the min-criterion trivially [S1, unofficial].
+2.  **Inner Loop (Normal Buckets):** For each bucket $c_i$ where $i < a$, traverse its records. Since records are sorted by `max` descending, collect cells as active as long as `record.max >= q`. Stop when `record.max < q` or the end of the bucket is reached. These active cells form a contiguous block at the start of the bucket [S1, unofficial].
+3.  **Special Case (Last Active Bucket $c_a$):** For bucket $c_a$, the min-criterion is not trivially satisfied. Iterate through all records in this bucket (up to `lim` records, where `lim` is $B$ or `m_last_bkt_len`). For each record, check both `record.max >= q` AND `q >= record.min`. If both hold, the cell is active. Active cells in this bucket may be non-contiguous [S1, unofficial].
+
+**Incremental Extraction (Increasing Isovalue $q' > q$):**
+Maintain markers for each bucket tracking the last visited cell during the previous extraction [S1, unofficial].
+1.  **Identify Bucket Categories:**
+    *   Buckets $c_0 \dots c_{a-1}$ remain active but may contain cells that become inactive (deactivation needed).
+    *   Bucket $c_a$ remains active but may have interleaved active/inactive cells (activation/deactivation needed).
+    *   New buckets $c_{a+1} \dots c_{a'}$ become active (activation needed) [S1, unofficial].
+2.  **Process:** Use markers to skip cells known to be unchanged. For deactivation, check cells from the marker to the end of the active block. For activation, check new buckets and the split region in $c_a$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class SpanQuad:
+    def __init__(self, B):
+        self.B = B
+        self.m_cells = None
+        self.m_min_dict = None
+        self.m_last_bkt = 0
+        self.m_last_bkt_len = 0
+
+    def construct(self, R, N):
+        # Step 1: Sort all cells by min
+        # Assuming R is a list of objects with .min, .max, .cell
+        R.sort(key=lambda x: x.min)
+        self.m_cells = R
+
+        # Step 2: Calculate bucket parameters
+        num_buckets = N // self.B + 1
+        self.m_last_bkt = num_buckets - 1
+        self.m_last_bkt_len = N - self.m_last_bkt * self.B
+
+        # Step 3: Create min-dictionary
+        self.m_min_dict = [0] * num_buckets
+        for i in range(self.m_last_bkt):
+            # Last cell in bucket i is at index (i+1)*B - 1
+            self.m_min_dict[i] = self.m_cells[(i + 1) * self.B - 1].min
+        
+        # Last bucket's min-dict entry is the last cell in the entire array
+        self.m_min_dict[self.m_last_bkt] = self.m_cells[N - 1].min
+
+        # Step 4: Sort each bucket by max (descending)
+        for i in range(self.m_last_bkt):
+            # Sort B cells starting at i*B
+            start_idx = i * self.B
+            end_idx = start_idx + self.B
+            self.m_cells[start_idx:end_idx].sort(key=lambda x: x.max, reverse=True)
+        
+        # Sort the last bucket
+        start_idx = self.m_last_bkt * self.B
+        end_idx = start_idx + self.m_last_bkt_len
+        self.m_cells[start_idx:end_idx].sort(key=lambda x: x.max, reverse=True)
+
+    def search(self, q, add_cell_callback):
+        cb = 0
+        # Normal active buckets: trivially satisfy min-criterion
+        while cb < self.m_last_bkt and q >= self.m_min_dict[cb]:
+            rec = 0
+            start_idx = cb * self.B
+            # Traverse records in this bucket
+            for i in range(start_idx, start_idx + self.B):
+                record = self.m_cells[i]
+                if record.max >= q:
+                    add_cell_callback(record.cell)
+                    rec += 1
+                else:
+                    # Since sorted by max descending, remaining cells fail max-criterion
+                    break
+        
+        # Last active bucket c_a
+        lim = self.m_last_bkt_len if cb == self.m_last_bkt else self.B
+        start_idx = cb * self.B
+        for i in range(start_idx, start_idx + lim):
+            record = self.m_cells[i]
+            if record.max >= q and q >= record.min:
+                add_cell_callback(record.cell)
+```
+
+## Subtopics
+
+### [Incremental Isosurface Extraction](1303-incremental-isosurface-extraction.md)
+An optimization that reuses state from a previous query to accelerate new queries by tracking active/inactive cell boundaries via markers, avoiding full re-scanning. It builds on Fixed-Sized Buckets by maintaining boundary markers that allow the algorithm to skip over cells whose active status is known to be unchanged.
+
+## Operating characteristics
+**Time Complexity:** Construction is $O(N \log N)$, dominated by the first sorting pass. The second pass is $O((N/B) \cdot B \log B) = O(N \log B)$, which is subsumed if $B$ is constant [S1, unofficial]. Initial extraction and average-case runtime complexity is $O(K)$, where $K$ is the number of active cells, making it output optimal [S1, unofficial]. Worst-case performance is $O(N)$ [S1, unofficial].
+**Memory Complexity:** The method incurs a $3 + 1/B$ factor increase in memory consumption relative to the input data, or $3 + 2/B$ if incremental search is desired. For large $B$, this factor is effectively 3 [S1, unofficial].
+**Strengths:** Simple implementation, output optimal average-case performance, works with floating-point and quantized data, small memory footprint [S1, unofficial].
+**Limitations:** Worst-case $O(N)$ performance. The last active bucket requires checking all $B$ cells, which can be a bottleneck if $B$ is large and the isosurface is sparse in that region [S1, unofficial].
+**When to use:** When output optimality is critical and the data distribution allows for efficient bucketing. Suitable for large-scale visualization systems where incremental extraction is beneficial [S1, unofficial].
+
+## Background
+The method was introduced by Kenneth W. Waters, Christopher S. Co, and Kenneth I. Joy at the University of California, Davis [S1, unofficial]. It is used in the SpanQuad class implementation for isosurface extraction, demonstrated with Engine and Kyle unstructured flow simulation data sets [S1, unofficial]. The method is amenable to out-of-core implementation using out-of-core sorting algorithms [S1, unofficial].
+
+## Sources
+[S1] Isosurface Extraction Using Fixed-Sized Buckets, https://doi.org/10.2312/vissym/eurovis05/207-214, fetched 2026-10-26 (unofficial)

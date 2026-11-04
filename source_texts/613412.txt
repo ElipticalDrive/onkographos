@@ -1,0 +1,235 @@
+Cross-platform voxel sandbox engine built from scratch in C++20 with Vulkan and SDL3. - feat(renderer): pack voxel mesh vertices and move chunk origin to per-draw data (issue #110) by gkehren · Pull Request #125 · gkehren/ft_vox
+
+feat(renderer): pack voxel mesh vertices and move chunk origin to per-draw data (issue #110) by gkehren · Pull Request #125 · gkehren/ft_vox · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+gkehren
+commented
+Sep 6, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Implements #110: voxel mesh vertices are packed from 28 to 16 bytes (−42.86 %) with chunk-local coordinates, and the chunk world origin moves to per-draw data (VoxelDrawData SSBO indexed via firstInstance/gl_InstanceIndex) — no per-chunk descriptor binds or updates, fully compatible with the arenas/indirect architecture from #109/#121.
+Vertex format (28 → 16 bytes)
+```
+struct Vertex {
+    uint32_t packedPos;        // X 9 bits, Y 14 bits, Z 9 bits @ scale 1/16
+    uint32_t packedData;       // normal | texIndex | biome | AO | skyLight | blockLight
+    uint16_t texCoordU;        // greedy UVs are integer block extents
+    uint16_t texCoordV;
+    uint32_t packedBiomeColor; // RGBA8
+};
+```
+Position ranges vs actual geometry: X/Z are chunk-local 0..16 (9 bits @ 1/16 → 0..31.94 covers greedy endpoints at chunk/section boundaries); Y covers 0..256 face vertices (14 bits @ 1/16 → 0..1023). Unit tests round-trip every integer boundary (0..16 × 0..256 × 0..16) and the 1/16-grid plant offsets exactly — no cracks by construction, and precision no longer depends on world distance at all.
+UV semantics preserved: greedy UVs are integer block extents and plant/LOD UVs are 0/1 — uint16 stores them exactly, so texture tiling behavior is bit-identical (no normalization anywhere).
+Mesher emits the packed format directly (buildSectionGreedy, plant quads, buildLODMeshRanged) — no 28-byte intermediate + conversion pass. Plant geometry was re-anchored from arbitrary decimals (.05/.1/.9/.95) to the 1/16 grid (1/16, 2/16, 14/16, 15/16), which the packing can represent exactly; visually verified in-game.
+VertexHasher updated; operator== is field-exact; decodePosition(origin) / decodeTexCoord() give tests a canonical semantic representation.
+Per-draw origin
+VoxelDrawData { ivec3 worldOrigin; uint flags; } (16 B, std430) in a frame-mapped SSBO at set 0, binding 2. The descriptor is written once per frames-in-flight buffer at init (no mid-command-buffer updates, per project convention).
+Each collected draw writes its entry and carries its table index in VkDrawIndexedIndirectCommand::firstInstance; the vertex shaders reconstruct worldPos = chunkOrigin + unpack(packedPos). gl_InstanceIndex includes firstInstance per Vulkan semantics — no extra feature.
+Disjoint table regions per pass (opaque 0, water 65 536, shadow 131 072 + cascade × 65 536; 393 216 entries / 6 MiB per frame), partial vmaFlushAllocation per pass, and the FT_VOX_DRAW_DIRECT diagnostic path is kept working (same table, firstInstance as the draw's firstInstance).
+Chunk::IndirectDraw carries chunkOrigin in the per-chunk cache ([Vulkan/Performance] Replace per-chunk mesh buffers with shared GPU arenas and indirect drawing #109), so populating the table is a straight copy per draw — no extra chunk lookups in the record path.
+Shaders
+terrain.vert, shadow.vert, water.vert: aPos → uint aPackedPos, aTexCoord → uvec2, identical unpack (same masks/scale as CPU), world position reconstructed before foliage wind (wind phase uses world position exactly as before). Fragment shaders unchanged.
+Review follow-up (drawIndirectFirstInstance + layout hardening)
+Vulkan drawIndirectFirstInstance is now explicitly queried and enabled - it is required for firstInstance-indexed per-draw data and was previously left off, leaving the per-draw origin silently ignored on strictly-conformant implementations. Devices lacking it are rejected cleanly at initialization; startup logs drawIndirectFirstInstance=yes.
+The per-frame draw-data table layout is centralized in Renderer/VoxelDrawDataLayout.hpp (single source for the opaque/water/shadow-per-cascade regions and total count derived from shadow::kCascadeCount - 5 regions of 65 536 entries, static-asserted non-overlapping); the three passes share it and Debug-assert base + count <= kEntryCount.
+Vertex::packPosition uses named bit constants and Debug range asserts (no more silent masking); layout static_asserts lock the attribute offsets to the Vulkan vertex-input declarations.
+The out-of-scope network test port change was reverted (54321 restored) - the WinNAT issue needs an ephemeral-port fix of its own, not a third magic port.
+The gl_InstanceIndex == firstInstance contract (instanceCount is always 1) is documented in all three vertex shaders.
+Tests & validation
+test_render_helpers: packed-position round-trip at all integer boundaries (X 0..16, Y 0..256 step 16, Z 0..16), plant 1/16 fractions, UV precision, the contract maximum (CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE), struct size/offset static_asserts.
+test_mesh_facekey / test_mesh_result_pool / test_mesh_upload green.
+Full CTest Release: 20/21 - the single failure is NetworkIntegrationTest, pre-existing and environmental (its restored hard-coded port 54321 sits in a Windows/WinNAT excluded range; bind fails before the test body, reproduced on a fresh main binary).
+Vulkan drawIndirectFirstInstance=yes logged; FT_VOX_VALIDATION=1 FT_VOX_VALIDATE_INDIRECT=1 and the FT_VOX_DRAW_DIRECT=1 diagnostic path both run with 0 new VUIDs (only the two known pre-existing swapchain/imageView VUIDs on main).
+Visual: spawn view (trees/snow/water/foliage coherent, no seams), (10000, 110, 10000) smooth greedy water, and (+1 000 000, -1 000 000) - river, forests, beaches and water all seam-free at a megablock from the origin, which is precisely the precision win of chunk-local vertices + exact ivec3 origins.
+Post-review 30 s smoke (grade S, 9920): vertex upload ~82 KB/frame (-45 %), gpu.live 8 arena pages (-25 %), GPU Shadow 0.178 ms (-28 %), Opaque parity - magnitudes match the A/B.
+Benchmarks
+Two sets in docs/benchmarks/issue110/:
+Preliminary 10 s run (kept, provenance caveat documented: its PR-side report was built from a dirty tree so the label shows the parent hash): vertex bytes −34.9 %, cpu mesh −28.4 %, arena high-water −41 MB, staging peak −17.4 %, GPU shadow −31 %, Record −8.9 %.
+Interleaved 30 s A/B, 3 clean-tree pairs vs main c868716 (M,P,M,P,M,P):
+Metric
+main
+PR
+Δ
+upload.vertexBytes / frame
+148-157 KB
+80-88 KB
+≈ −45 % (28→16 ratio)
+upload.indexBytes / frame
+33-35 KB
+32-35 KB
+parity (indices unchanged)
+cpu.mesh.capacityBytes
+19.6-21.2 MB
+13.7-16.6 MB
+−25…−31 %
+gpu.live.bytes
+1.07 GB (10 pages)
+0.81 GB (8 pages)
+−25 %
+Record avg
+0.362-0.387 ms
+0.333-0.366 ms
+≈ −5 % (noise)
+GPU Shadow avgMs
+0.253-0.291
+0.181-0.212
+−28 %
+GPU Opaque avgMs
+0.986-1.039
+0.947-1.049
+parity
+Score
+9909-9922 (S)
+9911-9916 (S)
+parity
+The flat index bytes alongside −45 % vertex bytes confirm the gain is exactly the stride change (no geometry change); the shadow pass benefits most because it re-fetches the entire scene per cascade — the "GPU vertex-fetch must not regress" acceptance is met with margin.
+Acceptance criteria
+✅ No world-space float32 XYZ per vertex (chunk-local packed + per-draw origin)
+✅ Origin via per-draw data, indirect-compatible (firstInstance/gl_InstanceIndex), zero per-chunk descriptor work
+✅ Stride 16 bytes ≤ 16 target
+✅ Tiling/AO/lighting/normals/tex indices/biome colors preserved (exact UV integers, unpack identical CPU/GPU)
+✅ Boundaries + far coordinates crack-free (round-trip tests + visual at 10k blocks)
+✅ Mesher emits packed directly
+✅ CPU mesh / staging / GPU mesh bytes reported before/after
+✅ GPU fetch: Shadow −28 %, Opaque/Water parity
+✅ CPU MeshBuild within noise (packing is branch-free integer math at emission)
+✅ Vertex-input declarations covered by helpers tests + Vulkan validation run
+Close #110
+gkehren
+added 5 commits
+September 6, 2026 20:03
+feat(renderer): pack voxel mesh vertices and move chunk origin to per…
+…
+ff33f49
+```
+…-draw data (closes #110)
+
+- Reduce voxel Vertex stride from 28 bytes to 16 bytes (42.86% reduction)
+- Store vertex positions in chunk-local packed integer/sub-voxel coordinates
+- Pass per-draw chunk origin via VoxelDrawData SSBO bound to set 0, binding 2
+- Index draw data using gl_InstanceIndex via firstInstance in indirect draws
+- Reconstruct world position in terrain, shadow, and water vertex shaders
+- Preserve exact greedy UV tiling, AO, lighting, normals, and plant geometry
+- Update architecture documentation and add A/B benchmark reports
+```
+bench(renderer): interleaved 30 s A/B + visual validation for packed …
+…
+9d9f2b2
+```
+…vertices (#110)
+
+3 clean-tree pairs vs main c868716 confirm the 10 s preliminary numbers
+at scale: vertex upload bytes -45% (28->16 ratio) with index bytes flat,
+cpu mesh -25..-31%, gpu live 10 -> 8 arena pages, Record within noise,
+GPU Shadow -28% (vertex fetch per cascade), Opaque/Water parity, grade S
+both sides. Also notes the dirty-tree provenance of the preliminary PR
+report and records the two-view visual validation (spawn vegetation and
+10k-blocks-away water surface).
+
+Refs #110
+```
+fix(vulkan): require drawIndirectFirstInstance for per-draw voxel data (
+…
+0a44f83
+```
+#110)
+
+The packed-vertex renderer writes a non-zero firstInstance into every
+VkDrawIndexedIndirectCommand (and uses it in the FT_VOX_DRAW_DIRECT
+diagnostic path) to index the per-frame VoxelDrawData table in the
+vertex shaders. Honoring firstInstance is optional in Vulkan: without
+the core-1.0 drawIndirectFirstInstance feature enabled, the field is
+ignored and every chunk renders at the world origin.
+
+The feature is now queried, explicitly enabled, and devices lacking it
+are rejected at initialization with an explicit error instead of
+silently mis-rendering. Startup logging reports it next to
+multiDrawIndirect.
+
+Refs #110
+```
+refactor(renderer): harden packed vertex and draw-data layout (#110)
+…
+45bce39
+```
+- New VoxelDrawDataLayout.hpp: single source of truth for the per-frame
+  draw-data table (opaque / water / shadow-per-cascade regions and total
+  entry count derived from shadow::kCascadeCount - 5 regions of 65536
+  entries, not the previous ad-hoc 6-region 393216 count). The passes
+  and WorldRenderer now share these constants; region non-overlap is
+  static_asserted.
+- Debug asserts in all three passes: base + count never leaves the
+  table.
+- Vertex::packPosition: named bit constants (kXBits/kYBits/kZBits +
+  masks/maxima), Debug range asserts instead of silent masking, and
+  layout static_asserts locking the attribute offsets to the Vulkan
+  vertex-input declarations (R32/R32/R16G16/R32 at 0/4/8/12).
+- test_render_helpers: explicit contract-maximum round-trip
+  (CHUNK_SIZE, CHUNK_HEIGHT, CHUNK_SIZE) and static range coverage
+  checks.
+- Revert the out-of-scope network test port change (54321 restored);
+  the WinNAT port-range problem needs its own fix (ephemeral port), not
+  a third magic port.
+- Document the gl_InstanceIndex == firstInstance contract (instanceCount
+  is always 1) in the three vertex shaders.
+
+Refs #110
+```
+bench(renderer): post-review validation smoke for packed vertices (#110)
+…
+cb81bf6
+```
+Clean 30 s run on the review-fix HEAD: grade S (9920), vertex upload
+~82 KB/frame (-45% vs main), gpu.live 8 arena pages (-25%), GPU Shadow
+0.178 ms (-28%), Opaque parity - all magnitudes match the A/B. Vulkan
+validation re-run on both indirect and FT_VOX_DRAW_DIRECT paths: only
+the two known pre-existing VUIDs, none new, with
+drawIndirectFirstInstance=yes logged at startup. Visual check at
+(+1e6, -1e6): terrain, river, water and foliage render seam-free.
+
+Refs #110
+```
+Hide details
+View details
+gkehren
+merged commit d66dd11
+into
+main
+Sep 6, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+gkehren
+deleted the
+issue-110-packed-voxel-vertices
+branch
+September 6, 2026 19:13
+gkehren
+mentioned this pull request
+Sep 6, 2026
+feat(entities): passive mobs - cow, pig, sheep and chicken
+#126
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

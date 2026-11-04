@@ -1,0 +1,116 @@
+# Projection-Based Ray Casting for Curvilinear Grids
+
+Also called: Hong and Kaufman hexahedron traversal, Hong and Kaufman method
+
+## Overview
+Projection-Based Ray Casting is a direct volume rendering technique for curvilinear hexahedral grids that determines cell traversal by projecting cell faces onto the 2D image plane [S1, unofficial]. It solves the problem of efficiently finding entry and exit points in irregular, non-planar meshes by avoiding complex 3D geometric intersection tests for every cell, instead relying on 2D screen-space projection and ray-crossing tests [S1, unofficial]. Unlike general traversal methods that require pre-computed topological structures, this method uses on-the-fly decomposition and 2D projection, making it suitable for irregular sampling densities [S1, unofficial][S2].
+
+## How it works
+The method operates on a curvilinear grid where each element is a six-sided cell with non-planar, non-orthogonal faces [S2]. The algorithm finds the first face along the ray observed from the viewpoint by scan-converting all boundary faces onto the image plane, then projects all faces to find exit points [S1, unofficial].
+
+**Inputs and Outputs:**
+- Input: Curvilinear grid data (hexahedral elements), scalar values associated with nodes, viewpoint parameters (eye position, direction, projection matrix) [S1, unofficial][S2].
+- Output: Composited color and opacity for each pixel [S2].
+
+**Data Structures:**
+- **Hexahedron Representation:** Each hexahedron is decomposed on the fly into twelve triangles to ensure planarity for intersection calculations [S1, unofficial][S2]. A hexahedron has 6 faces; each face is split into 2 triangles, resulting in 12 triangles per cell [S1, unofficial][S2].
+- **Image Plane:** 2D buffer storing depth and color information [G].
+- **Active Element List / Scan Line List:** Data structures to reduce the number of intersection calculations by tracking elements intersecting the current scan line or pixel [S2].
+
+**Steps:**
+1. **Boundary Face Scan-Conversion:** Scan-convert all boundary faces of the volume onto the image plane to identify the first face along the ray observed from the viewpoint [S1, unofficial]. This determines the entry hexahedron.
+2. **Triangle Decomposition:** For the current hexahedron, decompose all 6 faces into 12 triangles on the fly [S1, unofficial][S2].
+3. **Projection:** Project all 12 triangles onto the image plane [S1, unofficial].
+4. **Entry Point Determination:** The entry point is determined by the scan-conversion step or by finding the intersection of the ray with the entry face's triangles [S1, unofficial].
+5. **Exit Point Determination (Original Approach):** Test the remaining 11 triangles sequentially until an intersected triangle (exit face) is found [S1, unofficial].
+6. **Exit Point Determination (Follow-up Approach):** Group the remaining 11 triangles and project them onto the image plane [S1, unofficial]. Use a ray-crossing technique to find the exiting triangle [S1, unofficial].
+   - **Ray-Crossing Technique:** A point $P$ is inside a 2D polygon if a horizontal ray starting from $P$ and shooting infinitely to the right crosses the polygon edges an odd number of times [S1, unofficial]. By checking how many times this horizontal ray crosses the edges of the projected triangles, the exiting triangle is determined [S1, unofficial].
+7. **Ray-Intersection and Integration:** Compute the intersection of the ray with the entry and exit triangles [S2]. Interpolate scalar values along the ray segment within the hexahedron; these values are computed together with the depth as part of the ray-triangle intersection test [S1, unofficial].
+8. **Compositing:** Accumulate the contribution of the ray segment using pre-integration techniques [S1, unofficial].
+9. **Traversal:** Move to the next hexahedron along the ray and repeat steps 2-8 until the ray exits the volume [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_curvilinear_volume(grid, viewpoint):
+    image = create_image_buffer(viewport_width, viewport_height)
+    boundary_faces = get_boundary_faces(grid)
+    for y in range(viewport_height):
+        for x in range(viewport_width):
+            ray = create_ray(viewpoint, x, y)
+            entry_hex = find_entry_hexahedron_via_scan_conversion(boundary_faces, ray)
+            if entry_hex is None:
+                continue
+            current_hex = entry_hex
+            t_entry = compute_intersection(ray, entry_hex.entry_face)
+            while current_hex is not None:
+                triangles = decompose_hexahedron_into_triangles(current_hex)
+                projected_triangles = project_to_image_plane(triangles, viewpoint)
+                exit_triangle = find_exit_triangle_ray_crossing(ray, projected_triangles[1:], t_entry)
+                if exit_triangle is None:
+                    break
+                t_exit = compute_intersection(ray, exit_triangle)
+                scalar_values = interpolate_scalar_values(ray, t_entry, t_exit, current_hex)
+                color, opacity = pre_integrate_segment(scalar_values, t_entry, t_exit)
+                image[x, y] = composite(image[x, y], color, opacity)
+                current_hex = get_next_hexahedron(current_hex, exit_triangle)
+                if current_hex:
+                    t_entry = t_exit
+    return image
+
+def find_exit_triangle_ray_crossing(ray, projected_triangles, t_entry):
+    P = ray.pixel_coords
+    for tri in projected_triangles:
+        crossings = 0
+        for i in range(len(tri.edges_2d)):
+            p1 = tri.edges_2d[i]
+            p2 = tri.edges_2d[(i + 1) % len(tri.edges_2d)]
+            if crosses_horizontal_ray(P, p1, p2):
+                crossings += 1
+        if crossings % 2 == 1:
+            return tri
+    return None
+
+def crosses_horizontal_ray(P, p1, p2):
+    if p1.y == p2.y:
+        return False
+    if min(p1.y, p2.y) <= P.y < max(p1.y, p2.y):
+        x_intersect = p1.x + (P.y - p1.y) * (p2.x - p1.x) / (p2.y - p1.y)
+        if x_intersect > P.x:
+            return True
+    return False
+```
+
+**Parameters:**
+- Viewport resolution: Typically $300^2$ to $1024^2$ pixels [S1, unofficial].
+- Hardware: SGI Octane (198 MHz MIPS) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Faces:** Faces may be degenerate, non-planar, or non-orthogonal [S2]. Decomposition into triangles ensures planarity for intersection [S2].
+- **Precision:** Depth sorting and intersection calculations are sensitive to precision, especially for large viewports (up to 100 seconds for $1024^2$) [S1, unofficial].
+- **Sorting Overhead:** Sorting step on viewpoint change is around two seconds, negligible for resolutions greater than $512^2$ [S1, unofficial].
+
+## Subtopics
+
+### [Exterior-Face Ray Casting](3615-exterior-face-ray-casting.md)
+Exterior-Face Ray Casting is a parallel volume rendering technique for unstructured grids that restricts ray casting to visible exterior faces of subvolumes. It solves the problem of efficiently traversing irregular, partitioned data domains by identifying which boundary faces are visible from the current viewpoint, projecting them to screen space, and casting rays only through these regions. Unlike general traversal methods that may enter and exit internal boundaries, this method leverages the associativity of compositing to process segments independently, making it suitable for distributed-memory architectures.
+
+### Ray-casting Curvilinear Volumes
+Ray-casting Curvilinear Volumes is a method for direct volume rendering of data sampled on a curvilinear grid (six-sided cells with non-planar, non-orthogonal faces) by casting rays directly through the volume without interpolating to a rectilinear grid first [S2]. It represents each curvilinear element as bounded by twelve triangles to ensure planarity for intersection calculations [S2]. Intersections are computed using ray-triangle intersection techniques, assuming convexity to generate two intersections if the ray intersects the element [S2]. Shading methods are similar to rectilinear volumes [S2]. Data structures such as a scan line list and active element list are used to reduce the number of intersection calculations [S2]. This approach is less prone to accumulation of interpolation errors and easily accommodates irregular sampling densities compared to interpolation-based methods, but is generally slower because it cannot make the simplifying assumptions in traversing regular grids [S2].
+
+## Operating characteristics
+- **Time Complexity:** The follow-up algorithm is twice as fast as the original implementation [S1, unofficial]. Rendering a $300^2$ viewport of the Blunt-fin data set takes 3.45 seconds on an SGI Octane (198 MHz MIPS) [S1, unofficial]. Sorting overhead is around two seconds per viewpoint change, negligible for resolutions greater than $512^2$ [S1, unofficial].
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** The method is slower than interpolation-based methods for rectilinear grids because it cannot make simplifying assumptions in traversing regular grids [S2]. However, it avoids interpolation errors and handles irregular sampling densities [S2].
+- **Strengths:** Handles curvilinear grids directly, avoids interpolation errors, suitable for irregular sampling, parallelizable via exterior-face casting [S1, unofficial][S2].
+- **Limitations:** Slower than rectilinear grid methods, sensitive to precision for large viewports, requires on-the-fly decomposition and projection [S1, unofficial][S2].
+- **When to Use:** When the data is naturally curvilinear and interpolation to a rectilinear grid is undesirable due to error accumulation or irregular sampling [S2].
+- **When Not to Use:** When high performance on regular grids is required and interpolation errors are acceptable [S2].
+
+## Background
+The method was proposed by Hong and Kaufman [S1, unofficial]. The original approach was described in [Hong98], and a follow-up optimization was described in [Hong99] [S1, unofficial]. The technique is part of the broader field of direct volume rendering, which maps data values directly to pixel contributions without intermediate geometric representations [S2]. It builds on [Hexahedron Projection for Curvilinear Grids](1111-hexahedron-projection-for-curvilinear-grids.md), which handles the classification of hexahedron projections for hardware rendering [S1, unofficial].
+
+## Sources
+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
+[S2] Direct volume rendering of curvilinear volumes, https://doi.org/10.1145/99308.99318, fetched 2026-10-28

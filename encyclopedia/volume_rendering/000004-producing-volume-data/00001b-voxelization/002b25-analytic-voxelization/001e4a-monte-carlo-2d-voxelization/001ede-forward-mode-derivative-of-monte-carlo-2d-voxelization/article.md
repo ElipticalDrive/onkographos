@@ -1,0 +1,165 @@
+# Forward-Mode Derivative of Monte Carlo 2D Voxelization
+
+
+## Overview
+Computes the forward-mode derivatives of the voxel occupancy grid with respect to the input mesh vertex positions [S1, unofficial]. It extends [Monte Carlo 2D Voxelization](1734-monte-carlo-2d-voxelization.md) by propagating gradients through the Monte Carlo integration of the generalized winding number boundary term [S1, unofficial]. Unlike the forward pass which only computes occupancy, this method computes $\frac{\partial \text{occupancy}}{\partial \text{vertices}}$ using the same sampling strategy, enabling gradient-based optimization of mesh geometry [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `vertices`: Array of shape $(N, 2)$ containing 2D vertex positions [S1, unofficial].
+- `edges`: Array of shape $(M, 2)$ containing vertex indices for each edge [S1, unofficial].
+- `d_vertices`: Array of shape $(N, 2)$ containing seed gradients (typically identity or upstream gradients) with respect to vertex positions [S1, unofficial].
+- `voxel_size`: Scalar or vector defining the grid resolution [S1, unofficial].
+- `num_samples_per_simplex`: Integer number of Monte Carlo samples per edge [S1, unofficial].
+- `filter`: Filter object with radius [S1, unofficial].
+- `min_coord`, `max_coord`: Grid boundaries [S1, unofficial].
+
+**Outputs:**
+- `d_occupancy`: Array of shape $(H, W)$ containing the computed gradients of the occupancy grid with respect to the input vertices [S1, unofficial].
+
+**Data Structures:**
+- `d_occupancy`: Initialized to zeros. Accumulates contributions from all edge samples.
+- `d_vertices`: Input gradients. Used to compute the derivative of the sample position on the edge.
+
+**Steps:**
+1. **Initialize**: Create random engine and distribution identical to the forward pass [S1, unofficial]. Initialize `d_occupancy` to zero [S1, unofficial].
+2. **Loop over edges**: For each edge $e$ from $0$ to $M-1$:
+   a. Retrieve vertex indices $v0\_idx = edges[e][0]$ and $v1\_idx = edges[e][1]$ [S1, unofficial].
+   b. Get positions $\mathbf{v}_0 = \text{vertices}[v0\_idx]$ and $\mathbf{v}_1 = \text{vertices}[v1\_idx]$ [S1, unofficial].
+   c. Compute edge vector $\mathbf{v}_{01} = \mathbf{v}_1 - \mathbf{v}_0$ [S1, unofficial].
+   d. Compute edge normal $\mathbf{n} = \text{normalize}(\langle v_{01,y}, -v_{01,x} \rangle)$ (90-degree clockwise rotation) [S1, unofficial].
+   e. Compute edge length $L = \|\mathbf{v}_{01}\|$ [S1, unofficial].
+   f. **Loop over samples**: For each sample index $s$ from $0$ to $\text{num\_samples\_per\_simplex}-1$:
+      i. Generate uniform random number $u \in [0, 1)$ [S1, unofficial]. If stratified sampling is used, $u = (s + u) \times \frac{1}{\text{num\_samples\_per\_simplex}}$ [S1, unofficial].
+      ii. Compute the derivative of the boundary point $\mathbf{x}_{bn} = \mathbf{v}_0 + u \mathbf{v}_{01}$ with respect to vertices:
+          $$ \frac{\partial \mathbf{x}_{bn}}{\partial \mathbf{v}_0} = \mathbf{n} (1 - u) $$
+          $$ \frac{\partial \mathbf{x}_{bn}}{\partial \mathbf{v}_1} = \mathbf{n} u $$
+          [S1, unofficial]
+      iii. Compute the directional derivative of the boundary point using the input vertex gradients $\mathbf{d}_{v0}$ and $\mathbf{d}_{v1}$ from `d_vertices`:
+          $$ \mathbf{d}_{x_{bn}} = \text{dot}(\mathbf{d}_{v0}, \frac{\partial \mathbf{x}_{bn}}{\partial \mathbf{v}_0}) + \text{dot}(\mathbf{d}_{v1}, \frac{\partial \mathbf{x}_{bn}}{\partial \mathbf{v}_1}) $$
+          [S1, unofficial]
+      iv. Compute the sample position on the edge: $\mathbf{x}_{sample} = \mathbf{v}_0 + u \mathbf{v}_{01}$ [S1, unofficial].
+      v. Convert to grid coordinates: $\mathbf{c} = \text{point\_to\_grid\_coord}(\mathbf{x}_{sample}, \text{voxel\_size})$ [S1, unofficial].
+      vi. Determine filter support: Get voxel indices $(nx, ny)$ within the filter radius [S1, unofficial].
+      vii. **Loop over affected voxels**: For each voxel $(nx, ny)$ in the support:
+           1. Compute voxel center $\mathbf{c}_{center} = \langle nx \cdot \text{voxel\_size}_x + \text{half\_voxel\_offset}_x, ny \cdot \text{voxel\_size}_y + \text{half\_voxel\_offset}_y \rangle$ [S1, unofficial].
+           2. Compute the gradient contribution. The forward-mode derivative of the winding number boundary term involves the dot product of the sample derivative $\mathbf{d}_{x_{bn}}$ and the gradient of the winding number kernel with respect to the sample position [S1, unofficial]. *Note: The exact kernel gradient formula is not explicitly detailed in the provided snippets, but the accumulation follows the standard adjoint rule where the derivative flows through the filter evaluation* [G].
+           3. Accumulate the result into `d_occupancy[ny, nx]` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def forward_mode_derivative_mc_2d_voxelize(
+    vertices: Array2D,      # (N, 2)
+    edges: Array2D,         # (M, 2)
+    d_vertices: Array2D,    # (N, 2)
+    voxel_size: float,
+    num_samples_per_simplex: int,
+    filter_radius: float,
+    min_coord: float,
+    max_coord: float,
+    use_stratified: bool = False
+) -> Array2D:
+    # Initialize output gradient array
+    # Assuming grid dimensions derived from bounds and voxel_size
+    height = int((max_coord[1] - min_coord[1]) / voxel_size)
+    width = int((max_coord[0] - min_coord[0]) / voxel_size)
+    d_occupancy = zeros((height, width))
+    
+    half_voxel_offset = voxel_size / 2.0
+    
+    # Initialize RNG (same as forward pass)
+    rng = init_random_engine()
+    dist = UniformDistribution(0.0, 1.0)
+    
+    stratum_size = 1.0 / num_samples_per_simplex
+    
+    for e in range(edges.shape[0]):
+        v0_idx = edges[e, 0]
+        v1_idx = edges[e, 1]
+        
+        v0 = vertices[v0_idx]
+        v1 = vertices[v1_idx]
+        
+        v0v1 = v1 - v0
+        length = norm(v0v1)
+        
+        # Normal: 90 degree rotation to the right
+        # Vector2<Float>{v0v1[1], -v0v1[0]}
+        normal = normalize(Vector2(v0v1[1], -v0v1[0]))
+        
+        for s in range(num_samples_per_simplex):
+            u = dist(rng)
+            if use_stratified:
+                u = (s + u) * stratum_size
+            
+            # Derivatives of boundary point w.r.t vertices
+            # d_xbn_d_v0 = normal * (1 - u)
+            # d_xbn_d_v1 = normal * u
+            d_xbn_d_v0 = normal * (1.0 - u)
+            d_xbn_d_v1 = normal * u
+            
+            # Forward-mode derivative of boundary point
+            d_v0 = d_vertices[v0_idx]
+            d_v1 = d_vertices[v1_idx]
+            d_xbn = dot(d_v0, d_xbn_d_v0) + dot(d_v1, d_xbn_d_v1)
+            
+            # Sample position
+            sample = v0 + u * v0v1
+            
+            # Grid coordinate
+            sample_grid_coord = point_to_grid_coord(sample, voxel_size)
+            
+            # Filter support
+            # get_grid_support returns list of (nx, ny)
+            support = get_grid_support(sample_grid_coord, filter_radius / voxel_size, min_coord, max_coord)
+            
+            for (nx, ny) in support:
+                # Voxel center
+                n_center_x = nx * voxel_size + half_voxel_offset
+                n_center_y = ny * voxel_size + half_voxel_offset
+                n_center = Vector2(n_center_x, n_center_y)
+                
+                # Compute kernel gradient and accumulate
+                # The specific kernel gradient formula is not provided in the source snippets.
+                # In a standard differentiable voxelization, this would involve:
+                # 1. Computing the winding number gradient w.r.t sample position.
+                # 2. Dotting with d_xbn.
+                # 3. Scaling by importance sampling weight (1/length).
+                # Placeholder for the specific kernel derivative logic [G]
+                grad_contribution = compute_kernel_gradient_derivative(sample, n_center, d_xbn)
+                
+                d_occupancy[ny, nx] += grad_contribution
+                
+    return d_occupancy
+```
+
+**Parameters:**
+- `Mode`: `DifferentiationMode::Forward` [S1, unofficial].
+- `d_vertices`: Input gradients, shape $(N, 2)$, type `Float` [S1, unofficial].
+- `d_occupancy`: Output gradients, shape $(H, W)$, type `Float` [S1, unofficial].
+- `num_samples_per_simplex`: Number of Monte Carlo samples per edge [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Zero-length edges**: If $\mathbf{v}_0 = \mathbf{v}_1$, the normal is undefined. The source notes do not specify handling, but standard practice requires a guard or skipping [G].
+- **Precision**: Accumulating gradients in `d_occupancy` may suffer from precision loss if many edges contribute to the same voxel. Use double precision for accumulation if necessary [G].
+- **Boundary Conditions**: The filter support calculation must correctly handle voxels outside the grid bounds [S1, unofficial].
+
+## Subtopics
+
+### Forward Differentiable Monte Carlo Voxelization
+A variant that generalizes the 2D forward-mode derivative to both 2D and 3D cases [S1, unofficial]. It validates inputs (`d_vertices` and `d_occupancy` shapes and device placement) and dispatches to the appropriate 2D or 3D implementation with `DifferentiationMode::Forward` [S1, unofficial]. It accepts `d_vertices` of shape $(N, \text{dim})$ and outputs `d_occupancy` of shape $(H, W)$ or $(D, H, W)$ [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(M \cdot S \cdot K)$, where $M$ is the number of edges, $S$ is the number of samples per edge, and $K$ is the average number of voxels in the filter support [S1, unofficial].
+- **Memory Complexity**: $O(H \cdot W)$ for the output gradient array, plus $O(N)$ for input gradients [S1, unofficial].
+- **Performance**: Performance scales linearly with the number of edges and samples. The Monte Carlo approach allows for variable sampling rates to balance noise and speed [S1, unofficial].
+- **Strengths**: Provides exact gradients for the Monte Carlo estimator; differentiable with respect to vertex positions; supports adaptive and stratified sampling [S1, unofficial].
+- **Limitations**: Stochastic noise in gradients due to Monte Carlo sampling; requires careful tuning of sample counts for smooth gradients [S1, unofficial].
+
+## Background
+The method is part of the "Differentiable Voxelization of Surface Representations" framework by Djuren et al. (2026) [S1, unofficial]. It builds on the generalized winding number formulation for voxelization, extending it to support gradient-based optimization of mesh geometry via forward-mode automatic differentiation [S1, unofficial]. The code is available in the `differentiable-voxelization` repository [S1, unofficial].
+
+## Sources
+[S1] Differentiable Voxelization of Surface Representations, https://github.com/mworchel/differentiable-voxelization, fetched 2026-10-29 (unofficial)

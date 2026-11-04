@@ -1,0 +1,370 @@
+Qwen serving appliance on RTX 4070 Ti: CUDA primary, Vulkan fallback - Decompose a ray query into the stages a resident worker would keep by Oichkatzelesfrettschen · Pull Request #95 · Oichkatzelesfrettschen/qwen-nvidia
+
+Decompose a ray query into the stages a resident worker would keep by Oichkatzelesfrettschen · Pull Request #95 · Oichkatzelesfrettschen/qwen-nvidia · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Oichkatzelesfrettschen
+commented
+Sep 21, 2026
+Copy link
+Copy Markdown
+Owner
+The measurement half of the OptiX item. The runtime reported wall_ms and
+launch_ms and nothing between them, so a resident worker could be argued for
+but not measured. Both arms ran on the RTX 4070 Ti at 1,048,576 rays, accepted
+at 28 of 28, retained under evidence/ada/geometry-launch-timing/.
+Where the time goes
+stage
+warm (ms)
+cold (ms)
+scene
+22.113
+21.902
+cuda_context
+135.953
+118.646
+optix_context
+46.761
+36.893
+accel
+0.170
+0.169
+module
+0.316
+33.518
+pipeline
+8.922
+6.303
+sbt
+0.024
+0.025
+upload
+3.036
+2.978
+launch
+2.428
+2.434
+download
+3.202
+3.120
+validate
+88.719
+88.303
+teardown
+7.831
+7.769
+total
+319.475
+322.060
+The ray trace is 2.43 ms of a 319 ms query -- 0.76 percent. Upload, launch
+and download together are 8.7 ms, so under three percent of a query is device
+work. The partition is complete: stage_sum_ms equals wall_ms to three
+decimals in every run, and the protocol rejects a reply whose stages sum past
+the wall time they were taken inside.
+What a resident worker would actually buy
+The cacheable stages come to 192.1 ms and teardown's 7.8 ms goes with them,
+leaving about 119 ms per query -- of which 88.7 ms is the host reference
+intersection, not the device. Ray generation is another 22.1 ms and is
+constant for a fixed query set, so it caches under a reuse key naming scene,
+query set and ray count. Validation does not: it is the check that the device
+answer is right and runs per query by construction.
+So a worker that cached everything cacheable would spend three quarters of
+each query in host arithmetic verifying an 8.7 ms device round trip. That
+ordering is the finding, and it is what the resident worker has to answer
+before any streams or events are worth adding.
+Two ways this measurement could have lied, and did not
+The first pair blamed the cache for first touch. Run cold-then-warm on an
+idle card, cuda_context_ms read 401.351 against 130.628 and
+optix_context_ms 206.565 against 52.511 -- 548 ms of apparent cache saving.
+Four alternating runs hold both stages flat whatever the cache state while
+module_ms tracks it exactly (1.082, 32.576, 0.355, 32.840). It was driver
+initialization. order-series.tsv retains the series.
+The retained reply carried the account name. optix_host.h gives the Linux
+default cache location as /var/tmp/OptixCache_<username> -- a different
+directory for every caller, so a warm timing against it depends on who ran it,
+and eirikr travelled into a tracked artifact past both the harness scrub and
+the publication gate. The service now sets OPTIX_CACHE_PATH (which the header
+says takes precedence over the API) to one declared location, the harness
+scrubs the reply on the way in like every other capture, and the latch capture
+takes the same scrub. A first run against a fresh location is a populate, not a
+hit, and reported module_ms at 22.859; the retained warm arm is the run after.
+The cache is a ledger property
+optix_host.h: there is no in-memory cache, so optixModuleCreate either
+compiles the PTX or reads a compiled module back. A module timing that does not
+pin this measures run history. geometry-profiles.tsv gains module_cache
+with a second row at disabled; the service sets OPTIX_CACHE_MAXSIZE=0 for
+it; the runtime reads the state back off the context, because the header says
+the environment takes precedence over the API and can close a cache the row
+asked for. PROTOCOL_VERSION 2 requires the readback to agree with the request.
+Verification
+```
+both device arms                          accepted 28/28
+scripts/test-geometry-service.py          accepted, 2 new known-bad modes
+scripts/test-physics-service.py           accepted
+scripts/sidecar-mcp/test-sidecar-mcp.py   accepted
+scripts/test-sidecar-runtime.py           accepted
+scripts/test-web-presets.sh               all checks passed
+scripts/check-authority-consistency.py    accepted
+sanitize-public-artifact.py --check       files=12124 failures=0
+shellcheck -S warning, ruff, g++ -Werror  clean
+```
+The new known-bad modes are stage timings that sum past the wall time and a run
+claiming the cache it disabled. build-geometry-runtime.sh now compiles at
+-Wall -Wextra -Werror, which it did not. Both rows stay
+execution_policy=refused.
+Not in this change
+The resident worker itself, its explicit streams and events, its reusable
+allocations and its reuse key. This measures the ground they have to gain.
+Touches scripts/admit-geometry-runtime.sh where #94 does; the latch scrub is
+the identical line in both.
+🤖 Generated with Claude Code
+geometry: decompose a ray query into the stages a resident worker wou…
+…
+57f9ae0
+```
+…ld keep
+
+The runtime reported wall_ms and launch_ms and nothing between them, so a
+resident worker could be argued for but not measured. It now reports one number
+per stage and the partition is complete: stage_sum_ms equals wall_ms to three
+decimals in every run, so a mark left behind or a stage double-counted fails the
+protocol rather than producing a plausible table.
+
+Measured on the device at 1048576 rays, both arms accepted at 28 of 28. The ray
+trace is 2.428 ms of a 319.5 ms query, and upload, launch and download together
+are 8.7 ms, so under three percent of a query is device work and the rest is
+process construction and host arithmetic. The stages a worker would keep come
+to 192.1 ms and teardown's 7.8 goes with them, which leaves about 119 ms per
+query of which 88.7 is the host reference intersection. That ordering is the
+finding: the reference check is the cost, not the launch.
+
+The disk cache is a ledger property because optix_host.h states there is no
+in-memory cache, so optixModuleCreate either compiles the PTX or reads a
+compiled module back and a timing that does not pin the cache measures run
+history. geometry-profiles.tsv gains module_cache with a second row at
+`disabled`, the service sets OPTIX_CACHE_MAXSIZE=0 for it, and the runtime reads
+the state back off the context because the header says the environment takes
+precedence over optixDeviceContextSetCacheEnabled and can close a cache the row
+asked for. module_ms reads 33.518 ms disabled against 0.316 enabled.
+
+Attributing the first pair's difference to the cache would have been wrong. The
+first run on an idle card reported cuda_context_ms at 401.351 and
+optix_context_ms at 206.565 against 130.628 and 52.511 for the run after it,
+and four alternating runs hold both stages flat whatever the cache state while
+module_ms tracks it exactly: 1.082, 32.576, 0.355, 32.840. order-series.tsv
+retains them. That 548 ms was first-touch driver initialization.
+
+The cache location is declared rather than defaulted. optix_host.h gives the
+Linux default as /var/tmp/OptixCache_<username>, which names the account and
+differs between callers, and the retained reply carried that account name past
+both the harness scrub and the publication gate. The service sets
+OPTIX_CACHE_PATH, which takes precedence over the API, and the harness scrubs
+the reply on the way in like every other capture. The latch capture takes the
+same scrub, which sanitize-public-artifact.py was refusing.
+
+The protocol moves with the runtime at PROTOCOL_VERSION 2, the validator rejects
+stage timings that sum past wall_ms or disagree with launch_ms and a reply
+claiming a cache its run disabled, and build-geometry-runtime.sh compiles at
+-Wall -Wextra -Werror, which it did not.
+
+Evidence: test-geometry-service.py accepted with two new known-bad modes;
+test-physics-service.py, test-sidecar-mcp.py, test-sidecar-runtime.py,
+test-web-presets.sh and check-authority-consistency.py accepted;
+sanitize-public-artifact.py --check files=12124 failures=0; shellcheck -S
+warning, ruff and g++ -Werror clean. Both rows stay execution_policy=refused.
+
+Assisted-by: Claude Code (Claude Opus 5)
+```
+coderabbitai
+Bot
+commented
+Sep 21, 2026
+Copy link
+Copy Markdown
+Important
+🔍 Trigger review
+This repository does not receive automatic reviews because it has fewer than 10 stars.
+⚙️ Run configuration
+Configuration used: Organization UI
+Review profile: ASSERTIVE
+Plan: Advanced
+Run ID: bd9ce24b-18ca-48fc-a1e5-599e595e5b6e
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands.
+chatgpt-codex-connector
+Bot
+commented
+Sep 21, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codex Review Summary
+This comment shows the latest Codex review activity on this pull request.
+Review
+Status
+Commit
+Review trigger
+📝 Code Review
+✅ Completed 2026-09-21T12:08:46.664988Z
+57f9ae0
+PR opened
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review" or "@codex security review".
+Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.
+chatgpt-codex-connector
+Bot
+reviewed
+Sep 21, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 57f9ae0cf0
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+scripts/geometry_protocol.py
+# The stages partition the run, so their sum cannot exceed the wall time
+# they were taken inside; a stage double-counted or a mark left behind
+# shows up here rather than in a plausible-looking table.
+if sum(timings.values()) > result["wall_ms"] + 1e-6:
+chatgpt-codex-connector
+Bot
+Sep 21, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Allow for millisecond rounding in stage-sum validation
+The runtime serializes wall_ms and each of the twelve stage timings independently to three decimal places, but this comparison permits only 0.000001 ms of excess. A valid run can therefore be rejected whenever several stages round upward while the wall value rounds downward—even though the unrounded stages remain inside the wall interval. Allow for the aggregate serialization error (up to roughly 0.0065 ms), or validate unrounded values before formatting.
+Useful? React with 👍 / 👎.
+Comment thread
+scripts/geometry-runtime/optix-ray-runtime.cpp
+Comment on lines
++444
+to
++445
+const auto wall_end = Clock::now();
+const double wall_ms = elapsed_ms(wall_start, wall_end);
+chatgpt-codex-connector
+Bot
+Sep 21, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Include process-boundary time in the stage partition
+The timer stops before JSON construction, stdout delivery, process shutdown, and the service/client handoff, while it also starts only after the runtime process has entered main. This leaves a material portion of every query outside the claimed complete partition: the retained warm and cold summaries report end-to-end request_wall_s of 0.415/0.416 seconds versus runtime walls of 319.477/322.060 ms, roughly 93–96 ms unaccounted for. Because spawning and retiring the runtime are exactly costs a resident worker may change, the projected 119 ms resident-query cost and its stage percentages are unsupported unless the process-boundary time is measured and classified.
+Useful? React with 👍 / 👎.
+Comment thread
+scripts/geometry-service.py
+Comment on lines
+349
+to
+352
+scene_sha256 = hashlib.sha256(json.dumps(
+{"scene": profile["scene"], "query_set": profile["query_set"], "rays": rays},
+{"scene": profile["scene"], "query_set": profile["query_set"], "rays": rays,
+"module_cache": profile["module_cache"]},
+sort_keys=True).encode()).hexdigest()
+chatgpt-codex-connector
+Bot
+Sep 21, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Record whether an enabled module cache was actually warm
+An enabled profile always receives the same scene_sha256 regardless of whether the fixed cache directory is empty or already populated. On a fresh or evicted cache, the first request compiles and populates the module; later requests hit it, yet both runs report requested=enabled, enabled=true, and the same run digest. The retained evidence itself shows this distinction changes module_ms from 22.859 ms on population to 0.316 ms on the retained hit, so the new identity still permits incomparable module timings unless the harness explicitly prewarms/clears the cache or records a hit/populate state in the identity.
+Useful? React with 👍 / 👎.
+Comment thread
+scripts/geometry_protocol.py
+import json
+PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
+chatgpt-codex-connector
+Bot
+Sep 21, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Update the canonical guide for geometry protocol 2
+This bumps the service protocol and ledger schema, but the repository's canonical geometry doctrine still says the protocol is version 1 and describes the profile ledger without module_cache. Contributors or agents following that guide will construct obsolete messages or ledgers that the new service rejects, so update the canonical guide and the module's remaining version-1 docstrings with this protocol transition.
+AGENTS.md reference: AGENTS.md:L1154-L1161
+Useful? React with 👍 / 👎.
+Oichkatzelesfrettschen
+commented
+Sep 21, 2026
+View reviewed changes
+Oichkatzelesfrettschen
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewed the runtime stage boundaries, retained warm/cold results, profile/schema changes and successful clone-local run. This is useful measurement instrumentation; no resident worker or reduced verification is being enabled. The identical latch-scrub change from #94 must remain together with #94's shared compute-client parser.
+Design decision: keep the full per-ray reference comparison and the one-shot implementation as the default/control. Do not hold the compute lease while waiting for future requests. Any future resident worker requires explicit memory-residency admission, per-job compute ownership and synchronized retirement; merely allowing an extra process name is insufficient.
+The approximately 119.5 ms worker result is a projection, not a measured runtime. The 88.719 ms validate stage combines reference construction, comparison and reductions. For identical scene/ray bytes, independently computed reference results can be cached while still comparing every fresh GPU result; this is not sampling and must never cache a previous GPU answer as its own reference. Dynamic scene changes invalidate such reference reuse.
+Two measurement qualifications for follow-up: (1) the warm stage sum is 319.475 ms versus wall_ms 319.477 ms, so not exact equality at three decimals; independently rounded millisecond values need a rounding-aware sum tolerance, not the current 1e-6 ms limit; (2) runtime wall_ms excludes the later digest/JSON work and differs from the retained roughly 415 ms client time. Preserve both. No device measurement was performed during this review.
+Hide details
+View details
+Oichkatzelesfrettschen
+merged commit 4e0ea5c
+into
+main
+Sep 21, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Oichkatzelesfrettschen
+deleted the
+geometry/launch-timing-decomposition
+branch
+September 21, 2026 12:39
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

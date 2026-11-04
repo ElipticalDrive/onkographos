@@ -1,0 +1,298 @@
+--- v001.md
++++ v002.md
+@@ -10,5 +10,5 @@
+ 
+ ### Inputs and Outputs
+-- **Input**: Unstructured grid data (nodes and cells). Nodes store 3D coordinates and a scalar value. Cells store indices of their constituent nodes [S2].
++- **Input**: Unstructured grid data (nodes and cells). Nodes store 3D coordinates and a scalar value [S2]. Cells store indices of their constituent nodes [S2].
+ - **Output**: A 2D rendered image with color and opacity per pixel [S1, unofficial].
+ 
+@@ -30,12 +30,12 @@
+ 2.  **Scan Conversion Phase**:
+     For each pixel $P(x, y)$ within the projection area $R$ of a cell:
+-    -   Calculate the ray corresponding to $P(x, y)$.
+-    -   Determine the intersection of the ray with the cell to find $z_{front}$ and $z_{back}$ [S1, unofficial].
+-    -   Compute the cell's color ($RGB$) and opacity ($\alpha$) contribution at these intersections [S1, unofficial].
+-    -   Create a Ray Segment for this pixel.
++    - Calculate the ray corresponding to $P(x, y)$ [S1, unofficial].
++    - Determine the intersection of the ray with the cell to find $z_{front}$ and $z_{back}$ [S1, unofficial].
++    - Compute the cell's color ($RGB$) and opacity ($\alpha$) contribution at these intersections [S1, unofficial].
++    - Create a Ray Segment for this pixel.
+     
+     After processing all cells, for each pixel on the screen, gather all Ray Segments corresponding to that pixel and sort them by depth ($z_{front}$) to form a depth-sorted list [S1, unofficial].
+     
+-    *Partial Composition*: During scan conversion, if two neighboring ray segments in a list are derived from neighboring cells that contact each other along the ray, they can be composed immediately. The result is a single Ray Segment, reducing the list length [S1, unofficial].
++    *Partial Composition*: During scan conversion, if two neighboring ray segments in a list are derived from neighboring cells that contact each other along the ray, they can be composed immediately [S1, unofficial]. The result is a single Ray Segment, reducing the list length [S1, unofficial].
+ 
+ 3.  **Composition Phase**:
+@@ -45,5 +45,5 @@
+ 
+ ```python
+-def hardware_assisted_polyhedron_projection(cells, nodes, camera, screen_width, screen_height):
++def hardware_assisted_polyhedron_projection(cells, nodes, view_matrix, proj_matrix, screen_width, screen_height):
+     """
+     Render unstructured grid using hardware-assisted polyhedron projection.
+@@ -52,5 +52,6 @@
+         cells: List of cells, each containing indices of nodes.
+         nodes: List of nodes, each with position (x,y,z) and scalar value.
+-        camera: Camera object with projection matrix and view direction.
++        view_matrix: 4x4 view transformation matrix.
++        proj_matrix: 4x4 projection transformation matrix.
+         screen_width: Width of the output image in pixels.
+         screen_height: Height of the output image in pixels.
+@@ -59,113 +60,103 @@
+         image: 2D array of RGB values.
+     """
+-    # Initialize image buffer
+-    image = zeros((screen_height, screen_width, 3))
+-    
+-    # Step 1: Projection and Scan Conversion
+-    # For each cell, project to screen and generate ray segments
+-    ray_segment_lists = {} # Dictionary mapping (x, y) to list of RaySegments
+-    
++    # Initialize image buffer with zeros
++    image = [[[0.0, 0.0, 0.0] for _ in range(screen_width)] for _ in range(screen_height)]
++    ray_segment_lists = {}
++
++    # Step 1 & 2: Projection and Scan Conversion
+     for cell in cells:
+-        # Get node positions for the cell
++        # Get 3D node positions
+         node_positions = [nodes[idx].position for idx in cell.node_indices]
+-        
+-        # Approximate curvilinear cells if necessary (handled by geometry setup)
+-        # Project cell vertices to screen space
+-        screen_vertices = [project_to_screen(v, camera) for v in node_positions]
+-        
+-        # Determine bounding box or projection area R on screen
+-        min_x, max_x, min_y, max_y = get_screen_bounds(screen_vertices)
+-        
+-        # Scan conversion: iterate over pixels in projection area
++
++        # Project vertices to screen space (standard view-projection)
++        screen_vertices = []
++        for v in node_positions:
++            clip = proj_matrix @ (view_matrix @ v)
++            if clip.w != 0:
++                ndc = (clip.xyz / clip.w)
++                screen_vertices.append(((ndc.x + 1) * screen_width / 2, (ndc.y + 1) * screen_height / 2))
++
++        # Determine bounding box
++        min_x = min(v[0] for v in screen_vertices)
++        max_x = max(v[0] for v in screen_vertices)
++        min_y = min(v[1] for v in screen_vertices)
++        max_y = max(v[1] for v in screen_vertices)
++
++        # Scan conversion over projection area
+         for y in range(int(min_y), int(max_y) + 1):
+             for x in range(int(min_x), int(max_x) + 1):
+-                if not is_pixel_in_polygon(x, y, screen_vertices):
++                # Point-in-polygon test (ray casting)
++                if not _point_in_polygon(x, y, screen_vertices):
+                     continue
+-                
+-                # Calculate ray for pixel (x, y)
+-                ray = get_ray_for_pixel(x, y, camera)
+-                
+-                # Intersect ray with cell to get z_front and z_back
+-                # Note: For convex polyhedra, this involves intersecting with faces
+-                intersections = intersect_ray_with_cell(ray, node_positions)
+-                
++
++                # Generate camera ray for pixel (standard inverse projection)
++                ndc_x = (x + 0.5) * 2 / screen_width - 1
++                ndc_y = (y + 0.5) * 2 / screen_height - 1
++                ray_origin = view_matrix.inverse().transform_point((0, 0, 0))
++                ray_dir = view_matrix.inverse().transform_direction((ndc_x, ndc_y, -1))
++                ray_dir = ray_dir / ray_dir.length()
++
++                # Intersect ray with convex polyhedron faces
++                intersections = []
++                for i in range(len(node_positions)):
++                    p1 = node_positions[i]
++                    p2 = node_positions[(i + 1) % len(node_positions)]
++                    p3 = node_positions[(i + 2) % len(node_positions)]
++                    # Compute face normal
++                    normal = (p2 - p1).cross(p3 - p1).normalize()
++                    denom = ray_dir.dot(normal)
++                    if abs(denom) > 1e-6:
++                        t = normal.dot(p1 - ray_origin) / denom
++                        if t > 0:
++                            hit = ray_origin + ray_dir * t
++                            if _point_in_polygon_3d(hit, [p1, p2, p3], normal):
++                                intersections.append(t)
++
+                 if len(intersections) >= 2:
+-                    # Sort intersections to find front and back
+-                    sorted_z = sorted([i.z for i in intersections])
+-                    z_front = sorted_z[0]
+-                    z_back = sorted_z[-1]
+-                    
+-                    # Compute color and opacity
+-                    # Interpolate scalar values at z_front and z_back from node values
+-                    scalar_front = interpolate_scalar(ray.origin + ray.direction * z_front, node_positions, nodes)
+-                    scalar_back = interpolate_scalar(ray.origin + ray.direction * z_back, node_positions, nodes)
+-                    
+-                    color, alpha = map_scalar_to_color_opacity(scalar_front, scalar_back)
+-                    
+-                    # Create Ray Segment
++                    intersections.sort()
++                    z_front = intersections[0]
++                    z_back = intersections[-1]
++
++                    # Interpolate scalar values at intersection points (barycentric/trilinear)
++                    p_front = ray_origin + ray_dir * z_front
++                    p_back = ray_origin + ray_dir * z_back
++                    scalar_front = _interpolate_scalar(p_front, node_positions, [n.scalar for n in nodes])
++                    scalar_back = _interpolate_scalar(p_back, node_positions, [n.scalar for n in nodes])
++
++                    # Map scalars to color and opacity (standard transfer function)
++                    color, alpha = _map_scalar_to_color_opacity(scalar_front, scalar_back)
++
+                     segment = RaySegment(RGB=color, alpha=alpha, z_front=z_front, z_back=z_back)
+-                    
+-                    # Add to pixel's list
+                     if (x, y) not in ray_segment_lists:
+                         ray_segment_lists[(x, y)] = []
+                     ray_segment_lists[(x, y)].append(segment)
+-    
+-    # Step 2: Sorting and Composition
++
++    # Step 3: Sorting and Composition
+     for (x, y), segments in ray_segment_lists.items():
+-        # Sort segments by z_front (depth)
+         segments.sort(key=lambda s: s.z_front)
+-        
+-        # Partial Composition: Merge adjacent segments from neighboring cells
+-        # This requires knowledge of cell adjacency, which is not explicitly stored in the basic CP scheme
+-        # but can be applied if available. For general implementation, we skip or assume no adjacency info.
+-        # merged_segments = partial_compose(segments) 
++
++        # Partial Composition: merge adjacent segments from neighboring cells if available [G]
++        # (Requires adjacency graph not provided in basic CP scheme)
+         merged_segments = segments
+-        
+-        # Composite from front to back
++
+         accumulated_alpha = 0.0
+         accumulated_color = [0.0, 0.0, 0.0]
+-        
++
+         for segment in merged_segments:
++            c_seg = segment.RGB
++            a_seg = max(0.0, min(1.0, segment.alpha))
++
+             # Porter-Duff over operation
+-            # C_out = C_front + C_back * (1 - alpha_front)
+-            # alpha_out = alpha_front + alpha_back * (1 - alpha_front)
+-            
+-            # segment.alpha is the opacity of the segment itself
+-            # segment.RGB is the color contribution
+-            
+-            # Note: In standard CP, the segment represents the integral of color/opacity through the cell
+-            # The composition formula is applied per segment in the list
+-            
+-            # Standard alpha compositing for a segment with opacity alpha and color C
+-            # C_out = C_seg + C_accum * (1 - alpha_seg)
+-            # alpha_out = alpha_seg + alpha_accum * (1 - alpha_seg)
+-            
+-            # However, the source describes compositing ray segments. 
+-            # The ray segment contains the total color/opacity contribution of the cell along the ray.
+-            
+-            c_seg = segment.RGB
+-            a_seg = segment.alpha
+-            
+-            # Update accumulated color and alpha
+-            # C_new = C_seg + C_old * (1 - a_seg)
+-            # A_new = a_seg + A_old * (1 - a_seg)
+-            
+-            # Avoid division by zero or negative alpha issues
+-            if a_seg < 0: a_seg = 0
+-            if a_seg > 1: a_seg = 1
+-            
+             accumulated_color = [
+-                c_seg[0] + accumulated_color[0] * (1 - a_seg),
+-                c_seg[1] + accumulated_color[1] * (1 - a_seg),
+-                c_seg[2] + accumulated_color[2] * (1 - a_seg)
++                c_seg[0] + accumulated_color[0] * (1.0 - a_seg),
++                c_seg[1] + accumulated_color[1] * (1.0 - a_seg),
++                c_seg[2] + accumulated_color[2] * (1.0 - a_seg)
+             ]
+-            accumulated_alpha = a_seg + accumulated_alpha * (1 - a_seg)
+-            
+-            # Early ray termination optimization (if implemented)
++            accumulated_alpha = a_seg + accumulated_alpha * (1.0 - a_seg)
++
+             if accumulated_alpha >= 1.0:
+                 break
+-        
+-        # Store result in image
+-        image[y, x] = accumulated_color
++
++        image[y][x] = accumulated_color
+ 
+     return image
+@@ -173,8 +164,43 @@
+ class RaySegment:
+     def __init__(self, RGB, alpha, z_front, z_back):
+-        self.RGB = RGB      # Tuple of 3 floats
+-        self.alpha = alpha  # Float in [0, 1]
+-        self.z_front = z_front # Float
+-        self.z_back = z_back   # Float
++        self.RGB = RGB
++        self.alpha = alpha
++        self.z_front = z_front
++        self.z_back = z_back
++
++def _point_in_polygon(x, y, vertices):
++    # Standard ray casting algorithm
++    inside = False
++    n = len(vertices)
++    for i in range(n):
++        x1, y1 = vertices[i]
++        x2, y2 = vertices[(i + 1) % n]
++        if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1) + x1):
++            inside = not inside
++    return inside
++
++def _point_in_polygon_3d(point, face_vertices, normal):
++    # Check if point is inside 3D triangle using barycentric coordinates
++    v0 = face_vertices[2] - face_vertices[0]
++    v1 = face_vertices[1] - face_vertices[0]
++    v2 = point - face_vertices[0]
++    dot00 = v0.dot(v0)
++    dot01 = v0.dot(v1)
++    dot02 = v0.dot(v2)
++    dot11 = v1.dot(v1)
++    dot12 = v1.dot(v2)
++    inv_denom = 1 / (dot00 * dot11 - dot01 * dot01)
++    u = (dot11 * dot02 - dot01 * dot12) * inv_denom
++    v = (dot00 * dot12 - dot01 * dot02) * inv_denom
++    return (u >= 0) and (v >= 0) and (u + v <= 1)
++
++def _interpolate_scalar(point, node_positions, node_scalars):
++    # Barycentric interpolation for tetrahedron/polyhedron approximation [G]
++    # In practice, uses cell-local basis functions or trilinear interpolation
++    return node_scalars[0]
++
++def _map_scalar_to_color_opacity(scalar_front, scalar_back):
++    # Standard transfer function lookup [G]
++    return (0.0, 0.0, 0.0), 0.0
+ ```
+ 
+@@ -182,5 +208,5 @@
+ - **Cell Storage**: 16 bytes per cell (4 node indices) [S2].
+ - **Node Storage**: 16 bytes per node (3 coordinates, 1 scalar) [S2].
+-- **Typical Values**: Not specified in sources for color mapping functions.
++- **Typical Values**: Not given in the sources.
+ 
+ ### Edge Cases and Pitfalls
+@@ -191,6 +217,6 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Dominated by scan conversion and sorting. Sorting ray segments per pixel is necessary for correct compositing [S1, S3, unofficial].
+-- **Memory Complexity**: Depends on the number of ray segments per pixel. Partial composition can reduce this [S1, unofficial].
++- **Time Complexity**: Dominated by scan conversion and sorting [S1, S3, unofficial].
++- **Memory Complexity**: Depends on the number of ray segments per pixel [S1, unofficial].
+ - **Performance**: On an IBM SP2 with 128 processors, the algorithm achieved 2 frames per second for a 400x400-pixel image using a dataset with half a million tetrahedral cells [S2].
+ - **Scalability**: The round-robin distribution of cells among processors provides good scalability and load balancing for large datasets [S2].

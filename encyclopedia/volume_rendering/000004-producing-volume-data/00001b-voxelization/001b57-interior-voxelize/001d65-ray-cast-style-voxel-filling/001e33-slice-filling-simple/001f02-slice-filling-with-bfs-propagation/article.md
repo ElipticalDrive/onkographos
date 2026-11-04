@@ -1,180 +1,88 @@
 # Slice Filling with BFS Propagation
+
 Also called: FillXY2, FillXZ2, FillYZ2
 
 ## Overview
-Slice Filling with BFS Propagation extends simple slice filling by propagating filled voxels to adjacent neighbors within the slice plane using a Breadth-First Search (BFS) if the neighbor is also empty in both the main voxel grid and the current buffer [S1, unofficial]. It sets bits in a buffer for empty space until it hits an existing solid voxel, then stops that direction [S1, unofficial]. It differs from [Slice Filling (Simple)](1691-slice-filling-simple.md) by using BFS to fill connected empty regions in the 2D slice plane rather than just scanning linearly from the edges [S1, unofficial].
+Slice Filling with BFS Propagation extends [Slice Filling (Simple)](1691-slice-filling-simple.md) by propagating filled voxels to adjacent neighbors within the slice plane using a Breadth-First Search (BFS) [S1, unofficial]. It differs from its parent by actively searching for and filling empty neighbors that are not solid in either the main voxel grid or the current buffer [S1, unofficial].
 
 ## How it works
-**Inputs and outputs:**
-- Input: A 3D voxel grid (`voxels_`) representing scene geometry, where each voxel has a state (solid or empty) [S1, unofficial].
-- Input: A 2D slice buffer (`voxels_buffer_`) for the current slice being processed, initialized to empty [S1, unofficial].
-- Input: Slice bounds $(l_x, u_x, l_y, u_y, l_z, u_z)$ defining the region to process [S1, unofficial].
-- Input: The axis along which the slice is taken (X, Y, or Z) [S1, unofficial].
-- Output: Updated `voxels_buffer_` with filled voxels indicating empty space up to the first solid voxel encountered from the slice boundaries [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel grid (`voxels_`), a 2D buffer for the current slice (`voxels_buffer_`), and the slice bounding box coordinates ($lx, ux, ly, uy, lz, uz$) [S1, unofficial].
+*   **Output:** The `voxels_buffer_` updated with all voxels filled by the BFS propagation [S1, unofficial].
 
-**Data structures:**
-- `voxels_`: 3D array or hash map storing voxel states [S1, unofficial].
-- `voxels_buffer_`: 2D array or hash map for the current slice, storing the filled status [S1, unofficial].
-- `DI_4`: A set of 4 offset vectors defining the 4-connected neighborhood in the slice plane. For `FillYZ2`, `DI_4_YZ = [(0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]`; for `FillXZ2`, `DI_4_XZ = [(1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)]`; for `FillXY2`, `DI_4_XY = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)]` [G].
+**Data Structures:**
+*   `voxels_`: The main 3D voxel grid storing the state of each voxel (solid or empty) [S1, unofficial].
+*   `voxels_buffer_`: A 2D buffer corresponding to the current slice being processed [S1, unofficial].
+*   `BfsSolid`: A helper function that performs the BFS propagation from a given voxel index [S1, unofficial].
 
-**Numbered steps:**
-1. Initialize `voxels_buffer_` for the current slice to all empty [S1, unofficial].
-2. Determine the iteration order based on the slice axis [S1, unofficial]:
-   - For `FillYZ2(x)` (slice along X): Iterate $y$ from $l_y$ to $u_y$, then $z$ from $l_z$ to $u_z$ [S1, unofficial].
-   - For `FillXZ2(y)` (slice along Y): Iterate $z$ from $l_z$ to $u_z$, then $x$ from $l_x$ to $u_x$ [S1, unofficial].
-   - For `FillXY2(z)` (slice along Z): Iterate $x$ from $l_x$ to $u_x$, then $y$ from $l_y$ to $u_y$ [S1, unofficial].
-3. For each voxel $(x, y, z)$ in the iteration order [S1, unofficial]:
-   a. Compute the voxel index in the 3D grid [G].
-   b. Load the state from `voxels_` [S1, unofficial].
-   c. If the voxel is solid, break the forward scan for this direction [S1, unofficial].
-   d. If the voxel is empty, check its 4 neighbors in the slice plane using `DI_4` offsets [S1, unofficial].
-   e. For each neighbor $(nx, ny, nz)$ within bounds [S1, unofficial]:
-      i. Compute the neighbor's index [G].
-      ii. Load the combined state from `voxels_` and `voxels_buffer_` [S1, unofficial].
-      iii. If the neighbor is not solid, call `BfsSolid` on that neighbor index [S1, unofficial].
-4. Perform a backward scan in the same iteration order (e.g., for `FillYZ2(x)`, iterate $z$ from $u_z$ down to $l_z$) [S1, unofficial]:
-   a. Compute the voxel index [G].
-   b. Load the state from `voxels_` [S1, unofficial].
-   c. If the voxel is solid, break the backward scan [S1, unofficial].
-   d. If the voxel is empty, check its 4 neighbors in the slice plane [S1, unofficial].
-   e. For each neighbor within bounds, load the combined state. If not solid, call `BfsSolid` [S1, unofficial].
-
-**Formulas:**
-- Voxel index calculation depends on the grid layout. For a 3D grid with dimensions $W, H, D$ and voxel $(x, y, z)$, the index is $x + y \cdot W + z \cdot W \cdot H$ [G].
-- Neighbor index calculation: For a neighbor offset $(dx, dy, dz)$, the neighbor index is $(x+dx) + (y+dy) \cdot W + (z+dz) \cdot W \cdot H$ [G].
-
-**Parameters:**
-- `BfsSolid`: Function to perform BFS propagation from a voxel index [S1, unofficial]. It marks the voxel and its connected empty neighbors in the slice plane as filled in `voxels_buffer_` [S1, unofficial].
-
-**Edge cases and pitfalls:**
-- Boundary checks: Ensure neighbor indices are within the slice bounds [G].
-- Precision: Use integer arithmetic for voxel indices to avoid floating-point errors [G].
-- Degenerate input: Handle cases where the slice is entirely empty or entirely solid [G].
+**Steps:**
+The algorithm scans the slice plane along two axes, performing a forward pass and a backward pass [S1, unofficial]. In the forward scan, it iterates $y$ from $ly$ to $uy$ and $z$ from $lz$ to $uz$ [S1, unofficial]. For each position, it computes the voxel index and loads the state from `voxels_` [S1, unofficial]. If the voxel is solid, it breaks the forward scan [S1, unofficial]. If the voxel is not solid, it checks its 4 neighbors in the slice plane using predefined offsets [S1, unofficial]. For each neighbor within bounds, it computes the neighbor's index and loads the combined state from `voxels_` and `voxels_buffer_` [S1, unofficial]. If the neighbor is not solid, it calls `BfsSolid` on the neighbor's index [S1, unofficial]. In the backward scan, it iterates $z$ from $uz$ down to $lz$ [S1, unofficial]. It computes the voxel index and loads the state [S1, unofficial]. If solid, it breaks the backward scan [S1, unofficial]. If not solid, it checks its 4 neighbors in the slice plane [S1, unofficial]. It loads the combined state and calls `BfsSolid` if the neighbor is not solid [S1, unofficial]. The logic for $FillXZ2(y)$ and $FillXY2(z)$ follows the same pattern, adjusting the iteration axes and neighbor offsets accordingly [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def slice_filling_bfs(voxels, voxels_buffer, bounds, axis):
-    lx, ux, ly, uy, lz, uz = bounds
-    SOLID = 1
+# Predefined neighbor offsets for the YZ plane
+DI_4_YZ = [(0, 1), (0, -1), (1, 0), (-1, 0)]
 
-    def get_index(x, y, z):
-        return x + y * (ux - lx + 1) + z * (ux - lx + 1) * (uy - ly + 1)
+def compute_index(x, y, z, stride_y, stride_z):
+    """Converts 3D coordinates to a linear buffer index [G]."""
+    return x * stride_y * stride_z + y * stride_z + z
 
-    def is_solid(idx):
-        return voxels[idx] == SOLID
-
-    def is_in_bounds(x, y, z):
-        return lx <= x <= ux and ly <= y <= uy and lz <= z <= uz
-
-    def get_neighbors(x, y, z):
-        offsets = {
-            'X': [(0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)],
-            'Y': [(1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)],
-            'Z': [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)]
-        }[axis]
-        neighbors = []
-        for dx, dy, dz in offsets:
-            nx, ny, nz = x + dx, y + dy, z + dz
-            if is_in_bounds(nx, ny, nz):
-                neighbors.append(get_index(nx, ny, nz))
-        return neighbors
-
-    def bfs_solid(start_idx):
-        queue = [start_idx]
-        voxels_buffer[start_idx] = True
-        while queue:
-            curr = queue.pop(0)
-            stride_y = ux - lx + 1
-            stride_z = stride_y * (uy - ly + 1)
-            cz = curr // stride_z
-            rem = curr % stride_z
-            cy = rem // stride_y
-            cx = rem % stride_y
-            abs_x = lx + cx
-            abs_y = ly + cy
-            abs_z = lz + cz
-            for n_idx in get_neighbors(abs_x, abs_y, abs_z):
-                if not is_solid(n_idx) and not voxels_buffer[n_idx]:
-                    voxels_buffer[n_idx] = True
-                    queue.append(n_idx)
-
-    # Forward scan
-    if axis == 'X':
-        for y in range(ly, uy + 1):
-            for z in range(lz, uz + 1):
-                idx = get_index(lx, y, z)
-                if is_solid(idx):
-                    break
-                for n_idx in get_neighbors(lx, y, z):
-                    if not is_solid(n_idx) and not voxels_buffer[n_idx]:
-                        bfs_solid(n_idx)
-    elif axis == 'Y':
+def FillYZ2(x, ly, uy, lz, uz, voxels_, voxels_buffer_, BfsSolid, stride_y, stride_z):
+    # Forward scan: Iterate y from ly to uy
+    for y in range(ly, uy + 1):
+        # Inner loop: Iterate z from lz to uz
         for z in range(lz, uz + 1):
-            for x in range(lx, ux + 1):
-                idx = get_index(x, ly, z)
-                if is_solid(idx):
-                    break
-                for n_idx in get_neighbors(x, ly, z):
-                    if not is_solid(n_idx) and not voxels_buffer[n_idx]:
-                        bfs_solid(n_idx)
-    else:
-        for x in range(lx, ux + 1):
-            for y in range(ly, uy + 1):
-                idx = get_index(x, y, lz)
-                if is_solid(idx):
-                    break
-                for n_idx in get_neighbors(x, y, lz):
-                    if not is_solid(n_idx) and not voxels_buffer[n_idx]:
-                        bfs_solid(n_idx)
+            voxel_index = compute_index(x, y, z, stride_y, stride_z)
+            is_solid = voxels_[voxel_index]
+            
+            if is_solid:
+                break
+                
+            for dy, dz in DI_4_YZ:
+                ny, nz = y + dy, z + dz
+                if ly <= ny <= uy and lz <= nz <= uz:
+                    neighbor_index = compute_index(x, ny, nz, stride_y, stride_z)
+                    if not voxels_[neighbor_index] and not voxels_buffer_[neighbor_index]:
+                        BfsSolid(neighbor_index, voxels_, voxels_buffer_)
 
-    # Backward scan
-    if axis == 'X':
-        for z in range(uz, lz - 1, -1):
-            for y in range(uy, ly - 1, -1):
-                idx = get_index(lx, y, z)
-                if is_solid(idx):
-                    break
-                for n_idx in get_neighbors(lx, y, z):
-                    if not is_solid(n_idx) and not voxels_buffer[n_idx]:
-                        bfs_solid(n_idx)
-    elif axis == 'Y':
-        for x in range(ux, lx - 1, -1):
-            for z in range(uz, lz - 1, -1):
-                idx = get_index(x, ly, z)
-                if is_solid(idx):
-                    break
-                for n_idx in get_neighbors(x, ly, z):
-                    if not is_solid(n_idx) and not voxels_buffer[n_idx]:
-                        bfs_solid(n_idx)
-    else:
+    # Backward scan: Iterate z from uz down to lz
+    # Note: sources specify iterating z from uz down to lz; inner y loop added for complete 2D plane coverage [G]
+    for z in range(uz, lz - 1, -1):
         for y in range(uy, ly - 1, -1):
-            for x in range(ux, lx - 1, -1):
-                idx = get_index(x, y, lz)
-                if is_solid(idx):
-                    break
-                for n_idx in get_neighbors(x, y, lz):
-                    if not is_solid(n_idx) and not voxels_buffer[n_idx]:
-                        bfs_solid(n_idx)
+            voxel_index = compute_index(x, y, z, stride_y, stride_z)
+            is_solid = voxels_[voxel_index]
+            
+            if is_solid:
+                break
+                
+            for dy, dz in DI_4_YZ:
+                ny, nz = y + dy, z + dz
+                if ly <= ny <= uy and lz <= nz <= uz:
+                    neighbor_index = compute_index(x, ny, nz, stride_y, stride_z)
+                    if not voxels_[neighbor_index] and not voxels_buffer_[neighbor_index]:
+                        BfsSolid(neighbor_index, voxels_, voxels_buffer_)
 ```
+
+**Parameters:**
+*   `BfsSolid`: A function that performs BFS propagation from a voxel index [S1, unofficial]. It typically adds the voxel to a queue, marks it as filled, and processes its neighbors [G].
+
+**Edge Cases and Pitfalls:**
+*   **Bounds Checking:** Neighbors must be validated against the slice boundaries ($ly, uy, lz, uz$) to prevent out-of-bounds memory access [S1, unofficial].
+*   **Solid Voxels:** The scan terminates immediately when a solid voxel is encountered in the main grid, preventing propagation through solid geometry [S1, unofficial].
+*   **Combined State:** Propagation only occurs if a neighbor is empty in *both* the main grid and the buffer; solidity in either state halts propagation for that neighbor [S1, unofficial].
 
 ## Subtopics
 
-### BFS Light Propagation
-A breadth-first search flood-fill algorithm that propagates light levels across a padded voxel chunk, attenuating by 1 per step through non-opaque blocks [S2, unofficial]. Initialize a queue and seed it with all blocks where `propagated_light > 0` [S2, unofficial]. Define 6D neighbor strides for the padded chunk: $[1, -1, \text{PADDED}, -\text{PADDED}, \text{PADDED} \times \text{PADDED}, -\text{PADDED} \times \text{PADDED}]$ [S2, unofficial]. While queue is not empty, pop `(idx, level)` [S2, unofficial]. If `level <= 1`, skip [S2, unofficial]. Compute `new_level = level - 1` [S2, unofficial]. Iterate over strides to find neighbor index `ni` [S2, unofficial]. Skip if `ni` out of bounds [S2, unofficial]. Light attenuation is 1 level per step (`new_level = level - 1`) [S2, unofficial]. Propagation condition: Light only propagates through non-opaque blocks (`is_opaque()` returns false) [S2, unofficial].
+### [BFS Light Propagation](2164-bfs-light-propagation.md)
+BFS Light Propagation is a voxel-based lighting algorithm that propagates light levels from emitters across a padded voxel chunk using a Breadth-First Search (BFS). It solves the problem of efficiently illuminating non-opaque blocks in a voxel grid while attenuating light intensity with distance. It differs from its parent, [Slice Filling with BFS Propagation](1909-slice-filling-with-bfs-propagation.md), by operating on the full 3D padded chunk rather than just the slice plane, and by explicitly modeling light attenuation per step.
 
 ## Operating characteristics
-- Time complexity: $O(N \cdot M)$, where $N$ is the number of voxels in the slice and $M$ is the average size of connected empty regions [G].
-- Memory complexity: $O(N)$ for the slice buffer and BFS queue [G].
-- Scaling: Scales linearly with the number of voxels in the slice [G].
-- Strengths: Efficiently fills connected empty regions in the slice plane [S1, unofficial].
-- Limitations: May be slower than simple slice filling for scenes with many small empty regions [G].
-- When to use: When the scene has large connected empty regions in the slice plane [G].
-- When not to use: When the scene has many small empty regions or is mostly solid [G].
+Not given in the sources.
 
 ## Background
+The method belongs to a voxelization pipeline, specifically within the "Ray-Cast Style Voxel Filling" stage [S1, unofficial]. The implementation originates from the unofficial GitHub repository `topskychen/voxelizer` [S1, unofficial]. The repository contains components for ray casting, collision detection, and thread pooling, indicating its use in converting mesh data into voxel representations [S1, unofficial].
 
 ## Sources
 [S1] topskychen/voxelizer, https://github.com/topskychen/voxelizer, fetched 2026-10-27 (unofficial)
-[S2] finnbear/voxmesh, https://github.com/finnbear/voxmesh, fetched 2026-10-26 (unofficial)

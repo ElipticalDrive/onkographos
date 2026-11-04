@@ -1,0 +1,145 @@
+# PG-NeuS
+
+Also called: PG-NeuS: Point-Guided Neural Implicit Surface Reconstruction by Volume Rendering, Point-NeuS
+
+## Overview
+PG-NeuS is a point-guided neural implicit surface reconstruction method that enhances the base NeuS framework by modeling aleatoric uncertainty to capture point cloud noise distribution, using a Neural Projection module for geometric constraints, and employing a Bias Network to compensate for geometric bias between volume rendering and point modeling [S1, unofficial]. It distinguishes itself from siblings like RegSDF and TUVR by estimating point reliability during geometry optimization via uncertainty modeling rather than using uniform smoothing or external MVS confidence maps, enabling robust handling of noisy and sparse point data [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Camera center $o$, ray direction $d$, a noisy point cloud $\{P\}$, initial weights for the SDF network $f$, the Sigmoid parameter $s$, the Neural Projection module, the Bias Network, and observed pixel colors [S1, unofficial].
+*   **Outputs:** Reconstructed surface (zero-level set of $f$) and rendered colors [S1, unofficial].
+
+**Data Structures:**
+*   **SDF Network ($f$):** A multi-layer perceptron (MLP) mapping 3D coordinates to signed distance values and aleatoric uncertainty [S1, unofficial].
+*   **Neural Projection Module:** A module that projects 3D points onto the implicit surface and then onto the 2D image plane to enforce photometric consistency [S1, unofficial].
+*   **Bias Network:** An MLP that takes high-fidelity points as input to output geometric corrections [S1, unofficial].
+*   **Uncertainty Model:** For each point $p_k \in P$, the SDF value is modeled as a Gaussian distribution $\mathcal{N}(\mu_k, \sigma_k^2)$, where $\mu_k = f(p_k)$ and $\sigma_k$ represents the aleatoric uncertainty [S1, unofficial].
+
+**Numbered Steps:**
+
+1.  **Ray Sampling and Base Rendering:**
+    For each pixel, cast a ray $p(t) = o + td$ for $t > 0$ [S1, unofficial]. Sample $N$ points along the ray [S1, unofficial]. Compute the discrete opacity $\alpha_i$ for each sample point $p(t_i)$ using the NeuS formulation [S1, unofficial]:
+    $$ \alpha_i = \max\left(\frac{\Phi_s(f(p(t_i))) - \Phi_s(f(p(t_{i+1})))}{\Phi_s(f(p(t_i)))}, 0\right) $$
+    where $\Phi_s(x) = (1 + e^{-sx})^{-1}$ is the Sigmoid function with trainable parameter $s$, and $f$ is the SDF network output [S1, unofficial]. Compute the accumulated transmittance $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ and the rendered color $\hat{C} = \sum_{i=1}^N T_i \alpha_i c_i$, where $c_i$ is the color predicted by the network at $p(t_i)$ [S1, unofficial].
+
+2.  **Aleatoric Uncertainty Modeling:**
+    For each point $p_k$ in the input point cloud $P$, the SDF network predicts a mean value $\mu_k = f(p_k)$ and an uncertainty value $\sigma_k$ [S1, unofficial]. The point's reliability is estimated based on $\sigma_k$ [S1, unofficial].
+
+3.  **Neural Projection:**
+    The point data undergoes two projections within the Neural Projection module [S1, unofficial]:
+    a.  **Spatial Projection:** Project the 3D point $p_k$ onto the implicit surface defined by $f(x)=0$ [S1, unofficial].
+    b.  **Image Projection:** Project the spatially projected point onto the 2D image plane corresponding to the camera view [S1, unofficial].
+    A photometric consistency constraint is imposed on these projected positions to serve as regularization for the SDF, ensuring the implicit surface aligns with the observed image colors [S1, unofficial].
+
+4.  **High-Fidelity Point Filtering:**
+    Perform a filter operation utilizing the modeled uncertainty $\sigma_k$ to select high-fidelity points [S1, unofficial].
+
+5.  **Bias Compensation:**
+    Feed the selected high-fidelity points into the Bias Network to compensate for the geometric bias between volume rendering and point modeling [S1, unofficial].
+
+6.  **Optimization:**
+    Update the network weights (SDF, Projection, Bias) and parameter $s$ by minimizing a combined loss function including photometric loss, geometric loss (from NeuS), uncertainty regularization, and photometric consistency constraints [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def sample_points_along_ray(ray_o, ray_d, num_samples):
+    """Returns list of 3D points p(t) = o + t*d for t in (0, 1]."""
+    points = []
+    for i in range(1, num_samples + 1):
+        t = i / num_samples
+        points.append([ray_o[j] + t * ray_d[j] for j in range(3)])
+    return points
+
+def pg_neus_forward(ray_o, ray_d, point_cloud, sdf_net, proj_module, bias_net, s_param, num_samples, observed_colors):
+    # 1. Base NeuS Rendering
+    p_samples = sample_points_along_ray(ray_o, ray_d, num_samples)
+    sdf_vals = [sdf_net(p)[0] for p in p_samples]  # Extract mean SDF
+    
+    # Phi_s(x) = 1 / (1 + exp(-s * x))
+    phi_s = [1.0 / (1.0 + math.exp(-s_param * v)) for v in sdf_vals]
+    
+    # Alpha_i = max((Phi_s(t_i) - Phi_s(t_{i+1})) / Phi_s(t_i), 0)
+    alpha = []
+    for i in range(len(phi_s)):
+        phi_curr = phi_s[i]
+        phi_next = phi_s[i+1] if i+1 < len(phi_s) else 0.0
+        if phi_curr == 0.0:
+            alpha.append(0.0)
+        else:
+            alpha.append(max((phi_curr - phi_next) / phi_curr, 0.0))
+            
+    # Transmittance T_i = product_{j=1}^{i-1} (1 - alpha_j)
+    transmittance = [1.0]
+    for i in range(1, len(alpha)):
+        transmittance.append(transmittance[-1] * (1.0 - alpha[i-1]))
+        
+    colors = [sdf_net.get_color(p) for p in p_samples]
+    rendered_color = [sum(transmittance[i] * alpha[i] * colors[i][j] for i in range(len(alpha))) for j in range(3)]
+    
+    # 2. Uncertainty Modeling for Point Cloud
+    point_cloud_sdf = [sdf_net(p) for p in point_cloud]
+    point_cloud_sigma = [sigma for _, sigma in point_cloud_sdf]
+    
+    # 3. Neural Projection
+    projected_3d = [proj_module.project_to_surface(p, sdf_net) for p in point_cloud]
+    projected_2d = [proj_module.project_to_image(p3d, ray_o, ray_d) for p3d in projected_3d]
+    photometric_loss = sum(abs(rendered_color[j] - observed_colors[i][j]) for i in range(len(point_cloud)) for j in range(3))
+    
+    # 4. Filter High-Fidelity Points
+    mean_sigma = sum(point_cloud_sigma) / len(point_cloud_sigma) if point_cloud_sigma else 0.0
+    high_fidelity_mask = [sigma < mean_sigma for sigma in point_cloud_sigma]
+    high_fidelity_points = [p for p, mask in zip(point_cloud, high_fidelity_mask) if mask]
+    
+    # 5. Bias Compensation
+    if high_fidelity_points:
+        bias_correction = [bias_net(p) for p in high_fidelity_points]
+        # Apply bias correction to SDF values (simplified as additive correction)
+        avg_bias = [sum(b[j] for b in bias_correction) / len(bias_correction) for j in range(3)]
+        sdf_vals_corrected = [v + avg_bias[0] for v in sdf_vals]  # Simplified scalar correction
+    else:
+        sdf_vals_corrected = sdf_vals
+        
+    return rendered_color, photometric_loss, point_cloud_sigma, sdf_vals_corrected
+```
+
+**Parameters:**
+*   $s$: A trainable parameter in the Sigmoid function $\Phi_s(x) = (1 + e^{-sx})^{-1}$ used to define opacity [S1, unofficial].
+*   Typical values: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Input:** If the point cloud is extremely sparse, the Neural Projection module may fail to find valid surface projections [S1, unofficial].
+*   **Precision:** The uncertainty modeling requires the SDF network to output not just a value but a distribution parameter ($\sigma$) [G].
+*   **Boundary Conditions:** The opacity formula involves division by $\Phi_s(f(p(t_i)))$. If $\Phi_s$ is close to zero, numerical instability may occur [G].
+
+## Subtopics
+
+### NeuS Training Loss
+The base training objective combining photometric and geometric losses. PG-NeuS builds on this by adding uncertainty and projection losses. [NeuS Training Loss](2535-neus-training-loss.md)
+
+### RegSDF
+Uses uniform smoothing for noise mitigation. PG-NeuS is preferred when noise characteristics vary significantly across regions, as RegSDF weakens precise point support [S1, unofficial]. [RegSDF](link-to-regsdf.md)
+
+### TUVR
+Relies on MVS network confidence. PG-NeuS is preferred when depth camera data is used or when MVS confidence maps are unreliable, as PG-NeuS estimates reliability during optimization [S1, unofficial]. [TUVR](link-to-tuvr.md)
+
+## Operating characteristics
+*   **Time Complexity:** PG-NeuS achieves an 11x speedup compared to NeuS without masks [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Achieves a 33.3% improvement in accuracy compared to NeuS without masks on DTU and BlendedMVS datasets [S1, unofficial].
+*   **Scaling:** Benefits from lightweight networks, allowing efficient convergence while maintaining high accuracy [S1, unofficial].
+*   **Strengths:** Robust to noisy and sparse point data; balances accuracy and efficiency; handles region-specific noise via uncertainty modeling [S1, unofficial].
+*   **Limitations:** Requires a point cloud prior; complexity of implementing uncertainty modeling and bias compensation [G].
+*   **When to use:** When high-quality point clouds are available but contain noise, and computational efficiency is a concern [G].
+*   **When not to use:** When no point cloud prior is available, or when the point cloud is extremely sparse to the point where projection is ambiguous [G].
+
+## Background
+PG-NeuS was proposed to address challenges in neural implicit surface reconstruction, specifically limited accuracy, excessive time complexity, and the impact of point cloud noise [S1, unofficial]. It was introduced in the paper "Point-NeuS: Point-Guided Neural Implicit Surface Reconstruction by Volume Rendering" [S1, unofficial]. The method improves upon prior point-guided methods like RegSDF and TUVR by introducing aleatoric uncertainty estimation and a Bias Network to handle geometric bias [S1, unofficial].
+
+## Sources
+[S1] Point-NeuS: Point-Guided Neural Implicit Surface Reconstruction by Volume Rendering, https://doi.org/10.48550/arXiv.2310.07997, fetched 2026-10-30 (unofficial)

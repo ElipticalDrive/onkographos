@@ -1,0 +1,241 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Geometry Shader Voxelization converts polygonal meshes (`.obj`, `.ply`) into a discrete 3D occupancy or color grid by rasterizing triangles directly into a 3D texture using an OpenGL Geometry Shader [S3, unofficial]. It solves the problem of efficiently filling a 3D grid using standard GPU hardware rasterizers, which are optimized for 2D screens [S4]. Unlike [GPU Mesh Voxelization via Axis-Aligned Projection](2561-gpu-mesh-voxelization-via-axis-aligned-projection.md) which explicitly selects the optimal projection axis per triangle to maximize coverage, this method uses generic 3D rasterization logic or swizzles geometry to align with the XY plane while checking overlaps in all three dimensions (XY, YZ, ZX) [S3, unofficial]. It differs from [GPU Voxelization Using OpenGL Image Atomics](2544-gpu-voxelization-using-opengl-image-atomics.md) by typically relying on the geometry shader's ability to emit multiple primitives or iterate through grid cells, rather than pure atomic accumulation without depth-based projection [S4].
++Geometry Shader Voxelization converts polygonal meshes (`.obj`, `.ply`) into a discrete 3D occupancy or color grid by rasterizing triangles directly into a 3D texture using an OpenGL Geometry Shader [S3, unofficial]. It projects each triangle to cover grid cells at a specified resolution and determines occupied voxels by checking overlaps in all three dimensions (XY, YZ, ZX) [S3, unofficial]. Unlike [GPU Mesh Voxelization via Axis-Aligned Projection](2561-gpu-mesh-voxelization-via-axis-aligned-projection.md) which explicitly selects the optimal projection axis per triangle to maximize coverage, this method swizzles geometry to align with the XY plane while iterating through bounding boxes to verify 3D overlaps [S3, unofficial]. It differs from [GPU Voxelization Using OpenGL Image Atomics](2544-gpu-voxelization-using-opengl-image-atomics.md) by relying on the geometry shader's ability to emit multiple primitives and iterate through grid cells, rather than pure atomic accumulation without depth-based projection [S3, unofficial].
+ 
+ ## How it works
+@@ -25,10 +25,10 @@
+ 
+ 1. **Load and Normalize Mesh:**
+-   Load vertices and faces. Compute bounding box: $xmin, xmax, ymin, ymax, zmin, zmax$. Calculate dimensions $dx, dy, dz$ and $dmax = \max(dx, dy, dz)$ [S3, unofficial]. Normalize vertices to $[0, 1]$ range:
++   Load vertices and faces. Compute bounding box: $xmin, xmax, ymin, ymax, zmin, zmax$ [S3, unofficial]. Calculate dimensions $dx, dy, dz$ and $dmax = \max(dx, dy, dz)$ [S3, unofficial]. Normalize vertices to $[0, 1]$ range:
+    $$ V_{norm} = \frac{V - min}{dmax} $$
+    [S3, unofficial].
+ 
+ 2. **Setup Rendering Pipeline:**
+-   Load shaders (`VoxelizationVS.glsl`, `VoxelizationGS.glsl`, `VoxelizationFS.glsl`) [S3, unofficial]. Bind vertex buffer `mesh.V` and element buffer `mesh.F`. Pass `voxelResolution` uniform [S3, unofficial]. Bind `voxelOccupancy` (`layout(r8ui, binding = 0) uniform uimage3D`) and `voxelColor` (`layout(rgba8, binding = 1) uniform image3D`) [S3, unofficial].
++   Load shaders (`VoxelizationVS.glsl`, `VoxelizationGS.glsl`, `VoxelizationFS.glsl`) [S3, unofficial]. Bind vertex buffer `mesh.V` and element buffer `mesh.F` [S3, unofficial]. Pass `voxelResolution` uniform [S3, unofficial]. Bind `voxelOccupancy` (`layout(r8ui, binding = 0) uniform uimage3D`) and `voxelColor` (`layout(rgba8, binding = 1) uniform image3D`) [S3, unofficial].
+ 
+ 3. **Swizzle Triangle:**
+@@ -50,5 +50,5 @@
+    Thin: $d_{Tri} = \text{dot}(n_{proj}, v_0) - \text{dot}(n_{proj,xy}, 0.5)$
+    Fat: $d_{Tri, min} = \text{dot}(n_{proj}, v_0) - \max(n_{proj,x}, 0) - \max(n_{proj,y}, 0)$
+-   $d_{Tri, max} = \text{dot}(n_{proj}, v_0) - \min(n_{proj,x}, 0) - \min(n_{proj,y}, 0)$
++   $$ d_{Tri, max} = \text{dot}(n_{proj}, v_0) - \min(n_{proj,x}, 0) - \min(n_{proj,y}, 0) $$
+    [S3, unofficial].
+ 
+@@ -84,6 +84,6 @@
+    [S3, unofficial].
+    Check overlaps:
+-   $$ yz\_overlap = (dd_{e0,yz} \ge 0) \land \dots $$
+-   $$ zx\_overlap = (dd_{e0,zx} \ge 0) \land \dots $$
++   $$ yz\_overlap = (dd_{e0,yz} \ge 0) \land (dd_{e1,yz} \ge 0) \land (dd_{e2,yz} \ge 0) $$
++   $$ zx\_overlap = (dd_{e0,zx} \ge 0) \land (dd_{e1,zx} \ge 0) \land (dd_{e2,zx} \ge 0) $$
+    [S3, unofficial].
+ 
+@@ -110,83 +110,90 @@
+     """
+     # 1. Normalize Mesh
+-    min_coords = np.min(mesh_V, axis=1)
+-    max_coords = np.max(mesh_V, axis=1)
+-    dmax = np.max(max_coords - min_coords)
+-    mesh_V_norm = (mesh_V - min_coords) / dmax
++    min_coords = [min(mesh_V[i]) for i in range(3)]
++    max_coords = [max(mesh_V[i]) for i in range(3)]
++    dmax = max(max_coords[i] - min_coords[i] for i in range(3))
++    mesh_V_norm = [[(mesh_V[i][j] - min_coords[i]) / dmax for j in range(len(mesh_V[0]))] for i in range(3)]
+     
+-    # 2. Setup Pipeline (Abstracted)
+-    # Bind shaders, buffers, and images (voxelOccupancy, voxelColor)
++    # Initialize output grids
++    voxel_occupancy = [[[0 for _ in range(voxel_resolution)] for _ in range(voxel_resolution)] for _ in range(voxel_resolution)]
++    voxel_color = [[[0.0 for _ in range(4)] for _ in range(voxel_resolution)] for _ in range(voxel_resolution)]
+     
+-    # 3. Process Each Triangle
+-    for i in range(mesh_F.shape[1]):
+-        v0 = mesh_V_norm[:, mesh_F[0, i]]
+-        v1 = mesh_V_norm[:, mesh_F[1, i]]
+-        v2 = mesh_V_norm[:, mesh_F[2, i]]
++    # 2. Process Each Triangle
++    for i in range(len(mesh_F[0])):
++        v0 = [mesh_V_norm[j][mesh_F[0][i]] for j in range(3)]
++        v1 = [mesh_V_norm[j][mesh_F[1][i]] for j in range(3)]
++        v2 = [mesh_V_norm[j][mesh_F[2][i]] for j in range(3)]
+         
+         # Swizzle: Align dominant normal axis to Z (XY plane projection)
+-        n = np.cross(v1 - v0, v2 - v1)
+-        dominant_axis = np.argmax(np.abs(n))
++        n = [v1[1]*v2[2] - v1[2]*v2[1], v1[2]*v2[0] - v1[0]*v2[2], v1[0]*v2[1] - v1[1]*v2[0]]
++        dominant_axis = 0 if abs(n[0]) >= abs(n[1]) and abs(n[0]) >= abs(n[2]) else (1 if abs(n[1]) >= abs(n[2]) else 2)
++        
+         # Permute vertices and normal to align dominant plane with XY
+-        v0_swizzled, v1_swizzled, v2_swizzled, n_swizzled, unswizzle = swizzle_triangle(v0, v1, v2, n)
++        # In practice, a permutation matrix is applied. Here we assume Z is dominant for the example.
++        v0_swizzled, v1_swizzled, v2_swizzled, n_swizzled = v0, v1, v2, n
++        unswizzle = [[1,0,0],[0,1,0],[0,0,1]] # Identity for Z-dominant case
+         
+         # 4. Compute Edge Normals
+-        e0 = v1_swizzled - v0_swizzled
+-        e1 = v2_swizzled - v1_swizzled
+-        e2 = v0_swizzled - v2_swizzled
+-        
+-        # Compute 2D edge normals for XY, YZ, ZX planes
+-        # Example for XY plane (using n.z)
+-        n_e0_xy = np.array([-e0[1], e0[0]]) if n_swizzled[2] >= 0 else np.array([e0[1], -e0[0]])
+-        n_e1_xy = np.array([-e1[1], e1[0]]) if n_swizzled[2] >= 0 else np.array([e1[1], -e1[0]])
+-        n_e2_xy = np.array([-e2[1], e2[0]]) if n_swizzled[2] >= 0 else np.array([e2[1], -e2[0]])
+-        
+-        # Similar logic for YZ (using n.x) and ZX (using n.y) planes...
++        e0 = [v1_swizzled[j] - v0_swizzled[j] for j in range(3)]
++        e1 = [v2_swizzled[j] - v1_swizzled[j] for j in range(3)]
++        e2 = [v0_swizzled[j] - v2_swizzled[j] for j in range(3)]
++        
++        # Compute 2D edge normals for XY plane (using n.z)
++        def get_2d_normal(e, n_perp):
++            if n_perp >= 0:
++                return [-e[1], e[0]]
++            else:
++                return [e[1], -e[0]]
++                
++        n_e0_xy = get_2d_normal(e0, n_swizzled[2])
++        n_e1_xy = get_2d_normal(e1, n_swizzled[2])
++        n_e2_xy = get_2d_normal(e2, n_swizzled[2])
+         
+         # 5. Calculate Initial Distances
+-        # Projected vertices for XY plane
+         v0_proj = v0_swizzled[:2]
+         v1_proj = v1_swizzled[:2]
+         v2_proj = v2_swizzled[:2]
+         
++        def dot2(a, b): return a[0]*b[0] + a[1]*b[1]
++        def max2(a): return max(abs(a[0]), abs(a[1]))
++        
+         if thickness_mode == 'THIN':
+-            d_e0_xy = dot(n_e0_xy, 0.5 - v0_proj) + 0.5 * max(abs(n_e0_xy[0]), abs(n_e0_xy[1]))
+-            # ... compute d_e1_xy, d_e2_xy
+-            d_tri = dot(n_swizzled[:2], v0_proj) - dot(n_swizzled[:2], 0.5)
++            d_e0_xy = dot2(n_e0_xy, [0.5 - v0_proj[0], 0.5 - v0_proj[1]]) + 0.5 * max2(n_e0_xy)
++            d_e1_xy = dot2(n_e1_xy, [0.5 - v1_proj[0], 0.5 - v1_proj[1]]) + 0.5 * max2(n_e1_xy)
++            d_e2_xy = dot2(n_e2_xy, [0.5 - v2_proj[0], 0.5 - v2_proj[1]]) + 0.5 * max2(n_e2_xy)
++            d_tri = dot2(n_swizzled[:2], v0_proj) - dot2(n_swizzled[:2], [0.5, 0.5])
+         else: # FAT
+-            d_e0_xy = -dot(n_e0_xy, v0_proj) + max(0, n_e0_xy[0]) + max(0, n_e0_xy[1])
+-            # ... compute d_e1_xy, d_e2_xy
+-            d_tri_min = dot(n_swizzled[:2], v0_proj) - max(n_swizzled[0], 0) - max(n_swizzled[1], 0)
+-            d_tri_max = dot(n_swizzled[:2], v0_proj) - min(n_swizzled[0], 0) - min(n_swizzled[1], 0)
++            d_e0_xy = -dot2(n_e0_xy, v0_proj) + max(0, n_e0_xy[0]) + max(0, n_e0_xy[1])
++            d_e1_xy = -dot2(n_e1_xy, v1_proj) + max(0, n_e1_xy[0]) + max(0, n_e1_xy[1])
++            d_e2_xy = -dot2(n_e2_xy, v2_proj) + max(0, n_e2_xy[0]) + max(0, n_e2_xy[1])
++            d_tri_min = dot2(n_swizzled[:2], v0_proj) - max(n_swizzled[0], 0) - max(n_swizzled[1], 0)
++            d_tri_max = dot2(n_swizzled[:2], v0_proj) - min(n_swizzled[0], 0) - min(n_swizzled[1], 0)
+             
+         # 6. X-Y Loop
+-        # Compute AABB in voxel space
+-        min_vox = clamp(floor(min(v0_proj, v1_proj, v2_proj)), 0, voxel_resolution)
+-        max_vox = clamp(ceil(max(v0_proj, v1_proj, v2_proj)), 0, voxel_resolution)
++        min_vox = [max(0, min(int(v0_proj[0]), int(v1_proj[0]), int(v2_proj[0]))), max(0, min(int(v0_proj[1]), int(v1_proj[1]), int(v2_proj[1])))]
++        max_vox = [min(voxel_resolution, max(int(v0_proj[0]), int(v1_proj[0]), int(v2_proj[0]))), min(voxel_resolution, max(int(v0_proj[1]), int(v1_proj[1]), int(v2_proj[1])))]
+         
+         for p_x in range(min_vox[0], max_vox[0] + 1):
+             for p_y in range(min_vox[1], max_vox[1] + 1):
+-                p_proj = np.array([p_x, p_y])
++                p_proj = [p_x, p_y]
+                 
+-                # Update distances
+-                dd_e0_xy = d_e0_xy + dot(n_e0_xy, p_proj)
+-                dd_e1_xy = d_e1_xy + dot(n_e1_xy, p_proj)
+-                dd_e2_xy = d_e2_xy + dot(n_e2_xy, p_proj)
++                dd_e0_xy = d_e0_xy + dot2(n_e0_xy, p_proj)
++                dd_e1_xy = d_e1_xy + dot2(n_e1_xy, p_proj)
++                dd_e2_xy = d_e2_xy + dot2(n_e2_xy, p_proj)
+                 
+                 if (dd_e0_xy >= 0) and (dd_e1_xy >= 0) and (dd_e2_xy >= 0):
+                     # 7. Z-Range Calculation
+                     if thickness_mode == 'THIN':
+-                        z_min = (-dot(n_swizzled[:2], p_proj) + d_tri) / n_swizzled[2]
+-                        z_max = z_min # Simplified for thin, actual logic involves floor/ceil boundary handling
++                        z_min = (-dot2(n_swizzled[:2], p_proj) + d_tri) / n_swizzled[2]
++                        z_max = z_min # Simplified for thin
+                     else:
+-                        z_min = (-dot(n_swizzled[:2], p_proj) + d_tri_min) / n_swizzled[2]
+-                        z_max = (-dot(n_swizzled[:2], p_proj) + d_tri_max) / n_swizzled[2]
++                        z_min = (-dot2(n_swizzled[:2], p_proj) + d_tri_min) / n_swizzled[2]
++                        z_max = (-dot2(n_swizzled[:2], p_proj) + d_tri_max) / n_swizzled[2]
+                     
+-                    # Apply boundary handling
+                     z_min_int = int(z_min)
+                     z_max_int = int(z_max)
+-                    z_min_final = z_min_int - int(z_min_int == z_min)
+-                    z_max_final = z_max_int + int(z_max_int == z_max)
++                    z_min_final = z_min_int - (1 if z_min_int == z_min else 0)
++                    z_max_final = z_max_int + (1 if z_max_int == z_max else 0)
+                     
+-                    # Clamp Z range to grid
+                     z_min_final = max(0, min(z_min_final, voxel_resolution))
+                     z_max_final = max(0, min(z_max_final, voxel_resolution))
+@@ -194,17 +201,34 @@
+                     # 8. Z-Loop and Overlap Check
+                     for p_z in range(z_min_final, z_max_final + 1):
+-                        p_swizzled = np.array([p_x, p_y, p_z])
+-                        
+-                        # Check YZ and ZX overlaps
+-                        # ... (similar distance updates and checks for YZ and ZX planes)
++                        p_swizzled = [p_x, p_y, p_z]
++                        
++                        # Check YZ and ZX overlaps (follows same logic as XY using n.x and n.y)
++                        n_e0_yz = get_2d_normal(e0, n_swizzled[0])
++                        n_e1_yz = get_2d_normal(e1, n_swizzled[0])
++                        n_e2_yz = get_2d_normal(e2, n_swizzled[0])
++                        n_e0_zx = get_2d_normal(e0, n_swizzled[1])
++                        n_e1_zx = get_2d_normal(e1, n_swizzled[1])
++                        n_e2_zx = get_2d_normal(e2, n_swizzled[1])
++                        
++                        dd_e0_yz = d_e0_xy + dot2(n_e0_yz, [p_z, p_x])
++                        dd_e1_yz = d_e1_xy + dot2(n_e1_yz, [p_z, p_x])
++                        dd_e2_yz = d_e2_xy + dot2(n_e2_yz, [p_z, p_x])
++                        
++                        dd_e0_zx = d_e0_xy + dot2(n_e0_zx, [p_y, p_z])
++                        dd_e1_zx = d_e1_xy + dot2(n_e1_zx, [p_y, p_z])
++                        dd_e2_zx = d_e2_xy + dot2(n_e2_zx, [p_y, p_z])
++                        
++                        yz_overlap = (dd_e0_yz >= 0) and (dd_e1_yz >= 0) and (dd_e2_yz >= 0)
++                        zx_overlap = (dd_e0_zx >= 0) and (dd_e1_zx >= 0) and (dd_e2_zx >= 0)
++                        
+                         if yz_overlap and zx_overlap:
+                             # 9. Write Voxel
+-                            p_unswizzled = unswizzle @ p_swizzled
+-                            image_store(voxelOccupancy, p_unswizzled, 1)
+-                            image_store(voxelColor, p_unswizzled, p_unswizzled / voxel_resolution)
+-
+-    # 10. Synchronize
+-    gl_memory_barrier(GL_ALL_BARRIER_BITS)
+-    return read_3d_texture(voxelOccupancy)
++                            p_unswizzled = [sum(unswizzle[j][k]*p_swizzled[k] for k in range(3)) for j in range(3)]
++                            voxel_occupancy[p_unswizzled[0]][p_unswizzled[1]][p_unswizzled[2]] = 1
++                            voxel_color[p_unswizzled[0]][p_unswizzled[1]][p_unswizzled[2]] = [p_unswizzled[0]/voxel_resolution, p_unswizzled[1]/voxel_resolution, p_unswizzled[2]/voxel_resolution, 1.0]
++
++    # 10. Synchronize and Read Back
++    # glMemoryBarrier(GL_ALL_BARRIER_BITS) ensures writes are visible
++    return voxel_occupancy, voxel_color
+ ```
+ 
+@@ -221,11 +245,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Depends on the number of triangles and the volume of their bounding boxes in voxel space. The nested loops (XY and Z) iterate over the bounding box of each triangle, making it efficient for sparse scenes but potentially costly for dense or large triangles.
++- **Time Complexity:** Not given in the sources.
+ - **Memory Complexity:** $O(N^3)$ for a grid of size $N \times N \times N$ to store the occupancy and color data [S3, unofficial].
+-- **Performance:** Efficient for real-time voxelization on GPUs supporting Geometry Shaders [S3, unofficial]. Performance scales with voxel resolution and triangle count.
++- **Performance:** Not given in the sources.
+ - **Strengths:** Uses standard graphics pipeline, easy to implement with OpenGL, supports both thin and fat voxelization [S3, unofficial].
+-- **Limitations:** Geometry shader overhead, potential for holes if not using fat voxelization, requires careful handling of boundary conditions [S3, unofficial].
+-- **When to use:** When using OpenGL and needing a straightforward rasterization-based approach.
+-- **When not to use:** When using DirectX 12 without geometry shaders (use [VoxelizerX](2566-geometry-shader-voxelization.md) DX12 variant or other methods), or when compute shader-based methods are preferred for better control.
++- **Limitations:** Not given in the sources.
++- **When to use:** Not given in the sources.
++- **When not to use:** Not given in the sources.
+ 
+ ## Background

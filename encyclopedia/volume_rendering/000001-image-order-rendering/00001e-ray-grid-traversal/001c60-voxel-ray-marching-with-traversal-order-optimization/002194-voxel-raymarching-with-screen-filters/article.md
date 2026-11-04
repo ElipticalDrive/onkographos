@@ -1,0 +1,241 @@
+# Voxel Raymarching with Screen Filters
+
+Also called: Voxel Transparency Shader
+
+## Overview
+Voxel Raymarching with Screen Filters is a fragment shader technique for rendering transparent voxels that combines ray-marched lighting with post-process screen-space visualization modes [S2, unofficial]. It differs from its parent [Voxel Ray Marching with Traversal Order Optimization](1251-voxel-ray-marching-with-traversal-order-optimization.md) by extending the standard traversal loop with a switchable set of screen filters (Normal, Position, Iterations, Flat Color, Depth, and Toon) that override or modify the final output color based on ray metadata, rather than relying solely on pre-filtered screen-space accumulation or hierarchical structures [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Ray origin, ray direction, scene data (world width, time, screen filter ID, tonemap mode), camera data (position, previous position, previous rotation), voxel texture (3D), albedo palette, material palette, previous depth texture, skybox.
+*   **Outputs:** `colorTexture` (final color), `velocityTexture` (optional), `currentDepthTexture` (optional), `positionTexture` (optional).
+
+**Data Structures**
+*   `RayHit`: Struct containing `status` (int, 0=empty, 2=world hit, 3=out of bounds), `position` (vec3<f32>), `normal` (vec3<f32>), `uv` (vec2<f32>), `worldUV` (vec2<f32>), `voxelData` (u32), `iterations` (u32).
+*   `voxelData` (u32): Packed voxel information. Bits 7–4 (`(voxelData >> 4) & 0xF`) store the `albedoIndex`. Bits 3–0 (`voxelData & 0xF`) store the `materialIndex`.
+*   `sceneData`: Contains `worldWidth` (f32), `time` (f32), `screenFilter` (int), `tonemap` (int).
+*   `cameraData`: Contains `position` (vec3<f32>), `prevPosition` (vec3<f32>), `prevRotation` (mat4<f32>).
+
+**Algorithm Steps**
+
+1.  **Ray Marching:** Perform voxel raymarching using the parent method's traversal logic to find the first world hit.
+    *   Initialize `rayPos = floor(rayOrigin)`.
+    *   Compute `rayStep = sign(rayDir)`.
+    *   Compute `maxTranslation` and `deltaTranslation` for axis-aligned traversal.
+    *   Loop while `steps < maxSteps`:
+        *   Sample `voxelData = GetVoxel(vec3<u32>(rayPos))`.
+        *   If `voxelData != 0`:
+            *   Compute intersection depth with the current voxel box.
+            *   Calculate `intersectionPosition = rayOrigin + rayDir * intersectionDepth`.
+            *   Determine `intersectionNormal` based on the dominant axis of the direction from the voxel center.
+            *   Set `result.status = 2`, `result.position = intersectionPosition`, `result.normal = intersectionNormal`, `result.voxelData = voxelData`, `result.iterations = steps`.
+            *   Return `result`.
+        *   Advance `rayPos` along the traversal grid.
+        *   Check bounds. If out of bounds, set `status = 3` and return.
+    *   If loop exits without hit, set `status = 0` (or skybox hit) and return.
+
+2.  **Hit Processing:**
+    *   Let `hitWorld` be true if `ray.status == 2`.
+    *   If `hitWorld`:
+        *   **Extract Data:**
+            *   `albedoIndex = (ray.voxelData >> 4) & 0xF`
+            *   `materialIndex = ray.voxelData & 0xF`
+            *   `albedo = COLORS[albedoIndex]`
+            *   `material = MATERIALS[materialIndex]`
+        *   **Random Seed:**
+            *   `seed = (ray.position + vec3<f32>(sceneData.time * 17.0, sceneData.time * 29.0, sceneData.time * 41.0)) * f32(pixelPos.x) / f32(pixelPos.y)`
+        *   **Directions:**
+            *   `specularDir = reflect(rayDir, ray.normal)`
+            *   `diffuseDir = normalize(ray.normal + RandomDirection(seed))`
+        *   **Emissive Check:**
+            *   If `material.emissive` is true:
+                *   `color = throughput * albedo`
+                *   Break lighting loop.
+        *   **Specular Contribution:**
+            *   If `material.specular > 0.0`:
+                *   `bounceCount += 1`
+                *   `throughput *= (1.0 - material.specular * 0.1)`
+        *   **Sun Contribution:**
+            *   `sunContribution = Sunlight(ray.position, ray.normal)`
+            *   `color += throughput * (albedo * sunContribution) * (1.0 - material.specular)`
+            *   `throughput *= albedo`
+        *   **Ray Update:**
+            *   `rayPos = ray.position - (0.001 * rayDir)`
+            *   `rayDir = mix(diffuseDir, specularDir, material.specular)`
+    *   If not `hitWorld` (Skybox hit):
+        *   `color = throughput * Skybox(rayDir)`
+
+3.  **Screen Filters:**
+    *   If `hitWorld && sceneData.screenFilter != 0`:
+        *   **Filter 1 (Normal):**
+            *   `color = (ray.normal / 2.0) + 0.5`
+        *   **Filter 2 (Position):**
+            *   `color = ray.position / f32(sceneData.worldWidth)`
+        *   **Filter 3 (Iterations):**
+            *   `color = vec3<f32>(1.0 - (f32(iterationCount) / 50.0))`
+        *   **Filter 4 (Flat Color):**
+            *   `norm = (ray.normal / 2.0) + 0.5`
+            *   `brightness = norm.x * 0.2 + norm.y * 0.4 + norm.z * 0.6`
+            *   `color = albedo * brightness`
+        *   **Filter 5 (Depth):**
+            *   `color = vec3<f32>(1.0 - depth / f32(sceneData.worldWidth) * 2.0)`
+        *   **Filter 6 (Toon):**
+            *   Sample 4 neighboring depth values from `previousDeptTexture` (note: source uses `previousDeptTexture`):
+                *   `d0 = previousDeptTexture[pixelPos]`
+                *   `d1 = previousDeptTexture[pixelPos + (1,0)]`
+                *   `d2 = previousDeptTexture[pixelPos + (0,1)]`
+                *   `d3 = previousDeptTexture[pixelPos + (1,1)]`
+            *   `mean = (d0 + d1 + d2 + d3) / 4.0`
+            *   `variance = (pow(d0 - mean, 2.0) + pow(d1 - mean, 2.0) + pow(d2 - mean, 2.0) + pow(d3 - mean, 2.0)) / 4.0`
+            *   `color = (vec3<f32>(1.0) - vec3<f32>(variance)) * albedo`
+
+4.  **Post-Processing:**
+    *   Apply gamma correction: `color = gammaCorrect(color)`.
+    *   Store `color` in `colorTexture`.
+
+5.  **Auxiliary Passes (if no screen filter):**
+    *   If `!hitWorld`:
+        *   Write `vec4<f32>(1000000000.0, 1000000000.0, 0.0, 0.0)` to `velocityTexture`.
+        *   Write `vec4<f32>(1000000000.0, 1000000000.0, 0.0, 0.0)` to `currentDepthTexture`.
+    *   Else (`hitWorld`):
+        *   Compute `prevPixelPos = WorldToClipSpace(pixelWorldPosition, cameraData.prevPosition, cameraData.prevRotation)`.
+        *   Compute `pixelVelocity = vec2<f32>(pixelPos) - prevPixelPos`.
+        *   Store `pixelVelocity` in `velocityTexture`.
+        *   Compute `depth = distance(cameraData.position, pixelWorldPosition)`.
+        *   Store `depth` in `currentDepthTexture`.
+        *   Write `pixelWorldPosition` to `positionTexture`.
+        *   Apply tonemapping:
+            *   If `sceneData.tonemap == 0`: `color = tonemapACES(color)`
+            *   If `sceneData.tonemap == 1`: `color = tonemapReinhard(color)`
+        *   Apply gamma correction: `color = gammaCorrect(color)`.
+        *   Store `color` in `colorTexture`.
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+fn VoxelRaymarchingWithScreenFilters(pixelPos: vec2<u32>, rayOrigin: vec3<f32>, rayDir: vec3<f32>, sceneData: SceneData, cameraData: CameraData) -> vec4<f32>:
+    # 1. Ray Marching (Parent Method)
+    rayHit = MarchThroughVoxels(rayOrigin, rayDir, sceneData.maxSteps)
+    
+    hitWorld = (rayHit.status == 2)
+    color = vec3<f32>(0.0)
+    throughput = vec3<f32>(1.0)
+    
+    if hitWorld:
+        # 2. Hit Processing
+        albedoIndex = (rayHit.voxelData >> 4) & 0xF
+        materialIndex = rayHit.voxelData & 0xF
+        albedo = COLORS[albedoIndex]
+        material = MATERIALS[materialIndex]
+        
+        seed = (rayHit.position + vec3<f32>(sceneData.time * 17.0, sceneData.time * 29.0, sceneData.time * 41.0)) * f32(pixelPos.x) / f32(pixelPos.y)
+        
+        specularDir = reflect(rayDir, rayHit.normal)
+        diffuseDir = normalize(rayHit.normal + RandomDirection(seed))
+        
+        if material.emissive:
+            color = throughput * albedo
+            # Skip lighting loop
+        else:
+            if material.specular > 0.0:
+                throughput *= (1.0 - material.specular * 0.1)
+            
+            sunContribution = Sunlight(rayHit.position, rayHit.normal)
+            color += throughput * (albedo * sunContribution) * (1.0 - material.specular)
+            throughput *= albedo
+            
+        # Note: Ray update is performed for further bounces in parent, 
+        # but screen filters use the initial hit data.
+        
+    else:
+        # Skybox hit
+        color = throughput * Skybox(rayDir)
+        
+    # 3. Screen Filters
+    if hitWorld and sceneData.screenFilter != 0:
+        filterId = sceneData.screenFilter
+        if filterId == 1:
+            color = (rayHit.normal / 2.0) + 0.5
+        elif filterId == 2:
+            color = rayHit.position / f32(sceneData.worldWidth)
+        elif filterId == 3:
+            color = vec3<f32>(1.0 - (f32(rayHit.iterations) / 50.0))
+        elif filterId == 4:
+            norm = (rayHit.normal / 2.0) + 0.5
+            brightness = norm.x * 0.2 + norm.y * 0.4 + norm.z * 0.6
+            color = albedo * brightness
+        elif filterId == 5:
+            depth = distance(cameraData.position, rayHit.position)
+            color = vec3<f32>(1.0 - depth / f32(sceneData.worldWidth) * 2.0)
+        elif filterId == 6:
+            d0 = previousDeptTexture[pixelPos]
+            d1 = previousDeptTexture[pixelPos + (1,0)]
+            d2 = previousDeptTexture[pixelPos + (0,1)]
+            d3 = previousDeptTexture[pixelPos + (1,1)]
+            mean = (d0 + d1 + d2 + d3) / 4.0
+            variance = (pow(d0 - mean, 2.0) + pow(d1 - mean, 2.0) + pow(d2 - mean, 2.0) + pow(d3 - mean, 2.0)) / 4.0
+            color = (vec3<f32>(1.0) - vec3<f32>(variance)) * albedo
+            
+    # 4. Post-Processing
+    color = gammaCorrect(color)
+    
+    # 5. Auxiliary Passes (only if no screen filter)
+    if sceneData.screenFilter == 0:
+        if not hitWorld:
+            velocityTexture[pixelPos] = vec4<f32>(1000000000.0, 1000000000.0, 0.0, 0.0)
+            currentDepthTexture[pixelPos] = vec4<f32>(1000000000.0, 1000000000.0, 0.0, 0.0)
+        else:
+            prevPixelPos = WorldToClipSpace(rayHit.position, cameraData.prevPosition, cameraData.prevRotation)
+            pixelVelocity = vec2<f32>(pixelPos) - prevPixelPos
+            velocityTexture[pixelPos] = vec4<f32>(pixelVelocity, 0.0, 0.0)
+            
+            depth = distance(cameraData.position, rayHit.position)
+            currentDepthTexture[pixelPos] = vec4<f32>(depth, 0.0, 0.0, 0.0)
+            
+            positionTexture[pixelPos] = vec4<f32>(rayHit.position, 1.0)
+            
+            if sceneData.tonemap == 0:
+                color = tonemapACES(color)
+            elif sceneData.tonemap == 1:
+                color = tonemapReinhard(color)
+                
+            color = gammaCorrect(color)
+            
+    return vec4<f32>(color, 1.0)
+```
+
+**Parameters and Typical Values**
+*   `maxSteps`: Not given in the sources.
+*   `worldWidth`: Not given in the sources.
+*   `screenFilter`: Integer ID (1-6). 0 disables filters.
+*   `tonemap`: Integer ID (0=ACES, 1=Reinhard).
+
+**Edge Cases and Pitfalls**
+*   **Transparency Grayscale:** Transparency falls back to grayscale when used outside the same voxel volume, due to alpha channel limitations [S2, unofficial].
+*   **Transparency Testing:** Transparency is not tested in the current project; a test project is planned for later [S2, unofficial].
+*   **Variable Name Typo:** The source code uses `previousDeptTexture` instead of `previousDepthTexture` for the Toon filter sampling [S1, unofficial].
+*   **Division by Zero:** The seed calculation divides by `f32(pixelPos.y)`. If `pixelPos.y` is 0, this results in infinity or NaN. A guard is required [G].
+*   **Bounds Checking:** The ray marching loop checks bounds after advancing. If the ray starts outside bounds, the initial sample might be invalid or the loop might not catch it immediately depending on the `MarchThroughVoxels` implementation [S1, unofficial].
+
+## Subtopics
+
+### [Voxel Visualization Ray Marcher](3432-voxel-visualization-ray-marcher.md)
+A fragment shader technique that ray marches through a 3D texture to visualize voxelized data by accumulating color along a ray until opacity saturates or the ray exits the volume. It differs from its parent [Voxel Raymarching with Screen Filters](2555-voxel-raymarching-with-screen-filters.md) by using a fixed-step traversal loop with explicit alpha compositing in the fragment shader, rather than relying on pre-filtered screen-space accumulation or hierarchical traversal structures.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of steps taken during ray marching, plus constant time for screen filter application. The Toon filter (Filter 6) requires sampling 4 neighboring depth values, adding a small constant overhead.
+*   **Memory Complexity:** Depends on the size of the voxel texture and auxiliary textures (`velocityTexture`, `currentDepthTexture`, `positionTexture`, `previousDeptTexture`).
+*   **Performance:** The method is efficient for real-time rendering as it leverages GPU fragment shaders. The screen filters are computationally inexpensive, except for the Toon filter which requires multiple texture samples.
+*   **Strengths:** Flexible visualization modes via screen filters; integrates with existing voxel raymarching infrastructure; supports various tonemapping options.
+*   **Limitations:** Transparency support is incomplete/untested; grayscale fallback for transparency outside the volume; potential division by zero in seed calculation; typo in variable name for Toon filter.
+*   **When to Use:** When visual debugging or stylized rendering of voxel data is required, and the standard lighting model is insufficient or needs to be overridden.
+*   **When Not to Use:** When physically accurate transparency is required (as it is not tested and has limitations); when high-performance is critical and the Toon filter's extra samples are a bottleneck.
+
+## Background
+The method originates from the `webgpu-voxel-raymarching` project by James Kiernan, which implements a WebGPU-based voxel raymarcher [S1, unofficial]. The screen filter functionality is part of this implementation, providing various visualization modes for the rendered voxels. The `godot-voxel` project by Viktor Ferenczi also references this technique, noting its use for rendering transparent voxels with color filtering and transmittance calculation [S2, unofficial].
+
+## Sources
+[S1] jamestkiernan/webgpu-voxel-raymarching, https://github.com/jamestkiernan/webgpu-voxel-raymarching, fetched 2026-10-24 (unofficial)
+[S2] viktor-ferenczi/godot-voxel, https://github.com/viktor-ferenczi/godot-voxel, fetched 2026-10-24 (unofficial)

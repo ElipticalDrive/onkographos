@@ -1,0 +1,3699 @@
+Source code for ["Plug-and-Play Acceleration of Occupancy Grid-based NeRF Rendering using VDB Grid and Hierarchical Ray Traversal"](https://arxiv.org/abs/2404.10272)
+
+![poster](./NRI2024_Poster_84x42_q20.jpg)
+
+## Usage
+
+```
+> docker build -t faster-occgrid .
+> bash start_container.sh
+# pip install -e ./nerfacc
+# cd experiments
+# bash ./run_baselines.sh
+```
+
+```
+( Edit experiments/vdbgrid/csrc/grid_kernel.cu and comment/uncomment #define ALG_* )
+# pip install -e ./experiments/vdbgrid
+# mkdir {EXPNAME}
+# bash ./run_experiments.sh {EXP_NAME}
+```
+
+## LICENSE
+This repository is licensed under MIT License. See ./LICENSE for detail.
+
+### License of NerfAcc
+Some codes are copied from https://github.com/nerfstudio-project/nerfacc.git
+
+```
+MIT License
+
+Copyright (c) 2022 Ruilong Li
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+THIS SOFTWARE AND/OR DATA WAS DEPOSITED IN THE BAIR OPEN RESEARCH COMMONS 
+REPOSITORY ON 05/08/2023.
+```
+
+## Citation
+
+```
+@misc{kato2024plugandplay,
+      title={Plug-and-Play Acceleration of Occupancy Grid-based NeRF Rendering using VDB Grid and Hierarchical Ray Traversal}, 
+      author={Yoshio Kato and Shuhei Tarashima},
+      year={2024},
+      eprint={2404.10272},
+      archivePrefix={arXiv}
+}
+```
+
+### experiments/src/render_ngp_nerf_vdb.py
+```
+"""
+Modified nerfacc/examples/train_ngp_nerf_occ.py
+Original Copyright (c) 2022 Ruilong Li, UC Berkeley., MIT License.
+"""
+
+import argparse
+import math
+import pathlib
+import time
+import sqlite3
+from typing import Callable, List, Optional, Tuple, Union
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch import Tensor
+import tqdm
+from lpips import LPIPS
+from radiance_fields.ngp import NGPRadianceField
+
+from utils import (
+    MIPNERF360_UNBOUNDED_SCENES,
+    NERF_SYNTHETIC_SCENES,
+    render_image_with_occgrid,
+    render_image_with_occgrid_test,
+    set_random_seed,
+)
+from nerfacc.estimators.base import AbstractEstimator
+from nerfacc.volrend import render_visibility_from_alpha, render_visibility_from_density
+from nerfacc.grid import ray_aabb_intersect
+import vdbgrid_cuda
+from PIL import Image
+
+def _enlarge_aabb(aabb, factor: float) -> Tensor:
+    center = (aabb[:3] + aabb[3:]) / 2
+    extent = (aabb[3:] - aabb[:3]) / 2
+    return torch.cat([center - extent * factor, center + extent * factor])
+
+def _meshgrid3d(res, device="cpu"):
+    """Create 3D grid coordinates."""
+    assert len(res) == 3
+    res = res.tolist()
+    return torch.stack(
+        torch.meshgrid(
+            [
+                torch.arange(res[0], dtype=torch.long),
+                torch.arange(res[1], dtype=torch.long),
+                torch.arange(res[2], dtype=torch.long),
+            ],
+            indexing="ij",
+        ),
+        dim=-1,
+    ).to(device)
+
+class VDBGridEstimator(AbstractEstimator):
+    DIM: int = 3
+
+    def __init__(self, roi_aabb, resolution=128, levels=1, **kwargs):
+        super().__init__()
+
+        if "contraction_type" in kwargs:
+            raise ValueError(
+                "`contraction_type` is not supported anymore for nerfacc >= 0.4.0."
+            )
+
+        # check the resolution is legal
+        if isinstance(resolution, int):
+            resolution = [resolution] * self.DIM
+        if isinstance(resolution, (list, tuple)):
+            resolution = torch.tensor(resolution, dtype=torch.int32)
+        assert isinstance(resolution, Tensor), f"Invalid type: {resolution}!"
+        assert resolution.shape[0] == self.DIM, f"Invalid shape: {resolution}!"
+
+        # check the roi_aabb is legal
+        if isinstance(roi_aabb, (list, tuple)):
+            roi_aabb = torch.tensor(roi_aabb, dtype=torch.float32)
+        assert isinstance(roi_aabb, Tensor), f"Invalid type: {roi_aabb}!"
+        assert roi_aabb.shape[0] == self.DIM * 2, f"Invalid shape: {roi_aabb}!"
+
+        # multiple levels of aabbs
+        aabbs = torch.stack(
+            [_enlarge_aabb(roi_aabb, 2**i) for i in range(levels)], dim=0
+        )
+
+        # total number of voxels
+        self.cells_per_lvl = int(resolution.prod().item())
+        self.levels = levels
+
+        # Buffers
+        self.register_buffer("resolution", resolution)  # [3]
+        self.register_buffer("aabbs", aabbs)  # [n_aabbs, 6]
+        self.register_buffer(
+            "occs", torch.zeros(self.levels * self.cells_per_lvl)
+        )
+        self.register_buffer(
+            "binaries",
+            torch.zeros([levels] + resolution.tolist(), dtype=torch.bool),
+        )
+
+        # Grid coords & indices
+        grid_coords = _meshgrid3d(resolution).reshape(
+            self.cells_per_lvl, self.DIM
+        )
+        self.register_buffer("grid_coords", grid_coords, persistent=False)
+        grid_indices = torch.arange(self.cells_per_lvl)
+        self.register_buffer("grid_indices", grid_indices, persistent=False)
+        self.tree = vdbgrid_cuda.DensityGrid(*self.resolution, self.levels)
+        self.tree.setValues(self.binaries.cpu())
+
+    def load_state_dict(self, *args):
+        super().load_state_dict(*args)
+        self.tree = vdbgrid_cuda.DensityGrid(*self.resolution, self.levels)
+        self.tree.setValues(self.binaries.cpu())
+
+    @torch.no_grad()
+    def sampling(
+        self,
+        # rays
+        rays_o: Tensor,  # [n_rays, 3]
+        rays_d: Tensor,  # [n_rays, 3]
+        # sigma/alpha function for skipping invisible space
+        sigma_fn: Optional[Callable] = None,
+        alpha_fn: Optional[Callable] = None,
+        near_plane: float = 0.0,
+        far_plane: float = 1e10,
+        t_min: Optional[Tensor] = None,  # [n_rays]
+        t_max: Optional[Tensor] = None,  # [n_rays]
+        # rendering options
+        render_step_size: float = 1e-3,
+        early_stop_eps: float = 1e-4,
+        alpha_thre: float = 0.0,
+        stratified: bool = False,
+        cone_angle: float = 0.0,
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        """Sampling with spatial skipping.
+
+        Note:
+            This function is not differentiable to any inputs.
+
+        Args:
+            rays_o: Ray origins of shape (n_rays, 3).
+            rays_d: Normalized ray directions of shape (n_rays, 3).
+            sigma_fn: Optional. If provided, the marching will skip the invisible space
+                by evaluating the density along the ray with `sigma_fn`. It should be a
+                function that takes in samples {t_starts (N,), t_ends (N,),
+                ray indices (N,)} and returns the post-activation density values (N,).
+                You should only provide either `sigma_fn` or `alpha_fn`.
+            alpha_fn: Optional. If provided, the marching will skip the invisible space
+                by evaluating the density along the ray with `alpha_fn`. It should be a
+                function that takes in samples {t_starts (N,), t_ends (N,),
+                ray indices (N,)} and returns the post-activation opacity values (N,).
+                You should only provide either `sigma_fn` or `alpha_fn`.
+            near_plane: Optional. Near plane distance. Default: 0.0.
+            far_plane: Optional. Far plane distance. Default: 1e10.
+            t_min: Optional. Per-ray minimum distance. Tensor with shape (n_rays).
+                If profided, the marching will start from maximum of t_min and near_plane.
+            t_max: Optional. Per-ray maximum distance. Tensor with shape (n_rays).
+                If profided, the marching will stop by minimum of t_max and far_plane.
+            render_step_size: Step size for marching. Default: 1e-3.
+            early_stop_eps: Early stop threshold for skipping invisible space. Default: 1e-4.
+            alpha_thre: Alpha threshold for skipping empty space. Default: 0.0.
+            stratified: Whether to use stratified sampling. Default: False.
+            cone_angle: Cone angle for linearly-increased step size. 0. means
+                constant step size. Default: 0.0.
+
+        Returns:
+            A tuple of {LongTensor, Tensor, Tensor}:
+
+            - **ray_indices**: Ray index of each sample. IntTensor with shape (n_samples).
+            - **t_starts**: Per-sample start distance. Tensor with shape (n_samples,).
+            - **t_ends**: Per-sample end distance. Tensor with shape (n_samples,).
+
+        Examples:
+
+        .. code-block:: python
+
+            >>> ray_indices, t_starts, t_ends = grid.sampling(
+            >>>     rays_o, rays_d, render_step_size=1e-3)
+            >>> t_mid = (t_starts + t_ends) / 2.0
+            >>> sample_locs = rays_o[ray_indices] + t_mid * rays_d[ray_indices]
+
+        """
+
+        near_planes = torch.full_like(rays_o[..., 0], fill_value=near_plane)
+        far_planes = torch.full_like(rays_o[..., 0], fill_value=far_plane)
+
+        if t_min is not None:
+            near_planes = torch.clamp(near_planes, min=t_min)
+        if t_max is not None:
+            far_planes = torch.clamp(far_planes, max=t_max)
+
+        if stratified:
+            near_planes += torch.rand_like(near_planes) * render_step_size
+        
+        t_mins, t_maxs, hits = ray_aabb_intersect(rays_o, rays_d, self.aabbs)
+        t_sorted, t_indices = torch.sort(
+            torch.cat([t_mins, t_maxs], dim=-1), dim=-1
+        )
+
+        ray_indices, t_starts, t_ends, chunk_indices, chunk_counts = self.tree.traverse(
+            rays_o.contiguous(),
+            rays_d.contiguous(),
+            self.resolution,
+            self.aabbs,
+            t_sorted,
+            t_indices,
+            hits,
+            near_planes,
+            far_planes,
+            render_step_size,
+            cone_angle,
+        )
+        packed_info = torch.stack([chunk_indices, chunk_counts], -1)
+
+        # skip invisible space
+        if (alpha_thre > 0.0 or early_stop_eps > 0.0) and (
+            sigma_fn is not None or alpha_fn is not None
+        ):
+            alpha_thre = min(alpha_thre, self.occs.mean().item())
+
+            # Compute visibility of the samples, and filter out invisible samples
+            if sigma_fn is not None:
+                if t_starts.shape[0] != 0:
+                    sigmas = sigma_fn(t_starts, t_ends, ray_indices)
+                else:
+                    sigmas = torch.empty((0,), device=t_starts.device)
+                assert (
+                    sigmas.shape == t_starts.shape
+                ), "sigmas must have shape of (N,)! Got {}".format(sigmas.shape)
+                masks = render_visibility_from_density(
+                    t_starts=t_starts,
+                    t_ends=t_ends,
+                    sigmas=sigmas,
+                    packed_info=packed_info,
+                    early_stop_eps=early_stop_eps,
+                    alpha_thre=alpha_thre,
+                )
+            elif alpha_fn is not None:
+                if t_starts.shape[0] != 0:
+                    alphas = alpha_fn(t_starts, t_ends, ray_indices)
+                else:
+                    alphas = torch.empty((0,), device=t_starts.device)
+                assert (
+                    alphas.shape == t_starts.shape
+                ), "alphas must have shape of (N,)! Got {}".format(alphas.shape)
+                masks = render_visibility_from_alpha(
+                    alphas=alphas,
+                    packed_info=packed_info,
+                    early_stop_eps=early_stop_eps,
+                    alpha_thre=alpha_thre,
+                )
+            ray_indices, t_starts, t_ends = (
+                ray_indices[masks],
+                t_starts[masks],
+                t_ends[masks],
+            )
+        return ray_indices, t_starts, t_ends
+
+    @torch.no_grad()
+    def update_every_n_steps(
+        self,
+        step: int,
+        occ_eval_fn: Callable,
+        occ_thre: float = 1e-2,
+        ema_decay: float = 0.95,
+        warmup_steps: int = 256,
+        n: int = 16,
+    ) -> None:
+        """Update the estimator every n steps during training.
+
+        Args:
+            step: Current training step.
+            occ_eval_fn: A function that takes in sample locations :math:`(N, 3)` and
+                returns the occupancy values :math:`(N, 1)` at those locations.
+            occ_thre: Threshold used to binarize the occupancy grid. Default: 1e-2.
+            ema_decay: The decay rate for EMA updates. Default: 0.95.
+            warmup_steps: Sample all cells during the warmup stage. After the warmup
+                stage we change the sampling strategy to 1/4 uniformly sampled cells
+                together with 1/4 occupied cells. Default: 256.
+            n: Update the grid every n steps. Default: 16.
+        """
+        if not self.training:
+            raise RuntimeError(
+                "You should only call this function only during training. "
+                "Please call _update() directly if you want to update the "
+                "field during inference."
+            )
+        if step % n == 0 and self.training:
+            self._update(
+                step=step,
+                occ_eval_fn=occ_eval_fn,
+                occ_thre=occ_thre,
+                ema_decay=ema_decay,
+                warmup_steps=warmup_steps,
+            )
+
+    # adapted from https://github.com/kwea123/ngp_pl/blob/master/models/networks.py
+    @torch.no_grad()
+    def mark_invisible_cells(
+        self,
+        K: Tensor,
+        c2w: Tensor,
+        width: int,
+        height: int,
+        near_plane: float = 0.0,
+        chunk: int = 32**3,
+    ) -> None:
+        """Mark the cells that aren't covered by the cameras with density -1.
+        Should only be executed once before training starts.
+
+        Args:
+            K: Camera intrinsics of shape (N, 3, 3) or (1, 3, 3).
+            c2w: Camera to world poses of shape (N, 3, 4) or (N, 4, 4).
+            width: Image width in pixels
+            height: Image height in pixels
+            near_plane: Near plane distance
+            chunk: The chunk size to split the cells (to avoid OOM)
+        """
+        assert K.dim() == 3 and K.shape[1:] == (3, 3)
+        assert c2w.dim() == 3 and (
+            c2w.shape[1:] == (3, 4) or c2w.shape[1:] == (4, 4)
+        )
+        assert K.shape[0] == c2w.shape[0] or K.shape[0] == 1
+
+        N_cams = c2w.shape[0]
+        w2c_R = c2w[:, :3, :3].transpose(2, 1)  # (N_cams, 3, 3)
+        w2c_T = -w2c_R @ c2w[:, :3, 3:]  # (N_cams, 3, 1)
+
+        lvl_indices = self._get_all_cells()
+        for lvl, indices in enumerate(lvl_indices):
+            grid_coords = self.grid_coords[indices]
+
+            for i in range(0, len(indices), chunk):
+                x = grid_coords[i : i + chunk] / (self.resolution - 1)
+                indices_chunk = indices[i : i + chunk]
+                # voxel coordinates [0, 1]^3 -> world
+                xyzs_w = (
+                    self.aabbs[lvl, :3]
+                    + x * (self.aabbs[lvl, 3:] - self.aabbs[lvl, :3])
+                ).T
+                xyzs_c = w2c_R @ xyzs_w + w2c_T  # (N_cams, 3, chunk)
+                uvd = K @ xyzs_c  # (N_cams, 3, chunk)
+                uv = uvd[:, :2] / uvd[:, 2:]  # (N_cams, 2, chunk)
+                in_image = (
+                    (uvd[:, 2] >= 0)
+                    & (uv[:, 0] >= 0)
+                    & (uv[:, 0] < width)
+                    & (uv[:, 1] >= 0)
+                    & (uv[:, 1] < height)
+                )
+                covered_by_cam = (
+                    uvd[:, 2] >= near_plane
+                ) & in_image  # (N_cams, chunk)
+                # if the cell is visible by at least one camera
+                count = covered_by_cam.sum(0) / N_cams
+
+                too_near_to_cam = (
+                    uvd[:, 2] < near_plane
+                ) & in_image  # (N, chunk)
+                # if the cell is too close (in front) to any camera
+                too_near_to_any_cam = too_near_to_cam.any(0)
+                # a valid cell should be visible by at least one camera and not too close to any camera
+                valid_mask = (count > 0) & (~too_near_to_any_cam)
+
+                cell_ids_base = lvl * self.cells_per_lvl
+                self.occs[cell_ids_base + indices_chunk] = torch.where(
+                    valid_mask, 0.0, -1.0
+                )
+
+    @torch.no_grad()
+    def _get_all_cells(self) -> List[Tensor]:
+        """Returns all cells of the grid."""
+        lvl_indices = []
+        for lvl in range(self.levels):
+            # filter out the cells with -1 density (non-visible to any camera)
+            cell_ids = lvl * self.cells_per_lvl + self.grid_indices
+            indices = self.grid_indices[self.occs[cell_ids] >= 0.0]
+            lvl_indices.append(indices)
+        return lvl_indices
+
+    @torch.no_grad()
+    def _sample_uniform_and_occupied_cells(self, n: int) -> List[Tensor]:
+        """Samples both n uniform and occupied cells."""
+        lvl_indices = []
+        for lvl in range(self.levels):
+            uniform_indices = torch.randint(
+                self.cells_per_lvl, (n,), device=self.device
+            )
+            # filter out the cells with -1 density (non-visible to any camera)
+            cell_ids = lvl * self.cells_per_lvl + uniform_indices
+            uniform_indices = uniform_indices[self.occs[cell_ids] >= 0.0]
+            occupied_indices = torch.nonzero(self.binaries[lvl].flatten())[:, 0]
+            if n < len(occupied_indices):
+                selector = torch.randint(
+                    len(occupied_indices), (n,), device=self.device
+                )
+                occupied_indices = occupied_indices[selector]
+            indices = torch.cat([uniform_indices, occupied_indices], dim=0)
+            lvl_indices.append(indices)
+        return lvl_indices
+
+    @torch.no_grad()
+    def _update(
+        self,
+        step: int,
+        occ_eval_fn: Callable,
+        occ_thre: float = 0.01,
+        ema_decay: float = 0.95,
+        warmup_steps: int = 256,
+    ) -> None:
+        """Update the occ field in the EMA way."""
+        # sample cells
+        if step < warmup_steps:
+            lvl_indices = self._get_all_cells()
+        else:
+            N = self.cells_per_lvl // 4
+            lvl_indices = self._sample_uniform_and_occupied_cells(N)
+
+        for lvl, indices in enumerate(lvl_indices):
+            # infer occupancy: density * step_size
+            grid_coords = self.grid_coords[indices]
+            x = (
+                grid_coords + torch.rand_like(grid_coords, dtype=torch.float32)
+            ) / self.resolution
+            # voxel coordinates [0, 1]^3 -> world
+            x = self.aabbs[lvl, :3] + x * (
+                self.aabbs[lvl, 3:] - self.aabbs[lvl, :3]
+            )
+            occ = occ_eval_fn(x).squeeze(-1)
+            # ema update
+            cell_ids = lvl * self.cells_per_lvl + indices
+            self.occs[cell_ids] = torch.maximum(
+                self.occs[cell_ids] * ema_decay, occ
+            )
+            # suppose to use scatter max but emperically it is almost the same.
+            # self.occs, _ = scatter_max(
+            #     occ, indices, dim=0, out=self.occs * ema_decay
+            # )
+        thre = torch.clamp(self.occs[self.occs >= 0].mean(), max=occ_thre)
+        self.binaries = (self.occs > thre).view(self.binaries.shape)
+        self.tree = vdbgrid_cuda.DensityGrid(*self.resolution, self.levels)
+        self.tree.setValues(self.binaries.cpu())
+
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--data_root",
+    type=str,
+    # default=str(pathlib.Path.cwd() / "data/360_v2"),
+    default=str(pathlib.Path.cwd() / "data/nerf_synthetic"),
+    help="the root dir of the dataset",
+)
+parser.add_argument(
+    "--train_split",
+    type=str,
+    default="train",
+    choices=["train", "trainval"],
+    help="which train split to use",
+)
+parser.add_argument(
+    "--scene",
+    type=str,
+    default="lego",
+    choices=NERF_SYNTHETIC_SCENES + MIPNERF360_UNBOUNDED_SCENES,
+    help="which scene to use",
+)
+parser.add_argument(
+    "--db",
+    type=str,
+    default="./ngp_nerf_vdb.db",
+    help="path to db file"
+)
+parser.add_argument(
+    "--save_img",
+    action="store_true"
+)
+args = parser.parse_args()
+
+device = "cuda:0"
+db_file = args.db
+conn = sqlite3.connect(db_file)
+cur = conn.cursor()
+cur.execute("CREATE TABLE IF NOT EXISTS exp(data TEXT, psnr REAL, lpips REAL, traintime REAL, fps REAL, mem REAL)")
+set_random_seed(42)
+
+if args.scene in MIPNERF360_UNBOUNDED_SCENES:
+    from datasets.nerf_360_v2 import SubjectLoader
+
+    # training parameters
+    max_steps = 20000
+    init_batch_size = 1024
+    target_sample_batch_size = 1 << 18
+    weight_decay = 0.0
+    # scene parameters
+    aabb = torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], device=device)
+    near_plane = 0.2
+    far_plane = 1.0e10
+    # dataset parameters
+    train_dataset_kwargs = {"color_bkgd_aug": "random", "factor": 4}
+    test_dataset_kwargs = {"factor": 4}
+    # model parameters
+    grid_resolution = 128
+    grid_nlvl = 4
+    # render parameters
+    render_step_size = 1e-3
+    alpha_thre = 1e-2
+    cone_angle = 0.004
+
+else:
+    from datasets.nerf_synthetic import SubjectLoader
+
+    # training parameters
+    max_steps = 20000
+    init_batch_size = 1024
+    target_sample_batch_size = 1 << 18
+    weight_decay = (
+        1e-5 if args.scene in ["materials", "ficus", "drums"] else 1e-6
+    )
+    # scene parameters
+    aabb = torch.tensor([-1.5, -1.5, -1.5, 1.5, 1.5, 1.5], device=device)
+    near_plane = 0.0
+    far_plane = 1.0e10
+    # dataset parameters
+    train_dataset_kwargs = {}
+    test_dataset_kwargs = {}
+    # model parameters
+    grid_resolution = 128
+    grid_nlvl = 1
+    # render parameters
+    render_step_size = 5e-3
+    alpha_thre = 0.0
+    cone_angle = 0.0
+
+train_dataset = SubjectLoader(
+    subject_id=args.scene,
+    root_fp=args.data_root,
+    split=args.train_split,
+    num_rays=init_batch_size,
+    device=device,
+    **train_dataset_kwargs,
+)
+
+test_dataset = SubjectLoader(
+    subject_id=args.scene,
+    root_fp=args.data_root,
+    split="test",
+    num_rays=None,
+    device=device,
+    **test_dataset_kwargs,
+)
+
+estimator = VDBGridEstimator(
+    roi_aabb=aabb, resolution=grid_resolution, levels=grid_nlvl
+).to(device)
+radiance_field = NGPRadianceField(aabb=estimator.aabbs[-1]).to(device)
+
+lpips_net = LPIPS(net="vgg").to(device)
+lpips_norm_fn = lambda x: x[None, ...].permute(0, 3, 1, 2) * 2 - 1
+lpips_fn = lambda x, y: lpips_net(lpips_norm_fn(x), lpips_norm_fn(y)).mean()
+
+radiance_field.load_state_dict(torch.load(f"occ_models/nerf_{args.scene}.pth"))
+estimator.load_state_dict(torch.load(f"occ_models/occ_{args.scene}.pth"))
+
+# evaluation
+radiance_field.eval()
+estimator.eval()
+if args.save_img:
+    folder = pathlib.Path(f"vdb_{args.scene}")
+    folder.mkdir(exist_ok=True)
+
+psnrs = []
+lpips = []
+traintime = 0
+rendertime = 0
+with torch.no_grad():
+    for i in tqdm.tqdm(range(len(test_dataset))):
+        data = test_dataset[i]
+        render_bkgd = data["color_bkgd"]
+        rays = data["rays"]
+        pixels = data["pixels"]
+
+        # rendering
+        tic = time.perf_counter()
+        rgb, acc, depth, n_rendering_samples = render_image_with_occgrid(
+            radiance_field,
+            estimator,
+            rays,
+            # rendering options
+            near_plane=near_plane,
+            render_step_size=render_step_size,
+            render_bkgd=render_bkgd,
+            cone_angle=cone_angle,
+            alpha_thre=alpha_thre,
+        )
+        rendertime += time.perf_counter() - tic
+        if args.save_img:
+            Image.fromarray(rgb.mul(255).clamp(0, 255).byte().cpu().numpy()).save(str(folder / f"{i}.png"))
+
+        mse = F.mse_loss(rgb, pixels)
+        psnr = -10.0 * torch.log(mse) / np.log(10.0)
+        psnrs.append(psnr.item())
+        lpips.append(lpips_fn(rgb, pixels).item())
+psnr_avg = sum(psnrs) / len(psnrs)
+lpips_avg = sum(lpips) / len(lpips)
+fps = len(test_dataset) / rendertime
+mem = estimator.tree.memUsage()
+print(f"evaluation: psnr_avg={psnr_avg}, lpips_avg={lpips_avg}, train time={int(traintime)}sec, fps={fps}, mem={mem}")
+
+if not args.save_img:
+    cur.executemany("INSERT INTO exp VALUES(?, ?, ?, ?, ?, ?)", [(args.scene, psnr_avg, lpips_avg, traintime, fps, mem)])
+    conn.commit()
+    conn.close()
+```
+
+### experiments/src/show_table.py
+```
+from argparse import ArgumentParser
+import sqlite3
+import pandas as pd
+
+parser = ArgumentParser()
+parser.add_argument("db")
+parser.add_argument("--format", choices=["md", "tex"], default="md")
+args = parser.parse_args()
+
+conn = sqlite3.connect(args.db)
+df = pd.read_sql_query("SELECT * FROM exp", conn)
+if args.format == "md":
+    print(df.to_markdown())
+elif args.format == "tex":
+    print(df.to_latex(float_format="%.2f", index=False))
+else:
+    raise NotImplementedError
+conn.close()
+```
+
+### experiments/src/show_table_tex.py
+```
+from argparse import ArgumentParser
+import sqlite3
+import pandas as pd
+
+parser = ArgumentParser()
+parser.add_argument("db")
+args = parser.parse_args()
+
+conn = sqlite3.connect(args.db)
+df = pd.read_sql_query("SELECT * FROM exp", conn)
+print("psnr mean", df["psnr"].mean())
+print("fps mean", df["fps"].mean())
+if "mem" in df.columns:
+    print("mem mean", df["mem"].mean() / 1024)
+    df = df[["data", "psnr", "mem", "fps"]].set_index("data")
+    df["mem"] = list(map(lambda x: f"{x / 1024:.1f}", df["mem"]))
+else:
+    df = df[["data", "psnr", "fps"]].set_index("data")
+df = df.T
+
+if "lego" in df.columns:  # NeRF-Synthetic
+    print(df.to_latex(float_format="%.2f", index=True))
+else:
+    print(df["bicycle flowers garden stump treehill room counter kitchen bonsai".split()].to_latex(float_format="%.2f", index=True))
+conn.close()
+```
+
+### experiments/src/train_ngp_nerf_occ.py
+```
+"""
+Modified nerfacc/examples/train_ngp_nerf_occ.py
+Original Copyright (c) 2022 Ruilong Li, UC Berkeley., MIT License.
+"""
+
+import argparse
+import math
+import pathlib
+import time
+import sqlite3
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+import tqdm
+from lpips import LPIPS
+from radiance_fields.ngp import NGPRadianceField
+from PIL import Image
+
+from utils import (
+    MIPNERF360_UNBOUNDED_SCENES,
+    NERF_SYNTHETIC_SCENES,
+    render_image_with_occgrid,
+    set_random_seed,
+)
+from nerfacc.estimators.occ_grid import OccGridEstimator
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--data_root",
+    type=str,
+    # default=str(pathlib.Path.cwd() / "data/360_v2"),
+    default=str(pathlib.Path.cwd() / "data/nerf_synthetic"),
+    help="the root dir of the dataset",
+)
+parser.add_argument(
+    "--train_split",
+    type=str,
+    default="train",
+    choices=["train", "trainval"],
+    help="which train split to use",
+)
+parser.add_argument(
+    "--scene",
+    type=str,
+    default="lego",
+    choices=NERF_SYNTHETIC_SCENES + MIPNERF360_UNBOUNDED_SCENES,
+    help="which scene to use",
+)
+parser.add_argument(
+    "--save_img",
+    action="store_true"
+)
+parser.add_argument(
+    "--no_eval",
+    action="store_true"
+)
+args = parser.parse_args()
+
+models_path = pathlib.Path("occ_models")
+models_path.mkdir(exist_ok=True)
+
+device = "cuda:0"
+set_random_seed(42)
+
+if args.scene in MIPNERF360_UNBOUNDED_SCENES:
+    from datasets.nerf_360_v2 import SubjectLoader
+
+    # training parameters
+    max_steps = 20000
+    init_batch_size = 1024
+    target_sample_batch_size = 1 << 18
+    weight_decay = 0.0
+    # scene parameters
+    aabb = torch.tensor([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0], device=device)
+    near_plane = 0.2
+    far_plane = 1.0e10
+    # dataset parameters
+    train_dataset_kwargs = {"color_bkgd_aug": "random", "factor": 4}
+    test_dataset_kwargs = {"factor": 4}
+    # model parameters
+    grid_resolution = 128
+    grid_nlvl = 4
+    # render parameters
+    render_step_size = 1e-3
+    alpha_thre = 1e-2
+    cone_angle = 0.004
+
+    db_file = "./mip_nerf_occ.db"
+else:
+    from datasets.nerf_synthetic import SubjectLoader
+
+    # training parameters
+    max_steps = 20000
+    init_batch_size = 1024
+    target_sample_batch_size = 1 << 18
+    weight_decay = (
+        1e-5 if args.scene in ["materials", "ficus", "drums"] else 1e-6
+    )
+    # scene parameters
+    aabb = torch.tensor([-1.5, -1.5, -1.5, 1.5, 1.5, 1.5], device=device)
+    near_plane = 0.0
+    far_plane = 1.0e10
+    # dataset parameters
+    train_dataset_kwargs = {}
+    test_dataset_kwargs = {}
+    # model parameters
+    grid_resolution = 128
+    grid_nlvl = 1
+    # render parameters
+    render_step_size = 5e-3
+    alpha_thre = 0.0
+    cone_angle = 0.0
+
+    db_file = "./ngp_nerf_occ.db"
+
+if not args.save_img:
+    conn = sqlite3.connect(db_file)
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE IF NOT EXISTS exp(data TEXT, psnr REAL, lpips REAL, traintime REAL, fps REAL)")
+
+
+train_dataset = SubjectLoader(
+    subject_id=args.scene,
+    root_fp=args.data_root,
+    split=args.train_split,
+    num_rays=init_batch_size,
+    device=device,
+    **train_dataset_kwargs,
+)
+
+test_dataset = SubjectLoader(
+    subject_id=args.scene,
+    root_fp=args.data_root,
+    split="test",
+    num_rays=None,
+    device=device,
+    **test_dataset_kwargs,
+)
+
+estimator = OccGridEstimator(
+    roi_aabb=aabb, resolution=grid_resolution, levels=grid_nlvl
+).to(device)
+
+# setup the radiance field we want to train.
+grad_scaler = torch.cuda.amp.GradScaler(2**10)
+radiance_field = NGPRadianceField(aabb=estimator.aabbs[-1]).to(device)
+optimizer = torch.optim.Adam(
+    radiance_field.parameters(), lr=1e-2, eps=1e-15, weight_decay=weight_decay
+)
+scheduler = torch.optim.lr_scheduler.ChainedScheduler(
+    [
+        torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.01, total_iters=100
+        ),
+        torch.optim.lr_scheduler.MultiStepLR(
+            optimizer,
+            milestones=[
+                max_steps // 2,
+                max_steps * 3 // 4,
+                max_steps * 9 // 10,
+            ],
+            gamma=0.33,
+        ),
+    ]
+)
+lpips_net = LPIPS(net="vgg").to(device)
+lpips_norm_fn = lambda x: x[None, ...].permute(0, 3, 1, 2) * 2 - 1
+lpips_fn = lambda x, y: lpips_net(lpips_norm_fn(x), lpips_norm_fn(y)).mean()
+
+# training
+tic = time.time()
+for step in tqdm.tqdm(range(max_steps + 1)):
+    radiance_field.train()
+    estimator.train()
+
+    i = torch.randint(0, len(train_dataset), (1,)).item()
+    data = train_dataset[i]
+
+    render_bkgd = data["color_bkgd"]
+    rays = data["rays"]
+    pixels = data["pixels"]
+
+    def occ_eval_fn(x):
+        density = radiance_field.query_density(x)
+        return density * render_step_size
+
+    # update occupancy grid
+    estimator.update_every_n_steps(
+        step=step,
+        occ_eval_fn=occ_eval_fn,
+        occ_thre=1e-2,
+    )
+
+    # render
+    rgb, acc, depth, n_rendering_samples = render_image_with_occgrid(
+        radiance_field,
+        estimator,
+        rays,
+        # rendering options
+        near_plane=near_plane,
+        render_step_size=render_step_size,
+        render_bkgd=render_bkgd,
+        cone_angle=cone_angle,
+        alpha_thre=alpha_thre,
+    )
+    if n_rendering_samples == 0:
+        continue
+
+    if target_sample_batch_size > 0:
+        # dynamic batch size for rays to keep sample batch size constant.
+        num_rays = len(pixels)
+        num_rays = int(
+            num_rays * (target_sample_batch_size / float(n_rendering_samples))
+        )
+        train_dataset.update_num_rays(num_rays)
+
+    # compute loss
+    loss = F.smooth_l1_loss(rgb, pixels)
+
+    optimizer.zero_grad()
+    # do not unscale it because we are using Adam.
+    grad_scaler.scale(loss).backward()
+    optimizer.step()
+    scheduler.step()
+
+traintime = time.time() - tic
+
+torch.save(radiance_field.state_dict(), str(models_path / f"nerf_{args.scene}.pth"))
+torch.save(estimator.state_dict(), str(models_path / f"occ_{args.scene}.pth"))
+if args.no_eval:
+    exit(0)
+
+# evaluation
+radiance_field.eval()
+estimator.eval()
+if args.save_img:
+    folder = pathlib.Path(f"occ_{args.scene}")
+    folder.mkdir(exist_ok=True)
+
+psnrs = []
+lpips = []
+rendertime = 0
+with torch.no_grad():
+    for i in tqdm.tqdm(range(len(test_dataset))):
+        data = test_dataset[i]
+        render_bkgd = data["color_bkgd"]
+        rays = data["rays"]
+        pixels = data["pixels"]
+
+        # rendering
+        tic = time.perf_counter()
+        rgb, acc, depth, n_rendering_samples = render_image_with_occgrid(
+            radiance_field,
+            estimator,
+            rays,
+            # rendering options
+            near_plane=near_plane,
+            render_step_size=render_step_size,
+            render_bkgd=render_bkgd,
+            cone_angle=cone_angle,
+            alpha_thre=alpha_thre,
+        )
+        rendertime += time.perf_counter() - tic
+        if args.save_img:
+            Image.fromarray(rgb.mul(255).clamp(0, 255).byte().cpu().numpy()).save(str(folder / f"{i}.png"))
+        mse = F.mse_loss(rgb, pixels)
+        psnr = -10.0 * torch.log(mse) / np.log(10.0)
+        psnrs.append(psnr.item())
+        lpips.append(lpips_fn(rgb, pixels).item())
+psnr_avg = sum(psnrs) / len(psnrs)
+lpips_avg = sum(lpips) / len(lpips)
+fps = len(test_dataset) / rendertime
+print(f"evaluation: psnr_avg={psnr_avg}, lpips_avg={lpips_avg}, train time={int(traintime)}sec, fps={fps}")
+
+if not args.save_img:
+    cur.executemany("INSERT INTO exp VALUES(?, ?, ?, ?, ?)", [(args.scene, psnr_avg, lpips_avg, traintime, fps)])
+    conn.commit()
+    conn.close()
+```
+
+### experiments/src/utils.py
+```
+"""
+Modified version to support flowers & treehill scenes.
+Original Copyright (c) 2022 Ruilong Li, UC Berkeley.
+"""
+
+import random
+from typing import Optional, Sequence
+
+try:
+    from typing import Literal
+except ImportError:
+    from typing_extensions import Literal
+
+import numpy as np
+import torch
+from datasets.utils import Rays, namedtuple_map
+from torch.utils.data._utils.collate import collate, default_collate_fn_map
+
+from nerfacc.estimators.occ_grid import OccGridEstimator
+from nerfacc.estimators.prop_net import PropNetEstimator
+from nerfacc.grid import ray_aabb_intersect, traverse_grids
+from nerfacc.volrend import (
+    accumulate_along_rays_,
+    render_weight_from_density,
+    rendering,
+)
+
+NERF_SYNTHETIC_SCENES = [
+    "chair",
+    "drums",
+    "ficus",
+    "hotdog",
+    "lego",
+    "materials",
+    "mic",
+    "ship",
+]
+MIPNERF360_UNBOUNDED_SCENES = [
+    "garden",
+    "bicycle",
+    "bonsai",
+    "counter",
+    "kitchen",
+    "room",
+    "stump",
+    "flowers",
+    "treehill",
+]
+
+
+def set_random_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+def render_image_with_occgrid(
+    # scene
+    radiance_field: torch.nn.Module,
+    estimator: OccGridEstimator,
+    rays: Rays,
+    # rendering options
+    near_plane: float = 0.0,
+    far_plane: float = 1e10,
+    render_step_size: float = 1e-3,
+    render_bkgd: Optional[torch.Tensor] = None,
+    cone_angle: float = 0.0,
+    alpha_thre: float = 0.0,
+    # test options
+    test_chunk_size: int = 8192,
+    # only useful for dnerf
+    timestamps: Optional[torch.Tensor] = None,
+):
+    """Render the pixels of an image."""
+    rays_shape = rays.origins.shape
+    if len(rays_shape) == 3:
+        height, width, _ = rays_shape
+        num_rays = height * width
+        rays = namedtuple_map(
+            lambda r: r.reshape([num_rays] + list(r.shape[2:])), rays
+        )
+    else:
+        num_rays, _ = rays_shape
+
+    results = []
+    chunk = (
+        torch.iinfo(torch.int32).max
+        if radiance_field.training
+        else test_chunk_size
+    )
+    for i in range(0, num_rays, chunk):
+        chunk_rays = namedtuple_map(lambda r: r[i : i + chunk], rays)
+
+        rays_o = chunk_rays.origins
+        rays_d = chunk_rays.viewdirs
+
+        def sigma_fn(t_starts, t_ends, ray_indices):
+            if t_starts.shape[0] == 0:
+                sigmas = torch.empty((0, 1), device=t_starts.device)
+            else:
+                t_origins = rays_o[ray_indices]
+                t_dirs = rays_d[ray_indices]
+                positions = (
+                    t_origins + t_dirs * (t_starts + t_ends)[:, None] / 2.0
+                )
+                if timestamps is not None:
+                    # dnerf
+                    t = (
+                        timestamps[ray_indices]
+                        if radiance_field.training
+                        else timestamps.expand_as(positions[:, :1])
+                    )
+                    sigmas = radiance_field.query_density(positions, t)
+                else:
+                    sigmas = radiance_field.query_density(positions)
+            return sigmas.squeeze(-1)
+
+        def rgb_sigma_fn(t_starts, t_ends, ray_indices):
+            if t_starts.shape[0] == 0:
+                rgbs = torch.empty((0, 3), device=t_starts.device)
+                sigmas = torch.empty((0, 1), device=t_starts.device)
+            else:
+                t_origins = rays_o[ray_indices]
+                t_dirs = rays_d[ray_indices]
+                positions = (
+                    t_origins + t_dirs * (t_starts + t_ends)[:, None] / 2.0
+                )
+                if timestamps is not None:
+                    # dnerf
+                    t = (
+                        timestamps[ray_indices]
+                        if radiance_field.training
+                        else timestamps.expand_as(positions[:, :1])
+                    )
+                    rgbs, sigmas = radiance_field(positions, t, t_dirs)
+                else:
+                    rgbs, sigmas = radiance_field(positions, t_dirs)
+            return rgbs, sigmas.squeeze(-1)
+
+        ray_indices, t_starts, t_ends = estimator.sampling(
+            rays_o,
+            rays_d,
+            sigma_fn=sigma_fn,
+            near_plane=near_plane,
+            far_plane=far_plane,
+            render_step_size=render_step_size,
+            stratified=radiance_field.training,
+            cone_angle=cone_angle,
+            alpha_thre=alpha_thre,
+        )
+        rgb, opacity, depth, extras = rendering(
+            t_starts,
+            t_ends,
+            ray_indices,
+            n_rays=rays_o.shape[0],
+            rgb_sigma_fn=rgb_sigma_fn,
+            render_bkgd=render_bkgd,
+        )
+        chunk_results = [rgb, opacity, depth, len(t_starts)]
+        results.append(chunk_results)
+    colors, opacities, depths, n_rendering_samples = [
+        torch.cat(r, dim=0) if isinstance(r[0], torch.Tensor) else r
+        for r in zip(*results)
+    ]
+    return (
+        colors.view((*rays_shape[:-1], -1)),
+        opacities.view((*rays_shape[:-1], -1)),
+        depths.view((*rays_shape[:-1], -1)),
+        sum(n_rendering_samples),
+    )
+
+
+def render_image_with_propnet(
+    # scene
+    radiance_field: torch.nn.Module,
+    proposal_networks: Sequence[torch.nn.Module],
+    estimator: PropNetEstimator,
+    rays: Rays,
+    # rendering options
+    num_samples: int,
+    num_samples_per_prop: Sequence[int],
+    near_plane: Optional[float] = None,
+    far_plane: Optional[float] = None,
+    sampling_type: Literal["uniform", "lindisp"] = "lindisp",
+    opaque_bkgd: bool = True,
+    render_bkgd: Optional[torch.Tensor] = None,
+    # train options
+    proposal_requires_grad: bool = False,
+    # test options
+    test_chunk_size: int = 8192,
+):
+    """Render the pixels of an image."""
+    rays_shape = rays.origins.shape
+    if len(rays_shape) == 3:
+        height, width, _ = rays_shape
+        num_rays = height * width
+        rays = namedtuple_map(
+            lambda r: r.reshape([num_rays] + list(r.shape[2:])), rays
+        )
+    else:
+        num_rays, _ = rays_shape
+
+    def prop_sigma_fn(t_starts, t_ends, proposal_network):
+        t_origins = chunk_rays.origins[..., None, :]
+        t_dirs = chunk_rays.viewdirs[..., None, :]
+        positions = t_origins + t_dirs * (t_starts + t_ends)[..., None] / 2.0
+        sigmas = proposal_network(positions)
+        if opaque_bkgd:
+            sigmas[..., -1, :] = torch.inf
+        return sigmas.squeeze(-1)
+
+    def rgb_sigma_fn(t_starts, t_ends, ray_indices):
+        t_origins = chunk_rays.origins[..., None, :]
+        t_dirs = chunk_rays.viewdirs[..., None, :].repeat_interleave(
+            t_starts.shape[-1], dim=-2
+        )
+        positions = t_origins + t_dirs * (t_starts + t_ends)[..., None] / 2.0
+        rgb, sigmas = radiance_field(positions, t_dirs)
+        if opaque_bkgd:
+            sigmas[..., -1, :] = torch.inf
+        return rgb, sigmas.squeeze(-1)
+
+    results = []
+    chunk = (
+        torch.iinfo(torch.int32).max
+        if radiance_field.training
+        else test_chunk_size
+    )
+    for i in range(0, num_rays, chunk):
+        chunk_rays = namedtuple_map(lambda r: r[i : i + chunk], rays)
+        t_starts, t_ends = estimator.sampling(
+            prop_sigma_fns=[
+                lambda *args: prop_sigma_fn(*args, p) for p in proposal_networks
+            ],
+            prop_samples=num_samples_per_prop,
+            num_samples=num_samples,
+            n_rays=chunk_rays.origins.shape[0],
+            near_plane=near_plane,
+            far_plane=far_plane,
+            sampling_type=sampling_type,
+            stratified=radiance_field.training,
+            requires_grad=proposal_requires_grad,
+        )
+        rgb, opacity, depth, extras = rendering(
+            t_starts,
+            t_ends,
+            ray_indices=None,
+            n_rays=None,
+            rgb_sigma_fn=rgb_sigma_fn,
+            render_bkgd=render_bkgd,
+        )
+        chunk_results = [rgb, opacity, depth]
+        results.append(chunk_results)
+
+    colors, opacities, depths = collate(
+        results,
+        collate_fn_map={
+            **default_collate_fn_map,
+            torch.Tensor: lambda x, **_: torch.cat(x, 0),
+        },
+    )
+    return (
+        colors.view((*rays_shape[:-1], -1)),
+        opacities.view((*rays_shape[:-1], -1)),
+        depths.view((*rays_shape[:-1], -1)),
+        extras,
+    )
+
+
+@torch.no_grad()
+def render_image_with_occgrid_test(
+    max_samples: int,
+    # scene
+    radiance_field: torch.nn.Module,
+    estimator: OccGridEstimator,
+    rays: Rays,
+    # rendering options
+    near_plane: float = 0.0,
+    far_plane: float = 1e10,
+    render_step_size: float = 1e-3,
+    render_bkgd: Optional[torch.Tensor] = None,
+    cone_angle: float = 0.0,
+    alpha_thre: float = 0.0,
+    early_stop_eps: float = 1e-4,
+    # only useful for dnerf
+    timestamps: Optional[torch.Tensor] = None,
+):
+    """Render the pixels of an image."""
+    rays_shape = rays.origins.shape
+    if len(rays_shape) == 3:
+        height, width, _ = rays_shape
+        num_rays = height * width
+        rays = namedtuple_map(
+            lambda r: r.reshape([num_rays] + list(r.shape[2:])), rays
+        )
+    else:
+        num_rays, _ = rays_shape
+
+    def rgb_sigma_fn(t_starts, t_ends, ray_indices):
+        t_origins = rays.origins[ray_indices]
+        t_dirs = rays.viewdirs[ray_indices]
+        positions = (
+            t_origins + t_dirs * (t_starts[:, None] + t_ends[:, None]) / 2.0
+        )
+        if timestamps is not None:
+            # dnerf
+            t = (
+                timestamps[ray_indices]
+                if radiance_field.training
+                else timestamps.expand_as(positions[:, :1])
+            )
+            rgbs, sigmas = radiance_field(positions, t, t_dirs)
+        else:
+            rgbs, sigmas = radiance_field(positions, t_dirs)
+        return rgbs, sigmas.squeeze(-1)
+
+    device = rays.origins.device
+    opacity = torch.zeros(num_rays, 1, device=device)
+    depth = torch.zeros(num_rays, 1, device=device)
+    rgb = torch.zeros(num_rays, 3, device=device)
+
+    ray_mask = torch.ones(num_rays, device=device).bool()
+
+    # 1 for synthetic scenes, 4 for real scenes
+    min_samples = 1 if cone_angle == 0 else 4
+
+    iter_samples = total_samples = 0
+
+    rays_o = rays.origins
+    rays_d = rays.viewdirs
+
+    near_planes = torch.full_like(rays_o[..., 0], fill_value=near_plane)
+    far_planes = torch.full_like(rays_o[..., 0], fill_value=far_plane)
+
+    t_mins, t_maxs, hits = ray_aabb_intersect(rays_o, rays_d, estimator.aabbs)
+
+    n_grids = estimator.binaries.size(0)
+
+    if n_grids > 1:
+        t_sorted, t_indices = torch.sort(torch.cat([t_mins, t_maxs], -1), -1)
+    else:
+        t_sorted = torch.cat([t_mins, t_maxs], -1)
+        t_indices = torch.arange(
+            0, n_grids * 2, device=t_mins.device, dtype=torch.int64
+        ).expand(num_rays, n_grids * 2)
+
+    opc_thre = 1 - early_stop_eps
+
+    while iter_samples < max_samples:
+        n_alive = ray_mask.sum().item()
+        if n_alive == 0:
+            break
+
+        # the number of samples to add on each ray
+        n_samples = max(min(num_rays // n_alive, 64), min_samples)
+        iter_samples += n_samples
+
+        # ray marching
+        (intervals, samples, termination_planes) = traverse_grids(
+            # rays
+            rays_o,  # [n_rays, 3]
+            rays_d,  # [n_rays, 3]
+            # grids
+            estimator.binaries,  # [m, resx, resy, resz]
+            estimator.aabbs,  # [m, 6]
+            # options
+            near_planes,  # [n_rays]
+            far_planes,  # [n_rays]
+            render_step_size,
+            cone_angle,
+            n_samples,
+            True,
+            ray_mask,
+            # pre-compute intersections
+            t_sorted,  # [n_rays, m*2]
+            t_indices,  # [n_rays, m*2]
+            hits,  # [n_rays, m]
+        )
+        t_starts = intervals.vals[intervals.is_left]
+        t_ends = intervals.vals[intervals.is_right]
+        ray_indices = samples.ray_indices[samples.is_valid]
+        packed_info = samples.packed_info
+
+        # get rgb and sigma from radiance field
+        rgbs, sigmas = rgb_sigma_fn(t_starts, t_ends, ray_indices)
+        # volume rendering using native cuda scan
+        weights, _, alphas = render_weight_from_density(
+            t_starts,
+            t_ends,
+            sigmas,
+            ray_indices=ray_indices,
+            n_rays=num_rays,
+            prefix_trans=1 - opacity[ray_indices].squeeze(-1),
+        )
+        if alpha_thre > 0:
+            vis_mask = alphas >= alpha_thre
+            ray_indices, rgbs, weights, t_starts, t_ends = (
+                ray_indices[vis_mask],
+                rgbs[vis_mask],
+                weights[vis_mask],
+                t_starts[vis_mask],
+                t_ends[vis_mask],
+            )
+
+        accumulate_along_rays_(
+            weights,
+            values=rgbs,
+            ray_indices=ray_indices,
+            outputs=rgb,
+        )
+        accumulate_along_rays_(
+            weights,
+            values=None,
+            ray_indices=ray_indices,
+            outputs=opacity,
+        )
+        accumulate_along_rays_(
+            weights,
+            values=(t_starts + t_ends)[..., None] / 2.0,
+            ray_indices=ray_indices,
+            outputs=depth,
+        )
+        # update near_planes using termination planes
+        near_planes = termination_planes
+        # update rays status
+        ray_mask = torch.logical_and(
+            # early stopping
+            opacity.view(-1) <= opc_thre,
+            # remove rays that have reached the far plane
+            packed_info[:, 1] == n_samples,
+        )
+        total_samples += ray_indices.shape[0]
+
+    rgb = rgb + render_bkgd * (1.0 - opacity)
+    depth = depth / opacity.clamp_min(torch.finfo(rgbs.dtype).eps)
+
+    return (
+        rgb.view((*rays_shape[:-1], -1)),
+        opacity.view((*rays_shape[:-1], -1)),
+        depth.view((*rays_shape[:-1], -1)),
+        total_samples,
+    )
+```
+
+### experiments/vdbgrid/setup.py
+```
+from setuptools import setup
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+# NOTE: OpenVDB must be built with cmake -DOPENVDB_BUILD_NANOVDB=ON -DNANOVDB_USE_INTRINSICS=ON -DNANOVDB_USE_CUDA=ON -DNANOVDB_CUDA_KEEP_PTX=ON -DCMAKE_CXX_FLAGS="-D_GLIBCXX_USE_CXX11_ABI=0" ..
+setup(
+    name='vdbgrid',
+    ext_modules=[
+        CUDAExtension('vdbgrid_cuda', [
+            'csrc/grid.cpp',
+            'csrc/grid_kernel.cu',
+        ],
+        libraries=["openvdb"],
+        library_dirs=["/usr/local/lib"],
+        extra_compile_args={
+            "cxx": ["-O3", "-Wno-sign-compare"],
+            "nvcc": ["-O3", "--extended-lambda", "--ptxas-options=-v"]
+        }
+        )
+    ],
+    cmdclass={
+        'build_ext': BuildExtension.with_options(no_python_abi_suffix=True, use_ninja=False)
+    }
+)
+```
+
+### experiments/vdbgrid/test.py
+```
+import unittest
+import torch
+import vdbgrid_cuda
+
+class TestGrid(unittest.TestCase):
+    def test_grid(self):
+        X = vdbgrid_cuda.DensityGrid(10, 10, 10)
+        b = torch.zeros([10, 10, 10])
+        b[4:7, 4:7, 4:7] = 1
+        b[9, 9, 9] = 1
+        b = b == 1
+        X.setValues(b)
+
+        o = torch.FloatTensor([[0, 0, 0]]).cuda()
+        d = torch.FloatTensor([[1, 1, 1]]).cuda()
+        near = torch.FloatTensor([1e-5]).cuda()
+        far = torch.FloatTensor([100]).cuda()
+        ray_ind, left, right, _, _ = X.traverse(o, d, near, far, 0.3, 0)
+        pos = o + d * (left + right)[:, None] / 2
+        self.assertTrue(
+            torch.allclose(
+                pos.cpu(),
+                torch.tensor(
+                    [[4.1500, 4.1500, 4.1500],
+                    [4.4500, 4.4500, 4.4500],
+                    [4.7500, 4.7500, 4.7500],
+                    [5.1500, 5.1500, 5.1500],
+                    [5.4500, 5.4500, 5.4500],
+                    [5.7500, 5.7500, 5.7500],
+                    [6.1500, 6.1500, 6.1500],
+                    [6.4500, 6.4500, 6.4500],
+                    [6.7500, 6.7500, 6.7500],
+                    [9.1500, 9.1500, 9.1500],
+                    [9.4500, 9.4500, 9.4500],
+                    [9.7500, 9.7500, 9.7500]])))
+
+if __name__ == '__main__':
+    unittest.main()
+```
+
+### experiments/src/datasets/__init__.py
+```
+
+```
+
+### experiments/src/datasets/dnerf_synthetic.py
+```
+"""
+Copyright (c) 2022 Ruilong Li, UC Berkeley.
+"""
+
+import json
+import os
+
+import imageio.v2 as imageio
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+from .utils import Rays
+
+
+def _load_renderings(root_fp: str, subject_id: str, split: str):
+    """Load images from disk."""
+    if not root_fp.startswith("/"):
+        # allow relative path. e.g., "./data/dnerf_synthetic/"
+        root_fp = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..",
+            "..",
+            root_fp,
+        )
+
+    data_dir = os.path.join(root_fp, subject_id)
+    with open(
+        os.path.join(data_dir, "transforms_{}.json".format(split)), "r"
+    ) as fp:
+        meta = json.load(fp)
+    images = []
+    camtoworlds = []
+    timestamps = []
+
+    for i in range(len(meta["frames"])):
+        frame = meta["frames"][i]
+        fname = os.path.join(data_dir, frame["file_path"] + ".png")
+        rgba = imageio.imread(fname)
+        timestamp = (
+            frame["time"]
+            if "time" in frame
+            else float(i) / (len(meta["frames"]) - 1)
+        )
+        timestamps.append(timestamp)
+        camtoworlds.append(frame["transform_matrix"])
+        images.append(rgba)
+
+    images = np.stack(images, axis=0)
+    camtoworlds = np.stack(camtoworlds, axis=0)
+    timestamps = np.stack(timestamps, axis=0)
+
+    h, w = images.shape[1:3]
+    camera_angle_x = float(meta["camera_angle_x"])
+    focal = 0.5 * w / np.tan(0.5 * camera_angle_x)
+
+    return images, camtoworlds, focal, timestamps
+
+
+class SubjectLoader(torch.utils.data.Dataset):
+    """Single subject data loader for training and evaluation."""
+
+    SPLITS = ["train", "val", "test"]
+    SUBJECT_IDS = [
+        "bouncingballs",
+        "hellwarrior",
+        "hook",
+        "jumpingjacks",
+        "lego",
+        "mutant",
+        "standup",
+        "trex",
+    ]
+
+    WIDTH, HEIGHT = 800, 800
+    NEAR, FAR = 2.0, 6.0
+    OPENGL_CAMERA = True
+
+    def __init__(
+        self,
+        subject_id: str,
+        root_fp: str,
+        split: str,
+        color_bkgd_aug: str = "white",
+        num_rays: int = None,
+        near: float = None,
+        far: float = None,
+        batch_over_images: bool = True,
+        device: str = "cpu",
+    ):
+        super().__init__()
+        assert split in self.SPLITS, "%s" % split
+        assert subject_id in self.SUBJECT_IDS, "%s" % subject_id
+        assert color_bkgd_aug in ["white", "black", "random"]
+        self.split = split
+        self.num_rays = num_rays
+        self.near = self.NEAR if near is None else near
+        self.far = self.FAR if far is None else far
+        self.training = (num_rays is not None) and (
+            split in ["train", "trainval"]
+        )
+        self.color_bkgd_aug = color_bkgd_aug
+        self.batch_over_images = batch_over_images
+        (
+            self.images,
+            self.camtoworlds,
+            self.focal,
+            self.timestamps,
+        ) = _load_renderings(root_fp, subject_id, split)
+        self.images = torch.from_numpy(self.images).to(device).to(torch.uint8)
+        self.camtoworlds = (
+            torch.from_numpy(self.camtoworlds).to(device).to(torch.float32)
+        )
+        self.timestamps = (
+            torch.from_numpy(self.timestamps)
+            .to(device)
+            .to(torch.float32)[:, None]
+        )
+        self.K = torch.tensor(
+            [
+                [self.focal, 0, self.WIDTH / 2.0],
+                [0, self.focal, self.HEIGHT / 2.0],
+                [0, 0, 1],
+            ],
+            dtype=torch.float32,
+            device=device,
+        )  # (3, 3)
+        assert self.images.shape[1:3] == (self.HEIGHT, self.WIDTH)
+
+    def __len__(self):
+        return len(self.images)
+
+    @torch.no_grad()
+    def __getitem__(self, index):
+        data = self.fetch_data(index)
+        data = self.preprocess(data)
+        return data
+
+    def preprocess(self, data):
+        """Process the fetched / cached data with randomness."""
+        rgba, rays = data["rgba"], data["rays"]
+        pixels, alpha = torch.split(rgba, [3, 1], dim=-1)
+
+        if self.training:
+            if self.color_bkgd_aug == "random":
+                color_bkgd = torch.rand(3, device=self.images.device)
+            elif self.color_bkgd_aug == "white":
+                color_bkgd = torch.ones(3, device=self.images.device)
+            elif self.color_bkgd_aug == "black":
+                color_bkgd = torch.zeros(3, device=self.images.device)
+        else:
+            # just use white during inference
+            color_bkgd = torch.ones(3, device=self.images.device)
+
+        pixels = pixels * alpha + color_bkgd * (1.0 - alpha)
+        return {
+            "pixels": pixels,  # [n_rays, 3] or [h, w, 3]
+            "rays": rays,  # [n_rays,] or [h, w]
+            "color_bkgd": color_bkgd,  # [3,]
+            **{k: v for k, v in data.items() if k not in ["rgba", "rays"]},
+        }
+
+    def update_num_rays(self, num_rays):
+        self.num_rays = num_rays
+
+    def fetch_data(self, index):
+        """Fetch the data (it maybe cached for multiple batches)."""
+        num_rays = self.num_rays
+
+        if self.training:
+            if self.batch_over_images:
+                image_id = torch.randint(
+                    0,
+                    len(self.images),
+                    size=(num_rays,),
+                    device=self.images.device,
+                )
+            else:
+                image_id = [index] * num_rays
+            x = torch.randint(
+                0, self.WIDTH, size=(num_rays,), device=self.images.device
+            )
+            y = torch.randint(
+                0, self.HEIGHT, size=(num_rays,), device=self.images.device
+            )
+        else:
+            image_id = [index]
+            x, y = torch.meshgrid(
+                torch.arange(self.WIDTH, device=self.images.device),
+                torch.arange(self.HEIGHT, device=self.images.device),
+                indexing="xy",
+            )
+            x = x.flatten()
+            y = y.flatten()
+
+        # generate rays
+        rgba = self.images[image_id, y, x] / 255.0  # (num_rays, 4)
+        c2w = self.camtoworlds[image_id]  # (num_rays, 3, 4)
+        camera_dirs = F.pad(
+            torch.stack(
+                [
+                    (x - self.K[0, 2] + 0.5) / self.K[0, 0],
+                    (y - self.K[1, 2] + 0.5)
+                    / self.K[1, 1]
+                    * (-1.0 if self.OPENGL_CAMERA else 1.0),
+                ],
+                dim=-1,
+            ),
+            (0, 1),
+            value=(-1.0 if self.OPENGL_CAMERA else 1.0),
+        )  # [num_rays, 3]
+
+        # [n_cams, height, width, 3]
+        directions = (camera_dirs[:, None, :] * c2w[:, :3, :3]).sum(dim=-1)
+        origins = torch.broadcast_to(c2w[:, :3, -1], directions.shape)
+        viewdirs = directions / torch.linalg.norm(
+            directions, dim=-1, keepdims=True
+        )
+
+        if self.training:
+            origins = torch.reshape(origins, (num_rays, 3))
+            viewdirs = torch.reshape(viewdirs, (num_rays, 3))
+            rgba = torch.reshape(rgba, (num_rays, 4))
+        else:
+            origins = torch.reshape(origins, (self.HEIGHT, self.WIDTH, 3))
+            viewdirs = torch.reshape(viewdirs, (self.HEIGHT, self.WIDTH, 3))
+            rgba = torch.reshape(rgba, (self.HEIGHT, self.WIDTH, 4))
+
+        rays = Rays(origins=origins, viewdirs=viewdirs)
+        timestamps = self.timestamps[image_id]
+
+        return {
+            "rgba": rgba,  # [h, w, 4] or [num_rays, 4]
+            "rays": rays,  # [h, w, 3] or [num_rays, 3]
+            "timestamps": timestamps,  # [num_rays, 1]
+        }
+```
+
+### experiments/src/datasets/nerf_360_v2.py
+```
+"""
+Copyright (c) 2022 Ruilong Li, UC Berkeley.
+"""
+
+import collections
+import os
+import sys
+
+import imageio
+import numpy as np
+import torch
+import torch.nn.functional as F
+import tqdm
+
+from .utils import Rays
+
+_PATH = os.path.abspath(__file__)
+
+sys.path.insert(
+    0, os.path.join(os.path.dirname(_PATH), "../../../nerfacc/examples", "pycolmap", "pycolmap")
+)
+from scene_manager import SceneManager
+
+
+def _load_colmap(root_fp: str, subject_id: str, factor: int = 1):
+    assert factor in [1, 2, 4, 8]
+
+    data_dir = os.path.join(root_fp, subject_id)
+    colmap_dir = os.path.join(data_dir, "sparse/0/")
+
+    manager = SceneManager(colmap_dir)
+    manager.load_cameras()
+    manager.load_images()
+
+    # Assume shared intrinsics between all cameras.
+    cam = manager.cameras[1]
+    fx, fy, cx, cy = cam.fx, cam.fy, cam.cx, cam.cy
+    K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
+    K[:2, :] /= factor
+
+    # Extract extrinsic matrices in world-to-camera format.
+    imdata = manager.images
+    w2c_mats = []
+    bottom = np.array([0, 0, 0, 1]).reshape(1, 4)
+    for k in imdata:
+        im = imdata[k]
+        rot = im.R()
+        trans = im.tvec.reshape(3, 1)
+        w2c = np.concatenate([np.concatenate([rot, trans], 1), bottom], axis=0)
+        w2c_mats.append(w2c)
+    w2c_mats = np.stack(w2c_mats, axis=0)
+
+    # Convert extrinsics to camera-to-world.
+    camtoworlds = np.linalg.inv(w2c_mats)
+
+    # Image names from COLMAP. No need for permuting the poses according to
+    # image names anymore.
+    image_names = [imdata[k].name for k in imdata]
+
+    # # Switch from COLMAP (right, down, fwd) to Nerf (right, up, back) frame.
+    # poses = poses @ np.diag([1, -1, -1, 1])
+
+    # Get distortion parameters.
+    type_ = cam.camera_type
+
+    if type_ == 0 or type_ == "SIMPLE_PINHOLE":
+        params = None
+        camtype = "perspective"
+
+    elif type_ == 1 or type_ == "PINHOLE":
+        params = None
+        camtype = "perspective"
+
+    if type_ == 2 or type_ == "SIMPLE_RADIAL":
+        params = {k: 0.0 for k in ["k1", "k2", "k3", "p1", "p2"]}
+        params["k1"] = cam.k1
+        camtype = "perspective"
+
+    elif type_ == 3 or type_ == "RADIAL":
+        params = {k: 0.0 for k in ["k1", "k2", "k3", "p1", "p2"]}
+        params["k1"] = cam.k1
+        params["k2"] = cam.k2
+        camtype = "perspective"
+
+    elif type_ == 4 or type_ == "OPENCV":
+        params = {k: 0.0 for k in ["k1", "k2", "k3", "p1", "p2"]}
+        params["k1"] = cam.k1
+        params["k2"] = cam.k2
+        params["p1"] = cam.p1
+        params["p2"] = cam.p2
+        camtype = "perspective"
+
+    elif type_ == 5 or type_ == "OPENCV_FISHEYE":
+        params = {k: 0.0 for k in ["k1", "k2", "k3", "k4"]}
+        params["k1"] = cam.k1
+        params["k2"] = cam.k2
+        params["k3"] = cam.k3
+        params["k4"] = cam.k4
+        camtype = "fisheye"
+
+    assert params is None, "Only support pinhole camera model."
+
+    # Previous Nerf results were generated with images sorted by filename,
+    # ensure metrics are reported on the same test set.
+    inds = np.argsort(image_names)
+    image_names = [image_names[i] for i in inds]
+    camtoworlds = camtoworlds[inds]
+
+    # Load images.
+    if factor > 1:
+        image_dir_suffix = f"_{factor}"
+    else:
+        image_dir_suffix = ""
+    colmap_image_dir = os.path.join(data_dir, "images")
+    image_dir = os.path.join(data_dir, "images" + image_dir_suffix)
+    for d in [image_dir, colmap_image_dir]:
+        if not os.path.exists(d):
+            raise ValueError(f"Image folder {d} does not exist.")
+    # Downsampled images may have different names vs images used for COLMAP,
+    # so we need to map between the two sorted lists of files.
+    colmap_files = sorted(os.listdir(colmap_image_dir))
+    image_files = sorted(os.listdir(image_dir))
+    colmap_to_image = dict(zip(colmap_files, image_files))
+    image_paths = [
+        os.path.join(image_dir, colmap_to_image[f]) for f in image_names
+    ]
+    print("loading images")
+    images = [imageio.imread(x) for x in tqdm.tqdm(image_paths)]
+    images = np.stack(images, axis=0)
+
+    # Select the split.
+    all_indices = np.arange(images.shape[0])
+    split_indices = {
+        "test": all_indices[all_indices % 8 == 0],
+        "train": all_indices[all_indices % 8 != 0],
+    }
+    return images, camtoworlds, K, split_indices
+
+
+def similarity_from_cameras(c2w, strict_scaling):
+    """
+    reference: nerf-factory
+    Get a similarity transform to normalize dataset
+    from c2w (OpenCV convention) cameras
+    :param c2w: (N, 4)
+    :return T (4,4) , scale (float)
+    """
+    t = c2w[:, :3, 3]
+    R = c2w[:, :3, :3]
+
+    # (1) Rotate the world so that z+ is the up axis
+    # we estimate the up axis by averaging the camera up axes
+    ups = np.sum(R * np.array([0, -1.0, 0]), axis=-1)
+    world_up = np.mean(ups, axis=0)
+    world_up /= np.linalg.norm(world_up)
+
+    up_camspace = np.array([0.0, -1.0, 0.0])
+    c = (up_camspace * world_up).sum()
+    cross = np.cross(world_up, up_camspace)
+    skew = np.array(
+        [
+            [0.0, -cross[2], cross[1]],
+            [cross[2], 0.0, -cross[0]],
+            [-cross[1], cross[0], 0.0],
+        ]
+    )
+    if c > -1:
+        R_align = np.eye(3) + skew + (skew @ skew) * 1 / (1 + c)
+    else:
+        # In the unlikely case the original data has y+ up axis,
+        # rotate 180-deg about x axis
+        R_align = np.array([[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+
+    #  R_align = np.eye(3) # DEBUG
+    R = R_align @ R
+    fwds = np.sum(R * np.array([0, 0.0, 1.0]), axis=-1)
+    t = (R_align @ t[..., None])[..., 0]
+
+    # (2) Recenter the scene using camera center rays
+    # find the closest point to the origin for each camera's center ray
+    nearest = t + (fwds * -t).sum(-1)[:, None] * fwds
+
+    # median for more robustness
+    translate = -np.median(nearest, axis=0)
+
+    #  translate = -np.mean(t, axis=0)  # DEBUG
+
+    transform = np.eye(4)
+    transform[:3, 3] = translate
+    transform[:3, :3] = R_align
+
+    # (3) Rescale the scene using camera distances
+    scale_fn = np.max if strict_scaling else np.median
+    scale = 1.0 / scale_fn(np.linalg.norm(t + translate, axis=-1))
+
+    return transform, scale
+
+
+class SubjectLoader(torch.utils.data.Dataset):
+    """Single subject data loader for training and evaluation."""
+
+    SPLITS = ["train", "test"]
+    SUBJECT_IDS = [
+        "garden",
+        "bicycle",
+        "bonsai",
+        "counter",
+        "kitchen",
+        "room",
+        "stump",
+        "flowers",
+        "treehill",
+    ]
+
+    OPENGL_CAMERA = False
+
+    def __init__(
+        self,
+        subject_id: str,
+        root_fp: str,
+        split: str,
+        color_bkgd_aug: str = "white",
+        num_rays: int = None,
+        near: float = None,
+        far: float = None,
+        batch_over_images: bool = True,
+        factor: int = 1,
+        device: str = "cpu",
+    ):
+        super().__init__()
+        assert split in self.SPLITS, "%s" % split
+        assert subject_id in self.SUBJECT_IDS, "%s" % subject_id
+        assert color_bkgd_aug in ["white", "black", "random"]
+        self.split = split
+        self.num_rays = num_rays
+        self.near = near
+        self.far = far
+        self.training = (num_rays is not None) and (
+            split in ["train", "trainval"]
+        )
+        self.color_bkgd_aug = color_bkgd_aug
+        self.batch_over_images = batch_over_images
+        self.images, self.camtoworlds, self.K, split_indices = _load_colmap(
+            root_fp, subject_id, factor
+        )
+        # normalize the scene
+        T, sscale = similarity_from_cameras(
+            self.camtoworlds, strict_scaling=False
+        )
+        self.camtoworlds = np.einsum("nij, ki -> nkj", self.camtoworlds, T)
+        self.camtoworlds[:, :3, 3] *= sscale
+        # split
+        indices = split_indices[split]
+        self.images = self.images[indices]
+        self.camtoworlds = self.camtoworlds[indices]
+        # to tensor
+        self.images = torch.from_numpy(self.images).to(torch.uint8).to(device)
+        self.camtoworlds = (
+            torch.from_numpy(self.camtoworlds).to(torch.float32).to(device)
+        )
+        self.K = torch.tensor(self.K).to(torch.float32).to(device)
+        self.height, self.width = self.images.shape[1:3]
+
+    def __len__(self):
+        return len(self.images)
+
+    @torch.no_grad()
+    def __getitem__(self, index):
+        data = self.fetch_data(index)
+        data = self.preprocess(data)
+        return data
+
+    def preprocess(self, data):
+        """Process the fetched / cached data with randomness."""
+        pixels, rays = data["rgb"], data["rays"]
+
+        if self.training:
+            if self.color_bkgd_aug == "random":
+                color_bkgd = torch.rand(3, device=self.images.device)
+            elif self.color_bkgd_aug == "white":
+                color_bkgd = torch.ones(3, device=self.images.device)
+            elif self.color_bkgd_aug == "black":
+                color_bkgd = torch.zeros(3, device=self.images.device)
+        else:
+            # just use white during inference
+            color_bkgd = torch.ones(3, device=self.images.device)
+
+        return {
+            "pixels": pixels,  # [n_rays, 3] or [h, w, 3]
+            "rays": rays,  # [n_rays,] or [h, w]
+            "color_bkgd": color_bkgd,  # [3,]
+            **{k: v for k, v in data.items() if k not in ["rgb", "rays"]},
+        }
+
+    def update_num_rays(self, num_rays):
+        self.num_rays = num_rays
+
+    def fetch_data(self, index):
+        """Fetch the data (it maybe cached for multiple batches)."""
+        num_rays = self.num_rays
+
+        if self.training:
+            if self.batch_over_images:
+                image_id = torch.randint(
+                    0,
+                    len(self.images),
+                    size=(num_rays,),
+                    device=self.images.device,
+                )
+            else:
+                image_id = [index] * num_rays
+            x = torch.randint(
+                0, self.width, size=(num_rays,), device=self.images.device
+            )
+            y = torch.randint(
+                0, self.height, size=(num_rays,), device=self.images.device
+            )
+        else:
+            image_id = [index]
+            x, y = torch.meshgrid(
+                torch.arange(self.width, device=self.images.device),
+                torch.arange(self.height, device=self.images.device),
+                indexing="xy",
+            )
+            x = x.flatten()
+            y = y.flatten()
+
+        # generate rays
+        rgb = self.images[image_id, y, x] / 255.0  # (num_rays, 3)
+        c2w = self.camtoworlds[image_id]  # (num_rays, 3, 4)
+        camera_dirs = F.pad(
+            torch.stack(
+                [
+                    (x - self.K[0, 2] + 0.5) / self.K[0, 0],
+                    (y - self.K[1, 2] + 0.5)
+                    / self.K[1, 1]
+                    * (-1.0 if self.OPENGL_CAMERA else 1.0),
+                ],
+                dim=-1,
+            ),
+            (0, 1),
+            value=(-1.0 if self.OPENGL_CAMERA else 1.0),
+        )  # [num_rays, 3]
+
+        # [num_rays, 3]
+        directions = (camera_dirs[:, None, :] * c2w[:, :3, :3]).sum(dim=-1)
+        origins = torch.broadcast_to(c2w[:, :3, -1], directions.shape)
+        viewdirs = directions / torch.linalg.norm(
+            directions, dim=-1, keepdims=True
+        )
+
+        if self.training:
+            origins = torch.reshape(origins, (num_rays, 3))
+            viewdirs = torch.reshape(viewdirs, (num_rays, 3))
+            rgb = torch.reshape(rgb, (num_rays, 3))
+        else:
+            origins = torch.reshape(origins, (self.height, self.width, 3))
+            viewdirs = torch.reshape(viewdirs, (self.height, self.width, 3))
+            rgb = torch.reshape(rgb, (self.height, self.width, 3))
+
+        rays = Rays(origins=origins, viewdirs=viewdirs)
+
+        return {
+            "rgb": rgb,  # [h, w, 3] or [num_rays, 3]
+            "rays": rays,  # [h, w, 3] or [num_rays, 3]
+        }
+```
+
+### experiments/src/datasets/nerf_synthetic.py
+```
+"""
+Copyright (c) 2022 Ruilong Li, UC Berkeley.
+"""
+
+import collections
+import json
+import os
+
+import imageio.v2 as imageio
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+from .utils import Rays
+
+
+def _load_renderings(root_fp: str, subject_id: str, split: str):
+    """Load images from disk."""
+    if not root_fp.startswith("/"):
+        # allow relative path. e.g., "./data/nerf_synthetic/"
+        root_fp = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..",
+            "..",
+            root_fp,
+        )
+
+    data_dir = os.path.join(root_fp, subject_id)
+    with open(
+        os.path.join(data_dir, "transforms_{}.json".format(split)), "r"
+    ) as fp:
+        meta = json.load(fp)
+    images = []
+    camtoworlds = []
+
+    for i in range(len(meta["frames"])):
+        frame = meta["frames"][i]
+        fname = os.path.join(data_dir, frame["file_path"] + ".png")
+        rgba = imageio.imread(fname)
+        camtoworlds.append(frame["transform_matrix"])
+        images.append(rgba)
+
+    images = np.stack(images, axis=0)
+    camtoworlds = np.stack(camtoworlds, axis=0)
+
+    h, w = images.shape[1:3]
+    camera_angle_x = float(meta["camera_angle_x"])
+    focal = 0.5 * w / np.tan(0.5 * camera_angle_x)
+
+    return images, camtoworlds, focal
+
+
+class SubjectLoader(torch.utils.data.Dataset):
+    """Single subject data loader for training and evaluation."""
+
+    SPLITS = ["train", "val", "trainval", "test"]
+    SUBJECT_IDS = [
+        "chair",
+        "drums",
+        "ficus",
+        "hotdog",
+        "lego",
+        "materials",
+        "mic",
+        "ship",
+    ]
+
+    WIDTH, HEIGHT = 800, 800
+    NEAR, FAR = 2.0, 6.0
+    OPENGL_CAMERA = True
+
+    def __init__(
+        self,
+        subject_id: str,
+        root_fp: str,
+        split: str,
+        color_bkgd_aug: str = "white",
+        num_rays: int = None,
+        near: float = None,
+        far: float = None,
+        batch_over_images: bool = True,
+        device: torch.device = torch.device("cpu"),
+    ):
+        super().__init__()
+        assert split in self.SPLITS, "%s" % split
+        assert subject_id in self.SUBJECT_IDS, "%s" % subject_id
+        assert color_bkgd_aug in ["white", "black", "random"]
+        self.split = split
+        self.num_rays = num_rays
+        self.near = self.NEAR if near is None else near
+        self.far = self.FAR if far is None else far
+        self.training = (num_rays is not None) and (
+            split in ["train", "trainval"]
+        )
+        self.color_bkgd_aug = color_bkgd_aug
+        self.batch_over_images = batch_over_images
+        if split == "trainval":
+            _images_train, _camtoworlds_train, _focal_train = _load_renderings(
+                root_fp, subject_id, "train"
+            )
+            _images_val, _camtoworlds_val, _focal_val = _load_renderings(
+                root_fp, subject_id, "val"
+            )
+            self.images = np.concatenate([_images_train, _images_val])
+            self.camtoworlds = np.concatenate(
+                [_camtoworlds_train, _camtoworlds_val]
+            )
+            self.focal = _focal_train
+        else:
+            self.images, self.camtoworlds, self.focal = _load_renderings(
+                root_fp, subject_id, split
+            )
+        self.images = torch.from_numpy(self.images).to(torch.uint8)
+        self.camtoworlds = torch.from_numpy(self.camtoworlds).to(torch.float32)
+        self.K = torch.tensor(
+            [
+                [self.focal, 0, self.WIDTH / 2.0],
+                [0, self.focal, self.HEIGHT / 2.0],
+                [0, 0, 1],
+            ],
+            dtype=torch.float32,
+        )  # (3, 3)
+        self.images = self.images.to(device)
+        self.camtoworlds = self.camtoworlds.to(device)
+        self.K = self.K.to(device)
+        assert self.images.shape[1:3] == (self.HEIGHT, self.WIDTH)
+
+    def __len__(self):
+        return len(self.images)
+
+    @torch.no_grad()
+    def __getitem__(self, index):
+        data = self.fetch_data(index)
+        data = self.preprocess(data)
+        return data
+
+    def preprocess(self, data):
+        """Process the fetched / cached data with randomness."""
+        rgba, rays = data["rgba"], data["rays"]
+        pixels, alpha = torch.split(rgba, [3, 1], dim=-1)
+
+        if self.training:
+            if self.color_bkgd_aug == "random":
+                color_bkgd = torch.rand(3, device=self.images.device)
+            elif self.color_bkgd_aug == "white":
+                color_bkgd = torch.ones(3, device=self.images.device)
+            elif self.color_bkgd_aug == "black":
+                color_bkgd = torch.zeros(3, device=self.images.device)
+        else:
+            # just use white during inference
+            color_bkgd = torch.ones(3, device=self.images.device)
+
+        pixels = pixels * alpha + color_bkgd * (1.0 - alpha)
+        return {
+            "pixels": pixels,  # [n_rays, 3] or [h, w, 3]
+            "rays": rays,  # [n_rays,] or [h, w]
+            "color_bkgd": color_bkgd,  # [3,]
+            **{k: v for k, v in data.items() if k not in ["rgba", "rays"]},
+        }
+
+    def update_num_rays(self, num_rays):
+        self.num_rays = num_rays
+
+    def fetch_data(self, index):
+        """Fetch the data (it maybe cached for multiple batches)."""
+        num_rays = self.num_rays
+
+        if self.training:
+            if self.batch_over_images:
+                image_id = torch.randint(
+                    0,
+                    len(self.images),
+                    size=(num_rays,),
+                    device=self.images.device,
+                )
+            else:
+                image_id = [index] * num_rays
+            x = torch.randint(
+                0, self.WIDTH, size=(num_rays,), device=self.images.device
+            )
+            y = torch.randint(
+                0, self.HEIGHT, size=(num_rays,), device=self.images.device
+            )
+        else:
+            image_id = [index]
+            x, y = torch.meshgrid(
+                torch.arange(self.WIDTH, device=self.images.device),
+                torch.arange(self.HEIGHT, device=self.images.device),
+                indexing="xy",
+            )
+            x = x.flatten()
+            y = y.flatten()
+
+        # generate rays
+        rgba = self.images[image_id, y, x] / 255.0  # (num_rays, 4)
+        c2w = self.camtoworlds[image_id]  # (num_rays, 3, 4)
+        camera_dirs = F.pad(
+            torch.stack(
+                [
+                    (x - self.K[0, 2] + 0.5) / self.K[0, 0],
+                    (y - self.K[1, 2] + 0.5)
+                    / self.K[1, 1]
+                    * (-1.0 if self.OPENGL_CAMERA else 1.0),
+                ],
+                dim=-1,
+            ),
+            (0, 1),
+            value=(-1.0 if self.OPENGL_CAMERA else 1.0),
+        )  # [num_rays, 3]
+
+        # [n_cams, height, width, 3]
+        directions = (camera_dirs[:, None, :] * c2w[:, :3, :3]).sum(dim=-1)
+        origins = torch.broadcast_to(c2w[:, :3, -1], directions.shape)
+        viewdirs = directions / torch.linalg.norm(
+            directions, dim=-1, keepdims=True
+        )
+
+        if self.training:
+            origins = torch.reshape(origins, (num_rays, 3))
+            viewdirs = torch.reshape(viewdirs, (num_rays, 3))
+            rgba = torch.reshape(rgba, (num_rays, 4))
+        else:
+            origins = torch.reshape(origins, (self.HEIGHT, self.WIDTH, 3))
+            viewdirs = torch.reshape(viewdirs, (self.HEIGHT, self.WIDTH, 3))
+            rgba = torch.reshape(rgba, (self.HEIGHT, self.WIDTH, 4))
+
+        rays = Rays(origins=origins, viewdirs=viewdirs)
+
+        return {
+            "rgba": rgba,  # [h, w, 4] or [num_rays, 4]
+            "rays": rays,  # [h, w, 3] or [num_rays, 3]
+        }
+```
+
+### experiments/src/datasets/utils.py
+```
+"""
+Copyright (c) 2022 Ruilong Li, UC Berkeley.
+"""
+
+import collections
+
+Rays = collections.namedtuple("Rays", ("origins", "viewdirs"))
+
+
+def namedtuple_map(fn, tup):
+    """Apply `fn` to each element of `tup` and cast to `tup`'s namedtuple."""
+    return type(tup)(*(None if x is None else fn(x) for x in tup))
+```
+
+### experiments/src/radiance_fields/__init__.py
+```
+
+```
+
+### experiments/src/radiance_fields/mlp.py
+```
+"""
+MIT License
+
+Copyright (c) 2022 Ruilong Li
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
+import functools
+import math
+from typing import Callable, Optional
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class MLP(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,  # The number of input tensor channels.
+        output_dim: int = None,  # The number of output tensor channels.
+        net_depth: int = 8,  # The depth of the MLP.
+        net_width: int = 256,  # The width of the MLP.
+        skip_layer: int = 4,  # The layer to add skip layers to.
+        hidden_init: Callable = nn.init.xavier_uniform_,
+        hidden_activation: Callable = nn.ReLU(),
+        output_enabled: bool = True,
+        output_init: Optional[Callable] = nn.init.xavier_uniform_,
+        output_activation: Optional[Callable] = nn.Identity(),
+        bias_enabled: bool = True,
+        bias_init: Callable = nn.init.zeros_,
+    ):
+        super().__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.net_depth = net_depth
+        self.net_width = net_width
+        self.skip_layer = skip_layer
+        self.hidden_init = hidden_init
+        self.hidden_activation = hidden_activation
+        self.output_enabled = output_enabled
+        self.output_init = output_init
+        self.output_activation = output_activation
+        self.bias_enabled = bias_enabled
+        self.bias_init = bias_init
+
+        self.hidden_layers = nn.ModuleList()
+        in_features = self.input_dim
+        for i in range(self.net_depth):
+            self.hidden_layers.append(
+                nn.Linear(in_features, self.net_width, bias=bias_enabled)
+            )
+            if (
+                (self.skip_layer is not None)
+                and (i % self.skip_layer == 0)
+                and (i > 0)
+            ):
+                in_features = self.net_width + self.input_dim
+            else:
+                in_features = self.net_width
+        if self.output_enabled:
+            self.output_layer = nn.Linear(
+                in_features, self.output_dim, bias=bias_enabled
+            )
+        else:
+            self.output_dim = in_features
+
+        self.initialize()
+
+    def initialize(self):
+        def init_func_hidden(m):
+            if isinstance(m, nn.Linear):
+                if self.hidden_init is not None:
+                    self.hidden_init(m.weight)
+                if self.bias_enabled and self.bias_init is not None:
+                    self.bias_init(m.bias)
+
+        self.hidden_layers.apply(init_func_hidden)
+        if self.output_enabled:
+
+            def init_func_output(m):
+                if isinstance(m, nn.Linear):
+                    if self.output_init is not None:
+                        self.output_init(m.weight)
+                    if self.bias_enabled and self.bias_init is not None:
+                        self.bias_init(m.bias)
+
+            self.output_layer.apply(init_func_output)
+
+    def forward(self, x):
+        inputs = x
+        for i in range(self.net_depth):
+            x = self.hidden_layers[i](x)
+            x = self.hidden_activation(x)
+            if (
+                (self.skip_layer is not None)
+                and (i % self.skip_layer == 0)
+                and (i > 0)
+            ):
+                x = torch.cat([x, inputs], dim=-1)
+        if self.output_enabled:
+            x = self.output_layer(x)
+            x = self.output_activation(x)
+        return x
+
+
+class DenseLayer(MLP):
+    def __init__(self, input_dim, output_dim, **kwargs):
+        super().__init__(
+            input_dim=input_dim,
+            output_dim=output_dim,
+            net_depth=0,  # no hidden layers
+            **kwargs,
+        )
+
+
+class NerfMLP(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,  # The number of input tensor channels.
+        condition_dim: int,  # The number of condition tensor channels.
+        net_depth: int = 8,  # The depth of the MLP.
+        net_width: int = 256,  # The width of the MLP.
+        skip_layer: int = 4,  # The layer to add skip layers to.
+        net_depth_condition: int = 1,  # The depth of the second part of MLP.
+        net_width_condition: int = 128,  # The width of the second part of MLP.
+    ):
+        super().__init__()
+        self.base = MLP(
+            input_dim=input_dim,
+            net_depth=net_depth,
+            net_width=net_width,
+            skip_layer=skip_layer,
+            output_enabled=False,
+        )
+        hidden_features = self.base.output_dim
+        self.sigma_layer = DenseLayer(hidden_features, 1)
+
+        if condition_dim > 0:
+            self.bottleneck_layer = DenseLayer(hidden_features, net_width)
+            self.rgb_layer = MLP(
+                input_dim=net_width + condition_dim,
+                output_dim=3,
+                net_depth=net_depth_condition,
+                net_width=net_width_condition,
+                skip_layer=None,
+            )
+        else:
+            self.rgb_layer = DenseLayer(hidden_features, 3)
+
+    def query_density(self, x):
+        x = self.base(x)
+        raw_sigma = self.sigma_layer(x)
+        return raw_sigma
+
+    def forward(self, x, condition=None):
+        x = self.base(x)
+        raw_sigma = self.sigma_layer(x)
+        if condition is not None:
+            if condition.shape[:-1] != x.shape[:-1]:
+                num_rays, n_dim = condition.shape
+                condition = condition.view(
+                    [num_rays] + [1] * (x.dim() - condition.dim()) + [n_dim]
+                ).expand(list(x.shape[:-1]) + [n_dim])
+            bottleneck = self.bottleneck_layer(x)
+            x = torch.cat([bottleneck, condition], dim=-1)
+        raw_rgb = self.rgb_layer(x)
+        return raw_rgb, raw_sigma
+
+
+class SinusoidalEncoder(nn.Module):
+    """Sinusoidal Positional Encoder used in Nerf."""
+
+    def __init__(self, x_dim, min_deg, max_deg, use_identity: bool = True):
+        super().__init__()
+        self.x_dim = x_dim
+        self.min_deg = min_deg
+        self.max_deg = max_deg
+        self.use_identity = use_identity
+        self.register_buffer(
+            "scales", torch.tensor([2**i for i in range(min_deg, max_deg)])
+        )
+
+    @property
+    def latent_dim(self) -> int:
+        return (
+            int(self.use_identity) + (self.max_deg - self.min_deg) * 2
+        ) * self.x_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: [..., x_dim]
+        Returns:
+            latent: [..., latent_dim]
+        """
+        if self.max_deg == self.min_deg:
+            return x
+        xb = torch.reshape(
+            (x[Ellipsis, None, :] * self.scales[:, None]),
+            list(x.shape[:-1]) + [(self.max_deg - self.min_deg) * self.x_dim],
+        )
+        latent = torch.sin(torch.cat([xb, xb + 0.5 * math.pi], dim=-1))
+        if self.use_identity:
+            latent = torch.cat([x] + [latent], dim=-1)
+        return latent
+
+
+class VanillaNeRFRadianceField(nn.Module):
+    def __init__(
+        self,
+        net_depth: int = 8,  # The depth of the MLP.
+        net_width: int = 256,  # The width of the MLP.
+        skip_layer: int = 4,  # The layer to add skip layers to.
+        net_depth_condition: int = 1,  # The depth of the second part of MLP.
+        net_width_condition: int = 128,  # The width of the second part of MLP.
+    ) -> None:
+        super().__init__()
+        self.posi_encoder = SinusoidalEncoder(3, 0, 10, True)
+        self.view_encoder = SinusoidalEncoder(3, 0, 4, True)
+        self.mlp = NerfMLP(
+            input_dim=self.posi_encoder.latent_dim,
+            condition_dim=self.view_encoder.latent_dim,
+            net_depth=net_depth,
+            net_width=net_width,
+            skip_layer=skip_layer,
+            net_depth_condition=net_depth_condition,
+            net_width_condition=net_width_condition,
+        )
+
+    def query_opacity(self, x, step_size):
+        density = self.query_density(x)
+        # if the density is small enough those two are the same.
+        # opacity = 1.0 - torch.exp(-density * step_size)
+        opacity = density * step_size
+        return opacity
+
+    def query_density(self, x):
+        x = self.posi_encoder(x)
+        sigma = self.mlp.query_density(x)
+        return F.relu(sigma)
+
+    def forward(self, x, condition=None):
+        x = self.posi_encoder(x)
+        if condition is not None:
+            condition = self.view_encoder(condition)
+        rgb, sigma = self.mlp(x, condition=condition)
+        return torch.sigmoid(rgb), F.relu(sigma)
+
+
+class TNeRFRadianceField(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.posi_encoder = SinusoidalEncoder(3, 0, 4, True)
+        self.time_encoder = SinusoidalEncoder(1, 0, 4, True)
+        self.warp = MLP(
+            input_dim=self.posi_encoder.latent_dim
+            + self.time_encoder.latent_dim,
+            output_dim=3,
+            net_depth=4,
+            net_width=64,
+            skip_layer=2,
+            output_init=functools.partial(torch.nn.init.uniform_, b=1e-4),
+        )
+        self.nerf = VanillaNeRFRadianceField()
+
+    def query_opacity(self, x, timestamps, step_size):
+        idxs = torch.randint(0, len(timestamps), (x.shape[0],), device=x.device)
+        t = timestamps[idxs]
+        density = self.query_density(x, t)
+        # if the density is small enough those two are the same.
+        # opacity = 1.0 - torch.exp(-density * step_size)
+        opacity = density * step_size
+        return opacity
+
+    def query_density(self, x, t):
+        x = x + self.warp(
+            torch.cat([self.posi_encoder(x), self.time_encoder(t)], dim=-1)
+        )
+        return self.nerf.query_density(x)
+
+    def forward(self, x, t, condition=None):
+        x = x + self.warp(
+            torch.cat([self.posi_encoder(x), self.time_encoder(t)], dim=-1)
+        )
+        return self.nerf(x, condition=condition)
+
+
+class NDRTNeRFRadianceField(nn.Module):
+
+    """Invertble NN from https://arxiv.org/pdf/2206.15258.pdf"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.time_encoder = SinusoidalEncoder(1, 0, 4, True)
+        self.warp_layers_1 = nn.ModuleList()
+        self.time_layers_1 = nn.ModuleList()
+        self.warp_layers_2 = nn.ModuleList()
+        self.time_layers_2 = nn.ModuleList()
+        self.posi_encoder_1 = SinusoidalEncoder(2, 0, 4, True)
+        self.posi_encoder_2 = SinusoidalEncoder(1, 0, 4, True)
+        for _ in range(3):
+            self.warp_layers_1.append(
+                MLP(
+                    input_dim=self.posi_encoder_1.latent_dim + 64,
+                    output_dim=1,
+                    net_depth=2,
+                    net_width=128,
+                    skip_layer=None,
+                    output_init=functools.partial(
+                        torch.nn.init.uniform_, b=1e-4
+                    ),
+                )
+            )
+            self.warp_layers_2.append(
+                MLP(
+                    input_dim=self.posi_encoder_2.latent_dim + 64,
+                    output_dim=1 + 2,
+                    net_depth=1,
+                    net_width=128,
+                    skip_layer=None,
+                    output_init=functools.partial(
+                        torch.nn.init.uniform_, b=1e-4
+                    ),
+                )
+            )
+            self.time_layers_1.append(
+                DenseLayer(
+                    input_dim=self.time_encoder.latent_dim,
+                    output_dim=64,
+                )
+            )
+            self.time_layers_2.append(
+                DenseLayer(
+                    input_dim=self.time_encoder.latent_dim,
+                    output_dim=64,
+                )
+            )
+
+        self.nerf = VanillaNeRFRadianceField()
+
+    def _warp(self, x, t_enc, i_layer):
+        uv, w = x[:, :2], x[:, 2:]
+        dw = self.warp_layers_1[i_layer](
+            torch.cat(
+                [self.posi_encoder_1(uv), self.time_layers_1[i_layer](t_enc)],
+                dim=-1,
+            )
+        )
+        w = w + dw
+        rt = self.warp_layers_2[i_layer](
+            torch.cat(
+                [self.posi_encoder_2(w), self.time_layers_2[i_layer](t_enc)],
+                dim=-1,
+            )
+        )
+        r = self._euler2rot_2dinv(rt[:, :1])
+        t = rt[:, 1:]
+        uv = torch.bmm(r, (uv - t)[..., None]).squeeze(-1)
+        return torch.cat([uv, w], dim=-1)
+
+    def warp(self, x, t):
+        t_enc = self.time_encoder(t)
+        x = self._warp(x, t_enc, 0)
+        x = x[..., [1, 2, 0]]
+        x = self._warp(x, t_enc, 1)
+        x = x[..., [2, 0, 1]]
+        x = self._warp(x, t_enc, 2)
+        return x
+
+    def query_opacity(self, x, timestamps, step_size):
+        idxs = torch.randint(0, len(timestamps), (x.shape[0],), device=x.device)
+        t = timestamps[idxs]
+        density = self.query_density(x, t)
+        # if the density is small enough those two are the same.
+        # opacity = 1.0 - torch.exp(-density * step_size)
+        opacity = density * step_size
+        return opacity
+
+    def query_density(self, x, t):
+        x = self.warp(x, t)
+        return self.nerf.query_density(x)
+
+    def forward(self, x, t, condition=None):
+        x = self.warp(x, t)
+        return self.nerf(x, condition=condition)
+
+    def _euler2rot_2dinv(self, euler_angle):
+        # (B, 1) -> (B, 2, 2)
+        theta = euler_angle.reshape(-1, 1, 1)
+        rot = torch.cat(
+            (
+                torch.cat((theta.cos(), -theta.sin()), 1),
+                torch.cat((theta.sin(), theta.cos()), 1),
+            ),
+            2,
+        )
+        return rot
+```
+
+### experiments/src/radiance_fields/ngp.py
+```
+"""
+MIT License
+
+Copyright (c) 2022 Ruilong Li
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
+from typing import Callable, List, Union
+
+import numpy as np
+import torch
+from torch.autograd import Function
+from torch.cuda.amp import custom_bwd, custom_fwd
+
+try:
+    import tinycudann as tcnn
+except ImportError as e:
+    print(
+        f"Error: {e}! "
+        "Please install tinycudann by: "
+        "pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch"
+    )
+    exit()
+
+
+class _TruncExp(Function):  # pylint: disable=abstract-method
+    # Implementation from torch-ngp:
+    # https://github.com/ashawkey/torch-ngp/blob/93b08a0d4ec1cc6e69d85df7f0acdfb99603b628/activation.py
+    @staticmethod
+    @custom_fwd(cast_inputs=torch.float32)
+    def forward(ctx, x):  # pylint: disable=arguments-differ
+        ctx.save_for_backward(x)
+        return torch.exp(x)
+
+    @staticmethod
+    @custom_bwd
+    def backward(ctx, g):  # pylint: disable=arguments-differ
+        x = ctx.saved_tensors[0]
+        return g * torch.exp(torch.clamp(x, max=15))
+
+
+trunc_exp = _TruncExp.apply
+
+
+def contract_to_unisphere(
+    x: torch.Tensor,
+    aabb: torch.Tensor,
+    ord: Union[str, int] = 2,
+    #  ord: Union[float, int] = float("inf"),
+    eps: float = 1e-6,
+    derivative: bool = False,
+):
+    aabb_min, aabb_max = torch.split(aabb, 3, dim=-1)
+    x = (x - aabb_min) / (aabb_max - aabb_min)
+    x = x * 2 - 1  # aabb is at [-1, 1]
+    mag = torch.linalg.norm(x, ord=ord, dim=-1, keepdim=True)
+    mask = mag.squeeze(-1) > 1
+
+    if derivative:
+        dev = (2 * mag - 1) / mag**2 + 2 * x**2 * (
+            1 / mag**3 - (2 * mag - 1) / mag**4
+        )
+        dev[~mask] = 1.0
+        dev = torch.clamp(dev, min=eps)
+        return dev
+    else:
+        x[mask] = (2 - 1 / mag[mask]) * (x[mask] / mag[mask])
+        x = x / 4 + 0.5  # [-inf, inf] is at [0, 1]
+        return x
+
+
+class NGPRadianceField(torch.nn.Module):
+    """Instance-NGP Radiance Field"""
+
+    def __init__(
+        self,
+        aabb: Union[torch.Tensor, List[float]],
+        num_dim: int = 3,
+        use_viewdirs: bool = True,
+        density_activation: Callable = lambda x: trunc_exp(x - 1),
+        unbounded: bool = False,
+        base_resolution: int = 16,
+        max_resolution: int = 4096,
+        geo_feat_dim: int = 15,
+        n_levels: int = 16,
+        log2_hashmap_size: int = 19,
+    ) -> None:
+        super().__init__()
+        if not isinstance(aabb, torch.Tensor):
+            aabb = torch.tensor(aabb, dtype=torch.float32)
+        self.register_buffer("aabb", aabb)
+        self.num_dim = num_dim
+        self.use_viewdirs = use_viewdirs
+        self.density_activation = density_activation
+        self.unbounded = unbounded
+        self.base_resolution = base_resolution
+        self.max_resolution = max_resolution
+        self.geo_feat_dim = geo_feat_dim
+        self.n_levels = n_levels
+        self.log2_hashmap_size = log2_hashmap_size
+
+        per_level_scale = np.exp(
+            (np.log(max_resolution) - np.log(base_resolution)) / (n_levels - 1)
+        ).tolist()
+
+        if self.use_viewdirs:
+            self.direction_encoding = tcnn.Encoding(
+                n_input_dims=num_dim,
+                encoding_config={
+                    "otype": "Composite",
+                    "nested": [
+                        {
+                            "n_dims_to_encode": 3,
+                            "otype": "SphericalHarmonics",
+                            "degree": 4,
+                        },
+                        # {"otype": "Identity", "n_bins": 4, "degree": 4},
+                    ],
+                },
+            )
+
+        self.mlp_base = tcnn.NetworkWithInputEncoding(
+            n_input_dims=num_dim,
+            n_output_dims=1 + self.geo_feat_dim,
+            encoding_config={
+                "otype": "HashGrid",
+                "n_levels": n_levels,
+                "n_features_per_level": 2,
+                "log2_hashmap_size": log2_hashmap_size,
+                "base_resolution": base_resolution,
+                "per_level_scale": per_level_scale,
+            },
+            network_config={
+                "otype": "FullyFusedMLP",
+                "activation": "ReLU",
+                "output_activation": "None",
+                "n_neurons": 64,
+                "n_hidden_layers": 1,
+            },
+        )
+        if self.geo_feat_dim > 0:
+            self.mlp_head = tcnn.Network(
+                n_input_dims=(
+                    (
+                        self.direction_encoding.n_output_dims
+                        if self.use_viewdirs
+                        else 0
+                    )
+                    + self.geo_feat_dim
+                ),
+                n_output_dims=3,
+                network_config={
+                    "otype": "FullyFusedMLP",
+                    "activation": "ReLU",
+                    "output_activation": "None",
+                    "n_neurons": 64,
+                    "n_hidden_layers": 2,
+                },
+            )
+
+    def query_density(self, x, return_feat: bool = False):
+        if self.unbounded:
+            x = contract_to_unisphere(x, self.aabb)
+        else:
+            aabb_min, aabb_max = torch.split(self.aabb, self.num_dim, dim=-1)
+            x = (x - aabb_min) / (aabb_max - aabb_min)
+        selector = ((x > 0.0) & (x < 1.0)).all(dim=-1)
+        x = (
+            self.mlp_base(x.view(-1, self.num_dim))
+            .view(list(x.shape[:-1]) + [1 + self.geo_feat_dim])
+            .to(x)
+        )
+        density_before_activation, base_mlp_out = torch.split(
+            x, [1, self.geo_feat_dim], dim=-1
+        )
+        density = (
+            self.density_activation(density_before_activation)
+            * selector[..., None]
+        )
+        if return_feat:
+            return density, base_mlp_out
+        else:
+            return density
+
+    def _query_rgb(self, dir, embedding, apply_act: bool = True):
+        # tcnn requires directions in the range [0, 1]
+        if self.use_viewdirs:
+            dir = (dir + 1.0) / 2.0
+            d = self.direction_encoding(dir.reshape(-1, dir.shape[-1]))
+            h = torch.cat([d, embedding.reshape(-1, self.geo_feat_dim)], dim=-1)
+        else:
+            h = embedding.reshape(-1, self.geo_feat_dim)
+        rgb = (
+            self.mlp_head(h)
+            .reshape(list(embedding.shape[:-1]) + [3])
+            .to(embedding)
+        )
+        if apply_act:
+            rgb = torch.sigmoid(rgb)
+        return rgb
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        directions: torch.Tensor = None,
+    ):
+        if self.use_viewdirs and (directions is not None):
+            assert (
+                positions.shape == directions.shape
+            ), f"{positions.shape} v.s. {directions.shape}"
+            density, embedding = self.query_density(positions, return_feat=True)
+            rgb = self._query_rgb(directions, embedding=embedding)
+        return rgb, density  # type: ignore
+
+
+class NGPDensityField(torch.nn.Module):
+    """Instance-NGP Density Field used for resampling"""
+
+    def __init__(
+        self,
+        aabb: Union[torch.Tensor, List[float]],
+        num_dim: int = 3,
+        density_activation: Callable = lambda x: trunc_exp(x - 1),
+        unbounded: bool = False,
+        base_resolution: int = 16,
+        max_resolution: int = 128,
+        n_levels: int = 5,
+        log2_hashmap_size: int = 17,
+    ) -> None:
+        super().__init__()
+        if not isinstance(aabb, torch.Tensor):
+            aabb = torch.tensor(aabb, dtype=torch.float32)
+        self.register_buffer("aabb", aabb)
+        self.num_dim = num_dim
+        self.density_activation = density_activation
+        self.unbounded = unbounded
+        self.base_resolution = base_resolution
+        self.max_resolution = max_resolution
+        self.n_levels = n_levels
+        self.log2_hashmap_size = log2_hashmap_size
+
+        per_level_scale = np.exp(
+            (np.log(max_resolution) - np.log(base_resolution)) / (n_levels - 1)
+        ).tolist()
+
+        self.mlp_base = tcnn.NetworkWithInputEncoding(
+            n_input_dims=num_dim,
+            n_output_dims=1,
+            encoding_config={
+                "otype": "HashGrid",
+                "n_levels": n_levels,
+                "n_features_per_level": 2,
+                "log2_hashmap_size": log2_hashmap_size,
+                "base_resolution": base_resolution,
+                "per_level_scale": per_level_scale,
+            },
+            network_config={
+                "otype": "FullyFusedMLP",
+                "activation": "ReLU",
+                "output_activation": "None",
+                "n_neurons": 64,
+                "n_hidden_layers": 1,
+            },
+        )
+
+    def forward(self, positions: torch.Tensor):
+        if self.unbounded:
+            positions = contract_to_unisphere(positions, self.aabb)
+        else:
+            aabb_min, aabb_max = torch.split(self.aabb, self.num_dim, dim=-1)
+            positions = (positions - aabb_min) / (aabb_max - aabb_min)
+        selector = ((positions > 0.0) & (positions < 1.0)).all(dim=-1)
+        density_before_activation = (
+            self.mlp_base(positions.view(-1, self.num_dim))
+            .view(list(positions.shape[:-1]) + [1])
+            .to(positions)
+        )
+        density = (
+            self.density_activation(density_before_activation)
+            * selector[..., None]
+        )
+        return density
+```
+
+### experiments/vdbgrid/csrc/grid.cpp
+```
+#include <nanovdb/util/Ray.h>
+#include <nanovdb/util/OpenToNanoVDB.h>
+#include <nanovdb/util/HDDA.h>
+#include <nanovdb/util/CudaDeviceBuffer.h>
+#include <torch/extension.h>
+#include <vector>
+// #include <thrust/host_vector.h>
+// #include <thrust/device_vector.h>
+
+#define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
+#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
+#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
+
+inline int max(int a, int b)
+{
+    return a > b ? a : b;
+}
+
+inline int min(int a, int b)
+{
+    return a < b ? a : b;
+}
+
+torch::Tensor indices2keys(torch::Tensor indices);
+
+using PackedSegments = std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>;
+
+PackedSegments launch_traverse_kernel(
+    // thrust::device_vector<const nanovdb::BoolGrid*> grids,
+    const torch::Tensor grids,
+    const torch::Tensor rays_o,
+    const torch::Tensor rays_d,
+    const torch::Tensor resolution,
+    const torch::Tensor aabbs,
+    const torch::Tensor t_sorted,
+    const torch::Tensor t_indices,
+    const torch::Tensor hits,
+    const torch::Tensor near_planes,
+    const torch::Tensor far_planes,
+    const float step_size,
+    const float cone_angle);
+
+using openvdb::math::Coord;
+
+
+class DensityGrid {
+    using GridT = openvdb::MaskGrid;
+    using NanoGridT = nanovdb::MaskGrid;
+    using NanoValueT = nanovdb::ValueMask;
+public:
+    DensityGrid(int rx, int ry, int rz, int levels)
+    : mX(rx), mY(ry), mZ(rz), mLevels(levels), handle(levels) {
+        openvdb::initialize();
+        for (int i=0; i<levels; i++) {
+            mOpenGrid.emplace_back(GridT::create());
+        }
+    }
+
+    void setValues(torch::Tensor binaries) {
+        TORCH_CHECK(!binaries.device().is_cuda(), "binaries must be CPU tensor");
+        TORCH_CHECK(binaries.is_contiguous(), "binaries must be contiguous");
+        TORCH_CHECK(binaries.size(0) == mLevels, "levels mismatch");
+        mNanoGridD = torch::zeros({mLevels}, torch::TensorOptions().dtype(torch::kLong).device(torch::kCUDA));
+
+        const bool* ptr = binaries.data_ptr<bool>();
+        int sG = mX * mY * mZ;
+        int sX = mY * mZ;
+        int sY = mZ;
+        for (int g=0; g<mLevels; g++) {
+            auto accessor = mOpenGrid[g]->getAccessor();
+            for (int x = 0; x < mX; x++) {
+                for (int y = 0; y < mY; y++) {
+                    for (int z = 0; z < mZ; z++) {
+                        if (ptr[sG * g + sX * x + sY * y + z]) {
+                            accessor.setValue(Coord(x, y, z), true);
+                        }
+                    }
+                }
+            }
+
+            mOpenGrid[g]->tree().prune();
+
+            handle[g] = nanovdb::openToNanoVDB<nanovdb::CudaDeviceBuffer>(*mOpenGrid[g]);
+            handle[g].deviceUpload();
+            // mNanoGridH[g] = handle[g].deviceGrid<NanoValueT>();
+            // TORCH_CHECK(mNanoGridH[g], "GPU handling error");
+            auto nano = handle[g].deviceGrid<NanoValueT>();
+            TORCH_CHECK(nano, "GPU handling error");
+            mNanoGridD[g] = reinterpret_cast<int64_t>(nano);
+        }
+        // mNanoGridD = mNanoGridH;
+    }
+
+    PackedSegments traverse(
+        torch::Tensor rays_o,  // [n_rays, 3]
+        torch::Tensor rays_d,  // [n_rays, 3]
+        torch::Tensor resolution,
+        torch::Tensor aabbs,
+        torch::Tensor t_sorted,
+        torch::Tensor t_indices,
+        torch::Tensor hits,
+        torch::Tensor near_planes,  // [n_rays]
+        torch::Tensor far_planes,  // [n_rays]
+        const float step_size,
+        const float cone_angle
+    ) {
+        CHECK_INPUT(rays_o);
+        CHECK_INPUT(rays_d);
+        CHECK_INPUT(near_planes);
+        CHECK_INPUT(far_planes);
+
+        return launch_traverse_kernel(
+            mNanoGridD,
+            rays_o,
+            rays_d,
+            resolution,
+            aabbs,
+            t_sorted,
+            t_indices,
+            hits,
+            near_planes,
+            far_planes,
+            step_size,
+            cone_angle
+        );
+    }
+
+    uint64_t memUsage() {
+        uint64_t mem = 0;
+	for (int i = 0; i < mLevels; i++) {
+            // mem += reinterpret_cast<const NanoGridT*>(mNanoGridD[i].item<int64_t>()) -> memUsage();
+            mem += mOpenGrid[i]->memUsage();
+        }
+        return mem;
+    }
+
+private:
+    std::vector<nanovdb::GridHandle<nanovdb::CudaDeviceBuffer>> handle;
+    std::vector<GridT::Ptr> mOpenGrid;
+    // thrust::host_vector<const NanoGridT*> mNanoGridH;
+    // thrust::device_vector<const NanoGridT*> mNanoGridD;
+    torch::Tensor mNanoGridD;
+
+    /* resolution of the grid */
+    int mX, mY, mZ;
+    int mLevels;
+};
+
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("indices2keys", &indices2keys);
+    py::class_<DensityGrid>(m, "DensityGrid")
+        .def(py::init<const int, const int, const int, const int>())
+        .def("setValues", &DensityGrid::setValues)
+        .def("traverse", &DensityGrid::traverse)
+    	.def("memUsage", &DensityGrid::memUsage);
+}
+```
+
+### experiments/vdbgrid/csrc/grid_kernel.cu
+```
+#include <nanovdb/util/Ray.h>
+#include <nanovdb/util/HDDA.h>
+#include <nanovdb/util/CudaDeviceBuffer.h>
+#include <torch/extension.h>
+#include <ATen/cuda/detail/KernelUtils.h>
+#include <ATen/cuda/detail/IndexUtils.cuh>
+// #include <thrust/device_vector.h>
+
+// #define ALG_DDA_BRANCH
+// #define ALG_DDA_SKIP
+// #define ALG_HDDA_BRANCH
+#define ALG_HDDA_SKIP
+// #define ALG_HDDA_HYBRID
+
+inline __device__ float clamp(float f, float a, float b)
+{
+    return fmaxf(a, fminf(f, b));
+}
+
+inline __device__ float _calc_dt(
+    const float t, const float cone_angle,
+    const float dt_min, const float dt_max)
+{
+    return clamp(t * cone_angle, dt_min, dt_max);
+}
+
+// Helper function for 2d-morton coding.
+inline __device__ int64_t spread2(int64_t x) {
+    x &=                0x00000000FFFFFFFF;
+    x = (x | x << 32) & 0x0000FFFF0000FFFF;
+    x = (x | x << 16) & 0x00FF00FF00FF00FF;
+    x = (x | x << 8) &  0x0F0F0F0F0F0F0F0F;
+    x = (x | x << 4) &  0x3333333333333333;
+    x = (x | x << 2) &  0x5555555555555555;
+    return x;
+}
+
+// Convert index to morton code.
+inline __device__ int64_t index2key(int64_t x, int64_t y) {
+    return spread2(x) | (spread2(y) << 1);
+}
+
+__global__ void indices2keys_kernel(
+    const int64_t n_points,
+    const int64_t *indices,  // [numel, 2]
+    int64_t *out  // [numel]
+) {
+    CUDA_KERNEL_LOOP_TYPE(index, n_points, int64_t) {
+        out[index] = index2key(indices[index*2], indices[index*2+1]);
+    }
+}
+
+// march until t_mid is right after t_target
+inline __device__ float advance_time(float t, float cone_angle, float step_size, float t_target) {
+    float dt = _calc_dt(t, cone_angle, step_size, 1e10f);
+    float advance_n = ceilf(fmaxf((t_target - t - dt * 0.5f) / dt, 0));
+    return t + advance_n * dt;
+}
+
+__global__ void traverse_kernel(
+    int n_grids,
+    const nanovdb::MaskGrid** grids,
+    int64_t n_rays,
+    const float *rays_o,  // [n_rays, 3]
+    const float *rays_d,  // [n_rays, 3]
+    const int32_t *resolution,  // [3]
+    const float *aabbs,  // [n_grids, 6]
+    // sorted intersections
+    const bool *hits,         // [n_rays, n_grids]
+    const float *t_sorted,    // [n_rays, n_grids * 2]
+    const int64_t *t_indices, // [n_rays, n_grids * 2]
+    // options
+    const float *near_planes,  // [n_rays]
+    const float *far_planes,  // [n_rays]
+    const float step_size,
+    const float cone_angle,
+    const bool first_pass,  // If True, only chunk_counts are filled
+    int64_t *chunk_counts,  // [n_rays] the number of traversed samples
+    int64_t *chunk_indices,  // [n_rays]
+    int64_t *ray_indices,  // [flattened_samples]
+    float *t_left,  // [flattened_samples]
+    float *t_right  // [flattened_samples]
+) {
+    using GridT = nanovdb::MaskGrid;
+    using TreeT = GridT::TreeType;
+
+    CUDA_KERNEL_LOOP_TYPE(index, n_rays, int64_t) {
+        int32_t base_hits = index * n_grids;
+        int32_t base_t_sorted = index * n_grids * 2;
+        int32_t end_t_sorted = base_t_sorted + n_grids * 2 - 1;
+
+        int n_trav = 0;
+        float tlast = near_planes[index];
+        // loop over all intersections along the ray.
+        for (int32_t i = base_t_sorted; i < end_t_sorted; i++) {
+            // whether this is the entering or leaving for this level of grid.
+            bool is_entering = t_indices[i] < n_grids;
+            int64_t level = t_indices[i] % n_grids;
+
+            if (!hits[base_hits + level]) {
+                continue; // this grid is not hit.
+            }
+            if (!is_entering) {
+                // we are leaving this grid. Are we inside the next grid?
+                bool next_is_entering = t_indices[i + 1] < n_grids;
+                if (next_is_entering) continue; // we are outside next grid.
+                level = t_indices[i + 1] % n_grids;
+                if (!hits[base_hits + level]) {
+                    continue; // this grid is not hit.
+                }
+            }
+
+            float this_tmin = fmaxf(t_sorted[i], near_planes[index]);
+            float this_tmax = fminf(t_sorted[i + 1], far_planes[index]);   
+            if (this_tmin >= this_tmax) continue; // this interval is invalid. e.g. (0.0f, 0.0f)        
+            tlast = advance_time(tlast, cone_angle, step_size, this_tmin);
+
+            nanovdb::Vec3f aabb_min(aabbs[level * 6], aabbs[level * 6 + 1], aabbs[level * 6 + 2]);
+            nanovdb::Vec3f aabb_max(aabbs[level * 6 + 3], aabbs[level * 6 + 4], aabbs[level * 6 + 5]);
+            nanovdb::Vec3f res(resolution[0], resolution[1], resolution[2]);
+
+            auto acc = grids[level]->tree().getAccessor();
+            nanovdb::Vec3f ray_o(rays_o[index * 3], rays_o[index * 3 + 1], rays_o[index * 3 + 2]);
+            nanovdb::Vec3f ray_d(rays_d[index * 3], rays_d[index * 3 + 1], rays_d[index * 3 + 2]);
+            // to index-space
+            ray_o = (ray_o - aabb_min) / (aabb_max - aabb_min) * res;
+            ray_d = ray_d / (aabb_max - aabb_min) * res;
+
+            nanovdb::Ray<float> ray(ray_o, ray_d, this_tmin, this_tmax);
+
+            nanovdb::TreeMarcher<TreeT::LeafNodeType, decltype(ray), decltype(acc)> marcher(acc);
+            nanovdb::DDA<decltype(ray)> dda;
+#ifdef ALG_DDA_BRANCH
+            dda.init(ray, this_tmin, this_tmax);
+            bool ddaIsValid = true;
+            do {
+                float dt = _calc_dt(tlast, cone_angle, step_size, 1e10f);
+                if (acc.getValue(dda.voxel())) {
+                    while (tlast + dt / 2 < dda.next()) {
+                        if (!first_pass) {
+                            int64_t chunk_offset = chunk_indices[index];
+                            ray_indices[chunk_offset + n_trav] = index;
+                            t_left[chunk_offset + n_trav] = tlast;
+                            t_right[chunk_offset + n_trav] = tlast + dt;
+                        }
+                        n_trav++;
+                        dt = _calc_dt(tlast, cone_angle, step_size, 1e10f);
+                        tlast += dt;
+                    }
+                } else {
+                    while (tlast + dt / 2 < dda.next()) tlast += dt;
+                }
+            } while (dda.step());
+#endif
+#ifdef ALG_DDA_SKIP
+            dda.init(ray, this_tmin, this_tmax);
+            bool ddaIsValid = true;
+            do {
+                do {
+                    if (acc.getValue(dda.voxel())) break;
+                    ddaIsValid = dda.step();
+                } while (ddaIsValid);
+                if (!ddaIsValid) break;
+                tlast = advance_time(tlast, cone_angle, step_size, dda.time());
+                float dt = _calc_dt(tlast, cone_angle, step_size, 1e10f);
+                while (tlast + dt / 2 < dda.next()) {
+                    if (!first_pass) {
+                        int64_t chunk_offset = chunk_indices[index];
+                        ray_indices[chunk_offset + n_trav] = index;
+                        t_left[chunk_offset + n_trav] = tlast;
+                        t_right[chunk_offset + n_trav] = tlast + dt;
+                    }
+                    n_trav++;
+                    dt = _calc_dt(tlast, cone_angle, step_size, 1e10f);
+                    tlast += dt;
+                }
+            } while (dda.step());
+#endif
+#ifdef ALG_HDDA_BRANCH
+            float t0 = ray.t0() + 1e-6f;
+            float t1 = ray.t1() - 1e-6f;
+            nanovdb::HDDA<decltype(ray), nanovdb::Coord> hdda;
+            bool ddaIsValid = true;
+            float dt;
+            if (!ray.clip(acc.root().bbox()) || t0 > t1) continue;
+            auto ijk = nanovdb::RoundDown<nanovdb::Coord>(ray(t0));
+            int dim = acc.getDim(ijk, ray);
+            hdda.init(ray, t0, t1, dim);
+            do {
+                float dt = _calc_dt(tlast, cone_angle, step_size, 1e10f);
+                if (acc.isActive(ijk)) {
+                    while (tlast + dt / 2 < hdda.next()) {
+                        if (!first_pass) {
+                            int64_t chunk_offset = chunk_indices[index];
+                            ray_indices[chunk_offset + n_trav] = index;
+                            t_left[chunk_offset + n_trav] = tlast;
+                            t_right[chunk_offset + n_trav] = tlast + dt;
+                        }
+                        n_trav++;
+                        dt = _calc_dt(tlast, cone_angle, step_size, 1e10f);
+                        tlast += dt;
+                    }
+                } else {
+                    while (tlast + dt / 2 < hdda.next()) tlast += dt;
+                }
+
+                ddaIsValid = hdda.step();
+                ijk = hdda.voxel();
+                dim = acc.getDim(ijk, ray);
+                hdda.update(ray, dim);
+            } while (ddaIsValid);
+#endif
+#ifdef ALG_HDDA_SKIP
+            float t0 = ray.t0() + 1e-6f;
+            float t1 = ray.t1() - 1e-6f;
+            nanovdb::HDDA<decltype(ray), nanovdb::Coord> hdda;
+            bool ddaIsValid = true;
+            float dt;
+            if (!ray.clip(acc.root().bbox()) || t0 > t1) continue;
+            auto ijk = nanovdb::RoundDown<nanovdb::Coord>(ray(t0));
+            int dim = acc.getDim(ijk, ray);
+            hdda.init(ray, t0, t1, dim);
+            do {
+                do {
+                    if (acc.isActive(ijk)) break;
+
+                    ddaIsValid = hdda.step();
+                    ijk = hdda.voxel();
+                    dim = acc.getDim(ijk, ray);
+                    hdda.update(ray, dim);
+                } while (ddaIsValid);
+                if (!ddaIsValid) break;
+                tlast = advance_time(tlast, cone_angle, step_size, hdda.time());
+                dt = _calc_dt(tlast, cone_angle, step_size, 1e10f);
+                while (tlast + dt / 2 < hdda.next()) {
+                    if (!first_pass) {
+                        int64_t chunk_offset = chunk_indices[index];
+                        ray_indices[chunk_offset + n_trav] = index;
+                        t_left[chunk_offset + n_trav] = tlast;
+                        t_right[chunk_offset + n_trav] = tlast + dt;
+                    }
+                    n_trav++;
+                    dt = _calc_dt(tlast, cone_angle, step_size, 1e10f);
+                    tlast += dt;
+                }
+
+                ddaIsValid = hdda.step();
+                ijk = hdda.voxel();
+                dim = acc.getDim(ijk, ray);
+                hdda.update(ray, dim);
+            } while (ddaIsValid);
+#endif
+#ifdef ALG_HDDA_HYBRID
+            const int leafdim = TreeT::LeafNodeType::dim();
+            // assert(leafdim == 8);
+            float t0 = ray.t0() + 1e-6f;
+            float t1 = ray.t1() - 1e-6f;
+            nanovdb::HDDA<decltype(ray), nanovdb::Coord> hdda;
+            bool ddaIsValid = true;
+            float dt;
+            if (!ray.clip(acc.root().bbox()) || t0 > t1) continue;
+            auto ijk = nanovdb::RoundDown<nanovdb::Coord>(ray(t0));
+            int dim = acc.getDim(ijk, ray);
+            // whether we are looking the interval as a tile
+            // in non-tilemode (looking at a single voxel), traverse anyway as 8-dim tile
+            bool tileMode = dim >= leafdim;
+            hdda.init(ray, t0, t1, nanovdb::Max(leafdim, dim));
+            do {
+                while (ddaIsValid && tileMode) {
+                    if (acc.isActive(ijk)) break;  // it is an occupied tile. traverse.
+
+                    ddaIsValid = hdda.step();
+                    ijk = hdda.voxel();
+                    dim = acc.getDim(ijk, ray);
+                    tileMode = dim >= leafdim;
+                    hdda.update(ray, nanovdb::Max(leafdim, dim));
+                }
+                if (!ddaIsValid) break;
+                if (hdda.time() > hdda.next()) break;
+                dda.init(ray, hdda.time(), hdda.next());
+                tlast = advance_time(tlast, cone_angle, step_size, hdda.time());
+                do {
+                    dt = _calc_dt(tlast, cone_angle, step_size, 1e10f);
+                    if (acc.isActive(dda.voxel())) {
+                        while (tlast + dt / 2 < dda.next()) {
+                            if (!first_pass) {
+                                int64_t chunk_offset = chunk_indices[index];
+                                ray_indices[chunk_offset + n_trav] = index;
+                                t_left[chunk_offset + n_trav] = tlast;
+                                t_right[chunk_offset + n_trav] = tlast + dt;
+                            }
+                            n_trav++;
+                            dt = _calc_dt(tlast, cone_angle, step_size, 1e10f);
+                            tlast += dt;
+                        }
+                    } else {
+                        while (tlast + dt / 2 < dda.next()) tlast += dt;
+                    }
+                } while (dda.step());
+
+                ddaIsValid = hdda.step();
+                ijk = hdda.voxel();
+                dim = acc.getDim(ijk, ray);
+                tileMode = dim >= leafdim;
+                hdda.update(ray, nanovdb::Max(leafdim, dim));
+            } while (ddaIsValid);
+#endif
+        }
+        if (first_pass)
+            chunk_counts[index] = n_trav;
+    }
+}
+
+torch::Tensor indices2keys(torch::Tensor indices) {
+    indices = indices.to(torch::kLong);
+    int threads = 256;
+    int64_t n_points = indices.size(0);
+    torch::Tensor keys = torch::empty({n_points}, torch::TensorOptions().dtype(torch::kLong).device(torch::kCUDA));
+    indices2keys_kernel<<<at::cuda::detail::GET_BLOCKS(n_points, threads), threads>>>(
+        n_points,
+        indices.data_ptr<int64_t>(),
+        keys.data_ptr<int64_t>()
+    );
+    return keys;
+}
+
+
+std::tuple<
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor
+> launch_traverse_kernel(
+    // thrust::device_vector<const nanovdb::BoolGrid*>& grids,
+    const torch::Tensor grids,
+    const torch::Tensor rays_o,
+    const torch::Tensor rays_d,
+    const torch::Tensor resolution,
+    const torch::Tensor aabbs,
+    const torch::Tensor t_sorted,
+    const torch::Tensor t_indices,
+    const torch::Tensor hits,
+    const torch::Tensor near_planes,
+    const torch::Tensor far_planes,
+    const float step_size,
+    const float cone_angle
+) {
+    int64_t n_rays = rays_o.size(0);
+    torch::Tensor chunk_counts = torch::empty({n_rays}, rays_o.options().dtype(torch::kLong));
+    int threads = 256;
+
+    traverse_kernel<<<at::cuda::detail::GET_BLOCKS(n_rays, threads), threads>>>(
+        // grids.size(),
+        // thrust::raw_pointer_cast(grids.data()),
+        grids.size(0),
+        reinterpret_cast<const nanovdb::MaskGrid**>(grids.data_ptr<int64_t>()),
+        n_rays,
+        rays_o.data_ptr<float>(),
+        rays_d.data_ptr<float>(),
+        resolution.data_ptr<int32_t>(),
+        aabbs.data_ptr<float>(),
+        hits.data_ptr<bool>(),         // [n_rays, n_grids]
+        t_sorted.data_ptr<float>(),    // [n_rays, n_grids * 2]
+        t_indices.data_ptr<int64_t>(), // [n_rays, n_grids * 2]
+        near_planes.data_ptr<float>(),
+        far_planes.data_ptr<float>(),
+        step_size,
+        cone_angle,
+        true,
+        chunk_counts.data_ptr<int64_t>(),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr);
+
+    torch::Tensor cumsum = torch::cumsum(chunk_counts, 0, chunk_counts.scalar_type());
+    int64_t n_samples = cumsum[-1].item<int64_t>();
+    torch::Tensor chunk_indices = cumsum - chunk_counts;
+    torch::Tensor ray_indices = torch::zeros({n_samples}, chunk_counts.options().dtype(torch::kLong));
+    torch::Tensor t_left = torch::zeros({n_samples}, chunk_counts.options().dtype(torch::kFloat32));
+    torch::Tensor t_right = torch::zeros({n_samples}, chunk_counts.options().dtype(torch::kFloat32));
+
+    traverse_kernel<<<at::cuda::detail::GET_BLOCKS(n_rays, threads), threads>>>(
+        // grids.size(),
+        // thrust::raw_pointer_cast(grids.data()),
+        grids.size(0),
+        reinterpret_cast<const nanovdb::MaskGrid**>(grids.data_ptr<int64_t>()),
+        n_rays,
+        rays_o.data_ptr<float>(),
+        rays_d.data_ptr<float>(),
+        resolution.data_ptr<int32_t>(),
+        aabbs.data_ptr<float>(),
+        hits.data_ptr<bool>(),         // [n_rays, n_grids]
+        t_sorted.data_ptr<float>(),    // [n_rays, n_grids * 2]
+        t_indices.data_ptr<int64_t>(), // [n_rays, n_grids * 2]
+        near_planes.data_ptr<float>(),
+        far_planes.data_ptr<float>(),
+        step_size,
+        cone_angle,
+        false,
+        chunk_counts.data_ptr<int64_t>(),
+        chunk_indices.data_ptr<int64_t>(),
+        ray_indices.data_ptr<int64_t>(),
+        t_left.data_ptr<float>(),
+        t_right.data_ptr<float>());
+
+    return {ray_indices, t_left, t_right, chunk_indices, chunk_counts};
+}
+```

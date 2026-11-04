@@ -1,0 +1,138 @@
+# QEF Boundary Constrained Vertex Placement
+
+Also called: Boundary-Constrained Vertex Placement, Constrained QEF Solver
+
+## Overview
+QEF Boundary Constrained Vertex Placement is a fallback strategy for vertex placement in Dual Contouring when the optimal solution to the unconstrained Quadratic Error Function (QEF) lies outside the current voxel cell [S1, unofficial]. It progressively constrains the search space from the interior point to cell faces, then edges, then corners to find a valid point within the cell boundaries [S1, unofficial]. It sets itself apart from its parent method, [Quadric Error Function (QEF) for Sharp Features](1604-quadric-error-function-qef-for-sharp-features.md), by explicitly handling boundary violations through hierarchical constraint fixing rather than relying solely on SVD minimization [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** An unconstrained QEF solution $v$ (a 3D vector), the cell bounds defined by origin $(x, y, z)$ and `CELL_SIZE`, and configuration flags `settings.BOUNDARY` and `settings.CLIP` [S1, unofficial].
+- **Output:** A constrained vertex position $v$ guaranteed to be within the cell boundaries if `settings.BOUNDARY` is enabled [S1, unofficial].
+
+**Data Structures:**
+- **QEF Object:** Represents the quadratic error function [S1, unofficial]. It supports methods `fix_axis(axis, value)` to constrain a specific coordinate and `solve()` to compute the minimum residual vertex [S1, unofficial]. It also supports `eval_with_pos(pos)` to evaluate the error at a specific position [S1, unofficial].
+- **Inside Function:** A predicate `inside(v)` that returns true if $x \le v[0] \le x + \text{CELL\_SIZE}$, $y \le v[1] \le y + \text{CELL\_SIZE}$, and $z \le v[2] \le z + \text{CELL\_SIZE}$ [S1, unofficial].
+
+**Parameters:**
+- `settings.BOUNDARY`: Boolean flag enabling the boundary constraint fallback logic. Default: `True` [S1, unofficial].
+- `settings.CLIP`: Boolean flag enabling crude clamping of the final vertex position. Default: `False` [S1, unofficial].
+- `CELL_SIZE`: The size of the voxel cell along each axis. Default: `1.0` [S1, unofficial].
+
+**Steps:**
+1. **Unconstrained Solve:** Solve the unconstrained QEF to get residual and vertex $v$ [S1, unofficial].
+2. **Boundary Check:** If `settings.BOUNDARY` is enabled, check if $v$ is inside the cell using the `inside` function [S1, unofficial].
+3. **Plane Constraints:** If $v$ is outside, constrain the QEF to the 6 planes bordering the cell by fixing one axis at the cell boundaries ($0$ or `CELL_SIZE`) and solving [S1, unofficial]. The planes are:
+   - Fix axis 0 at $x+0$ and $x+\text{CELL\_SIZE}$ [S1, unofficial]
+   - Fix axis 1 at $y+0$ and $y+\text{CELL\_SIZE}$ [S1, unofficial]
+   - Fix axis 2 at $z+0$ and $z+\text{CELL\_SIZE}$ [S1, unofficial]
+4. **Filter Planes:** Filter the 6 plane solutions to keep only those inside the cell [S1, unofficial]. If no solutions remain, proceed to constrain the QEF to the 12 lines bordering the cell by fixing two axes at the cell boundaries [S1, unofficial].
+5. **Edge Constraints:** Generate 12 edge solutions by fixing two axes [S1, unofficial]. Examples include fixing axis 1 at $y+0$ and axis 0 at $x+0$, axis 1 at $y+\text{CELL\_SIZE}$ and axis 0 at $x+0$, etc., covering all combinations of two axes fixed at $0$ or `CELL_SIZE` [S1, unofficial].
+6. **Filter Edges:** Filter the 12 edge solutions to keep only those inside the cell [S1, unofficial]. If no solutions remain, proceed to evaluate the 8 corners of the cell [S1, unofficial].
+7. **Corner Evaluation:** Evaluate the QEF at all 8 corners of the cell using `eval_with_pos` for each corner coordinate combination: $(x+0, y+0, z+0)$ through $(x+\text{CELL\_SIZE}, y+\text{CELL\_SIZE}, z+\text{CELL\_SIZE})$ [S1, unofficial].
+8. **Filter Corners:** Filter the 8 corner solutions to keep only those inside the cell [S1, unofficial].
+9. **Select Best:** Select the best solution (minimum residual) from the remaining valid options (plane, edge, or corner solutions) [S1, unofficial].
+10. **Clipping:** If `settings.CLIP` is enabled, forcibly clamp the vertex coordinates to the cell boundaries using `numpy.clip` for each axis: $v[0] \in [x, x+\text{CELL\_SIZE}]$, $v[1] \in [y, y+\text{CELL\_SIZE}]$, $v[2] \in [z, z+\text{CELL\_SIZE}]$ [S1, unofficial].
+
+**Pitfalls:**
+- The unconstrained QEF solution may lie outside the cell [S1, unofficial].
+- Even after constraining to planes, the solutions may still lie outside the box because the planes are infinite [S1, unofficial].
+- The algorithm handles these cases by falling back to edge constraints, then corners, ensuring a valid point is always found [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy
+
+def solve_constrained_qef(qef, x, y, z, CELL_SIZE, settings):
+    # Step 1: Solve unconstrained
+    residual, v = qef.solve()
+    
+    # Step 2: Check if inside
+    def inside(pos):
+        return (x <= pos[0] <= x + CELL_SIZE and
+                y <= pos[1] <= y + CELL_SIZE and
+                z <= pos[2] <= z + CELL_SIZE)
+
+    if not settings.BOUNDARY or inside(v):
+        final_v = v
+    else:
+        candidates = []
+        
+        # Step 3 & 4: Plane constraints (6 planes)
+        candidates.append(qef.fix_axis(0, x + 0).solve())
+        candidates.append(qef.fix_axis(0, x + CELL_SIZE).solve())
+        candidates.append(qef.fix_axis(1, y + 0).solve())
+        candidates.append(qef.fix_axis(1, y + CELL_SIZE).solve())
+        candidates.append(qef.fix_axis(2, z + 0).solve())
+        candidates.append(qef.fix_axis(2, z + CELL_SIZE).solve())
+        
+        valid_candidates = [c for c in candidates if inside(c[1])]
+        
+        if not valid_candidates:
+            candidates = []
+            
+            # Step 5 & 6: Edge constraints (12 edges)
+            candidates.append(qef.fix_axis(1, y + 0).fix_axis(0, x + 0).solve())
+            candidates.append(qef.fix_axis(1, y + CELL_SIZE).fix_axis(0, x + 0).solve())
+            candidates.append(qef.fix_axis(1, y + 0).fix_axis(0, x + CELL_SIZE).solve())
+            candidates.append(qef.fix_axis(1, y + CELL_SIZE).fix_axis(0, x + CELL_SIZE).solve())
+            candidates.append(qef.fix_axis(2, z + 0).fix_axis(0, x + 0).solve())
+            candidates.append(qef.fix_axis(2, z + CELL_SIZE).fix_axis(0, x + 0).solve())
+            candidates.append(qef.fix_axis(2, z + 0).fix_axis(0, x + CELL_SIZE).solve())
+            candidates.append(qef.fix_axis(2, z + CELL_SIZE).fix_axis(0, x + CELL_SIZE).solve())
+            candidates.append(qef.fix_axis(2, z + 0).fix_axis(1, y + 0).solve())
+            candidates.append(qef.fix_axis(2, z + CELL_SIZE).fix_axis(1, y + 0).solve())
+            candidates.append(qef.fix_axis(2, z + 0).fix_axis(1, y + CELL_SIZE).solve())
+            candidates.append(qef.fix_axis(2, z + CELL_SIZE).fix_axis(1, y + CELL_SIZE).solve())
+            
+            valid_candidates = [c for c in candidates if inside(c[1])]
+            
+            if not valid_candidates:
+                candidates = []
+                
+                # Step 7 & 8: Corner evaluation (8 corners)
+                corners = [
+                    (x + 0, y + 0, z + 0),
+                    (x + 0, y + 0, z + CELL_SIZE),
+                    (x + 0, y + CELL_SIZE, z + 0),
+                    (x + 0, y + CELL_SIZE, z + CELL_SIZE),
+                    (x + CELL_SIZE, y + 0, z + 0),
+                    (x + CELL_SIZE, y + 0, z + CELL_SIZE),
+                    (x + CELL_SIZE, y + CELL_SIZE, z + 0),
+                    (x + CELL_SIZE, y + CELL_SIZE, z + CELL_SIZE)
+                ]
+                
+                for corner in corners:
+                    candidates.append(qef.eval_with_pos(corner))
+                
+                valid_candidates = [c for c in candidates if inside(c[1])]
+        
+        # Step 9: Select best
+        if valid_candidates:
+            residual, final_v = min(valid_candidates, key=lambda c: c[0])
+        else:
+            final_v = v
+            
+    # Step 10: Clipping
+    if settings.CLIP:
+        final_v[0] = numpy.clip(final_v[0], x, x + CELL_SIZE)
+        final_v[1] = numpy.clip(final_v[1], y, y + CELL_SIZE)
+        final_v[2] = numpy.clip(final_v[2], z, z + CELL_SIZE)
+        
+    return final_v
+```
+
+## Operating characteristics
+- **Time Complexity:** In the worst case, the algorithm solves the QEF 26 times (1 unconstrained + 6 planes + 12 edges + 8 corners) [S1, unofficial].
+- **Memory Complexity:** Minimal additional memory, storing a list of candidate residuals and vertices [S1, unofficial].
+- **Strengths:** Guarantees a valid vertex position within the cell boundaries [S1, unofficial].
+- **Limitations:** Can be computationally expensive if many cells require fallback to edges or corners [S1, unofficial]. The crude clipping option may introduce discontinuities if not used carefully [S1, unofficial].
+- **When to use:** Not given in the sources [G].
+
+## Background
+This method provides a fallback strategy for vertex placement in Dual Contouring when the unconstrained QEF solution lies outside the voxel cell [S1, unofficial]. It addresses the issue where the optimal point for a sharp feature does not lie within the containing voxel [S1, unofficial].
+
+## Sources
+[S1] BorisTheBrave/mc-dc, https://github.com/BorisTheBrave/mc-dc, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,226 @@
+# Adaptive Undersampling
+
+Also called: Fast Adaptive Undersampling, Two-pass Adaptive Undersampling with Pre-computed Intervals
+
+## Overview
+Adaptive Undersampling accelerates volume rendering by replacing the full volume integral calculation for a subset of pixels with interpolation, while storing pre-computed integral values over fixed intervals to allow partial recomputation for pixels where interpolation is inaccurate [S1]. It differs from standard adaptive undersampling methods that use recursive block division (which are inefficient on GPUs) by employing a fixed two-pass approach with pre-computed intervals, ensuring only necessary intervals are integrated on the second pass [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** 3D volume texture (unit cube), transfer function $f$, viewport resolution, block size $n$, maximum number of intervals $M$.
+*   **Outputs:** Final image (pixel colors).
+
+**Data Structures**
+*   **G-buffer:** Contains $M+1$ parallel textures (or arrays) with resolution $\frac{W}{n} \times \frac{H}{n}$ (where $W, H$ are viewport dimensions).
+    *   Texture 0 (`G[0]`): Stores the final composited color $C$ (4-component vector: RGB + Transparency $A$) for the representative pixel of each $n \times n$ block.
+    *   Textures $1 \dots M$ (`G[1] \dots G[M]`): Store the volume integral values $I_i$ for each of the $M$ equal-length intervals. Each $I_i$ is a 4-component vector containing the color and transparency contribution of that interval.
+    *   *Note:* The last interval may have a different length if the ray exits the volume early.
+
+**Parameters**
+*   $n$: Side length of the square blocks. One pixel is processed per $n \times n$ block in Pass 1.
+*   $M$: User-selected maximum number of equal-length intervals into which the integration domain is divided.
+
+**Algorithm Steps**
+
+1.  **Pass 1: Pre-computation**
+    For each $n \times n$ block in the viewport:
+    1.  Select one representative pixel (e.g., top-left).
+    2.  Determine the ray starting point $s$ and final point $f$.
+    3.  Find the starting point $v$ of the non-zero transfer function domain using `GetDistanceForStart(s, f)`.
+        *   If `GetDistanceForStart` returns -1 (no intersection with non-zero domain), skip this pixel or mark as empty.
+        *   Otherwise, $v$ is the point where the ray first meets the domain where $f$ is not zero.
+    4.  Calculate the interval length $L$. Since samples are in a unit cube, the maximum ray length is $\sqrt{3}$. The length of each of the $M$ equal intervals is $L = \frac{\sqrt{3}}{M}$.
+    5.  Initialize composited color $C = (0,0,0,0)$ and transparency $A = 0$.
+    6.  Initialize interval integrals $I_i = (0,0,0,0)$ for $i = 0 \dots M-1$.
+    7.  Perform volume integration along the ray from $v$ to $f$, divided into $M$ intervals of length $L$.
+        *   For each interval $i$, compute the integral $I_i$ using the compositing recurrence relation (see Formulas).
+        *   Store $I_i$ in `G[i+1]`.
+    8.  Handle the last interval: If the ray exits the volume before completing the $M$-th equal interval, the last interval is shorter. Calculate this partial integral separately and store it.
+    9.  Store the final composited color $C$ in `G[0]`.
+
+2.  **Pass 2: Interpolation and Partial Recomputation**
+    For each pixel $P$ not processed in Pass 1:
+    1.  Identify the four neighboring pixels $N_0, N_1, N_2, N_3$ that were processed in Pass 1 (their coordinates correspond to the $n \times n$ blocks surrounding $P$).
+    2.  Check if the colors of the adjacent pixels are sufficiently close.
+        *   If yes, interpolate the current pixel's color $C_P$ bilinearly from the $C$ values in `G[0]` of the neighbors.
+        *   If no, calculate $C_P$ using the recurrence relation, leveraging the pre-computed interval integrals $I_i$ from the neighbors.
+            *   Let $A_i^*$ and $C_i^*$ be the transparency and color contributions for interval $i$.
+            *   If the neighbor's interval integral is close enough, use the interpolated $A_i^*, C_i^*$.
+            *   Otherwise, calculate the integral for that specific interval using the recurrence relation starting from the previous interval's result.
+            *   The recurrence relation for interval $i$ is:
+                $$ C_{i+1} = C_i + (1 - A_i) \cdot a_i \cdot c_i $$
+                $$ A_{i+1} = A_i + (1 - A_i) \cdot a_i $$
+                Where $a_i, c_i$ are the sample transparency and color. In the context of the interval integrals $I_i$, these are treated as the accumulated contributions for that segment.
+            *   Specifically, for the second pass calculation [S1]:
+                $$ CP_{i+1} = CP_i + (1 - AP_i) \cdot A_i^* \cdot C_i^* $$
+                $$ AP_{i+1} = AP_i + (1 - AP_i) \cdot A_i^* $$
+                for $0 \le i \le M-1$. Here $A_i^*$ and $C_i^*$ are either interpolated or recomputed.
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_distance_for_start(s, f, transfer_function):
+    """
+    Finds the distance from start point s to the first point v where
+    the transfer function is non-zero.
+    Returns -1 if no such point is found along the ray segment s->f.
+    """
+    # Implementation depends on specific ray-marching or intersection logic.
+    # For the purpose of this article, we assume this function exists
+    # and returns the 3D coordinate v or a distance value.
+    pass
+
+def compositing_step(C_prev, A_prev, a_sample, c_sample):
+    """
+    Standard front-to-back compositing step.
+    """
+    C_new = C_prev + (1.0 - A_prev) * a_sample * c_sample
+    A_new = A_prev + (1.0 - A_prev) * a_sample
+    return C_new, A_new
+
+def pass1_render(voxel_data, transfer_function, viewport_w, viewport_h, n, M):
+    """
+    First pass: Render representative pixels and pre-compute interval integrals.
+    """
+    # G-buffer textures
+    # G[0] stores final color C (RGBA)
+    # G[1..M] store interval integrals I_i (RGBA)
+    g_buffer_color = create_texture(viewport_w // n, viewport_h // n, channels=4)
+    g_buffer_intervals = [create_texture(viewport_w // n, viewport_h // n, channels=4) for _ in range(M)]
+    
+    max_ray_length = 1.73205080757  # sqrt(3)
+    interval_length = max_ray_length / M
+    
+    for block_y in range(0, viewport_h, n):
+        for block_x in range(0, viewport_w, n):
+            # Select one pixel per block (e.g., top-left)
+            pixel_x = block_x
+            pixel_y = block_y
+            
+            # Get ray origin and direction for this pixel
+            ray_origin, ray_direction = get_ray_for_pixel(pixel_x, pixel_y)
+            
+            # Find start of non-zero transfer function domain
+            start_point_v = get_distance_for_start(ray_origin, ray_direction, transfer_function)
+            
+            if start_point_v == -1:
+                # No non-zero domain intersection
+                continue
+            
+            # Initialize compositing variables
+            current_color = (0.0, 0.0, 0.0, 0.0)
+            current_alpha = 0.0
+            
+            # Integrate over M intervals
+            for i in range(M):
+                # Determine interval bounds
+                # Note: The source implies intervals are equal length sqrt(3)/M
+                # in texture space. We march along the ray.
+                
+                # Sample the volume along this interval
+                # This involves marching from current position to current position + interval_length
+                # Accumulate the integral for this interval
+                
+                interval_color = (0.0, 0.0, 0.0, 0.0)
+                interval_alpha = 0.0
+                
+                # Marching loop for the interval
+                # ... (standard volume integration steps) ...
+                # For each sample in the interval:
+                #   val = sample_volume(voxel_data, sample_pos)
+                #   a, c = transfer_function(val)
+                #   interval_color, interval_alpha = compositing_step(interval_color, interval_alpha, a, c)
+                
+                # Store interval integral
+                g_buffer_intervals[i][block_y // n, block_x // n] = (interval_color, interval_alpha)
+                
+                # Update global compositing state
+                current_color, current_alpha = compositing_step(current_color, current_alpha, interval_alpha, interval_color)
+                
+                # Check if ray has exited volume (alpha is 0 or position > end)
+                if current_alpha <= 0.0:
+                    break
+            
+            # Handle last interval if it was shorter (ray exited early)
+            # This is handled implicitly by the loop break, but the last stored
+            # interval might need adjustment if the source specifies separate handling.
+            # The source mentions a 'lastStep' calculation for the shorter last interval.
+            
+            # Store final color
+            g_buffer_color[block_y // n, block_x // n] = (current_color, current_alpha)
+            
+    return g_buffer_color, g_buffer_intervals
+
+def pass2_render(g_buffer_color, g_buffer_intervals, viewport_w, viewport_h, n, M):
+    """
+    Second pass: Interpolate or partially recompute for remaining pixels.
+    """
+    final_image = create_texture(viewport_w, viewport_h, channels=4)
+    
+    for y in range(viewport_h):
+        for x in range(viewport_w):
+            # Skip pixels processed in Pass 1
+            if x % n == 0 and y % n == 0:
+                continue
+            
+            # Identify 4 neighboring blocks
+            # Neighbors are at (x//n, y//n), (x//n+1, y//n), etc.
+            # Need to map current pixel to the 4 surrounding G-buffer texels
+            neighbor_indices = get_neighbor_block_indices(x, y, n)
+            
+            # Check if neighbors' colors are sufficiently close
+            neighbor_colors = [g_buffer_color[idx] for idx in neighbor_indices]
+            is_similar = check_color_similarity(neighbor_colors)
+            
+            if is_similar:
+                # Bilinear interpolation of color
+                final_image[y, x] = bilinear_interpolate(g_buffer_color, x, y, n)
+            else:
+                # Partial recomputation
+                # Start with zero
+                current_color = (0.0, 0.0, 0.0, 0.0)
+                current_alpha = 0.0
+                
+                for i in range(M):
+                    # Get interval integral from neighbors
+                    # Interpolate or pick from neighbors
+                    interval_val = interpolate_interval(g_buffer_intervals[i], neighbor_indices, x, y, n)
+                    
+                    # If interpolation accuracy is insufficient, recompute this specific interval
+                    # This requires re-marching the ray for just this interval segment
+                    # For simplicity, we assume interval_val is the (a, c) for this interval
+                    a_i, c_i = interval_val
+                    
+                    current_color, current_alpha = compositing_step(current_color, current_alpha, a_i, c_i)
+                    
+                    if current_alpha <= 0.0:
+                        break
+                
+                final_image[y, x] = (current_color, current_alpha)
+                
+    return final_image
+```
+
+**Edge Cases and Pitfalls**
+*   **Woodgrain Artifacts:** Caused by high derivatives of the opacity function near the ray start. Mitigated by finding the starting point $v$ where the transfer function becomes non-zero, rather than starting at the ray origin. This increases the probability that the first integrals $I_0$ coincide on adjacent rays [S1].
+*   **Last Interval Length:** The last interval of integration may be shorter than the others because the ray may exit the volume before completing the $M$-th equal interval. This is handled by a separate 'lastStep' calculation [S1].
+*   **GPU Efficiency:** Recursive block division is inefficient on GPUs due to concurrent processing groups. This method avoids that overhead by using a fixed two-pass approach [S1].
+
+## Subtopics
+
+### [Two-pass Adaptive Screen Sampling with Interval Partitioning](5460-two-pass-adaptive-screen-sampling-with-interval-partitioning.md)
+This method accelerates volume integral calculation by partitioning the ray integration interval into $M$ equal pieces and using a second pass to interpolate or recompute integrals for pixels based on neighborhood coherence. It builds on [Adaptive Undersampling](5397-adaptive-undersampling.md) by increasing the undersampling factor through interval partitioning, allowing pixels to reuse integral data from neighbors rather than integrating over the entire ray. Unlike standard adaptive undersampling, it explicitly manages the granularity of integration steps to balance interpolation accuracy against recomputation cost.
+
+## Operating characteristics
+*   **Performance:** Accelerates adaptive undersampling by a factor of 1.5 on average [S1]. In a real dataset example, 91.7% of pixels were interpolated, 5.7% required 1 interval calculation, 2.1% required 2, 0.1% required 3, and 0.4% required >3 intervals [S1].
+*   **Memory:** Requires a G-buffer with $M+1$ textures of resolution $\frac{W}{n} \times \frac{H}{n}$.
+*   **Strengths:** Avoids the overhead of recursive subdivision on GPUs; reduces the length of the interval of integration for most pixels; mitigates woodgrain artifacts.
+*   **Limitations:** Effectiveness depends on the number of intervals $M$ being relatively small; requires two passes; interpolation accuracy may be insufficient in regions with high frequency changes.
+
+## Background
+Adaptive undersampling is a method for accelerating the rendering process by replacing the calculation of a volume integral with an interpolation procedure for a number of pixels [S1]. The specific two-pass method with pre-computed intervals was proposed in [S1]. It builds on earlier work such as [KSK*16] and [BSSS18] which examined methods for excluding artifacts, and [L15] which used a two-pass algorithm for GPU efficiency. The method is particularly useful for high-resolution screens and devices with low computing power [S1].
+
+## Sources
+[S1] Fast Adaptive Undersampling for Volume Rendering, http://wscg.zcu.cz/wscg2019/Full/A37-full.PDF, fetched 2026-10-27

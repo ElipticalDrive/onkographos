@@ -1,0 +1,157 @@
+Hi, thanks for your nice work! I find some misleading code in the rotation and transformation. Here is part of code in function load_gs_cameras rot = np.array(camera_transform['rotation']) pos = np.array(camera_transform['position']) W2C...
+
+coordinate misleading between sugar and gaussian · Issue #112 · Anttwo/SuGaR · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+coordinate misleading between sugar and gaussian #112
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+coordinate misleading between sugar and gaussian#112
+Copy link
+Description
+yiming-cc
+opened on Jan 22, 2024
+Issue body actions
+Hi, thanks for your nice work!
+I find some misleading code in the rotation and transformation. Here is part of code in function load_gs_cameras
+```
+        rot = np.array(camera_transform['rotation'])
+        pos = np.array(camera_transform['position'])
+        
+        W2C = np.zeros((4,4))
+        W2C[:3, :3] = rot
+        W2C[:3, 3] = pos
+        W2C[3,3] = 1
+        
+        Rt = np.linalg.inv(W2C)
+        T = Rt[:3, 3]
+        R = Rt[:3, :3].transpose()
+```
+It seams that you define R as rotation from world to camera, and T as transformation from camera to world. In the following code R and T are passed to GSCamera initialization:
+```
+        gs_camera = GSCamera(
+            colmap_id=id, image=gt_image, gt_alpha_mask=None,
+            R=R, T=T, FoVx=fov_x, FoVy=fov_y,
+            image_name=name, uid=id,
+            image_height=image_height, image_width=image_width,)
+```
+But int GSCamera, the R and T are defined in the totally oposite way, which can be deducted by its function getWorld2View2:
+```
+def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0):
+    Rt = np.zeros((4, 4))
+    Rt[:3, :3] = R.transpose()
+    Rt[:3, 3] = t
+    Rt[3, 3] = 1.0
+
+    C2W = np.linalg.inv(Rt)
+    cam_center = C2W[:3, 3]
+    cam_center = (cam_center + translate) * scale
+    C2W[:3, 3] = cam_center
+    Rt = np.linalg.inv(C2W)
+    return np.float32(Rt)
+```
+You can find that Rt here is the translation from world to camera, which in your code is camera to world.
+Can you explain this misleading to me? Thanks so much!
+Activity
+Anttwo commented on Jan 23, 2024
+Anttwo
+on Jan 23, 2024
+Last edited by Anttwo
+Owner
+More actions
+Hello @codejoker-c,
+Thanks you so much for your nice words!
+Sure, no problem!
+If you look closely, there is actually no implementation error in these parts of the code, but I agree that in one specific place the notation is misleading in both 3DGS code and SuGaR's code.
+Let me explain.
+I. About the inconsistency in the notations
+The function getWorld2View2 is the exact same as the function from the original Gaussian Splatting code.
+The function load_gs_cameras loads and parses the .JSON file saved when running the original Gaussian Splatting code. As such, this function just inverts the operations performed when saving the .JSON with their code. You can check these operations in the original code here, inside the camera_to_JSON function.
+As you may see, these two functions are directly inspired/rewritten from the original code, so we know for sure that there is no error in their implementation.
+Moreover, these functions use the same naming conventions as the original code. Now that you say it, I agree that there is one specific place where the notation is misleading.
+First of all, as you may have understood from reading the code, the rotation matrix R and translation vector t (or T) are combined to build the transform matrix Rt, which is equal to W2C (world to camera). There is no need to invert matrices to compute W2C.
+As we see in getWorld2View2, inverting the matrix W2C (or Rt) outputs the matrix C2W, which corresponds to the transform from the camera space/view space to the world space.
+However, as you may have noticed inside the camera_to_JSON function from the original 3DGS code, the code inverts the Rt matrix and calls it W2C:
+```
+def camera_to_JSON(id, camera : Camera):
+    Rt = np.zeros((4, 4))
+    Rt[:3, :3] = camera.R.transpose()
+    Rt[:3, 3] = camera.T
+    Rt[3, 3] = 1.0
+
+    W2C = np.linalg.inv(Rt)
+    pos = W2C[:3, 3]
+    rot = W2C[:3, :3]
+    <...>
+```
+I used the exact same notation inside my load_gs_cameras function, that inverts the operations just above.
+Unless I got something wrong, I think you're right, this is indeed a misleading notation in 3DGS code. Here, the name W2C should be replaced by C2W, which is saved in the .JSON file.
+Thank you for noticing this. Well, the 3DGS code is really awesome and super well-written in my opinion; Still, small mistakes happen hehe, no one can avoid them! And I admit I did not notice this misleading notation either.
+Just like the original Gaussian Splatting code, in the rest of SUGAR's code, Rt corresponds to the W2C matrix.
+Alright, this explains the inconsistency you noticed between notations!
+I also see that you asked:
+It seems that you define R as rotation from world to camera, and T as transformation from camera to world.
+This is a very interesting point: You may wonder why, sometimes, we transpose the matrix R (which is equivalent to inverting the matrix for rotation matrices), but we do not convert the vector T.
+Actually, this is because we do not change the coordinate space, but we just change the writing convention.
+Let me explain.
+II. About conventions for writing a transform matrix.
+As you may know, a transform matrix is generally written
+$$
+M = \left(\begin{array}{cc}
+R & T\\
+0 & 1
+\end{array}\right)
+$$
+Where $R$ is the rotation matrix of the transform, and $T$ the translation written as a column vector.
+Mathematically, for any 3D points $(x, y, z)$, if you write the homogeneous coordinates as a column vector $X = (x, y, z, 1)^t$, then you just have to multiply on the left by the transform matrix to obtain the transformed point in homogeneous coordinates: $Y = MX$
+However, when coding with numpy/pytorch, arrays or tensors containing 3D points are generally represented as a matrix containing row vectors (with shape $N \times 3$) rather than column vectors. Therefore, if you try to multiply on the left, you will get a shape error.
+Consequently, it is quite common to write the transform matrix as follows:
+$$
+M' = M^t = \left(\begin{array}{cc}
+R' & 0\\
+T' & 1
+\end{array}\right)
+$$
+Where $R'=R^t$, and $T'=T^t$ is the translation vector written as a row vector. With this notation, you just have to multiply your input tensor on the right (i.e. $Y' = X'M'$ with $X'$ the tensor of 3D points written as row vectors) to avoid shape errors and get the expected result as a matrix of 3D points written as row tensors. Consequently, it's quite usual to store $R^t$ instead of $R$ when coding.
+This is the reason why inside the load_gs_cameras function, $R$ and $T$ sometimes appear to be written in different spaces. They actually aren't, they are just written with the 'row convention', which requires to apply transpose() to $R$.
+I hope you will find this message helpful!
+👍React with 👍2Reacted by Hugh Khu and rebecca-lay3rs
+yiming-cc commented on Jan 23, 2024
+yiming-cc
+on Jan 23, 2024
+Last edited by yiming-cc
+Author
+More actions
+@Anttwo Thank you very much for your comprehensive explanation! I gained valuable insights from it and greatly appreciate your assistance.
+👍React with 👍1Reacted by Antoine GUEDON
+hughkhu commented on Jan 23, 2024
+hughkhu
+on Jan 23, 2024
+More actions
+@Anttwo Valuable explanation. I am still confused. As we change the conventions for writing a transform matrix, why should we transpose R while not transpose T and put it in bottom-left of the matrix. Should it be Rt[3, :3] = camera.T instead of Rt[:3, 3] = camera.T?
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,2765 @@
+# VoxelWorld
+
+A Minecraft-inspired voxel sandbox built on Unreal Engine 5.7. Infinite procedural world driven by multi-octave Perlin noise, block breaking and placing, world save/load, and a hotbar inventory.
+
+## Demo
+
+[![VoxelWorld demo](https://img.youtube.com/vi/J5yOp9EUoHg/maxresdefault.jpg)](https://www.youtube.com/watch?v=J5yOp9EUoHg)
+
+[Watch on YouTube](https://www.youtube.com/watch?v=J5yOp9EUoHg)
+
+## Download
+
+Packaged Windows build: [Google Drive](https://drive.google.com/file/d/1HicS6sr1U31TbG8-qBnxtui80iDYB4Cd/view?usp=sharing)
+
+## Stack
+
+- **Unreal Engine** 5.7
+- **Language**: C++ (Runtime module `VoxelWorld`) + Blueprints for UI/configuration
+- **Plugins**: `ProceduralMeshComponent`, `ModelingToolsEditorMode` (editor only), `EnhancedInput`, `UMG`
+
+## Features
+
+- Infinite procedural world streamed in chunks (16×16×64 by default)
+- Two-layer Perlin noise: continental (mountains/valleys) + detail (surface roughness)
+- Biome layering: stone → dirt (4 blocks) → grass; snow above `SnowAltitude`
+- Asynchronous chunk generation and mesh build on TaskGraph (MPSC queue, no hitches)
+- Pooled `UProceduralMeshComponent`s with chunk streaming based on `RenderDistance`
+- Block mining with per-type mining time and a shader-driven progress overlay via `MaterialParameterCollection`
+- Block placement from the selected hotbar slot (4 slots)
+- Save/load to named slots — only the modification delta is stored, plus seed and player state
+- Main menu, HUD, and save-slot widgets (UMG)
+
+## Source layout
+
+```
+Source/VoxelWorld/
+├── BlockType.h              EBlockType: Air, Stone, Dirt, Grass, Snow
+├── ChunkData.h              FChunkData — single-chunk block storage and helpers
+├── ChunkWorldSubsystem.*    UWorldSubsystem: streaming, cache, queues, block API
+├── WorldGenerator.*         FWorldGenParams + thread-safe static chunk generation
+├── WorldMeshActor.*         AWorldMeshActor: procedural mesh, sections per block type, collision
+├── VoxelWorldSettings.h     UDataAsset with world, material and MPC settings
+├── InventoryTypes.h         FInventorySlot
+├── MCGameMode.*             AMCGameMode: NewWorld / SaveWorld / LoadWorld / GetSaveSlots
+├── MCSaveGame.h             USaveGame: seed, block delta, player position/inventory
+└── PlayerCharacter/
+    ├── MCPlayerCharacter.*  ACharacter: crosshair trace, mining, placement, inventory
+    └── MCPlayerController.* APlayerController: EnhancedInput bindings, HUD, menu
+```
+
+## Content
+
+```
+Content/
+├── LVL_World.umap                  Gameplay map
+├── Chunks/                         M_BaseMaterial + MI_Stone/Dirt/Grass/Snow + textures
+├── Data/
+│   ├── DA_WorldSettings.uasset     UVoxelWorldSettings (seed, biomes, materials)
+│   └── MPC_Mining.uasset           Mining-progress MPC consumed by the block shader
+├── GameSources/
+│   ├── BP_GameMode / BP_PlayerController / BP_PlayerPawn
+│   └── Inputs/                     IMC + IA_Move/Look/Jump/Use/SecondUse/Item_01..04/MainMenu
+└── UI/                             WG_MainMenu, WG_PlayerDefault, WG_SaveSlot, WG_InventoryItem
+```
+
+## Controls
+
+| Action                | Input Action       |
+|-----------------------|--------------------|
+| Movement              | `IA_Move`          |
+| Camera                | `IA_Look`          |
+| Jump                  | `IA_Jump`          |
+| Mine block (hold)     | `IA_Use`           |
+| Place block           | `IA_SecondUse`     |
+| Hotbar slots 1–4      | `IA_Item_01..04`   |
+| Menu                  | `IA_MainMenu`      |
+
+Key bindings live in `Content/GameSources/Inputs/MC_Game` (Input Mapping Context).
+
+## How the world works
+
+1. Each tick, `UChunkWorldSubsystem` computes the desired chunks around the player (`RenderDistance`) and requests missing ones via `RequestChunkAsync`.
+2. Background tasks (`FWorldGenerator::GenerateChunk` + `AWorldMeshActor::PrepareChunkMesh`) build chunk data and prepare mesh sections, then push the result into a thread-safe `TQueue`.
+3. On the game thread, ready chunks are applied in batches (`ChunksPerFrame`); `UProceduralMeshComponent`s are pulled from a reusable pool.
+4. Player edits (mining/placing) live in `ModifiedBlocks` as a delta against the generated terrain — saves memory and serialization size.
+5. On save, only seed + delta + player state are written. On load, the world is re-derived from the seed and the delta is applied on top.
+
+## Build and run
+
+1. Right-click `VoxelWorld.uproject` → **Generate Visual Studio project files**.
+2. Open `VoxelWorld.uproject` in Unreal Engine 5.7 (let it rebuild modules if prompted), or build from the IDE via `VoxelWorld.sln` (Development Editor, Win64).
+3. Launch the editor and press **Play** on `LVL_World`.
+
+> Visual Studio 2022 with the C++ workload and a Windows SDK is required to rebuild the C++ module.
+
+## World configuration
+
+All generation parameters live in `Content/Data/DA_WorldSettings` (`UVoxelWorldSettings`):
+<img width="1352" height="959" alt="image" src="https://github.com/user-attachments/assets/ccc0e3d9-e190-45a8-8c2d-fff298017a44" />
+
+- `Seed`, `RenderDistance`, `ChunkSize`, `ChunkHeight`
+- `SeaLevel`, `SnowAltitude`
+- Continental noise: `ContinentalAmplitude/Frequency/Octaves`
+- Detail noise: `DetailAmplitude/Frequency/Octaves`, `Persistence`
+- `BlockMaterials` — material per `EBlockType`
+- `BlockMiningTime` — mining time (seconds) per block type
+- `MiningMPC` — `MaterialParameterCollection` the block shader reads progress from
+
+## Save / Load (Blueprint API on `AMCGameMode`)
+
+- `NewWorld()` — new world with a random seed, inventory reset to defaults
+- `SaveWorld(SlotName)` / `LoadWorld(SlotName)` / `DeleteSave(SlotName)`
+- `GetSaveSlots()` / `DoesSaveExist(SlotName)`
+
+Save files are written to `Saved/SaveGames/MC_<SlotName>.sav`.
+
+### Source/VoxelWorld.Target.cs
+```
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+using UnrealBuildTool;
+using System.Collections.Generic;
+
+public class VoxelWorldTarget : TargetRules
+{
+	public VoxelWorldTarget(TargetInfo Target) : base(Target)
+	{
+		Type = TargetType.Game;
+		DefaultBuildSettings = BuildSettingsVersion.V6;
+		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_7;
+		ExtraModuleNames.Add("VoxelWorld");
+	}
+}
+```
+
+### Source/VoxelWorldEditor.Target.cs
+```
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+using UnrealBuildTool;
+using System.Collections.Generic;
+
+public class VoxelWorldEditorTarget : TargetRules
+{
+	public VoxelWorldEditorTarget( TargetInfo Target) : base(Target)
+	{
+		Type = TargetType.Editor;
+		DefaultBuildSettings = BuildSettingsVersion.V6;
+		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_7;
+		ExtraModuleNames.Add("VoxelWorld");
+	}
+}
+```
+
+### Source/VoxelWorld/BlockType.h
+```
+#pragma once
+
+#include "CoreMinimal.h"
+#include "BlockType.generated.h"
+
+UENUM(BlueprintType)
+enum class EBlockType : uint8
+{
+	Air,
+	Stone,
+	Dirt,
+	Grass,
+	Snow
+};
+```
+
+### Source/VoxelWorld/ChunkData.h
+```
+#pragma once
+
+#include "CoreMinimal.h"
+#include "BlockType.h"
+#include "ChunkData.generated.h"
+
+USTRUCT(BlueprintType)
+struct FChunkData
+{
+	GENERATED_BODY()
+
+	static constexpr int32 DefaultSizeX = 16;
+	static constexpr int32 DefaultSizeY = 16;
+	static constexpr int32 DefaultSizeZ = 64;
+
+	UPROPERTY()
+	int32 SizeX = DefaultSizeX;
+
+	UPROPERTY()
+	int32 SizeY = DefaultSizeY;
+
+	UPROPERTY()
+	int32 SizeZ = DefaultSizeZ;
+
+	UPROPERTY()
+	FIntPoint ChunkIndex = FIntPoint::ZeroValue;
+
+	UPROPERTY()
+	TArray<EBlockType> Blocks;
+
+	void Init(const FIntPoint& InChunkIndex, int32 InSizeX, int32 InSizeY, int32 InSizeZ)
+	{
+		ChunkIndex = InChunkIndex;
+		SizeX = InSizeX;
+		SizeY = InSizeY;
+		SizeZ = InSizeZ;
+		Blocks.SetNumZeroed(SizeX * SizeY * SizeZ);
+	}
+
+	int32 BlockIndex(int32 X, int32 Y, int32 Z) const
+	{
+		return X + Y * SizeX + Z * SizeX * SizeY;
+	}
+
+	bool InBounds(int32 X, int32 Y, int32 Z) const
+	{
+		return X >= 0 && X < SizeX && Y >= 0 && Y < SizeY && Z >= 0 && Z < SizeZ;
+	}
+
+	EBlockType GetBlock(int32 X, int32 Y, int32 Z) const
+	{
+		if (!InBounds(X, Y, Z)) return EBlockType::Air;
+		return Blocks[BlockIndex(X, Y, Z)];
+	}
+
+	void SetBlock(int32 X, int32 Y, int32 Z, EBlockType Type)
+	{
+		if (!InBounds(X, Y, Z)) return;
+		Blocks[BlockIndex(X, Y, Z)] = Type;
+	}
+
+	bool IsOpaque(int32 X, int32 Y, int32 Z) const
+	{
+		if (!InBounds(X, Y, Z)) return false;
+		return Blocks[BlockIndex(X, Y, Z)] != EBlockType::Air;
+	}
+};
+```
+
+### Source/VoxelWorld/ChunkWorldSubsystem.cpp
+```
+#include "ChunkWorldSubsystem.h"
+#include "VoxelWorldSettings.h"
+#include "Kismet/GameplayStatics.h"
+#include "Async/Async.h"
+#include "Materials/MaterialParameterCollectionInstance.h"
+
+void UChunkWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
+{
+	Super::Initialize(Collection);
+
+	if (!Settings)
+	{
+		Settings = LoadObject<UVoxelWorldSettings>(nullptr,
+			TEXT("/Game/Data/DA_WorldSettings.DA_WorldSettings"));
+	}
+
+	if (Settings)
+	{
+		ChunkSizeX = Settings->ChunkSize;
+		ChunkSizeY = Settings->ChunkSize;
+		ChunkSizeZ = Settings->ChunkHeight;
+
+		RenderDistance = Settings->RenderDistance;
+		GenParams.ChunkSizeX = ChunkSizeX;
+		GenParams.ChunkSizeY = ChunkSizeY;
+		GenParams.ChunkSizeZ = ChunkSizeZ;
+		GenParams.Seed = (Settings->Seed == 0) ? FMath::Rand() : Settings->Seed;
+		GenParams.SeaLevel = Settings->SeaLevel;
+		GenParams.SnowAltitude = Settings->SnowAltitude;
+		GenParams.ContinentalAmplitude = Settings->ContinentalAmplitude;
+		GenParams.ContinentalFrequency = Settings->ContinentalFrequency;
+		GenParams.ContinentalOctaves = Settings->ContinentalOctaves;
+		GenParams.DetailAmplitude = Settings->DetailAmplitude;
+		GenParams.DetailFrequency = Settings->DetailFrequency;
+		GenParams.DetailOctaves = Settings->DetailOctaves;
+		GenParams.Persistence = Settings->Persistence;
+	}
+}
+
+void UChunkWorldSubsystem::EnsureWorldMesh()
+{
+	if (WorldMesh && !IsValid(WorldMesh))
+	{
+		WorldMesh = nullptr;
+	}
+
+	if (WorldMesh)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Clean up leftover actors from previous PIE sessions
+	TArray<AActor*> StaleActors;
+	UGameplayStatics::GetAllActorsOfClass(World, AWorldMeshActor::StaticClass(), StaleActors);
+	for (AActor* Stale : StaleActors)
+	{
+		Stale->Destroy();
+	}
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	WorldMesh = World->SpawnActor<AWorldMeshActor>(
+		AWorldMeshActor::StaticClass(),
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		Params);
+
+	if (WorldMesh && Settings)
+	{
+		WorldMesh->BlockMaterials = Settings->BlockMaterials;
+	}
+}
+
+void UChunkWorldSubsystem::Deinitialize()
+{
+	// Drain async queue (shared ptr keeps it alive if tasks are still in flight)
+	FAsyncChunkResult Result;
+	while (ReadyQueue->Dequeue(Result)) {}
+
+	if (WorldMesh)
+	{
+		WorldMesh->Destroy();
+		WorldMesh = nullptr;
+	}
+
+	ActiveChunks.Empty();
+	ChunkCache.Empty();
+	InFlightChunks.Empty();
+	PendingApply.Empty();
+	PendingLoadQueue.Empty();
+	RebuildQueue.Empty();
+	RebuildSet.Empty();
+
+	Super::Deinitialize();
+}
+
+void UChunkWorldSubsystem::Tick(float DeltaTime)
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	if (!WorldMesh)
+	{
+		EnsureWorldMesh();
+		return;
+	}
+
+	const APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
+	if (!PlayerPawn)
+	{
+		return;
+	}
+
+	const FIntPoint PlayerChunk = WorldToChunkIndex(PlayerPawn->GetActorLocation());
+
+	TSet<FIntPoint> DesiredChunks;
+	for (int32 DX = -RenderDistance; DX <= RenderDistance; ++DX)
+	{
+		for (int32 DY = -RenderDistance; DY <= RenderDistance; ++DY)
+		{
+			DesiredChunks.Add(FIntPoint(PlayerChunk.X + DX, PlayerChunk.Y + DY));
+		}
+	}
+
+	// Unload chunks that left render distance
+	TArray<FIntPoint> ToUnload;
+	for (const FIntPoint& Index : ActiveChunks)
+	{
+		if (!DesiredChunks.Contains(Index))
+		{
+			ToUnload.Add(Index);
+		}
+	}
+	for (const FIntPoint& Index : ToUnload)
+	{
+		UnloadChunk(Index);
+	}
+
+	// Cancel in-flight requests that are no longer needed
+	TArray<FIntPoint> StaleInFlight;
+	for (const FIntPoint& Index : InFlightChunks)
+	{
+		if (!DesiredChunks.Contains(Index))
+		{
+			StaleInFlight.Add(Index);
+		}
+	}
+	for (const FIntPoint& Index : StaleInFlight)
+	{
+		InFlightChunks.Remove(Index);
+	}
+
+	ApplyReadyChunks(DesiredChunks);
+	ProcessRebuildQueue();
+
+	// Enable collision and shadows only for chunks near the player
+	for (const FIntPoint& Index : ActiveChunks)
+	{
+		const bool bNearPlayer =
+			FMath::Abs(Index.X - PlayerChunk.X) <= 1 &&
+			FMath::Abs(Index.Y - PlayerChunk.Y) <= 1;
+
+		if (bNearPlayer)
+		{
+			if (!WorldMesh->HasCollision(Index))
+			{
+				WorldMesh->EnableCollision(Index);
+			}
+			WorldMesh->SetChunkShadows(Index, true);
+		}
+		else
+		{
+			if (WorldMesh->HasCollision(Index))
+			{
+				WorldMesh->DisableCollision(Index);
+			}
+			WorldMesh->SetChunkShadows(Index, false);
+		}
+	}
+
+	// Build pending set to avoid re-requesting chunks already waiting
+	TSet<FIntPoint> PendingApplySet;
+	for (const FAsyncChunkResult& R : PendingApply)
+	{
+		PendingApplySet.Add(R.ChunkIndex);
+	}
+
+	PendingLoadQueue.Reset();
+	for (const FIntPoint& Index : DesiredChunks)
+	{
+		if (!ActiveChunks.Contains(Index) && !InFlightChunks.Contains(Index) && !PendingApplySet.Contains(Index))
+		{
+			PendingLoadQueue.Add(Index);
+		}
+	}
+
+	PendingLoadQueue.Sort([&PlayerChunk](const FIntPoint& A, const FIntPoint& B)
+	{
+		const int32 DistA = FMath::Abs(A.X - PlayerChunk.X) + FMath::Abs(A.Y - PlayerChunk.Y);
+		const int32 DistB = FMath::Abs(B.X - PlayerChunk.X) + FMath::Abs(B.Y - PlayerChunk.Y);
+		return DistA < DistB;
+	});
+
+	while (InFlightChunks.Num() < MaxInFlight && PendingLoadQueue.Num() > 0)
+	{
+		const FIntPoint Index = PendingLoadQueue[0];
+		PendingLoadQueue.RemoveAt(0);
+		RequestChunkAsync(Index);
+	}
+}
+
+TStatId UChunkWorldSubsystem::GetStatId() const
+{
+	RETURN_QUICK_DECLARE_CYCLE_STAT(UChunkWorldSubsystem, STATGROUP_Tickables);
+}
+
+FIntPoint UChunkWorldSubsystem::WorldToChunkIndex(const FVector& WorldPos) const
+{
+	return FIntPoint(
+		FMath::FloorToInt(WorldPos.X / (ChunkSizeX * AWorldMeshActor::BlockSize)),
+		FMath::FloorToInt(WorldPos.Y / (ChunkSizeY * AWorldMeshActor::BlockSize)));
+}
+
+void UChunkWorldSubsystem::RequestChunkAsync(const FIntPoint& Index)
+{
+	InFlightChunks.Add(Index);
+
+	FWorldGenParams Params = GenParams;
+	const bool bCached = ChunkCache.Contains(Index);
+
+	FChunkData CachedCopy;
+	if (bCached)
+	{
+		CachedCopy = ChunkCache[Index];
+	}
+
+	// Copy modifications for this chunk to apply after generation (thread-safe copy)
+	TMap<FIntVector, EBlockType> ChunkMods;
+	if (const auto* Mods = ModifiedBlocks.Find(Index))
+	{
+		ChunkMods = *Mods;
+	}
+
+	TSharedPtr<TQueue<FAsyncChunkResult>> Queue = ReadyQueue;
+
+	Async(EAsyncExecution::TaskGraph,
+		[Queue, Index, Params, bCached, CachedCopy = MoveTemp(CachedCopy),
+		 ChunkMods = MoveTemp(ChunkMods)]() mutable
+	{
+		FAsyncChunkResult Result;
+		Result.ChunkIndex = Index;
+		Result.Data = bCached ? MoveTemp(CachedCopy) : FWorldGenerator::GenerateChunk(Params, Index);
+
+		// Apply player modifications on top of generated terrain
+		for (const auto& [Pos, Type] : ChunkMods)
+		{
+			Result.Data.SetBlock(Pos.X, Pos.Y, Pos.Z, Type);
+		}
+
+		Result.Mesh = AWorldMeshActor::PrepareChunkMesh(Result.Data);
+		Queue->Enqueue(MoveTemp(Result));
+	});
+}
+
+void UChunkWorldSubsystem::ApplyReadyChunks(const TSet<FIntPoint>& DesiredChunks)
+{
+	FAsyncChunkResult Result;
+	while (ReadyQueue->Dequeue(Result))
+	{
+		InFlightChunks.Remove(Result.ChunkIndex);
+
+		if (!ChunkCache.Contains(Result.ChunkIndex))
+		{
+			ChunkCache.Add(Result.ChunkIndex, MoveTemp(Result.Data));
+		}
+
+		if (!DesiredChunks.Contains(Result.ChunkIndex) || ActiveChunks.Contains(Result.ChunkIndex))
+		{
+			continue;
+		}
+
+		PendingApply.Add(MoveTemp(Result));
+	}
+
+	PendingApply.RemoveAll([&](const FAsyncChunkResult& R)
+	{
+		return !DesiredChunks.Contains(R.ChunkIndex) || ActiveChunks.Contains(R.ChunkIndex);
+	});
+
+	int32 Applied = 0;
+	while (Applied < ChunksPerFrame && PendingApply.Num() > 0)
+	{
+		WorldMesh->ApplyChunk(PendingApply[0].ChunkIndex, PendingApply[0].Mesh);
+		ActiveChunks.Add(PendingApply[0].ChunkIndex);
+		PendingApply.RemoveAt(0);
+		++Applied;
+	}
+}
+
+void UChunkWorldSubsystem::UnloadChunk(const FIntPoint& Index)
+{
+	WorldMesh->RemoveChunk(Index);
+	ActiveChunks.Remove(Index);
+}
+
+void UChunkWorldSubsystem::GlobalToLocal(int32 GlobalX, int32 GlobalY, int32 GlobalZ,
+	FIntPoint& OutChunkIndex, FIntVector& OutLocalBlock) const
+{
+	OutChunkIndex.X = FMath::FloorToInt(static_cast<float>(GlobalX) / ChunkSizeX);
+	OutChunkIndex.Y = FMath::FloorToInt(static_cast<float>(GlobalY) / ChunkSizeY);
+	OutLocalBlock.X = GlobalX - OutChunkIndex.X * ChunkSizeX;
+	OutLocalBlock.Y = GlobalY - OutChunkIndex.Y * ChunkSizeY;
+	OutLocalBlock.Z = GlobalZ;
+}
+
+bool UChunkWorldSubsystem::FindSolidBlock(const FVector& HitLocation,
+	FIntPoint& OutChunkIndex, FIntVector& OutLocalBlock) const
+{
+	const float S = AWorldMeshActor::BlockSize;
+	const int32 CenterX = FMath::FloorToInt(HitLocation.X / S);
+	const int32 CenterY = FMath::FloorToInt(HitLocation.Y / S);
+	const int32 CenterZ = FMath::FloorToInt(HitLocation.Z / S);
+
+	static const FIntVector Offsets[] = {
+		{0, 0, 0}, {0, 0, -1}, {0, 0, 1},
+		{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}
+	};
+
+	float BestDist = TNumericLimits<float>::Max();
+	bool bFound = false;
+
+	for (const FIntVector& Off : Offsets)
+	{
+		const int32 GX = CenterX + Off.X;
+		const int32 GY = CenterY + Off.Y;
+		const int32 GZ = CenterZ + Off.Z;
+
+		if (GZ < 0 || GZ >= ChunkSizeZ)
+		{
+			continue;
+		}
+
+		FIntPoint CI;
+		FIntVector LB;
+		GlobalToLocal(GX, GY, GZ, CI, LB);
+
+		const FChunkData* Data = ChunkCache.Find(CI);
+		if (!Data || Data->GetBlock(LB.X, LB.Y, LB.Z) == EBlockType::Air)
+		{
+			continue;
+		}
+
+		const FVector BlockCenter((GX + 0.5f) * S, (GY + 0.5f) * S, (GZ + 0.5f) * S);
+		const float Dist = FVector::DistSquared(HitLocation, BlockCenter);
+
+		if (Dist < BestDist)
+		{
+			BestDist = Dist;
+			OutChunkIndex = CI;
+			OutLocalBlock = LB;
+			bFound = true;
+		}
+	}
+
+	return bFound;
+}
+
+bool UChunkWorldSubsystem::FindAdjacentEmpty(const FVector& HitLocation,
+	FIntPoint& OutChunkIndex, FIntVector& OutLocalBlock) const
+{
+	FIntPoint SolidChunk;
+	FIntVector SolidBlock;
+	if (!FindSolidBlock(HitLocation, SolidChunk, SolidBlock))
+	{
+		return false;
+	}
+
+	const float S = AWorldMeshActor::BlockSize;
+	const int32 SolidGX = SolidChunk.X * ChunkSizeX + SolidBlock.X;
+	const int32 SolidGY = SolidChunk.Y * ChunkSizeY + SolidBlock.Y;
+	const int32 SolidGZ = SolidBlock.Z;
+
+	const FVector SolidCenter(
+		(SolidGX + 0.5f) * S,
+		(SolidGY + 0.5f) * S,
+		(SolidGZ + 0.5f) * S);
+
+	// Hit face is the axis with the largest offset from block center
+	const FVector Offset = HitLocation - SolidCenter;
+	const float AbsX = FMath::Abs(Offset.X);
+	const float AbsY = FMath::Abs(Offset.Y);
+	const float AbsZ = FMath::Abs(Offset.Z);
+
+	int32 PlaceGX = SolidGX;
+	int32 PlaceGY = SolidGY;
+	int32 PlaceGZ = SolidGZ;
+
+	if (AbsX >= AbsY && AbsX >= AbsZ)
+	{
+		PlaceGX += (Offset.X > 0) ? 1 : -1;
+	}
+	else if (AbsY >= AbsX && AbsY >= AbsZ)
+	{
+		PlaceGY += (Offset.Y > 0) ? 1 : -1;
+	}
+	else
+	{
+		PlaceGZ += (Offset.Z > 0) ? 1 : -1;
+	}
+
+	if (PlaceGZ < 0 || PlaceGZ >= ChunkSizeZ)
+	{
+		return false;
+	}
+
+	GlobalToLocal(PlaceGX, PlaceGY, PlaceGZ, OutChunkIndex, OutLocalBlock);
+
+	const FChunkData* Data = ChunkCache.Find(OutChunkIndex);
+	if (!Data || Data->GetBlock(OutLocalBlock.X, OutLocalBlock.Y, OutLocalBlock.Z) != EBlockType::Air)
+	{
+		return false;
+	}
+
+	return true;
+}
+
+EBlockType UChunkWorldSubsystem::GetBlock(const FVector& HitLocation) const
+{
+	FIntPoint ChunkIndex;
+	FIntVector LocalBlock;
+
+	if (!FindSolidBlock(HitLocation, ChunkIndex, LocalBlock))
+	{
+		return EBlockType::Air;
+	}
+
+	return GetBlockAt(ChunkIndex, LocalBlock);
+}
+
+EBlockType UChunkWorldSubsystem::GetBlockAt(const FIntPoint& ChunkIndex, const FIntVector& LocalBlock) const
+{
+	const FChunkData* Data = ChunkCache.Find(ChunkIndex);
+	if (!Data)
+	{
+		return EBlockType::Air;
+	}
+
+	return Data->GetBlock(LocalBlock.X, LocalBlock.Y, LocalBlock.Z);
+}
+
+float UChunkWorldSubsystem::GetBlockMiningTime(EBlockType Type) const
+{
+	if (Settings)
+	{
+		if (const float* Time = Settings->BlockMiningTime.Find(Type))
+		{
+			return *Time;
+		}
+	}
+	return 1.0f;
+}
+
+bool UChunkWorldSubsystem::RemoveBlock(const FVector& HitLocation)
+{
+	FIntPoint ChunkIndex;
+	FIntVector LocalBlock;
+
+	if (!FindSolidBlock(HitLocation, ChunkIndex, LocalBlock))
+	{
+		return false;
+	}
+
+	// Bedrock: cannot destroy blocks at Z=0
+	if (LocalBlock.Z == 0)
+	{
+		return false;
+	}
+
+	FChunkData* Data = ChunkCache.Find(ChunkIndex);
+	if (!Data)
+	{
+		return false;
+	}
+
+	Data->SetBlock(LocalBlock.X, LocalBlock.Y, LocalBlock.Z, EBlockType::Air);
+	ModifiedBlocks.FindOrAdd(ChunkIndex).Add(FIntVector(LocalBlock.X, LocalBlock.Y, LocalBlock.Z), EBlockType::Air);
+	QueueRebuild(ChunkIndex);
+
+	return true;
+}
+
+bool UChunkWorldSubsystem::PlaceBlock(const FVector& HitLocation, EBlockType Type)
+{
+	if (Type == EBlockType::Air)
+	{
+		return false;
+	}
+
+	FIntPoint ChunkIndex;
+	FIntVector LocalBlock;
+
+	if (!FindAdjacentEmpty(HitLocation, ChunkIndex, LocalBlock))
+	{
+		return false;
+	}
+
+	FChunkData* Data = ChunkCache.Find(ChunkIndex);
+	if (!Data)
+	{
+		return false;
+	}
+
+	Data->SetBlock(LocalBlock.X, LocalBlock.Y, LocalBlock.Z, Type);
+	ModifiedBlocks.FindOrAdd(ChunkIndex).Add(FIntVector(LocalBlock.X, LocalBlock.Y, LocalBlock.Z), Type);
+	QueueRebuild(ChunkIndex);
+
+	return true;
+}
+
+bool UChunkWorldSubsystem::GetBlockCoords(const FVector& HitLocation,
+	FIntPoint& OutChunkIndex, FIntVector& OutLocalBlock) const
+{
+	return FindSolidBlock(HitLocation, OutChunkIndex, OutLocalBlock);
+}
+
+FVector UChunkWorldSubsystem::BlockWorldCenter(const FIntPoint& ChunkIndex, const FIntVector& LocalBlock) const
+{
+	const float S = AWorldMeshActor::BlockSize;
+	return FVector(
+		(ChunkIndex.X * ChunkSizeX + LocalBlock.X + 0.5f) * S,
+		(ChunkIndex.Y * ChunkSizeY + LocalBlock.Y + 0.5f) * S,
+		(LocalBlock.Z + 0.5f) * S);
+}
+
+bool UChunkWorldSubsystem::GetPlaceBlockWorldCenter(const FVector& HitLocation, FVector& OutCenter) const
+{
+	FIntPoint ChunkIndex;
+	FIntVector LocalBlock;
+
+	if (!FindAdjacentEmpty(HitLocation, ChunkIndex, LocalBlock))
+	{
+		return false;
+	}
+
+	OutCenter = BlockWorldCenter(ChunkIndex, LocalBlock);
+	return true;
+}
+
+void UChunkWorldSubsystem::SetMiningProgress(const FVector& BlockCenter, float Progress)
+{
+	if (!Settings || !Settings->MiningMPC)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	UMaterialParameterCollectionInstance* MPC = World->GetParameterCollectionInstance(Settings->MiningMPC);
+	if (!MPC)
+	{
+		return;
+	}
+
+	const float HalfBlock = AWorldMeshActor::BlockSize * 0.5f;
+	const float Expand = 0.5f;
+	MPC->SetVectorParameterValue(FName("MiningMin"), FLinearColor(
+		BlockCenter.X - HalfBlock - Expand, BlockCenter.Y - HalfBlock - Expand, BlockCenter.Z - HalfBlock - Expand));
+	MPC->SetVectorParameterValue(FName("MiningMax"), FLinearColor(
+		BlockCenter.X + HalfBlock + Expand, BlockCenter.Y + HalfBlock + Expand, BlockCenter.Z + HalfBlock + Expand));
+	MPC->SetScalarParameterValue(FName("MiningProgress"), FMath::Clamp(Progress, 0.f, 1.f));
+}
+
+void UChunkWorldSubsystem::ClearMiningProgress()
+{
+	SetMiningProgress(FVector::ZeroVector, 0.f);
+}
+
+void UChunkWorldSubsystem::QueueRebuild(const FIntPoint& ChunkIndex)
+{
+	if (!RebuildSet.Contains(ChunkIndex))
+	{
+		RebuildSet.Add(ChunkIndex);
+		RebuildQueue.Add(ChunkIndex);
+	}
+}
+
+void UChunkWorldSubsystem::ProcessRebuildQueue()
+{
+	if (RebuildQueue.Num() == 0 || !WorldMesh)
+	{
+		return;
+	}
+
+	const FIntPoint ChunkIndex = RebuildQueue.Last();
+	RebuildQueue.Pop();
+	RebuildSet.Remove(ChunkIndex);
+
+	if (!ActiveChunks.Contains(ChunkIndex))
+	{
+		return;
+	}
+
+	const FChunkData* Data = ChunkCache.Find(ChunkIndex);
+	if (!Data)
+	{
+		return;
+	}
+
+	FPreparedChunkMesh Mesh = AWorldMeshActor::PrepareChunkMesh(*Data);
+	WorldMesh->UpdateChunk(ChunkIndex, Mesh);
+
+	const APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(GetWorld(), 0);
+	if (PlayerPawn)
+	{
+		const FIntPoint PlayerChunk = WorldToChunkIndex(PlayerPawn->GetActorLocation());
+		const bool bNearPlayer =
+			FMath::Abs(ChunkIndex.X - PlayerChunk.X) <= 1 &&
+			FMath::Abs(ChunkIndex.Y - PlayerChunk.Y) <= 1;
+
+		if (bNearPlayer)
+		{
+			WorldMesh->EnableCollision(ChunkIndex);
+		}
+	}
+}
+
+void UChunkWorldSubsystem::SetSeed(int32 InSeed)
+{
+	GenParams.Seed = InSeed;
+}
+
+void UChunkWorldSubsystem::ResetWorld()
+{
+	// Remove all active chunk meshes
+	if (WorldMesh)
+	{
+		for (const FIntPoint& Index : ActiveChunks)
+		{
+			WorldMesh->RemoveChunk(Index);
+		}
+	}
+
+	ActiveChunks.Empty();
+	ChunkCache.Empty();
+	InFlightChunks.Empty();
+	PendingApply.Empty();
+	PendingLoadQueue.Empty();
+	RebuildQueue.Empty();
+	RebuildSet.Empty();
+	ModifiedBlocks.Empty();
+
+	// Drain async queue
+	FAsyncChunkResult Result;
+	while (ReadyQueue->Dequeue(Result)) {}
+}
+
+void UChunkWorldSubsystem::SetModifiedBlocks(const TMap<FIntPoint, TMap<FIntVector, EBlockType>>& InModified)
+{
+	ModifiedBlocks = InModified;
+}
+
+void UChunkWorldSubsystem::ForceLoadChunksAt(const FVector& WorldPos)
+{
+	EnsureWorldMesh();
+	if (!WorldMesh)
+	{
+		return;
+	}
+
+	const FIntPoint Center = WorldToChunkIndex(WorldPos);
+
+	// Generate player chunk and immediate neighbors (3x3) synchronously
+	for (int32 DX = -1; DX <= 1; ++DX)
+	{
+		for (int32 DY = -1; DY <= 1; ++DY)
+		{
+			const FIntPoint Index(Center.X + DX, Center.Y + DY);
+
+			if (ActiveChunks.Contains(Index))
+			{
+				continue;
+			}
+
+			// Generate chunk data
+			if (!ChunkCache.Contains(Index))
+			{
+				FChunkData Data = FWorldGenerator::GenerateChunk(GenParams, Index);
+
+				// Apply modifications
+				if (const auto* Mods = ModifiedBlocks.Find(Index))
+				{
+					for (const auto& [Pos, Type] : *Mods)
+					{
+						Data.SetBlock(Pos.X, Pos.Y, Pos.Z, Type);
+					}
+				}
+
+				ChunkCache.Add(Index, MoveTemp(Data));
+			}
+
+			// Build and apply mesh
+			const FChunkData* Data = ChunkCache.Find(Index);
+			if (Data)
+			{
+				FPreparedChunkMesh Mesh = AWorldMeshActor::PrepareChunkMesh(*Data);
+				WorldMesh->ApplyChunk(Index, Mesh);
+				WorldMesh->EnableCollision(Index);
+				ActiveChunks.Add(Index);
+			}
+		}
+	}
+}
+```
+
+### Source/VoxelWorld/ChunkWorldSubsystem.h
+```
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Subsystems/WorldSubsystem.h"
+#include "ChunkData.h"
+#include "WorldMeshActor.h"
+#include "WorldGenerator.h"
+#include "ChunkWorldSubsystem.generated.h"
+
+class UVoxelWorldSettings;
+
+UCLASS()
+class VOXELWORLD_API UChunkWorldSubsystem : public UWorldSubsystem, public FTickableGameObject
+{
+	GENERATED_BODY()
+
+public:
+	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+	virtual void Deinitialize() override;
+
+	virtual void Tick(float DeltaTime) override;
+	virtual TStatId GetStatId() const override;
+	virtual bool IsTickableInEditor() const override { return false; }
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Config")
+	TObjectPtr<UVoxelWorldSettings> Settings;
+
+	// Returns the block type at the given world position. Air if out of bounds or not loaded.
+	UFUNCTION(BlueprintCallable, Category = "Voxel")
+	EBlockType GetBlock(const FVector& HitLocation) const;
+
+	// Direct block lookup without FindSolidBlock. For use when coords are already known.
+	EBlockType GetBlockAt(const FIntPoint& ChunkIndex, const FIntVector& LocalBlock) const;
+
+	// Returns mining time for the given block type. Defaults to 1.0 if not configured.
+	UFUNCTION(BlueprintCallable, Category = "Voxel")
+	float GetBlockMiningTime(EBlockType Type) const;
+
+	// Removes the solid block at the hit surface. Returns true if a block was removed.
+	UFUNCTION(BlueprintCallable, Category = "Voxel")
+	bool RemoveBlock(const FVector& HitLocation);
+
+	// Places a block on the face of the solid block that was hit. Returns true if placed.
+	UFUNCTION(BlueprintCallable, Category = "Voxel")
+	bool PlaceBlock(const FVector& HitLocation, EBlockType Type);
+
+	// Returns chunk index and local block coordinates of the solid block at the hit surface.
+	UFUNCTION(BlueprintCallable, Category = "Voxel")
+	bool GetBlockCoords(const FVector& HitLocation,
+		FIntPoint& OutChunkIndex, FIntVector& OutLocalBlock) const;
+
+	// Computes world-space center from chunk index and local block coordinates.
+	FVector BlockWorldCenter(const FIntPoint& ChunkIndex, const FIntVector& LocalBlock) const;
+
+	// Returns the world-space center of the empty cell where a block would be placed.
+	UFUNCTION(BlueprintCallable, Category = "Voxel")
+	bool GetPlaceBlockWorldCenter(const FVector& HitLocation, FVector& OutCenter) const;
+
+	// Sets the mining target block and progress (0.0 to 1.0) for visual feedback via MPC.
+	UFUNCTION(BlueprintCallable, Category = "Voxel")
+	void SetMiningProgress(const FVector& BlockCenter, float Progress);
+
+	// Clears the mining visual (sets progress to 0).
+	UFUNCTION(BlueprintCallable, Category = "Voxel")
+	void ClearMiningProgress();
+
+	int32 GetSeed() const { return GenParams.Seed; }
+	int32 GetChunkSizeZ() const { return ChunkSizeZ; }
+
+	// Sets seed before first chunk generation (used by load)
+	void SetSeed(int32 InSeed);
+
+	// Returns all block modifications made by the player
+	const TMap<FIntPoint, TMap<FIntVector, EBlockType>>& GetModifiedBlocks() const { return ModifiedBlocks; }
+
+	// Applies loaded modifications (call before chunks generate)
+	void SetModifiedBlocks(const TMap<FIntPoint, TMap<FIntVector, EBlockType>>& InModified);
+
+	// Clears all chunks, cache, and modifications. Call before loading a different world.
+	void ResetWorld();
+
+	// Synchronously generates and applies chunks around a world position (for spawn/load)
+	void ForceLoadChunksAt(const FVector& WorldPos);
+
+private:
+	bool FindSolidBlock(const FVector& HitLocation,
+		FIntPoint& OutChunkIndex, FIntVector& OutLocalBlock) const;
+
+	bool FindAdjacentEmpty(const FVector& HitLocation,
+		FIntPoint& OutChunkIndex, FIntVector& OutLocalBlock) const;
+
+	void GlobalToLocal(int32 GlobalX, int32 GlobalY, int32 GlobalZ,
+		FIntPoint& OutChunkIndex, FIntVector& OutLocalBlock) const;
+
+	void QueueRebuild(const FIntPoint& ChunkIndex);
+	void ProcessRebuildQueue();
+
+	struct FAsyncChunkResult
+	{
+		FIntPoint ChunkIndex;
+		FChunkData Data;
+		FPreparedChunkMesh Mesh;
+	};
+
+	FWorldGenParams GenParams;
+
+	// Chunk dimensions, set once in Initialize from DataAsset
+	int32 ChunkSizeX = FChunkData::DefaultSizeX;
+	int32 ChunkSizeY = FChunkData::DefaultSizeY;
+	int32 ChunkSizeZ = FChunkData::DefaultSizeZ;
+
+	TMap<FIntPoint, FChunkData> ChunkCache;
+
+	// Tracks all player modifications (delta from generated terrain)
+	TMap<FIntPoint, TMap<FIntVector, EBlockType>> ModifiedBlocks;
+	TSet<FIntPoint> ActiveChunks;
+	TSet<FIntPoint> InFlightChunks;
+	TArray<FIntPoint> PendingLoadQueue;
+	TArray<FAsyncChunkResult> PendingApply;
+	TArray<FIntPoint> RebuildQueue;
+	TSet<FIntPoint> RebuildSet;
+
+	// MPSC queue: TaskGraph threads enqueue, game thread dequeues in Tick.
+	// Shared pointer ensures the queue outlives the subsystem if async tasks are still in flight.
+	TSharedPtr<TQueue<FAsyncChunkResult>> ReadyQueue = MakeShared<TQueue<FAsyncChunkResult>>();
+
+	UPROPERTY()
+	AWorldMeshActor* WorldMesh = nullptr;
+
+	int32 RenderDistance = 4;
+	int32 ChunksPerFrame = 2;
+	int32 MaxInFlight = 4;
+
+	void EnsureWorldMesh();
+	FIntPoint WorldToChunkIndex(const FVector& WorldPos) const;
+	void RequestChunkAsync(const FIntPoint& Index);
+	void ApplyReadyChunks(const TSet<FIntPoint>& DesiredChunks);
+	void UnloadChunk(const FIntPoint& Index);
+};
+```
+
+### Source/VoxelWorld/InventoryTypes.h
+```
+#pragma once
+
+#include "CoreMinimal.h"
+#include "BlockType.h"
+#include "InventoryTypes.generated.h"
+
+USTRUCT(BlueprintType)
+struct FInventorySlot
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	EBlockType Type = EBlockType::Air;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 Count = 0;
+};
+```
+
+### Source/VoxelWorld/MCGameMode.cpp
+```
+#include "MCGameMode.h"
+#include "MCSaveGame.h"
+#include "ChunkWorldSubsystem.h"
+#include "PlayerCharacter/MCPlayerCharacter.h"
+#include "PlayerCharacter/MCPlayerController.h"
+#include "Kismet/GameplayStatics.h"
+#include "Misc/Paths.h"
+#include "HAL/FileManager.h"
+
+static const FString SavePrefix = TEXT("MC_");
+
+AMCGameMode::AMCGameMode()
+{
+	DefaultPawnClass = AMCPlayerCharacter::StaticClass();
+	PlayerControllerClass = AMCPlayerController::StaticClass();
+}
+
+void AMCGameMode::NewWorld()
+{
+	UChunkWorldSubsystem* Sub = GetWorld()->GetSubsystem<UChunkWorldSubsystem>();
+	if (Sub)
+	{
+		Sub->ResetWorld();
+		Sub->SetSeed(FMath::Rand());
+
+		const FVector SpawnPos(0.f, 0.f, Sub->GetChunkSizeZ() * AWorldMeshActor::BlockSize);
+		Sub->ForceLoadChunksAt(SpawnPos);
+
+		AMCPlayerCharacter* Player = Cast<AMCPlayerCharacter>(UGameplayStatics::GetPlayerPawn(GetWorld(), 0));
+		if (Player)
+		{
+			Player->SetActorLocation(SpawnPos);
+
+			// Reset inventory to defaults
+			Player->Inventory.SetNum(4);
+			Player->Inventory[0] = { EBlockType::Stone, 32 };
+			Player->Inventory[1] = { EBlockType::Dirt,  32 };
+			Player->Inventory[2] = { EBlockType::Grass, 32 };
+			Player->Inventory[3] = { EBlockType::Snow,  32 };
+			Player->SelectedSlot = 0;
+		}
+	}
+}
+
+void AMCGameMode::SaveWorld(const FString& SlotName)
+{
+	UMCSaveGame* Save = NewObject<UMCSaveGame>();
+
+	UChunkWorldSubsystem* Sub = GetWorld()->GetSubsystem<UChunkWorldSubsystem>();
+	if (Sub)
+	{
+		Save->Seed = Sub->GetSeed();
+
+		for (const auto& [ChunkIndex, BlockMap] : Sub->GetModifiedBlocks())
+		{
+			FChunkModifications ChunkMod;
+			ChunkMod.ChunkIndex = ChunkIndex;
+
+			for (const auto& [LocalPos, Type] : BlockMap)
+			{
+				FBlockModification BlockMod;
+				BlockMod.LocalBlock = LocalPos;
+				BlockMod.Type = Type;
+				ChunkMod.Blocks.Add(BlockMod);
+			}
+
+			Save->ModifiedChunks.Add(ChunkMod);
+		}
+	}
+
+	AMCPlayerCharacter* Player = Cast<AMCPlayerCharacter>(UGameplayStatics::GetPlayerPawn(GetWorld(), 0));
+	if (Player)
+	{
+		Save->PlayerPosition = Player->GetActorLocation();
+		Save->PlayerRotation = Player->GetActorRotation();
+		Save->Inventory = Player->Inventory;
+		Save->SelectedSlot = Player->SelectedSlot;
+	}
+
+	UGameplayStatics::SaveGameToSlot(Save, SavePrefix + SlotName, 0);
+}
+
+void AMCGameMode::LoadWorld(const FString& SlotName)
+{
+	const FString FullSlot = SavePrefix + SlotName;
+
+	if (!UGameplayStatics::DoesSaveGameExist(FullSlot, 0))
+	{
+		return;
+	}
+
+	UMCSaveGame* Save = Cast<UMCSaveGame>(UGameplayStatics::LoadGameFromSlot(FullSlot, 0));
+	if (!Save)
+	{
+		return;
+	}
+
+	UChunkWorldSubsystem* Sub = GetWorld()->GetSubsystem<UChunkWorldSubsystem>();
+	if (Sub)
+	{
+		Sub->ResetWorld();
+		Sub->SetSeed(Save->Seed);
+
+		TMap<FIntPoint, TMap<FIntVector, EBlockType>> Mods;
+		for (const FChunkModifications& ChunkMod : Save->ModifiedChunks)
+		{
+			TMap<FIntVector, EBlockType>& BlockMap = Mods.FindOrAdd(ChunkMod.ChunkIndex);
+			for (const FBlockModification& BlockMod : ChunkMod.Blocks)
+			{
+				BlockMap.Add(BlockMod.LocalBlock, BlockMod.Type);
+			}
+		}
+
+		Sub->SetModifiedBlocks(Mods);
+	}
+
+	// Force-generate chunks at saved position so player doesn't fall through
+	if (Sub)
+	{
+		Sub->ForceLoadChunksAt(Save->PlayerPosition);
+	}
+
+	// Restore player state immediately — pawn exists by StartPlay
+	AMCPlayerCharacter* Player = Cast<AMCPlayerCharacter>(UGameplayStatics::GetPlayerPawn(GetWorld(), 0));
+	if (Player)
+	{
+		Player->SetActorLocation(Save->PlayerPosition);
+		if (Player->GetController())
+		{
+			Player->GetController()->SetControlRotation(Save->PlayerRotation);
+		}
+		Player->Inventory = Save->Inventory;
+		Player->SelectedSlot = Save->SelectedSlot;
+	}
+}
+
+void AMCGameMode::DeleteSave(const FString& SlotName)
+{
+	UGameplayStatics::DeleteGameInSlot(SavePrefix + SlotName, 0);
+}
+
+TArray<FString> AMCGameMode::GetSaveSlots() const
+{
+	TArray<FString> Slots;
+
+	const FString SaveDir = FPaths::ProjectSavedDir() / TEXT("SaveGames");
+	TArray<FString> Files;
+	IFileManager::Get().FindFiles(Files, *SaveDir, TEXT(".sav"));
+
+	for (const FString& File : Files)
+	{
+		const FString Name = FPaths::GetBaseFilename(File);
+		if (Name.StartsWith(SavePrefix))
+		{
+			Slots.Add(Name.RightChop(SavePrefix.Len()));
+		}
+	}
+
+	return Slots;
+}
+
+bool AMCGameMode::DoesSaveExist(const FString& SlotName) const
+{
+	return UGameplayStatics::DoesSaveGameExist(SavePrefix + SlotName, 0);
+}
+```
+
+### Source/VoxelWorld/MCGameMode.h
+```
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/GameModeBase.h"
+#include "MCGameMode.generated.h"
+
+class UMCSaveGame;
+
+UCLASS()
+class VOXELWORLD_API AMCGameMode : public AGameModeBase
+{
+	GENERATED_BODY()
+
+public:
+	AMCGameMode();
+
+	// Start a new world with a fresh random seed, reset player to default state
+	UFUNCTION(BlueprintCallable, Category = "Save")
+	void NewWorld();
+
+	// Save current world and player state to a named slot
+	UFUNCTION(BlueprintCallable, Category = "Save")
+	void SaveWorld(const FString& SlotName);
+
+	// Load world and player state from a named slot
+	UFUNCTION(BlueprintCallable, Category = "Save")
+	void LoadWorld(const FString& SlotName);
+
+	// Delete a save slot
+	UFUNCTION(BlueprintCallable, Category = "Save")
+	void DeleteSave(const FString& SlotName);
+
+	// Returns list of all existing save slot names
+	UFUNCTION(BlueprintCallable, Category = "Save")
+	TArray<FString> GetSaveSlots() const;
+
+	// Check if a save slot exists
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Save")
+	bool DoesSaveExist(const FString& SlotName) const;
+};
+```
+
+### Source/VoxelWorld/MCSaveGame.h
+```
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/SaveGame.h"
+#include "BlockType.h"
+#include "InventoryTypes.h"
+#include "MCSaveGame.generated.h"
+
+USTRUCT()
+struct FBlockModification
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FIntVector LocalBlock = FIntVector::ZeroValue;
+
+	UPROPERTY()
+	EBlockType Type = EBlockType::Air;
+};
+
+USTRUCT()
+struct FChunkModifications
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	FIntPoint ChunkIndex = FIntPoint::ZeroValue;
+
+	UPROPERTY()
+	TArray<FBlockModification> Blocks;
+};
+
+UCLASS()
+class VOXELWORLD_API UMCSaveGame : public USaveGame
+{
+	GENERATED_BODY()
+
+public:
+	// World
+	UPROPERTY()
+	int32 Seed = 0;
+
+	UPROPERTY()
+	TArray<FChunkModifications> ModifiedChunks;
+
+	// Player
+	UPROPERTY()
+	FVector PlayerPosition = FVector::ZeroVector;
+
+	UPROPERTY()
+	FRotator PlayerRotation = FRotator::ZeroRotator;
+
+	UPROPERTY()
+	TArray<FInventorySlot> Inventory;
+
+	UPROPERTY()
+	int32 SelectedSlot = 0;
+};
+```
+
+### Source/VoxelWorld/VoxelWorld.Build.cs
+```
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+using UnrealBuildTool;
+
+public class VoxelWorld : ModuleRules
+{
+	public VoxelWorld(ReadOnlyTargetRules Target) : base(Target)
+	{
+		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
+	
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "ProceduralMeshComponent", "UMG" });
+
+		PrivateDependencyModuleNames.AddRange(new string[] {  });
+
+		// Uncomment if you are using Slate UI
+		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
+		
+		// Uncomment if you are using online features
+		// PrivateDependencyModuleNames.Add("OnlineSubsystem");
+
+		// To include OnlineSubsystemSteam, add it to the plugins section in your uproject file with the Enabled attribute set to true
+	}
+}
+```
+
+### Source/VoxelWorld/VoxelWorld.cpp
+```
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "VoxelWorld.h"
+#include "Modules/ModuleManager.h"
+
+IMPLEMENT_PRIMARY_GAME_MODULE( FDefaultGameModuleImpl, VoxelWorld, "VoxelWorld" );
+```
+
+### Source/VoxelWorld/VoxelWorld.h
+```
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#pragma once
+
+#include "CoreMinimal.h"
+```
+
+### Source/VoxelWorld/VoxelWorldSettings.h
+```
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Engine/DataAsset.h"
+#include "BlockType.h"
+#include "VoxelWorldSettings.generated.h"
+
+UCLASS(BlueprintType)
+class VOXELWORLD_API UVoxelWorldSettings : public UDataAsset
+{
+	GENERATED_BODY()
+
+public:
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Blocks")
+	TMap<EBlockType, UMaterialInterface*> BlockMaterials;
+
+	// MPC used to pass mining target position and progress to block materials
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Blocks")
+	class UMaterialParameterCollection* MiningMPC = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Blocks")
+	TMap<EBlockType, float> BlockMiningTime;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World")
+	int32 Seed = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World")
+	int32 RenderDistance = 2;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World")
+	int32 ChunkSize = 32;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "World")
+	int32 ChunkHeight = 64;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
+	int32 SeaLevel = 24;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation")
+	int32 SnowAltitude = 45;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continental")
+	int32 ContinentalAmplitude = 16;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continental")
+	float ContinentalFrequency = 0.002f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continental")
+	int32 ContinentalOctaves = 3;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
+	int32 DetailAmplitude = 6;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
+	float DetailFrequency = 0.015f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
+	int32 DetailOctaves = 4;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
+	float Persistence = 0.5f;
+};
+```
+
+### Source/VoxelWorld/WorldGenerator.cpp
+```
+#include "WorldGenerator.h"
+
+FChunkData FWorldGenerator::GenerateChunk(const FWorldGenParams& Params, const FIntPoint& ChunkIndex)
+{
+	FChunkData Data;
+	Data.Init(ChunkIndex, Params.ChunkSizeX, Params.ChunkSizeY, Params.ChunkSizeZ);
+
+	const int32 SX = Params.ChunkSizeX;
+	const int32 SY = Params.ChunkSizeY;
+	const int32 SZ = Params.ChunkSizeZ;
+
+	const int32 BaseX = ChunkIndex.X * SX;
+	const int32 BaseY = ChunkIndex.Y * SY;
+
+	// Different seed offsets for each noise layer so they don't correlate
+	const float SeedOffset1 = static_cast<float>(Params.Seed) * 1000.f;
+	const float SeedOffset2 = static_cast<float>(Params.Seed) * 3571.f;
+
+	for (int32 X = 0; X < SX; ++X)
+	{
+		for (int32 Y = 0; Y < SY; ++Y)
+		{
+			const float WorldX = static_cast<float>(BaseX + X);
+			const float WorldY = static_cast<float>(BaseY + Y);
+
+			const float Continental = SampleNoise(WorldX, WorldY,
+				Params.ContinentalFrequency, Params.ContinentalOctaves, Params.Persistence, SeedOffset1);
+
+			const float Detail = SampleNoise(WorldX, WorldY,
+				Params.DetailFrequency, Params.DetailOctaves, Params.Persistence, SeedOffset2);
+
+			const int32 SurfaceZ = FMath::Clamp(
+				Params.SeaLevel
+				+ FMath::RoundToInt(Continental * Params.ContinentalAmplitude)
+				+ FMath::RoundToInt(Detail * Params.DetailAmplitude),
+				1, SZ - 1);
+
+			for (int32 Z = 0; Z <= SurfaceZ; ++Z)
+			{
+				EBlockType Type;
+
+				if (Z == SurfaceZ)
+				{
+					Type = SurfaceZ >= Params.SnowAltitude ? EBlockType::Snow : EBlockType::Grass;
+				}
+				else if (Z >= SurfaceZ - 4)
+				{
+					Type = EBlockType::Dirt;
+				}
+				else
+				{
+					Type = EBlockType::Stone;
+				}
+
+				Data.SetBlock(X, Y, Z, Type);
+			}
+		}
+	}
+
+	return Data;
+}
+
+float FWorldGenerator::SampleNoise(float WorldX, float WorldY, float Frequency,
+	int32 Octaves, float Persistence, float SeedOffset)
+{
+	float Total = 0.f;
+	float Amp = 1.f;
+	float Freq = Frequency;
+	float MaxAmp = 0.f;
+
+	for (int32 i = 0; i < Octaves; ++i)
+	{
+		const float Nx = (WorldX + SeedOffset) * Freq;
+		const float Ny = (WorldY + SeedOffset) * Freq;
+
+		Total += FMath::PerlinNoise2D(FVector2D(Nx, Ny)) * Amp;
+
+		MaxAmp += Amp;
+		Amp *= Persistence;
+		Freq *= 2.f;
+	}
+
+	return Total / MaxAmp;
+}
+```
+
+### Source/VoxelWorld/WorldGenerator.h
+```
+#pragma once
+
+#include "CoreMinimal.h"
+#include "ChunkData.h"
+#include "WorldGenerator.generated.h"
+
+// Thread-safe generation parameters
+USTRUCT(BlueprintType)
+struct FWorldGenParams
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 ChunkSizeX = FChunkData::DefaultSizeX;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 ChunkSizeY = FChunkData::DefaultSizeY;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 ChunkSizeZ = FChunkData::DefaultSizeZ;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 Seed = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 SeaLevel = 24;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 SnowAltitude = 45;
+
+	// Large-scale terrain shape (mountains and valleys)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continental")
+	int32 ContinentalAmplitude = 16;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continental")
+	float ContinentalFrequency = 0.002f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Continental")
+	int32 ContinentalOctaves = 3;
+
+	// Small-scale surface detail
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
+	int32 DetailAmplitude = 6;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
+	float DetailFrequency = 0.015f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
+	int32 DetailOctaves = 4;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Detail")
+	float Persistence = 0.5f;
+};
+
+// Static functions, safe to call from any thread
+struct VOXELWORLD_API FWorldGenerator
+{
+	static FChunkData GenerateChunk(const FWorldGenParams& Params, const FIntPoint& ChunkIndex);
+
+private:
+	static float SampleNoise(float WorldX, float WorldY, float Frequency,
+		int32 Octaves, float Persistence, float SeedOffset);
+};
+```
+
+### Source/VoxelWorld/WorldMeshActor.cpp
+```
+#include "WorldMeshActor.h"
+#include "ProceduralMeshComponent.h"
+
+AWorldMeshActor::AWorldMeshActor()
+{
+	PrimaryActorTick.bCanEverTick = false;
+	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+}
+
+void AWorldMeshActor::AddFace(FChunkMeshSection& Section, const FVector& Origin,
+	const FVector& Right, const FVector& Up, const FVector& Normal)
+{
+	const int32 BaseIdx = Section.Vertices.Num();
+
+	Section.Vertices.Add(Origin);
+	Section.Vertices.Add(Origin + Right);
+	Section.Vertices.Add(Origin + Right + Up);
+	Section.Vertices.Add(Origin + Up);
+
+	Section.Triangles.Add(BaseIdx);
+	Section.Triangles.Add(BaseIdx + 2);
+	Section.Triangles.Add(BaseIdx + 1);
+	Section.Triangles.Add(BaseIdx);
+	Section.Triangles.Add(BaseIdx + 3);
+	Section.Triangles.Add(BaseIdx + 2);
+
+	for (int32 i = 0; i < 4; ++i)
+	{
+		Section.Normals.Add(Normal);
+	}
+
+	// UV scales with quad size so textures tile correctly
+	const float USize = Right.Size() / BlockSize;
+	const float VSize = Up.Size() / BlockSize;
+	Section.UVs.Add(FVector2D(0.f, 0.f));
+	Section.UVs.Add(FVector2D(USize, 0.f));
+	Section.UVs.Add(FVector2D(USize, VSize));
+	Section.UVs.Add(FVector2D(0.f, VSize));
+}
+
+// Face info for greedy meshing algorithm
+struct FGreedyFace
+{
+	EBlockType Type = EBlockType::Air;
+	bool bVisible = false;
+};
+
+// Merges adjacent same-type faces in a 2D mask into larger quads
+static void GreedyMeshSlice(
+	TArray<FGreedyFace>& Mask, int32 Width, int32 Height,
+	TMap<EBlockType, FChunkMeshSection>& Sections,
+	FChunkMeshSection& CollisionSection,
+	bool bAddCollision,
+	const FVector& SliceOrigin, const FVector& AxisU, const FVector& AxisV,
+	const FVector& Normal, float BlockSize)
+{
+	for (int32 J = 0; J < Height; ++J)
+	{
+		for (int32 I = 0; I < Width; ++I)
+		{
+			const FGreedyFace& Face = Mask[I + J * Width];
+			if (!Face.bVisible)
+			{
+				continue;
+			}
+
+			const EBlockType Type = Face.Type;
+
+			// Expand along I
+			int32 W = 1;
+			while (I + W < Width)
+			{
+				const FGreedyFace& Next = Mask[(I + W) + J * Width];
+				if (!Next.bVisible || Next.Type != Type)
+				{
+					break;
+				}
+				++W;
+			}
+
+			// Expand along J
+			int32 H = 1;
+			bool bDone = false;
+			while (J + H < Height && !bDone)
+			{
+				for (int32 K = 0; K < W; ++K)
+				{
+					const FGreedyFace& Next = Mask[(I + K) + (J + H) * Width];
+					if (!Next.bVisible || Next.Type != Type)
+					{
+						bDone = true;
+						break;
+					}
+				}
+				if (!bDone)
+				{
+					++H;
+				}
+			}
+
+			const FVector Origin = SliceOrigin + AxisU * (I * BlockSize) + AxisV * (J * BlockSize);
+			const FVector Right = AxisU * (W * BlockSize);
+			const FVector Up = AxisV * (H * BlockSize);
+
+			AWorldMeshActor::AddFace(Sections.FindOrAdd(Type), Origin, Right, Up, Normal);
+
+			if (bAddCollision)
+			{
+				AWorldMeshActor::AddFace(CollisionSection, Origin, Right, Up, Normal);
+			}
+
+			// Mark merged faces as processed
+			for (int32 DJ = 0; DJ < H; ++DJ)
+			{
+				for (int32 DI = 0; DI < W; ++DI)
+				{
+					Mask[(I + DI) + (J + DJ) * Width].bVisible = false;
+				}
+			}
+		}
+	}
+}
+
+// Greedy mesh: mask I index aligns with AxisU, J with AxisV
+FPreparedChunkMesh AWorldMeshActor::PrepareChunkMesh(const FChunkData& Data)
+{
+	FPreparedChunkMesh Result;
+	Result.ChunkIndex = Data.ChunkIndex;
+	Result.SizeX = Data.SizeX;
+	Result.SizeY = Data.SizeY;
+
+	const float S = BlockSize;
+	const int32 SX = Data.SizeX;
+	const int32 SY = Data.SizeY;
+	const int32 SZ = Data.SizeZ;
+
+	// +Z: AxisU=+X, AxisV=+Y, mask I=X J=Y
+	{
+		TArray<FGreedyFace> Mask;
+		Mask.SetNum(SX * SY);
+		for (int32 Z = 0; Z < SZ; ++Z)
+		{
+			for (int32 Y = 0; Y < SY; ++Y)
+				for (int32 X = 0; X < SX; ++X)
+				{
+					FGreedyFace& F = Mask[X + Y * SX];
+					const EBlockType Type = Data.GetBlock(X, Y, Z);
+					F.bVisible = (Type != EBlockType::Air && !Data.IsOpaque(X, Y, Z + 1));
+					F.Type = Type;
+				}
+			GreedyMeshSlice(Mask, SX, SY, Result.Sections, Result.CollisionSection, true,
+				FVector(0, 0, (Z + 1) * S), FVector(1, 0, 0), FVector(0, 1, 0), FVector(0, 0, 1), S);
+		}
+	}
+
+	// -Z: AxisU=+Y, AxisV=+X, mask I=Y J=X
+	{
+		TArray<FGreedyFace> Mask;
+		Mask.SetNum(SY * SX);
+		for (int32 Z = 0; Z < SZ; ++Z)
+		{
+			for (int32 X = 0; X < SX; ++X)
+				for (int32 Y = 0; Y < SY; ++Y)
+				{
+					FGreedyFace& F = Mask[Y + X * SY];
+					const EBlockType Type = Data.GetBlock(X, Y, Z);
+					F.bVisible = (Type != EBlockType::Air && !Data.IsOpaque(X, Y, Z - 1));
+					F.Type = Type;
+				}
+			GreedyMeshSlice(Mask, SY, SX, Result.Sections, Result.CollisionSection, true,
+				FVector(0, 0, Z * S), FVector(0, 1, 0), FVector(1, 0, 0), FVector(0, 0, -1), S);
+		}
+	}
+
+	// +X: AxisU=+Y, AxisV=+Z, mask I=Y J=Z
+	{
+		TArray<FGreedyFace> Mask;
+		Mask.SetNum(SY * SZ);
+		for (int32 X = 0; X < SX; ++X)
+		{
+			for (int32 Z = 0; Z < SZ; ++Z)
+				for (int32 Y = 0; Y < SY; ++Y)
+				{
+					FGreedyFace& F = Mask[Y + Z * SY];
+					const EBlockType Type = Data.GetBlock(X, Y, Z);
+					F.bVisible = (Type != EBlockType::Air && !Data.IsOpaque(X + 1, Y, Z));
+					F.Type = Type;
+				}
+			GreedyMeshSlice(Mask, SY, SZ, Result.Sections, Result.CollisionSection, true,
+				FVector((X + 1) * S, 0, 0), FVector(0, 1, 0), FVector(0, 0, 1), FVector(1, 0, 0), S);
+		}
+	}
+
+	// -X: AxisU=+Z, AxisV=+Y, mask I=Z J=Y
+	{
+		TArray<FGreedyFace> Mask;
+		Mask.SetNum(SZ * SY);
+		for (int32 X = 0; X < SX; ++X)
+		{
+			for (int32 Y = 0; Y < SY; ++Y)
+				for (int32 Z = 0; Z < SZ; ++Z)
+				{
+					FGreedyFace& F = Mask[Z + Y * SZ];
+					const EBlockType Type = Data.GetBlock(X, Y, Z);
+					F.bVisible = (Type != EBlockType::Air && !Data.IsOpaque(X - 1, Y, Z));
+					F.Type = Type;
+				}
+			GreedyMeshSlice(Mask, SZ, SY, Result.Sections, Result.CollisionSection, true,
+				FVector(X * S, 0, 0), FVector(0, 0, 1), FVector(0, 1, 0), FVector(-1, 0, 0), S);
+		}
+	}
+
+	// +Y: AxisU=+Z, AxisV=+X, mask I=Z J=X
+	{
+		TArray<FGreedyFace> Mask;
+		Mask.SetNum(SZ * SX);
+		for (int32 Y = 0; Y < SY; ++Y)
+		{
+			for (int32 X = 0; X < SX; ++X)
+				for (int32 Z = 0; Z < SZ; ++Z)
+				{
+					FGreedyFace& F = Mask[Z + X * SZ];
+					const EBlockType Type = Data.GetBlock(X, Y, Z);
+					F.bVisible = (Type != EBlockType::Air && !Data.IsOpaque(X, Y + 1, Z));
+					F.Type = Type;
+				}
+			GreedyMeshSlice(Mask, SZ, SX, Result.Sections, Result.CollisionSection, true,
+				FVector(0, (Y + 1) * S, 0), FVector(0, 0, 1), FVector(1, 0, 0), FVector(0, 1, 0), S);
+		}
+	}
+
+	// -Y: AxisU=+X, AxisV=+Z, mask I=X J=Z
+	{
+		TArray<FGreedyFace> Mask;
+		Mask.SetNum(SX * SZ);
+		for (int32 Y = 0; Y < SY; ++Y)
+		{
+			for (int32 Z = 0; Z < SZ; ++Z)
+				for (int32 X = 0; X < SX; ++X)
+				{
+					FGreedyFace& F = Mask[X + Z * SX];
+					const EBlockType Type = Data.GetBlock(X, Y, Z);
+					F.bVisible = (Type != EBlockType::Air && !Data.IsOpaque(X, Y - 1, Z));
+					F.Type = Type;
+				}
+			GreedyMeshSlice(Mask, SX, SZ, Result.Sections, Result.CollisionSection, true,
+				FVector(0, Y * S, 0), FVector(1, 0, 0), FVector(0, 0, 1), FVector(0, -1, 0), S);
+		}
+	}
+
+	return Result;
+}
+
+UProceduralMeshComponent* AWorldMeshActor::AcquireComponent()
+{
+	if (ComponentPool.Num() > 0)
+	{
+		UProceduralMeshComponent* Comp = ComponentPool.Pop();
+		Comp->SetActive(true);
+		Comp->SetVisibility(true);
+		Comp->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		Comp->RegisterComponent();
+		return Comp;
+	}
+
+	UProceduralMeshComponent* Comp = NewObject<UProceduralMeshComponent>(this);
+	Comp->SetupAttachment(RootComponent);
+	Comp->SetCastShadow(false);
+	Comp->RegisterComponent();
+	return Comp;
+}
+
+void AWorldMeshActor::ReleaseComponent(UProceduralMeshComponent* Comp)
+{
+	if (!Comp)
+	{
+		return;
+	}
+
+	Comp->ClearAllMeshSections();
+	Comp->SetVisibility(false);
+	Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Comp->UnregisterComponent();
+	ComponentPool.Add(Comp);
+}
+
+void AWorldMeshActor::BuildMeshSections(UProceduralMeshComponent* Comp,
+	const FPreparedChunkMesh& Prepared, FActiveChunk& OutChunk)
+{
+	Comp->ClearAllMeshSections();
+
+	UMaterialInterface* FallbackMat = nullptr;
+	for (const auto& [_, Mat] : BlockMaterials)
+	{
+		if (Mat) { FallbackMat = Mat; break; }
+	}
+
+	int32 SectionIndex = 0;
+	for (const auto& [Type, Section] : Prepared.Sections)
+	{
+		if (Section.Vertices.Num() == 0)
+		{
+			continue;
+		}
+
+		Comp->CreateMeshSection(
+			SectionIndex,
+			Section.Vertices,
+			Section.Triangles,
+			Section.Normals,
+			Section.UVs,
+			TArray<FColor>(),
+			TArray<FProcMeshTangent>(),
+			false);
+
+		UMaterialInterface** Mat = BlockMaterials.Find(Type);
+		Comp->SetMaterial(SectionIndex, (Mat && *Mat) ? *Mat : FallbackMat);
+
+		++SectionIndex;
+	}
+
+	OutChunk.MeshComp = Comp;
+	OutChunk.CollisionSectionIndex = SectionIndex;
+	OutChunk.PendingCollision = Prepared.CollisionSection;
+	OutChunk.bHasCollision = false;
+	OutChunk.bCastsShadow = false;
+}
+
+void AWorldMeshActor::ApplyChunk(const FIntPoint& Index, const FPreparedChunkMesh& Prepared)
+{
+	RemoveChunk(Index);
+
+	UProceduralMeshComponent* Comp = AcquireComponent();
+	if (!Comp)
+	{
+		return;
+	}
+
+	const FVector ChunkWorldOrigin(
+		Index.X * Prepared.SizeX * BlockSize,
+		Index.Y * Prepared.SizeY * BlockSize,
+		0.f);
+	Comp->SetRelativeLocation(ChunkWorldOrigin);
+
+	FActiveChunk& Chunk = Chunks.Add(Index);
+	BuildMeshSections(Comp, Prepared, Chunk);
+}
+
+void AWorldMeshActor::UpdateChunk(const FIntPoint& Index, const FPreparedChunkMesh& Prepared)
+{
+	FActiveChunk* Chunk = Chunks.Find(Index);
+	if (!Chunk || !Chunk->MeshComp)
+	{
+		return;
+	}
+
+	BuildMeshSections(Chunk->MeshComp, Prepared, *Chunk);
+}
+
+void AWorldMeshActor::SetChunkShadows(const FIntPoint& Index, bool bCastShadow)
+{
+	FActiveChunk* Chunk = Chunks.Find(Index);
+	if (Chunk && Chunk->MeshComp && Chunk->bCastsShadow != bCastShadow)
+	{
+		Chunk->bCastsShadow = bCastShadow;
+		Chunk->MeshComp->SetCastShadow(bCastShadow);
+	}
+}
+
+void AWorldMeshActor::RemoveChunk(const FIntPoint& Index)
+{
+	if (FActiveChunk* Found = Chunks.Find(Index))
+	{
+		ReleaseComponent(Found->MeshComp);
+		Chunks.Remove(Index);
+	}
+}
+
+void AWorldMeshActor::EnableCollision(const FIntPoint& Index)
+{
+	FActiveChunk* Chunk = Chunks.Find(Index);
+	if (!Chunk || Chunk->bHasCollision || Chunk->PendingCollision.Vertices.Num() == 0)
+	{
+		return;
+	}
+
+	Chunk->MeshComp->CreateMeshSection(
+		Chunk->CollisionSectionIndex,
+		Chunk->PendingCollision.Vertices,
+		Chunk->PendingCollision.Triangles,
+		Chunk->PendingCollision.Normals,
+		Chunk->PendingCollision.UVs,
+		TArray<FColor>(),
+		TArray<FProcMeshTangent>(),
+		true);
+
+	Chunk->MeshComp->SetMeshSectionVisible(Chunk->CollisionSectionIndex, false);
+	Chunk->bHasCollision = true;
+}
+
+void AWorldMeshActor::DisableCollision(const FIntPoint& Index)
+{
+	FActiveChunk* Chunk = Chunks.Find(Index);
+	if (!Chunk || !Chunk->bHasCollision)
+	{
+		return;
+	}
+
+	Chunk->MeshComp->ClearMeshSection(Chunk->CollisionSectionIndex);
+	Chunk->bHasCollision = false;
+}
+
+bool AWorldMeshActor::HasCollision(const FIntPoint& Index) const
+{
+	const FActiveChunk* Chunk = Chunks.Find(Index);
+	return Chunk && Chunk->bHasCollision;
+}
+```
+
+### Source/VoxelWorld/WorldMeshActor.h
+```
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/Actor.h"
+#include "ChunkData.h"
+#include "WorldMeshActor.generated.h"
+
+class UProceduralMeshComponent;
+
+// Mesh data for a single section (one block type)
+struct FChunkMeshSection
+{
+	TArray<FVector> Vertices;
+	TArray<int32> Triangles;
+	TArray<FVector> Normals;
+	TArray<FVector2D> UVs;
+};
+
+// Pre-built chunk mesh, safe to prepare on any thread
+struct FPreparedChunkMesh
+{
+	FIntPoint ChunkIndex;
+	int32 SizeX = FChunkData::DefaultSizeX;
+	int32 SizeY = FChunkData::DefaultSizeY;
+	TMap<EBlockType, FChunkMeshSection> Sections;
+	FChunkMeshSection CollisionSection;
+};
+
+// Runtime state for a loaded chunk
+struct FActiveChunk
+{
+	UProceduralMeshComponent* MeshComp = nullptr;
+	FChunkMeshSection PendingCollision;
+	int32 CollisionSectionIndex = -1;
+	bool bHasCollision = false;
+	bool bCastsShadow = false;
+};
+
+// Single actor that owns all chunk mesh components
+UCLASS()
+class VOXELWORLD_API AWorldMeshActor : public AActor
+{
+	GENERATED_BODY()
+
+public:
+	AWorldMeshActor();
+
+	static constexpr float BlockSize = 100.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Blocks")
+	TMap<EBlockType, UMaterialInterface*> BlockMaterials;
+
+	static FPreparedChunkMesh PrepareChunkMesh(const FChunkData& Data);
+
+	void ApplyChunk(const FIntPoint& Index, const FPreparedChunkMesh& Prepared);
+	void UpdateChunk(const FIntPoint& Index, const FPreparedChunkMesh& Prepared);
+	void RemoveChunk(const FIntPoint& Index);
+	void EnableCollision(const FIntPoint& Index);
+	void DisableCollision(const FIntPoint& Index);
+	bool HasCollision(const FIntPoint& Index) const;
+
+	void SetChunkShadows(const FIntPoint& Index, bool bCastShadow);
+
+	static void AddFace(FChunkMeshSection& Section, const FVector& Origin,
+		const FVector& Right, const FVector& Up, const FVector& Normal);
+
+private:
+	TMap<FIntPoint, FActiveChunk> Chunks;
+
+	UPROPERTY()
+	TArray<UProceduralMeshComponent*> ComponentPool;
+
+	UProceduralMeshComponent* AcquireComponent();
+	void ReleaseComponent(UProceduralMeshComponent* Comp);
+	void BuildMeshSections(UProceduralMeshComponent* Comp, const FPreparedChunkMesh& Prepared, FActiveChunk& OutChunk);
+};
+```
+
+### Source/VoxelWorld/PlayerCharacter/MCPlayerCharacter.cpp
+```
+#include "MCPlayerCharacter.h"
+
+#include "Camera/CameraComponent.h"
+#include "GameFramework/SpringArmComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "VoxelWorld/ChunkWorldSubsystem.h"
+#include "VoxelWorld/WorldMeshActor.h"
+#include "DrawDebugHelpers.h"
+
+AMCPlayerCharacter::AMCPlayerCharacter()
+{
+	PrimaryActorTick.bCanEverTick = true;
+
+	SpringArm = CreateDefaultSubobject<USpringArmComponent>(TEXT("SpringArm"));
+	SpringArm->SetupAttachment(RootComponent);
+	SpringArm->SetRelativeLocation(FVector(0.0, 0.0, 70.0));
+	SpringArm->TargetArmLength = 0.0f;
+	SpringArm->bUsePawnControlRotation = true;
+	SpringArm->bDoCollisionTest = false;
+
+	Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
+	Camera->SetupAttachment(SpringArm, USpringArmComponent::SocketName);
+	Camera->bUsePawnControlRotation = false;
+
+	bUseControllerRotationPitch = false;
+	bUseControllerRotationYaw = true;
+	bUseControllerRotationRoll = false;
+
+	GetCharacterMovement()->bOrientRotationToMovement = false;
+
+	// Default inventory: 32 of each block type
+	Inventory.SetNum(4);
+	Inventory[0] = { EBlockType::Stone, 32 };
+	Inventory[1] = { EBlockType::Dirt,  32 };
+	Inventory[2] = { EBlockType::Grass, 32 };
+	Inventory[3] = { EBlockType::Snow,  32 };
+}
+
+void AMCPlayerCharacter::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+	UpdateTrace();
+
+	const float Extent = AWorldMeshActor::BlockSize * 0.51f;
+	if (bHasAimedBlock)
+	{
+		DrawDebugBox(GetWorld(), AimedBlockCenter, FVector(Extent), FColor::Red, false, 0.f, 0, 1.f);
+	}
+	if (bHasPlaceBlock)
+	{
+		DrawDebugBox(GetWorld(), PlaceBlockCenter, FVector(Extent), FColor::Green, false, 0.f, 0, 1.f);
+	}
+}
+
+void AMCPlayerCharacter::UpdateTrace()
+{
+	bHasAimedBlock = false;
+	bHasPlaceBlock = false;
+
+	const FVector TraceStart = Camera->GetComponentLocation();
+	const FVector TraceEnd = TraceStart + Camera->GetForwardVector() * 500.0f;
+
+	FHitResult HitResult;
+	bTraceHit = GetWorld()->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_Visibility);
+
+	if (!bTraceHit)
+	{
+		return;
+	}
+
+	TraceHitLocation = HitResult.Location;
+
+	UChunkWorldSubsystem* Sub = GetWorld()->GetSubsystem<UChunkWorldSubsystem>();
+	if (!Sub)
+	{
+		return;
+	}
+
+	if (Sub->GetBlockCoords(TraceHitLocation, AimedChunkIndex, AimedBlockCoords))
+	{
+		bHasAimedBlock = true;
+		AimedBlockCenter = Sub->BlockWorldCenter(AimedChunkIndex, AimedBlockCoords);
+		AimedBlockType = Sub->GetBlockAt(AimedChunkIndex, AimedBlockCoords);
+	}
+
+	bHasPlaceBlock = Sub->GetPlaceBlockWorldCenter(TraceHitLocation, PlaceBlockCenter);
+}
+
+void AMCPlayerCharacter::OnUseTriggered()
+{
+	if (!bHasAimedBlock)
+	{
+		ClearMine();
+		return;
+	}
+
+	const bool bSameBlock = bHasTarget && (AimedBlockCoords == TargetBlockCoords);
+
+	if (bSameBlock && bIsMining)
+	{
+		// Still mining the same block — update progress visual
+		UChunkWorldSubsystem* Sub = GetWorld()->GetSubsystem<UChunkWorldSubsystem>();
+		if (!Sub)
+		{
+			return;
+		}
+
+		const float Remaining = GetWorldTimerManager().GetTimerRemaining(MiningTimerHandle);
+		const float Total = Sub->GetBlockMiningTime(TargetBlockType);
+		const float Progress = (Total > 0.f) ? FMath::Clamp(1.f - (Remaining / Total), 0.f, 1.f) : 1.f;
+		Sub->SetMiningProgress(AimedBlockCenter, Progress);
+		return;
+	}
+
+	// New block or not mining yet — start fresh
+	ClearMine();
+	bHasTarget = true;
+	TargetBlockCoords = AimedBlockCoords;
+	TargetBlockType = AimedBlockType;
+	MiningHitLocation = TraceHitLocation;
+	StartMining();
+}
+
+void AMCPlayerCharacter::OnUseCompleted()
+{
+	ClearMine();
+}
+
+void AMCPlayerCharacter::StartMining()
+{
+	UChunkWorldSubsystem* Sub = GetWorld()->GetSubsystem<UChunkWorldSubsystem>();
+	if (!Sub)
+	{
+		return;
+	}
+
+	const float Duration = Sub->GetBlockMiningTime(TargetBlockType);
+	bIsMining = true;
+	GetWorldTimerManager().SetTimer(MiningTimerHandle, this, &AMCPlayerCharacter::CompleteMining, Duration, false);
+}
+
+void AMCPlayerCharacter::ClearMine()
+{
+	bIsMining = false;
+	bHasTarget = false;
+	TargetBlockCoords = FIntVector::ZeroValue;
+	TargetBlockType = EBlockType::Air;
+	GetWorldTimerManager().ClearTimer(MiningTimerHandle);
+
+	if (UChunkWorldSubsystem* Sub = GetWorld()->GetSubsystem<UChunkWorldSubsystem>())
+	{
+		Sub->ClearMiningProgress();
+	}
+}
+
+void AMCPlayerCharacter::CompleteMining()
+{
+	if (UChunkWorldSubsystem* Sub = GetWorld()->GetSubsystem<UChunkWorldSubsystem>())
+	{
+		if (Sub->RemoveBlock(MiningHitLocation))
+		{
+			// Add the destroyed block to matching inventory slot
+			for (FInventorySlot& Slot : Inventory)
+			{
+				if (Slot.Type == TargetBlockType)
+				{
+					++Slot.Count;
+					break;
+				}
+			}
+		}
+	}
+
+	ClearMine();
+}
+
+void AMCPlayerCharacter::SelectSlot(int32 SlotIndex)
+{
+	if (SlotIndex >= 0 && SlotIndex < Inventory.Num())
+	{
+		SelectedSlot = SlotIndex;
+	}
+}
+
+void AMCPlayerCharacter::PlaceSelectedBlock()
+{
+	if (!bTraceHit || !Inventory.IsValidIndex(SelectedSlot))
+	{
+		return;
+	}
+
+	FInventorySlot& Slot = Inventory[SelectedSlot];
+	if (Slot.Type == EBlockType::Air || Slot.Count <= 0)
+	{
+		return;
+	}
+
+	if (UChunkWorldSubsystem* Sub = GetWorld()->GetSubsystem<UChunkWorldSubsystem>())
+	{
+		if (Sub->PlaceBlock(TraceHitLocation, Slot.Type))
+		{
+			--Slot.Count;
+		}
+	}
+}
+```
+
+### Source/VoxelWorld/PlayerCharacter/MCPlayerCharacter.h
+```
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/Character.h"
+#include "VoxelWorld/BlockType.h"
+#include "VoxelWorld/InventoryTypes.h"
+#include "MCPlayerCharacter.generated.h"
+
+class USpringArmComponent;
+class UCameraComponent;
+
+UCLASS()
+class VOXELWORLD_API AMCPlayerCharacter : public ACharacter
+{
+	GENERATED_BODY()
+
+public:
+	AMCPlayerCharacter();
+
+	virtual void Tick(float DeltaTime) override;
+
+	void OnUseTriggered();
+	void OnUseCompleted();
+
+	// Select hotbar slot (0-3)
+	void SelectSlot(int32 SlotIndex);
+
+	// Place block from currently selected slot
+	UFUNCTION(BlueprintCallable, Category = "Interaction")
+	void PlaceSelectedBlock();
+
+	// Inventory (4 hotbar slots)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Inventory")
+	TArray<FInventorySlot> Inventory;
+
+	// Currently selected hotbar slot index
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Inventory")
+	int32 SelectedSlot = 0;
+
+private:
+	void UpdateTrace();
+	void StartMining();
+	void ClearMine();
+	void CompleteMining();
+
+	// Trace result, updated once per frame in Tick
+	bool bTraceHit = false;
+	FVector TraceHitLocation = FVector::ZeroVector;
+
+	// Block under crosshair (from trace)
+	bool bHasAimedBlock = false;
+	FIntPoint AimedChunkIndex;
+	FIntVector AimedBlockCoords = FIntVector::ZeroValue;
+	FVector AimedBlockCenter = FVector::ZeroVector;
+	EBlockType AimedBlockType = EBlockType::Air;
+
+	// Place preview
+	bool bHasPlaceBlock = false;
+	FVector PlaceBlockCenter = FVector::ZeroVector;
+
+	// Mining state
+	FTimerHandle MiningTimerHandle;
+	bool bIsMining = false;
+	bool bHasTarget = false;
+	FIntVector TargetBlockCoords = FIntVector::ZeroValue;
+	EBlockType TargetBlockType = EBlockType::Air;
+	FVector MiningHitLocation = FVector::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<USpringArmComponent> SpringArm;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UCameraComponent> Camera;
+};
+```
+
+### Source/VoxelWorld/PlayerCharacter/MCPlayerController.cpp
+```
+#include "MCPlayerController.h"
+#include "MCPlayerCharacter.h"
+
+#include "EnhancedInputComponent.h"
+#include "EnhancedInputSubsystems.h"
+#include "InputActionValue.h"
+#include "Blueprint/UserWidget.h"
+
+AMCPlayerController::AMCPlayerController()
+{
+}
+
+void AMCPlayerController::BeginPlay()
+{
+	Super::BeginPlay();
+
+	SetInputMode(FInputModeGameOnly());
+	bShowMouseCursor = false;
+
+	if (UEnhancedInputLocalPlayerSubsystem* Subsystem =
+			ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(GetLocalPlayer()))
+	{
+		Subsystem->AddMappingContext(DefaultMappingContext, 0);
+	}
+
+	if (HUDWidgetClass)
+	{
+		HUDWidget = CreateWidget<UUserWidget>(this, HUDWidgetClass);
+		if (HUDWidget)
+		{
+			HUDWidget->AddToViewport();
+		}
+	}
+}
+
+void AMCPlayerController::SetupInputComponent()
+{
+	Super::SetupInputComponent();
+
+	if (UEnhancedInputComponent* EIC = CastChecked<UEnhancedInputComponent>(InputComponent))
+	{
+		EIC->BindAction(MoveAction, ETriggerEvent::Triggered, this, &AMCPlayerController::Move);
+		EIC->BindAction(LookAction, ETriggerEvent::Triggered, this, &AMCPlayerController::Look);
+		EIC->BindAction(JumpAction, ETriggerEvent::Started, this, &AMCPlayerController::StartJump);
+		EIC->BindAction(JumpAction, ETriggerEvent::Completed, this, &AMCPlayerController::StopJump);
+		EIC->BindAction(UseAction, ETriggerEvent::Triggered, this, &AMCPlayerController::UseTriggered);
+		EIC->BindAction(UseAction, ETriggerEvent::Completed, this, &AMCPlayerController::UseStopped);
+		EIC->BindAction(SecondUseAction, ETriggerEvent::Started, this, &AMCPlayerController::SecondUse);
+		EIC->BindAction(Slot1Action, ETriggerEvent::Started, this, &AMCPlayerController::SelectSlot1);
+		EIC->BindAction(Slot2Action, ETriggerEvent::Started, this, &AMCPlayerController::SelectSlot2);
+		EIC->BindAction(Slot3Action, ETriggerEvent::Started, this, &AMCPlayerController::SelectSlot3);
+		EIC->BindAction(Slot4Action, ETriggerEvent::Started, this, &AMCPlayerController::SelectSlot4);
+		EIC->BindAction(MenuAction, ETriggerEvent::Started, this, &AMCPlayerController::ToggleMenu);
+	}
+}
+
+void AMCPlayerController::Move(const FInputActionValue& Value)
+{
+	APawn* ControlledPawn = GetPawn();
+	if (!ControlledPawn) return;
+
+	const FVector2D Input = Value.Get<FVector2D>();
+	const FRotator YawRotation(0.0, ControlRotation.Yaw, 0.0);
+
+	const FVector ForwardDir = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
+	const FVector RightDir   = FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
+
+	ControlledPawn->AddMovementInput(ForwardDir, Input.Y);
+	ControlledPawn->AddMovementInput(RightDir, Input.X);
+}
+
+void AMCPlayerController::Look(const FInputActionValue& Value)
+{
+	const FVector2D Input = Value.Get<FVector2D>();
+	AddYawInput(Input.X);
+	AddPitchInput(Input.Y);
+}
+
+void AMCPlayerController::StartJump()
+{
+	if (ACharacter* Char = Cast<ACharacter>(GetPawn()))
+	{
+		Char->Jump();
+	}
+}
+
+void AMCPlayerController::StopJump()
+{
+	if (ACharacter* Char = Cast<ACharacter>(GetPawn()))
+	{
+		Char->StopJumping();
+	}
+}
+
+void AMCPlayerController::UseTriggered()
+{
+	if (AMCPlayerCharacter* Char = Cast<AMCPlayerCharacter>(GetPawn()))
+	{
+		Char->OnUseTriggered();
+	}
+}
+
+void AMCPlayerController::UseStopped()
+{
+	if (AMCPlayerCharacter* Char = Cast<AMCPlayerCharacter>(GetPawn()))
+	{
+		Char->OnUseCompleted();
+	}
+}
+
+void AMCPlayerController::SecondUse()
+{
+	if (AMCPlayerCharacter* Char = Cast<AMCPlayerCharacter>(GetPawn()))
+	{
+		Char->PlaceSelectedBlock();
+	}
+}
+
+void AMCPlayerController::SelectSlot1()
+{
+	if (AMCPlayerCharacter* Char = Cast<AMCPlayerCharacter>(GetPawn()))
+	{
+		Char->SelectSlot(0);
+	}
+}
+
+void AMCPlayerController::SelectSlot2()
+{
+	if (AMCPlayerCharacter* Char = Cast<AMCPlayerCharacter>(GetPawn()))
+	{
+		Char->SelectSlot(1);
+	}
+}
+
+void AMCPlayerController::SelectSlot3()
+{
+	if (AMCPlayerCharacter* Char = Cast<AMCPlayerCharacter>(GetPawn()))
+	{
+		Char->SelectSlot(2);
+	}
+}
+
+void AMCPlayerController::SelectSlot4()
+{
+	if (AMCPlayerCharacter* Char = Cast<AMCPlayerCharacter>(GetPawn()))
+	{
+		Char->SelectSlot(3);
+	}
+}
+
+void AMCPlayerController::ToggleMenu()
+{
+	if (IsMenuOpen())
+	{
+		HideMenu();
+	}
+	else
+	{
+		ShowMenu();
+	}
+}
+
+void AMCPlayerController::ShowMenu()
+{
+	if (!MenuWidgetClass)
+	{
+		return;
+	}
+
+	if (!MenuWidget)
+	{
+		MenuWidget = CreateWidget<UUserWidget>(this, MenuWidgetClass);
+	}
+
+	if (MenuWidget && !MenuWidget->IsInViewport())
+	{
+		MenuWidget->AddToViewport(10);
+		SetInputMode(FInputModeGameAndUI());
+		bShowMouseCursor = true;
+		SetPause(true);
+	}
+}
+
+void AMCPlayerController::HideMenu()
+{
+	if (MenuWidget && MenuWidget->IsInViewport())
+	{
+		MenuWidget->RemoveFromParent();
+	}
+
+	SetInputMode(FInputModeGameOnly());
+	bShowMouseCursor = false;
+	SetPause(false);
+}
+
+bool AMCPlayerController::IsMenuOpen() const
+{
+	return MenuWidget && MenuWidget->IsInViewport();
+}
+```
+
+### Source/VoxelWorld/PlayerCharacter/MCPlayerController.h
+```
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GameFramework/PlayerController.h"
+#include "MCPlayerController.generated.h"
+
+class UInputMappingContext;
+class UInputAction;
+class UUserWidget;
+struct FInputActionValue;
+
+UCLASS()
+class VOXELWORLD_API AMCPlayerController : public APlayerController
+{
+	GENERATED_BODY()
+
+public:
+	AMCPlayerController();
+
+protected:
+	virtual void BeginPlay() override;
+	virtual void SetupInputComponent() override;
+
+private:
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI", meta = (AllowPrivateAccess = "true"))
+	TSubclassOf<UUserWidget> HUDWidgetClass;
+
+	UPROPERTY()
+	TObjectPtr<UUserWidget> HUDWidget;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputMappingContext> DefaultMappingContext;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> MoveAction;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> LookAction;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> JumpAction;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> UseAction;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> SecondUseAction;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> Slot1Action;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> Slot2Action;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> Slot3Action;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> Slot4Action;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UInputAction> MenuAction;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "UI", meta = (AllowPrivateAccess = "true"))
+	TSubclassOf<UUserWidget> MenuWidgetClass;
+
+	UPROPERTY()
+	TObjectPtr<UUserWidget> MenuWidget;
+
+	void Move(const FInputActionValue& Value);
+	void Look(const FInputActionValue& Value);
+	void StartJump();
+	void StopJump();
+	void UseTriggered();
+	void UseStopped();
+	void SecondUse();
+	void SelectSlot1();
+	void SelectSlot2();
+	void SelectSlot3();
+	void SelectSlot4();
+	void ToggleMenu();
+
+public:
+	UFUNCTION(BlueprintCallable, Category = "UI")
+	void ShowMenu();
+
+	UFUNCTION(BlueprintCallable, Category = "UI")
+	void HideMenu();
+
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "UI")
+	bool IsMenuOpen() const;
+};
+```

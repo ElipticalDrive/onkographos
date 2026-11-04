@@ -130,4 +130,4 @@ Not given in the sources.
 This optimization is described in the tsplat project, which implements Gaussian splatting rasterization in a terminal environment [S1, unofficial].
 
 ## Sources
-[S1] Tsplat – Run Gaussian splatting in your terminal, https://github.com/darshanmakwana412/tsplat, fetched 2026-10-26 [S1, unofficial]
+[S1] Tsplat – Run Gaussian splatting in your terminal, https://github.com/darshanmakwana412/tsplat, fetched 2026-10-26 (unofficial)

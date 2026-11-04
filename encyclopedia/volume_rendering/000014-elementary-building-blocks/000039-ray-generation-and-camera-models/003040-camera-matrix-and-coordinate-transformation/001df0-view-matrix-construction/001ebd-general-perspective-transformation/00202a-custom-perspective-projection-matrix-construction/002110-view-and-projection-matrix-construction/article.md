@@ -1,0 +1,168 @@
+# View and Projection Matrix Construction
+
+Also called: Camera Projection Setup, Camera Uniform and Setup, View-Projection Matrix Setup, View/Projection Matrix Construction
+
+## Overview
+This method constructs the view and projection matrices required to transform 3D scene coordinates into clip space for rendering, specifically tailored for Gaussian Splatting pipelines [S3, unofficial]. It builds on [Custom Perspective Projection Matrix Construction](2175-custom-perspective-projection-matrix-construction.md) [G].
+
+## How it works
+**Inputs:**
+- Camera position (eye), target point, and up vector [S2, S3, unofficial].
+- Viewport width and height [S3, unofficial].
+- Field of view (FOV) in degrees [S1, S3, unofficial].
+- Near and far clipping plane distances [S1, S3, unofficial].
+
+**Outputs:**
+- View matrix ($V$) [S3, unofficial].
+- Projection matrix ($P$) [S3, unofficial].
+- Combined view-projection matrix ($VP = P \times V$) [S3, unofficial].
+- Inverse view-projection matrix ($VP^{-1}$) [S2, unofficial].
+- Camera uniform data for shader access [S2, unofficial].
+
+**Data Structures:**
+The `CameraUniform` struct is passed to the GPU [S2, unofficial]. Its layout is defined as `#[repr(C)]` (C-style packing) [S2, unofficial]:
+- `view_proj`: 4x4 matrix of `f32` (16 floats).
+- `inv_view_proj`: 4x4 matrix of `f32` (16 floats).
+- `position`: 3 `f32` values (x, y, z).
+- `_pad`: 1 `f32` for alignment [S2, unofficial].
+Total: 34 floats. Depending on alignment requirements, this may be padded to 36 or 40 bytes [S2, unofficial].
+
+**Steps:**
+
+1. **Initialize Parameters:**
+   Set default values if not provided:
+   - Position: $(0, 5, 5)$
+   - Target: $(0, 0, 0)$
+   - Up: $(0, -1, 0)$
+   - Near plane: $0.1$
+   - Far plane: $100.0$
+   - FOV: $45.0^\circ$ [S3, unofficial].
+   *Note: Alternative defaults exist for specific backends, e.g., eye $(16, 90, 90)$, target $(0, 25, 0)$, up $(0, 1, 0)$, fovy $60^\circ$, znear $0.1$, zfar $2000.0$ [S2, unofficial].*
+
+2. **Compute Aspect Ratio:**
+   $$ \text{aspect} = \frac{\text{width}}{\text{height}} $$
+   Recompute on viewport size changes [S3, unofficial].
+
+3. **Compute Tangents of Half-FOV:**
+   $$ \text{fov}_{\text{rad}} = \text{radians}(\text{fov}_{\text{deg}}) $$
+   $$ \text{tan\_fov}_x = \tan\left(\frac{\text{fov}_{\text{rad}}}{2}\right) $$
+   $$ \text{tan\_fov}_y = \text{tan\_fov}_x \times \frac{\text{height}}{\text{width}} $$
+   [S1, unofficial].
+
+4. **Construct View Matrix:**
+   Using `lookAt` or equivalent:
+   $$ V = \text{lookAt}(\text{eye}, \text{target}, \text{up}) $$
+   Alternatively, computed as inverse of rotation-translation:
+   $$ V = (\text{translation} \times \text{rotation})^{-1} $$
+   [S1, S3, unofficial].
+
+5. **Construct Projection Matrix:**
+   Using the computed tangents:
+   $$ P = \text{perspective}(2 \times \arctan(\text{tan\_fov}_y), \text{aspect}, \text{near}, \text{far}) $$
+   [S1, unofficial]. Or directly from FOV:
+   $$ P = \text{perspective}(\text{fov}_{\text{rad}}, \text{aspect}, \text{near}, \text{far}) $$
+   [S3, unofficial].
+
+6. **Coordinate System Conversion:**
+   If converting from OpenGL to WGPU/Vulkan, flip the Y and Z axes of view and projection matrices by multiplying columns 1 and 2 by $-1.0$ [S1, unofficial]. Alternatively, apply the explicit conversion matrix $C$ with columns $(1,0,0,0)$, $(0,1,0,0)$, $(0,0,0.5,0)$, $(0,0,0.5,1)$ [S2, unofficial].
+
+7. **Compute Combined Matrices:**
+   $$ VP = P \times V $$
+   [S3, unofficial].
+   $$ VP^{-1} = (VP)^{-1} $$
+   [S2, unofficial].
+
+8. **Populate Camera Uniform:**
+   - Set `view_proj` to $VP$.
+   - Set `inv_view_proj` to $VP^{-1}$.
+   - Set `position` to eye coordinates.
+   - Set `_pad` to $0.0$ [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def construct_view_projection(eye, target, up, width, height, fov_deg, near, far, convert_coord_system=False):
+    # Step 1: Aspect Ratio
+    aspect = width / height
+    
+    # Step 2: Tangents of half-FOV (fov_deg is in degrees)
+    fov_rad = math.radians(fov_deg)
+    tan_fov_x = math.tan(fov_rad / 2.0)
+    tan_fov_y = tan_fov_x * height / width
+    
+    # Step 3: View Matrix (LookAt)
+    forward = np.array(target) - np.array(eye)
+    forward = forward / np.linalg.norm(forward)
+    right = np.cross(forward, np.array(up))
+    right = right / np.linalg.norm(right)
+    cam_up = np.cross(right, forward)
+    
+    view = np.eye(4)
+    view[0, 0:3] = right
+    view[1, 0:3] = cam_up
+    view[2, 0:3] = -forward
+    view[0, 3] = -np.dot(right, eye)
+    view[1, 3] = -np.dot(cam_up, eye)
+    view[2, 3] = np.dot(forward, eye)
+    
+    # Step 4: Projection Matrix (Standard perspective)
+    proj = np.zeros((4, 4))
+    proj[0, 0] = 1.0 / (aspect * tan_fov_y)
+    proj[1, 1] = 1.0 / tan_fov_y
+    proj[2, 2] = -(far + near) / (far - near)
+    proj[2, 3] = -2.0 * far * near / (far - near)
+    proj[3, 2] = -1.0
+    
+    # Step 5: Coordinate System Conversion
+    if convert_coord_system:
+        # Flip Y and Z axes by multiplying columns 1 and 2 by -1.0
+        view[:, 1] *= -1.0
+        view[:, 2] *= -1.0
+        proj[:, 1] *= -1.0
+        proj[:, 2] *= -1.0
+        
+    # Step 6: Combined Matrices
+    view_proj = proj @ view
+    inv_view_proj = np.linalg.inv(view_proj)
+    
+    # Step 7: Camera Uniform
+    camera_uniform = {
+        'view_proj': view_proj,
+        'inv_view_proj': inv_view_proj,
+        'position': eye,
+        '_pad': 0.0
+    }
+    
+    return view_proj, inv_view_proj, camera_uniform
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Use `f32` for GPU uniform; ensure alignment padding is correct to avoid shader access errors [S2, unofficial].
+- **Degenerate Input:** If `width` or `height` is zero, aspect ratio is undefined. Guard against division by zero [G].
+- **Coordinate Systems:** Apply the specified column flip or conversion matrix when switching between backends with different NDC conventions [S1, S2, unofficial].
+
+## Subtopics
+
+### [Camera Setup and Projection Matrix Construction](3965-camera-setup-and-projection-matrix-construction.md)
+Prepares camera parameters for rendering and training, handling downscaling, view matrix construction, and projection matrix calculation. It differs from standard graphics pipelines by deriving a custom projection matrix tailored for the specific near/far plane constraints of 3D Gaussian Splatting training, rather than using a standard OpenGL/DirectX default projection.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources. [G]
+- **Memory Complexity:** Not given in the sources. [G]
+- **Strengths:** Simple, fast, adaptable to different coordinate systems. [G]
+- **Limitations:** Requires manual handling of coordinate system conversions; not optimized for dynamic camera movements beyond standard lookAt updates. [G]
+- **When to Use:** When setting up a camera for Gaussian Splatting or similar point-based rendering techniques. [G]
+- **When Not to Use:** For complex camera rigs requiring skeletal animation or non-perspective projections. [G]
+
+## Background
+Originating from implementations of 3D Gaussian Splatting in Vulkan and OpenGL [S1, S3, unofficial], this method adapts standard graphics pipeline camera setup to handle the specific requirements of splat rendering, such as custom near/far planes and coordinate system conversions for different backends [S1, S2, S3, unofficial].
+
+## Sources
+[S1] Show HN: 3DGS.cpp – performant, cross platform Gaussian Splatting with Vulkan, https://github.com/shg8/3DGS.cpp, fetched 2026-10-26 (unofficial)
+[S2] scarlyle0/voxel-compare, https://github.com/scarlyle0/voxel-compare, fetched 2026-10-27 (unofficial)
+[S3] liaozhangsheng/gsplat-opengl, https://github.com/liaozhangsheng/gsplat-opengl, fetched 2026-10-28 (unofficial)

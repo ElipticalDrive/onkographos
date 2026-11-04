@@ -1,0 +1,171 @@
+# Non-Linear Gradient Interpolation for Pre-Integrated Volume Rendering
+
+Also called: Non-linear polynomial interpolation, Quadratic gradient interpolation
+
+## Overview
+This method approximates the non-linear path of a normalized gradient vector between front and back sample normals in pre-integrated volume rendering using a quadratic polynomial, thereby correcting the energy loss and shading errors inherent in linear interpolation [S1]. It enables the use of 2D pre-integration lookup tables instead of 3D tables, maintaining low memory usage and allowing real-time updates during transfer function changes [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Normalized gradient vector at the front sample $\nabla g(0)$, normalized gradient vector at the back sample $\nabla g(D)$, slab size $D$ (distance between consecutive sample points), and light direction $L$.
+*   **Outputs:** Approximated normalized gradient $\frac{\nabla g(t)}{\|\nabla g(t)\|}$ at position $t$ along the ray segment, where $0 \le t \le D$.
+
+**Data Structures:**
+No specific data structures are required beyond the scalar values and vectors defined above. The method relies on scalar arithmetic and vector operations.
+
+**Parameters:**
+*   $D$: The length of the sampling step (slab size) between two consecutive sample points [S1].
+*   $\nabla g(0)$: The gradient vector at the front sample point [S1].
+*   $\nabla g(D)$: The gradient vector at the back sample point [S1].
+
+**Step-by-Step Method:**
+
+1.  **Compute the angle $\alpha$:**
+    Calculate half the angle between the front normal $N_f$ and back normal $N_b$. Note that $N_f$ and $N_b$ are the normalized gradients $\frac{\nabla g(0)}{\|\nabla g(0)\|}$ and $\frac{\nabla g(D)}{\|\nabla g(D)\|}$ respectively.
+    $$ \alpha = \frac{\arccos(N_f \cdot N_b)}{2} $$
+    [S1]
+
+2.  **Compute the normalization term $\eta(t)$:**
+    The normalization term accounts for the fact that linear interpolation of normals results in a vector norm always lower than one. It is approximated by a quadratic function:
+    $$ \eta(t) \approx \frac{\cos(\alpha)}{x^2 (\cos(\alpha) - 1) + 1} $$
+    where the variable $x$ is defined as:
+    $$ x = \frac{\beta(t) - \alpha}{\alpha} = \frac{2t}{D} - 1 $$
+    and $\beta(t) = \frac{2\alpha t}{D}$ [S1].
+    
+    *Verification of boundary conditions:*
+    *   At $t=0$, $x=-1$, $\eta(0) = 1$.
+    *   At $t=D/2$, $x=0$, $\eta(D/2) = \cos(\alpha)$.
+    *   At $t=D$, $x=1$, $\eta(D) = 1$.
+    These match the exact values for the circular arc interpolation [S1].
+
+3.  **Compute the interpolated unnormalized gradient:**
+    Perform linear interpolation of the gradient vectors:
+    $$ G_{lin}(t) = \nabla g(0) \cdot \frac{t}{D} + \nabla g(D) \cdot \frac{D-t}{D} $$
+    [S1]
+
+4.  **Compute the final normalized gradient:**
+    Combine the linear interpolation with the normalization term. The final expression for the normalized gradient is:
+    $$ \frac{\nabla g(t)}{\|\nabla g(t)\|} \approx \frac{(1 + (\frac{2t}{D} - 1)^2 (\cos(\alpha) - 1)) \cdot G_{lin}(t)}{D \cdot \cos(\alpha)} $$
+    [S1]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def non_linear_gradient_interpolation(grad_front, grad_back, D, t):
+    """
+    Computes the normalized gradient at position t along a slab of size D.
+    
+    Args:
+        grad_front (tuple): Gradient vector (gx, gy, gz) at the front sample.
+        grad_back (tuple): Gradient vector (gx, gy, gz) at the back sample.
+        D (float): Slab size (distance between samples).
+        t (float): Position along the slab, 0 <= t <= D.
+        
+    Returns:
+        tuple: Normalized gradient vector (gx, gy, gz) at t.
+    """
+    # Step 1: Normalize input gradients to get normals Nf and Nb
+    norm_f = math.sqrt(sum(c**2 for c in grad_front))
+    norm_b = math.sqrt(sum(c**2 for c in grad_back))
+    
+    # Guard against zero-length gradients
+    if norm_f == 0 or norm_b == 0:
+        return (0.0, 0.0, 0.0)
+
+    Nf = (grad_front[0]/norm_f, grad_front[1]/norm_f, grad_front[2]/norm_f)
+    Nb = (grad_back[0]/norm_b, grad_back[1]/norm_b, grad_back[2]/norm_b)
+
+    # Step 2: Compute alpha
+    dot_product = Nf[0]*Nb[0] + Nf[1]*Nb[1] + Nf[2]*Nb[2]
+    # Clamp dot_product to [-1, 1] to handle floating point errors
+    dot_product = max(-1.0, min(1.0, dot_product))
+    alpha = math.acos(dot_product) / 2.0
+
+    # Step 3: Compute normalization term eta(t)
+    # x = 2t/D - 1
+    x = (2.0 * t / D) - 1.0
+    
+    cos_alpha = math.cos(alpha)
+    
+    # Denominator: x^2 * (cos(alpha) - 1) + 1
+    denom = (x * x) * (cos_alpha - 1.0) + 1.0
+    
+    # Guard against division by zero if denom is extremely close to 0
+    if abs(denom) < 1e-9:
+        # Fallback to linear interpolation normalized, though theoretically unlikely
+        # with valid inputs and this specific polynomial form
+        pass 
+        
+    eta = cos_alpha / denom
+
+    # Step 4: Linear interpolation of the raw gradient vectors
+    # G_lin(t) = grad_front * (t/D) + grad_back * ((D-t)/D)
+    factor_front = t / D
+    factor_back = (D - t) / D
+    
+    G_lin_x = grad_front[0] * factor_front + grad_back[0] * factor_back
+    G_lin_y = grad_front[1] * factor_front + grad_back[1] * factor_back
+    G_lin_z = grad_front[2] * factor_front + grad_back[2] * factor_back
+
+    # Step 5: Final normalized gradient
+    # Formula: (1 + x^2 * (cos(alpha) - 1)) * G_lin(t) / (D * cos(alpha))
+    # Note: The term (1 + x^2 * (cos(alpha) - 1)) is equivalent to cos(alpha) / eta
+    # But we use the explicit form from the source equation (6)
+    
+    numerator_scale = 1.0 + (x * x) * (cos_alpha - 1.0)
+    denominator_scale = D * cos_alpha
+    
+    # Guard against division by zero if cos(alpha) is 0 (90 degree angle)
+    if abs(cos_alpha) < 1e-9:
+        # If alpha is 90 degrees, cos(alpha) is 0. 
+        # The source formula divides by cos(alpha). 
+        # In practice, for 90 degrees, the error is small (0.3%), 
+        # but numerically this term blows up. 
+        # However, the source states the approximation matches exact values.
+        # At 90 degrees, alpha=pi/4, cos(alpha)=0.707. 
+        # Wait, alpha = acos(dot)/2. If dot=0, alpha=pi/4. cos(pi/4) != 0.
+        # cos(alpha) is only 0 if alpha=pi/2, meaning acos(dot)=pi, meaning dot=-1.
+        # If dot=-1, normals are opposite.
+        return (0.0, 0.0, 0.0) # Or handle as degenerate case
+
+    scale = numerator_scale / denominator_scale
+    
+    final_gx = G_lin_x * scale
+    final_gy = G_lin_y * scale
+    final_gz = G_lin_z * scale
+    
+    # The result from the formula is the normalized gradient vector.
+    # The source equation (6) yields the normalized vector directly.
+    return (final_gx, final_gy, final_gz)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Linear Interpolation Error:** Linear interpolation of normals (assuming $\eta(t)=1$) results in a vector norm always lower than one. This causes energy loss proportional to the angle between normals, especially affecting high-frequency components like specular highlights [S1]. For a 90-degree angle, this error reaches 41% [S1].
+*   **High Frequency Components:** The non-linear method reduces the maximal error to approximately 0.3% for a 90-degree angle [S1].
+*   **Zero-Length Gradients:** If either $\nabla g(0)$ or $\nabla g(D)$ is zero, normalization is undefined. A guard should be implemented [G].
+*   **Opposite Normals:** If $N_f = -N_b$, $\alpha = \pi/2$, $\cos(\alpha) = 0$. The denominator in the final formula becomes 0. This is a degenerate case where the gradient flips direction abruptly. The source does not explicitly define the behavior for $\cos(\alpha)=0$ other than the formula, but numerically this requires a guard [G].
+
+## Operating characteristics
+*   **Time Complexity:** The method involves basic arithmetic operations (dot product, acos, cos, square, multiply, add). It is computationally cheap, suitable for real-time rendering [S1].
+*   **Memory Complexity:** By using this approximation, the method allows the use of 2D pre-integration tables instead of 3D tables (which would depend on $\alpha$). This keeps memory usage low [S1].
+*   **Performance:** The method reduces shading errors significantly compared to linear interpolation (from 41% error to 0.3% for 90-degree angles) [S1].
+*   **Strengths:**
+    *   Avoids energy loss inherent in linear interpolation.
+    *   Maintains 2D lookup tables, enabling real-time updates during transfer function changes [S1].
+    *   Low memory footprint compared to 3D tables [S1].
+*   **Limitations:**
+    *   It is an approximation. While the error is very low (0.3%), it is not exact [S1].
+    *   Requires computing $\alpha$ and trigonometric functions per sample or per slab [S1].
+*   **When to use:** When high-quality shading with specular highlights is required in pre-integrated volume rendering, and real-time updates or low memory usage are constraints [S1].
+*   **When not to use:** If extreme precision is required and computational cost of 3D tables is acceptable, or if gradients are always very similar (small angles), where linear interpolation error is negligible [S1].
+
+## Background
+*   **Origin:** The method was introduced in the paper "Pre-Integrated Volume Rendering with Non-Linear Gradient Interpolation" [S1].
+*   **History:** Phong normal interpolation on surfaces is a well-studied problem [S1]. In volume rendering, gradients are typically interpolated and normalized on the fly using hardware trilinear filters. Pre-integrated volume rendering requires handling two gradients (front and back) per slab. The authors proposed this non-linear polynomial interpolation to improve shading quality while keeping the pre-integration tables 2D [S1].
+*   **Comparison:** Compared to linear interpolation (Lum et al. [8]), which assumes $\eta(t)=1$, this method significantly reduces energy loss [S1].
+
+## Sources
+[S1] Pre-Integrated Volume Rendering with Non-Linear ..., https://dpt-info.u-strasbg.fr/~dischler/papers/Vis2010.pdf, fetched 2026-10-28

@@ -1,0 +1,181 @@
+# Analytic Transmittance 3DGS
+
+Also called: Analytic transmittance computation for 3DGS, Volumetrically Consistent 3D Gaussian Rasterization, Volumetrically Consistent 3D Gaussian Splatting
+
+## Overview
+Analytic Transmittance 3DGS is a rasterization-based rendering method that replaces the approximate alpha computation of standard 3D Gaussian Splatting (3DGS) with an analytic integration of the volume rendering equation along the camera ray [S1]. It computes physically accurate transmittance and alpha values without projecting 3D Gaussians to 2D splats, thereby avoiding the linearization of the exponential transmittance and the assumption of non-self-occlusion inherent in splatting [S1]. Unlike its sibling [3D Gaussian Splatting Differentiable Rasterizer](2813-3d-gaussian-splatting-differentiable-rasterizer.md) which relies on 2D Gaussian projection, this method integrates 3D Gaussians directly in ray-space to better represent opaque surfaces and improve view synthesis quality [S1].
+
+## How it works
+The method builds on [3D Gaussian Splatting Rasterization](2812-3d-gaussian-splatting-rasterization.md) but replaces the alpha blending calculation with an exact volumetric integration. It assumes that 3D Gaussians are sorted front-to-back and do not overlap along the ray [S1]. If these assumptions are violated, the separation of transmittance terms is invalid [S1].
+
+### Inputs and Outputs
+**Inputs:**
+*   A set of $N$ 3D Gaussians, each defined by:
+    *   $\boldsymbol{\mu}_i$: 3D mean (center) [S1].
+    *   $\boldsymbol{\Sigma}_i$: 3D covariance matrix [S1].
+    *   $\kappa_i$: Density parameter [S1].
+    *   $c_i$: View-dependent color [S1].
+    *   $o_i$: Peak opacity, restricted to $[0, 1]$ [S1].
+*   Camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the origin and $\mathbf{d}$ is the direction [S1].
+*   Sorting order of Gaussians along the ray (front-to-back) [S1].
+
+**Outputs:**
+*   Pixel color $C(p)$ and accumulated opacity $\alpha_i$ for each Gaussian $i$ contributing to the pixel [S1].
+
+### Data Structures
+The method uses the standard 3D Gaussian attributes defined in [3D Gaussian Splatting Rasterization](2812-3d-gaussian-splatting-rasterization.md). No new complex data structures are required beyond the standard Gaussian attributes and the ray parameters. The density $\kappa$ is often reparameterized for optimization stability:
+$$ \kappa = -\log(1 - 0.99\theta) \frac{1}{3} \left( \frac{1}{s_x} + \frac{1}{s_y} + \frac{1}{s_z} \right) $$
+where $\theta \in [0, 1]$ is a learnable parameter and $s_x, s_y, s_z$ are scales [S1]. The constant $0.99$ promotes high density for small Gaussians [S1].
+
+### Formulas
+The unnormalized 3D Gaussian density function is [S1]:
+$$ G_i(\mathbf{x}) = \exp \left\{ -\frac{1}{2}(\mathbf{x} - \boldsymbol{\mu}_i)^T \boldsymbol{\Sigma}_i^{-1}(\mathbf{x} - \boldsymbol{\mu}_i) \right\} $$
+
+The total density field is [S1]:
+$$ \sigma(\mathbf{x}) = \sum_{i=1}^N \kappa_i G_i(\mathbf{x}) $$
+
+The exponential transmittance across a ray segment from $a$ to $b$ is [S1]:
+$$ T(a, b) = \exp \left( - \int_a^b \sigma(\mathbf{r}(s)) ds \right) $$
+
+To compute the accumulated transmittance $\overline{T}_j$ across a specific Gaussian $j$, we project the 3D Gaussian onto the 1D ray. The 1D Gaussian distribution $g_j(t)$ along the ray is [S1]:
+$$ g_j(t) = G_j(\gamma_j \mathbf{d}) \exp \left\{ -\frac{(t - \gamma_j)^2}{2\beta_j^2} \right\} $$
+where $\gamma_j$ is the mean and $\beta_j$ is the variance of the 1D Gaussian [S1]. These are computed as [S1]:
+$$ \gamma_j = \frac{(\boldsymbol{\mu}_j - \mathbf{o})^T \boldsymbol{\Sigma}_j^{-1} \mathbf{d}}{\mathbf{d}^T \boldsymbol{\Sigma}_j^{-1} \mathbf{d}}, \quad \beta_j = \frac{1}{\sqrt{\mathbf{d}^T \boldsymbol{\Sigma}_j^{-1} \mathbf{d}}} $$
+
+The integral of the 1D Gaussian from entry $t_{jn}$ to exit $t_{jf}$ is [S1]:
+$$ \int_{t_{jn}}^{t_{jf}} g_j(t) dt = G_j(\gamma_j \mathbf{d}) \sqrt{\frac{\pi}{2}} \beta_j \text{erf} \left( \frac{t - \gamma_j}{2\beta_j} \right) \Big|_{t_{jn}}^{t_{jf}} $$
+
+Assuming infinite support (integrating from $-\infty$ to $\infty$), the accumulated transmittance across Gaussian $j$ is [S1]:
+$$ \overline{T}_j = \exp \left( -\kappa_j G_j(\gamma_j \mathbf{d}) \sqrt{2\pi} \beta_j \right) $$
+
+The accumulated opacity $\alpha_i$ for the $i$-th Gaussian is derived from the transmittance entering and leaving it. Under the non-overlapping assumption, the opacity is [S1]:
+$$ \alpha_i = 1 - \overline{T}_i $$
+Note: In the general volume rendering equation, the opacity contribution is $\alpha_i = \int_{t_{in}}^{t_{if}} T(t_{in}, t) \kappa_i G_i(\mathbf{r}(t)) dt$, which simplifies to $1 - \overline{T}_i$ when $T(t_{in}, t)$ is constant across the non-overlapping primitive (i.e., $T(t_{in}, t) = \prod_{j=1}^{i-1} \overline{T}_j$) [S1].
+
+The final pixel color is computed via alpha blending [S1]:
+$$ C(p) = \sum_{i=1}^N c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+
+### Pseudocode
+The following pseudocode implements the analytic transmittance computation for a single pixel, assuming a list of sorted Gaussians intersecting the ray.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def analytic_transmittance_3dgs(ray_origin, ray_direction, gaussians):
+    """
+    Computes pixel color and alpha using analytic transmittance.
+    
+    Args:
+        ray_origin: 3D vector (o)
+        ray_direction: 3D vector (d), assumed normalized
+        gaussians: List of Gaussian objects, sorted front-to-back along the ray.
+                   Each Gaussian has:
+                   - mu: 3D vector (center)
+                   - Sigma_inv: 3x3 matrix (inverse covariance)
+                   - kappa: scalar (density)
+                   - color: 3D vector (c_i)
+                   - peak_opacity: scalar (o_i) [Note: In analytic method, peak opacity 
+                     is less critical than kappa, but retained for compatibility]
+    
+    Returns:
+        color: 3D vector (final pixel color)
+        accumulated_alpha: scalar (total opacity)
+    """
+    accumulated_transmittance = 1.0
+    final_color = [0.0, 0.0, 0.0]
+    
+    for g in gaussians:
+        # 1. Compute 1D Gaussian parameters
+        # delta_mu = mu - o
+        delta_mu = [g.mu[0] - ray_origin[0], 
+                    g.mu[1] - ray_origin[1], 
+                    g.mu[2] - ray_origin[2]]
+        
+        # d^T Sigma_inv d
+        # Let v = Sigma_inv * d
+        v = [0.0, 0.0, 0.0]
+        for i in range(3):
+            for j in range(3):
+                v[i] += g.Sigma_inv[i][j] * ray_direction[j]
+        
+        d_Sigma_inv_d = sum(ray_direction[i] * v[i] for i in range(3))
+        
+        # Avoid division by zero for degenerate Gaussians
+        if d_Sigma_inv_d < 1e-8:
+            continue
+            
+        # beta_j = 1 / sqrt(d^T Sigma_inv d)
+        beta_j = 1.0 / math.sqrt(d_Sigma_inv_d)
+        
+        # gamma_j = (mu - o)^T Sigma_inv d / (d^T Sigma_inv d)
+        # (mu - o)^T Sigma_inv d is dot(delta_mu, v)
+        gamma_j = sum(delta_mu[i] * v[i] for i in range(3)) / d_Sigma_inv_d
+        
+        # 2. Compute peak value of 3D Gaussian along the ray: G_j(gamma_j * d)
+        # The exponent argument at the mean projection:
+        # x_mean = o + gamma_j * d
+        # delta_mean = x_mean - mu = (o + gamma_j * d) - mu = -(mu - o) + gamma_j * d
+        # Actually, simpler: The exponent is -0.5 * (x - mu)^T Sigma_inv (x - mu)
+        # At x = o + gamma_j * d:
+        # x - mu = (o - mu) + gamma_j * d = -delta_mu + gamma_j * d
+        diff_at_mean = [-delta_mu[i] + gamma_j * ray_direction[i] for i in range(3)]
+        
+        # Exponent = -0.5 * diff^T Sigma_inv diff
+        # Let w = Sigma_inv * diff
+        w = [0.0, 0.0, 0.0]
+        for i in range(3):
+            for j in range(3):
+                w[i] += g.Sigma_inv[i][j] * diff_at_mean[j]
+                
+        exponent_arg = sum(diff_at_mean[i] * w[i] for i in range(3))
+        G_peak = math.exp(-0.5 * exponent_arg)
+        
+        # 3. Compute accumulated transmittance across this Gaussian
+        # T_j = exp(-kappa * G_peak * sqrt(2*pi) * beta)
+        # Note: The integral of the 1D Gaussian over infinite support is G_peak * sqrt(2*pi) * beta
+        integral_value = G_peak * math.sqrt(2.0 * math.pi) * beta_j
+        transmittance_across_g = math.exp(-g.kappa * integral_value)
+        
+        # 4. Compute opacity alpha_i for this Gaussian
+        # alpha_i = 1 - T_j (since T_in = accumulated_transmittance, T_out = accumulated_transmittance * T_j)
+        # The contribution to color is c_i * alpha_i * T_in
+        alpha_i = 1.0 - transmittance_across_g
+        
+        # 5. Add to final color
+        # C += c_i * alpha_i * accumulated_transmittance
+        for k in range(3):
+            final_color[k] += g.color[k] * alpha_i * accumulated_transmittance
+            
+        # 6. Update accumulated transmittance
+        accumulated_transmittance *= transmittance_across_g
+        
+    return final_color, 1.0 - accumulated_transmittance
+```
+
+### Parameters and Hyperparameters
+*   **Density Reparameterization**: $\kappa$ is reparameterized using $\theta \in [0, 1]$ as $\kappa = -\log(1 - 0.99\theta) \frac{1}{3} (\frac{1}{s_x} + \frac{1}{s_y} + \frac{1}{s_z})$ [S1].
+*   **Densification Heuristics**:
+    *   Halve density $\kappa$ after splitting and cloning [S1].
+    *   Split points with high density $\kappa$ [S1].
+    *   Prune points with low density based on $\theta$ (density before reparameterization) [S1].
+    *   Disable opacity reset during optimization [S1].
+
+### Edge Cases and Pitfalls
+*   **Overlap and Sorting**: The method relies on the assumptions that Gaussians are sorted front-to-back and do not overlap along the ray [S1]. If these are violated, the separation of transmittance terms is invalid, leading to artifacts [S1].
+*   **Degenerate Covariance**: If $\mathbf{d}^T \boldsymbol{\Sigma}_j^{-1} \mathbf{d}$ is near zero (e.g., Gaussian is infinitely thin in the ray direction), $\beta_j$ becomes large and numerical instability may occur. A guard check is required [G].
+*   **Infinite Support Assumption**: The analytic formula assumes infinite support for the Gaussian integral. For very small Gaussians or those far from the ray origin, this is a good approximation, but for Gaussians intersecting the ray near their tails, truncation errors may occur [S1].
+
+## Operating characteristics
+*   **Time Complexity**: Similar to 3DGS rasterization, $O(N)$ per pixel where $N$ is the number of Gaussians covering the pixel. The analytic computation adds a constant overhead per Gaussian (matrix-vector multiplications and exponentials) compared to the 2D splatting approximation.
+*   **Memory Complexity**: Same as 3DGS, storing $N$ Gaussians.
+*   **Performance**: On MipNeRF-360, the method achieves PSNR 27.30, SSIM 0.813, LPIPS 0.209, and FPS 136 on an Nvidia 3090-Ti GPU [S1]. This is slightly slower than standard 3DGS (159 FPS) but faster than some other variants like GES (186 FPS) [S1].
+*   **Strengths**: More physically accurate alpha values; better representation of opaque surfaces; fewer artifacts near edges; works out-of-the-box for tomography [S1].
+*   **Limitations**: Relies on non-overlapping assumption; slightly higher computational cost per Gaussian than 2D splatting [S1].
+
+## Background
+The method was introduced in "Volumetrically Consistent 3D Gaussian Rasterization" [S1]. It addresses the limitations of 3DGS splatting, which linearizes the exponential transmittance and assumes no self-occlusion [S1]. By analytically integrating the 3D Gaussian along the ray, it provides a more accurate volume rendering solution while maintaining rasterization speed [S1]. It is compatible with other 3DGS extensions and has been applied to view synthesis and tomography [S1].
+
+## Sources
+[S1] Volumetrically Consistent 3D Gaussian Rasterization, https://arxiv.org/abs/2412.03378v3, fetched 2026-10-26

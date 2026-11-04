@@ -1,0 +1,261 @@
+A custom ray-tracing engine for blender that allows the plug in of custom materials and custom ray tracing methods for astrophysically based ray tracing. - fix(#961,#1019,#884): one light pick per volume segment (Cycles light-tree segment importance); sample clamp on linear mean by HendrikGC02 · Pull Request #1054 · HendrikGC02/Astroray
+
+fix(#961,#1019,#884): one light pick per volume segment (Cycles light-tree segment importance); sample clamp on linear mean by HendrikGC02 · Pull Request #1054 · HendrikGC02/Astroray · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+HendrikGC02
+commented
+Oct 3, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Spot-lamp shaft through fog reads 0.70 (CPU) / 0.75 (GPU) of Cycles (corpus v2_media) #961 + Media: heavy-tailed variance (fireflies) in the smoke plume; relMSE falls slower than 1/N (equal-time efficiency 0.052 -> 0.006 vs Cycles OptiX) #1019 (one root cause). Light-tree mode of the Volume direct light: per-segment equiangular + distance MIS, absorption as weight #925/GPU twin of #925 per-segment volume direct light #929 segment volume NEE picked the anchor light at the segment midpoint, then picked again independently at P. When the midpoint was outside the spot cone (smoke VDB in front of fog) there was no anchor, and the exponential at the hull's global majorant could not reach the fog: mean deficit plus heavy tail. Fix ports Cycles light_tree_sample<true> / light_tree_pdf<true> / compute_v (intern/cycles/kernel/light/tree.h, Apache-2.0): one pick per segment (o, d, surfaceT), same light re-sampled at anchor and at P, segment-pdf forward MIS for lamp/emitter hits after a medium scatter. CPU state misSeg*; GPU state path_mis_n* (= P - origin), new path_mis_dt, flag env_nee_sampled_prev == 2. Review fix: a tree node whose children both have zero importance now means no light / pdf 0. Research note: .astroray_plan/docs/issue961-segment-light-tree-research.md.
+Indirect clamp removes far more energy on Astroray than Cycles in multi-scatter media (cabinet 9-10 % vs 2 %) #884. The issue's symptom (cabinet 9-10 % vs 2 %) does not reproduce on main (2.0 % vs 2.0 %, 3 seeds x 96 spp; branch 1.3 %). Clamp metric changed from XYZ Y to signed (R+G+B)/3 in linear Rec.709 (CPU clampMetricRGB, GPU gpu_clampContribMW), as Blender's setting means; signed over fabs by lead decision. Out-of-gamut narrowband difference documented in code, see Film: out-of-gamut channels clipped to 0 per pass/beauty; decide whether scene-linear output keeps negative values #1024.
+pkg296 clip-start test raised 64 -> 256 spp at the same tolerance (a 2.5-sigma single-seed gate flaked on the new RNG stream; the 8-seed mean is unbiased on main and on the branch).
+Removes the three Spot-lamp shaft through fog reads 0.70 (CPU) / 0.75 (GPU) of Cycles (corpus v2_media) #961 provisional rows (v2_media cpu shaft r/g/b/L, gpu shaft g, gpu_cpu shaft r). The Corpus v2 bands: CPU sigma from correlated seeds 278-282 is underestimated (mt19937 seed+tile streams overlap) #986 emitter_cool_glow row is kept (still a strict xfail).
+Numbers
+CPU v2_media, shaft ROI, luminance, seeds 11-16 (256 spp: 11-14), vs Cycles CPU 1024 spp:
+shaft mean 0.121-0.134 -> 0.184-0.193 (Cycles 0.187-0.189).
+N x relVar at 16/64/256 spp: shaft 27.7/31.9/71.3 -> 21.6/26.4/23.4; whole image 55.8/372.6/91.5 -> 29.0/27.6/25.5 (1/N restored; Cycles shaft 1.5, image 4-11). Tail variance share (top-pixel fraction, shaft, 256 spp) 0.456 -> 0.047.
+Equal-time noise bench (mc_tolerance.py --noise-bench, v2_media, 5 seeds, RTX 5070 Ti), branch vs ar-981 baseline, GPU efficiency relative to Cycles OptiX:
+ROI
+2 s
+10 s
+60 s
+image, before
+0.053
+0.028
+0.006
+image, after
+0.178
+0.115
+0.087
+shaft, before
+0.027
+0.001
+0.001
+shaft, after
+0.045
+0.051
+0.053
+N x relVar log-slope, GPU image 0.465 -> 0.017, shaft 0.965 -> -0.047 (0 = 1/N). CPU image 0.292 -> -0.012, shaft 0.591 -> -0.322.
+CPU efficiency vs Cycles CPU (image, 16/64/256 spp): 0.007/0.007/0.003 -> 0.011/0.011/0.010.
+Astroray is still ~17x Cycles' relVar per sample in the shaft: smoke VDB global-majorant distance sampling, follow-up Media: heterogeneous segment-NEE distance strategy uses the hull's global majorant (smoke VDB per-sample variance ~75x Cycles) #1032.
+Verification
+Corpus gates (tests/test_corpus_v2_parity.py, tests/test_production_corpus.py, build_cuda of f56509f, Blender 5.2): 624 passed, 111 xfailed, 1 failed. The one failure is v2_camera_geometry-gpu_cpu-motion_vane-L XPASS(strict) of the Motion-blurred rotating vane: Astroray reads 0.84x (perspective) / 0.40x (ortho) of Cycles (v2_camera_geometry) #947 row: a non-media scene this diff does not touch, not re-blessed here. All v2_media rows incl. the removed Spot-lamp shaft through fog reads 0.70 (CPU) / 0.75 (GPU) of Cycles (corpus v2_media) #961 rows pass.
+GPU tests, 31 files (media / clamp / light tree incl. new test_issue961_segment_light_tree.py, test_issue884_clamp_metric.py, test_1020): 230 passed, 3 skipped, 1 xfailed.
+CPU full suite (rebased, pre-review-fix MinGW build): 3465 passed, 4 failed: test_issue884 blue band (fixed since), test_jh_lookup_equality[1,2] (MinGW-only, passes on the MSVC build), test_roadmap_orchestrator_locks::test_simultaneous_contenders_have_one_owner hang (worker killed by PID, unattributed).
+cuobjdump on f56509f: stageShadeBucketed max 255 regs / stack 8104 (unchanged vs ar-981); fleet p0 128/432; volume scatter kernels 61/88; intersect max 186. stageRestirPrimaryKernel 242 -> 255 regs, stack +176 (clamp metric): at the limit, not over.
+Terra review: pass 1 CHANGES_REQUESTED (zero-importance fallback: fixed; clamp fabs: lead decided signed; doc nit: fixed; GPU mesh-boundary AABB: pre-existing, the binding docstring says GPU uses the AABB). Pass 2 on the final diff: VERDICT: APPROVE (one minor: trailing whitespace on two wavefront_state.cu lines, which is the CR of that file's CRLF endings, not real).
+Lint gate: 0 new findings except that CRLF artifact.
+Evidence: test_results/volumes/media-segment-light-pick/ (Cycles | CPU before | CPU after | GPU after sheet, N x relVar charts; visually inspected: beam now present and at Cycles brightness, still speckled).
+Build: CUDA build of f56509f by lead, exit 0; 5db2748 and later are comment/test/doc only. Last 5 build-log lines: to be pasted by lead.
+Authorized surface
+Spec/research note scope: include/astroray/{light_sampler,light_tree,gpu_wavefront_state}.h, include/raytracer.h, src/{light_sampler,light_tree,light_list}.cpp, src/gpu/{gpu_nee.cuh,gpu_spectral_tables.h,light_tree_device.cuh}, src/gpu/wavefront/{stage_advance.cu,stage_advance_device.cuh,stage_volume_hetero.cu,wavefront_state.cu}; tests (test_issue961_*, test_issue884_*, pkg296 spp bump), provisional_v2.toml (rows removed), pkg306 progress line, research note, evidence PNGs. Nothing outside this list.
+Follow-ups
+#1032 (smoke VDB per-sample variance ~75x Cycles), #1033 (transparent bounces counted as bounces), #1024 (out-of-gamut clamp difference).
+Closes #961, #1019, #884
+🤖 Generated with Claude Code
+HendrikGC02
+and others
+added 10 commits
+October 3, 2026 05:50
+fix(#961,#1019): CPU medium NEE picks one light per segment (Cycles l…
+…
+6b90691
+```
+…ight-tree segment importance)
+
+The light-tree path of the #925 segment direct light picked the equiangular
+anchor at the segment midpoint and connected an independent point pick at P.
+When the midpoint was outside a spot cone there was no anchor and the
+majorant-rate exponential alone could not reach the lit part of the ray: the
+v2_media spot shaft behind the smoke VDB read 0.67-0.71 of Cycles with a heavy
+tail (top-0.1 % variance share 0.96, relVar 64x Cycles at 64 spp).
+
+Port Cycles light_sample_from_volume_segment / light_tree_sample<true> /
+light_tree_pdf<true> (kernel/light/tree.h, Apache-2.0): the tree picks with the
+segment importance (theta_d/d at closest approach, compute_v), the same light is
+re-sampled at the anchor and at P with that selection pdf, the lamp/emitter hit
+after a medium scatter is MIS-weighted with the same segment pdf (Cycles
+mis_origin_n / previous_dt). Power sampler: unchanged estimator.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(#961,#1019): GPU twin of the per-segment light-tree pick + segmen…
+…
+2792c3e
+```
+…t forward MIS
+
+gpu_volumeSegmentDirect picks one light per segment with the light tree's
+segment importance (gpu_light_tree_pick_segment, Cycles light_tree_sample<true>)
+or the power CDF, clips spot/area, and re-samples that light at the anchor and
+at P. The intersect stage stores P - segment origin in path_mis_n* and the
+segment length in the new path_mis_dt at a grid or fog scatter; the scatter
+kernels flag the vertex with env_nee_sampled_prev = 2 (the surface shade keeps
+writing 0/1, so no shade-kernel change), and the lamp/emitter-hit MIS re-walks
+the segment pick (gpu_light_tree_pdf_segment). The env-miss MIS now tests == 1.
+
+Research: .astroray_plan/docs/issue961-segment-light-tree-research.md.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(#884): sample clamp compares (R+G+B)/3 in linear Rec.709, as Blen…
+…
+dab947b
+```
+…der's setting means
+
+Cycles scales the user limit by 3 and clamps when reduce_add(fabs(RGB)) exceeds
+it (scene/integrator.cpp, kernel/film/light_passes.h film_clamp_light): a
+per-channel-average limit. Astroray compared XYZ Y, so a saturated blue
+contribution passed at 4.6x the limit and a green one was cut at 0.47x. CPU
+clampMetricRGB / GPU gpu_clampContribMW now take the contribution's XYZ to linear
+Rec.709 and compare (R+G+B)/3 (signed: equal to the fabs sum in gamut, linear in
+XYZ, so a hero-wavelength sample's chroma noise does not inflate it).
+
+The #884 symptom itself (geometry_zoo cabinet, clamp 10, volume_bounces 4:
+Astroray 9-10 % removed vs Cycles 2 %) no longer reproduces on main f06f356:
+2.0 % vs 2.0 % (3 seeds x 96 spp); 1.3 % with this branch.
+
+Tests: tests/test_issue884_clamp_metric.py, tests/test_issue961_segment_light_tree.py
+(spot-in-fog single-scatter quadrature, tree == power behind a high-majorant grid,
+tree NEE on == off with several lights; the grid gate fails on main).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs(pkg306): record the media tail owner found by #961/#1019
+…
+ab51b37
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(pkg296): clip-start transmittance at 256 spp (single-seed 2.5-si…
+…
+13b5625
+```
+…gma gate flaked on the #961 RNG stream)
+
+Seed 2966 read 0.459/0.459/0.464 vs exp(-0.8)=0.449 after #961 changed the
+segment-NEE RNG consumption; the 8-seed mean is 0.448-0.450 on main and on this
+branch (per-seed sigma 0.005), so the estimator is unbiased and rtol 3 % at 64 spp
+was a 2.5-sigma gate. Same tolerance, 4x the samples.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs(#884): clamp metric comments point at the #1020 film matrix
+…
+e188fdf
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(#961 review): zero-importance tree node -> no light (Cycles), not…
+…
+f56509f
+```
+… left with pdf 0.5
+
+Terra: the < 1e-8 fallback always descended left but recorded 0.5, doubling the
+left subtree and giving the right one a pdf pick() could never produce. Like
+Cycles get_left_probability, a node whose children both have zero importance now
+fails the pick and has pdf 0 (CPU pickWith/pdfWith, GPU point and segment
+traversals). Also: env_nee_sampled_prev doc names the medium value 2, and the
+#884 test band follows the #1020 film matrix (blue clamps to 0.90 of Cycles).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs(#884): note the out-of-gamut difference of the signed clamp metr…
+…
+5db2748
+```
+…ic (#1024)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(#961): v2_media segment-light-pick evidence sheet + N x relVar c…
+…
+fd05c95
+```
+…harts
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+test(#961): drop the three v2_media shaft provisional rows (pending c…
+…
+91e178a
+```
+…orpus gate confirmation)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+HendrikGC02
+merged commit 305bf1a
+into
+main
+Oct 3, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+HendrikGC02
+added a commit
+that referenced
+this pull request
+Oct 3, 2026
+Merge origin/main (#1053, #1054, #1040) into lane/at-n1
+…
+5b92de4
+```
+Conflicts (native, manual): gpu_shadow_transmittance gained #1037's skipPrim; kept both trailing params (skipPrim, then my lpSwitch) and updated the single caller in stage_advance.cu.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+HendrikGC02
+added a commit
+that referenced
+this pull request
+Oct 3, 2026
+Merge origin/main into lane/au-caustic
+…
+600f6f1
+```
+Resolutions: spectral_path_tracer.cpp photon loop keeps the #959 Fresnel-roulette comment and takes main's #1037 selfPrim declaration (passedCaster is declared earlier in this branch; main's tr is unused here). provisional_v2.toml drops both sides' rows (#961 removed by #1054, #959 removed by this branch). test_results/index.html regenerated.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+This was referenced Oct 3, 2026
+feat(#991,#990): Light Path node + Attribute/Color Attribute/Object Info, CPU+GPU
+#1048
+Merged
+fix(#959,#1025): Fresnel-sampled caustic photons, any-caster split cull, CPU photon map from Blender; arbitration prism scene fixed
+#1055
+Merged
+HendrikGC02
+deleted the
+lane/au-media
+branch
+October 3, 2026 09:42
+HendrikGC02
+mentioned this pull request
+Oct 5, 2026
+Indirect clamp removes far more energy on Astroray than Cycles in multi-scatter media (cabinet 9-10 % vs 2 %)
+#884
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

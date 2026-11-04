@@ -1,0 +1,213 @@
+A Visual Exploration of Neural Radiance Fields
+A Visual Exploration of Neural Radiance Fields
+Moving beyond voxels through positional encoding.
+Neural Radiance Fields (NeRFs) provide a substantial step up in our ability to construct interactive, photorealistic 3D objects. The core of this capability comes from a "coordinate-based neural representation of low-dimensional signals". The goal of this post is to gain a strong intuition about what that means, and the trade-offs involved.
+Volume Rendering
+Before we dive into the details of how NeRF works, let us first get a better understanding of one way of viewing
+3D objects. A "volume" is a dataset spanning 3 spatial dimensions V : \mathbb{R}^3 \rightarrow F
+and can include several "features" for each point in space for example it could have a measure of density or
+texture. As opposed to meshes, volumes are not defined only by their surfaces, instead, they can often represent
+the entire space. Making them well-suited for considering semi-transparent objects; for our case let's define the
+"interesting" features for our volume as a colour RGB and a density \sigma.
+Creating a 2D image from a volume (known as rendering) consists of computing the "radiance" - the
+reflection, refraction and emittance of light of an object from a source to a particular observer - which can then
+be used to produce an RGB pixel grid showing what our model looks like.
+A common technique for volume rendering (and the one used in NeRF) is Ray Marching. Ray Marching constructs
+a series of rays; \mathbf{r}(t) = \mathbf{o} + t\mathbf{d}, defined by an origin vector and a direction
+vector for each pixel. We then sample along this ray to get both a colour, c_i, and a density,
+\sigma_i.
+To form an RGBA sample, a transfer function (from classical volume rendering
+) is applied to these samples. This transfer function progressively accumulates from the point close to
+the eye to the point where we exit our volume. We can think of this discretely, as:
+c = \sum^M T_i \alpha_i c_i
+where T_i = \prod^{i-1}_{j=1} (1 - \alpha_j), \alpha_i = 1 - e^{-\sigma_i \delta_i}
+, and \delta_i is the sampling distance.
+For the full details of how Ray Marching works, I'd recommend 1000 Forms of Bunny's guide, and you can
+also see the code used for the TensorFlow renderings in the Appendix which uses a
+camera projection for acquiring rays and a 64 point linear sample.
+In essence, the transfer function is designed to translate our common-sense understanding that if something is
+behind a dense / "non-transparent" object then it will contribute less to an image than if it was behind a
+less-dense / "transparent" object. The key requirement for the rendering component is that it is differentiable,
+and hence can be optimised over efficiently.
+With that out of the way, the innovation behind NeRF has little to do with the rendering approach - instead, it is
+about how you capture a volume. How do you encode the volume to allow it to be queryable at any arbitrary point in
+space? While also aware of non-"matte" surfaces?
+Volume Representation
+Let us first consider a naive approach for encoding volumes - voxel grids. Voxel grids apply an explicit
+discretisation to the 3D space, chunking up into cubes of space, storing the required metadata in an array (often
+referencing a material that includes colour, and viewpoint specific features which the ray marcher must take into
+account). The challenge with this internal representation is that it takes no advantage of any natural symmetries
+and the storage and rendering requirements explode in O(N^3). We also need to handle the
+viewpoint specific reflections and lighting separately in the rendering process which is a challenge in itself.
+You can get a good feel for the performance impact by increasing the level of granularity in the Sine-wave Voxel Grid. I encourage you to compare this level of detail and fluidity to our
+NeRF Lego bulldozer.
+Neural Radiance Fields (NeRF)
+What is a volume if not a function mapping? Given that there are clear symmetries in any particular volume, we'd
+like a method to learn to exploit those symmetries. Densely connected neural networks have been found to suit this
+task well, when given sufficient data.
+Neural Radiance Fields use a densely connected ReLU Neural Networks (8
+layers of 256 units) to represent this volume. The resulting Neural Network, F_\theta, can
+output a RGB\sigma value for each spatial/viewpoint pair. Implicitly this encodes all of the
+material properties that normally have to be manually specified; including lighting. Put more formally we can see
+this as:
+(\underbrace{x, y, z}_\text{Spatial}, \underbrace{\theta, \phi}_\text{Viewpoint}) \rightarrow F_{\theta}
+\rightarrow (\underbrace{r, g, b}_\text{Color}, \underbrace{\sigma}_\text{Density})
+2: NeRF multi-layer perceptron
+Optimising
+Adding these two components together - a compact, continuous volume estimator - and a volume renderer, we have
+sufficient components to construct a fully-differentiable pipeline to optimise our model. We can then minimise our
+pixel-squared error loss over our parameters.
+One of the most important things to remember is that there is zero training involved in basic NeRF models.
+There is no prior knowledge about what the image it is trying to create, nor any information about common
+materials or shapes. Insteadm each NeRF model is trained from scratch for each scene we want to synthesise. We can
+see the impact that has on both training time, and the data requirements in our training
+simulator.
+Challenges
+In addition to the extended training times, and substantial data requirements, there are also a few common
+failure cases that should be highlighted.
+Special Sauce
+You may notice that the above examples don't have the same clarity that the baked model.
+This is no accident, beyond just training time, state-of-the-art performance when optimising these densely
+connected networks requires a few additional techniques.
+Held-out Viewing Directions
+Rather than adding viewing direction to the original input to the function, it is best to leave the directions
+out of the first 4 layers. This reduces the number of view-dependent (often floating) artifacts that occur from a
+premature optimisation of a view-dependent feature before realising the underlying spatial structure.
+Fourier Transforms
+In truth, the input to the Neural Networks isn't the raw RGB images and viewpoints, instead, a pre-processing step
+is included to transform the position into sinusoidal signals of exponential frequencies.
+\begin{bmatrix}
+sin(\mathbf{v})cos(\mathbf{v}) \\
+sin(2 \mathbf{v})cos(2 \mathbf{v}) \\
+\vdots \\
+sin(2^{L - 1} \mathbf{v})cos(2^{L - 1} \mathbf{v})
+\end{bmatrix}
+This seemingly "magical" trick leads to substantially better results are removes a tendency to "blur" resulting
+images. The network architecture for NeRF (Densely connected ReLU) is incapable of modelling signals with fine
+detail, and fail to represent a signal's spatial and temporal derivatives, even though these are
+essential to the physical signals. This is a similar realisation to the work of Sitzmann , although approached by pre-processing as opposed to changing the network's
+activation function.
+A ReLU MLP with Fourier Features (of which Positional Encoding is one type) allows for these high frequency
+functions to be represented in low dimensional domains because the ReLU MLP acting as a dot product kernel, and
+the dot product of Fourier Features are stationary.
+Hierarchical Sampling
+One of the first questions that likely came to mind when talking about classical
+volume rendering was why we were using a uniform sampling system when the vast majority of models will have
+large quantities of empty space (with low densities) and diminishing value from samples behind dense objects.
+The original NeRF paper handles this by learning two models
+simultaneously - a coarse-grained model that provides density estimates from particular position/viewpoint pairs
+and a fine-grained model identical to the original model. The coarse-grained model is then used to re-weight the
+sampling of the fine-grained model and generally produces better results.
+Conclusion
+With this article, you should have obtained an overview of the original Neural Radiance Field paper, and
+developed a deeper understanding of how they work. As we have seen, Neural Radiance Fields can also offer a
+flexible framework for encoding 3D scenes for rendering and while they have several shortcomings, there are
+significant extensions possible to both alleviate and expand on the system proposed.
+Further Reading
+To hint at the variety of uses we add a short list of recent papers that have used a NeRF framework alongside the
+shortcomings they address:
+Slow (training + rendering)
+Neural Sparse Voxel Fields: organize scene as sparse voxel octree (10x render speedup).
+NERF++: Model the background separately.
+DeRF: “soft Voronoi diagrams” to take advantage of accelerator memory architectures.
+AutoInt: Learning the volume integral directly
+Learned Initialisations: Meta-Learning for initialisation
+JaxNeRF: Days => Hour training with JAX
+FastNERF: NeRF volume rendering equation factorisation (efficient caching) => 3000x speedup!
+KiloNERF: Replace MLP with thousands of tiny MLPs (kind of strange that this works…)
+SNeRG: Precompute and Bake NeRF into “Sparse Neural Radiance Grid”
+DONeRF: depth oracle network predicts ray sample locations for each view ray with a single
+network evaluation => 48x rendering speedup.
+Static scenes
+D-NeRF: Second MLP applies a translation-only deformation to each frame
+Nerfies (D-NeRF II): deformations are more general
+Space-Time Neural Irradiance Fields: Add time as an input
+Neural Scene Flow Fields: Use depth predictions as a prior & regularise by scene flow
+NeRFlow: D-NeRF Model with scene-flow across time.
+DynamicVS: Free-viewpoint video synthesis
+Skeleton Driven
+NARF: Local occupancy network per articulation; modulates conditionally trained NeRF
+Animatable NeRF: Mocap + Multi-view to create “blend-fields”.
+One lighting condition is encoded into the model
+NERF-W: Latent Codes for lighting
+Neural Reflectance Fields: Local Reflection Model (single-point lighting)
+NeRV: Second visibility MLP
+NeRD: Local Reflection Model
+Scene Representation
+Neural Scene Graphs: Several object-level NeRFs
+GIRAFFE: Object-level NeRF output feature vectors, composed by averaging, rendered to 2D Feature
+Map, upscaled to 2D image
+GANcraft: Voxel-Grid of objects to compose a scene
+EditNeRF: category-specific conditional NeRF (latent space editing / supervision)
+ObjectNeRF: Learn voxel embedding
+Zero Generalisation
+Light Field Networks: Learns the class of objects alongside the particular image to allow fewer
+shot generalisation
+Requires Pose
+BARF: Optimise over the scene and pose
+SCNeRF: BARF + “intrinsics”
+GNeRF: Rough initial pose network
+Ray Marching Code
+# Based on: https://github.com/bmild/nerf
+trans_t = lambda t : tf.convert_to_tensor([
+[1,0,0,0],
+[0,1,0,0],
+[0,0,1,t],
+[0,0,0,1],
+], dtype=tf.float32)
+rot_phi = lambda phi : tf.convert_to_tensor([
+[1,0,0,0],
+[0,tf.cos(phi),-tf.sin(phi),0],
+[0,tf.sin(phi), tf.cos(phi),0],
+[0,0,0,1],
+], dtype=tf.float32)
+rot_theta = lambda th : tf.convert_to_tensor([
+[tf.cos(th),0,-tf.sin(th),0],
+[0,1,0,0],
+[tf.sin(th),0, tf.cos(th),0],
+[0,0,0,1],
+], dtype=tf.float32)
+def pose_spherical(theta, phi, radius):
+c2w = trans_t(radius)
+c2w = rot_phi(phi/180.*np.pi) @ c2w
+c2w = rot_theta(theta/180.*np.pi) @ c2w
+c2w = np.array([[-1,0,0,0],[0,0,1,0],[0,1,0,0],[0,0,0,1]]) @ c2w
+return c2w
+def get_rays(H, W, focal, c2w):
+i, j = tf.meshgrid(tf.range(W, dtype=tf.float32), tf.range(H, dtype=tf.float32), indexing='xy')
+dirs = tf.stack([(i-W*.5)/focal, -(j-H*.5)/focal, -tf.ones_like(i)], -1)
+rays_d = tf.reduce_sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)
+rays_o = tf.broadcast_to(c2w[:3,-1], tf.shape(rays_d))
+return rays_o, rays_d
+def render_rays(network_fn, rays_o, rays_d, near, far, N_samples, rand=False):
+def batchify(fn, chunk=1024*32):
+return lambda inputs : tf.concat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+# Compute 3D query points
+z_vals = tf.linspace(near, far, N_samples)
+if rand:
+z_vals += tf.random.uniform(list(rays_o.shape[:-1]) + [N_samples]) * (far-near)/N_samples
+pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None]
+# Run network
+pts_flat = tf.reshape(pts, [-1,3])
+pts_flat = embed_fn(pts_flat)
+raw = batchify(network_fn)(pts_flat)
+raw = tf.reshape(raw, list(pts.shape[:-1]) + [4])
+# Compute opacities and colors
+sigma_a = tf.nn.relu(raw[...,3])
+rgb = tf.math.sigmoid(raw[...,:3])
+# Do volume rendering
+dists = tf.concat([z_vals[..., 1:] - z_vals[..., :-1], tf.broadcast_to([1e10], z_vals[...,:1].shape)], -1)
+alpha = 1.-tf.exp(-sigma_a * dists)
+weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
+rgb_map = tf.reduce_sum(weights[...,None] * rgb, -2)
+depth_map = tf.reduce_sum(weights * z_vals, -1)
+acc_map = tf.reduce_sum(weights, -1)
+return rgb_map, depth_map, acc_map
+def view_given_position(**kwargs):
+c2w = pose_spherical(**kwargs)
+rays_o, rays_d = get_rays(H, W, focal, c2w[:3,:4])
+rgb, depth, acc = render_rays(model, rays_o, rays_d, near=2., far=6., N_samples=N_samples)
+img = np.clip(rgb,0,1)
+plt.figure(2, figsize=(20,6))
+plt.imshow(img)
+plt.show()

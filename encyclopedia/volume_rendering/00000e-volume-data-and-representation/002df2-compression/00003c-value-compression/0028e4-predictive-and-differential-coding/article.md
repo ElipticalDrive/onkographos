@@ -1,0 +1,61 @@
+# Predictive and Differential Coding
+
+Also called: Differential Pulse Code Modulation (DPCM), Linear Predictive Coding (LPC), Delta Encoding
+
+## Overview
+Predictive and Differential Coding compresses volume data by encoding the difference between a predicted value and the actual value, rather than encoding the absolute values directly. This exploits local spatial or temporal correlation to reduce the entropy of the data, making it more amenable to entropy coding. It sets itself apart from transform-based methods (like [Triadic frequency band decomposition](828-triadic-frequency-band-decomposition.md)) by operating directly on the sample domain to preserve local detail, and from block codecs by often relying on sequential or directional dependencies rather than fixed spatial blocks.
+
+## Shared principles
+The core mechanism involves two steps: prediction and differential encoding.
+
+1.  **Prediction:** For a target voxel $v$, a predicted value $\hat{v}$ is computed based on neighboring voxels that have already been encoded or decoded. The prediction model depends on the data structure (e.g., 1D sequence, 3D grid, or temporal series).
+2.  **Differential Encoding:** The residual (error) $e$ is calculated as the difference between the actual value and the prediction:
+    $$ e = v - \hat{v} $$
+    This residual typically has a smaller dynamic range and higher concentration around zero than the original data, allowing for more efficient storage (e.g., fewer bits or better entropy coding performance).
+
+**Decoding:** The original value is reconstructed by adding the decoded residual to the prediction:
+$$ v = \hat{v} + e $$
+
+**Key Constraints:**
+*   **Causality:** In streaming or sequential contexts, the prediction must rely only on data available at the time of encoding/decoding to avoid lookahead requirements.
+*   **Error Propagation:** In simple delta encoding (a form of predictive coding), errors in the residual can accumulate if not handled carefully, though integer arithmetic in heightfields mitigates this [S1, unofficial].
+*   **Directionality:** In complex 3D or holographic data, the "neighborhood" for prediction may be selected based on directional correlation to minimize residual entropy [S1, unofficial].
+
+## Subtopics
+
+### [Delta Encoding](1096-delta-encoding.md)
+[Delta Encoding](1096-delta-encoding.md) is a specific form of predictive coding where the prediction for a value is simply the previous value in a sequence. It is optimal for data with high local correlation, such as heightfields or gstack intervals. It differs from sibling methods like Run-Length Encoding by focusing on value differences rather than repetition, but lacks the random access capabilities of block-based variants.
+
+### [Residual Updates in Transform Domain](5256-residual-updates-in-transform-domain.md)
+[Residual Updates in Transform Domain](5256-residual-updates-in-transform-domain.md) applies predictive coding in the frequency domain (e.g., DCT). Instead of predicting spatial values, it predicts transform coefficients using a reference frame, encoding only the difference. This is particularly effective for temporal redundancy in video-like volume data.
+
+### Directional Linear Predictive Coding
+*   **Definition:** Compresses hologram interference patterns losslessly by exploiting directional correlation using DPCM and linear prediction [S1, unofficial].
+*   **Method:**
+    1.  Segment interference patterns into blocks [S1, unofficial].
+    2.  Scan pixels in eight directions for each block [S1, unofficial].
+    3.  Calculate entropy in each direction [S1, unofficial].
+    4.  Determine the direction with minimum entropy [S1, unofficial].
+    5.  Encode the difference by DPCM in the determined direction [S1, unofficial].
+    6.  Calculate prediction coefficients for the determined direction [S1, unofficial].
+    7.  Use DPCM only to determine the prediction direction for the original pixel [S1, unofficial].
+    8.  Calculate the difference between the predicted and the original pixel [S1, unofficial].
+*   **Performance:** The first process (directional DPCM) achieved a compression rate of 26.7% [S1, unofficial].
+
+### JPEG-LS
+*   **Definition:** An older JPEG standard variant tested against 3-D/2-D MLZC, featuring seven prediction modes [S2].
+*   **Comparison:** Provides the best compression for ANGIO data but lacks quality scalability and simultaneous lossy/lossless support in the same codestream [S2].
+
+### Inter-frame Delta Encoding with Haar Wavelets
+*   **Definition:** Classifies each time step as an intra-coded or predictive frame. All frames are encoded with Haar wavelets, but predictive frames are also expressed as deltas with respect to previous frames and then encoded [S3, unofficial].
+
+### Functional Representation (Spherical Ellipsoids)
+*   **Definition:** An approach similar to inter-frame delta encoding but encodes data with a functional representation based on spherical ellipsoids [S3, unofficial].
+
+## Background
+Predictive coding has its roots in speech and image compression, where Differential Pulse Code Modulation (DPCM) was widely used. In volume rendering, it is applied to exploit the high redundancy in medical imaging (CT, MRI) and scientific datasets. The transition from 2D image prediction to 3D volume prediction involves extending the neighborhood model from 2D pixels to 3D voxels, often considering spatial and temporal dimensions for time-varying data.
+
+## Sources
+[S1] Holographic display method for volume data by volume rendering, https://www.researchgate.net/publication/330223296_Holographic_display_method_for_volume_data_by_volume_rendering, fetched 2026-10-27 (unofficial)
+[S2] Three-dimensional encoding/two-dimensional decoding of medical data, https://doi.org/10.1109/tmi.2003.809689, fetched 2026-10-26
+[S3] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27 (unofficial)

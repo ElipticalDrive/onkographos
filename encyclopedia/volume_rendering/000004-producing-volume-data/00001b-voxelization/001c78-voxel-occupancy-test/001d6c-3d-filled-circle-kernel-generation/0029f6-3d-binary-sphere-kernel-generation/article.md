@@ -1,0 +1,109 @@
+# 3D Binary Sphere Kernel Generation
+
+Also called: Sphere Volume Generation for Marching Cubes
+
+## Overview
+This method procedurally generates a 3D binary scalar field (density texture) representing a sphere centered at the origin of a voxel grid, specifically designed as input for GPU-based Marching Cubes surface extraction. Unlike static voxelization, this implementation features a time-varying radius that oscillates, creating a dynamic volume. It differs from its parent [3D Filled Circle Kernel Generation](1520-3d-filled-circle-kernel-generation.md) by explicitly targeting the `DensityTexture` property of a Marching Cubes component and utilizing a specific oscillating radius formula rather than a static threshold.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** `Resolution` (integer, dimension of the cubic grid), `Time.time` (float, current simulation time).
+*   **Output:** A 3D texture `densityTexture` of size `Resolution` x `Resolution` x `Resolution` with format `RFloat` (single-channel float), and a 1D array `colors` of size `Resolution^3` storing the density values in the red channel.
+
+**Data Structures:**
+*   `colors`: 1D array of size $N^3$ (where $N = \text{Resolution}$). Each element is a color/vector with a red channel `r` storing the binary density (0 or 1).
+*   `densityTexture`: 3D texture, dimensions $N \times N \times N$, format `RFloat`, wrap mode `Clamp`.
+
+**Parameters:**
+*   `Resolution`: Grid dimension. Typical values depend on desired surface smoothness; higher resolutions reduce aliasing but increase memory.
+*   `Time.time`: Continuous time variable.
+
+**Steps:**
+1.  Initialize `colors` array of size $N^3$ with white values (or zero-initialized, as only the red channel is used).
+2.  Calculate the current radius `resol` using the oscillating formula:
+    $$ \text{resol} = \frac{N - 2}{2} \times \sin(0.25 \times \text{Time.time}) $$
+    The radius oscillates between $0$ and $\frac{N-2}{2}$.
+3.  Iterate through all voxel indices `idx` from $0$ to $N^3 - 1$. This is typically done using nested loops for $z$, $y$, and $x$:
+    $$ \text{idx} = z \cdot N^2 + y \cdot N + x $$
+4.  For each voxel $(x, y, z)$, compute normalized coordinates relative to the center of the volume:
+    $$ s_x = x - \frac{N}{2} $$
+    $$ s_y = y - \frac{N}{2} $$
+    $$ s_z = z - \frac{N}{2} $$
+5.  Determine the density value `amount` by checking if the squared Euclidean distance from the center is less than or equal to the squared radius:
+    $$ \text{amount} = \begin{cases} 1 & \text{if } s_x^2 + s_y^2 + s_z^2 \le \text{resol}^2 \\ 0 & \text{otherwise} \end{cases} $$
+6.  Store the density value in the red channel of the color array:
+    $$ \text{colors}[\text{idx}].r = \text{amount} $$
+7.  Upload the computed `colors` array to the 3D texture `densityTexture` using `SetPixels` and `Apply` (or equivalent GPU upload mechanism).
+8.  Assign `densityTexture` to the Marching Cubes component's `DensityTexture` property.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_sphere_kernel(Resolution, Time_time):
+    N = Resolution
+    num_voxels = N * N * N
+    
+    # Initialize colors array (R, G, B, A)
+    # Only R channel is used for density
+    colors = [Vector4(1.0, 1.0, 1.0, 1.0) for _ in range(num_voxels)]
+    
+    # Calculate oscillating radius
+    # Radius oscillates between 0 and (N-2)/2
+    resol = ((N - 2) / 2.0) * math.sin(0.25 * Time_time)
+    resol_sq = resol * resol
+    
+    center = N / 2.0
+    
+    for z in range(N):
+        for y in range(N):
+            for x in range(N):
+                idx = z * N * N + y * N + x
+                
+                # Normalized coordinates relative to center
+                sx = x - center
+                sy = y - center
+                sz = z - center
+                
+                # Squared distance from center
+                dist_sq = sx*sx + sy*sy + sz*sz
+                
+                # Binary density: 1 if inside sphere, 0 otherwise
+                if dist_sq <= resol_sq:
+                    colors[idx].r = 1.0
+                else:
+                    colors[idx].r = 0.0
+                    
+    # Upload to 3D texture
+    # densityTexture.SetPixels(colors)
+    # densityTexture.Apply()
+    # marching_cubes_component.DensityTexture = densityTexture
+    
+    return colors
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The comparison `dist_sq <= resol_sq` is sensitive to floating-point precision. For very large resolutions or small radii, this may cause aliasing or incorrect boundary voxels.
+*   **Boundary Conditions:** The radius formula uses `(N-2)/2`, leaving a 1-voxel border around the sphere. This ensures the sphere never touches the grid boundaries, which might be important for certain marching cubes implementations that assume a buffer.
+*   **Time Variation:** If `Time.time` is not continuous or resets, the sphere will jump. Ensure `Time.time` is a monotonically increasing value.
+*   **Zero Radius:** When `sin(0.25 * Time.time) == 0`, the radius is 0, and the entire volume is empty (all zeros).
+
+## Subtopics
+
+### Sphere Carving
+A method that subtracts a sphere from an existing volume. Choose this when you need to hollow out a region rather than generate a solid sphere. [Sphere Carving](2377-sphere-carving.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(N^3)$, where $N$ is the resolution. Every voxel is visited once.
+*   **Memory Complexity:** $O(N^3)$ for the `colors` array and the 3D texture.
+*   **Performance:** The method is computationally lightweight per voxel (simple arithmetic and comparison). However, uploading the texture to the GPU every frame can be a bottleneck if done naively. Using a compute shader or persistent mapped memory can improve performance.
+*   **Strengths:** Simple to implement, produces a smooth sphere for Marching Cubes, dynamic radius.
+*   **Limitations:** Binary field may lead to aliasing artifacts in the extracted mesh if the resolution is too low. The oscillating radius is specific to this implementation and may not be suitable for static scenes.
+*   **When to use:** When a dynamic, procedurally generated sphere is needed for Marching Cubes surface extraction, and the oscillating behavior is desired.
+*   **When not to use:** For static spheres (use a static kernel), or when higher-order interpolation is needed (use a signed distance field).
+
+## Background
+This method originates from an unofficial Unity-based implementation of GPU Marching Cubes by Pavel Kouril. It is designed to demonstrate procedural geometry generation within the Unity engine, leveraging the `Marching Cubes` component's ability to accept a `DensityTexture`. The oscillating radius is a visual effect to demonstrate the dynamic nature of the volume.
+
+## Sources
+[S1] pavelkouril/unity-marching-cubes-gpu, https://github.com/pavelkouril/unity-marching-cubes-gpu, fetched 2026-10-26 (unofficial)

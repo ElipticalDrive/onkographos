@@ -1,0 +1,143 @@
+# Real-Time Image-Based Volume Lighting
+
+Cyril Delalandre Pascal Gautron Jean-Eudes Marvie Technicolor
+
+
+
+Figure 1: Our solution computes single scattering due to distant lighting using an optimized spherical harmonics projection of the scattered radiance.
+
+# 1. Introduction
+
+The interaction of translucent objects with light creates complex effects such as scattering, absorption and volumetric shadows. While most accurate rendering approaches resort to heavy computations, recent needs in interactive applications have led to new types of algorithms, trading quality or genericity for speed.
+
+We propose a two-step, GPU-friendly technique for realtime rendering of heterogeneous participating media under distant environment lighting (Figure 1\). First, our algorithm estimates the spherical scattered radiance at a number of points in the medium and projects this function into the spherical harmonics basis. In the second step we render use the scattered radiance information to compute single scattering by ray-marching. Our method is easy to implement using GPU shaders and does not require any precomputation, hence supporting dynamic lighting, animated media, dynamic optical properties of the volume, emission and selfshadowing.
+
+# 2. Related Work
+
+Rendering participating media remains a widely studied topic [CFP∗05]. Some of these techniques generate high quality images using offline stochastic techniques such as Monte Carlo path tracing [Sta94] or variations on photon mapping [JNSJ11]. To achieve interactive or real-time performance, some techniques introduce restrictive assumptions by considering homogeneous media [WR08] or point lighting [DGMF11]. In the real world objects are lit by their entire environment. To enhance realism of rendered media some approaches [ZRL∗08] simulate distant lighting to illuminate the medium. After a computationally-intensive volume analysis, this technique renders predetermined volumes in real-time. Another interactive technique [NGS09] leverages medium sparsity for interactive lighting from a constellation of point light sources. The proposed concepts of distance function and validity masks could be merged with our technique for further performance.
+
+Spherical harmonics projection has been extensively used in computer graphics in the last decade. In particular, the Precomputed Radiance Transfer techniques initiated by Sloan et al. [SKS02] have given rise to numerous solution for real-time lighting under low-frequency environments. However, most methods share the need for long, modeldependent precomputations. Our method leverages techniques similar to PRT, while avoiding precomputations.
+
+# 3. Technical Background
+
+# 3.1. Single scattering
+
+The interaction between light and participating media is fully described by the radiative transport equation [Cha50]. At each point p a participating medium is described by its coefficients of absorption σ*a*(p) and scattering σ*s*(p), as well as its extinction σ*t*(p) = σ*a*(p)+σ*s*(p). The amount of light scattered at p from the incoming direction ωi towards ωo is given by the phase function p(p,ωo,ωi).
+
+The radiance reaching a point c (Figure 2\) due to single scattering along a direction ωo is given by integrating the scattering events occurring between pin and pout as follows:
+
+$$L(\mathbf{p}_{\text{in}}, \mathbf{\omega}_0) = \int_{\mathbf{p}_{\text{in}}}^{\mathbf{p}_{\text{out}}} R_S(\mathbf{p}_{\text{n}}, \mathbf{\omega}_0) e^{\int_{\mathbf{p}_{\text{in}}}^{\mathbf{p}_{\text{out}}} -\sigma_i(\mathbf{p}) d\mathbf{p}} d\mathbf{p}_{\text{n}} \quad (1)$$
+
+where e R pn pin −σ*t*(p)dp is the attenuation along |pnpin|. Rs(pn,ωo) is the radiance scattered at pn towards ωo:
+
+$$R_s(\mathbf{p}_n, \omega_0) = \sigma_s(\mathbf{p}_n) \int_{\Omega} p(\mathbf{p}_n, \omega_0, \omega_1) L(\omega_1) e^{\int_{\mathbf{p}_n}^{\mathbf{p}_n} - \sigma_t(\mathbf{k}) \mathrm{d}\mathbf{k}} \mathrm{d}\omega_1 \quad (2)$$
+
+
+
+Figure 2: Notations and principle of a ray-marching single scattering estimation within a bounded a participating medium. The light reduced intensity of the environment map is estimated for each direction ωo along [kin,pn].
+
+As those integral equations cannot be solved analytically nor numerically in a reasonable time, a classical approach consists in caching directional data using spherical harmonics.
+
+#### 3.2. Spherical Harmonics
+
+Real spherical harmonics define an orthonormal functional basis over the sphere:
+
+$$Y_l^m(\theta, \phi) = \begin{cases} \sqrt{2}K_l^m \cos(m\phi) P_l^m(\cos(\theta)) & m > 0, \\ \sqrt{2}K_l^m \sin(|m|\phi) P_l^{|m|}(\cos(\theta)) & m < 0, \\ \sqrt{2}K_l^0 P_l^0(\cos(\theta)) & m = 0 \end{cases} \quad (3)$$
+
+where Pm l are the associated Legendre polynomials and Km l is the normalization constant. This extends the principle of Fourier transforms to the spherical domain, allowing the representation of a spherical function f as a vector of coefficients f. The orthonormality of the SH basis reduces the dot product of two functions f and g to:
+
+
+$$\int f(s)g(s)ds = \sum_{l=0}^N \sum_{m=-l}^{m=l} \mathfrak{f}_l^m \mathbf{g}_l^m \quad (4)$$
+
+
+
+Figure 3: Offline rendering of a volume under a fully detailed environment map (a) and its reconstruction from 9 SH coefficients (b). As scattering smoothes out high frequency lighting details both images remain visually similar.
+
+Similarly, the triple product of functions f , g, and h represented by their SH vectors f, g and h is:
+
+
+$$\int f(s)g(s)h(s)ds = \sum_i \sum_j \sum_k \mathbf{f}_i \mathbf{g}_j \mathbf{h}_k C_{ijk} \quad (5)$$
+
+where*Ci jk* = R Ω Yi(ω)Yj(ω)Yk(ω)d*ω. Despite the sparsity of *C, the costs of the triple product quickly become prohibitive in real-time applications.
+
+## 4. Our algorithm
+
+The scattered radiance equation features three spherical functions: the incoming radiance L(ωi), the radiance attenuation e R kin pn −σ*t*(k)dk) and the phase function p(p,ωo,ωi).
+
+Using spherical harmonics for each component, the scattered radiance equation is equivalent to the costly triple product shown in Equation 5. Based on this observation we divide Equation 2 into two factors to reduce the computation to a simple dot product (Equation 4\). The volume-independent factor FInd, which does not change during rendering and the volume-dependent factor FDep which varies over time and must be recomputed for each frame.
+
+For clarity our exposition considers isotropic media only. In this case FInd is the light intensity L(ω*i*) and FDep corresponds to the product of the reduced intensity by the phase function. We relieve this limitation in Section 4.4.
+
+#### 4.1. Light intensity projection
+
+As in [SKS02] the distant incoming lighting L(ω*i*) is provided by a HDR image projected into SH. As scattering effects tend to act as a low-pass filter on the environment light, our experiments show that even using a low number of coefficients (typically 9) the loss of high frequency details of the environment map remains visually innocuous (Figure 3\).
+
+## 4.2. Reduced Intensity Projection
+
+The remaining factor FDep represents the dot product of the phase function and the transmittance. This function depends on two directions:
+
+$$F_{Dep}(\mathbf{p}, \boldsymbol{\omega}_i, \boldsymbol{\omega}_0) = p(\mathbf{p}, \boldsymbol{\omega}_0, \boldsymbol{\omega}_i) e^{\int_{\mathbf{p}}^{\mathbf{k}_{\text{in}}} - \sigma_i(\mathbf{k}) d\mathbf{k}} \quad (6)$$
+
+The phase function being constant in isotropic media, FDep collapses to:
+
+
+$$F_{Dep}(\mathbf{p}, \boldsymbol{\omega}_i) = \frac{1}{4\pi} e^{i\mathbf{k}_{\text{in}} - \sigma_i(\mathbf{k}) d\mathbf{k}} \quad (7)$$
+
+The remainder of Equation 7 is the transmittance between the entry kin and p. For heterogeneous media, this factor cannot be computed analytically. We thus use a raymarching based algorithm for each direction ωi. The main idea of our method is to cache this reduced intensity factor to amortize the evaluation costs during the rendering step.
+
+Reduced intensity record The projection of the volumedependent factor FDep into spherical harmonics must be performed for each frame and may constitute a bottleneck. The numerical integration is then performed using a very low number of samples. The HEALPix distribution [GHB∗04] not only provides evenly distributed samples around the sphere, but also generates elements along discrete rings of constant latitude. The associated Legendre polynomials can then be evaluated once per row instead of per sample.
+
+Considering a point p inside the medium, we compute the intersection point kin between the bounding box of the medium and each sample ray (p,ωi). The reduced intensity is obtained by sampling the medium along the path ||pkin||. The spherical reduced intensity is then projected into spherical harmonics. The coefficients along with the location of p are then packed into a reduced intensity record.
+
+Record grid Generating a reduced intensity record containing 9 half-precision coefficients for each voxel of a 5123 voxel grid would occupy an impractical 2.25 GB of graphics memory. Instead, we subdivide the bounding box of the medium into a coarse uniform grid. As light scattering can be considered as a diffusion process [Sta95], the reduced intensity tends to vary relatively slowly across a medium. We thus assign the same set of spherical harmonics coefficients for each point in a grid cell, the center of the cell being the origin of the projection. We implement the cell grid using multiple 2D-floating point textures where each texel of the texture contains the set of coefficient of a cell.
+
+The size of the cell influences the rendering quality: using small cells size converges towards the reference solution at the expense of computational efficiency (Figure 4\).
+
+Depending on the configuration of the medium several cells may only cover empty voxels. Further speedup is then achieved by aggressively eliminating empty cells from the grid. Each cell is probed by evaluating the volume density at a number of sample points, and marked as empty if the overall density is null. As shown in Figure 5 agressive cell elimination does not introduce visible artifacts.
+
+#### 4.3. Rendering
+
+After projecting volume-dependent and -independent factors we render the medium using a ray-marching algorithm to
+
+
+
+Figure 5: Cells density with eliminated non-empty cells shown in red: reference (a), 33 (b), and 103 samples (c).
+
+solve Equation 1. For each pixel we cast a ray in the direction ωo and intersect the bounding box of the medium to determine the entry point pin and the exit point pout. We then sample the ray along the path |pinpout|. For each sample pn we compute the scattered radiance. We first determine the cell containing pn and fetch the corresponding set of coefficients from the record array. We then compute the dot product between these two sets of coefficients to get the scattered radiance. For all rays intersecting the medium we sum the scattered radiance contributions from the samples pn attenuated by the medium along the path |pinpn|. For isotropic static media, FDep can then be projected only once.
+
+## 4.4. Anisotropic Media
+
+In anisotropic media (Figure 6\(b\)\) the phase function depends on both ωi and ωo. A solution for dynamic media directly uses our grid subdivision: Given a viewing direction ωo we evaluate the phase function p for each direction sample ωi. We then store the product of p and L into FDep.
+
+Static media could benefit from another formulation: FInd can represent the phase function while FDep stores the product of the reduced intensity and the incoming lighting. The phase function can typically be projected for a number of outgoing directions, as proposed in [KSS02]. This second method allows us to recompute the dynamic factor for static media only when the lighting conditions change.
+
+
+
+Figure 4: Comparison between a reference solution and our method with different grid resolutions using a 5123 volume.
+
+| Grid resolution  | Ref. | 103   | 50 3  | 100 3 |
+|------------------|------|-------|-------|-------|
+| Dynamic lighting | 0.07 | 28.00 | 10.70 | 3.81  |
+| Static lighting  | 0.07 | 31.90 | 31.90 | 31.90 |
+
+Table 1: Rendering speed (fps) using 9 SH coefficients to render 1280×720 images.
+
+#### 4.5. Emissive media
+
+Our solution easily extends to emissive media by simply accumulating self emission during the evaluation of radiance attenuation. This evaluation comes as a by-product of the reduced intensity computation, hence simulating emissive media at no additional cost.
+
+
+
+Figure 6: Emissive medium (a) and anisotropic production medium (b) rendered using a 1003 grid.
+
+#### 5. Results
+
+We implemented our algorithm on a Intel Xeon X5680 3.36GHz processor running a Geforce GTX580 GPU. All scenes are rendered with a resolution of 1280 × 720 (Figure 1\). We render a 5123 resolution volume at 10.70 fps for a full dynamic rendering using a 503 subdivision grid. The rendering speed increases to 31.90 fps when the FDep is evaluated only once (Table 1\).
+
+## 6. Conclusion
+
+We proposed a set of solutions for rendering single scattering due to distant lighting. By splitting the scattered radiance into volume-independent and -dependent factors and using agressive caching, our solutions provide high performance for static and dynamic volumes with arbitrary optical properties. The subdivision of the medium and the projection in spherical harmonics yield interactive to real-time frame rates. The next steps will enhance our technique for efficient multiple scattering evaluation by using spherical harmonics interpolations to simulate light exchanges between neighboring cells. Another goal is the optimization of the medium subdivision for a more efficient cell elimination.
+
+## References
+
+[CFP∗05] CEREZO E., FRANCISCO S., PEREZ F., SILLION F., PUEYO X.: A survey on participating media rendering techniques. Visual Computer 21, 5 (2005), 303–328. [Cha50] CHANDRASEKHAR S.: Radiative Transfer. Clarendon Press, Oxford, 1950. [DGMF11] DELALANDRE C., GAUTRON P., MARVIE J.-E., FRANÇOIS G.: Transmittance function mapping. In Proceedings of the Symposium on Interactive 3D Graphics and Games (2011), pp. 31–38. [GHB∗04] GORSKI K. M., HIVON E., BANDAY A. J., WAN-DELT B. D., HANSEN F. K., REINECKE M., BARTELMAN M.: Healpix – a framework for high resolution discretization, and fast analysis of data distributed on the sphere, 2004. [JNSJ11] JAROSZ W., NOWROUZEZAHRAI D., SADEGHI I., JENSEN H. W.: A comprehensive theory of volumetric radiance estimation using photon points and beams. In Proceedings of SIGGRAPH (2011), vol. 30, pp. 5:1–5:19. [KSS02] KAUTZ J., SLOAN P.-P., SNYDER J.: Fast, arbitrary BRDF shading for low-frequency lighting using spherical harmonics. In Proceedings of the Eurographics Workshop on Rendering (2002), pp. 291–296. [NGS09] NAVARRO F., GUTIERREZ D., SERÓN F. J.: Interactive HDR lighting of dynamic participating media. Visual Computer 25 (2009), 339–347. [SKS02] SLOAN P.-P., KAUTZ J., SNYDER J.: Precomputed radiance transfer for real-time rendering in dynamic, lowfrequency lighting environments. In Proceedings of SIGGRAPH (2002), pp. 527–536. [Sta94] STAM J.: Stochastic rendering of density fields. In Proceedings of Graphics Interface (1994), pp. 51–58. [Sta95] STAM J.: Multiple scattering as a diffusion process. In Proceedings of the Eurographics Workshop on Rendering (1995), pp. 41–50. [WR08] WYMAN C., RAMSEY S.: Interactive volumetric shadows in participating media with single-scattering. Proceedings of IEEE Symposium on Interactive Ray Tracing (2008), 87–92. [ZRL∗08] ZHOU K., REN Z., LIN S., BAO H., GUO B., SHUM H.-Y.: Real-time smoke rendering using compensated ray marching. In Proceedings of SIGGRAPH (2008), pp. 1–12.

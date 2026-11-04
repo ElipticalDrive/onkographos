@@ -1,0 +1,5002 @@
+# infinigen [![CI](https://github.com/jameshiew/infinigen/actions/workflows/ci.yml/badge.svg)](https://github.com/jameshiew/infinigen/actions/workflows/ci.yml)
+
+Minecraft-like procedural generation using the [Bevy game engine](https://bevyengine.org/).
+
+- chunks along all axes (X, Y and Z)
+- adjustable zoom level for viewing a world at different levels of detail
+
+![Main screenshot](screenshots/main.webp "Screenshot")
+![Zoomed out screenshot](screenshots/zoomed_out.webp "Zoomed out")
+
+## Why?
+
+This is a sandbox for experimenting with Bevy and efficient chunk rendering, and trying out different things in Rust. There are no gameplay elements like physics or editing blocks. I'm keeping this code up to date with the latest Bevy version as new versions are released.
+
+## Quickstart
+
+Make sure [OS dependencies for Bevy](https://bevyengine.org/learn/quick-start/getting-started/setup/#installing-os-dependencies) are installed.
+
+These commands should be run from within the root directory of the repo in order to pick up assets, otherwise block textures will be replaced with colours.
+
+```shell
+cargo run --release # best performance
+cargo run --release --features jemalloc  # on macOS/Linux
+```
+
+### Controls
+
+- <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> - to move around
+- <kbd>Space</kbd> - ascend
+- <kbd>Shift</kbd> - descend
+- <kbd>F3</kbd> - toggle wireframes
+- <kbd>F7</kbd> - toggle debug panels
+
+### Configuration
+
+See [infinigen.config.yml](./infinigen.config.yml) for what can be configured. Pass the path to a configuration file when launching.
+
+```shell
+cargo run --release -- --config infinigen.config.yml
+```
+
+Specific settings can also be overridden via environment variables.
+
+```shell
+INFINIGEN_WORLD=Flat cargo run --release
+```
+
+## Development
+
+All textures are derived from images generated with [Midjourney](https://midjourney.com).
+
+Simplest way to change how the world generates is to edit [crates/extras/src/worldgen/mountain_islands.rs](crates/extras/src/worldgen/mountain_islands.rs).
+
+### crates/common/benches/benchmark.rs
+```
+use std::hint::black_box;
+
+use criterion::{Criterion, criterion_group, criterion_main};
+use infinigen_common::mesh::block::VoxelBlock;
+use infinigen_common::mesh::shapes::{PADDED_CHUNK_VOLUME, PaddedChunk};
+use infinigen_common::mesh::textures::BlockAppearances;
+use infinigen_common::mesh::{mesh_chunk_greedy_quads, mesh_chunk_visible_block_faces};
+use infinigen_common::world::MappedBlockID;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+
+fn random_padded_chunk<F>(block_constructor: F, fill_prob: f32) -> PaddedChunk
+where
+    F: Fn(MappedBlockID) -> VoxelBlock,
+{
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut padded = [VoxelBlock::Empty; PADDED_CHUNK_VOLUME];
+
+    for voxel in padded.iter_mut() {
+        let roll: f32 = rng.random();
+        if roll < fill_prob {
+            *voxel = block_constructor(MappedBlockID::default());
+        } else {
+            *voxel = VoxelBlock::Empty;
+        }
+    }
+
+    padded
+}
+
+fn bench_mesh_visible_block_faces(c: &mut Criterion) {
+    let padded_chunk = random_padded_chunk(VoxelBlock::Opaque, 0.3);
+    let block_textures = BlockAppearances::default();
+
+    c.bench_function("mesh_chunk_visible_block_faces", |b| {
+        b.iter(|| {
+            let _mesh_info = mesh_chunk_visible_block_faces(
+                black_box(&padded_chunk),
+                black_box(&block_textures),
+            );
+        });
+    });
+}
+
+fn bench_mesh_greedy_quads(c: &mut Criterion) {
+    let padded_chunk = random_padded_chunk(VoxelBlock::Translucent, 0.3);
+    let block_textures = BlockAppearances::default();
+
+    c.bench_function("mesh_chunk_greedy_quads", |b| {
+        b.iter(|| {
+            let _mesh_info =
+                mesh_chunk_greedy_quads(black_box(&padded_chunk), black_box(&block_textures));
+        });
+    });
+}
+
+criterion_group!(
+    name = benches;
+    config = Criterion::default();
+    targets = bench_mesh_visible_block_faces, bench_mesh_greedy_quads
+);
+criterion_main!(benches);
+```
+
+### crates/common/src/blocks.rs
+```
+use std::collections::BTreeMap;
+
+use ahash::AHashMap;
+use linearize::Linearize;
+use serde::{Deserialize, Serialize};
+use strum::{EnumCount, EnumIter};
+
+use crate::world::MappedBlockID;
+
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Ord,
+    PartialOrd,
+    Serialize,
+    Deserialize,
+    EnumCount,
+)]
+pub enum BlockVisibility {
+    #[default]
+    Opaque = 0,
+    Translucent,
+}
+
+pub type BlockID = String;
+pub type BlockColor = [u8; 4];
+
+type TextureFilename = String;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
+pub struct BlockType {
+    pub id: BlockID,
+    #[serde(default)]
+    pub visibility: BlockVisibility,
+    #[serde(default = "default_block_color")]
+    pub color: BlockColor,
+    pub textures: Option<BTreeMap<Face, TextureFilename>>,
+}
+
+impl Default for BlockType {
+    fn default() -> Self {
+        Self {
+            color: default_block_color(),
+            id: "default".to_string(),
+            visibility: BlockVisibility::Opaque,
+            textures: None,
+        }
+    }
+}
+
+const fn default_block_color() -> BlockColor {
+    [255, 255, 255, 255]
+}
+
+#[derive(Debug, Default)]
+pub struct Palette {
+    pub inner: AHashMap<BlockID, MappedBlockID>,
+}
+
+impl From<AHashMap<BlockID, MappedBlockID>> for Palette {
+    fn from(value: AHashMap<BlockID, MappedBlockID>) -> Self {
+        Self { inner: value }
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Ord,
+    PartialOrd,
+    EnumIter,
+    Linearize,
+)]
+#[linearize(const)]
+pub enum Face {
+    Top = 0,
+    Bottom,
+    Left,
+    Right,
+    Front,
+    Back,
+}
+```
+
+### crates/common/src/chunks.rs
+```
+use std::fmt;
+
+use ndarray::Array3;
+
+use super::world::MappedBlockID;
+use crate::world::BlockPosition;
+
+/// The length of one side of a cubic chunk.
+pub const CHUNK_SIZE: u8 = 32;
+
+pub const CHUNK_USIZE: usize = CHUNK_SIZE as usize;
+pub const CHUNK_SIZE_U32: u32 = CHUNK_SIZE as u32;
+pub const CHUNK_SIZE_I32: i32 = CHUNK_SIZE as i32;
+pub const CHUNK_SIZE_F32: f32 = CHUNK_SIZE as f32;
+pub const CHUNK_SIZE_F64: f64 = CHUNK_SIZE as f64;
+
+/// Chunk represented as a 3D array of [`MappedBlockID`].
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Array3Chunk {
+    blocks: Array3<Option<MappedBlockID>>,
+}
+
+impl fmt::Debug for Array3Chunk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Array3Chunk")
+    }
+}
+
+impl Default for Array3Chunk {
+    fn default() -> Self {
+        Self {
+            blocks: Array3::<Option<MappedBlockID>>::from_elem(
+                (CHUNK_USIZE, CHUNK_USIZE, CHUNK_USIZE),
+                None,
+            ),
+        }
+    }
+}
+
+impl Array3Chunk {
+    pub fn get(&self, pos: &BlockPosition) -> Option<MappedBlockID> {
+        self.blocks[[pos.x as usize, pos.y as usize, pos.z as usize]]
+    }
+
+    pub fn insert(&mut self, pos: &BlockPosition, block: MappedBlockID) {
+        self.blocks[[pos.x as usize, pos.y as usize, pos.z as usize]] = Some(block);
+    }
+
+    pub fn insert_if_free(&mut self, pos: &BlockPosition, block: MappedBlockID) {
+        if self.blocks[[pos.x as usize, pos.y as usize, pos.z as usize]].is_none() {
+            self.blocks[[pos.x as usize, pos.y as usize, pos.z as usize]] = Some(block);
+        }
+    }
+
+    pub fn clear(&mut self, pos: &BlockPosition) {
+        self.blocks[[pos.x as usize, pos.y as usize, pos.z as usize]] = None;
+    }
+}
+
+pub fn filled_chunk(block: MappedBlockID) -> Array3Chunk {
+    let mut chunk = Array3Chunk::default();
+    for x in 0..CHUNK_SIZE {
+        for y in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                chunk.insert(&BlockPosition { x, y, z }, block);
+            }
+        }
+    }
+    chunk
+}
+
+/// Chunk where the topmost layer is dirt - can be used to represent the ground.
+pub fn top_chunk(block: MappedBlockID) -> Array3Chunk {
+    let mut chunk = Array3Chunk::default();
+    for x in 0..CHUNK_SIZE {
+        for z in 0..CHUNK_SIZE {
+            chunk.insert(
+                &BlockPosition {
+                    x,
+                    y: CHUNK_SIZE - 1,
+                    z,
+                },
+                block,
+            );
+        }
+    }
+    chunk
+}
+```
+
+### crates/common/src/lib.rs
+```
+#![deny(unstable_features)]
+#![deny(unused_features)]
+//! Core logic, not coupled to the Bevy engine.
+pub mod blocks;
+pub mod chunks;
+pub mod mesh;
+pub mod noise;
+pub mod view;
+pub mod world;
+pub mod zoom;
+```
+
+### crates/common/src/noise.rs
+```
+//! Seeded 2D Perlin noise and fractional Brownian motion (FBM).
+//!
+//! This is a small, self-contained replacement for the subset of the
+//! `noise` crate that worldgen actually uses: Perlin with a `u32`
+//! seed, FBM over Perlin with configurable octaves and persistence, and a
+//! `get([x, y])` sampling API.
+
+use std::f64::consts::PI;
+
+#[derive(Debug, Clone)]
+pub struct Perlin {
+    permutation: [u8; 512],
+}
+
+impl Perlin {
+    pub fn new(seed: u32) -> Self {
+        let mut perm = [0u8; 256];
+        for (i, slot) in perm.iter_mut().enumerate() {
+            *slot = i as u8;
+        }
+
+        // Expand the 32-bit seed with a constant so seed 0 doesn't produce a
+        // degenerate shuffle on the first step.
+        let mut state = (seed as u64) ^ 0x9E37_79B9_7F4A_7C15;
+        for i in (1..256).rev() {
+            let j = (splitmix64(&mut state) as usize) % (i + 1);
+            perm.swap(i, j);
+        }
+
+        let mut permutation = [0u8; 512];
+        for i in 0..512 {
+            permutation[i] = perm[i & 255];
+        }
+        Self { permutation }
+    }
+
+    pub fn get(&self, point: [f64; 2]) -> f64 {
+        let [x, y] = point;
+
+        let xi = (x.floor() as i64).rem_euclid(256) as usize;
+        let yi = (y.floor() as i64).rem_euclid(256) as usize;
+
+        let xf = x - x.floor();
+        let yf = y - y.floor();
+
+        let u = fade(xf);
+        let v = fade(yf);
+
+        let p = &self.permutation;
+        let a = p[xi] as usize + yi;
+        let b = p[xi + 1] as usize + yi;
+
+        let x1 = lerp(u, grad(p[a], xf, yf), grad(p[b], xf - 1.0, yf));
+        let x2 = lerp(
+            u,
+            grad(p[a + 1], xf, yf - 1.0),
+            grad(p[b + 1], xf - 1.0, yf - 1.0),
+        );
+
+        // Raw 2D Perlin peaks around ±√½; scale so output is roughly in [-1, 1].
+        lerp(v, x1, x2) * std::f64::consts::SQRT_2
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Fbm {
+    seed: u32,
+    sources: Vec<Perlin>,
+    pub octaves: usize,
+    pub frequency: f64,
+    pub lacunarity: f64,
+    pub persistence: f64,
+}
+
+impl Fbm {
+    pub const DEFAULT_OCTAVES: usize = 6;
+    pub const DEFAULT_FREQUENCY: f64 = 1.0;
+    /// Matches the `noise` crate's default: an irrational lacunarity avoids
+    /// octaves lining up on a repeating lattice.
+    pub const DEFAULT_LACUNARITY: f64 = PI * 2.0 / 3.0;
+    pub const DEFAULT_PERSISTENCE: f64 = 0.5;
+    pub const MAX_OCTAVES: usize = 32;
+
+    pub fn new(seed: u32) -> Self {
+        Self {
+            seed,
+            sources: build_sources(seed, Self::DEFAULT_OCTAVES),
+            octaves: Self::DEFAULT_OCTAVES,
+            frequency: Self::DEFAULT_FREQUENCY,
+            lacunarity: Self::DEFAULT_LACUNARITY,
+            persistence: Self::DEFAULT_PERSISTENCE,
+        }
+    }
+
+    #[must_use]
+    pub fn set_octaves(mut self, octaves: usize) -> Self {
+        let octaves = octaves.clamp(1, Self::MAX_OCTAVES);
+        if octaves != self.octaves {
+            self.sources = build_sources(self.seed, octaves);
+            self.octaves = octaves;
+        }
+        self
+    }
+
+    #[must_use]
+    pub const fn set_persistence(mut self, persistence: f64) -> Self {
+        self.persistence = persistence;
+        self
+    }
+
+    pub fn get(&self, point: [f64; 2]) -> f64 {
+        let mut result = 0.0;
+        let mut frequency = self.frequency;
+        let mut amplitude = 1.0;
+        for source in &self.sources {
+            let p = [point[0] * frequency, point[1] * frequency];
+            result = source.get(p).mul_add(amplitude, result);
+            frequency *= self.lacunarity;
+            amplitude *= self.persistence;
+        }
+        result
+    }
+}
+
+fn build_sources(seed: u32, octaves: usize) -> Vec<Perlin> {
+    (0..octaves)
+        .map(|i| Perlin::new(seed.wrapping_add(i as u32)))
+        .collect()
+}
+
+fn fade(t: f64) -> f64 {
+    // 6t^5 - 15t^4 + 10t^3
+    t * t * t * t.mul_add(t.mul_add(6.0, -15.0), 10.0)
+}
+
+fn lerp(t: f64, a: f64, b: f64) -> f64 {
+    t.mul_add(b - a, a)
+}
+
+fn grad(hash: u8, x: f64, y: f64) -> f64 {
+    match hash & 7 {
+        0 => x + y,
+        1 => -x + y,
+        2 => x - y,
+        3 => -x - y,
+        4 => x,
+        5 => -x,
+        6 => y,
+        _ => -y,
+    }
+}
+
+const fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn perlin_is_zero_at_integer_lattice_points() {
+        let p = Perlin::new(42);
+        for x in -3..=3 {
+            for y in -3..=3 {
+                let v = p.get([x as f64, y as f64]);
+                assert!(v.abs() < 1e-9, "expected 0 at ({x}, {y}), got {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn perlin_is_deterministic() {
+        let a = Perlin::new(1234);
+        let b = Perlin::new(1234);
+        for i in 0..50 {
+            let p = [i as f64 * 0.37, i as f64 * 0.91];
+            assert_eq!(a.get(p), b.get(p));
+        }
+    }
+
+    #[test]
+    fn perlin_different_seeds_differ() {
+        let a = Perlin::new(1);
+        let b = Perlin::new(2);
+        let differs = (0..100)
+            .map(|i| [(i as f64).mul_add(0.1, 0.37), (i as f64).mul_add(0.1, 0.91)])
+            .any(|p| a.get(p) != b.get(p));
+        assert!(differs);
+    }
+
+    #[test]
+    fn perlin_output_roughly_bounded() {
+        let p = Perlin::new(7);
+        let mut max_abs = 0.0f64;
+        for i in 0..200 {
+            for j in 0..200 {
+                let v = p.get([i as f64 * 0.13, j as f64 * 0.17]);
+                max_abs = max_abs.max(v.abs());
+            }
+        }
+        // Scaled 2D Perlin occasionally exceeds 1 but should not blow up.
+        assert!(max_abs < 1.5, "max |Perlin| = {max_abs} is too large");
+    }
+
+    #[test]
+    fn fbm_respects_octaves_and_persistence() {
+        let base = Fbm::new(1);
+        let tuned = Fbm::new(1).set_octaves(8).set_persistence(0.7);
+        assert_eq!(base.octaves, Fbm::DEFAULT_OCTAVES);
+        assert_eq!(tuned.octaves, 8);
+        assert_eq!(tuned.persistence, 0.7);
+        // Different parameters should produce different samples.
+        assert_ne!(base.get([0.3, 0.4]), tuned.get([0.3, 0.4]));
+    }
+}
+```
+
+### crates/common/src/view.rs
+```
+use std::cmp::Ordering;
+
+use ahash::AHashSet;
+use glam::{Mat4, Quat, Vec3, Vec4};
+
+use crate::chunks::CHUNK_SIZE_F32;
+use crate::world::ChunkPosition;
+
+/// Calculates the squared distance between two chunk positions.
+#[inline]
+const fn chunk_distance_squared(from: &ChunkPosition, to: &ChunkPosition) -> i32 {
+    let dx = to.x - from.x;
+    let dy = to.y - from.y;
+    let dz = to.z - from.z;
+    dx * dx + dy * dy + dz * dz
+}
+
+/// Returns an iterator over `ChunkPosition`s within a cylinder centred at `centre` that should be loaded and rendered.
+pub fn in_distance(
+    centre: &ChunkPosition,
+    horizontal_view_distance: usize,
+    vertical_view_distance: usize,
+) -> impl Iterator<Item = ChunkPosition> {
+    let mut chunks = Vec::new();
+    let (horizontal_view_distance, vertical_view_distance) = (
+        horizontal_view_distance as i32,
+        vertical_view_distance as i32,
+    );
+    let horizontal_view_distance_squared = horizontal_view_distance * horizontal_view_distance;
+    for x in -horizontal_view_distance..=horizontal_view_distance {
+        for y in -vertical_view_distance..=vertical_view_distance {
+            for z in -horizontal_view_distance..=horizontal_view_distance {
+                if x * x + z * z <= horizontal_view_distance_squared {
+                    chunks.push(ChunkPosition {
+                        x: centre.x + x,
+                        y: centre.y + y,
+                        z: centre.z + z,
+                    });
+                }
+            }
+        }
+    }
+    chunks.into_iter()
+}
+
+#[derive(Debug)]
+pub struct Plane {
+    normal: Vec4,
+    constant: f32,
+}
+
+pub fn normalize_plane(plane: Vec4) -> Plane {
+    let normal = plane.truncate();
+    let magnitude = normal.length();
+
+    if magnitude == 0.0 {
+        // Degenerate plane; fall back to zero normal to avoid NaNs.
+        return Plane {
+            normal: Vec4::ZERO,
+            constant: 0.0,
+        };
+    }
+
+    let normalized = Vec4::new(
+        normal.x / magnitude,
+        normal.y / magnitude,
+        normal.z / magnitude,
+        0.0,
+    );
+    Plane {
+        normal: normalized,
+        constant: plane.w / magnitude,
+    }
+}
+
+pub fn compute_frustum_planes(combined_matrix: &Mat4) -> [Plane; 6] {
+    let cols = combined_matrix.to_cols_array();
+    let row = |r: usize| -> Vec4 { Vec4::new(cols[r], cols[4 + r], cols[8 + r], cols[12 + r]) };
+
+    let row0 = row(0);
+    let row1 = row(1);
+    let row2 = row(2);
+    let row3 = row(3);
+
+    [
+        normalize_plane(row3 + row0), // Left
+        normalize_plane(row3 - row0), // Right
+        normalize_plane(row3 - row1), // Top
+        normalize_plane(row3 + row1), // Bottom
+        normalize_plane(row3 + row2), // Near
+        normalize_plane(row3 - row2), // Far
+    ]
+}
+
+pub fn check_chunk_in_frustum(chunk: &ChunkPosition, frustum_planes: &[Plane; 6]) -> bool {
+    for plane in frustum_planes {
+        let chunk_center = Vec4::new(chunk.x as f32, chunk.y as f32, chunk.z as f32, 1.0);
+        let distance = plane.normal.dot(chunk_center) + plane.constant;
+        // TODO: it would be better to check against corners of chunks
+        if distance < -CHUNK_SIZE_F32 / 2. {
+            return false;
+        }
+    }
+    true
+}
+
+// TODO: too many arguments
+pub fn compute_chunks_delta(
+    current_cpos: ChunkPosition,
+    horizontal_view_distance: usize,
+    vertical_view_distance: usize,
+    camera_translation: [f32; 3],
+    camera_rotation: [f32; 4], // w,x,y,z
+    aspect_ratio: f32,
+    fov: f32,
+    near: f32,
+    far: f32,
+    already_loaded_or_loading: &AHashSet<ChunkPosition>,
+) -> (Vec<ChunkPosition>, Vec<ChunkPosition>) {
+    let rotation = Quat::from_xyzw(
+        camera_rotation[1],
+        camera_rotation[2],
+        camera_rotation[3],
+        camera_rotation[0],
+    )
+    .normalize();
+    let translation = Vec3::new(
+        camera_translation[0],
+        camera_translation[1],
+        camera_translation[2],
+    );
+
+    let projection_matrix = Mat4::perspective_rh_gl(fov, aspect_ratio, near, far);
+    let view_matrix = Mat4::from_quat(rotation) * Mat4::from_translation(-translation);
+    let combined_matrix = projection_matrix * view_matrix;
+    let frustum_planes = compute_frustum_planes(&combined_matrix);
+
+    let chunks_within_render_distance: AHashSet<_> = in_distance(
+        &current_cpos,
+        horizontal_view_distance,
+        vertical_view_distance,
+    )
+    .collect();
+
+    let mut to_load: Vec<_> = chunks_within_render_distance
+        .difference(already_loaded_or_loading)
+        .copied()
+        .collect();
+
+    // nearest chunks first
+    to_load.sort_unstable_by_key(|c| chunk_distance_squared(&current_cpos, c));
+
+    // chunks within view frustum first
+    to_load.sort_unstable_by(|c1, c2| {
+        let in_frustum1 = check_chunk_in_frustum(c1, &frustum_planes);
+        let in_frustum2 = check_chunk_in_frustum(c2, &frustum_planes);
+
+        if in_frustum1 && !in_frustum2 {
+            Ordering::Less
+        } else if !in_frustum1 && in_frustum2 {
+            Ordering::Greater
+        } else {
+            let dist1 = chunk_distance_squared(&current_cpos, c1);
+            let dist2 = chunk_distance_squared(&current_cpos, c2);
+            dist1.cmp(&dist2)
+        }
+    });
+
+    let to_unload: Vec<_> = already_loaded_or_loading
+        .difference(&chunks_within_render_distance)
+        .copied()
+        .collect();
+
+    (to_load, to_unload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_in_distance() {
+        let centre = ChunkPosition { x: 0, y: 0, z: 0 };
+        let chunks: Vec<_> = in_distance(&centre, 1, 1).collect();
+        assert_eq!(
+            chunks,
+            [
+                ChunkPosition { x: -1, y: -1, z: 0 },
+                ChunkPosition { x: -1, y: 0, z: 0 },
+                ChunkPosition { x: -1, y: 1, z: 0 },
+                ChunkPosition { x: 0, y: -1, z: -1 },
+                ChunkPosition { x: 0, y: -1, z: 0 },
+                ChunkPosition { x: 0, y: -1, z: 1 },
+                ChunkPosition { x: 0, y: 0, z: -1 },
+                ChunkPosition { x: 0, y: 0, z: 0 },
+                ChunkPosition { x: 0, y: 0, z: 1 },
+                ChunkPosition { x: 0, y: 1, z: -1 },
+                ChunkPosition { x: 0, y: 1, z: 0 },
+                ChunkPosition { x: 0, y: 1, z: 1 },
+                ChunkPosition { x: 1, y: -1, z: 0 },
+                ChunkPosition { x: 1, y: 0, z: 0 },
+                ChunkPosition { x: 1, y: 1, z: 0 }
+            ]
+        );
+    }
+}
+```
+
+### crates/common/src/world.rs
+```
+use std::fmt;
+use std::num::NonZeroU8;
+
+use linearize::Linearize;
+use strum::EnumIter;
+
+use crate::chunks::{Array3Chunk, CHUNK_SIZE, CHUNK_SIZE_F32, CHUNK_SIZE_I32};
+use crate::zoom::ZoomLevel;
+
+/// Chunks work with [`MappedBlockID`]s (u8s), which correspond to [`crate::blocks::BlockID`]s (strings).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MappedBlockID(NonZeroU8);
+
+impl Default for MappedBlockID {
+    fn default() -> Self {
+        Self(unsafe { NonZeroU8::new_unchecked(1) })
+    }
+}
+
+impl TryFrom<u8> for MappedBlockID {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        NonZeroU8::new(value)
+            .map(Self)
+            .ok_or("mapped block ID cannot be zero")
+    }
+}
+
+impl MappedBlockID {
+    pub fn next(&self) -> Option<Self> {
+        if self.0 == NonZeroU8::MAX {
+            None
+        } else {
+            Some(Self(self.0.checked_add(1).unwrap()))
+        }
+    }
+}
+
+pub trait WorldGen {
+    /// Should return `None` for empty chunks.
+    fn get(&self, pos: &ChunkPosition, zoom_level: ZoomLevel) -> Option<Array3Chunk>;
+}
+
+/// Position of a block within a chunk.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
+pub struct BlockPosition {
+    pub x: u8,
+    pub y: u8,
+    pub z: u8,
+}
+
+impl BlockPosition {
+    pub const MAX_IDX: u8 = CHUNK_SIZE - 1;
+    pub const MIN_IDX: u8 = 0;
+}
+
+/// Position of a chunk within a world.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
+pub struct ChunkPosition {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
+impl fmt::Display for ChunkPosition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "({}, {}, {})", self.x, self.y, self.z)
+    }
+}
+
+/// Absolute position of something within the world (e.g. a camera)
+#[derive(Debug, Clone, Copy)]
+pub struct WorldPosition {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+impl From<&ChunkPosition> for WorldPosition {
+    fn from(cpos: &ChunkPosition) -> Self {
+        Self {
+            x: (cpos.x * CHUNK_SIZE_I32) as f32,
+            y: (cpos.y * CHUNK_SIZE_I32) as f32,
+            z: (cpos.z * CHUNK_SIZE_I32) as f32,
+        }
+    }
+}
+
+impl From<WorldPosition> for ChunkPosition {
+    fn from(wpos: WorldPosition) -> Self {
+        Self {
+            x: (wpos.x / CHUNK_SIZE_F32).floor() as i32,
+            y: (wpos.y / CHUNK_SIZE_F32).floor() as i32,
+            z: (wpos.z / CHUNK_SIZE_F32).floor() as i32,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, EnumIter, Linearize)]
+#[linearize(const)]
+pub enum Direction {
+    Up = 0,
+    Down,
+    North,
+    South,
+    East,
+    West,
+}
+
+impl Direction {
+    pub const fn opposite(&self) -> Self {
+        match self {
+            Self::Up => Self::Down,
+            Self::Down => Self::Up,
+            Self::North => Self::South,
+            Self::South => Self::North,
+            Self::East => Self::West,
+            Self::West => Self::East,
+        }
+    }
+}
+
+impl From<Direction> for [i32; 3] {
+    /// The normalized vector for this direction, in a right-handed Y-up coordinate system.
+    fn from(direction: Direction) -> Self {
+        match direction {
+            Direction::Up => [0, 1, 0],
+            Direction::Down => [0, -1, 0],
+            Direction::North => [0, 0, -1],
+            Direction::South => [0, 0, 1],
+            Direction::East => [1, 0, 0],
+            Direction::West => [-1, 0, 0],
+        }
+    }
+}
+```
+
+### crates/common/src/zoom.rs
+```
+/// Zero is no zoom. Negative zoom levels zoom out, positive zoom levels zoom in.
+#[derive(Debug, Default, Copy, Clone, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub struct ZoomLevel(pub i8);
+
+impl ZoomLevel {
+    pub fn as_f64(&self) -> f64 {
+        (self.0 as f64).exp2()
+    }
+}
+impl From<i8> for ZoomLevel {
+    fn from(value: i8) -> Self {
+        Self(value)
+    }
+}
+```
+
+### crates/extras/benches/benchmark.rs
+```
+use std::hint::black_box;
+
+use ahash::AHashMap;
+use criterion::{Criterion, criterion_group, criterion_main};
+use infinigen_common::blocks::{BlockType, Palette};
+use infinigen_common::world::{ChunkPosition, MappedBlockID, WorldGen};
+use infinigen_common::zoom::ZoomLevel;
+use infinigen_extras::blocks::block_types;
+use infinigen_extras::worldgen::mountain_islands::MountainIslands;
+
+fn bench_mountain_islands(c: &mut Criterion) {
+    let mapping: AHashMap<_, _> = block_types()
+        .enumerate()
+        .map(|(chunk_block_id, BlockType { id, .. })| {
+            (
+                id,
+                MappedBlockID::try_from(1 + chunk_block_id as u8).unwrap(),
+            )
+        })
+        .collect();
+    let palette: Palette = mapping.into();
+    let wgen = MountainIslands::new(0, palette);
+    const SIZE: i32 = 4;
+    c.bench_function("mountain islands", |b| {
+        b.iter(|| {
+            for cx in -SIZE..SIZE {
+                for cy in -SIZE..SIZE {
+                    for cz in -SIZE..SIZE {
+                        wgen.get(
+                            black_box(&ChunkPosition {
+                                x: cx,
+                                y: cy,
+                                z: cz,
+                            }),
+                            black_box(ZoomLevel::default()),
+                        );
+                    }
+                }
+            }
+        })
+    });
+}
+
+criterion_group!(benches, bench_mountain_islands,);
+criterion_main!(benches);
+```
+
+### crates/extras/src/blocks.rs
+```
+use infinigen_common::blocks::{BlockType, BlockVisibility};
+
+pub const DIRT_BLOCK_ID: &str = "infinigen:dirt";
+pub const GRASS_BLOCK_ID: &str = "infinigen:grass";
+pub const GRAVEL_BLOCK_ID: &str = "infinigen:gravel";
+pub const LAVA_BLOCK_ID: &str = "infinigen:lava";
+pub const LEAVES_BLOCK_ID: &str = "infinigen:leaves";
+pub const SAND_BLOCK_ID: &str = "infinigen:sand";
+pub const SNOW_BLOCK_ID: &str = "infinigen:snow";
+pub const STONE_BLOCK_ID: &str = "infinigen:stone";
+pub const WATER_BLOCK_ID: &str = "infinigen:water";
+pub const WOOD_BLOCK_ID: &str = "infinigen:wood";
+
+pub fn block_types() -> impl Iterator<Item = BlockType> {
+    [
+        BlockType {
+            id: STONE_BLOCK_ID.to_string(),
+            color: [128, 128, 128, 255],
+            ..Default::default()
+        },
+        BlockType {
+            id: DIRT_BLOCK_ID.to_string(),
+            color: [139, 69, 19, 255],
+            ..Default::default()
+        },
+        BlockType {
+            id: GRASS_BLOCK_ID.to_string(),
+            color: [34, 139, 34, 255],
+            ..Default::default()
+        },
+        BlockType {
+            id: WATER_BLOCK_ID.to_string(),
+            visibility: BlockVisibility::Translucent,
+            color: [25, 153, 230, 128],
+            ..Default::default()
+        },
+        BlockType {
+            id: LAVA_BLOCK_ID.to_string(),
+            visibility: BlockVisibility::Translucent,
+            color: [207, 16, 32, 128],
+            ..Default::default()
+        },
+        BlockType {
+            id: SAND_BLOCK_ID.to_string(),
+            color: [194, 178, 128, 255],
+            ..Default::default()
+        },
+        BlockType {
+            id: SNOW_BLOCK_ID.to_string(),
+            color: [255, 250, 250, 255],
+            ..Default::default()
+        },
+        BlockType {
+            id: WOOD_BLOCK_ID.to_string(),
+            color: [139, 69, 19, 255],
+            ..Default::default()
+        },
+        BlockType {
+            id: LEAVES_BLOCK_ID.to_string(),
+            color: [84, 161, 66, 255],
+            ..Default::default()
+        },
+        BlockType {
+            id: GRAVEL_BLOCK_ID.to_string(),
+            color: [128, 128, 128, 255],
+            ..Default::default()
+        },
+    ]
+    .into_iter()
+}
+```
+
+### crates/extras/src/lib.rs
+```
+#![deny(unstable_features)]
+#![deny(unused_features)]
+#![allow(clippy::tuple_array_conversions)] // gives false positives
+
+//! Default world generators and block definitions.
+use std::str::FromStr;
+
+use bevy::prelude::*;
+use infinigen_plugins::assets::DefaultBlockTypes;
+use infinigen_plugins::world::WorldInitializer;
+use worldgen::WorldGenTypes;
+
+pub mod blocks;
+pub mod worldgen;
+
+pub struct ExtrasPlugin;
+
+impl Plugin for ExtrasPlugin {
+    fn build(&self, app: &mut App) {
+        tracing::info!("Initializing extras plugin");
+        app.insert_resource(DefaultBlockTypes(crate::blocks::block_types().collect()))
+            .insert_resource(WorldInitializer(Box::new(
+                move |world_gen_name: &str, seed, palette| {
+                    let world_gen_type = WorldGenTypes::from_str(world_gen_name)?;
+                    Ok(world_gen_type.as_world_gen(seed, palette))
+                },
+            )));
+    }
+}
+```
+
+### crates/extras/src/worldgen.rs
+```
+use std::sync::Arc;
+
+use infinigen_common::blocks::Palette;
+use infinigen_common::world::WorldGen;
+use serde::{Deserialize, Serialize};
+use strum::{Display, EnumString};
+
+pub mod flat;
+pub mod mountain_islands;
+pub mod single_block;
+
+#[derive(
+    Default, Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, EnumString, Display,
+)]
+pub enum WorldGenTypes {
+    Flat,
+    #[default]
+    MountainIslands,
+    SingleBlock,
+}
+
+impl WorldGenTypes {
+    pub(crate) fn as_world_gen(
+        &self,
+        seed: u32,
+        palette: Palette,
+    ) -> Arc<dyn WorldGen + Send + Sync> {
+        match self {
+            Self::Flat => Arc::new(flat::Flat::from(palette)),
+            Self::MountainIslands => {
+                Arc::new(mountain_islands::MountainIslands::new(seed, palette))
+            }
+            Self::SingleBlock => Arc::new(single_block::SingleBlock::from(palette)),
+        }
+    }
+}
+```
+
+### crates/infinigen/src/lib.rs
+```
+#![deny(unstable_features)]
+#![deny(unused_features)]
+#[cfg(all(feature = "remote", not(target_family = "wasm")))]
+pub mod remote;
+```
+
+### crates/infinigen/src/main.rs
+```
+#![deny(unstable_features)]
+#![deny(unused_features)]
+use std::process::ExitCode;
+use std::time::Duration;
+
+use bevy::DefaultPlugins;
+use bevy::app::{ScheduleRunnerPlugin, TaskPoolThreadAssignmentPolicy};
+use bevy::log::LogPlugin;
+use bevy::prelude::*;
+use bevy::tasks::available_parallelism;
+use bevy::window::{ExitCondition, Window, WindowPlugin};
+use bevy::winit::WinitPlugin;
+use clap::Parser;
+use config::Config;
+use infinigen_plugins::{AppPlugin, RuntimeOptions};
+#[cfg(all(
+    feature = "jemalloc",
+    not(target_env = "msvc"),
+    not(target_family = "wasm")
+))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(all(
+    feature = "jemalloc",
+    not(target_env = "msvc"),
+    not(target_family = "wasm")
+))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
+const APP_NAME: &str = "infinigen";
+#[cfg(not(target_family = "wasm"))]
+const CONFIG_PREFIX: &str = "INFINIGEN";
+const DEFAULT_LOG_FILTER: &str = "info,wgpu_core=warn,wgpu_hal=warn,naga=info";
+
+#[derive(Parser)]
+#[command(version)]
+struct Cli {
+    #[arg(long, help = "Path to a configuration file")]
+    config: Option<String>,
+    #[arg(
+        long,
+        help = "Run without creating a window or requiring a display server"
+    )]
+    headless: bool,
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let mut cfg = Config::builder();
+    if let Some(config_path) = cli.config {
+        cfg = cfg.add_source(config::File::with_name(&config_path));
+    };
+    #[cfg(not(target_family = "wasm"))]
+    let cfg = cfg.add_source(
+        config::Environment::with_prefix(CONFIG_PREFIX)
+            .prefix_separator("_")
+            .separator("__")
+            .try_parsing(true),
+    );
+    let cfg: infinigen_plugins::settings::AppSettings = match cfg.build() {
+        Ok(settings) => match settings.try_deserialize() {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                eprintln!("Couldn't parse settings: {err}");
+                return ExitCode::from(78);
+            }
+        },
+        Err(err) => {
+            eprintln!("Couldn't load settings: {err}");
+            return ExitCode::from(78);
+        }
+    };
+    let runtime = RuntimeOptions {
+        headless: cli.headless,
+    };
+
+    let mut default_plugins = DefaultPlugins
+        .set(LogPlugin {
+            filter: DEFAULT_LOG_FILTER.into(),
+            level: bevy::log::Level::DEBUG,
+            custom_layer: |_| None,
+            fmt_layer: |_| None,
+        })
+        .set(TaskPoolPlugin {
+            task_pool_options: TaskPoolOptions {
+                compute: TaskPoolThreadAssignmentPolicy {
+                    min_threads: available_parallelism(),
+                    max_threads: usize::MAX,
+                    percent: 1.0,
+                    on_thread_spawn: None,
+                    on_thread_destroy: None,
+                },
+                ..default()
+            },
+        })
+        .set(ImagePlugin::default_nearest());
+
+    if runtime.headless {
+        default_plugins = default_plugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: ExitCondition::DontExit,
+                ..default()
+            })
+            .disable::<WinitPlugin>();
+    } else {
+        default_plugins = default_plugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: APP_NAME.into(),
+                ..default()
+            }),
+            ..default()
+        });
+    }
+
+    let mut app = App::new();
+    app.add_plugins(default_plugins);
+
+    if runtime.headless {
+        app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )));
+    } else {
+        app.add_plugins(bevy_framepace::FramepacePlugin);
+    }
+
+    #[cfg(all(feature = "remote", not(target_family = "wasm")))]
+    app.add_plugins(infinigen::remote::RemotePlugin);
+
+    app.add_plugins((AppPlugin::new(cfg, runtime),))
+        .add_plugins(infinigen_extras::ExtrasPlugin);
+
+    match app.run() {
+        AppExit::Success => ExitCode::SUCCESS,
+        AppExit::Error(code) => ExitCode::from(code.get()),
+    }
+}
+```
+
+### crates/infinigen/src/remote.rs
+```
+use bevy::prelude::*;
+use bevy::remote;
+
+pub struct RemotePlugin;
+
+impl Plugin for RemotePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins((
+            remote::RemotePlugin::default(),
+            remote::http::RemoteHttpPlugin::default(),
+        ));
+    }
+}
+```
+
+### crates/plugins/src/lib.rs
+```
+#![deny(unstable_features)]
+#![deny(unused_features)]
+use bevy::prelude::*;
+
+pub mod assets;
+pub mod camera;
+pub mod debug;
+pub mod mesh;
+pub mod registry;
+pub mod scene;
+pub mod settings;
+pub mod window;
+pub mod world;
+
+use crate::camera::setup::CameraSettings;
+use crate::scene::SceneSettings;
+use crate::world::WorldSettings;
+
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RuntimeOptions {
+    pub headless: bool,
+}
+
+#[derive(States, Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum AppState {
+    #[default]
+    LoadingAssets,
+    InitializingRegistry,
+    InitializingWorld,
+    MainGame,
+    Paused,
+}
+
+pub struct AppPlugin {
+    settings: settings::AppSettings,
+    runtime: RuntimeOptions,
+}
+
+impl AppPlugin {
+    pub const fn new(settings: settings::AppSettings, runtime: RuntimeOptions) -> Self {
+        Self { settings, runtime }
+    }
+}
+
+impl Plugin for AppPlugin {
+    fn build(&self, app: &mut App) {
+        tracing::info!(
+            "Initializing app plugin with config: {:#?}, runtime: {:?}",
+            self.settings,
+            self.runtime
+        );
+        app.insert_resource(self.runtime)
+            .init_state::<AppState>()
+            .insert_resource(CameraSettings {
+                zoom_level: self.settings.zoom_level,
+                target_x: self.settings.target_x as f32,
+                target_y: self.settings.target_y as f32,
+                target_z: self.settings.target_z as f32,
+                wx: self.settings.wx as f32,
+                wy: self.settings.wy as f32,
+                wz: self.settings.wz as f32,
+            })
+            .insert_resource(SceneSettings {
+                horizontal_view_distance: self.settings.horizontal_view_distance as usize,
+                vertical_view_distance: self.settings.vertical_view_distance as usize,
+                zoom_level: self.settings.zoom_level,
+            })
+            .insert_resource(WorldSettings {
+                world_gen_name: self.settings.world.clone(),
+                seed: self.settings.seed as u32,
+            })
+            .add_plugins((
+                registry::RegistryPlugin,
+                assets::AssetsPlugin,
+                scene::ScenePlugin,
+                mesh::MeshPlugin,
+                camera::CameraPlugin,
+                world::WorldPlugin,
+            ));
+
+        if !self.runtime.headless {
+            app.add_plugins((debug::DebugPlugin, window::ControlsPlugin));
+        }
+    }
+}
+```
+
+### crates/plugins/src/settings.rs
+```
+use serde::{Deserialize, Serialize};
+
+const fn default_horizontal_view_distance() -> u64 {
+    8
+}
+
+const fn default_vertical_view_distance() -> u64 {
+    8
+}
+
+fn default_world() -> String {
+    "MountainIslands".to_string() // TODO: remove this implicit dependency on infinigen_extras crate
+}
+
+const fn default_wx() -> f64 {
+    -1283.
+}
+
+const fn default_wy() -> f64 {
+    140.
+}
+
+const fn default_wz() -> f64 {
+    -1752.
+}
+
+const fn default_target_x() -> f64 {
+    -1300.
+}
+
+const fn default_target_y() -> f64 {
+    6.
+}
+
+const fn default_target_z() -> f64 {
+    -1615.
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSettings {
+    #[serde(default = "default_horizontal_view_distance")]
+    pub horizontal_view_distance: u64,
+    #[serde(default = "default_vertical_view_distance")]
+    pub vertical_view_distance: u64,
+    #[serde(default = "default_world")]
+    pub world: String,
+
+    #[serde(default)]
+    pub zoom_level: i8,
+    #[serde(default = "default_wx")]
+    pub wx: f64,
+    #[serde(default = "default_wy")]
+    pub wy: f64,
+    #[serde(default = "default_wz")]
+    pub wz: f64,
+
+    #[serde(default = "default_target_x")]
+    pub target_x: f64,
+    #[serde(default = "default_target_y")]
+    pub target_y: f64,
+    #[serde(default = "default_target_z")]
+    pub target_z: f64,
+
+    #[serde(default)]
+    pub seed: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    use super::*;
+
+    #[test]
+    fn test_config_parse() -> Result<()> {
+        let _settings: AppSettings = config::Config::builder()
+            .add_source(config::File::with_name("../../infinigen.config.yml"))
+            .build()?
+            .try_deserialize()?;
+        Ok(())
+    }
+}
+```
+
+### crates/common/src/mesh/block.rs
+```
+use crate::world::MappedBlockID;
+
+/// Visibility category used to decide whether a face between two voxels
+/// should be meshed.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum VoxelVisibility {
+    Empty,
+    Translucent,
+    Opaque,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum VoxelBlock {
+    Opaque(MappedBlockID),
+    Translucent(MappedBlockID),
+    Empty,
+}
+
+impl VoxelBlock {
+    #[inline]
+    pub const fn visibility(self) -> VoxelVisibility {
+        match self {
+            Self::Opaque(_) => VoxelVisibility::Opaque,
+            Self::Translucent(_) => VoxelVisibility::Translucent,
+            Self::Empty => VoxelVisibility::Empty,
+        }
+    }
+}
+```
+
+### crates/common/src/mesh/faces.rs
+```
+use linearize::StaticCopyMap;
+use strum::IntoEnumIterator;
+
+use super::shapes::{EMPTY_CHUNK_FACES, chunk_face_linearize};
+use crate::blocks::BlockVisibility;
+use crate::chunks::{Array3Chunk, CHUNK_SIZE, CHUNK_SIZE_U32};
+use crate::mesh::block::VoxelBlock;
+use crate::mesh::shapes::{ChunkFace, PADDED_CHUNK_VOLUME, PaddedChunk, padded_linearize};
+use crate::world::{BlockPosition, Direction, MappedBlockID};
+
+const PADDED_BOUNDARY_MIN: u32 = 0;
+const PADDED_BOUNDARY_MAX: u32 = CHUNK_SIZE_U32 + 1;
+
+// Encodes the orientation of a face within the chunk and its matching padded boundary.
+#[derive(Clone, Copy)]
+struct FaceSpec {
+    fixed_axis: usize,
+    fixed_value: u8,
+    iter_axes: [usize; 2],
+    padded_boundary_index: u32,
+}
+
+const fn face_spec(direction: Direction) -> FaceSpec {
+    match direction {
+        Direction::Up => FaceSpec {
+            fixed_axis: 1,
+            fixed_value: BlockPosition::MAX_IDX,
+            iter_axes: [0, 2],
+            padded_boundary_index: PADDED_BOUNDARY_MAX,
+        },
+        Direction::Down => FaceSpec {
+            fixed_axis: 1,
+            fixed_value: BlockPosition::MIN_IDX,
+            iter_axes: [0, 2],
+            padded_boundary_index: PADDED_BOUNDARY_MIN,
+        },
+        Direction::North => FaceSpec {
+            fixed_axis: 2,
+            fixed_value: BlockPosition::MIN_IDX,
+            iter_axes: [0, 1],
+            padded_boundary_index: PADDED_BOUNDARY_MIN,
+        },
+        Direction::South => FaceSpec {
+            fixed_axis: 2,
+            fixed_value: BlockPosition::MAX_IDX,
+            iter_axes: [0, 1],
+            padded_boundary_index: PADDED_BOUNDARY_MAX,
+        },
+        Direction::East => FaceSpec {
+            fixed_axis: 0,
+            fixed_value: BlockPosition::MAX_IDX,
+            iter_axes: [1, 2],
+            padded_boundary_index: PADDED_BOUNDARY_MAX,
+        },
+        Direction::West => FaceSpec {
+            fixed_axis: 0,
+            fixed_value: BlockPosition::MIN_IDX,
+            iter_axes: [1, 2],
+            padded_boundary_index: PADDED_BOUNDARY_MIN,
+        },
+    }
+}
+
+const fn chunk_face_index(u: u8, v: u8) -> usize {
+    chunk_face_linearize([u as u32, v as u32])
+}
+
+const fn face_block_position(spec: FaceSpec, u: u8, v: u8) -> BlockPosition {
+    let mut coords = [0u8; 3];
+    coords[spec.iter_axes[0]] = u;
+    coords[spec.iter_axes[1]] = v;
+    coords[spec.fixed_axis] = spec.fixed_value;
+    BlockPosition {
+        x: coords[0],
+        y: coords[1],
+        z: coords[2],
+    }
+}
+
+const fn padded_coords(spec: FaceSpec, u: u8, v: u8) -> [u32; 3] {
+    let mut coords = [1u32; 3];
+    coords[spec.iter_axes[0]] = u as u32 + 1;
+    coords[spec.iter_axes[1]] = v as u32 + 1;
+    coords[spec.fixed_axis] = spec.padded_boundary_index;
+    coords
+}
+
+fn map_block(block: Option<MappedBlockID>, checker: &impl BlockVisibilityChecker) -> VoxelBlock {
+    block.map_or(VoxelBlock::Empty, |mapped_id| {
+        map_non_empty(mapped_id, checker)
+    })
+}
+
+fn map_non_empty(mapped_id: MappedBlockID, checker: &impl BlockVisibilityChecker) -> VoxelBlock {
+    match checker.get_visibility(&mapped_id) {
+        BlockVisibility::Opaque => VoxelBlock::Opaque(mapped_id),
+        BlockVisibility::Translucent => VoxelBlock::Translucent(mapped_id),
+    }
+}
+
+pub trait BlockVisibilityChecker: Clone + Send + Sync {
+    fn get_visibility(&self, mapped_id: &MappedBlockID) -> BlockVisibility;
+}
+
+impl<T> BlockVisibilityChecker for &T
+where
+    T: BlockVisibilityChecker,
+{
+    fn get_visibility(&self, mapped_id: &MappedBlockID) -> BlockVisibility {
+        (*self).get_visibility(mapped_id)
+    }
+}
+
+pub fn extract_faces(
+    chunk: &Array3Chunk,
+    visibility_checker: impl BlockVisibilityChecker,
+) -> StaticCopyMap<Direction, ChunkFace> {
+    let mut faces = EMPTY_CHUNK_FACES;
+    let checker = &visibility_checker;
+    for dir in Direction::iter() {
+        let spec = face_spec(dir);
+        for u in 0..CHUNK_SIZE {
+            for v in 0..CHUNK_SIZE {
+                let position = face_block_position(spec, u, v);
+                let index = chunk_face_index(u, v);
+                let block = chunk.get(&position);
+                faces[dir][index] = map_block(block, checker);
+            }
+        }
+    }
+    faces
+}
+
+/// Puts `chunk` into a `ChunkShape` with 1-voxel padding around the edges, filled according to the neighbor faces.
+pub fn prepare_padded_chunk(
+    chunk: &Array3Chunk,
+    neighbor_faces: &StaticCopyMap<Direction, ChunkFace>,
+    visibility_checker: impl BlockVisibilityChecker,
+) -> PaddedChunk {
+    let mut padded = [VoxelBlock::Empty; PADDED_CHUNK_VOLUME];
+    let checker = &visibility_checker;
+
+    for dir in Direction::iter() {
+        let spec = face_spec(dir);
+        let neighboring_face = neighbor_faces[dir];
+        for u in 0..CHUNK_SIZE {
+            for v in 0..CHUNK_SIZE {
+                let face_index = chunk_face_index(u, v);
+                let padded_index = padded_linearize(padded_coords(spec, u, v));
+                padded[padded_index] = neighboring_face[face_index];
+            }
+        }
+    }
+
+    for bx in 0..CHUNK_SIZE {
+        for by in 0..CHUNK_SIZE {
+            for bz in 0..CHUNK_SIZE {
+                let block = chunk.get(&BlockPosition {
+                    x: bx,
+                    y: by,
+                    z: bz,
+                });
+                if let Some(mapped_id) = block {
+                    let i = padded_linearize([bx as u32 + 1, by as u32 + 1, bz as u32 + 1]);
+                    padded[i] = map_non_empty(mapped_id, checker);
+                }
+            }
+        }
+    }
+    padded
+}
+
+#[cfg(test)]
+mod tests {
+    use linearize::static_copy_map;
+
+    use crate::blocks::BlockVisibility;
+    use crate::chunks::{CHUNK_SIZE_U32, filled_chunk};
+    use crate::mesh::shapes::{CHUNK_FACE_VOLUME, PADDED_CHUNK_MAX_INDEX, PADDED_CHUNK_SIZE};
+    use crate::mesh::visible_block_faces_quads;
+
+    #[derive(Clone)]
+    struct AllOpaque;
+
+    impl BlockVisibilityChecker for AllOpaque {
+        fn get_visibility(&self, _mapped_id: &MappedBlockID) -> BlockVisibility {
+            BlockVisibility::Opaque
+        }
+    }
+
+    use super::*;
+
+    const PADDED_CHUNK_MIN_INDEX: u32 = 0;
+
+    pub fn full_chunk_face() -> ChunkFace {
+        [VoxelBlock::Opaque(MappedBlockID::default()); CHUNK_FACE_VOLUME]
+    }
+
+    #[test]
+    fn test_prepare_padded_chunk_with_empty_faces() {
+        let full = filled_chunk(MappedBlockID::default());
+        let empties = EMPTY_CHUNK_FACES;
+        let padded = prepare_padded_chunk(&full, &empties, AllOpaque);
+        // faces of padded chunk remain empty
+        for x in 0..CHUNK_SIZE_U32 + 2 {
+            for y in 0..CHUNK_SIZE_U32 + 2 {
+                for z in 0..CHUNK_SIZE_U32 + 2 {
+                    let i = padded_linearize([x, y, z]);
+                    if x == 0
+                        || x == CHUNK_SIZE_U32 + 1
+                        || y == 0
+                        || y == CHUNK_SIZE_U32 + 1
+                        || z == 0
+                        || z == CHUNK_SIZE_U32 + 1
+                    {
+                        assert!(matches!(padded[i], VoxelBlock::Empty))
+                    } else {
+                        assert!(matches!(padded[i], VoxelBlock::Opaque(_)))
+                    }
+                }
+            }
+        }
+
+        let groups = visible_block_faces_quads(&padded);
+        assert_eq!(groups.len(), 6);
+        let quads: usize = groups.iter().map(Vec::len).sum();
+        assert_eq!(
+            quads as u32,
+            6 * CHUNK_SIZE_U32 * CHUNK_SIZE_U32,
+            "all blocks on the faces of the chunk are exposed, but none within"
+        );
+    }
+
+    #[test]
+    fn test_prepare_padded_chunk_with_full_faces() {
+        let full = filled_chunk(MappedBlockID::default());
+        let full_chunk_faces = static_copy_map! {
+            Direction::Up => full_chunk_face(),
+            Direction::Down => full_chunk_face(),
+            Direction::North => full_chunk_face(),
+            Direction::South => full_chunk_face(),
+            Direction::East => full_chunk_face(),
+            Direction::West => full_chunk_face()
+        };
+        let padded = prepare_padded_chunk(&full, &full_chunk_faces, AllOpaque);
+
+        // faces of padded chunk are all full, except for corners
+        let mut empty: u32 = 0;
+        let mut full: u32 = 0;
+        for x in 0..PADDED_CHUNK_SIZE {
+            for y in 0..PADDED_CHUNK_SIZE {
+                for z in 0..PADDED_CHUNK_SIZE {
+                    let i = padded_linearize([x, y, z]);
+                    if matches!(padded[i], VoxelBlock::Empty) {
+                        empty += 1;
+                    } else {
+                        full += 1;
+                    }
+
+                    let mut on_n_outer_faces = 0;
+                    let on_x_outer_face =
+                        x == PADDED_CHUNK_MIN_INDEX || x == PADDED_CHUNK_MAX_INDEX;
+                    if on_x_outer_face {
+                        on_n_outer_faces += 1;
+                    }
+                    let on_y_outer_face =
+                        y == PADDED_CHUNK_MIN_INDEX || y == PADDED_CHUNK_MAX_INDEX;
+                    if on_y_outer_face {
+                        on_n_outer_faces += 1;
+                    }
+                    let on_z_outer_face =
+                        z == PADDED_CHUNK_MIN_INDEX || z == PADDED_CHUNK_MAX_INDEX;
+                    if on_z_outer_face {
+                        on_n_outer_faces += 1;
+                    }
+
+                    if on_n_outer_faces >= 2 {
+                        assert!(matches!(padded[i], VoxelBlock::Empty))
+                    } else {
+                        assert!(
+                            matches!(padded[i], VoxelBlock::Opaque(_)),
+                            "at {:?}",
+                            [x, y, z]
+                        )
+                    }
+                }
+            }
+        }
+        println!("empty: {empty}, full: {full}");
+        // edges are empty
+        assert_eq!(
+            empty,
+            ((PADDED_CHUNK_SIZE * 4) - 4) * 2 + (PADDED_CHUNK_SIZE - 2) * 4
+        );
+        // faces + inner chunk are full
+        assert_eq!(
+            full,
+            (CHUNK_SIZE_U32 * CHUNK_SIZE_U32 * 6)
+                + (CHUNK_SIZE_U32 * CHUNK_SIZE_U32 * CHUNK_SIZE_U32)
+        );
+
+        let groups = visible_block_faces_quads(&padded);
+        assert_eq!(groups.len(), 6);
+        let quads: usize = groups.iter().map(Vec::len).sum();
+        assert_eq!(
+            quads, 0,
+            "all blocks on the faces of the chunk are occluded by neighboring chunks"
+        );
+    }
+}
+```
+
+### crates/common/src/mesh/mod.rs
+```
+//! Chunk meshing — converts padded chunks of voxels into triangle-list meshes
+//! ready for upload to the GPU.
+//!
+//! Two meshing strategies are provided:
+//!
+//! - [`mesh_chunk_visible_block_faces`] emits one unit quad per visible face,
+//!   used for opaque geometry.
+//! - [`mesh_chunk_greedy_quads`] merges adjacent face quads into larger
+//!   rectangles, used for translucent geometry (water, etc).
+
+use self::block::{VoxelBlock, VoxelVisibility};
+use self::quad::{FaceDir, Quad};
+use self::shapes::{PADDED_CHUNK_MAX_INDEX, PaddedChunk, padded_linearize};
+use self::textures::BlockAppearances;
+use crate::blocks::Face;
+
+pub mod block;
+pub mod faces;
+pub mod quad;
+pub mod shapes;
+pub mod textures;
+
+/// Stores details of a mesh, to be passed to a GPU for rendering.
+pub struct MeshInfo {
+    pub indices: Vec<u32>,
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub colors: Vec<[f32; 4]>,
+    pub uvs: Vec<[f32; 2]>,
+}
+
+/// Whether the face between `voxel` (owner) and `neighbor` should be meshed.
+///
+/// Mirrors the rule used by `block-mesh-rs` so that visible geometry matches
+/// the old behavior: opaque faces are emitted next to anything non-opaque,
+/// translucent faces are emitted only next to empty voxels.
+#[inline]
+const fn face_needs_mesh(voxel: VoxelVisibility, neighbor: VoxelVisibility) -> bool {
+    match (voxel, neighbor) {
+        (VoxelVisibility::Empty, _) | (_, VoxelVisibility::Opaque) => false,
+        (VoxelVisibility::Opaque, _) => true,
+        (VoxelVisibility::Translucent, VoxelVisibility::Empty) => true,
+        (VoxelVisibility::Translucent, VoxelVisibility::Translucent) => false,
+    }
+}
+
+/// Emits one unit quad per visible block face in the padded chunk.
+///
+/// The returned array is indexed by [`FaceDir`] discriminant.
+pub fn visible_block_faces_quads(padded: &PaddedChunk) -> [Vec<Quad>; 6] {
+    let mut out: [Vec<Quad>; 6] = Default::default();
+
+    // Iterate interior voxels only. The 1-voxel padding lets us always look
+    // at neighbors without bounds checks.
+    for z in 1..PADDED_CHUNK_MAX_INDEX {
+        for y in 1..PADDED_CHUNK_MAX_INDEX {
+            for x in 1..PADDED_CHUNK_MAX_INDEX {
+                let voxel = padded[padded_linearize([x, y, z])];
+                let vis = voxel.visibility();
+                if matches!(vis, VoxelVisibility::Empty) {
+                    continue;
+                }
+                for &face in &FaceDir::ALL {
+                    let [nx, ny, nz] = face.normal();
+                    let neighbor_idx = padded_linearize([
+                        (x as i32 + nx) as u32,
+                        (y as i32 + ny) as u32,
+                        (z as i32 + nz) as u32,
+                    ]);
+                    let neighbor = padded[neighbor_idx];
+                    if face_needs_mesh(vis, neighbor.visibility()) {
+                        out[face as usize].push(Quad {
+                            voxel: [x, y, z],
+                            width: 1,
+                            height: 1,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Greedy-mesh the padded chunk, merging adjacent visible faces of the same
+/// voxel into larger quads to reduce triangle count.
+///
+/// The returned array is indexed by [`FaceDir`] discriminant.
+pub fn greedy_quads(padded: &PaddedChunk) -> [Vec<Quad>; 6] {
+    let mut out: [Vec<Quad>; 6] = Default::default();
+    for &face in &FaceDir::ALL {
+        greedy_quads_for_face(padded, face, &mut out[face as usize]);
+    }
+    out
+}
+
+fn greedy_quads_for_face(padded: &PaddedChunk, face: FaceDir, out: &mut Vec<Quad>) {
+    let normal_axis = face.normal_axis();
+    let u_axis = face.u_axis();
+    let v_axis = face.v_axis();
+    let normal = face.normal();
+
+    let min: u32 = 1;
+    let max: u32 = PADDED_CHUNK_MAX_INDEX; // exclusive
+    let u_size = max - min;
+    let v_size = max - min;
+
+    let mut mask: Vec<Option<VoxelBlock>> = vec![None; (u_size * v_size) as usize];
+
+    for n_coord in min..max {
+        // Populate the mask.
+        for vi in 0..v_size {
+            for ui in 0..u_size {
+                let coord =
+                    coord_from_axes(normal_axis, u_axis, v_axis, n_coord, min + ui, min + vi);
+                let voxel = padded[padded_linearize(coord)];
+                let vis = voxel.visibility();
+                if matches!(vis, VoxelVisibility::Empty) {
+                    mask[(ui + vi * u_size) as usize] = None;
+                    continue;
+                }
+                let neighbor_idx = padded_linearize([
+                    (coord[0] as i32 + normal[0]) as u32,
+                    (coord[1] as i32 + normal[1]) as u32,
+                    (coord[2] as i32 + normal[2]) as u32,
+                ]);
+                let neighbor = padded[neighbor_idx];
+                mask[(ui + vi * u_size) as usize] = if face_needs_mesh(vis, neighbor.visibility()) {
+                    Some(voxel)
+                } else {
+                    None
+                };
+            }
+        }
+
+        // Scan the mask and emit greedy quads.
+        let mut vi = 0u32;
+        while vi < v_size {
+            let mut ui = 0u32;
+            while ui < u_size {
+                let Some(current) = mask[(ui + vi * u_size) as usize] else {
+                    ui += 1;
+                    continue;
+                };
+
+                // Extend width along u.
+                let mut w = 1u32;
+                while ui + w < u_size && mask[((ui + w) + vi * u_size) as usize] == Some(current) {
+                    w += 1;
+                }
+
+                // Extend height along v: each candidate row must match the
+                // full current width.
+                let mut h = 1u32;
+                'outer: while vi + h < v_size {
+                    for k in 0..w {
+                        if mask[((ui + k) + (vi + h) * u_size) as usize] != Some(current) {
+                            break 'outer;
+                        }
+                    }
+                    h += 1;
+                }
+
+                let voxel =
+                    coord_from_axes(normal_axis, u_axis, v_axis, n_coord, min + ui, min + vi);
+                out.push(Quad {
+                    voxel,
+                    width: w,
+                    height: h,
+                });
+
+                // Mark the covered cells as consumed.
+                for jj in 0..h {
+                    for ii in 0..w {
+                        mask[((ui + ii) + (vi + jj) * u_size) as usize] = None;
+                    }
+                }
+
+                ui += w;
+            }
+            vi += 1;
+        }
+    }
+}
+
+#[inline]
+const fn coord_from_axes(
+    normal_axis: usize,
+    u_axis: usize,
+    v_axis: usize,
+    n: u32,
+    u: u32,
+    v: u32,
+) -> [u32; 3] {
+    let mut coord = [0u32; 3];
+    coord[normal_axis] = n;
+    coord[u_axis] = u;
+    coord[v_axis] = v;
+    coord
+}
+
+/// Build a mesh of all visible opaque block faces in the padded chunk.
+pub fn mesh_chunk_visible_block_faces(
+    padded: &PaddedChunk,
+    block_textures: &BlockAppearances,
+) -> Option<MeshInfo> {
+    let quads = visible_block_faces_quads(padded);
+    build_mesh_info(padded, &quads, block_textures, MeshStyle::Opaque)
+}
+
+/// Build a greedy-meshed translucent mesh from the padded chunk.
+pub fn mesh_chunk_greedy_quads(
+    padded: &PaddedChunk,
+    block_textures: &BlockAppearances,
+) -> Option<MeshInfo> {
+    let quads = greedy_quads(padded);
+    build_mesh_info(padded, &quads, block_textures, MeshStyle::Translucent)
+}
+
+enum MeshStyle {
+    Opaque,
+    Translucent,
+}
+
+fn build_mesh_info(
+    padded: &PaddedChunk,
+    quads: &[Vec<Quad>; 6],
+    block_textures: &BlockAppearances,
+    style: MeshStyle,
+) -> Option<MeshInfo> {
+    let total_quads: usize = quads.iter().map(Vec::len).sum();
+    if total_quads == 0 {
+        return None;
+    }
+
+    let mut indices = Vec::with_capacity(total_quads * 6);
+    let mut positions = Vec::with_capacity(total_quads * 4);
+    let mut normals = Vec::with_capacity(total_quads * 4);
+    let mut colors = Vec::with_capacity(total_quads * 4);
+    let mut uvs = Vec::with_capacity(total_quads * 4);
+
+    for (face_idx, face_quads) in quads.iter().enumerate() {
+        let face = FaceDir::ALL[face_idx];
+        let normal = face.normal_f32();
+        let is_side = matches!(
+            face,
+            FaceDir::XNeg | FaceDir::XPos | FaceDir::ZNeg | FaceDir::ZPos
+        );
+
+        for quad in face_quads {
+            let base = positions.len() as u32;
+            indices.extend_from_slice(&Quad::indices(base, face));
+            positions.extend_from_slice(&quad.positions(face));
+            normals.extend_from_slice(&[normal; 4]);
+
+            let voxel = padded[padded_linearize(quad.voxel)];
+
+            // Texture-fallback hack: grass/snow-style blocks should use their
+            // bottom texture on side faces when there's an opaque block
+            // sitting on top (the side texture would look wrong without
+            // visible grass capping it).
+            let mut block_face = face.block_face();
+            if is_side {
+                let above_idx = padded_linearize([quad.voxel[0], quad.voxel[1] + 1, quad.voxel[2]]);
+                if matches!(padded[above_idx].visibility(), VoxelVisibility::Opaque) {
+                    block_face = Face::Bottom;
+                }
+            }
+
+            match style {
+                MeshStyle::Opaque => {
+                    let VoxelBlock::Opaque(chunk_block_id) = voxel else {
+                        unimplemented!("only opaque blocks are supported")
+                    };
+                    let flip_v = is_side;
+                    let face_uvs = quad.uvs(face, flip_v);
+                    match block_textures.get(&chunk_block_id, block_face, face_uvs) {
+                        Some(textures::FaceAppearanceTransformed::Texture { coords }) => {
+                            uvs.extend_from_slice(&coords);
+                            colors.extend_from_slice(&[[1.0; 4]; 4]);
+                        }
+                        Some(textures::FaceAppearanceTransformed::Color { r, g, b, a }) => {
+                            uvs.extend_from_slice(&[[0.0; 2]; 4]);
+                            colors.extend_from_slice(&[[r, g, b, a]; 4]);
+                        }
+                        None => {
+                            tracing::error!(
+                                ?chunk_block_id,
+                                ?block_face,
+                                "No appearance defined for block face"
+                            );
+                            uvs.extend_from_slice(&[[0.0; 2]; 4]);
+                            colors.extend_from_slice(&[[0.0; 4]; 4]);
+                        }
+                    }
+                }
+                MeshStyle::Translucent => {
+                    let VoxelBlock::Translucent(chunk_block_id) = voxel else {
+                        unimplemented!("only translucent blocks are supported")
+                    };
+                    // Translucent blocks render as flat colors, so raw UVs
+                    // are fine — no atlas lookup needed.
+                    let face_uvs = quad.uvs(face, false);
+                    uvs.extend_from_slice(&face_uvs);
+                    let color = block_textures
+                        .to_color(&chunk_block_id, block_face)
+                        .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+                    colors.extend_from_slice(&[color; 4]);
+                }
+            }
+        }
+    }
+
+    Some(MeshInfo {
+        indices,
+        positions,
+        normals,
+        colors,
+        uvs,
+    })
+}
+```
+
+### crates/common/src/mesh/quad.rs
+```
+//! Axis-aligned face directions, quads, and per-face geometry helpers used
+//! by the chunk meshing algorithms in [`super`].
+
+use crate::blocks::Face;
+
+/// One of the six axis-aligned face directions on a cube.
+///
+/// Discriminants match the index used in the `[Vec<Quad>; 6]` buffer returned
+/// by the meshing algorithms.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaceDir {
+    XNeg = 0,
+    XPos = 1,
+    YNeg = 2,
+    YPos = 3,
+    ZNeg = 4,
+    ZPos = 5,
+}
+
+impl FaceDir {
+    pub const ALL: [Self; 6] = [
+        Self::XNeg,
+        Self::XPos,
+        Self::YNeg,
+        Self::YPos,
+        Self::ZNeg,
+        Self::ZPos,
+    ];
+
+    #[inline]
+    pub const fn normal(self) -> [i32; 3] {
+        match self {
+            Self::XNeg => [-1, 0, 0],
+            Self::XPos => [1, 0, 0],
+            Self::YNeg => [0, -1, 0],
+            Self::YPos => [0, 1, 0],
+            Self::ZNeg => [0, 0, -1],
+            Self::ZPos => [0, 0, 1],
+        }
+    }
+
+    #[inline]
+    pub const fn normal_f32(self) -> [f32; 3] {
+        let [x, y, z] = self.normal();
+        [x as f32, y as f32, z as f32]
+    }
+
+    /// Axis index (0=X, 1=Y, 2=Z) along which this face's normal points.
+    #[inline]
+    pub const fn normal_axis(self) -> usize {
+        match self {
+            Self::XNeg | Self::XPos => 0,
+            Self::YNeg | Self::YPos => 1,
+            Self::ZNeg | Self::ZPos => 2,
+        }
+    }
+
+    /// Axis index along which quad width extends.
+    ///
+    /// Axes follow the convention used by
+    /// [`block-mesh-rs`](https://github.com/bonsairobo/block-mesh-rs)'s
+    /// `RIGHT_HANDED_Y_UP_CONFIG`, so that texture orientation matches what
+    /// the existing texture atlas expects.
+    #[inline]
+    pub const fn u_axis(self) -> usize {
+        match self {
+            Self::XNeg | Self::XPos => 2, // Z
+            Self::YNeg | Self::YPos => 2, // Z
+            Self::ZNeg | Self::ZPos => 0, // X
+        }
+    }
+
+    /// Axis index along which quad height extends.
+    #[inline]
+    pub const fn v_axis(self) -> usize {
+        match self {
+            Self::XNeg | Self::XPos => 1, // Y
+            Self::YNeg | Self::YPos => 0, // X
+            Self::ZNeg | Self::ZPos => 1, // Y
+        }
+    }
+
+    #[inline]
+    pub const fn is_positive(self) -> bool {
+        matches!(self, Self::XPos | Self::YPos | Self::ZPos)
+    }
+
+    /// The corresponding [`Face`] used for texture atlas lookup.
+    #[inline]
+    pub const fn block_face(self) -> Face {
+        match self {
+            Self::XPos => Face::Right,
+            Self::XNeg => Face::Left,
+            Self::YPos => Face::Top,
+            Self::YNeg => Face::Bottom,
+            Self::ZPos => Face::Back,
+            Self::ZNeg => Face::Front,
+        }
+    }
+}
+
+/// A face quad covering `width × height` voxels on one face of the voxel at
+/// [`voxel`](Quad::voxel).
+///
+/// Width extends along [`FaceDir::u_axis`]; height extends along
+/// [`FaceDir::v_axis`]. Unit quads have `width == height == 1`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Quad {
+    /// Minimum-corner voxel in the quad, in padded chunk coordinates.
+    pub voxel: [u32; 3],
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Quad {
+    /// Returns the 4 vertex positions of the quad, in the order:
+    /// `[min_u/min_v, max_u/min_v, min_u/max_v, max_u/max_v]`.
+    pub fn positions(&self, face: FaceDir) -> [[f32; 3]; 4] {
+        let mut origin = [
+            self.voxel[0] as f32,
+            self.voxel[1] as f32,
+            self.voxel[2] as f32,
+        ];
+        if face.is_positive() {
+            origin[face.normal_axis()] += 1.0;
+        }
+
+        let u_axis = face.u_axis();
+        let v_axis = face.v_axis();
+        let w = self.width as f32;
+        let h = self.height as f32;
+
+        let min_u_min_v = origin;
+        let mut max_u_min_v = origin;
+        max_u_min_v[u_axis] += w;
+        let mut min_u_max_v = origin;
+        min_u_max_v[v_axis] += h;
+        let mut max_u_max_v = origin;
+        max_u_max_v[u_axis] += w;
+        max_u_max_v[v_axis] += h;
+
+        [min_u_min_v, max_u_min_v, min_u_max_v, max_u_max_v]
+    }
+
+    /// Returns the two-triangle index list for the quad with winding chosen
+    /// so the outward normal points in [`FaceDir::normal`]'s direction.
+    pub const fn indices(base_index: u32, face: FaceDir) -> [u32; 6] {
+        // Which faces wind counter-clockwise was chosen to match
+        // block-mesh-rs's output so Bevy's default backface culling keeps the
+        // same set of visible triangles as before.
+        let ccw = matches!(face, FaceDir::XNeg | FaceDir::YPos | FaceDir::ZPos);
+        if ccw {
+            [
+                base_index,
+                base_index + 1,
+                base_index + 2,
+                base_index + 1,
+                base_index + 3,
+                base_index + 2,
+            ]
+        } else {
+            [
+                base_index,
+                base_index + 2,
+                base_index + 1,
+                base_index + 1,
+                base_index + 2,
+                base_index + 3,
+            ]
+        }
+    }
+
+    /// UV coordinates for each vertex (pre-atlas), in the same order as
+    /// [`Quad::positions`]. Width/height are baked in so textures repeat
+    /// across merged quads.
+    pub const fn uvs(&self, face: FaceDir, flip_v: bool) -> [[f32; 2]; 4] {
+        // Positive faces flip U to keep texture orientation consistent with
+        // negative faces sharing the same axis.
+        let flip_u = face.is_positive();
+        let w = self.width as f32;
+        let h = self.height as f32;
+        match (flip_u, flip_v) {
+            (false, false) => [[0.0, 0.0], [w, 0.0], [0.0, h], [w, h]],
+            (true, false) => [[w, 0.0], [0.0, 0.0], [w, h], [0.0, h]],
+            (false, true) => [[0.0, h], [w, h], [0.0, 0.0], [w, 0.0]],
+            (true, true) => [[w, h], [0.0, h], [w, 0.0], [0.0, 0.0]],
+        }
+    }
+}
+```
+
+### crates/common/src/mesh/shapes.rs
+```
+use linearize::{StaticCopyMap, static_copy_map};
+
+use crate::chunks::CHUNK_SIZE_U32;
+use crate::mesh::block::VoxelBlock;
+use crate::world::Direction;
+
+/// 1-voxel boundary padding around the chunk is required so that meshing
+/// can look at neighbors without bounds checks.
+pub const PADDED_CHUNK_SIZE: u32 = CHUNK_SIZE_U32 + 2;
+pub const PADDED_CHUNK_MAX_INDEX: u32 = PADDED_CHUNK_SIZE - 1;
+pub const PADDED_CHUNK_VOLUME: usize =
+    (PADDED_CHUNK_SIZE * PADDED_CHUNK_SIZE * PADDED_CHUNK_SIZE) as usize;
+
+pub type PaddedChunk = [VoxelBlock; PADDED_CHUNK_VOLUME];
+
+/// Linearize a 3D padded-chunk coordinate to an index with X innermost.
+#[inline]
+pub const fn padded_linearize([x, y, z]: [u32; 3]) -> usize {
+    (x + PADDED_CHUNK_SIZE * (y + PADDED_CHUNK_SIZE * z)) as usize
+}
+
+pub const CHUNK_FACE_VOLUME: usize = (CHUNK_SIZE_U32 * CHUNK_SIZE_U32) as usize;
+
+/// Represents a face of a chunk — used to expose neighbor chunks' boundary
+/// voxels during meshing.
+pub type ChunkFace = [VoxelBlock; CHUNK_FACE_VOLUME];
+
+#[inline]
+pub const fn chunk_face_linearize([u, v]: [u32; 2]) -> usize {
+    (u + CHUNK_SIZE_U32 * v) as usize
+}
+
+pub const EMPTY_CHUNK_FACE: ChunkFace = [VoxelBlock::Empty; CHUNK_FACE_VOLUME];
+pub const EMPTY_CHUNK_FACES: StaticCopyMap<Direction, ChunkFace> = static_copy_map! {
+    of type Direction:
+    _ => EMPTY_CHUNK_FACE,
+};
+```
+
+### crates/common/src/mesh/textures.rs
+```
+use ahash::AHashMap;
+use linearize::StaticCopyMap;
+
+use crate::blocks::Face;
+use crate::world::MappedBlockID;
+
+const TEXTURE_SIZE: usize = 64;
+
+// translate UVs for a texture atlas given raw coordinates
+pub fn to_tex_coords_raw(
+    mut uvs: [[f32; 2]; 4],
+    texture_start: [usize; 2], // the top left corner of the texture in the atlas
+    texture_atlas_size: [usize; 2], // the (width, height) of the texture atlas
+) -> [[f32; 2]; 4] {
+    for uv in &mut uvs {
+        uv[0] *= TEXTURE_SIZE as f32;
+        uv[1] *= TEXTURE_SIZE as f32;
+        uv[0] += texture_start[0] as f32;
+        uv[1] += texture_start[1] as f32;
+        uv[0] /= texture_atlas_size[0] as f32;
+        uv[1] /= texture_atlas_size[1] as f32;
+    }
+    uvs
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct BlockAppearances {
+    pub size: [usize; 2],
+    appearance: AHashMap<MappedBlockID, StaticCopyMap<Face, FaceAppearance>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum FaceAppearance {
+    Texture { coords: [usize; 2] },
+    Color { r: f32, g: f32, b: f32, a: f32 },
+}
+
+pub enum FaceAppearanceTransformed {
+    Texture { coords: [[f32; 2]; 4] },
+    Color { r: f32, g: f32, b: f32, a: f32 },
+}
+
+impl BlockAppearances {
+    pub fn add(&mut self, id: MappedBlockID, appearance: StaticCopyMap<Face, FaceAppearance>) {
+        tracing::debug!(?id, ?appearance, "Recording appearance for block");
+        self.appearance.insert(id, appearance);
+    }
+
+    pub fn get(
+        &self,
+        id: &MappedBlockID,
+        face: Face,
+        uvs: [[f32; 2]; 4],
+    ) -> Option<FaceAppearanceTransformed> {
+        let appearances = self.appearance.get(id)?;
+        match appearances[face] {
+            FaceAppearance::Texture { coords } => Some(FaceAppearanceTransformed::Texture {
+                coords: to_tex_coords_raw(uvs, coords, self.size),
+            }),
+            FaceAppearance::Color { r, g, b, a } => {
+                Some(FaceAppearanceTransformed::Color { r, g, b, a })
+            }
+        }
+    }
+
+    pub fn to_color(&self, id: &MappedBlockID, face: Face) -> Option<[f32; 4]> {
+        let appearances = self.appearance.get(id)?;
+        match appearances[face] {
+            FaceAppearance::Texture { .. } => None,
+            FaceAppearance::Color { r, g, b, a } => Some([r, g, b, a]),
+        }
+    }
+}
+```
+
+### crates/extras/src/worldgen/flat.rs
+```
+use infinigen_common::blocks::Palette;
+use infinigen_common::chunks::Array3Chunk;
+use infinigen_common::world::{ChunkPosition, MappedBlockID, WorldGen};
+use infinigen_common::zoom::ZoomLevel;
+
+use crate::blocks::DIRT_BLOCK_ID;
+
+/// Generates a completely flat world of dirt at y=0.
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub struct Flat {
+    dirt: MappedBlockID,
+}
+
+#[allow(clippy::fallible_impl_from)]
+impl From<Palette> for Flat {
+    fn from(palette: Palette) -> Self {
+        Self {
+            dirt: *palette.inner.get(DIRT_BLOCK_ID).unwrap(),
+        }
+    }
+}
+
+impl WorldGen for Flat {
+    fn get(&self, pos: &ChunkPosition, _zoom_level: ZoomLevel) -> Option<Array3Chunk> {
+        // zoom level does not change anything
+        if pos.y == -1 {
+            Some(infinigen_common::chunks::top_chunk(self.dirt))
+        } else {
+            None
+        }
+    }
+}
+```
+
+### crates/extras/src/worldgen/mountain_islands.rs
+```
+use infinigen_common::blocks::Palette;
+use infinigen_common::chunks::{Array3Chunk, CHUNK_SIZE, CHUNK_SIZE_F64, CHUNK_USIZE};
+use infinigen_common::noise::{Fbm, Perlin};
+use infinigen_common::world::{
+    BlockPosition, ChunkPosition, MappedBlockID, WorldGen, WorldPosition,
+};
+use infinigen_common::zoom::ZoomLevel;
+use splines::{Interpolation, Key, Spline};
+
+use crate::blocks::{
+    DIRT_BLOCK_ID, GRASS_BLOCK_ID, GRAVEL_BLOCK_ID, SAND_BLOCK_ID, SNOW_BLOCK_ID, STONE_BLOCK_ID,
+    WATER_BLOCK_ID,
+};
+
+#[derive(Debug, Clone)]
+pub struct MountainIslands {
+    /// The world height at any given (x, z)
+    heightmap: Fbm,
+    verticality: Perlin,
+    terrain_variance: Fbm,
+    vspline: Spline<f64, f64>,
+    /// max mountain size without zoom is roughly double this value
+    vertical_scale: f64,
+    horizontal_smoothness: f64,
+
+    water: MappedBlockID,
+    snow: MappedBlockID,
+    gravel: MappedBlockID,
+    sand: MappedBlockID,
+    dirt: MappedBlockID,
+    grass: MappedBlockID,
+    stone: MappedBlockID,
+}
+
+impl MountainIslands {
+    pub fn new(seed: u32, palette: Palette) -> Self {
+        let vspline = Spline::from_vec(vec![
+            Key::new(-1., 0.6, Interpolation::Cosine),
+            Key::new(-0.9, 0.7, Interpolation::Cosine),
+            Key::new(0., 0.8, Interpolation::Cosine),
+            Key::new(0.5, 0.85, Interpolation::Cosine),
+            Key::new(0.8, 0.9, Interpolation::Cosine),
+            Key::new(0.9, 1., Interpolation::Cosine),
+            Key::new(1.1, 1.5, Interpolation::default()), // this last one must be strictly greater than 1 because sometime we may sample with exactly the value 1.
+        ]);
+
+        let wgen = Self {
+            heightmap: default_heightmap(seed),
+            verticality: Perlin::new(seed),
+            terrain_variance: default_terrain_variance(seed),
+            vspline,
+            vertical_scale: CHUNK_SIZE_F64 * 4.,
+            horizontal_smoothness: CHUNK_SIZE_F64 * 0.1,
+
+            water: *palette.inner.get(WATER_BLOCK_ID).unwrap(),
+            snow: *palette.inner.get(SNOW_BLOCK_ID).unwrap(),
+            gravel: *palette.inner.get(GRAVEL_BLOCK_ID).unwrap(),
+            sand: *palette.inner.get(SAND_BLOCK_ID).unwrap(),
+            dirt: *palette.inner.get(DIRT_BLOCK_ID).unwrap(),
+            grass: *palette.inner.get(GRASS_BLOCK_ID).unwrap(),
+            stone: *palette.inner.get(STONE_BLOCK_ID).unwrap(),
+        };
+        tracing::debug!(?wgen.heightmap.octaves, wgen.heightmap.frequency, wgen.heightmap.lacunarity, wgen.heightmap.persistence, "MountainIslands initialized");
+        wgen
+    }
+}
+
+fn default_heightmap(seed: u32) -> Fbm {
+    Fbm::new(seed).set_octaves(6)
+}
+
+pub fn default_terrain_variance(seed: u32) -> Fbm {
+    Fbm::new(seed).set_octaves(8).set_persistence(0.7)
+}
+
+const SEA_LEVEL: f64 = 0.;
+
+// we still bound the worldgen on the Y axis to improve performance
+// for an infinitely deep world, we would not have a MIN_Y_HEIGHT maybe
+const MIN_Y_HEIGHT: i32 = -6;
+
+/// Based on <https://www.youtube.com/watch?v=CSa5O6knuwI>
+impl WorldGen for MountainIslands {
+    fn get(&self, pos: &ChunkPosition, zoom_level: ZoomLevel) -> Option<Array3Chunk> {
+        if pos.y < MIN_Y_HEIGHT {
+            return None;
+        }
+        let zoom = zoom_level.as_f64();
+        let sand_level = (SEA_LEVEL + (1. / zoom)).floor();
+        // let snow_level: f64 = (SEA_LEVEL + self.vertical_scale) * zoom;
+
+        let block_ranges = [
+            (SEA_LEVEL + (-3.0f64).mul_add(zoom, 1.), self.sand),
+            (SEA_LEVEL + 9.0f64.mul_add(zoom, 1.), self.dirt),
+            (SEA_LEVEL + 285.0f64.mul_add(zoom, 1.), self.grass),
+            (SEA_LEVEL + 300.0f64.mul_add(zoom, 1.), self.stone),
+            (f64::INFINITY, self.snow),
+        ];
+
+        let mut chunk = Array3Chunk::default();
+        let offset: WorldPosition = pos.into();
+        let zoomed_offset = [
+            offset.x as f64 / zoom,
+            offset.y as f64 / zoom,
+            offset.z as f64 / zoom,
+        ];
+
+        // needed for every column
+        let mut world_heights = [[0.; CHUNK_USIZE]; CHUNK_USIZE];
+        let mut nxzs = [[(0., 0.); CHUNK_USIZE]; CHUNK_USIZE];
+
+        let mut is_empty = true;
+
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                let wx = x as f64 / zoom + zoomed_offset[0];
+                let wz = z as f64 / zoom + zoomed_offset[2];
+
+                let nx = wx / (self.horizontal_smoothness * self.vertical_scale);
+                let nz = wz / (self.horizontal_smoothness * self.vertical_scale);
+
+                let mut world_height = self.heightmap.get([nx, nz]);
+                let verticality = self.verticality.get([nx, nz]);
+                world_height *= self.vertical_scale * self.vspline.sample(verticality).unwrap();
+
+                // short circuit if bottom-most layer (y=0) is empty as this world doesn't have things in the sky
+                let wy = zoomed_offset[1];
+                if wy <= world_height || wy <= SEA_LEVEL {
+                    is_empty = false;
+                }
+
+                world_heights[x as usize][z as usize] = world_height;
+                nxzs[x as usize][z as usize] = (nx, nz);
+            }
+        }
+        if is_empty {
+            return None;
+        }
+
+        let mut terrain_variances = [[None::<f64>; CHUNK_USIZE]; CHUNK_USIZE];
+
+        {
+            let _span = tracing::debug_span!("worldgen{stage = terrain}").entered();
+            for x in 0..CHUNK_SIZE {
+                for z in 0..CHUNK_SIZE {
+                    let world_height = world_heights[x as usize][z as usize];
+                    for y in 0..CHUNK_SIZE {
+                        let wy = y as f64 / zoom + zoomed_offset[1];
+
+                        // world_height is sunken, so we're in a body of water
+                        if world_height <= wy && wy <= SEA_LEVEL {
+                            is_empty = false;
+                            chunk.insert(&BlockPosition { x, y, z }, self.water);
+                            continue;
+                        }
+
+                        // ensure we fill blocks up to the world_height
+                        if wy <= world_height {
+                            is_empty = false;
+                            if wy < SEA_LEVEL {
+                                // always gravel under sea
+                                chunk.insert(&BlockPosition { x, y, z }, self.gravel);
+                                continue;
+                            } else if wy.floor() <= sand_level {
+                                // sand always borders water
+                                chunk.insert(&BlockPosition { x, y, z }, self.sand);
+                                continue;
+                            }
+
+                            let next_band_chance = {
+                                let slot = &mut terrain_variances[x as usize][z as usize];
+                                let value = slot.get_or_insert_with(|| {
+                                    let (nx, nz) = nxzs[x as usize][z as usize];
+                                    self.terrain_variance.get([nx, nz]) / 2.0
+                                });
+                                *value
+                            };
+
+                            // Assign block type based on the height and noise.
+                            let mut block_id = block_ranges[0].1;
+                            for &(threshold, id) in &block_ranges {
+                                if next_band_chance.mul_add(self.vertical_scale, wy) < threshold {
+                                    block_id = id;
+                                    break;
+                                }
+                            }
+
+                            chunk.insert(&BlockPosition { x, y, z }, block_id);
+                        }
+                    }
+                }
+            }
+
+            if is_empty {
+                return None;
+            }
+        }
+
+        Some(chunk)
+    }
+}
+```
+
+### crates/extras/src/worldgen/single_block.rs
+```
+use infinigen_common::blocks::Palette;
+use infinigen_common::chunks::{Array3Chunk, CHUNK_SIZE};
+use infinigen_common::world::{BlockPosition, ChunkPosition, MappedBlockID, WorldGen};
+use infinigen_common::zoom::ZoomLevel;
+
+use crate::blocks::GRASS_BLOCK_ID;
+
+/// Generates a single block in the middle of every chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SingleBlock {
+    grass: MappedBlockID,
+}
+
+#[allow(clippy::fallible_impl_from)]
+impl From<Palette> for SingleBlock {
+    fn from(palette: Palette) -> Self {
+        Self {
+            grass: *palette.inner.get(GRASS_BLOCK_ID).unwrap(),
+        }
+    }
+}
+
+impl WorldGen for SingleBlock {
+    fn get(&self, _pos: &ChunkPosition, _zoom_level: ZoomLevel) -> Option<Array3Chunk> {
+        // TODO: implement zoom?
+        let mut chunk = Array3Chunk::default();
+        chunk.insert(
+            &BlockPosition {
+                x: CHUNK_SIZE / 2,
+                y: 0,
+                z: CHUNK_SIZE / 2,
+            },
+            self.grass,
+        );
+        Some(chunk)
+    }
+}
+```
+
+### crates/plugins/src/assets/mod.rs
+```
+use bevy::prelude::*;
+use bevy_asset_loader::prelude::*;
+use bevy_common_assets::ron::RonAssetPlugin;
+use infinigen_common::blocks::BlockType;
+
+use crate::AppState;
+use crate::registry::BlockDefinition;
+
+mod setup;
+
+pub struct AssetsPlugin;
+
+#[derive(Resource)]
+pub struct DefaultBlockTypes(pub Vec<BlockType>);
+
+#[derive(AssetCollection, Resource, Default)]
+pub struct BlockAssets {
+    #[asset(path = "blocks/types", collection(typed))]
+    pub block_definitions: Vec<Handle<BlockDefinition>>,
+    #[asset(path = "blocks/textures", collection(typed))]
+    pub block_textures: Vec<Handle<Image>>,
+}
+
+impl Plugin for AssetsPlugin {
+    fn build(&self, app: &mut App) {
+        tracing::info!("Initializing assets plugin");
+        app.add_plugins((RonAssetPlugin::<BlockDefinition>::new(&["block.ron"]),))
+            .add_systems(
+                OnEnter(AppState::InitializingRegistry),
+                setup::initialize_block_assets,
+            );
+
+        register_loading_flow(app);
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn register_loading_flow(app: &mut App) {
+    app.add_loading_state(
+        LoadingState::new(AppState::LoadingAssets)
+            .continue_to_state(AppState::InitializingRegistry)
+            .on_failure_continue_to_state(AppState::InitializingRegistry)
+            .load_collection::<BlockAssets>(),
+    );
+}
+
+#[cfg(target_family = "wasm")]
+fn register_loading_flow(app: &mut App) {
+    app.add_systems(OnEnter(AppState::LoadingAssets), skip_loading_assets);
+}
+
+/// For targets not yet supported for loading assets.
+#[cfg(target_family = "wasm")]
+pub fn skip_loading_assets(mut next_state: ResMut<NextState<AppState>>) {
+    next_state.set(AppState::InitializingRegistry);
+}
+```
+
+### crates/plugins/src/assets/setup.rs
+```
+use ahash::AHashMap;
+use bevy::asset::{AssetPath, AssetServer, Assets};
+use bevy::prelude::{
+    AlphaMode, BevyError, Color, Handle, Image, NextState, Res, ResMut, Result, StandardMaterial,
+    TextureAtlasBuilder, TextureAtlasLayout, TextureAtlasSources, default,
+};
+use infinigen_common::blocks::{BlockVisibility, Face};
+use infinigen_common::mesh::textures::{BlockAppearances, FaceAppearance};
+use linearize::{StaticCopyMap, static_copy_map};
+use strum::IntoEnumIterator;
+
+use crate::AppState;
+use crate::assets::{BlockAssets, DefaultBlockTypes};
+use crate::registry::{BlockDefinition, BlockRegistry};
+
+pub fn initialize_block_assets(
+    mut next_state: ResMut<NextState<AppState>>,
+    mut registry: ResMut<BlockRegistry>,
+    block_assets: Option<Res<BlockAssets>>,
+    asset_server: Res<AssetServer>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut textures: ResMut<Assets<Image>>,
+    settings: Res<DefaultBlockTypes>,
+    block_definitions: Res<Assets<BlockDefinition>>,
+) -> Result {
+    let block_assets = block_assets.as_deref();
+    let prepared_textures =
+        prepare_block_textures(block_assets, asset_server.as_ref(), textures.as_mut())?;
+
+    let mut block_textures = BlockAppearances::default();
+    if let Some(prepared) = prepared_textures.as_ref() {
+        block_textures.size = [
+            prepared.atlas_layout.size.x as usize,
+            prepared.atlas_layout.size.y as usize,
+        ];
+    }
+
+    let block_definitions =
+        load_block_definitions(block_assets, block_definitions.as_ref(), settings.as_ref());
+
+    register_blocks(
+        block_definitions,
+        registry.as_mut(),
+        &mut block_textures,
+        prepared_textures.as_ref(),
+    );
+
+    registry.appearances = block_textures;
+    tracing::debug!("Registered all block textures: {:#?}", registry.appearances);
+
+    configure_materials(
+        registry.as_mut(),
+        materials.as_mut(),
+        prepared_textures
+            .as_ref()
+            .map(|prepared| prepared.atlas_texture.clone()),
+    );
+
+    next_state.set(AppState::InitializingWorld);
+    Ok(())
+}
+
+#[derive(Debug)]
+struct PreparedTextures {
+    handles_by_name: AHashMap<String, Handle<Image>>,
+    atlas_sources: TextureAtlasSources,
+    atlas_layout: TextureAtlasLayout,
+    atlas_texture: Handle<Image>,
+}
+
+impl PreparedTextures {
+    fn coords_for_name(&self, texture_name: &str) -> Option<[usize; 2]> {
+        let handle = self.handles_by_name.get(texture_name)?;
+        let index = self.atlas_sources.texture_index(handle)?;
+        let rect = self.atlas_layout.textures.get(index)?;
+        Some([rect.min.x as usize, rect.min.y as usize])
+    }
+}
+
+fn prepare_block_textures(
+    block_assets: Option<&BlockAssets>,
+    asset_server: &AssetServer,
+    textures: &mut Assets<Image>,
+) -> Result<Option<PreparedTextures>> {
+    let Some(block_assets) = block_assets else {
+        tracing::warn!("Block textures were not loaded, falling back to colours");
+        return Ok(None);
+    };
+
+    if block_assets.block_textures.is_empty() {
+        tracing::warn!("Block textures were not loaded, falling back to colours");
+        return Ok(None);
+    }
+
+    let mut handles_by_name = AHashMap::with_capacity(block_assets.block_textures.len());
+    let mut atlas_builder = TextureAtlasBuilder::default();
+
+    for handle in &block_assets.block_textures {
+        let Some(asset_path) = asset_server.get_path(handle.id()) else {
+            tracing::warn!(?handle, "Skipping texture without a known path");
+            continue;
+        };
+
+        let Some(texture) = textures.get(handle) else {
+            return Err(BevyError::from(format!(
+                "{asset_path:?} did not resolve to an `Image` asset.",
+            )));
+        };
+
+        let Some(texture_name) = texture_name_from_path(&asset_path) else {
+            tracing::warn!(path = ?asset_path, "Skipping texture without a valid filename");
+            continue;
+        };
+
+        tracing::debug!(path = ?asset_path, "Texture found");
+        handles_by_name.insert(texture_name, handle.clone());
+        atlas_builder.add_texture(Some(handle.id()), texture);
+    }
+
+    if handles_by_name.is_empty() {
+        tracing::warn!("Block textures were not loaded, falling back to colours");
+        return Ok(None);
+    }
+
+    let (atlas_layout, atlas_sources, atlas_image) = atlas_builder.build()?;
+    tracing::debug!(
+        size = ?atlas_layout.size,
+        textures = ?atlas_layout.textures,
+        "Stitched texture atlas"
+    );
+    let atlas_texture = textures.add(atlas_image);
+
+    Ok(Some(PreparedTextures {
+        handles_by_name,
+        atlas_sources,
+        atlas_layout,
+        atlas_texture,
+    }))
+}
+
+fn texture_name_from_path(path: &AssetPath) -> Option<String> {
+    path.path()
+        .file_name()
+        .and_then(|file| file.to_str())
+        .map(|name| name.trim_end_matches(".png").to_owned())
+}
+
+fn load_block_definitions(
+    block_assets: Option<&BlockAssets>,
+    block_definitions: &Assets<BlockDefinition>,
+    defaults: &DefaultBlockTypes,
+) -> Vec<BlockDefinition> {
+    let mut loaded = block_assets
+        .map(|assets| collect_block_definitions(assets, block_definitions))
+        .unwrap_or_default();
+
+    if loaded.is_empty() {
+        tracing::warn!("No block definition files found, falling back to default definitions");
+        loaded = defaults
+            .0
+            .iter()
+            .cloned()
+            .map(BlockDefinition::from)
+            .collect();
+    }
+
+    loaded.sort();
+    loaded
+}
+
+fn collect_block_definitions(
+    block_assets: &BlockAssets,
+    block_definitions: &Assets<BlockDefinition>,
+) -> Vec<BlockDefinition> {
+    let mut definitions = Vec::with_capacity(block_assets.block_definitions.len());
+    for handle in &block_assets.block_definitions {
+        match block_definitions.get(handle) {
+            Some(definition) => definitions.push(definition.clone()),
+            None => tracing::warn!(?handle, "Skipping missing block definition"),
+        }
+    }
+    definitions
+}
+
+fn register_blocks(
+    block_definitions: Vec<BlockDefinition>,
+    registry: &mut BlockRegistry,
+    block_textures: &mut BlockAppearances,
+    prepared_textures: Option<&PreparedTextures>,
+) {
+    for block_definition in block_definitions {
+        tracing::debug!(?block_definition, "Block definition found");
+        let appearances = build_face_appearances(&block_definition, prepared_textures);
+        let mapped_id = registry
+            .definitions
+            .add(block_definition)
+            .expect("should have been able to map all block IDs");
+        block_textures.add(mapped_id, appearances);
+    }
+}
+
+fn build_face_appearances(
+    block_definition: &BlockDefinition,
+    prepared_textures: Option<&PreparedTextures>,
+) -> StaticCopyMap<Face, FaceAppearance> {
+    let mut appearances = default_face_appearances(block_definition);
+
+    if let (Some(textures), Some(texture_paths)) =
+        (prepared_textures, block_definition.0.textures.as_ref())
+    {
+        for face in Face::iter() {
+            if let Some(texture_name) = texture_paths.get(&face)
+                && let Some(coords) = textures.coords_for_name(texture_name.as_str())
+            {
+                tracing::debug!(
+                    ?face,
+                    block_id = ?block_definition.0.id,
+                    "Found specific texture"
+                );
+                appearances[face] = FaceAppearance::Texture { coords };
+            }
+        }
+    }
+
+    appearances
+}
+
+fn default_face_appearances(
+    block_definition: &BlockDefinition,
+) -> StaticCopyMap<Face, FaceAppearance> {
+    let color = block_color(block_definition);
+    static_copy_map! {
+        Face::Top => color,
+        Face::Bottom => color,
+        Face::Front => color,
+        Face::Back => color,
+        Face::Left => color,
+        Face::Right => color,
+    }
+}
+
+fn block_color(block_definition: &BlockDefinition) -> FaceAppearance {
+    FaceAppearance::Color {
+        r: block_definition.0.color[0] as f32 / 255.,
+        g: block_definition.0.color[1] as f32 / 255.,
+        b: block_definition.0.color[2] as f32 / 255.,
+        a: block_definition.0.color[3] as f32 / 255.,
+    }
+}
+
+fn configure_materials(
+    registry: &mut BlockRegistry,
+    materials: &mut Assets<StandardMaterial>,
+    texture_atlas: Option<Handle<Image>>,
+) {
+    registry.materials[BlockVisibility::Opaque as usize] = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.75,
+        reflectance: 0.25,
+        base_color_texture: texture_atlas,
+        ..default()
+    });
+
+    registry.materials[BlockVisibility::Translucent as usize] = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        alpha_mode: AlphaMode::Blend,
+        ..default()
+    });
+}
+```
+
+### crates/plugins/src/camera/messages.rs
+```
+use bevy::prelude::*;
+
+use super::FpsController;
+
+#[derive(Message)]
+pub enum CameraMessage {
+    EnableControls,
+    DisableControls,
+}
+
+pub fn handle_camera_messages(
+    mut camera_messages: MessageReader<CameraMessage>,
+    mut fps_controller: Single<&mut FpsController>,
+) {
+    for msg in camera_messages.read() {
+        match msg {
+            CameraMessage::EnableControls => fps_controller.enabled = true,
+            CameraMessage::DisableControls => fps_controller.enabled = false,
+        }
+    }
+}
+```
+
+### crates/plugins/src/camera/mod.rs
+```
+use bevy::input::mouse::MouseMotion;
+use bevy::prelude::*;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use leafwing_input_manager::prelude::*;
+
+use crate::{AppState, RuntimeOptions};
+
+pub mod messages;
+pub mod setup;
+
+/// First-person camera controller component
+#[derive(Component, Debug)]
+pub struct FpsController {
+    /// Whether camera controls are enabled
+    pub enabled: bool,
+    /// Mouse sensitivity for looking around (radians per pixel)
+    pub mouse_sensitivity: f32,
+    /// Movement speed in units per second
+    pub movement_speed: f32,
+    /// Current pitch rotation (up/down angle in radians)
+    pub pitch: f32,
+    /// Current yaw rotation (left/right angle in radians)
+    pub yaw: f32,
+}
+
+impl Default for FpsController {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mouse_sensitivity: 0.002,
+            movement_speed: 30.0,
+            pitch: 0.0,
+            yaw: 0.0,
+        }
+    }
+}
+
+/// Camera movement and control actions
+#[derive(Actionlike, PartialEq, Eq, Hash, Clone, Copy, Debug, Reflect)]
+pub enum CameraAction {
+    MoveForward,
+    MoveBackward,
+    MoveLeft,
+    MoveRight,
+    MoveUp,
+    MoveDown,
+}
+
+/// Set up camera input actions
+fn setup_actions(mut commands: Commands) {
+    let mut input_map = InputMap::new([
+        (CameraAction::MoveForward, KeyCode::KeyW),
+        (CameraAction::MoveBackward, KeyCode::KeyS),
+        (CameraAction::MoveLeft, KeyCode::KeyA),
+        (CameraAction::MoveRight, KeyCode::KeyD),
+        (CameraAction::MoveUp, KeyCode::Space),
+    ]);
+    // Support both shift keys for moving down
+    input_map.insert(CameraAction::MoveDown, KeyCode::ShiftLeft);
+    input_map.insert(CameraAction::MoveDown, KeyCode::ShiftRight);
+
+    commands.spawn(input_map);
+}
+
+pub struct CameraPlugin;
+
+impl Plugin for CameraPlugin {
+    fn build(&self, app: &mut App) {
+        tracing::info!("Initializing camera plugin");
+        app.add_plugins(InputManagerPlugin::<CameraAction>::default())
+            .add_systems(
+                OnEnter(AppState::InitializingWorld),
+                (setup::setup, setup_actions),
+            )
+            .add_systems(
+                Update,
+                (
+                    update_camera_look
+                        .run_if(not(resource_equals(RuntimeOptions { headless: true }))),
+                    update_camera_movement,
+                    messages::handle_camera_messages,
+                )
+                    .chain()
+                    .run_if(in_state(AppState::MainGame)),
+            )
+            .add_message::<messages::CameraMessage>();
+    }
+}
+
+/// System to handle mouse look for the camera
+fn update_camera_look(
+    mut mouse_motion: MessageReader<MouseMotion>,
+    mut query: Query<(&mut FpsController, &mut Transform), With<Camera>>,
+    primary_cursor_options: Single<&mut CursorOptions, With<PrimaryWindow>>,
+) {
+    let Some((mut controller, mut transform)) = query.iter_mut().next() else {
+        return;
+    };
+
+    if !controller.enabled {
+        return;
+    }
+
+    // Check if cursor is grabbed
+    if primary_cursor_options.grab_mode != CursorGrabMode::Locked {
+        return;
+    }
+
+    // Accumulate mouse motion
+    let mut delta = Vec2::ZERO;
+    for motion in mouse_motion.read() {
+        delta += motion.delta;
+    }
+
+    if delta.length_squared() > 0.0 {
+        // Update yaw (left/right) and pitch (up/down)
+        controller.yaw = delta
+            .x
+            .mul_add(-controller.mouse_sensitivity, controller.yaw);
+        controller.pitch = delta
+            .y
+            .mul_add(-controller.mouse_sensitivity, controller.pitch);
+
+        // Clamp pitch to prevent camera flipping
+        controller.pitch = controller.pitch.clamp(
+            -std::f32::consts::FRAC_PI_2 + 0.001,
+            std::f32::consts::FRAC_PI_2 - 0.001,
+        );
+
+        // Apply rotation to transform
+        transform.rotation = Quat::from_euler(EulerRot::YXZ, controller.yaw, controller.pitch, 0.0);
+    }
+}
+
+/// System to handle WASD + space/shift movement
+fn update_camera_movement(
+    time: Res<Time>,
+    action_state: Single<&ActionState<CameraAction>>,
+    mut query: Query<(&FpsController, &mut Transform), With<Camera>>,
+) {
+    let Some((controller, mut transform)) = query.iter_mut().next() else {
+        return;
+    };
+
+    if !controller.enabled {
+        return;
+    }
+
+    let mut velocity = Vec3::ZERO;
+    let forward = transform.forward();
+    let right = transform.right();
+
+    // WASD movement (horizontal plane for forward/back, actual right vector for strafing)
+    if action_state.pressed(&CameraAction::MoveForward) {
+        velocity += *forward;
+    }
+    if action_state.pressed(&CameraAction::MoveBackward) {
+        velocity -= *forward;
+    }
+    if action_state.pressed(&CameraAction::MoveLeft) {
+        velocity -= *right;
+    }
+    if action_state.pressed(&CameraAction::MoveRight) {
+        velocity += *right;
+    }
+
+    // Vertical movement (fly up/down)
+    if action_state.pressed(&CameraAction::MoveUp) {
+        velocity += Vec3::Y;
+    }
+    if action_state.pressed(&CameraAction::MoveDown) {
+        velocity -= Vec3::Y;
+    }
+
+    // Normalize to prevent faster diagonal movement, then apply speed
+    if velocity.length_squared() > 0.0 {
+        velocity = velocity.normalize() * controller.movement_speed * time.delta_secs();
+        transform.translation += velocity;
+    }
+}
+```
+
+### crates/plugins/src/camera/setup.rs
+```
+#[cfg(not(target_arch = "wasm32"))]
+use bevy::anti_alias::contrast_adaptive_sharpening::ContrastAdaptiveSharpening;
+use bevy::anti_alias::taa::TemporalAntiAliasing;
+use bevy::core_pipeline::prepass::DepthPrepass;
+use bevy::pbr::ScreenSpaceAmbientOcclusion;
+use bevy::prelude::*;
+use bevy::render::experimental::occlusion_culling::OcclusionCulling;
+use bevy::render::view::Hdr;
+
+use super::FpsController;
+
+#[derive(Resource)]
+pub struct CameraSettings {
+    pub zoom_level: i8,
+    pub wx: f32,
+    pub wy: f32,
+    pub wz: f32,
+    pub target_x: f32,
+    pub target_y: f32,
+    pub target_z: f32,
+}
+
+pub fn setup(mut commands: Commands, settings: Res<CameraSettings>) {
+    let zoom = (settings.zoom_level as f32).exp2();
+
+    // Calculate initial position and rotation
+    let eye_pos = Vec3::new(settings.wx * zoom, settings.wy * zoom, settings.wz * zoom);
+    let target_pos = Vec3::new(
+        settings.target_x * zoom,
+        settings.target_y * zoom,
+        settings.target_z * zoom,
+    );
+
+    // Calculate initial yaw and pitch from eye to target
+    let direction = (target_pos - eye_pos).normalize();
+    let yaw = direction.z.atan2(direction.x) - std::f32::consts::FRAC_PI_2;
+    let pitch = direction.y.asin();
+
+    let controller = FpsController {
+        yaw,
+        pitch,
+        ..FpsController::default()
+    };
+
+    let rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+
+    commands.spawn((
+        Name::new("Camera"),
+        controller,
+        Camera::default(),
+        Hdr,
+        Camera3d::default(),
+        Transform::from_translation(eye_pos).with_rotation(rotation),
+        #[cfg(not(target_arch = "wasm32"))]
+        ContrastAdaptiveSharpening::default(),
+        DepthPrepass,
+        OcclusionCulling,
+        ScreenSpaceAmbientOcclusion::default(),
+        TemporalAntiAliasing::default(),
+        Msaa::Off,
+    ));
+}
+```
+
+### crates/plugins/src/debug/info.rs
+```
+use bevy::diagnostic::{
+    DiagnosticsStore, EntityCountDiagnosticsPlugin, FrameTimeDiagnosticsPlugin,
+};
+use bevy::prelude::*;
+use bevy_inspector_egui::bevy_egui::EguiContexts;
+use bevy_inspector_egui::bevy_egui::egui::{self, Slider};
+use infinigen_common::chunks::CHUNK_SIZE_F32;
+use leafwing_input_manager::prelude::*;
+
+use crate::camera::FpsController;
+use crate::scene::{self, LoadedChunk};
+
+pub fn display_debug_info(
+    mut egui: EguiContexts,
+    diagnostics: Res<DiagnosticsStore>,
+    camera_query: Single<(&Transform, &mut FpsController), With<Camera>>,
+    scene_view: Res<scene::SceneView>,
+    scene_zoom: Res<scene::SceneZoom>,
+    chunk_requests: Res<scene::ChunkRequests>,
+    mut update_msgs: MessageWriter<scene::UpdateSettingsMessage>,
+    mut reload_msgs: MessageWriter<scene::ReloadAllChunksMessage>,
+    loaded_chunks: Query<&LoadedChunk>,
+) -> Result {
+    let (camera_transform, mut fps_controller) = camera_query.into_inner();
+    egui::Window::new("Position").show(egui.ctx_mut()?, |ui| {
+        egui::Grid::new("position").show(ui, |ui| {
+            ui.label("");
+            ui.label("x");
+            ui.label("y");
+            ui.label("z");
+            ui.end_row();
+
+            // Block position
+            let block_pos = [
+                camera_transform.translation.x.floor() as i32,
+                camera_transform.translation.y.floor() as i32,
+                camera_transform.translation.z.floor() as i32,
+            ];
+            ui.label("Block:");
+            ui.label(format!("{}", block_pos[0]));
+            ui.label(format!("{}", block_pos[1]));
+            ui.label(format!("{}", block_pos[2]));
+            ui.end_row();
+
+            // Chunk position
+            let chunk_pos = [
+                (camera_transform.translation.x / CHUNK_SIZE_F32).floor() as i32,
+                (camera_transform.translation.y / CHUNK_SIZE_F32).floor() as i32,
+                (camera_transform.translation.z / CHUNK_SIZE_F32).floor() as i32,
+            ];
+            ui.label("Chunk:");
+            ui.label(format!("{}", chunk_pos[0]));
+            ui.label(format!("{}", chunk_pos[1]));
+            ui.label(format!("{}", chunk_pos[2]));
+            ui.end_row();
+        });
+    });
+
+    egui::Window::new("Controls").show(egui.ctx_mut()?, |ui| {
+        {
+            let (mut horizontal_view_distance, mut vertical_view_distance) = (
+                scene_view.horizontal_view_distance,
+                scene_view.vertical_view_distance,
+            );
+
+            ui.label("Horizontal view distance");
+            if ui
+                .add(Slider::new(&mut horizontal_view_distance, 1..=64))
+                .changed()
+                && horizontal_view_distance != scene_view.horizontal_view_distance
+            {
+                update_msgs.write(scene::UpdateSettingsMessage::HorizontalViewDistance(
+                    horizontal_view_distance,
+                ));
+            };
+
+            ui.label("Vertical view distance");
+            if ui
+                .add(Slider::new(&mut vertical_view_distance, 1..=64))
+                .changed()
+                && vertical_view_distance != scene_view.vertical_view_distance
+            {
+                update_msgs.write(scene::UpdateSettingsMessage::VerticalViewDistance(
+                    vertical_view_distance,
+                ));
+            };
+        }
+
+        {
+            let mut zoom_level = scene_zoom.zoom_level;
+            ui.label("Zoom level");
+            if ui.add(Slider::new(&mut zoom_level, -5..=5)).changed()
+                && scene_zoom.zoom_level != zoom_level
+            {
+                update_msgs.write(scene::UpdateSettingsMessage::ZoomLevel(zoom_level));
+            };
+        }
+
+        ui.label("Camera speed");
+        ui.add(Slider::new(&mut fps_controller.movement_speed, 1.0..=100.0));
+        if ui.button("Clear and reload all chunks").clicked() {
+            reload_msgs.write(scene::ReloadAllChunksMessage);
+        }
+    });
+
+    egui::Window::new("Stats").show(egui.ctx_mut()?, |ui| {
+        egui::Grid::new("stats").num_columns(2).show(ui, |ui| {
+            ui.label("FPS");
+            ui.label(format!(
+                "{:.0}",
+                diagnostics
+                    .get(&FrameTimeDiagnosticsPlugin::FPS)
+                    .unwrap()
+                    .average()
+                    .unwrap_or_default()
+            ));
+            ui.end_row();
+
+            ui.label("Entities");
+            ui.label(format!(
+                "{:.0}",
+                diagnostics
+                    .get(&EntityCountDiagnosticsPlugin::ENTITY_COUNT)
+                    .unwrap()
+                    .average()
+                    .unwrap_or_default()
+            ));
+            ui.end_row();
+
+            ui.label("Queued chunk ops");
+            ui.label(format!("{}", chunk_requests.len()));
+            ui.end_row();
+
+            ui.label("Non-empty chunks loaded");
+            ui.label(format!("{}", loaded_chunks.iter().count()));
+            ui.end_row();
+        });
+    });
+    Ok(())
+}
+
+#[derive(Debug, Resource, Eq, PartialEq)]
+pub struct UiState {
+    pub show_debug_info: bool,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            show_debug_info: true,
+        }
+    }
+}
+
+#[derive(Actionlike, PartialEq, Eq, Hash, Clone, Copy, Debug, Reflect)]
+pub enum Action {
+    ToggleDebugUI,
+}
+
+pub fn setup_actions(mut commands: Commands) {
+    // Describes how to convert from player inputs into those actions
+    let input_map = InputMap::new([(Action::ToggleDebugUI, KeyCode::F7)]);
+    commands.spawn(input_map);
+}
+
+pub fn handle_actions(action_state: Single<&ActionState<Action>>, mut ui_state: ResMut<UiState>) {
+    if action_state.just_pressed(&Action::ToggleDebugUI) {
+        ui_state.show_debug_info = !ui_state.show_debug_info;
+        tracing::info!(%ui_state.show_debug_info, "Debug UI toggled");
+    }
+}
+```
+
+### crates/plugins/src/debug/mod.rs
+```
+use bevy::camera::Camera3dDepthLoadOp;
+use bevy::diagnostic::{EntityCountDiagnosticsPlugin, FrameTimeDiagnosticsPlugin};
+use bevy::gizmos::config::GizmoConfigStore;
+use bevy::light::cluster::ClusterConfig;
+use bevy::light::{AmbientLight, DirectionalLight, PointLight};
+use bevy::prelude::*;
+use bevy::render::view::{ColorGradingGlobal, ColorGradingSection};
+use bevy_inspector_egui::DefaultInspectorConfigPlugin;
+use bevy_inspector_egui::bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
+use leafwing_input_manager::prelude::*;
+
+use self::info::{UiState, display_debug_info};
+use self::world_inspector::world_inspector_ui;
+use crate::AppState;
+
+mod info;
+#[cfg(not(target_family = "wasm"))]
+mod wireframe;
+mod world_inspector;
+
+pub struct DebugPlugin;
+
+impl Plugin for DebugPlugin {
+    fn build(&self, app: &mut App) {
+        tracing::info!("Initializing debug UI plugin");
+        app.register_type::<GizmoConfigStore>();
+        app.register_type::<ColorGradingSection>();
+        app.register_type::<ColorGradingGlobal>();
+        app.register_type::<AmbientLight>();
+        app.register_type::<PointLight>();
+        app.register_type::<DirectionalLight>();
+        app.register_type::<ClusterConfig>();
+        app.register_type::<Camera3dDepthLoadOp>();
+        app.init_resource::<UiState>()
+            .add_plugins((
+                InputManagerPlugin::<info::Action>::default(),
+                EguiPlugin::default(),
+                FrameTimeDiagnosticsPlugin::default(),
+                EntityCountDiagnosticsPlugin::default(),
+                DefaultInspectorConfigPlugin,
+            ))
+            .add_systems(OnEnter(AppState::MainGame), info::setup_actions)
+            .add_systems(
+                EguiPrimaryContextPass,
+                (
+                    display_debug_info.run_if(resource_equals(UiState {
+                        show_debug_info: true,
+                    })),
+                    info::handle_actions,
+                    world_inspector_ui.run_if(resource_equals(UiState {
+                        show_debug_info: true,
+                    })),
+                )
+                    .run_if(in_state(AppState::MainGame)),
+            );
+        #[cfg(not(target_family = "wasm"))]
+        app.add_plugins(wireframe::WireframePlugin);
+    }
+}
+```
+
+### crates/plugins/src/debug/wireframe.rs
+```
+use bevy::pbr::wireframe::WireframeConfig;
+use bevy::prelude::*;
+use leafwing_input_manager::prelude::*;
+
+use crate::AppState;
+
+pub struct WireframePlugin;
+
+impl Plugin for WireframePlugin {
+    fn build(&self, app: &mut App) {
+        tracing::info!("Initializing wireframe plugin");
+
+        app.add_plugins((
+            bevy::pbr::wireframe::WireframePlugin::default(),
+            InputManagerPlugin::<Action>::default(),
+        ))
+        .add_systems(OnEnter(AppState::MainGame), setup_actions)
+        .add_systems(Update, handle_actions.run_if(in_state(AppState::MainGame)));
+    }
+}
+
+#[derive(Actionlike, PartialEq, Eq, Hash, Clone, Copy, Debug, Reflect)]
+pub enum Action {
+    ToggleWireframes,
+}
+
+pub fn setup_actions(mut commands: Commands) {
+    let input_map = InputMap::new([(Action::ToggleWireframes, KeyCode::F3)]);
+    commands.spawn(input_map);
+}
+
+pub fn handle_actions(
+    action_state: Single<&ActionState<Action>>,
+    mut wireframe_cfg: ResMut<WireframeConfig>,
+) {
+    if action_state.just_pressed(&Action::ToggleWireframes) {
+        wireframe_cfg.global = !wireframe_cfg.global;
+        tracing::info!(%wireframe_cfg.global, "Wireframe toggled");
+    }
+}
+```
+
+### crates/plugins/src/debug/world_inspector.rs
+```
+use bevy::prelude::*;
+use bevy_inspector_egui::bevy_egui::{EguiContext, PrimaryEguiContext, egui};
+use bevy_inspector_egui::bevy_inspector::ui_for_world;
+use bevy_inspector_egui::egui::Align2;
+
+pub fn world_inspector_ui(world: &mut World) {
+    let egui_context = world
+        .query_filtered::<&mut EguiContext, With<PrimaryEguiContext>>()
+        .single(world);
+
+    let Ok(egui_context) = egui_context else {
+        return;
+    };
+    let mut egui_context = egui_context.clone();
+
+    egui::Window::new("World Inspector")
+        .default_size((320., 160.))
+        .anchor(Align2::RIGHT_TOP, [-5., 5.])
+        .show(egui_context.get_mut(), |ui| {
+            egui::ScrollArea::both().show(ui, |ui| {
+                ui_for_world(world, ui);
+                ui.allocate_space(ui.available_size());
+            });
+        });
+}
+```
+
+### crates/plugins/src/mesh/messages.rs
+```
+use std::ops::Deref;
+use std::sync::Arc;
+
+use bevy::prelude::*;
+use infinigen_common::mesh::shapes::EMPTY_CHUNK_FACES;
+use infinigen_common::world::{ChunkPosition, Direction};
+use infinigen_common::zoom::ZoomLevel;
+use strum::IntoEnumIterator;
+
+use super::{MeshInfo, MeshStatus, Meshes};
+use crate::mesh::utils::{bevy_mesh_greedy_quads, bevy_mesh_visible_block_faces};
+use crate::registry::BlockRegistry;
+use crate::world::messages::GenerateChunkRequest;
+use crate::world::{ChunkStatus, World};
+
+#[derive(Message)]
+pub struct MeshChunkRequest {
+    pub chunk_position: ChunkPosition,
+    pub zoom_level: ZoomLevel,
+}
+
+#[derive(Message)]
+pub struct MeshChunkRerequest {
+    pub chunk_position: ChunkPosition,
+    pub zoom_level: ZoomLevel,
+}
+
+pub fn handle_mesh_chunk_rerequests(
+    mut mesh_chunk_rerequests: MessageReader<MeshChunkRerequest>,
+    mut mesh_chunk_requests: MessageWriter<MeshChunkRequest>,
+) {
+    for (
+        MeshChunkRerequest {
+            chunk_position,
+            zoom_level,
+        },
+        _,
+    ) in mesh_chunk_rerequests.par_read()
+    {
+        mesh_chunk_requests.write(MeshChunkRequest {
+            chunk_position: *chunk_position,
+            zoom_level: *zoom_level,
+        });
+    }
+}
+
+pub fn handle_mesh_chunk_requests(
+    mut mesh_chunk_requests: MessageReader<MeshChunkRequest>,
+    mut mesh_chunk_rerequests: MessageWriter<MeshChunkRerequest>,
+    mut generate_chunk_reqs: MessageWriter<GenerateChunkRequest>,
+    world: Res<World>,
+    mut meshes: ResMut<Meshes>,
+    registry: Res<BlockRegistry>,
+) {
+    for (
+        MeshChunkRequest {
+            chunk_position,
+            zoom_level,
+        },
+        _,
+    ) in mesh_chunk_requests.par_read()
+    {
+        let Some(status) = world.cache.get(&(*chunk_position, *zoom_level)) else {
+            // chunk not available yet, request generation and check to mesh later
+            generate_chunk_reqs.write(GenerateChunkRequest {
+                chunk_position: *chunk_position,
+                zoom_level: *zoom_level,
+            });
+            mesh_chunk_rerequests.write(MeshChunkRerequest {
+                chunk_position: *chunk_position,
+                zoom_level: *zoom_level,
+            });
+            continue;
+        };
+        let chunk_info = match status {
+            ChunkStatus::Generating => {
+                mesh_chunk_rerequests.write(MeshChunkRerequest {
+                    chunk_position: *chunk_position,
+                    zoom_level: *zoom_level,
+                });
+                continue;
+            }
+            ChunkStatus::Generated(chunk_info) => chunk_info.deref(),
+            ChunkStatus::Empty => {
+                meshes
+                    .meshes
+                    .insert((*chunk_position, *zoom_level), MeshStatus::Empty);
+                continue;
+            }
+        };
+        let mut neighbours = vec![];
+        let mut all_neighbours_present = true;
+        for (dir, neighbour_cpos) in get_neighbour_cposes(chunk_position) {
+            match world.cache.get(&(neighbour_cpos, *zoom_level)) {
+                Some(status) => match status {
+                    ChunkStatus::Generating => {
+                        all_neighbours_present = false;
+                        continue;
+                    }
+                    ChunkStatus::Generated(_) | ChunkStatus::Empty => {
+                        neighbours.push((dir, status))
+                    }
+                },
+                None => {
+                    all_neighbours_present = false;
+                    // request chunk generation but not mesh, as we might not need it
+                    // mesh requests should be driven by the active scene
+                    generate_chunk_reqs.write(GenerateChunkRequest {
+                        chunk_position: neighbour_cpos,
+                        zoom_level: *zoom_level,
+                    });
+                    continue;
+                }
+            }
+        }
+        if !all_neighbours_present {
+            // not all neighbours available yet, check again later
+            mesh_chunk_rerequests.write(MeshChunkRerequest {
+                chunk_position: *chunk_position,
+                zoom_level: *zoom_level,
+            });
+            continue;
+        }
+
+        let mut neighbour_faces = EMPTY_CHUNK_FACES;
+        for (dir, neighbour) in neighbours.into_iter() {
+            let opposite = dir.opposite();
+            let faces = match neighbour {
+                ChunkStatus::Generated(chunk_info) => chunk_info.faces,
+                ChunkStatus::Empty => EMPTY_CHUNK_FACES,
+                ChunkStatus::Generating => unreachable!(),
+            };
+            neighbour_faces[dir] = faces[opposite];
+        }
+
+        let mut mesh_info = MeshInfo::default();
+
+        for translucent in chunk_info.translucents.iter() {
+            if let Some(translucent_mesh) = bevy_mesh_greedy_quads(
+                translucent,
+                &neighbour_faces,
+                &registry.appearances,
+                &registry.definitions,
+            ) {
+                mesh_info.translucents.push(translucent_mesh);
+            }
+        }
+
+        mesh_info.opaque = bevy_mesh_visible_block_faces(
+            &chunk_info.opaque,
+            &neighbour_faces,
+            &registry.appearances,
+            &registry.definitions,
+        );
+
+        if mesh_info.opaque.is_none() && mesh_info.translucents.is_empty() {
+            // TODO: can this happen?
+            meshes
+                .meshes
+                .insert((*chunk_position, *zoom_level), MeshStatus::Empty);
+            continue;
+        }
+
+        meshes.meshes.insert(
+            (*chunk_position, *zoom_level),
+            MeshStatus::Meshed(Arc::new(mesh_info)),
+        );
+    }
+}
+
+pub fn get_neighbour_cposes(
+    position: &ChunkPosition,
+) -> impl Iterator<Item = (Direction, ChunkPosition)> + '_ {
+    Direction::iter().map(|dir| {
+        let normal: [i32; 3] = dir.into();
+        (
+            dir,
+            ChunkPosition {
+                x: position.x + normal[0],
+                y: position.y + normal[1],
+                z: position.z + normal[2],
+            },
+        )
+    })
+}
+```
+
+### crates/plugins/src/mesh/mod.rs
+```
+use std::sync::Arc;
+
+use ahash::AHashMap;
+use bevy::prelude::*;
+use infinigen_common::world::ChunkPosition;
+use infinigen_common::zoom::ZoomLevel;
+use messages::{MeshChunkRequest, MeshChunkRerequest};
+
+use crate::AppState;
+
+pub mod messages;
+mod utils;
+
+#[derive(Resource, Default)]
+pub struct Meshes {
+    pub meshes: AHashMap<(ChunkPosition, ZoomLevel), MeshStatus>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct MeshInfo {
+    pub opaque: Option<Mesh>,
+    pub translucents: Vec<Mesh>,
+}
+
+pub enum MeshStatus {
+    Meshing,
+    Meshed(Arc<MeshInfo>),
+    Empty,
+}
+
+pub struct MeshPlugin;
+
+impl Plugin for MeshPlugin {
+    fn build(&self, app: &mut App) {
+        tracing::info!("Initializing mesh plugin");
+        app.init_resource::<Meshes>()
+            .add_message::<MeshChunkRequest>()
+            .add_message::<MeshChunkRerequest>()
+            .add_systems(
+                FixedUpdate,
+                (
+                    messages::handle_mesh_chunk_requests.run_if(on_message::<MeshChunkRequest>),
+                    messages::handle_mesh_chunk_rerequests.run_if(on_message::<MeshChunkRerequest>),
+                )
+                    .chain()
+                    .run_if(in_state(AppState::MainGame)),
+            );
+    }
+}
+```
+
+### crates/plugins/src/mesh/utils.rs
+```
+//! Converts from our native mesh types to Bevy meshes
+
+use bevy::asset::RenderAssetUsages;
+use bevy::mesh::{Indices, VertexAttributeValues};
+use bevy::prelude::*;
+use bevy::render::render_resource::PrimitiveTopology;
+use infinigen_common::chunks::Array3Chunk;
+use infinigen_common::mesh::faces::{BlockVisibilityChecker, prepare_padded_chunk};
+use infinigen_common::mesh::shapes::ChunkFace;
+use infinigen_common::mesh::textures::BlockAppearances;
+use infinigen_common::mesh::{MeshInfo, mesh_chunk_greedy_quads, mesh_chunk_visible_block_faces};
+use infinigen_common::world::Direction;
+use linearize::StaticCopyMap;
+
+pub fn to_bevy_mesh(
+    MeshInfo {
+        positions,
+        normals,
+        colors,
+        uvs,
+        indices,
+    }: MeshInfo,
+) -> Mesh {
+    let mut render_mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    render_mesh.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        VertexAttributeValues::Float32x3(positions),
+    );
+    render_mesh.insert_attribute(
+        Mesh::ATTRIBUTE_NORMAL,
+        VertexAttributeValues::Float32x3(normals),
+    );
+    render_mesh.insert_attribute(
+        Mesh::ATTRIBUTE_COLOR,
+        VertexAttributeValues::Float32x4(colors),
+    );
+    render_mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, VertexAttributeValues::Float32x2(uvs));
+    render_mesh.insert_indices(Indices::U32(indices));
+    render_mesh
+}
+
+/// Returns a mesh of all visible block faces in the chunk.
+/// adapted from <https://github.com/bonsairobo/block-mesh-rs/blob/main/examples-crate/render/main.rs>
+pub fn bevy_mesh_visible_block_faces(
+    chunk: &Array3Chunk,
+    neighbor_faces: &StaticCopyMap<Direction, ChunkFace>,
+    block_textures: &BlockAppearances,
+    visibility_checker: impl BlockVisibilityChecker,
+) -> Option<Mesh> {
+    let samples = prepare_padded_chunk(chunk, neighbor_faces, visibility_checker);
+    let mesh = mesh_chunk_visible_block_faces(&samples, block_textures);
+    mesh.map(to_bevy_mesh)
+}
+
+/// Returns a mesh of quads in a chunk.
+/// adapted from <https://github.com/bonsairobo/block-mesh-rs/blob/main/examples-crate/render/main.rs>
+pub fn bevy_mesh_greedy_quads(
+    chunk: &Array3Chunk,
+    neighbor_faces: &StaticCopyMap<Direction, ChunkFace>,
+    block_textures: &BlockAppearances,
+    visibility_checker: impl BlockVisibilityChecker,
+) -> Option<Mesh> {
+    let samples = prepare_padded_chunk(chunk, neighbor_faces, visibility_checker);
+    let mesh = mesh_chunk_greedy_quads(&samples, block_textures);
+    mesh.map(to_bevy_mesh)
+}
+```
+
+### crates/plugins/src/registry/mod.rs
+```
+use ahash::{AHashMap, AHashSet};
+use bevy::prelude::*;
+use infinigen_common::blocks::{BlockType, BlockVisibility, Palette};
+use infinigen_common::mesh::faces::BlockVisibilityChecker;
+use infinigen_common::mesh::textures::BlockAppearances;
+use infinigen_common::world::MappedBlockID;
+use serde::{Deserialize, Serialize};
+use strum::EnumCount;
+
+#[derive(
+    Default,
+    Debug,
+    Serialize,
+    Deserialize,
+    Clone,
+    Ord,
+    PartialOrd,
+    Eq,
+    PartialEq,
+    Hash,
+    TypePath,
+    Asset,
+)]
+#[serde(transparent)]
+pub struct BlockDefinition(pub BlockType);
+
+impl From<BlockType> for BlockDefinition {
+    fn from(value: BlockType) -> Self {
+        Self(value)
+    }
+}
+
+/// Tracks which [`MappedBlockID`]s are being used for which [`BlockDefinition`]s for the currently loaded session.
+#[derive(Debug, Default, Clone)]
+pub struct BlockDefinitions {
+    by_mapped_id: AHashMap<MappedBlockID, BlockDefinition>,
+    next_free_mapped_id: MappedBlockID,
+}
+
+impl BlockDefinitions {
+    pub fn get(&self, mapped_id: &MappedBlockID) -> &BlockDefinition {
+        self.by_mapped_id.get(mapped_id).unwrap()
+    }
+
+    /// Adds a block definition to the mappings and returns the mapped ID, or None if no more IDs are available.
+    pub fn add(&mut self, block_definition: BlockDefinition) -> Option<MappedBlockID> {
+        let mapped_id = self.next_free_mapped_id;
+        tracing::debug!(?block_definition, ?mapped_id, "Mapping block");
+        self.by_mapped_id
+            .insert(self.next_free_mapped_id, block_definition);
+        self.next_free_mapped_id = self.next_free_mapped_id.next()?;
+        Some(mapped_id)
+    }
+
+    pub fn palette(&self) -> Palette {
+        let mut palette = Palette::default();
+        for (mapped_id, block_definition) in self.by_mapped_id.iter() {
+            palette
+                .inner
+                .insert(block_definition.0.id.clone(), *mapped_id);
+        }
+        palette
+    }
+
+    pub fn visibility_checker(&self) -> impl BlockVisibilityChecker + 'static {
+        #[derive(Clone)]
+        struct Checker {
+            opaque: AHashSet<MappedBlockID>,
+        }
+        impl BlockVisibilityChecker for Checker {
+            fn get_visibility(&self, mapped_id: &MappedBlockID) -> BlockVisibility {
+                if self.opaque.contains(mapped_id) {
+                    BlockVisibility::Opaque
+                } else {
+                    BlockVisibility::Translucent
+                }
+            }
+        }
+        Checker {
+            opaque: self
+                .by_mapped_id
+                .iter()
+                .filter_map(|(id, def)| {
+                    if def.0.visibility == BlockVisibility::Opaque {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+impl BlockVisibilityChecker for BlockDefinitions {
+    fn get_visibility(&self, mapped_id: &MappedBlockID) -> BlockVisibility {
+        self.get(mapped_id).0.visibility
+    }
+}
+
+#[derive(Default, Resource)]
+pub struct BlockRegistry {
+    pub materials: [Handle<StandardMaterial>; BlockVisibility::COUNT],
+    pub appearances: BlockAppearances,
+    pub definitions: BlockDefinitions,
+}
+
+impl BlockRegistry {
+    pub fn get_material(&self, visibility: BlockVisibility) -> Handle<StandardMaterial> {
+        self.materials[visibility as usize].clone()
+    }
+}
+
+pub struct RegistryPlugin;
+
+impl Plugin for RegistryPlugin {
+    fn build(&self, app: &mut App) {
+        tracing::info!("Initializing registry plugin");
+        app.init_resource::<BlockRegistry>();
+    }
+}
+```
+
+### crates/plugins/src/scene/handle.rs
+```
+use bevy::prelude::*;
+use infinigen_common::blocks::BlockVisibility;
+use infinigen_common::chunks::CHUNK_SIZE_F32;
+use infinigen_common::world::WorldPosition;
+use infinigen_common::zoom::ZoomLevel;
+
+use super::{ChunkRequests, SceneChunkStatus, UnloadChunkOpMessage};
+use crate::mesh::messages::MeshChunkRequest;
+use crate::mesh::{MeshStatus, Meshes};
+use crate::registry::BlockRegistry;
+use crate::scene::LoadedChunk;
+
+// bigger chunks means go slower to prevent lag/stutter
+const MESH_SPAWN_RATE: usize = (128. * (32. / CHUNK_SIZE_F32)) as usize;
+const CHUNK_REQUEST_RATE: usize = MESH_SPAWN_RATE * 5;
+
+pub fn process_unload_chunk_ops(
+    mut commands: Commands,
+    mut unload_msgs: MessageReader<crate::scene::UnloadChunkOpMessage>,
+    loaded: Query<(Entity, &LoadedChunk)>,
+) {
+    for (UnloadChunkOpMessage(cpos), _) in unload_msgs.par_read() {
+        for (eid, LoadedChunk { cpos: loaded_cpos }) in loaded.iter() {
+            if loaded_cpos == cpos {
+                commands.entity(eid).despawn();
+            }
+        }
+    }
+}
+
+pub fn process_load_requested(
+    mut chunk_requests: ResMut<ChunkRequests>,
+    scene_zoom: Res<crate::scene::SceneZoom>,
+    meshes: Res<Meshes>,
+    mut mesh_chunk_reqs: MessageWriter<MeshChunkRequest>,
+) {
+    let zoom_level: ZoomLevel = scene_zoom.zoom_level.into();
+
+    let statuses: Vec<_> = chunk_requests.all_statuses();
+    let should_check: Vec<_> = statuses
+        .into_iter()
+        .filter_map(|(cpos, status)| {
+            if matches!(status, SceneChunkStatus::LoadRequested) {
+                Some(cpos)
+            } else {
+                None
+            }
+        })
+        .take(CHUNK_REQUEST_RATE)
+        .collect();
+
+    for cpos in should_check {
+        match meshes.meshes.get(&(cpos, zoom_level)) {
+            None => {
+                mesh_chunk_reqs.write(MeshChunkRequest {
+                    chunk_position: cpos,
+                    zoom_level,
+                });
+                chunk_requests.add(cpos, SceneChunkStatus::MeshRequested);
+            }
+            Some(MeshStatus::Meshing) => {
+                chunk_requests.add(cpos, SceneChunkStatus::MeshRequested);
+            }
+            Some(MeshStatus::Empty) => {
+                chunk_requests.remove(cpos);
+            }
+            Some(MeshStatus::Meshed(_)) => {
+                chunk_requests.add(cpos, SceneChunkStatus::SpawnRequested);
+            }
+        }
+    }
+}
+
+pub fn process_mesh_requested(
+    mut chunk_requests: ResMut<ChunkRequests>,
+    scene_zoom: Res<crate::scene::SceneZoom>,
+    meshes: Res<Meshes>,
+) {
+    let zoom_level: ZoomLevel = scene_zoom.zoom_level.into();
+
+    let statuses: Vec<_> = chunk_requests.all_statuses();
+    let should_check: Vec<_> = statuses
+        .into_iter()
+        .filter_map(|(cpos, status)| {
+            if matches!(status, SceneChunkStatus::MeshRequested) {
+                Some(cpos)
+            } else {
+                None
+            }
+        })
+        .take(CHUNK_REQUEST_RATE)
+        .collect();
+
+    for cpos in should_check {
+        match meshes.meshes.get(&(cpos, zoom_level)) {
+            None => continue,
+            Some(MeshStatus::Meshing) => continue,
+            Some(MeshStatus::Empty) => {
+                chunk_requests.remove(cpos);
+            }
+            Some(MeshStatus::Meshed(_)) => {
+                chunk_requests.add(cpos, SceneChunkStatus::SpawnRequested);
+            }
+        }
+    }
+}
+
+pub fn process_spawn_requested(
+    mut chunk_requests: ResMut<ChunkRequests>,
+    mut commands: Commands,
+    scene_zoom: Res<crate::scene::SceneZoom>,
+    meshes: Res<Meshes>,
+    registry: Res<BlockRegistry>,
+    mut mesh_assets: ResMut<Assets<Mesh>>,
+) {
+    let zoom_level: ZoomLevel = scene_zoom.zoom_level.into();
+    let statuses: Vec<_> = chunk_requests.all_statuses();
+    let should_spawn = statuses
+        .into_iter()
+        .filter_map(|(cpos, status)| {
+            if matches!(status, SceneChunkStatus::SpawnRequested) {
+                Some(cpos)
+            } else {
+                None
+            }
+        })
+        .take(MESH_SPAWN_RATE);
+
+    for cpos in should_spawn {
+        let MeshStatus::Meshed(mesh_info) = meshes
+            .meshes
+            .get(&(cpos, zoom_level))
+            .expect("must be able to get mesh")
+        else {
+            unreachable!("must be able to get mesh");
+        };
+        let wpos: WorldPosition = (&cpos).into();
+        let transform = Transform::from_xyz(wpos.x, wpos.y, wpos.z);
+
+        let chunk_entity = commands
+            .spawn((
+                Name::new(format!("Chunk {cpos:?}")),
+                LoadedChunk { cpos },
+                Transform::from_translation(transform.translation),
+                Visibility::default(),
+            ))
+            .id();
+
+        if let Some(ref opaque_mesh) = mesh_info.opaque {
+            commands
+                .spawn((
+                    Name::new("Opaque mesh"),
+                    Mesh3d(mesh_assets.add(opaque_mesh.clone())),
+                    MeshMaterial3d(registry.get_material(BlockVisibility::Opaque)),
+                    Transform::default(),
+                    Visibility::default(),
+                ))
+                .insert(ChildOf(chunk_entity));
+        }
+
+        for trans_mesh in &mesh_info.translucents {
+            commands
+                .spawn((
+                    Name::new("Translucent mesh"),
+                    Mesh3d(mesh_assets.add(trans_mesh.clone())),
+                    MeshMaterial3d(registry.get_material(BlockVisibility::Translucent)),
+                    Transform::default(),
+                    Visibility::default(),
+                ))
+                .insert(ChildOf(chunk_entity));
+        }
+        chunk_requests.remove(cpos);
+    }
+}
+```
+
+### crates/plugins/src/scene/mod.rs
+```
+use std::collections::hash_map::Entry;
+
+use ahash::{AHashMap, AHashSet};
+use bevy::prelude::*;
+use infinigen_common::chunks::CHUNK_SIZE_F32;
+use infinigen_common::view;
+use infinigen_common::world::{ChunkPosition, WorldPosition};
+
+use crate::AppState;
+
+mod handle;
+pub mod setup;
+
+const MAX_CHUNKS_TO_QUEUE_PER_FRAME: usize = 200;
+
+#[derive(Component)]
+pub struct LoadedChunk {
+    pub cpos: ChunkPosition,
+}
+
+#[derive(Default, Resource)]
+pub struct ChunkRequests {
+    requests: AHashMap<ChunkPosition, SceneChunkStatus>,
+}
+
+#[derive(Default, Resource)]
+pub struct PendingChunkLoads {
+    chunks: Vec<ChunkPosition>,
+}
+
+#[derive(Clone, Copy)]
+pub enum SceneChunkStatus {
+    LoadRequested,
+    MeshRequested,
+    SpawnRequested,
+}
+
+impl ChunkRequests {
+    pub fn add(&mut self, cpos: ChunkPosition, request: SceneChunkStatus) {
+        self.requests.insert(cpos, request);
+    }
+
+    pub fn request_load(&mut self, cpos: ChunkPosition) {
+        match self.requests.entry(cpos) {
+            Entry::Occupied(occupied_entry) => match occupied_entry.get() {
+                SceneChunkStatus::LoadRequested
+                | SceneChunkStatus::MeshRequested
+                | SceneChunkStatus::SpawnRequested => (),
+            },
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(SceneChunkStatus::LoadRequested);
+            }
+        };
+    }
+
+    pub fn remove(&mut self, cpos: ChunkPosition) {
+        self.requests.remove(&cpos);
+    }
+
+    pub fn get_priority_requests(&self, n: usize) -> Vec<(ChunkPosition, SceneChunkStatus)> {
+        // TODO: should sort by priority to render i.e. closest and in view frustum first
+        let v: Vec<_> = self
+            .requests
+            .iter()
+            .take(n)
+            .map(|(cpos, status)| (*cpos, *status))
+            .collect();
+        v
+    }
+
+    pub fn all_statuses(&self) -> Vec<(ChunkPosition, SceneChunkStatus)> {
+        self.get_priority_requests(usize::MAX)
+    }
+
+    pub fn len(&self) -> usize {
+        self.requests.len()
+    }
+
+    pub fn clear(&mut self) {
+        self.requests.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+}
+
+#[derive(Debug, Default, Resource)]
+pub struct SceneCamera {
+    /// The current chunk the player is located in.
+    cpos: Option<ChunkPosition>,
+}
+
+#[derive(Debug, Resource)]
+pub struct SceneView {
+    pub horizontal_view_distance: usize,
+    pub vertical_view_distance: usize,
+}
+
+impl Default for SceneView {
+    fn default() -> Self {
+        Self {
+            horizontal_view_distance: 4,
+            vertical_view_distance: 4,
+        }
+    }
+}
+
+#[derive(Debug, Default, Resource)]
+pub struct SceneZoom {
+    // Zoom as a power of 2. e.g. if this is 0, then there will be no zoom.
+    pub prev_zoom_level: i8,
+    pub zoom_level: i8,
+}
+
+#[derive(Resource)]
+pub struct SceneSettings {
+    pub zoom_level: i8,
+    pub horizontal_view_distance: usize,
+    pub vertical_view_distance: usize,
+}
+
+#[derive(Debug, Message)]
+pub struct UnloadChunkOpMessage(ChunkPosition);
+
+pub const FAR: f32 = CHUNK_SIZE_F32 * 64.;
+
+#[derive(Message)]
+pub struct RefreshChunkOpsQueueMessage;
+
+#[derive(Message)]
+pub struct ReloadAllChunksMessage;
+
+#[derive(Message)]
+pub enum UpdateSettingsMessage {
+    HorizontalViewDistance(usize),
+    VerticalViewDistance(usize),
+    ZoomLevel(i8),
+}
+
+pub fn handle_update_scene_view(
+    mut scene_view: ResMut<SceneView>,
+    mut scene_zoom: ResMut<SceneZoom>,
+    mut update_msgs: MessageReader<UpdateSettingsMessage>,
+    mut refresh_msgs: MessageWriter<RefreshChunkOpsQueueMessage>,
+    mut reload_msgs: MessageWriter<ReloadAllChunksMessage>,
+) {
+    for msg in update_msgs.read() {
+        match msg {
+            UpdateSettingsMessage::HorizontalViewDistance(horizontal_view_distance) => {
+                tracing::info!(
+                    "Updating horizontal view distance from {} to {}",
+                    scene_view.horizontal_view_distance,
+                    horizontal_view_distance
+                );
+                scene_view.horizontal_view_distance = *horizontal_view_distance;
+                refresh_msgs.write(RefreshChunkOpsQueueMessage);
+            }
+            UpdateSettingsMessage::VerticalViewDistance(vertical_view_distance) => {
+                tracing::info!(
+                    "Updating vertical view distance from {} to {}",
+                    scene_view.vertical_view_distance,
+                    vertical_view_distance
+                );
+                scene_view.vertical_view_distance = *vertical_view_distance;
+                refresh_msgs.write(RefreshChunkOpsQueueMessage);
+            }
+            UpdateSettingsMessage::ZoomLevel(zoom_level) => {
+                tracing::info!(
+                    "Updating zoom level from {} to {}",
+                    scene_zoom.zoom_level,
+                    zoom_level
+                );
+                scene_zoom.prev_zoom_level = scene_zoom.zoom_level;
+                scene_zoom.zoom_level = *zoom_level;
+                reload_msgs.write(ReloadAllChunksMessage);
+            }
+        }
+    }
+}
+
+#[derive(Message)]
+pub struct UpdateSceneMessage;
+
+pub fn check_if_should_update_scene(
+    mut commands: Commands,
+    mut scene_camera: ResMut<SceneCamera>,
+    camera: Single<&Transform, With<Camera>>,
+    mut chunk_requests: ResMut<ChunkRequests>,
+    mut pending_loads: ResMut<PendingChunkLoads>,
+    mut reload_msgs: MessageReader<ReloadAllChunksMessage>,
+    mut refresh_msgs: MessageReader<RefreshChunkOpsQueueMessage>,
+    mut update_scene_msgs: MessageWriter<UpdateSceneMessage>,
+    loaded: Query<Entity, With<LoadedChunk>>,
+) {
+    let mut should_update = if refresh_msgs.read().next().is_some() {
+        chunk_requests.clear();
+        pending_loads.chunks.clear();
+        true
+    } else if reload_msgs.read().next().is_some() {
+        chunk_requests.clear();
+        pending_loads.chunks.clear();
+        tracing::info!("Reloading all chunks");
+        for loaded_chunk in loaded.iter() {
+            commands.entity(loaded_chunk).despawn();
+        }
+        true
+    } else {
+        false
+    };
+
+    let current_cpos: ChunkPosition = WorldPosition {
+        x: camera.translation.x,
+        y: camera.translation.y,
+        z: camera.translation.z,
+    }
+    .into();
+
+    if Some(current_cpos) != scene_camera.cpos {
+        let previous_cpos = scene_camera.cpos.replace(current_cpos);
+        tracing::debug!(?previous_cpos, current_cpos = ?scene_camera.cpos, "Camera moved to new chunk");
+        should_update = true;
+    }
+    if !should_update {
+        return;
+    }
+    update_scene_msgs.write(UpdateSceneMessage);
+}
+
+pub fn update_scene(
+    scene_view: Res<SceneView>,
+    camera: Query<(&Transform, &Projection), With<Camera>>,
+    mut pending_loads: ResMut<PendingChunkLoads>,
+    mut unload_msgs: MessageWriter<UnloadChunkOpMessage>,
+    mut update_scene_msgs: MessageReader<UpdateSceneMessage>,
+    loaded: Query<&LoadedChunk>,
+) -> Result {
+    if update_scene_msgs.read().next().is_none() {
+        return Ok(());
+    }
+    tracing::trace!("Updating scene");
+
+    let (camera, projection) = camera.single()?;
+    let current_cpos: ChunkPosition = WorldPosition {
+        x: camera.translation.x,
+        y: camera.translation.y,
+        z: camera.translation.z,
+    }
+    .into();
+
+    let Projection::Perspective(projection) = projection else {
+        unimplemented!("only perspective projection is supported right now")
+    };
+
+    let aspect_ratio = projection.aspect_ratio;
+    let fov = projection.fov;
+    let near = projection.near;
+    let far = projection.far;
+
+    let already_loaded: AHashSet<_> = loaded.iter().map(|l| l.cpos).collect();
+    tracing::debug!(loaded = ?already_loaded.len(), "Chunks already loaded");
+
+    let (to_load, to_unload) = view::compute_chunks_delta(
+        current_cpos,
+        scene_view.horizontal_view_distance,
+        scene_view.vertical_view_distance,
+        [
+            camera.translation.x,
+            camera.translation.y,
+            camera.translation.z,
+        ],
+        [
+            camera.rotation.w,
+            camera.rotation.x,
+            camera.rotation.y,
+            camera.rotation.z,
+        ],
+        aspect_ratio,
+        fov,
+        near,
+        far,
+        &already_loaded,
+    );
+    tracing::debug!(load = ?to_load.len(), unload = ?to_unload.len(), "Chunks to load/unload");
+
+    pending_loads.chunks = to_load;
+
+    unload_msgs.write_batch(to_unload.into_iter().map(UnloadChunkOpMessage));
+    Ok(())
+}
+
+/// Process pending chunk loads in batches to prevent freezing.
+pub fn process_pending_chunk_loads(
+    mut chunk_requests: ResMut<ChunkRequests>,
+    mut pending_loads: ResMut<PendingChunkLoads>,
+) {
+    if pending_loads.chunks.is_empty() {
+        return;
+    }
+
+    let batch_size = MAX_CHUNKS_TO_QUEUE_PER_FRAME.min(pending_loads.chunks.len());
+    let to_add: Vec<_> = pending_loads.chunks.drain(..batch_size).collect();
+
+    for cpos in to_add {
+        chunk_requests.request_load(cpos);
+    }
+}
+
+pub struct ScenePlugin;
+
+impl Plugin for ScenePlugin {
+    fn build(&self, app: &mut App) {
+        tracing::info!("Initializing scene plugin");
+        app.init_resource::<SceneView>()
+            .init_resource::<SceneCamera>()
+            .init_resource::<SceneZoom>()
+            .init_resource::<ChunkRequests>()
+            .init_resource::<PendingChunkLoads>()
+            .add_systems(
+                OnEnter(AppState::MainGame),
+                (setup::setup_lighting, setup::setup),
+            )
+            .add_message::<UpdateSettingsMessage>()
+            .add_message::<ReloadAllChunksMessage>()
+            .add_message::<RefreshChunkOpsQueueMessage>()
+            .add_message::<UnloadChunkOpMessage>()
+            .add_message::<UpdateSceneMessage>()
+            .add_systems(
+                FixedUpdate,
+                ((
+                    (
+                        handle::process_load_requested,
+                        handle::process_mesh_requested,
+                        handle::process_spawn_requested,
+                    )
+                        .chain(),
+                    handle::process_unload_chunk_ops.run_if(on_message::<UnloadChunkOpMessage>),
+                )
+                    .run_if(in_state(AppState::MainGame)),),
+            )
+            .add_systems(
+                Update,
+                ((
+                    handle_update_scene_view.run_if(on_message::<UpdateSettingsMessage>),
+                    check_if_should_update_scene,
+                    update_scene.run_if(on_message::<UpdateSceneMessage>),
+                    process_pending_chunk_loads,
+                )
+                    .chain())
+                .run_if(in_state(AppState::MainGame)),
+            );
+    }
+}
+```
+
+### crates/plugins/src/scene/setup.rs
+```
+use std::f32::consts::PI;
+
+use bevy::light::CascadeShadowConfigBuilder;
+use bevy::prelude::*;
+use infinigen_common::chunks::CHUNK_SIZE_F32;
+
+use super::{FAR, SceneSettings, SceneView, SceneZoom};
+
+pub const SKY_COLOR: Color = Color::srgb(0.47, 0.66, 1.);
+
+pub fn setup_lighting(mut commands: Commands) {
+    commands.insert_resource(GlobalAmbientLight::default());
+    commands.insert_resource(ClearColor(SKY_COLOR));
+
+    commands.spawn((
+        Name::new("Global lighting"),
+        DirectionalLight {
+            shadows_enabled: true,
+            ..default()
+        },
+        Transform {
+            translation: Vec3::new(0.0, FAR / 8., 0.0),
+            rotation: Quat::from_rotation_x(-PI / 4.),
+            ..default()
+        },
+        CascadeShadowConfigBuilder {
+            #[cfg(not(target_arch = "wasm32"))]
+            num_cascades: 4,
+            first_cascade_far_bound: CHUNK_SIZE_F32 * 8.,
+            maximum_distance: FAR,
+            ..default()
+        }
+        .build(),
+    ));
+}
+
+pub fn setup(
+    mut scene_view: ResMut<SceneView>,
+    mut scene_zoom: ResMut<SceneZoom>,
+    settings: Res<SceneSettings>,
+) {
+    scene_view.horizontal_view_distance = settings.horizontal_view_distance;
+    scene_view.vertical_view_distance = settings.vertical_view_distance;
+    scene_zoom.prev_zoom_level = settings.zoom_level;
+    scene_zoom.zoom_level = settings.zoom_level;
+}
+```
+
+### crates/plugins/src/window/mod.rs
+```
+use bevy::prelude::*;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use bevy_inspector_egui::bevy_egui::input::{
+    egui_wants_any_keyboard_input, egui_wants_any_pointer_input,
+};
+use leafwing_input_manager::prelude::*;
+
+use crate::camera::messages::CameraMessage;
+
+pub fn setup(mut primary_cursor_options: Single<&mut CursorOptions, With<PrimaryWindow>>) {
+    primary_cursor_options.grab_mode = CursorGrabMode::Locked;
+    primary_cursor_options.visible = false;
+}
+
+pub fn focus(
+    primary_cursor_options: &mut CursorOptions,
+    camera_messages: &mut MessageWriter<CameraMessage>,
+) {
+    primary_cursor_options.grab_mode = CursorGrabMode::Locked;
+    primary_cursor_options.visible = false;
+    camera_messages.write(CameraMessage::EnableControls);
+}
+
+pub fn unfocus(
+    primary_cursor_options: &mut CursorOptions,
+    camera_messages: &mut MessageWriter<CameraMessage>,
+) {
+    primary_cursor_options.grab_mode = CursorGrabMode::None;
+    primary_cursor_options.visible = true;
+    camera_messages.write(CameraMessage::DisableControls);
+}
+
+#[derive(Actionlike, PartialEq, Eq, Hash, Clone, Copy, Debug, Reflect)]
+pub enum Action {
+    ToggleFocus,
+    ForceFocus,
+}
+
+pub fn setup_actions(mut commands: Commands) {
+    let mut input_map = InputMap::new([(Action::ToggleFocus, KeyCode::Escape)]);
+    input_map.insert(Action::ForceFocus, MouseButton::Left);
+    commands.spawn(input_map);
+}
+
+pub fn handle_actions(
+    action_state: Single<&ActionState<Action>>,
+    mut primary_cursor_options: Single<&mut CursorOptions, With<PrimaryWindow>>,
+    mut camera_messages: MessageWriter<CameraMessage>,
+) {
+    if action_state.just_pressed(&Action::ToggleFocus) {
+        match primary_cursor_options.grab_mode {
+            CursorGrabMode::None => {
+                focus(&mut primary_cursor_options, &mut camera_messages);
+            }
+            _ => {
+                unfocus(&mut primary_cursor_options, &mut camera_messages);
+            }
+        }
+    }
+
+    if action_state.just_pressed(&Action::ForceFocus) {
+        focus(&mut primary_cursor_options, &mut camera_messages);
+    }
+}
+pub struct ControlsPlugin;
+
+impl Plugin for ControlsPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(InputManagerPlugin::<Action>::default())
+            .add_systems(Startup, (setup, setup_actions))
+            .add_systems(
+                Update,
+                handle_actions.run_if(
+                    not(egui_wants_any_keyboard_input).and(not(egui_wants_any_pointer_input)),
+                ),
+            );
+    }
+}
+```
+
+### crates/plugins/src/world/messages.rs
+```
+use std::collections::hash_map::Entry;
+use std::sync::Arc;
+
+use ahash::AHashMap;
+use bevy::prelude::*;
+use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
+use infinigen_common::blocks::BlockVisibility;
+use infinigen_common::chunks::{Array3Chunk, CHUNK_SIZE};
+use infinigen_common::mesh::faces::{BlockVisibilityChecker, extract_faces};
+use infinigen_common::world::{BlockPosition, ChunkPosition, MappedBlockID, WorldGen};
+use infinigen_common::zoom::ZoomLevel;
+
+use super::{ChunkInfo, ChunkStatus};
+use crate::registry::BlockRegistry;
+
+#[derive(Message)]
+pub struct GenerateChunkRequest {
+    pub chunk_position: ChunkPosition,
+    pub zoom_level: ZoomLevel,
+}
+
+#[derive(Component)]
+pub struct GenerateChunkTask(pub Task<(ZoomLevel, ChunkPosition, Option<ChunkInfo>)>);
+
+pub fn handle_generate_chunk_request(
+    mut commands: Commands,
+    mut generate_chunk_reqs: MessageReader<GenerateChunkRequest>,
+    mut world: ResMut<crate::world::World>,
+    registry: Res<BlockRegistry>,
+) {
+    let task_pool = AsyncComputeTaskPool::get();
+    for (
+        GenerateChunkRequest {
+            chunk_position,
+            zoom_level,
+        },
+        _,
+    ) in generate_chunk_reqs.par_read()
+    {
+        match world.cache.entry((*chunk_position, *zoom_level)) {
+            Entry::Occupied(_) => {
+                tracing::trace!(
+                    ?chunk_position,
+                    ?zoom_level,
+                    "Ignored request for previously requested chunk"
+                );
+                continue;
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(ChunkStatus::Generating);
+            }
+        };
+        let task = generate_chunk_async(
+            task_pool,
+            *zoom_level,
+            *chunk_position,
+            world.generator.clone(),
+            Box::new(registry.definitions.visibility_checker()),
+        );
+        commands.spawn((Name::new("Generate chunk task"), GenerateChunkTask(task)));
+    }
+}
+
+pub fn generate_chunk_async(
+    task_pool: &AsyncComputeTaskPool,
+    zoom_level: ZoomLevel,
+    position: ChunkPosition,
+    worldgen: Arc<dyn WorldGen + Send + Sync>,
+    visibility_checker: Box<impl BlockVisibilityChecker + 'static>,
+) -> Task<(ZoomLevel, ChunkPosition, Option<ChunkInfo>)> {
+    let zoom_level = zoom_level.to_owned();
+    let position = position.to_owned();
+    task_pool.spawn(async move {
+        let chunk = worldgen.get(&position, zoom_level);
+        let Some(mut chunk) = chunk else {
+            return (zoom_level, position, None);
+        };
+        let faces = extract_faces(&chunk, *visibility_checker.clone());
+        let translucents = split_out_translucent(&mut chunk, *visibility_checker);
+        (
+            zoom_level,
+            position,
+            Some(ChunkInfo {
+                opaque: Box::new(chunk),
+                faces,
+                translucents: translucents.into_values().collect(),
+            }),
+        )
+    })
+}
+
+pub fn handle_generate_chunk_task(
+    mut commands: Commands,
+    mut world: ResMut<crate::world::World>,
+    mut generate_chunk_tasks: Query<(Entity, &mut GenerateChunkTask)>,
+) {
+    for (entity, mut task) in generate_chunk_tasks.iter_mut() {
+        if let Some((zoom_level, cpos, chunk)) = block_on(poll_once(&mut task.0)) {
+            let status = chunk.map_or_else(
+                || ChunkStatus::Empty,
+                |chunk_info| ChunkStatus::Generated(Arc::new(chunk_info)),
+            );
+            match world.cache.insert((cpos, zoom_level), status) {
+                Some(status) => match status {
+                    ChunkStatus::Generating => (),
+                    ChunkStatus::Generated(_) | ChunkStatus::Empty => {
+                        tracing::debug!(?cpos, ?zoom_level, "Overwrote already generated chunk!")
+                    }
+                },
+                None => unreachable!(),
+            };
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
+/// Splits out translucent chunks from chunk, leaving only opaque blocks.
+pub fn split_out_translucent(
+    chunk: &mut Array3Chunk,
+    visibility_checker: impl BlockVisibilityChecker,
+) -> AHashMap<MappedBlockID, Array3Chunk> {
+    let mut translucents = AHashMap::new();
+
+    for x in 0..CHUNK_SIZE {
+        for y in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                if let Some(block_id) = chunk.get(&BlockPosition { x, y, z }) {
+                    if visibility_checker.get_visibility(&block_id) == BlockVisibility::Opaque {
+                        continue;
+                    }
+                    translucents
+                        .entry(block_id)
+                        .or_insert_with(Array3Chunk::default)
+                        .insert(&BlockPosition { x, y, z }, block_id);
+                    chunk.clear(&BlockPosition { x, y, z });
+                }
+            }
+        }
+    }
+
+    translucents
+}
+```
+
+### crates/plugins/src/world/mod.rs
+```
+use std::sync::Arc;
+
+use ahash::AHashMap;
+use anyhow::Context;
+use bevy::prelude::*;
+use infinigen_common::blocks::Palette;
+use infinigen_common::chunks::Array3Chunk;
+use infinigen_common::mesh::shapes::ChunkFace;
+use infinigen_common::world::{ChunkPosition, Direction, WorldGen};
+use infinigen_common::zoom::ZoomLevel;
+use linearize::StaticCopyMap;
+use messages::{GenerateChunkRequest, GenerateChunkTask};
+
+use crate::AppState;
+use crate::registry::BlockRegistry;
+
+pub mod messages;
+
+#[derive(Resource)]
+pub struct World {
+    pub generator: Arc<dyn WorldGen + Send + Sync>,
+    pub cache: AHashMap<(ChunkPosition, ZoomLevel), ChunkStatus>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChunkInfo {
+    pub opaque: Box<Array3Chunk>,
+    pub translucents: Vec<Array3Chunk>,
+    pub faces: StaticCopyMap<Direction, ChunkFace>,
+}
+
+pub enum ChunkStatus {
+    Generating,
+    Generated(Arc<ChunkInfo>),
+    Empty,
+}
+
+impl Default for World {
+    fn default() -> Self {
+        struct Empty;
+        impl WorldGen for Empty {
+            fn get(&self, _pos: &ChunkPosition, _zoom_level: ZoomLevel) -> Option<Array3Chunk> {
+                None
+            }
+        }
+        Self {
+            generator: Arc::new(Empty),
+            cache: Default::default(),
+        }
+    }
+}
+
+impl World {
+    pub fn generate(&self, zoom_level: ZoomLevel, pos: &ChunkPosition) -> Option<Array3Chunk> {
+        self.generator.get(pos, zoom_level)
+    }
+}
+
+pub struct WorldPlugin;
+
+impl Plugin for WorldPlugin {
+    fn build(&self, app: &mut App) {
+        tracing::info!("Initializing world plugin");
+        app.init_resource::<World>()
+            .add_message::<GenerateChunkRequest>()
+            .add_systems(OnEnter(AppState::InitializingWorld), init_world)
+            .add_systems(
+                FixedUpdate,
+                (
+                    messages::handle_generate_chunk_request
+                        .run_if(on_message::<GenerateChunkRequest>),
+                    messages::handle_generate_chunk_task
+                        .run_if(any_with_component::<GenerateChunkTask>),
+                )
+                    .run_if(in_state(AppState::MainGame)),
+            );
+    }
+}
+
+pub type WorldInitializerFn = Box<
+    dyn Fn(&str, u32, Palette) -> anyhow::Result<Arc<dyn WorldGen + Send + Sync>> + Send + Sync,
+>;
+
+#[derive(Resource)]
+pub struct WorldInitializer(pub WorldInitializerFn);
+
+#[derive(Resource)]
+pub struct WorldSettings {
+    pub world_gen_name: String,
+    pub seed: u32,
+}
+
+fn init_world(
+    mut next_state: ResMut<NextState<AppState>>,
+    registry: Res<BlockRegistry>,
+    world_initializer: Res<WorldInitializer>,
+    settings: Res<WorldSettings>,
+    mut world: ResMut<World>,
+) -> Result {
+    let WorldInitializer(world_initializer) = &*world_initializer;
+    let world_gen_name = &settings.world_gen_name;
+    world.generator = world_initializer(
+        world_gen_name,
+        settings.seed,
+        registry.definitions.palette(),
+    )
+    .with_context(|| format!("No world generator found for '{world_gen_name}'"))?;
+    next_state.set(AppState::MainGame);
+    Ok(())
+}
+```

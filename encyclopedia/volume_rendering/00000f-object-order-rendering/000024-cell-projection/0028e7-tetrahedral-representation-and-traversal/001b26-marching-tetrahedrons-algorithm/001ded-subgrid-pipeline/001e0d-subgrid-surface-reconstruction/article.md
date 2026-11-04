@@ -1,0 +1,82 @@
+# Subgrid Surface Reconstruction
+
+
+## Overview
+Subgrid Surface Reconstruction is a method for extracting a triangle soup from a tetrahedral grid by processing individual tetrahedra to resolve topological ambiguities in isosurface extraction [S1, unofficial]. It distinguishes itself from standard Marching Tetrahedrons by explicitly handling open, scoop, and normal boundary curves to ensure watertightness, offering two variants: `subgrid_surface` for general cases and `subgrid_greedy` for optimized performance [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+The method takes a single tetrahedron defined by its four vertex positions, global indices, and pre-computed edge intersection times. It also requires flags for scoop mid-vertices and bulge magnitude, along with boundary curve data (open, scoop, normal) and non-normal edge occupation flags [S1, unofficial]. The output is a set of triangles (triangle soup) representing the isosurface segment within that tetrahedron [S1, unofficial].
+
+**Data Structures:**
+*   **Tetrahedron:** 4 vertex positions (3D vectors), 4 global indices (integers).
+*   **Edge Intersections:** 6 intersection times (floats), one per edge.
+*   **Boundary Curves:** Lists of vertices/edges defining open, scoop, and normal boundaries [S1, unofficial].
+*   **Flags:** Boolean flags for scoop mid-vertices and bulge magnitude [S1, unofficial].
+
+**Steps:**
+1.  **Filter Unoccupied Edges:** Use `unoccupied_edge_isect_ts` to filter edge intersection times, returning only times for edges that are not occupied [S1, unofficial].
+2.  **Reconstruct Surface:**
+    *   For `subgrid_surface`: Use tetrahedron positions, global indices, edge intersection times, open boundary curves, scoop boundary curves, non-normal edge occupations, and flags for scoop mid-vertices and bulge magnitude to generate triangles [S1, unofficial].
+    *   For `subgrid_greedy`: Use tetrahedron positions, global indices, edge intersection times, scoop boundary curves, normal boundary curves, and flags for scoop mid-vertices and bulge magnitude to generate triangles [S1, unofficial].
+3.  **Handle Ambiguities:** The method resolves topological ambiguities by utilizing the boundary curves and occupation flags to determine the correct connectivity of the generated triangles [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def subgrid_surface(tet_pos, tet_indices, edge_isect_times, open_curves, scoop_curves, non_normal_occ, scoop_mid_flags, bulge_mag):
+    # Filter unoccupied edges
+    valid_isects = unoccupied_edge_isect_ts(edge_isect_times, non_normal_occ)
+    
+    # Reconstruct triangles based on boundary curves and flags
+    triangles = []
+    # Implementation details for resolving topology using open_curves, scoop_curves, and flags
+    # This involves connecting intersection points based on the boundary definitions
+    # [G] Specific topological resolution logic is not fully detailed in sources, 
+    # but relies on the provided boundary curves and occupation flags.
+    return triangles
+
+def subgrid_greedy(tet_pos, tet_indices, edge_isect_times, scoop_curves, normal_curves, scoop_mid_flags, bulge_mag):
+    # Reconstruct triangles using scoop and normal curves
+    triangles = []
+    # Implementation details for greedy reconstruction
+    # [G] Specific greedy algorithm logic is not fully detailed in sources
+    return triangles
+
+def unoccupied_edge_isect_ts(edge_isect_times, non_normal_occ):
+    # Return intersection times only for edges where non_normal_occ is false
+    valid_times = []
+    for i, occ in enumerate(non_normal_occ):
+        if not occ:
+            valid_times.append(edge_isect_times[i])
+    return valid_times
+```
+
+**Parameters:**
+*   **Bulge Magnitude:** Controls the deformation of the surface near scoop boundaries [S1, unofficial].
+*   **Scoop Mid-Vertices:** Flags indicating the presence of mid-vertices for scoop boundaries [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Non-Watertight Input:** If the input is not watertight, the even-sum condition may not be satisfied, leading to non-orientable output or open holes [S1, unofficial].
+*   **Grid Edge-Intersection Issues:** Changes in resolution or perturbation may be required to resolve intersection issues [S1, unofficial].
+
+## Subtopics
+
+### [Dual Subgrid Pipeline](1732-dual-subgrid-pipeline.md)
+Extracts isosurfaces from SDFs or triangle meshes using a dual mesh representation, resolving topological ambiguities with a dual grid structure. Choose when robust intersection queries and regularization are needed.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Measured performance includes query, construction, and overall time, but specific values are not provided in the sources [S1, unofficial].
+*   **Strengths:** Handles topological ambiguities explicitly, supports watertight output for watertight inputs [S1, unofficial].
+*   **Limitations:** Requires pre-computed boundary curves and edge intersections [S1, unofficial].
+*   **When to Use:** When extracting isosurfaces from tetrahedral grids with complex topology.
+*   **When Not to Use:** When input is not watertight and watertight output is required.
+
+## Background
+The Subgrid Surface Reconstruction method is part of the Subgrid Pipeline, which is based on the Marching Tetrahedrons Algorithm [S1, unofficial]. It was developed to address topological ambiguities in isosurface extraction from tetrahedral grids [S1, unofficial].
+
+## Sources
+[S1] hbaktash/subgrid-marching, https://github.com/hbaktash/subgrid-marching, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,161 @@
+# Planes Method
+
+Also called: Compositing on the CPU, RealityEngine Volume Rendering with CPU Compositing
+
+## Overview
+The Planes Method is a hardware-accelerated direct volume rendering technique that leverages 3D texture mapping hardware to resample volumetric data into planes coplanar with rays, while performing shading and front-to-back compositing on the CPU [S1]. It solves the problem of view-dependent shading in texture-mapped rendering by offloading lighting calculations to the CPU, allowing for arbitrary dynamic lights and non-linear transfer functions without hardware interpolation artifacts [S1, 3423-texture-mapped-volume-rendering-with-cpu-shading.md]. Unlike [Shear-Warp](52-shear-warp.md), which performs classification before bilinear resampling and requires a final warp step, the Planes method performs trilinear interpolation followed by classification and does not require a final warp, resulting in higher image quality and consistent performance for perspective projections [S1].
+
+## How it works
+The method utilizes a master-slave architecture on symmetric multi-processor (SMP) systems, where the master process handles the graphics hardware interface and slave processes handle the CPU-based raycasting [S1].
+
+### Inputs and Outputs
+*   **Input:** A 3D volumetric dataset $V$ of size $D_x \times D_y \times D_z$.
+*   **Input:** A viewing volume defined by parallel or perspective projection parameters.
+*   **Input:** A transfer function mapping density to opacity and a reflectance map (or lighting model) mapping gradients to color.
+*   **Output:** A 2D image of resolution $W \times H$.
+
+### Data Structures
+The voxel data is stored in a 3D texture map. Each voxel consists of four 8-bit values loaded into an RGB-type texture map, where the fields represent three gradient components ($G_x, G_y, G_z$) and the raw density value $\rho$ [S1].
+
+*   **Gradient Precomputation:** High-quality Sobel gradients are computed serially offline for the volume. For a $256^3$ volume, this takes 12 seconds on a 200MHz CPU [S1].
+*   **Texture Layout:** The 3D texture stores $(G_x, G_y, G_z, \rho)$ per voxel. The hardware performs trilinear interpolation on these values during resampling [S1].
+
+### Algorithm Steps
+The rendering process interlaces CPU and graphics hardware computation. The master initiates texture mapping for scanline $y+1$ while the slave processes scanline $y$ [S1].
+
+1.  **Load Texture Rotation Matrix:** Load the transformation matrix required to orient the resampling polygons relative to the volume and view [S1].
+2.  **Resample First Plane:** Resample the first plane of orthogonal rays into the frame buffer using 3D texture mapping hardware. The polygons are oriented such that they are coplanar with the rays ending in a row of pixels in the final image plane [S1].
+3.  **Read First Plane:** Read the resampled first plane from the frame buffer into main memory [S1].
+4.  **Loop Over Remaining Scanlines:** For each remaining scanline $y$:
+    a.  **Resample Next Plane:** Resample the next plane of orthogonal rays into the frame buffer [S1].
+    b.  **Loop Over Columns:** For each column $x$ in the previous plane (which corresponds to a ray):
+        i.  **Initialize Integration Variables:** Initialize the accumulated color $C_{acc}$ and accumulated opacity $\alpha_{acc}$ to 0 and 0, respectively [G].
+        ii. **While Within Bounds and Ray Not Opaque:**
+            1.  **Lookup Opacity:** Retrieve the raw density $\rho$ and gradient components $(G_x, G_y, G_z)$ from the current plane data. Lookup the opacity $\alpha$ using the transfer function $T(\rho)$ [S1].
+            2.  **Skip Low Opacity (Optimization):** If $\alpha < \text{threshold}$, skip shading and compositing for this sample. The sample minimally contributes to the final pixel color [S1].
+            3.  **Lookup Shade (Optimization):** If $\alpha \ge \text{threshold}$, lookup the shaded color $C_{sample}$ using the reflectance map (e.g., Phong shading) based on the interpolated gradients and lighting parameters [S1].
+            4.  **Composite:** Perform front-to-back compositing:
+                $$ C_{acc} = C_{acc} + C_{sample} \cdot \alpha \cdot (1 - \alpha_{acc}) $$
+                $$ \alpha_{acc} = \alpha_{acc} + \alpha \cdot (1 - \alpha_{acc}) $$
+            5.  **Early Ray Termination (Optimization):** If $\alpha_{acc} \ge 1.0$ (or a threshold close to 1.0), terminate the ray sampling loop [S1].
+        iii. **Store Ray Color:** Store the final $C_{acc}$ for this column in the previous row of the image [S1].
+    c.  **Read Next Plane:** Read the next plane from the frame buffer into memory [S1].
+5.  **Shade and Composite Final Plane:** Shade and composite the final plane as described in step 4b [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def planes_method(volume_texture, view_matrix, transfer_function, reflectance_map, image_width, image_height, num_samples_per_ray, opacity_threshold=0.01):
+    # Precomputed gradients are stored in volume_texture as (Gx, Gy, Gz, Density)
+    
+    # Initialize image buffer
+    image = zeros((image_height, image_width, 3))
+    
+    # Load texture rotation matrix for the current view
+    load_texture_rotation_matrix(view_matrix)
+    
+    # Resample the first plane of orthogonal rays into the frame buffer
+    resample_plane_into_framebuffer(view_matrix, plane_index=0)
+    
+    # Read the first plane from the frame buffer into main memory
+    plane_data = read_framebuffer_to_memory()
+    
+    # Loop over all remaining scanlines
+    for y in range(1, image_height):
+        # Resample the next plane into the frame buffer
+        resample_plane_into_framebuffer(view_matrix, plane_index=y)
+        
+        # Loop over all columns in the previous plane
+        for x in range(image_width):
+            # Initialize integration variables
+            acc_color = [0.0, 0.0, 0.0]
+            acc_opacity = 0.0
+            
+            # Get the ray data for this column from the previous plane
+            # The plane_data contains samples for all rays in the row
+            ray_samples = get_ray_samples_for_column(plane_data, x)
+            
+            # While within bounds and ray not opaque
+            for sample in ray_samples:
+                if acc_opacity >= 1.0:
+                    break
+                
+                # Lookup opacity in transfer function
+                density = sample.density
+                opacity = transfer_function(density)
+                
+                # Optimization: Skip if opacity is under threshold
+                if opacity < opacity_threshold:
+                    # Update accumulated opacity but skip shading/compositing
+                    acc_opacity += opacity * (1.0 - acc_opacity)
+                    continue
+                
+                # Lookup shade in reflectance map
+                # Gradients are interpolated by hardware, available in sample
+                gradients = sample.gradients # (Gx, Gy, Gz)
+                sample_color = reflectance_map(gradients, lighting_params)
+                
+                # Composite ray color OVER sample
+                weight = opacity * (1.0 - acc_opacity)
+                acc_color = acc_color + sample_color * weight
+                acc_opacity = acc_opacity + weight
+            
+            # Store ray color in previous row of image
+            image[y-1, x] = acc_color
+        
+        # Read next plane from frame buffer into memory
+        plane_data = read_framebuffer_to_memory()
+    
+    # Shade and composite final plane as above (handled in loop or as a final step)
+    # Note: The loop above processes y-1 based on y. 
+    # A more precise implementation processes the last plane separately or adjusts indices.
+    # Based on source: "Shade and composite final plane as above" implies the last plane read is processed.
+    
+    return image
+```
+
+### Parameters
+*   **Hardware:** Tested on Onyx 2 workstation with Infinite Reality graphics [S1].
+*   **Architecture:** Master-slave model using shared memory SMP functionality of Onyx 2 and IRIX 6.4 [S1].
+*   **Opacity Threshold:** Used for low-opacity skipping. Value not explicitly given, but described as a threshold [S1].
+
+### Edge Cases and Pitfalls
+*   **Sequential Bottleneck:** The parallel speedup is limited by the time it takes to perform texture mapping for all planes, which must be performed sequentially because there is only one graphics pipeline [S1].
+*   **Texture Memory Limits:** Storing gradients in the texture map limits the size of the volume that can be rendered without texture paging, as the frame rate is limited by the amount of available texture memory [S1].
+*   **Precision:** The method relies on hardware trilinear interpolation. While this produces gradient values equivalent to unit voxel distance computation, it may introduce interpolation artifacts compared to exact gradient calculation, though it is faster [S1].
+
+## Subtopics
+
+### [Texture-Mapped Volume Rendering with CPU Shading](3423-texture-mapped-volume-rendering-with-cpu-shading.md)
+Renders regular volumetric grids by leveraging 3D texture mapping hardware to resample density and pre-computed gradients, then transfers raw sample data to main memory for CPU-based Phong shading and compositing. It solves the problem of view-dependent shading by avoiding the need to re-shade and reload textures for every frame change, and by circumventing the infeasibly large lookup tables required by post-texturing gradient indexing. Unlike the Planes Method, which may rely on hardware blending for final compositing without explicit CPU shading, this method explicitly offloads the lighting calculation to the CPU to support arbitrary dynamic lights and non-linear transfer functions without hardware interpolation artifacts.
+
+### [Image-Parallel Ray Casting via 2D Texture Mapping](5854-image-parallel-ray-casting-via-2d-texture-mapping.md)
+Replaces per-ray processing with per-slice processing by projecting parallel slices of the volumetric dataset onto the image plane and compositing them using standard graphics blending operations. It is distinct from the Planes Method, which relies on 3D texture hardware; this method uses only 2D texture units, making it compatible with older graphics architectures while maintaining equivalence to standard ray casting results.
+
+## Operating characteristics
+*   **Time Complexity:** The rendering time is dominated by the texture mapping operations, which are sequential. The CPU-based shading and compositing are parallelized across multiple processors. The theoretical best speedup is bound by the time it takes to perform texture mapping for all planes [S1].
+*   **Memory Complexity:** Requires storing the volume data in 3D texture memory. The size is limited by available texture memory, as gradients are stored per voxel [S1].
+*   **Measured Performance:**
+    *   CT scanned Head dataset (bone structures) at 2002 resolution: 0.44 seconds [S1].
+    *   Lobster dataset (sampling resolution 512x512x64): 1.88 seconds [S1].
+    *   Opaque Sphere dataset: 1.84 seconds [S1].
+    *   Translucent Lobster dataset: 2.78 seconds (12 times faster than Sommer et al.) [S1].
+    *   128x128 image of Opaque Sphere with 84 samples per ray: 0.19 seconds [S1].
+    *   Lobster dataset (128x128 image, 84 samples per ray): 0.24 seconds [S1].
+    *   Time to perform texture mapping of 128x128x84 planes: 0.12 seconds [S1].
+*   **Strengths:**
+    *   Supports arbitrary parallel and perspective projections in the same time, unlike shear-warp which takes up to four times longer for perspective projections [S1].
+    *   Does not require a final warp step, removing a filtering step and resulting in higher image quality [S1].
+    *   Supports interactive segmentation/classification, unlike shear-warp which must generate three copies of a compressed data structure per classification [S1].
+    *   Allows for full Phong lighting with ambient, diffuse, and specular components, providing higher quality images than methods lacking directional shading [S1].
+*   **Limitations:**
+    *   Limited by the throughput of the serial graphics pipeline for parallel speedup [S1].
+    *   Limited by available texture memory for large volumes [S1].
+    *   Slower than some non-shaded methods (e.g., Cabral et al.) but provides higher quality due to shading [S1].
+
+## Background
+The Planes Method was developed for use on Silicon Graphics Onyx 2 workstations with Infinite Reality graphics hardware [S1]. It was presented as a high-quality volume rendering algorithm that utilizes 3D texture map hardware to render volumetric datasets, combining texture mapping for resampling with CPU-based raycasting for shading and classification [S1]. The method was compared to shear-warp, Cullip and Neumann, and Sommer et al., demonstrating superior image quality and competitive performance for perspective projections [S1].
+
+## Sources
+[S1] High-Quality Volume Rendering Using Texture Mapping ..., https://cfcs.pku.edu.cn/baoquan/docs/20180622110034067331.pdf, fetched 2026-10-27

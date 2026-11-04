@@ -1,0 +1,1568 @@
+# vdrm
+
+hackaday: https://hackaday.io/project/194714-volumetric-display-using-rotating-mirror
+
+emulator: https://hikaricai.github.io/vdrm/
+
+## Volumetric Display using Rotating Mirror(early stage)
+An idea of Volumetric Display by changing the optical path with two spinning mirrors
+
+
+<a href="https://youtube.com/shorts/yh6b7pyUaBM" target="_blank"><img src="images/vdrm1_hardware.jpg" width="400" height="300" border="10" /></a>
+
+## version 2.0
+<a target="_blank"><img src="images/vdrm2_hardware.jpg" width="300" height="300" border="10" /></a>
+
+version 2.0 demo hardware with one mirror and three surrouding led screens
+
+<a target="_blank"><img src="images/half_pyramid.jpg" width="300" height="300" border="10" /></a>
+
+showing a half pyramid
+
+## version 3.0
+<a target="_blank"><img src="images/vdrm3_hardware.jpg" width="300" height="300" border="10" /></a>
+
+version 3.0 demo hardware 
+
+Video: [https://www.youtube.com/shorts/NyY_jAdijms](https://www.youtube.com/shorts/NyY_jAdijms) (some simple 3d models)
+
+Video: [https://www.youtube.com/watch?v=SHl5ib-P7Bg](https://www.youtube.com/watch?v=SHl5ib-P7Bg) (some simple 3d models)
+
+### vdrm-alg/src/lib.rs
+```
+use geo::{ClosestPoint, EuclideanDistance, EuclideanLength, LineInterpolatePoint};
+use std::collections::BTreeMap;
+
+pub const W_PIXELS: usize = 64;
+pub const H_PIXELS: usize = 40;
+// pub const W_PIXELS: usize = 192;
+// pub const H_PIXELS: usize = 130;
+const CIRCLE_R: f32 = 1.;
+pub const SCREEN_HEIGHT: f32 = SCREEN_ZOOM * CIRCLE_R * 2.;
+const POINT_SIZE: f32 = SCREEN_ZOOM * 2. * CIRCLE_R / W_PIXELS as f32;
+// screem 位置和大小
+const SCREEN_ZOOM: f32 = 1.;
+// 修改这个值 越大成像越远 屏幕间距越大
+// pub const SCREEN_OFFSET: f32 = 0.25;
+pub const SCREEN_OFFSET: f32 = 0.05;
+pub const SCREEN_Z_OFFSET: f32 = -1.0 + SCREEN_OFFSET;
+pub const SCREEN_Y_OFFSET: f32 = -1.0 + SCREEN_OFFSET;
+// 八边形就x8 越大越清晰
+pub const TOTAL_ANGLES: usize = W_PIXELS * 8;
+
+// 点顺时针
+// 坐标系逆时针
+const MAT_ROTATE_X: glam::Mat2 = glam::Mat2::from_cols(
+    glam::Vec2::new(
+        std::f32::consts::FRAC_1_SQRT_2,
+        -std::f32::consts::FRAC_1_SQRT_2,
+    ),
+    glam::Vec2::new(
+        std::f32::consts::FRAC_1_SQRT_2,
+        std::f32::consts::FRAC_1_SQRT_2,
+    ),
+);
+
+const MAT_ROTATE_X_REV: glam::Mat2 = glam::Mat2::from_cols(
+    glam::Vec2::new(
+        std::f32::consts::FRAC_1_SQRT_2,
+        std::f32::consts::FRAC_1_SQRT_2,
+    ),
+    glam::Vec2::new(
+        -std::f32::consts::FRAC_1_SQRT_2,
+        std::f32::consts::FRAC_1_SQRT_2,
+    ),
+);
+
+pub fn rotate_x(v: (f32, f32)) -> (f32, f32) {
+    let v = glam::Vec2::new(v.0, v.1);
+    let v = MAT_ROTATE_X * v;
+    (v.x, v.y)
+}
+
+pub fn rotate_x_rev(v: (f32, f32)) -> (f32, f32) {
+    let v = glam::Vec2::new(v.0, v.1);
+    let v = MAT_ROTATE_X_REV * v;
+    (v.x, v.y)
+}
+
+// pub const TOTAL_ANGLES: usize = 360;
+
+type PixelColor = u32;
+type PixelXY = (u32, u32);
+pub type PixelSurface = Vec<(u32, u32, (u32, PixelColor))>;
+pub type FloatSurface = Vec<(f32, f32, f32)>;
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+struct ScreenLineAddr {
+    screen_idx: usize,
+    addr: u32,
+}
+#[derive(Debug, Copy, Clone)]
+struct ScreenLinePixels {
+    pixels: [Option<PixelColor>; W_PIXELS],
+}
+
+impl Default for ScreenLinePixels {
+    fn default() -> Self {
+        Self {
+            pixels: [None; W_PIXELS],
+        }
+    }
+}
+
+pub const MIRROR_OFFSET: f32 = std::f32::consts::SQRT_2;
+// const MIRROR_OFFSET2: f32 = -std::f32::consts::SQRT_2;
+// const SCREEN_OFFSET: f32 = std::f32::consts::SQRT_2;
+// const V_IMG_Y_TOP: f32 = (MIRROR_OFFSET2 * 2. - SCREEN_OFFSET) / std::f32::consts::SQRT_2;
+// const V_IMG_Y_TOP: f32 = -2.;
+// const V_IMG_Z_TOP: f32 = -3.;
+
+// const VIRTUAL_IMG_CENTER: f32 = -4.;
+
+fn cacul_v_img_cord() -> glam::Vec4 {
+    let angle = (90f32).to_radians();
+    let mat = mirror_mat4(angle);
+    let p = glam::Vec4::new(0.0, SCREEN_Y_OFFSET, SCREEN_Z_OFFSET, 1.0);
+    mat * p
+}
+
+pub const NUM_SCREENS: usize = 3;
+
+lazy_static::lazy_static! {
+    pub static ref V_IMG_CORD: glam::Vec4 = {
+        cacul_v_img_cord()
+    };
+    pub static ref V_IMG_CENTER_CORD: glam::Vec4 = {
+        let center_y = V_IMG_CORD.y - SCREEN_ZOOM;
+        let center_z = V_IMG_CORD.z - 0.5 * SCREEN_ZOOM;
+        glam::Vec4::new(0.0, center_y, center_z, 1.0)
+    };
+    static ref SCREENS:[Screen; NUM_SCREENS]  = {
+        // screens_with_rotate(std::f32::consts::PI / 8., Some(std::f32::consts::PI / 8.))
+        screens_with_rotate(0., None)
+    };
+}
+
+pub fn screens_with_rotate(
+    rad_rotate: f32,
+    offset_middle_screen: Option<f32>,
+) -> [Screen; NUM_SCREENS] {
+    let z = SCREEN_Z_OFFSET;
+
+    let depth = 2f32 * SCREEN_ZOOM;
+    let a: (f32, f32) = (-0.0, SCREEN_Y_OFFSET);
+
+    let b: (f32, f32) = (
+        a.0 + depth * rad_rotate.sin(),
+        a.1 + depth * rad_rotate.cos(),
+    );
+
+    let screen = Screen::new([a, b], z);
+    let angle_off = 360.0f32 / 8.0 / 2.0 / 2.0;
+    let angle_l = 90f32 - angle_off;
+    let angle_r = 90f32 + angle_off;
+    let v_screen = mirror_points_f(90f32.to_radians(), &screen.points);
+    let screen_l = mirror_points_f(angle_l.to_radians(), &v_screen);
+    let screen_r = mirror_points_f(angle_r.to_radians(), &v_screen);
+
+    let screen_l = Screen {
+        points: screen_l.try_into().unwrap(),
+    };
+    let screen_r = Screen {
+        points: screen_r.try_into().unwrap(),
+    };
+    let screen = if let Some(angle) = offset_middle_screen {
+        let screen_real_depth = 0.75;
+        let offset = screen_real_depth * angle.sin() / 2.;
+        let a = (a.0 - offset, a.1);
+        let b = (b.0 - offset, b.1);
+        Screen::new([a, b], z)
+    } else {
+        screen
+    };
+    [screen_l, screen, screen_r]
+}
+
+pub fn screens() -> &'static [Screen] {
+    &*SCREENS
+}
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
+struct ScreenPixel {
+    idx: usize,
+    addr: u32,
+    pixel: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PixelZInfo {
+    angle: u32,
+    pixel: u32,
+    is_borrowed: bool,
+    screen_pixel: ScreenPixel,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct ScreenLine {
+    pub screen_idx: usize,
+    pub addr: u32,
+    pub pixels: [Option<PixelColor>; W_PIXELS],
+}
+
+pub type AngleMap = BTreeMap<u32, [Vec<ScreenLine>; NUM_SCREENS]>;
+
+type PixelZInfoList = [Option<PixelZInfo>; H_PIXELS];
+type PixelXYArr = Vec<Vec<PixelZInfoList>>;
+
+#[derive(Copy, Clone)]
+pub struct Screen {
+    pub points: [(f32, f32, f32); 4],
+}
+
+impl Screen {
+    fn new(xy: [(f32, f32); 2], z: f32) -> Self {
+        let xy_line = geo::Line::new(xy[0], xy[1]);
+        let (a, b) = xy_line.points();
+        let screen_top = z + SCREEN_HEIGHT;
+        let points = [
+            (a.x(), a.y(), z),
+            (a.x(), a.y(), screen_top),
+            (b.x(), b.y(), screen_top),
+            (b.x(), b.y(), z),
+        ];
+        Self { points }
+    }
+}
+
+pub fn pixel_surface_to_float(pixel_surface: &PixelSurface) -> FloatSurface {
+    pixel_surface
+        .into_iter()
+        .map(|&(pixel_x, pixel_y, (pixel_z, _color))| {
+            let x = pixel_to_v(pixel_x);
+            let y = pixel_to_v(pixel_y);
+            let z = pixel_to_h(pixel_z);
+            (x, y, z)
+        })
+        .collect()
+}
+
+fn pixel_to_v(p: u32) -> f32 {
+    let point_size: f32 = POINT_SIZE;
+    p as f32 * point_size + 0.5 * point_size - CIRCLE_R * SCREEN_ZOOM
+}
+
+fn v_to_pixel(v: f32) -> Option<u32> {
+    let point_size: f32 = POINT_SIZE;
+    let v = (v + CIRCLE_R * SCREEN_ZOOM) / point_size - 0.5;
+    if v < -POINT_SIZE {
+        return None;
+    }
+    let mut v = v as u32;
+    if v > W_PIXELS as u32 {
+        return None;
+    }
+    if v == W_PIXELS as u32 {
+        v -= 1;
+    }
+    Some(v)
+}
+
+fn pixel_to_h(p: u32) -> f32 {
+    (p as f32) * POINT_SIZE
+}
+
+fn h_to_pixel(mut h: f32) -> Option<u32> {
+    let point_size: f32 = POINT_SIZE;
+    // fix z offset
+    h += POINT_SIZE;
+    if h < -POINT_SIZE {
+        return None;
+    }
+    let mut p = (h / point_size) as u32;
+    if p > H_PIXELS as u32 {
+        return None;
+    }
+    if p == H_PIXELS as u32 {
+        p -= 1;
+    }
+    Some(p)
+}
+
+fn v3_2_pixel(x: f32, y: f32, z: f32) -> Option<(u32, u32, u32)> {
+    let x = v_to_pixel(x)?;
+    let y = v_to_pixel(y)?;
+    let z = h_to_pixel(z)?;
+    // fix offset
+    // if z + 1 < H_PIXELS as u32 {
+    //     z += 1;
+    // }
+    Some((x, y, z))
+}
+
+pub fn angle_to_v(p: u32) -> f32 {
+    (p as f32 * 360. / TOTAL_ANGLES as f32).to_radians()
+}
+
+fn cacl_view_point(
+    mat: glam::Mat4,
+    screen_idx: usize,
+    addr: u32,
+    pixel_z: u32,
+) -> ((f32, f32, f32), (f32, f32, f32)) {
+    let screen = &SCREENS[screen_idx];
+    let fraction = addr as f32 / W_PIXELS as f32;
+    let fraction_z = pixel_z as f32 / W_PIXELS as f32;
+    let p_o = glam::Vec3::from(screen.points[0]);
+    let p_z = glam::Vec3::from(screen.points[1]);
+    let p_y = glam::Vec3::from(screen.points[3]);
+    let v_oz = p_z - p_o;
+    let v_oy = p_y - p_o;
+    let p_xy = p_o + v_oy * fraction + v_oz * fraction_z;
+
+    let v = glam::Vec4::new(p_xy.x, p_xy.y, p_xy.z, 1.0);
+    let led = v;
+    let p_view = mat * v;
+    ((p_view.x, p_view.y, p_view.z), (led.x, led.y, led.z))
+}
+
+fn closest_len(line: &geo::Line<f32>, p: &geo::Point<f32>) -> f32 {
+    let close_p = match line.closest_point(p) {
+        geo::Closest::Intersection(point) => point,
+        geo::Closest::SinglePoint(point) => point,
+        geo::Closest::Indeterminate => unreachable!(),
+    };
+    close_p.euclidean_distance(p)
+}
+
+fn mirror_mat4(angle_f: f32) -> glam::Mat4 {
+    let sin = -angle_f.sin();
+    let cos = -angle_f.cos();
+    let sin2 = sin * sin;
+    let cos2 = cos * cos;
+    let sin_cos = sin * cos;
+    let mat_mir = glam::Mat4::from_cols(
+        glam::Vec4::new(sin2 - cos2, -2.0 * sin_cos, 0., 0.),
+        glam::Vec4::new(-2.0 * sin_cos, cos2 - sin2, 0., 0.),
+        glam::Vec4::new(0., 0., 1., 0.),
+        glam::Vec4::new(2.0 * MIRROR_OFFSET * cos, 2.0 * MIRROR_OFFSET * sin, 0., 1.),
+    );
+    let mat_ratate_x = glam::Mat4::from_cols(
+        glam::Vec4::new(1.0, 0.0, 0.0, 0.),
+        glam::Vec4::new(0.0, MAT_ROTATE_X.x_axis.x, MAT_ROTATE_X.x_axis.y, 0.),
+        glam::Vec4::new(0.0, MAT_ROTATE_X.y_axis.x, MAT_ROTATE_X.y_axis.y, 0.),
+        glam::Vec4::new(0.0, 0., 0., 1.),
+    );
+    let ro_rev = MAT_ROTATE_X_REV;
+    let mat_ratate_x_rev = glam::Mat4::from_cols(
+        glam::Vec4::new(1.0, 0.0, 0.0, 0.),
+        glam::Vec4::new(0.0, ro_rev.x_axis.x, ro_rev.x_axis.y, 0.),
+        glam::Vec4::new(0.0, ro_rev.y_axis.x, ro_rev.y_axis.y, 0.),
+        glam::Vec4::new(0.0, 0., 0., 1.),
+    );
+    let mat = mat_ratate_x_rev * mat_mir * mat_ratate_x;
+    mat
+}
+
+pub fn mirror_points_f(angle_f: f32, points: &[(f32, f32, f32)]) -> Vec<(f32, f32, f32)> {
+    let mat = mirror_mat4(angle_f);
+    points
+        .iter()
+        .map(|v| {
+            let v = glam::Vec4::new(v.0, v.1, v.2, 1.0);
+            let v = mat * v;
+            (v.x, v.y, v.z)
+        })
+        .collect()
+}
+
+pub fn mirror_points(angle: u32, points: &[(f32, f32, f32)]) -> Vec<(f32, f32, f32)> {
+    let angle_f = angle_to_v(angle);
+    mirror_points_f(angle_f, points)
+}
+
+pub struct Codec {
+    xy_arrs: [PixelXYArr; NUM_SCREENS],
+    mat_map: BTreeMap<u32, glam::Mat4>,
+}
+
+impl Codec {
+    // TODO map screens to image and fill tthe xy_arr
+    pub fn new() -> Self {
+        // 初始化坐标map key是xyz虚像自己的相对坐标
+        let mut xy_arrs = [PixelXYArr::new(), PixelXYArr::new(), PixelXYArr::new()];
+        for _x in 0..W_PIXELS {
+            let mut line = vec![];
+            line.extend(
+                std::iter::repeat(())
+                    .take(W_PIXELS)
+                    .map(|_| [None; H_PIXELS]),
+            );
+            xy_arrs[0].push(line.clone());
+            xy_arrs[1].push(line.clone());
+            xy_arrs[2].push(line);
+        }
+        let mut mat_map = BTreeMap::new();
+        let screen_metas: Vec<_> = SCREENS
+            .iter()
+            .map(|screen| {
+                let fraction = 1f32 / W_PIXELS as f32;
+                let fraction_z = 1f32 / W_PIXELS as f32;
+                let p_o = glam::Vec3::from(screen.points[0]);
+                let p_z = glam::Vec3::from(screen.points[1]);
+                let p_y = glam::Vec3::from(screen.points[3]);
+                let v_oz = p_z - p_o;
+                let v_oy = p_y - p_o;
+                let v_oa = v_oz * fraction_z;
+                let v_ob = v_oy * fraction;
+
+                let p_o = glam::Vec4::new(p_o.x, p_o.y, p_o.z, 1.0);
+                let v_oa = glam::Vec4::new(v_oa.x, v_oa.y, v_oa.z, 1.0);
+                let v_ob = glam::Vec4::new(v_ob.x, v_ob.y, v_ob.z, 1.0);
+                log::info!("p_o {p_o:?} v_oa {v_oa:?} v_ob {v_ob:?}");
+                (screen, p_o, v_oa, v_ob)
+            })
+            .collect();
+        for angle in 0..TOTAL_ANGLES {
+            let angle = angle as u32;
+            let angle_f = angle_to_v(angle);
+            let mat = mirror_mat4(angle_f);
+            mat_map.insert(angle, mat);
+
+            // 虚像的中心
+            let center = mat * *V_IMG_CENTER_CORD;
+            // 虚像对应实际的和屏幕接触的中心
+            let center_xy = geo::Point::new(center.x, center.y);
+
+            let dbg = angle == (TOTAL_ANGLES as u32 / 4);
+            // Vec4(0.0, 1.0, 1.0, 1.0) v_oa Vec4(0.0, 0.0, 0.03125, 1.0) v_ob Vec4(0.0, 0.03125, 0.0, 1.0)
+
+            for (screen_idx, (screen, p_o, v_oa, v_ob)) in
+                screen_metas.clone().into_iter().enumerate()
+            {
+                // 过滤掉太远的角度 减小计算量
+                let xy_line = geo::Line::new(
+                    (screen.points[0].0, screen.points[0].1),
+                    (screen.points[3].0, screen.points[3].1),
+                );
+                let closest_len = closest_len(&xy_line, &center_xy);
+                // log::info!("angle {angle} closest_len {closest_len}");
+                if closest_len > (2f32 * SCREEN_ZOOM).sqrt() {
+                    continue;
+                }
+
+                let v_o = mat * glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
+                if dbg {
+                    log::info!("angle_f {angle_f}");
+                    log::info!("mat {mat}");
+                }
+
+                // 把斜着放的屏幕的向量映射到虚像空间 实际上是二维坐标变换
+                let p_o = mat * p_o;
+                let v_oa = mat * v_oa;
+                let v_ob = mat * v_ob;
+                if dbg {
+                    log::info!("p_o {p_o:?} v_oa {v_oa:?} v_ob {v_ob:?}");
+                }
+                let v_oa = v_oa - v_o;
+                let v_ob = v_ob - v_o;
+                if dbg {
+                    log::info!("new v_o {v_o} v_oa {v_oa:?} v_ob {v_ob:?}");
+                }
+                // 计算屏幕上每一个点对应虚像自己坐标的位置
+                for i in 0..W_PIXELS {
+                    for j in 0..W_PIXELS {
+                        let p = p_o + v_oa * (i as f32) + v_ob * (j as f32);
+                        let dbg = dbg && (i < 10 && j < 10);
+                        if dbg {
+                            log::info!("i {i} j {j} p {p}");
+                        }
+                        let pz = V_IMG_CORD.z - p.z;
+                        let px = p.x;
+                        let py = p.y - V_IMG_CORD.y + 1. * SCREEN_ZOOM;
+                        let Some((x, y, z)) = v3_2_pixel(px, py, pz) else {
+                            continue;
+                        };
+                        if dbg {
+                            log::info!("x {x} y {y} z {z}");
+                        }
+                        let z_point = PixelZInfo {
+                            angle,
+                            pixel: z,
+                            is_borrowed: false,
+                            screen_pixel: ScreenPixel {
+                                idx: screen_idx,
+                                addr: j as u32,
+                                pixel: i as u32,
+                            },
+                        };
+                        xy_arrs[screen_idx][x as usize][y as usize][z as usize] = Some(z_point);
+                    }
+                }
+            }
+        }
+        // TODO borrow value from other coloums
+        // not good
+
+        // TODO no clone
+        // let xy_arr_cl = xy_arr.clone();
+        // let borrow = |x: usize, y: usize, z: usize, z_info: &mut Option<PixelZInfo>| match xy_arr_cl
+        //     .get(x)
+        //     .and_then(|v| v.get(y))
+        //     .and_then(|v| v[z])
+        //     .as_ref()
+        // {
+        //     Some(v) => {
+        //         if v.is_borrowed {
+        //             return false;
+        //         }
+        //         let mut v = v.clone();
+        //         v.is_borrowed = true;
+        //         *z_info = Some(v);
+        //         return true;
+        //     }
+        //     None => return false,
+        // };
+
+        // for (x, y_arr) in xy_arr.iter_mut().enumerate() {
+        //     for (y, z_arr) in y_arr.iter_mut().enumerate() {
+        //         for (z, z_info) in z_arr.iter_mut().enumerate() {
+        //             if z_info.is_some() {
+        //                 continue;
+        //             }
+
+        //             if borrow(x + 1, y, z, z_info) {
+        //                 continue;
+        //             }
+        //             if borrow(x, y + 1, z, z_info) {
+        //                 continue;
+        //             }
+        //             if x > 1 {
+        //                 if borrow(x - 1, y, z, z_info) {
+        //                     continue;
+        //                 }
+        //             }
+        //             if y > 1 {
+        //                 if borrow(x, y - 1, z, z_info) {
+        //                     continue;
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
+        Self { xy_arrs, mat_map }
+    }
+
+    pub fn encode(
+        &self,
+        pixel_surface: &PixelSurface,
+        pixel_offset: i32,
+        optimze_speed_for_mbi5264: bool,
+    ) -> AngleMap {
+        let mut angle_map: BTreeMap<
+            u32,
+            [BTreeMap<ScreenLineAddr, ScreenLinePixels>; NUM_SCREENS],
+        > = BTreeMap::new();
+        for &(x, y, (z, color)) in pixel_surface {
+            for screen_idx in 0..NUM_SCREENS {
+                let z_info_list = &self.xy_arrs[screen_idx][x as usize][y as usize];
+                // fix z offset
+                // TODO find the reason for offset
+                // let z = if z > 1 { z - 1 } else { z };
+                let Some(z_info) = z_info_list.get(z as usize).and_then(|v| *v) else {
+                    continue;
+                };
+                let entry = angle_map.entry(z_info.angle).or_default();
+                let addr = ScreenLineAddr {
+                    screen_idx: z_info.screen_pixel.idx,
+                    addr: z_info.screen_pixel.addr,
+                };
+                let line_pixels = entry[screen_idx].entry(addr).or_default();
+                let pixel_idx = z_info.screen_pixel.pixel as usize;
+                if let Some(c) = line_pixels.pixels.get_mut(pixel_idx) {
+                    *c = Some(color);
+                } else {
+                    panic!("{x}, {y}, {z}, pixel_idx {pixel_idx}");
+                }
+            }
+        }
+        angle_map
+            .into_iter()
+            .map(|(k, addr_maps)| {
+                (
+                    k,
+                    addr_maps.map(|addr_map| {
+                        parse_addr_map(addr_map, pixel_offset, optimze_speed_for_mbi5264)
+                    }),
+                )
+            })
+            .collect()
+    }
+    pub fn decode(&self, angle: u32, lines: &[ScreenLine]) -> (FloatSurface, FloatSurface) {
+        let mut view_surface = FloatSurface::default();
+        let mut led_surface = FloatSurface::default();
+        for ScreenLine {
+            screen_idx,
+            addr,
+            pixels,
+        } in lines
+        {
+            for (idx, pixel) in pixels.into_iter().enumerate() {
+                let Some(_pixel) = pixel else { continue };
+                let pixel_z = idx as u32;
+                let mat = self.mat_map.get(&angle).unwrap();
+                let (view, led) = cacl_view_point(*mat, *screen_idx, *addr, pixel_z);
+                view_surface.push(view);
+                led_surface.push(led);
+            }
+        }
+        (view_surface, led_surface)
+    }
+    pub fn decode_all(&self, angle_map: AngleMap) -> (FloatSurface, FloatSurface) {
+        let mut view_surface = FloatSurface::default();
+        let mut led_surface = FloatSurface::default();
+        for (angle, lines_arr) in angle_map {
+            for lines in lines_arr {
+                let (view, led) = self.decode(angle, lines.as_slice());
+                view_surface.extend(view);
+                led_surface.extend(led);
+            }
+        }
+        (view_surface, led_surface)
+    }
+}
+
+fn parse_addr_map(
+    mut addr_map: BTreeMap<ScreenLineAddr, ScreenLinePixels>,
+    pixel_offset: i32,
+    optimze_speed_for_mbi5264: bool,
+) -> Vec<ScreenLine> {
+    let mut pixels_info: [Option<([u8; 4], ScreenLineAddr)>; W_PIXELS] = [None; W_PIXELS];
+    for (addr, line) in addr_map.iter_mut() {
+        for (color, pixel_info) in line.pixels.iter_mut().zip(&mut pixels_info) {
+            let Some(rgbh) = color.as_ref() else {
+                continue;
+            };
+            let [r, g, b, _a] = rgbh.to_ne_bytes();
+            match pixel_info {
+                Some(_rgbh) => {
+                    *color = None;
+                }
+                None => {
+                    *pixel_info = Some(([r, g, b, addr.addr as u8], *addr));
+                }
+            }
+        }
+    }
+    if optimze_speed_for_mbi5264 {
+        for i in 0..64usize {
+            let region0 = i;
+            let region1 = i + 64;
+            let region2 = i + 128;
+            let regions = [region1, region0, region2];
+            let mut non_empty_h: Option<u8> = None;
+            for region in regions {
+                let Some(pixel_info) = pixels_info[region] else {
+                    continue;
+                };
+                if pixel_info.0[..3] == [0; 3] {
+                    continue;
+                }
+                non_empty_h = Some(pixel_info.0[3]);
+                break;
+            }
+            let Some(non_empty_h) = non_empty_h else {
+                continue;
+            };
+            let non_empty_h_mod = non_empty_h % 16;
+            for region in regions {
+                let Some((rgbh, line_addr)) = &pixels_info[region] else {
+                    continue;
+                };
+                let h = rgbh[3];
+                let h_mod = h % 16;
+                if h_mod == non_empty_h_mod {
+                    continue;
+                }
+                let mut deta = non_empty_h_mod as i16 - h_mod as i16;
+                if deta.abs() > 8 {
+                    let try_deta = if deta > 0 { deta - 16 } else { deta + 16 };
+                    let try_h = h as i16 + try_deta as i16;
+                    if try_h >= 0 && try_h <= 143 {
+                        deta = try_deta;
+                    }
+                }
+                let new_h = (h as i16 + deta) as u8;
+                let line_pixels = addr_map.get_mut(&line_addr).unwrap();
+                let pixel = line_pixels.pixels[region].take().unwrap();
+                let mut line_addr = *line_addr;
+                line_addr.addr = new_h as u32;
+                let entry = addr_map.entry(line_addr).or_default();
+                entry.pixels[region] = Some(pixel);
+            }
+        }
+    }
+
+    addr_map
+        .into_iter()
+        .map(|(k, mut v)| {
+            if pixel_offset > 0 {
+                let offset = pixel_offset as usize;
+                v.pixels.rotate_right(offset);
+                v.pixels.iter_mut().take(offset).for_each(|v| {
+                    v.take();
+                });
+            } else if pixel_offset < 0 {
+                let offset = (-pixel_offset) as usize;
+                v.pixels.rotate_left(offset);
+                v.pixels.iter_mut().rev().take(offset).for_each(|v| {
+                    v.take();
+                });
+            }
+            ScreenLine {
+                screen_idx: k.screen_idx,
+                addr: k.addr,
+                pixels: v.pixels,
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    #[test]
+    fn test_mirror_mat() {
+        let angle = (90f32).to_radians();
+        let mat = mirror_mat4(angle);
+        let p = glam::Vec4::new(0.0, 1.0, 1.0, 1.0);
+        let p = mat * p;
+        // p [-0.00000024726896, -2.9999998, -2.9999998, 1]
+        println!("p {p}");
+    }
+}
+```
+
+### vdrm-alg/src/main.rs
+```
+use std::fmt::Display;
+
+fn gen_pyramid_surface() -> vdrm_alg::PixelSurface {
+    let mut pixel_surface = vdrm_alg::PixelSurface::new();
+    let gray: u8 = 0xff;
+    let r = vdrm_alg::W_PIXELS as i32 / 2;
+    for x in 0..vdrm_alg::W_PIXELS as u32 {
+        for y in 0..vdrm_alg::W_PIXELS as u32 {
+            let x_i32 = x as i32 - r;
+            let y_i32 = y as i32 - r;
+            let h = x_i32.abs() + y_i32.abs();
+            if h >= vdrm_alg::H_PIXELS as i32 {
+                continue;
+            }
+            let z = vdrm_alg::H_PIXELS as u32 - 1 - h as u32;
+            // let z = h as u32;
+            let color = match (x_i32 >= 0, y_i32 >= 0) {
+                (true, true) => u32::from_ne_bytes([gray, gray, gray, 0]),
+                (false, true) => u32::from_ne_bytes([gray, 0, 0, 0]),
+                (false, false) => u32::from_ne_bytes([0, gray, 0, 0]),
+                (true, false) => u32::from_ne_bytes([gray, 0, gray, 0]),
+            };
+            pixel_surface.push((x, y, (z, color)));
+        }
+    }
+    pixel_surface
+}
+
+pub type RGBH = [u8; 4];
+pub const IMG_HEIGHT: usize = 192;
+pub const IMG_WIDTH: usize = IMG_HEIGHT / 4;
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct AngleImage {
+    pub angle: u32,
+    // rgbh
+    pub coloum: [RGBH; IMG_HEIGHT],
+}
+
+impl AngleImage {
+    pub const fn new(angle: u32) -> Self {
+        Self {
+            angle,
+            coloum: [[0; 4]; IMG_HEIGHT],
+        }
+    }
+}
+
+impl Display for AngleImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for rgbh in self.coloum {
+            let h = rgbh[3];
+            write!(f, "{h:02}")?;
+        }
+        write!(f, "\n")
+    }
+}
+
+fn dbg_codec() {
+    let codec = vdrm_alg::Codec::new();
+    let pyramid = gen_pyramid_surface();
+    let map = codec.encode(&pyramid, 0, false);
+    let mut angle_list = vec![];
+    let mut angles = vec![];
+    for (angle, lines) in map {
+        let mut img = AngleImage::new(angle);
+        let mut pixels: [Option<[u8; 4]>; IMG_HEIGHT] = [None; IMG_HEIGHT];
+        let [line, ..] = lines;
+        if line.is_empty() {
+            continue;
+        }
+        angles.push(angle);
+        for p in line {
+            for (color, pixel) in p.pixels.iter().zip(&mut pixels) {
+                let Some(color) = color else {
+                    continue;
+                };
+                let [r, g, b, _a] = color.to_ne_bytes();
+                match pixel {
+                    Some(rgbh) => {
+                        let h = rgbh[3];
+                        if p.addr < h as u32 {
+                            *rgbh = [r, g, b, p.addr as u8];
+                        }
+                    }
+                    None => {
+                        *pixel = Some([r, g, b, p.addr as u8]);
+                    }
+                }
+            }
+        }
+        for (c, p) in img.coloum.iter_mut().zip(pixels) {
+            if let Some(p) = p {
+                *c = p;
+            }
+        }
+        // print!("{} {}", img.angle, img);
+        angle_list.push(img);
+    }
+    println!(
+        "angles {} [{}..{}]",
+        angles.len(),
+        angles.first().unwrap(),
+        angles.last().unwrap()
+    );
+    let buf = unsafe {
+        std::slice::from_raw_parts(
+            angle_list.as_ptr() as *const u8,
+            angle_list.len() * std::mem::size_of::<AngleImage>(),
+        )
+    };
+}
+
+fn dbg_screens() {
+    let rad_rotate = 0f32;
+    let screens = vdrm_alg::screens_with_rotate(rad_rotate, Some(std::f32::consts::PI / 8.0));
+    let unit = 75f32;
+    for (idx, s) in screens.iter().enumerate() {
+        for p in [s.points[0], s.points[3]] {
+            let yz = vdrm_alg::rotate_x((p.1, p.2));
+            let p = glam::Vec3::new(p.0, yz.0, yz.1) * unit;
+            println!("screen {idx} {p:?}");
+        }
+    }
+}
+
+fn main() {
+    dbg_screens();
+    dbg_codec();
+}
+```
+
+### vdrm-emu/src/lib.rs
+```
+use wasm_bindgen::prelude::*;
+use web_sys::HtmlCanvasElement;
+
+mod plot2d;
+mod plot3d;
+
+#[global_allocator]
+static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
+
+/// Type alias for the result of a drawing function.
+pub type DrawResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// Type used on the JS side to convert screen coordinates to chart
+/// coordinates.
+#[wasm_bindgen]
+pub struct Chart {}
+
+#[wasm_bindgen]
+impl Chart {
+    pub fn plot3d(
+        canvas: HtmlCanvasElement,
+        angle: Option<u32>,
+        pitch: f64,
+        yaw: f64,
+        enb_screens: Vec<usize>,
+    ) -> Result<(), JsValue> {
+        plot3d::draw(canvas, angle, pitch, yaw, enb_screens).map_err(|err| err.to_string())?;
+        Ok(())
+    }
+    pub fn plot2d(
+        canvas: HtmlCanvasElement,
+        angle_offset: u32,
+        enb_screens: Vec<usize>,
+    ) -> Result<(), JsValue> {
+        plot2d::draw(canvas, angle_offset, enb_screens).map_err(|err| err.to_string())?;
+        Ok(())
+    }
+}
+```
+
+### vdrm-emu/src/plot2d.rs
+```
+use std::f32::consts::PI;
+const MIRROR_OFFSET: f32 = 1.;
+const SCREEN_OFFSET: f32 = 0.25;
+const SCREEN_X_OFFSET: f32 = -1.0 + SCREEN_OFFSET;
+const NUM_SCREENS: usize = 3;
+use crate::DrawResult;
+use plotters::prelude::*;
+use plotters_canvas::CanvasBackend;
+use web_sys::HtmlCanvasElement;
+
+fn mirror_mat3(angle_f: f32) -> glam::Mat3A {
+    let sin = angle_f.sin();
+    let cos = angle_f.cos();
+    let sin2 = sin * sin;
+    let cos2 = cos * cos;
+    let sin_cos = sin * cos;
+    let mat_mir = glam::Mat3A::from_cols(
+        glam::Vec3A::new(sin2 - cos2, -2.0 * sin_cos, 0.),
+        glam::Vec3A::new(-2.0 * sin_cos, cos2 - sin2, 0.),
+        glam::Vec3A::new(2.0 * MIRROR_OFFSET * cos, 2.0 * MIRROR_OFFSET * sin, 1.),
+    );
+    mat_mir
+}
+
+fn mirror_points_f(angle_f: f32, points: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    let mat = mirror_mat3(angle_f);
+    points
+        .iter()
+        .map(|v| {
+            let v = glam::Vec3A::new(v.0, v.1, 1.0);
+            let v = mat * v;
+            (v.x, v.y)
+        })
+        .collect()
+}
+
+pub fn screens() -> [[(f32, f32); 2]; NUM_SCREENS] {
+    let depth = 1f32;
+    let a: (f32, f32) = (SCREEN_X_OFFSET, 0.);
+
+    let b: (f32, f32) = (SCREEN_X_OFFSET + depth, 0.);
+
+    let screen = [a, b];
+    let angle = 180f32;
+    let angle_off = 360.0f32 / 8.0 / 2.0 / 2.0;
+    let angle_l = angle - angle_off;
+    let angle_r = angle + angle_off;
+    let v_screen = mirror_points_f(angle.to_radians(), &screen);
+    let screen_l = mirror_points_f(angle_l.to_radians(), &v_screen);
+    let screen_r = mirror_points_f(angle_r.to_radians(), &v_screen);
+
+    let screen_l = screen_l.try_into().unwrap();
+    let screen_r = screen_r.try_into().unwrap();
+    [screen_l, screen, screen_r]
+}
+
+/// Draw power function f(x) = x^power.
+pub fn draw(
+    canvas: HtmlCanvasElement,
+    angle_offset: u32,
+    enb_screens: Vec<usize>,
+) -> DrawResult<impl Fn((i32, i32)) -> Option<(f32, f32)>> {
+    let backend = CanvasBackend::with_canvas_object(canvas).unwrap();
+    let root = backend.into_drawing_area();
+    let font: FontDesc = ("sans-serif", 20.0).into();
+    let cord_len = 3f32;
+
+    root.fill(&WHITE)?;
+
+    let mut chart = ChartBuilder::on(&root)
+        .margin(20u32)
+        .caption(format!("2d simulate"), font)
+        .x_label_area_size(30u32)
+        .y_label_area_size(30u32)
+        .build_cartesian_2d(-cord_len..cord_len, -cord_len..cord_len)?;
+
+    chart.configure_mesh().x_labels(3).y_labels(3).draw()?;
+
+    let angle_offset = (angle_offset as f32 / 2. - 22.5).to_radians();
+    let angle_init = PI / 8.0;
+    let r = MIRROR_OFFSET / (PI / 8.0).cos();
+    let mut points: Vec<_> = (0..8)
+        .map(|i| {
+            let angle = PI * i as f32 / 4. + angle_init + angle_offset;
+            let x = r * angle.cos();
+            let y = r * angle.sin();
+            (x, y)
+        })
+        .collect();
+    points.push(points[0]);
+    chart.draw_series(LineSeries::new(points, &BLACK))?;
+    let angle = PI + angle_offset;
+    for (idx, screen) in screens().into_iter().enumerate() {
+        if !enb_screens.contains(&idx) {
+            continue;
+        }
+        for offset in [-PI / 4., 0f32, PI / 4.] {
+            let angle = angle + offset;
+            let v_screen = mirror_points_f(angle, &screen);
+            chart.draw_series(LineSeries::new(v_screen, &BLACK.mix(0.5)))?;
+        }
+
+        chart.draw_series(LineSeries::new(screen, &BLACK))?;
+    }
+
+    root.present()?;
+    return Ok(chart.into_coord_trans());
+}
+```
+
+### vdrm-emu/src/plot3d.rs
+```
+use crate::DrawResult;
+use plotters::coord::ranged3d::ProjectionMatrix;
+use plotters::prelude::*;
+use plotters_canvas::CanvasBackend;
+use std::collections::BTreeMap;
+use vdrm_alg::mirror_points_f;
+use web_sys::HtmlCanvasElement;
+
+static CTX: std::sync::Mutex<Option<Ctx>> = std::sync::Mutex::new(None);
+
+pub fn gen_rrds_surface() -> vdrm_alg::PixelSurface {
+    // const PATH: &'static str = "/Users/hikari/rust/vdrm-codec/frames/1738589846_rrds";
+    const SCREEN_WIDTH: usize = 256;
+    const SCREEN_HEIGHT: usize = 192;
+    const IMG_LEN: usize = SCREEN_HEIGHT * SCREEN_WIDTH + 1;
+    // let img = include_bytes!("/Users/hikari/rust/vdrm-codec/frames/1738589846_rrds");
+    let img = "";
+    let img: &[u64] = unsafe { std::slice::from_raw_parts(img.as_ptr() as *const u64, IMG_LEN) };
+
+    let mut pixel_surface = vdrm_alg::PixelSurface::new();
+
+    for y in 0..SCREEN_HEIGHT {
+        for x in 0..SCREEN_HEIGHT {
+            let idx = x + 32 + y * SCREEN_WIDTH + 1;
+            let pixel = img[idx];
+            let abgr = (pixel >> 32) as u32;
+            let rgba = abgr.swap_bytes();
+            let z = (pixel & 0xFFFF) as u32;
+            let z = (z as f32) / 0xFFFF as f32;
+            let mut z = ((1.0 - z) * 96.0) as u32;
+            if rgba & 0xFFFF_FF00 == 0 {
+                z = 0;
+            }
+            pixel_surface.push((x as u32, y as u32, (z, rgba)));
+        }
+    }
+    return pixel_surface;
+}
+pub fn gen_pyramid_surface() -> vdrm_alg::PixelSurface {
+    let mut pixel_surface = vdrm_alg::PixelSurface::new();
+    let r = vdrm_alg::W_PIXELS as i32 / 2;
+    for x in 0..vdrm_alg::W_PIXELS as u32 {
+        for y in 0..vdrm_alg::W_PIXELS as u32 {
+            let x_i32 = x as i32 - r;
+            let y_i32 = y as i32 - r;
+            let h = x_i32.abs() + y_i32.abs();
+            if h >= 40 {
+                continue;
+            }
+            let z = (r - 1 - h) as u32;
+            let z = h as u32;
+            let color = match (x_i32 >= 0, y_i32 >= 0) {
+                (true, true) => 0b111,
+                (false, true) => 0b001,
+                (false, false) => 0b010,
+                (true, false) => 0b101,
+            };
+            pixel_surface.push((x, y, (z, color)));
+        }
+    }
+    pixel_surface
+}
+struct Mirror {
+    points: [(f32, f32, f32); 4],
+}
+impl Mirror {
+    fn new(len: f32, angle: u32) -> Self {
+        // let len = len / 2.0;
+        let angle = vdrm_alg::angle_to_v(angle);
+        let mat = glam::Mat2::from_angle(angle);
+        let points = [
+            (-vdrm_alg::MIRROR_OFFSET, -len, -len),
+            (-vdrm_alg::MIRROR_OFFSET, len, -len),
+            (-vdrm_alg::MIRROR_OFFSET, len, len),
+            (-vdrm_alg::MIRROR_OFFSET, -len, len),
+        ];
+        let points = points.map(|(x, y, z)| {
+            let p = mat * glam::Vec2::new(x, y);
+            (p.x, p.y, z)
+        });
+        let points = points.map(|(x, y, z)| {
+            let mat = glam::Mat2::from_angle(45f32.to_radians());
+            let p = mat * glam::Vec2::new(y, z);
+            (x, p.x, p.y)
+        });
+        Self { points }
+    }
+    fn polygon(&self) -> Polygon<(f32, f32, f32)> {
+        Polygon::new(self.points, BLACK.mix(0.2))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Screen {
+    points: [(f32, f32, f32); 4],
+}
+
+impl Screen {
+    fn new(idx: usize) -> Self {
+        let points = vdrm_alg::screens()[idx].points;
+        Self { points }
+    }
+
+    fn polygon(&self) -> Polygon<(f32, f32, f32)> {
+        Polygon::new(self.points, BLACK.mix(0.8))
+    }
+}
+
+struct AngleCtx {
+    mirror: Mirror,
+    led_pixels: Vec<(f32, f32, f32)>,
+    emu_pixels: Vec<(f32, f32, f32)>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct CtxParam {
+    enb_screens: Vec<usize>,
+}
+struct Ctx {
+    angle_ctx_map: BTreeMap<u32, AngleCtx>,
+    all_real_pixels: Vec<(f32, f32, f32)>,
+    all_emu_pixels: Vec<(f32, f32, f32)>,
+    all_led_pixels: Vec<(f32, f32, f32)>,
+    screens: [Screen; vdrm_alg::NUM_SCREENS],
+    param: CtxParam,
+}
+
+impl Ctx {
+    fn new(param: CtxParam) -> Self {
+        let codec = vdrm_alg::Codec::new();
+        // let pixel_surface = gen_rrds_surface();
+        let pixel_surface = gen_pyramid_surface();
+        let all_real_pixels = vdrm_alg::pixel_surface_to_float(&pixel_surface)
+            .into_iter()
+            .map(|(x, y, z)| (x, y + 1.0, -z))
+            .collect();
+        let optimze_speed_for_mbi5264 = false;
+        let angle_map = codec.encode(&pixel_surface, 0, optimze_speed_for_mbi5264);
+        let (mut all_emu_pixels, mut all_led_pixels) = (vec![], vec![]);
+        let angle_ctx_map = (0..vdrm_alg::TOTAL_ANGLES as u32)
+            .map(|angle| {
+                let mirror = Mirror::new(1. / 2_f32.sqrt(), angle);
+                let Some(lines_arr) = angle_map.get(&angle) else {
+                    return (
+                        angle,
+                        AngleCtx {
+                            mirror,
+                            led_pixels: vec![],
+                            emu_pixels: vec![],
+                        },
+                    );
+                };
+                let mut led_pixels = vec![];
+                let mut emu_pixels = vec![];
+                for (idx, lines) in lines_arr.iter().enumerate() {
+                    if !param.enb_screens.contains(&idx) {
+                        continue;
+                    }
+                    let (emu_pixels_dec, led_pixels_dec) = codec.decode(angle, lines);
+                    all_emu_pixels.extend(emu_pixels_dec.clone());
+                    all_led_pixels.extend(led_pixels_dec.clone());
+                    led_pixels.extend(led_pixels_dec);
+                    emu_pixels.extend(emu_pixels_dec);
+                }
+                let angle_ctx = AngleCtx {
+                    mirror,
+                    led_pixels,
+                    emu_pixels,
+                };
+                (angle, angle_ctx)
+            })
+            .collect();
+        let screens: [usize; vdrm_alg::NUM_SCREENS] = std::array::from_fn(|i| i);
+
+        Self {
+            angle_ctx_map,
+            all_real_pixels,
+            all_emu_pixels,
+            all_led_pixels,
+            screens: screens.map(|idx| Screen::new(idx)),
+            param,
+        }
+    }
+}
+
+pub fn draw(
+    canvas: HtmlCanvasElement,
+    angle: Option<u32>,
+    pitch: f64,
+    yaw: f64,
+    enb_screens: Vec<usize>,
+) -> DrawResult<()> {
+    static INIT_LOG: std::sync::Once = std::sync::Once::new();
+    INIT_LOG.call_once(|| {
+        wasm_logger::init(wasm_logger::Config::new(log::Level::Trace));
+        console_error_panic_hook::set_once();
+    });
+    log::info!("draw");
+    let mut guard = CTX.lock().unwrap();
+    let param = CtxParam { enb_screens };
+    let ctx = guard.get_or_insert_with(|| Ctx::new(param.clone()));
+    if ctx.param != param {
+        *ctx = Ctx::new(param);
+    }
+    let area = CanvasBackend::with_canvas_object(canvas)
+        .unwrap()
+        .into_drawing_area();
+    area.fill(&WHITE)?;
+
+    let axis_len = 4f32;
+    let x_axis = (-axis_len..axis_len).step(0.1);
+    let y_axis = (-axis_len..axis_len).step(0.1);
+
+    let mut chart = ChartBuilder::on(&area).build_cartesian_3d(
+        x_axis.clone(),
+        y_axis.clone(),
+        -axis_len..axis_len,
+    )?;
+    chart.with_projection(|_pb| {
+        let (x, y) = area.get_pixel_range();
+        let v = (x.end - x.start).min(y.end - y.start) * 4 / 5 / 2;
+        let before = (v, v, v);
+        let after = ((x.start + x.end) / 2, (y.start + y.end) / 2);
+
+        let mut mat = if before == (0, 0, 0) {
+            ProjectionMatrix::default()
+        } else {
+            let (x, y, z) = before;
+            ProjectionMatrix::shift(-x as f64, -y as f64, -z as f64) * ProjectionMatrix::default()
+        };
+        if yaw.abs() > 1e-20 {
+            mat = mat * ProjectionMatrix::rotate(0.0, 0.0, yaw);
+        }
+        if pitch.abs() > 1e-20 {
+            mat = mat * ProjectionMatrix::rotate(pitch, 0.0, 0.0);
+        }
+        mat = mat * ProjectionMatrix::scale(0.7);
+        if after != (0, 0) {
+            let (x, y) = after;
+            mat = mat * ProjectionMatrix::shift(x as f64, y as f64, 0.0);
+        }
+        mat
+    });
+
+    chart.configure_axes().draw()?;
+
+    chart
+        .draw_series(
+            [
+                ("x", (axis_len, -axis_len, -axis_len), &RED),
+                ("y", (-axis_len, axis_len, -axis_len), &GREEN),
+                ("z", (-axis_len, -axis_len, axis_len), &BLUE),
+                ("o'", (-axis_len, -axis_len, -axis_len), &CYAN),
+            ]
+            .map(|(label, position, color)| {
+                Text::new(
+                    label,
+                    position,
+                    ("sans-serif", 20, color).into_text_style(&area),
+                )
+            }),
+        )
+        .unwrap();
+    let screen_polygons = ctx
+        .screens
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, v)| ctx.param.enb_screens.contains(&idx).then(|| v.polygon()));
+    chart
+        .draw_series(screen_polygons)?
+        .label("SCREEN")
+        .legend(|(x, y)| {
+            Rectangle::new([(x + 5, y - 5), (x + 15, y + 5)], BLACK.mix(0.9).filled())
+        });
+    let screen = ctx.screens[1];
+    let angle_s = 90f32 - 22.5f32;
+    let angle_e = 90f32 + 22.5f32;
+    let mut screen_s = mirror_points_f(angle_s.to_radians(), &screen.points);
+    screen_s.push(screen_s[0]);
+    let mut screen_e = mirror_points_f(angle_e.to_radians(), &screen.points);
+    screen_e.push(screen_e[0]);
+    let mut elements = vec![];
+    let board_s = PathElement::new(screen_s, BLACK.mix(0.5));
+    let board_e = PathElement::new(screen_e, BLACK.mix(0.5));
+
+    elements.extend([board_s, board_e]);
+    let num_points = 10;
+    let mut boards = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+
+    for i in 0..num_points {
+        let angle = angle_s + (angle_e - angle_s) * (i as f32) / ((num_points - 1) as f32);
+        let points = mirror_points_f(angle.to_radians(), &screen.points);
+        let points: [(f32, f32, f32); 4] = points.try_into().unwrap();
+        boards[0].push(points[0]);
+        boards[1].push(points[1]);
+        boards[2].push(points[2]);
+        boards[3].push(points[3]);
+    }
+    for board in boards {
+        let e = PathElement::new(board, BLACK.mix(0.5));
+        elements.push(e);
+    }
+    chart
+        .draw_series(elements)?
+        .label("BOARD")
+        .legend(|(x, y)| {
+            Rectangle::new([(x + 5, y - 5), (x + 15, y + 5)], BLACK.mix(0.5).filled())
+        });
+
+    if let Some(angle) = angle {
+        let v_screens = ctx.screens.iter().enumerate().filter_map(|(idx, v)| {
+            ctx.param.enb_screens.contains(&idx).then(|| {
+                let v_points = vdrm_alg::mirror_points(angle, &v.points);
+                Polygon::new(v_points, BLACK.mix(0.5))
+            })
+        });
+        chart
+            .draw_series(v_screens)?
+            .label("V_SCREEN")
+            .legend(|(x, y)| {
+                Rectangle::new([(x + 5, y - 5), (x + 15, y + 5)], BLACK.mix(0.5).filled())
+            });
+    };
+    let real_surface_points: PointSeries<_, _, Circle<_, _>, _> =
+        PointSeries::new(ctx.all_real_pixels.clone(), 1_f64, &BLUE.mix(0.2));
+    chart
+        .draw_series(real_surface_points)?
+        .label("REAL")
+        .legend(|(x, y)| Rectangle::new([(x + 5, y - 5), (x + 15, y + 5)], BLUE.mix(0.5).filled()));
+
+    let (emu, led) = match angle {
+        None => (ctx.all_emu_pixels.clone(), ctx.all_led_pixels.clone()),
+        Some(angle) => {
+            let angle_ctx = ctx.angle_ctx_map.get(&angle).unwrap();
+            chart
+                .draw_series([angle_ctx.mirror.polygon()])?
+                .label("MIRROR")
+                .legend(|(x, y)| {
+                    Rectangle::new([(x + 5, y - 5), (x + 15, y + 5)], BLACK.mix(0.1).filled())
+                });
+
+            (angle_ctx.emu_pixels.clone(), angle_ctx.led_pixels.clone())
+        }
+    };
+
+    let emu_surface_points: PointSeries<_, _, Circle<_, _>, _> =
+        PointSeries::new(emu, 1_f32, &RED.mix(0.3));
+    chart
+        .draw_series(emu_surface_points)?
+        .label("VIRTUAL")
+        .legend(|(x, y)| Rectangle::new([(x + 5, y - 5), (x + 15, y + 5)], RED.mix(0.5).filled()));
+
+    let led_surface_points: PointSeries<_, _, Circle<_, _>, _> =
+        PointSeries::new(led, 1_f64, &RED.mix(0.8));
+    chart.draw_series(led_surface_points)?;
+
+    chart.configure_series_labels().border_style(BLACK).draw()?;
+    Ok(())
+}
+```
+
+### vdrm-emu/www/bootstrap.js
+```
+init();
+
+async function init() {
+    if (typeof process == "object") {
+        // We run in the npm/webpack environment.
+        const [{Chart}, {main, setup}] = await Promise.all([
+            import("wasm-demo"),
+            import("./index.js"),
+        ]);
+        setup(Chart);
+        main();
+    } else {
+        const [{Chart, default: init}, {main, setup}] = await Promise.all([
+            import("./pkg/wasm_demo.js"),
+            import("./index.js"),
+        ]);
+        await init();
+        setup(Chart);
+        main();
+    }
+}
+```
+
+### vdrm-emu/www/index.js
+```
+// If you only use `npm` you can simply
+// import { Chart } from "wasm-demo" and remove `setup` call from `bootstrap.js`.
+class Chart {}
+
+const plotType = document.getElementById("plot-type");
+const canvas = document.getElementById("canvas");
+const coord = document.getElementById("coord");
+const showall = document.getElementById("showall");
+const angle = document.getElementById("angle");
+const pitch = document.getElementById("pitch");
+const yaw = document.getElementById("yaw");
+const screen_check = document.getElementById("screen_check");
+const control = document.getElementById("3d-control");
+
+const screen_check_2d = document.getElementById("screen_check_2d");
+const angle_2d = document.getElementById("angle_2d");
+const control_2d = document.getElementById("2d-control");
+
+let chart = null;
+
+/** Main entry point */
+export function main() {
+  setupUI();
+  applyHash();
+  setupCanvas();
+}
+
+/** Map between plot-type select value and url hash. */
+const HASH_TO_VALUE = { "#2d": "wd-plot", "#3d": "3d-plot" };
+const VALUE_TO_HASH = { "wd-plot": "#2d", "3d-plot": "#3d" };
+
+/** Read location.hash and update the selected plot type. */
+function applyHash() {
+  const value = HASH_TO_VALUE[window.location.hash] || "3d-plot";
+  if (plotType.value !== value) {
+    plotType.value = value;
+  }
+  updatePlot();
+}
+
+/** Write the currently selected plot type back to location.hash. */
+function syncHash() {
+  const hash = VALUE_TO_HASH[plotType.value] || "#3d";
+  if (window.location.hash !== hash) {
+    window.location.hash = hash;
+  }
+  updatePlot();
+}
+
+/** This function is used in `bootstrap.js` to setup imports. */
+export function setup(WasmChart) {
+  Chart = WasmChart;
+}
+
+/** Add event listeners. */
+function setupUI() {
+  plotType.addEventListener("change", syncHash);
+  window.addEventListener("hashchange", applyHash);
+  showall.addEventListener("change", updatePlot);
+  screen_check.addEventListener("change", updatePlot);
+  angle.addEventListener("change", updatePlot);
+  angle.addEventListener("input", updatePlot);
+  yaw.addEventListener("change", updatePlot);
+  yaw.addEventListener("input", updatePlot);
+  pitch.addEventListener("change", updatePlot);
+  pitch.addEventListener("input", updatePlot);
+  window.addEventListener("resize", setupCanvas);
+  window.addEventListener("mousemove", onMouseMove);
+
+  angle_2d.addEventListener("change", updatePlot);
+  angle_2d.addEventListener("input", updatePlot);
+  screen_check_2d.addEventListener("change", updatePlot);
+}
+
+/** Setup canvas to properly handle high DPI and redraw current plot. */
+function setupCanvas() {
+  const dpr = window.devicePixelRatio || 1.0;
+  const aspectRatio = canvas.width / canvas.height;
+  const size = canvas.parentNode.offsetWidth * 0.8;
+  canvas.style.width = size + "px";
+  canvas.style.height = size / aspectRatio + "px";
+  canvas.width = size;
+  canvas.height = size / aspectRatio;
+  updatePlot();
+}
+
+/** Update displayed coordinates. */
+function onMouseMove(event) {
+  if (chart) {
+    var text = "Mouse pointer is out of range";
+
+    if (event.target == canvas) {
+      let actualRect = canvas.getBoundingClientRect();
+      let logicX = (event.offsetX * canvas.width) / actualRect.width;
+      let logicY = (event.offsetY * canvas.height) / actualRect.height;
+      const point = chart.coord(logicX, logicY);
+      text = point ? `(${point.x.toFixed(3)}, ${point.y.toFixed(3)})` : text;
+    }
+    coord.innerText = text;
+  }
+}
+
+function updatePlot3d() {
+  angle.disabled = showall.checked;
+  let angle_value = Number(angle.value);
+  let yaw_value = Number(yaw.value) / 100.0;
+  let pitch_value = Number(pitch.value) / 100.0;
+  const start = performance.now();
+  var enb_screens = [];
+  let angle_opt = showall.checked ? null : angle_value;
+  for (var i = 0; i < screen_check.children.length; i++) {
+    var childElement = screen_check.children[i];
+    if (childElement.checked) {
+      enb_screens.push(i);
+    }
+  }
+  Chart.plot3d(canvas, angle_opt, pitch_value, yaw_value, enb_screens);
+  const end = performance.now();
+  coord.innerText = `angle: ${angle_value} Pitch:${pitch_value}, Yaw:${yaw_value} Rendered in ${Math.ceil(end - start)}ms`;
+}
+
+function updatePlot2d() {
+  var enb_screens = [];
+  let angle_value = Number(angle_2d.value);
+  for (var i = 0; i < screen_check_2d.children.length; i++) {
+    var childElement = screen_check_2d.children[i];
+    if (childElement.checked) {
+      enb_screens.push(i);
+    }
+  }
+  Chart.plot2d(canvas, angle_value, enb_screens);
+}
+
+/** Redraw currently selected plot. */
+function updatePlot() {
+  const selected = plotType.selectedOptions[0];
+  if (selected.value == "3d-plot") {
+    control_2d.classList.add("hide");
+    control.classList.remove("hide");
+    updatePlot3d();
+    return;
+  }
+  control.classList.add("hide");
+  control_2d.classList.remove("hide");
+  updatePlot2d();
+}
+```

@@ -1,0 +1,226 @@
+--- v001.md
++++ v002.md
+@@ -1,134 +1,111 @@
+ # Recursive Octree Traversal
+ 
+-Also called: BuildOctree, ConstructOctreeNodes, ContourCellProc, Octree Construction & Traversal, Recursive Octree Rendering
++Also called: Octree Node Traversal (Standard), Raycast Entry Point
+ 
+ ## Overview
+-Recursive Octree Traversal is a depth-first algorithm for processing a 3D sparse voxel octree by visiting every node in the tree structure. It serves as the foundational traversal logic for both volume rendering (rendering active leaf nodes as cubes) and isosurface extraction (generating vertex buffers via contouring) [S1, S2, S3, S4, unofficial]. It differs from its siblings by explicitly using the call stack to manage recursion depth, whereas [Iterative Octree Traversal](2618-iterative-octree-traversal.md) uses an explicit stack, and [Parametric Octree Traversal](2361-parametric-octree-traversal.md) uses parametric ray-marching logic. It builds on [CPU Sparse Voxel Octree Traversal](2455-cpu-sparse-voxel-octree-traversal.md) by replacing the stack-based state machine with direct recursive function calls [S1, S3, unofficial].
++Recursive Octree Traversal is a depth-first algorithm that processes a 3D sparse voxel octree by visiting nodes to either render them as geometry or process them for mesh generation [S3, S4, S5, unofficial]. It differs from [Iterative Octree Traversal](2618-iterative-octree-traversal.md) by using the call stack instead of an explicit stack, and from [Parametric Octree Traversal](2361-parametric-octree-traversal.md) by relying on hierarchical node masks rather than parametric ray-marching [S1, S3, S4, unofficial]. It builds on [CPU Sparse Voxel Octree Traversal](2455-cpu-sparse-voxel-octree-traversal.md) by replacing the stack-based state machine with direct recursive function calls [S1, S3, unofficial].
+ 
+ ## How it works
+-The method consists of two primary phases: tree construction (optional, depending on the source) and recursive traversal. The traversal visits nodes to either render them as geometry or process them for mesh generation.
++The method consists of tree construction (optional), recursive traversal, and leaf processing (rendering or contouring).
+ 
+ ### Inputs and Outputs
+-*   **Input:** A root octree node pointer, current depth (initially 0), and optional parameters such as `stop_at_lvl` (maximum depth to traverse) or `currentDepth` (depth threshold for rendering) [S1, S3, S4, unofficial].
+-*   **Output:**
+-    *   For rendering: OpenGL immediate mode draw calls or a vertex buffer [S2, S4, unofficial].
+-    *   For contouring: An index buffer containing triangle indices for the isosurface [S1, S2, unofficial].
++*   **Input:** A root octree node, current depth (initially 0), and optional parameters such as `stop_at_lvl` (maximum traversal depth) or `currentDepth` (rendering threshold) [S3, S4, unofficial].
++*   **Output:** 
++    *   For rendering: OpenGL immediate mode draw calls or a vertex buffer [S3, S5, unofficial].
++    *   For contouring: An index buffer containing triangle indices for the isosurface [S2, unofficial].
+     *   For construction: A constructed octree root node [S1, unofficial].
+ 
+ ### Data Structures
+-*   **OctreeNode:** Contains `min` (3D offset), `size` (voxel dimension), `type` (Node_Internal or Node_Leaf), and an array of 8 child pointers [S1, S4, unofficial].
+-*   **Vertex Struct (for contouring):** Contains `glm::vec3 position`, `glm::vec3 color`, `glm::vec3 normal`, and 1 float of padding, totaling 40 bytes and aligned [S2, unofficial].
+-*   **Child Offsets:** `CHILD_MIN_OFFSETS` defines the 8 relative offsets for children (typically binary combinations of -1/0 or 0/1 depending on coordinate system) [S1, unofficial].
++*   **NodeDescriptor:** Contains `child_mask` (`std::uint8_t`), `leaf_mask` (`std::uint8_t`), `internal_child_mask` (`std::uint8_t`), and `payload_base` (implied) [S1, unofficial].
++*   **Vertex Struct:** Contains `glm::vec3 position`, `glm::vec3 color`, `glm::vec3 normal`, and 1 float of padding, totaling 40 bytes and aligned [S3, unofficial].
++*   **Child Offsets:** `CHILD_MIN_OFFSETS` defines the 8 relative offsets for children (binary combinations of 0/1 in voxel units) [S1, unofficial].
+ 
+ ### Steps
+-
+-#### 1. Construction (if applicable)
+-If the tree is not pre-built, `ConstructOctreeNodes` is called on the root [S1, unofficial]:
+-1.  If `size == 1`, call `ConstructLeaf(node)` to evaluate voxel density/material and return [S1, unofficial].
+-2.  Else, create 8 children with `size/2`.
+-3.  For each child `i` (0 to 7), set `min` offset by `CHILD_MIN_OFFSETS[i] * childSize` [S1, unofficial].
+-4.  Recursively call `ConstructOctreeNodes` on each child [S1, unofficial].
+-5.  If no children were created (all empty), delete the node and return `nullptr` [S1, unofficial].
+-6.  Return the node [S1, unofficial].
+-
+-#### 2. Recursive Traversal
+-The core traversal function `traverse_r` (or similar) processes the tree [S3, unofficial]:
+-
+-1.  **Base Case / Null Check:** If the current node is `NULL`, return [S1, S3, unofficial].
+-2.  **Leaf/Stop Condition:** If the node is a leaf OR the current `depth` equals `stop_at_lvl` (or `currentDepth` for rendering), invoke the leaf callback `on_leaf(morton, node_idx)` or render the node [S3, S4, unofficial].
+-    *   *Rendering Detail:* If rendering, check if `node->isLeaf && node->isActive` or `depth >= currentDepth` [S4, unofficial]. Draw 6 faces (Front, Back, Top, Bottom, Right, Left) with vertices in range [-1, 1] and appropriate normals [S4, unofficial]. Pop matrix and return [S4, unofficial].
+-3.  **Recursive Step:** If not a leaf and not at stop depth:
+-    *   Iterate `i` from 0 to 7 [S2, S3, S4, unofficial].
+-    *   Calculate Morton code: `parent_morton | (i << (3 * (depth - 1)))` [S3, unofficial].
+-    *   Read child at index `offset + i` [S3, unofficial].
+-    *   If child exists (is not null), recursively call `traverse_r` (or `GenerateVertexIndices`) with the child address and `depth + 1` [S2, S3, S4, unofficial].
+-
+-#### 3. Contour Processing (Variant)
+-For isosurface extraction, `ContourCellProc` handles boundary resolution [S1, unofficial]:
+-1.  If `node == NULL`, return [S1, unofficial].
+-2.  If `node->type == Node_Internal`, recursively process 8 children [S1, unofficial].
+-3.  Process 12 faces using `cellProcFaceMask` and `ContourFaceProc` [S1, unofficial].
+-    *   Face pairs are defined as `{1,0}, {3,2}, {5,4}, {7,6}` for X, `{2,0}, {6,4}, {3,1}, {7,5}` for Y, etc. [S2, unofficial].
+-4.  Process 6 edges using `cellProcEdgeMask` and `ContourEdgeProc` [S1, unofficial].
+-    *   Edge pairs are defined for XY, XZ, and YZ planes [S2, unofficial].
+-5.  If all 4 nodes of an edge are leaves, call `ContourProcessEdge` [S1, unofficial].
++1.  **Construction (if applicable):** If the tree is not pre-built, `ConstructOctreeNodes` is called on the root [S1, unofficial]. If `size == 1`, call `ConstructLeaf(node)` to evaluate voxel density/material and return [S1, unofficial]. Else, create 8 children with `size/2`. For each child `i` (0 to 7), set `min` offset by `CHILD_MIN_OFFSETS[i] * childSize` [S1, unofficial]. Recursively call `ConstructOctreeNodes` on each child [S1, unofficial]. If no children were created (all empty), delete the node and return `nullptr` [S1, unofficial]. Return the node [S1, unofficial].
++2.  **Recursive Traversal:** The core traversal function `traverse_r` processes the tree [S3, unofficial]. If the current node is `NULL`, return [S1, S3, unofficial]. If the node is a leaf OR the current `depth` equals `stop_at_lvl` (or `currentDepth` for rendering), invoke the leaf callback `on_leaf(morton, node_idx)` or render the node [S3, S4, unofficial]. If not a leaf and not at stop depth, iterate `i` from 0 to 7 [S2, S3, S4, unofficial]. Calculate the Morton code: `parent_morton | (i << (3 * (depth - 1)))` [S3, unofficial]. Read child at index `offset + i` [S3, unofficial]. If child exists (is not null), recursively call `traverse_r` with the child address and `depth + 1` [S3, unofficial].
++3.  **Leaf Processing:** 
++    *   *Rendering:* Check if `node->isLeaf && node->isActive` or `depth >= currentDepth` [S4, unofficial]. Draw 6 faces (Front, Back, Top, Bottom, Right, Left) with vertices in range [-1, 1] and appropriate normals [S4, unofficial]. Pop matrix and return [S4, unofficial].
++    *   *Contouring:* If `node == NULL`, return [S1, unofficial]. If `node->type == Node_Internal`, recursively process 8 children [S1, unofficial]. Process 12 faces using `cellProcFaceMask` and `ContourFaceProc` [S1, unofficial]. Process 6 edges using `cellProcEdgeMask` and `ContourEdgeProc` [S1, unofficial]. If all 4 nodes of an edge are leaves, call `ContourProcessEdge` [S1, unofficial].
+ 
+ ### Pseudocode
++```python
++# Constants and types
++Node_Internal = 0
++Node_Leaf = 1
++MATERIAL_SOLID = 1
++MATERIAL_AIR = 0
++# 8 children offsets in voxel units (binary combinations of 0/1)
++CHILD_MIN_OFFSETS = [
++    (0,0,0), (1,0,0), (0,1,0), (1,1,0),
++    (0,0,1), (1,0,1), (0,1,1), (1,1,1)
++]
+ 
+-```python
+-def traverse_r(node, depth, stop_at_lvl, on_leaf):
+-    """
+-    Recursive traversal of an octree.
+-    node: OctreeNode or None
+-    depth: Current depth level (0 for root)
+-    stop_at_lvl: Depth at which to stop recursion and invoke on_leaf
+-    on_leaf: Callback function(morton_code, node_index)
+-    """
+-    if node is None:
+-        return
++class OctreeNode:
++    def __init__(self, min_pos, size, node_type, children=None, corners=0):
++        self.min = min_pos
++        self.size = size
++        self.type = node_type
++        self.children = children if children else [None] * 8
++        self.corners = corners
+ 
+-    # Check if we should process this node as a leaf/stop node
+-    is_leaf = (node.type == Node_Leaf)
+-    is_stop_depth = (depth >= stop_at_lvl)
+-
+-    if is_leaf or is_stop_depth:
+-        # Calculate Morton code if needed for the callback
+-        # morton_code = ... (calculated from parent path)
+-        on_leaf(node.morton_code, node.index)
+-        return
+-
+-    # Recursive step: visit all 8 children
+-    child_size = node.size / 2
+-    for i in range(8):
+-        # Calculate child offset based on binary index i
+-        # CHILD_MIN_OFFSETS[i] is a vec3 with components -1 or 0 (or 0/1)
+-        child_min = node.min + (CHILD_MIN_OFFSETS[i] * child_size)
+-        
+-        # Access child pointer
+-        child = node.children[i]
+-        
+-        if child is not None:
+-            # Recurse
+-            traverse_r(child, depth + 1, stop_at_lvl, on_leaf)
++def compute_morton(parent_morton, child_index, depth):
++    """Computes Morton code for a child node."""
++    return parent_morton | (child_index << (3 * (depth - 1)))
+ 
+ def construct_octree_node(min_pos, size, density_func):
+-    """
+-    Constructs an octree node recursively.
+-    """
++    """Constructs an octree node recursively."""
+     if size == 1:
+         return construct_leaf(min_pos, density_func)
+-    
+     child_size = size / 2
+-    children = [None] * 8
+-    
++    children = []
+     for i in range(8):
+-        child_min = min_pos + (CHILD_MIN_OFFSETS[i] * child_size)
++        child_min = (min_pos[0] + CHILD_MIN_OFFSETS[i][0] * child_size,
++                     min_pos[1] + CHILD_MIN_OFFSETS[i][1] * child_size,
++                     min_pos[2] + CHILD_MIN_OFFSETS[i][2] * child_size)
+         child = construct_octree_node(child_min, child_size, density_func)
+-        if child is not None:
+-            children[i] = child
+-            
+-    # If no children were created, this node is empty
++        children.append(child)
+     if all(c is None for c in children):
+         return None
+-        
+-    return OctreeNode(min=min_pos, size=size, type=Node_Internal, children=children)
++    return OctreeNode(min_pos, size, Node_Internal, children)
+ 
+ def construct_leaf(min_pos, density_func):
+-    """
+-    Evaluates a leaf voxel. Returns None if empty/full, else a leaf node.
+-    """
++    """Evaluates a leaf voxel. Returns None if empty/full, else a leaf node."""
+     corners = 0
+     for i in range(8):
+-        corner_pos = min_pos + CHILD_MIN_OFFSETS[i]
++        corner_pos = (min_pos[0] + CHILD_MIN_OFFSETS[i][0],
++                      min_pos[1] + CHILD_MIN_OFFSETS[i][1],
++                      min_pos[2] + CHILD_MIN_OFFSETS[i][2])
+         density = density_func(corner_pos)
+         material = MATERIAL_SOLID if density < 0.0 else MATERIAL_AIR
+         corners |= (material << i)
+-        
+-    # If all corners are same material, voxel is uniform
+     if corners == 0 or corners == 255:
+         return None
+-        
+-    # Voxel contains surface, create leaf with contour data
+-    return OctreeNode(min=min_pos, size=1, type=Node_Leaf, corners=corners)
++    return OctreeNode(min_pos, 1, Node_Leaf, corners=corners)
++
++def traverse_r(node, depth, stop_at_lvl, on_leaf, parent_morton=0):
++    """Recursive traversal of an octree."""
++    if node is None:
++        return
++    if node.type == Node_Leaf or depth >= stop_at_lvl:
++        morton = compute_morton(parent_morton, 0, depth)
++        on_leaf(morton, node)
++        return
++    child_size = node.size / 2
++    for i in range(8):
++        if node.children[i] is not None:
++            child_morton = compute_morton(parent_morton, i, depth)
++            traverse_r(node.children[i], depth + 1, stop_at_lvl, on_leaf, child_morton)
++
++def render_node(node, depth, currentDepth):
++    """Renders a node as a cube if it meets depth/activity criteria."""
++    is_leaf = (node.type == Node_Leaf)
++    is_stop_depth = (depth >= currentDepth)
++    if is_leaf or is_stop_depth:
++        # Draw 6 faces with vertices in [-1, 1] and appropriate normals
++        # Pop matrix and return
++        return
++    for i in range(8):
++        if node.children[i] is not None:
++            render_node(node.children[i], depth + 1, currentDepth)
+ ```
+ 
+@@ -166,9 +143,10 @@
+ 
+ ## Background
+-Recursive octree traversal is a fundamental algorithm in computer graphics, originating from early 3D modeling and ray-tracing systems. It is widely used in voxel-based editors, Marching Cubes implementations, and sparse voxel octree renderers. The specific implementations cited here are from modern open-source projects demonstrating voxelization and contouring techniques [S1, S2, S3, S4, unofficial].
++Not given in the sources.
+ 
+ ## Sources
+-[S1] nickgildea/DualContouringSample, https://github.com/nickgildea/DualContouringSample, fetched 2026-10-26 (unofficial)
+-[S2] Tsarpf/procgen, https://github.com/Tsarpf/procgen, fetched 2026-10-26 (unofficial)
+-[S3] loryruta/voxelizer, https://github.com/loryruta/voxelizer, fetched 2026-10-27 (unofficial)
+-[S4] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)+[S1] hectorpiteau/sparse-voxels, https://github.com/hectorpiteau/sparse-voxels, fetched 2026-10-24 (unofficial)
++[S2] nickgildea/DualContouringSample, https://github.com/nickgildea/DualContouringSample, fetched 2026-10-26 (unofficial)
++[S3] Tsarpf/procgen, https://github.com/Tsarpf/procgen, fetched 2026-10-26 (unofficial)
++[S4] loryruta/voxelizer, https://github.com/loryruta/voxelizer, fetched 2026-10-27 (unofficial)
++[S5] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)

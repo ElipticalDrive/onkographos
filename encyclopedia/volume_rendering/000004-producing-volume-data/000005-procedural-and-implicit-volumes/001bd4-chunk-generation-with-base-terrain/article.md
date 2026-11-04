@@ -1,0 +1,149 @@
+# Chunk Generation with Base Terrain
+Also called: Procedural Chunk Generation
+## Overview
+Chunk Generation with Base Terrain is a method for automatically populating voxel data when a new chunk is created or accessed in a procedural voxel world [S1, unofficial]. It solves the problem of empty or undefined space by providing a deterministic initial state for chunks, such as a flat platform, before more complex features are added. It differs from [Procedural Volume Rendering with Noise Perturbation](1370-procedural-volume-rendering-with-noise-perturbation.md) by focusing on the structural generation of the voxel grid itself rather than the visual rendering of volumetric density, and from [Distance to Hypertextures](1555-distance-to-hypertextures.md) by using discrete voxel assignment rather than continuous field evaluation for the base terrain.
+## How it works
+**Inputs and Outputs:**
+- Input: Camera position, chunk size (typically $32 \times 32 \times 32$), render distance radius, and chunk coordinates.
+- Output: A populated 3D voxel array for the requested chunk and a list of chunks to render within the render distance.
+
+**Data Structures:**
+- `Chunk`: Contains a 3D array `voxels` of size $32 \times 32 \times 32$ (or configurable) and a mesh handle.
+- `VoxelKind`: An enumeration representing block types (e.g., `Air`, `Dirt`).
+- `World`: A map or hash table storing generated chunks keyed by their 3D integer coordinates (`IVec3`).
+
+**Steps:**
+1. **Calculate Camera Chunk:** Determine the chunk index containing the camera by performing floor division of the camera's world position by the chunk size [S1, unofficial].
+   $$ \text{camera\_chunk} = \lfloor \frac{\text{camera\_position}}{\text{chunk\_size}} \rfloor $$
+2. **Render Distance Loop:** Iterate through all chunk offsets within the specified radius around the camera chunk [S1, unofficial].
+   $$ \text{chunk\_pos} = \text{camera\_chunk} + \text{offset} $$
+   where offset ranges from $-\text{radius}$ to $+\text{radius}$ in X, Y, and Z.
+3. **Get or Create Chunk:** For each chunk position, check if it exists in the world data structure. If not, generate it [S1, unofficial].
+4. **Initialize Voxel Grid:** Create a 3D array of `VoxelKind::Air` for the new chunk [S1, unofficial].
+5. **Apply Base Terrain:** If the chunk's Y-coordinate is 0 (or the designated base level), populate the bottom layer with solid terrain (e.g., `Dirt`) [S1, unofficial].
+   $$ \text{voxels}[0][z][x] = \text{VoxelKind::Dirt} \quad \forall x, z \in [0, 32) $$
+6. **Mesh Generation:** (Implicit step) Process the voxel grid to extract visible faces for rendering.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_or_create_chunk(world: World, chunk_position: IVec3, chunk_size: int = 32) -> Chunk:
+    """
+    Generates a new chunk with base terrain if it does not exist.
+    """
+    if chunk_position not in world.chunks:
+        # Initialize 3D array with Air
+        # Dimensions: Y (height), Z (depth), X (width)
+        voxels = [[[VoxelKind.Air for _ in range(chunk_size)] 
+                   for _ in range(chunk_size)] 
+                  for _ in range(chunk_size)]
+        
+        # Apply base terrain: Flat platform at Y=0
+        if chunk_position.y == 0:
+            for z in range(chunk_size):
+                for x in range(chunk_size):
+                    voxels[0][z][x] = VoxelKind.Dirt
+        
+        # Store chunk
+        world.chunks[chunk_position] = Chunk(mesh=None, voxels=voxels)
+    
+    return world.chunks[chunk_position]
+
+def generate_chunks_around_camera(world: World, camera_position: Vec3, render_radius: int, chunk_size: int) -> List[Chunk]:
+    """
+    Generates and returns chunks within the render distance.
+    """
+    # Calculate camera chunk index
+    camera_chunk = IVec3(
+        camera_position.x // chunk_size,
+        camera_position.y // chunk_size,
+        camera_position.z // chunk_size
+    )
+    
+    chunks_to_render = []
+    
+    # Iterate through chunks in a cube around the camera
+    for y in range(-render_radius, render_radius + 1):
+        for z in range(-render_radius, render_radius + 1):
+            for x in range(-render_radius, render_radius + 1):
+                chunk_offset = IVec3(x, y, z)
+                chunk_pos = camera_chunk + chunk_offset
+                
+                chunk = get_or_create_chunk(world, chunk_pos, chunk_size)
+                chunks_to_render.append(chunk)
+                
+    return chunks_to_render
+```
+
+**Parameters:**
+- `chunk_size`: The dimension of a single chunk (e.g., 32).
+- `render_radius`: The number of chunks away from the camera to generate (e.g., 4).
+
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions:** Ensure floor division handles negative coordinates correctly (e.g., using `div_euclid` or equivalent) to avoid chunk misalignment [S1, unofficial].
+- **Memory Usage:** Generating chunks for the entire render distance every frame can be expensive; caching is required [S1, unofficial].
+- **Degenerate Input:** If the camera is exactly on a chunk boundary, the floor division must consistently assign the camera to one specific chunk to avoid gaps or overlaps in generation logic.
+
+## Subtopics
+
+### [Procedural Terrain Heightmap Generation](1850-procedural-terrain-heightmap-generation.md)
+Procedural Terrain Heightmap Generation computes a 2D heightmap for terrain surfaces. It differs from the parent method by focusing on surface elevation rather than full 3D voxel population, often serving as a precursor to generating the base terrain layer in chunks. Link: [Procedural Terrain Heightmap Generation](1850-procedural-terrain-heightmap-generation.md).
+
+### [Voxel Evaluation with AABB Culling](2415-voxel-evaluation-with-aabb-culling.md)
+Voxel Evaluation with AABB Culling is a GPU-accelerated technique for computing Signed Distance Function (SDF) values for a chunk's voxel grid by restricting computation to voxels intersecting active SDF primitives. It solves the problem of unnecessary GPU computation for voxels far from any terrain geometry. Unlike [Chunk-Based Voxel Terrain Generation](4140-chunk-based-voxel-terrain-generation.md) which may process the entire chunk volume, this method uses Axis-Aligned Bounding Box (AABB) culling to identify a minimal sub-region of interest, significantly reducing the number of voxels processed per frame. Link: [Voxel Evaluation with AABB Culling](2415-voxel-evaluation-with-aabb-culling.md).
+
+### [Procedural Cave Generation](2579-procedural-cave-generation.md)
+Procedural cave generation creates subsurface voids in voxel terrain using either subtractive particle tracing or threshold-based noise filtering. Unlike [Simplex Noise Chunk Generation](5016-simplex-noise-chunk-generation.md) which generates the base terrain, this method operates as a post-processing or layered feature to carve out complex, organic underground structures. It differs from [Procedural Object Generation](5028-procedural-object-generation.md) by focusing on large-scale, continuous erosion-like voids rather than discrete static meshes. Link: [Procedural Cave Generation](2579-procedural-cave-generation.md).
+
+### [Procedural Voxel World Generation](3891-procedural-voxel-world-generation.md)
+Procedural Voxel World Generation is a method for determining the block type at any given 3D integer coordinate in a voxel grid based on height, noise functions, and quality settings, supporting terrain, caves, trees, clouds, and emissive blocks. It differs from [Procedural Terrain Heightmap Generation](1850-procedural-terrain-heightmap-generation.md) by not only computing the surface height but also assigning specific block IDs (grass, dirt, stone, wood, leaves) and handling volumetric features like caves and trees within the same evaluation logic. It builds on [Chunk Generation with Base Terrain](1110-chunk-generation-with-base-terrain.md) by providing the detailed voxel-level content for the chunks generated by that parent method. Link: [Procedural Voxel World Generation](3891-procedural-voxel-world-generation.md).
+
+### [Chunk-Based Voxel Terrain Generation](4140-chunk-based-voxel-terrain-generation.md)
+Chunk-Based Voxel Terrain Generation is a procedural technique that divides a 3D world into fixed-size cubic chunks, populating each with voxel data via multi-octave noise sampling and biome logic, then extracting visible faces for meshing. It differs from raymarching or marching cubes by explicitly generating a dense 3D voxel grid per chunk before mesh extraction, rather than computing surfaces via implicit functions or ray traversal. Link: [Chunk-Based Voxel Terrain Generation](4140-chunk-based-voxel-terrain-generation.md).
+
+### [Spiral Chunk Generation](4271-spiral-chunk-generation.md)
+Spiral Chunk Generation produces a queue of 3D chunk positions in a spiral pattern to drive procedural octree and mesh generation. It differs from sibling methods like [Simplex Noise Chunk Generation](5016-simplex-noise-chunk-generation.md) by decoupling spatial traversal order from noise evaluation, ensuring chunks are generated in a contiguous spiral sequence rather than arbitrary spatial locality, which aids in progressive loading and memory management. Link: [Spiral Chunk Generation](4271-spiral-chunk-generation.md).
+
+### [Simplex Noise Chunk Generation](5016-simplex-noise-chunk-generation.md)
+Generates a voxel chunk's geometry and data using a 3D simplex noise function to determine voxel presence/height, allocating vertex and index buffers for rendering. It differs from heightmap-based siblings by evaluating noise in full 3D space to create volumetric terrain rather than surface-only heightmaps, and from cave generation by using a single scalar threshold for solid vs. empty space rather than complex noise blending. Link: [Simplex Noise Chunk Generation](5016-simplex-noise-chunk-generation.md).
+
+### [Procedural Object Generation](5028-procedural-object-generation.md)
+Constructs a basic rectangular house with a floor, roof, walls, a door on a specified side, and supporting legs extending down to solid ground. It differs from sibling methods like [Procedural Terrain Heightmap Generation](1850-procedural-terrain-heightmap-generation.md) by placing discrete, structured architectural primitives rather than continuous terrain surfaces, and from [Procedural Cave Generation](2579-procedural-cave-generation.md) by generating enclosed, man-made geometry rather than voids. Link: [Procedural Object Generation](5028-procedural-object-generation.md).
+
+### Procedural Arch Generation
+A procedural method to generate arches by sweeping a sphere along a cubic Bézier spline. It uses tapering parameters to simulate greater erosion towards the middle of the arch [S2].
+**Steps:**
+1. Define the cubic Bézier spline using four control points [S2].
+2. For each step $t$ of the sweep, calculate the radius using tapering parameters $T_i$ at each end of the arch [S2].
+**Formulas:**
+Calculate tapering parameter $T_i$ for each end $i$:
+$$ T_i = r \cdot M_i \cdot (1 - I_i^{E_i}) $$
+where $M_i$ is the radius multiplier, $E_i$ is the exponent, and $I_i$ is the interpolant defining where tapering occurs [S2].
+Calculate the total radius:
+$$ \text{radius} = r + T_0 + T_1 $$
+Compute the delta value $D_{Arch}(V, P)$ for voxel $V$ and position $P$ (voxel position after radius application):
+$$ D_{Arch}(V, P) = \begin{cases} 1, & \text{if } \|P - V\| < \text{radius} \\ 0, & \text{otherwise} \end{cases} $$
+**Parameters:**
+- $M_i$: Radius multipliers for optional tapering at each end of the arch [S2].
+- $E_i$: Exponents for optional tapering at each end of the arch [S2].
+- $I_i$: Interpolants defining where the tapering occurs at each end of the arch [S2].
+- $r$: Base radius of the sphere being swept [S2].
+Link: [Procedural Arch Generation](1110-chunk-generation-with-base-terrain.md#procedural-arch-generation) (Note: No separate article exists, so it is a subtopic here).
+
+## Operating characteristics
+- **Time Complexity:** $O(R^3)$ per frame for chunk generation, where $R$ is the render radius in chunks. Voxel initialization is $O(C^3)$ per chunk, where $C$ is the chunk size.
+- **Memory Complexity:** $O(R^3 \cdot C^3)$ for storing voxel data of all active chunks.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Performance degrades linearly with the cube of the render distance. Chunk caching mitigates repeated generation costs.
+- **Strengths:** Simple to implement; deterministic; low memory overhead for base terrain.
+- **Limitations:** Lacks natural variation without additional noise or features; static base terrain.
+- **When to use:** Prototyping, simple voxel worlds, or as a foundation for more complex procedural generation.
+- **When not to use:** When natural-looking terrain or complex volumetric features are required without additional algorithms.
+
+## Background
+Originating from tutorials on building voxel engines quickly, this method was popularized by weekend coding challenges and blogs focusing on minimal viable voxel worlds [S1, unofficial]. It serves as the foundational step in procedural voxel generation pipelines, preceding more complex noise-based or feature-based generation techniques. It is widely used in educational contexts and simple sandbox games.
+
+## Sources
+[S1] Make yourself a Voxel Engine THIS weekend, https://daymare.net/blogs/voxel-engine-in-a-weekend/, fetched 2026-10-26 (unofficial)
+[S2] Procedural feature generation for volumetric terrains, https://doi.org/10.1145/3102163.3102216, fetched 2026-10-26

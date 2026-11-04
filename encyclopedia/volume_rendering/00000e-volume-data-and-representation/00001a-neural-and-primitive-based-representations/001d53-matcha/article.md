@@ -1,0 +1,99 @@
+# MAtCha
+
+
+## Overview
+MAtCha is a method for high-quality avatar generation from sparse views, specifically designed to handle scenarios with minimal view overlap [S1][S2, unofficial]. It employs an atlas-of-charts and depth estimation as input to an MLP, which deforms the atlas and produces high-quality meshes represented with 2D Gaussians [S1][S2, unofficial]. Unlike feed-forward network (FFN) approaches that directly predict Gaussian parameters, MAtCha uses a deformation-based pipeline to ensure geometric consistency [S2, unofficial].
+
+## How it works
+**Inputs:**
+1.  Atlas-of-charts: A set of 2D parameterizations (charts) covering the target geometry (e.g., head or body).
+2.  Depth estimation: Estimated depth maps corresponding to the input views.
+
+**Outputs:**
+*   High-quality meshes represented with 2D Gaussians.
+
+**Data Structures:**
+*   **Atlas-of-charts:** A collection of 2D domains mapping to 3D surface patches. Exact layout depends on the specific charting algorithm used (e.g., conformal mapping). Not given in the sources.
+*   **MLP:** A Multi-Layer Perceptron that takes chart coordinates and depth as input. Not given in the sources.
+
+**Steps:**
+1.  **Input Preparation:** Generate an atlas-of-charts for the target subject and estimate depth maps from the input sparse views [S1][S2, unofficial].
+2.  **Deformation Network:** Feed the atlas coordinates and depth information into an MLP [S1][S2, unofficial].
+3.  **Mesh Generation:** The MLP outputs deformation parameters that adjust the atlas to match the estimated geometry [S1][S2, unofficial].
+4.  **Gaussian Representation:** The deformed atlas is converted into a mesh represented by 2D Gaussians [S1][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def matcha_pipeline(atlas_charts, depth_maps):
+    """
+    MAtCha pipeline for sparse view reconstruction.
+    
+    Args:
+        atlas_charts: List of 2D chart domains and their UV mappings.
+        depth_maps: Estimated depth maps for input views.
+        
+    Returns:
+        gaussian_mesh: 2D Gaussian representation of the deformed mesh.
+    """
+    # Step 1: Prepare inputs
+    # atlas_charts contains the 2D parameterization of the surface
+    # depth_maps contains the estimated depth from sparse views
+    
+    # Step 2: Deform atlas using MLP
+    # The MLP takes chart coordinates and depth as input
+    # Output is deformation parameters
+    deformation_params = deform_atlas_mlp(atlas_charts, depth_maps)
+    
+    # Step 3: Apply deformation to atlas
+    deformed_atlas = apply_deformation(atlas_charts, deformation_params)
+    
+    # Step 4: Convert to 2D Gaussian representation
+    gaussian_mesh = atlas_to_gaussians(deformed_atlas)
+    
+    return gaussian_mesh
+
+def deform_atlas_mlp(atlas_charts, depth_maps):
+    """
+    MLP that deforms the atlas based on depth.
+    Note: Specific architecture details are not provided in the sources.
+    """
+    # Input: Chart coordinates (u, v) and depth (d)
+    # Output: Deformation offsets or parameters
+    # Implementation detail: Not given in the sources.
+    pass
+
+def apply_deformation(atlas_charts, deformation_params):
+    """
+    Apply deformation parameters to the atlas charts.
+    """
+    # Implementation detail: Not given in the sources.
+    pass
+
+def atlas_to_gaussians(deformed_atlas):
+    """
+    Convert deformed atlas to 2D Gaussian representation.
+    """
+    # Implementation detail: Not given in the sources.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Minimal View Overlap:** The method is specifically designed for this scenario, but accuracy may degrade if depth estimation is poor [S1][S2, unofficial].
+*   **Depth Estimation Errors:** Inaccurate depth maps can lead to incorrect deformation and poor mesh quality [S1][S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** High-quality mesh reconstruction from sparse views; handles minimal view overlap effectively [S1][S2, unofficial].
+*   **Limitations:** Relies on accurate depth estimation; specific performance metrics are not provided in the sources.
+*   **When to Use:** Sparse view reconstruction for avatars where view overlap is limited [S1][S2, unofficial].
+*   **When Not to Use:** Dense view scenarios where FFN-based methods might be more efficient [S2, unofficial].
+
+## Background
+MAtCha was introduced as a heuristic-based approach for sparse view novel view synthesis (NVS) [S2, unofficial]. It is part of the broader family of methods that use MLPs for geometry and color effects, distinct from FFN-based approaches [S2, unofficial]. The method is cited in surveys covering the transition from volume rendering to 3D Gaussian Splatting [S1][S2, unofficial].
+
+## Sources
+[S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
+[S2] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)

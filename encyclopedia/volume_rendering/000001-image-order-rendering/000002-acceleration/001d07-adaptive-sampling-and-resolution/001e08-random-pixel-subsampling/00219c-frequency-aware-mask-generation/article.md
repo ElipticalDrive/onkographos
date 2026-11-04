@@ -1,0 +1,295 @@
+# Frequency-aware Mask Generation
+
+Also called: Frequency-specific mask generation, Multi-scale frequency mask
+
+## Overview
+Frequency-aware Mask Generation produces a binary spatial mask $M_{freq}$ that highlights frequency-specific structures in rendered images to guide training [S2, S1, unofficial]. It distinguishes between coarse structures (prioritized early in training) and fine structures (prioritized later) by modulating Gaussian filter scales based on a schedule parameter [S2, unofficial]. Unlike standard pixel-wise losses, this method spatially weights the error based on the spectral content of the ground truth image, allowing the model to prioritize low-frequency structures early and high-frequency details later [S1, S2, unofficial].
+
+## How it works
+The method consists of two distinct variants: a **Spectral Difference-of-Gaussians (DoG) Mask** (detailed below) and a **Random Distribution Mask** [S1, S2, unofficial]. The Spectral DoG variant is used for importance scoring and mask-weighted reconstruction loss in Generalized Exponential Splatting (GES) [S2, unofficial]. The Random Distribution variant generates binary sampling masks for 1D or 2D data using Gaussian or uniform random distributions with optional center-region oversampling [S1, unofficial].
+
+### Inputs and Outputs
+**Spectral DoG Variant:**
+*   **Input:** Grayscale image $I \in \mathbb{R}^{B \times 1 \times H_{img} \times W_{img}}$ (or RGB image converted to grayscale), schedule parameter $f \in [0, 100]$, downsampling scale factor $s$ (typically $0.5$) [S2, unofficial].
+*   **Output:** Binary mask $M_{freq} \in \{0, 1\}^{B \times 1 \times H_{img} \times W_{img}}$ [S2, unofficial].
+
+**Random Distribution Variant:**
+*   **Input:** Image dimensions (`size`), acceleration factor `acc_factor`, distribution `type` ('gaussian2d', 'uniformrandom2d', 'gaussian1d', 'uniform1d'), center fraction `center_fraction` (default 0.04), covariance factor (default derived from size), and boolean `fix` [S1, unofficial].
+*   **Output:** Binary mask tensor of zeros with shape matching the input image, with indices set to 1 where samples fall [S1, unofficial].
+
+### Data Structures
+*   **Mask Tensor:** A binary tensor of the same spatial dimensions as the input image.
+*   **Gaussian Kernel:** 2D kernel generated from standard deviation $\sigma$ and kernel size $k$, normalized to unit sum [S2, unofficial].
+*   **Frequency Response Map:** Intermediate float tensor representing the absolute difference of filtered images [S2, unofficial].
+
+### Steps: Spectral DoG Mask Generation
+1.  **Grayscale Conversion:** Convert input image $I$ to grayscale by averaging color channels:
+    $$I_{\text{gray}} \leftarrow \text{mean}(I, \dim = 1, \text{keepdim} = \text{true})$$
+    [S2, unofficial]
+2.  **Downsampling:** Downsample $I_{\text{gray}}$ by factor $s$ using bilinear interpolation:
+    $$I_{\text{down}} \leftarrow \text{BilinearInterp}(I_{\text{gray}}, s)$$
+    [S2, unofficial]
+3.  **Bandwidth Calculation:** Compute $\sigma_1$ based on schedule parameter $f$:
+    $$
+    \sigma_1 = \begin{cases} 
+    0.1 + (100 - f) \times 0.1, & \text{if } f \geq 50 \\
+    0.1 + f \times 0.1, & \text{otherwise}
+    \end{cases}
+    $$
+    Set $\sigma_2 \leftarrow 2\sigma_1$ [S2, unofficial].
+4.  **Kernel Generation:** Compute kernel sizes:
+    $$k_1 \leftarrow 2 \lceil 3\sigma_1 \rceil + 1, \quad k_2 \leftarrow 2 \lceil 3\sigma_2 \rceil + 1$$
+    Generate normalized 2D Gaussian kernels $\mathcal{K}_1$ and $\mathcal{K}_2$ with standard deviations $\sigma_1$ and $\sigma_2$ respectively [S2, unofficial].
+5.  **Convolution:** Apply dimension-preserving zero-padded 2D convolution:
+    $$I_1^{\text{blur}} \leftarrow \mathcal{K}_1 * I_{\text{down}}, \quad I_2^{\text{blur}} \leftarrow \mathcal{K}_2 * I_{\text{down}}$$
+    [S2, unofficial]
+6.  **Difference-of-Gaussians:** Compute absolute difference:
+    $$H_{\text{freq}} \leftarrow |I_1^{\text{blur}} - I_2^{\text{blur}}|$$
+    [S2, unofficial]
+7.  **Upsampling:** Upsample $H_{\text{freq}}$ back to original resolution $(H_{img}, W_{img})$ using bilinear interpolation:
+    $$H_{up} \leftarrow \text{BilinearInterp}(H_{\text{freq}}, (H_{img}, W_{img}))$$
+    [S2, unofficial]
+8.  **Normalization:** Normalize each image independently over spatial pixels with stabilization constant $\varepsilon_{norm} > 0$:
+    $$H_{\text{norm}} \leftarrow \frac{H_{up} - \min(H_{up})}{\max(H_{up}) - \min(H_{up}) + \varepsilon_{norm}}$$
+    [S2, unofficial]
+9.  **Thresholding:** Generate binary mask $M_{freq}$ using indicator function $\mathbb{I}[\cdot]$:
+    $$
+    M_{freq} = \begin{cases} 
+    \mathbb{I}[H_{\text{norm}} \geq 0.5], & \text{if } f \geq 50 \\
+    \mathbb{I}[1 - H_{\text{norm}} \geq 0.5], & \text{if } f < 50
+    \end{cases}
+    $$
+    [S2, unofficial]
+
+### Steps: Random Distribution Mask Generation
+1.  **Calculate Sample Count:** For 2D types, $N_{samp} = \text{size}^2 // \text{acc\_factor}$; for 1D types, $N_{samp} = \text{size} // \text{acc\_factor}$ [S1, unofficial].
+2.  **Initialize Mask:** Create a tensor of zeros with shape matching the input image [S1, unofficial].
+3.  **Sample Coordinates:**
+    *   For Gaussian types: Sample coordinates from a multivariate normal (2D) or normal (1D) distribution with mean at the center and covariance scaled by $\text{size} \times \text{cov\_factor}$ [S1, unofficial].
+    *   For Uniform types: Sample coordinates uniformly from $[0, \text{size}-1]$ [S1, unofficial].
+4.  **Clip Samples:** Clip sampled coordinates to valid grid bounds $[0, \text{size}-1]$ [S1, unofficial].
+5.  **Set Mask Indices:** Set the mask indices corresponding to the clipped samples to 1 [S1, unofficial].
+6.  **Center Oversampling (1D only):** For 1D Gaussian/Uniform types, additionally set a center region of size $N_{samp\_center} = \text{int}(\text{size} \times \text{center\_fraction})$ to 1 [S1, unofficial].
+7.  **Batch Independence:** If `fix=False`, generate independent masks for each batch element [S1, unofficial].
+
+### Pseudocode: Spectral DoG Mask Generation
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_frequency_mask(image, f, s=0.5, epsilon_norm=1e-6):
+    """
+    Generates a frequency-aware binary mask using Difference of Gaussians.
+    
+    Args:
+        image: Input tensor of shape (B, C, H, W).
+        f: Schedule parameter in [0, 100].
+        s: Downsampling scale factor (default 0.5).
+        epsilon_norm: Numerical stabilization constant for normalization.
+        
+    Returns:
+        M_freq: Binary mask tensor of shape (B, 1, H, W).
+    """
+    # 1. Grayscale Conversion
+    # Average color channels. Assuming image is (B, C, H, W)
+    if image.shape[1] > 1:
+        I_gray = torch.mean(image, dim=1, keepdim=True)
+    else:
+        I_gray = image
+        
+    # 2. Downsampling
+    H, W = image.shape[2], image.shape[3]
+    H_down, W_down = int(H * s), int(W * s)
+    I_down = torch.nn.functional.interpolate(I_gray, size=(H_down, W_down), mode='bilinear', align_corners=False)
+    
+    # 3. Bandwidth Calculation
+    if f >= 50:
+        sigma_1 = 0.1 + (100 - f) * 0.1
+    else:
+        sigma_1 = 0.1 + f * 0.1
+    sigma_2 = 2 * sigma_1
+    
+    # 4. Kernel Generation
+    k_1 = 2 * math.ceil(3 * sigma_1) + 1
+    k_2 = 2 * math.ceil(3 * sigma_2) + 1
+    
+    K_1 = create_gaussian_kernel(k_1, sigma_1)
+    K_2 = create_gaussian_kernel(k_2, sigma_2)
+    
+    # 5. Convolution (Zero-padded to preserve dimensions)
+    # Note: In practice, use padding=(k//2) in convolution layers
+    I_1_blur = torch.nn.functional.conv2d(I_down, K_1, padding=k_1 // 2)
+    I_2_blur = torch.nn.functional.conv2d(I_down, K_2, padding=k_2 // 2)
+    
+    # 6. Difference-of-Gaussians
+    H_freq = torch.abs(I_1_blur - I_2_blur)
+    
+    # 7. Upsampling
+    H_up = torch.nn.functional.interpolate(H_freq, size=(H, W), mode='bilinear', align_corners=False)
+    
+    # 8. Normalization (per image in batch)
+    H_min = H_up.min(dim=2, keepdim=True)[0].min(dim=3, keepdim=True)[0]
+    H_max = H_up.max(dim=2, keepdim=True)[0].max(dim=3, keepdim=True)[0]
+    H_norm = (H_up - H_min) / (H_max - H_min + epsilon_norm)
+    
+    # 9. Thresholding
+    if f >= 50:
+        M_freq = (H_norm >= 0.5).float()
+    else:
+        M_freq = ((1 - H_norm) >= 0.5).float()
+        
+    return M_freq
+
+def create_gaussian_kernel(kernel_size, sigma):
+    """Creates a 2D Gaussian kernel normalized to unit sum."""
+    coords = torch.arange(kernel_size, dtype=torch.float)
+    coords -= (kernel_size - 1) / 2.0
+    
+    g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+    g /= g.sum()
+    
+    # Outer product for 2D kernel
+    kernel_2d = torch.outer(g, g)
+    return kernel_2d.unsqueeze(0).unsqueeze(0) # Shape (1, 1, k, k)
+```
+
+### Pseudocode: Random Distribution Mask Generation
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_random_mask(size, acc_factor=8, type='gaussian2d', center_fraction=0.04, fix=False, batch_size=1):
+    """
+    Generates a binary sampling mask using random distributions.
+    
+    Args:
+        size: Spatial dimension (for 1D) or (H, W) for 2D.
+        acc_factor: Divisor for calculating number of samples.
+        type: Distribution type ('gaussian2d', 'uniformrandom2d', 'gaussian1d', 'uniform1d').
+        center_fraction: Fraction of 1D size reserved for forced center sampling.
+        fix: If False, generate independent masks per batch element.
+        batch_size: Number of batch elements.
+        
+    Returns:
+        mask: Binary mask tensor.
+    """
+    if isinstance(size, int):
+        is_1d = True
+        dim = size
+    else:
+        is_1d = False
+        H, W = size
+        dim = (H, W)
+        
+    masks = []
+    
+    for _ in range(batch_size if not fix else 1):
+        if is_1d:
+            N_samp = size // acc_factor
+            mask = torch.zeros(size, dtype=torch.float)
+            
+            if 'gaussian' in type:
+                # 1D Gaussian
+                mean = size // 2
+                # Covariance scaling factor from source: size * (1.5 / 128)
+                cov_factor = size * (1.5 / 128)
+                std = math.sqrt(cov_factor) # Assuming cov_factor is variance or std^2? 
+                # Source says "covariance scaled by size * factor". 
+                # Code snippet: cov = [[size * cov_factor, 0], [0, size * cov_factor]]
+                # For 1D, variance = size * cov_factor.
+                variance = size * cov_factor
+                std = math.sqrt(variance)
+                
+                samples = torch.normal(mean=mean, std=std, size=(N_samp,))
+                int_samples = torch.clamp(samples.long(), 0, size - 1)
+                mask[int_samples] = 1.0
+                
+                # Center oversampling
+                N_center = int(size * center_fraction)
+                center_start = size // 2 - N_center // 2
+                center_end = center_start + N_center
+                mask[center_start:center_end] = 1.0
+                
+            elif 'uniform' in type:
+                # 1D Uniform
+                samples = torch.randint(0, size, (N_samp,))
+                mask[samples] = 1.0
+                
+                # Center oversampling
+                N_center = int(size * center_fraction)
+                center_start = size // 2 - N_center // 2
+                center_end = center_start + N_center
+                mask[center_start:center_end] = 1.0
+                
+            masks.append(mask.unsqueeze(0)) # Add batch dim
+            
+        else:
+            N_samp = (size[0] * size[1]) // acc_factor
+            mask = torch.zeros(size, dtype=torch.float)
+            
+            if 'gaussian' in type:
+                # 2D Gaussian
+                mean = [size[0] // 2, size[1] // 2]
+                cov_factor = size[0] * (1.5 / 128) # Using H for scaling
+                # Covariance matrix: [[size * cov_factor, 0], [0, size * cov_factor]]
+                variance = size[0] * cov_factor
+                std = math.sqrt(variance)
+                
+                # Sample from multivariate normal
+                # Using torch.distributions.MultivariateNormal
+                mean_tensor = torch.tensor(mean, dtype=torch.float)
+                cov_matrix = torch.eye(2) * variance
+                dist = torch.distributions.MultivariateNormal(mean_tensor, cov_matrix)
+                samples = dist.sample((N_samp,))
+                
+                # Clip to [0, size-1]
+                int_samples = torch.clamp(samples.long(), 0, torch.tensor([size[0]-1, size[1]-1]))
+                
+                # Set mask indices
+                # Flatten indices for assignment
+                y_coords = int_samples[:, 0]
+                x_coords = int_samples[:, 1]
+                mask[y_coords, x_coords] = 1.0
+                
+            elif 'uniform' in type:
+                # 2D Uniform
+                y_coords = torch.randint(0, size[0], (N_samp,))
+                x_coords = torch.randint(0, size[1], (N_samp,))
+                mask[y_coords, x_coords] = 1.0
+                
+            masks.append(mask.unsqueeze(0))
+            
+    return torch.cat(masks, dim=0)
+```
+
+### Parameters
+*   **$f$ (Schedule Parameter):** Controls Gaussian filter scales and complement behavior. Increases linearly with training iteration: $f(t) = 100t/T_{total}$ [S2, unofficial]. Range $[0, 100]$ [S2, unofficial].
+*   **$s$ (Downsampling Scale):** Typically $0.5$ [S2, unofficial].
+*   **acc_factor:** Divisor for calculating the number of samples to accelerate computation. Default 8 [S1, unofficial].
+*   **center_fraction:** Fraction of the 1D size reserved for forced center sampling. Default 0.04 [S1, unofficial].
+*   **type:** String specifying mask distribution ('gaussian2d', 'uniformrandom2d', 'gaussian1d', 'uniform1d') [S1, unofficial].
+*   **$\varepsilon_{norm}$:** Numerical stabilization constant for normalization. Value not given in sources [S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Boundary Clipping:** Random samples may fall outside valid grid bounds; handled by clipping to $[0, \text{size}-1]$ [S1, unofficial].
+*   **Constant Response:** If the spatial response is constant ($H_{\text{norm}}$ has zero variance), the denominator becomes $\varepsilon_{norm}$. The text states: 'A spatially constant response has $H_{\text{norm}} = 0$ under the stated stabilization rule, yielding an all-one mask for $f < 50$ and an all-zero mask for $f \geq 50$' [S2, unofficial].
+*   **Normalization Scope:** Scores are normalized independently for each setting/image, so heatmap colors indicate relative selection strength within each image rather than absolute values [S2, unofficial].
+
+## Subtopics
+
+### [Frequency-Modulated Edge-Aware Loss](4658-frequency-modulated-edge-aware-loss.md)
+Uses a Difference of Gaussians (DoG) filter to create an edge-aware mask, focusing optimization on specific frequency bands to tune the shape parameter $\beta$ and improve high-frequency detail reconstruction in Generalized Exponential Splatting (GES). It differs from standard pixel-wise losses by spatially weighting the error based on the spectral content of the ground truth image, allowing the model to prioritize low-frequency structures early in training and high-frequency details later.
+
+## Operating characteristics
+*   **Time Complexity:** The Spectral DoG method involves downsampling, two convolutions, upsampling, and normalization. The complexity is dominated by the convolution operations on the downsampled image, making it significantly faster than operating on full-resolution images. The Random Distribution method is $O(N_{samp})$ where $N_{samp}$ is the number of samples.
+*   **Memory Complexity:** The Spectral DoG method requires storing intermediate feature maps ($I_{down}$, $I_1^{blur}$, $I_2^{blur}$, $H_{freq}$, $H_{up}$, $H_{norm}$). The memory footprint is bounded and stable, fluctuating within a range without sustained upward trends over sequential processing [S2, unofficial].
+*   **Performance:** The method improves reconstruction quality and efficiency when included in the full framework, particularly in outdoor environments with clearer edges and finer texture details compared to FastGS and Speedy-Splat [S2, unofficial].
+*   **Strengths:** Adapts to training stage (coarse to fine), computationally efficient due to downsampling, stable memory usage.
+*   **Limitations:** Requires careful tuning of schedule parameter $f$ and downsampling scale $s$. Normalization is relative, not absolute.
+*   **When to Use:** When training Gaussian Splatting models and needing to guide optimization towards specific frequency bands to improve detail reconstruction.
+*   **When Not to Use:** When absolute frequency selection strength across different images is required, or when computational resources are extremely limited and even downsampled convolutions are prohibitive.
+
+## Background
+Frequency-aware Mask Generation was introduced in the context of Efficient and High-Fidelity Gaussian Splatting (EffGS) [S2, unofficial]. It is used in importance scoring and mask-weighted reconstruction loss throughout training [S2, unofficial]. The method addresses the need to balance low-frequency structure preservation and high-frequency detail reconstruction during the training process [S1, S2, unofficial]. The Random Distribution variant is also documented in the DGR repository [S1, unofficial].
+
+## Sources
+[S1] wskingdom/DGR, https://github.com/wskingdom/DGR, fetched 2026-10-26 (unofficial)
+[S2] EffGS: Efficient and High-Fidelity Gaussian Splatting, https://arxiv.org/abs/2609.39553, fetched 2026-10-29 (unofficial)

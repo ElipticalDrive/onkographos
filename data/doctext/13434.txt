@@ -1,0 +1,107 @@
+1. 空间加速结构的意义在光线追踪中，我们需要求大量的ray-primitive intersections，构成了最主要的计算量。每一帧中我们都会有海量的光线与三角形，最简单的方式就是对于每一条光线都遍历所有三角形，但这显然是…
+
+光线追踪小记：空间加速结构Regular Grid与3DDDA - 知乎
+首发于光线追踪小记
+无障碍写文章
+登录/注册
+1. 空间加速结构的意义
+在光线追踪中，我们需要求大量的ray-primitive intersections，构成了最主要的计算量。每一帧中我们都会有海量的光线与三角形，最简单的方式就是对于每一条光线都遍历所有三角形，但这显然是太浪费了。空间加速结构能够帮助我们减少这样的判断数目，也就是帮助我们预测一条光线可能相交的三角形集合，而其他大量不可能相交的三角形就能忽略不做计算。
+空间加速结构多少都依赖于保守包围盒，对于一个模型来说，其每个顶点都一定存在于保守包围盒内。一个三角模型可能有上万个面，但是判断光线能否与包围盒相交往往非常简单。我们可以预见的是，当我们的相机远离模型，绝大多数的光线都不会与模型相交，因而我们通过简单的包围盒计算，就能省略掉【大多数光线*模型面数】这么多的计算，非常美妙。
+Triangle Mesh &amp;amp;amp;amp;amp; Bounding Region
+包围盒的种类很多，最简单的有AABB（与坐标轴齐平的一个长方体，求包围与求交都简单）、外接球之类，越复杂的包围盒往往能更好的排除空白区域，减少不必要的求交计算，但是缺点往往是光线与包围盒的求交变得复杂。
+2. 简单结构Regular Grid
+给每个模型整上一个包围盒也算是不小的优化了，但是我们相机离得近的时候，这样粗糙的结构基本没有意义了，因为每一条光线都会与整体的包围盒相交。所以我们希望能够对于模型内部三角形进行一些有意义的划分整理，形成更细的加速结构。
+Regular Grid就是这样一种简单的结构，它将AABB包围盒切分为若干等大的体素，这样一来光线需要求交的部分一定在那些光线穿过的体素内。
+Regular Grid的2D版本
+对于每个体素（voxel / cell），我们应当记录那些在体素内存在顶点的所有图元，当我们的光线交于某一体素时，遍历所有图元，找到最近的即可。
+注意，一个三角形可能穿过了好几个体素，我们在第一次遇到这个三角形时就能够判断出它不可能与光线相交了（如果相交当然皆大欢喜，赶紧返回吧），因而在接下来如果在其他体素遇到它，我们也大可不必计算。因而可以做一些标记，记录是否已经判断过。
+3. 3DDDA
+3DDDA是一个算法（前面的3.是章节！），实际是3D-DDA这样拆分。它解决了这么个问题：我们的regular grid显然不可能与每个voxel做交，我们需要高效的判断出哪些voxel会与光线相交。熟悉光栅化原理的朋友肯定可以联想到这就是2D画线算法（DDA/Bresenham）的3D版本。3DDDA也就是DDA的3D版本。
+类比为3D版本的2D画线算法
+回顾一下DDA，其计算了一个单位增量，（以斜率绝对值小于1情况为例）该增量沿着直线方向使得x每步进1，然后给离y最近的像素画上；结果是x轴每个单位上都有一个点。每一次 迭代x轴都会进一，称作“driving axis”，相对的y轴可能增可能不增，是“passive axis”。
+但是单位增量由于是浮点数，多次迭代后精度误差会累计越来越大。Bresenham 便是在此基础上做了些手脚（差不多也就是同乘分母），维护了一个error项，而转换为了整型计算。
+虽然我很想说3DDDA只要把算法扩展一维就大功告成了，不过事情并非如此。
+与2D画线算法不同的是，我们的求交应当是保守的（如下图），因而在同一“driving axis”上也可能出现多个体素（下图中灰色的部分）。这就导致了我们实际的3DDDA思想和DDA还是有较大不同的。每次发生passive axis的增加时，我们需要考虑怎么判断是否会有“灰色块”出现并决定它的位置，这显然是由线段与坐标轴的相交情况决定的，如果离开第一个cell时交于y轴那么灰色快在右；离开第一个cell时较与x轴则灰色块在上。
+DDA像素（红），额外保守像素（灰）
+接下来，我们的思路就稍微做一些转变。在光线与grid的ray marching中，不再步进一个固定值，而是步进到下一个与grid的交点，这实际上并不复杂。
+我们维护一个距离，而每个交点由于在坐标轴上，而网格是均匀分割的，因而同样平行线上 的所有交点（如上图中所有绿点）与起点距离可以轻松的累加得到。我们可以发现这个类似于DDA的算法，由于我们每次可能的交点都会出现在三个轴平面上，我们分别寻找接下来分别在三个轴平面上的三个交点，获取最近的那个做步进，显然我们根据交点所在的轴得知下一个cell的方位，比如我们交于xy平面，那肯定就是z轴步进1了。并且这样的做法一定是保守的。
+4. 实现
+4.1 初始化Regular Grid
+注意，我们需要将场景中的每个primitive都映射给regular grid，在每个grid种存储一个primitive的指针数组，指向其中（可能）包含的primitives，注意这个过程一定是保守的。也就是说只能多不能少，否则就会出错。不过这个过程其实并不简单，试想一下如何判断一个三角形是否与某个Axis-Aligned的长方体相交？如果硬做，的确有些麻烦了。
+那到底应该怎么做呢，速速来看前文：
+4.2 初始化光线相交
+需要分类讨论，有三种情况，一是射线顶点在包围盒内、二是在外且与包围盒相交、三是在外并且不相交。第三种情况显然可以直接忽略了，第二种情况求第一个交点转化为第一种情况。
+为了实现递进，我们需要初始化在三轴上的下个交点初始距离t_next_x/y/z以及最初开始的cell位置i/j/k。
+```
+Vec3f offset = Ray.origin - BoundingBox.min
+mi.i = floor(offset.x() / stepX);
+mi.j = floor(offset.y() / stepY);
+mi.k = floor(offset.z() / stepZ);
+
+mi.d_tx = abs(stepX / r.getDirection().x());
+mi.d_ty = abs(stepY / r.getDirection().y());
+mi.d_tz = abs(stepZ / r.getDirection().z());
+
+mi.sign_x = r.getDirection().x() > 0 ? 1 : -1;
+mi.sign_y = r.getDirection().y() > 0 ? 1 : -1;
+mi.sign_z = r.getDirection().z() > 0 ? 1 : -1;
+
+int d_next_x = (mi.sign_x == 1) ? ceil(offset.x() / stepX) : floor(offset.x() / stepX);
+int d_next_y = (mi.sign_y == 1) ? ceil(offset.y() / stepY) : floor(offset.y() / stepY);
+int d_next_z = (mi.sign_z == 1) ? ceil(offset.z() / stepZ) : floor(offset.z() / stepZ);
+
+mi.t_next_x = abs((d_next_x * stepX - offset.x()) / r.getDirection().x());
+mi.t_next_y = abs((d_next_y * stepY - offset.y()) / r.getDirection().y());
+mi.t_next_z = abs((d_next_z * stepZ - offset.z()) / r.getDirection().z());
+```
+求解第一个交点
+4.3 步进
+在初始化完成后就不再需要继续求交了，只需要DDA步进就行了，注意需要判断是否已经离开Regular Grid的范围。
+```
+bool nextCell()
+{
+	float t_min_next = min(t_next_x, min(t_next_y, t_next_z));
+	if (t_min_next == t_next_x)
+	{
+		t_next_x += d_tx;
+		i += sign_x;
+		if (i < 0 || i >= maxX)
+			return false;
+	}
+	else if (t_min_next == t_next_y)
+	{
+		t_next_y += d_ty;
+		j += sign_y;
+		if (j < 0 || j >= maxY)
+			return false;
+	}
+	else
+	{
+		t_next_z += d_tz;
+		k += sign_z;
+		if (k < 0 || k >= maxZ)
+			return false;
+	}
+	return true;
+}
+```
+保守cell步进完成
+5. Regular Grid的优劣与其他空间加速结构
+Regular Grid最大的优点可能也就是实现起来方便了。缺点在于由于空间是均匀划分的，而起不到自适应性，很多三角形实际上可能聚集在同一个很小的区域，而被划分进同一个cell。
+根据这一点的修改包括了Nested Grids与Octree，在三角形实际占据较多的地方不断进行细分，当然副作用就是对grid进行traverse的时候就变慢了。另外一种类似的方法就是Kd-Tree，放弃了均匀网格使得对三角形的划分更加优美；BSP Tree则干脆丢掉了AABB。
+但上述的所有结构都服从了同一种性质，即将空间分割为没有交集的子块，同一primitive可能属于多个子块。BVH则有本质不同，其分割图元为没有交集的子块，使得每个子块的包围盒可能存在空间交叠，但是primitive则不再存在交叠。
+不过此文主要介绍Regular Grid，其他的结构与详细的优劣论述还是等待以后吧。
+参考 | REFERENCES
+Microsoft PowerPoint - 09_grid_acceleration.ppt
+Bresenham Line Drawing Algorithm (opengenus.org)
+发布于 2021-10-04 19:01
+光线追踪
+计算机图形学
+渲染
+​赞同 15​
+​添加评论
+​分享
+​喜欢​收藏​申请转载
+​
+文章被以下专栏收录
+光线追踪小记

@@ -1,0 +1,190 @@
+--- v001.md
++++ v002.md
+@@ -9,5 +9,5 @@
+ **Inputs:**
+ - List of $N$ projected 2D Gaussian splats, each defined by center $(x_i, y_i)$, 2D covariance matrix $\Sigma'_i$, color $c_i$, opacity $\alpha_i$, and depth $Z_c$ [S1, S2, unofficial].
+-- Image resolution $(W, H)$ and tile dimensions $T_w \times T_h$ (typically $16 \times 16$ pixels) [S1, S2, unofficial].
++- Image resolution $(W, H)$ and tile dimensions $16 \times 16$ pixels [S1, S2, unofficial].
+ 
+ **Outputs:**
+@@ -16,53 +16,33 @@
+ 
+ **Data Structures:**
+-- **Splat List:** Array of $N$ splats. Each splat contains fields: `x`, `y`, `sigma_xx`, `sigma_xy`, `sigma_yy` (for $\Sigma'$), `color`, `opacity`, `Zc` [S1, S2, unofficial].
+-- **Tile Grid:** Implicit grid of tiles covering the image. Tile ID $t$ for a pixel $(x, y)$ is calculated as $t = \lfloor y / T_h \rfloor \times \lceil W / T_w \rceil + \lfloor x / T_w \rfloor$ [S2, unofficial].
+-- **Sort Key:** A 64-bit integer key for each (splat, tile) pair. The high bits contain the tile ID, and the low bits contain the depth $Z_c$ [S2, unofficial].
+-- **Sorted Pairs:** Array of indices or pointers into the Splat List, ordered by the Sort Key [S2, unofficial].
++- **Splat List:** Array of $N$ splats. Each splat stores its projected 2D parameters: position $(x_i, y_i)$, covariance $\Sigma'_i$, color $c_i$, opacity $\alpha_i$, and depth $Z_c$ [S1, S2, unofficial].
++- **Tile Grid:** Implicit grid of tiles covering the image, with tile dimensions $T_w \times T_h = 16 \times 16$ pixels [S1, S2, unofficial].
++- **Sort Key:** A 64-bit integer key for each (splat, tile) pair, packing the tile ID into the high bits and the splat's depth $Z_c$ into the low bits [S2, unofficial].
++- **Sorted Pairs:** Array of (splat_index, tile_id, depth) tuples, ordered by the Sort Key [S2, unofficial].
+ 
+ **Steps:**
+-1. **Tile Assignment:** For each splat $i$, calculate its 2D axis-aligned bounding box (AABB) based on its covariance $\Sigma'_i$ and a cutoff threshold (e.g., $3\sigma$) [S2, unofficial]. Identify all tiles that overlap with this AABB [S2, unofficial].
+-2. **Pair Generation:** For each overlapping tile $t$, create a (splat, tile) pair. If a splat straddles multiple tiles, it is duplicated into each relevant tile's pair list [S1, S2, unofficial].
+-3. **Key Packing:** For each (splat, tile) pair, pack the tile ID $t$ into the high bits and the splat's depth $Z_c$ into the low bits of a 64-bit integer key $K$ [S2, unofficial]. The exact bit allocation depends on the maximum tile ID and depth range, but the principle is $K = (t \ll \text{depth\_bits}) | Z_c$ [S2, unofficial].
+-4. **Global Radix Sort:** Perform a single GPU radix sort on all generated (splat, tile) pairs using the 64-bit keys [S1, S2, unofficial]. This sort simultaneously bins splats by tile ID (making them contiguous) and sorts them by depth within each tile [S2, unofficial].
+-5. **Tile Processing:** For each tile $t$, a GPU thread block processes the contiguous segment of sorted pairs belonging to that tile [S1, S2, unofficial].
+-6. **Compositing:** For each pixel in the tile, iterate through the sorted splats for that tile. Perform front-to-back alpha compositing using the splat's color and alpha at the pixel location [S2, unofficial]. The compositing loop is:
+-   $$
+-   C_{out} = \sum_{i \in \text{sorted}} c_i \alpha_i T_i, \quad T_{out} = \prod_{i \in \text{sorted}} (1 - \alpha_i)
+-   $$
+-   where $T_i = \prod_{j < i} (1 - \alpha_j)$ is the transmittance before splat $i$ [S2, unofficial].
+-7. **Early Termination:** Stop compositing for a pixel when the accumulated transmittance $T$ drops below a small threshold $\epsilon$ (e.g., $1/255$) [S2, unofficial].
+-8. **Backpropagation:** Reuse the same sorted list of (splat, tile) pairs to compute gradients for position, shape, opacity, and color during training, avoiding additional sorting [S1, unofficial].
++1. **Tile Assignment:** Assign each Gaussian to every tile its projected 2D splat touches [S1, unofficial]. If a splat straddles tile boundaries, it is duplicated into each relevant tile [S1, S2, unofficial].
++2. **Key Packing:** For each (splat, tile) pair, pack the tile ID into the high bits and the splat's depth $Z_c$ into the low bits of a 64-bit integer key [S2, unofficial].
++3. **Global Radix Sort:** Perform one GPU radix sort over all (splat, tile) pairs [S1, S2, unofficial]. This simultaneously bins splats by tile ID (contiguity) and sorts them by depth within each tile [S2, unofficial].
++4. **Tile Processing:** Each tile is processed by one GPU thread block that walks the sorted list [S1, unofficial].
++5. **Compositing:** For each pixel in a tile, run the front-to-back compositing loop using the tile's sorted list of splats, evaluating per-pixel alpha $\alpha_i(\mathbf{x})$ and breaking early when transmittance $T < \epsilon$ [S2, unofficial].
++6. **Backpropagation:** Reuse the same sorted lists for training, allowing gradients to flow to position, shape, opacity, and color without additional sorting [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def tile_based_rasterization(splats, image_width, image_height, tile_width=16, tile_height=16):
+-    """
+-    Performs tile-based rasterization for 3D Gaussian Splatting.
+-    
+-    Args:
+-        splats: List of dicts with keys 'x', 'y', 'sigma_xx', 'sigma_xy', 'sigma_yy', 
+-                'color', 'opacity', 'Zc'.
+-        image_width: Width of the image in pixels.
+-        image_height: Height of the image in pixels.
+-        tile_width: Width of each tile in pixels.
+-        tile_height: Height of each tile in pixels.
+-        
+-    Returns:
+-        image: Rendered image array of shape (image_height, image_width, 3).
+-        gradients: Gradients for splat parameters (simplified for this example).
+-    """
++import math
++
++def tile_based_rasterization(splats, image_width, image_height, tile_width=16, tile_height=16, epsilon=1e-3):
+     num_tiles_x = (image_width + tile_width - 1) // tile_width
+     num_tiles_y = (image_height + tile_height - 1) // tile_height
+-    num_tiles = num_tiles_x * num_tiles_y
+     
+     # Step 1 & 2: Tile Assignment and Pair Generation
+-    pairs = []  # List of (splat_index, tile_id, depth)
+-    
++    pairs = []
+     for i, splat in enumerate(splats):
+-        # Calculate 2D AABB for the splat
+-        # This involves projecting the Gaussian covariance to 2D and finding the bounding box
+-        # For simplicity, assume we have a function to get the tile range
+-        tile_min_x, tile_max_x, tile_min_y, tile_max_y = get_splat_tile_range(splat, tile_width, tile_height)
++        # Determine tile coordinates overlapping the splat's 2D projection [G]
++        tile_min_x = max(0, int((splat['x'] - 2 * splat['sigma_x']) / tile_width))
++        tile_max_x = min(num_tiles_x - 1, int((splat['x'] + 2 * splat['sigma_x']) / tile_width))
++        tile_min_y = max(0, int((splat['y'] - 2 * splat['sigma_y']) / tile_height))
++        tile_max_y = min(num_tiles_y - 1, int((splat['y'] + 2 * splat['sigma_y']) / tile_height))
+         
+         for ty in range(tile_min_y, tile_max_y + 1):
+@@ -70,68 +50,56 @@
+                 tile_id = ty * num_tiles_x + tx
+                 pairs.append((i, tile_id, splat['Zc']))
+-    
+-    # Step 3 & 4: Key Packing and Global Radix Sort
+-    # Pack tile_id into high bits and depth into low bits
+-    # Assuming 32 bits for tile_id and 32 bits for depth (simplified)
+-    # In practice, bit widths depend on max tile_id and depth range
+-    keys = []
+-    for i, tile_id, depth in pairs:
+-        key = (tile_id << 32) | depth
+-        keys.append(key)
+-    
+-    # Perform radix sort on keys
+-    # This sorts pairs by tile_id, then by depth within each tile
+-    sorted_indices = radix_sort(keys)
+-    
+-    # Reorder pairs based on sorted indices
++                
++    # Step 3: Key Packing and Global Radix Sort
++    # Pack tile_id into high bits and depth into low bits [S2, unofficial]
++    keys = [(tile_id << 32) | depth for i, tile_id, depth in pairs]
++    sorted_indices = sorted(range(len(keys)), key=lambda k: keys[k])
+     sorted_pairs = [pairs[i] for i in sorted_indices]
+     
+-    # Step 5 & 6: Tile Processing and Compositing
+-    image = np.zeros((image_height, image_width, 3))
+-    
+-    # Group sorted pairs by tile
+-    tile_groups = {}
+-    for i, tile_id, depth in sorted_pairs:
+-        if tile_id not in tile_groups:
+-            tile_groups[tile_id] = []
+-        tile_groups[tile_id].append((i, depth))
+-    
+-    for tile_id, tile_pairs in tile_groups.items():
+-        # Determine tile coordinates
++    # Step 4 & 5: Tile Processing and Compositing
++    image = [[0.0, 0.0, 0.0] for _ in range(image_height)]
++    for tile_id in range(num_tiles_x * num_tiles_y):
+         ty = tile_id // num_tiles_x
+         tx = tile_id % num_tiles_x
++        y_start, y_end = ty * tile_height, min((ty + 1) * tile_height, image_height)
++        x_start, x_end = tx * tile_width, min((tx + 1) * tile_width, image_width)
+         
+-        tile_x_start = tx * tile_width
+-        tile_y_start = ty * tile_height
+-        tile_x_end = min((tx + 1) * tile_width, image_width)
+-        tile_y_end = min((ty + 1) * tile_height, image_height)
+-        
+-        # Step 7: Compositing with Early Termination
+-        for y in range(tile_y_start, tile_y_end):
+-            for x in range(tile_x_start, tile_x_end):
++        # Extract contiguous segment for this tile from sorted list
++        tile_segment = []
++        for idx, (splat_idx, t_id, depth) in enumerate(sorted_pairs):
++            if t_id == tile_id:
++                tile_segment.append((splat_idx, depth))
++            elif t_id > tile_id:
++                break
++                
++        for y in range(y_start, y_end):
++            for x in range(x_start, x_end):
+                 transmittance = 1.0
+-                color = np.zeros(3)
+-                
+-                for splat_idx, depth in tile_pairs:
++                color = [0.0, 0.0, 0.0]
++                for splat_idx, _ in tile_segment:
+                     splat = splats[splat_idx]
+-                    
+-                    # Calculate alpha for this pixel
+-                    alpha = calculate_gaussian_alpha(splat, x, y)
+-                    
++                    alpha = compute_gaussian_alpha(splat, x, y)
+                     if alpha > 0:
+-                        color += splat['color'] * alpha * transmittance
+-                        transmittance *= (1 - alpha)
+-                    
+-                    if transmittance < 1e-3:  # Early termination threshold
++                        color[0] += splat['color'][0] * alpha * transmittance
++                        color[1] += splat['color'][1] * alpha * transmittance
++                        color[2] += splat['color'][2] * alpha * transmittance
++                        transmittance *= (1.0 - alpha)
++                    if transmittance < epsilon:
+                         break
+-                
+-                image[y, x] = color
+-    
+-    return image, gradients
++                image[y][x] = color
++    return image
++
++def compute_gaussian_alpha(splat, x, y):
++    # Standard 2D Gaussian evaluation at pixel coordinates [G]
++    dx = x - splat['x']
++    dy = y - splat['y']
++    inv_det = 1.0 / (splat['sigma_xx'] * splat['sigma_yy'] - splat['sigma_xy']**2)
++    exponent = -0.5 * inv_det * (splat['sigma_yy'] * dx**2 - 2 * splat['sigma_xy'] * dx * dy + splat['sigma_xx'] * dy**2)
++    return splat['opacity'] * max(0.0, math.exp(exponent))
+ ```
+ 
+ **Parameters:**
+ - Tile size: $16 \times 16$ pixels [S1, S2, unofficial].
+-- Early termination threshold: Not given in the sources.
++- Early termination threshold: $\epsilon$ (implementation-defined, typically small) [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**

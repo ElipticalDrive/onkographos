@@ -1,0 +1,228 @@
+# IsimCloudTexture density evaluation
+
+Also called: Cloud texture generation, IsimCloudTexture, Procedural Cloud Density Generation
+
+## Overview
+IsimCloudTexture density evaluation computes the volumetric density of a cloud at a given point in space by combining geometric primitives (text segments or implicit cloud bodies), fractal Brownian motion (FBM) noise, and depth-based fading [S1, S2, unofficial]. It differs from general procedural gas modeling by focusing on specific cloud structures (text-based or layered bodies) and from simple cloud density sampling by generating the density field procedurally via CUDA kernels rather than sampling pre-baked data [S1, S2, unofficial]. The method outputs a grayscale density value (replicated to RGB) suitable for volume rendering [S1, unofficial].
+
+## How it works
+The method exists in two primary variants: a text-segment-based approach (Variant A) and a CUDA-generated implicit body approach (Variant B). Both variants evaluate density at a point $p$ or grid index $(x,y,z)$.
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   Point $p = (p.x, p.y, p.z)$ in world or local space [S1, unofficial].
+    *   Grid indices $(x, y, z)$ and dimensions $(width, height, depth)$ for Variant B [S2, unofficial].
+    *   Volume bounds $box_{min}, box_{max}$ [S1, unofficial].
+    *   Text segments defining letter shapes (Variant A) [S1, unofficial].
+    *   Noise generator instance with FBM capability [S1, S2, unofficial].
+    *   Parameters: $cloud\_scale$, $letter\_radius$, $smooth\_width$, $segments$ (Variant A); thread block size, grid size (Variant B) [S1, S2, unofficial].
+*   **Outputs**:
+    *   Density value $d \in [0, 1]$ [S1, S2, unofficial].
+    *   RGB vector $(d, d, d)$ [S1, unofficial].
+    *   Written to a 3D CUDA surface object (Variant B) [S2, unofficial].
+
+### Data Structures
+*   **Point3/Vector3**: 3D vector with components $x, y, z$ [S1, unofficial].
+*   **Segment**: Defined by endpoints, used for distance calculation [S1, unofficial].
+*   **CUDA Surface**: 3D texture surface object written to via `surf3Dwrite` [S2, unofficial].
+
+### Steps
+
+#### Variant A: Text Segment Based (CPU/General)
+1.  **Boundary Check**: If $p$ is outside $box_{min}$ and $box_{max}$, return $(0, 0, 0)$ [S1, unofficial].
+2.  **Text Density Calculation**:
+    *   Initialize $text\_density = 0.0$ [S1, unofficial].
+    *   For each segment in $segments$:
+        *   Compute squared distance $d_{sq}$ from $p$ to the segment [S1, unofficial].
+        *   If $d_{sq} < (letter\_radius + smooth\_width)^2$:
+            *   Compute $d = \sqrt{d_{sq}}$ [S1, unofficial].
+            *   Update $text\_density = \max(text\_density, \text{smoothstep}(letter\_radius + smooth\_width, letter\_radius, d))$ [S1, unofficial].
+    *   If $text\_density < 0.001$, return $(0, 0, 0)$ [S1, unofficial].
+3.  **Noise Evaluation**:
+    *   Compute $n = \text{noise\_}.fbm(p \times cloud\_scale, 5)$ [S1, unofficial].
+    *   Compute $cloud\_noise = \text{clamp}((n - 0.3) \times 3.0, 0.0, 1.0)$ [S1, unofficial].
+4.  **Combine**:
+    *   $final\_density = text\_density \times cloud\_noise$ [S1, unofficial].
+5.  **Depth Fading**:
+    *   Compute $center\_z = (box_{min}.z + box_{max}.z) \times 0.5$ [S1, unofficial].
+    *   Compute $depth\_fade = \text{smoothstep}(1.5, 0.5, |p.z - center\_z|)$ [S1, unofficial].
+    *   $final\_density = final\_density \times depth\_fade$ [S1, unofficial].
+6.  **Return**: $(final\_density, final\_density, final\_density)$ [S1, unofficial].
+
+#### Variant B: CUDA Implicit Body (GPU)
+1.  **Coordinate Normalization**:
+    *   Calculate normalized device coordinates $px, py, pz \in [-1, 1]$ from thread indices $(x, y, z)$ and dimensions $(width, height, depth)$:
+        $$px = 2.0 \times \frac{x}{width - 1} - 1.0$$
+        $$py = 2.0 \times \frac{y}{height - 1} - 1.0$$
+        $$pz = 2.0 \times \frac{z}{depth - 1} - 1.0$$
+    [S2, unofficial]
+2.  **Upper Cloud Body**:
+    *   Calculate warped coordinates:
+        $$upperX = px - 0.18 \times \sin(4.0 \times py)$$
+        $$upperZ = pz - 0.12 \times \cos(5.0 \times py)$$
+    [S2, unofficial]
+    *   Compute upper cloud density:
+        $$upperCloud = \exp(-8.0 \times (upperX^2 + upperZ^2) - 3.5 \times (py - 0.35)^2)$$
+    [S2, unofficial]
+3.  **Lower Cloud Body**:
+    *   Compute lower cloud density:
+        $$lowerCloud = \exp(-4.5 \times (px^2 + pz^2) - 2.2 \times (py + 0.25)^2)$$
+    [S2, unofficial]
+4.  **Detail Noise**:
+    *   Compute detail factor:
+        $$detail = 0.68 + 0.20 \times \sin(11.0 \times px + 7.0 \times py) \times \sin(9.0 \times pz - 5.0 \times py) + 0.12 \times \sin(23.0 \times (px + pz))$$
+    [S2, unofficial]
+5.  **Boundary Fade**:
+    *   Compute boundary fade factor:
+        $$boundaryFade = \text{saturate}((1.0 - \max(|px|, |py|, |pz|)) \times 8.0)$$
+        where $\text{saturate}(v) = \min(\max(v, 0.0), 1.0)$ [S2, unofficial].
+6.  **Final Density**:
+    *   Combine components:
+        $$density = \text{saturate}((0.85 \times lowerCloud + 0.75 \times upperCloud - 0.18) \times detail \times boundaryFade)$$
+    [S2, unofficial]
+7.  **Write Output**:
+    *   Write $density$ to the 3D surface at $(x, y, z)$ using `surf3Dwrite` with pitch $x \times \text{sizeof(float)}$ [S2, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def smoothstep(edge0, edge1, x):
+    """Standard smoothstep function."""
+    t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
+    return t * t * (3.0 - 2.0 * t)
+
+def clamp(v, min_val, max_val):
+    return max(min_val, min(v, max_val))
+
+def saturate(v):
+    return max(0.0, min(v, 1.0))
+
+def distance_point_to_segment(p, seg_start, seg_end):
+    """Euclidean distance from point p to line segment."""
+    seg_vec = seg_end - seg_start
+    p_vec = p - seg_start
+    seg_len_sq = seg_vec.dot(seg_vec)
+    if seg_len_sq == 0:
+        return p_vec.norm()
+    t = clamp(p_vec.dot(seg_vec) / seg_len_sq, 0.0, 1.0)
+    projection = seg_start + seg_vec * t
+    return (p - projection).norm()
+
+def fbm_noise(p, scale, octaves):
+    """
+    Placeholder for FBM noise evaluation.
+    In source [S1, unofficial], this is noise_.fbm(p * cloud_scale_, 5).
+    Implementation details of the noise generator are not provided in the sources.
+    """
+    # [G] Generic FBM implementation assumed for completeness
+    value = 0.0
+    amplitude = 0.5
+    frequency = 1.0
+    for i in range(octaves):
+        value += amplitude * noise_function(p * frequency * scale)
+        amplitude *= 0.5
+        frequency *= 2.0
+    return value
+
+def noise_function(p):
+    """Placeholder for base noise function (e.g., Perlin, Simplex)."""
+    # [G] Not specified in sources
+    return 0.0
+
+def evaluate_isimcloud_variant_a(p, box_min, box_max, segments, letter_radius, smooth_width, cloud_scale):
+    """
+    Variant A: Text Segment Based Density Evaluation.
+    """
+    # 1. Boundary Check
+    if not (box_min.x <= p.x <= box_max.x and
+            box_min.y <= p.y <= box_max.y and
+            box_min.z <= p.z <= box_max.z):
+        return (0.0, 0.0, 0.0)
+
+    # 2. Text Density
+    text_density = 0.0
+    for seg in segments:
+        d = distance_point_to_segment(p, seg.start, seg.end)
+        if d < (letter_radius + smooth_width):
+            density_val = smoothstep(letter_radius + smooth_width, letter_radius, d)
+            if density_val > text_density:
+                text_density = density_val
+
+    if text_density < 0.001:
+        return (0.0, 0.0, 0.0)
+
+    # 3. Noise
+    n = fbm_noise(p, cloud_scale, 5)
+    cloud_noise = clamp((n - 0.3) * 3.0, 0.0, 1.0)
+
+    # 4. Combine
+    final_density = text_density * cloud_noise
+
+    # 5. Depth Fade
+    center_z = (box_min.z + box_max.z) * 0.5
+    depth_fade = smoothstep(1.5, 0.5, abs(p.z - center_z))
+    final_density *= depth_fade
+
+    # 6. Return
+    return (final_density, final_density, final_density)
+
+def evaluate_isimcloud_variant_b(x, y, z, width, height, depth):
+    """
+    Variant B: CUDA Implicit Body Density Evaluation.
+    """
+    # 1. Normalized Coordinates
+    px = 2.0 * x / (width - 1) - 1.0
+    py = 2.0 * y / (height - 1) - 1.0
+    pz = 2.0 * z / (depth - 1) - 1.0
+
+    # 2. Upper Cloud
+    upperX = px - 0.18 * sin(4.0 * py)
+    upperZ = pz - 0.12 * cos(5.0 * py)
+    upperCloud = exp(-8.0 * (upperX**2 + upperZ**2) - 3.5 * (py - 0.35)**2)
+
+    # 3. Lower Cloud
+    lowerCloud = exp(-4.5 * (px**2 + pz**2) - 2.2 * (py + 0.25)**2)
+
+    # 4. Detail Noise
+    detail = 0.68 + 0.20 * sin(11.0 * px + 7.0 * py) * sin(9.0 * pz - 5.0 * py) + 0.12 * sin(23.0 * (px + pz))
+
+    # 5. Boundary Fade
+    max_abs = max(abs(px), abs(py), abs(pz))
+    boundaryFade = saturate((1.0 - max_abs) * 8.0)
+
+    # 6. Final Density
+    density = saturate((0.85 * lowerCloud + 0.75 * upperCloud - 0.18) * detail * boundaryFade)
+
+    return density
+```
+
+### Parameters
+*   **cloud_scale**: Scales input position for noise evaluation [S1, unofficial].
+*   **letter_radius**: Radius for text segment influence, typically 0.25 [S1, unofficial].
+*   **smooth_width**: Smoothness width for text segments, typically 0.2 [S1, unofficial].
+*   **segments**: Vector of line segments defining letter shapes [S1, unofficial].
+*   **box_min, box_max**: Volume bounds [S1, unofficial].
+*   **Thread block size**: 8x8x8 threads (dim3 threads{8, 8, 8}) [S2, unofficial].
+*   **Grid size**: $\lceil width/8 \rceil \times \lceil height/8 \rceil \times \lceil depth/8 \rceil$ blocks [S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Division by Zero**: In `smoothstep`, if `edge0 == edge1`, division by zero occurs. The sources assume valid ranges where `edge0 < edge1` [S1, unofficial].
+*   **Null Vector**: Normalization operations throw if the vector norm is zero [S1, unofficial].
+*   **Boundary Conditions**: Points outside the bounding box return zero density immediately [S1, unofficial].
+*   **Precision**: CUDA implementation uses `float` (32-bit) while C++ implementation uses `double` (64-bit) for intermediate calculations [S1, S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(N \times S)$ for Variant A, where $N$ is the number of points and $S$ is the number of segments. $O(1)$ per voxel for Variant B.
+*   **Memory Complexity**: $O(S)$ for Variant A (storing segments). $O(1)$ auxiliary memory for Variant B, plus output texture storage [S1, S2, unofficial].
+*   **Performance**: Variant B is optimized for GPU execution via CUDA, utilizing 3D surface writes [S2, unofficial]. Variant A is a general-purpose CPU implementation [S1, unofficial].
+*   **Strengths**: Procedural generation allows infinite resolution and easy parameter tweaking [S1, S2, unofficial].
+*   **Limitations**: Variant A requires explicit segment definitions [S1, unofficial]. Variant B is hardcoded to specific implicit shapes [S2, unofficial].
+
+## Background
+The method originates from two unofficial GitHub repositories: "Volumetric-Path-Tracing" by TakTikFR and "HZL-fluidEffectsStudio" by pvasbob [S1, S2, unofficial]. It is used in procedural volume cloud modeling to generate density fields for visualization [S1, S2, unofficial].
+
+## Sources
+[S1] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)
+[S2] pvasbob/HZL-fluidEffectsStudio, https://github.com/pvasbob/HZL-fluidEffectsStudio, fetched 2026-10-27 (unofficial)

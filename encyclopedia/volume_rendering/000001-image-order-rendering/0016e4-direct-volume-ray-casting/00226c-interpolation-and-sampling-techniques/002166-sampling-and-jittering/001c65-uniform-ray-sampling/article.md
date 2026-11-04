@@ -3,54 +3,54 @@
 Also called: Random Sampling, Ray Sampling with Randomization, Uniform Point Sampling, Uniform Point Sampling along Rays, Uniform Random Sampling, Uniform Sampling
 
 ## Overview
-Uniform Ray Sampling generates a fixed number of sample points along camera rays by uniformly distributing depths between a near and far clipping plane [S4, unofficial, S5, S6, unofficial]. It assumes every point along the ray contributes equally to the final rendering, implying a constant probability density function (PDF) and linearly decaying transmittance [S1]. This method serves as the baseline for volume rendering when no transmittance estimator or spatial skipping structure is available [S1]. It is distinguished from its siblings by its simplicity and lack of scene-awareness; unlike [Stochastic Jittering](924-stochastic-jittering.md) which adds noise to break symmetry, or [Hierarchical Sampling (Inverse CDF Sampling)](973-hierarchical-sampling-inverse-cdf-sampling.md) which concentrates samples in high-density regions, uniform sampling treats all intervals equally [S1]. It is computationally efficient to implement but yields the lowest rendering efficiency in most cases compared to spatial skipping or PDF-based methods [S1].
+Uniform Ray Sampling generates a fixed number of sample points along camera rays by uniformly distributing depths between a near and far clipping plane [S4, unofficial][S5][S6, unofficial]. It assumes every point along the ray contributes equally to the final rendering, implying a constant probability density function (PDF) and linearly decaying transmittance [S1]. This method serves as the baseline for volume rendering when no transmittance estimator or spatial skipping structure is available [S1]. It is distinguished from its siblings by its simplicity and lack of scene-awareness; unlike [Stochastic Jittering](924-stochastic-jittering.md) which adds noise to break symmetry, or [Hierarchical Sampling (Inverse CDF Sampling)](973-hierarchical-sampling-inverse-cdf-sampling.md) which concentrates samples in high-density regions, uniform sampling treats all intervals equally [S1]. It is computationally efficient to implement but yields the lowest rendering efficiency in most cases compared to spatial skipping or PDF-based methods [S1].
 
 ## How it works
 **Inputs:**
-*   `rays_o`: Tensor of ray origins, shape $(N, 3)$ [S6, unofficial, S10, unofficial].
-*   `rays_d`: Tensor of ray directions, shape $(N, 3)$, typically unit-norm [S6, unofficial, S11, unofficial].
-*   `near`: Scalar or tensor defining the near clipping plane distance [S5, S12, unofficial].
-*   `far`: Scalar or tensor defining the far clipping plane distance [S5, S12, unofficial].
-*   `n_pts_per_ray` (or $N_{samples}$): Integer number of sample points per ray [S6, unofficial, S12, unofficial].
+*   `rays_o`: Tensor of ray origins, shape $(N, 3)$ [S6, S10, unofficial].
+*   `rays_d`: Tensor of ray directions, shape $(N, 3)$, typically unit-norm [S6, S11, unofficial].
+*   `near`: Scalar or tensor defining the near clipping plane distance [S5][S12, unofficial].
+*   `far`: Scalar or tensor defining the far clipping plane distance [S5][S12, unofficial].
+*   `n_pts_per_ray` (or $N_{samples}$): Integer number of sample points per ray [S6, S12, unofficial].
 *   `perturb` (optional): Float controlling the magnitude of random noise added for stratification [S12, unofficial].
 *   `lindisp` (optional): Boolean flag to switch between linear depth and linear disparity sampling [S12, unofficial].
 
 **Outputs:**
-*   `sample_points`: Tensor of 3D coordinates, shape $(N, n_{pts\_per\_ray}, 3)$ [S6, unofficial, S10, unofficial].
-*   `sample_lengths`: Tensor of segment lengths, shape $(N, n_{pts\_per\_ray}, 1)$ [S6, unofficial, S10, unofficial].
+*   `sample_points`: Tensor of 3D coordinates, shape $(N, n_{pts\_per\_ray}, 3)$ [S6, S10, unofficial].
+*   `sample_lengths`: Tensor of segment lengths, shape $(N, n_{pts\_per\_ray}, 1)$ [S6, S10, unofficial].
 
 **Data Structures:**
 The method typically populates a `RayBundle` object containing:
 *   `origins`: $(N, 3)$
 *   `directions`: $(N, 3)$
 *   `sample_points`: $(N, n_{pts\_per\_ray}, 3)$
-*   `sample_lengths`: $(N, n_{pts\_per\_ray}, 1)$ [S6, unofficial, S10, unofficial].
+*   `sample_lengths`: $(N, n_{pts\_per\_ray}, 1)$ [S6, S10, unofficial].
 
 **Steps:**
 
-1.  **Generate Depth Values:** Create $n_{pts\_per\_ray}$ linearly spaced values $t_i$ in the interval $[0, 1]$ using `torch.linspace(0.0, 1.0, n_pts_per_ray)` [S8, unofficial, S12, unofficial].
-2.  **Map to Depth Range:** Map $t_i$ to the depth range $[near, far]$ [S8, unofficial, S12, unofficial].
+1.  **Generate Depth Values:** Create $n_{pts\_per\_ray}$ linearly spaced values $t_i$ in the interval $[0, 1]$ using `torch.linspace(0.0, 1.0, n_pts_per_ray)` [S8, S12, unofficial].
+2.  **Map to Depth Range:** Map $t_i$ to the depth range $[near, far]$ [S8, S12, unofficial].
     *   If `lindisp` is false (linear depth):
         $$ z_i = near \cdot (1 - t_i) + far \cdot t_i $$
-        [S8, unofficial, S12, unofficial]
+        [S8, S12, unofficial]
     *   If `lindisp` is true (linear disparity):
         $$ z_i = \frac{1}{\frac{1}{near}(1 - t_i) + \frac{1}{far}t_i} $$
         [S12, unofficial]
-3.  **Stratification (Optional):** If training or `perturb > 0`, add uniform random noise to break symmetry and reduce variance [S9, unofficial, S12, unofficial].
+3.  **Stratification (Optional):** If training or `perturb > 0`, add uniform random noise to break symmetry and reduce variance [S9, S12, unofficial].
     *   Compute midpoints: $z_{mid, i} = 0.5 \cdot (z_i + z_{i+1})$ for $i=0 \dots n-2$, with $z_{mid, n-1} = z_{n-1}$ [S12, unofficial].
     *   Define intervals: $upper = [z_{mid, 0}, \dots, z_{mid, n-2}, z_{n-1}]$ and $lower = [z_0, \dots, z_{n-2}, z_{mid, n-2}]$ [S12, unofficial].
     *   Generate random noise $r_i \sim \mathcal{U}[0, 1]$ [S12, unofficial].
     *   Update depths: $z_i = lower_i + (upper_i - lower_i) \cdot perturb \cdot r_i$ [S12, unofficial].
 4.  **Broadcast Ray Parameters:**
-    *   Reshape `rays_o` from $(N, 3)$ to $(N, 1, 3)$ and repeat along the second dimension to shape $(N, n_{pts\_per\_ray}, 3)$ [S4, unofficial, S10, unofficial].
-    *   Reshape `rays_d` from $(N, 3)$ to $(N, 1, 3)$ and repeat along the second dimension to shape $(N, n_{pts\_per\_ray}, 3)$ [S4, unofficial, S10, unofficial].
-    *   Reshape $z$ from $(n_{pts\_per\_ray})$ to $(1, n_{pts\_per\_ray}, 1)$ and repeat along the first dimension to shape $(N, n_{pts\_per\_ray}, 1)$ [S4, unofficial, S10, unofficial].
+    *   Reshape `rays_o` from $(N, 3)$ to $(N, 1, 3)$ and repeat along the second dimension to shape $(N, n_{pts\_per\_ray}, 3)$ [S4, S10, unofficial].
+    *   Reshape `rays_d` from $(N, 3)$ to $(N, 1, 3)$ and repeat along the second dimension to shape $(N, n_{pts\_per\_ray}, 3)$ [S4, S10, unofficial].
+    *   Reshape $z$ from $(n_{pts\_per\_ray})$ to $(1, n_{pts\_per\_ray}, 1)$ and repeat along the first dimension to shape $(N, n_{pts\_per\_ray}, 1)$ [S4, S10, unofficial].
 5.  **Compute Sample Points:** Calculate 3D coordinates:
     $$ P = O + D \cdot z $$
-    where $O$ is the broadcasted origin, $D$ is the broadcasted direction, and $z$ is the broadcasted depth [S7, unofficial, S9, unofficial, S12, unofficial].
+    where $O$ is the broadcasted origin, $D$ is the broadcasted direction, and $z$ is the broadcasted depth [S7, S9, S12, unofficial].
     $$ \text{sample\_points} = \text{rays\_o} + \text{rays\_d} \cdot z $$
-    [S7, unofficial, S10, unofficial, S12, unofficial]
-6.  **Compute Sample Lengths:** Calculate segment lengths [S6, unofficial, S10, unofficial]. Segment lengths are computed as the difference between consecutive depths, $\Delta z_i = z_{i+1} - z_i$, with the last segment set to a large value (e.g., $10^{10}$) to ensure full transmittance decay [S6, unofficial].
+    [S7, S10, S12, unofficial]
+6.  **Compute Sample Lengths:** Calculate segment lengths [S6, S10, unofficial]. Segment lengths are computed as the difference between consecutive depths, $\Delta z_i = z_{i+1} - z_i$, with the last segment set to a large value (e.g., $10^{10}$) to ensure full transmittance decay [S6, unofficial].
 
 **Pseudocode:**
 
@@ -130,7 +130,7 @@ def uniform_ray_sampling(rays_o, rays_d, near, far, n_pts_per_ray, perturb=0.0, 
 **Edge Cases and Pitfalls:**
 *   **Near/Far Equality:** If `near == far`, the interval is zero, leading to division by zero in disparity sampling or zero-length samples. Guard against this by clamping or skipping rays. [G]
 *   **Zero Direction:** If ray direction components are zero, normalization or intersection calculations may fail. Replace zero directions with a small epsilon (e.g., $10^{-6}$) [S12, unofficial].
-*   **Precision:** Using `torch.linspace` and broadcasting requires careful shape management to avoid memory bloat for large batches [S4, unofficial, S10, unofficial].
+*   **Precision:** Using `torch.linspace` and broadcasting requires careful shape management to avoid memory bloat for large batches [S4, S10, unofficial].
 *   **Degenerate Input:** If `n_pts_per_ray` is 0 or negative, return empty tensors [S12, unofficial].
 
 ## Subtopics
@@ -185,8 +185,8 @@ where $\sigma_t$ is the extinction coefficient, $k$ is the sample index, and $k_
 *   **Small Object Width:** The sampling scheme handles small object widths by ensuring $k_{\max}$ samples are always placed, preventing undersampling [S14].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot n_{pts\_per\_ray})$ for generating sample points, where $N$ is the number of rays [S6, unofficial, S10, unofficial].
-*   **Memory Complexity:** $O(N \cdot n_{pts\_per\_ray} \cdot 3)$ for storing sample points and $O(N \cdot n_{pts\_per\_ray})$ for depths/lengths [S6, unofficial, S10, unofficial].
+*   **Time Complexity:** $O(N \cdot n_{pts\_per\_ray})$ for generating sample points, where $N$ is the number of rays [S6, S10, unofficial].
+*   **Memory Complexity:** $O(N \cdot n_{pts\_per\_ray} \cdot 3)$ for storing sample points and $O(N \cdot n_{pts\_per\_ray})$ for depths/lengths [S6, S10, unofficial].
 *   **Performance:** Uniform sampling is the easiest to implement but has the lowest efficiency in most cases compared to spatial skipping or PDF-based methods [S1]. It wastes samples in empty space and misses high-density regions [S1].
 *   **Strengths:** Simple to implement, deterministic (without perturbation), low overhead [S1].
 *   **Limitations:** Inefficient for scenes with large empty regions or complex geometry; requires many samples to converge [S1].
@@ -194,7 +194,7 @@ where $\sigma_t$ is the extinction coefficient, $k$ is the sample index, and $k_
 *   **When Not to Use:** High-quality rendering of complex scenes with sparse geometry, where spatial skipping or importance sampling is preferred [S1].
 
 ## Background
-Uniform sampling was introduced as the baseline sampling method in the original NeRF paper [16] (cited as [S1] in the context of NerfAcc). It assumes a constant PDF and linearly decaying transmittance, which is inherent to coarse-level NeRF models [S1]. It is widely used in neural radiance field implementations due to its simplicity [S1, S11, unofficial].
+Uniform sampling was introduced as the baseline sampling method in the original NeRF paper [16] (cited as [S1] in the context of NerfAcc). It assumes a constant PDF and linearly decaying transmittance, which is inherent to coarse-level NeRF models [S1]. It is widely used in neural radiance field implementations due to its simplicity [S1][S11, unofficial].
 
 ## Sources
 [S1] NerfAcc: Efficient Sampling Accelerates NeRFs, https://doi.org/10.1109/iccv51070.2023.01699, fetched 2026-10-26

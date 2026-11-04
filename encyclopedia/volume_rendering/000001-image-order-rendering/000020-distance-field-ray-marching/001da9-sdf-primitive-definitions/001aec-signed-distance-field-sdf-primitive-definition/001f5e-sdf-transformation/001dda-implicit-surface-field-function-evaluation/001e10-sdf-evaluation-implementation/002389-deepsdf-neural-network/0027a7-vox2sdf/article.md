@@ -1,0 +1,145 @@
+# Vox2SDF
+
+Also called: Neural SDF from Voxels, Voxel-to-SDF
+
+## Overview
+Vox2SDF is a neural network pipeline that converts a discrete 3D voxel grid into a continuous Signed Distance Field (SDF) representation [S1, unofficial]. It solves implicit surface reconstruction from discrete inputs by encoding the voxel structure into a latent vector and decoding it via a position-conditional MLP to predict SDF values at arbitrary 3D points [S1, unofficial]. Unlike [DeepSDF Neural Network](3051-deepsdf-neural-network.md), which relies on a global latent code independent of input geometry, Vox2SDF derives its latent code directly from the input voxel grid using a 3D CNN encoder [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel grid tensor of shape $(1, 128, 128, 128)$ [S1, unofficial].
+*   **Output:** A scalar SDF value for any query point $\mathbf{x} \in \mathbb{R}^3$ [S1, unofficial].
+
+**Data Structures:**
+*   **Voxel Grid:** Float tensor, shape $(1, 128, 128, 128)$ [S1, unofficial].
+*   **Latent Vector:** Float tensor, shape $(latent\_size)$ [S1, unofficial].
+*   **Query Points:** Float tensor, shape $(N, 3)$, where $N$ is the number of points [S1, unofficial].
+
+**Parameters:**
+*   `input_voxel_grid_size`: Spatial resolution of input voxel grid. Default: 128 [S1, unofficial].
+*   `latent_dimension`: Size of the bottleneck latent vector. Default: 256 [S1, unofficial].
+*   `decoder_hidden_dimension`: Width of MLP hidden layers. Default: 512 [S1, unofficial].
+*   `decoder_num_hidden_layers`: Number of MLP layers in the decoder. Default: 10 [S1, unofficial].
+*   `num_points_per_minor_batch`: Number of query points processed per forward pass to manage memory. Default: Config-dependent [S1, unofficial].
+*   `learning_rate`: Adam optimizer step size. Default: Config-dependent [S1, unofficial].
+
+**Algorithm Steps:**
+1.  Encode voxel grid through 3D CNN blocks: Conv3d(1->16, k=3, s=2, p=1) -> BN -> ReLU -> MaxPool3d(2) -> Dropout(0.3), repeated 3 times with channels 16->32->64 [S1, unofficial].
+2.  Flatten features [S1, unofficial].
+3.  Pass through FC layers: Linear(64, 512) -> BN -> ReLU -> Dropout(0.3) -> Linear(512, `latent_dimension`) [S1, unofficial].
+4.  Repeat latent code for each query point [S1, unofficial].
+5.  Concatenate latent code and query positions (xyz) [S1, unofficial].
+6.  Decode through MLP: Layer 0 Linear(`latent_dimension`+3, `decoder_hidden_dimension`), layers 1..N-2 with skip connections every 4th layer, final layer Linear(512, 1) [S1, unofficial].
+7.  Apply ReLU to hidden layers, Tanh to output [S1, unofficial].
+
+**Formula:**
+The SDF value $d(\mathbf{x})$ for a query point $\mathbf{x}$ is computed as:
+$$ d(\mathbf{x}) = \text{Tanh}( \mathbf{W}_{out} \cdot \text{ReLU}( \text{Dropout}( \mathbf{W}_i \cdot \text{Concat}(\mathbf{z}, \mathbf{x}, \text{skip}) ) ) ) $$
+where $\mathbf{z}$ is the latent code, and skip connections are added to the MLP input every 4th layer for $i \% 4 == 0$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class VoxelCNNEncoder(nn.Module):
+    def __init__(self, latent_size):
+        super().__init__()
+        self.conv1 = nn.Conv3d(1, 16, kernel_size=3, stride=2, padding=1)
+        self.bn1 = nn.BatchNorm3d(16)
+        self.conv2 = nn.Conv3d(16, 32, kernel_size=3, stride=2, padding=1)
+        self.bn2 = nn.BatchNorm3d(32)
+        self.conv3 = nn.Conv3d(32, 64, kernel_size=3, stride=2, padding=1)
+        self.bn3 = nn.BatchNorm3d(64)
+        self.pool = nn.MaxPool3d(2)
+        self.dropout = nn.Dropout3d(0.3)
+        # Hardcoded to match source assumption of 64*1*1*1 spatial reduction
+        self.fc1 = nn.Linear(64, 512)
+        self.bn_fc1 = nn.BatchNorm1d(512)
+        self.fc2 = nn.Linear(512, latent_size)
+
+    def forward(self, x):
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.pool(x)
+        x = self.dropout(x)
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.pool(x)
+        x = self.dropout(x)
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = self.pool(x)
+        # [G] AdaptiveAvgPool3d(1) ensures spatial dimensions collapse to 1x1x1,
+        # matching the hardcoded flattened_size = 64 * 1 * 1 * 1 in the source.
+        x = F.adaptive_avg_pool3d(x, 1)
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.bn_fc1(self.fc1(x)))
+        x = F.dropout(x, p=0.3, training=self.training)
+        x = self.fc2(x)
+        return x
+
+class SDFDecoder(nn.Module):
+    def __init__(self, latent_dim, hidden_dim, num_layers):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        self.layers.append(nn.Linear(latent_dim + 3, hidden_dim))
+        for i in range(1, num_layers - 1):
+            if i % 4 == 0:
+                self.layers.append(nn.Linear(hidden_dim + latent_dim + 3, hidden_dim))
+            else:
+                self.layers.append(nn.Linear(hidden_dim, hidden_dim))
+        self.layers.append(nn.Linear(hidden_dim, 1))
+        self.dropout = nn.Dropout(0.3)
+        self.relu = nn.ReLU()
+        self.tanh = nn.Tanh()
+
+    def forward(self, latent, points):
+        x = torch.cat([latent, points], dim=1)
+        input_concat = x
+        for i, layer in enumerate(self.layers):
+            if i == 0:
+                h = layer(x)
+            elif i == len(self.layers) - 1:
+                h = layer(x)
+            else:
+                if i % 4 == 0:
+                    x = torch.cat([x, input_concat], dim=1)
+                h = layer(x)
+                h = self.relu(h)
+                h = self.dropout(h)
+                x = h
+        return self.tanh(h)
+
+class Vox2SDF(nn.Module):
+    def __init__(self, latent_size, hidden_dim, num_layers):
+        super().__init__()
+        self.encoder = VoxelCNNEncoder(latent_size)
+        self.decoder = SDFDecoder(latent_size, hidden_dim, num_layers)
+
+    def forward(self, voxel_grid, points):
+        latent = self.encoder(voxel_grid)
+        B, S = points.shape[0], points.shape[1]
+        latent_repeated = latent.unsqueeze(1).repeat(1, S, 1)
+        latent_flat = latent_repeated.view(-1, latent_repeated.size(-1))
+        points_flat = points.view(-1, 3)
+        return self.decoder(latent_flat, points_flat)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Shape Mismatch:** The encoder hardcodes the flattened feature size as $64 \times 1 \times 1 \times 1$ [S1, unofficial]. Changing `input_voxel_grid_size` without updating the CNN architecture or adding adaptive pooling will cause a shape mismatch at `self.fc1` [S1, unofficial].
+*   **Decoder Hardcoding:** The decoder's final layer is hardcoded as `Linear(512, 1)` [S1, unofficial]. Changing `decoder_hidden_dimension` from 512 without updating the final layer's input size will break the model [S1, unofficial].
+*   **Memory Management:** During mesh extraction, query points are split into batches of 200,000 to prevent GPU OOM [S1, unofficial]. The SDF tensor is accumulated via `torch.cat` across batches before reshaping to $(100, 100, 100)$ [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Evaluated on ShapeNet categories [S1, unofficial]. Trained with MSE loss on sampled SDF points [S1, unofficial]. Extracted via Marching Cubes at level 0 [S1, unofficial].
+*   **Strengths:** Converts discrete voxels to smooth implicit surfaces [S1, unofficial]. Generalizes across different shapes within a category while preserving input-specific geometric details [S1, unofficial].
+*   **Limitations:** Hardcoding in encoder and decoder makes hyperparameter tuning rigid [S1, unofficial]. Output SDF resolution is limited by query point density and extraction grid resolution [S1, unofficial].
+
+## Background
+Vox2SDF was introduced to bridge the gap between discrete voxel representations and continuous implicit surfaces [S1, unofficial]. It builds on the [DeepSDF Neural Network](3051-deepsdf-neural-network.md) architecture but replaces the global latent code with one derived from the input geometry [S1, unofficial].
+
+## Sources
+[S1] TurtleJayWang/Vox2SDF, https://github.com/TurtleJayWang/Vox2SDF, fetched 2026-10-28 (unofficial)

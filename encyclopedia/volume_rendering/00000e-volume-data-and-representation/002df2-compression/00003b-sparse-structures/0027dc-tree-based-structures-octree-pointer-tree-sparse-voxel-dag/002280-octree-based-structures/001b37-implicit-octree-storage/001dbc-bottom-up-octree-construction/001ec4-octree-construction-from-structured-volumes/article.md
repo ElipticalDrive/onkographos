@@ -1,0 +1,135 @@
+# Octree Construction from Structured Volumes
+
+Also called: Adaptive-resolution octree, Lossless-compression octree representation, Octree Volume Construction and Compression, Voxel Consolidation, Zero-variance Octree Construction
+
+## Overview
+This method compresses large structured scalar volumes into an adaptive-resolution octree to reduce memory footprint while serving as an acceleration structure for ray tracing [S1, S2, unofficial]. It solves the problem of storing and rendering large 3D array volumes on commodity machines with limited memory by converting a dense 3D grid into a sparse structure [S1, S2, unofficial]. Unlike sibling methods that may encapsulate eight-voxel cells, this technique encapsulates actual individual voxels, allowing for finer granularity in compression [S1, S2, unofficial]. It extends the principle of quadtree generation from 2D grids (consolidating pixels with zero inter-pixel variance) to 3D octrees by consolidating voxels with zero inter-voxel variance [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar array (grid) of voxel values.
+*   **Output:** An octree volume where scalar values are stored at leaf nodes, and interior nodes define the hierarchical structure [S1, S2, unofficial].
+
+**Data Structures:**
+The octree is an adaptive-resolution, hierarchical scalar field [S1, unofficial].
+*   **Leaf Nodes:** Store the scalar values. At maximum octree depth, these correspond to the finest available data resolution [S1, unofficial].
+*   **Interior Nodes:** Define the structure of the octree by maintaining pointers from parents to children. They need not contain scalar data unless a multiresolution representation is desired [S1, unofficial].
+*   **Storage:** The method employs optimized octree hash schemes to embed the acceleration tree and scalar data in a single structure [S1, S2, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialize:** Start with the root node representing the entire 3D input grid.
+2.  **Variance Check:** For the current node, calculate the inter-voxel variance of the scalar values contained within its spatial extent [S1, S2, unofficial].
+3.  **Consolidation Decision:**
+    *   If the inter-voxel variance is zero (all voxels in the extent have identical values), consolidate the node. Store the single scalar value at this node and mark it as a leaf (or interior node with uniform value, depending on implementation details for multiresolution) [S1, S2, unofficial].
+    *   If the inter-voxel variance is non-zero, split the node into eight children (sub-cubes) [S1, S2, unofficial].
+4.  **Recursion:** Recursively apply steps 2-3 to each child node.
+5.  **Termination:** The process terminates when all nodes are either consolidated (zero variance) or have reached the maximum allowed octree depth [S1, unofficial].
+
+**Formulas:**
+*   **Inter-voxel Variance:** The condition for consolidation is based on the variance $\sigma^2$ of the scalar values $v_i$ within a node's extent:
+    $$ \sigma^2 = \frac{1}{N} \sum_{i=1}^{N} (v_i - \mu)^2 $$
+    Where $N$ is the number of voxels in the node's extent, and $\mu$ is the mean value. Consolidation occurs if $\sigma^2 = 0$ [S1, S2, unofficial].
+
+**Parameters:**
+*   **Maximum Octree Depth:** Not given in the sources. Determines the finest resolution limit.
+*   **Variance Threshold:** Strictly zero for lossless compression as described [S1, S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point precision issues may prevent exact zero variance detection for theoretically identical values. [G] A small epsilon tolerance might be required in practice, though the source specifies "zero inter-voxel variance" strictly.
+*   **Boundary Conditions:** Values outside the octree data are defined to be zero [S1, S2, unofficial]. This affects ray traversal and variance calculations near the volume boundaries.
+*   **Memory:** While the compression allows data to occupy less than one quarter the size of the original 3D array, the overhead of the octree structure (pointers/hash entries) must be considered [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_octree(grid, current_node, depth, max_depth):
+    """
+    Recursively builds an octree from a 3D scalar grid.
+    
+    Args:
+        grid: The 3D scalar array.
+        current_node: The node object being processed.
+        depth: Current depth in the octree.
+        max_depth: Maximum allowed depth.
+    """
+    # Get the sub-volume of the grid corresponding to current_node
+    sub_volume = get_sub_volume(grid, current_node.bounds)
+    
+    # Calculate variance of scalar values in the sub-volume
+    variance = calculate_variance(sub_volume)
+    
+    # Check consolidation condition
+    if variance == 0 or depth == max_depth:
+        # Consolidate: store the single scalar value
+        # If depth < max_depth, all voxels are identical
+        if depth < max_depth:
+            scalar_value = sub_volume[0] # All values are same
+            current_node.scalar = scalar_value
+            current_node.is_leaf = True
+            current_node.children = None
+        else:
+            # Reached max depth, store individual voxels
+            current_node.is_leaf = True
+            current_node.children = None
+            # Store scalar values for each voxel in this leaf
+            # Implementation detail: how scalars are stored in leaf is not specified
+            # [G] Assuming a flat array or similar structure for leaf scalars
+            current_node.scalars = sub_volume.flatten()
+    else:
+        # Split: create 8 children
+        current_node.is_leaf = False
+        current_node.children = [None] * 8
+        
+        for i in range(8):
+            child_node = create_node()
+            current_node.children[i] = child_node
+            build_octree(grid, child_node, depth + 1, max_depth)
+
+def get_sub_volume(grid, bounds):
+    """Extracts the 3D sub-array defined by bounds from the grid."""
+    # Implementation depends on grid storage format
+    # Returns a 3D array of scalar values
+    pass
+
+def calculate_variance(sub_volume):
+    """Calculates the variance of a 3D array of scalars."""
+    mean = sum(sub_volume) / len(sub_volume)
+    variance = sum((x - mean) ** 2 for x in sub_volume) / len(sub_volume)
+    return variance
+```
+
+## Subtopics
+
+### Min/Max Tree Construction
+Builds a min/max hierarchy inside interior octree nodes for acceleration. Sets it apart by focusing on the min/max values for early ray termination. [Link](1623-min-max-tree-construction.md)
+
+### Hierarchical Partition Optimization
+Optimizes the partitioning of the volume. Sets it apart by potentially using non-uniform or optimized splits rather than strict variance-based splitting. [Link](1953-hierarchical-partition-optimization.md)
+
+### Omnitree Refinement
+Refines the octree structure. Sets it apart by allowing refinement of existing nodes based on specific criteria. [Link](2222-omnitree-refinement.md)
+
+### Octree Compaction & Construction
+Compacts the octree structure. Sets it apart by focusing on memory layout and cache efficiency after construction. [Link](2857-octree-compaction-construction.md)
+
+### DMC Octree Build
+Uses Discrete Multi-Resolution Compression. Sets it apart by using DMC principles for compression. [Link](2995-dmc-octree-build.md)
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. Depends on the variance of the data and the maximum depth.
+*   **Memory Complexity:** The compression allows the data to occupy less than one quarter the size of the original 3D array [S1, unofficial].
+*   **Measured Performance:**
+    *   On an Intel Core Duo 2.16 GHz laptop with 2 GB RAM, frame rates were 2.4, 1.3, and 3.3 fps for three test scenes [S1, unofficial].
+    *   On a 16-core NUMA 2.4 GHz Opteron workstation, frame rates were 17.9, 9.8, and 22.0 fps [S1, unofficial].
+*   **Strengths:** Lossless compression, reduces memory footprint significantly, serves as both data storage and acceleration structure, enables rendering of large time-variant data on consumer machines [S1, S2, unofficial].
+*   **Limitations:** Performance depends on the variance of the data; highly variable data may not compress well. Precision issues with zero variance check.
+*   **When to use:** When memory is limited and the volume data has large homogeneous regions. When interactive ray tracing of isosurfaces is required.
+*   **When not to use:** When the data has high variance everywhere, leading to minimal compression. When lossy compression is acceptable and faster construction is needed.
+
+## Background
+This technique was presented in the paper "Interactive isosurface ray tracing of large octree volumes" [S1, S2, unofficial]. It was developed to address the difficulty of storing and rendering large 3D array volumes on commodity machines with limited memory [S1, S2, unofficial]. The approach is similar to that of Velasco and Torres [20, 24] but encapsulates actual voxels as opposed to eight-voxel cells [S1, S2, unofficial]. It draws inspiration from previous works that use a min/max tree to simplify extraction and rasterization [S1, S2, unofficial]. The method is used for ray tracing isosurfaces of large compressed structured volumes [S1, S2, unofficial].
+
+## Sources
+[S1] Interactive isosurface ray tracing of large octree volumes, https://www.researchgate.net/publication/310054812_Interactive_isosurface_ray_tracing_of_large_octree_volumes, fetched 2026-10-29 (unofficial)
+[S2] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.researchgate.net/publication/261082346_Interactive_Isosurface_Ray_Tracing_of_Large_Octree_Volumes, fetched 2026-10-29 (unofficial)

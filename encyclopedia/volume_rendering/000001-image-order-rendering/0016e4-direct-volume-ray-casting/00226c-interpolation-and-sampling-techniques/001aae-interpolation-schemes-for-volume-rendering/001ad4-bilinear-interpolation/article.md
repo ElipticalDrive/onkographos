@@ -3,37 +3,37 @@
 Also called: 2D Bilinear Sampling, Bilinear Image Sampling, Bilinear Image Sampling at XY Grid, F.grid_sample with bilinear mode, Grid Sample Bilinear, Grid with Bilinear Interpolation, Tri-linear Interpolation on GPU
 
 ## Overview
-Bilinear interpolation estimates values at arbitrary 2D coordinates by linearly interpolating across the four nearest grid points [S3]. It sets itself apart from nearest neighbor interpolation by eliminating blocky artifacts while maintaining lower computational cost than higher-order schemes like tri-cubic interpolation [S4].
+Bilinear interpolation estimates values at arbitrary 2D coordinates by linearly interpolating across the four nearest grid points [S3, unofficial]. It sets itself apart from nearest neighbor interpolation by eliminating blocky artifacts while maintaining lower computational cost than higher-order schemes like tri-cubic interpolation [S4, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 2D grid of values $V$ with dimensions $resX \times resY$, and a query coordinate $(x, y)$ where $x, y \in \mathbb{R}$ [S3].
-*   **Output:** The interpolated scalar value $V(x, y)$ [S3].
+*   **Input:** A 2D grid of values $V$ with dimensions $resX \times resY$, and a query coordinate $(x, y)$ where $x, y \in \mathbb{R}$ [S3, unofficial].
+*   **Output:** The interpolated scalar value $V(x, y)$ [S3, unofficial].
 
 **Data Structures:**
-The grid is stored as a 1D contiguous array `values` of size $resX \times resY$ [S3].
+The grid is stored as a 1D contiguous array `values` of size $resX \times resY$ [S3, unofficial].
 *   **Fields:**
     *   `int resX`: Width of the grid.
     *   `int resY`: Height of the grid.
-    *   `Data* values`: Pointer to the memory block [S3].
-*   **Layout:** Element at integer coordinates $(x, y)$ is stored at index $x \cdot resY + y$ [S3].
+    *   `Data* values`: Pointer to the memory block [S3, unofficial].
+*   **Layout:** Element at integer coordinates $(x, y)$ is stored at index $x \cdot resY + y$ [S3, unofficial].
 
 **Algorithm Steps:**
-1.  **Integer Bounds:** Compute the integer coordinates of the lower-left corner of the cell containing $(x, y)$ [S3].
-    *   Let $x_1 = \lfloor x \rfloor$ and $y_1 = \lfloor y \rfloor$ [S3].
-    *   If the implementation uses integer truncation for negative numbers (e.g., `int(x)` in C++), special handling is required [S3]. If $x < 0$, $x_1$ must be set to $-\lfloor -x \rfloor - 1$ to correctly identify the floor [S3]. The same logic applies to $y_1$ [S3].
+1.  **Integer Bounds:** Compute the integer coordinates of the lower-left corner of the cell containing $(x, y)$ [S3, unofficial].
+    *   Let $x_1 = \lfloor x \rfloor$ and $y_1 = \lfloor y \rfloor$ [S3, unofficial].
+    *   If the implementation uses integer truncation for negative numbers (e.g., `int(x)` in C++), special handling is required [S3, unofficial]. If $x < 0$, $x_1$ must be set to $-\lfloor -x \rfloor - 1$ to correctly identify the floor [S3, unofficial]. The same logic applies to $y_1$ [S3, unofficial].
 2.  **Fractional Parts:** Compute the interpolation weights (blending factors) as the fractional parts of the coordinates:
     $$d_x = x - x_1$$
     $$d_y = y - y_1$$
-    These values represent the offset from the corner in the range $[0, 1)$ [S3, S4]. When working with normalized texture coordinates $C$ and resolution $R$, the blending factor can also be computed as $F = C \times R - \lfloor C \times R \rfloor$ [S4].
+    These values represent the offset from the corner in the range $[0, 1)$ [S3, S4, unofficial]. When working with normalized texture coordinates $C$ and resolution $R$, the blending factor can also be computed as $F = C \times R - \lfloor C \times R \rfloor$ [S4, unofficial].
 3.  **Neighbor Fetch:** Retrieve the four surrounding grid values:
     *   $V_{00} = Grid(x_1, y_1)$
     *   $V_{10} = Grid(x_1 + 1, y_1)$
     *   $V_{01} = Grid(x_1, y_1 + 1)$
-    *   $V_{11} = Grid(x_1 + 1, y_1 + 1)$ [S3].
+    *   $V_{11} = Grid(x_1 + 1, y_1 + 1)$ [S3, unofficial].
 4.  **Interpolation:** Compute the final value using the bilinear formula:
     $$V(x, y) = V_{00}(1 - d_x)(1 - d_y) + V_{10}d_x(1 - d_y) + V_{01}(1 - d_x)d_y + V_{11}d_x d_y$$
-    [S3].
+    [S3, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -55,7 +55,7 @@ def bilinear_interpolate(values, resX, resY, x, y):
     dx = x - x1
     dy = y - y1
     
-    # Corrected wrapping logic (fixes the resY/resX bug in [S3])
+    # Corrected wrapping logic (fixes the resY/resX bug in [S3, unofficial])
     def wrap(idx, dim):
         if idx < 0:
             idx = dim - ((-idx) % dim)
@@ -84,8 +84,8 @@ def bilinear_interpolate(values, resX, resY, x, y):
 When using `torch.nn.functional.grid_sample`, the input grid coordinates must be negated and reshaped to `[batch_size, -1, 1, 2]` to match the expected format, and `align_corners=True` should be used [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Negative Index Wrapping Bug:** A common implementation error in wrapping negative indices is using the wrong dimension for the modulo operation [S3]. Specifically, `if(x<0){x = resX - ((-x) % resY);}` is incorrect because it uses `resY` instead of `resX` for the x-axis modulo, causing incorrect wrapping along the x-axis [S3].
-*   **Boundary Conditions:** The sources do not specify behavior for coordinates outside the $[0, resX-1] \times [0, resY-1]$ range other than the wrapping bug example [S3]. Standard implementations typically clamp or wrap coordinates to the grid boundaries [G].
+*   **Negative Index Wrapping Bug:** A common implementation error in wrapping negative indices is using the wrong dimension for the modulo operation [S3, unofficial]. Specifically, `if(x<0){x = resX - ((-x) % resY);}` is incorrect because it uses `resY` instead of `resX` for the x-axis modulo, causing incorrect wrapping along the x-axis [S3, unofficial].
+*   **Boundary Conditions:** The sources do not specify behavior for coordinates outside the $[0, resX-1] \times [0, resY-1]$ range other than the wrapping bug example [S3, unofficial]. Standard implementations typically clamp or wrap coordinates to the grid boundaries [G].
 
 ## Subtopics
 
@@ -93,26 +93,26 @@ When using `torch.nn.functional.grid_sample`, the input grid coordinates must be
 This variant uses trilinear interpolation of color and opacity optimized using SIMD extensions (MMX, SSE, or 3DNow!) to improve memory copying and interpolation speed [S5]. It typically uses 16-bit unsigned integers for color and opacity values [S5]. A specific pitfall is that on MMX-only processors, line equation tests cannot be performed, leading to minor artifacts in the image [S5].
 
 ### Linear Interpolation on Polyhedra
-This method uses linear interpolation to scan-convert the front and back faces of each polyhedron in unstructured meshes [S6]. It is chosen because reconstruction for non-uniform sampling on unstructured meshes is not well understood and is significantly more complex than uniform sampling [S6]. It exhibits C1 discontinuities common to linear interpolation [S6].
+This method uses linear interpolation to scan-convert the front and back faces of each polyhedron in unstructured meshes [S6, unofficial]. It is chosen because reconstruction for non-uniform sampling on unstructured meshes is not well understood and is significantly more complex than uniform sampling [S6, unofficial]. It exhibits C1 discontinuities common to linear interpolation [S6, unofficial].
 
 ### Temporal Interpolation
-This method uses linear interpolation between two sampled flow vectors of different time steps to handle dynamic vector fields [S7]. The interpolated vector is calculated as $M_R(v, t) = (1 - t)S_i(v) + tS_j(v)$, where $S_i(v)$ and $S_j(v)$ are vector field slices [S7]. A pitfall occurs if the interpolation index $k$ is not in $[i, j]$, as the equation yields extrapolation instead of interpolation [S7].
+This method uses linear interpolation between two sampled flow vectors of different time steps to handle dynamic vector fields [S7, unofficial]. The interpolated vector is calculated as $M_R(v, t) = (1 - t)S_i(v) + tS_j(v)$, where $S_i(v)$ and $S_j(v)$ are vector field slices [S7, unofficial]. A pitfall occurs if the interpolation index $k$ is not in $[i, j]$, as the equation yields extrapolation instead of interpolation [S7, unofficial].
 
 ## Operating characteristics
-*   **Strengths:** Computationally inexpensive; provides smoother results than nearest neighbor; hardware-friendly (supported by GPU texture units via LRP instructions or bilinear filtering modes) [S4].
-*   **Limitations:** Exhibits C1 discontinuities (discontinuous derivatives) at grid boundaries [S6]; lower frequency response compared to sinc or cubic methods, potentially causing blurring [S4].
+*   **Strengths:** Computationally inexpensive; provides smoother results than nearest neighbor; hardware-friendly (supported by GPU texture units via LRP instructions or bilinear filtering modes) [S4, unofficial].
+*   **Limitations:** Exhibits C1 discontinuities (discontinuous derivatives) at grid boundaries [S6, unofficial]; lower frequency response compared to sinc or cubic methods, potentially causing blurring [S4, unofficial].
 *   **Time Complexity:** Not given in the sources.
 *   **Memory Complexity:** Not given in the sources.
 *   **When to use:** Not given in the sources.
 
 ## Background
-The specific GPU-based frequency domain rendering implementation using LRP instructions for neighbor address pre-computation was described by Viola et al. [S4]. Optimized trilinear variants using SIMD were explored in early object-order ray-casting algorithms [S5].
+The specific GPU-based frequency domain rendering implementation using LRP instructions for neighbor address pre-computation was described by Viola et al. [S4, unofficial]. Optimized trilinear variants using SIMD were explored in early object-order ray-casting algorithms [S5].
 
 ## Sources
 [S1] learning3d/assignment3, https://github.com/learning3d/assignment3, fetched 2026-10-26
 [S2] Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
 [S3] mkazhdan/IsoSurfaceExtraction, https://github.com/mkazhdan/IsoSurfaceExtraction, fetched 2026-10-27 (unofficial)
-[S4] PDF GPU-based Frequency Domain Volume Rendering - TU Wien, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-GPU/Viola-2004-GPU-Paper.pdf, fetched 2026-10-27
+[S4] PDF GPU-based Frequency Domain Volume Rendering - TU Wien, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-GPU/Viola-2004-GPU-Paper.pdf, fetched 2026-10-27 (unofficial)
 [S5] A new object-order ray-casting algorithm, https://doi.org/10.5555/602099.602130, fetched 2026-10-26
-[S6] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27
-[S7] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31
+[S6] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
+[S7] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)

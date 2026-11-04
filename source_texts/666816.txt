@@ -1,0 +1,527 @@
+Small, code-first native game engine kit for C# / .NET. Explicit building blocks for rendering, audio, assets, animation, collision, diagnostics, and game loops. - Vulkan compute froxel by KshitijVikramSingh · Pull Request #2 · KshitijVikramSingh/blix
+
+Vulkan compute froxel by KshitijVikramSingh · Pull Request #2 · KshitijVikramSingh/blix · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+KshitijVikramSingh
+commented
+May 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+This is primarily an engine capability PR: it builds out a first-class compute subsystem on the Vulkan backend and integrates it into the render graph. Froxel volumetric fog in the VulkanSponza demo is the first real consumer that proves the path end-to-end — but the durable value is the compute layer, not the fog visual.
+Engine capabilities
+Compute shader programs + pipelines — CreateComputeShaderProgramFromSpv and CreateComputePipeline (vkCreateComputePipelines, compute stage, shared pipeline-layout builder with the graphics path).
+Compute passes in the command model — DispatchCommand, RenderCommandList.ComputePass, and a Compute flag on RenderPassDescription. Executed outside a render pass with explicit storage-image barriers and bind-point-aware descriptor binding (storage in GENERAL, sampled in SHADER_READ_ONLY).
+Graph-native compute — RenderGraph.Dispatch(passHandle, DispatchCommand) records a compute pass's work; Execute emits it in declaration order, so a compute pass declared before a graphics pass that samples its output runs first. Graphics subpass dependencies now include ComputeShaderBit on both edges, so a downstream compute pass can sample a pass's colour/depth output (and a prior compute read is ordered ahead of a rewrite) with no manual barrier.
+Storage images + 3D textures — CreateStorageTexture2D/3D, CreateTexture3D (ImageType.Type3D). No-upload storage targets are left in ShaderReadOnlyOptimal so they're valid to bind as sampled before their first compute write.
+Contract enforcement — the OpenGL backend rejects compute passes with a clear error; compute passes may contain only DispatchCommands and graphics passes none; compute pipelines can't be bound for a draw and graphics pipelines can't be bound for a dispatch; RenderGraph.Dispatch rejects a non-compute pass handle.
+Demo: froxel volumetric fog (VulkanSponza)
+A 128×72×48 RGBA16F view-aligned grid (3D storage texture). A single fused compute pass — declared between the cascade passes and the lit pass — marches each screen column front-to-back, accumulating shadow-aware sun in-scattering (samples the cascade maps, Henyey-Greenstein phase) and Beer-Lambert transmittance. Each slice stores the integrated result, so the lit pass composites with one trilinear fetch: color·transmittance + inScatter. World reconstruction via the camera inverse view-projection, so the clip-Y flip is handled for free and the grid aligns with gl_FragCoord.
+Off by default (it adds a per-frame compute pass): launch with --fog, or toggle live in the overlay Fog scope (density / scatter / phase g / ambient / far). --fog-stress auto-toggles fog to exercise the enabled↔disabled barrier transitions under validation.
+Validation
+Run via tools/run-vulkan-sponza.sh (macOS/MoltenVK; the window can't be screenshotted, so correctness is verified via validation-layer-clean logs). Clean (frame-errors 0, no VUID) in all configurations: fog off (default), fog on, and the on/off stress toggle. Resize is correct by construction — the grid is a fixed resolution independent of the swapchain, and the composite uses the live frame dimensions for screen-UV.
+Known limitations (v1, marked in code)
+Depth slices are linear in world distance; logarithmic/exponential distribution would give better near-camera quality per slice.
+Shadow lookup in the fog is a single cascade texel with a fixed bias (no PCF) — fine while validating the pipeline; widen to a small PCF kernel if shafts shimmer.
+Grid resolution is fixed; it should become a renderer quality preset (quarter/half/full) since the z-march cost scales with it.
+The sky doesn't receive fog (lit geometry only), so there's a faint boundary at the atrium opening.
+KshitijVikramSingh
+and others
+added 20 commits
+May 29, 2026 04:02
+vulkan-sponza: CSM sun shadows, two-sided foliage, V-flip cook config
+…
+dd1654c
+```
+Builds the VulkanSponza scene rendering forward from the IBL scaffold:
+
+- Cascaded sun shadow maps (3 cascades, frustum-slice + texel-snap fit,
+  per-cascade depth targets bound as a Count=3 sampler array, view-depth
+  cascade pick, 3x3 PCF, geometric per-cascade bias, per-cascade frustum
+  culling, alpha-cutout foliage casters). Toggles: C cascade viz, L on/off.
+- Two-sided lit shading (gl_FrontFacing normal flip) for double-sided
+  foliage/curtain back faces.
+- Granular per-import texture V-flip config (AssetImportContext.FlipTextureV,
+  GltfStaticImporter, blix-cook mesh --flip-v) to canonicalise the bottom-up
+  (OpenGL-authored) Intel Sponza UVs to Vulkan's top-down origin. Default off;
+  GL SponzaModern unaffected.
+- Engine: implement deferred array-uniform UBO writes (Matrix4x4ArrayUniform
+  / FloatArrayUniform / Vector3ArrayUniform) with std140 strides (F-009).
+- Candles add-on dropped from the load list.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan: bump transient descriptor pool 1024 -> 4096 for CSM scene
+…
+e6740ac
+```
+The descriptor-ownership refactor's per-frame transient pool allocates one
+set per non-material set per draw. VulkanSponza's cascaded-shadow scene
+issues ~2100 such sets/frame (~455 lit x2 + ~1188 shadow x1), which
+exhausted the 1024-set cap (vkAllocateDescriptorSets ErrorOutOfPoolMemory).
+Bump to 4096 per the pool's documented "bump rather than complicate" knob;
+per-type counts (~3900 image samplers) stay well under 8192.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan-sponza: split shadow casters + diagnostics overlay, drop debug…
+…
+109f6f0
+```
+… hacks
+
+Refinements on top of the descriptor-ownership rebase.
+
+Shadow-caster split (cuts ~900-1100 transient descriptor sets/frame):
+- Opaque casters use a push-only shadow.{vert,frag} (no descriptor sets →
+  zero per-draw transient allocations); only MASK foliage uses the
+  alpha-cutout shadow_mask.{vert,frag} that binds albedo. Routed by cutoff
+  in the cascade draw loop.
+
+Diagnostics overlay (replaces ad-hoc Console logging + hardcoded key toggles):
+- SponzaLoop implements IDebuggable; registers the GPU contributor + itself.
+- Controls: Sun shadows, Visualize cascades, Sun intensity, Ambient (IBL),
+  Exposure, Shadow bias, Fly speed — SunIntensity/AmbientIntensity/BiasTexels
+  promoted from consts to live fields so the panel drives the visible look.
+- Values: shadow-map size, splits, per-cascade caster counts, camera pos.
+- Draw gizmos: sun-direction arrow + the three cascade ortho frustums.
+- Removed the one-shot cull-count Console.WriteLine/Flush and C/L key toggles.
+
+Input rework:
+- Arrow keys drive the camera (forward/back + strafe, alongside WASD).
+- Exposure removed from keys (overlay slider only).
+- Cmd+C toggles the overlay; with it off, Debug() emits no gizmos either
+  (the debug-line pass renders whatever's queued regardless of State).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan-sponza: full tuning panel + arrow-key camera rotation
+…
+6735fc4
+```
+Controls panel was light/toy; make it a real tuning surface, grouped by
+scope (Sun / Shadows / Cascades / Material / Render):
+- Sun: yaw + pitch (live sun angle → relights direct sun + shadows; IBL
+  stays baked), intensity, ambient (IBL).
+- Shadows: shadows on/off, visualize cascades, bias texels, bias slope
+  scale, sun distance (cascade frustum depth).
+- Cascades: frustum-cull toggle + margin, per-cascade far distances.
+- Material: metallic threshold (the "metallic floor" step cutoff, now live),
+  normal-map strength.
+- Render: exposure, fly speed.
+
+Promotes the backing values (sun dir via yaw/pitch, shadowSunDistance,
+cascade splits, slope scale, metallic threshold, normal strength) from
+consts to live fields, and adds a uShaderParams vec4 to the frame UBO wired
+into lit.frag (metallic step / normal scale / shadow-bias slope).
+
+Arrow keys now ROTATE the camera (Left/Right yaw, Up/Down pitch) instead of
+moving — WASD already handles translation.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan-sponza: fix control panel rendering every input twice
+…
+54d039d
+```
+DebugSystem.Run() processes both the registered contributors AND the
+debuggables passed by the host, and the runtime already passes the game
+loop (it implements IDebuggable). Registering the loop too ran its Debug()
+— and re-emitted every control — twice per frame. Drop Register(this);
+keep only the GPU contributor registration.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan-sponza: cut per-frame render-loop allocations (GC stability)
+…
+aff48e7
+```
+The shadow pass allocated ~1100 push byte[]s + ~600 mask binding objects
+every frame; the resulting gen0 GC showed up as build-commands spikes
+(1.6ms baseline → 3.5-7.6ms on ~quarter of frames) and stretched the
+correlated execute time. Reduce hot-path allocations from ~1700 to ~35/frame:
+
+- Opaque casters in a cascade all push identical bytes (identity model +
+  that cascade's VP) → build one buffer per cascade, not per caster.
+- Pre-build each mask drawable's albedo binding array once at load.
+- Pool + reuse mask push buffers across frames (CmdPushConstants copies at
+  record time, so a buffer frees once the frame's commands are recorded).
+- Cache passBindings + identityPush as load-time fields.
+
+Functionally identical; validation-clean. Average FPS remains GPU-bound
+(Intel Sponza ~11.5M tris drawn 4x/frame) — addressed separately.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan-sponza: cache shadow cascades, skip redraw when VP unchanged
+…
+52d7d4c
+```
+The 3 shadow cascades redrew the full ~11.5M-tri scene every frame even
+when nothing moved — the dominant GPU cost and the source of the frame-time
+swing. Cache each cascade's depth map: a texel-snapped cascade VP is
+bit-identical frame-to-frame while the camera + sun + splits hold (and for
+sub-texel camera moves, thanks to the snap), so skip re-recording an
+unchanged cascade's pass entirely. The depth target is persistent and stays
+in ShaderReadOnlyOptimal, which is exactly what the lit pass samples; when a
+cascade does change, its attachment InitialLayout=Undefined accepts the
+prior layout, so re-rendering is hazard-free. Shadows-off also skips the
+passes (the lit shader early-outs) and invalidates the cache.
+
+Measured (static camera, headless): execute 26-46ms -> 19.5-22.9ms,
+build-commands 1.6-7.6ms -> ~0.4ms, frame ~30ms -> ~22ms, validation-clean
+(frame-errors 0). Moving re-renders only the cascades whose snapped VP
+actually shifted (near changes most; far often stays cached).
+
+Overlay shows a per-cascade cache indicator (R = rendered, · = cached).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan-sponza: real per-vertex tangents (MikkT) for normal mapping
+…
+3346b96
+```
+Replaces the screen-space-derivative TBN, which swirled/flipped on sculpted
+or mirrored-UV geometry (lavabo, lion-head fountains) and forced a fade-out
+hack that left those hero surfaces under-detailed.
+
+- New VertexPosition3NormalTangentTexture layout (pos/normal/tangent vec4/uv,
+  48B) alongside the existing one — not a mutation, so the other demos on the
+  shared layout are untouched.
+- AssetImportContext.IncludeTangents (opt-in, default off): the static
+  importer forwards the glTF TANGENT attribute (world-transformed, handedness
+  in .w; MikkTSpace-compatible per spec so no recompute), falling back to a
+  normal-derived tangent if absent. SanitizePackedUVs is now layout-aware.
+- VulkanSponza imports with includeTangents; its lit + shadow pipelines use
+  the tangent layout (sky/present keep the dummy layout). lit.frag builds a
+  real Gram-Schmidt TBN from the forwarded tangent; lit.vert forwards it;
+  shadow shaders read only what they need from the wider layout.
+
+All four Sponza packs ship TANGENT. Validation-clean (frame-errors 0); the
+48B layout verified consistent VB↔pipeline↔shader. execute ~22->~24ms (bigger
+vertices) — a fair trade for correct, stable normal mapping.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan-sponza: cooked .blixprobe IBL (real GGX prefilter)
+…
+202e5e3
+```
+Replaces the procedural analytic-sky IBL — whose specular was a stand-in
+(re-evaluated sky per mip, not a real prefilter) — with a cooked .blixprobe:
+GGX importance-sampled prefiltered specular + cosine irradiance + split-sum
+BRDF LUT, baked from the HDR sky (RGBA16F). Proper roughness-correct
+reflections for metal/stone.
+
+- Implement the previously-stubbed Vulkan CreateTextureCubeHdr /
+  CreateTextureCubeHdrMipped (RGBA16F cube uploads). The single-mip Half[] is
+  face-major (forwards straight to the existing cube path); the mipped probe
+  data is mip-major, so repack to face-major/mip-major once. Size-validated
+  by the existing CreateTextureCube.
+- VulkanSponza loads sky_hdr.blixprobe via BlixProbeReader +
+  EnvironmentBaker.UploadCookedProbe, binds its prefilter/irradiance/BRDF;
+  uEnvMipCount now tracks the probe's prefilter mip count. Falls back to the
+  procedural bake (BakeProceduralIbl) when no probe is present.
+- setup-sponza-modern.sh cooks the probe (best-effort) so a fresh checkout
+  gets real IBL; the lit.frag specular path was already compatible.
+
+Validation-clean (frame-errors 0); probe loads with 5 prefilter mips.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan-sponza: batch opaque draws by material (shared VB/IB)
+…
+53aa203
+```
+Collapses the one-draw-per-primitive scaffold into clean batched draws:
+opaque/mask primitives sharing a glTF material merge into one Material + one
+shared VB/IB (concatenated verts, rebased 32-bit indices — exact, since the
+importer bakes transforms into the vertices). Spatially sub-batched in chunks
+of <=16 (sorted along the group's longest axis) so each merged drawable keeps
+a tight AABB and per-cascade frustum culling stays effective. Mirrors the
+engine's GltfSceneInstance batcher. Blend stays per-primitive (back-to-front
+sorting needs the granularity).
+
+Mainly a correctness/architecture cleanup, but it also cut frame time
+materially: draws 448 -> 47, frame ~22 -> ~13ms, build-commands ~0.4 -> ~0.08ms
+(MoltenVK per-draw encoding overhead was bigger than the timers implied).
+Validation-clean; culling preserved (cascade casters 45/47/47).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan-sponza: overcast daylight IBL probe + runtime sun over it
+…
+becaf5a
+```
+The kloppenheim sunset probe lit the atrium poorly (low sun, occluded) and
+its sun fought the runtime sun. Switch to a sunless overcast HDR (Poly Haven
+rogland_overcast_4k): bright, even daylight that actually fills the closed
+atrium, with NO baked sun — so the demo's own directional sun (default +
+overlay yaw/pitch) is the key light + shadow caster, sitting over the
+probe's ambient. We don't align the runtime sun to the probe (nothing to
+align to).
+
+- Demo loads probes by preference: rogland_overcast_4k → sky_hdr → procedural.
+- Cooked at 512 env / 256 prefilter (was 256/128) so the sky background and
+  reflections are sharper.
+- setup-sponza-modern.sh prefers the overcast HDR and cooks at the higher res.
+
+Validation-clean (frame-errors 0); 512px RGBA16F env + 256px prefilter cubes
+upload fine through the HDR cube path. HDR/probe live in the untracked assets
+tree (rogland_overcast_4k.hdr from Poly Haven).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan-sponza: prefer sun-bearing HDR probe + auto-align the sun
+…
+45a8a75
+```
+The overcast probe was too flat (low light/dark contrast) for crisp shadows.
+Prefer autumn_field_4k (Poly Haven, has a sun): high-contrast IBL plus a real
+sun to align to. Probe order is now autumn_field → rogland overcast → sky_hdr
+→ procedural.
+
+Sun alignment is automatic and correct for both kinds of map: HdrSunFinder
+returns null when there's no clear sun, so the demo seeds its directional sun
+(key light + shadow caster) from the probe's detected sun ONLY when the map
+has one (autumn_field aligns; rogland keeps our own sun). FROM-sun-into-scene
+convention, matching sunDirection.
+
+Validation-clean (frame-errors 0); sun detected at ~29deg elevation and the
+directional light snapped to it.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan: compute shader program + pipeline creation (Phase 1a)
+…
+fe8a15c
+```
+First step toward compute support: CreateComputeShaderProgramFromSpv (single
+compute-stage program, reusing the existing descriptor-set-layout machinery —
+StorageImage/StorageBuffer/Compute-stage mapping already existed) and
+CreateComputePipeline (vkCreateComputePipelines). Extracts the shared
+pipeline-layout build (set layouts + push ranges) used by both graphics and
+compute. Destruction handles the compute module.
+
+Not yet dispatchable — the command-model dispatch path + executor + storage-
+image binding/barriers land next. Builds clean.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan: compute dispatch end-to-end (Phase 1b)
+…
+e5f3aac
+```
+Compute passes now actually execute. Command model gains a DispatchCommand +
+RenderCommandList.ComputePass (a compute marker on RenderPassDescription); the
+Vulkan executor records it outside any render pass — pre-barriers each storage-
+image target to GENERAL (discard, fully rewritten), writes a transient
+descriptor set (BindTransientDescriptorSets now takes a bind point + binds
+StorageImage descriptors in GENERAL vs sampled in shader-read), pushes
+constants, vkCmdDispatch, then post-barriers the targets to SHADER_READ so a
+later graphics pass can sample them. GL backend rejects compute passes.
+
+New CreateStorageTexture2D (STORAGE|SAMPLED image). VulkanSponza carries a
+Phase-1 smoke test: a compute pass writes a UV gradient into a 256x256 storage
+image each frame. Validation-clean (frame-errors 0, no VUID) end-to-end:
+program → pipeline → dispatch → storage descriptor → barriers.
+
+Pairs with fe8a15c (compute program + pipeline creation). 3D textures + the
+froxel grid build on this next.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan: 3D textures + storage (Phase 2)
+…
+6aee817
+```
+3D texture support on the Vulkan backend (ImageType.Type3D):
+- CreateStorageTexture3D — compute-writable + sampleable volume grid
+  (STORAGE|SAMPLED, no initial data), the froxel-grid foundation. Single
+  mip/layer; depth in the extent, so the existing storage barriers apply.
+- CreateTexture3D — sampled 3D texture with initial data (staging upload),
+  fulfilling the IGraphicsDevice stub. Shared CreateImage3D helper.
+
+The compute smoke test now writes a 64x64x32 3D storage texture each frame
+(3D imageStore, 4x4x4 work groups), validating the 3D compute path end to
+end. Validation-clean (frame-errors 0). Next: the froxel scattering grid
+fills this and the composite samples it.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan: froxel volumetric fog (Phase 3+4) + graph-native compute
+…
+4671263
+```
+Completes the compute layer arc — the froxel fog is its first real
+consumer, integrated through the render graph rather than dispatched
+imperatively.
+
+Graph-native compute:
+- RenderGraph.Dispatch(passHandle, DispatchCommand) records a compute
+  pass's work for the frame; Execute emits it as a ComputePass in
+  declaration order, so a compute pass declared before a graphics pass
+  that samples its output runs first.
+- Graphics passes' subpass dependencies now include ComputeShaderBit on
+  both edges, so a downstream compute pass can sample a pass's colour/
+  depth output (and a prior compute read is ordered before a rewrite)
+  without a manual barrier.
+
+Froxel fog (Blix.Demos.VulkanSponza):
+- A 160x90x64 RGBA16F view-aligned grid (3D storage texture). The
+  froxel.comp pass — declared between the cascade passes and the lit
+  pass — marches each screen column front-to-back, accumulating
+  shadow-aware sun in-scattering (sampling the cascade maps, HG phase)
+  and Beer-Lambert transmittance; each slice stores the integrated
+  result so the lit pass composites with one trilinear fetch
+  (color*transmittance + inScatter). World reconstruction via the
+  camera inverse view-projection, so the clip Y flip is handled for free
+  and the grid aligns with gl_FragCoord.
+- Overlay Fog scope: enable, density, scatter albedo, phase g, ambient,
+  far distance.
+
+Replaces the Phase-1/2 compute smoke test (compute_test.comp removed).
+Validation-clean: 5520 frames, frame-errors 0, no VUID.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan: froxel fog — fix phase sign, tame density, halve cost, defaul…
+…
+e8521a7
+```
+…t off
+
+Addresses the fog looking "static / not nice" and costing FPS:
+
+- Phase-function sign bug: the HG scattering angle is between the sun's
+  travel direction and the ray toward the camera (-rayDir), not +rayDir.
+  The old sign turned forward-scatter into back-scatter, putting the
+  bright halo on the wrong side of the sky — it read as a flat wash that
+  didn't track the light. Now crepuscular shafts brighten toward the sun.
+- Defaults were a near-opaque wash (~4% visibility by 60 m). Density
+  0.06→0.018, scatter 0.9→0.6, ambient 0.02→0.005 — a subtle haze that
+  lets the shadow-driven shafts show through. Tune live in the Fog scope.
+- Grid 160x90x64 → 128x72x48 (~half the froxels / shadow samples).
+- Fog now off by default (it adds a per-frame compute pass); launch with
+  --fog or toggle it in the overlay.
+
+Validation-clean (frame-errors 0, no VUID).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan: leave unwritten storage 3D textures in ShaderReadOnly
+…
+b3a4c29
+```
+With froxel fog off by default the grid is bound by the lit pass but never
+written by the compute, so it sat in Undefined layout — the lit shader
+statically references uFroxelGrid (inside the uFog.w branch), so the
+validation layer would flag the descriptor's layout mismatch and sampling
+Undefined-layout memory is UB. CreateStorageTexture3D now does a one-time
+Undefined→ShaderReadOnly transition for no-upload storage targets, so
+they're valid to bind before their first compute write. The compute
+pre-barrier uses oldLayout=Undefined, so it discards this on first write.
+
+Adds the Undefined→ShaderReadOnly case to TransitionImageLayout.
+Validation-clean with fog off (the previously-untested default path).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+vulkan: enforce compute/graphics pass contracts + readability pass
+…
+8b95557
+```
+Review follow-ups before merge:
+
+- Record order = frame order: the froxel dispatch is now recorded after
+  the shadow scopes and before the lit scope in OnRender, instead of
+  after the lit scope relying on graph declaration order. Execution is
+  still graph-order; the code just no longer reads misleadingly. Comment
+  spells out the invariant.
+- Contract enforcement (previously only conventions in comments):
+  * RenderGraph.Dispatch rejects a non-ComputePass handle.
+  * A compute pass may contain only DispatchCommands; a graphics pass
+    may contain none — both throw otherwise.
+  * Pipelines carry IsCompute; binding a compute pipeline for a draw or
+    a graphics pipeline for a dispatch throws.
+  (The OpenGL backend already rejects compute passes clearly.)
+- "Disabled means never sample" invariant made explicit; v1
+  simplifications marked in froxel.comp (linear z slices, single-tap
+  shadow lookup, fixed grid resolution → future quality preset).
+- --fog-stress auto-toggles fog every 90 frames to exercise the
+  enabled<->disabled storage-image barrier transitions. Validation-clean
+  across 5400 frames (~60 toggles), frame-errors 0, no VUID.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+test(graph): L.14 — Dispatch rejects non-compute pass handle
+…
+9523690
+```
+Locks the compute-pass dispatch contract with a CPU-only test (test-mode
+graph, no live device): graph.Dispatch against a graphics-pass handle
+throws "not a ComputePass"; against a compute-pass handle it's accepted.
+143/143 graph tests pass.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+KshitijVikramSingh
+mentioned this pull request
+May 30, 2026
+VulkanSponza rendering polish — tonemap, glass, shadows, MSAA
+#3
+Merged
+KshitijVikramSingh
+merged commit ee8007a
+into
+main
+May 30, 2026
+This was referenced May 30, 2026
+VulkanSponza perf: depth pre-pass + BC-compressed textures
+#4
+Merged
+Core Integrity Pass — conventions index, Section AJ tests, demo Proves/Owns
+#25
+Merged
+Bulwark — game #2 (tower defense): picking, A* nav, skinned-mesh instancing
+#26
+Merged
+KshitijVikramSingh
+added a commit
+that referenced
+this pull request
+Jun 4, 2026
+Merge pull request #26 from KshitijVikramSingh/bulwark
+…
+f694290
+```
+Bulwark — game #2 (tower defense): picking, A* nav, skinned-mesh instancing
+```
+KshitijVikramSingh
+mentioned this pull request
+Jun 4, 2026
+engine: extract the sun-shadow technique (carefully — not a scene renderer)
+#27
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

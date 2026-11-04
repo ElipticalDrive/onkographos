@@ -1,0 +1,111 @@
+--- v001.md
++++ v002.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-NanoVolumeHDDA is an iterator that traverses a `NanoGrid` along a ray to yield merged active spans $(t_0, t_1)$ without heap allocations, using a callback interface [S1, unofficial]. It merges adjacent active leaves and tiles to eliminate seam artifacts at 8-voxel tile edges [S1, unofficial]. It builds on [Hierarchical Digital Differential Analyzer (HDDA)](1122-hierarchical-digital-differential-analyzer-hdda.md) by operating specifically on the `NanoGrid` structure and optimizing for zero-allocation iteration [S1, unofficial].
++NanoVolumeHDDA is an iterator that traverses a `NanoGrid` along a ray to yield merged active spans $(t_0, t_1)$ without heap allocations [S1, unofficial]. It merges adjacent active leaves and tiles to eliminate seam artifacts at 8-voxel tile edges [S1, unofficial]. It builds on [Hierarchical Digital Differential Analyzer (HDDA)](1122-hierarchical-digital-differential-analyzer-hdda.md) by operating specifically on the `NanoGrid` structure and optimizing for zero-allocation iteration [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A `NanoGrid` (containing the sparse voxel data), a `Ray` (origin and direction), and a callback function `f(t0, t1)` to receive active spans.
+-**Outputs:** Calls to `f` with `TimeSpan` structs representing merged active regions along the ray in front-to-back order.
++**Inputs:** A `NanoGrid` (containing the sparse voxel data), a `Ray` (origin and direction) [S1, unofficial].
++**Outputs:** `TimeSpan` structs representing merged active regions along the ray in front-to-back order, yielded via an iterator protocol that internally invokes a callback [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -32,10 +32,10 @@
+ 1.  **Collect Root Hits:**
+     Iterate `i` from 0 to `root_count - 1`.
+-    *   Calculate entry pointer `ep = root_pos + i * entry_sz`.
++    *   Calculate entry pointer `ep = root_pos + i * entry_sz` [S1, unofficial].
+     *   Load `is_child` from buffer at `ep + 12`. If `is_child != 0x01`, continue to next `i` [S1, unofficial].
+     *   Load `i2_off` from buffer at `ep + 13` [S1, unofficial].
+     *   Load `origin` from buffer at `i2_off` [S1, unofficial].
+     *   Construct an AABB with `origin` as the center and size 4096.0 (extending to `origin + (4096, 4096, 4096)`) [S1, unofficial].
+-    *   Intersect `ray` with this AABB. If the intersection is valid (not nothing), let `hit[1]` be the entry time `tmin`. Store `(tmin, i2_off)` in the `roots` list [S1, unofficial].
++    *   Intersect `ray` with this AABB. If the intersection is valid, let `hit[1]` be the entry time `tmin`. Store `(tmin, i2_off)` in the `roots` list [S1, unofficial].
+     *   Break if the number of roots exceeds `_MAX_ROOTS` (8) [S1, unofficial].
+ 
+@@ -48,5 +48,5 @@
+ 
+ 4.  **Iterate (Callback Loop):**
+-    The iteration proceeds by calling an internal advance function `_hdda_advance` which manages two phases.
++    The iteration proceeds by calling an internal advance function `_hdda_advance` which manages two phases [S1, unofficial].
+ 
+     **Phase 1: I1 (Leaf) DDA Loop**
+@@ -68,5 +68,5 @@
+         *   Check `has_child` by testing if the child mask bit `cidx` is set at `s.i2_off + _I2_CMASK_OFF` in the buffer [S1, unofficial].
+         *   If `has_child` is true:
+-            *   Calculate `tidx` using `_buf_count_on_before` to determine the offset of the child node [S1, unofficial].
++            *   Calculate `tidx` using `_buf_count_on_before` to determine the child index count [S1, unofficial].
+             *   Load `i1_off` for the child node [S1, unofficial].
+             *   Construct an I1 AABB with size 128.0 centered at the child's origin [S1, unofficial].
+@@ -102,5 +102,5 @@
+     root_count = grid.root_count
+     root_pos = grid.root_buffer_ptr
+-    entry_sz = grid.root_entry_size # Typically 16 bytes based on offsets
++    entry_sz = grid.root_entry_size  # Typically 16 bytes based on offsets
+     
+     for i in range(root_count):
+@@ -122,10 +122,14 @@
+             roots.append((tmin, i2_off))
+         
+-        if len(roots) >= 8: # _MAX_ROOTS
++        if len(roots) >= 8:  # _MAX_ROOTS
+             break
+             
+-    # 2. Sort Roots
+-    roots.sort(key=lambda x: x[0])
+-    
++    # 2. Sort Roots (Insertion Sort)
++    for i in range(1, len(roots)):
++        j = i
++        while j > 0 and roots[j][0] < roots[j-1][0]:
++            roots[j], roots[j-1] = roots[j-1], roots[j]
++            j -= 1
++            
+     if not roots:
+         return
+@@ -189,5 +193,5 @@
+         if has_child:
+             tidx = _buf_count_on_before(buf, s['i2_off'] + _I2_CMASK_OFF, cidx)
+-            i1_off = get_child_offset(buf, s['i2_off'], tidx) # Implementation detail for offset calculation
++            i1_off = get_child_offset(buf, s['i2_off'], tidx)
+             i1_origin = get_node_origin(buf, i1_off)
+             
+@@ -229,13 +233,29 @@
+         
+     return None, s
++
++# Helper definitions (standard buffer/DDA operations)
++def read_byte(addr): return buf[addr]
++def read_int(addr): return buf[addr:addr+4]
++def read_vec3(addr): return vec3(buf[addr], buf[addr+4], buf[addr+8])
++def intersect_bbox(ray, min, max):
++    # Standard slab intersection; returns hit object with entry_time or None
++    pass
++def node_dda_inside(ndda): return ndda.t < ndda.t_max
++def node_dda_child_index(ndda): return ndda.cidx
++def _buf_mask_is_on(buf, mask_addr, cidx): return (buf[mask_addr] >> cidx) & 1
++def node_dda_cell_time(ndda): return ndda.t
++def step_ndda(ndda): ndda.t += ndda.step; ndda.cidx += 1
++def _buf_count_on_before(buf, mask_addr, cidx): return sum(1 for i in range(cidx) if (buf[mask_addr] >> i) & 1)
++def get_child_offset(buf, parent_off, tidx): return parent_off + tidx * child_stride
++def get_node_origin(buf, off): return read_vec3(off)
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Proportional to the number of active tiles and leaves traversed, with logarithmic overhead for hierarchical stepping. The root collection is bounded by `_MAX_ROOTS` (8).
+-*   **Memory Complexity:** $O(1)$ auxiliary memory per ray traversal instance (excluding the grid itself), as it uses a callback interface and avoids heap allocations for span lists [S1, unofficial].
+-*   **Strengths:** Zero-allocation iteration makes it suitable for GPU kernels or high-performance CPU loops where memory fragmentation or GC pressure is a concern. Merging spans reduces the number of shader invocations.
+-*   **Limitations:** Bounded root count (8) may miss intersections in highly fragmented scenes if not handled by the caller. Specific to `NanoGrid` structure.
+-*   **When to use:** When rendering sparse voxel grids (VDB) with `NanoGrid` and performance/zero-allocation is critical.
+-*   **When not to use:** For dense grids where linear traversal might be faster, or if the grid structure does not support the `NanoGrid` format.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** $O(1)$ auxiliary memory per ray traversal instance, as it avoids heap allocations for span lists [S1, unofficial].
++*   **Strengths:** Zero-allocation iteration makes it suitable for GPU kernels or high-performance CPU loops where memory fragmentation or GC pressure is a concern [S1, unofficial]. Merging spans reduces the number of shader invocations [S1, unofficial].
++*   **Limitations:** Bounded root count (8) may miss intersections in highly fragmented scenes if not handled by the caller [S1, unofficial]. Specific to `NanoGrid` structure [S1, unofficial].
++*   **When to use:** When rendering sparse voxel grids (VDB) with `NanoGrid` and performance/zero-allocation is critical [S1, unofficial].
++*   **When not to use:** For dense grids where linear traversal might be faster, or if the grid structure does not support the `NanoGrid` format [S1, unofficial].
+ 
+ ## Background

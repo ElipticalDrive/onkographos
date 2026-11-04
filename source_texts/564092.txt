@@ -1,0 +1,163 @@
+It is based on DDGI, more material: jcgt.org entry Full talk, mirror First we'll start using the voxelized results from VCT. Afterwards once we have Raytracing, we'll also allow to use Raytracing instead; since both are very similars (wi...
+
+Implement Irradiance Fields · Issue #29 · OGRECave/ogre-next · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Implement Irradiance Fields #29
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Implement Irradiance Fields#29
+Copy link
+Assignees
+Labels
+TaskenhancementNew feature or requestNew feature or request
+Description
+darksylinc
+opened on Sep 30, 2019
+Issue body actions
+It is based on DDGI, more material:
+jcgt.org entry
+Full talk, mirror
+First we'll start using the voxelized results from VCT. Afterwards once we have Raytracing, we'll also allow to use Raytracing instead; since both are very similars (with VCT we shoot cones instead of rays)
+Update 2019-09-29:
+Wrote the C++ code, but it still doesn't fill all buffers required by the compute shader. There's probably not much more to do from this end.
+Started the compute shader. The concept is very simple, but I had a lot of trouble thinking how to best schedule the compute threads and distribute the work. I ended up assigning one thread per ray/cone, and flattening the whole compute (i.e. it's 1D rather than 2D; although strictly speaking we need to use 2D if we exceed more than 65535 workgroups) and de-flattening based on ray index. It was complex because it was hard to translate values back and forth to all these different representations:
+Irradiance field is a 3D field (3D grid of probes)
+But the probes are stored in two 2D textures (not 3D)
+The two 2D textures, depth and colour, have different resolutions! At least depth resolution must be multiple of colour resolution.
+Each depth pixel can have multiple rays. We force the same number of rays per pixel to all pixels
+If each probe has a 16x16 depth texture and 8x8 colour texture, that means each colour pixel has 4x the number of rays per pixel.
+VCT means there's also another 3D texture (with its own resolution)
+The original DDGI implementation distributed the probe update over multiple frames. In the end, I've decided to allow updates at per probe granularity (i.e. not at per ray granularity), otherwise blending of old and new results becomes too hard (too many synchronization/locking, memory and accuracy trade offs to think about).
+Update 2019-10-04:
+Pixel Shaders for rendering:
+It works!!! Colour Irradiance Field is working
+Masking probes behind geometry is also working
+Depth-aware masking is working, but doesn't produce good results yet. I suspect it's because we're defaulting to one ray per pixel, which forces variance to be 0
+There are a few artifacts. I suspect it has to do with how we're currently performing the ray(cone) tracing. Our rays/cones are too narrow, thus it can capture distant bright objects with a lot of brightness.
+Activity
+darksylinc
+added
+enhancementNew feature or requestNew feature or request
+Task
+on Sep 30, 2019
+darksylinc
+self-assigned this
+on Sep 30, 2019
+darksylinc
+added 9 commits that reference this issue on Oct 5, 2019
+Bugfix: Class 'Texture' and 'TexturePtr' were being forward declared,…
+...
+0112c52
+Added IrradianceFieldSettings::createSubsamples
+...
+e35a3e4
+Started integrating IF into the samples. Compute shader doesn't compi…
+...
+9ef98c0
+Bugfix: thread distribution across workgroups was flawed. Fixed (WIP,…
+...
+0aced4a
+Fixed reduction bugs
+...
+86b3cdc
+Added pixel shader to render the Irradiance Fields with Depth
+...
+2e5ed92
+IFD is beginning to work.
+...
+ffe2db1
+Colour IFD works!
+...
+e1aeaa8
+Mask probes behind geometry
+...
+a186b79
+darksylinc commented on Oct 14, 2019
+darksylinc
+on Oct 14, 2019
+Last edited by darksylinc
+MemberAuthor
+More actions
+Updated the main comment.
+Performance is great. Apples to Apples IFD is running at 1.5ms per frame vs 3.5ms for VCT (diffuse only). There's a bit of quality degradation though (VCT has superior quality). This is expected. But the cost vs quality tradeoff is really good.
+There's a few bugs remaining though:
+Sharp artifacts on distant objects
+This can either be something very silly: dir.y = -dir.y; in getIrradianceFieldXY may just be wrong. If I remove that bit of code, these artifacts get much less notorious
+Another possibility is that the generation of the probes in IrradianceFieldGenFromVct_piece_cs.any needs to shoot more rays and blend wider angles.
+Additionally blending more rays is needed to improve the depth-aware filter, which right now is producing horrible results due to only considering one ray per pixel
+Precision artifacts generating noise
+Some scenes produce very noticeable noise artifacts:
+Which animate as the camera rotates. I look into this in detail, all points to precision errors due to normals being in view space, thus octahedronMappingEncode ends up warping some directions to entirely different texels, due to octahedronMappingWrap being sharp.
+I hope I can fix this by quantizing the normals.
+darksylinc
+added a commit that references this issue on Oct 14, 2019
+Quantize direction to fix noise artifacts
+...
+a599430
+darksylinc commented on Oct 14, 2019
+darksylinc
+on Oct 14, 2019
+Last edited by darksylinc
+MemberAuthor
+More actions
+Ok that was fast!
+Note: All of the pictures have been taken with depth-aware disabled. Comment this line:
+weight *= variance / ( variance + dev * dev );
+Also, we're showing GI contribution only by modifying 200.BRDFs_piece_ps.any:
+```
+finalColour += pixelData.envColourD * pixelData.diffuse.xyz * fresnelD +
+                   pixelData.envColourS * pixelData.specular.xyz * fresnelS;
+finalColour = pixelData.envColourD; //Override
+```
+First bug was fixed by not flipping dir.y; it appears that is the correct path.
+The second bug was indeed fixed by quantizing the direction. There's still some remnants of small flickering pieces of geometry due to the octahedron encoding, but nothing major.
+There's also some artifacts but they're not easy to see unless you pay really close attention. These differences were obtained by increasing the quantization factor from 2048 to 131072:
+Since these differences are not obvious unless shown side by side, I won't try to fix it.
+It seems the 'biggest' task that remains is to improve generation so that variance isn't 0.
+And after that, a few more TODOs:
+Only use ambient lighting if object is outside IFD probe; i.e. do the same we perform with vct_ambient_hemisphere but when IFD is active
+Allow specular VCT to coexist with IFD diffuse
+Color should be resolved from normal but visibility from -dir.
+darksylinc
+added 2 commits that reference this issue on Oct 19, 2019
+Bugfix: IFD's Depth evaluation was in the wrong space. It looks much …
+...
+8cbc502
+Support VCT + IFD hybrids, where IFD is used for diffuse and VCT is u…
+...
+19356c4
+darksylinc
+added a commit that references this issue on Apr 5, 2020
+Quantization workaround can be relaxed MUCH more now
+...
+3f2d626
+darksylinc
+closed this as completedon Aug 5, 2020
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+darksylinc
+Labels
+TaskenhancementNew feature or requestNew feature or request
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

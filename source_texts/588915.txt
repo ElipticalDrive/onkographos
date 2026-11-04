@@ -1,0 +1,401 @@
+A realtime 3D engine for Flutter. Contribute to bdero/flutter_scene development by creating an account on GitHub.
+
+Live widget trees on scene surfaces, scene raycasting, and scene pointers by bdero · Pull Request #170 · bdero/flutter_scene · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+bdero
+commented
+Jun 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Adds live widget trees on scene surfaces, scene raycasting with interpolated hit attributes, and programmatic scene pointers.
+Scene raycasting
+Scene.raycast/raycastAll test the rendered meshes directly (no colliders or physics setup) and return typed hits: distance, world point, geometric normal, barycentric weights, triangle index, and the texture coordinate interpolated from the vertex data, so a hit on any shape carries the surface UV.
+Filtering: invisible subtrees skipped by default, a layer mask against Node.layers, the new Node.raycastable flag, and an optional predicate. Distinct from the physics queries, which test collision shapes.
+The base Geometry retains the uploaded vertex/index data (a reference, not a copy), so procedural, imported, and payload-backed geometry all participate.
+Widget surfaces
+WidgetComponent places a live widget subtree on a surface: the widget keeps running (state, tickers, animations) while SceneView hosts it invisibly and streams its output into a texture. Zero-config use creates an aspect-correct alpha-blended quad; bring your own geometry or material (implicit binding for built-ins, a bind callback otherwise), or bindOnly for surfaces that already exist (a screen inside an imported model). Dialogs and dropdowns render inside the texture.
+Captures default to once per frame (WidgetUpdatePolicy.everyFrame), throttled to one in flight; recording reuses the child's retained layers, so the steady cost is rasterizing content that actually changes. Per-frame is the only trigger that observes repaints inside the child's own repaint boundaries (scrollable items, progress indicators), which update their layers without notifying ancestors. interval and manual policies throttle further. Captures round-trip through the CPU today (a few ms at panel sizes); a future engine API moves them to the GPU with no change to this surface.
+WidgetTexture is the low-level capture primitive underneath.
+Input
+Automatic by default: platform pointers raycast into the scene and presses, drags, and scrolls (mouse wheel and trackpad pan-zoom) forward into the widgets at the hit UV, on any geometry, blocked by occluding geometry, with pointer capture keeping drags alive at surface edges. The forwarding never enters gesture arenas.
+ScenePointer for programmatic input (crosshairs, gamepad cursors): point it along any ray or screen position (Camera.screenPointToRay), then press/release/scroll. Occlusion filtering and interaction filtering are independent masks, and pointers carry independent capture and hover.
+SceneView.debugWidgetInput overlays the pointer's hit node, UV, and distance.
+Supporting changes
+MaterialInputs.normal (the lit .fmat surface) now defaults to the interpolated surface normal instead of a constant (0, 0, 1); a Surface() that never assigned it previously shaded flat, silently.
+UnlitMaterial.alphaMode (opaque/blend) routes unlit surfaces through the translucent pass.
+Surface.lastSwapchainColorTexture exposes the previous frame's color texture for one-frame feedback effects.
+Fixed vertically flipped texturing on the cuboid and wedge primitives (face UVs had v = 0 on the bottom edge; the engine convention puts v = 0 at the top of the image). This is the one behavior change existing users might notice, and the golden screenshot diffs on textured primitives are this fix landing.
+Example
+The widget-texture example is a CRT television: a dome-curved screen (raycast input through real interpolated UVs), a VHS .fmat effect (tape wave, crease, head-switching noise, chromatic bloom, AC beat, each a parameter) consuming the live capture as emissive light on black glossy tube glass, and a scrollable in-screen control panel whose sliders drive the effect distorting it, plus brightness/gloss controls and a one-frame-feedback "recursive" toggle.
+The stress tests' environment menu and lighting panel (skybox, exposure, IBL intensity, environment rotation) moved to shared example helpers used by both scenes, and the examples share a free-look camera helper (the stress tests' control scheme).
+Guide: WIDGETS.md. All 504 tests pass; verified interactively on macOS.
+bdero
+added 12 commits
+June 10, 2026 16:43
+Add WidgetTexture: live widget subtrees as scene textures
+…
+dd65bd2
+```
+Hosts a widget subtree that stays fully live (state, tickers, and
+animations run normally) but never paints to the screen, and streams
+its visual output into a texture for sampling by scene materials. The
+subtree is recorded into a detached layer whenever it repaints (a
+static subtree costs nothing per frame), rasterized and read back
+asynchronously, throttled to one capture in flight with skipped
+intermediates, and uploaded to the controller's texture.
+
+The controller also forwards pointer input: events synthesized at a
+texture-space UV are hit-tested against the hosted subtree and
+dispatched through the gesture system, so taps and drags raycast
+against scene geometry drive the widgets (buttons, drags, scrollables).
+Hover needs MouseTracker integration and is left as a TODO, as is
+keeping captures on the GPU once the engine can wrap a ui.Image as a
+flutter_gpu texture.
+
+The example app gains a Widget Texture example: an animated panel with
+a working button textured onto a rotating cuboid, with tap and drag
+raycasts mapped to panel UVs.
+```
+Fix vertically flipped texturing on cuboid and wedge primitives
+…
+4f3bb7a
+```
+The cuboid and wedge face UVs put v = 0 on the bottom edge of each
+face, while the engine's texture convention is the glTF one (v = 0 at
+the top of the image, matching how image rows are uploaded and what
+imported models author). Any image textured onto these primitives
+rendered vertically flipped; the sphere already followed the
+convention.
+```
+Expose the previous frame's color texture on Surface
+…
+c4be998
+```
+Surface.lastSwapchainColorTexture returns the most recently issued
+swapchain color texture for a view. The ring guarantees it is not the
+texture being rendered this frame, so materials can sample it for
+one-frame feedback effects (the scene's own output appearing inside the
+scene). The Widget Texture example gains a recursive toggle that swaps
+the panel between the live widget capture and the scene's previous
+frame.
+```
+Add scene raycasting against render geometry
+…
+efc04cc
+```
+Scene.raycast and Scene.raycastAll cast a ray through the rendered
+meshes (no colliders or physics setup) and return typed hits with the
+distance, world point, geometric normal, barycentric weights, triangle
+index, and the texture coordinate interpolated from the vertex data, so
+a hit on any shape carries the surface UV at the intersection. Distinct
+from the physics queries, which test collision shapes.
+
+Filtering: invisible subtrees are skipped by default (includeInvisible
+opts in), nodes must intersect the layer mask, carry the new
+Node.raycastable flag (disable for geometry that renders but should be
+transparent to rays), and pass an optional predicate. Nearest-hit and
+sorted-all variants share one traversal with node-bounds early-outs.
+Both faces hit; skinned meshes test at rest pose; custom vertex layouts
+and non-triangle topology are skipped.
+
+The base Geometry now retains the uploaded vertex/index data (a
+reference, not a copy) so all geometry paths are raycastable. The
+widget-texture example drops its bespoke quad intersection for
+scene.raycast, gaining occlusion and shape independence.
+```
+Factor the free-look camera into a shared example helper
+…
+45413dd
+```
+The navigation-route example's free inspection camera (WASD plus
+space/shift movement, drag to look) moves to a reusable QuakeCamera
+helper, and the widget-texture example adopts it: a drag starting on
+the widget panel forwards to the widgets as before, while a drag
+anywhere else looks around, so occlusion can be tested from arbitrary
+viewpoints.
+```
+Use the stress tests' control scheme for the shared free-look camera
+…
+b3a7800
+```
+QuakeCamera adopts the stress-test conventions: Q/E moves down/up,
+holding shift boosts speed, strafing ignores pitch (looking down no
+longer drifts into the floor), forward is -Z at rest, and key repeats
+keep held keys alive. The stress tests now use the shared helper (their
+bespoke camera state and movement code are deleted), and the
+navigation-route hint text reflects the new bindings.
+```
+Add WidgetComponent with SceneView hosting and update policies
+…
+97bcb02
+```
+WidgetComponent places a live widget subtree on a scene surface with
+one component: it owns the capture controller and the binding of the
+captured texture to a material, and SceneView hosts the subtree
+invisibly (discovered through the render scene's registry), wrapped in
+its own Overlay so dialogs and dropdowns render inside the texture.
+
+Three setup tiers share the component: zero config (an aspect-correct
+unlit alpha-blended quad is created), custom geometry (any surface with
+0..1 UVs), and custom material via implicit binding for the built-in
+materials or a bind callback for everything else. bindOnly creates no
+mesh at all, for screens that already exist in imported models. The
+texture object is stable across captures and replaced only on capture
+size changes; bind re-fires exactly on replacement.
+
+Captures follow a WidgetUpdatePolicy: onRepaint (default), interval, or
+manual via the controller's requestCapture. UnlitMaterial gains an
+alphaMode (opaque or blend) so unlit surfaces can route through the
+translucent pass. The widget-texture example moves onto the component.
+```
+Front-face the widget quad and back the example panel with a box
+…
+538a897
+```
+The component's owned quad was wound against the engine's front-face
+convention, so it rendered invisible from the default viewpoint; its
+vertex order, winding, and UVs now mirror the cuboid primitive's +Z
+face. The example's spinning panel gains a slightly extruded solid
+backing box, so it reads as an object with depth and stays visible from
+behind.
+```
+Add ScenePointer and automatic widget-surface input
+…
+bfb16de
+```
+ScenePointer is a programmatic pointer into a scene (a crosshair, a
+gamepad cursor, a VR laser): the caller supplies the ray (pointAt from
+a screen position via the new Camera.screenPointToRay, or pointAlong),
+and the pointer owns the raycast, UV mapping, event forwarding,
+capture, and hover state. Filtering has two axes: the occlusion set
+(layerMask, predicate, reach) controls what the ray hits, and
+interactionMask controls which widget surfaces respond, so a wall
+blocks a press without ever being interactive. While pressed, the
+interaction is captured to the pressed surface (moves route to it even
+when the ray slides off, holding the last UV at the edge), and
+pressTravel exposes the down-to-up travel for click-versus-drag
+discrimination. Pointers are independent: each carries its own
+forwarding id, capture, and hover.
+
+WidgetComponent gains an input mode, and SceneView forwards platform
+pointers automatically through a built-in ScenePointer behind a
+translucent Listener (presses forward only when the nearest hit is an
+automatic-input widget surface; everything else passes through). The
+forwarding state machine is now per-pointer-id, so concurrent pointers
+never share capture, and the controller gains pointerScroll for
+scrollables. SceneView.debugWidgetInput overlays the pointer's hit
+node, UV, distance, and a marker at the pointer position.
+
+The example drops its manual forwarding for automatic input, gates the
+camera-look drag to off-panel starts, and enables the debug overlay.
+```
+Center the widget-input debug chip so app chrome does not cover it
+b346ffd
+Prepare 0.18.0 notes and add the widget-surfaces guide
+…
+30e4b3c
+```
+Bumps the version, writes the 0.18.0 CHANGELOG section (scene
+raycasting, WidgetComponent, automatic and programmatic input, the
+unlit alpha mode, the previous-frame surface texture, and the primitive
+UV orientation fix), and adds WIDGETS.md, the guide for placing live
+widget trees on scene surfaces: setup tiers, update policies, the input
+ladder, raycasting, and current limitations.
+```
+Bump workspace constraints to flutter_scene 0.18.0
+94cb82a
+bdero
+added
+the
+roadmap
+Planned long-horizon work owned by maintainers.
+label
+Jun 11, 2026
+argos-ci
+Bot
+commented
+Jun 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+The latest updates on your projects. Learn more about Argos notifications ↗︎
+Build
+Status
+Details
+Updated (UTC)
+android_gles (Inspect)
+✅ No changes detected
+-
+Jun 11, 2026, 5:49 AM
+android_vulkan (Inspect)
+✅ No changes detected
+-
+Jun 11, 2026, 5:49 AM
+linux (Inspect)
+✅ No changes detected
+-
+Jun 11, 2026, 5:44 AM
+web (Inspect)
+✅ No changes detected
+-
+Jun 11, 2026, 5:44 AM
+bdero
+added 11 commits
+June 10, 2026 20:58
+Turn the widget example into a CRT showcase
+…
+acc52f4
+```
+The widget surface is now a bulbous dome-curved screen (a subdivided
+grid, so input forwarding runs through real interpolated UVs), its
+capture is consumed by a custom .fmat effect (scanlines, chroma
+fringing, tracking wobble, static, and a vignette over the live widget
+texture), and the panel itself is a scrollable control deck whose
+sliders drive the effect's parameters, the widgets adjust their own
+distortion. Drag the panel to scroll it, drag elsewhere to look, and
+the recursive toggle now feeds the scene's previous frame through the
+CRT filter.
+```
+Unmirror the CRT screen and keep it stationary
+…
+ec58e52
+```
+The dome grid mapped u = 0 to the -x edge while the engine's hand-built
+front-face convention puts u = 0 at +x, so the widget texture rendered
+horizontally mirrored (input tracked the mirror, since both share the
+UVs). The TV also no longer rotates.
+```
+Capture widget surfaces per frame; forward trackpad scrolling
+…
+70294a3
+```
+The capture trigger was the host render object's own paint, but
+repaints inside the child's repaint boundaries (scrollable items,
+progress indicators) update their layers in place without notifying
+ancestors, so state changes inside a ListView never refreshed the
+texture (a scrollbar repaint happened to). The default policy is now
+everyFrame: the host re-records each frame (reusing the child's
+retained layers, so recording stays cheap) with the existing
+one-in-flight capture throttle; interval throttles the cadence and
+manual is unchanged for static panels.
+
+Trackpads report scrolling as pan-zoom gestures rather than scroll
+signals; SceneView now forwards pan-zoom pans as scroll deltas, so
+trackpad scrolling drives widget surfaces.
+```
+Rework the CRT showcase: VHS effect, emissive glass tube, environment…
+…
+030eb8b
+```
+… menu
+
+The screen effect is a VHS-playback shader (tape wave, tape crease,
+head-switching noise, chromatic bloom, AC beat), each aspect an
+adjustable parameter, running on a lit material: the tube is black
+glossy glass and the picture is emitted light, so the environment
+glares off the screen. The in-screen panel gains brightness (emissive
+scale) and gloss (roughness) sliders alongside the tape controls.
+
+The stress tests' environment switcher (the Khronos sample HDRs, the
+resolver with caching, and the HUD popup) moves to a shared example
+helper, the stress tests use it, and the widget-texture example gains
+the menu so the glare can be tested under different lighting.
+```
+Share the lighting panel; light the CRT scene properly
+…
+9a55d00
+```
+The stress tests' lighting controls (environment menu, skybox toggle,
+sky blur, exposure, IBL intensity, environment rotation) move into a
+shared, self-contained LightingPanel that applies directly to the
+scene it is given; the stress tests drop their local copy and the
+widget-texture example gains the panel with the skybox enabled, so the
+tube's glare can be tested under any environment. The example floor was
+a rough metal (metallicFactor defaults to 1.0), reading as a mirror; it
+is now a dielectric at 0.3 roughness.
+```
+CRT polish: panel placement, gloss direction, analytic dome normals
+…
+eeb9dc6
+```
+The lighting panel moves to the bottom left (matching the stress
+tests), with the capture diagnostics above the recursive toggle. The
+gloss slider now means gloss (all the way up is mirror glass; it drove
+roughness directly before). The dome supplies analytic surface normals
+instead of relying on the auto-computed ones, so reflections follow the
+screen's curvature.
+```
+Default the lit material shading normal to the surface normal
+…
+4b2c3da
+```
+MaterialInputs.normal initialized to a constant (0, 0, 1), so a lit
+.fmat Surface() that never assigned material.normal shaded every
+fragment with a flat normal: reflections ignored the geometry's
+curvature entirely, silently. The default is now GetWorldNormal() (the
+interpolated surface normal), so leaving the field unset means "shade
+with the geometry", and assigning it remains the normal-mapping hook.
+The CRT effect also sets it explicitly.
+```
+Make the CRT housing a dielectric (it defaulted to metal)
+10f9a5c
+Drop the green-terminal panel styling for natural widget colors
+44412a9
+Spin a Flutter logo at the top of the CRT panel
+450bef4
+Credit the VHS shader source
+8839c33
+Hide details
+View details
+bdero
+merged commit 123e5cf
+into
+master
+Jun 11, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+bdero
+deleted the
+bdero/widget-textures
+branch
+June 11, 2026 06:12
+bdero
+mentioned this pull request
+Jun 11, 2026
+Generate vertex normals matching the engine front-face winding
+#171
+Merged
+orestesgaolin
+mentioned this pull request
+Aug 23, 2026
+fix: slider widget should work in scenes when not at window origin (dispatch forwarded widget-surface input in global coordinates)
+#356
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+roadmap
+Planned long-horizon work owned by maintainers.
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

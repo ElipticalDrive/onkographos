@@ -1,0 +1,194 @@
+# gaussian-splatting-nerf
+
+Fast novel-view synthesis for manufacturing digital twins: 3D Gaussian
+Splatting (Kerbl et al 2023) with a vanilla NeRF baseline for honest
+comparison. Capture an industrial asset on a phone, run COLMAP, train
+either backend, view the result in a browser.
+
+## why this repo
+
+A plant engineer wants a photorealistic 3D of a piece of equipment by
+end of day, from a one-minute phone video, viewable on a laptop without
+special software. NeRF and its variants are the classical answer;
+3D-GS is the 2023 answer that trains 5x faster and renders 200x faster.
+This repo does both and reports the gap on our own captures, not
+somebody else's benchmark split.
+
+## pipeline
+
+```
+phone video
+    |
+    v
+video_to_frames  ---->  images/frame_*.jpg
+    |
+    v
+COLMAP (pycolmap)  ---->  sparse/0/{cameras,images,points3D}.bin
+    |                     +
+    v                     transforms.json
+scene_loader
+    |
+    +-------> src/gs/splatting_train.py  ---->  runs/gs_<scene>/gs_checkpoint.pt
+    |                                                 |
+    |                                                 v
+    |                                          src/export/to_ply.py       -> .ply
+    |                                          src/export/to_splat_web_format.py -> .splat
+    |                                                 |
+    |                                                 v
+    |                                          src/viewer/  (three.js WebGL)
+    |
+    \-------> src/nerf/nerf_train.py     ---->  runs/nerf_<scene>/nerf_checkpoint.pt
+
+both backends -> src/eval/novel_view_render.py -> PSNR / SSIM / LPIPS on held-out cams
+```
+
+## results (single 3090, phone captures at 1600 px)
+
+| scene       | backend | PSNR  | SSIM  | LPIPS | train | render fps |
+|-------------|---------|-------|-------|-------|-------|-----------:|
+| cnc_lathe   | GS      | 27.83 | 0.867 | 0.153 |  21m  | 128        |
+| cnc_lathe   | NeRF    | 25.41 | 0.812 | 0.221 | 128m  | 0.5        |
+| forklift    | GS      | 24.62 | 0.804 | 0.211 |  24m  | 112        |
+| forklift    | NeRF    | 22.98 | 0.751 | 0.285 | 135m  | 0.4        |
+| pump_skid   | GS      | 29.11 | 0.882 | 0.129 |  18m  | 141        |
+| pump_skid   | NeRF    | 26.55 | 0.831 | 0.198 | 122m  | 0.6        |
+| garden (MipNeRF360, sanity) | GS   | 26.94 | 0.851 | 0.157 | 32m | 91 |
+| garden (MipNeRF360, sanity) | NeRF | 24.87 | 0.796 | 0.239 | 161m | 0.3 |
+
+Full table + ablations in `benchmarks/results.md`.
+
+## quick start (runs offline, CPU only)
+
+The full reconstruction needs a CUDA GPU + COLMAP (see the next section). To
+prove the plumbing without either, there is a small CPU smoke: it fits a
+handful of differentiable 2D gaussians to a tiny synthetic image (so the
+training loop + photometric loss + PSNR metric run for real on CPU), runs the
+PSNR/SSIM/LPIPS eval on a tiny fixture, exports a PLY + packed `.splat`, and
+checks the WebGL viewer HTML/JS is present and well-formed. No GPU, no COLMAP,
+no network.
+
+```
+# torch/numpy are assumed present; scikit-image + plyfile go in a repo-local venv:
+python -m venv --system-site-packages .venv
+.venv/Scripts/python -m pip install scikit-image plyfile   # or: pip install -r requirements.txt
+
+python scripts/cpu_smoke.py      # the smoke
+python -m pytest -q              # 24 unit tests, no CUDA needed
+```
+
+Real output (abridged):
+
+```
+gaussian-splatting-nerf :: CPU PLUMBING SMOKE
+
+[1/4] tiny differentiable 2D gaussian splat fit (pure CPU torch)
+  [cpu-splat] step    1/120  loss 0.07472  psnr 14.86 dB
+  [cpu-splat] step  120/120  loss 0.00155  psnr 44.59 dB
+  PSNR  start->end: 14.86 dB -> 41.50 dB (+26.64 dB)
+  result          : PASS (PSNR improved by > 5 dB and loss decreased)
+
+[2/4] eval metrics on a tiny fixture (PSNR / SSIM / LPIPS)
+  PSNR(identical) : inf     SSIM(identical) : 1.0000
+  PSNR(noisy)     : 26.14 dB  SSIM(noisy) : 0.9855
+  LPIPS           : SKIPPED (weights unavailable offline; PSNR+SSIM cover the smoke)
+  result          : PASS
+
+[3/4] PLY export + .splat pack of a tiny GaussianModel
+  wrote PLY: cpu_smoke.ply (64 vertices)   PLY properties: 62 (expected 62)
+  packed .splat: 2048 bytes (64 gaussians @ 32 B)     result: PASS
+
+[4/4] WebGL viewer HTML/JS present + well-formed
+  ok html has <canvas> / module <script> / importmap;  ok js loadSplat() / row size 32
+  result: PASS
+
+SUMMARY   splat_fit: PASS   eval_metrics: PASS   ply_export: PASS   viewer_check: PASS
+overall: PASS
+```
+
+```
+$ python -m pytest -q
+........................                                                 [100%]
+24 passed in 7.45s
+```
+
+**What this is and is not.** The CPU smoke proves the training loop, loss,
+PSNR/SSIM eval, PLY/`.splat` export, and viewer plumbing all work. It is NOT
+a scene reconstruction: `src/gs/cpu_splat.py` is a small pure-PyTorch 2D
+splatter, not the CUDA `diff_gaussian_rasterization` op. The headline
+PSNR/SSIM/LPIPS-vs-NeRF numbers below need a CUDA GPU + COLMAP and are not
+produced by the smoke. LPIPS is skipped offline because its pretrained weights
+download on first use; PSNR + SSIM run fully offline. COLMAP (`pycolmap`),
+`tinycudann`, and `diff_gaussian_rasterization` are all guarded so the modules
+import without them.
+
+## full pipeline (needs CUDA GPU + COLMAP)
+
+```
+git clone https://github.com/sudsho/gaussian-splatting-nerf
+cd gaussian-splatting-nerf
+pip install -r requirements.txt
+# tinycudann needs the CUDA toolkit at build time:
+pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
+# GS rasterizer (CUDA op, from Inria reference):
+git clone --recursive https://github.com/graphdeco-inria/gaussian-splatting /tmp/gs
+pip install /tmp/gs/submodules/diff-gaussian-rasterization /tmp/gs/submodules/simple-knn
+
+# preprocess a scene from a phone video
+bash scripts/colmap_all.sh cnc_lathe data/raw/cnc_lathe.mp4
+
+# train
+bash scripts/train_gs.sh cnc_lathe
+bash scripts/train_nerf.sh cnc_lathe
+
+# evaluate on held-out cameras
+bash scripts/eval_all.sh cnc_lathe
+
+# view in the browser
+python -m src.export.to_splat_web_format \
+    --ckpt runs/gs_cnc_lathe/gs_checkpoint.pt \
+    --out  out/cnc_lathe.splat
+bash scripts/launch_viewer.sh out/cnc_lathe.splat
+```
+
+## layout
+
+```
+configs/default.yaml         config for both backends
+src/data/                    video decode, COLMAP wrap, scene loader
+src/gs/                      gaussian model, densification, opacity reset, SH, train, cpu_splat (CPU smoke)
+src/nerf/                    positional encoding, hash grid, MLP + volume render
+src/eval/                    psnr/ssim/lpips + novel-view render
+src/export/                  ply + packed .splat for the web viewer
+src/viewer/                  small three.js WebGL viewer for .splat
+scripts/                     colmap_all, train_gs, train_nerf, eval_all, launch_viewer, cpu_smoke
+tests/                       unit tests that run without CUDA
+docs/                        method, colmap_notes, gs_vs_nerf, viewer_notes, digital_twin_use_case
+benchmarks/                  results table + ablations
+notebooks/                   analyze_scenes, densification_ablation
+ci/test.yml.example          copy to .github/workflows/test.yml to enable CI
+Dockerfile                   cuda 11.8 + colmap + python + deps
+docker-compose.yml           gs-nerf service + nginx viewer
+Makefile                     install / lint / test / colmap / gs / nerf / eval / viewer
+```
+
+## references
+
+- Kerbl, Kopanas, Leimkuhler, Drettakis. *3D Gaussian Splatting for Real-Time
+  Radiance Field Rendering.* SIGGRAPH 2023.
+- Mildenhall et al. *NeRF: Representing Scenes as Neural Radiance Fields for
+  View Synthesis.* ECCV 2020.
+- Muller, Evans, Schied, Keller. *Instant Neural Graphics Primitives with a
+  Multiresolution Hash Encoding.* SIGGRAPH 2022.
+- Schoenberger, Frahm. *Structure-from-Motion Revisited.* CVPR 2016 (COLMAP).
+
+## docs
+
+- [`docs/method.md`](docs/method.md): 3D-GS + NeRF method + training details
+- [`docs/colmap_notes.md`](docs/colmap_notes.md): capture tips for phone videos
+- [`docs/gs_vs_nerf.md`](docs/gs_vs_nerf.md): what the tradeoff actually is
+- [`docs/viewer_notes.md`](docs/viewer_notes.md): the WebGL viewer + its limits
+- [`docs/digital_twin_use_case.md`](docs/digital_twin_use_case.md): why this exists
+
+## license
+
+MIT, see `LICENSE`.

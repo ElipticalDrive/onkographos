@@ -1,0 +1,1700 @@
+# CT Volume Reconstruction – GPU Lab Project
+**Course:** Lab Course – High Performance Computing with Graphic Cards (GPU LAB)  
+**Semester:** WS 25/26  
+**Topic:** CT Volume Reconstruction (Cone-Beam FDK – Full GPU Acceleration)  
+**Team:** Prasoon, Samar, Hardik
+
+---
+
+## Project Overview
+
+This project implements 3D Cone-Beam CT reconstruction using the **FDK algorithm** on the GPU.
+
+The program reconstructs a 3D volume from 2D projection images by:
+1. Applying a cone-beam weighting and ramp filter to each projection
+2. Back-projecting all filtered projections into 3D space
+
+Four complete pipelines are benchmarked:
+
+| Pipeline | Ramp Filter | Backprojection | Description |
+|---|---|---|---|
+| CPU | CPU | CPU | Full FDK reference, matches Python output |
+| GPU-Buffer | CPU | GPU (global buffer) | Basic GPU acceleration |
+| GPU-Image | CPU | GPU (image2d_t) | Hardware interpolation via texture cache |
+| **GPU-Full** | **GPU** | **GPU** | **Full FDK on GPU – highest parallelisation** |
+
+---
+
+## Project Structure
+
+```
+Project_GPU_lab/
+├── CMakeLists.txt
+├── include/
+│   └── reconstruction.hpp          # All function declarations
+├── src/
+│   ├── main.cpp                    # Entry point, benchmarks, HDF5 output
+│   ├── fdk_filter.cpp              # Shared FDK pre-filter (CPU, used by all paths)
+│   ├── cpu_reconstruction.cpp      # Full FDK on CPU (reference)
+│   ├── gpu_reconstruction_buffer.cpp      # GPU backprojection (buffer)
+│   ├── gpu_reconstruction_image.cpp       # GPU backprojection (image2d)
+│   ├── gpu_reconstruction_buffer_full.cpp # Full FDK on GPU (ramp+backproject)
+│   └── mse.cpp                     # MSE validation
+└── kernels/
+    ├── backprojection_buffer.cl    # Voxel-driven backprojection (buffer)
+    ├── backprojection_image.cl     # Voxel-driven backprojection (image2d)
+    ├── ramp_filter_gpu.cl          # GPU ramp filter (1 work-item = 1 detector row)
+    └── cone_weight.cl              # Standalone cone weight kernel (utility)
+```
+
+---
+
+## FDK Pipeline
+
+The FDK (Feldkamp-Davis-Kress) algorithm for cone-beam CT:
+
+```
+Raw projections
+     │
+     ▼
+[1] Scale by 1/voxelSize
+     │
+     ▼
+[2] Cone weighting per pixel:  w = SDD / sqrt(SDD² + a² + b²)
+     │
+     ▼
+[3] Ramp filter (Ram-Lak) per detector row:  FFT → ×ramp → IFFT
+     │
+     ▼
+[4] Backprojection for each projection angle θ:
+      For each voxel (x,y,z):
+        t = y·cos(θ) - x·sin(θ)
+        U = SOD + y·sin(θ) + x·cos(θ)
+        u_proj = SDD·t/U       (detector u)
+        v_proj = SDD·z/U       (detector v)
+        accumulate: filtered_proj(u,v) × SOD²/U²
+     │
+     ▼
+[5] Final scale:  × π / num_projections
+     │
+     ▼
+Reconstructed 3D volume
+```
+
+---
+
+## GPU Parallelisation Strategy
+
+### Backprojection kernel (all GPU paths)
+```
+1 OpenCL work-item = 1 voxel (x, y, z)
+Total work-items = NX × NX × NY = 128 × 128 × 128 = 2,097,152
+```
+Each work-item independently computes the contribution from one projection angle to one voxel. No synchronisation needed — each GID owns its volume element.
+
+### Ramp filter kernel (GPU-Full path only)
+```
+1 OpenCL work-item = 1 detector row (one v-slice of one projection)
+Total work-items = P × H = 360 × 128 = 46,080
+```
+Each work-item processes one full detector row: cone weighting + 1D DFT (W=128 points) + ramp multiply + 1D IDFT. All rows processed in parallel.
+
+### Buffer vs Image comparison
+| Aspect | Buffer | Image (image2d_t) |
+|---|---|---|
+| Interpolation | Manual bilinear (kernel code) | Hardware (texture unit) |
+| Memory | Global memory | Texture cache |
+| Typical speedup | Good | Often faster due to cache |
+
+---
+
+## Requirements
+
+- Linux (GPU Lab machines)
+- C++17 or later
+- CMake ≥ 3.10
+- OpenCL 1.2+
+- HDF5 with C++ bindings (`libhdf5-dev`)
+
+Check GPU:
+```bash
+lspci | grep VGA
+clinfo
+```
+
+Check CPU:
+```bash
+grep "model name" /proc/cpuinfo
+```
+
+---
+
+## Building
+
+```bash
+mkdir build
+cd build
+cmake ..
+make
+```
+
+Executable: `build/ct_recon`
+
+---
+
+## Running
+
+Run from the **project root** directory (so kernel paths resolve correctly):
+
+```bash
+./build/ct_recon
+```
+
+Expected console output:
+- Hardware info (Computer, CPU, GPU)
+- Timing for all 4 pipelines
+- MSE validation (CPU vs each GPU pipeline)
+- Speedup table
+
+---
+
+## Input Data
+
+Default path (GPU Lab machines):
+```
+/lgrp/edu-2025-2-gpulab/Data/proj_shepplogan128.hdf5
+```
+
+To use a different file, edit the `path` variable in `src/main.cpp`.
+
+---
+
+## Output
+
+After execution, `reconstructed_volume.hdf5` is created in the working directory with four datasets:
+
+| Dataset name | Contents |
+|---|---|
+| `Reconstruction_CPU` | Full FDK on CPU |
+| `Reconstruction_GPU_Buffer` | GPU backprojection (buffer) |
+| `Reconstruction_GPU_Image` | GPU backprojection (image2d) |
+| `Reconstruction_GPU_Full` | Full FDK on GPU |
+
+---
+
+## Validation
+
+MSE is computed between the CPU reference and each GPU result.  
+Expected: MSE < 1e-4 for all GPU pipelines, indicating numerically correct results.
+
+---
+
+## Troubleshooting
+
+| Problem | Command |
+|---|---|
+| No OpenCL device | `clinfo` |
+| HDF5 not found | `sudo apt install libhdf5-dev` |
+| Kernel file not found | Run from project root, not from `build/` |
+
+### pack_hdf5.py
+```
+#!/usr/bin/env python3
+"""Packs raw binary volume dumps into reconstructed_volume.hdf5."""
+import numpy as np
+import h5py
+import os
+import sys
+
+with open('volumes_meta.txt') as f:
+    NX, NY = map(int, f.readline().split())
+    has_cpu = int(f.readline().strip()) == 1
+
+shape = (NX, NX, NY)
+total = NX * NX * NY
+
+def load_bin(fname):
+    if not os.path.exists(fname):
+        return None
+    data = np.fromfile(fname, dtype=np.float32)
+    if len(data) != total:
+        print(f"  WARNING: {fname} has {len(data)} floats, expected {total}")
+        return None
+    return data.reshape(shape)
+
+print("Packing volumes into reconstructed_volume.hdf5...")
+
+volumes = {}
+if has_cpu:
+    v = load_bin('vol_cpu.bin')
+    if v is not None: volumes['Reconstruction_CPU'] = v
+
+for fname, key in [
+    ('vol_buf.bin',   'Reconstruction_GPU_Buffer'),
+    ('vol_img.bin',   'Reconstruction_GPU_Image'),
+    ('vol_full.bin',  'Reconstruction_GPU_Full'),
+    ('vol_local.bin', 'Reconstruction_GPU_Local'),
+]:
+    v = load_bin(fname)
+    if v is not None: volumes[key] = v
+
+if not volumes:
+    print("ERROR: No binary files found. Run ./build/ct_recon first.")
+    sys.exit(1)
+
+with h5py.File('reconstructed_volume.hdf5', 'w') as f:
+    for name, data in volumes.items():
+        f.create_dataset(name, data=data)
+        print(f"  Saved: {name}  shape={data.shape}  "
+              f"min={data.min():.3f}  max={data.max():.3f}")
+
+print("\nreconstructed_volume.hdf5 written successfully.")
+print("Now run: python3 validate_and_plot.py")
+```
+
+### validate_and_plot.py
+```
+#!/usr/bin/env python3
+"""Validates C++ outputs against Python FDK and saves comparison plots."""
+
+import sys
+import numpy as np
+import h5py
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from scipy.fft import fft, ifft, next_fast_len
+
+DATA_PATH   = sys.argv[1] if len(sys.argv) > 1 \
+              else "/Users/prasamar/Downloads/proj_shepplogan128.hdf5"
+OUTPUT_HDF5 = "/Users/prasamar/Downloads/Project_GPU_lab/reconstructed_volume.hdf5"
+
+def python_fdk(projections, P, W, H, NX, NY,
+               voxelSize, pixelSize, SDD, SOD):
+    """Python reference FDK implementation used for accuracy checks."""
+    proj = projections.copy().astype(np.float64)
+
+    proj /= voxelSize
+
+    u_coords = -(np.arange(W) - (W-1)/2) * pixelSize
+    v_coords =  (np.arange(H) - (H-1)/2) * pixelSize
+    A, B = np.meshgrid(u_coords, v_coords, indexing='ij')
+    cone_w = SDD / np.sqrt(SDD**2 + A**2 + B**2)
+    for p in range(P):
+        proj[p] *= cone_w
+
+    padN = 1
+    while padN < W:
+        padN <<= 1
+
+    f = np.zeros(padN)
+    f[0] = 0.25
+    n_list = []
+    i = 1
+    while i <= padN // 2:
+        n_list.append(i); i += 2
+    i = padN // 2 - 1
+    while i > 0:
+        n_list.append(i); i -= 2
+    for ni, n in enumerate(n_list):
+        if 1 + ni*2 < padN:
+            f[1 + ni*2] = -1.0 / (np.pi * n)**2
+    F = 2.0 * np.real(fft(f))  # ramp filter of length padN
+
+    proj_f = np.zeros_like(proj)
+    row_pad = np.zeros(padN)
+    for p in range(P):
+        for v in range(H):
+            row_pad[:W] = proj[p, :, v]
+            row_pad[W:] = 0.0
+            filtered = np.real(ifft(fft(row_pad) * F))
+            proj_f[p, :, v] = filtered[:W] / 2.0
+
+    volume = np.zeros((NX, NX, NY), dtype=np.float64)
+    xs = (np.arange(NX) - (NX-1)/2) * voxelSize
+    ys = (np.arange(NX) - (NX-1)/2) * voxelSize
+    zs = (np.arange(NY) - (NY-1)/2) * voxelSize
+    angles = 2 * np.pi * np.arange(P) / P
+    cos_a = np.cos(angles)
+    sin_a = np.sin(angles)
+
+    for xi, xm in enumerate(xs):
+        for yi, ym in enumerate(ys):
+            t_all   = ym * cos_a - xm * sin_a
+            U_all   = SOD + ym * sin_a + xm * cos_a
+            valid   = np.abs(U_all) > 1e-6
+            invU    = np.where(valid, 1.0/np.where(valid, U_all, 1.0), 0.0)
+            u_proj  = SDD * t_all * invU
+            u_idx   = (W-1)/2 - u_proj / pixelSize
+            u_valid = valid & (u_idx >= 0) & (u_idx < W-1)
+            weight  = (SOD * invU)**2
+
+            for zi, zm in enumerate(zs):
+                v_proj = SDD * zm * invU
+                v_idx  = (H-1)/2 - v_proj / pixelSize
+                v_valid = (v_idx >= 0) & (v_idx < H-1)
+                mask   = u_valid & v_valid
+
+                if not np.any(mask): continue
+
+                u0 = np.floor(u_idx[mask]).astype(int)
+                u1 = u0 + 1
+                du = u_idx[mask] - u0
+                v0 = np.floor(v_idx[mask]).astype(int)
+                v1 = v0 + 1
+                dv = v_idx[mask] - v0
+                ps = np.where(mask)[0]
+
+                i00 = proj_f[ps, u0, v0]; i10 = proj_f[ps, u1, v0]
+                i01 = proj_f[ps, u0, v1]; i11 = proj_f[ps, u1, v1]
+                val = ((i00*(1-du) + i10*du)*(1-dv) +
+                       (i01*(1-du) + i11*du)*dv)
+
+                volume[xi, yi, zi] += np.sum(val * weight[mask])
+
+    volume *= np.pi / P
+    return volume.astype(np.float32)
+
+
+def mse(a, b):
+    return float(np.mean((a.astype(np.float64) - b.astype(np.float64))**2))
+
+def value_range(name, vol):
+    print(f"  {name:<22}  min={vol.min():+.6f}  max={vol.max():+.6f}  "
+          f"mean={vol.mean():+.6f}")
+
+
+print(f"Loading dataset: {DATA_PATH}")
+with h5py.File(DATA_PATH, 'r') as f:
+    P         = int(f['num_projs'][()])
+    W         = int(f['detector_width'][()])
+    H         = int(f['detector_height'][()])
+    NX        = int(f['Volumen_num_xz'][()])
+    NY        = int(f['Volumen_num_y'][()])
+    voxelSize = float(f['voxelSize'][()])
+    pixelSize = float(f['pixelSize'][()])
+    SDD       = float(f['SDD'][()])
+    SOD       = float(f['SOD'][()])
+    proj_raw  = f['Projection'][:]
+
+print(f"  Projections: {P}  |  Detector: {W}x{H}  |  Volume: {NX}x{NX}x{NY}")
+print(f"  SDD={SDD:.2f}mm  SOD={SOD:.2f}mm  "
+      f"voxelSize={voxelSize:.4f}mm  pixelSize={pixelSize:.4f}mm\n")
+
+print(f"Loading C++ results from: {OUTPUT_HDF5}")
+with h5py.File(OUTPUT_HDF5, 'r') as f:
+    vol_cpu   = f['Reconstruction_CPU'][:]
+    vol_buf   = f['Reconstruction_GPU_Buffer'][:]
+    vol_img   = f['Reconstruction_GPU_Image'][:]
+    vol_full  = f['Reconstruction_GPU_Full'][:]
+    vol_local = f['Reconstruction_GPU_Local'][:]
+
+print("\nRunning Python FDK reference (15-20 min)...")
+vol_python = python_fdk(proj_raw, P, W, H, NX, NY,
+                        voxelSize, pixelSize, SDD, SOD)
+print("Python reference done.\n")
+
+print("══════════════════ Validation ══════════════════")
+print("\n[Step 1] Python reference vs C++ CPU:")
+mse_py_cpu = mse(vol_python, vol_cpu)
+print(f"  MSE (Python vs C++ CPU) = {mse_py_cpu:.6e}")
+print(f"  → {'C++ CPU matches Python reference ✓' if mse_py_cpu < 1.0 else 'WARNING: larger than expected'}")
+
+print("\n[Step 2] C++ CPU vs GPU pipelines:")
+for name, vol in [("GPU-Buffer", vol_buf), ("GPU-Image",  vol_img),
+                  ("GPU-Full",   vol_full), ("GPU-Local",  vol_local)]:
+    m = mse(vol_cpu, vol)
+    print(f"  MSE (CPU vs {name:<12}) = {m:.6e}  {'✓' if m < 1e-1 else '✗'}")
+
+print("\n[Value Range] Min / Max / Mean:")
+for name, vol in [("Python reference", vol_python), ("C++ CPU", vol_cpu),
+                  ("GPU-Buffer",  vol_buf),  ("GPU-Image",  vol_img),
+                  ("GPU-Full",    vol_full), ("GPU-Local",  vol_local)]:
+    value_range(name, vol)
+
+mid = NX // 2
+vmin = vol_cpu[:,:,mid].min()
+vmax = vol_cpu[:,:,mid].max()
+
+# Figure 1: all 6 reconstructions
+fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+items = [("Python Reference", vol_python), ("C++ CPU", vol_cpu),
+         ("GPU Buffer", vol_buf), ("GPU Image", vol_img),
+         ("GPU Full", vol_full), ("GPU Local", vol_local)]
+for ax, (title, vol) in zip(axes.flat, items):
+    im = ax.imshow(vol[:, :, mid], cmap='gray', vmin=vmin, vmax=vmax)
+    ax.set_title(title, fontsize=11); ax.axis('off')
+    plt.colorbar(im, ax=ax, fraction=0.046)
+plt.suptitle(f'FDK Reconstruction — Middle Slice (z={mid})\n'
+             f'Dataset: {DATA_PATH.split("/")[-1]}', fontsize=13)
+plt.tight_layout()
+plt.savefig('reconstruction_all.png', dpi=150, bbox_inches='tight')
+print("\nSaved: reconstruction_all.png")
+
+# Figure 2: CPU vs GPU difference maps
+fig2, axes2 = plt.subplots(1, 4, figsize=(18, 5))
+for ax, (title, vol) in zip(axes2, [("CPU - GPU Buffer", vol_buf),
+    ("CPU - GPU Image", vol_img), ("CPU - GPU Full", vol_full),
+    ("CPU - GPU Local", vol_local)]):
+    diff = vol_cpu[:,:,mid] - vol[:,:,mid]
+    vm = max(abs(diff.min()), abs(diff.max())) or 1e-10
+    im = ax.imshow(diff, cmap='seismic', vmin=-vm, vmax=vm)
+    ax.set_title(title, fontsize=10); ax.axis('off')
+    plt.colorbar(im, ax=ax, fraction=0.046)
+plt.suptitle('Difference Maps: C++ CPU vs GPU Pipelines', fontsize=12)
+plt.tight_layout()
+plt.savefig('reconstruction_diff.png', dpi=150, bbox_inches='tight')
+print("Saved: reconstruction_diff.png")
+
+# Figure 3: Python vs CPU
+fig3, axes3 = plt.subplots(1, 3, figsize=(15, 5))
+for ax, sl in zip(axes3, [NX//4, NX//2, 3*NX//4]):
+    diff = vol_python[:,:,sl] - vol_cpu[:,:,sl]
+    vm = max(abs(diff.min()), abs(diff.max())) or 1e-10
+    im = ax.imshow(diff, cmap='seismic', vmin=-vm, vmax=vm)
+    ax.set_title(f'Python − CPU  (slice z={sl})', fontsize=10)
+    ax.axis('off'); plt.colorbar(im, ax=ax, fraction=0.046)
+plt.suptitle(f'Python Reference vs C++ CPU  |  MSE = {mse_py_cpu:.2e}', fontsize=12)
+plt.tight_layout()
+plt.savefig('python_vs_cpu.png', dpi=150, bbox_inches='tight')
+print("Saved: python_vs_cpu.png")
+print("\nAll done.")
+```
+
+### include/reconstruction.hpp
+```
+#pragma once
+#include <vector>
+#include <string>
+
+// Shared FDK pre-filter used before backprojection.
+std::vector<float> applyFDKPreFilter(
+    const std::vector<float>& projections,
+    int P, int W, int H,
+    float voxelSize, float sdd, float pixelSize);
+
+// CPU reference reconstruction.
+std::vector<float> reconstructCPU(
+    const std::vector<float>& projections,
+    int P, int W, int H, int NX, int NY,
+    float voxelSize, float pixelSize, float sdd, float sod);
+
+// GPU backprojection using OpenCL buffers.
+std::vector<float> reconstructGPU_Buffer(
+    const std::vector<float>& projections,
+    int P, int W, int H, int NX, int NY,
+    float voxelSize, float pixelSize, float sdd, float sod);
+
+// GPU backprojection using OpenCL image textures.
+std::vector<float> reconstructGPU_Image(
+    const std::vector<float>& projections,
+    int P, int W, int H, int NX, int NY,
+    float voxelSize, float pixelSize, float sdd, float sod);
+
+// Full GPU path: ramp filter plus backprojection on GPU.
+std::vector<float> reconstructGPU_Buffer_Full(
+    const std::vector<float>& projections,
+    int P, int W, int H, int NX, int NY,
+    float voxelSize, float pixelSize, float sdd, float sod);
+
+// GPU backprojection using local-memory tiling.
+std::vector<float> reconstructGPU_Local(
+    const std::vector<float>& projections,
+    int P, int W, int H, int NX, int NY,
+    float voxelSize, float pixelSize, float sdd, float sod);
+
+// Mean squared error helper for result comparison.
+double computeMSE(const std::vector<float>& a,
+                  const std::vector<float>& b);
+```
+
+### src/cpu_reconstruction.cpp
+```
+// CPU reference FDK reconstruction used as baseline for GPU paths.
+
+#include "reconstruction.hpp"
+#include <cmath>
+#include <stdexcept>
+#include <vector>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+std::vector<float> reconstructCPU(
+    const std::vector<float>& projectionsRaw,
+    int P, int W, int H,
+    int NX, int NY,
+    float voxelSize, float pixelSize,
+    float sdd, float sod)
+{
+    std::vector<float> projections = applyFDKPreFilter(
+        projectionsRaw, P, W, H, voxelSize, sdd, pixelSize);
+
+    const size_t volumeSize = static_cast<size_t>(NX) * NX * NY;
+    const size_t projSize   = static_cast<size_t>(W)  * H;
+
+    std::vector<float> volume(volumeSize, 0.0f);
+
+    for (int p = 0; p < P; ++p)
+    {
+        float angle = 2.0f * static_cast<float>(M_PI) * p / P;
+        float cosA  = std::cos(angle);
+        float sinA  = std::sin(angle);
+
+        const float* proj = projections.data() + p * projSize;
+
+        for (int x = 0; x < NX; ++x)
+        {
+            float xm = (x - 0.5f * (NX - 1)) * voxelSize;
+
+            for (int y = 0; y < NX; ++y)
+            {
+                float ym = (y - 0.5f * (NX - 1)) * voxelSize;
+
+                float t = ym * cosA - xm * sinA;
+                float U = sod + ym * sinA + xm * cosA;
+
+                if (std::abs(U) < 1e-6f) continue;
+
+                float invU  = 1.0f / U;
+                float sddoU = sdd * invU;
+
+                float weight = (sod * sod) * (invU * invU);
+
+                for (int z = 0; z < NY; ++z)
+                {
+                    float zm = (z - 0.5f * (NY - 1)) * voxelSize;
+
+                    float u_proj = sddoU * t;
+                    float v_proj = sddoU * zm;
+
+                    float u_idx = 0.5f * (W - 1) - u_proj / pixelSize;
+                    float v_idx = 0.5f * (H - 1) - v_proj / pixelSize;
+
+                    if (u_idx < 0.0f || u_idx >= (float)(W - 1) ||
+                        v_idx < 0.0f || v_idx >= (float)(H - 1))
+                        continue;
+
+                    int   u0 = static_cast<int>(std::floor(u_idx));
+                    int   v0 = static_cast<int>(std::floor(v_idx));
+                    int   u1 = u0 + 1;
+                    int   v1 = v0 + 1;
+                    float du = u_idx - u0;
+                    float dv = v_idx - v0;
+
+                    float i00 = proj[u0 * H + v0];
+                    float i10 = proj[u1 * H + v0];
+                    float i01 = proj[u0 * H + v1];
+                    float i11 = proj[u1 * H + v1];
+
+                    float interpolated =
+                        (i00 * (1.0f - du) + i10 * du) * (1.0f - dv) +
+                        (i01 * (1.0f - du) + i11 * du) * dv;
+
+                    volume[x * NX * NY + y * NY + z] +=
+                        interpolated * weight;
+                }
+            }
+        }
+    }
+
+    float scale = static_cast<float>(M_PI) / P;
+    for (auto& v : volume) v *= scale;
+
+    return volume;
+}
+```
+
+### src/fdk_filter.cpp
+```
+// Shared CPU-side FDK pre-filter used by CPU and GPU reconstruction paths.
+
+#include "reconstruction.hpp"
+#include <cmath>
+#include <complex>
+#include <vector>
+#include <algorithm>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+static void fft_inplace(std::vector<std::complex<double>>& a, int sign)
+{
+    int N = (int)a.size();
+    for (int i = 1, j = 0; i < N; ++i) {
+        int bit = N >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) std::swap(a[i], a[j]);
+    }
+    for (int len = 2; len <= N; len <<= 1) {
+        double ang = sign * 2.0 * M_PI / len;
+        std::complex<double> wlen(std::cos(ang), std::sin(ang));
+        for (int i = 0; i < N; i += len) {
+            std::complex<double> w(1.0, 0.0);
+            for (int j = 0; j < len / 2; ++j) {
+                std::complex<double> u = a[i + j];
+                std::complex<double> v = a[i + j + len/2] * w;
+                a[i + j]         = u + v;
+                a[i + j + len/2] = u - v;
+                w *= wlen;
+            }
+        }
+    }
+}
+
+static int nextPow2(int n)
+{
+    int p = 1;
+    while (p < n) p <<= 1;
+    return p;
+}
+
+static std::vector<double> buildRampFilter(int size)
+{
+    std::vector<double> f(size, 0.0);
+    f[0] = 0.25;
+    std::vector<int> n;
+    for (int i = 1; i <= size/2;   i += 2) n.push_back(i);
+    for (int i = size/2-1; i > 0;  i -= 2) n.push_back(i);
+    for (int i = 0; i < (int)n.size(); ++i)
+        f[1 + i*2] = -1.0 / (M_PI * n[i] * M_PI * n[i]);
+
+    std::vector<std::complex<double>> fc(size);
+    for (int i = 0; i < size; ++i) fc[i] = f[i];
+    fft_inplace(fc, -1);
+
+    std::vector<double> filter(size);
+    for (int i = 0; i < size; ++i)
+        filter[i] = 2.0 * fc[i].real();
+    return filter;
+}
+
+std::vector<float> applyFDKPreFilter(
+    const std::vector<float>& projections,
+    int P, int W, int H,
+    float voxelSize, float sdd, float pixelSize)
+{
+    const size_t projSize = static_cast<size_t>(W) * H;
+
+    const int padN = nextPow2(W);
+    const std::vector<double> ramp = buildRampFilter(padN);
+
+    std::vector<float> out(projections.begin(), projections.end());
+
+    for (int p = 0; p < P; ++p)
+    {
+        float* proj = out.data() + p * projSize;
+
+        for (int u = 0; u < W; ++u) {
+            float a = -((float)u - 0.5f*(W-1)) * pixelSize;
+            for (int v = 0; v < H; ++v) {
+                float b = ((float)v - 0.5f*(H-1)) * pixelSize;
+                float cw = sdd / std::sqrt(sdd*sdd + a*a + b*b);
+                proj[u*H + v] = (proj[u*H + v] / voxelSize) * cw;
+            }
+        }
+
+        std::vector<std::complex<double>> row(padN);
+        for (int v = 0; v < H; ++v)
+        {
+            for (int u = 0; u < W;    ++u) row[u] = proj[u*H + v];
+            for (int u = W; u < padN; ++u) row[u] = 0.0;
+
+            fft_inplace(row, -1);
+            for (int u = 0; u < padN; ++u) row[u] *= ramp[u];
+            fft_inplace(row, +1);
+
+            double norm = 1.0 / ((double)padN * 2.0);
+            for (int u = 0; u < W; ++u)
+                proj[u*H + v] = static_cast<float>(row[u].real() * norm);
+        }
+    }
+
+    return out;
+}
+```
+
+### src/gpu_reconstruction_buffer.cpp
+```
+// GPU reconstruction path that backprojects filtered projections using OpenCL buffers.
+
+#include "reconstruction.hpp"
+#include <CL/cl.h>
+#include <vector>
+#include <iostream>
+#include <fstream>
+#include <cmath>
+#include <stdexcept>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+static void checkError(cl_int err, const char* msg)
+{
+    if (err != CL_SUCCESS) {
+        std::cerr << "OpenCL Error (" << err << "): " << msg << "\n";
+        exit(EXIT_FAILURE);
+    }
+}
+
+static std::string loadKernelSource(const std::string& path)
+{
+    std::ifstream file(path);
+    if (!file.is_open())
+        throw std::runtime_error("Cannot open kernel file: " + path);
+    return std::string(std::istreambuf_iterator<char>(file),
+                       std::istreambuf_iterator<char>());
+}
+
+std::vector<float> reconstructGPU_Buffer(
+    const std::vector<float>& projectionsRaw,
+    int P, int W, int H,
+    int NX, int NY,
+    float voxelSize, float pixelSize,
+    float sdd, float sod)
+{
+    std::cout << "[GPU-Buffer] Applying FDK pre-filter on CPU...\n";
+    std::vector<float> projections = applyFDKPreFilter(
+        projectionsRaw, P, W, H, voxelSize, sdd, pixelSize);
+
+    cl_int err;
+
+    cl_platform_id platform;
+    checkError(clGetPlatformIDs(1, &platform, nullptr), "clGetPlatformIDs");
+
+    cl_device_id device;
+    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, nullptr);
+    if (err != CL_SUCCESS) {
+        std::cout << "[INFO] No GPU found – falling back to default device.\n";
+        checkError(clGetDeviceIDs(platform, CL_DEVICE_TYPE_DEFAULT,
+                                  1, &device, nullptr),
+                   "clGetDeviceIDs fallback");
+    }
+
+    cl_context context = clCreateContext(nullptr, 1, &device,
+                                         nullptr, nullptr, &err);
+    checkError(err, "clCreateContext");
+
+    cl_command_queue queue = clCreateCommandQueueWithProperties(
+        context, device, nullptr, &err);
+    checkError(err, "clCreateCommandQueue");
+
+    std::string kernelCode = loadKernelSource("kernels/backprojection_buffer.cl");
+    const char* src = kernelCode.c_str();
+
+    cl_program program = clCreateProgramWithSource(context, 1, &src,
+                                                    nullptr, &err);
+    checkError(err, "clCreateProgramWithSource");
+
+    err = clBuildProgram(program, 1, &device, nullptr, nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        size_t logSize;
+        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG,
+                              0, nullptr, &logSize);
+        std::vector<char> log(logSize);
+        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG,
+                              logSize, log.data(), nullptr);
+        std::cerr << "Build Log:\n" << log.data() << "\n";
+        checkError(err, "clBuildProgram");
+    }
+
+    cl_kernel kernel = clCreateKernel(program, "backproject", &err);
+    checkError(err, "clCreateKernel");
+
+    const size_t volumeSize = static_cast<size_t>(NX) * NX * NY;
+    const size_t projSize   = static_cast<size_t>(W)  * H;
+
+    cl_mem volumeBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                                          sizeof(float) * volumeSize,
+                                          nullptr, &err);
+    checkError(err, "clCreateBuffer volume");
+
+    float zero = 0.0f;
+    checkError(clEnqueueFillBuffer(queue, volumeBuffer,
+                                    &zero, sizeof(float), 0,
+                                    sizeof(float) * volumeSize,
+                                    0, nullptr, nullptr),
+               "clEnqueueFillBuffer");
+
+    for (int p = 0; p < P; ++p)
+    {
+        float angle = 2.0f * static_cast<float>(M_PI) * p / P;
+
+        cl_mem projBuffer = clCreateBuffer(
+            context,
+            CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+            sizeof(float) * projSize,
+            (void*)(projections.data() + p * projSize),
+            &err);
+        checkError(err, "clCreateBuffer projBuffer");
+
+        clSetKernelArg(kernel,  0, sizeof(cl_mem), &projBuffer);
+        clSetKernelArg(kernel,  1, sizeof(cl_mem), &volumeBuffer);
+        clSetKernelArg(kernel,  2, sizeof(int),    &W);
+        clSetKernelArg(kernel,  3, sizeof(int),    &H);
+        clSetKernelArg(kernel,  4, sizeof(int),    &NX);
+        clSetKernelArg(kernel,  5, sizeof(int),    &NY);
+        clSetKernelArg(kernel,  6, sizeof(float),  &voxelSize);
+        clSetKernelArg(kernel,  7, sizeof(float),  &pixelSize);
+        clSetKernelArg(kernel,  8, sizeof(float),  &sdd);
+        clSetKernelArg(kernel,  9, sizeof(float),  &sod);
+        clSetKernelArg(kernel, 10, sizeof(float),  &angle);
+
+        size_t globalSize = volumeSize;
+        checkError(clEnqueueNDRangeKernel(queue, kernel, 1,
+                                           nullptr, &globalSize, nullptr,
+                                           0, nullptr, nullptr),
+                   "clEnqueueNDRangeKernel");
+
+        clReleaseMemObject(projBuffer);
+    }
+
+    std::vector<float> volume(volumeSize);
+    checkError(clEnqueueReadBuffer(queue, volumeBuffer, CL_TRUE,
+                                    0, sizeof(float) * volumeSize,
+                                    volume.data(), 0, nullptr, nullptr),
+               "clEnqueueReadBuffer");
+
+    float scale = static_cast<float>(M_PI) / P;
+    for (auto& v : volume) v *= scale;
+
+    // Cleanup
+    clReleaseMemObject(volumeBuffer);
+    clReleaseKernel(kernel);
+    clReleaseProgram(program);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(context);
+
+    return volume;
+}
+```
+
+### src/gpu_reconstruction_buffer_full.cpp
+```
+// Full GPU FDK path that runs ramp filtering and backprojection on the device.
+
+#include "reconstruction.hpp"
+#include <CL/cl.h>
+#include <vector>
+#include <iostream>
+#include <fstream>
+#include <cmath>
+#include <stdexcept>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+static void checkErr(cl_int err, const char* msg)
+{
+    if (err != CL_SUCCESS) {
+        std::cerr << "OpenCL Error (" << err << "): " << msg << "\n";
+        exit(EXIT_FAILURE);
+    }
+}
+
+static std::string loadSrc(const std::string& path)
+{
+    std::ifstream f(path);
+    if (!f.is_open())
+        throw std::runtime_error("Cannot open: " + path);
+    return std::string(std::istreambuf_iterator<char>(f),
+                       std::istreambuf_iterator<char>());
+}
+
+static cl_program buildProgram(cl_context ctx, cl_device_id dev,
+                                const std::string& src)
+{
+    cl_int err;
+    const char* s = src.c_str();
+    cl_program prog = clCreateProgramWithSource(ctx, 1, &s, nullptr, &err);
+    checkErr(err, "clCreateProgramWithSource");
+
+    err = clBuildProgram(prog, 1, &dev, nullptr, nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        size_t logSz;
+        clGetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, 0, nullptr, &logSz);
+        std::vector<char> log(logSz);
+        clGetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, logSz, log.data(), nullptr);
+        std::cerr << "Build log:\n" << log.data() << "\n";
+        checkErr(err, "clBuildProgram");
+    }
+    return prog;
+}
+
+std::vector<float> reconstructGPU_Buffer_Full(
+    const std::vector<float>& projectionsRaw,
+    int P, int W, int H,
+    int NX, int NY,
+    float voxelSize, float pixelSize,
+    float sdd, float sod)
+{
+    cl_int err;
+
+    cl_platform_id platform;
+    checkErr(clGetPlatformIDs(1, &platform, nullptr), "clGetPlatformIDs");
+
+    cl_device_id device;
+    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, nullptr);
+    if (err != CL_SUCCESS) {
+        std::cout << "[GPU-Full] No GPU – falling back to default device.\n";
+        checkErr(clGetDeviceIDs(platform, CL_DEVICE_TYPE_DEFAULT,
+                                1, &device, nullptr), "clGetDeviceIDs");
+    }
+
+    cl_context ctx = clCreateContext(nullptr, 1, &device, nullptr, nullptr, &err);
+    checkErr(err, "clCreateContext");
+
+    cl_command_queue queue = clCreateCommandQueueWithProperties(
+        ctx, device, nullptr, &err);
+    checkErr(err, "clCreateCommandQueue");
+
+    std::string rampSrc = loadSrc("kernels/ramp_filter_gpu.cl");
+    std::string bpSrc   = loadSrc("kernels/backprojection_buffer.cl");
+
+    cl_program rampProg = buildProgram(ctx, device, rampSrc);
+    cl_program bpProg   = buildProgram(ctx, device, bpSrc);
+
+    cl_kernel rampKernel = clCreateKernel(rampProg, "ramp_filter_gpu", &err);
+    checkErr(err, "clCreateKernel ramp_filter_gpu");
+
+    cl_kernel bpKernel = clCreateKernel(bpProg, "backproject", &err);
+    checkErr(err, "clCreateKernel backproject");
+
+    const size_t totalProjFloats = static_cast<size_t>(P) * W * H;
+    const size_t volumeSize      = static_cast<size_t>(NX) * NX * NY;
+    const size_t projSize        = static_cast<size_t>(W) * H;
+
+    std::cout << "[GPU-Full] Uploading " << P << " projections to GPU...\n";
+
+    cl_mem projBuf = clCreateBuffer(
+        ctx,
+        CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+        sizeof(float) * totalProjFloats,
+        (void*)projectionsRaw.data(),
+        &err);
+    checkErr(err, "clCreateBuffer projBuf");
+
+    std::cout << "[GPU-Full] Dispatching ramp filter kernel ("
+              << P * H << " work-items)...\n";
+
+    clSetKernelArg(rampKernel, 0, sizeof(cl_mem), &projBuf);
+    clSetKernelArg(rampKernel, 1, sizeof(int),    &P);
+    clSetKernelArg(rampKernel, 2, sizeof(int),    &W);
+    clSetKernelArg(rampKernel, 3, sizeof(int),    &H);
+    clSetKernelArg(rampKernel, 4, sizeof(float),  &voxelSize);
+    clSetKernelArg(rampKernel, 5, sizeof(float),  &sdd);
+    clSetKernelArg(rampKernel, 6, sizeof(float),  &pixelSize);
+
+    size_t rampGlobal = static_cast<size_t>(P) * H;
+    checkErr(clEnqueueNDRangeKernel(queue, rampKernel, 1,
+                                     nullptr, &rampGlobal, nullptr,
+                                     0, nullptr, nullptr),
+             "clEnqueueNDRangeKernel ramp");
+
+    checkErr(clFinish(queue), "clFinish after ramp filter");
+
+    std::cout << "[GPU-Full] Ramp filter done. Starting backprojection...\n";
+
+    cl_mem volBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE,
+                                    sizeof(float) * volumeSize,
+                                    nullptr, &err);
+    checkErr(err, "clCreateBuffer volBuf");
+
+    float zero = 0.0f;
+    checkErr(clEnqueueFillBuffer(queue, volBuf, &zero, sizeof(float),
+                                  0, sizeof(float) * volumeSize,
+                                  0, nullptr, nullptr),
+             "clEnqueueFillBuffer");
+
+    for (int p = 0; p < P; ++p)
+    {
+        float angle = 2.0f * static_cast<float>(M_PI) * p / P;
+
+        cl_buffer_region region;
+        region.origin = static_cast<size_t>(p) * projSize * sizeof(float);
+        region.size   = projSize * sizeof(float);
+
+        cl_mem subProj = clCreateSubBuffer(
+            projBuf,
+            CL_MEM_READ_ONLY,
+            CL_BUFFER_CREATE_TYPE_REGION,
+            &region,
+            &err);
+        checkErr(err, "clCreateSubBuffer");
+
+        clSetKernelArg(bpKernel,  0, sizeof(cl_mem), &subProj);
+        clSetKernelArg(bpKernel,  1, sizeof(cl_mem), &volBuf);
+        clSetKernelArg(bpKernel,  2, sizeof(int),    &W);
+        clSetKernelArg(bpKernel,  3, sizeof(int),    &H);
+        clSetKernelArg(bpKernel,  4, sizeof(int),    &NX);
+        clSetKernelArg(bpKernel,  5, sizeof(int),    &NY);
+        clSetKernelArg(bpKernel,  6, sizeof(float),  &voxelSize);
+        clSetKernelArg(bpKernel,  7, sizeof(float),  &pixelSize);
+        clSetKernelArg(bpKernel,  8, sizeof(float),  &sdd);
+        clSetKernelArg(bpKernel,  9, sizeof(float),  &sod);
+        clSetKernelArg(bpKernel, 10, sizeof(float),  &angle);
+
+        size_t bpGlobal = volumeSize;
+        checkErr(clEnqueueNDRangeKernel(queue, bpKernel, 1,
+                                         nullptr, &bpGlobal, nullptr,
+                                         0, nullptr, nullptr),
+                 "clEnqueueNDRangeKernel backproject");
+
+        clReleaseMemObject(subProj);
+    }
+
+    std::vector<float> volume(volumeSize);
+    checkErr(clEnqueueReadBuffer(queue, volBuf, CL_TRUE,
+                                  0, sizeof(float) * volumeSize,
+                                  volume.data(), 0, nullptr, nullptr),
+             "clEnqueueReadBuffer");
+
+    float scale = static_cast<float>(M_PI) / P;
+    for (auto& v : volume) v *= scale;
+
+    // Cleanup
+    clReleaseMemObject(projBuf);
+    clReleaseMemObject(volBuf);
+    clReleaseKernel(rampKernel);
+    clReleaseKernel(bpKernel);
+    clReleaseProgram(rampProg);
+    clReleaseProgram(bpProg);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(ctx);
+
+    return volume;
+}
+```
+
+### src/gpu_reconstruction_image.cpp
+```
+// GPU reconstruction path that uses OpenCL images for cached projection reads.
+
+#include "reconstruction.hpp"
+#include <CL/cl.h>
+#include <vector>
+#include <iostream>
+#include <fstream>
+#include <cmath>
+#include <stdexcept>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+static void checkError(cl_int err, const char* msg)
+{
+    if (err != CL_SUCCESS) {
+        std::cerr << "OpenCL Error (" << err << "): " << msg << "\n";
+        exit(EXIT_FAILURE);
+    }
+}
+
+static std::string loadKernelSource(const std::string& path)
+{
+    std::ifstream file(path);
+    if (!file.is_open())
+        throw std::runtime_error("Cannot open kernel file: " + path);
+    return std::string(std::istreambuf_iterator<char>(file),
+                       std::istreambuf_iterator<char>());
+}
+
+std::vector<float> reconstructGPU_Image(
+    const std::vector<float>& projectionsRaw,
+    int P, int W, int H,
+    int NX, int NY,
+    float voxelSize, float pixelSize,
+    float sdd, float sod)
+{
+    std::cout << "[GPU-Image] Applying FDK pre-filter on CPU...\n";
+    std::vector<float> projections = applyFDKPreFilter(
+        projectionsRaw, P, W, H, voxelSize, sdd, pixelSize);
+
+    cl_int err;
+
+    cl_platform_id platform;
+    checkError(clGetPlatformIDs(1, &platform, nullptr), "clGetPlatformIDs");
+
+    cl_device_id device;
+    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, nullptr);
+    if (err != CL_SUCCESS) {
+        std::cout << "[INFO] No GPU found – falling back to default device.\n";
+        checkError(clGetDeviceIDs(platform, CL_DEVICE_TYPE_DEFAULT,
+                                  1, &device, nullptr),
+                   "clGetDeviceIDs fallback");
+    }
+
+    cl_context context = clCreateContext(nullptr, 1, &device,
+                                         nullptr, nullptr, &err);
+    checkError(err, "clCreateContext");
+
+    cl_command_queue queue = clCreateCommandQueueWithProperties(
+        context, device, nullptr, &err);
+    checkError(err, "clCreateCommandQueue");
+
+    std::string kernelCode = loadKernelSource("kernels/backprojection_image.cl");
+    const char* src = kernelCode.c_str();
+
+    cl_program program = clCreateProgramWithSource(context, 1, &src,
+                                                    nullptr, &err);
+    checkError(err, "clCreateProgramWithSource");
+
+    err = clBuildProgram(program, 1, &device, nullptr, nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        size_t logSize;
+        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG,
+                              0, nullptr, &logSize);
+        std::vector<char> log(logSize);
+        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG,
+                              logSize, log.data(), nullptr);
+        std::cerr << "Build Log:\n" << log.data() << "\n";
+        checkError(err, "clBuildProgram");
+    }
+
+    cl_kernel kernel = clCreateKernel(program, "backproject_image", &err);
+    checkError(err, "clCreateKernel");
+
+    const size_t volumeSize = static_cast<size_t>(NX) * NX * NY;
+    const size_t projSize   = static_cast<size_t>(W)  * H;
+
+    cl_mem volumeBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE,
+                                          sizeof(float) * volumeSize,
+                                          nullptr, &err);
+    checkError(err, "clCreateBuffer volume");
+
+    float zero = 0.0f;
+    checkError(clEnqueueFillBuffer(queue, volumeBuffer,
+                                    &zero, sizeof(float), 0,
+                                    sizeof(float) * volumeSize,
+                                    0, nullptr, nullptr),
+               "clEnqueueFillBuffer");
+
+    for (int p = 0; p < P; ++p)
+    {
+        float angle = 2.0f * static_cast<float>(M_PI) * p / P;
+
+        std::vector<float> rowMajor(projSize);
+        const float* psrc = projections.data() + p * projSize;
+        for (int u = 0; u < W; ++u)
+            for (int v = 0; v < H; ++v)
+                rowMajor[v * W + u] = psrc[u * H + v];
+
+        cl_image_format format;
+        format.image_channel_order     = CL_R;
+        format.image_channel_data_type = CL_FLOAT;
+
+        cl_image_desc desc{};
+        desc.image_type      = CL_MEM_OBJECT_IMAGE2D;
+        desc.image_width     = static_cast<size_t>(W);
+        desc.image_height    = static_cast<size_t>(H);
+        desc.image_row_pitch = 0;
+
+        cl_mem image = clCreateImage(
+            context,
+            CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+            &format, &desc,
+            rowMajor.data(),
+            &err);
+        checkError(err, "clCreateImage");
+
+        clSetKernelArg(kernel,  0, sizeof(cl_mem), &image);
+        clSetKernelArg(kernel,  1, sizeof(cl_mem), &volumeBuffer);
+        clSetKernelArg(kernel,  2, sizeof(int),    &W);
+        clSetKernelArg(kernel,  3, sizeof(int),    &H);
+        clSetKernelArg(kernel,  4, sizeof(int),    &NX);
+        clSetKernelArg(kernel,  5, sizeof(int),    &NY);
+        clSetKernelArg(kernel,  6, sizeof(float),  &voxelSize);
+        clSetKernelArg(kernel,  7, sizeof(float),  &pixelSize);
+        clSetKernelArg(kernel,  8, sizeof(float),  &sdd);
+        clSetKernelArg(kernel,  9, sizeof(float),  &sod);
+        clSetKernelArg(kernel, 10, sizeof(float),  &angle);
+
+        size_t globalSize = volumeSize;
+        checkError(clEnqueueNDRangeKernel(queue, kernel, 1,
+                                           nullptr, &globalSize, nullptr,
+                                           0, nullptr, nullptr),
+                   "clEnqueueNDRangeKernel");
+
+        clReleaseMemObject(image);
+    }
+
+    std::vector<float> volume(volumeSize);
+    checkError(clEnqueueReadBuffer(queue, volumeBuffer, CL_TRUE,
+                                    0, sizeof(float) * volumeSize,
+                                    volume.data(), 0, nullptr, nullptr),
+               "clEnqueueReadBuffer");
+
+    float scale = static_cast<float>(M_PI) / P;
+    for (auto& v : volume) v *= scale;
+
+    // Cleanup
+    clReleaseMemObject(volumeBuffer);
+    clReleaseKernel(kernel);
+    clReleaseProgram(program);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(context);
+
+    return volume;
+}
+```
+
+### src/gpu_reconstruction_local.cpp
+```
+// GPU backprojection path that uses local-memory tiling along Z for reuse.
+
+#include "reconstruction.hpp"
+#include <CL/cl.h>
+#include <vector>
+#include <iostream>
+#include <fstream>
+#include <cmath>
+#include <stdexcept>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+#define TILE_Z 64
+
+static void checkErr(cl_int err, const char* msg) {
+    if (err != CL_SUCCESS) {
+        std::cerr << "OpenCL Error (" << err << "): " << msg << "\n";
+        exit(EXIT_FAILURE);
+    }
+}
+static std::string loadSrc(const std::string& path) {
+    std::ifstream f(path);
+    if (!f.is_open()) throw std::runtime_error("Cannot open: " + path);
+    return std::string(std::istreambuf_iterator<char>(f),
+                       std::istreambuf_iterator<char>());
+}
+
+std::vector<float> reconstructGPU_Local(
+    const std::vector<float>& projectionsRaw,
+    int P, int W, int H,
+    int NX, int NY,
+    float voxelSize, float pixelSize,
+    float sdd, float sod)
+{
+    std::cout << "[GPU-Local] Applying FDK pre-filter on CPU...\n";
+    std::vector<float> projections = applyFDKPreFilter(
+        projectionsRaw, P, W, H, voxelSize, sdd, pixelSize);
+
+    cl_int err;
+
+    cl_platform_id platform;
+    checkErr(clGetPlatformIDs(1, &platform, nullptr), "clGetPlatformIDs");
+    cl_device_id device;
+    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, nullptr);
+    if (err != CL_SUCCESS) {
+        checkErr(clGetDeviceIDs(platform, CL_DEVICE_TYPE_DEFAULT,
+                                1, &device, nullptr), "clGetDeviceIDs");
+    }
+
+    cl_ulong localMemSize = 0;
+    clGetDeviceInfo(device, CL_DEVICE_LOCAL_MEM_SIZE,
+                    sizeof(localMemSize), &localMemSize, nullptr);
+    size_t localNeeded = 2 * static_cast<size_t>(H) * sizeof(float);
+    std::cout << "[GPU-Local] Local mem needed : " << localNeeded << " bytes\n";
+    std::cout << "[GPU-Local] Local mem available: " << localMemSize << " bytes\n";
+
+    cl_context ctx = clCreateContext(nullptr, 1, &device,
+                                      nullptr, nullptr, &err);
+    checkErr(err, "clCreateContext");
+    cl_command_queue queue = clCreateCommandQueueWithProperties(
+        ctx, device, nullptr, &err);
+    checkErr(err, "clCreateCommandQueue");
+
+    std::string src = loadSrc("kernels/backprojection_local.cl");
+    const char* srcPtr = src.c_str();
+    cl_program prog = clCreateProgramWithSource(ctx, 1, &srcPtr, nullptr, &err);
+    checkErr(err, "clCreateProgramWithSource");
+    err = clBuildProgram(prog, 1, &device, nullptr, nullptr, nullptr);
+    if (err != CL_SUCCESS) {
+        size_t logSz;
+        clGetProgramBuildInfo(prog, device, CL_PROGRAM_BUILD_LOG,
+                              0, nullptr, &logSz);
+        std::vector<char> log(logSz);
+        clGetProgramBuildInfo(prog, device, CL_PROGRAM_BUILD_LOG,
+                              logSz, log.data(), nullptr);
+        std::cerr << "Build log:\n" << log.data() << "\n";
+        checkErr(err, "clBuildProgram");
+    }
+    cl_kernel kernel = clCreateKernel(prog, "backproject_local", &err);
+    checkErr(err, "clCreateKernel");
+
+    const size_t volumeSize = static_cast<size_t>(NX) * NX * NY;
+    const size_t projSize   = static_cast<size_t>(W) * H;
+
+    cl_mem volBuf = clCreateBuffer(ctx, CL_MEM_READ_WRITE,
+                                    sizeof(float) * volumeSize, nullptr, &err);
+    checkErr(err, "clCreateBuffer volume");
+    float zero = 0.0f;
+    checkErr(clEnqueueFillBuffer(queue, volBuf, &zero, sizeof(float),
+                                  0, sizeof(float)*volumeSize, 0, nullptr, nullptr),
+             "clEnqueueFillBuffer");
+
+    size_t gz = ((NY + TILE_Z - 1) / TILE_Z) * TILE_Z;
+    size_t globalSize[3] = { (size_t)NX, (size_t)NX, gz };
+    size_t localSize[3]  = { 1, 1, TILE_Z };
+
+    size_t col0Bytes = static_cast<size_t>(H) * sizeof(float);
+    size_t col1Bytes = static_cast<size_t>(H) * sizeof(float);
+
+    std::cout << "[GPU-Local] NDRange: global=("
+              << NX << "," << NX << "," << gz
+              << ")  local=(1,1," << TILE_Z << ")\n";
+    std::cout << "[GPU-Local] Work-groups: "
+              << NX * NX * (gz / TILE_Z) << "\n";
+    std::cout << "[GPU-Local] Local mem per work-group: "
+              << col0Bytes + col1Bytes << " bytes\n";
+
+    for (int p = 0; p < P; ++p)
+    {
+        float angle = 2.0f * static_cast<float>(M_PI) * p / P;
+
+        cl_mem projBuf = clCreateBuffer(
+            ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+            sizeof(float) * projSize,
+            (void*)(projections.data() + p * projSize), &err);
+        checkErr(err, "clCreateBuffer proj");
+
+        clSetKernelArg(kernel,  0, sizeof(cl_mem), &projBuf);
+        clSetKernelArg(kernel,  1, sizeof(cl_mem), &volBuf);
+        clSetKernelArg(kernel,  2, col0Bytes,       nullptr);  // __local col0
+        clSetKernelArg(kernel,  3, col1Bytes,       nullptr);  // __local col1
+        clSetKernelArg(kernel,  4, sizeof(int),    &W);
+        clSetKernelArg(kernel,  5, sizeof(int),    &H);
+        clSetKernelArg(kernel,  6, sizeof(int),    &NX);
+        clSetKernelArg(kernel,  7, sizeof(int),    &NY);
+        clSetKernelArg(kernel,  8, sizeof(float),  &voxelSize);
+        clSetKernelArg(kernel,  9, sizeof(float),  &pixelSize);
+        clSetKernelArg(kernel, 10, sizeof(float),  &sdd);
+        clSetKernelArg(kernel, 11, sizeof(float),  &sod);
+        clSetKernelArg(kernel, 12, sizeof(float),  &angle);
+
+        checkErr(clEnqueueNDRangeKernel(queue, kernel, 3,
+                                         nullptr, globalSize, localSize,
+                                         0, nullptr, nullptr),
+                 "clEnqueueNDRangeKernel");
+
+        clReleaseMemObject(projBuf);
+    }
+
+    std::vector<float> volume(volumeSize);
+    checkErr(clEnqueueReadBuffer(queue, volBuf, CL_TRUE,
+                                  0, sizeof(float)*volumeSize,
+                                  volume.data(), 0, nullptr, nullptr),
+             "clEnqueueReadBuffer");
+
+    float scale = static_cast<float>(M_PI) / P;
+    for (auto& v : volume) v *= scale;
+
+    clReleaseMemObject(volBuf);
+    clReleaseKernel(kernel);
+    clReleaseProgram(prog);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(ctx);
+
+    return volume;
+}
+```
+
+### src/main.cpp
+```
+// Runs all reconstruction pipelines, compares quality, and prints benchmark numbers.
+
+#define _USE_MATH_DEFINES
+#include <cmath>
+#include <vector>
+#include <algorithm>
+#include <iostream>
+#include <iomanip>
+#include <chrono>
+#include <fstream>
+#include <string>
+#include <stdexcept>
+#include <limits>
+#include <H5Cpp.h>
+#include <CL/cl.h>
+#ifdef _WIN32
+#  include <windows.h>
+#else
+#  include <unistd.h>
+#endif
+#include "reconstruction.hpp"
+
+using namespace H5;
+using Clock   = std::chrono::high_resolution_clock;
+using Seconds = std::chrono::duration<double>;
+
+std::string getCpuModelName() {
+#ifndef _WIN32
+    std::ifstream f("/proc/cpuinfo"); std::string line;
+    while (std::getline(f, line))
+        if (line.find("model name") != std::string::npos)
+            return line.substr(line.find(':') + 2);
+#endif
+    return "Unknown CPU";
+}
+std::string getComputerName() {
+    char buf[1024] = {};
+#ifdef _WIN32
+    DWORD sz = sizeof(buf); GetComputerNameA(buf, &sz);
+#else
+    gethostname(buf, sizeof(buf));
+#endif
+    return std::string(buf);
+}
+std::string getGpuModelName() {
+    cl_platform_id plat; cl_uint np = 0;
+    if (clGetPlatformIDs(1,&plat,&np)!=CL_SUCCESS||np==0) return "No OpenCL platform";
+    cl_device_id dev; cl_uint nd = 0;
+    if (clGetDeviceIDs(plat,CL_DEVICE_TYPE_GPU,1,&dev,&nd)!=CL_SUCCESS||nd==0) return "No GPU";
+    size_t sz=0; clGetDeviceInfo(dev,CL_DEVICE_NAME,0,nullptr,&sz);
+    std::string name(sz,'\0'); clGetDeviceInfo(dev,CL_DEVICE_NAME,sz,&name[0],nullptr);
+    if (!name.empty()&&name.back()=='\0') name.pop_back();
+    return name;
+}
+static double elapsed(Clock::time_point t0){ return Seconds(Clock::now()-t0).count(); }
+static void writeVol(H5File& f,const std::string& name,
+                     const std::vector<float>& data,hsize_t NX,hsize_t NY){
+    hsize_t dims[3]={NX,NX,NY}; DataSpace sp(3,dims);
+    DataSet ds=f.createDataSet(name,PredType::NATIVE_FLOAT,sp);
+    ds.write(data.data(),PredType::NATIVE_FLOAT);
+    std::cout<<"  Saved: "<<name<<"\n";
+}
+static void printValueRange(const std::string& label,const std::vector<float>& v){
+    float mn=*std::min_element(v.begin(),v.end());
+    float mx=*std::max_element(v.begin(),v.end());
+    float mean=0.f; for(auto x:v) mean+=x; mean/=(float)v.size();
+    std::cout<<"  "<<std::left<<std::setw(22)<<label
+             <<"  min="<<std::setw(12)<<mn
+             <<"  max="<<std::setw(12)<<mx
+             <<"  mean="<<mean<<"\n";
+}
+static std::vector<float> tryLoadPythonReference(H5File& file){
+    for(auto& name:{"Reconstruction","reconstruction","Reconstruction_Python","recon","volume"}){
+        try{
+            DataSet ds=file.openDataSet(name);
+            DataSpace sp=ds.getSpace(); hsize_t dims[3];
+            sp.getSimpleExtentDims(dims);
+            std::vector<float> ref(dims[0]*dims[1]*dims[2]);
+            ds.read(ref.data(),PredType::NATIVE_FLOAT);
+            std::cout<<"  [Python reference loaded from: '"<<name<<"']\n";
+            return ref;
+        }catch(...){}
+    }
+    return {};
+}
+
+int main(int argc, char* argv[]){
+    std::cout<<std::fixed<<std::setprecision(6);
+    std::cout<<"═══════════════════════════════════════════════\n"
+             <<"   CT Reconstruction – GPU Lab Project\n"
+             <<"   FDK Cone-Beam CT — 5-pipeline benchmark\n"
+             <<"═══════════════════════════════════════════════\n\n";
+
+    std::string path="/lgrp/edu-2025-2-gpulab/Data/proj_shepplogan128.hdf5";
+    bool gpuOnly = false;
+    for(int i=1;i<argc;++i){
+        std::string arg=argv[i];
+        if(arg=="--gpu-only") gpuOnly=true;
+        else path=arg;
+    }
+    if(gpuOnly)
+        std::cout<<"[MODE] GPU-only: CPU reconstruction skipped.\n"
+                 <<"       GPU-Buffer used as reference for MSE.\n\n";
+
+    try{
+        std::cout<<"[INFO] Loading:\n  "<<path<<"\n\n";
+        H5File file(path,H5F_ACC_RDONLY);
+        int P,W,H,NX,NY; float voxelSize,pixelSize,SDD,SOD;
+        file.openDataSet("num_projs")      .read(&P,        PredType::NATIVE_INT);
+        file.openDataSet("detector_width") .read(&W,        PredType::NATIVE_INT);
+        file.openDataSet("detector_height").read(&H,        PredType::NATIVE_INT);
+        file.openDataSet("Volumen_num_xz") .read(&NX,       PredType::NATIVE_INT);
+        file.openDataSet("Volumen_num_y")  .read(&NY,       PredType::NATIVE_INT);
+        file.openDataSet("voxelSize")      .read(&voxelSize,PredType::NATIVE_FLOAT);
+        file.openDataSet("pixelSize")      .read(&pixelSize,PredType::NATIVE_FLOAT);
+        file.openDataSet("SDD")            .read(&SDD,      PredType::NATIVE_FLOAT);
+        file.openDataSet("SOD")            .read(&SOD,      PredType::NATIVE_FLOAT);
+        DataSet projDS=file.openDataSet("Projection");
+        DataSpace projSpace=projDS.getSpace(); hsize_t dims[3];
+        projSpace.getSimpleExtentDims(dims);
+        std::vector<float> projections(dims[0]*dims[1]*dims[2]);
+        projDS.read(projections.data(),PredType::NATIVE_FLOAT);
+
+        H5::Exception::dontPrint();
+        auto volPython=tryLoadPythonReference(file);
+
+        std::cout<<"[INFO] Dataset loaded\n"
+                 <<"  Projections : "<<P<<"\n"
+                 <<"  Detector    : "<<W<<" x "<<H<<" px\n"
+                 <<"  Volume      : "<<NX<<" x "<<NX<<" x "<<NY<<" voxels\n"
+                 <<"  SDD / SOD   : "<<SDD<<" / "<<SOD<<" mm\n"
+                 <<"  voxelSize   : "<<voxelSize<<" mm\n"
+                 <<"  pixelSize   : "<<pixelSize<<" mm\n\n";
+
+        double projGB = (double)P*W*H*4*2/1e9;
+        double volGB  = (double)NX*NX*NY*4/1e9;
+        std::cout<<"[INFO] Estimated memory: projections="<<std::setprecision(2)
+                 <<projGB<<" GB  volume="<<volGB<<" GB\n\n"
+                 <<std::setprecision(6);
+
+        double tCPU = 0.0;
+        std::vector<float> volCPU;
+        std::cout<<"────────────────────────────────────────────────\n";
+        if(!gpuOnly){
+            std::cout<<"[1/5] CPU Reconstruction (FDK reference)...\n";
+            auto t0=Clock::now();
+            volCPU=reconstructCPU(projections,P,W,H,NX,NY,voxelSize,pixelSize,SDD,SOD);
+            tCPU=elapsed(t0);
+            std::cout<<"  Done in "<<tCPU<<" s\n\n";
+        } else {
+            std::cout<<"[1/5] CPU Reconstruction — SKIPPED (--gpu-only mode)\n\n";
+        }
+
+        std::cout<<"[2/5] GPU-Buffer (filter CPU, backproject GPU global memory)...\n";
+        auto t0=Clock::now();
+        auto volBuf=reconstructGPU_Buffer(projections,P,W,H,NX,NY,voxelSize,pixelSize,SDD,SOD);
+        double tBuf=elapsed(t0);
+        std::cout<<"  Done in "<<tBuf<<" s\n\n";
+
+        const std::vector<float>& ref = gpuOnly ? volBuf : volCPU;
+        const std::string refName     = gpuOnly ? "GPU-Buffer" : "CPU";
+
+        std::cout<<"[3/5] GPU-Image (filter CPU, backproject GPU image2d_t)...\n";
+        t0=Clock::now();
+        auto volImg=reconstructGPU_Image(projections,P,W,H,NX,NY,voxelSize,pixelSize,SDD,SOD);
+        double tImg=elapsed(t0);
+        std::cout<<"  Done in "<<tImg<<" s\n\n";
+
+        std::cout<<"[4/5] GPU-Full (ramp filter + backproject both on GPU)...\n";
+        t0=Clock::now();
+        auto volFull=reconstructGPU_Buffer_Full(projections,P,W,H,NX,NY,voxelSize,pixelSize,SDD,SOD);
+        double tFull=elapsed(t0);
+        std::cout<<"  Done in "<<tFull<<" s\n\n";
+
+        std::cout<<"[5/5] GPU-Local (local memory tiling + 3D NDRange)...\n";
+        t0=Clock::now();
+        auto volLocal=reconstructGPU_Local(projections,P,W,H,NX,NY,voxelSize,pixelSize,SDD,SOD);
+        double tLocal=elapsed(t0);
+        std::cout<<"  Done in "<<tLocal<<" s\n\n";
+
+        std::cout<<"══════════════════ Validation ══════════════════\n\n";
+
+        std::cout<<"  [Step 1] Python reference vs C++ CPU:\n";
+        if(!volPython.empty()&&!volCPU.empty()){
+            double msePyCPU=computeMSE(volPython,volCPU);
+            std::cout<<"  MSE (Python vs C++ CPU) = "<<msePyCPU<<"\n";
+            std::cout<<"  → "<<(msePyCPU<1e-2?"C++ CPU matches Python reference ✓":"WARNING: larger than expected.")<<"\n";
+        } else if(gpuOnly){
+            std::cout<<"  Skipped (--gpu-only mode, no CPU reconstruction)\n";
+            std::cout<<"  → See 128-dataset run for Python vs CPU validation.\n";
+        } else {
+            std::cout<<"  Python reference not found in HDF5.\n";
+            std::cout<<"  → Run: python3 validate_and_plot.py\n";
+        }
+        std::cout<<"\n";
+
+        double mseBuf  =gpuOnly?0.0:computeMSE(ref,volBuf);
+        double mseImg  =computeMSE(ref,volImg);
+        double mseFull =computeMSE(ref,volFull);
+        double mseLocal=computeMSE(ref,volLocal);
+        std::cout<<"  [Step 2] "<<refName<<" vs GPU pipelines:\n";
+        if(!gpuOnly)
+            std::cout<<"  MSE ("<<refName<<" vs GPU-Buffer) : "<<mseBuf  <<"  "<<(mseBuf  <1e-1?"✓":"✗")<<"\n";
+        std::cout<<"  MSE ("<<refName<<" vs GPU-Image)  : "<<mseImg  <<"  "<<(mseImg  <1e-1?"✓":"✗")<<"\n";
+        std::cout<<"  MSE ("<<refName<<" vs GPU-Full)   : "<<mseFull <<"  "<<(mseFull <1e-1?"✓":"✗")<<"\n";
+        std::cout<<"  MSE ("<<refName<<" vs GPU-Local)  : "<<mseLocal<<"  "<<(mseLocal<1e-1?"✓":"✗")<<"\n";
+        std::cout<<"  (< 1e-4: excellent  |  < 1e-2: good  |  < 1e-1: acceptable)\n\n";
+
+        std::cout<<"  [Value Range] Min / Max / Mean:\n";
+        if(!gpuOnly) printValueRange("CPU", volCPU);
+        printValueRange("GPU-Buffer", volBuf);
+        printValueRange("GPU-Image",  volImg);
+        printValueRange("GPU-Full",   volFull);
+        printValueRange("GPU-Local",  volLocal);
+        std::cout<<"\n";
+
+        std::cout<<"[INFO] Writing raw volumes for HDF5 packing...\n";
+        {
+            std::ofstream meta("volumes_meta.txt");
+            meta << NX << " " << NY << "\n";
+            meta << (gpuOnly ? "0" : "1") << "\n";
+            meta.close();
+
+            auto dumpBin = [](const std::string& name, const std::vector<float>& v){
+                std::ofstream f(name, std::ios::binary);
+                f.write(reinterpret_cast<const char*>(v.data()),
+                        v.size()*sizeof(float));
+                std::cout<<"  Dumped: "<<name<<"\n";
+            };
+            if(!gpuOnly) dumpBin("vol_cpu.bin",   volCPU);
+            dumpBin("vol_buf.bin",   volBuf);
+            dumpBin("vol_img.bin",   volImg);
+            dumpBin("vol_full.bin",  volFull);
+            dumpBin("vol_local.bin", volLocal);
+        }
+        std::cout<<"  Run: python3 pack_hdf5.py\n\n";
+
+        double bestTime=std::min({tBuf,tImg,tFull,tLocal});
+        auto tag=[&](double t)->const char*{return(t==bestTime)?"  ← fastest":"";};
+
+        std::cout
+            <<"════════════════ Benchmark Summary ════════════════\n"
+            <<"  Computer : "<<getComputerName()<<"\n"
+            <<"  CPU      : "<<getCpuModelName()<<"\n"
+            <<"  GPU      : "<<getGpuModelName()<<"\n"
+            <<"  ──────────────────────────────────────────────\n"
+            <<"  Pipeline                  Time(s)     Speedup\n"
+            <<"  ──────────────────────────────────────────────\n";
+        if(!gpuOnly)
+            std::cout<<"  [1] CPU (reference)    "<<std::setw(10)<<tCPU<<"      1.000x\n";
+        else
+            std::cout<<"  [1] CPU (reference)    "<<std::setw(10)<<"N/A"<<"      N/A (--gpu-only)\n";
+        double refTime = gpuOnly ? tBuf : tCPU;
+        std::cout<<"  [2] GPU Buffer         "<<std::setw(10)<<tBuf <<std::setw(10)<<refTime/tBuf <<"x"<<tag(tBuf) <<"\n"
+                 <<"  [3] GPU Image          "<<std::setw(10)<<tImg <<std::setw(10)<<refTime/tImg <<"x"<<tag(tImg) <<"\n"
+                 <<"  [4] GPU Full           "<<std::setw(10)<<tFull<<std::setw(10)<<refTime/tFull<<"x"<<tag(tFull)<<"\n"
+                 <<"  [5] GPU Local(tiling)  "<<std::setw(10)<<tLocal<<std::setw(10)<<refTime/tLocal<<"x"<<tag(tLocal)<<"\n"
+                 <<"════════════════════════════════════════════════════\n";
+    }
+    catch(const H5::Exception& e){std::cerr<<"HDF5 Error: "<<e.getDetailMsg()<<"\n";return -1;}
+    catch(const std::exception& e){std::cerr<<"Error: "<<e.what()<<"\n";return -1;}
+    return 0;
+}
+```
+
+### src/mse.cpp
+```
+// Small utility to compute mean squared error between two volumes.
+#include "reconstruction.hpp"
+#include <stdexcept>
+#include <cmath>
+
+double computeMSE(const std::vector<float>& a,
+                  const std::vector<float>& b)
+{
+    if (a.size() != b.size())
+        throw std::runtime_error(
+            "MSE error: vector size mismatch.");
+
+    double mse = 0.0;
+
+    for (size_t i = 0; i < a.size(); ++i)
+    {
+        double diff = static_cast<double>(a[i]) -
+                      static_cast<double>(b[i]);
+        mse += diff * diff;
+    }
+
+    return mse / static_cast<double>(a.size());
+}
+```

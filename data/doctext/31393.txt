@@ -1,0 +1,1997 @@
+# Subgrid Marching Tetrahedra — reference code (vendored)
+
+This repository **vendors** the author-provided reference code for the per-tetrahedron
+reconstruction algorithm from the paper:
+
+> **Subgrid Marching Tetrahedra**
+> Hossein Baktash, Mark Gillespie, Keenan Crane
+> ACM Transactions on Graphics (TOG), 2026.
+
+Both the C and the HTML/JavaScript code here were taken **verbatim** from the authors'
+project web page:
+
+> https://www.cs.cmu.edu/~kmcrane/Projects/SubgridMarching/index.html
+
+It is mirrored here so it can be pinned and consumed as a dependency (e.g. vendored into a
+Zentaizo context workspace). **It is not original work of this repository's owner** — all
+credit goes to the paper's authors. Upstream is the source of truth; prefer it for any
+canonical use.
+
+## Contents
+
+| Path | What it is | Upstream download |
+|---|---|---|
+| [`c/`](c/) | Single-header, stb-style C99/C11 reference library implementing the single-tet reconstruction (`subgrid_marching_tet.h`), plus a CLI that writes a Wavefront OBJ (`cli.c`), a minimal example (`minimal.c`), a `Makefile`, and the authors' own `README.md`. | `SubgridMarchingTetrahedron-C.zip` |
+| [`web/subgrid-tet.html`](web/subgrid-tet.html) | Self-contained web-based visualizer + JavaScript implementation of the same single-tet reconstruction. Open in a browser; manipulate the edge/normal coordinates interactively. | `subgrid-tet.html` |
+
+Both implement the **same** algorithm: given the *edge coordinates* of a single tetrahedron
+(how many times the surface crosses each of its six edges), reconstruct an intersection-free
+triangulation interpolating those crossings. Neither contours a whole surface on its own — to
+mesh a grid, compute per-edge intersection counts and apply the reconstruction per tet (split
+each cube into tets), as described in the paper.
+
+## License
+
+- **`c/`** — the C reference library declares `SPDX-License-Identifier: MIT-0` (MIT No
+  Attribution) at the top of `subgrid_marching_tet.h`; the full text is in
+  [`c/LICENSE`](c/LICENSE). MIT-0 permits use, copying, modification, and redistribution
+  without an attribution requirement.
+- **`web/subgrid-tet.html`** — the authors' project page states **no explicit license** for
+  the web visualizer. It is offered there as a public download; it is included here under the
+  authors' copyright, with attribution, for reference. If you intend to reuse or redistribute
+  it beyond personal/research reference, confirm terms with the authors.
+
+## Provenance
+
+Files copied unmodified from the project page on 2026-06-07. The C archive's `__MACOSX/`
+resource-fork entries (zip-extraction junk) were dropped; nothing else was changed. See the
+supplemental material (`SubgridMarchingSupplement.pdf`) and the paper on the project page for
+the exhaustive surface tables and performance statistics.
+
+### c/cli.c
+```
+/* cli.c -- command-line front-end for subgrid_marching_tet.h.
+ *
+ * Reconstructs a single tetrahedron's surface from its six edge coordinates and
+ * writes a Wavefront OBJ mesh.
+ *
+ *   sgmt E01 E02 E03 E23 E13 E12 [options]
+ *
+ *     -o, --output PATH            output OBJ path (default: subgrid_tet.obj)
+ *     --no-simplicial-embedding    disable the simplicial embedding (on by default)
+ *     --writeTet                   also write the four tet faces (default: off)
+ */
+
+#define SUBGRID_MARCHING_TET_IMPLEMENTATION
+#include "subgrid_marching_tet.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+/* Vertices of a regular (equilateral) tetrahedron. */
+static void equilateral_tet(sgmt_real xyz[12]) {
+    sgmt_real s6 = (sgmt_real)sqrt(6.0), s3 = (sgmt_real)sqrt(3.0);
+    sgmt_real v[4][3] = {
+        { (sgmt_real)0.0,  s6 / 4,        (sgmt_real)0.0 },
+        { (sgmt_real)-0.5, -s6 / 12,      -s3 / 6 },
+        { (sgmt_real)0.5,  -s6 / 12,      -s3 / 6 },
+        { (sgmt_real)0.0,  -s6 / 12,      s3 / 3 }
+    };
+    int i, d;
+    for (i = 0; i < 4; ++i) for (d = 0; d < 3; ++d) xyz[3 * i + d] = v[i][d];
+}
+
+static void usage(const char *prog) {
+    fprintf(stderr,
+        "usage: %s E01 E02 E03 E23 E13 E12 [options]\n"
+        "  reconstruct one tet's surface from its six edge coordinates (paper order)\n"
+        "  and write a Wavefront OBJ mesh.\n\n"
+        "options:\n"
+        "  -o, --output PATH            output OBJ path (default: subgrid_tet.obj)\n"
+        "  --no-simplicial-embedding    disable the simplicial embedding (on by default)\n"
+        "  --writeTet                   also write the four tetrahedron faces (default: off)\n"
+        "  -h, --help                   show this help\n",
+        prog);
+}
+
+int main(int argc, char **argv) {
+    int32_t edge_coords[6];
+    int got_coords = 0;
+    int simplicial = 1, write_tet = 0;
+    const char *output = "subgrid_tet.obj";
+    int i;
+
+    sgmt_real tet[12];
+    sgmt_mesh mesh;
+    int32_t slot;
+    FILE *f;
+    static const int32_t TRIPLETS[4][3] = { {1,2,3}, {0,2,3}, {0,1,3}, {0,1,2} };
+
+    for (i = 1; i < argc; ++i) {
+        const char *a = argv[i];
+        if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) { usage(argv[0]); return 0; }
+        else if (strcmp(a, "-o") == 0 || strcmp(a, "--output") == 0) {
+            if (++i >= argc) { fprintf(stderr, "error: %s needs an argument\n", a); return 2; }
+            output = argv[i];
+        } else if (strcmp(a, "--no-simplicial-embedding") == 0) {
+            simplicial = 0;
+        } else if (strcmp(a, "--writeTet") == 0) {
+            write_tet = 1;
+        } else if (a[0] == '-' && !(a[1] >= '0' && a[1] <= '9') && a[1] != '\0') {
+            fprintf(stderr, "error: unknown option '%s'\n", a);
+            usage(argv[0]);
+            return 2;
+        } else {
+            if (got_coords >= 6) { fprintf(stderr, "error: too many edge coordinates\n"); return 2; }
+            edge_coords[got_coords++] = (int32_t)atoi(a);
+        }
+    }
+
+    if (got_coords != 6) {
+        fprintf(stderr, "error: expected six edge coordinates (got %d)\n", got_coords);
+        usage(argv[0]);
+        return 2;
+    }
+    for (i = 0; i < 6; ++i) if (edge_coords[i] < 0) {
+        fprintf(stderr, "error: edge coordinates must be non-negative\n");
+        return 2;
+    }
+
+    equilateral_tet(tet);
+    mesh = sgmt_triangulate_tet(edge_coords, simplicial, tet);
+    if (!mesh.ok) { fprintf(stderr, "error: reconstruction failed\n"); return 1; }
+
+    f = fopen(output, "w");
+    if (!f) { fprintf(stderr, "error: cannot open '%s' for writing\n", output); sgmt_free_mesh(&mesh); return 1; }
+
+    fprintf(f, "# Subgrid Marching Tetrahedra reconstruction\n");
+    fprintf(f, "# edge coordinates (e01,e02,e03,e23,e13,e12) = (%d, %d, %d, %d, %d, %d)\n",
+            edge_coords[0], edge_coords[1], edge_coords[2], edge_coords[3], edge_coords[4], edge_coords[5]);
+    fprintf(f, "# simplicial embedding = %s\n", simplicial ? "True" : "False");
+
+    fprintf(f, "o surface\n");
+    for (i = 0; i < mesh.num_vertices; ++i)
+        fprintf(f, "v %.10g %.10g %.10g\n",
+                (double)mesh.positions[3 * i + 0], (double)mesh.positions[3 * i + 1], (double)mesh.positions[3 * i + 2]);
+    for (i = 0; i < mesh.num_triangles; ++i)
+        fprintf(f, "f %d %d %d\n",
+                mesh.triangles[3 * i + 0] + 1, mesh.triangles[3 * i + 1] + 1, mesh.triangles[3 * i + 2] + 1);
+
+    if (write_tet) {
+        fprintf(f, "o tetrahedron\n");
+        for (i = 0; i < 4; ++i)
+            fprintf(f, "v %.10g %.10g %.10g\n",
+                    (double)tet[3 * i + 0], (double)tet[3 * i + 1], (double)tet[3 * i + 2]);
+        for (slot = 0; slot < 4; ++slot)
+            fprintf(f, "f %d %d %d\n",
+                    mesh.num_vertices + TRIPLETS[slot][0] + 1,
+                    mesh.num_vertices + TRIPLETS[slot][1] + 1,
+                    mesh.num_vertices + TRIPLETS[slot][2] + 1);
+    }
+
+    fclose(f);
+    printf("Wrote %s: %d vertices, %d triangles (simplicial embedding=%s, tet faces=%s)\n",
+           output, mesh.num_vertices, mesh.num_triangles, simplicial ? "on" : "off", write_tet ? "on" : "off");
+
+    sgmt_free_mesh(&mesh);
+    return 0;
+}
+```
+
+### c/minimal.c
+```
+/* minimal.c -- the smallest complete program that calls the core routine and
+ * prints its raw output: the triangle index triples and the barycentric
+ * coordinates of any Steiner points. */
+
+#define SUBGRID_MARCHING_TET_IMPLEMENTATION
+#include "subgrid_marching_tet.h"
+
+#include <stdio.h>
+
+int main(void) {
+    /* Edge coordinates in paper order: (e01, e02, e03, e23, e13, e12). */
+    int32_t edge_coords[6] = {0, 2, 2, 0, 0, 0};
+    int32_t t, s;
+
+    int embedded = 1;
+    sgmt_result result = sgmt_reconstruct_tet(edge_coords, embedded);
+
+    printf("edge coordinates: %d %d %d %d %d %d\n",
+           edge_coords[0], edge_coords[1], edge_coords[2], edge_coords[3], edge_coords[4], edge_coords[5]);
+    printf("embedded: %d\n", embedded);
+
+    printf("%d triangles, %d edge points, %d Steiner points\n",
+           result.num_triangles, result.num_edge_points, result.num_steiner);
+
+    for (t = 0; t < result.num_triangles; ++t)
+        printf("triangle %d: %d %d %d\n", t,
+               result.triangles[3 * t + 0],
+               result.triangles[3 * t + 1],
+               result.triangles[3 * t + 2]);
+
+    for (s = 0; s < result.num_steiner; ++s)
+        printf("steiner %d (index %d): %g %g %g %g\n",
+               s, result.num_edge_points + s,
+               (double)result.steiner_bary[4 * s + 0],
+               (double)result.steiner_bary[4 * s + 1],
+               (double)result.steiner_bary[4 * s + 2],
+               (double)result.steiner_bary[4 * s + 3]);
+
+    sgmt_free_result(&result);
+    return 0;
+}
+```
+
+### c/subgrid_marching_tet.h
+```
+/* SPDX-License-Identifier: MIT-0 */
+/* =========================================================================== *
+ *  subgrid_marching_tet.h -- Subgrid Marching Tetrahedra, C reference library  *
+ * =========================================================================== *
+ *
+ *  This is a single-file, header-only C implementation of the per-tetrahedron
+ *  reconstruction procedure from the paper "Subgrid Marching Tetrahedra"
+ *  (Baktash, Gillespie & Crane, ACM TOG 2026).
+ *
+ *  The full documentation (duplicated from README.md so this file is entirely
+ *  self-contained) follows below, then the API, then the implementation.
+ *
+ * --------------------------------------------------------------------------- *
+ *  README (verbatim)
+ * --------------------------------------------------------------------------- *
+ *
+ *  # Subgrid Marching Tetrahedra -- C Reference Implementation
+ *
+ *  Given the edge coordinates of a single tetrahedron -- the number of times a
+ *  surface crosses each of its six edges -- this library reconstructs the
+ *  CONNECTIVITY of an intersection-free triangulation that interpolates those
+ *  crossings. It is written as rock-solid, self-contained "archival" code: a
+ *  single source file you drop into a larger, high-performance codebase and
+ *  compile directly.
+ *
+ *  ## Conventions
+ *
+ *  The tetrahedron has vertices labelled 0, 1, 2, 3.
+ *
+ *  Edge coordinates are supplied in the canonical order used in the paper
+ *  (Section 2.2), which offsets complementary edge pairs (e.g. 01 and 23) by
+ *  three entries:
+ *
+ *      e = (e_01, e_02, e_03, e_23, e_13, e_12)
+ *
+ *  The output triangulation is connectivity only (no vertex positions). Each
+ *  triangle indexes into a flat list of points serialized as follows:
+ *
+ *    1. Edge-intersection points come first, ordered exactly as the input edge
+ *       coordinates, and within each edge from the lower- to the higher-indexed
+ *       vertex. Edge e (with c crossings) occupies a contiguous block of c
+ *       indices [base, base + c); crossing number o (1-based, from the lower
+ *       vertex) sits at offset o - 1. Every input crossing gets an index, even
+ *       crossings the reconstruction discards (e.g. endpoints of open curves),
+ *       so the indexing depends only on the input. There are num_edge_points
+ *       (= the sum of the edge coordinates) such points, at indices
+ *       [0, num_edge_points).
+ *
+ *    2. Steiner points (extra vertices the algorithm introduces, e.g. octagon
+ *       centers or simplicial-embedding offsets) come after all edge points, at
+ *       indices [num_edge_points, num_edge_points + num_steiner). For these the
+ *       library returns barycentric coordinates relative to vertices 0,1,2,3,
+ *       assuming crossings are uniformly spaced along each edge.
+ *
+ *  ## Minimal example
+ *
+ *      #define SUBGRID_MARCHING_TET_IMPLEMENTATION
+ *      #include "subgrid_marching_tet.h"
+ *
+ *      int main(void) {
+ *          int32_t edge_coords[6] = {0, 2, 2, 0, 0, 0};  // (e01,e02,e03,e23,e13,e12)
+ *
+ *          sgmt_result result = sgmt_reconstruct_tet(edge_coords, 1);
+ *          // use result.triangles, result.steiner_bary, result.num_* ...
+ *          sgmt_free_result(&result);
+ *          return 0;
+ *      }
+ *
+ *  See minimal.c for a runnable version that prints the result.
+ *
+ *  ## Integrating the library
+ *
+ *  This is an stb-style single-header library. In EXACTLY ONE translation unit,
+ *  define the implementation macro before including the header:
+ *
+ *      #define SUBGRID_MARCHING_TET_IMPLEMENTATION
+ *      #include "subgrid_marching_tet.h"
+ *
+ *  In every other file, just #include "subgrid_marching_tet.h" for declarations.
+ *
+ *  ### Compile-time configuration (all optional)
+ *
+ *      SGMT_REAL .................. floating-point type (default: double),
+ *                                   typedef'd to sgmt_real.
+ *      SGMT_MALLOC/REALLOC/FREE ... allocator hooks (default: malloc/realloc/free).
+ *      SGMT_ASSERT ................ assertion macro (default: assert); also used
+ *                                   for out-of-memory.
+ *      SGMT_STATIC ................ if defined, API functions get static linkage.
+ *      SGMT_DEFAULT_BULGE ......... inward inflation for simplicial-embedding
+ *                                   Steiner points (default: 0.05).
+ *
+ *  ## API
+ *
+ *      typedef SGMT_REAL sgmt_real;       // defaults to double
+ *
+ *      typedef struct {
+ *          int32_t   *triangles;       // 3 * num_triangles vertex indices
+ *          int32_t    num_triangles;
+ *          sgmt_real *steiner_bary;    // 4 * num_steiner barycentric coords
+ *          int32_t    num_steiner;
+ *          int32_t    num_edge_points; // edge points occupy [0, num_edge_points)
+ *          int32_t    ok;              // 1 on success, 0 on invalid input
+ *      } sgmt_result;
+ *
+ *      sgmt_result sgmt_reconstruct_tet(const int32_t edge_coords[6],
+ *                                       int use_simplicial_embedding);
+ *      void sgmt_free_result(sgmt_result *result);
+ *      void sgmt_realize_uniform(const sgmt_result *result,
+ *                                const int32_t edge_coords[6],
+ *                                const sgmt_real tet_xyz[12], sgmt_real *out_xyz);
+ *
+ *  ## Helper: triangulate directly on a tet
+ *
+ *  For the common case where you just want a concrete mesh, the helper
+ *  sgmt_triangulate_tet() rolls the two calls above into one: given the edge
+ *  coordinates, the simplicial flag, and the four tet vertex positions, it
+ *  returns the 3D positions of all points (edge-intersection points then Steiner
+ *  points) together with the triangles indexing into them.
+ *
+ *      typedef struct {
+ *          sgmt_real *positions;     // 3 * num_vertices (x,y,z)
+ *          int32_t    num_vertices;
+ *          int32_t   *triangles;     // 3 * num_triangles vertex indices
+ *          int32_t    num_triangles;
+ *          int32_t    ok;            // 1 on success, 0 on invalid input
+ *      } sgmt_mesh;
+ *
+ *      sgmt_mesh sgmt_triangulate_tet(const int32_t edge_coords[6],
+ *                                     int use_simplicial_embedding,
+ *                                     const sgmt_real tet_xyz[12]);
+ *      void sgmt_free_mesh(sgmt_mesh *mesh);
+ *
+ *  use_simplicial_embedding != 0 inserts mid-scoop Steiner points for an embedded
+ *  simplicial complex (Section 4.3.3), inflated inward by SGMT_DEFAULT_BULGE
+ *  (override with a #define before including). The returned result owns heap
+ *  memory; release it with
+ *  sgmt_free_result(). sgmt_realize_uniform() turns the abstract result into 3D
+ *  positions on a tet whose four vertices are tet_xyz[12] (4 * x,y,z), placing
+ *  crossings uniformly along each edge; it fills out_xyz with
+ *  3 * (num_edge_points + num_steiner) coordinates (edge points first).
+ *
+ *  ## Standards and portability
+ *
+ *  Compiles as both C99 and C11, no platform-specific dependencies: fixed-width
+ *  <stdint.h> types, no variable-length arrays, no anonymous structs/unions, no
+ *  optional C11 features, floating-point type abstracted behind sgmt_real. Uses
+ *  only <stdint.h>, <stdlib.h>, <string.h>, <math.h>, <assert.h> (link -lm).
+ *
+ * =========================================================================== */
+
+#ifndef SUBGRID_MARCHING_TET_H
+#define SUBGRID_MARCHING_TET_H
+
+#include <stdint.h>
+
+#ifndef SGMT_REAL
+#define SGMT_REAL double
+#endif
+typedef SGMT_REAL sgmt_real;
+
+#ifndef SGMT_DEFAULT_BULGE
+#define SGMT_DEFAULT_BULGE ((sgmt_real)0.05)
+#endif
+
+#ifdef SGMT_STATIC
+#define SGMT_API static
+#else
+#define SGMT_API extern
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    int32_t   *triangles;       /* 3 * num_triangles vertex indices               */
+    int32_t    num_triangles;
+    sgmt_real *steiner_bary;    /* 4 * num_steiner barycentric coords (b0..b3)     */
+    int32_t    num_steiner;
+    int32_t    num_edge_points; /* edge points occupy indices [0, num_edge_points) */
+    int32_t    ok;              /* 1 on success, 0 on invalid input                */
+} sgmt_result;
+
+/* Reconstruct one tet's surface triangulation from its six edge coordinates,
+ * given in paper order (e01,e02,e03,e23,e13,e12). See the header banner for the
+ * meaning of the returned indices. Simplicial-embedding Steiner points (when
+ * use_simplicial_embedding != 0) are inflated inward by SGMT_DEFAULT_BULGE. */
+SGMT_API sgmt_result sgmt_reconstruct_tet(const int32_t edge_coords[6],
+                                          int use_simplicial_embedding);
+
+/* Release the heap memory owned by a result. Safe to call on a zeroed result. */
+SGMT_API void sgmt_free_result(sgmt_result *result);
+
+/* Realize the abstract result as 3D positions on a tet whose four vertices are
+ * tet_xyz[12] (4 * (x,y,z)), with crossings uniformly spaced along each edge.
+ * out_xyz must hold 3 * (num_edge_points + num_steiner) reals. */
+SGMT_API void sgmt_realize_uniform(const sgmt_result *result,
+                                   const int32_t edge_coords[6],
+                                   const sgmt_real tet_xyz[12], sgmt_real *out_xyz);
+
+/* A concrete triangle mesh: 3D vertex positions plus triangle connectivity. */
+typedef struct {
+    sgmt_real *positions;     /* 3 * num_vertices (x,y,z); edge points then Steiner */
+    int32_t    num_vertices;
+    int32_t   *triangles;     /* 3 * num_triangles vertex indices into positions    */
+    int32_t    num_triangles;
+    int32_t    ok;            /* 1 on success, 0 on invalid input                   */
+} sgmt_mesh;
+
+/* Helper: directly produce a ready-to-use triangle mesh for one tetrahedron.
+ *
+ * Combines sgmt_reconstruct_tet() and sgmt_realize_uniform() into a single call.
+ * Given the six edge coordinates (paper order), the simplicial-embedding flag,
+ * and the four tet vertex positions tet_xyz[12] (4 * (x,y,z)), it returns the 3D
+ * positions of all reconstructed points (edge-intersection points first, then
+ * Steiner points; crossings placed uniformly along each edge) and the list of
+ * triangles indexing into them. The returned mesh owns heap memory: release it
+ * with sgmt_free_mesh(). */
+SGMT_API sgmt_mesh sgmt_triangulate_tet(const int32_t edge_coords[6],
+                                        int use_simplicial_embedding,
+                                        const sgmt_real tet_xyz[12]);
+
+/* Release the heap memory owned by a mesh. Safe to call on a zeroed mesh. */
+SGMT_API void sgmt_free_mesh(sgmt_mesh *mesh);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* SUBGRID_MARCHING_TET_H */
+
+/* =========================================================================== *
+ *  IMPLEMENTATION                                                              *
+ * =========================================================================== */
+#ifdef SUBGRID_MARCHING_TET_IMPLEMENTATION
+
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+#ifndef SGMT_ASSERT
+#include <assert.h>
+#define SGMT_ASSERT(x) assert(x)
+#endif
+#ifndef SGMT_MALLOC
+#define SGMT_MALLOC(sz) malloc(sz)
+#endif
+#ifndef SGMT_REALLOC
+#define SGMT_REALLOC(p, sz) realloc(p, sz)
+#endif
+#ifndef SGMT_FREE
+#define SGMT_FREE(p) free(p)
+#endif
+
+#define SGMT__TOL ((sgmt_real)1e-7)
+
+/* --------------------------------------------------------------------------- *
+ *  Combinatorial conventions                                                   *
+ * --------------------------------------------------------------------------- */
+
+/* Internal edge order (lower vertex first); used for all per-edge arrays. */
+static const int32_t SGMT__TET_EDGES[6][2] = {
+    {0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}
+};
+/* Canonical paper order for input edge coordinates and output serialization. */
+static const int32_t SGMT__PAPER_EDGES[6][2] = {
+    {0, 1}, {0, 2}, {0, 3}, {2, 3}, {1, 3}, {1, 2}
+};
+/* The four triangular faces, each listed as the triple opposite one vertex. */
+static const int32_t SGMT__TET_TRIPLETS[4][3] = {
+    {1, 2, 3}, {0, 2, 3}, {0, 1, 3}, {0, 1, 2}
+};
+
+static int32_t sgmt__edge_index(int32_t i, int32_t j) {
+    int32_t lo = (i < j) ? i : j, hi = (i < j) ? j : i, e;
+    for (e = 0; e < 6; ++e)
+        if (SGMT__TET_EDGES[e][0] == lo && SGMT__TET_EDGES[e][1] == hi) return e;
+    SGMT_ASSERT(0 && "invalid edge");
+    return -1;
+}
+
+/* Vertices of {0,1,2,3} not in excl[0..n); returns how many, fills out. */
+static int sgmt__complement(const int32_t *excl, int n, int32_t out[4]) {
+    int m = 0, v, e, found;
+    for (v = 0; v < 4; ++v) {
+        found = 0;
+        for (e = 0; e < n; ++e) if (excl[e] == v) { found = 1; break; }
+        if (!found) out[m++] = v;
+    }
+    return m;
+}
+
+/* The first vertex not in {i,j,k} (k may be -1 to mean "unset"). */
+static int32_t sgmt__first_other(int32_t i, int32_t j, int32_t k) {
+    int32_t excl[3], out[4];
+    excl[0] = i; excl[1] = j; excl[2] = k;
+    sgmt__complement(excl, 3, out);
+    return out[0];
+}
+
+static int32_t sgmt__floor_div2(int32_t x) {
+    return (int32_t)floor((double)x / 2.0);
+}
+
+/* Triangle inequality on three edge counts (Section 2.1). Returns feasibility;
+ * on failure exactly one residual is positive (the excess on the long edge). */
+static int sgmt__tri_ineq(int32_t a, int32_t b, int32_t c,
+                          int32_t *ra, int32_t *rb, int32_t *rc) {
+    int32_t m = a; int feasible;
+    if (b > m) m = b;
+    if (c > m) m = c;
+    feasible = (a + b + c) >= 2 * m;
+    *ra = *rb = *rc = 0;
+    if (!feasible) {
+        if (a == m) *ra = a - b - c;
+        else if (b == m) *rb = b - a - c;
+        else *rc = c - a - b;
+    }
+    return feasible;
+}
+
+static int32_t sgmt__iround(sgmt_real x) {
+    return (int32_t)floor((double)x + 0.5);
+}
+
+/* --------------------------------------------------------------------------- *
+ *  Barycentric vector (length 4)                                              *
+ * --------------------------------------------------------------------------- */
+
+typedef struct { sgmt_real c[4]; } sgmt__vec4;
+
+static sgmt__vec4 sgmt__v_add(sgmt__vec4 a, sgmt__vec4 b) {
+    sgmt__vec4 r; int k; for (k = 0; k < 4; ++k) r.c[k] = a.c[k] + b.c[k]; return r;
+}
+static sgmt__vec4 sgmt__v_sub(sgmt__vec4 a, sgmt__vec4 b) {
+    sgmt__vec4 r; int k; for (k = 0; k < 4; ++k) r.c[k] = a.c[k] - b.c[k]; return r;
+}
+static sgmt__vec4 sgmt__v_scale(sgmt__vec4 a, sgmt_real s) {
+    sgmt__vec4 r; int k; for (k = 0; k < 4; ++k) r.c[k] = a.c[k] * s; return r;
+}
+static sgmt__vec4 sgmt__v_lerp(sgmt__vec4 a, sgmt__vec4 b, sgmt_real t) {
+    return sgmt__v_add(sgmt__v_scale(a, (sgmt_real)1 - t), sgmt__v_scale(b, t));
+}
+static sgmt__vec4 sgmt__v_zero(void) {
+    sgmt__vec4 r; r.c[0] = r.c[1] = r.c[2] = r.c[3] = 0; return r;
+}
+
+/* --------------------------------------------------------------------------- *
+ *  Growable arrays                                                            *
+ * --------------------------------------------------------------------------- */
+
+static void *sgmt__grow(void *data, int32_t *cap, int32_t need, size_t elem) {
+    int32_t nc;
+    void *p;
+    if (need <= *cap) return data;
+    nc = (*cap) ? (*cap) : 8;
+    while (nc < need) nc *= 2;
+    p = SGMT_REALLOC(data, (size_t)nc * elem);
+    SGMT_ASSERT(p != NULL);
+    *cap = nc;
+    return p;
+}
+
+typedef struct { int32_t   *data; int32_t len, cap; } sgmt__i32v;
+typedef struct { sgmt_real *data; int32_t len, cap; } sgmt__rv;
+typedef struct { sgmt__vec4 *data; int32_t len, cap; } sgmt__v4v;
+
+static void sgmt__i32v_push(sgmt__i32v *v, int32_t x) {
+    v->data = (int32_t *)sgmt__grow(v->data, &v->cap, v->len + 1, sizeof(int32_t));
+    v->data[v->len++] = x;
+}
+static void sgmt__rv_push(sgmt__rv *v, sgmt_real x) {
+    v->data = (sgmt_real *)sgmt__grow(v->data, &v->cap, v->len + 1, sizeof(sgmt_real));
+    v->data[v->len++] = x;
+}
+static void sgmt__v4v_push(sgmt__v4v *v, sgmt__vec4 x) {
+    v->data = (sgmt__vec4 *)sgmt__grow(v->data, &v->cap, v->len + 1, sizeof(sgmt__vec4));
+    v->data[v->len++] = x;
+}
+
+/* --------------------------------------------------------------------------- *
+ *  Combinatorial vertices, derived vertices, faces                            *
+ * --------------------------------------------------------------------------- */
+
+typedef struct {
+    int32_t i, j, order, edge_int, k, l;
+    int32_t scoop_steiner, scoop_interior_steiner;
+} sgmt__cv;
+
+static sgmt__cv sgmt__mk(int32_t i, int32_t j, int32_t order, int32_t edge_int, int32_t k) {
+    sgmt__cv c;
+    c.i = i; c.j = j; c.order = order; c.edge_int = edge_int; c.k = k; c.l = -1;
+    c.scoop_steiner = 0; c.scoop_interior_steiner = 0;
+    return c;
+}
+
+static int sgmt__cv_eq(sgmt__cv a, sgmt__cv b) {
+    if (a.i == b.i && a.j == b.j && a.order == b.order) return 1;
+    if (a.i == b.j && a.j == b.i && a.order == a.edge_int - b.order + 1) return 1;
+    return 0;
+}
+static int sgmt__cv_same_edge(sgmt__cv a, sgmt__cv b) {
+    return (a.i == b.i && a.j == b.j) || (a.i == b.j && a.j == b.i);
+}
+
+typedef struct { sgmt__cv *data; int32_t len, cap; } sgmt__cvv;
+static void sgmt__cvv_push(sgmt__cvv *v, sgmt__cv x) {
+    v->data = (sgmt__cv *)sgmt__grow(v->data, &v->cap, v->len + 1, sizeof(sgmt__cv));
+    v->data[v->len++] = x;
+}
+static void sgmt__cvv_free(sgmt__cvv *v) { SGMT_FREE(v->data); v->data = NULL; v->len = v->cap = 0; }
+
+/* A point expressed as a weighted average of up to four combinatorial vertices. */
+typedef struct { sgmt__cv parents[4]; sgmt_real weights[4]; int32_t n; } sgmt__derived;
+
+static sgmt__derived sgmt__derived2(sgmt__cv a, sgmt__cv b) {
+    sgmt__derived d;
+    d.parents[0] = a; d.parents[1] = b;
+    d.weights[0] = (sgmt_real)0.5; d.weights[1] = (sgmt_real)0.5;
+    d.n = 2;
+    return d;
+}
+static sgmt__derived sgmt__derived_lerp(sgmt__derived a, sgmt__derived b, sgmt_real t) {
+    sgmt__derived d; int k;
+    d.n = a.n + b.n;
+    SGMT_ASSERT(d.n <= 4);
+    for (k = 0; k < a.n; ++k) { d.parents[k] = a.parents[k]; d.weights[k] = ((sgmt_real)1 - t) * a.weights[k]; }
+    for (k = 0; k < b.n; ++k) { d.parents[a.n + k] = b.parents[k]; d.weights[a.n + k] = t * b.weights[k]; }
+    return d;
+}
+
+typedef struct {
+    sgmt__cvv v;
+    int32_t type;
+    int32_t has_derived;
+    sgmt__derived derived;
+} sgmt__face;
+
+/* Combinatorial face types (how a polygon should be triangulated). */
+enum {
+    SGMT__FT_FLAT = 0, SGMT__FT_QUAD02 = 1, SGMT__FT_QUAD13 = 2, SGMT__FT_SPIRAL = 3,
+    SGMT__FT_OPEN = 4, SGMT__FT_CLOSED_NON_NORMAL = 5, SGMT__FT_CLOSED_NORMAL = 6,
+    SGMT__FT_TRIANGLE = 7, SGMT__FT_OCTAGON = 8, SGMT__FT_SMEARED_QUAD = 9,
+    SGMT__FT_CORNER_TYPE_TRIANGLE = 10, SGMT__FT_TUNNEL_QUAD = 11,
+    SGMT__FT_INTERIOR_HEXAGON = 12, SGMT__FT_INTERIOR_CORNER_TYPE = 13
+};
+
+static void sgmt__face_init(sgmt__face *f, int32_t type) {
+    f->v.data = NULL; f->v.len = 0; f->v.cap = 0;
+    f->type = type; f->has_derived = 0;
+}
+static void sgmt__face_free(sgmt__face *f) { sgmt__cvv_free(&f->v); }
+static void sgmt__face_push(sgmt__face *f, sgmt__cv c) { sgmt__cvv_push(&f->v, c); }
+
+/* --------------------------------------------------------------------------- *
+ *  Edge coordinates and occupations                                           *
+ * --------------------------------------------------------------------------- */
+
+typedef struct { int32_t c[6]; } sgmt__edgeints; /* indexed by sgmt__edge_index */
+
+static int32_t sgmt__ei_get(const sgmt__edgeints *e, int32_t i, int32_t j) {
+    return e->c[sgmt__edge_index(i, j)];
+}
+static void sgmt__ei_set(sgmt__edgeints *e, int32_t i, int32_t j, int32_t v) {
+    e->c[sgmt__edge_index(i, j)] = v;
+}
+
+typedef struct { int8_t *bits[6]; int32_t len[6]; } sgmt__occ;
+
+static void sgmt__occ_init(sgmt__occ *o, const sgmt__edgeints *e) {
+    int idx, k;
+    for (idx = 0; idx < 6; ++idx) {
+        int32_t n = e->c[idx];
+        o->len[idx] = n;
+        o->bits[idx] = n ? (int8_t *)SGMT_MALLOC((size_t)n * sizeof(int8_t)) : NULL;
+        if (n) SGMT_ASSERT(o->bits[idx] != NULL);
+        for (k = 0; k < n; ++k) o->bits[idx][k] = 0;
+    }
+}
+static void sgmt__occ_free(sgmt__occ *o) {
+    int idx;
+    for (idx = 0; idx < 6; ++idx) { SGMT_FREE(o->bits[idx]); o->bits[idx] = NULL; o->len[idx] = 0; }
+}
+static void sgmt__occ_clone(sgmt__occ *dst, const sgmt__occ *src) {
+    int idx, k;
+    for (idx = 0; idx < 6; ++idx) {
+        int32_t n = src->len[idx];
+        dst->len[idx] = n;
+        dst->bits[idx] = n ? (int8_t *)SGMT_MALLOC((size_t)n * sizeof(int8_t)) : NULL;
+        if (n) SGMT_ASSERT(dst->bits[idx] != NULL);
+        for (k = 0; k < n; ++k) dst->bits[idx][k] = src->bits[idx][k];
+    }
+}
+/* Index into the stored (lower-vertex-first) array for crossing order_index. */
+static int32_t sgmt__occ_slot(const sgmt__occ *o, int32_t i, int32_t j, int32_t order_index) {
+    int32_t e = sgmt__edge_index(i, j);
+    int32_t idx = order_index;
+    if (i > j) idx = o->len[e] - 1 - idx;
+    return idx;
+}
+static int sgmt__occ_get_cv(const sgmt__occ *o, sgmt__cv cv) {
+    int32_t e = sgmt__edge_index(cv.i, cv.j);
+    int32_t idx = sgmt__occ_slot(o, cv.i, cv.j, cv.order - 1);
+    return o->bits[e][idx];
+}
+static void sgmt__occ_set_cv(sgmt__occ *o, sgmt__cv cv, int value) {
+    int32_t e = sgmt__edge_index(cv.i, cv.j);
+    int32_t idx = sgmt__occ_slot(o, cv.i, cv.j, cv.order - 1);
+    o->bits[e][idx] = (int8_t)value;
+}
+static int sgmt__occ_get(const sgmt__occ *o, int32_t i, int32_t j, int32_t index) {
+    int32_t e = sgmt__edge_index(i, j);
+    int32_t idx = sgmt__occ_slot(o, i, j, index);
+    return o->bits[e][idx];
+}
+/* --------------------------------------------------------------------------- *
+ *  Normal coordinates (Section 2.3)                                           *
+ * --------------------------------------------------------------------------- */
+
+typedef struct {
+    sgmt__edgeints e;
+    int32_t scc[4][6];          /* scc[i][edge_index(j,k)] */
+    int32_t scc_reduced[4][6];
+    int32_t scoop[4][6];
+    int32_t cc[4];
+    int32_t dc[6];              /* dc[edge_index(i,j)] */
+    int32_t triangle_ineq;
+    int32_t even_sum;
+} sgmt__nc;
+
+static int32_t sgmt__scc_get(const sgmt__nc *nc, int32_t i, int32_t j, int32_t k) {
+    return nc->scc[i][sgmt__edge_index(j, k)];
+}
+static void sgmt__scc_set(sgmt__nc *nc, int32_t i, int32_t j, int32_t k, int32_t v) {
+    nc->scc[i][sgmt__edge_index(j, k)] = v;
+}
+static int32_t sgmt__sccr_get(const sgmt__nc *nc, int32_t i, int32_t j, int32_t k) {
+    return nc->scc_reduced[i][sgmt__edge_index(j, k)];
+}
+static void sgmt__sccr_set(sgmt__nc *nc, int32_t i, int32_t j, int32_t k, int32_t v) {
+    nc->scc_reduced[i][sgmt__edge_index(j, k)] = v;
+}
+static int32_t sgmt__scoop_get(const sgmt__nc *nc, int32_t i, int32_t j, int32_t k) {
+    return nc->scoop[i][sgmt__edge_index(j, k)];
+}
+static void sgmt__scoop_set(sgmt__nc *nc, int32_t i, int32_t j, int32_t k, int32_t v) {
+    nc->scoop[i][sgmt__edge_index(j, k)] = v;
+}
+static int32_t sgmt__dc_get(const sgmt__nc *nc, int32_t i, int32_t j) {
+    return nc->dc[sgmt__edge_index(i, j)];
+}
+static void sgmt__dc_set(sgmt__nc *nc, int32_t i, int32_t j, int32_t v) {
+    int32_t comp[2], excl[2];
+    nc->dc[sgmt__edge_index(i, j)] = v;
+    excl[0] = i; excl[1] = j;
+    sgmt__complement(excl, 2, comp);
+    nc->dc[sgmt__edge_index(comp[0], comp[1])] = v;
+}
+
+static void sgmt__nc_zero(sgmt__nc *nc) {
+    memset(nc, 0, sizeof(*nc));
+    nc->triangle_ineq = 1;
+    nc->even_sum = 1;
+}
+
+static void sgmt__nc_compute(sgmt__nc *nc); /* fwd */
+
+static void sgmt__nc_semicorner(sgmt__nc *nc) {
+    int t;
+    for (t = 0; t < 4; ++t) {
+        int32_t i = SGMT__TET_TRIPLETS[t][0];
+        int32_t j = SGMT__TET_TRIPLETS[t][1];
+        int32_t k = SGMT__TET_TRIPLETS[t][2];
+        int32_t e_ij = sgmt__ei_get(&nc->e, i, j);
+        int32_t e_ik = sgmt__ei_get(&nc->e, i, k);
+        int32_t e_jk = sgmt__ei_get(&nc->e, j, k);
+        int32_t r_ij, r_ik, r_jk, m_ij, m_ik, m_jk;
+        int feasible = sgmt__tri_ineq(e_ij, e_ik, e_jk, &r_ij, &r_ik, &r_jk);
+        int face_even = ((e_ij + e_ik + e_jk) % 2) == 0;
+
+        nc->triangle_ineq = feasible && nc->triangle_ineq;
+        nc->even_sum = face_even && nc->even_sum;
+
+        if (!face_even && feasible) { r_ij = 1; r_ik = 1; r_jk = 1; }
+
+        m_ij = e_ij - r_ij; m_ik = e_ik - r_ik; m_jk = e_jk - r_jk;
+
+        {
+            int32_t s;
+            s = sgmt__floor_div2(m_ij + m_ik - m_jk); if (s < 0) s = 0; sgmt__scc_set(nc, i, j, k, s);
+            s = sgmt__floor_div2(m_ij + m_jk - m_ik); if (s < 0) s = 0; sgmt__scc_set(nc, j, i, k, s);
+            s = sgmt__floor_div2(m_ik + m_jk - m_ij); if (s < 0) s = 0; sgmt__scc_set(nc, k, i, j, s);
+        }
+        sgmt__scoop_set(nc, i, j, k, sgmt__floor_div2(r_jk));
+        sgmt__scoop_set(nc, j, i, k, sgmt__floor_div2(r_ik));
+        sgmt__scoop_set(nc, k, i, j, sgmt__floor_div2(r_ij));
+    }
+}
+
+static int32_t sgmt__min3(int32_t a, int32_t b, int32_t c) {
+    int32_t m = a; if (b < m) m = b; if (c < m) m = c; return m;
+}
+static int32_t sgmt__min4(int32_t a, int32_t b, int32_t c, int32_t d) {
+    int32_t m = a; if (b < m) m = b; if (c < m) m = c; if (d < m) m = d; return m;
+}
+
+static void sgmt__nc_corner_reduced(sgmt__nc *nc) {
+    int i;
+    for (i = 0; i < 4; ++i) {
+        int32_t o[4]; int32_t excl[1]; excl[0] = i;
+        sgmt__complement(excl, 1, o);
+        nc->cc[i] = sgmt__min3(sgmt__scc_get(nc, i, o[0], o[1]),
+                               sgmt__scc_get(nc, i, o[0], o[2]),
+                               sgmt__scc_get(nc, i, o[1], o[2]));
+    }
+    for (i = 0; i < 4; ++i) {
+        int32_t o[4], a, b; int32_t excl[1]; excl[0] = i;
+        sgmt__complement(excl, 1, o);
+        for (a = 0; a < 3; ++a)
+            for (b = a + 1; b < 3; ++b)
+                sgmt__sccr_set(nc, i, o[a], o[b], sgmt__scc_get(nc, i, o[a], o[b]) - nc->cc[i]);
+    }
+}
+
+static void sgmt__nc_diagonal(sgmt__nc *nc) {
+    int j;
+    for (j = 1; j < 4; ++j) {
+        int32_t kl[2], excl[2]; int32_t k, l;
+        excl[0] = 0; excl[1] = j;
+        sgmt__complement(excl, 2, kl);
+        k = kl[0]; l = kl[1];
+        sgmt__dc_set(nc, 0, j, sgmt__min4(
+            sgmt__sccr_get(nc, k, 0, j),
+            sgmt__sccr_get(nc, l, 0, j),
+            sgmt__sccr_get(nc, j, k, l),
+            sgmt__sccr_get(nc, 0, k, l)));
+    }
+}
+
+static sgmt__cv sgmt__nc_find_next(const sgmt__nc *nc, sgmt__cv v0) {
+    int32_t i = v0.i, j = v0.j;
+    int32_t k = sgmt__first_other(i, j, v0.k);
+    int32_t order = v0.order, nij = v0.edge_int;
+    int32_t next_order;
+    SGMT_ASSERT(nc->even_sum);
+    SGMT_ASSERT(sgmt__scc_get(nc, i, j, k) + sgmt__scc_get(nc, j, i, k)
+                + 2 * sgmt__scoop_get(nc, k, i, j) == nij);
+    if (order <= sgmt__scc_get(nc, i, j, k))
+        return sgmt__mk(i, k, order, sgmt__ei_get(&nc->e, i, k), j);
+    if (order >= nij - sgmt__scc_get(nc, j, i, k) + 1)
+        return sgmt__mk(j, k, nij - order + 1, sgmt__ei_get(&nc->e, j, k), i);
+    next_order = ((order - sgmt__scc_get(nc, i, j, k)) % 2 == 0) ? order - 1 : order + 1;
+    return sgmt__mk(i, j, next_order, nij, k);
+}
+
+static void sgmt__nc_trace_forever(const sgmt__nc *nc, sgmt__cv start, sgmt__occ *occ) {
+    sgmt__cv cv = start;
+    for (;;) {
+        if (sgmt__occ_get_cv(occ, cv)) return;
+        sgmt__occ_set_cv(occ, cv, 1);
+        cv = sgmt__nc_find_next(nc, cv);
+    }
+}
+
+static sgmt__edgeints sgmt__nc_scoop_reduction(const sgmt__nc *nc) {
+    sgmt__occ occ;
+    sgmt__edgeints reduced;
+    int t, e, idx;
+    sgmt__occ_init(&occ, &nc->e);
+    for (t = 0; t < 4; ++t) {
+        int32_t ii = SGMT__TET_TRIPLETS[t][0];
+        int32_t jj = SGMT__TET_TRIPLETS[t][1];
+        int32_t kk = SGMT__TET_TRIPLETS[t][2];
+        int32_t base, v1, v2, s, cnt;
+        if (sgmt__scoop_get(nc, ii, jj, kk) > 0) { base = ii; v1 = jj; v2 = kk; }
+        else if (sgmt__scoop_get(nc, jj, kk, ii) > 0) { base = jj; v1 = kk; v2 = ii; }
+        else if (sgmt__scoop_get(nc, kk, ii, jj) > 0) { base = kk; v1 = ii; v2 = jj; }
+        else continue;
+        cnt = sgmt__scoop_get(nc, base, v1, v2);
+        for (s = 0; s < cnt; ++s) {
+            int32_t base_order = 2 * s + sgmt__scc_get(nc, v1, v2, base);
+            int32_t nv1v2 = sgmt__ei_get(&nc->e, v1, v2);
+            sgmt__nc_trace_forever(nc, sgmt__mk(v1, v2, base_order + 1, nv1v2, base), &occ);
+            sgmt__nc_trace_forever(nc, sgmt__mk(v1, v2, base_order + 2, nv1v2, base), &occ);
+        }
+    }
+    for (e = 0; e < 6; ++e) {
+        int32_t i = SGMT__TET_EDGES[e][0], j = SGMT__TET_EDGES[e][1];
+        int32_t unused = 0;
+        for (idx = 0; idx < sgmt__ei_get(&nc->e, i, j); ++idx)
+            if (!sgmt__occ_get(&occ, i, j, idx)) ++unused;
+        reduced.c[e] = unused;
+    }
+    sgmt__occ_free(&occ);
+    return reduced;
+}
+
+static void sgmt__nc_compute(sgmt__nc *nc) {
+    sgmt__nc_semicorner(nc);
+    if ((nc->even_sum && nc->triangle_ineq) || !nc->even_sum) {
+        sgmt__nc_corner_reduced(nc);
+        sgmt__nc_diagonal(nc);
+    } else if (nc->even_sum) {
+        sgmt__edgeints reduced = sgmt__nc_scoop_reduction(nc);
+        sgmt__nc rnc;
+        sgmt__nc_zero(&rnc);
+        rnc.e = reduced;
+        sgmt__nc_compute(&rnc);
+        SGMT_ASSERT(rnc.triangle_ineq && rnc.even_sum);
+        memcpy(nc->cc, rnc.cc, sizeof(nc->cc));
+        memcpy(nc->dc, rnc.dc, sizeof(nc->dc));
+    }
+}
+
+static void sgmt__nc_init(sgmt__nc *nc, const sgmt__edgeints *e) {
+    sgmt__nc_zero(nc);
+    nc->e = *e;
+    sgmt__nc_compute(nc);
+}
+
+/* --------------------------------------------------------------------------- *
+ *  Residual / scoop vertex selection for arbitrary boundary curves            *
+ * --------------------------------------------------------------------------- */
+
+static int sgmt__pick_residual_cv(int32_t i, int32_t j, int32_t other,
+                                  const sgmt__nc *nc, const int32_t *ginds,
+                                  sgmt__cv *out) {
+    int32_t nij = sgmt__ei_get(&nc->e, i, j);
+    if (sgmt__ei_get(&nc->e, i, j) > (2 * sgmt__scoop_get(nc, other, i, j)
+            + sgmt__scc_get(nc, i, j, other) + sgmt__scc_get(nc, j, i, other))) {
+        int32_t scoop_ij = sgmt__scoop_get(nc, other, i, j);
+        int32_t order;
+        if (scoop_ij == 0) {
+            if (sgmt__ei_get(&nc->e, i, j) == 1 + sgmt__scc_get(nc, i, j, other) + sgmt__scc_get(nc, j, i, other)) {
+                order = sgmt__scc_get(nc, i, j, other) + 1;
+                *out = sgmt__mk(i, j, order, nij, other);
+                return 1;
+            }
+            SGMT_ASSERT(sgmt__ei_get(&nc->e, i, j) == sgmt__scc_get(nc, i, j, other) + sgmt__scc_get(nc, j, i, other));
+            return 0;
+        }
+        if (scoop_ij % 2 == 0) {
+            order = sgmt__scc_get(nc, i, j, other) + scoop_ij + 1;
+            *out = sgmt__mk(i, j, order, nij, other);
+            return 1;
+        }
+        order = sgmt__scc_get(nc, i, j, other) + scoop_ij - 1 + 1;
+        if (ginds[i] > ginds[j]) order += 2;
+        *out = sgmt__mk(i, j, order, nij, other);
+        return 1;
+    }
+    return 0;
+}
+
+static void sgmt__pick_scoop_cvs(int32_t i, int32_t j, int32_t other, const sgmt__nc *nc,
+                                 int has_res, sgmt__cv res, sgmt__cvv *out) {
+    int32_t nij = sgmt__ei_get(&nc->e, i, j);
+    int32_t start = sgmt__scc_get(nc, i, j, other) + 1;
+    int32_t end = nij - sgmt__scc_get(nc, j, i, other);
+    int32_t order;
+    for (order = start; order <= end; ++order) {
+        sgmt__cv cv = sgmt__mk(i, j, order, nij, other);
+        if (!has_res || !sgmt__cv_eq(cv, res)) sgmt__cvv_push(out, cv);
+    }
+}
+
+static void sgmt__pick_residuals_and_scoops(const sgmt__nc *nc, const int32_t *ginds,
+                                            sgmt__cvv *residuals, sgmt__cvv *scoops) {
+    int t, a, b;
+    for (t = 0; t < 4; ++t) {
+        const int32_t *tri = SGMT__TET_TRIPLETS[t];
+        for (a = 0; a < 3; ++a) {
+            for (b = a + 1; b < 3; ++b) {
+                int32_t i = tri[a], j = tri[b];
+                int32_t k = tri[0] + tri[1] + tri[2] - i - j;
+                sgmt__cv res; int has_res = sgmt__pick_residual_cv(i, j, k, nc, ginds, &res);
+                if (has_res) sgmt__cvv_push(residuals, res);
+                sgmt__pick_scoop_cvs(i, j, k, nc, has_res, res, scoops);
+            }
+        }
+    }
+}
+
+static sgmt__cv sgmt__find_next_generic(sgmt__cv cv0, const sgmt__nc *nc, const int32_t *ginds) {
+    int32_t i = cv0.i, j = cv0.j;
+    int32_t k = sgmt__first_other(i, j, cv0.k);
+    int32_t order = cv0.order, nij = cv0.edge_int;
+    sgmt__cv res; int has_res; int32_t res_order, next_order;
+
+    if (order <= sgmt__scc_get(nc, i, j, k))
+        return sgmt__mk(i, k, order, sgmt__ei_get(&nc->e, i, k), j);
+    if (order >= nij - sgmt__scc_get(nc, j, i, k) + 1)
+        return sgmt__mk(j, k, nij - order + 1, sgmt__ei_get(&nc->e, j, k), i);
+
+    has_res = sgmt__pick_residual_cv(i, j, k, nc, ginds, &res);
+    res_order = has_res ? res.order : -1;
+    if (order == res_order) return res;
+
+    if (order < res_order || !has_res)
+        next_order = ((order - sgmt__scc_get(nc, i, j, k)) % 2 == 0) ? order - 1 : order + 1;
+    else
+        next_order = ((order - sgmt__scc_get(nc, i, j, k)) % 2 == 0) ? order + 1 : order - 1;
+    return sgmt__mk(i, j, next_order, nij, k);
+}
+
+/* Trace one boundary curve, appending its vertices to `curve`; optionally mark
+ * occupations. */
+static void sgmt__trace_generic_curve(sgmt__cv start, const sgmt__nc *nc, const int32_t *ginds,
+                                      sgmt__occ *occ, int track, sgmt__cvv *curve) {
+    sgmt__cv current = start;
+    sgmt__cvv_push(curve, current);
+    if (track) sgmt__occ_set_cv(occ, current, 1);
+    for (;;) {
+        sgmt__cv nxt = sgmt__find_next_generic(current, nc, ginds);
+        if (track) sgmt__occ_set_cv(occ, nxt, 1);
+        if (sgmt__cv_eq(nxt, current) || sgmt__cv_eq(nxt, start)) break;
+        sgmt__cvv_push(curve, nxt);
+        current = nxt;
+    }
+}
+
+/* A list of scoop curves (each owning its vertex array). */
+typedef struct { sgmt__cvv *data; int32_t len, cap; } sgmt__curvelist;
+static void sgmt__curvelist_push(sgmt__curvelist *cl, sgmt__cvv c) {
+    cl->data = (sgmt__cvv *)sgmt__grow(cl->data, &cl->cap, cl->len + 1, sizeof(sgmt__cvv));
+    cl->data[cl->len++] = c;
+}
+static void sgmt__curvelist_free(sgmt__curvelist *cl) {
+    int32_t i;
+    for (i = 0; i < cl->len; ++i) sgmt__cvv_free(&cl->data[i]);
+    SGMT_FREE(cl->data);
+    cl->data = NULL; cl->len = cl->cap = 0;
+}
+
+/* Boundary-curve reconstruction (Section 3.1). Fills scoop_curves and
+ * non_normal_occ; open curves only mark occupations and are discarded. */
+static void sgmt__boundary_comb_curves(const int32_t *ginds, const sgmt__edgeints *edge_ints,
+                                       sgmt__curvelist *scoop_curves, sgmt__occ *non_normal_occ) {
+    sgmt__nc nc;
+    sgmt__cvv residuals, scoops;
+    sgmt__occ occ;
+    int32_t r;
+
+    sgmt__nc_zero(&nc);
+    nc.e = *edge_ints;
+    sgmt__nc_semicorner(&nc);
+
+    residuals.data = NULL; residuals.len = residuals.cap = 0;
+    scoops.data = NULL; scoops.len = scoops.cap = 0;
+    sgmt__pick_residuals_and_scoops(&nc, ginds, &residuals, &scoops);
+
+    sgmt__occ_init(&occ, edge_ints);
+
+    for (r = 0; r < residuals.len; ++r) {
+        if (!sgmt__occ_get_cv(&occ, residuals.data[r])) {
+            sgmt__cvv tmp; tmp.data = NULL; tmp.len = tmp.cap = 0;
+            sgmt__trace_generic_curve(residuals.data[r], &nc, ginds, &occ, 1, &tmp);
+            sgmt__cvv_free(&tmp); /* open curves are discarded */
+        }
+    }
+    for (r = 0; r < scoops.len; ++r) {
+        if (!sgmt__occ_get_cv(&occ, scoops.data[r])) {
+            sgmt__cvv curve; curve.data = NULL; curve.len = curve.cap = 0;
+            sgmt__trace_generic_curve(scoops.data[r], &nc, ginds, &occ, 1, &curve);
+            sgmt__curvelist_push(scoop_curves, curve);
+        }
+    }
+
+    sgmt__occ_clone(non_normal_occ, &occ);
+
+    sgmt__occ_free(&occ);
+    sgmt__cvv_free(&residuals);
+    sgmt__cvv_free(&scoops);
+}
+
+/* --------------------------------------------------------------------------- *
+ *  Geometric realization of combinatorial vertices (in barycentric space)     *
+ * --------------------------------------------------------------------------- */
+
+static sgmt__vec4 sgmt__interp_cv(sgmt__cv cv, const sgmt__vec4 tet[4],
+                                  const sgmt__rv ts[6], sgmt_real bulge) {
+    int32_t i = cv.i, j = cv.j, edge_idx = sgmt__edge_index(i, j), nij = cv.edge_int;
+    sgmt_real t, next_t;
+    sgmt__vec4 pos, next_pos, mid;
+    int32_t next_order;
+
+    if (i < j) t = ts[edge_idx].data[cv.order - 1];
+    else t = (sgmt_real)1 - ts[edge_idx].data[nij - cv.order];
+    pos = sgmt__v_lerp(tet[i], tet[j], t);
+
+    if (!cv.scoop_steiner && !cv.scoop_interior_steiner) return pos;
+    SGMT_ASSERT(!(cv.scoop_steiner && cv.scoop_interior_steiner));
+
+    next_order = cv.order + 1;
+    if (i < j) next_t = ts[edge_idx].data[next_order - 1];
+    else next_t = (sgmt_real)1 - ts[edge_idx].data[nij - next_order];
+    next_pos = sgmt__v_lerp(tet[i], tet[j], next_t);
+    mid = sgmt__v_scale(sgmt__v_add(pos, next_pos), (sgmt_real)0.5);
+
+    if (cv.scoop_interior_steiner) {
+        sgmt__vec4 sum = sgmt__v_add(sgmt__v_add(tet[0], tet[1]), sgmt__v_add(tet[2], tet[3]));
+        sgmt__vec4 other_mid = sgmt__v_scale(sgmt__v_sub(sgmt__v_sub(sum, tet[i]), tet[j]), (sgmt_real)0.5);
+        return sgmt__v_add(sgmt__v_scale(mid, (sgmt_real)1 - bulge), sgmt__v_scale(other_mid, bulge));
+    }
+    {
+        sgmt__vec4 face_interior = sgmt__v_scale(
+            sgmt__v_add(sgmt__v_add(sgmt__v_scale(tet[cv.k], (sgmt_real)2), tet[i]), tet[j]),
+            (sgmt_real)0.25);
+        return sgmt__v_add(sgmt__v_scale(mid, (sgmt_real)1 - bulge), sgmt__v_scale(face_interior, bulge));
+    }
+}
+
+static sgmt__vec4 sgmt__interp_derived(const sgmt__derived *dv, const sgmt__vec4 tet[4],
+                                       const sgmt__rv ts[6]) {
+    sgmt__vec4 pos = sgmt__v_zero();
+    int32_t k;
+    for (k = 0; k < dv->n; ++k)
+        pos = sgmt__v_add(pos, sgmt__v_scale(sgmt__interp_cv(dv->parents[k], tet, ts, (sgmt_real)-1), dv->weights[k]));
+    return pos;
+}
+
+/* --------------------------------------------------------------------------- *
+ *  Triangle soup assembly                                                     *
+ * --------------------------------------------------------------------------- */
+
+typedef struct { sgmt__v4v verts; sgmt__i32v tris; } sgmt__soup;
+
+/* Triangulate one combinatorial face and append it to the global soup. */
+static void sgmt__face_to_soup(const sgmt__face *face, const sgmt__vec4 tet[4],
+                               const sgmt__rv ts[6], int mid_scoop, sgmt_real bulge,
+                               sgmt__soup *soup) {
+    sgmt__v4v pos; sgmt__i32v tri;
+    int32_t n = face->v.len, idx, base, t;
+
+    pos.data = NULL; pos.len = pos.cap = 0;
+    tri.data = NULL; tri.len = tri.cap = 0;
+    SGMT_ASSERT(n >= 3);
+
+    if (face->type == SGMT__FT_TRIANGLE) {
+        for (idx = 0; idx < n; ++idx) sgmt__v4v_push(&pos, sgmt__interp_cv(face->v.data[idx], tet, ts, (sgmt_real)-1));
+        sgmt__i32v_push(&tri, 0); sgmt__i32v_push(&tri, 1); sgmt__i32v_push(&tri, 2);
+
+    } else if (face->type == SGMT__FT_QUAD02 || face->type == SGMT__FT_QUAD13) {
+        for (idx = 0; idx < n; ++idx) sgmt__v4v_push(&pos, sgmt__interp_cv(face->v.data[idx], tet, ts, (sgmt_real)-1));
+        if (face->type == SGMT__FT_QUAD02) {
+            sgmt__i32v_push(&tri, 0); sgmt__i32v_push(&tri, 1); sgmt__i32v_push(&tri, 2);
+            sgmt__i32v_push(&tri, 2); sgmt__i32v_push(&tri, 3); sgmt__i32v_push(&tri, 0);
+        } else {
+            sgmt__i32v_push(&tri, 0); sgmt__i32v_push(&tri, 1); sgmt__i32v_push(&tri, 3);
+            sgmt__i32v_push(&tri, 1); sgmt__i32v_push(&tri, 2); sgmt__i32v_push(&tri, 3);
+        }
+
+    } else if (face->type == SGMT__FT_OCTAGON) {
+        SGMT_ASSERT(face->has_derived);
+        sgmt__v4v_push(&pos, sgmt__interp_derived(&face->derived, tet, ts));
+        for (idx = 0; idx < n; ++idx) {
+            sgmt__v4v_push(&pos, sgmt__interp_cv(face->v.data[idx], tet, ts, (sgmt_real)-1));
+            sgmt__i32v_push(&tri, 0);
+            sgmt__i32v_push(&tri, idx + 1);
+            sgmt__i32v_push(&tri, (idx + 1) % n + 1);
+        }
+
+    } else if (face->type == SGMT__FT_SPIRAL) {
+        sgmt__vec4 mean = sgmt__v_zero();
+        for (idx = 0; idx < n; ++idx) {
+            sgmt__vec4 p = sgmt__interp_cv(face->v.data[idx], tet, ts, bulge);
+            sgmt__v4v_push(&pos, p);
+            mean = sgmt__v_add(mean, p);
+        }
+        sgmt__v4v_push(&pos, sgmt__v_scale(mean, (sgmt_real)1 / (sgmt_real)n));
+        for (idx = 0; idx < n; ++idx) {
+            sgmt__i32v_push(&tri, n);
+            sgmt__i32v_push(&tri, idx);
+            sgmt__i32v_push(&tri, (idx + 1) % n);
+        }
+
+    } else if (face->type == SGMT__FT_INTERIOR_HEXAGON && mid_scoop) {
+        static const int32_t H[7][3] = {
+            {8, 2, 5}, {2, 8, 0}, {2, 0, 1}, {5, 2, 3}, {5, 3, 4}, {8, 5, 6}, {8, 6, 7}
+        };
+        SGMT_ASSERT(n == 9);
+        for (idx = 0; idx < n; ++idx) sgmt__v4v_push(&pos, sgmt__interp_cv(face->v.data[idx], tet, ts, bulge));
+        for (idx = 0; idx < 7; ++idx) {
+            sgmt__i32v_push(&tri, H[idx][0]); sgmt__i32v_push(&tri, H[idx][1]); sgmt__i32v_push(&tri, H[idx][2]);
+        }
+
+    } else if ((face->type == SGMT__FT_INTERIOR_CORNER_TYPE
+                || face->type == SGMT__FT_CORNER_TYPE_TRIANGLE) && mid_scoop) {
+        sgmt__cv cv0 = face->v.data[0], cv1 = face->v.data[1];
+        int32_t common, opposite, m;
+        int32_t excl[4]; int32_t junk[4];
+        sgmt__vec4 pos0, pos1, edge_mid, other_mid, steiner;
+        if (cv0.i == cv1.i || cv0.i == cv1.j) common = cv0.i;
+        else { SGMT_ASSERT(cv0.j == cv1.i || cv0.j == cv1.j); common = cv0.j; }
+        excl[0] = cv0.i; excl[1] = cv0.j; excl[2] = cv1.i; excl[3] = cv1.j;
+        sgmt__complement(excl, 4, junk);
+        opposite = junk[0];
+        pos0 = sgmt__interp_cv(cv0, tet, ts, bulge);
+        pos1 = sgmt__interp_cv(cv1, tet, ts, bulge);
+        edge_mid = sgmt__v_scale(sgmt__v_add(pos0, pos1), (sgmt_real)0.5);
+        other_mid = sgmt__v_scale(sgmt__v_add(tet[opposite], tet[common]), (sgmt_real)0.5);
+        steiner = sgmt__v_add(sgmt__v_scale(edge_mid, (sgmt_real)1 - bulge), sgmt__v_scale(other_mid, bulge));
+        /* positions = [v0, steiner, v1, v2, ...] */
+        sgmt__v4v_push(&pos, pos0);
+        sgmt__v4v_push(&pos, steiner);
+        for (idx = 1; idx < n; ++idx) sgmt__v4v_push(&pos, sgmt__interp_cv(face->v.data[idx], tet, ts, bulge));
+        m = pos.len; /* == n + 1 */
+        for (idx = 2; idx < m; ++idx) {
+            sgmt__i32v_push(&tri, 1); sgmt__i32v_push(&tri, idx); sgmt__i32v_push(&tri, (idx + 1) % m);
+        }
+
+    } else if (face->type == SGMT__FT_SMEARED_QUAD || face->type == SGMT__FT_INTERIOR_HEXAGON
+               || face->type == SGMT__FT_INTERIOR_CORNER_TYPE || face->type == SGMT__FT_TUNNEL_QUAD
+               || face->type == SGMT__FT_CORNER_TYPE_TRIANGLE) {
+        for (idx = 0; idx < n; ++idx) sgmt__v4v_push(&pos, sgmt__interp_cv(face->v.data[idx], tet, ts, bulge));
+        for (idx = 2; idx < n; ++idx) {
+            sgmt__i32v_push(&tri, 1); sgmt__i32v_push(&tri, idx); sgmt__i32v_push(&tri, (idx + 1) % n);
+        }
+
+    } else {
+        SGMT_ASSERT(0 && "unsupported face type");
+    }
+
+    base = soup->verts.len;
+    for (idx = 0; idx < pos.len; ++idx) sgmt__v4v_push(&soup->verts, pos.data[idx]);
+    for (t = 0; t < tri.len; ++t) sgmt__i32v_push(&soup->tris, tri.data[t] + base);
+
+    SGMT_FREE(pos.data);
+    SGMT_FREE(tri.data);
+}
+
+/* --------------------------------------------------------------------------- *
+ *  Simplicial-embedding Steiner vertices for scoop surfaces (Section 4.3.3)   *
+ * --------------------------------------------------------------------------- */
+
+static void sgmt__align_cvs(sgmt__cv cv1, sgmt__cv cv2, sgmt__cv *a1, sgmt__cv *a2) {
+    SGMT_ASSERT(sgmt__cv_same_edge(cv1, cv2) && cv1.edge_int == cv2.edge_int);
+    *a1 = cv1;
+    if (cv1.i == cv2.i && cv1.j == cv2.j) *a2 = cv2;
+    else *a2 = sgmt__mk(cv1.i, cv1.j, cv1.edge_int - cv2.order + 1, cv2.edge_int, cv2.k);
+}
+
+/* Which adjacent faces a scoop segment closes against (0, 1, or 2 sides). */
+static int sgmt__close_scoop_sides(const sgmt__nc *nc, sgmt__cv cv1, sgmt__cv cv2, int32_t sides[2]) {
+    int32_t i = cv1.i, j = cv1.j, nij = sgmt__ei_get(&nc->e, i, j);
+    sgmt__cv a1, a2;
+    int32_t kl[2], excl[2], smaller, s, count = 0, si;
+    sgmt__align_cvs(cv1, cv2, &a1, &a2);
+    excl[0] = i; excl[1] = j;
+    sgmt__complement(excl, 2, kl);
+    smaller = (a1.order < a2.order) ? a1.order : a2.order;
+    for (si = 0; si < 2; ++si) {
+        s = kl[si];
+        if (smaller > sgmt__scc_get(nc, i, j, s)
+            && smaller <= nij - sgmt__scc_get(nc, j, i, s)
+            && (smaller - sgmt__scc_get(nc, i, j, s)) % 2 == 1)
+            sides[count++] = s;
+    }
+    return count;
+}
+
+/* Build a new face with mid-scoop Steiner vertices inserted. Caller frees. */
+static sgmt__face sgmt__add_mid_scoop(const sgmt__face *face, const sgmt__nc *nc) {
+    sgmt__face out;
+    int32_t n = face->v.len, idx;
+
+    if (face->type == SGMT__FT_SPIRAL) {
+        sgmt__face_init(&out, SGMT__FT_SPIRAL);
+        for (idx = 0; idx < n; ++idx) {
+            sgmt__cv cv = face->v.data[idx];
+            sgmt__cv nxt = face->v.data[(idx + 1) % n];
+            sgmt__face_push(&out, cv);
+            if (sgmt__cv_same_edge(cv, nxt)) {
+                int32_t nxt_order, min_order; sgmt__cv mid;
+                SGMT_ASSERT(nxt.k != -1);
+                nxt_order = (cv.i == nxt.i && cv.j == nxt.j) ? nxt.order : nxt.edge_int - nxt.order + 1;
+                min_order = (cv.order < nxt_order) ? cv.order : nxt_order;
+                mid = sgmt__mk(cv.i, cv.j, min_order, cv.edge_int, nxt.k);
+                mid.scoop_steiner = 1;
+                sgmt__face_push(&out, mid);
+            }
+        }
+        return out;
+    }
+
+    if (face->type == SGMT__FT_TUNNEL_QUAD) {
+        sgmt__cv cv1 = face->v.data[0], cv2 = face->v.data[1];
+        int32_t sides[2];
+        int count = sgmt__close_scoop_sides(nc, cv1, cv2, sides);
+        sgmt__face_init(&out, SGMT__FT_TUNNEL_QUAD);
+        if (count == 0) {
+            /* unchanged */
+            sgmt__face_push(&out, cv1);
+            sgmt__face_push(&out, cv2);
+            return out;
+        }
+        if (count == 1) {
+            int32_t k = sides[0];
+            int32_t l = sgmt__first_other(cv1.i, cv1.j, k);
+            sgmt__cv mid_face = sgmt__mk(cv1.i, cv1.j, cv1.order, cv1.edge_int, k);
+            sgmt__cv mid_interior = sgmt__mk(cv1.i, cv1.j, cv1.order, cv1.edge_int, k);
+            mid_face.scoop_steiner = 1;
+            mid_interior.l = l;
+            mid_interior.scoop_interior_steiner = 1;
+            sgmt__face_push(&out, cv1);
+            sgmt__face_push(&out, mid_face);
+            sgmt__face_push(&out, cv2);
+            sgmt__face_push(&out, mid_interior);
+            return out;
+        }
+        {
+            sgmt__cv mid1 = sgmt__mk(cv1.i, cv1.j, cv1.order, cv1.edge_int, sides[0]);
+            sgmt__cv mid2 = sgmt__mk(cv1.i, cv1.j, cv1.order, cv1.edge_int, sides[1]);
+            mid1.scoop_steiner = 1; mid2.scoop_steiner = 1;
+            sgmt__face_push(&out, cv1);
+            sgmt__face_push(&out, mid1);
+            sgmt__face_push(&out, cv2);
+            sgmt__face_push(&out, mid2);
+            return out;
+        }
+    }
+
+    sgmt__face_init(&out, face->type);
+    for (idx = 0; idx < n; ++idx) {
+        sgmt__cv cv1 = face->v.data[idx];
+        sgmt__cv cv2 = face->v.data[(idx + 1) % n];
+        int32_t sides[2]; int count;
+        sgmt__cv a1, a2, mid; int32_t min_order;
+        sgmt__face_push(&out, cv1);
+        if (!sgmt__cv_same_edge(cv1, cv2)) continue;
+        count = sgmt__close_scoop_sides(nc, cv1, cv2, sides);
+        SGMT_ASSERT(count != 2);
+        sgmt__align_cvs(cv1, cv2, &a1, &a2);
+        min_order = (a1.order < a2.order) ? a1.order : a2.order;
+        mid = sgmt__mk(a1.i, a1.j, min_order, a1.edge_int, cv1.k);
+        if (count == 1 && sides[0] == cv1.k) mid.scoop_steiner = 1;
+        else mid.scoop_interior_steiner = 1;
+        sgmt__face_push(&out, mid);
+    }
+    return out;
+}
+
+/* --------------------------------------------------------------------------- *
+ *  Scoop (non-normal) surface construction (Section 3.1)                      *
+ * --------------------------------------------------------------------------- */
+
+static sgmt__edgeints sgmt__comb_face_edge_ints(const sgmt__cvv *verts) {
+    sgmt__edgeints r; int32_t idx;
+    memset(&r, 0, sizeof(r));
+    for (idx = 0; idx < verts->len; ++idx)
+        sgmt__ei_set(&r, verts->data[idx].i, verts->data[idx].j,
+                     sgmt__ei_get(&r, verts->data[idx].i, verts->data[idx].j) + 1);
+    return r;
+}
+
+static int sgmt__separated_vertices(const sgmt__edgeints *cei, int32_t out[4]) {
+    int count = 0, i;
+    out[count++] = 0;
+    for (i = 1; i < 4; ++i)
+        if (sgmt__ei_get(cei, 0, i) % 2 == 0) out[count++] = i;
+    return count;
+}
+
+static int32_t sgmt__interior_vertex(const int32_t *sep, int n) {
+    int32_t out[4];
+    if (n == 0 || n == 4) return -1;
+    if (n == 3) { sgmt__complement(sep, 3, out); return out[0]; }
+    if (n == 1) return sep[0];
+    SGMT_ASSERT(0 && "invalid number of separated vertices");
+    return -1;
+}
+
+/* Restrict the global crossing locations to those used by a single curve. */
+static void sgmt__extract_curve_ts(const sgmt__cvv *curve, const sgmt__rv global_ts[6],
+                                   sgmt__rv out[6]) {
+    sgmt__edgeints cei;
+    sgmt__occ occ;
+    int e, idx;
+    for (e = 0; e < 6; ++e) cei.c[e] = global_ts[e].len;
+    sgmt__occ_init(&occ, &cei);
+    for (idx = 0; idx < curve->len; ++idx) sgmt__occ_set_cv(&occ, curve->data[idx], 1);
+    for (e = 0; e < 6; ++e) {
+        int32_t i = SGMT__TET_EDGES[e][0], j = SGMT__TET_EDGES[e][1];
+        out[e].data = NULL; out[e].len = out[e].cap = 0;
+        for (idx = 0; idx < global_ts[e].len; ++idx)
+            if (sgmt__occ_get(&occ, i, j, idx)) sgmt__rv_push(&out[e], global_ts[e].data[idx]);
+    }
+    sgmt__occ_free(&occ);
+}
+
+/* Forward declarations for the two mutually-recursive normal/scoop builders. */
+static void sgmt__nondiagonal_scoop(const sgmt__vec4 tet[4], const sgmt__rv local_ts[6],
+                                    const sgmt__edgeints *smeared, int32_t interior_vertex,
+                                    sgmt__soup *soup, int mid_scoop, sgmt_real bulge);
+static void sgmt__interior_region(const sgmt__vec4 tet[4], const sgmt__rv local_ts[6],
+                                  const sgmt__nc *nc, int32_t interior_vertex,
+                                  sgmt__soup *soup, int mid_scoop, sgmt_real bulge);
+static void sgmt__normal_surface(const sgmt__vec4 tet[4], const sgmt__rv normal_ts[6],
+                                 sgmt__soup *soup);
+
+static void sgmt__emit_face(sgmt__face *face, const sgmt__vec4 tet[4], const sgmt__rv ts[6],
+                            int mid_scoop, sgmt_real bulge, sgmt__soup *soup, int apply_mid,
+                            const sgmt__nc *nc) {
+    if (apply_mid && mid_scoop) {
+        sgmt__face mid = sgmt__add_mid_scoop(face, nc);
+        sgmt__face_to_soup(&mid, tet, ts, mid_scoop, bulge, soup);
+        sgmt__face_free(&mid);
+    } else {
+        sgmt__face_to_soup(face, tet, ts, mid_scoop, bulge, soup);
+    }
+}
+
+static void sgmt__evensum_surface(const sgmt__vec4 tet[4], const sgmt__rv global_ts[6],
+                                  const sgmt__curvelist *scoop_curves, sgmt__soup *soup,
+                                  int mid_scoop, sgmt_real bulge) {
+    int32_t c;
+    for (c = 0; c < scoop_curves->len; ++c) {
+        const sgmt__cvv *curve = &scoop_curves->data[c];
+        sgmt__edgeints cei = sgmt__comb_face_edge_ints(curve);
+        int32_t sep[4];
+        int nsep = sgmt__separated_vertices(&cei, sep);
+        if (nsep == 2) {
+            sgmt__face spiral; int32_t idx;
+            sgmt__face_init(&spiral, SGMT__FT_SPIRAL);
+            for (idx = 0; idx < curve->len; ++idx) sgmt__face_push(&spiral, curve->data[idx]);
+            if (mid_scoop) {
+                sgmt__nc cnc; sgmt__face mid;
+                sgmt__nc_init(&cnc, &cei);
+                mid = sgmt__add_mid_scoop(&spiral, &cnc);
+                sgmt__face_to_soup(&mid, tet, global_ts, mid_scoop, bulge, soup);
+                sgmt__face_free(&mid);
+            } else {
+                sgmt__face_to_soup(&spiral, tet, global_ts, mid_scoop, bulge, soup);
+            }
+            sgmt__face_free(&spiral);
+        } else {
+            sgmt__rv local_ts[6];
+            int32_t interior = sgmt__interior_vertex(sep, nsep), e;
+            sgmt__extract_curve_ts(curve, global_ts, local_ts);
+            sgmt__nondiagonal_scoop(tet, local_ts, &cei, interior, soup, mid_scoop, bulge);
+            for (e = 0; e < 6; ++e) SGMT_FREE(local_ts[e].data);
+        }
+    }
+}
+
+static void sgmt__nondiagonal_scoop(const sgmt__vec4 tet[4], const sgmt__rv local_ts[6],
+                                    const sgmt__edgeints *smeared, int32_t interior_vertex,
+                                    sgmt__soup *soup, int mid_scoop, sgmt_real bulge) {
+    sgmt__nc nc;
+    int t, e;
+    sgmt__nc_init(&nc, smeared);
+    SGMT_ASSERT(!nc.triangle_ineq && nc.even_sum);
+
+    for (t = 0; t < 4; ++t) {
+        const int32_t *tri = SGMT__TET_TRIPLETS[t];
+        int a;
+        for (a = 0; a < 3; ++a) {
+            int32_t i = tri[a];
+            int32_t j = (tri[0] == i) ? tri[1] : tri[0];
+            int32_t k = tri[0] + tri[1] + tri[2] - i - j;
+            int32_t nij = sgmt__ei_get(smeared, i, j);
+            int32_t nik = sgmt__ei_get(smeared, i, k);
+            int i_is_interior = (interior_vertex == i);
+            int32_t seg_order;
+            for (seg_order = 1; seg_order <= sgmt__scc_get(&nc, i, j, k); ++seg_order) {
+                int build = (i_is_interior && seg_order % 2 == 1) || (!i_is_interior && seg_order % 2 == 0);
+                if (build && seg_order > 1) {
+                    sgmt__face face;
+                    sgmt__face_init(&face, SGMT__FT_SMEARED_QUAD);
+                    sgmt__face_push(&face, sgmt__mk(i, j, seg_order - 1, nij, k));
+                    sgmt__face_push(&face, sgmt__mk(i, j, seg_order, nij, k));
+                    sgmt__face_push(&face, sgmt__mk(i, k, seg_order, nik, j));
+                    sgmt__face_push(&face, sgmt__mk(i, k, seg_order - 1, nik, j));
+                    sgmt__emit_face(&face, tet, local_ts, mid_scoop, bulge, soup, 1, &nc);
+                    sgmt__face_free(&face);
+                }
+            }
+        }
+    }
+
+    sgmt__interior_region(tet, local_ts, &nc, interior_vertex, soup, mid_scoop, bulge);
+
+    if (interior_vertex != -1) {
+        int32_t i = interior_vertex, jkl[4], excl[1];
+        sgmt__cv cv_ij, cv_ik, cv_il;
+        sgmt__face corner;
+        int32_t j, k, l;
+        excl[0] = i; sgmt__complement(excl, 1, jkl);
+        j = jkl[0]; k = jkl[1]; l = jkl[2];
+        cv_ij = sgmt__mk(i, j, 1, sgmt__ei_get(smeared, i, j), -1);
+        cv_ik = sgmt__mk(i, k, 1, sgmt__ei_get(smeared, i, k), -1);
+        cv_il = sgmt__mk(i, l, 1, sgmt__ei_get(smeared, i, l), -1);
+        sgmt__face_init(&corner, SGMT__FT_CORNER_TYPE_TRIANGLE);
+        if (!mid_scoop || sgmt__scc_get(&nc, i, j, k) == 0) {
+            sgmt__face_push(&corner, cv_ij); sgmt__face_push(&corner, cv_ik); sgmt__face_push(&corner, cv_il);
+        } else if (sgmt__scc_get(&nc, i, j, l) == 0) {
+            sgmt__face_push(&corner, cv_ij); sgmt__face_push(&corner, cv_il); sgmt__face_push(&corner, cv_ik);
+        } else if (sgmt__scc_get(&nc, i, k, l) == 0) {
+            sgmt__face_push(&corner, cv_ik); sgmt__face_push(&corner, cv_il); sgmt__face_push(&corner, cv_ij);
+        } else {
+            SGMT_ASSERT(0 && "invalid corner curve");
+        }
+        sgmt__face_to_soup(&corner, tet, local_ts, mid_scoop, bulge, soup);
+        sgmt__face_free(&corner);
+    }
+
+    if (!mid_scoop) return;
+    for (e = 0; e < 6; ++e) {
+        int32_t i = SGMT__TET_EDGES[e][0], j = SGMT__TET_EDGES[e][1];
+        int32_t nij = sgmt__ei_get(smeared, i, j);
+        int32_t seg_order;
+        for (seg_order = 2; seg_order <= nij; ++seg_order) {
+            int i_is_interior = (interior_vertex == i);
+            int build = (i_is_interior && seg_order % 2 == 1) || (!i_is_interior && seg_order % 2 == 0);
+            sgmt__face tunnel, mid;
+            if (!build) continue;
+            sgmt__face_init(&tunnel, SGMT__FT_TUNNEL_QUAD);
+            sgmt__face_push(&tunnel, sgmt__mk(i, j, seg_order - 1, nij, -1));
+            sgmt__face_push(&tunnel, sgmt__mk(i, j, seg_order, nij, -1));
+            mid = sgmt__add_mid_scoop(&tunnel, &nc);
+            sgmt__face_free(&tunnel);
+            if (mid.v.len >= 3)
+                sgmt__face_to_soup(&mid, tet, local_ts, mid_scoop, bulge, soup);
+            sgmt__face_free(&mid);
+        }
+    }
+}
+
+static void sgmt__interior_region(const sgmt__vec4 tet[4], const sgmt__rv local_ts[6],
+                                  const sgmt__nc *nc, int32_t interior_vertex,
+                                  sgmt__soup *soup, int mid_scoop, sgmt_real bulge) {
+    if (interior_vertex == -1) {
+        int t;
+        for (t = 0; t < 4; ++t) {
+            int32_t i = SGMT__TET_TRIPLETS[t][0], j = SGMT__TET_TRIPLETS[t][1], k = SGMT__TET_TRIPLETS[t][2];
+            if (sgmt__scc_get(nc, i, j, k) % 2 == 1) {
+                sgmt__face face;
+                sgmt__face_init(&face, SGMT__FT_INTERIOR_HEXAGON);
+                sgmt__face_push(&face, sgmt__mk(i, j, 1, 2, k));
+                sgmt__face_push(&face, sgmt__mk(i, k, 1, 2, j));
+                sgmt__face_push(&face, sgmt__mk(k, i, 1, 2, j));
+                sgmt__face_push(&face, sgmt__mk(k, j, 1, 2, i));
+                sgmt__face_push(&face, sgmt__mk(j, k, 1, 2, i));
+                sgmt__face_push(&face, sgmt__mk(j, i, 1, 2, k));
+                sgmt__emit_face(&face, tet, local_ts, mid_scoop, bulge, soup, 1, nc);
+                sgmt__face_free(&face);
+                break;
+            }
+        }
+        return;
+    }
+
+    {
+        int32_t i = interior_vertex, jkl[4], excl[1];
+        int32_t j, k, scoop_idx, nkj, cv_kj_order;
+        sgmt__face face;
+        excl[0] = i; sgmt__complement(excl, 1, jkl);
+        if (sgmt__scc_get(nc, i, jkl[0], jkl[1]) == 0) { j = jkl[0]; k = jkl[1]; }
+        else if (sgmt__scc_get(nc, i, jkl[0], jkl[2]) == 0) { j = jkl[0]; k = jkl[2]; }
+        else if (sgmt__scc_get(nc, i, jkl[1], jkl[2]) == 0) { j = jkl[1]; k = jkl[2]; }
+        else { SGMT_ASSERT(0 && "invalid corner curve"); j = jkl[0]; k = jkl[1]; }
+
+        sgmt__face_init(&face, SGMT__FT_INTERIOR_CORNER_TYPE);
+        sgmt__face_push(&face, sgmt__mk(i, j, 1, sgmt__ei_get(&nc->e, i, j), k));
+        sgmt__face_push(&face, sgmt__mk(i, k, 1, sgmt__ei_get(&nc->e, i, k), j));
+        sgmt__face_push(&face, sgmt__mk(k, j, sgmt__scc_get(nc, k, j, i), sgmt__ei_get(&nc->e, k, j), i));
+        nkj = sgmt__ei_get(&nc->e, k, j);
+        cv_kj_order = sgmt__scc_get(nc, k, j, i);
+        for (scoop_idx = 0; scoop_idx < sgmt__scoop_get(nc, i, j, k); ++scoop_idx) {
+            sgmt__face_push(&face, sgmt__mk(k, j, 2 * scoop_idx + cv_kj_order + 1, nkj, i));
+            sgmt__face_push(&face, sgmt__mk(k, j, 2 * scoop_idx + cv_kj_order + 2, nkj, i));
+        }
+        sgmt__face_push(&face, sgmt__mk(j, k, sgmt__scc_get(nc, j, k, i), sgmt__ei_get(&nc->e, j, k), i));
+
+        sgmt__emit_face(&face, tet, local_ts, mid_scoop, bulge, soup, 1, nc);
+        sgmt__face_free(&face);
+    }
+}
+
+/* --------------------------------------------------------------------------- *
+ *  Normal surface construction (Section 3.1.1)                                *
+ * --------------------------------------------------------------------------- */
+
+static void sgmt__get_d1_d2(const sgmt__nc *nc, int32_t *d1, int32_t *d2) {
+    int diag_types = 0, i;
+    *d1 = 0; *d2 = 0;
+    for (i = 1; i < 4; ++i) {
+        int32_t d = sgmt__dc_get(nc, 0, i);
+        if (d > 0) {
+            ++diag_types;
+            if (*d1 == 0) *d1 = d; else *d2 = d;
+        }
+    }
+    SGMT_ASSERT(diag_types <= 2);
+}
+
+static int32_t sgmt__gcd(int32_t a, int32_t b) {
+    if (a < 0) a = -a;
+    if (b < 0) b = -b;
+    while (b) { int32_t t = a % b; a = b; b = t; }
+    return a;
+}
+
+static void sgmt__corner_construction(const sgmt__vec4 tet[4], const sgmt__rv ts[6],
+                                      const sgmt__nc *nc, sgmt__soup *soup) {
+    int i;
+    for (i = 0; i < 4; ++i) {
+        int32_t o[4], excl[1]; int32_t order;
+        excl[0] = i; sgmt__complement(excl, 1, o);
+        for (order = 1; order <= nc->cc[i]; ++order) {
+            sgmt__face face;
+            sgmt__face_init(&face, SGMT__FT_TRIANGLE);
+            sgmt__face_push(&face, sgmt__mk(i, o[0], order, sgmt__ei_get(&nc->e, i, o[0]), -1));
+            sgmt__face_push(&face, sgmt__mk(i, o[1], order, sgmt__ei_get(&nc->e, i, o[1]), -1));
+            sgmt__face_push(&face, sgmt__mk(i, o[2], order, sgmt__ei_get(&nc->e, i, o[2]), -1));
+            sgmt__face_to_soup(&face, tet, ts, 0, (sgmt_real)0, soup);
+            sgmt__face_free(&face);
+        }
+    }
+}
+
+static void sgmt__diagonal_construction(const sgmt__vec4 tet[4], const sgmt__rv ts[6],
+                                        const sgmt__nc *nc, sgmt__soup *soup) {
+    int32_t b1 = 0, b2 = -1, b, h1, h2, t;
+    int32_t hl[2], excl[2];
+    for (b = 1; b < 4; ++b) if (sgmt__dc_get(nc, b1, b) != 0) { b2 = b; break; }
+    if (b2 == -1) return;
+    excl[0] = b1; excl[1] = b2; sgmt__complement(excl, 2, hl);
+    h1 = hl[0]; h2 = hl[1];
+    for (t = 0; t < sgmt__dc_get(nc, b1, b2); ++t) {
+        sgmt__face face;
+        sgmt__face_init(&face, SGMT__FT_QUAD02);
+        sgmt__face_push(&face, sgmt__mk(b1, h1, t + nc->cc[b1] + 1, sgmt__ei_get(&nc->e, b1, h1), -1));
+        sgmt__face_push(&face, sgmt__mk(b1, h2, t + nc->cc[b1] + 1, sgmt__ei_get(&nc->e, b1, h2), -1));
+        sgmt__face_push(&face, sgmt__mk(b2, h2, t + nc->cc[b2] + 1, sgmt__ei_get(&nc->e, b2, h2), -1));
+        sgmt__face_push(&face, sgmt__mk(b2, h1, t + nc->cc[b2] + 1, sgmt__ei_get(&nc->e, b2, h1), -1));
+        sgmt__face_to_soup(&face, tet, ts, 0, (sgmt_real)0, soup);
+        sgmt__face_free(&face);
+    }
+}
+
+static void sgmt__octagon_construction(const sgmt__vec4 tet[4], const sgmt__rv ts[6],
+                                       const sgmt__nc *nc, sgmt__soup *soup) {
+    int32_t b1 = 0, vd1 = -1, vd2 = -1, vdd = -1, d1 = -1, d2 = -1, d, other, t;
+    int32_t c_b1, c_vd1, c_vd2, c_vdd;
+    sgmt__derived b1_vdd_mid, vd1_vd2_mid;
+    (void)d2;
+    for (other = 1; other < 4; ++other) {
+        int32_t dd = sgmt__dc_get(nc, b1, other);
+        if (dd != 0) {
+            if (vd1 == -1) { vd1 = other; d1 = dd; }
+            else { vd2 = other; d2 = dd; }
+        } else vdd = other;
+    }
+    d = d1;
+    c_b1 = nc->cc[b1]; c_vd1 = nc->cc[vd1]; c_vd2 = nc->cc[vd2]; c_vdd = nc->cc[vdd];
+    b1_vdd_mid = sgmt__derived2(
+        sgmt__mk(b1, vdd, c_b1 + d, sgmt__ei_get(&nc->e, b1, vdd), -1),
+        sgmt__mk(b1, vdd, c_b1 + d + 1, sgmt__ei_get(&nc->e, b1, vdd), -1));
+    vd1_vd2_mid = sgmt__derived2(
+        sgmt__mk(vd1, vd2, c_vd1 + d, sgmt__ei_get(&nc->e, vd1, vd2), -1),
+        sgmt__mk(vd1, vd2, c_vd1 + d + 1, sgmt__ei_get(&nc->e, vd1, vd2), -1));
+    for (t = 0; t < d; ++t) {
+        sgmt__face face;
+        sgmt__face_init(&face, SGMT__FT_OCTAGON);
+        sgmt__face_push(&face, sgmt__mk(b1, vdd, t + 1 + c_b1, sgmt__ei_get(&nc->e, b1, vdd), -1));
+        sgmt__face_push(&face, sgmt__mk(b1, vd1, t + 1 + c_b1, sgmt__ei_get(&nc->e, b1, vd1), -1));
+        sgmt__face_push(&face, sgmt__mk(vd1, vd2, d - t + c_vd1, sgmt__ei_get(&nc->e, vd1, vd2), -1));
+        sgmt__face_push(&face, sgmt__mk(vd1, vdd, d - t + c_vd1, sgmt__ei_get(&nc->e, vd1, vdd), -1));
+        sgmt__face_push(&face, sgmt__mk(vdd, b1, t + 1 + c_vdd, sgmt__ei_get(&nc->e, b1, vdd), -1));
+        sgmt__face_push(&face, sgmt__mk(vd2, vdd, d - t + c_vd2, sgmt__ei_get(&nc->e, vd2, vdd), -1));
+        sgmt__face_push(&face, sgmt__mk(vd2, vd1, d - t + c_vd2, sgmt__ei_get(&nc->e, vd1, vd2), -1));
+        sgmt__face_push(&face, sgmt__mk(b1, vd2, t + 1 + c_b1, sgmt__ei_get(&nc->e, b1, vd2), -1));
+        face.has_derived = 1;
+        face.derived = sgmt__derived_lerp(vd1_vd2_mid, b1_vdd_mid, (sgmt_real)(t + 1) / (sgmt_real)(d + 1));
+        sgmt__face_to_soup(&face, tet, ts, 0, (sgmt_real)0, soup);
+        sgmt__face_free(&face);
+    }
+}
+
+static void sgmt__spiral_construction(const sgmt__vec4 tet[4], const sgmt__rv ts[6],
+                                      const sgmt__nc *nc, sgmt__soup *soup) {
+    int32_t ginds[4]; sgmt__face face; sgmt__cvv curve;
+    int32_t idx;
+    ginds[0] = 0; ginds[1] = 1; ginds[2] = 2; ginds[3] = 3;
+    curve.data = NULL; curve.len = curve.cap = 0;
+    sgmt__trace_generic_curve(sgmt__mk(0, 1, nc->cc[0] + 1, sgmt__ei_get(&nc->e, 0, 1), -1),
+                              nc, ginds, NULL, 0, &curve);
+    sgmt__face_init(&face, SGMT__FT_SPIRAL);
+    for (idx = 0; idx < curve.len; ++idx) sgmt__face_push(&face, curve.data[idx]);
+    sgmt__face_to_soup(&face, tet, ts, 0, (sgmt_real)0, soup);
+    sgmt__face_free(&face);
+    sgmt__cvv_free(&curve);
+}
+
+static void sgmt__recursive_construction(const sgmt__vec4 tet[4], const sgmt__rv ts[6],
+                                         const sgmt__nc *nc, sgmt__soup *soup) {
+    int32_t d1, d2, interior[4], b1 = 0, other, t;
+    sgmt__vec4 bary_center;
+    sgmt__get_d1_d2(nc, &d1, &d2);
+    if (d1 < d2) { int32_t tmp = d1; d1 = d2; d2 = tmp; }
+    interior[0] = interior[1] = interior[2] = interior[3] = 0;
+    interior[b1] = d1 - d2 + nc->cc[b1];
+    for (other = 1; other < 4; ++other) {
+        int32_t d = sgmt__dc_get(nc, b1, other);
+        if (d == 0) interior[other] = 2 * d2 + nc->cc[other];
+        else if (d == d1) interior[other] = d1 + nc->cc[other];
+        else if (d == d2) interior[other] = d2 + nc->cc[other];
+        else SGMT_ASSERT(0 && "unexpected diagonal value");
+    }
+
+    bary_center = sgmt__v_scale(sgmt__v_add(sgmt__v_add(tet[0], tet[1]), sgmt__v_add(tet[2], tet[3])), (sgmt_real)0.25);
+    for (t = 0; t < 4; ++t) {
+        int32_t i = SGMT__TET_TRIPLETS[t][0], j = SGMT__TET_TRIPLETS[t][1], k = SGMT__TET_TRIPLETS[t][2];
+        sgmt__vec4 child_tet[4];
+        sgmt__rv child_ts[6];
+        int32_t e, m;
+        child_tet[0] = bary_center; child_tet[1] = tet[i]; child_tet[2] = tet[j]; child_tet[3] = tet[k];
+        for (e = 0; e < 6; ++e) { child_ts[e].data = NULL; child_ts[e].len = child_ts[e].cap = 0; }
+        {
+            int32_t ic[3]; int s;
+            ic[0] = interior[i]; ic[1] = interior[j]; ic[2] = interior[k];
+            for (s = 0; s < 3; ++s)
+                for (m = 0; m < ic[s]; ++m)
+                    sgmt__rv_push(&child_ts[s], (sgmt_real)(m + 1) / (sgmt_real)(ic[s] + 1));
+        }
+        /* child edges (1,2)=(i,j), (1,3)=(i,k), (2,3)=(j,k) reuse parent locations */
+        for (m = 0; m < ts[sgmt__edge_index(i, j)].len; ++m) sgmt__rv_push(&child_ts[3], ts[sgmt__edge_index(i, j)].data[m]);
+        for (m = 0; m < ts[sgmt__edge_index(i, k)].len; ++m) sgmt__rv_push(&child_ts[4], ts[sgmt__edge_index(i, k)].data[m]);
+        for (m = 0; m < ts[sgmt__edge_index(j, k)].len; ++m) sgmt__rv_push(&child_ts[5], ts[sgmt__edge_index(j, k)].data[m]);
+
+        sgmt__normal_surface(child_tet, child_ts, soup);
+
+        for (e = 0; e < 6; ++e) SGMT_FREE(child_ts[e].data);
+    }
+}
+
+static void sgmt__normal_surface(const sgmt__vec4 tet[4], const sgmt__rv normal_ts[6],
+                                 sgmt__soup *soup) {
+    sgmt__edgeints e;
+    sgmt__nc nc;
+    int32_t d1, d2, k;
+    for (k = 0; k < 6; ++k) e.c[k] = normal_ts[k].len;
+    sgmt__nc_init(&nc, &e);
+    if (!nc.triangle_ineq || !nc.even_sum) return;
+    sgmt__get_d1_d2(&nc, &d1, &d2);
+
+    if (d1 == 0 || d2 == 0) {
+        sgmt__corner_construction(tet, normal_ts, &nc, soup);
+        sgmt__diagonal_construction(tet, normal_ts, &nc, soup);
+    } else if (d1 == d2 || sgmt__gcd(d1, d2) == 1) {
+        sgmt__corner_construction(tet, normal_ts, &nc, soup);
+        if (d1 == d2) sgmt__octagon_construction(tet, normal_ts, &nc, soup);
+        else sgmt__spiral_construction(tet, normal_ts, &nc, soup);
+    } else {
+        sgmt__recursive_construction(tet, normal_ts, &nc, soup);
+    }
+}
+
+/* --------------------------------------------------------------------------- *
+ *  Public entry points                                                        *
+ * --------------------------------------------------------------------------- */
+
+static int32_t sgmt__paper_slot(int32_t a, int32_t b) {
+    int32_t s;
+    for (s = 0; s < 6; ++s)
+        if (SGMT__PAPER_EDGES[s][0] == a && SGMT__PAPER_EDGES[s][1] == b) return s;
+    return -1;
+}
+
+SGMT_API sgmt_result sgmt_reconstruct_tet(const int32_t edge_coords[6],
+                                          int use_simplicial_embedding) {
+    const sgmt_real bulge = SGMT_DEFAULT_BULGE;
+    sgmt_result result;
+    sgmt__edgeints edge_ints;
+    sgmt__vec4 tet[4];
+    sgmt__rv ts[6];
+    sgmt__curvelist scoop_curves;
+    sgmt__occ non_normal_occ, *p_occ;
+    sgmt__rv normal_ts[6];
+    sgmt__soup soup;
+    int32_t ginds[4] = {0, 1, 2, 3};
+    int32_t s, e, v, idx;
+    int32_t base[6], total_edge_points;
+    sgmt__v4v steiner; /* stores barycentric of unique Steiner points */
+
+    memset(&result, 0, sizeof(result));
+
+    for (s = 0; s < 6; ++s) if (edge_coords[s] < 0) { result.ok = 0; return result; }
+
+    /* Edge coordinates in paper order -> internal edge ints. */
+    memset(&edge_ints, 0, sizeof(edge_ints));
+    for (s = 0; s < 6; ++s)
+        sgmt__ei_set(&edge_ints, SGMT__PAPER_EDGES[s][0], SGMT__PAPER_EDGES[s][1], edge_coords[s]);
+
+    /* Tet vertices = standard basis, so every produced position is a barycentric. */
+    for (v = 0; v < 4; ++v) { tet[v] = sgmt__v_zero(); tet[v].c[v] = (sgmt_real)1; }
+
+    /* Uniform crossing locations per (internal) edge. */
+    for (e = 0; e < 6; ++e) {
+        int32_t n = edge_ints.c[e], o;
+        ts[e].data = NULL; ts[e].len = ts[e].cap = 0;
+        for (o = 0; o < n; ++o) sgmt__rv_push(&ts[e], (sgmt_real)(o + 1) / (sgmt_real)(n + 1));
+    }
+
+    scoop_curves.data = NULL; scoop_curves.len = scoop_curves.cap = 0;
+    sgmt__boundary_comb_curves(ginds, &edge_ints, &scoop_curves, &non_normal_occ);
+
+    soup.verts.data = NULL; soup.verts.len = soup.verts.cap = 0;
+    soup.tris.data = NULL; soup.tris.len = soup.tris.cap = 0;
+
+    /* Scoop (non-normal) surface. */
+    sgmt__evensum_surface(tet, ts, &scoop_curves, &soup, use_simplicial_embedding, bulge);
+
+    /* Normal surface from crossings not consumed by open/scoop curves. */
+    p_occ = &non_normal_occ;
+    for (e = 0; e < 6; ++e) {
+        int32_t i = SGMT__TET_EDGES[e][0], j = SGMT__TET_EDGES[e][1], o;
+        normal_ts[e].data = NULL; normal_ts[e].len = normal_ts[e].cap = 0;
+        for (o = 0; o < ts[e].len; ++o)
+            if (!sgmt__occ_get(p_occ, i, j, o)) sgmt__rv_push(&normal_ts[e], ts[e].data[o]);
+    }
+    sgmt__normal_surface(tet, normal_ts, &soup);
+
+    /* ---- Serialize: classify each soup vertex as edge point or Steiner. ---- */
+    total_edge_points = 0;
+    for (s = 0; s < 6; ++s) { base[s] = total_edge_points; total_edge_points += edge_coords[s]; }
+
+    steiner.data = NULL; steiner.len = steiner.cap = 0;
+    result.num_triangles = soup.tris.len / 3;
+    result.triangles = (int32_t *)SGMT_MALLOC((size_t)(soup.tris.len ? soup.tris.len : 1) * sizeof(int32_t));
+    SGMT_ASSERT(result.triangles != NULL);
+
+    for (idx = 0; idx < soup.tris.len; ++idx) {
+        sgmt__vec4 vec = soup.verts.data[soup.tris.data[idx]];
+        int nonzero_count = 0, lanes[4], kk;
+        int32_t mapped = -1;
+        for (kk = 0; kk < 4; ++kk)
+            if (fabs((double)vec.c[kk]) > (double)SGMT__TOL) lanes[nonzero_count++] = kk;
+        if (nonzero_count == 2) {
+            int32_t a = lanes[0], b = lanes[1];
+            int32_t slot = sgmt__paper_slot(a, b);
+            int32_t n = edge_coords[slot];
+            if (n > 0) {
+                sgmt_real t = vec.c[b];
+                int32_t o = sgmt__iround(t * (sgmt_real)(n + 1));
+                if (o >= 1 && o <= n
+                    && fabs((double)(t - (sgmt_real)o / (sgmt_real)(n + 1))) < (double)SGMT__TOL)
+                    mapped = base[slot] + (o - 1);
+            }
+        }
+        if (mapped < 0) {
+            /* Steiner point: dedupe by (near-)equal barycentric. */
+            int32_t si;
+            for (si = 0; si < steiner.len; ++si) {
+                sgmt__vec4 q = steiner.data[si];
+                if (fabs((double)(q.c[0]-vec.c[0])) < 1e-9 && fabs((double)(q.c[1]-vec.c[1])) < 1e-9
+                    && fabs((double)(q.c[2]-vec.c[2])) < 1e-9 && fabs((double)(q.c[3]-vec.c[3])) < 1e-9) {
+                    mapped = total_edge_points + si; break;
+                }
+            }
+            if (mapped < 0) {
+                mapped = total_edge_points + steiner.len;
+                sgmt__v4v_push(&steiner, vec);
+            }
+        }
+        result.triangles[idx] = mapped;
+    }
+
+    result.num_edge_points = total_edge_points;
+    result.num_steiner = steiner.len;
+    result.steiner_bary = (sgmt_real *)SGMT_MALLOC((size_t)(steiner.len ? steiner.len * 4 : 1) * sizeof(sgmt_real));
+    SGMT_ASSERT(result.steiner_bary != NULL);
+    for (s = 0; s < steiner.len; ++s) {
+        int kk;
+        for (kk = 0; kk < 4; ++kk) result.steiner_bary[4 * s + kk] = steiner.data[s].c[kk];
+    }
+    result.ok = 1;
+
+    /* ---- Cleanup of scratch ---- */
+    SGMT_FREE(steiner.data);
+    SGMT_FREE(soup.verts.data);
+    SGMT_FREE(soup.tris.data);
+    for (e = 0; e < 6; ++e) { SGMT_FREE(ts[e].data); SGMT_FREE(normal_ts[e].data); }
+    sgmt__occ_free(&non_normal_occ);
+    sgmt__curvelist_free(&scoop_curves);
+
+    return result;
+}
+
+SGMT_API void sgmt_free_result(sgmt_result *result) {
+    if (!result) return;
+    SGMT_FREE(result->triangles);
+    SGMT_FREE(result->steiner_bary);
+    result->triangles = NULL;
+    result->steiner_bary = NULL;
+    result->num_triangles = 0;
+    result->num_steiner = 0;
+    result->num_edge_points = 0;
+    result->ok = 0;
+}
+
+SGMT_API void sgmt_realize_uniform(const sgmt_result *result, const int32_t edge_coords[6],
+                                   const sgmt_real tet_xyz[12], sgmt_real *out_xyz) {
+    int32_t slot, o, s, d, idx = 0;
+    for (slot = 0; slot < 6; ++slot) {
+        int32_t i = SGMT__PAPER_EDGES[slot][0], j = SGMT__PAPER_EDGES[slot][1];
+        int32_t n = edge_coords[slot];
+        for (o = 1; o <= n; ++o) {
+            sgmt_real t = (sgmt_real)o / (sgmt_real)(n + 1);
+            for (d = 0; d < 3; ++d)
+                out_xyz[3 * idx + d] = ((sgmt_real)1 - t) * tet_xyz[3 * i + d] + t * tet_xyz[3 * j + d];
+            ++idx;
+        }
+    }
+    for (s = 0; s < result->num_steiner; ++s) {
+        for (d = 0; d < 3; ++d) {
+            sgmt_real acc = 0;
+            int v;
+            for (v = 0; v < 4; ++v) acc += result->steiner_bary[4 * s + v] * tet_xyz[3 * v + d];
+            out_xyz[3 * idx + d] = acc;
+        }
+        ++idx;
+    }
+}
+
+SGMT_API sgmt_mesh sgmt_triangulate_tet(const int32_t edge_coords[6],
+                                        int use_simplicial_embedding,
+                                        const sgmt_real tet_xyz[12]) {
+    sgmt_mesh mesh;
+    sgmt_result r;
+    int32_t i;
+
+    memset(&mesh, 0, sizeof(mesh));
+    r = sgmt_reconstruct_tet(edge_coords, use_simplicial_embedding);
+    if (!r.ok) { sgmt_free_result(&r); return mesh; } /* mesh.ok stays 0 */
+
+    mesh.num_vertices = r.num_edge_points + r.num_steiner;
+    mesh.num_triangles = r.num_triangles;
+
+    mesh.positions = (sgmt_real *)SGMT_MALLOC(
+        (size_t)(mesh.num_vertices ? mesh.num_vertices * 3 : 1) * sizeof(sgmt_real));
+    SGMT_ASSERT(mesh.positions != NULL);
+    sgmt_realize_uniform(&r, edge_coords, tet_xyz, mesh.positions);
+
+    mesh.triangles = (int32_t *)SGMT_MALLOC(
+        (size_t)(mesh.num_triangles ? mesh.num_triangles * 3 : 1) * sizeof(int32_t));
+    SGMT_ASSERT(mesh.triangles != NULL);
+    for (i = 0; i < mesh.num_triangles * 3; ++i) mesh.triangles[i] = r.triangles[i];
+
+    mesh.ok = 1;
+    sgmt_free_result(&r);
+    return mesh;
+}
+
+SGMT_API void sgmt_free_mesh(sgmt_mesh *mesh) {
+    if (!mesh) return;
+    SGMT_FREE(mesh->positions);
+    SGMT_FREE(mesh->triangles);
+    mesh->positions = NULL;
+    mesh->triangles = NULL;
+    mesh->num_vertices = 0;
+    mesh->num_triangles = 0;
+    mesh->ok = 0;
+}
+
+#endif /* SUBGRID_MARCHING_TET_IMPLEMENTATION */
+```

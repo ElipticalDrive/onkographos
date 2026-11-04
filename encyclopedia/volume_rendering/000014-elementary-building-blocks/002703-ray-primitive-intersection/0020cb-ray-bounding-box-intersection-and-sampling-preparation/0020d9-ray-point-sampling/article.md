@@ -1,0 +1,91 @@
+# Ray Point Sampling
+## Overview
+Ray Point Sampling generates query points along camera rays for volume rendering by discretizing the ray segment between near and far clipping planes using a fixed step distance [S1, unofficial]. It performs the actual coordinate generation and masking after ray-box intersection, differing from its parent [Ray-Bounding Box Intersection and Sampling Preparation](2364-ray-bounding-box-intersection-and-sampling-preparation.md) [G]. It uses deterministic, structured grid spacing rather than the stochastic sampling of [Random Point Sampling in Bounds](3914-random-point-sampling-in-bounds.md) [G].
+## How it works
+**Inputs:**
+- `rays_o`: Ray origins, shape $(H, W, 3)$ or flattened $(N, 3)$.
+- `rays_d`: Ray directions, shape $(H, W, 3)$ or flattened $(N, 3)$.
+- `xyz_min`: Bounding box minimum coordinates, shape $(3,)$.
+- `xyz_max`: Bounding box maximum coordinates, shape $(3,)$.
+- `near`: Near clipping distance scalar.
+- `far`: Far clipping distance scalar. Default $10^9$ [S1, unofficial].
+- `stepsize`: Base step size scalar.
+- `voxel_size`: Physical size of a single voxel scalar.
+
+**Outputs:**
+- `ray_pts`: Sampled point coordinates, shape $(N, M, 3)$ where $N$ is number of rays and $M$ is max steps.
+- `ray_id`: Ray indices for each point, shape $(N, M)$.
+- `step_id`: Step indices for each point, shape $(N, M)$.
+
+**Data Structures:**
+- Points are stored in a dense tensor. Invalid points (outside bbox or beyond far clip) are masked out or padded.
+
+**Steps:**
+1. **Make Inputs Contiguous:** Ensure `rays_o` and `rays_d` are contiguous in memory [S1, unofficial].
+2. **Compute Step Distance:** Calculate the physical step distance:
+   $$ \text{stepdist} = \text{stepsize} \times \text{voxel\_size} $$
+   [S1, unofficial]
+3. **Generate Candidate Points:** Call the sampling routine with inputs `rays_o`, `rays_d`, `xyz_min`, `xyz_max`, `near`, `far`, and `stepdist`. This computes:
+   - `ray_pts`: Points along rays starting from `near` with spacing `stepdist`.
+   - `mask_outbbox`: Boolean mask for points outside the bounding box.
+   - `ray_id`: Index of the ray each point belongs to.
+   - `step_id`: Index of the step along the ray.
+   - `N_steps`: Total number of steps generated per ray (before masking).
+   - `t_min`, `t_max`: The parameter range $[t_{min}, t_{max}]$ for the ray segment within the bounding box.
+   [S1, unofficial]
+4. **Filter Points:** Compute the inverse mask for points inside the bounding box:
+   $$ \text{mask\_inbbox} = \neg \text{mask\_outbbox} $$
+   [S1, unofficial]
+5. **Apply Mask:** Filter `ray_pts`, `ray_id`, and `step_id` using `mask_inbbox` [S1, unofficial].
+6. **Return Results:** Return `ray_pts`, `ray_id`, `step_id` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_point_sampling(rays_o, rays_d, xyz_min, xyz_max, near, far, stepsize, voxel_size):
+    # Ensure inputs are contiguous arrays [S1, unofficial]
+    rays_o = contiguous_array(rays_o)
+    rays_d = contiguous_array(rays_d)
+    # Calculate physical step distance [S1, unofficial]
+    stepdist = stepsize * voxel_size
+    # Default far clip if not specified [S1, unofficial]
+    if far is None:
+        far = 1e9
+    # Generate candidate points along rays [S1, unofficial]
+    ray_pts, mask_outbbox, ray_id, step_id, N_steps, t_min, t_max = sample_pts_on_rays(
+        rays_o, rays_d, xyz_min, xyz_max, near, far, stepdist
+    )
+    # Filter points inside bounding box [S1, unofficial]
+    mask_inbbox = ~mask_outbbox
+    # Apply mask to coordinates and indices [S1, unofficial]
+    ray_pts = ray_pts[mask_inbbox]
+    ray_id = ray_id[mask_inbbox]
+    step_id = step_id[mask_inbbox]
+    # Return filtered results [S1, unofficial]
+    return ray_pts, ray_id, step_id
+
+def contiguous_array(arr):
+    # Standard memory layout guarantee [G]
+    return arr if arr.flags.contiguous else arr.copy()
+
+def sample_pts_on_rays(rays_o, rays_d, xyz_min, xyz_max, near, far, stepdist):
+    # The sources do not give the kernel internals; standard ray marching computes points at t = near + k * stepdist, checks bbox, and returns masks/indices [G]
+    ...
+```
+## Subtopics
+
+### Fine-stage Points Sampling
+This variant is used in the fine stage of Direct Voxel Grid Optimization [S2]. It modifies the standard sampling by first filtering out rays that do not intersect with known free space [S2]. For each ray, the near and far bounds ($t_{near}$ and $t_{far}$) are adjusted to the exact endpoints of the ray-box intersection [S2]. A critical pitfall is that $t_{near}$ must not be adjusted if the ray origin $x_0$ is already inside the bounding box [S2]. This ensures correct sampling bounds when the camera is inside the volume [S2].
+
+## Operating characteristics
+**Time Complexity:** $O(N \cdot M)$ where $N$ is the number of rays and $M$ is the number of steps per ray. The CUDA kernel performs this in parallel [G].
+**Memory Complexity:** $O(N \cdot M \cdot 3)$ for storing point coordinates, plus overhead for masks and indices [G].
+**Performance:** The method is highly parallelizable on GPU [G].
+**Strengths:** Deterministic sampling ensures consistent coverage [G]. The bounding box filtering reduces unnecessary density queries for empty space [G].
+**Limitations:** Fixed step size may lead to aliasing or insufficient resolution if `stepsize` is not tuned to the `voxel_size` [G]. Points outside the bounding box are discarded, which may require careful handling of rays that barely miss the box [G].
+## Background
+Ray Point Sampling is a core component of neural volume rendering pipelines, specifically referenced in the implementation of Direct Voxel Grid Optimization (DVGO) [S2] and its reference implementation [S1, unofficial]. It enables efficient evaluation of voxel-based radiance fields by providing structured query points along rays [S1, unofficial][S2].
+## Sources
+[S1] gkouros/ref-dvgo, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 (unofficial)
+[S2] Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00538, fetched 2026-10-26

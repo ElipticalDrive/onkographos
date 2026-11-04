@@ -1,0 +1,147 @@
+# Hierarchical Trilinear Ray Casting
+
+Also called: Adaptive ray casting using trilinear basis functions, Hierarchical Ray Casting with Trilinear Coefficients, Hierarchically Accelerated Ray Casting with Controlled Error, Ray casting with mdh tree
+
+## Overview
+Hierarchical Trilinear Ray Casting is a volume rendering method that accelerates ray casting by traversing a multi-dimensional hierarchy (mdh) and adaptively selecting the resolution level for data evaluation based on a user-defined error tolerance and data importance weighting [S1, unofficial]. It differs from sibling methods like [Hierarchical Digital Differential Analyzer (HDDA)](1122-hierarchical-digital-differential-analyzer-hdda.md) or [Sparse Voxel Octree Ray Traversal](2451-sparse-voxel-octree-ray-traversal.md) by using least-squares trilinear basis functions to model data regions, allowing the algorithm to decide whether to refine traversal or evaluate the region directly based on the approximation error [S1, unofficial]. Unlike methods that rely on simple homogeneity (constant values), this approach generalizes homogeneity to least-squares fits, providing a more robust metric for heterogeneous but smooth regions [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A multi-dimensional hierarchy (mdh) of the volume data, a ray defined by origin and direction, an error tolerance $\epsilon$, and an optional data importance weighting function $I(v)$.
+*   **Output:** The accumulated color and opacity for the ray.
+
+**Data Structures:**
+The hierarchy uses a BON tree structure [S1, unofficial]. Each node contains:
+1.  **Data Model:** Trilinear coefficients representing a least-squares fit to the data within the region covered by the node. For leaf nodes (original data), these coefficients model the behavior of sampled corner points, providing $C^0$ continuity at shared faces [S1, unofficial].
+2.  **Evaluation Information:**
+    *   **Nodal Error:** The average deviation of the node's trilinear model from the actual data within the region [S1, unofficial].
+    *   **Importance:** A value derived from the user-defined importance function, indicating the criticality of the data values in that region [S1, unofficial].
+
+**Algorithm Steps:**
+The core logic is implemented via a recursive function `rayCastRegion(ray, region, entryPt, exitPt)` [S1, unofficial].
+
+1.  **Termination Check:** If the current `region` is at the bottom level (leaf) or the nodal error (weighted by importance) is within the user-defined tolerance $\epsilon$, the ray is rendered directly from `entryPt` to `exitPt` using the region's data model.
+2.  **Refinement:** If not at the bottom level and error exceeds tolerance:
+    a.  Initialize `subEntry` to `entryPt`.
+    b.  Loop while `subEntry` is not equal to `exitPt` and rendering is not interrupted:
+        i.  **Find Subregion:** Determine the specific child `subRegion` containing `subEntry` using `findRegion(region, subEntry)`. For orthographic projection, a single permutation provides a front-to-back topological order for all subregions, making this efficient. For perspective projection, the permutation is fixed per ray but may vary between rays [S1, unofficial].
+        ii. **Find Exit:** Calculate the exit point `subExit` of the ray from `subRegion` starting at `subEntry` using `findExit(ray, subRegion, subEntry)`.
+        iii. **Recurse:** Call `rayCastRegion(ray, subRegion, subEntry, subExit)`.
+        iv. **Advance:** Update `subEntry` to `subExit`.
+
+**Intersection Calculation (`findExit`):**
+`findExit` uses a generalization of the Snyder and Barr method for regularly tessellated grids [S1, unofficial].
+*   Maintain three ray parameter values $t_x, t_y, t_z$, representing the most imminent intersections with the x, y, and z grid planes of the current subregion.
+*   Select the minimum of $t_x, t_y, t_z$ as the next intersection parameter.
+*   **Uniform Case:** Update the selected parameter by a fixed amount (e.g., if $t_x$ is selected, update by $\Delta t_x$).
+*   **Adaptive Case:** Updates are nondestructive because the same parameter value (`subEntry`) may be updated at several tree levels. The update amount is multiplied by $w_x$, the width (in grid points) of the subregion being jumped over [S1, unofficial].
+
+**Rendering at Termination:**
+When the algorithm stops refinement at a node higher than the bottom level:
+*   Evaluate data, color, and opacity at the intersection points of the region's bounding box using the node's trilinear coefficients [S1, unofficial].
+*   Integrate directly from `entryPt` to `exitPt` by approximately solving the underlying differential equation. The approximation finds the color at the thickest point of the cell's projection to determine the "emission" contribution, similar to the coherent projection method [S1, unofficial].
+
+If the algorithm goes down to the data level (leaf):
+*   Look up the eight corner data values of the cell/voxel.
+*   Compute colors and opacity at the intersection points of the cell boundary [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_cast_region(ray, region, entry_pt, exit_pt, tolerance, importance_func):
+    """
+    Recursively cast a ray through a hierarchical region.
+    ray: Ray object with origin, direction, and parameter t.
+    region: Node in the mdh tree.
+    entry_pt: Entry point of the ray into this region.
+    exit_pt: Exit point of the ray from this region.
+    tolerance: User-defined error tolerance.
+    importance_func: Function mapping data value to importance weight.
+    """
+    # Check if we should render directly
+    if region.is_leaf() or region.get_weighted_error(importance_func) <= tolerance:
+        return render_region_direct(ray, region, entry_pt, exit_pt)
+    
+    # Otherwise, refine and recurse
+    sub_entry = entry_pt
+    while sub_entry != exit_pt and not interrupted():
+        # Find the child subregion containing the current entry point
+        sub_region = find_region(region, sub_entry)
+        
+        # Calculate where the ray exits this subregion
+        sub_exit = find_exit(ray, sub_region, sub_entry)
+        
+        # Recursively process the subregion
+        contribution = ray_cast_region(ray, sub_region, sub_entry, sub_exit, tolerance, importance_func)
+        
+        # Accumulate contribution (implementation detail of render_region_direct)
+        accumulate(contribution)
+        
+        # Advance to the next segment
+        sub_entry = sub_exit
+
+def find_exit(ray, region, entry_pt):
+    """
+    Calculate the exit point of the ray from the region starting at entry_pt.
+    Uses a generalized Snyder and Barr traversal.
+    """
+    # Initialize intersection parameters for x, y, z planes of the region
+    tx = ray.intersection_t_x(region, entry_pt)
+    ty = ray.intersection_t_y(region, entry_pt)
+    tz = ray.intersection_t_z(region, entry_pt)
+    
+    # Determine the next intersection
+    t_next = min(tx, ty, tz)
+    
+    # Calculate the point at t_next
+    exit_pt = ray.point_at(entry_pt, t_next)
+    
+    return exit_pt
+
+def render_region_direct(ray, region, entry_pt, exit_pt):
+    """
+    Render the region directly using its data model (trilinear coefficients or leaf values).
+    """
+    if region.is_leaf():
+        # Use 8 corner data values
+        data_values = region.get_leaf_data()
+        color, opacity = compute_color_opacity_leaf(data_values, ray, entry_pt, exit_pt)
+    else:
+        # Use trilinear coefficients
+        coeffs = region.get_trilinear_coeffs()
+        color, opacity = compute_color_opacity_trilinear(coeffs, ray, entry_pt, exit_pt)
+    
+    return color, opacity
+```
+
+**Parameters:**
+*   **Error Tolerance ($\epsilon$):** A user-defined parameter controlling the maximum allowed error. Larger values allow rendering at higher tree levels (coarser resolution), increasing speed but reducing quality [S1, unofficial].
+*   **Data Importance Weighting Function:** A user-supplied function that weights the error metric. It allows small errors in critical data ranges to be considered serious, while substantial errors in uninteresting ranges (e.g., air around medical data) are acceptable [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Gradient Discontinuity:** The gradient calculated using the derivative of the trilinear function may not be continuous at shared cell faces, introducing potential error in shading calculations [S1, unofficial].
+*   **Perspective Permutations:** For perspective projection, the topological order of subregions may vary between rays, requiring careful handling in `findRegion` [S1, unofficial].
+
+## Subtopics
+
+### Hierarchical Volume Rendering with GPU Ray-Casting
+A single-pass volume rendering method compatible with a hierarchical data structure, extending Scharsach's ray-casting method [S2, unofficial]. It performs traversal and color accumulation in a fragment shader for each pixel, using a quad covering the display surface [S2, unofficial]. The vertex shader calculates ray position and direction in data space for each vertex of the display quad. Rasterization interpolates these rays to the fragment shader. For each ray, entry and exit points within the data volume bounds are calculated, handling cases where the ray starts outside or exits early due to max length. If the ray does not intersect the volume, shader execution stops immediately, replacing early depth testing [S2, unofficial]. Tree traversal alternates horizontal passes (within node grid) and vertical passes (between hierarchy levels), using either a mini-stack or stack-less algorithm. Samples are accumulated according to the volume rendering integral [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The method is adaptive. In homogeneous regions, it renders at higher tree levels, significantly reducing the number of samples. In heterogeneous regions, it refines to the leaf level.
+*   **Memory Complexity:** Depends on the BON tree structure, which is space-saving compared to full resolution storage [S1, unofficial].
+*   **Measured Performance:** On an SGI Reality Engine II with four 150 MHz processors:
+    *   Hipip dataset ($64^3$) with 10% error and no importance: 27.0 seconds (hierarchical) vs. 97.0 seconds (regular grid) [S1, unofficial].
+    *   CT Head dataset ($256 \times 256 \times 113$) with 1% error and importance: 56.0 seconds (hierarchical) vs. 205.0 seconds (regular grid) [S1, unofficial].
+*   **Strengths:** Provides error-controlled rendering; flexible importance weighting; easily parallelizable (each ray is nearly independent); supports perspective projection without significant penalty [S1, unofficial].
+*   **Limitations:** Noticeably slower than ray casting a non-hierarchical rectilinear volume; slower than coherent projection or hardware 3D textures for interactive speeds; gradient discontinuities may affect shading quality [S1, unofficial].
+*   **When to Use:** When image quality must be controlled by error tolerance and importance weighting, and when the volume has regions that can be approximated well by trilinear functions.
+*   **When Not to Use:** When maximum performance is required and error control is not critical; when the volume data is highly discontinuous and trilinear approximation is poor.
+
+## Background
+The method was developed by Gelder, Kim, and Wilhelms at the University of California, Santa Cruz, and published in March 1995 [S1, unofficial]. It builds on previous work in multi-dimensional trees (mdh) and coherent projection [WVG91, WVG92, WVG94, WVGW94]. The primary motivation was to provide a reference image for quantitative image comparisons with faster methods, offering a flexible interface for controlling image parameters [S1, unofficial]. It generalizes the concept of homogeneity from nearly constant values (used in works by Levoy, Danskin/Hanrahan, Westermann) to least-squares fits with trilinear basis functions [S1, unofficial].
+
+## Sources
+[S1] Hierarchically Accelerated Ray Casting for Volume Rendering with ..., https://tr.soe.ucsc.edu/sites/default/files/technical-reports/UCSC-CRL-95-31.pdf, fetched 2026-10-27 (unofficial)
+[S2] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)

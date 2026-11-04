@@ -1,0 +1,112 @@
+# AABB Ray Distance
+
+Also called: Axis-Aligned Bounding Box Intersection Distance
+
+## Overview
+Computes the distance along a ray direction from a given point to the nearest intersection with an axis-aligned bounding box (AABB). It returns -1 if the starting point is inside the box or if the ray does not intersect the box. It differs from standard intersection tests by returning a scalar distance value rather than a boolean or hit point, which is useful for sorting or early-out optimizations in volume rendering pipelines.
+
+## How it works
+**Inputs:**
+- `point`: The starting position of the ray (3D vector).
+- `direction`: The ray direction vector (3D vector).
+- `bounding_box_min`: Minimum coordinates of the AABB (3D vector).
+- `bounding_box_max`: Maximum coordinates of the AABB (3D vector).
+
+**Outputs:**
+- `dist`: The distance to the nearest intersection. Returns -1 if no valid intersection exists (point inside or ray misses).
+
+**Data Structures:**
+- Vectors are treated as 3-element arrays or tuples $(x, y, z)$.
+- Coordinates are in world space.
+
+**Steps:**
+1. Normalize the ray direction vector $\vec{d}$ to unit length. Let $\vec{d} = (d_x, d_y, d_z)$.
+2. Initialize `dist` to -1.
+3. Iterate over each axis $i \in \{x, y, z\}$:
+   a. Let $v$ be the coordinate of `point` on axis $i$.
+   b. Let $d$ be the component of `direction` on axis $i$.
+   c. Let $min_i$ and $max_i$ be the minimum and maximum extents of the AABB on axis $i$.
+   d. If `dist` is -1:
+      - If $v < min_i$ and $d > 0$: Set `dist` = $(min_i - v) / d$.
+      - If $v > max_i$ and $d < 0$: Set `dist` = $(max_i - v) / d$.
+   e. Else (`dist` is not -1):
+      - If $v < min_i$ and $d > 0$: Set `dist` = $\max(\text{dist}, (min_i - v) / d)$.
+      - If $v > max_i$ and $d < 0$: Set `dist` = $\max(\text{dist}, (max_i - v) / d)$.
+4. Return `dist`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def aabb_ray_distance(point, direction, bounding_box_min, bounding_box_max):
+    # Normalize direction
+    length = sqrt(direction.x**2 + direction.y**2 + direction.z**2)
+    if length == 0:
+        return -1
+    d_x = direction.x / length
+    d_y = direction.y / length
+    d_z = direction.z / length
+    
+    dist = -1
+    
+    # Process X axis
+    v = point.x
+    d = d_x
+    if dist == -1:
+        if v < bounding_box_min.x and d > 0:
+            dist = (bounding_box_min.x - v) / d
+        if v > bounding_box_max.x and d < 0:
+            dist = (bounding_box_max.x - v) / d
+    else:
+        if v < bounding_box_min.x and d > 0:
+            dist = max(dist, (bounding_box_min.x - v) / d)
+        if v > bounding_box_max.x and d < 0:
+            dist = max(dist, (bounding_box_max.x - v) / d)
+            
+    # Process Y axis
+    v = point.y
+    d = d_y
+    if dist == -1:
+        if v < bounding_box_min.y and d > 0:
+            dist = (bounding_box_min.y - v) / d
+        if v > bounding_box_max.y and d < 0:
+            dist = (bounding_box_max.y - v) / d
+    else:
+        if v < bounding_box_min.y and d > 0:
+            dist = max(dist, (bounding_box_min.y - v) / d)
+        if v > bounding_box_max.y and d < 0:
+            dist = max(dist, (bounding_box_max.y - v) / d)
+            
+    # Process Z axis
+    v = point.z
+    d = d_z
+    if dist == -1:
+        if v < bounding_box_min.z and d > 0:
+            dist = (bounding_box_min.z - v) / d
+        if v > bounding_box_max.z and d < 0:
+            dist = (bounding_box_max.z - v) / d
+    else:
+        if v < bounding_box_min.z and d > 0:
+            dist = max(dist, (bounding_box_min.z - v) / d)
+        if v > bounding_box_max.z and d < 0:
+            dist = max(dist, (bounding_box_max.z - v) / d)
+            
+    return dist
+```
+
+**Parameters:**
+- `bounding_box_min/max_x/y/z`: World coordinates defining the AABB extents [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- The algorithm uses `max` (or `fmaxf`) to keep the largest positive distance when multiple axes yield intersections, effectively finding the entry point into the box [S1, unofficial].
+- It returns -1 if the starting point is inside the box or if the ray points away from the box [S1, unofficial].
+- Precision issues may arise if the ray direction is very close to zero on an axis; normalization handles this, but division by near-zero direction components should be guarded against in robust implementations [G].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] YueJiang-nj/CVPR2020-SDFDiff, https://github.com/YueJiang-nj/CVPR2020-SDFDiff, fetched 2026-10-27 (unofficial)

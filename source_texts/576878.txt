@@ -1,0 +1,466 @@
+Open-source, browser-based clean-room park/coaster simulation game - Universal per-pixel occlusion with a mesh z-buffer oracle by nori-sessions[bot] · Pull Request #139 · tilework-tech/opencoaster
+
+Universal per-pixel occlusion with a mesh z-buffer oracle by nori-sessions[bot] · Pull Request #139 · tilework-tech/opencoaster · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+nori-sessions
+Bot
+commented
+Oct 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Universal per-pixel occlusion, proven by a mesh z-buffer oracle
+Supersedes #136 (structure slices) and #128 (Canvas2D parity). Visible change. Do not self-merge; ready for coordinator review.
+The model (one rule, both renderers)
+The projection sy = 16·(rx+ry) − 16·z keeps a pixel fixed along the view ray (1, 1, 2) (tiles, tiles, levels). So every point on one pixel's ray has a distinct world height, and per-pixel occlusion reduces to: the highest surface point at that pixel wins.
+Sprites. Every sprite is rasterised from a mesh (tools/sprites). The rasteriser now also bakes each pixel's height above the anchor. The packer writes a parallel RGBA8 height page per atlas page. Pixel height = anchor height + baked height × (drawn / frame height).
+WebGL2.
+Sprites draw with DEPTH_TEST and write gl_FragDepth = 0.5 − h/1024.
+Ground depth comes from a depth-only pass over the visible terrain and cliff meshes: an empty fragment shader, vertex-derived depth (exact at any zoom), and a polygon offset so ground loses exact ties. The zoom-1 ground cache now paints colour only.
+Water, patrol overlays and previews draw in a translucent pass afterwards, depth-tested with depthMask(false).
+Canvas2D.
+Ground is painted first.
+Then a software depth composite (depth-surface.ts, depth-composite.ts) z-tests every atlas drawImage by height, against span-rasterised terrain heights cached per view.
+It uses the same sampling, fill rule and tie rule as WebGL2.
+Deleted. SOLID_BIAS, PERSON_BIAS, GROUND_COVER_BIAS, the queue-rail and litter biases, SurfaceDepths/personDepth, pathSlabDepth, queueRailDepth, terrain-occlusion.ts (occluder redraw keys), the water/bank key offsets, adjustDepthForGroundZ, and ride-floor tracking.
+depth-key.ts is now one unbiased anchorKey. It only orders the translucent pass and settles exact ties.
+Multi-tile rides, entrances, exits, gates, track, vehicles and people get no special cases.
+Placement fixes, not biases.
+People, litter and path props stand on the path mesh's walking surface (PATH_SURFACE_Z, 1/16 level) instead of inside the slab.
+Flowerbed soil sits 1px above the terrain; it was exactly coplanar and z-fought.
+Found along the way: a Canvas2D bug that also exists on main. Tile culling kept no margin below the view, so raised paths and track over off-screen terrain vanished.
+src/render/docs.md has an "Occlusion model" section describing all of this.
+Park boundary and land overlay (owner report 2026-10-27)
+Boundary fence. The park boundary is now real geometry: a generated rail-and-post fence (park-fence wall sprites with baked heights) on every edge of owned land that faces unowned land or the map border. Both renderers draw it through the wall path, so track, supports, trees and rides in front of it hide it.
+Land overlay. The overlay (the wash over unowned land, plus the dashed land and construction-rights sale borders) lies on the terrain surface:
+WebGL2 draws it as translucent tile meshes in the depth-tested translucent pass;
+Canvas2D paints it per tile during the terrain walk, before sprites are composited over it.
+Shown only with land tools. setLandOverlay turns it on only while the land, buy-land or buy-rights tool is selected, as in RCT2.
+The screen-space OwnershipOverlay canvas is gone.
+Scored. Both have object kinds, the overlay is in the oracle as terrain-surface triangles, and fuzz parks cede the land past the coaster's middle so the boundary crosses track and supports.
+Fix found while scoring. The oracle and Canvas2D compared double-precision heights against Float32-stored ones, which broke exact coplanar ties into row stripes.
+Full matrix with fence and overlay: WebGL2 0.059% of 6.5M object px, Canvas2D 0.000%, no pair over 2%. The fence and overlay pairs are all at or below 1.26% (support>land-overlay).
+Proofs: boundary-* in pr-139/ (see comment).
+Oracle
+occlusion-oracle.ts z-buffers the placed sprites (anchor + baked height) and the terrain/water triangles into an object-ID image. occlusion-oracle.test.ts proves this equals one joint z-buffer over the meshes.
+occlusion-metric.ts scores a renderer's ID capture against it, with a per-object-pair breakdown. Both renderers have captureObjectIds.
+src/dev/occlusion-fuzz.ts builds dense random parks through real sim commands: flat, sloped and terraced ground; paths, queues and additions; scenery and walls; flat and multi-tile rides; a coaster with supports and train; stalls, gate, entrances and exits; people at sub-tile positions, including at gates, entrances and exits, in queues, under shelters and on ramps; litter.
+Ambiguous samples. Samples within 1/100 texel of a covered/clear texel boundary or a sprite edge are marked ambiguous and left out of the score, because GPU interpolation precision decides them. The report counts them.
+CI gate. smoke/occlusion-oracle.spec.ts runs seed 1 × 4 rotations × zoom 1 and 2 × both renderers in about 2.6 min. e2e/occlusion-oracle.spec.ts runs the full matrix (seeds 1-3).
+Caveat. The oracle scores ordering given the renderer's own placements. For Canvas2D it is close to a tautology, because the composite uses the oracle's rule. The independent Canvas2D check is the WebGL2-vs-Canvas2D object-kind parity in e2e/people-depth.spec.ts.
+Results
+before (main ordering)
+after
+WebGL2, seed 1, zoom 1, rot 0-3
+3.58% of 818,031 object px
+—
+WebGL2, seeds 1-3 × rot 0-3 × zoom 1, 2
+—
+0.033% of 5.8M object px (worst case 0.055%)
+Canvas2D, same matrix
+(no ID capture on main)
+0.000% (see caveat)
+Pairs over 2% (≥200 contested px)
+36 pairs, up to 59.6% (vehicle>rider), 59.2% (park-gate>guest), 43.4% (path>flowerbed), 37.6% (entrance>guest), 37.6% (path>litter), 28.4% (guest>track)
+none
+Ambiguous edge samples left out
+—
+55,878 (0.48% of object px)
+Baseline pairs, worst first by count: ground>track 10.2%, path>wall 10.7%, ground>flowerbed 2.9%, path>guest 4.0%, path>path-addition 10.1%, path>flowerbed 43.4%, support>support 5.4%, vehicle>rider 59.6%, park-gate>guest 59.3%, entrance>guest 37.6%, tree>track 14.8%, path>litter 37.6%, tree>scenery 14.3%.
+After, top remaining pairs, all far below 2%: tree>ground 0.03%, tree>tree 0.02%, shelter>path 0.09%, path>path-addition 0.21%, tree>path 0.05%, shelter>guest 0.16%, ground>track 0.06%, rider>vehicle 0.45%, vehicle>rider 0.65%.
+Remaining mismatch categories:
+rider/vehicle seat contact: riders are partly inside the car mesh;
+shelter canopy edges against guests;
+sampling at sprite edges at zoom 2 beyond the ambiguity tolerance.
+Tests
+e2e/people-depth.spec.ts, rewritten as an oracle test. Same scenes and guest positions as before, plus:
+a hill scene;
+guests all around a tree, a stall and a bench;
+guests under a raised path (the old bridge-deck case).
+It checks every pixel against the oracle in both renderers and caps guest-involving mismatches at 8 px per position. It also checks WebGL2-vs-Canvas2D kind parity (≤1% of pixels both show as objects). 36/36 pass.
+The old painter assertions ("a guest is never covered by its path tile", "a tile object beats a guest inside its tile") contradict the meshes. A guest standing 0.1 tile behind a kerb really has its feet covered. They are replaced, which acceptance (b) allows.
+e2e/renderer-depth.spec.ts asserted painter rules with heightless solid-colour atlases. It is superseded and removed.
+Unit tests:
+depth-composite.test.ts: id-for-id equality with the oracle on 20 random scenes with ground;
+fill-rule and ambiguity tests;
+the anchor-key test.
+e2e/rotation-ownership.spec.ts passes. Three fixture fixes, each failing the same way with main's ordering:
+the ride's entrance and exit huts sat on the ride's own footprint, which the sim refuses;
+the solid-colour atlas had no height pages; it now does, so it exercises the real depth path;
+litter is a few pixels tall, so it is now sampled just above its pivot.
+smoke/ui-icons.spec.ts fixed (it also failed on main's CI). The second click on Park toggled the already-open window closed, and the Actions lookup also matched another button.
+Full unit suite (1,675 tests), lint, format and typecheck pass. The smoke suite passes locally, including the new occlusion gate.
+Performance
+Pixel 8 numbers are not real yet. This runs in headless Chromium on SwiftShader (a CPU rasteriser, no GPU), so nothing here is a real Pixel 8 measurement.
+pnpm bench --guests 5000: p99 1.31 ms/tick, PASS. The sim is unchanged.
+WebGL2 draw wall time, dense fuzz park, 1280×800, warmed, median of 9 × 20 frames: before 2.56–2.81 ms, after 3.34–3.51 ms. That is +25–30% on SwiftShader, almost all of it the full-screen depth-only terrain pass.
+That pass is the price of exact ground depth. Limiting it to raised tiles made track and supports below the ground surface show through (ground>track 11%), so I reverted that.
+On a GPU a depth-only pass with an empty fragment shader is cheap. A fragment-bound CPU rasteriser is the worst case.
+Needs a real Pixel 8 profile before merge. If it misses the 10% budget, the follow-up is to draw the depth pass only under tiles that some sprite overlaps.
+Canvas2D: dense park at 1280×800, median 38–44 ms after vs 46–56 ms before. Removing the painter-era work offsets the composite.
+smoke/mobile-fps (Pixel 8 emulation, 4× CPU throttle): soft budget missed both before and after on SwiftShader (4–7 FPS). Adaptive resolution settled at different scales (0.60 vs 1.00), so these numbers aren't comparable.
+Proofs
+On nori/pr-proofs under pr-139/ (link in comment). Five scenes, each before/after, four rotations, both renderers, zoom 1 and 2, plus close-ups and oracle heatmaps:
+ride entrance with guests;
+ride exit with guests;
+park gate with a crowd;
+coaster station by a plaza;
+dense crowded park.
+To do / open
+Real Pixel 8 frame-time profile vs main (needs a device).
+Canvas2D placement previews are drawn on top without depth (they go through the tint canvas). WebGL2 depth-tests them.
+nori-sessions Bot
+pushed a commit
+that referenced
+this pull request
+Oct 26, 2026
+proofs: PR #139 universal per-pixel occlusion (before/after sheets, h…
+…
+a603152
+```
+…ighlights, oracle heatmaps)
+```
+nori-agent
+added 24 commits
+October 27, 2026 00:04
+sprites: bake a per-pixel height map alongside every rasterised mesh …
+…
+ff67729
+```
+…frame
+```
+art: pack a parallel height-map page for every atlas page
+58a3254
+render: load each atlas page together with its height page
+38e957d
+render: occlusion oracle compositing mesh-baked heights
+33ed3b8
+dev: seeded park fuzzer; render: object-ID capture mode for WebGL2
+fa0faf5
+e2e: occlusion oracle spec scoring renderer object ownership on fuzze…
+…
+d349102
+```
+…d parks
+```
+render: await colour and height pages together so a failed page canno…
+…
+0b966ce
+```
+…t go unhandled
+```
+render: WebGL2 orders every world surface by per-pixel height
+…
+8fc79ed
+```
+Sprites write gl_FragDepth from their anchor height plus the baked height map; ground chunks
+cache a height attachment and write it as depth; water, patrol overlays and previews draw in a
+translucent pass that tests but does not write depth. Terrain occluder redraws are gone.
+Oracle mismatch on seed 1: 3.58% -> 0.32% of object pixels.
+```
+sprites: flowerbed soil rests one pixel above the terrain like a path…
+…
+fdd5495
+```
+… surface
+
+Coplanar soil and terrain z-fought per pixel. Lifting the bed one screen pixel makes it nearer
+than the ground under it, as the path surface already is.
+```
+render: software per-pixel depth composite matching the occlusion oracle
+77fb112
+render: Canvas2D depth-composites world sprites by per-pixel height
+…
+42a11cf
+```
+Ground is painted as before; then every atlas sprite is composited through DepthSurface at its
+ground pivot's height against the terrain and water heights, with the same sampling and tie rule
+as WebGL2. Non-atlas drawing (procedural fallbacks, tinted previews) is replayed on top. The
+occlusion fixture and spec now cover both renderers.
+```
+lint: occlusion spec and depth surface
+ee4cf97
+render: cache Canvas2D ground heights per view, span-rasterise ground…
+…
+ac81931
+```
+…; update tests
+
+Ground heights are affine per triangle, so the composite fills one span per row and reuses the
+result while the camera and map are unchanged. The canvas is created willReadFrequently since
+the composite reads it back every frame. The occluder-redraw ordering test is replaced by one
+asserting the sprite pass no longer re-submits terrain; the flowerbed footprint test allows the
+1px soil lift.
+```
+dev: occlusion fixture painter toggle for Canvas2D cost comparison
+0475305
+render: delete per-object depth biases; one anchor key orders only th…
+…
+c59400e
+```
+…e translucent pass
+
+With per-pixel height ordering in both renderers, SOLID_BIAS, PERSON_BIAS, GROUND_COVER_BIAS,
+queue-rail and litter biases, SurfaceDepths, path slab keys, terrain-occlusion redraw keys and
+the water/bank key offsets no longer decide anything. Every instance now takes the plain key of
+its ground pivot. People, litter and path props stand on the path mesh's walking surface
+(PATH_SURFACE_Z) instead of its base, so the slab no longer covers their feet.
+```
+docs: occlusion model, oracle, depth composite; drop painter-bias des…
+…
+3f0ee55
+```
+…criptions
+```
+dev: fuzz park landmarks and a focus parameter for close-up proof views
+b6da42c
+render: oracle and Canvas2D composite follow the GPU fill rule at spr…
+…
+25732bd
+```
+…ite top edges
+
+A pixel centre exactly on a sprite's top edge belongs to the row above, as WebGL2 rasterises a
+quad; half-pixel placements at zoom 2 otherwise disagreed by one row. The occlusion fixture can
+list the pixels of one mismatched kind pair for diagnosis.
+```
+render: exact WebGL2 ground depth at any zoom; Canvas2D keeps raised …
+…
+8cabdd5
+```
+…objects of tiles below the view
+
+WebGL2 now lays ground depth with a depth-only pass over the visible tiles' terrain and cliff
+meshes instead of a zoom-1 height attachment in the colour cache, which was blocky at higher
+zoom. Canvas2D culled tiles by their terrain row with no margin below the view, so raised
+paths and track whose terrain sits under the bottom edge disappeared; tiles are now kept 32
+levels beyond both edges.
+
+e2e: people-depth is now scored against the occlusion oracle on the same scenes and guest
+positions (plus a hill scene and guests all around trees, stalls and benches) in both
+renderers, and compares the two renderers' object kinds pixel for pixel. renderer-depth, which
+asserted painter rules with heightless solid-colour atlases, is superseded by it.
+```
+e2e: people-depth parity counts only pixels both renderers give to an…
+…
+d73f00e
+```
+… object
+```
+render: oracle marks samples on texel and sprite edges as ambiguous a…
+…
+430e0de
+```
+…nd the score leaves them out
+
+A sample within 1/100 texel of a boundary between a covered and a clear texel (or of a sprite
+edge) is decided by GPU interpolation precision, not by ordering. Scores report how many such
+pixels were left out.
+```
+smoke: fixed-seed occlusion oracle gate in CI; e2e keeps the full mat…
+…
+a9d1e2c
+```
+…rix through a shared runner
+```
+render: terrain depth pass takes depth from the vertex shader with an…
+…
+ac92d66
+```
+… empty fragment shader
+
+Terrain is planar per triangle, so its depth interpolates exactly from the vertices; the
+depth-only pass no longer runs the atlas fragment shader over the whole ground. The ID-mode
+alpha discard applies to sprites only.
+```
+review fixes: ground loses exact ties, unsorted depth-pass upload, vi…
+…
+3191597
+```
+…ewport-culled oracle terrain
+
+- WebGL2 terrain depth pass uses a small polygon offset so ground loses an exact tie with what
+  rests on it, as in the oracle and Canvas2D; it uploads instances unsorted.
+- oracle-terrain only builds triangles for tiles that can reach the viewport; the Canvas2D
+  ground raster reuses one span buffer instead of a closure per row.
+- RideCellScene no longer tracks ride floors and Canvas2D no longer skips raised-tile redraws
+  near rides: both only existed to keep terrain redraws off rides.
+- Patrol overlays take the plain tile key.
+- Tests: the oracle runner gates coverage-only mismatches; people-depth caps guest-involving
+  mismatches per position, adds guests under a raised path, and derives the ground kind code.
+- Docs: the ground cache is colour-only; ground depth comes from the depth pass.
+```
+nori-sessions
+Bot
+force-pushed
+the
+nori/universal-depth-oracle
+branch
+from
+f3ff18a to
+3191597
+Compare
+October 27, 2026 00:05
+nori-sessions
+Bot
+commented
+Oct 27, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Proofs: before (main ordering) vs after (per-pixel height)
+Everything is in nori/pr-proofs/pr-139/. Captured with headless Chromium. "Before" is e3847b8: main's ordering plus the ID capture, nothing else.
+Park gate (owner report: a guest drawn on a park gate). Before, the crowd is drawn over the gate's front pillar. After, they stand inside the arch, behind it.
+Ride exit (owner report: guests on top of a ride exit). Before, guests are drawn over the hut roofs. After, the hut hides the guest behind it, and the queue rails show.
+Ride entrance
+Coaster station by a plaza
+Full sheets: four rotations (rows) × [WebGL2 before, WebGL2 after, Canvas2D before, Canvas2D after], at zoom 1 and zoom 2.
+entrance z1 · entrance z2
+exit z1 · exit z2
+gate z1 · gate z2
+coaster z1 · coaster z2
+crowded park z1 · crowded park z2
+Oracle diff heatmaps (seed 1, zoom 1, rotations 0-3). Columns: WebGL2 before (3.58% mismatched), WebGL2 after, Canvas2D after. Red = the renderer shows a different object than the mesh z-buffer.
+This was referenced Oct 27, 2026
+fix(render): park gate and ride entrances/exits draw as back and front depth layers
+#136
+Closed
+fix(render): Canvas2D uses the shared depth key for all scenery
+#128
+Closed
+smoke: ui-icons opens only windows that are not already open and find…
+…
+c7c9fa5
+```
+…s the Actions button exactly
+
+Toolbar buttons toggle their window, and the park window is open when the loop reaches it, so
+the second click closed it. 'Actions' also matched the Rides and attractions title buttons.
+Both failures also occur on main.
+```
+nori-agent
+added 3 commits
+October 27, 2026 00:38
+e2e: rotation-ownership fixture places the ride's entrance and exit o…
+…
+1095215
+```
+…utside its footprint and gives its atlas height pages
+
+The entrance and exit huts sat on the merry-go-round's own 3x3 footprint, a placement the sim
+refuses; with per-pixel height the ride covered them. The solid-colour atlas now has a height
+page (flat ground sprites, upright cards for the rest) so it exercises the depth path real
+atlases take, and litter, a few pixels tall in Canvas2D's box, is sampled just above its pivot.
+The entrance and litter misses also occurred with main's ordering.
+```
+render: park boundary fence is real geometry; land overlay lies on th…
+…
+2de0d95
+```
+…e terrain and shows only with land tools
+
+- The park boundary is a generated rail-and-post fence (park-fence wall style with baked
+  heights) placed on every edge of owned land facing unowned land, through the wall-sprite path
+  in both renderers, so track, supports, trees and rides in front of it hide it.
+- The land overlay (unowned wash and dashed land/rights sale borders) is drawn on the terrain
+  surface: WebGL2 as translucent tile meshes (depth tested), Canvas2D during the terrain walk
+  before sprites are composited. It shows only while the land, buy-land or buy-rights tool is
+  selected (setLandOverlay). The screen-space OwnershipOverlay is removed.
+- Both are scored: park-fence and land-overlay object kinds, overlay triangles in the oracle,
+  and fuzz parks cede the land beyond the coaster's middle so the boundary crosses it.
+```
+render: oracle and Canvas2D composite compare heights in stored 32-bi…
+…
+e4a376d
+```
+…t precision
+
+Heights are kept in Float32Arrays; comparing a double against its rounded neighbour broke exact
+ties between coplanar surfaces (the land overlay on its terrain) into row stripes.
+```
+nori-sessions
+Bot
+mentioned this pull request
+Oct 27, 2026
+test: add seeded coaster builder continuity coverage
+#140
+Closed
+nori-agent
+added 2 commits
+October 27, 2026 01:39
+docs: park boundary fence and land overlay in the occlusion model
+4abc8d5
+docs: ownership no longer has its own overlay canvas
+5406dc7
+nori-sessions Bot
+pushed a commit
+that referenced
+this pull request
+Oct 27, 2026
+proofs: PR #139 park boundary fence and land overlay
+fe712a6
+nori-sessions
+Bot
+commented
+Oct 27, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Park boundary: owner report 2026-10-27, "the boundary of the park weirdly overlaps things"
+Seed 1 fuzz park: a wooden coaster with tall supports, and the boundary crossing the middle of the coaster. Before is main. After: the fence is real geometry, and the land overlay lies on the terrain and only shows with the land tools.
+All four rotations × [before, after in play, after with the land tool] × both renderers:
+coaster, zoom 1
+coaster, zoom 2
+coaster exit, zoom 1
+coaster exit, zoom 2
+nori-sessions
+Bot
+marked this pull request as ready for review
+October 27, 2026 02:09
+Hide details
+View details
+nori-sessions
+Bot
+merged commit 6c70271
+into
+main
+Oct 27, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Oct 27, 2026
+Improve park boundary fence visibility
+#141
+Merged
+Tunnel portals and underground view for track below the terrain
+#142
+Merged
+Track heights on RCT2's half-level grid so any circuit can close
+#144
+Merged
+Tunnel portals: edge-only entries and masonry portal art
+#148
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

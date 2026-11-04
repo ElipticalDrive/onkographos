@@ -1,0 +1,506 @@
+I'm running collision tests between two triangular meshes in embree4. The rtcCollide function only accepts GEOMETRY_TYPE_USER as input. I got it to work and successfully find intersections between my meshes but noticed significant increa...
+
+GEOMETRY_TYPE_TRIANGLE vs GEOMETRY_TYPE_USER BVH build times · Issue #444 · RenderKit/embree · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+GEOMETRY_TYPE_TRIANGLE vs GEOMETRY_TYPE_USER BVH build times #444
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+GEOMETRY_TYPE_TRIANGLE vs GEOMETRY_TYPE_USER BVH build times#444
+Copy link
+Description
+mariuszhermansdorfer
+opened on May 2, 2023
+Issue body actions
+I'm running collision tests between two triangular meshes in embree4. The rtcCollide function only accepts GEOMETRY_TYPE_USER as input. I got it to work and successfully find intersections between my meshes but noticed significant increase in build times for the BVH.
+When creating a BVH for raytracing with the same geometry, I can use GEOMETRY_TYPE_TRIANGLE and the BVH is built almost instantaneously.
+Here are the results of the rtcCommitScene for a 25k tris mesh
+GEOMETRY_TYPE_USER : 14.3882 ms
+GEOMETRY_TYPE_TRIANGLE : 0.0342 ms
+The relevant code below. Do you have any ideas why this is the case?
+Collision:
+```
+void createBaseMesh(float vertices[], int verticesLength, int faces[], int facesLength)
+{
+  RTCDevice device = rtcNewDevice(NULL);
+  RTCScene scene = rtcNewScene(device);
+  rtcSetSceneBuildQuality(scene, RTC_BUILD_QUALITY_LOW);
+  rtcSetSceneFlags(scene, RTC_SCENE_FLAG_DYNAMIC);
+
+  meshes.clear();
+  std::unique_ptr<Mesh> baseMesh(new Mesh());
+  baseMesh->x_.resize(verticesLength / 3);
+  baseMesh->tris_.resize(facesLength / 3);
+
+  int j = 0;
+  for (int i = 0; i < verticesLength; i += 3) {
+    baseMesh->x_[j].x = vertices[i];
+    baseMesh->x_[j].y = vertices[i + 1];
+    baseMesh->x_[j].z = vertices[i + 2];
+    j++;
+  }
+
+  j = 0;
+  for (int i = 0; i < facesLength; i += 3) {
+    baseMesh->tris_[j].v0 = faces[i];
+    baseMesh->tris_[j].v1 = faces[i + 1];
+    baseMesh->tris_[j].v2 = faces[i + 2];
+    j++;
+  }
+
+  RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_USER);
+  unsigned int geomID = rtcAttachGeometry(scene, geom);
+  rtcSetGeometryUserPrimitiveCount(geom, baseMesh->tris_.size());
+  rtcSetGeometryUserData(geom, (void*)(size_t)geomID);
+  rtcSetGeometryBoundsFunction(geom, triangle_bounds_func, nullptr);
+  rtcSetGeometryIntersectFunction(geom, NULL);
+  rtcSetGeometryOccludedFunction(geom, NULL);
+  rtcCommitGeometry(geom);
+  rtcReleaseGeometry(geom);
+  meshes.push_back(std::move(baseMesh));
+  rtcCommitScene(scene);
+  rtcCollide(scene, scene, CollideFunc, &sim_collisions);
+  rtcReleaseScene(scene);
+  rtcReleaseDevice(device);
+}
+```
+Raytracing
+```
+void RaytracerTest(float vertices[], int verticesLength, int faces[], int facesLength)
+{
+  RTCDevice device = rtcNewDevice(NULL);
+  RTCScene scene = rtcNewScene(device);
+  RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
+
+  float* vb = (float*)rtcSetNewGeometryBuffer(geom,
+    RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, verticesLength * sizeof(float), 3);
+  memcpy(vb, vertices, verticesLength * sizeof(float));
+
+  unsigned* ib = (unsigned*)rtcSetNewGeometryBuffer(geom,
+    RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, facesLength * sizeof(unsigned), 1);  
+  memcpy(ib, faces, facesLength * sizeof(unsigned));
+  rtcCommitGeometry(geom);
+  rtcAttachGeometry(scene, geom);
+  rtcReleaseGeometry(geom);
+  rtcCommitScene(scene);
+  rtcReleaseScene(scene);
+  rtcReleaseDevice(device);
+}
+```
+Here is a benchmark of all the function calls:
+```
+rtcNewGeometry: 0.0022 ms
+rtcAttachGeometry: 0.0023 ms
+rtcSetGeometryUserPrimitiveCount: 0.0003 ms
+rtcSetGeometryUserData: 0.0002 ms
+rtcSetGeometryBoundsFunction: 0.0002 ms
+rtcSetGeometryIntersectFunction: 0.0002 ms
+rtcCommitGeometry: 0.0001 ms
+rtcReleaseGeometry: 0.0001 ms
+meshes: 0.0001 ms
+rtcCommitScene: 14.3882 ms
+rtcCollide: 1.5581 ms
+```
+Activity
+svenwoop commented on May 3, 2023
+svenwoop
+on May 3, 2023
+Collaborator
+More actions
+The problem may be inside the triangle_bounds_func function, how does it look like?
+mariuszhermansdorfer commented on May 3, 2023
+mariuszhermansdorfer
+on May 3, 2023
+Author
+More actions
+@svenwoop, I took it from the official tutorial:
+https://github.com/embree/embree/blob/02192dc3f91ea86bd96a8352c91bfda833c509ae/tutorials/collide/collide.cpp#L99-L109
+I couldn't find the one which embree uses under the hood for GEOMETRY_TYPE_TRIANGLE
+svenwoop commented on May 3, 2023
+svenwoop
+on May 3, 2023
+Collaborator
+More actions
+Maybe problem is that you store a shared_ptr inside the meshes array, but your access auto const & mesh = *meshes[geomID]; looks fine in my opinion and should not do any atomic operations.
+Can you modify one of the Embree tutorials and send as a reproducer?
+mariuszhermansdorfer commented on May 3, 2023
+mariuszhermansdorfer
+on May 3, 2023
+Author
+More actions
+Here is a simplified version. For the sake of reproducibility, I read the mesh from the attached txt file. In my pipeline, this data is obviously passed to the function itself. I also commented out the call to rtcCollide, since it's not the bottleneck here. The slow down happens at rtcCommitScene
+mesh.txt
+```
+#include <embree4/rtcore.h>
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include "../common/math/bbox.h"
+
+using embree::BBox3fa;
+
+struct Triangle { int v0, v1, v2; };
+struct Vertex { float x, y, z; };
+struct Mesh {
+
+  virtual ~Mesh() {};
+
+  std::vector<embree::Vec3fa> x_;
+  std::vector<Triangle>       tris_;
+};
+
+std::vector<std::unique_ptr<Mesh>> meshes;
+
+void triangle_bounds_func(const struct RTCBoundsFunctionArguments* args)
+{
+  void* ptr = args->geometryUserPtr;
+  unsigned geomID = (unsigned)(size_t)ptr;
+  auto const& mesh = *meshes[geomID];
+  BBox3fa bounds = embree::empty;
+  bounds.extend(mesh.x_[mesh.tris_[args->primID].v0]);
+  bounds.extend(mesh.x_[mesh.tris_[args->primID].v1]);
+  bounds.extend(mesh.x_[mesh.tris_[args->primID].v2]);
+  *(BBox3fa*)args->bounds_o = bounds;
+}
+
+
+extern "C" __declspec(dllexport) void BVHTest()
+{
+  const int verticesLength = 37500;
+  const int facesLength = 74988;
+  float vertices[verticesLength];
+  int faces[facesLength];
+
+  std::ifstream inputFile("C:\\mesh.txt");
+
+  for (int i = 0; i < verticesLength; ++i) {
+    inputFile >> vertices[i];
+  }
+
+  for (int i = 0; i < facesLength; ++i) {
+    inputFile >> faces[i];
+  }
+  
+  inputFile.close();
+
+  meshes.clear();
+  std::unique_ptr<Mesh> baseMesh(new Mesh());
+  baseMesh->x_.resize(verticesLength / 3);
+  baseMesh->tris_.resize(facesLength / 3);
+
+  int j = 0;
+  for (int i = 0; i < verticesLength; i += 3) {
+    baseMesh->x_[j].x = vertices[i];
+    baseMesh->x_[j].y = vertices[i + 1];
+    baseMesh->x_[j].z = vertices[i + 2];
+    j++;
+  }
+
+  j = 0;
+  for (int i = 0; i < facesLength; i += 3) {
+    baseMesh->tris_[j].v0 = faces[i];
+    baseMesh->tris_[j].v1 = faces[i + 1];
+    baseMesh->tris_[j].v2 = faces[i + 2];
+    j++;
+  }
+
+  RTCDevice device = rtcNewDevice(NULL);
+  RTCScene scene = rtcNewScene(device);
+  rtcSetSceneBuildQuality(scene, RTC_BUILD_QUALITY_LOW);
+  rtcSetSceneFlags(scene, RTC_SCENE_FLAG_DYNAMIC);
+  RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_USER);
+  unsigned int geomID = rtcAttachGeometry(scene, geom);
+  rtcSetGeometryUserPrimitiveCount(geom, baseMesh->tris_.size());
+  rtcSetGeometryUserData(geom, (void*)(size_t)geomID);
+  rtcSetGeometryBoundsFunction(geom, triangle_bounds_func, nullptr);
+  rtcSetGeometryIntersectFunction(geom, NULL);
+  rtcSetGeometryOccludedFunction(geom, NULL);
+  rtcCommitGeometry(geom);
+  rtcReleaseGeometry(geom);
+  meshes.push_back(std::move(baseMesh));
+  rtcCommitScene(scene);
+
+ // rtcCollide(scene, scene, CollideFunc, &sim_collisions);
+  rtcReleaseScene(scene);
+  rtcReleaseDevice(device);
+}
+```
+mariuszhermansdorfer commented on May 4, 2023
+mariuszhermansdorfer
+on May 4, 2023
+Author
+More actions
+I ran some more tests and it seems that this function is the bottleneck:
+https://github.com/embree/embree/blob/02192dc3f91ea86bd96a8352c91bfda833c509ae/common/math/bbox.h#L40
+Replacing it with the below placeholder simulating some read/write calls brings execution time down to 1.2 ms:
+```
+void triangle_bounds_func(const struct RTCBoundsFunctionArguments* args)
+{
+  void* ptr = args->geometryUserPtr;
+  unsigned geomID = (unsigned)(size_t)ptr;
+  auto const& mesh = *meshes[geomID];
+  BBox3fa bounds = embree::empty;
+  bounds.lower = mesh.x_[mesh.tris_[args->primID].v0];
+  bounds.upper = mesh.x_[mesh.tris_[args->primID].v1];
+  bounds.lower = mesh.x_[mesh.tris_[args->primID].v2];
+  //bounds.extend(mesh.x_[mesh.tris_[args->primID].v0]);
+  //bounds.extend(mesh.x_[mesh.tris_[args->primID].v1]);
+  //bounds.extend(mesh.x_[mesh.tris_[args->primID].v2]);
+  *(BBox3fa*)args->bounds_o = bounds;
+}
+```
+I've found this function which seems to be the default way of calculating the bounds of a triangle mesh but it's beyond my skillset to port it to my code. Any ideas how to do it @svenwoop?
+https://github.com/embree/embree/blob/02192dc3f91ea86bd96a8352c91bfda833c509ae/kernels/geometry/trianglev.h#L60-L74
+svenwoop commented on May 5, 2023
+svenwoop
+on May 5, 2023
+Collaborator
+More actions
+That extend function just looks correct, unclear why this affects performance. Maybe some vertices you pass into the builder are NAN or INF? To calculate the bounds for a triangle you would essentially do:
+bounds.lower = embree::min(v0,v1,v2);
+bounds.upper = embree::max(v0,v1,v2);
+Thus just calculate the min/max over all vertices for each component. But if you have Nans of INF this might bring you back to original bad performance, as I think previous code was correct.
+mariuszhermansdorfer commented on May 5, 2023
+mariuszhermansdorfer
+on May 5, 2023
+Author
+More actions
+Thanks @svenwoop, I have updated the triangle bounds function accordingly. Still, with the exact same input there is a massive difference in BVH build times between RTC_GEOMETRY_TYPE_USER & RTC_GEOMETRY_TYPE_TRIANGLE
+```
+rtcCommitScene RTC_GEOMETRY_TYPE_TRIANGLE: 0.0261 ms
+rtcCommitScene RTC_GEOMETRY_TYPE_USER: 12.4094 ms
+```
+I can think of 2 possible explanations:
+The triangle_bounds_func is still sub-optimal compared to what is called natively with RTC_GEOMETRY_TYPE_TRIANGLE
+rtcCommitScene doesn't call the triangle_bounds_func with RTC_GEOMETRY_TYPE_TRIANGLE
+Base structs and bounds function:
+```
+struct Mesh {
+
+  virtual ~Mesh() {};
+
+  std::vector<embree::Vec3fa> x_;
+  std::vector<Triangle>       tris_;
+};
+
+std::vector<std::unique_ptr<Mesh>> meshes;
+
+void triangle_bounds_func(const struct RTCBoundsFunctionArguments* args)
+{
+  void* ptr = args->geometryUserPtr;
+  unsigned geomID = (unsigned)(size_t)ptr;
+  auto const& mesh = *meshes[geomID];
+  BBox3fa bounds = embree::empty;
+  bounds.lower = embree::min(mesh.x_[mesh.tris_[args->primID].v0], mesh.x_[mesh.tris_[args->primID].v1], mesh.x_[mesh.tris_[args->primID].v2]);
+  bounds.upper = embree::max(mesh.x_[mesh.tris_[args->primID].v0], mesh.x_[mesh.tris_[args->primID].v1], mesh.x_[mesh.tris_[args->primID].v2]);
+  *(BBox3fa*)args->bounds_o = bounds;
+}
+```
+This is how I read the data and measure elapsed time:
+```
+extern "C" __declspec(dllexport) void createBaseMesh(float vertices1[], int verticesLength1, int faces1[], int facesLength1)
+{
+
+#pragma region RTC_GEOMETRY_TYPE_TRIANGLE
+
+  RTCDevice device = rtcNewDevice(NULL);
+  RTCScene scene = rtcNewScene(device);
+  RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
+  rtcAttachGeometry(scene, geom);
+
+  float* vb = (float*)rtcSetNewGeometryBuffer(geom,
+    RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, verticesLength1 * sizeof(float), 3);
+
+  memcpy(vb, vertices1, verticesLength1 * sizeof(float));
+
+  unsigned* ib = (unsigned*)rtcSetNewGeometryBuffer(geom,
+    RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, facesLength1 * sizeof(unsigned), 1);
+
+  memcpy(ib, faces1, facesLength1 * sizeof(unsigned));
+
+  rtcCommitGeometry(geom);
+  rtcReleaseGeometry(geom);
+
+  std::ofstream outfile("C:\\embree.txt");
+  auto start = std::chrono::high_resolution_clock::now();
+  rtcCommitScene(scene);
+  auto end = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double> elapsed = end - start;
+  outfile << "rtcCommitScene RTC_GEOMETRY_TYPE_TRIANGLE: " << elapsed.count() * 1000 << " ms" << std::endl;
+#pragma endregion
+
+  meshes.clear();
+  std::unique_ptr<Mesh> baseMesh(new Mesh());
+  baseMesh->x_.resize(verticesLength1 / 3);
+  baseMesh->tris_.resize(facesLength1 / 3);
+
+  int j = 0;
+  for (int i = 0; i < verticesLength1; i += 3) {
+    baseMesh->x_[j].x = vertices1[i];
+    baseMesh->x_[j].y = vertices1[i + 1];
+    baseMesh->x_[j].z = vertices1[i + 2];
+    j++;
+  }
+
+  j = 0;
+  for (int i = 0; i < facesLength1; i += 3) {
+    baseMesh->tris_[j].v0 = faces1[i];
+    baseMesh->tris_[j].v1 = faces1[i + 1];
+    baseMesh->tris_[j].v2 = faces1[i + 2];
+    j++;
+  }
+
+  RTCScene scene1 = rtcNewScene(device);
+  RTCGeometry geom1 = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_USER);
+  unsigned int geomID = rtcAttachGeometry(scene1, geom1);
+  rtcSetGeometryUserPrimitiveCount(geom1, baseMesh->tris_.size());
+  rtcSetGeometryUserData(geom1, (void*)(size_t)geomID);
+  rtcSetGeometryBoundsFunction(geom1, triangle_bounds_func, nullptr);
+  rtcSetGeometryIntersectFunction(geom1, NULL);
+  rtcSetGeometryOccludedFunction(geom1, NULL);
+  rtcCommitGeometry(geom1);
+  rtcReleaseGeometry(geom1);
+  meshes.push_back(std::move(baseMesh));
+  start = std::chrono::high_resolution_clock::now();
+  rtcCommitScene(scene1);
+  end = std::chrono::high_resolution_clock::now();
+  elapsed = end - start;
+  outfile << "rtcCommitScene RTC_GEOMETRY_TYPE_USER: " << elapsed.count() * 1000 << " ms" << std::endl;
+
+  outfile.close();
+  rtcReleaseScene(scene);
+  rtcReleaseScene(scene1);
+  rtcReleaseDevice(device);
+
+}
+```
+mariuszhermansdorfer commented on May 10, 2023
+mariuszhermansdorfer
+on May 10, 2023
+Author
+More actions
+@svenwoop, do you have any ideas where the time difference in rtcCommitScene could come from?
+svenwoop commented on May 10, 2023
+svenwoop
+on May 10, 2023
+Collaborator
+More actions
+@dopitz Will have a look into this, but I do not think we have further insights yet. I believe that this is a measurement problem, maybe in the one case you measure memory allocation time and not really the build time.
+mariuszhermansdorfer commented on May 10, 2023
+mariuszhermansdorfer
+on May 10, 2023
+Author
+More actions
+I'd appreciate it a lot! In the code above you can see that I only measure the time spent on rtcCommitScene. The one for RTC_GEOMETRY_TYPE_TRIANGLE is suspiciously low.
+svenwoop commented on May 10, 2023
+svenwoop
+on May 10, 2023
+Last edited by svenwoop
+Collaborator
+More actions
+I just had a look and found the issue. The triangle mesh just has one triangle. This code is wrong:
+```
+float* vb = (float*)rtcSetNewGeometryBuffer(geom,
+    RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, verticesLength1 * sizeof(float), 3);
+
+  memcpy(vb, vertices1, verticesLength1 * sizeof(float));
+
+  unsigned* ib = (unsigned*)rtcSetNewGeometryBuffer(geom,
+    RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, facesLength1 * sizeof(unsigned), 1);
+
+  memcpy(ib, faces1, facesLength1 * sizeof(unsigned));
+```
+You have to share the buffers like this:
+```
+   float* vb = (float*)rtcSetNewGeometryBuffer(geom,
+    RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, 3* sizeof(float), verticesLength1/3);
+
+  memcpy(vb, vertices1, verticesLength1 * sizeof(float));
+
+  unsigned* ib = (unsigned*)rtcSetNewGeometryBuffer(geom,
+    RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, 3*sizeof(unsigned), facesLength1/3);
+
+  memcpy(ib, faces1, facesLength1 * sizeof(unsigned));
+```
+svenwoop commented on May 10, 2023
+svenwoop
+on May 10, 2023
+Collaborator
+More actions
+Thus first pass stride, and then number of elements in the array, thus number of vertices or number of triangles.
+mariuszhermansdorfer commented on May 10, 2023
+mariuszhermansdorfer
+on May 10, 2023
+Last edited by mariuszhermansdorfer
+Author
+More actions
+Thanks @svenwoop!
+I copied the Hello World example and blindly changed the values here:
+It seems, however, that there still is a massive difference between the two:
+```
+rtcCommitScene RTC_GEOMETRY_TYPE_TRIANGLE: 1.9705 ms
+rtcCommitScene RTC_GEOMETRY_TYPE_USER: 12.9795 ms
+```
+[EDIT]
+To make sure the issue is not with the memcpy part, I replaced it with the following code. It gives the same results.
+```
+ float* vb = (float*)rtcSetNewGeometryBuffer(geom,
+    RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, 3 * sizeof(float), verticesLength1 / 3);
+
+  for (int i = 0; i < verticesLength1; i++)
+    vb[i] = vertices1[i];
+
+  unsigned* ib = (unsigned*)rtcSetNewGeometryBuffer(geom,
+    RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, 3 * sizeof(unsigned), facesLength1 / 3);
+
+  for (int i = 0; i < facesLength1; i++)
+    ib[i] = faces1[i];
+```
+mariuszhermansdorfer commented on May 12, 2023
+mariuszhermansdorfer
+on May 12, 2023
+Author
+More actions
+@svenwoop, I ran some more tests to make sure that the BVH is actually built in both cases. I had a suspicion that it only gets constructed on the first call to rtcIntersect but it doesn't seem to be the case.
+Do you have any ideas where the 7x time differences come from?
+Alternatively - would it be possible to perform collisions directly on RTC_GEOMETRY_TYPE_TRIANGLE? It would be a fantastic addition to this already awesome library!
+```
+RTC_GEOMETRY_TYPE_TRIANGLE rtcAttachGeometry: 0.0027 ms
+RTC_GEOMETRY_TYPE_TRIANGLE rtcCommitGeometry: 0.0004 ms
+RTC_GEOMETRY_TYPE_TRIANGLE rtcCommitScene: 1.9447 ms
+RTC_GEOMETRY_TYPE_TRIANGLE rtcIntersect1: 0.0012 ms
+
+RTC_GEOMETRY_TYPE_USER rtcAttachGeometry: 0.0044 ms
+RTC_GEOMETRY_TYPE_USER rtcCommitGeometry: 0.0002 ms
+RTC_GEOMETRY_TYPE_USER rtcCommitScene: 15.6469 ms
+```
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Fields
+No fields configured for issues without a type.
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

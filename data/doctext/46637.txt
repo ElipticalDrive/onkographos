@@ -1,0 +1,3503 @@
+# Parallel 3D Voxelization Project
+
+This project converts normalized triangle meshes in `.off` format into voxel grids and compares five implementations of the same voxelization algorithm:
+
+- sequential
+- OpenMP
+- POSIX threads
+- MPI
+- CUDA
+
+The benchmark workflow measures kernel runtime, verifies every backend against the sequential reference, and exports report-ready summary tables.
+
+## Repository Layout
+
+```text
+.
+├── data/                  Input meshes
+├── src/
+│   ├── common/            Shared parser, SAT test, voxel grid, timing, CSV helpers
+│   ├── sequential/        Sequential baseline
+│   ├── openmp/            OpenMP implementation
+│   ├── pthreads/          Pthreads implementation
+│   ├── mpi/               MPI implementation
+│   └── cuda/              CUDA implementation
+├── scripts/
+│   ├── bench.py           Full benchmark runner
+│   ├── bench.sh           Shell wrapper for bench.py
+│   └── summarize.py       Aggregation and report export
+├── results/               Timestamped benchmark sessions and summaries
+├── report/                Report assets
+└── Makefile               Top-level build
+```
+
+## Requirements
+
+- `gcc`
+- `make`
+- `mpicc` and `mpirun` for the MPI target
+- CUDA toolkit with `nvcc` for the CUDA target
+- Python 3
+
+Notes:
+
+- `make all` builds CPU targets unconditionally and builds CUDA only if `nvcc` is available.
+- The default CUDA architecture is `sm_89`. Override it if needed:
+
+```bash
+make CUDA_ARCH=sm_75 all
+```
+
+## Build
+
+Build everything:
+
+```bash
+make all
+```
+
+Useful individual targets:
+
+```bash
+make sequential
+make openmp
+make pthreads
+make mpi
+make cuda
+make verify
+make test
+```
+
+Clean generated binaries, object files, benchmark sessions, and summaries:
+
+```bash
+make clean
+```
+
+## Running Individual Implementations
+
+All binaries are written to `bin/`.
+
+Sequential:
+
+```bash
+bin/voxelize_seq -i data/airplane_0001.off -r 64 -o results/seq.voxel -c results/sequential.csv
+```
+
+OpenMP:
+
+```bash
+bin/voxelize_omp -i data/airplane_0001.off -r 64 -t 4 -o results/omp.voxel -c results/openmp.csv
+```
+
+Pthreads:
+
+```bash
+bin/voxelize_pth -i data/airplane_0001.off -r 64 -t 4 -o results/pth.voxel -c results/pthreads.csv
+```
+
+MPI:
+
+```bash
+mpirun -np 4 bin/voxelize_mpi -i data/airplane_0001.off -r 64 -o results/mpi.voxel -c results/mpi.csv
+```
+
+CUDA:
+
+```bash
+bin/voxelize_cuda -i data/airplane_0001.off -r 64 -b 128 -o results/cuda.voxel -c results/cuda.csv
+```
+
+Verify a backend output against the sequential output:
+
+```bash
+bin/verify results/seq.voxel results/omp.voxel
+```
+
+## Benchmark Matrix
+
+The benchmark runner uses:
+
+- Meshes: 9 input meshes from `data/`
+- Resolutions: `32`, `64`, `128`
+- Repeats: `3`
+- OpenMP threads: `1`, `4`, `8`
+- Pthreads threads: `1`, `4`, `8`
+- MPI processes: `1`, `4`, `8`
+- CUDA block sizes: `64`, `128`, `256`
+
+Each benchmark run:
+
+- creates a fresh timestamped session under `results/run_*`
+- writes one CSV per backend into that session
+- writes voxel outputs for each run/configuration
+- verifies every non-sequential output against the sequential reference
+
+## Reproducing All Results (Hybrid Workflow)
+
+Since the project uses both CPU backends (Sequential, OpenMP, Pthreads, MPI) and a GPU backend (CUDA), follow this hybrid workflow to generate the final report data.
+
+### 1. Local Run (CPU Backends)
+On your local machine (Mac/Linux):
+```bash
+make clean
+make all
+# Run only CPU backends to avoid CUDA/MPI issues locally
+python3 scripts/bench.py --backends sequential openmp pthreads mpi
+```
+This will create a session folder like `results/run_20260428_120000/`. Keep note of this folder name.
+
+### 2. Google Colab Run (GPU Backend)
+1. Upload `CUDA_Colab.ipynb` to Google Colab.
+2. Set Runtime to **T4 GPU**.
+3. Run all cells. The notebook is configured to run `python3 scripts/bench.py --backends cuda`.
+4. The notebook will automatically prompt you to download `cuda.csv` once finished.
+
+### 3. Merging and Summarizing
+1. Locate the `cuda.csv` you downloaded from Colab.
+2. Drag/Move `cuda.csv` into your **local** session folder (e.g., `results/run_20260428_120000/`).
+3. Run the summarizer locally:
+```bash
+python3 scripts/summarize.py --fresh-only
+```
+The final report tables will be generated in `results/summary/`.
+
+## Summary and Report Export
+
+Default summary to stdout plus generated artifacts:
+
+```bash
+python3 scripts/summarize.py
+```
+
+Summarize only the newest benchmark session and emit report-ready files:
+
+```bash
+python3 scripts/summarize.py --fresh-only --format csv --per-resolution
+```
+
+Summarize explicit CSVs instead of auto-selecting a session:
+
+```bash
+python3 scripts/summarize.py --input results/run_20260427_173810/*.csv
+```
+
+Write summary outputs somewhere else:
+
+```bash
+python3 scripts/summarize.py --fresh-only --output-dir /tmp/voxel-summary
+```
+
+Generated files under `results/summary/` include:
+
+- `overall.csv`
+- `best_per_backend.csv`
+- `backend_best_configs.csv`
+- `runtime_table.csv`
+- `speedup_table.csv`
+- `runtime_by_resolution.csv`
+- `runtime_by_resolution.md`
+- `speedup_by_resolution.csv`
+- `speedup_by_resolution.md`
+- `cuda_blocksize_comparison.csv`
+- `cuda_blocksize_comparison.md`
+- `scalability.csv`
+- `scalability_notes.md`
+
+Some of these tables were directly pasted into the report, while others were not to keep report size small.
+
+## Current Implementation Notes
+
+- The sequential baseline is the source of truth for correctness checks.
+- All benchmark CSVs use the schema:
+
+```text
+impl,config,mesh_file,num_triangles,grid_res,elapsed_ms
+```
+
+- CUDA timing records kernel time only.
+- The CUDA path precomputes per-face voxel bounds on the host and uploads them to the kernel to reduce repeated per-face min/max work in device code.
+
+## Troubleshooting
+
+- If CUDA does not build, confirm that `nvcc` exists and that `CUDA_ARCH` matches your GPU.
+- If MPI fails to launch, verify that `mpirun` works on your machine outside restricted sandboxes.
+- If you want a completely fresh benchmark dataset, run `make clean` before `python3 scripts/bench.py`.
+
+## Remote
+
+The local git repository is configured to use:
+
+```text
+https://github.com/simenzzz/Parallel-Project
+```
+
+## Google Colab
+
+To run the CUDA optimizations on Google Colab:
+
+1. Open [Google Colab](https://colab.research.google.com/).
+2. Select **File > Upload notebook** and upload `CUDA_Colab.ipynb`.
+3. Set runtime to **GPU** (**Runtime > Change runtime type > T4 GPU**).
+4. Run the cells.
+5. **Download Results**: The notebook will automatically trigger a download for `cuda.csv`.
+6. **Merge**: Copy this `cuda.csv` into your latest local `results/run_*` folder to include GPU data in your final summary.
+
+### scripts/bench.py
+```
+#!/usr/bin/env python3
+import argparse
+import shlex
+import subprocess
+import sys
+from datetime import datetime
+from dataclasses import dataclass
+import typing
+from pathlib import Path
+
+
+MESHES = [
+    "airplane_0001.off",
+    "chair_0001.off",
+    "table_0001.off",
+    "guitar_0001.off",
+    "lamp_0001.off",
+    "person_0001.off",
+    "bookshelf_0001.off",
+    "bottle_0001.off",
+    "piano_0001.off",
+]
+RESOLUTIONS = [32, 64, 128]
+THREAD_COUNTS = [1, 4, 8]
+BLOCK_SIZES = [64, 128, 256]
+REPEATS = 3
+
+
+@dataclass
+class BenchFailure:
+    step: str
+    command: list[str]
+    returncode: int
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run voxelizer benchmark matrix.")
+    parser.add_argument("--bin-dir", default="./bin", help="Directory containing binaries.")
+    parser.add_argument("--data-dir", default="./data", help="Directory containing OFF meshes.")
+    parser.add_argument(
+        "--results-dir",
+        default="./results",
+        help="Parent directory for timestamped benchmark sessions.",
+    )
+    parser.add_argument(
+        "--mpirun",
+        default="mpirun",
+        help="MPI launcher binary to use for MPI runs.",
+    )
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=REPEATS,
+        help="Number of repetitions per mesh/resolution combination.",
+    )
+    parser.add_argument(
+        "--keep-going",
+        action="store_true",
+        help="Record failures and continue running the remaining matrix.",
+    )
+    parser.add_argument(
+        "--backends",
+        nargs="+",
+        choices=("sequential", "openmp", "pthreads", "mpi", "cuda"),
+        help="Specific backends to run. Runs all if omitted.",
+    )
+    return parser.parse_args()
+
+
+def quote_command(command: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in command)
+
+
+def infer_resolution(byte_count: int) -> typing.Optional[int]:
+    if byte_count <= 0:
+        return None
+
+    res = round(byte_count ** (1.0 / 3.0))
+    if res > 0 and res * res * res == byte_count:
+        return res
+    return None
+
+
+def print_verify_mismatch_details(reference_path: Path, candidate_path: Path) -> None:
+    try:
+        reference = reference_path.read_bytes()
+        candidate = candidate_path.read_bytes()
+    except OSError as exc:
+        print(f"  detail read failed: {exc}", file=sys.stderr)
+        return
+
+    if len(reference) != len(candidate):
+        print(
+            f"  detail: size mismatch ref={len(reference)} candidate={len(candidate)}",
+            file=sys.stderr,
+        )
+        return
+
+    res = infer_resolution(len(reference))
+    if res is None:
+        print(f"  detail: could not infer cubic grid resolution from {len(reference)} bytes", file=sys.stderr)
+        return
+
+    mismatches: list[tuple[int, int, int, int, int, int]] = []
+    slice_counts: dict[int, list[int]] = {}
+
+    for idx, (ref_value, cand_value) in enumerate(zip(reference, candidate)):
+        if ref_value == cand_value:
+            continue
+
+        x = idx % res
+        y = (idx // res) % res
+        z = idx // (res * res)
+        mismatches.append((idx, x, y, z, ref_value, cand_value))
+        counts = slice_counts.setdefault(z, [0, 0])
+        counts[0] += ref_value
+        counts[1] += cand_value
+
+    if not mismatches:
+        print("  detail: verify failed but no byte mismatches were found", file=sys.stderr)
+        return
+
+    mismatch_slices = sorted(slice_counts)
+    print(
+        f"  detail: total_mismatches={len(mismatches)} resolution={res} z_slices={mismatch_slices}",
+        file=sys.stderr,
+    )
+    print("  detail: first_mismatches=", file=sys.stderr)
+    for idx, x, y, z, ref_value, cand_value in mismatches[:8]:
+        print(
+            f"    byte={idx} coord=({x},{y},{z}) ref={ref_value} candidate={cand_value}",
+            file=sys.stderr,
+        )
+
+    for z in mismatch_slices[:8]:
+        base = z * res * res
+        ref_count = sum(reference[base : base + res * res])
+        cand_count = sum(candidate[base : base + res * res])
+        print(
+            f"  detail: slice z={z} occupied ref={ref_count} candidate={cand_count} delta={ref_count - cand_count}",
+            file=sys.stderr,
+        )
+
+
+def run_command(
+    command: list[str],
+    step: str,
+    keep_going: bool,
+    *,
+    verify_pair: typing.Optional[typing.Tuple[Path, Path]] = None,
+) -> typing.Optional[BenchFailure]:
+    result = subprocess.run(command, check=False)
+    if result.returncode == 0:
+        return None
+
+    failure = BenchFailure(step=step, command=command, returncode=result.returncode)
+    print(
+        f"FAILED [{step}] exit={result.returncode}: {quote_command(command)}",
+        file=sys.stderr,
+    )
+    if verify_pair is not None:
+        print_verify_mismatch_details(verify_pair[0], verify_pair[1])
+    if not keep_going:
+        raise SystemExit(result.returncode)
+    return failure
+
+
+def verify_inputs(meshes: list[str], data_dir: Path) -> None:
+    missing = [str(data_dir / mesh) for mesh in meshes if not (data_dir / mesh).is_file()]
+    if missing:
+        for path in missing:
+            print(f"Missing mesh: {path}", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def build_command(binary: Path, *args: typing.Union[str, int]) -> typing.List[str]:
+    return [str(binary), *(str(arg) for arg in args)]
+
+
+def create_session_dir(results_root: Path) -> Path:
+    results_root.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    session_dir = results_root / timestamp
+    suffix = 1
+    while session_dir.exists():
+        session_dir = results_root / f"{timestamp}_{suffix}"
+        suffix += 1
+    session_dir.mkdir()
+    return session_dir
+
+
+def main() -> int:
+    args = parse_args()
+    bin_dir = Path(args.bin_dir)
+    data_dir = Path(args.data_dir)
+    results_root = Path(args.results_dir)
+    keep_going = args.keep_going
+    failures: list[BenchFailure] = []
+
+    results_dir = create_session_dir(results_root)
+    verify_inputs(MESHES, data_dir)
+    print(f"Writing benchmark outputs to {results_dir}", flush=True)
+
+    voxelize_seq = bin_dir / "voxelize_seq"
+    voxelize_omp = bin_dir / "voxelize_omp"
+    voxelize_pth = bin_dir / "voxelize_pth"
+    voxelize_mpi = bin_dir / "voxelize_mpi"
+    voxelize_cuda = bin_dir / "voxelize_cuda"
+    verify = bin_dir / "verify"
+
+    for res in RESOLUTIONS:
+        for mesh in MESHES:
+            stem = mesh.removesuffix(".off")
+            mesh_path = data_dir / mesh
+            seq_out = results_dir / f"seq_{res}_{stem}.voxel"
+
+            for run in range(1, args.repeats + 1):
+                step_prefix = f"mesh={mesh} res={res} run={run}"
+
+                run_seq = not args.backends or "sequential" in args.backends or any(b in args.backends for b in ("openmp", "pthreads", "mpi", "cuda"))
+                if run_seq:
+                    failure = run_command(
+                        build_command(
+                            voxelize_seq,
+                            "-i",
+                            mesh_path,
+                            "-r",
+                            res,
+                            "-o",
+                            seq_out,
+                            "-c",
+                            results_dir / "sequential.csv",
+                        ),
+                        f"{step_prefix} sequential",
+                        keep_going,
+                    )
+                    if failure:
+                        failures.append(failure)
+                        continue
+
+                for threads in THREAD_COUNTS:
+                    omp_out = results_dir / f"omp_{threads}t_{res}_{stem}.voxel"
+                    pth_out = results_dir / f"pth_{threads}t_{res}_{stem}.voxel"
+                    mpi_out = results_dir / f"mpi_{threads}p_{res}_{stem}.voxel"
+
+                    if not args.backends or "openmp" in args.backends:
+                        failure = run_command(
+                            build_command(
+                                voxelize_omp,
+                                "-i",
+                                mesh_path,
+                                "-r",
+                                res,
+                                "-t",
+                                threads,
+                                "-o",
+                                omp_out,
+                                "-c",
+                                results_dir / "openmp.csv",
+                            ),
+                            f"{step_prefix} openmp t={threads}",
+                            keep_going,
+                        )
+                        if failure:
+                            failures.append(failure)
+                        else:
+                            failure = run_command(
+                                build_command(verify, seq_out, omp_out),
+                                f"{step_prefix} verify openmp t={threads}",
+                                keep_going,
+                                verify_pair=(seq_out, omp_out),
+                            )
+                            if failure:
+                                failures.append(failure)
+
+                    if not args.backends or "pthreads" in args.backends:
+                        failure = run_command(
+                            build_command(
+                                voxelize_pth,
+                                "-i",
+                                mesh_path,
+                                "-r",
+                                res,
+                                "-t",
+                                threads,
+                                "-o",
+                                pth_out,
+                                "-c",
+                                results_dir / "pthreads.csv",
+                            ),
+                            f"{step_prefix} pthreads t={threads}",
+                            keep_going,
+                        )
+                        if failure:
+                            failures.append(failure)
+                        else:
+                            failure = run_command(
+                                build_command(verify, seq_out, pth_out),
+                                f"{step_prefix} verify pthreads t={threads}",
+                                keep_going,
+                                verify_pair=(seq_out, pth_out),
+                            )
+                            if failure:
+                                failures.append(failure)
+
+                    if not args.backends or "mpi" in args.backends:
+                        failure = run_command(
+                            [
+                                args.mpirun,
+                                "-np",
+                                str(threads),
+                                str(voxelize_mpi),
+                                "-i",
+                                str(mesh_path),
+                                "-r",
+                                str(res),
+                                "-o",
+                                str(mpi_out),
+                                "-c",
+                                str(results_dir / "mpi.csv"),
+                            ],
+                            f"{step_prefix} mpi p={threads}",
+                            keep_going,
+                        )
+                        if failure:
+                            failures.append(failure)
+                        else:
+                            failure = run_command(
+                                build_command(verify, seq_out, mpi_out),
+                                f"{step_prefix} verify mpi p={threads}",
+                                keep_going,
+                                verify_pair=(seq_out, mpi_out),
+                            )
+                            if failure:
+                                failures.append(failure)
+
+                if (not args.backends or "cuda" in args.backends) and voxelize_cuda.is_file() and voxelize_cuda.stat().st_mode & 0o111:
+                    for block_size in BLOCK_SIZES:
+                        cuda_out = results_dir / f"cuda_{block_size}tpb_{res}_{stem}.voxel"
+                        failure = run_command(
+                            build_command(
+                                voxelize_cuda,
+                                "-i",
+                                mesh_path,
+                                "-r",
+                                res,
+                                "-b",
+                                block_size,
+                                "-o",
+                                cuda_out,
+                                "-c",
+                                results_dir / "cuda.csv",
+                            ),
+                            f"{step_prefix} cuda b={block_size}",
+                            keep_going,
+                        )
+                        if failure:
+                            failures.append(failure)
+                        else:
+                            failure = run_command(
+                                build_command(verify, seq_out, cuda_out),
+                                f"{step_prefix} verify cuda b={block_size}",
+                                keep_going,
+                                verify_pair=(seq_out, cuda_out),
+                            )
+                            if failure:
+                                failures.append(failure)
+
+    if failures:
+        print("\nBenchmark completed with failures:", file=sys.stderr)
+        for failure in failures:
+            print(
+                f"- {failure.step}: exit={failure.returncode} command={quote_command(failure.command)}",
+                file=sys.stderr,
+            )
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+### scripts/summarize.py
+```
+#!/usr/bin/env python3
+import argparse
+import csv
+import glob
+import math
+import statistics
+import sys
+import typing
+from collections import defaultdict
+from pathlib import Path
+
+
+BACKEND_ORDER = {
+    "sequential": 0,
+    "openmp": 1,
+    "pthreads": 2,
+    "mpi": 3,
+    "cuda": 4,
+}
+BEST_BACKENDS = ("openmp", "pthreads", "mpi", "cuda")
+SCALING_BACKENDS = ("openmp", "pthreads", "mpi")
+CONFIG_PREFIX = {
+    "sequential": "seq",
+    "openmp": "omp",
+    "pthreads": "pth",
+    "mpi": "mpi",
+    "cuda": "cuda",
+}
+REQUIRED_COLUMNS = {
+    "impl",
+    "config",
+    "mesh_file",
+    "num_triangles",
+    "grid_res",
+    "elapsed_ms",
+}
+CORE_SESSION_CSVS = {"sequential.csv", "openmp.csv", "pthreads.csv", "mpi.csv"}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Summarize voxelizer benchmark CSVs.")
+    parser.add_argument(
+        "--input",
+        nargs="+",
+        help="Explicit CSV files or glob patterns. Overrides --fresh-only.",
+    )
+    parser.add_argument(
+        "--fresh-only",
+        action="store_true",
+        help="Use the newest timestamped run under results/run_*/ when available.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("markdown", "csv"),
+        default="markdown",
+        help="Stdout format. CSV mode still writes all artifacts and prints a manifest.",
+    )
+    parser.add_argument(
+        "--per-resolution",
+        action="store_true",
+        help="Print runtime/speedup tables as one Markdown table per resolution.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="results/summary",
+        help="Directory for generated CSV and Markdown artifacts.",
+    )
+    return parser.parse_args()
+
+
+def normalize_mesh_name(mesh_file: str) -> str:
+    return Path(mesh_file).name
+
+
+def config_sort_value(impl: str, config: str) -> tuple[int, str]:
+    number = ""
+    for char in config:
+        if char.isdigit():
+            number += char
+    if number:
+        return (int(number), config)
+    return (math.inf, config)
+
+
+def row_sort_key(row: dict[str, object]) -> tuple[int, str, int, tuple[int, str], str]:
+    return (
+        int(row["grid_res"]),
+        str(row["mesh_display"]),
+        BACKEND_ORDER.get(str(row["impl"]), 999),
+        config_sort_value(str(row["impl"]), str(row["config"])),
+        str(row["config"]),
+    )
+
+
+def expand_input_patterns(patterns: list[str]) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for pattern in patterns:
+        matches = [Path(match) for match in glob.glob(pattern)]
+        if not matches:
+            candidate = Path(pattern)
+            if candidate.is_file():
+                matches = [candidate]
+        for match in sorted(matches):
+            resolved = match.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            paths.append(match)
+    return paths
+
+
+def newest_session_csvs(root: Path) -> list[Path]:
+    sessions = [path for path in root.glob("run_*") if path.is_dir()]
+    if not sessions:
+        return []
+    complete_sessions = [
+        path
+        for path in sessions
+        if CORE_SESSION_CSVS.issubset({csv_path.name for csv_path in path.glob("*.csv")})
+    ]
+    candidates = complete_sessions if complete_sessions else sessions
+    newest = max(candidates, key=lambda path: path.stat().st_mtime)
+    return sorted(path for path in newest.glob("*.csv") if path.is_file())
+
+
+def select_input_paths(args: argparse.Namespace) -> list[Path]:
+    if args.input:
+        paths = expand_input_patterns(args.input)
+        if not paths:
+            raise ValueError("No CSV files matched --input patterns.")
+        return paths
+
+    results_root = Path("results")
+    if args.fresh_only:
+        session_paths = newest_session_csvs(results_root)
+        if session_paths:
+            return session_paths
+
+    root_paths = sorted(path for path in results_root.glob("*.csv") if path.is_file())
+    if root_paths:
+        return root_paths
+
+    session_paths = newest_session_csvs(results_root)
+    if session_paths:
+        return session_paths
+
+    raise ValueError("No benchmark CSV files found under results/.")
+
+
+def read_rows(paths: list[Path]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for path in paths:
+        with path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = set(reader.fieldnames or [])
+            missing = REQUIRED_COLUMNS - fieldnames
+            if missing:
+                raise ValueError(f"{path} is missing required columns: {', '.join(sorted(missing))}")
+            for row in reader:
+                rows.append(
+                    {
+                        "impl": row["impl"],
+                        "config": row["config"],
+                        "mesh_file": row["mesh_file"],
+                        "mesh_display": normalize_mesh_name(row["mesh_file"]),
+                        "num_triangles": int(row["num_triangles"]),
+                        "grid_res": int(row["grid_res"]),
+                        "elapsed_ms": float(row["elapsed_ms"]),
+                        "source_csv": str(path),
+                    }
+                )
+    if not rows:
+        raise ValueError("Input CSV files did not contain any benchmark rows.")
+    return rows
+
+
+def aggregate_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    groups: dict[tuple[str, str, str, int], list[dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        key = (
+            str(row["impl"]),
+            str(row["config"]),
+            str(row["mesh_file"]),
+            int(row["grid_res"]),
+        )
+        groups[key].append(row)
+
+    seq_baseline: dict[tuple[str, int], float] = {}
+    for (impl, _config, mesh_file, grid_res), group_rows in groups.items():
+        if impl != "sequential":
+            continue
+        seq_baseline[(mesh_file, grid_res)] = statistics.mean(
+            float(row["elapsed_ms"]) for row in group_rows
+        )
+
+    overall: list[dict[str, object]] = []
+    for (impl, config, mesh_file, grid_res), group_rows in groups.items():
+        elapsed_values = [float(row["elapsed_ms"]) for row in group_rows]
+        mean_ms = statistics.mean(elapsed_values)
+        stdev_ms = statistics.stdev(elapsed_values) if len(elapsed_values) > 1 else 0.0
+        base = seq_baseline.get((mesh_file, grid_res))
+        overall.append(
+            {
+                "impl": impl,
+                "config": config,
+                "mesh_file": mesh_file,
+                "mesh_display": normalize_mesh_name(mesh_file),
+                "grid_res": grid_res,
+                "num_triangles": int(group_rows[0]["num_triangles"]),
+                "runs": len(elapsed_values),
+                "mean_ms": mean_ms,
+                "stdev_ms": stdev_ms,
+                "min_ms": min(elapsed_values),
+                "max_ms": max(elapsed_values),
+                "speedup_vs_seq": (base / mean_ms) if base is not None and mean_ms > 0.0 else None,
+            }
+        )
+
+    overall.sort(key=row_sort_key)
+    return overall
+
+
+def build_best_per_backend(overall_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, int, str], list[dict[str, object]]] = defaultdict(list)
+    for row in overall_rows:
+        impl = str(row["impl"])
+        if impl not in BEST_BACKENDS:
+            continue
+        grouped[(impl, int(row["grid_res"]), str(row["config"]))].append(row)
+
+    candidates: dict[tuple[str, int], list[dict[str, object]]] = defaultdict(list)
+    for (impl, grid_res, config), rows_for_config in grouped.items():
+        avg_runtime = statistics.mean(float(row["mean_ms"]) for row in rows_for_config)
+        avg_speedup = statistics.mean(
+            float(row["speedup_vs_seq"])
+            for row in rows_for_config
+            if row["speedup_vs_seq"] is not None
+        )
+        candidates[(impl, grid_res)].append(
+            {
+                "impl": impl,
+                "grid_res": grid_res,
+                "config": config,
+                "meshes": len(rows_for_config),
+                "avg_mean_ms": avg_runtime,
+                "avg_speedup_vs_seq": avg_speedup,
+            }
+        )
+
+    best_rows: list[dict[str, object]] = []
+    for backend in BEST_BACKENDS:
+        for grid_res in sorted({int(row["grid_res"]) for row in overall_rows}):
+            options = candidates.get((backend, grid_res), [])
+            if not options:
+                continue
+            winner = min(
+                options,
+                key=lambda row: (
+                    float(row["avg_mean_ms"]),
+                    config_sort_value(str(row["impl"]), str(row["config"])),
+                    str(row["config"]),
+                ),
+            )
+            best_rows.append(winner)
+
+    best_rows.sort(
+        key=lambda row: (
+            int(row["grid_res"]),
+            BACKEND_ORDER.get(str(row["impl"]), 999),
+            config_sort_value(str(row["impl"]), str(row["config"])),
+        )
+    )
+    return best_rows
+
+
+def build_best_config_lookup(best_rows: list[dict[str, object]]) -> dict[tuple[str, int], str]:
+    return {
+        (str(row["impl"]), int(row["grid_res"])): str(row["config"])
+        for row in best_rows
+    }
+
+
+def build_runtime_or_speedup_table(
+    overall_rows: list[dict[str, object]],
+    field_name: str,
+) -> tuple[list[str], list[dict[str, object]]]:
+    seen_columns: set[tuple[str, str]] = set()
+    column_pairs: list[tuple[str, str]] = []
+    value_map: dict[tuple[str, str, int], dict[tuple[str, str], object]] = defaultdict(dict)
+
+    for row in overall_rows:
+        pair = (str(row["impl"]), str(row["config"]))
+        if pair not in seen_columns:
+            seen_columns.add(pair)
+            column_pairs.append(pair)
+        value_map[(str(row["mesh_file"]), str(row["mesh_display"]), int(row["grid_res"]))][pair] = row[field_name]
+
+    column_pairs.sort(
+        key=lambda pair: (
+            BACKEND_ORDER.get(pair[0], 999),
+            config_sort_value(pair[0], pair[1]),
+            pair[1],
+        )
+    )
+
+    headers = ["mesh_file", "mesh", "grid_res", *[f"{impl}:{config}" for impl, config in column_pairs]]
+    records: list[dict[str, object]] = []
+    for mesh_file, mesh_display, grid_res in sorted(value_map, key=lambda item: (item[2], item[1])):
+        record: dict[str, object] = {
+            "mesh_file": mesh_file,
+            "mesh": mesh_display,
+            "grid_res": grid_res,
+        }
+        for pair in column_pairs:
+            record[f"{pair[0]}:{pair[1]}"] = value_map[(mesh_file, mesh_display, grid_res)].get(pair)
+        records.append(record)
+
+    return headers, records
+
+
+def build_report_tables(
+    overall_rows: list[dict[str, object]],
+    best_lookup: dict[tuple[str, int], str],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    by_key = {
+        (str(row["impl"]), str(row["config"]), str(row["mesh_file"]), int(row["grid_res"])): row
+        for row in overall_rows
+    }
+    grid_resolutions = sorted({int(row["grid_res"]) for row in overall_rows})
+    mesh_pairs = sorted(
+        {(str(row["mesh_file"]), str(row["mesh_display"])) for row in overall_rows},
+        key=lambda pair: pair[1],
+    )
+
+    runtime_rows: list[dict[str, object]] = []
+    speedup_rows: list[dict[str, object]] = []
+    for grid_res in grid_resolutions:
+        for mesh_file, mesh_display in mesh_pairs:
+            seq_row = by_key.get(("sequential", "seq_1t", mesh_file, grid_res))
+            if seq_row is None:
+                continue
+
+            runtime_record: dict[str, object] = {
+                "mesh_file": mesh_file,
+                "mesh": mesh_display,
+                "grid_res": grid_res,
+                "seq": seq_row["mean_ms"],
+            }
+            speedup_record: dict[str, object] = {
+                "mesh_file": mesh_file,
+                "mesh": mesh_display,
+                "grid_res": grid_res,
+                "seq": 1.0,
+            }
+
+            for backend, runtime_key, speedup_key in (
+                ("openmp", "best_omp", "best_omp"),
+                ("pthreads", "best_pth", "best_pth"),
+                ("mpi", "best_mpi", "best_mpi"),
+                ("cuda", "best_cuda", "best_cuda"),
+            ):
+                config = best_lookup.get((backend, grid_res))
+                chosen = by_key.get((backend, config, mesh_file, grid_res)) if config else None
+                runtime_record[runtime_key] = chosen["mean_ms"] if chosen else None
+                speedup_record[speedup_key] = chosen["speedup_vs_seq"] if chosen else None
+
+            runtime_rows.append(runtime_record)
+            speedup_rows.append(speedup_record)
+
+    runtime_rows.sort(key=lambda row: (int(row["grid_res"]), str(row["mesh"])))
+    speedup_rows.sort(key=lambda row: (int(row["grid_res"]), str(row["mesh"])))
+    return runtime_rows, speedup_rows
+
+
+def parse_workers(config: str) -> typing.Optional[int]:
+    digits = "".join(char for char in config if char.isdigit())
+    return int(digits) if digits else None
+
+
+def build_scalability_rows(overall_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    by_key = {
+        (str(row["impl"]), str(row["config"]), str(row["mesh_file"]), int(row["grid_res"])): row
+        for row in overall_rows
+    }
+    meshes = sorted({str(row["mesh_file"]) for row in overall_rows})
+    grid_resolutions = sorted({int(row["grid_res"]) for row in overall_rows})
+    results: list[dict[str, object]] = []
+
+    for backend in SCALING_BACKENDS:
+        prefix = CONFIG_PREFIX[backend]
+        for grid_res in grid_resolutions:
+            for config in (f"{prefix}_1{'t' if backend != 'mpi' else 'p'}", f"{prefix}_4{'t' if backend != 'mpi' else 'p'}", f"{prefix}_8{'t' if backend != 'mpi' else 'p'}"):
+                workers = parse_workers(config)
+                if workers is None:
+                    continue
+                mesh_runtimes: list[float] = []
+                mesh_speedups: list[float] = []
+                mesh_efficiencies: list[float] = []
+                for mesh_file in meshes:
+                    base_config = f"{prefix}_1{'t' if backend != 'mpi' else 'p'}"
+                    base_row = by_key.get((backend, base_config, mesh_file, grid_res))
+                    row = by_key.get((backend, config, mesh_file, grid_res))
+                    if base_row is None or row is None:
+                        continue
+                    mean_runtime = float(row["mean_ms"])
+                    speedup = float(base_row["mean_ms"]) / mean_runtime if mean_runtime > 0.0 else None
+                    if speedup is None:
+                        continue
+                    mesh_runtimes.append(mean_runtime)
+                    mesh_speedups.append(speedup)
+                    mesh_efficiencies.append(speedup / workers)
+                if not mesh_runtimes:
+                    continue
+                results.append(
+                    {
+                        "impl": backend,
+                        "grid_res": grid_res,
+                        "config": config,
+                        "workers": workers,
+                        "meshes": len(mesh_runtimes),
+                        "avg_mean_ms": statistics.mean(mesh_runtimes),
+                        "avg_speedup_vs_1": statistics.mean(mesh_speedups),
+                        "avg_efficiency": statistics.mean(mesh_efficiencies),
+                    }
+                )
+
+    results.sort(
+        key=lambda row: (
+            BACKEND_ORDER.get(str(row["impl"]), 999),
+            int(row["grid_res"]),
+            int(row["workers"]),
+        )
+    )
+    return results
+
+
+def build_cuda_comparison_rows(overall_rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    grouped: dict[tuple[int, str], list[dict[str, object]]] = defaultdict(list)
+    for row in overall_rows:
+        if row["impl"] != "cuda":
+            continue
+        grouped[(int(row["grid_res"]), str(row["config"]))].append(row)
+
+    by_res: dict[int, list[dict[str, object]]] = defaultdict(list)
+    for (grid_res, config), rows_for_config in grouped.items():
+        avg_runtime = statistics.mean(float(row["mean_ms"]) for row in rows_for_config)
+        avg_speedup = statistics.mean(float(row["speedup_vs_seq"]) for row in rows_for_config if row["speedup_vs_seq"] is not None)
+        by_res[grid_res].append(
+            {
+                "grid_res": grid_res,
+                "config": config,
+                "meshes": len(rows_for_config),
+                "avg_mean_ms": avg_runtime,
+                "avg_speedup_vs_seq": avg_speedup,
+            }
+        )
+
+    results: list[dict[str, object]] = []
+    for grid_res in sorted(by_res):
+        configs = sorted(
+            by_res[grid_res],
+            key=lambda row: (
+                float(row["avg_mean_ms"]),
+                config_sort_value("cuda", str(row["config"])),
+                str(row["config"]),
+            ),
+        )
+        winner = configs[0]
+        runner_up = configs[1] if len(configs) > 1 else None
+        margin_ms = (
+            float(runner_up["avg_mean_ms"]) - float(winner["avg_mean_ms"])
+            if runner_up is not None
+            else 0.0
+        )
+        margin_pct = (
+            (margin_ms / float(runner_up["avg_mean_ms"])) * 100.0
+            if runner_up is not None and float(runner_up["avg_mean_ms"]) > 0.0
+            else 0.0
+        )
+        results.append(
+            {
+                "grid_res": grid_res,
+                "best_config": winner["config"],
+                "best_mean_ms": winner["avg_mean_ms"],
+                "best_avg_speedup_vs_seq": winner["avg_speedup_vs_seq"],
+                "runner_up_config": runner_up["config"] if runner_up is not None else "",
+                "runner_up_mean_ms": runner_up["avg_mean_ms"] if runner_up is not None else None,
+                "margin_ms": margin_ms,
+                "margin_pct_vs_runner_up": margin_pct,
+            }
+        )
+    return results
+
+
+def format_number(value: object, decimals: int = 3, suffix: str = "") -> str:
+    if value is None:
+        return ""
+    if isinstance(value, int):
+        return f"{value}{suffix}"
+    return f"{float(value):.{decimals}f}{suffix}"
+
+
+def markdown_table(headers: list[str], rows: list[list[str]]) -> str:
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
+
+
+def render_overall_markdown(overall_rows: list[dict[str, object]]) -> str:
+    headers = ["impl", "config", "mesh", "grid_res", "runs", "mean_ms", "stdev_ms", "min_ms", "max_ms", "speedup_vs_seq"]
+    rows: list[list[str]] = []
+    for row in overall_rows:
+        rows.append(
+            [
+                str(row["impl"]),
+                str(row["config"]),
+                str(row["mesh_display"]),
+                str(row["grid_res"]),
+                str(row["runs"]),
+                format_number(row["mean_ms"]),
+                format_number(row["stdev_ms"]),
+                format_number(row["min_ms"]),
+                format_number(row["max_ms"]),
+                format_number(row["speedup_vs_seq"], decimals=2, suffix="x"),
+            ]
+        )
+    return markdown_table(headers, rows)
+
+
+def render_best_configs_markdown(best_rows: list[dict[str, object]]) -> str:
+    headers = ["backend", "grid_res", "best_config", "meshes", "avg_mean_ms", "avg_speedup_vs_seq"]
+    rows: list[list[str]] = []
+    for row in best_rows:
+        rows.append(
+            [
+                str(row["impl"]),
+                str(row["grid_res"]),
+                str(row["config"]),
+                str(row["meshes"]),
+                format_number(row["avg_mean_ms"]),
+                format_number(row["avg_speedup_vs_seq"], decimals=2, suffix="x"),
+            ]
+        )
+    return markdown_table(headers, rows)
+
+
+def render_wide_markdown(headers: list[str], records: list[dict[str, object]], *, speedup: bool) -> str:
+    rows: list[list[str]] = []
+    for record in records:
+        rendered = [str(record["mesh"]), str(record["grid_res"])]
+        for header in headers[3:]:
+            value = record.get(header)
+            rendered.append(format_number(value, decimals=2 if speedup else 3, suffix="x" if speedup else ""))
+        rows.append(rendered)
+    display_headers = ["mesh", "grid_res", *headers[3:]]
+    return markdown_table(display_headers, rows)
+
+
+def render_report_tables_by_resolution(rows: list[dict[str, object]], *, speedup: bool) -> str:
+    sections: list[str] = []
+    headers = ["mesh", "seq", "best_omp", "best_pth", "best_mpi", "best_cuda"]
+    for grid_res in sorted({int(row["grid_res"]) for row in rows}):
+        section_rows: list[list[str]] = []
+        for row in rows:
+            if int(row["grid_res"]) != grid_res:
+                continue
+            section_rows.append(
+                [
+                    str(row["mesh"]),
+                    format_number(row["seq"], decimals=2 if speedup else 3, suffix="x" if speedup else ""),
+                    format_number(row["best_omp"], decimals=2 if speedup else 3, suffix="x" if speedup else ""),
+                    format_number(row["best_pth"], decimals=2 if speedup else 3, suffix="x" if speedup else ""),
+                    format_number(row["best_mpi"], decimals=2 if speedup else 3, suffix="x" if speedup else ""),
+                    format_number(row["best_cuda"], decimals=2 if speedup else 3, suffix="x" if speedup else ""),
+                ]
+            )
+        sections.append(f"### Resolution {grid_res}\n\n{markdown_table(headers, section_rows)}")
+    return "\n\n".join(sections)
+
+
+def render_scalability_markdown(rows: list[dict[str, object]]) -> str:
+    headers = ["backend", "grid_res", "config", "workers", "avg_mean_ms", "avg_speedup_vs_1", "avg_efficiency"]
+    table_rows: list[list[str]] = []
+    for row in rows:
+        table_rows.append(
+            [
+                str(row["impl"]),
+                str(row["grid_res"]),
+                str(row["config"]),
+                str(row["workers"]),
+                format_number(row["avg_mean_ms"]),
+                format_number(row["avg_speedup_vs_1"], decimals=2, suffix="x"),
+                format_number(row["avg_efficiency"], decimals=3),
+            ]
+        )
+    return markdown_table(headers, table_rows)
+
+
+def render_cuda_comparison_markdown(rows: list[dict[str, object]]) -> str:
+    headers = [
+        "grid_res",
+        "best_config",
+        "best_mean_ms",
+        "best_avg_speedup_vs_seq",
+        "runner_up_config",
+        "runner_up_mean_ms",
+        "margin_ms",
+        "margin_pct_vs_runner_up",
+    ]
+    table_rows: list[list[str]] = []
+    for row in rows:
+        table_rows.append(
+            [
+                str(row["grid_res"]),
+                str(row["best_config"]),
+                format_number(row["best_mean_ms"]),
+                format_number(row["best_avg_speedup_vs_seq"], decimals=2, suffix="x"),
+                str(row["runner_up_config"]),
+                format_number(row["runner_up_mean_ms"]),
+                format_number(row["margin_ms"]),
+                format_number(row["margin_pct_vs_runner_up"], decimals=2, suffix="%"),
+            ]
+        )
+    return markdown_table(headers, table_rows)
+
+
+def csv_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return f"{value:.6f}"
+    return str(value)
+
+
+def write_csv(path: Path, headers: list[str], rows: list[dict[str, object]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({header: csv_value(row.get(header)) for header in headers})
+
+
+def write_text(path: Path, content: str) -> None:
+    path.write_text(content.rstrip() + "\n", encoding="utf-8")
+
+
+def main() -> int:
+    args = parse_args()
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        input_paths = select_input_paths(args)
+        raw_rows = read_rows(input_paths)
+        overall_rows = aggregate_rows(raw_rows)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    best_rows = build_best_per_backend(overall_rows)
+    best_lookup = build_best_config_lookup(best_rows)
+    runtime_headers, runtime_records = build_runtime_or_speedup_table(overall_rows, "mean_ms")
+    speedup_headers, speedup_records = build_runtime_or_speedup_table(overall_rows, "speedup_vs_seq")
+    report_runtime_rows, report_speedup_rows = build_report_tables(overall_rows, best_lookup)
+    scalability_rows = build_scalability_rows(overall_rows)
+    cuda_rows = build_cuda_comparison_rows(overall_rows)
+
+    write_csv(
+        output_dir / "overall.csv",
+        [
+            "impl",
+            "config",
+            "mesh_file",
+            "mesh_display",
+            "grid_res",
+            "num_triangles",
+            "runs",
+            "mean_ms",
+            "stdev_ms",
+            "min_ms",
+            "max_ms",
+            "speedup_vs_seq",
+        ],
+        overall_rows,
+    )
+    write_csv(
+        output_dir / "best_per_backend.csv",
+        ["impl", "grid_res", "config", "meshes", "avg_mean_ms", "avg_speedup_vs_seq"],
+        best_rows,
+    )
+    write_csv(
+        output_dir / "backend_best_configs.csv",
+        ["impl", "grid_res", "config", "meshes", "avg_mean_ms", "avg_speedup_vs_seq"],
+        best_rows,
+    )
+    write_csv(output_dir / "runtime_table.csv", runtime_headers, runtime_records)
+    write_csv(output_dir / "speedup_table.csv", speedup_headers, speedup_records)
+    write_csv(
+        output_dir / "runtime_by_resolution.csv",
+        ["mesh_file", "mesh", "grid_res", "seq", "best_omp", "best_pth", "best_mpi", "best_cuda"],
+        report_runtime_rows,
+    )
+    write_csv(
+        output_dir / "speedup_by_resolution.csv",
+        ["mesh_file", "mesh", "grid_res", "seq", "best_omp", "best_pth", "best_mpi", "best_cuda"],
+        report_speedup_rows,
+    )
+    write_csv(
+        output_dir / "scalability.csv",
+        ["impl", "grid_res", "config", "workers", "meshes", "avg_mean_ms", "avg_speedup_vs_1", "avg_efficiency"],
+        scalability_rows,
+    )
+    write_csv(
+        output_dir / "cuda_blocksize_comparison.csv",
+        [
+            "grid_res",
+            "best_config",
+            "best_mean_ms",
+            "best_avg_speedup_vs_seq",
+            "runner_up_config",
+            "runner_up_mean_ms",
+            "margin_ms",
+            "margin_pct_vs_runner_up",
+        ],
+        cuda_rows,
+    )
+
+    backend_best_md = render_best_configs_markdown(best_rows)
+    runtime_by_resolution_md = render_report_tables_by_resolution(report_runtime_rows, speedup=False)
+    speedup_by_resolution_md = render_report_tables_by_resolution(report_speedup_rows, speedup=True)
+    scalability_md = render_scalability_markdown(scalability_rows)
+    cuda_md = render_cuda_comparison_markdown(cuda_rows)
+
+    write_text(output_dir / "backend_best_configs.md", backend_best_md)
+    write_text(output_dir / "runtime_by_resolution.md", runtime_by_resolution_md)
+    write_text(output_dir / "speedup_by_resolution.md", speedup_by_resolution_md)
+    write_text(output_dir / "scalability_notes.md", scalability_md)
+    write_text(output_dir / "cuda_blocksize_comparison.md", cuda_md)
+
+    if args.format == "csv":
+        print(f"inputs: {', '.join(str(path) for path in input_paths)}")
+        print(f"wrote: {output_dir / 'overall.csv'}")
+        print(f"wrote: {output_dir / 'best_per_backend.csv'}")
+        print(f"wrote: {output_dir / 'backend_best_configs.csv'}")
+        print(f"wrote: {output_dir / 'runtime_table.csv'}")
+        print(f"wrote: {output_dir / 'speedup_table.csv'}")
+        print(f"wrote: {output_dir / 'runtime_by_resolution.md'}")
+        print(f"wrote: {output_dir / 'speedup_by_resolution.md'}")
+        print(f"wrote: {output_dir / 'backend_best_configs.md'}")
+        print(f"wrote: {output_dir / 'cuda_blocksize_comparison.md'}")
+        print(f"wrote: {output_dir / 'scalability_notes.md'}")
+        return 0
+
+    stdout_sections = [
+        "# Overall\n\n" + render_overall_markdown(overall_rows),
+        "# Best Per Backend\n\n" + backend_best_md,
+    ]
+    if args.per_resolution:
+        stdout_sections.append("# Runtime By Resolution\n\n" + runtime_by_resolution_md)
+        stdout_sections.append("# Speedup By Resolution\n\n" + speedup_by_resolution_md)
+    else:
+        stdout_sections.append("# Runtime Table\n\n" + render_wide_markdown(runtime_headers, runtime_records, speedup=False))
+        stdout_sections.append("# Speedup Table\n\n" + render_wide_markdown(speedup_headers, speedup_records, speedup=True))
+    print("\n\n".join(stdout_sections))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+### src/common/config.h
+```
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#define DEFAULT_GRID_RES 64
+#define MIN_GRID_RES 16
+#define MAX_GRID_RES 256
+#define DEFAULT_THREADS 4
+#define MAX_THREADS 64
+#define DEFAULT_BLOCK_SIZE 128
+#define MAX_PATH_LEN 512
+#define CSV_COL_HEADER "impl,config,mesh_file,num_triangles,grid_res,elapsed_ms\n"
+
+#endif
+```
+
+### src/common/off_parser.c
+```
+#include "off_parser.h"
+
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static void mesh_reset(Mesh *m)
+{
+    m->vertices = NULL;
+    m->faces = NULL;
+    m->num_vertices = 0;
+    m->num_faces = 0;
+    m->bbox_min = (Vec3){0.0f, 0.0f, 0.0f};
+    m->bbox_max = (Vec3){0.0f, 0.0f, 0.0f};
+}
+
+static int next_data_line(FILE *fp, char *buf, size_t size)
+{
+    while (fgets(buf, (int)size, fp) != NULL) {
+        char *p = buf;
+        while (isspace((unsigned char)*p)) {
+            ++p;
+        }
+        if (*p == '\0' || *p == '\n' || *p == '#') {
+            continue;
+        }
+        return 0;
+    }
+    return -1;
+}
+
+int mesh_load(const char *path, Mesh *out)
+{
+    FILE *fp;
+    char line[1024];
+    int num_edges;
+
+    if (path == NULL || out == NULL) {
+        fprintf(stderr, "mesh_load: invalid argument\n");
+        return -1;
+    }
+
+    mesh_reset(out);
+    fp = fopen(path, "r");
+    if (fp == NULL) {
+        perror(path);
+        return -1;
+    }
+
+    if (next_data_line(fp, line, sizeof(line)) != 0) {
+        fprintf(stderr, "Failed to read OFF header from %s\n", path);
+        fclose(fp);
+        return -1;
+    }
+    if (strncmp(line, "OFF", 3) != 0) {
+        fprintf(stderr, "Invalid OFF magic in %s\n", path);
+        fclose(fp);
+        return -1;
+    }
+
+    /* handle both "OFF\nnV nF nE" and compact "OFFnV nF nE" on one line */
+    const char *count_src = (line[3] != '\0' && line[3] != '\n' && line[3] != '\r')
+        ? line + 3
+        : NULL;
+    if (count_src == NULL) {
+        if (next_data_line(fp, line, sizeof(line)) != 0) {
+            fprintf(stderr, "Invalid OFF counts in %s\n", path);
+            fclose(fp);
+            mesh_reset(out);
+            return -1;
+        }
+        count_src = line;
+    }
+    if (sscanf(count_src, "%d %d %d", &out->num_vertices, &out->num_faces, &num_edges) != 3 ||
+        out->num_vertices <= 0 || out->num_faces <= 0) {
+        fprintf(stderr, "Invalid OFF counts in %s\n", path);
+        fclose(fp);
+        mesh_reset(out);
+        return -1;
+    }
+    (void)num_edges;
+
+    out->vertices = (Vec3 *)malloc((size_t)out->num_vertices * sizeof(Vec3));
+    out->faces = (Face *)malloc((size_t)out->num_faces * sizeof(Face));
+    if (out->vertices == NULL || out->faces == NULL) {
+        fprintf(stderr, "Out of memory while loading %s\n", path);
+        fclose(fp);
+        mesh_free(out);
+        return -1;
+    }
+
+    for (int i = 0; i < out->num_vertices; ++i) {
+        if (next_data_line(fp, line, sizeof(line)) != 0 ||
+            sscanf(line, "%f %f %f",
+                   &out->vertices[i].x, &out->vertices[i].y, &out->vertices[i].z) != 3) {
+            fprintf(stderr, "Invalid vertex line %d in %s\n", i, path);
+            fclose(fp);
+            mesh_free(out);
+            return -1;
+        }
+        if (i == 0) {
+            out->bbox_min = out->vertices[i];
+            out->bbox_max = out->vertices[i];
+        } else {
+            Vec3 v = out->vertices[i];
+            if (v.x < out->bbox_min.x) {
+                out->bbox_min.x = v.x;
+            }
+            if (v.y < out->bbox_min.y) {
+                out->bbox_min.y = v.y;
+            }
+            if (v.z < out->bbox_min.z) {
+                out->bbox_min.z = v.z;
+            }
+            if (v.x > out->bbox_max.x) {
+                out->bbox_max.x = v.x;
+            }
+            if (v.y > out->bbox_max.y) {
+                out->bbox_max.y = v.y;
+            }
+            if (v.z > out->bbox_max.z) {
+                out->bbox_max.z = v.z;
+            }
+        }
+    }
+
+    for (int i = 0; i < out->num_faces; ++i) {
+        int n;
+        if (next_data_line(fp, line, sizeof(line)) != 0 ||
+            sscanf(line, "%d %d %d %d", &n,
+                   &out->faces[i].v[0], &out->faces[i].v[1], &out->faces[i].v[2]) != 4 ||
+            n != 3) {
+            fprintf(stderr, "Invalid face line %d in %s\n", i, path);
+            fclose(fp);
+            mesh_free(out);
+            return -1;
+        }
+        for (int k = 0; k < 3; ++k) {
+            if (out->faces[i].v[k] < 0 || out->faces[i].v[k] >= out->num_vertices) {
+                fprintf(stderr, "Face index out of range at face %d in %s\n", i, path);
+                fclose(fp);
+                mesh_free(out);
+                return -1;
+            }
+        }
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+void mesh_free(Mesh *m)
+{
+    if (m == NULL) {
+        return;
+    }
+    free(m->vertices);
+    free(m->faces);
+    mesh_reset(m);
+}
+
+void mesh_normalize(Mesh *m)
+{
+    float dx;
+    float dy;
+    float dz;
+    float scale;
+
+    if (m == NULL || m->vertices == NULL || m->num_vertices <= 0) {
+        return;
+    }
+
+    dx = m->bbox_max.x - m->bbox_min.x;
+    dy = m->bbox_max.y - m->bbox_min.y;
+    dz = m->bbox_max.z - m->bbox_min.z;
+    scale = dx;
+    if (dy > scale) {
+        scale = dy;
+    }
+    if (dz > scale) {
+        scale = dz;
+    }
+    if (scale <= 0.0f) {
+        scale = 1.0f;
+    }
+
+    for (int i = 0; i < m->num_vertices; ++i) {
+        m->vertices[i].x = (m->vertices[i].x - m->bbox_min.x) / scale;
+        m->vertices[i].y = (m->vertices[i].y - m->bbox_min.y) / scale;
+        m->vertices[i].z = (m->vertices[i].z - m->bbox_min.z) / scale;
+    }
+
+    m->bbox_min = (Vec3){0.0f, 0.0f, 0.0f};
+    m->bbox_max = (Vec3){dx / scale, dy / scale, dz / scale};
+}
+```
+
+### src/common/off_parser.h
+```
+#ifndef OFF_PARSER_H
+#define OFF_PARSER_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    float x;
+    float y;
+    float z;
+} Vec3;
+
+typedef struct {
+    int v[3];
+} Face;
+
+typedef struct {
+    Vec3 *vertices;
+    Face *faces;
+    int num_vertices;
+    int num_faces;
+    Vec3 bbox_min;
+    Vec3 bbox_max;
+} Mesh;
+
+int mesh_load(const char *path, Mesh *out);
+void mesh_free(Mesh *m);
+void mesh_normalize(Mesh *m);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+```
+
+### src/common/sat.c
+```
+#include "sat.h"
+
+#include <math.h>
+
+static Vec3 vsub(Vec3 a, Vec3 b)
+{
+    return (Vec3){a.x - b.x, a.y - b.y, a.z - b.z};
+}
+
+static Vec3 vcross(Vec3 a, Vec3 b)
+{
+    return (Vec3){
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x
+    };
+}
+
+static float vdot(Vec3 a, Vec3 b)
+{
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+static int axis_overlap(const Vec3 *verts, Vec3 axis, float half)
+{
+    float len2;
+    float min_p;
+    float max_p;
+    float p1;
+    float p2;
+    float r;
+
+    len2 = axis.x * axis.x + axis.y * axis.y + axis.z * axis.z;
+    if (len2 <= 1e-12f) {
+        return 1;
+    }
+
+    min_p = vdot(verts[0], axis);
+    max_p = min_p;
+    p1 = vdot(verts[1], axis);
+    p2 = vdot(verts[2], axis);
+
+    if (p1 < min_p) {
+        min_p = p1;
+    }
+    if (p1 > max_p) {
+        max_p = p1;
+    }
+    if (p2 < min_p) {
+        min_p = p2;
+    }
+    if (p2 > max_p) {
+        max_p = p2;
+    }
+
+    r = half * (fabsf(axis.x) + fabsf(axis.y) + fabsf(axis.z));
+    return !(min_p > r || max_p < -r);
+}
+
+static int axis_aligned_overlap(const Vec3 *verts, float half, int axis)
+{
+    float min_v;
+    float max_v;
+    float a;
+    float b;
+
+    if (axis == 0) {
+        min_v = verts[0].x;
+        max_v = verts[0].x;
+        a = verts[1].x;
+        b = verts[2].x;
+    } else if (axis == 1) {
+        min_v = verts[0].y;
+        max_v = verts[0].y;
+        a = verts[1].y;
+        b = verts[2].y;
+    } else {
+        min_v = verts[0].z;
+        max_v = verts[0].z;
+        a = verts[1].z;
+        b = verts[2].z;
+    }
+
+    if (a < min_v) {
+        min_v = a;
+    }
+    if (a > max_v) {
+        max_v = a;
+    }
+    if (b < min_v) {
+        min_v = b;
+    }
+    if (b > max_v) {
+        max_v = b;
+    }
+
+    return !(min_v > half || max_v < -half);
+}
+
+int sat_triangle_aabb(const Triangle *tri, Vec3 center, float half)
+{
+    Vec3 v[3];
+    Vec3 e[3];
+    Vec3 axes[3] = {
+        {1.0f, 0.0f, 0.0f},
+        {0.0f, 1.0f, 0.0f},
+        {0.0f, 0.0f, 1.0f}
+    };
+    Vec3 normal;
+
+    v[0] = vsub(tri->v[0], center);
+    v[1] = vsub(tri->v[1], center);
+    v[2] = vsub(tri->v[2], center);
+
+    if (!axis_aligned_overlap(v, half, 0) ||
+        !axis_aligned_overlap(v, half, 1) ||
+        !axis_aligned_overlap(v, half, 2)) {
+        return 0;
+    }
+
+    e[0] = vsub(v[1], v[0]);
+    e[1] = vsub(v[2], v[1]);
+    e[2] = vsub(v[0], v[2]);
+
+    normal = vcross(e[0], e[1]);
+    if (!axis_overlap(v, normal, half)) {
+        return 0;
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            Vec3 axis = vcross(e[i], axes[j]);
+            if (!axis_overlap(v, axis, half)) {
+                return 0;
+            }
+        }
+    }
+
+    return 1;
+}
+```
+
+### src/common/sat.h
+```
+#ifndef SAT_H
+#define SAT_H
+
+#include "off_parser.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    Vec3 v[3];
+} Triangle;
+
+int sat_triangle_aabb(const Triangle *tri, Vec3 center, float half);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+```
+
+### src/common/test_sat.c
+```
+#include "sat.h"
+
+#include <stdio.h>
+
+typedef struct {
+    const char *name;
+    Triangle tri;
+    Vec3 center;
+    float half;
+    int expected;
+} SatCase;
+
+int main(void)
+{
+    SatCase cases[] = {
+        {
+            "inside",
+            {{{0.45f, 0.45f, 0.50f}, {0.55f, 0.45f, 0.50f}, {0.50f, 0.55f, 0.50f}}},
+            {0.50f, 0.50f, 0.50f}, 0.10f, 1
+        },
+        {
+            "outside",
+            {{{1.20f, 1.20f, 1.20f}, {1.30f, 1.20f, 1.20f}, {1.20f, 1.30f, 1.20f}}},
+            {0.50f, 0.50f, 0.50f}, 0.10f, 0
+        },
+        {
+            "edge_cross",
+            {{{0.39f, 0.50f, 0.50f}, {0.61f, 0.50f, 0.50f}, {0.50f, 0.61f, 0.50f}}},
+            {0.50f, 0.50f, 0.50f}, 0.10f, 1
+        },
+        {
+            "axis_aligned",
+            {{{0.40f, 0.40f, 0.50f}, {0.60f, 0.40f, 0.50f}, {0.40f, 0.60f, 0.50f}}},
+            {0.50f, 0.50f, 0.50f}, 0.10f, 1
+        },
+        {
+            "near_miss",
+            {{{0.61f, 0.61f, 0.50f}, {0.70f, 0.61f, 0.50f}, {0.61f, 0.70f, 0.50f}}},
+            {0.50f, 0.50f, 0.50f}, 0.10f, 0
+        }
+    };
+    int failures = 0;
+
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        int got = sat_triangle_aabb(&cases[i].tri, cases[i].center, cases[i].half);
+        if (got != cases[i].expected) {
+            fprintf(stderr, "SAT test failed: %s expected=%d got=%d\n",
+                    cases[i].name, cases[i].expected, got);
+            ++failures;
+        }
+    }
+
+    if (failures != 0) {
+        return 1;
+    }
+    puts("SAT tests passed");
+    return 0;
+}
+```
+
+### src/common/timer.c
+```
+#include "timer.h"
+
+#include <stdio.h>
+
+void timer_start(Timer *t)
+{
+    if (clock_gettime(CLOCK_MONOTONIC, t) != 0) {
+        perror("clock_gettime");
+    }
+}
+
+double timer_stop_ms(const Timer *t)
+{
+    struct timespec t2;
+    double sec;
+    double nsec;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &t2) != 0) {
+        perror("clock_gettime");
+        return 0.0;
+    }
+
+    sec = (double)(t2.tv_sec - t->tv_sec) * 1e3;
+    nsec = (double)(t2.tv_nsec - t->tv_nsec) / 1e6;
+    return sec + nsec;
+}
+```
+
+### src/common/timer.h
+```
+#ifndef TIMER_H
+#define TIMER_H
+
+#include <time.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct timespec Timer;
+
+void timer_start(Timer *t);
+double timer_stop_ms(const Timer *t);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+```
+
+### src/common/verify.c
+```
+#include <stdio.h>
+#include <stdlib.h>
+
+static long file_size(FILE *fp)
+{
+    long size;
+
+    if (fseek(fp, 0L, SEEK_END) != 0) {
+        return -1L;
+    }
+    size = ftell(fp);
+    if (size < 0) {
+        return -1L;
+    }
+    if (fseek(fp, 0L, SEEK_SET) != 0) {
+        return -1L;
+    }
+    return size;
+}
+
+int main(int argc, char **argv)
+{
+    FILE *fa;
+    FILE *fb;
+    long size_a;
+    long size_b;
+    int mismatches = 0;
+    const int max_print = 16;
+
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s <grid_a> <grid_b>\n", argv[0]);
+        return 1;
+    }
+
+    fa = fopen(argv[1], "rb");
+    if (fa == NULL) {
+        perror(argv[1]);
+        return 1;
+    }
+    fb = fopen(argv[2], "rb");
+    if (fb == NULL) {
+        perror(argv[2]);
+        fclose(fa);
+        return 1;
+    }
+
+    size_a = file_size(fa);
+    size_b = file_size(fb);
+    if (size_a < 0 || size_b < 0) {
+        fprintf(stderr, "Failed to stat input files\n");
+        fclose(fa);
+        fclose(fb);
+        return 1;
+    }
+    if (size_a != size_b) {
+        fprintf(stderr, "Size mismatch: %s=%ld bytes, %s=%ld bytes\n",
+                argv[1], size_a, argv[2], size_b);
+        fclose(fa);
+        fclose(fb);
+        return 1;
+    }
+
+    for (long i = 0; i < size_a; ++i) {
+        int a = fgetc(fa);
+        int b = fgetc(fb);
+        if (a == EOF || b == EOF) {
+            fprintf(stderr, "Unexpected EOF while comparing\n");
+            fclose(fa);
+            fclose(fb);
+            return 1;
+        }
+        if (a != b) {
+            if (mismatches < max_print) {
+                fprintf(stderr, "Mismatch at byte %ld: %d != %d\n", i, a, b);
+            }
+            ++mismatches;
+        }
+    }
+
+    fclose(fa);
+    fclose(fb);
+
+    if (mismatches != 0) {
+        fprintf(stderr, "Found %d mismatches\n", mismatches);
+        return 1;
+    }
+
+    puts("Voxel grids are identical");
+    return 0;
+}
+```
+
+### src/common/voxel_grid.c
+```
+#include "voxel_grid.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int voxel_grid_alloc(VoxelGrid *g, int res)
+{
+    size_t bytes;
+
+    if (g == NULL || res <= 0) {
+        return -1;
+    }
+    bytes = (size_t)res * (size_t)res * (size_t)res;
+    g->data = (uint8_t *)calloc(bytes, sizeof(uint8_t));
+    if (g->data == NULL) {
+        fprintf(stderr, "Failed to allocate voxel grid for res=%d\n", res);
+        g->res = 0;
+        return -1;
+    }
+    g->res = res;
+    return 0;
+}
+
+void voxel_grid_free(VoxelGrid *g)
+{
+    if (g == NULL) {
+        return;
+    }
+    free(g->data);
+    g->data = NULL;
+    g->res = 0;
+}
+
+void voxel_grid_clear(VoxelGrid *g)
+{
+    size_t bytes;
+
+    if (g == NULL || g->data == NULL || g->res <= 0) {
+        return;
+    }
+    bytes = (size_t)g->res * (size_t)g->res * (size_t)g->res;
+    memset(g->data, 0, bytes);
+}
+
+int voxel_grid_save(const VoxelGrid *g, const char *path)
+{
+    FILE *fp;
+    size_t bytes;
+
+    if (g == NULL || g->data == NULL || path == NULL) {
+        return -1;
+    }
+    fp = fopen(path, "wb");
+    if (fp == NULL) {
+        perror(path);
+        return -1;
+    }
+    bytes = (size_t)g->res * (size_t)g->res * (size_t)g->res;
+    if (fwrite(g->data, 1, bytes, fp) != bytes) {
+        fprintf(stderr, "Failed to write voxel grid to %s\n", path);
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    return 0;
+}
+
+int voxel_grid_load(VoxelGrid *g, const char *path)
+{
+    FILE *fp;
+    long file_size;
+    size_t expected;
+
+    if (g == NULL || g->data == NULL || path == NULL || g->res <= 0) {
+        return -1;
+    }
+
+    fp = fopen(path, "rb");
+    if (fp == NULL) {
+        perror(path);
+        return -1;
+    }
+    if (fseek(fp, 0L, SEEK_END) != 0) {
+        fprintf(stderr, "Failed to seek %s\n", path);
+        fclose(fp);
+        return -1;
+    }
+    file_size = ftell(fp);
+    if (file_size < 0) {
+        fprintf(stderr, "Failed to size %s\n", path);
+        fclose(fp);
+        return -1;
+    }
+    if (fseek(fp, 0L, SEEK_SET) != 0) {
+        fprintf(stderr, "Failed to rewind %s\n", path);
+        fclose(fp);
+        return -1;
+    }
+
+    expected = (size_t)g->res * (size_t)g->res * (size_t)g->res;
+    if ((size_t)file_size != expected) {
+        fprintf(stderr, "Voxel grid size mismatch for %s: got %ld expected %zu\n",
+                path, file_size, expected);
+        fclose(fp);
+        return -1;
+    }
+    if (fread(g->data, 1, expected, fp) != expected) {
+        fprintf(stderr, "Failed to read voxel grid from %s\n", path);
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    return 0;
+}
+```
+
+### src/common/voxel_grid.h
+```
+#ifndef VOXEL_GRID_H
+#define VOXEL_GRID_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    uint8_t *data;
+    int res;
+} VoxelGrid;
+
+int voxel_grid_alloc(VoxelGrid *g, int res);
+void voxel_grid_free(VoxelGrid *g);
+void voxel_grid_clear(VoxelGrid *g);
+int voxel_grid_save(const VoxelGrid *g, const char *path);
+int voxel_grid_load(VoxelGrid *g, const char *path);
+
+static inline int vg_idx(int x, int y, int z, int res)
+{
+    return x + y * res + z * res * res;
+}
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+```
+
+### src/common/voxelize.c
+```
+#include "voxelize.h"
+
+#include <errno.h>
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+#include "config.h"
+
+static int clampi(int v, int lo, int hi)
+{
+    if (v < lo) {
+        return lo;
+    }
+    if (v > hi) {
+        return hi;
+    }
+    return v;
+}
+
+int path_exists(const char *path)
+{
+    struct stat st;
+    return path != NULL && stat(path, &st) == 0;
+}
+
+int ensure_directory(const char *path)
+{
+    if (path == NULL) {
+        return -1;
+    }
+    if (mkdir(path, 0777) == 0 || errno == EEXIST) {
+        return 0;
+    }
+    perror(path);
+    return -1;
+}
+
+int append_csv_row(const char *csv_path, const char *impl, const char *config,
+                   const char *mesh_file, int num_triangles, int grid_res,
+                   double elapsed_ms)
+{
+    FILE *fp;
+    int need_header;
+
+    if (csv_path == NULL || impl == NULL || config == NULL || mesh_file == NULL) {
+        return -1;
+    }
+
+    if (ensure_directory("results") != 0) {
+        return -1;
+    }
+
+    need_header = !path_exists(csv_path);
+    fp = fopen(csv_path, "a");
+    if (fp == NULL) {
+        perror(csv_path);
+        return -1;
+    }
+    if (need_header && fputs(CSV_COL_HEADER, fp) == EOF) {
+        fprintf(stderr, "Failed to write CSV header to %s\n", csv_path);
+        fclose(fp);
+        return -1;
+    }
+    if (fprintf(fp, "%s,%s,%s,%d,%d,%.6f\n",
+                impl, config, mesh_file, num_triangles, grid_res, elapsed_ms) < 0) {
+        fprintf(stderr, "Failed to append CSV row to %s\n", csv_path);
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    return 0;
+}
+
+Triangle triangle_from_face(const Mesh *mesh, int face_idx)
+{
+    Face f = mesh->faces[face_idx];
+    Triangle tri;
+
+    tri.v[0] = mesh->vertices[f.v[0]];
+    tri.v[1] = mesh->vertices[f.v[1]];
+    tri.v[2] = mesh->vertices[f.v[2]];
+    return tri;
+}
+
+VoxelBounds triangle_voxel_bounds(const Triangle *tri, int res)
+{
+    float min_x = tri->v[0].x;
+    float min_y = tri->v[0].y;
+    float min_z = tri->v[0].z;
+    float max_x = tri->v[0].x;
+    float max_y = tri->v[0].y;
+    float max_z = tri->v[0].z;
+
+    for (int i = 1; i < 3; ++i) {
+        if (tri->v[i].x < min_x) {
+            min_x = tri->v[i].x;
+        }
+        if (tri->v[i].y < min_y) {
+            min_y = tri->v[i].y;
+        }
+        if (tri->v[i].z < min_z) {
+            min_z = tri->v[i].z;
+        }
+        if (tri->v[i].x > max_x) {
+            max_x = tri->v[i].x;
+        }
+        if (tri->v[i].y > max_y) {
+            max_y = tri->v[i].y;
+        }
+        if (tri->v[i].z > max_z) {
+            max_z = tri->v[i].z;
+        }
+    }
+
+    return (VoxelBounds){
+        clampi((int)floorf(min_x * res), 0, res - 1),
+        clampi((int)floorf(min_y * res), 0, res - 1),
+        clampi((int)floorf(min_z * res), 0, res - 1),
+        clampi((int)floorf(max_x * res), 0, res - 1),
+        clampi((int)floorf(max_y * res), 0, res - 1),
+        clampi((int)floorf(max_z * res), 0, res - 1)
+    };
+}
+```
+
+### src/common/voxelize.h
+```
+#ifndef VOXELIZE_H
+#define VOXELIZE_H
+
+#include "off_parser.h"
+#include "sat.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    int min_x;
+    int min_y;
+    int min_z;
+    int max_x;
+    int max_y;
+    int max_z;
+} VoxelBounds;
+
+int path_exists(const char *path);
+int ensure_directory(const char *path);
+int append_csv_row(const char *csv_path, const char *impl, const char *config,
+                   const char *mesh_file, int num_triangles, int grid_res,
+                   double elapsed_ms);
+Triangle triangle_from_face(const Mesh *mesh, int face_idx);
+VoxelBounds triangle_voxel_bounds(const Triangle *tri, int res);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+```
+
+### src/cuda/main.cu
+```
+#include <cuda_runtime.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "../common/config.h"
+#include "../common/off_parser.h"
+#include "../common/voxel_grid.h"
+#include "../common/voxelize.h"
+
+__global__ void voxelize_kernel(const float3 *__restrict__ verts,
+                                const int3 *__restrict__ faces,
+                                const VoxelBounds *__restrict__ face_bounds,
+                                int n_faces,
+                                unsigned int *__restrict__ grid,
+                                int res);
+
+typedef struct {
+    const char *input;
+    const char *output;
+    const char *csv;
+    int res;
+    int block_size;
+} Options;
+
+static int parse_args(int argc, char **argv, Options *opt)
+{
+    opt->input = NULL;
+    opt->output = NULL;
+    opt->csv = NULL;
+    opt->res = DEFAULT_GRID_RES;
+    opt->block_size = DEFAULT_BLOCK_SIZE;
+
+    for (int i = 1; i < argc; i += 2) {
+        if (i + 1 >= argc) {
+            return -1;
+        }
+        if (strcmp(argv[i], "-i") == 0) {
+            opt->input = argv[i + 1];
+        } else if (strcmp(argv[i], "-o") == 0) {
+            opt->output = argv[i + 1];
+        } else if (strcmp(argv[i], "-c") == 0) {
+            opt->csv = argv[i + 1];
+        } else if (strcmp(argv[i], "-r") == 0) {
+            opt->res = atoi(argv[i + 1]);
+        } else if (strcmp(argv[i], "-b") == 0) {
+            opt->block_size = atoi(argv[i + 1]);
+        } else {
+            return -1;
+        }
+    }
+
+    return opt->input != NULL && opt->output != NULL && opt->csv != NULL &&
+                   path_exists(opt->input) &&
+                   opt->res >= MIN_GRID_RES && opt->res <= MAX_GRID_RES &&
+                   opt->block_size > 0
+               ? 0
+               : -1;
+}
+
+static int check_cuda(cudaError_t err, const char *what)
+{
+    if (err != cudaSuccess) {
+        fprintf(stderr, "%s failed: %s\n", what, cudaGetErrorString(err));
+        return -1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    Mesh mesh;
+    VoxelGrid grid;
+    Options opt;
+    float3 *verts_h = NULL;
+    int3 *faces_h = NULL;
+    VoxelBounds *bounds_h = NULL;
+    float3 *verts_d = NULL;
+    int3 *faces_d = NULL;
+    VoxelBounds *bounds_d = NULL;
+    unsigned int *grid_d = NULL;
+    unsigned int *grid_h32 = NULL;
+    cudaEvent_t start = NULL;
+    cudaEvent_t stop = NULL;
+    float elapsed_ms = 0.0f;
+    char config[32];
+    int total_voxels;
+    int blocks;
+    dim3 blockDim3(8, 8, 8);
+    dim3 gridDim3(1, 1, 1);
+
+    if (parse_args(argc, argv, &opt) != 0) {
+        fprintf(stderr, "Usage: %s -i <mesh.off> -r <res> -o <out.voxel> -b <block_size> -c <results.csv>\n",
+                argv[0]);
+        return 1;
+    }
+    if (ensure_directory("results") != 0) {
+        return 1;
+    }
+    if (mesh_load(opt.input, &mesh) != 0) {
+        return 1;
+    }
+    mesh_normalize(&mesh);
+    if (voxel_grid_alloc(&grid, opt.res) != 0) {
+        mesh_free(&mesh);
+        return 1;
+    }
+
+    verts_h = (float3 *)malloc((size_t)mesh.num_vertices * sizeof(float3));
+    faces_h = (int3 *)malloc((size_t)mesh.num_faces * sizeof(int3));
+    total_voxels = opt.res * opt.res * opt.res;
+    bounds_h = (VoxelBounds *)malloc((size_t)mesh.num_faces * sizeof(VoxelBounds));
+    grid_h32 = (unsigned int *)calloc((size_t)total_voxels, sizeof(unsigned int));
+    if (verts_h == NULL || faces_h == NULL || bounds_h == NULL || grid_h32 == NULL) {
+        fprintf(stderr, "Failed to allocate CUDA host buffers\n");
+        goto fail;
+    }
+
+    for (int i = 0; i < mesh.num_vertices; ++i) {
+        verts_h[i] = make_float3(mesh.vertices[i].x, mesh.vertices[i].y, mesh.vertices[i].z);
+    }
+    for (int i = 0; i < mesh.num_faces; ++i) {
+        Triangle tri;
+
+        faces_h[i] = make_int3(mesh.faces[i].v[0], mesh.faces[i].v[1], mesh.faces[i].v[2]);
+        tri = triangle_from_face(&mesh, i);
+        bounds_h[i] = triangle_voxel_bounds(&tri, opt.res);
+    }
+
+    if (check_cuda(cudaMalloc((void **)&verts_d, (size_t)mesh.num_vertices * sizeof(float3)), "cudaMalloc verts") != 0 ||
+        check_cuda(cudaMalloc((void **)&faces_d, (size_t)mesh.num_faces * sizeof(int3)), "cudaMalloc faces") != 0 ||
+        check_cuda(cudaMalloc((void **)&bounds_d, (size_t)mesh.num_faces * sizeof(VoxelBounds)), "cudaMalloc bounds") != 0 ||
+        check_cuda(cudaMalloc((void **)&grid_d, (size_t)total_voxels * sizeof(unsigned int)), "cudaMalloc grid") != 0 ||
+        check_cuda(cudaMemcpy(verts_d, verts_h, (size_t)mesh.num_vertices * sizeof(float3),
+                              cudaMemcpyHostToDevice), "cudaMemcpy verts") != 0 ||
+        check_cuda(cudaMemcpy(faces_d, faces_h, (size_t)mesh.num_faces * sizeof(int3),
+                              cudaMemcpyHostToDevice), "cudaMemcpy faces") != 0 ||
+        check_cuda(cudaMemcpy(bounds_d, bounds_h, (size_t)mesh.num_faces * sizeof(VoxelBounds),
+                              cudaMemcpyHostToDevice), "cudaMemcpy bounds") != 0 ||
+        check_cuda(cudaMemset(grid_d, 0, (size_t)total_voxels * sizeof(unsigned int)), "cudaMemset grid") != 0 ||
+        check_cuda(cudaEventCreate(&start), "cudaEventCreate start") != 0 ||
+        check_cuda(cudaEventCreate(&stop), "cudaEventCreate stop") != 0) {
+        goto fail;
+    }
+
+    gridDim3 = dim3((opt.res + 7) / 8, (opt.res + 7) / 8, (opt.res + 7) / 8);
+    if (check_cuda(cudaEventRecord(start), "cudaEventRecord start") != 0) {
+        goto fail;
+    }
+    voxelize_kernel<<<gridDim3, blockDim3>>>(verts_d, faces_d, bounds_d, mesh.num_faces, grid_d, opt.res);
+    if (check_cuda(cudaGetLastError(), "voxelize_kernel launch") != 0) {
+        goto fail;
+    }
+    if (check_cuda(cudaEventRecord(stop), "cudaEventRecord stop") != 0 ||
+        check_cuda(cudaEventSynchronize(stop), "cudaEventSynchronize stop") != 0 ||
+        check_cuda(cudaEventElapsedTime(&elapsed_ms, start, stop), "cudaEventElapsedTime") != 0) {
+        goto fail;
+    }
+
+    if (check_cuda(cudaMemcpy(grid_h32, grid_d, (size_t)total_voxels * sizeof(unsigned int),
+                              cudaMemcpyDeviceToHost), "cudaMemcpy grid") != 0) {
+        goto fail;
+    }
+    for (int i = 0; i < total_voxels; ++i) {
+        grid.data[i] = grid_h32[i] != 0U ? 1U : 0U;
+    }
+
+    snprintf(config, sizeof(config), "cuda_%dtpb", opt.block_size);
+    if (voxel_grid_save(&grid, opt.output) != 0 ||
+        append_csv_row(opt.csv, "cuda", config, opt.input,
+                       mesh.num_faces, opt.res, (double)elapsed_ms) != 0) {
+        goto fail;
+    }
+
+    cudaFree(verts_d);
+    cudaFree(faces_d);
+    cudaFree(bounds_d);
+    cudaFree(grid_d);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    free(verts_h);
+    free(faces_h);
+    free(bounds_h);
+    free(grid_h32);
+    voxel_grid_free(&grid);
+    mesh_free(&mesh);
+    return 0;
+
+fail:
+    cudaFree(verts_d);
+    cudaFree(faces_d);
+    cudaFree(bounds_d);
+    cudaFree(grid_d);
+    if (start != NULL) {
+        cudaEventDestroy(start);
+    }
+    if (stop != NULL) {
+        cudaEventDestroy(stop);
+    }
+    free(verts_h);
+    free(faces_h);
+    free(bounds_h);
+    free(grid_h32);
+    voxel_grid_free(&grid);
+    mesh_free(&mesh);
+    return 1;
+}
+```
+
+### src/cuda/voxelize_kernel.cu
+```
+#include <cuda_runtime.h>
+#include <math.h>
+#include <stdint.h>
+
+#include "../common/voxelize.h"
+
+static __device__ float3 fsub(float3 a, float3 b)
+{
+    return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+static __device__ float3 fcross(float3 a, float3 b)
+{
+    return make_float3(a.y * b.z - a.z * b.y,
+                       a.z * b.x - a.x * b.z,
+                       a.x * b.y - a.y * b.x);
+}
+
+static __device__ float fdot(float3 a, float3 b)
+{
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+static __device__ int axis_overlap(const float3 verts[3], float3 axis, float half)
+{
+    float len2 = axis.x * axis.x + axis.y * axis.y + axis.z * axis.z;
+    float min_p;
+    float max_p;
+    float p1;
+    float p2;
+    float r;
+
+    if (len2 <= 1e-12f) {
+        return 1;
+    }
+    min_p = fdot(verts[0], axis);
+    max_p = min_p;
+    p1 = fdot(verts[1], axis);
+    p2 = fdot(verts[2], axis);
+    if (p1 < min_p) {
+        min_p = p1;
+    }
+    if (p1 > max_p) {
+        max_p = p1;
+    }
+    if (p2 < min_p) {
+        min_p = p2;
+    }
+    if (p2 > max_p) {
+        max_p = p2;
+    }
+    r = half * (fabsf(axis.x) + fabsf(axis.y) + fabsf(axis.z));
+    return !(min_p > r || max_p < -r);
+}
+
+static __device__ int axis_aligned_overlap(const float3 verts[3], float half, int axis)
+{
+    float min_v;
+    float max_v;
+    float a;
+    float b;
+
+    if (axis == 0) {
+        min_v = verts[0].x;
+        max_v = verts[0].x;
+        a = verts[1].x;
+        b = verts[2].x;
+    } else if (axis == 1) {
+        min_v = verts[0].y;
+        max_v = verts[0].y;
+        a = verts[1].y;
+        b = verts[2].y;
+    } else {
+        min_v = verts[0].z;
+        max_v = verts[0].z;
+        a = verts[1].z;
+        b = verts[2].z;
+    }
+
+    if (a < min_v) {
+        min_v = a;
+    }
+    if (a > max_v) {
+        max_v = a;
+    }
+    if (b < min_v) {
+        min_v = b;
+    }
+    if (b > max_v) {
+        max_v = b;
+    }
+
+    return !(min_v > half || max_v < -half);
+}
+
+static __device__ int sat_device(float3 v0, float3 v1, float3 v2, float3 center, float half)
+{
+    float3 v[3];
+    float3 e[3];
+    float3 basis[3] = {
+        make_float3(1.0f, 0.0f, 0.0f),
+        make_float3(0.0f, 1.0f, 0.0f),
+        make_float3(0.0f, 0.0f, 1.0f)
+    };
+    float3 normal;
+
+    v[0] = fsub(v0, center);
+    v[1] = fsub(v1, center);
+    v[2] = fsub(v2, center);
+
+    if (!axis_aligned_overlap(v, half, 0) ||
+        !axis_aligned_overlap(v, half, 1) ||
+        !axis_aligned_overlap(v, half, 2)) {
+        return 0;
+    }
+
+    e[0] = fsub(v[1], v[0]);
+    e[1] = fsub(v[2], v[1]);
+    e[2] = fsub(v[0], v[2]);
+    normal = fcross(e[0], e[1]);
+    if (!axis_overlap(v, normal, half)) {
+        return 0;
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            if (!axis_overlap(v, fcross(e[i], basis[j]), half)) {
+                return 0;
+            }
+        }
+    }
+
+    return 1;
+}
+
+#define TILE_DIM 8
+#define CHUNK_SIZE 256
+
+__global__ void voxelize_kernel(const float3 *__restrict__ verts,
+                                const int3 *__restrict__ faces,
+                                const VoxelBounds *__restrict__ face_bounds,
+                                int n_faces,
+                                unsigned int *__restrict__ grid,
+                                int res)
+{
+    __shared__ float3 s_v0[CHUNK_SIZE];
+    __shared__ float3 s_v1[CHUNK_SIZE];
+    __shared__ float3 s_v2[CHUNK_SIZE];
+    __shared__ VoxelBounds s_bounds[CHUNK_SIZE];
+    __shared__ unsigned int s_grid[TILE_DIM * TILE_DIM * TILE_DIM];
+
+    int tid = threadIdx.z * TILE_DIM * TILE_DIM + threadIdx.y * TILE_DIM + threadIdx.x;
+    s_grid[tid] = 0;
+
+    int block_vx = blockIdx.x * TILE_DIM;
+    int block_vy = blockIdx.y * TILE_DIM;
+    int block_vz = blockIdx.z * TILE_DIM;
+    
+    int vx = block_vx + threadIdx.x;
+    int vy = block_vy + threadIdx.y;
+    int vz = block_vz + threadIdx.z;
+    float half = 0.5f / (float)res;
+
+    for (int i = 0; i < n_faces; i += CHUNK_SIZE) {
+        int left = n_faces - i;
+        int chunk = left < CHUNK_SIZE ? left : CHUNK_SIZE;
+        
+        if (tid < chunk) {
+            int f_idx = i + tid;
+            int3 f = faces[f_idx];
+            s_v0[tid] = verts[f.x];
+            s_v1[tid] = verts[f.y];
+            s_v2[tid] = verts[f.z];
+            s_bounds[tid] = face_bounds[f_idx];
+        }
+        __syncthreads();
+        
+        for (int t = 0; t < chunk; ++t) {
+            VoxelBounds b = s_bounds[t];
+            if (b.max_x >= block_vx && b.min_x < block_vx + TILE_DIM &&
+                b.max_y >= block_vy && b.min_y < block_vy + TILE_DIM &&
+                b.max_z >= block_vz && b.min_z < block_vz + TILE_DIM) 
+            {
+                if (vx >= b.min_x && vx <= b.max_x &&
+                    vy >= b.min_y && vy <= b.max_y &&
+                    vz >= b.min_z && vz <= b.max_z) 
+                {
+                    float3 center = make_float3(((float)vx + 0.5f) / (float)res,
+                                                ((float)vy + 0.5f) / (float)res,
+                                                ((float)vz + 0.5f) / (float)res);
+                    if (sat_device(s_v0[t], s_v1[t], s_v2[t], center, half)) {
+                        s_grid[tid] = 1;
+                    }
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    if (s_grid[tid] && vx < res && vy < res && vz < res) {
+        int idx = vx + vy * res + vz * res * res;
+        atomicOr(&grid[idx], 1u);
+    }
+}
+```
+
+### src/mpi/main.c
+```
+#include <mpi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "../common/config.h"
+#include "../common/off_parser.h"
+#include "../common/sat.h"
+#include "../common/timer.h"
+#include "../common/voxel_grid.h"
+#include "../common/voxelize.h"
+
+#define MPI_CHECK(call)                                                         \
+    do {                                                                        \
+        int mpi_status__ = (call);                                              \
+        if (mpi_status__ != MPI_SUCCESS) {                                      \
+            fprintf(stderr, "MPI call failed: %s\n", #call);                    \
+            MPI_Abort(MPI_COMM_WORLD, mpi_status__);                            \
+        }                                                                       \
+    } while (0)
+
+_Static_assert(sizeof(Vec3) == 3 * sizeof(float), "Vec3 must be tightly packed for MPI_Bcast");
+_Static_assert(sizeof(Face) == 3 * sizeof(int),   "Face must be tightly packed for MPI_Bcast");
+
+typedef struct {
+    const char *input;
+    const char *output;
+    const char *csv;
+    int res;
+} Options;
+
+static int parse_args(int argc, char **argv, Options *opt)
+{
+    opt->input = NULL;
+    opt->output = NULL;
+    opt->csv = NULL;
+    opt->res = DEFAULT_GRID_RES;
+
+    for (int i = 1; i < argc; i += 2) {
+        if (i + 1 >= argc) {
+            return -1;
+        }
+        if (strcmp(argv[i], "-i") == 0) {
+            opt->input = argv[i + 1];
+        } else if (strcmp(argv[i], "-o") == 0) {
+            opt->output = argv[i + 1];
+        } else if (strcmp(argv[i], "-c") == 0) {
+            opt->csv = argv[i + 1];
+        } else if (strcmp(argv[i], "-r") == 0) {
+            opt->res = atoi(argv[i + 1]);
+        } else {
+            return -1;
+        }
+    }
+
+    return opt->input != NULL && opt->output != NULL && opt->csv != NULL &&
+                   opt->res >= MIN_GRID_RES && opt->res <= MAX_GRID_RES
+               ? 0
+               : -1;
+}
+
+static void slab_for_rank(int res, int size, int rank, int *z_start, int *depth)
+{
+    int base = res / size;
+    int rem = res % size;
+
+    *depth = base + (rank < rem ? 1 : 0);
+    *z_start = rank * base + (rank < rem ? rank : rem);
+}
+
+int main(int argc, char **argv)
+{
+    Options opt;
+    Mesh mesh = {0};
+    VoxelGrid grid = {0};
+    Timer timer;
+    double elapsed_ms = 0.0;
+    int rank;
+    int size;
+    int counts[3];
+    float bbox[6];
+    int z_start;
+    int slab_depth;
+    int z_end;
+    uint8_t *local_slab = NULL;
+    char config[32];
+
+    MPI_CHECK(MPI_Init(&argc, &argv));
+    MPI_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
+    MPI_CHECK(MPI_Comm_size(MPI_COMM_WORLD, &size));
+
+    if (parse_args(argc, argv, &opt) != 0) {
+        if (rank == 0) {
+            fprintf(stderr, "Usage: %s -i <mesh.off> -r <res> -o <out.voxel> -c <results.csv>\n",
+                    argv[0]);
+        }
+        MPI_CHECK(MPI_Finalize());
+        return 1;
+    }
+
+    {
+        int load_ok = 0;
+        if (rank == 0) {
+            load_ok = (ensure_directory("results") == 0 && mesh_load(opt.input, &mesh) == 0);
+            if (load_ok) {
+                mesh_normalize(&mesh);
+            }
+        }
+        MPI_CHECK(MPI_Bcast(&load_ok, 1, MPI_INT, 0, MPI_COMM_WORLD));
+        if (!load_ok) {
+            mesh_free(&mesh);
+            MPI_CHECK(MPI_Finalize());
+            return 1;
+        }
+    }
+
+    if (rank == 0) {
+        counts[0] = mesh.num_vertices;
+        counts[1] = mesh.num_faces;
+        counts[2] = opt.res;
+        bbox[0] = mesh.bbox_min.x;
+        bbox[1] = mesh.bbox_min.y;
+        bbox[2] = mesh.bbox_min.z;
+        bbox[3] = mesh.bbox_max.x;
+        bbox[4] = mesh.bbox_max.y;
+        bbox[5] = mesh.bbox_max.z;
+    }
+
+    MPI_CHECK(MPI_Bcast(counts, 3, MPI_INT, 0, MPI_COMM_WORLD));
+    opt.res = counts[2];
+    if (rank != 0) {
+        mesh.num_vertices = counts[0];
+        mesh.num_faces = counts[1];
+        mesh.vertices = (Vec3 *)malloc((size_t)mesh.num_vertices * sizeof(Vec3));
+        mesh.faces = (Face *)malloc((size_t)mesh.num_faces * sizeof(Face));
+        if (mesh.vertices == NULL || mesh.faces == NULL) {
+            fprintf(stderr, "Rank %d failed to allocate mesh buffers\n", rank);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+    }
+
+    MPI_CHECK(MPI_Bcast((float *)mesh.vertices, mesh.num_vertices * 3, MPI_FLOAT, 0,
+                        MPI_COMM_WORLD));
+    MPI_CHECK(MPI_Bcast((int *)mesh.faces, mesh.num_faces * 3, MPI_INT, 0,
+                        MPI_COMM_WORLD));
+    MPI_CHECK(MPI_Bcast(bbox, 6, MPI_FLOAT, 0, MPI_COMM_WORLD));
+    mesh.bbox_min = (Vec3){bbox[0], bbox[1], bbox[2]};
+    mesh.bbox_max = (Vec3){bbox[3], bbox[4], bbox[5]};
+
+    slab_for_rank(opt.res, size, rank, &z_start, &slab_depth);
+    z_end = z_start + slab_depth;
+    local_slab = (uint8_t *)calloc((size_t)opt.res * (size_t)opt.res * (size_t)slab_depth,
+                                   sizeof(uint8_t));
+    if (local_slab == NULL) {
+        fprintf(stderr, "Rank %d failed to allocate slab\n", rank);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    MPI_CHECK(MPI_Barrier(MPI_COMM_WORLD));
+    if (rank == 0) {
+        timer_start(&timer);
+    }
+
+    for (int f = 0; f < mesh.num_faces; ++f) {
+        Triangle tri = triangle_from_face(&mesh, f);
+        VoxelBounds bounds = triangle_voxel_bounds(&tri, opt.res);
+        float half = 0.5f / (float)opt.res;
+        int min_z = bounds.min_z < z_start ? z_start : bounds.min_z;
+        int max_z = bounds.max_z >= z_end ? z_end - 1 : bounds.max_z;
+
+        if (min_z > max_z) {
+            continue;
+        }
+        for (int vx = bounds.min_x; vx <= bounds.max_x; ++vx) {
+            for (int vy = bounds.min_y; vy <= bounds.max_y; ++vy) {
+                for (int vz = min_z; vz <= max_z; ++vz) {
+                    Vec3 center = {
+                        ((float)vx + 0.5f) / (float)opt.res,
+                        ((float)vy + 0.5f) / (float)opt.res,
+                        ((float)vz + 0.5f) / (float)opt.res
+                    };
+                    if (sat_triangle_aabb(&tri, center, half)) {
+                        int idx = vx + vy * opt.res + (vz - z_start) * opt.res * opt.res;
+                        local_slab[idx] = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if (rank == 0 && voxel_grid_alloc(&grid, opt.res) != 0) {
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    if (rank == 0) {
+        int *recv_counts = (int *)malloc((size_t)size * sizeof(int));
+        int *recv_displs = (int *)malloc((size_t)size * sizeof(int));
+        int offset = 0;
+        if (recv_counts == NULL || recv_displs == NULL) {
+            fprintf(stderr, "Rank 0 failed to allocate gather metadata\n");
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        for (int r = 0; r < size; ++r) {
+            int start_r;
+            int depth_r;
+            slab_for_rank(opt.res, size, r, &start_r, &depth_r);
+            recv_counts[r] = depth_r * opt.res * opt.res;
+            recv_displs[r] = offset;
+            offset += recv_counts[r];
+        }
+        MPI_CHECK(MPI_Gatherv(local_slab, slab_depth * opt.res * opt.res, MPI_UNSIGNED_CHAR,
+                              grid.data, recv_counts, recv_displs, MPI_UNSIGNED_CHAR,
+                              0, MPI_COMM_WORLD));
+        free(recv_counts);
+        free(recv_displs);
+    } else {
+        MPI_CHECK(MPI_Gatherv(local_slab, slab_depth * opt.res * opt.res, MPI_UNSIGNED_CHAR,
+                              NULL, NULL, NULL, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD));
+    }
+
+    if (rank == 0) {
+        elapsed_ms = timer_stop_ms(&timer);
+    }
+
+    if (rank == 0) {
+        snprintf(config, sizeof(config), "mpi_%dp", size);
+        if (voxel_grid_save(&grid, opt.output) != 0 ||
+            append_csv_row(opt.csv, "mpi", config, opt.input,
+                           mesh.num_faces, opt.res, elapsed_ms) != 0) {
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+    }
+
+    free(local_slab);
+    voxel_grid_free(&grid);
+    mesh_free(&mesh);
+    MPI_CHECK(MPI_Finalize());
+    return 0;
+}
+```
+
+### src/openmp/main.c
+```
+#include <omp.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "../common/config.h"
+#include "../common/off_parser.h"
+#include "../common/sat.h"
+#include "../common/timer.h"
+#include "../common/voxel_grid.h"
+#include "../common/voxelize.h"
+
+typedef struct {
+    const char *input;
+    const char *output;
+    const char *csv;
+    int res;
+    int threads;
+} Options;
+
+static int parse_args(int argc, char **argv, Options *opt)
+{
+    opt->input = NULL;
+    opt->output = NULL;
+    opt->csv = NULL;
+    opt->res = DEFAULT_GRID_RES;
+    opt->threads = DEFAULT_THREADS;
+
+    for (int i = 1; i < argc; i += 2) {
+        if (i + 1 >= argc) {
+            return -1;
+        }
+        if (strcmp(argv[i], "-i") == 0) {
+            opt->input = argv[i + 1];
+        } else if (strcmp(argv[i], "-o") == 0) {
+            opt->output = argv[i + 1];
+        } else if (strcmp(argv[i], "-c") == 0) {
+            opt->csv = argv[i + 1];
+        } else if (strcmp(argv[i], "-r") == 0) {
+            opt->res = atoi(argv[i + 1]);
+        } else if (strcmp(argv[i], "-t") == 0) {
+            opt->threads = atoi(argv[i + 1]);
+        } else {
+            return -1;
+        }
+    }
+
+    return opt->input != NULL && opt->output != NULL && opt->csv != NULL &&
+                   path_exists(opt->input) &&
+                   opt->res >= MIN_GRID_RES && opt->res <= MAX_GRID_RES &&
+                   opt->threads > 0 && opt->threads <= MAX_THREADS
+               ? 0
+               : -1;
+}
+
+int main(int argc, char **argv)
+{
+    Mesh mesh;
+    VoxelGrid grid;
+    Options opt;
+    Timer timer;
+    double elapsed_ms;
+    char config[32];
+    int res;
+
+    if (parse_args(argc, argv, &opt) != 0) {
+        fprintf(stderr, "Usage: %s -i <mesh.off> -r <res> -o <out.voxel> -t <threads> -c <results.csv>\n",
+                argv[0]);
+        return 1;
+    }
+    if (ensure_directory("results") != 0) {
+        return 1;
+    }
+    if (mesh_load(opt.input, &mesh) != 0) {
+        return 1;
+    }
+    mesh_normalize(&mesh);
+    if (voxel_grid_alloc(&grid, opt.res) != 0) {
+        mesh_free(&mesh);
+        return 1;
+    }
+
+    res = grid.res;
+    omp_set_num_threads(opt.threads);
+    timer_start(&timer);
+#pragma omp parallel for schedule(dynamic, 64) default(none) shared(mesh, grid, res)
+    for (int f = 0; f < mesh.num_faces; ++f) {
+        Triangle tri = triangle_from_face(&mesh, f);
+        VoxelBounds bounds = triangle_voxel_bounds(&tri, res);
+        float half = 0.5f / (float)res;
+
+        for (int vx = bounds.min_x; vx <= bounds.max_x; ++vx) {
+            for (int vy = bounds.min_y; vy <= bounds.max_y; ++vy) {
+                for (int vz = bounds.min_z; vz <= bounds.max_z; ++vz) {
+                    Vec3 center = {
+                        ((float)vx + 0.5f) / (float)res,
+                        ((float)vy + 0.5f) / (float)res,
+                        ((float)vz + 0.5f) / (float)res
+                    };
+                    int idx = vg_idx(vx, vy, vz, res);
+                    if (sat_triangle_aabb(&tri, center, half)) {
+                        #pragma omp atomic write
+                        grid.data[idx] = 1;
+                    }
+                }
+            }
+        }
+    }
+    elapsed_ms = timer_stop_ms(&timer);
+
+    snprintf(config, sizeof(config), "omp_%dt", opt.threads);
+    if (voxel_grid_save(&grid, opt.output) != 0 ||
+        append_csv_row(opt.csv, "openmp", config, opt.input,
+                       mesh.num_faces, opt.res, elapsed_ms) != 0) {
+        voxel_grid_free(&grid);
+        mesh_free(&mesh);
+        return 1;
+    }
+
+    voxel_grid_free(&grid);
+    mesh_free(&mesh);
+    return 0;
+}
+```
+
+### src/pthreads/main.c
+```
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "../common/config.h"
+#include "../common/off_parser.h"
+#include "../common/timer.h"
+#include "../common/voxel_grid.h"
+#include "../common/voxelize.h"
+#include "worker.h"
+
+typedef struct {
+    const char *input;
+    const char *output;
+    const char *csv;
+    int res;
+    int threads;
+} Options;
+
+static int parse_args(int argc, char **argv, Options *opt)
+{
+    opt->input = NULL;
+    opt->output = NULL;
+    opt->csv = NULL;
+    opt->res = DEFAULT_GRID_RES;
+    opt->threads = DEFAULT_THREADS;
+
+    for (int i = 1; i < argc; i += 2) {
+        if (i + 1 >= argc) {
+            return -1;
+        }
+        if (strcmp(argv[i], "-i") == 0) {
+            opt->input = argv[i + 1];
+        } else if (strcmp(argv[i], "-o") == 0) {
+            opt->output = argv[i + 1];
+        } else if (strcmp(argv[i], "-c") == 0) {
+            opt->csv = argv[i + 1];
+        } else if (strcmp(argv[i], "-r") == 0) {
+            opt->res = atoi(argv[i + 1]);
+        } else if (strcmp(argv[i], "-t") == 0) {
+            opt->threads = atoi(argv[i + 1]);
+        } else {
+            return -1;
+        }
+    }
+
+    return opt->input != NULL && opt->output != NULL && opt->csv != NULL &&
+                   path_exists(opt->input) &&
+                   opt->res >= MIN_GRID_RES && opt->res <= MAX_GRID_RES &&
+                   opt->threads > 0 && opt->threads <= MAX_THREADS
+               ? 0
+               : -1;
+}
+
+int main(int argc, char **argv)
+{
+    Mesh mesh;
+    VoxelGrid grid;
+    Options opt;
+    Timer timer;
+    pthread_t *threads = NULL;
+    WorkerArgs *args = NULL;
+    char config[32];
+    double elapsed_ms;
+    pthread_mutex_t *z_mutexes = NULL;
+
+    if (parse_args(argc, argv, &opt) != 0) {
+        fprintf(stderr, "Usage: %s -i <mesh.off> -r <res> -o <out.voxel> -t <threads> -c <results.csv>\n",
+                argv[0]);
+        return 1;
+    }
+    if (ensure_directory("results") != 0) {
+        return 1;
+    }
+    if (mesh_load(opt.input, &mesh) != 0) {
+        return 1;
+    }
+    mesh_normalize(&mesh);
+    if (voxel_grid_alloc(&grid, opt.res) != 0) {
+        mesh_free(&mesh);
+        return 1;
+    }
+
+    z_mutexes = (pthread_mutex_t *)malloc((size_t)opt.res * sizeof(pthread_mutex_t));
+    if (z_mutexes == NULL) {
+        fprintf(stderr, "Failed to allocate mutexes\n");
+        voxel_grid_free(&grid);
+        mesh_free(&mesh);
+        return 1;
+    }
+    for (int i = 0; i < opt.res; ++i) {
+        pthread_mutex_init(&z_mutexes[i], NULL);
+    }
+
+    threads = (pthread_t *)malloc((size_t)opt.threads * sizeof(pthread_t));
+    args = (WorkerArgs *)malloc((size_t)opt.threads * sizeof(WorkerArgs));
+    if (threads == NULL || args == NULL) {
+        fprintf(stderr, "Failed to allocate pthread resources\n");
+        free(threads);
+        free(args);
+        for (int i = 0; i < opt.res; ++i) pthread_mutex_destroy(&z_mutexes[i]);
+        free(z_mutexes);
+        voxel_grid_free(&grid);
+        mesh_free(&mesh);
+        return 1;
+    }
+
+    timer_start(&timer);
+    for (int i = 0; i < opt.threads; ++i) {
+        int start_face = (mesh.num_faces * i) / opt.threads;
+        int end_face = (mesh.num_faces * (i + 1)) / opt.threads;
+        args[i] = (WorkerArgs){&mesh, &grid, opt.res, start_face, end_face, z_mutexes};
+        if (pthread_create(&threads[i], NULL, worker_fn, &args[i]) != 0) {
+            fprintf(stderr, "pthread_create failed for thread %d\n", i);
+            for (int j = 0; j < i; ++j) {
+                pthread_join(threads[j], NULL);
+            }
+            free(threads);
+            free(args);
+            for (int k = 0; k < opt.res; ++k) pthread_mutex_destroy(&z_mutexes[k]);
+            free(z_mutexes);
+            voxel_grid_free(&grid);
+            mesh_free(&mesh);
+            return 1;
+        }
+    }
+    for (int i = 0; i < opt.threads; ++i) {
+        if (pthread_join(threads[i], NULL) != 0) {
+            fprintf(stderr, "pthread_join failed for thread %d\n", i);
+            free(threads);
+            free(args);
+            for (int k = 0; k < opt.res; ++k) pthread_mutex_destroy(&z_mutexes[k]);
+            free(z_mutexes);
+            voxel_grid_free(&grid);
+            mesh_free(&mesh);
+            return 1;
+        }
+    }
+    elapsed_ms = timer_stop_ms(&timer);
+
+    snprintf(config, sizeof(config), "pth_%dt", opt.threads);
+    if (voxel_grid_save(&grid, opt.output) != 0 ||
+        append_csv_row(opt.csv, "pthreads", config, opt.input,
+                       mesh.num_faces, opt.res, elapsed_ms) != 0) {
+        free(threads);
+        free(args);
+        for (int k = 0; k < opt.res; ++k) pthread_mutex_destroy(&z_mutexes[k]);
+        free(z_mutexes);
+        voxel_grid_free(&grid);
+        mesh_free(&mesh);
+        return 1;
+    }
+
+    free(threads);
+    free(args);
+    for (int k = 0; k < opt.res; ++k) pthread_mutex_destroy(&z_mutexes[k]);
+    free(z_mutexes);
+    voxel_grid_free(&grid);
+    mesh_free(&mesh);
+    return 0;
+}
+```
+
+### src/pthreads/worker.c
+```
+#include "worker.h"
+
+#include <stddef.h>
+
+#include "../common/sat.h"
+#include "../common/voxelize.h"
+
+void *worker_fn(void *arg)
+{
+    WorkerArgs *wa = (WorkerArgs *)arg;
+    float half = 0.5f / (float)wa->res;
+
+    for (int f = wa->start_face; f < wa->end_face; ++f) {
+        Triangle tri = triangle_from_face(wa->mesh, f);
+        VoxelBounds bounds = triangle_voxel_bounds(&tri, wa->res);
+
+        for (int vx = bounds.min_x; vx <= bounds.max_x; ++vx) {
+            for (int vy = bounds.min_y; vy <= bounds.max_y; ++vy) {
+                for (int vz = bounds.min_z; vz <= bounds.max_z; ++vz) {
+                    Vec3 center = {
+                        ((float)vx + 0.5f) / (float)wa->res,
+                        ((float)vy + 0.5f) / (float)wa->res,
+                        ((float)vz + 0.5f) / (float)wa->res
+                    };
+                    if (sat_triangle_aabb(&tri, center, half)) {
+                        pthread_mutex_lock(&wa->z_mutexes[vz]);
+                        wa->grid->data[vg_idx(vx, vy, vz, wa->res)] = 1;
+                        pthread_mutex_unlock(&wa->z_mutexes[vz]);
+                    }
+                }
+            }
+        }
+    }
+
+    return NULL;
+}
+```
+
+### src/pthreads/worker.h
+```
+#ifndef PTHREADS_WORKER_H
+#define PTHREADS_WORKER_H
+
+#include "../common/off_parser.h"
+#include "../common/voxel_grid.h"
+#include <pthread.h>
+
+typedef struct {
+    const Mesh *mesh;
+    VoxelGrid *grid;
+    int res;
+    int start_face;
+    int end_face;
+    pthread_mutex_t *z_mutexes;
+} WorkerArgs;
+
+void *worker_fn(void *arg);
+
+#endif
+```
+
+### src/sequential/main.c
+```
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "../common/config.h"
+#include "../common/off_parser.h"
+#include "../common/sat.h"
+#include "../common/timer.h"
+#include "../common/voxel_grid.h"
+#include "../common/voxelize.h"
+
+typedef struct {
+    const char *input;
+    const char *output;
+    const char *csv;
+    int res;
+} Options;
+
+static int parse_args(int argc, char **argv, Options *opt)
+{
+    opt->input = NULL;
+    opt->output = NULL;
+    opt->csv = NULL;
+    opt->res = DEFAULT_GRID_RES;
+
+    for (int i = 1; i < argc; i += 2) {
+        if (i + 1 >= argc) {
+            return -1;
+        }
+        if (strcmp(argv[i], "-i") == 0) {
+            opt->input = argv[i + 1];
+        } else if (strcmp(argv[i], "-o") == 0) {
+            opt->output = argv[i + 1];
+        } else if (strcmp(argv[i], "-c") == 0) {
+            opt->csv = argv[i + 1];
+        } else if (strcmp(argv[i], "-r") == 0) {
+            opt->res = atoi(argv[i + 1]);
+        } else {
+            return -1;
+        }
+    }
+
+    return opt->input != NULL && opt->output != NULL && opt->csv != NULL &&
+                   path_exists(opt->input) &&
+                   opt->res >= MIN_GRID_RES && opt->res <= MAX_GRID_RES
+               ? 0
+               : -1;
+}
+
+static int voxelize_mesh(const Mesh *mesh, VoxelGrid *grid)
+{
+    int res = grid->res;
+    float half = 0.5f / (float)res;
+
+    for (int f = 0; f < mesh->num_faces; ++f) {
+        Triangle tri = triangle_from_face(mesh, f);
+        VoxelBounds bounds = triangle_voxel_bounds(&tri, res);
+
+        for (int vx = bounds.min_x; vx <= bounds.max_x; ++vx) {
+            for (int vy = bounds.min_y; vy <= bounds.max_y; ++vy) {
+                for (int vz = bounds.min_z; vz <= bounds.max_z; ++vz) {
+                    Vec3 center = {
+                        ((float)vx + 0.5f) / (float)res,
+                        ((float)vy + 0.5f) / (float)res,
+                        ((float)vz + 0.5f) / (float)res
+                    };
+                    int idx = vg_idx(vx, vy, vz, res);
+                    if (sat_triangle_aabb(&tri, center, half)) {
+                        grid->data[idx] = 1;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    Mesh mesh;
+    VoxelGrid grid;
+    Options opt;
+    Timer timer;
+    double elapsed_ms;
+
+    if (parse_args(argc, argv, &opt) != 0) {
+        fprintf(stderr, "Usage: %s -i <mesh.off> -r <res> -o <out.voxel> -c <results.csv>\n",
+                argv[0]);
+        return 1;
+    }
+    if (ensure_directory("results") != 0) {
+        return 1;
+    }
+
+    if (mesh_load(opt.input, &mesh) != 0) {
+        return 1;
+    }
+    mesh_normalize(&mesh);
+
+    if (voxel_grid_alloc(&grid, opt.res) != 0) {
+        mesh_free(&mesh);
+        return 1;
+    }
+
+    timer_start(&timer);
+    voxelize_mesh(&mesh, &grid);
+    elapsed_ms = timer_stop_ms(&timer);
+
+    if (voxel_grid_save(&grid, opt.output) != 0 ||
+        append_csv_row(opt.csv, "sequential", "seq_1t", opt.input,
+                       mesh.num_faces, opt.res, elapsed_ms) != 0) {
+        voxel_grid_free(&grid);
+        mesh_free(&mesh);
+        return 1;
+    }
+
+    voxel_grid_free(&grid);
+    mesh_free(&mesh);
+    return 0;
+}
+```

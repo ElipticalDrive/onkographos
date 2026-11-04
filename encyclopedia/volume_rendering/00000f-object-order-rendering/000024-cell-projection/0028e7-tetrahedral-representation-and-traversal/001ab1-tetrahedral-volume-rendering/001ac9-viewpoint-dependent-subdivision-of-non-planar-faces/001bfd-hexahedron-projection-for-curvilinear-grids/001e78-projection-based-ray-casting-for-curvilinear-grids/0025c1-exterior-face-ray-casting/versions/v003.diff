@@ -1,0 +1,149 @@
+--- v002.md
++++ v003.md
+@@ -50,9 +50,9 @@
+ 5.  **Sampling and Integration:**
+     *   For each segment (entry $a$ to exit $b$), compute the intensity contribution [S1, unofficial].
+-    *   **Fixed Sampling Implementation:** Precompute a fixed step size $dt$. Sample at least one additional point $c$ between entering point $a$ and leaving point $b$. Use the Trapezoid rule to calculate the value of the interval between sample points [S1, unofficial].
++    *   **Fixed Sampling Implementation:** Precompute a fixed step size $dt$ [S1, unofficial]. Sample at least one additional point $c$ between entering point $a$ and leaving point $b$ [S1, unofficial]. Use the Trapezoid rule to calculate the value of the interval between sample points [S1, unofficial].
+     *   **Adaptive Sampling (Alternative):** For linear elements with function $f(x,y,z)$, the sample rate $r$ can be defined as:
+         $$ r = \frac{|f(P(b)) - f(P(a))|}{b - a} \cdot k $$
+         where $P(t) = P(0) + td$, $P(0)$ is the ray start, $d$ is the direction, and $k$ is a constant representing the sampling rate for a unit change in function value [S1, unofficial]. However, fixed sampling is often preferred for simplicity and performance [S1, unofficial].
+-    *   **Gaussian Quadrature Approximation:** For linear elements, approximate intensity by computing the value at the middle of the segment. For quadratic elements, sample two points; for cubic, three points, based on Gaussian Quadrature principles (approximating a polynomial of degree $2n-1$ with $n$ points) [S1, unofficial].
++    *   **Gaussian Quadrature Approximation:** For linear elements, approximate intensity by computing the value at the middle of the segment [S1, unofficial]. For quadratic elements, sample two points; for cubic, three points, based on Gaussian Quadrature principles (approximating a polynomial of degree $2n-1$ with $n$ points) [S1, unofficial].
+ 
+ 6.  **Color/Opacity Mapping:**
+@@ -71,14 +71,13 @@
+ def exterior_face_ray_casting(grid, transfer_function, eye_position, screen_width, screen_height, pixel_size):
+     # Step 1: View-Independent Preprocessing
+-    # Find connectivity, exterior faces, and calculate normals
+     exterior_faces = []
+-    face_to_element = {}
++    face_to_elements = {}
+     for elem in grid.elements:
+         for face_idx in elem.faces:
+-            face_to_element.setdefault(face_idx, []).append(elem)
+-    for face_idx, elems in face_to_element.items():
+-        if len(elems) == 1: # Exterior face
++            face_to_elements.setdefault(face_idx, []).append(elem)
++    for face_idx, elems in face_to_elements.items():
++        if len(elems) == 1:
+             face = Face(face_idx, elems[0].nodes)
+-            face.normal = compute_normal(face.nodes)
++            face.normal = normalize(cross(elems[0].nodes[1] - elems[0].nodes[0], elems[0].nodes[2] - elems[0].nodes[0]))
+             exterior_faces.append(face)
+ 
+@@ -92,8 +91,7 @@
+     screen_polygons = []
+     for face in visible_faces:
+-        polygon = project_orthographic(face, eye_position, screen_width, screen_height, pixel_size)
+-        screen_polygons.append(polygon)
++        # [G] Project face vertices to screen coordinates and form convex polygon
++        screen_polygons.append(project_orthographic(face, eye_position, screen_width, screen_height, pixel_size))
+ 
+-    # Precompute fixed dt
+     lx, ly, lz = compute_bounding_box_sizes(grid)
+     ne = len(grid.elements)
+@@ -104,13 +102,12 @@
+     # Step 3 & 4: Ray Casting Loop
+     for polygon in screen_polygons:
+-        for pixel in polygon.pixels:
++        for py, px in polygon.pixel_coords:
+             ray_origin = eye_position
+-            ray_dir = compute_ray_direction(pixel, eye_position, screen_width, screen_height, pixel_size)
++            ray_dir = normalize(pixel_coords_to_direction(py, px, eye_position, screen_width, screen_height, pixel_size))
++            # [G] Trace ray through elements using connectivity; returns list of (entry_t, exit_t)
+             segments = trace_ray_through_elements(ray_origin, ray_dir, grid)
+ 
+             segment_results = []
+-            for segment in segments:
+-                a, b = segment.entry_t, segment.exit_t
+-                # Step 5: Sampling
++            for a, b in segments:
+                 samples = []
+                 t = a
+@@ -124,5 +121,4 @@
+                     t = next_t
+ 
+-                # Step 6 & 7: Mapping & Compositing for segment
+                 seg_color = [0.0, 0.0, 0.0]
+                 seg_opacity = 0.0
+@@ -130,5 +126,4 @@
+                     c1, o1 = transfer_function(v1)
+                     c2, o2 = transfer_function(v2)
+-                    # Trapezoid rule approximation for interval [t1, t2]
+                     interval_len = t2 - t1
+                     seg_color[0] += (c1[0] + c2[0]) * interval_len / 2.0
+@@ -138,50 +133,8 @@
+                 segment_results.append((seg_color, seg_opacity))
+ 
+-            # Combine segments (associative compositing)
+             final_color = composite_front_to_back(segment_results)
+-            final_image[pixel.y][pixel.x] = final_color
++            final_image[py][px] = final_color
+ 
+     return final_image
+-
+-# Helper definitions to ensure self-containment
+-def compute_normal(nodes):
+-    v1 = nodes[1] - nodes[0]
+-    v2 = nodes[2] - nodes[0]
+-    return normalize(cross(v1, v2))
+-
+-def project_orthographic(face, eye_pos, sw, sh, ps):
+-    return Polygon([project_vertex(v, eye_pos, sw, sh, ps) for v in face.nodes])
+-
+-def compute_bounding_box_sizes(grid):
+-    xs = [n.x for n in grid.nodes]
+-    ys = [n.y for n in grid.nodes]
+-    zs = [n.z for n in grid.nodes]
+-    return (max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs))
+-
+-def compute_ray_direction(pixel, eye_pos, sw, sh, ps):
+-    return normalize(pixel.coords - eye_pos)
+-
+-def trace_ray_through_elements(origin, direction, grid):
+-    segments = []
+-    current_elem = find_first_element(origin, direction, grid)
+-    while current_elem:
+-        entry_t, exit_t = intersect_element(origin, direction, current_elem)
+-        segments.append(Segment(entry_t, exit_t))
+-        current_elem = get_next_element(current_elem, direction, grid)
+-    return segments
+-
+-def interpolate_scalar(grid, point):
+-    elem = find_element_containing(grid, point)
+-    return barycentric_interpolate(elem, point)
+-
+-def composite_front_to_back(segments):
+-    acc_color = [0.0, 0.0, 0.0]
+-    acc_opacity = 0.0
+-    for color, opacity in segments:
+-        alpha = opacity
+-        if alpha > 0:
+-            acc_color = [acc_color[i] + color[i] * alpha * (1.0 - acc_opacity) for i in range(3)]
+-            acc_opacity += alpha * (1.0 - acc_opacity)
+-    return acc_color
+ ```
+ 
+@@ -191,14 +144,14 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Degenerate Elements:** Irregular shapes and partitioning can result in concavities and holes. Rays may enter and exit multiple exterior faces. Connectivity information is crucial for correct traversal [S1, unofficial].
+-*   **Performance:** Adaptive sampling increases rendering time significantly. Fixed sampling is often used despite potentially oversampling large elements with constant values [S1, unofficial].
+-*   **Precision:** The integration of intensity involves nested integrals. Numerical approximation (Trapezoid rule, Gaussian Quadrature) is necessary as analytic solutions are often impossible due to non-polynomial transfer functions [S1, unofficial].
++*   **Degenerate Elements:** Irregular shapes and partitioning can result in concavities and holes [S1, unofficial]. Rays may enter and exit multiple exterior faces [S1, unofficial]. Connectivity information is crucial for correct traversal [S1, unofficial].
++*   **Performance:** Adaptive sampling increases rendering time significantly [S1, unofficial]. Fixed sampling is often used despite potentially oversampling large elements with constant values [S1, unofficial].
++*   **Precision:** The integration of intensity involves nested integrals [S1, unofficial]. Numerical approximation (Trapezoid rule, Gaussian Quadrature) is necessary as analytic solutions are often impossible due to non-polynomial transfer functions [S1, unofficial].
+ 
+ ## Operating characteristics
+ 
+-*   **Time Complexity:** Dominated by ray traversal and sampling. Adaptive sampling adds overhead; fixed sampling is simpler but may use more samples than necessary [S1, unofficial].
+-*   **Memory Complexity:** Requires storage for element connectivity, exterior faces, and visible face lists. Parallel implementation distributes data to processors, requiring local preprocessing [S1, unofficial].
+-*   **Strengths:** Efficient for distributed computing by minimizing communication during ray casting (local traversal). Handles irregular, unstructured grids well.
+-*   **Limitations:** Preprocessing (finding visible faces) must be repeated for every view change. Adaptive sampling is expensive.
++*   **Time Complexity:** Dominated by ray traversal and sampling [S1, unofficial]. Adaptive sampling adds overhead; fixed sampling is simpler but may use more samples than necessary [S1, unofficial].
++*   **Memory Complexity:** Requires storage for element connectivity, exterior faces, and visible face lists [S1, unofficial]. Parallel implementation distributes data to processors, requiring local preprocessing [S1, unofficial].
++*   **Strengths:** Efficient for distributed computing by minimizing communication during ray casting (local traversal) [S1, unofficial]. Handles irregular, unstructured grids well [S1, unofficial].
++*   **Limitations:** Preprocessing (finding visible faces) must be repeated for every view change [S1, unofficial]. Adaptive sampling is expensive [S1, unofficial].
+ *   **When to Use:** Parallel volume rendering of unstructured grids on distributed-memory architectures where view changes are not extremely frequent or preprocessing cost is acceptable [S1, unofficial].
+ 

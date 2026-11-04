@@ -1,0 +1,152 @@
+# Voxel Map Lookup
+## Overview
+Retrieves the color of a voxel at a specific $(x, y, z)$ coordinate within a chunked voxel map. It solves the problem of efficient sparse voxel access by combining global geometry culling with binary search within sorted block arrays. It is distinguished from its sibling [Chunked Voxel Map Serialization with Visfaces](4201-chunked-voxel-map-serialization-with-visfaces.md) by its read-only access pattern and lack of visibility face computation, focusing instead on direct coordinate-to-color mapping.
+## How it works
+### Inputs and outputs
+- **Input**: A pointer to a `libvxl_map` structure, and integer coordinates $(x, y, z)$.
+- **Output**: A 32-bit color value (uint32_t). Returns 0 if the map is null, coordinates are out of bounds, or the global geometry bitfield indicates the position is empty. Returns `DEFAULT_COLOR` if the position is solid but no specific block color is found.
+
+### Data structures
+The method relies on the following structures defined in the source [S1, unofficial]:
+
+`struct libvxl_map`:
+- `width`, `height`, `depth`: Map dimensions.
+- `chunks`: Pointer to an array of `libvxl_chunk`.
+- `geometry`: Pointer to an array of `size_t` bits representing solid/empty status.
+- `streamed`: Unused in lookup.
+
+`struct libvxl_chunk`:
+- `blocks`: Pointer to an array of `libvxl_block`.
+- `length`: Total capacity of the blocks array.
+- `index`: Number of valid blocks in the array.
+
+`struct libvxl_block`:
+- `position`: 32-bit key encoding $(x, y, z)$.
+- `color`: 32-bit color value.
+
+`libvxl_span` and `libvxl_kv6` structures are not used in this lookup method.
+
+### Coordinate Keying
+Coordinates are mapped to a unique 32-bit integer key using the macro `pos_key(x, y, z)` [S1, unofficial]:
+$$ \text{key} = (y \ll 20) \mid (x \ll 8) \mid z $$
+This layout uses 12 bits for $x$ (bits 8-19), 12 bits for $y$ (bits 20-31), and 8 bits for $z$ (bits 0-7). The maximum coordinate values are therefore $x, y < 4096$ and $z < 256$.
+
+### Algorithm Steps
+1. **Null Check**: If the map pointer is null, return 0.
+2. **Bounds Check**: Verify $0 \le x < \text{width}$, $0 \le y < \text{height}$, and $0 \le z < \text{depth}$. If any check fails, return 0.
+3. **Geometry Check**: Call `libvxl_geometry_get(map, x, y, z)`. This function checks the global geometry bitfield. If the bit at the calculated offset is 0, the position is empty; return 0.
+4. **Chunk Selection**: Calculate the chunk index using `chunk_fposition(x, y, z)`. This function maps the global coordinates to the specific chunk containing the voxel. Retrieve the chunk pointer from `map->chunks`.
+5. **Binary Search**: Perform a binary search on `chunk->blocks` to find a block where `block.position == pos_key(x, y, z)`. The comparison function `cmp` compares the `position` field of `libvxl_block` structures against the target key.
+6. **Result**:
+   - If a matching block is found, return `block.color`.
+   - If no matching block is found, return `DEFAULT_COLOR(x, y, z)`, which is defined as `0x674028` [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def libvxl_map_get(map, x, y, z):
+    # 1. Null check
+    if map is None:
+        return 0
+    
+    # 2. Bounds check
+    if x < 0 or x >= map.width or \
+       y < 0 or y >= map.height or \
+       z < 0 or z >= map.depth:
+        return 0
+    
+    # 3. Geometry check
+    # libvxl_geometry_get checks the global bitfield
+    if not libvxl_geometry_get(map, x, y, z):
+        return 0
+    
+    # 4. Chunk selection
+    chunk = chunk_fposition(map, x, y, z)
+    if chunk is None:
+        return 0
+        
+    # 5. Binary search
+    target_key = pos_key(x, y, z)
+    
+    low = 0
+    high = chunk.index - 1
+    found_block = None
+    
+    while low <= high:
+        mid = (low + high) // 2
+        mid_block = chunk.blocks[mid]
+        
+        if mid_block.position == target_key:
+            found_block = mid_block
+            break
+        elif mid_block.position < target_key:
+            low = mid + 1
+        else:
+            high = mid - 1
+            
+    # 6. Result
+    if found_block is not None:
+        return found_block.color
+    else:
+        # DEFAULT_COLOR is defined as 0x674028
+        return 0x674028
+
+def pos_key(x, y, z):
+    return ((y << 20) | (x << 8) | z)
+
+def libvxl_geometry_get(map, x, y, z):
+    # Calculate offset in bits
+    # Note: The exact formula for geometry offset is not fully detailed in the 
+    # provided notes for the main lookup, but typically involves linearizing x,y,z.
+    # Based on Chunk Copy notes, offset = z + (x + y * width) * depth
+    offset = z + (x + y * map.width) * map.depth
+    bit_index = offset // (sizeof(size_t) * 8)
+    bit_mask = 1 << (offset % (sizeof(size_t) * 8))
+    
+    if bit_index >= len(map.geometry):
+        return False
+        
+    return (map.geometry[bit_index] & bit_mask) != 0
+```
+
+### Parameters and Edge Cases
+- **DEFAULT_COLOR**: If a voxel is marked solid in the geometry bitfield but no block exists in the chunk's block array, `0x674028` is returned. This can cause visual artifacts if the background is expected to be transparent or black [S1, unofficial].
+- **Precision**: The key format limits $z$ to 8 bits ($0-255$). If $z \ge 256$, the key generation will overflow or wrap, leading to incorrect lookups or collisions.
+- **Empty Chunks**: If `chunk->index` is 0, the binary search loop will not execute, and `DEFAULT_COLOR` will be returned.
+
+## Subtopics
+
+### Chunk Copy
+Copies a map's geometry bitfield and a specific chunk's block array into a `libvxl_chunk_copy` structure for isolated access. It is used when a subset of the map needs to be processed independently without modifying the original map. It is chosen when temporary, self-contained access to a chunk's data is required. It differs from the main lookup by creating a new structure rather than reading directly from the map.
+
+**Steps**:
+1. Check bounds for $x, y$.
+2. Calculate geometry size: $sg = \lceil \frac{\text{width} \times \text{height} \times \text{depth}}{8 \times \text{sizeof(size_t)}} \rceil \times \text{sizeof(size_t)}$.
+3. Allocate and copy `map->geometry` into `copy->geometry`.
+4. Get the chunk via `chunk_fposition`.
+5. Allocate `copy->blocks_sorted` of size `c->index * sizeof(struct libvxl_block)`.
+6. Copy `c->blocks` into `copy->blocks_sorted`.
+7. Set `copy->width`, `copy->height`, `copy->depth`.
+
+**Helper: `libvxl_copy_chunk_is_solid`**:
+1. If `copy` is null or coordinates out of bounds, return true.
+2. Calculate offset: $z + (x + y \times \text{copy->width}) \times \text{copy->depth}$.
+3. Return `(copy->geometry[offset / (sizeof(size_t) * 8)] & ((size_t)1 << (offset % (sizeof(size_t) * 8)))) != 0`.
+
+### Top Voxel Retrieval
+Finds the highest solid voxel at a given $(x, y)$ column and returns its color and $z$-coordinate. It is used for surface detection or sky visibility checks. It differs from standard lookup by iterating or searching for the maximum $z$ rather than a specific coordinate.
+
+**Pitfall**: Uses `libvxl_chunk_gequal_block` which likely performs a lower-bound search for $z \ge 0$. If no block exists, assertions may trigger [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(\log N)$ where $N$ is the number of blocks in the chunk. The geometry check is $O(1)$.
+- **Memory Complexity**: $O(1)$ auxiliary space for the main lookup. Chunk Copy requires $O(N)$ space for the copy structure.
+- **Strengths**: Efficient sparse access; global geometry culling avoids unnecessary chunk searches for empty space.
+- **Limitations**: Limited $z$ range (8 bits); `DEFAULT_COLOR` artifact if blocks are missing but geometry is set; not suitable for dense grids where linear access might be faster.
+
+## Background
+Originated in the `libvxl` library by xtreme8000 [S1, unofficial]. It is part of a system for storing and accessing voxel data in a chunked format, often used in voxel-based games or editors. The method is designed to work with the serialization format described in [Chunked Voxel Map Serialization with Visfaces](4201-chunked-voxel-map-serialization-with-visfaces.md).
+
+## Sources
+[S1] xtreme8000/libvxl, https://github.com/xtreme8000/libvxl, fetched 2026-10-28 (unofficial)

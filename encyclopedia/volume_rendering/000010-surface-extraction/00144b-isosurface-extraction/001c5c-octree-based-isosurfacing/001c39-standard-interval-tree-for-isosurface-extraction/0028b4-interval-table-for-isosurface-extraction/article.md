@@ -1,0 +1,144 @@
+# Interval Table for Isosurface Extraction
+
+Also called: Fast Implementation, TetIndex
+
+## Overview
+The Interval Table is a pre-processing data structure that maps scalar value intervals to tetrahedron IDs, allowing the extraction algorithm to skip tetrahedra whose function span does not contain the isovalue [S1, unofficial]. It differs from the Standard Interval Tree by using a fixed-size array of buckets (intervals) rather than a dynamic tree structure, offering a simpler implementation with comparable performance for uniform scalar distributions [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A tetrahedral mesh with scalar values at vertices; global minimum ($F_{min}$) and maximum ($F_{max}$) of the scalar field; desired table resolution ($N$).
+*   **Output:** A data structure (`TetIndex`) enabling $O(1)$ retrieval of candidate tetrahedra for a given isovalue.
+
+**Data Structures**
+The structure is implemented as a class `TetIndex` containing:
+*   `bounds`: A pair or struct storing `global_min` and `global_max` (floats).
+*   `resolution`: An integer $N$, representing the number of intervals.
+*   `table`: A `std::vector<std::vector<int>>` of size $N$. Each inner vector stores tetrahedron IDs.
+
+**Numbered Steps**
+
+1.  **Initialization:** Call `setBounds(F_min, F_max)` to store the global scalar range. Call `setResolution(N)` to allocate the table with $N$ empty vectors. A reasonable default for $N$ is 500 [S1, unofficial].
+2.  **Pre-processing (Build):** Iterate over all tetrahedra $T_i$ in the mesh.
+    *   Compute the function span $[t_{min}, t_{max}]$ for $T_i$, where $t_{min} = \min(v_0, v_1, v_2, v_3)$ and $t_{max} = \max(v_0, v_1, v_2, v_3)$ for vertex values $v_j$.
+    *   If $t_{min} > t_{max}$, skip (degenerate).
+    *   Map the span to table indices. The interval width is $\Delta = (F_{max} - F_{min}) / N$.
+    *   Calculate the start index $i_{start} = \lfloor (t_{min} - F_{min}) / \Delta \rfloor$ and end index $i_{end} = \lfloor (t_{max} - F_{min}) / \Delta \rfloor$.
+    *   Clamp indices to $[0, N-1]$.
+    *   Insert $T_i$ into `table[k]` for all $k$ such that $i_{start} \le k \le i_{end}$ [S1, unofficial].
+3.  **Runtime (Query):** Given an isovalue $I$:
+    *   Calculate the index $idx = \lfloor (I - F_{min}) / \Delta \rfloor$.
+    *   Clamp $idx$ to $[0, N-1]$.
+    *   Return a pointer to `table[idx]` [S1, unofficial].
+4.  **Extraction:** In `IsoSurfacer::FastExtraction()`, iterate only over the tetrahedra returned by the query step, rather than the entire mesh [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class TetIndex:
+    def __init__(self):
+        self.global_min = 0.0
+        self.global_max = 0.0
+        self.resolution = 500
+        self.table = []  # vector of vectors of ints
+
+    def set_bounds(self, f_min, f_max):
+        """Store the global function range."""
+        self.global_min = f_min
+        self.global_max = f_max
+        # Initialize table with empty vectors
+        self.table = [[] for _ in range(self.resolution)]
+
+    def set_resolution(self, n):
+        """Set the size of the table."""
+        self.resolution = n
+        # Re-initialize table if bounds are already set
+        if self.global_max != self.global_min:
+            self.table = [[] for _ in range(self.resolution)]
+
+    def add_tet(self, tet_id, t_min, t_max):
+        """
+        Store the tetrahedron ID in the table based on its function span.
+        t_min and t_max are the min/max scalar values of the tet's vertices.
+        """
+        if t_min > t_max:
+            return
+        
+        delta = (self.global_max - self.global_min) / self.resolution
+        
+        # Calculate interval indices
+        # Use epsilon to handle boundary precision issues if necessary
+        start_idx = int((t_min - self.global_min) / delta)
+        end_idx = int((t_max - self.global_min) / delta)
+        
+        # Clamp indices to valid range [0, resolution - 1]
+        start_idx = max(0, min(start_idx, self.resolution - 1))
+        end_idx = max(0, min(end_idx, self.resolution - 1))
+        
+        # Insert tet_id into all relevant intervals
+        for k in range(start_idx, end_idx + 1):
+            self.table[k].append(tet_id)
+
+    def get_candidates(self, isovalue):
+        """
+        Given an isovalue, return a pointer (reference) to the corresponding
+        vector of tetrahedron IDs.
+        """
+        delta = (self.global_max - self.global_min) / self.resolution
+        
+        idx = int((isovalue - self.global_min) / delta)
+        
+        # Clamp index
+        idx = max(0, min(idx, self.resolution - 1))
+        
+        return self.table[idx]
+
+def fast_extraction(tet_index, isovalue, mesh):
+    """
+    Extract isosurface using the interval table.
+    """
+    candidates = tet_index.get_candidates(isovalue)
+    
+    # Iterate only over candidates
+    for tet_id in candidates:
+        tet = mesh.get_tetrahedron(tet_id)
+        # Perform marching tetrahedra logic for this tet
+        process_tet(tet, isovalue)
+```
+
+**Parameters**
+*   **Resolution ($N$):** The number of intervals in the table. A reasonable value is 500 [S1, unofficial]. Higher values increase memory usage but may reduce the number of candidates per bucket if the scalar distribution is non-uniform.
+
+**Edge Cases and Pitfalls**
+*   **Precision:** Floating-point division and floor operations may cause boundary errors. Clamping indices is essential to prevent out-of-bounds access [S1, unofficial].
+*   **Degenerate Input:** If $F_{min} == F_{max}$, division by zero occurs in $\Delta$. This should be handled by checking for constant scalar fields and skipping extraction or returning all tetrahedra.
+*   **Non-uniform Distribution:** If scalar values are clustered, some buckets may become overloaded while others are empty, reducing the skipping efficiency compared to the Standard Interval Tree.
+
+## Subtopics
+
+### [Fixed-Sized Buckets for Isosurface Extraction](1252-fixed-sized-buckets-for-isosurface-extraction.md)
+Uses fixed-size buckets but may differ in bucket sizing strategy or hashing. Choose when memory is strictly constrained.
+
+### [Interval Tree with Cell Grouping](1342-interval-tree-with-cell-grouping.md)
+Groups cells to reduce tree depth. Choose for highly non-uniform scalar distributions.
+
+### [Span Space Isosurface Extraction](1750-span-space-isosurface-extraction.md)
+Operates in span space rather than value space. Choose for complex topological changes.
+
+### [Out-of-core Interval Tree Extraction](2146-out-of-core-interval-tree-extraction.md)
+Designed for datasets larger than RAM. Choose when memory is insufficient for in-memory structures.
+
+## Operating characteristics
+*   **Time Complexity:** Pre-processing is $O(T \cdot K)$, where $T$ is the number of tetrahedra and $K$ is the average number of intervals a tet spans. Query is $O(1)$ to find the bucket, plus $O(C)$ to process candidates, where $C$ is the number of candidates.
+*   **Memory Complexity:** $O(N + T \cdot K)$, where $N$ is the resolution and $K$ is the average number of intervals per tet.
+*   **Measured Performance:** The method drastically reduces the number of visited tetrahedra compared to naive iteration or standard neighbor-visiting approaches, yielding faster extraction times than VTK's standard implementation in typical exercises [S1, unofficial].
+*   **Strengths:** Simple implementation; fast query time; effective for uniform scalar distributions.
+*   **Limitations:** Performance degrades if scalar values are highly non-uniform (many tets per bucket); fixed resolution requires tuning.
+
+## Background
+The Interval Table, also referred to as the "Fast Implementation" or "TetIndex," was introduced in visualization exercises by Julien Tierny [S1, unofficial]. It is designed to optimize isosurface extraction by pre-filtering tetrahedra based on their scalar range, avoiding unnecessary processing of non-intersecting cells.
+
+## Sources
+[S1] Julien Tierny - Visualization Exercise - Isosurface Extraction, https://julien-tierny.github.io/visualizationExerciseIso.html, fetched 2026-10-30 (unofficial)

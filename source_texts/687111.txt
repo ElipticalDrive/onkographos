@@ -1,0 +1,1525 @@
+Coca-Splat: Collaborative Optimization for Camera
+Parameters and 3D Gaussians
+arXiv:2504.00639v1 [cs.CV] 1 Apr 2025
+Jiamin Wu1,2∗ , Hongyang Li 2 , Xiaoke Jiang2† , Yuan YAO1 , Lei Zhang2
+1
+Hong Kong University of Science and Technology
+2
+International Digital Economy Academy (IDEA)
+Abstract
+In this work, we introduce Coca-Splat, a novel approach to addressing the challenges of sparse view pose-free scene reconstruction and novel view synthesis
+(NVS) by jointly optimizing camera parameters with 3D Gaussians. Inspired by
+deformable DEtection TRansformer, we design separate queries for 3D Gaussians and camera parameters and update them layer by layer through deformable
+Transformer layers, enabling joint optimization in a single network. This design
+demonstrates better performance because to accurately render views that closely
+approximate ground-truth images relies on precise estimation of both 3D Gaussians and camera parameters. In such a design, the centers of 3D Gaussians are
+projected onto each view by camera parameters to get projected points, which are
+regarded as 2D reference points in deformable cross-attention. With camera-aware
+multi-view deformable cross-attention (CaMDFA), 3D Gaussians and camera
+parameters are intrinsically connected by sharing the 2D reference points. Additionally, 2D reference point determined rays (RayRef) defined from camera centers
+to the reference points assist in modeling relationship between 3D Gaussians and
+camera parameters through RQ-decomposition on an overdetermined system of
+equations derived from the rays, enhancing the relationship between 3D Gaussians
+and camera parameters. Extensive evaluation shows that our approach outperforms
+previous methods, both pose-required and pose-free, on RealEstate10K and ACID
+within the same pose-free setting.
+1
+Introduction
+Sparse view scene reconstruction, novel view synthesis (NVS), and input view pose estimation
+represent crucial challenges in computer vision with wide-ranging applications in robotics, augmented
+reality (AR), virtual reality (VR), games, and films. Recent advancements in differentiable rendering
+techniques such as Neural Radiance Fields (NeRF) (Mildenhall et al., 2020; Zhang et al., 2020) and
+3D Gaussian Splatting (3DGS) (Kerbl et al., 2023; Chen and Wang, 2024) have enabled rapid progress
+in scene reconstruction and NVS using deep learning methods, relying solely on 2D supervision due
+to difficulty in obtaining 3D assets for supervision. Recent methods like pixelSplat (Charatan et al.,
+2024) and MVSplat (Chen, Yuedong and Xu, Haofei and Zheng, Chuanxia and Zhuang, Bohan and
+Pollefeys, Marc and Geiger, Andreas and Cham, Tat-Jen and Cai, Jianfei, 2024) take advantage of
+fast rendering speed of 3DGS to achieve precise scene reconstruction and NVS within approximately
+one second. However, these methods require ground truth camera poses for input views, posing
+challenges in real-world scenarios. While these poses can be derived from dense videos using
+structure-from-motion (SfM) methods (Schonberger and Frahm, 2016; Hartley and Zisserman, 2004;
+Snavely et al., 2006), inaccurate pose estimation may impact performance and increase inference
+time.
+∗
+†
+This work is done during an internship in the International Digital Economy Academy (IDEA).
+Corresponding author
+Preprint. Under review.
+×V
+RQ-decomposition
+×V
+Pose
+×V
+Intrinsics
+Camera rays
+…
+Coca-Splat
+Rendering
+Input images
+* ‘V’ denotes the number of input views.
+3D Gaussians
+Novel views
+Figure 1: Coca-Splat. Given sparse unposed images, our method reconstructs 3D Gaussians and
+camera rays using a feed-forward network. Subsequently, camera parameters are derived from camera
+rays, and novel views are rendered from 3D Gaussians.
+Recent methods focusing on pose-free scene reconstruction are increasingly suitable for real-world
+applications, falling into two main categories. The first category involves pose-free scene reconstruction and NVS methods like Ye et al. (2025); Xu et al. (2024a); Wang et al. (2024); Leroy et al.
+(2024); Smart et al. (2024); Wang et al. (2023b); Liu et al. (2024a) which do not explicitly incorporate
+pose information in the network architecture. Instead, they generate scenes based on image feature
+matching and comparison while utilizing post-processing techniques, such as Perspective-n-Point
+(PnP) algorithm (Hartley and Zisserman, 2004), for calculating input poses. The second category
+includes methods like Jiang et al. (2024); Bian et al. (2023); Kang et al. (2024); Chen and Lee (2023);
+Smith et al. (2023); Hong et al. (2024b) which employ separate pose estimators for pose estimation
+and 3D estimators for scene reconstruction but obtain pose and scene information in a unified pipeline.
+Some of these methods combine predicted pose and 3D information to optimize re-projection error
+or rendered RGB error for enhanced results.
+However, the separation of camera parameter estimation and scene reconstruction in such approaches
+often leads to suboptimal results since only precise reconstructions of both 3D scenes and camera
+parameters can result in novel views that closely approximate ground truth. This separation not only
+lengthens the pipeline but also introduces a compounding effect: errors in camera parameters estimation can deteriorate scene reconstruction, leading to additional inaccuracies in camera parameters
+estimation (Ye et al., 2025).
+In this study, we introduce Coca-Splat to jointly estimate camera camera parameters of input views
+and synthesize novel views for scenes by directly connecting camera parameters with 3D Gaussians
+within a single network as shown in Fig. 1. Inspired by GeoLRM (Zhang et al., 2024a), LeanGaussian
+(Wu et al., 2025) and UNIG (Wu et al., 2024), which leverage the Deformable DEtection TRansformer
+(Deformable DETR) (Zhu et al., 2021) framework in 3D, we introduce separate queries for 3D
+Gaussians and camera parameters (3D queries and camera queries in short). The 3D queries are
+utilized to generate 3D Gaussians by multi-layer perceptron (MLP), while the camera queries are
+employed to regress camera extrinsics and intrinsics using our introduced RefRay (2D reference
+point determined rays) representation on the camera queries. 3D Gaussians (center of them) are
+then projected onto each view using camera parameters, and the projected points are regarded as 2D
+reference points in deformable cross-attention. Subsequently, both 3D and camera queries are updated
+by deformable cross-attention with image features surrounding these 2D reference points. The above
+process is called CaMDFA (camera-aware multi-view deformable cross-attention), which efficiently
+establishes a connection between 3D Gaussians and camera parameters through 2D reference points,
+updating them effectively.
+Although the model effectively optimizes 3D Gaussians and camera parameters jointly, a challenge
+arises when regressing camera parameters directly from numerous parameters (resulting from multiplication of the number of reference points by hidden dimension). This approach may not be optimal for
+neural learning, which typically benefits from over-parameterized distributed representations (Zhang
+et al., 2024c). Inspried by Ray-Diffusion (Zhang et al., 2024c), which represents camera parameters as
+rays from camera center to each pixel on a image, we design RefRay, modeling camera parameters as
+2
+Encoder
+Image & Query Preparation
+𝑸𝑸𝒄𝒄𝒄𝒄𝒄𝒄
+Head3𝐷𝐷
+𝑸𝑸𝟑𝟑𝟑𝟑
+×V
+Head𝑐𝑐𝑐𝑐𝑐𝑐
+FFN
+SelfAttention
+CaMDFA
+×V
+Multi-Layer Refinement
+×V
+RefRay
+Rendering
+Rays loss
+RGB loss
+…
+𝑸𝑸𝒄𝒄𝒄𝒄𝒄𝒄
+GT images
+…
+…
+𝑸𝑸𝟑𝟑𝟑𝟑
+×L
+3D Gaussians
+×V
+GT Rays
+Figure 2: Overall Framework: Our model employs an encoder-decoder architecture to simultaneously
+reconstruct 3D Gaussians and camera parameters. The Vision Transformer (ViT) encoder processes
+all input images, with the resulting image features serving as keys and values in CaMDFA block
+(Section 3.3) within the decoder layer. In our approach, define queries for 3D Gaussians and camera
+queries separately, incorporating them into the deformable decoder layer alongside the image features.
+Following L decoder layers, the model produces queries for 3D Gaussians and cameras, which are
+used to go through a fully connected network (FFN) operation to regress the 3D Gaussians and
+RefRay (in Plücker coordinates (Plücker, 1828) denoting the direction and moment Section 3.4) that
+points from camera center to reference points. Subsequently, the predicted 3D Gaussians undergo
+rendering via Gaussian Splatting (Kerbl et al., 2023) to generate the novel views while the rays are
+utilized to solve the camera parameters in Section 3.4.
+rays from camera center to the 2D reference points on each input view and design an overdetermined
+equation system using equations of the rays to solve camera parameters. With the aforementioned
+design, our model solves both camera extrinsics and intrinsics through RQ-decomposition, enabling
+scene reconstruction without the need for any input view camera parameters.
+With the aforementioned design, our model effectively establishes a direct connection between
+3D Gaussians and camera parameters through a shared set of 2D reference points, enabling joint
+optimization. The collaboration of 3D Gaussians and camera parameters plays an important role in
+the 3D Gaussian reconstruction and NVS outcomes.
+In summary, our contributions are as follows:
+• We propose a novel approach to modeling 3D Gaussians and camera poses of input views
+jointly without any pre-processing or post-processing steps, making scene reconstruction
+without any input view camera parameters.
+• We establish a direct connection between 3D Gaussians and camera parameters through
+2D reference points and using CaMDFA and RefRay to optimize both 3D Gaussians and
+camera parameters possible.
+• Our method outperforms previous methods, both pose-required and pose-free, on
+RealEstate10K (RE10K) (Zhou et al., 2018) and ACID (Liu et al., 2021) within the same
+pose-free setting.
+2
+Related Work
+Pose required scene reconstruction NVS The field of deep learning-based NVS has seen rapid
+advancement recently, driven by differentiable rendering techniques like NeRF (Mildenhall et al.,
+2020) and 3DGS (Kerbl et al., 2023). Subsequent methods, such as Yariv et al. (2021); Barron et al.
+(2021); Garbin et al. (2021); Rakotosaona et al. (2023); Yu et al. (2021); Müller et al. (2022); Li et al.
+(2023); Xu et al. (2024b); Zou et al. (2024); Zhang et al. (2024d,a); Tang et al. (2024); Long et al.
+(2024); Chen, Yuedong and Xu, Haofei and Zheng, Chuanxia and Zhuang, Bohan and Pollefeys,
+Marc and Geiger, Andreas and Cham, Tat-Jen and Cai, Jianfei (2024); Charatan et al. (2024); Wu et al.
+(2025, 2024); Xu et al. (2024c); Zhu et al. (2022, 2024); Matsuki et al. (2024), have introduced novel
+deep learning models for this task. While some approaches take a single-view image as input but lack
+finer details, others accept multi-view images but necessitate ground truth camera poses, limiting
+real-world applicability. Methods like LGM and InstantMesh (Tang et al., 2024; Xu et al., 2024b)
+leverage single-view inputs and utilize diffusion models (Rombach et al., 2022; Wang and Shi, 2023;
+Shi et al., 2024) to generate fixed views (e.g., front, right, back, left) before applying their models,
+exploiting the ease of obtaining poses for these predetermined views. However, the generated views
+3
+may introduce uncertainties and distortions compared to real-world scenarios due to the reliance on
+diffusion models. Some methods leverage off-the-shelf SfM techniques (Schonberger and Frahm,
+2016; Hartley and Zisserman, 2004; Snavely et al., 2006) to estimate input view poses. Nevertheless,
+this approach demands a denser array of views to achieve comparatively accurate estimations, and
+also increase the complexity of the process.
+Pose-free scene reconstruction and NVS Liu et al. (2024b) do not need pose input for scene NVS
+but instead require per-scene optimization. Pose-free methods without per-scene optimization can
+generally be categorized into two groups. The first group comprises methods (Wang et al., 2021;
+Chen and Lee, 2023; Chng et al., 2022; Xu et al., 2024a; Hong et al., 2024b; Smith et al., 2023;
+Bian et al., 2023; Yu et al., 2024; Hong et al., 2024a; Sajjadi et al., 2022) that optimize pose and
+scene simultaneously. However, these methods typically employ separate networks to estimate them,
+often lacking direct connections between them or relying on initializations from other pose and
+scene prediction models. This can lead to complex pipelines and a lack of explicit connections
+between pose and scene. The second category includes methods (Wang et al., 2024; Leroy et al.,
+2024; Ye et al., 2025; Smart et al., 2024; Zhang et al., 2024b) which initially reconstruct the scene in a
+canonical space without explicit pose input, rely on point or feature matching for scene reconstruction.
+Subsequently, the PnP algorithm is used to compute camera poses by matching points reconstructed
+from different input views, requiring sufficient overlap between input views and do pose-processing
+for pose estimation. Techniques for object reconstruction (Wang et al., 2023b; Jiang et al., 2024,
+2023) often involve lifting each pixel to a 3D Gaussian or relying on voxel representations, limiting
+input resolution and efficiency. In contrast, our model optimizes scene and pose jointly without
+additional pipelines. The comparison between our method and representative previous methods is in
+Table 1 with more methods comparison in Appendix A.1.1 Table 7.
+Model-free pose estimation Methods like Zhang et al. (2022); Lin et al. (2024); Zhang et al. (2024c);
+Wen et al. (2024); Wang et al. (2023a); Wen et al. (2023) directly regress poses from input images
+without 3D models. Many of these techniques leverage tools such as cross-attention and cost-volume
+to compare variations and similarities between different views and utilize the matching outcomes to
+estimate camera poses. However, lacking the assistance of 3D models, these methods are generally
+less effective compared to those incorporating 3D models. Some methods (Wang et al., 2019;
+Krishnan et al., 2024) utilize Normalized Object Coordinate Space (NOCS) for pose estimation.
+However, the reliance on well-aligned datasets that defines the positive direction for each object
+restricts its applicability.
+Table 1: Comparison with representative methods. ‘Pose-Free’ means that the model is pose-free,
+‘Jointly Opt’ means that the model optimize camera and 3D jointly, ‘Cano. Space’ means that the
+model define 3D points in the canonical space for all views, ‘Intri.-Free’ means that the model does
+not require intrinsic input, ‘3D GS’ means the model use 3D Gaussians as 3D representation.
+Method
+Pose-Free Jointly Opt. Cano. Space Intri.-Free 3D GS
+MVSplat
+CoPoNeRF
+SelfSplat
+NoPoSplat
+Ours
+3
+%
+!
+!
+!
+!
+%
+!
+%
+%
+!
+%
+!
+%
+!
+!
+%
+%
+%
+%
+!
+!
+%
+!
+!
+!
+Methods
+The details of our proposed method are given in this section. First, the preliminaries for 3D GS
+are briefly described in Section 3.1. Then, an overview of Coca-Splat is in Section 3.2. After that,
+Camera-aware Multi-view DeFormable cross-Attention (CaMDFA) module, the core contribution
+of Coca-Splat is described in Section 3.3 in detail. Moreover, the definition of 2D refernce point
+determined rays RefRay, which is proposed to represent the camera parameters in Coca-Splat, is
+introduced in Section 3.4. Finally, the training objective is introduced in Section 3.5.
+4
+3.1
+Prelimenaries of 3D GS
+3D GS (Kerbl et al., 2023) is a rendering method that utilize 3D Gaussians to represent 3D objects
+or scenes. In this context, a scene which consists of N 3D Gaussians can be represented as a set
+of parameters {SH, µ, σ, R, S}. The color of a 3D Gaussian ellipsoid is represented by spherical
+harmonics (SH) ∈ RN ×k (Dai et al., 2013; Kerbl et al., 2023), with degree of freedom k, while the
+geometry is described by position µ ∈ RN ×3 , shape (including rotation R ∈ RN ×4 in quternion
+and scales S ∈ RN ×3 ), and opacity σ ∈ RN (Zwicker et al., 2001; Kerbl et al., 2023). Therefore,
+the objective of 3D Gaussian reconstruction is to estimate the aforementioned parameters for 3D
+Gaussians.
+3.2
+Overview of Coca-Splat
+Image feature preparation. Following Wang et al. (2024); Leroy et al. (2024); Ye et al. (2025),
+we utilize the Vision Transformer (ViT) (Dosovitskiy et al., 2021) to extract multi-view image
+features from input images. The input images are first patchified and flattened to sequences of image
+tokens, which are then sent into ViT layers to derive the multi-view image features F. To expedite
+convergence, we initialize our ViT encoder based on NoPoSplatYe et al. (2025).
+Query preparation for 3D Gaussians and camera parameters. As mentioned in Section 1, our
+model define separate queries for 3D Gaussians and camera parameters as 3D queries Q3D ∈ RN ×D
+and camera queries Qcam ∈ RV ×N ×D respectively, where N denotes the number of queries, which
+is also the number of 3D Gaussians, V is the number of input views. Note that both quereis share the
+same locations as the centers of 3D Gaussians and therefore share the same set of 2D reference points
+after projection. The 3D Gaussian queries’ corresponding 3D Gaussian parameters G ∈ RN ×K are
+obtained by conducting an MLP on Q3D , where K denotes the dimention of 3D Gaussian parameters.
+The camera queries’ corresponding RefRay R ∈ RV ×N ×6 , which is the intermediate representation
+of camera parameters (see Section 3.4), are obtained by conducting MLP on Qcam . The 3D quereis
+are initialized from the flattening image features from ViT (see Appendix A.4 for more details). The
+camera queries are randomly initialized as learnable vectors.
+Multi-layer refinement. As shown in Fig. 2, within the multi-layer refinement, our method focuses
+on the optimization of 3D Gaussians G and camera RefRay R in each layer. As shown in Fig. 2, 3D
+queries and camera queries first pass through a camera-aware multi-view deformable cross-attention
+(CaMDFA) block, where the multi-view image features from the ViT encoder contribute as keys
+and values, as detailed in Section 3.3. Subsequently, the updated 3D queries and camera queries
+conduct self-attention individually. In particular, to mitigate memory costs, we implement a spatially
+efficient self-attention strategy inspired by UniG(Wu et al., 2024) (for more details, please refer to
+Appendix A.3. After that, the queries are updated by feed-forward networks (FFNs). The progress
+for updating queries in the l-th layer can be formulated as
+l−1
+l
+Ql3D , Qlcam = CaMDFA(Ql−1
+3D , Qcam , P , F),
+Ql3D = FFN(SA(Ql3D )),
+(1)
+Qlcam = FFN(SA(Qlcam ))
+where SA representing the self-attention layer and Pl indicates 2D reference points in the l-th layer
+(refer to details in Section 3.3). Finally, the updated 3D queries are utilized to refine the 3D Gaussians
+by Eq. (2),
+Gl = ∆Gl + Gl−1 , ∆Gl = Head3D (Ql3D )
+(2)
+where Gl is the parameters of 3D Gaussians in current layer 3 , Head3D is an MLP. Meanwhile,
+camera queries are utilized to update camera parameters, with the intermediate representation RefRay
+(see Section 3.4) as shown in Eq. (3),
+Rl = ∆Rl + Rl−1 , ∆Rl = Headcam (Qlcam )
+(3)
+where Rl denotes RefRay in current layer 4 , and Headcam is an MLP. After that the camera parameters
+Kl and π l are updated by the ray representation RefRay Rl (see Section 3.4 and Appendix A.2), and
+then they are passed into the next layer for 2D reference projection as in Eq. (4).
+3
+4
+In the first layer, Gl−1 is initialized by conducting an MLP on the intialized 3D queries.
+In the first layer, Rl−1 is initialized from initial camera parameters, which are defined as identity matrics.
+5
+3.3
+CaMDFA
+2D reference points in CaMDFA. As mentioned in Section 3.2, 2D reference points in CaMDFA are
+defined as the projected points of 3D Gaussians. Specifically, 2D reference points on the i-th view
+are generated by projecting the center of 3D Gaussians onto the i-th view, using the pinhole camera
+model (Forsyth and Ponce, 2003; Hartley and Zisserman, 2003), as shown in Fig. 3 and Eq. (4),
+P i = Ki π i µ
+(4)
+where Pi represents the 2D reference points on the i-th view, π i is the camera extrinsics, and Ki is
+camera intrinsics of the i-th view.
+Query updating for 3D Gaussian in CaMDFA. The locations of the 3D Gaussian queries are
+defined in canonical space 5 unitarily rather than individually for each view. Sharing the queries
+across multi-views directly is impractical. Inspired by Wu et al. (2024), we consider incorporating
+camera information for each view. Specifically, we employ camera modulation with adaptive layer
+norm (adaLN) (Hong et al., 2024c; Karras et al., 2019, 2020; Viazovetskyi et al., 2020) to derive 3D
+queries for the i-th view as shown in Eq. (5),
+Q3Di = LayerNorm(Q3D ) ∗ (1 + scale) + shift,
+shift, scale = MLP(Qcami )
+(5)
+The 3D queries are refined by conducting deformable cross-attention (DFA) on it with image features
+sampled surrounding the 2D reference points Pi (see Eq. (4)) in the i-th view as keys and values as
+shown in Eq. (6),
+Q3Di = DFA(Q3Di , Pi , Fi )
+(6)
+where Fi is the image feature for the i-th view, DFA is the deformable cross-attention (see details in
+Appendix A.5). After refining the 3D queries for each view, it is essential to merge them to derive the
+unitary 3D queries. In alignment with Wu et al. (2024), we utilize a weighted sum by Eq. (7).
+X
+Q3D =
+wi Q3Di , wi = sigmoid(MLP(Q3Di )).
+(7)
+i
+Query updating for camera parameters in CaMDFA. Instead of defining in canonical space like
+the 3D Gaussian queries, the camera queries are individually defined for each view. Meanwhile,
+the pose of each camera is specified relative to the reference view (defined as the 1-th view in our
+scenario without loss of generality). Therefore, to update camera queries for the i-th view, we only
+consider the 1-th and the i-th view as shown in Eq. (8).
+Qcami ⇐ DFA(Qcami , Pcami , Fi )
+Qcam1 ⇐ DFA(Qcam1 , Pcam1 , Fi ).
+(8)
+After refining Qcam1 and Qcami , our model performs an extra dense cross-attention to fuse them as
+shown in Eq. (9),
+Qcami ⇐ Ai · WV Qcam1 ,
+Ai = softmax
+WQ Qcami · (WK Qcam1 )T
+√
+dk
+(9)
+!
+where WQ , Wk , WV denotes transformation matrices, and dk is the dimension of keys.
+Insights in CaMDFA. The objective of CaMDFA is to link 3D Gaussians and camera parameters
+explicitly by sharing the same set of the projected 2D reference points. With the constraint in Eq. (4),
+3D Gaussians (with the centers µ) and camera parameters (K, π) are optimized simultaneously. This
+joint optimization aids in obtaining more meaningful 2D reference points and subsequently extracting
+more relevant image features from multi-view images.
+5
+The canonical space is defined as one input view’s local camera coordinates (Ye et al., 2025), and the
+selected input view is called reference view.
+6
+Camera center
+𝑷𝑷𝟏𝟏
+Camera center
+𝜋𝜋1 ,𝑲𝑲𝟏𝟏
+𝑷𝑷𝟎𝟎
+View0
+View1
+Reference points
+𝜋𝜋0 ,𝑲𝑲𝟎𝟎
+𝝁𝝁
+3D Gaussians
+RayRef
+Centers of 3D Gaussians
+𝜋𝜋0 , 𝜋𝜋1 Extrinsincs
+𝑲𝑲0 , 𝑲𝑲𝟏𝟏 Intrinsincs
+Figure 3: Our model projects the center of 3D Gaussians onto each input view by the camera
+parameters to get the reference points. The reference points are utilized to generate RefRay described
+in Section 3.4, which are the rays from the camera center to reference points. The 3D Gaussians and
+camera parameters are then explicitly linked by the reference points.
+3.4
+RefRay and Plücker-Camera sparse mapping
+Typically, camera for the i-th view is parameterized by extrinsics π i (consisting of rotations π iR ∈
+SO(3) and translations π it ∈ R3 ) and intrinsics Ki ∈ R3×3 . However, directly regressing Ki and
+π i from the camera queries (Qcami ∈ RN ×D for the i-th view), which entails regressing only 16
+parameters (9 for the rotation matrix, 3 for translation, and 4 for intrinsics including focal lengths
+and principal points) from the N × D parameters through an MLP, may be suboptimal for neural
+learning Zhang et al. (2024c). Therefore, inspired by Zhang et al. (2024c), we represent the camera
+parameters by N rays, transferring starting from the camera center to the N 2D reference points on
+the image plane as shown in Fig. 3. More specifically, our approach over-parameterize camera in
+the i-th view by a set of rays Ri = ri1 , . . . , riN , where each ray rij ∈ R6 is represented by Plücker
+coordinates (Plücker, 1828): rij ∈ R6 . Different from previous methods (Zhang et al., 2024c), we
+define the rays sparsly on the 2D refernce points instead of on each pixel to enhance the relationship
+between 3D Gaussians and camera parameters. After each layer, once the rays are predicted by
+Eq. (3), the camera parameters can be sovled by RQ-decomposition on a overdetermined system of
+equations from the Plücker coordinates of RefRay with details of Plücker-camera sparse mapping in
+Appendix A.2.
+3.5
+Training objective
+We leverage the differentiable rendering method 3D GS Kerbl et al. (2023) to generate RGB images
+from the 3D Gaussians G predicted by our model. Aligning with Hong et al. (2024c); Tang et al.
+(2024); Ye et al. (2025), we employ an RGB loss in Eq. (10), which consists of both a mean square
+error loss LMSE and a VGG-based LPIPS (Learned Perceptual Image Patch Similarity) loss (Zhang
+et al., 2018a) LLPIPS , to guide the rendered views. Here Ipd and Igt represent rendered views and
+ground truth images, ewspectively.
+L3D = LMSE (Ipd , Igt ) + λLLPIPS (Ipd , Igt )
+(10)
+For the camera parameters, with the 2D reference points, we can calculate the rays from the ground
+truth camera center to the N 2D reference points to get the ray supervision Rjgt . The ray loss is
+defined as Eq. (11).
+N
+X
+Lrays =
+Rjgt − Rjpd 2 .
+(11)
+j=1
+The total loss can be described as Eq. (12), where λrays and λ3D are weights of 3D and ray loss,
+respectively.
+L = λrays Lrays + λ3D L3D
+(12)
+7
+pixelSplat
+MVSplat
+SelfSplat
+NoPoSplat
+Ours
+GT
+RE10K(S) RE10K(M) RE10K(L)
+Input
+ACID(S)
+ACID(M)
+ACID(L)
+All
+Figure 4: Qualitative comparison on RE10K and ACID datasets. the ‘L’, ‘M’, and ‘S’ in the brackets
+meaning the groups of overlapping large, medium, and small, respectively.
+4
+Experiments
+Table 2: Novel view synthesis performance comparison on the ACID (Liu et al., 2021) dataset. ‘-A’
+means with evaluation-time pose alignment.
+Overlap Settings
+Method
+Small
+PSNR↑ SSIM↑ LPIPS↓
+Medium
+PSNR↑ SSIM↑ LPIPS↓
+Large
+PSNR↑ SSIM↑ LPIPS↓
+Average
+PSNR↑ SSIM↑ LPIPS↓
+Pose-Required
+pixelNeRF
+AttnRend
+pixelSplat
+MVSplat
+19.376 0.535 0.564
+20.942 0.616 0.398
+22.053 0.654 0.285
+21.392 0.639 0.290
+20.339 0.561 0.537
+24.004 0.720 0.301
+25.460 0.776 0.198
+25.103 0.770 0.199
+20.826 0.576 0.509
+27.117 0.808 0.207
+28.426 0.853 0.140
+28.388 0.852 0.139
+20.323 0.561 0.533
+24.475 0.730 0.287
+25.819 0.779 0.195
+25.512 0.773 0.196
+Pose-Free
+DUSt3R
+MASt3R
+CoPoNeRF
+NoPoSplat
+NoPoSplat-A
+Ours
+Ours-A
+14.494 0.372 0.502
+14.242 0.366 0.522
+18.651 0.551 0.485
+21.987 0.603 0.278
+23.087 0.685 0.258
+22.809 0.658 0.228
+24.343 0.713 0.237
+16.256 0.411 0.453
+16.169 0.411 0.463
+20.654 0.595 0.418
+23.236 0.689 0.238
+25.624 0.777 0.193
+23.292 0.707 0.218
+25.933 0.798 0.187
+17.324 0.431 0.408
+17.270 0.430 0.423
+22.654 0.652 0.343
+24.468 0.746 0.180
+28.043 0.841 0.144
+24.625 0.783 0.172
+28.467 0.859 0.120
+16.286 0.411 0.447
+16.179 0.409 0.461
+20.950 0.606 0.406
+23.416 0.692 0.226
+25.961 0.781 0.189
+23.648 0.723 0.204
+26.484 0.803 0.174
+Datasets Our paper focuses on benchmarking the Novel View Synthesis (NVS) task using the entire
+scene dataset. We have aligned our approach with the datasets employed in prior works Ye et al.
+(2025); Chen, Yuedong and Xu, Haofei and Zheng, Chuanxia and Zhuang, Bohan and Pollefeys,
+Marc and Geiger, Andreas and Cham, Tat-Jen and Cai, Jianfei (2024); Charatan et al. (2024), which
+leverage RealEstate10K (RE10K) (Zhou et al., 2018) and ACID (Liu et al., 2021) predominantly for
+both training and testing. We have adhered to the same train-test division and utilized the associated
+view indices outlined in Ye et al. (2025). Additionally, to enhance the scalability of our model, we
+have followed the approach in Ye et al. (2025) by incorporating the combined datasets of RE10K and
+DL3DV (Ling et al., 2024) (including all 11K subsets) for model training.
+8
+Table 3: Novel view synthesis performance comparison on the RealEstate10k (Zhou et al., 2018)
+dataset. ‘-A’ means with evaluation-time pose alignment. ‘-IF’ means the model is intrinsic free.
+Overlap Settings
+Method
+Small
+PSNR↑ SSIM↑ LPIPS↓
+Medium
+PSNR↑ SSIM↑ LPIPS↓
+Large
+PSNR↑ SSIM↑ LPIPS↓
+Average
+PSNR↑ SSIM↑ LPIPS↓
+Pose-Required
+pixelNeRF
+AttnRend
+pixelSplat
+MVSplat
+18.417 0.601 0.526
+19.151 0.663 0.368
+20.263 0.717 0.266
+20.353 0.724 0.250
+19.930 0.632 0.458
+22.532 0.763 0.186
+23.711 0.809 0.181
+23.778 0.812 0.173
+20.869 0.639 0.485
+25.897 0.845 0.269
+27.151 0.879 0.122
+27.408 0.884 0.116
+19.824 0.626 0.485
+22.664 0.762 0.269
+23.848 0.806 0.185
+23.977 0.811 0.176
+Pose-Free
+DUSt3R
+MASt3R
+Splatt3R
+CoPoNeRF
+SelfSplat
+NoPoSplat
+NoPoSplat-A
+Ours-IF
+Ours
+Ours-A
+14.101 0.432 0.468
+13.534 0.407 0.494
+14.352 0.475 0.472
+17.393 0.585 0.462
+17.506 0.550 0.461
+21.814 0.765 0.220
+22.514 0.784 0.210
+21.312 0.741 0.234
+22.843 0.781 0.192
+24.117 0.827 0.177
+15.419 0.451 0.402
+14.945 0.436 0.418
+15.529 0.502 0.425
+18.813 0.616 0.392
+19.357 0.704 0.378
+23.044 0.787 0.178
+24.899 0.839 0.160
+22.891 0.773 0.189
+23.394 0.804 0.175
+25.018 0.859 0.159
+16.427 0.453 0.432
+16.028 0.444 0.452
+15.817 0.483 0.421
+20.464 0.652 0.318
+20.868 0.672 0.256
+25.408 0.844 0.126
+27.411 0.883 0.119
+25.312 0.829 0.138
+26.270 0.872 0.110
+27.985 0.904 0.110
+15.382 0.447 0.432
+14.907 0.431 0.452
+15.318 0.490 0.436
+18.938 0.619 0.388
+19.33 0.656 0.363
+23.424 0.798 0.173
+25.033 0.838 0.160
+23.200 0.781 0.185
+24.093 0.818 0.160
+25.656 0.864 0.149
+Evaluation metrics Our model optimizes pose-free NVS and pose estimation simultaneously. For
+NVS evaluation, we consider metrics such as PSNR, SSIM, and LPIPS (Zhang et al., 2018b). In
+terms of pose estimation, we calculate the Area Under the Curve (AUC) for cumulative pose error
+using thresholds of 5◦ , 10◦ , and 20◦ (Ye et al., 2025; Sarlin et al., 2020). Furthermore, we also
+evaluate the performance of our model using input views with varying degrees of overlap, where a
+larger overlap indicates closer proximity between the input views. We categorize the overlaps into
+three groups: small (5% - 30%), medium (30% - 55%), and large (55% - 80%) following (Ye et al.,
+2025).
+Baselines We conduct comparison to the pose-free method NoPoSplat (Ye et al., 2025), and also
+other sparse view reconstruction methods, including pose-required methods pixelNeRF (Yu et al.,
+2021), AttnRend (Du et al., 2023), pixelSplat (Charatan et al., 2024), and MVSplat (Chen, Yuedong
+and Xu, Haofei and Zheng, Chuanxia and Zhuang, Bohan and Pollefeys, Marc and Geiger, Andreas
+and Cham, Tat-Jen and Cai, Jianfei, 2024), and pose-free methods DUSt3R (Wang et al., 2024),
+MASt3R (Leroy et al., 2024), Splatt3R (Smart et al., 2024), SelfSplat (Kang et al., 2024), CoPoNeRF
+(Hong et al., 2023), and RoMa (Edstedt et al., 2024).
+Implementation details We employ ViT initialized by NoPoSplat and multi-layer refinement contains
+4 layers. In accordance with prior research, we input all images at a resolution of 256 × 256. To
+compare fairly, we select the number of 3D Gaussians being same to previous methods, that is, the
+number of pixels in 2 views (2 × 256 × 256). Our model is trained on 8 A100 GPUs for 1 day.
+4.1
+Results and analysis
+Quantity results for NVS The comparison results for NVS performance on RE10K and ACID
+dataset are depicted in Table 3 and Table 2. As demonstrated in the table, our model consistently
+outperforms previous methods, even surpassing methods that rely on ground-truth pose input, particularly excelling in scenarios with limited view overlap. In particular, our unposed image model
+successfully reconstructs a plausible 3D scene that aligns well with the inputs provided. However,
+reconstructing a 3D scene with only two input views inherently poses challenges due to the ambiguity
+arising from multiple scenes producing the same pair of images (Ye et al., 2025). To address this, as
+discussed in Ye et al. (2025); Fan et al. (2024); Wang et al. (2021), we adopt an evaluation-time pose
+alignment strategy to refine the camera pose for the target view, ensuring a fair comparison. For each
+evaluation sample, we initially reconstruct 3D Gaussians using our proposed approach. Subsequently,
+we fine-tune the target camera pose to align the rendered image closely with the ground-truth image.
+We present results for both models with and without this alignment, denoting the aligned method
+with ‘-A’. As outlined in Section 3.4, rays are capable of representing not only camera poses but also
+intrinsics. Consequently, we conduct experiments that do not provide intrinsics but instead predicted
+them, the results are represented by ‘Ours-IF’ in Table 3. The results is worse than using ground-truth
+intrinsics but comparable to previous methods.
+9
+Quality results for NVS We present quality comparisons with pose-required methods (pixelSplat
+(Charatan et al., 2024) and MVSplat (Chen, Yuedong and Xu, Haofei and Zheng, Chuanxia and
+Zhuang, Bohan and Pollefeys, Marc and Geiger, Andreas and Cham, Tat-Jen and Cai, Jianfei, 2024))
+and the two categories of pose-free methods mentioned in Section 1. The first category is that
+solely optimize 3D while neglecting poses (NoPoSplat (Ye et al., 2025)) and the second category is
+that optimize both pose and 3D using separate networks (SelfSplat (Kang et al., 2024)) Fig. 4 and
+Appendix A.6. Our method demonstrates superior performance compared to previous ones. Poserequired methods typically employ a ‘transform-then-fuse’ strategy (Ye et al., 2025), generating 3D
+Gaussians under each view’s camera coordinates and then concatenating them in world coordinates,
+resulting in blurring in novel views. Pose-free methods that focus solely on 3D may encounter
+issues with incorrect rendering in novel views due to improper pose handling. Pose-free methods
+that optimize 3D and pose separately risk inaccurate novel views resulting from improper pose
+estimations.
+Relative pose estimation The results of relative pose estimated are presented in Table 4. Aligning
+with Ye et al. (2025), we assess the performance in pose estimation by training two models in different
+datasets. One model is trained using the RE10K dataset, while the other is trained using a combination
+of RE10K and DL3DV datasets, denoted as ‘Ours’ and ‘Ours*’ in the table, respectively. We evaluate
+the performance on both the RE10K test set and the ACID test set to demonstrate the efficacy of our
+models on both in-domain and cross-domain datasets. The results indicate that as the training set
+grows, the accuracy of pose estimation improves. The comparison on another evaluation matrix with
+rotation and translation error is shown in Table 8.
+Table 4: Pose estimation performance in AUC with various thresholds on RE10k, ACID. Methods
+with ‘*’ meaning the model is trained on RE10k+DL3DV dataset, otherwise only on RE10K. ‘-A’
+means with evaluation-time pose alignment.
+RE10k
+ACID
+Method
+5◦ ↑
+10◦ ↑
+20◦ ↑
+5◦ ↑
+10◦ ↑
+20◦ ↑
+CoPoNeRF
+DUSt3R
+MASt3R
+RoMa
+NoPoSplat
+NoPoSplat*
+NoPoSplat-A
+NoPoSplat-A*
+Ours
+Ours*
+Ours-A
+Ours-A*
+0.161
+0.301
+0.372
+0.546
+0.546
+0.623
+0.672
+0.691
+0.605
+0.650
+0.710
+0.683
+0.362
+0.495
+0.561
+0.698
+0.719
+0.775
+0.792
+0.806
+0.749
+0.788
+0.805
+0.810
+0.575
+0.657
+0.709
+0.797
+0.843
+0.867
+0.869
+0.877
+0.885
+0.887
+0.887
+0.886
+0.078
+0.166
+0.234
+0.463
+0.366
+0.440
+0.454
+0.486
+0.405
+0.451
+0.487
+0.499
+0.216
+0.304
+0.396
+0.588
+0.519
+0.578
+0.591
+0.617
+0.556
+0.587
+0.610
+0.627
+0.398
+0.437
+0.541
+0.689
+0.654
+0.693
+0.709
+0.728
+0.661
+0.702
+0.715
+0.735
+Geometry reconstruction To conduct a comprehensive comparison between our model and previous
+approaches based on the reconstructed 3D Gaussians rather than solely novel views, we present the
+rendered geometry depicted using 3D Gaussians in Fig. 5. The results of geometry are visualized by
+the code provided by Charatan et al. (2024); Chen, Yuedong and Xu, Haofei and Zheng, Chuanxia
+and Zhuang, Bohan and Pollefeys, Marc and Geiger, Andreas and Cham, Tat-Jen and Cai, Jianfei
+(2024). As illustrated in the figure, by jointly optimizing 3D Gaussians and input view camera poses,
+our methods achieve better alignment between input views, resulting in reduced artifacts within
+the reconstructed scenes. Furthermore, our model exhibits enhanced performance in reconstructing
+missing elements that were challenging for previous methods.
+Model Efficiency To show the model efficiency of our model, we test the inference time on a 3090
+GPU with batch size 1. As shown in Table 5, our method can predict 3D Gaussians together with the
+camera poses from two 256 × 256 input images in 0.131 seconds (7.63 fps), outperforms previous
+methods.
+In-the-wild input images To ensure that our model can generalize beyond the training dataset, we
+evaluated it on in-the-wild images, as illustrated in Fig. 6. Our model demonstrates ability in both
+indoor and outdoor scenes.
+10
+Input
+pixelSplat
+MVSplat
+Ours
+NoPoSplat
+Figure 5: Geometry visualization with renderd novel view and depth. Our model demonstrates
+enhanced performance in addressing specific artifacts in the first row. Furthermore, our model excels
+in reconstructing missing elements that were challenging for prior approaches, (like chairs and tables
+situated in the corner), indicated by the blue arrows.
+Table 5: Inference time comparison. ‘3D time’ denotes the duration for reconstructing 3D scenes,
+‘pose time’ signifies the time taken for pose estimation, ‘forward time’ represents the total duration
+for inferring both 3D scenes and poses, while ‘rendering time’ indicates the time for NVS from 3D
+for a single image. For the network without the parts or has no separate parts, we use ‘NA’. without
+All measurements are in seconds.
+Method
+3D time Pose time Forward time Rendering time
+pixelSplat
+MVSplat
+DBARF
+DUSt3R
+MASt3R
+NoPoSplat
+Our model
+4.2
+0.825
+0.0.301
+NA
+0.062
+0.079
+0.108
+NA
+NA
+NA
+NA
+0.211
+0.211
+0.211
+NA
+0.825
+0.301
+1.132
+0.273
+0.290
+0.319
+0.131
+0.003
+0.003
+1.268
+0.003
+0.003
+0.003
+0.003
+Ablation studies
+Ground-truth pose input In contrast to earlier pose-free methods lacking pose incorporation in their
+networks, our model optimizes 3D and pose jointly. Consequently, we can use the ground-truth poses
+as input to further enhance our model’s performance give they are given. By utilizing ground-truth
+pose data, our model demonstrates even better outcomes, as evidenced in Table 6.
+No CaMDFA To demonstrate the significance of our custom CaMDFA decoder, we conducted an
+ablation study by omitting this component. In other words, we attempted to regress 3D Gaussians
+directly from the ViT encoder. The absence of the CaMDFA resulted in a decrease in performance as
+shown in Table 6.
+Regress camera pose as 6D pose As discussed in Section 3.4, directly regressing 6D pose of the
+camera from queries with numerous parameters, leads to suboptimal results. To support this, we
+conducted an ablation study on directly regressing the 6D pose (rotation and translation) as shown in
+Table 6, with the results supporting our assertion.
+Rays on pixel In our model, we define rays from the camera center to 2D reference points, which
+differs from the approach in Zhang et al. (2024c), where rays are defined from the camera center to
+each pixel or patch on the image. To demonstrate the effectiveness of our approach, we conduct an
+ablation study on the rays defined in Zhang et al. (2024c), referred to as ‘Rays on pixel’ in Table 6.
+As illustrated in the table, the design of our RefRay contributes to improved model performance.
+11
+Input
+3D Gaussians
+Input
+Novel views
+3D Gaussians
+Novel views
+Figure 6: In-the-wild input images. Our method is applied using real-world photographs taken with
+mobile phones, encompassing both indoor and outdoor scenarios.
+Input more views Our model is flexible and can receive an arbitrary number of input views rather
+than only two views. The inclusion of three input views yields superior results compared to two
+views, as demonstrated in Table 6. Additionally, we present the PSNR results for a larger number of
+input views, extending up to 10 views, in the model details section (Appendix A.6 Fig. 8).
+Table 6: Ablation Studies on RE10K dataset.
+Method
+PSNR ↑ SSIM ↑ LPIPS ↓
+Full model
+25.656
+0.864
+0.149
+GT pose input
+No CaMDFA
+6D pose
+Rays on pixel
+Input 3 views
+26.217
+23.916
+23.929
+24.323
+26.706
+0.870
+0.808
+0.814
+0.822
+0.884
+0.138
+0.172
+0.163
+0.158
+0.124
+Number of Gaussians We evaluate our model using the same number of 3D Gaussians as previous
+methods, equivalent to the total pixels in two input views (131,072). However,our model offers the
+flexibility to treat the number of 3D Gaussians as a hyperparameter. In our ablation study on the
+number of 3D Gaussians (Appendix A.6 Fig. 9), we observe that performance improves with an
+increased number of 3D Gaussians utilized.
+5
+Conclusion and Limitation
+In conclusion, we introduces a novel approach Coca-Splat to optimizing 3D Gaussians and camera
+poses collaboratively within a unified network, enhancing the relationship between them for improved
+scene reconstruction and novel view synthesis. Inspired by Deformable DETR, our model represents
+define separate queries for 3D Gaussians and camera parameters, leveraging image features for
+efficient updates within CaMDFA block. This process involves projecting 3D queries onto image
+features using camera poses as 2D reference points and utilizing surrounding image features to
+update both 3D and camera queries. To tackle the challenge in regressing rotations and translations
+from numerous parameters, we adopt a ray-based design (RefRay) that representing camera poses
+as rays from the camera center to the 2D reference points on the image feature. Our methodology
+surpasses previous approaches on benchmark datasets like RealEstate10K and ACID, demonstrating
+its effectiveness and potential for advancing scene reconstruction and novel view synthesis.
+Limitations A limitation persists in that the training datasets seldom contain videos that capture the
+entire 360-degree scenes. Consequently, our model lack the ability on reconstruct the 360◦ scenes
+from one forward.
+12
+References
+Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla, and Pratul P
+Srinivasan. Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields. In IEEE/CVF
+International Conference on Computer Vision (ICCV), 2021.
+Wenjing Bian, Zirui Wang, Kejie Li, Jia-Wang Bian, and Victor Adrian Prisacariu. NoPe-NeRF: Optimising
+Neural Radiance Field With No Pose Prior. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 4160–4169, 2023.
+David Charatan, Sizhe Lester Li, Andrea Tagliasacchi, and Vincent Sitzmann. pixelsplat: 3d gaussian splats
+from image pairs for scalable generalizable 3d reconstruction. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 19457–19467, 2024.
+Guikun Chen and Wenguan Wang. A Survey on 3D Gaussian Splatting. ArXiv, 2024.
+Yu Chen and Gim Hee Lee. DBARF: Deep Bundle-Adjusting Generalizable Neural Radiance Fields. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 24–34, 2023.
+Chen, Yuedong and Xu, Haofei and Zheng, Chuanxia and Zhuang, Bohan and Pollefeys, Marc and Geiger,
+Andreas and Cham, Tat-Jen and Cai, Jianfei. Mvsplat: Efficient 3d gaussian splatting from sparse multi-view
+images. European Conference on Computer Vision, 2024.
+Shin-Fang Chng, Sameera Ramasinghe, Jamie Sherrah, and Simon Lucey. Gaussian activated neural radiance
+fields for high fidelity reconstruction and pose estimation. In European Conference on Computer Vision,
+pages 264–280. Springer, 2022.
+Feng Dai, Yuan Xu, Feng Dai, and Yuan Xu. Spherical harmonics. Approximation theory and harmonic analysis
+on spheres and balls, pages 1–27, 2013.
+Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner,
+Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, et al. An Image is Worth 16x16 Words:
+Transformers for Image Recognition at Scale. ICLR, 2021.
+Yilun Du, Cameron Smith, Ayush Tewari, and Vincent Sitzmann. Learning to render novel views from
+wide-baseline stereo pairs. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 4970–4980, 2023.
+Johan Edstedt, Qiyu Sun, Georg Bökman, Mårten Wadenbäck, and Michael Felsberg. RoMa: Robust dense
+feature matching. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+pages 19790–19800, 2024.
+Zhiwen Fan, Wenyan Cong, Kairun Wen, Kevin Wang, Jian Zhang, Xinghao Ding, Danfei Xu, Boris Ivanovic,
+Marco Pavone, Georgios Pavlakos, et al. Instantsplat: Unbounded sparse-view pose-free gaussian splatting in
+40 seconds. arXiv preprint arXiv:2403.20309, 2(3):4, 2024.
+David A Forsyth and Jean Ponce. A Modern Approach. Computer vision: a modern approach, 17:21–48, 2003.
+Stephan J. Garbin, Marek Kowalski, Matthew Johnson, Jamie Shotton, and Julien P. C. Valentin. FastNeRF:
+High-Fidelity Neural Rendering at 200FPS. In IEEE/CVF International Conference on Computer Vision
+(ICCV), 2021.
+Richard Hartley and Andrew Zisserman. Multiple View Geometry in Computer Vision. Cambridge university
+press, 2003.
+R. Hartley and A. Zisserman. Multiple View Geometry in Computer Vision. Cambridge University Press, 2004.
+Sunghwan Hong, Jaewoo Jung, Heeseong Shin, Jiaolong Yang, Seungryong Kim, and Chong Luo. Unifying
+Correspondence, Pose and NeRF for Pose-Free Novel View Synthesis from Stereo Pairs. arXiv preprint
+arXiv:2312.07246, 2023.
+Sunghwan Hong, Jaewoo Jung, Heeseong Shin, Jisang Han, Jiaolong Yang, Chong Luo, and Seungryong Kim.
+PF3plat: Pose-Free Feed-Forward 3D Gaussian Splatting. arXiv preprint arXiv:2410.22128, 2024a.
+Sunghwan Hong, Jaewoo Jung, Heeseong Shin, Jiaolong Yang, Seungryong Kim, and Chong Luo. Unifying
+Correspondence, Pose and NeRF for Pose-Free Novel View Synthesis from Stereo Pairs. CVPR, 2024b.
+Yicong Hong, Kai Zhang, Jiuxiang Gu, Sai Bi, Yang Zhou, Difan Liu, Feng Liu, Kalyan Sunkavalli, Trung Bui,
+and Hao Tan. LRM: Large Reconstruction Model for Single Image to 3D. In International Conference on
+Learning Representations (ICLR), 2024c.
+13
+Hanwen Jiang, Zhenyu Jiang, Yue Zhao, and Qixing Huang. Leap: Liberate sparse-view 3d modeling from
+camera poses. arXiv preprint arXiv:2310.01410, 2023.
+Hanwen Jiang, Zhenyu Jiang, Kristen Grauman, and Yuke Zhu. Few-View Object Reconstruction with Unknown
+Categories and Camera Poses. In 2024 International Conference on 3D Vision (3DV), pages 31–41. IEEE,
+2024.
+Gyeongjin Kang, Jisang Yoo, Jihyeon Park, Seungtae Nam, Hyeonsoo Im, Sangpil Kim, Eunbyung Park,
+et al. SelfSplat: Pose-Free and 3D Prior-Free Generalizable 3D Gaussian Splatting. arXiv preprint
+arXiv:2411.17190, 2024.
+Tero Karras, Samuli Laine, and Timo Aila. A Style-Based Generator Architecture for Generative Adversarial
+Networks. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition (CVPR),
+pages 4401–4410, 2019.
+Tero Karras, Samuli Laine, Miika Aittala, Janne Hellsten, Jaakko Lehtinen, and Timo Aila. Analyzing and
+Improving the Image Quality of StyleGAN. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition (CVPR), pages 8110–8119, 2020.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler, and George Drettakis. 3D Gaussian Splatting for
+Real-Time Radiance Field Rendering. In ACM Transactions on Graphics (TOG), 2023.
+Akshay Krishnan, Abhijit Kundu, Kevis-Kokitsi Maninis, James Hays, and Matthew Brown. OmniNOCS: A
+unified NOCS dataset and model for 3D lifting of 2D objects. In European Conference on Computer Vision,
+pages 127–145. Springer, 2024.
+Vincent Leroy, Yohann Cabon, and Jérôme Revaud. Grounding image matching in 3d with mast3r. In European
+Conference on Computer Vision, pages 71–91. Springer, 2024.
+Jiahao Li, Hao Tan, Kai Zhang, Zexiang Xu, Fujun Luan, Yinghao Xu, Yicong Hong, Kalyan Sunkavalli,
+Greg Shakhnarovich, and Sai Bi. Instant3D: Fast Text-to-3D with Sparse-View Generation and Large
+Reconstruction Model. The International Conference on Learning Representations (ICLR), 2023.
+Amy Lin, Jason Y Zhang, Deva Ramanan, and Shubham Tulsiani. Relpose++: Recovering 6d poses from
+sparse-view observations. In 2024 International Conference on 3D Vision (3DV), pages 106–115. IEEE,
+2024.
+Lu Ling, Yichen Sheng, Zhi Tu, Wentian Zhao, Cheng Xin, Kun Wan, Lantao Yu, Qianyu Guo, Zixun Yu, Yawen
+Lu, et al. Dl3dv-10k: A large-scale scene dataset for deep learning-based 3d vision. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 22160–22169, 2024.
+Andrew Liu, Richard Tucker, Varun Jampani, Ameesh Makadia, Noah Snavely, and Angjoo Kanazawa. Infinite
+Nature: Perpetual View Generation of Natural Scenes from a Single Image. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV), 2021.
+Changkun Liu, Shuai Chen, Yash Bhalgat, Siyan Hu, Ming Cheng, Zirui Wang, Victor Adrian Prisacariu, and
+Tristan Braud. GS-CPR: Efficient Camera Pose Refinement via 3D Gaussian Splatting. arXiv preprint
+arXiv:2408.11085, 2024a.
+Fangfu Liu, Wenqiang Sun, Hanyang Wang, Yikai Wang, Haowen Sun, Junliang Ye, Jun Zhang, and Yueqi
+Duan. Reconx: Reconstruct any scene from sparse views with video diffusion model. arXiv preprint
+arXiv:2408.16767, 2024b.
+Xiaoxiao Long, Yuan-Chen Guo, Cheng Lin, Yuan Liu, Zhiyang Dou, Lingjie Liu, Yuexin Ma, Song-Hai Zhang,
+Marc Habermann, Christian Theobalt, et al. Wonder3d: Single image to 3d using cross-domain diffusion. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 9970–9980,
+2024.
+Hidenobu Matsuki, Riku Murai, Paul HJ Kelly, and Andrew J Davison. Gaussian Splatting Slam. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 18039–18048, 2024.
+Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng.
+NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis. In The European Conference on
+Computer Vision (ECCV), 2020.
+Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant Neural Graphics Primitives with a
+Multiresolution Hash Encoding. In ACM Transactions on Graphics (SIGGRAPH), 2022.
+Julius Plücker. Analytisch-geometrische Entwicklungen. GD Baedeker, 1828.
+14
+Charles R Qi, Hao Su, Kaichun Mo, and Leonidas J Guibas. PointNet: Deep Learning on Point Sets for 3D
+Classification and Segmentation. In Proceedings of the IEEE conference on computer vision and pattern
+recognition (CVPR), pages 652–660, 2017.
+Marie-Julie Rakotosaona, Fabian Manhardt, Diego Martin Arroyo, Michael Niemeyer, Abhijit Kundu, and
+Federico Tombari. NeRFMeshing: Distilling Neural Radiance Fields into Geometrically-Accurate 3D Meshes.
+In International Conference on 3D Vision (3DV), 2023.
+Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick Esser, and Björn Ommer. High-resolution image
+synthesis with latent diffusion models. In Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition (CVPR), pages 10684–10695, 2022.
+Mehdi S. M. Sajjadi, Henning Meyer, Etienne Pot, Urs Bergmann, Klaus Greff, Noha Radwan, Suhani Vora,
+Mario Lucic, Daniel Duckworth, Alexey Dosovitskiy, Jakob Uszkoreit, Thomas Funkhouser, and Andrea
+Tagliasacchi. Scene Representation Transformer: Geometry-Free Novel View Synthesis Through Set-Latent
+Scene Representations. CVPR, 2022.
+Paul-Edouard Sarlin, Daniel DeTone, Tomasz Malisiewicz, and Andrew Rabinovich. SuperGlue: Learning
+Feature Matching with Graph Neural Networks. In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, pages 4938–4947, 2020.
+Johannes L. Schonberger and Jan-Michael Frahm. Structure-From-Motion Revisited. In Proceedings of the
+IEEE Conference on Computer Vision and Pattern Recognition (CVPR), 2016.
+Yichun Shi, Peng Wang, Jianglong Ye, Long Mai, Kejie Li, and Xiao Yang. MVDream: Multi-view Diffusion
+for 3D Generation. The International Conference on Learning Representations (ICLR), 2024.
+Brandon Smart, Chuanxia Zheng, Iro Laina, and Victor Adrian Prisacariu. Splatt3r: Zero-shot gaussian splatting
+from uncalibrated image pairs. arXiv preprint arXiv:2408.13912, 2024.
+Cameron Smith, Yilun Du, Ayush Tewari, and Vincent Sitzmann. FlowCam: Training Generalizable 3D
+Radiance Fields without Camera Poses via Pixel-Aligned Scene Flow. NeurIPS, 2023.
+N. Snavely, S. M. Seitz, and R. Szeliski. Photo Tourism: Exploring Photo Collections in 3D. In ACM
+Transactions on Graphics (TOG), pages 835–846, 2006.
+Jiaxiang Tang, Zhaoxi Chen, Xiaokang Chen, Tengfei Wang, Gang Zeng, and Ziwei Liu. LGM: Large MultiView Gaussian Model for High-Resolution 3D Content Creation. In European Conference on Computer
+Vision, pages 1–18. Springer, 2024.
+Yuri Viazovetskyi, Vladimir Ivashkin, and Evgeny Kashin. StyleGAN2 Distillation for Feed-forward Image
+Manipulation. In Proceedings of the IEEE/CVF European Conference on Computer Vision (ECCV), pages
+170–186. Springer, 2020.
+He Wang, Srinath Sridhar, Jingwei Huang, Julien Valentin, Shuran Song, and Leonidas J Guibas. Normalized
+Object Coordinate Space for Category-Level 6D Object Pose and Size Estimation. In Proceedings of the
+IEEE/CVF conference on computer vision and pattern recognition, pages 2642–2651, 2019.
+Jianyuan Wang, Christian Rupprecht, and David Novotny. PoseDiffusion: Solving Pose Estimation via Diffusionaided Bundle Adjustment. In Proceedings of the IEEE/CVF International Conference on Computer Vision,
+pages 9773–9783, 2023a.
+Peng Wang and Yichun Shi. ImageDream: Image-Prompt Multi-view Diffusion for 3D Generation. arXiv
+preprint arXiv:2312.02201, 2023.
+Peng Wang, Hao Tan, Sai Bi, Yinghao Xu, Fujun Luan, Kalyan Sunkavalli, Wenping Wang, Zexiang Xu, and
+Kai Zhang. PF-LRM: Pose-Free Large Reconstruction Model for Joint Pose and Shape Prediction. arXiv
+preprint arXiv:2311.12024, 2023b.
+Shuzhe Wang, Vincent Leroy, Yohann Cabon, Boris Chidlovskii, and Jerome Revaud. Dust3r: Geometric 3d
+vision made easy. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+pages 20697–20709, 2024.
+Zirui Wang, Shangzhe Wu, Weidi Xie, Min Chen, and Victor Adrian Prisacariu. NeRF–: Neural radiance fields
+without known camera parameters. arXiv preprint arXiv:2102.07064, 2021.
+Bowen Wen, Jonathan Tremblay, Valts Blukis, Stephen Tyree, Thomas Müller, Alex Evans, Dieter Fox, Jan
+Kautz, and Stan Birchfield. BundleSDF: Neural 6-DoF Tracking and 3D Reconstruction of Unknown Objects.
+In CVPR, 2023.
+15
+Bowen Wen, Wei Yang, Jan Kautz, and Stan Birchfield. FoundationPose: Unified 6D Pose Estimation and
+Tracking of Novel Objects. In CVPR, 2024.
+Jiamin Wu, Kenkun Liu, Yukai Shi, Xiaoke Jiang, Yuan Yao, and Lei Zhang. UniG: Modelling Unitary 3D
+Gaussians for View-consistent 3D Reconstruction. arXiv preprint arXiv:2410.13195, 2024.
+Jiamin Wu, Kenkun Liu, Han Gao, Xiaoke Jiang, and Lei Zhang. LeanGaussian: Breaking Pixel or Point
+Cloud Correspondence in Modeling 3D Gaussians. Conference on Computer Vision and Pattern Recognition
+(CVPR), 2025.
+Chao Xu, Ang Li, Linghao Chen, Yulin Liu, Ruoxi Shi, Hao Su, and Minghua Liu. SpaRP: Fast 3D Object
+Reconstruction and Pose Estimation from Sparse Views. In European Conference on Computer Vision, pages
+143–163. Springer, 2024a.
+Jiale Xu, Weihao Cheng, Yiming Gao, Xintao Wang, Shenghua Gao, and Ying Shan. InstantMesh: Efficient
+3D Mesh Generation from a Single Image with Sparse-view Large Reconstruction Models. arXiv preprint
+arXiv:2404.07191, 2024b.
+Yinghao Xu, Zifan Shi, Wang Yifan, Sida Peng, Ceyuan Yang, Yujun Shen, and Wetzstein Gordon. GRM: Large
+Gaussian Reconstruction Model for Efficient 3D Reconstruction and Generation, author=Xu Yinghao and Shi
+Zifan and Yifan Wang and Chen Hansheng and Yang Ceyuan and Peng Sida and Shen Yujun and Wetzstein
+Gordon, 2024c.
+Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. In
+Conference on Neural Information Processing Systems (NIPS), 2021.
+Botao Ye, Sifei Liu, Haofei Xu, Li Xueting, Marc Pollefeys, Ming-Hsuan Yang, and Peng Songyou. No Pose,
+No Problem: Surprisingly Simple 3D Gaussian Splats from Sparse Unposed Images. ICLR, 2025.
+Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. pixelNeRF: Neural Radiance Fields from One or
+Few Images. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2021.
+Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mip-splatting: Alias-free 3d gaussian
+splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+19447–19456, 2024.
+Chubin Zhang, Hongliang Song, Yi Wei, Yu Chen, Jiwen Lu, and Yansong Tang. GeoLRM: Geometry-Aware
+Large Reconstruction Model for High-Quality 3D Gaussian Generation. NeurIPS, 2024a.
+Hao Zhang, Feng Li, Shilong Liu, Lei Zhang, Hang Su, Jun-Juan Zhu, Lionel Ming shuan Ni, and Heung yeung
+Shum. DINO: DETR with Improved DeNoising Anchor Boxes for End-to-End Object Detection. In The
+International Conference on Learning Representations (ICLR), 2023.
+Junyi Zhang, Charles Herrmann, Junhwa Hur, Varun Jampani, Trevor Darrell, Forrester Cole, Deqing Sun, and
+Ming-Hsuan Yang. MonST3R: A Simple Approach for Estimating Geometry in the Presence of Motion.
+arXiv preprint arXiv:2410.03825, 2024b.
+Jason Y Zhang, Deva Ramanan, and Shubham Tulsiani. Relpose: Predicting probabilistic relative rotation for
+single objects in the wild. In European Conference on Computer Vision, pages 592–611. Springer, 2022.
+Jason Y Zhang, Amy Lin, Moneish Kumar, Tzu-Hsuan Yang, Deva Ramanan, and Shubham Tulsiani. Cameras as
+Rays: Pose Estimation via Ray Diffusion. In International Conference on Learning Representations (ICLR),
+2024c.
+Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen Koltun. NeRF++: Analyzing and Improving Neural
+Radiance Fields. ArXiv, 2020.
+Kai Zhang, Sai Bi, Hao Tan, Yuanbo Xiangli, Nanxuan Zhao, Kalyan Sunkavalli, and Zexiang Xu. GS-LRM:
+Large Reconstruction Model for 3D Gaussian Splatting. European Conference on Computer Vision, 2024d.
+Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. The Unreasonable Effectiveness of Deep Features as a Perceptual Metric. In IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2018a.
+Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The Unreasonable Effectiveness
+of Deep Features as a Perceptual Metric. In Proceedings of the IEEE conference on computer vision and
+pattern recognition (CVPR), pages 586–595, 2018b.
+16
+Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe, and Noah Snavely. Stereo Magnification: Learning
+View Synthesis using Multiplane Images. ACM Transactions on Graphics (TOG), 2018.
+Xizhou Zhu, Weijie Su, Lewei Lu, Bin Li, Xiaogang Wang, and Jifeng Dai. Deformable DETR: Deformable
+Transformers for End-to-End Object Detection. In The International Conference on Learning Representations
+(ICLR), 2021.
+Zihan Zhu, Songyou Peng, Viktor Larsson, Weiwei Xu, Hujun Bao, Zhaopeng Cui, Martin R. Oswald, and Marc
+Pollefeys. NICE-SLAM: Neural Implicit Scalable Encoding for SLAM. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), 2022.
+Zihan Zhu, Songyou Peng, Viktor Larsson, Zhaopeng Cui, Martin R Oswald, Andreas Geiger, and Marc
+Pollefeys. Nicer-slam: Neural Implicit Scene Encoding for RGB Slam. In 2024 International Conference on
+3D Vision (3DV), pages 42–52. IEEE, 2024.
+Zi-Xin Zou, Zhipeng Yu, Yuan-Chen Guo, Yangguang Li, Ding Liang, Yan-Pei Cao, and Song-Hai Zhang.
+Triplane Meets Gaussian Splatting: Fast and Generalizable Single-View 3D Reconstruction with Transformers.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages
+10324–10335, 2024.
+M. Zwicker, H. Pfister, J. van Baar, and M. Gross. EWA volume splatting. In IEEE Visualization (IEEE VIS),
+2001.
+17
+A
+Appendix
+A.1
+Model details
+A.1.1
+Comparison to previous methods
+Table 7: Methods comparison: ‘Pose-Free’ means that the model is pose-free, ‘Jointly Opt.’ means
+that the model optimize camera and 3D jointly, ‘Cano. Space’ means that the model define 3D points
+in the canonical space for all views, ‘Intri.-Free’ means that the model does not require intrinsic input.
+Method
+Pose-Free Jointly Opt. Cano. Space Intri.-Free
+PixelNeRF
+PixelSplat
+MVSplat
+DUSt3R
+MASt3R
+CoPoNeRF
+SelfSplat
+NoPoSplat
+Ours
+%
+%
+%
+!
+!
+!
+!
+!
+!
+%
+%
+%
+%
+%
+!
+%
+%
+!
+%
+%
+%
+!
+!
+!
+%
+!
+!
+%
+%
+%
+%
+%
+%
+%
+%
+!
+We offer a comparison with various methods in Table 7. Our model is a pose-free approach that jointly
+optimizes pose and scene, operating within canonical space, and is free from intrinsic constraints.
+A.2
+RefRay
+Typically, camera for the i-th view is parameterized by extrinsics π i (consisting of rotations π iR ∈
+SO(3) and translations π it ∈ R3 ) and intrinsics Ki ∈ R3×3 . However, directly regressing Ki and
+π i from the camera queries (Qcami ∈ RN ×D for the i-th view), which entails regressing only 16
+parameters (9 for the rotation matrix, 3 for translation, and 4 for intrinsics including focal lengths
+and principal points) from the N × D parameters through an MLP, may be suboptimal for neural
+learning Zhang et al. (2024c). Therefore, inspired by Zhang et al. (2024c), we represent the camera
+parameters by N rays, transferring starting from the camera center to the N 2D reference points on
+the image plane as shown in Fig. 3. More specifically, our approach over-parameterize camera in
+the i-th view by a set of rays Ri = ri1 , . . . , riN , where each ray rij ∈ R6 is represented by Plücker
+coordinates (Plücker, 1828): rij ∈ R6 . Different from previous methods (Zhang et al., 2024c), we
+define the rays sparsly on the 2D refernce points instead of on each pixel to enhance the relationship
+between 3D Gaussians and camera parameters. After each layer, once the rays are predicted by
+Eq. (3), the camera parameters can be sovled by RQ-decomposition on a overdetermined system of
+equations from the Plücker coordinates of RefRay with details of Plücker-camera sparse mapping as
+following. We give the mapping from cameras to rays in Theorem 1 and the mapping from rays to
+cameras in Theorem 2
+Theorem 1. Cameras to rays mapping. Given camera center c ∈ R3 , rotation matrix R ∈ R3×3 ,
+translation t ∈ R3 , camera intrinsics K ∈ R3×3 , and a point x ∈ R3 in 3D with coordinate. The
+Plücker coordinates d, m for a ray passing through pointsx and c, which defined as d = x − c,
+m = c × d can be derived by
+d = RT K−1 u, m = (−RT t) × d
+(13)
+Proof. Given xW , xC denote the coordinates of point x in world and camera coordinates and camera
+coordinates, cW , cC denote the coordinates of camera center c in world and camera coordinates and
+camera coordinates. Let u denotes the UV coordinates that derived from projecting x to the image by
+camera parameters u = K(RxW + t).
+18
+cC = RcW + t
+0 = RcW + t
+(14)
+(15)
+⇒ cW = −RT t
+(16)
+xC = RxW + t
+(17)
+−1
+(18)
+K
+u = xC = RxW + t
+T
+−1
+T
+−1
+u − t)
+(19)
+u − cC
+(20)
+xW = R (K
+=R K
+Then use the definition of d, m,
+d = x W − cW
+−1
+T
+=R K
+u
+(21)
+(22)
+m=c×d
+(23)
+T
+(24)
+= (−R t) × d
+Theorem 2. Rays to cameras mapping. Given a set of rays R = r1 , . . . , rN , which denote the
+N rays representing a camera with camera center c ∈ R3 , rotation matrix R ∈ R3×3 , translation
+t ∈ R3 , camera intrinsics K ∈ R3×3 , and projected points U on the image plane from 3D points X,
+the camera parameters can be solved by,
+X
+c = arg min3
+|p × d − m|2
+(25)
+p∈R
+⟨d,m⟩∈R
+M = arg min
+|H|=1
+m
+X
+|Hdj × uj |
+(26)
+i=1
+where r = ⟨d, m⟩ ∈ R denotes a ray passing through points x and camera center c, d = x − c,
+m = c × d, M = KR.
+Proof. All rays should passing through the same point c, which is the camera center. In order to
+solve the camera center, we want
+m=c×d
+(27)
+for all rays r = ⟨d, m⟩ ∈ R. When the number of rays is greater than the the number of unknown
+parameters for camera center, this gives a overparameterized equation system.
+X
+c = arg min3
+|p × d − m|2
+(28)
+p∈R
+⟨d,m⟩∈R
+As for the rotation matrix K and intrinsics matrix K, denoting M = KR,
+d = RT K−1 u
+⇒ KRd = u
+⇒= Md = u.
+(29)
+(30)
+(31)
+Ignoring the translation here, we require the direction of Md and u being the same, i.e.,
+Md × u = 0.
+(32)
+Similar to what we do for camera center, M can be solved by
+M = arg min
+|H|=1
+m
+X
+i=1
+19
+|Hdj × uj |
+(33)
+𝑸𝑸𝑸3𝐷𝐷
+Fusion
+𝑸𝑸𝑸3𝐷𝐷1
+𝑸𝑸𝑸3𝐷𝐷0
+MatMul
+MatMul
+𝑸𝑸3𝐷𝐷1
+𝑸𝑸3𝐷𝐷0
+𝑽𝑽𝟎𝟎
+M
+𝑽𝑽𝟏𝟏
+M
+𝜋𝜋0
+𝜋𝜋1
+M Camera modulation
+𝑸𝑸3𝐷𝐷
+Figure 7: Query updation for CAMVDFA. The updating of queries for 3D Gaussians follows a
+similar process to that of camera queries. In this context, ’MatMul’ signifies matrix multiplication.
+Q3Di stands for the 3D queries for the i-th input view, while Q′ 3Di indicates the updated 3D queries
+for the same view. Camera modulation has details in Section 3.3. Further insights into the fusion
+block, which combines the view-wise queries.
+A.3
+Details for spatially efficient self-attention
+Directly do self-attention on the 3D queries may cause large memory costs, particularly when N is
+extensive, we implement a spatially efficient self-attention strategy inspired by (Wu et al., 2024). This
+method involves sampling a subset of queries Qdown from Q3D using the Fast Point Sampling (FPS)
+(Qi et al., 2017) algorithm on the locations of the queries, which are defined as the centers of 3D
+Gaussians. Such design focuses on 3D Gaussians positioned farthest apart and likely to encompass the
+entire scene. Keys and values are then derived from Qdown while queries are extracted from Q3D by
+linear projection during self-attention computation. This approach minimizes memory consumption
+without compromising performance.
+A.4
+Details for 3D queries initialization
+3D queries are initialized by the flattening image features with shape V × H × W , where V , H, and
+W represent the number of input views, height, and width of each view, respectively. Subsequently,
+the 3D queries are passed through Head3D to initialize 3D Gaussians.
+In cases where the resolution or the number of input views are large, resulting in large V × H × W ,
+memory conservation becomes crucial. To address this, we introduce a hyperparameter N3D to
+denote the number of 3D queries. To select N3D queries from the pool of V × H × W queries, we
+employ FPS (Farthest Point Sampling) (Qi et al., 2017) on the centers of the initial 3D Gaussians.
+Given the one-to-one correspondence between the 3D Gaussians and 3D queries, the 3D queries are
+subsequently downsampled based on the chosen 3D Gaussians.
+Note that the number of camera queries can be much smaller than 3D queries due to the sparser
+nature of camera parameters requirements, we subsample a portion of the 2D reference points using
+FPS (Qi et al., 2017) based on the centroids of 3D Gaussians to obtain the reference points for camera
+parameters queries. For simplicity, we ignore the downsampling in the main paper. In the experiment,
+we use 256 queries for camera parameters in each view while 131,072 queries for 3D Gaussians.
+20
+A.5
+Details for deformable attention
+After defining the reference points Pi , image features, Fi , and given the 3D queries Q3Di for the
+i-th view, we do DFA on them to refine the queries. To sample the image features surrounding the
+reference points, trainable sampling offsets ∆s = MLP(q) are calculated, where MLP represents
+the multilayer perceptron layer comprising two linear layers and two activation functions. After that,
+the image features on the sampling points s = Pi + ∆s are sampled by grid sampling algorithm
+with bilinear interpolation, serving as the values v for cross-attention. Then the attention score
+a3Di = MLP(Q3Di ) is computed for the sampled image features at s. Finally, Q3Di is refined by
+dot product between the attention score and values. Consistent with (Zhang et al., 2023; Zhu et al.,
+2021), we derive attention scores directly from queries, omitting keys to simplify computations. The
+updating process of queries is shown in Fig. 7.
+A.6
+More results
+Table 8: Pose estimation performance in rotation error (e_rot) and translation error (e_trans) on
+RE10k, ACID. Methods with ‘*’ meaning the model is trained on RE10k+DL3DV dataset, otherwise
+only on RE10K. ‘-A’ means with evaluation-time pose alignment.
+RE10k
+ACID
+Method
+e_rot ↓
+e_trans ↓
+e_rot ↓
+e_trans ↓
+NoPoSplat
+NoPoSplat*
+NoPoSplat-A
+NoPoSplat-A*
+Ours
+Ours*
+Ours-A
+Ours-A*
+4.258
+3.399
+3.860
+2.948
+3.704
+3.164
+3.295
+2.746
+2.879
+1.806
+2.953
+1.912
+2.295
+1.746
+2.704
+1.838
+11.269
+9.835
+10.507
+10.448
+11.087
+9.797
+10.191
+9.815
+3.296
+3.827
+3.423
+3.488
+3.192
+2.988
+3.053
+3.234
+Pose estimation performance In addition to the pose estimation evaluated by AUC, we also
+provide the pose estimation performance in rotation error (e_rot) and translation error (e_trans) on
+RE10k, ACID in Table 8.
+Table 9: Performance comparison on the evaluation set of pixelSplat for re10k dataset.
+Method
+PSNR ↑ SSIM ↑ LPIPS
+pixelNeRF
+GPNR
+AttnRend
+pixelSplat
+MVSplat
+NoPoSplat-A
+Ours
+Ours-A
+20.43
+24.11
+24.78
+26.09
+26.39
+26.786
+25.837
+27.214
+0.589
+0.793
+0.82
+0.863
+0.869
+0.878
+0.852
+0.891
+0.55
+0.255
+0.213
+0.136
+0.128
+0.124
+0.129
+0.118
+Performance on the evaluation set of pixelSplat In order to conduct a fair comparison between our
+methods and the previous MVSplat benchmark, we evaluated our model using the indices provided in
+pixelSplat and MVSplat (Charatan et al., 2024; Chen, Yuedong and Xu, Haofei and Zheng, Chuanxia
+and Zhuang, Bohan and Pollefeys, Marc and Geiger, Andreas and Cham, Tat-Jen and Cai, Jianfei,
+2024). As depicted in Table 9, our model continues to outperform previous methodologies on the
+pixelSplat index.
+More number of input views Our model is flexible and can receive an arbitrary number of input
+views, surpassing the limitations of only considering two views. We present the PSNR results for a
+larger number of input views, extending up to 10 views, in Fig. 8. Generally, more input views give
+better performance on scene reconstruction.
+21
+Figure 8: PSNR v.s. number of input views.
+Figure 9: PSNR v.s. number of 3D Gaussians.
+Number of 3D Gaussians We show the PSNR v.s. the number of 3D Gaussians in Fig. 9.
+More visualization We provide more novel view synthesis results on RE10K and ACID with
+different groups of overlapping in this section Fig. 10, Fig. 11, Fig. 12, Fig. 13, Fig. 14, Fig. 15.
+22
+Input
+pixelSplat
+MVSplat
+SelfSplat
+NoPoSplat
+Ours
+GT
+Figure 10: More comparisons of the RealEstate10K dataset with large overlap of input images.
+23
+Input pixelSplat
+MVSplat
+SelfSplat
+NoPoSplat
+Ours
+GT
+Figure 11: More comparisons of the RealEstate10K dataset with medium overlap of input images.
+24
+Input
+pixelSplat
+MVSplat
+SelfSplat
+NoPoSplat
+Ours
+GT
+Figure 12: More comparisons of the RealEstate10K dataset with small overlap of input images.
+25
+Input
+pixelSplat
+MVSplat
+SelfSplat
+NoPoSplat
+Ours
+GT
+Figure 13: More comparisons of the ACID dataset with large overlap of input images.
+26
+Input
+pixelSplat
+MVSplat
+SelfSplat
+NoPoSplat
+Ours
+GT
+Figure 14: More comparisons of the ACID dataset with medium overlap of input images.
+27
+Input
+pixelSplat
+MVSplat
+SelfSplat
+NoPoSplat
+Ours
+GT
+Figure 15: More comparisons of the RealEstate10K dataset with small overlap of input images.
+28

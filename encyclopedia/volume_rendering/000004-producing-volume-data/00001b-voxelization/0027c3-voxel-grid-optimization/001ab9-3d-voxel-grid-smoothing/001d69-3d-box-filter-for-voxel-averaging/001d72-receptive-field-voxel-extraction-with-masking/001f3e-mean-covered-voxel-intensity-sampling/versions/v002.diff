@@ -1,0 +1,142 @@
+--- v001.md
++++ v002.md
+@@ -1,76 +1,51 @@
+ # Mean-Covered Voxel Intensity Sampling
+-
+-
+ ## Overview
+-Mean-Covered Voxel Intensity Sampling computes the average intensity of voxels within the bounding footprint of a splat, explicitly handling region pooling logic to smooth supervision signals [S1, unofficial]. It differs from its parent, Receptive Field Voxel Extraction with Masking, by iterating over discrete scale indices to compute means over specific bounding box regions rather than a fixed normalized neighborhood, and from its sibling, 3x3x3 Froxel Neighborhood, by supporting arbitrary scale-dependent bounding boxes rather than a fixed 3x3x3 grid [S1, unofficial][S2].
++Mean-Covered Voxel Intensity Sampling averages voxel intensities across mean-covered regions for each splat, explicitly handling the footprint pooling logic to smooth supervision signals [S1, unofficial]. It computes bounding boxes based on scale indices and coverage masks, extracts sub-volumes, and returns their means [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `volume`: 3D tensor of voxel intensities (shape $D \times H \times W$).
+-- `scales`: List of scale indices or multipliers defining the footprint size for each splat.
+-- `coverage_mask`: Boolean mask indicating valid splat centers or regions.
+-- `volume_min`, `volume_max`: Scalar bounds for normalization.
+-- `normalize`: Boolean flag to enable intensity normalization.
++- `volume`: 3D tensor of voxel intensities (shape $D \times H \times W$) [S1, unofficial].
++- `scales`: List of scale indices or multipliers defining the footprint size for each splat [S1, unofficial].
++- `coverage_mask`: Boolean mask indicating valid splat centers or regions [S1, unofficial].
++- `volume_min`, `volume_max`: Scalar bounds for normalization [S1, unofficial].
++- `normalize`: Boolean flag to enable intensity normalization [S1, unofficial].
+ 
+ **Outputs:**
+-- `processed`: Tensor of mean intensities corresponding to the splat footprints.
++- `processed`: Tensor of mean intensities corresponding to the splat footprints [S1, unofficial].
+ 
+ **Data Structures:**
+-- `volume`: Stored as a contiguous 3D array or tensor. Indices are clamped to $[0, D-1]$, $[0, H-1]$, $[0, W-1]$.
+-- `coverage_mask`: Boolean tensor of the same spatial resolution as the base samples, identifying valid regions for pooling.
++- `volume`: Stored as a contiguous 3D array or tensor. Indices are clamped to valid volume dimensions using `torch.maximum` and `torch.minimum` to prevent out-of-bounds access [S1, unofficial].
++- `coverage_mask`: Boolean tensor of the same spatial resolution as the base samples, identifying valid regions for pooling [S1, unofficial].
+ 
+ **Steps:**
+ 1. **Base Sampling:** Compute initial base samples using `sample_intensities_from_volume` with `enable_footprint_pooling=False` to retrieve raw voxel values at specific coordinates [S1, unofficial].
+ 2. **Bounding Box Computation:** If `scales` are valid and `coverage_mask` exists, compute the voxel bounding boxes for each point based on the scale indices [S1, unofficial].
+-3. **Index Clamping:** Clamp the minimum indices ($min\_idx$) and maximum indices ($max\_idx$) of the bounding boxes to the volume dimensions using `torch.maximum` and `torch.minimum` to prevent out-of-bounds access [S1, unofficial].
+-4. **Region Mean Calculation:** Iterate over each `scale_index`:
+-   - Extract the region volume defined by the clamped indices: $volume[z_0:z_1+1, y_0:y_1+1, x_0:x_1+1]$.
+-   - Compute the mean intensity of this region.
+-   - Update the subset of the output tensor with this mean value [S1, unofficial].
+-5. **Normalization:** If `normalize` is requested:
+-   - Check if $volume\_max > volume\_min + 10^{-8}$.
+-   - If true, normalize the processed values to $[0, 1]$ and clamp.
+-   - If false, set processed values to $0.5$ [S1, unofficial].
++3. **Index Clamping:** Clamp the minimum indices (`min_idx`) and maximum indices (`max_idx`) of the bounding boxes to the volume dimensions using `torch.maximum` and `torch.minimum` [S1, unofficial].
++4. **Region Mean Calculation:** Iterate over each `scale_index`: extract the region `volume[z0:z1+1, y0:y1+1, x0:x1+1]`, compute its mean intensity, and update the output subset [S1, unofficial].
++5. **Normalization:** If `normalize` is requested: check if `volume_max > volume_min + 1e-8`; if true, normalize and clamp to `[0, 1]`; otherwise, set processed values to `0.5` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def mean_covered_voxel_intensity_sampling(volume, scales, coverage_mask, volume_min, volume_max, normalize):
+-    """
+-    Computes mean intensity over mean-covered voxel regions.
+-    
+-    Args:
+-        volume: 3D tensor (D, H, W) of voxel intensities.
+-        scales: List of scale indices defining footprint sizes.
+-        coverage_mask: Boolean mask for valid regions.
+-        volume_min: Minimum intensity value for normalization.
+-        volume_max: Maximum intensity value for normalization.
+-        normalize: Boolean flag for normalization.
+-        
+-    Returns:
+-        processed: Tensor of mean intensities.
+-    """
+     # Step 1: Get base samples without footprint pooling
+     base_samples = sample_intensities_from_volume(volume, enable_footprint_pooling=False)
+-    
+     processed = torch.zeros_like(base_samples)
+-    
++
+     # Step 2 & 3: Compute bounding boxes and clamp indices
+     if scales is not None and coverage_mask is not None:
+         for scale_idx in scales:
+-            # Compute bounding boxes for each point based on scale_idx
+-            # This involves determining z0, z1, y0, y1, x0, x1 for each splat
+             min_idx, max_idx = compute_bounding_boxes(base_samples, scale_idx)
+-            
+-            # Clamp indices to volume dimensions
+             min_idx = torch.maximum(min_idx, torch.zeros_like(min_idx))
+             max_idx = torch.minimum(max_idx, torch.tensor(volume.shape) - 1)
+-            
+-            # Step 4: Iterate and compute mean
+-            for each valid region defined by (z0, z1, y0, y1, x0, x1):
++
++            # Step 4: Iterate over scale_indices to extract regions and compute means
++            # The sources do not specify the exact iteration structure over splats [G]
++            for i in range(len(min_idx)):
++                z0, y0, x0 = min_idx[i]
++                z1, y1, x1 = max_idx[i]
+                 region = volume[z0:z1+1, y0:y1+1, x0:x1+1]
+                 mean_val = torch.mean(region)
+-                # Update subset of processed tensor
+-                update_processed_subset(processed, mean_val, region_indices)
+-    
++                processed[i] = mean_val
++
+     # Step 5: Normalization
+     if normalize:
+@@ -80,31 +55,29 @@
+         else:
+             processed = torch.full_like(processed, 0.5)
+-            
++
+     return processed
+ ```
+ 
+ **Parameters:**
+-- `volume_min`, `volume_max`: Typical values depend on the specific volume data (e.g., CT Hounsfield units or normalized $[0, 1]$). Not given in the sources.
+-- `normalize`: Boolean. Default behavior implies normalization is optional.
++- `volume_min`, `volume_max`: Scalar bounds for normalization. Typical values depend on the specific volume data (e.g., CT Hounsfield units or normalized `[0, 1]`). Not given in the sources.
++- `normalize`: Boolean flag. Default behavior implies normalization is optional. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+ - **Out-of-bounds access:** Clamping is required to prevent indexing errors when splats extend beyond volume boundaries [S1, unofficial].
+-- **Zero-range volumes:** If $volume\_max \le volume\_min + 10^{-8}$, normalization is skipped to avoid division by zero, defaulting to $0.5$ [S1, unofficial].
+-- **Precision:** Floating-point precision in mean calculation may vary; standard tensor operations are assumed [S1, unofficial].
++- **Zero-range volumes:** If `volume_max <= volume_min + 1e-8`, normalization is skipped to avoid division by zero, defaulting to `0.5` [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Fast Calculation of Local Vicinity Information
+-An incremental algorithm to calculate the mean and standard deviation of an $n \times n \times n$ region around each voxel in $O(1)$ time, assuming CT values follow a normal distribution [S2]. It uses Sum1D, Sum2D, and Sum3D incremental updates to compute averages and variance efficiently [S2]. Region size $n$ is typically 15 [S2].
++An incremental algorithm to calculate the mean and standard deviation of an $n \times n \times n$ region around each voxel in $O(1)$ time, assuming CT values follow a normal distribution [S2]. It uses incremental updates for Sum1D, Sum2D, and Sum3D to compute averages and variance efficiently [S2]. Region size $n$ is typically 15 [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The naive mean calculation over a bounding box is $O(V)$ where $V$ is the number of voxels in the footprint. The incremental variant (Fast Calculation of Local Vicinity Information) achieves $O(1)$ per voxel for the mean and variance [S2].
+-- **Memory Complexity:** $O(D \times H \times W)$ for the volume and intermediate sum tensors [S2].
+-- **Performance:** The incremental method was tested on a PC with Intel Q9550 CPU, 4 GB RAM, and GeForce GTX 1050 GPU, using 15x15x15 regions [S2].
+-- **Strengths:** Explicit handling of footprint pooling; efficient computation of local statistics [S1, unofficial][S2].
+-- **Limitations:** Requires careful clamping and normalization logic; incremental method assumes normal distribution of CT values [S1, unofficial][S2].
++- **Time Complexity:** The incremental variant achieves $O(1)$ time per voxel for computing mean and standard deviation of local neighborhoods [S2].
++- **Performance:** The incremental method was tested on a PC with Intel Q9550 CPU, 4 GB RAM, and GeForce GTX 1050 GPU, using $15 \times 15 \times 15$ regions [S2].
++- **Strengths:** Explicit handling of footprint pooling logic [S1, unofficial]. Efficient constant-time computation of local statistics using incremental sums [S2].
++- **Limitations:** Requires careful clamping and normalization logic [S1, unofficial]. The incremental method assumes CT values follow a normal distribution [S2].
+ 
+ ## Background
+-The method originates from the vgs repository, which implements voxel-based supervision for Gaussian Splatting, specifically handling footprint pooling for volume rendering [S1, S1, unofficial]. The concept of fast local vicinity calculation for ambient occlusion in volume rendering was introduced in a 2019 paper on real-time CT visualization, which used incremental sums to compute local statistics for shading [S2].
++The method is implemented in the vgs repository for voxel-based supervision in Gaussian Splatting, specifically handling footprint pooling for volume rendering [S1, unofficial]. The concept of fast local vicinity calculation for ambient occlusion in volume rendering was introduced in a 2019 paper on real-time CT visualization, which used incremental sums to compute local statistics for shading [S2].
+ 
+ ## Sources

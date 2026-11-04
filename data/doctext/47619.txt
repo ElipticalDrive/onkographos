@@ -1,0 +1,356 @@
+Contribute to tier4/AWML development by creating an account on GitHub.
+
+perf(BEVFusion): faster bit-identical GPU voxelizer (training) by Max-Bin · Pull Request #212 · tier4/AWML · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Max-Bin
+commented
+Jun 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Summary
+This PR adds a fast GPU path for deterministic BEVFusion hard voxelization.
+In training, the current deterministic hard_voxelize is a major bottleneck, taking around 70 ms per 250k-point LiDAR frame. The new voxelize_fast_gpu keeps deterministic behavior while reducing runtime to about 0.7 ms/frame on H100, roughly 100× faster.
+The change is backward-compatible and falls back to the existing C++ op on CPU, in non-deterministic mode, or when the voxel count exceeds max_voxels.
+Why
+The existing deterministic CUDA path is slow mainly because of its algorithm:
+point_to_voxelidx_kernel scans previous points to find each point's rank inside its voxel.
+determin_voxel_num runs with a single CUDA thread and loops over all points.
+For large point clouds, this makes voxelization one of the biggest costs in BEVFusion training.
+Using deterministic=False is faster, but it is not reproducible because atomic ordering can change which points are kept when a voxel is full. Many training setups therefore keep deterministic=True and pay the extra cost.
+What changed
+voxelize_fast_gpu reproduces the deterministic behavior with parallel PyTorch operations:
+Filter points by range.
+Compute voxel coordinates.
+Stable-sort by voxel id.
+Keep the original point order inside each voxel.
+Keep only the first max_num_points points per voxel.
+Scatter the output deterministically.
+The voxel row order is different from the C++ op, but this does not affect BEVFusion because downstream sparse encoding uses voxel coordinates. The final BEV output was verified to be identical.
+Verification
+Verified against the freshly compiled C++ hard_voxelize(deterministic=True) op from this repo on 8 real 120 m LiDAR frames with around 250k points and 103k voxels per frame.
+The following matched exactly:
+voxel coordinates
+number of points per voxel
+per-voxel mean features used by HardSimpleVFE
+full downstream extract_feat output
+Result:
+```
+max_abs_diff = 0.0
+```
+Speed
+Benchmark setup: single H100, torch 2.12 + cu130, freshly JIT-compiled op, 5 warm-up runs + 30 measured runs, voxelization only.
+```
+C++ deterministic hard_voxelize: 69.8–70.1 ms/frame
+voxelize_fast_gpu:              0.69–0.70 ms/frame
+speedup:                        ~100×
+```
+In a downstream E2E trainer, this reduced per-step time from 2.61 s to 0.38 s, about 6.9× faster.
+Test
+```
+cd projects/BEVFusion
+python -m bevfusion.ops.voxel.test_voxelize_fast
+```
+The test checks output equivalence and prints benchmark numbers for the current GPU/data.
+perf(BEVFusion): bit-identical GPU voxelizer ~100x faster (training)
+…
+88f0e92
+```
+The deterministic C++ hard_voxelize is O(N^2) (point_to_voxelidx scans every
+earlier point) plus single-thread (determin_voxel_num is launched <<<1, 1>>>),
+costing ~70ms per 250k-point frame and dominating the BEVFusion training data
+path.
+
+Add voxelize_fast_gpu: a parallel sort + unique + scatter PyTorch path that
+reproduces the C++ deterministic op's output bit-for-bit (coords, num_points,
+per-voxel mean) at ~0.7ms (~100x). Voxelization.forward uses it on GPU in
+deterministic mode and falls back to the C++ op on CPU, in non-deterministic
+mode, or when M > max_voxels. Unlike deterministic=False (fast but not
+reproducible), this is both fast AND deterministic.
+
+Deployment is unaffected: Autoware uses the spconv Point2VoxelGPU hash
+voxelizer, not this op. test_voxelize_fast.py verifies bit-identical output on
+synthetic clouds including dense clusters that trigger the max_num_points
+truncation.
+
+Signed-off-by: Max-Bin <vborisw@gmail.com>
+```
+Max-Bin
+requested review from
+KSeangTan and
+amadeuszsz
+as code owners
+June 1, 2026 07:09
+ci(pre-commit): autofix
+3029147
+chatgpt-codex-connector
+Bot
+reviewed
+Jun 1, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 88f0e926bd
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+projects/BEVFusion/bevfusion/ops/voxel/voxelize.py
+Outdated
+Comment on lines
++105
+to
++106
+in_range = ((points[:, :3] >= rmin) & (points[:, :3] < rmax)).all(dim=1)
+pts = points[in_range]
+chatgpt-codex-connector
+Bot
+Jun 1, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reject coordinates outside the rounded grid
+For configs where (range / voxel_size) is not an exact integer (or for points very close to the upper bound where division rounds up), this filter admits points solely because they are < rmax, while the CUDA dynamic_voxelize_kernel computes c_* and then drops any c_* >= grid_*. The fast path then emits coords such as x == grid_x when M <= max_voxels, which the old op would have discarded and which are outside the pcd_shape derived from the same rounded grid, so downstream sparse encoding can receive invalid voxels. Please apply the same coord < grid check after computing coord rather than using only the raw range comparison.
+Useful? React with 👍 / 👎.
+Max-Bin
+Jun 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+fixed in 7fc9d22. The fast path now mirrors dynamic_voxelize_kernel exactly: it computes the voxel index for every point and keeps only 0 <= coord < grid (the kernel's c < 0 || c >= grid rejection), replacing the raw >= min & < max range filter. So for a non-integer range/voxel_size, or upper-bound points that floor up to c == grid, the same points are now dropped and no out-of-grid voxel is emitted.
+Verified bit-identical to the C++ op (coords / num_points / per-voxel mean, max_diff = 0.0) on a non-integer grid (10 / 0.3 → grid 33), exact upper-bound points (x == 10.0), and real frames — and the fast output is always within the grid.
+fix(voxelize): drop out-of-grid voxels to match the C++ op exactly
+…
+7fc9d22
+```
+Per review (P2): the fast path used a raw range filter (>= min & < max), but the
+CUDA dynamic_voxelize_kernel computes the voxel index and drops points whose
+index is out of the rounded grid (c < 0 or c >= grid). For non-integer
+range/voxel_size, or points at the upper bound that floor up to c == grid, the
+two diverged and the fast path could emit out-of-grid voxels the encoder would
+reject. Now compute coord first and keep only 0 <= coord < grid, exactly like
+the C++ kernel.
+
+Verified bit-identical (coords / num_points / per-voxel mean) vs the C++ op on
+non-integer-grid + upper-edge synthetic clouds and on real frames; fast output
+is always within the grid.
+
+Signed-off-by: Max-Bin <vborisw@gmail.com>
+```
+Max-Bin
+changed the title
+perf(BEVFusion): bit-identical GPU voxelizer ~100x faster (training)
+perf(BEVFusion): faster bit-identical GPU voxelizer (training)
+Jun 1, 2026
+KSeangTan
+commented
+Jun 1, 2026
+Copy link
+Copy Markdown
+Contributor
+Thanks @Max-Bin for the implementation. Do you think it is possible to migrate this implementation to autoware.universe as well?
+Max-Bin
+commented
+Jun 1, 2026
+Copy link
+Copy Markdown
+Author
+Thanks @Max-Bin for the implementation. Do you think it is possible to migrate this implementation to autoware.universe as well?
+@KSeangTan Since this is a Torch-based method, it is difficult to make it fully compatible with the existing C++ implementation.
+Also, the spconv-based deployment on the Autoware side differs from our current results, so further investigation is needed to align them properly.
+KSeangTan
+requested review from
+Copilot and
+mojomex
+June 1, 2026 13:40
+KSeangTan
+assigned
+Max-Bin
+Jun 1, 2026
+Copilot started reviewing on behalf of
+KSeangTan
+June 1, 2026 13:41
+View session
+Copilot
+AI
+reviewed
+Jun 1, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR introduces a new deterministic GPU voxelization path for BEVFusion training to replace the current slow deterministic CUDA implementation of hard_voxelize, while preserving output equivalence and falling back to the existing op when needed.
+Changes:
+Added voxelize_fast_gpu() in voxelize.py, using stable sort + segment logic to deterministically keep the first max_num_points per voxel and return (voxels, coors, num_points_per_voxel).
+Updated Voxelization.forward() to use the fast path when deterministic=True and inputs are on CUDA, with a fallback to the existing C++ op when M > max_voxels.
+Added a CUDA-side equivalence + benchmark script test_voxelize_fast.py.
+Reviewed changes
+Copilot reviewed 2 out of 2 changed files in this pull request and generated 2 comments.
+File
+Description
+projects/BEVFusion/bevfusion/ops/voxel/voxelize.py
+Adds the fast deterministic GPU voxelizer and wires it into Voxelization.forward() with safe fallback behavior.
+projects/BEVFusion/bevfusion/ops/voxel/test_voxelize_fast.py
+Adds a verification/benchmark script comparing the new GPU path against the compiled deterministic C++ op.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+projects/BEVFusion/bevfusion/ops/voxel/voxelize.py
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+projects/BEVFusion/bevfusion/ops/voxel/test_voxelize_fast.py
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+KSeangTan
+requested changes
+Jun 1, 2026
+View reviewed changes
+KSeangTan
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+LGTM overall, would you mind addressing the comments? Thanks
+Comment thread
+projects/BEVFusion/bevfusion/ops/voxel/voxelize.py
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+projects/BEVFusion/bevfusion/ops/voxel/test_voxelize_fast.py
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+projects/BEVFusion/bevfusion/ops/voxel/voxelize.py
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+projects/BEVFusion/bevfusion/ops/voxel/voxelize.py
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+projects/BEVFusion/bevfusion/ops/voxel/voxelize.py
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Max-Bin
+and others
+added 2 commits
+June 2, 2026 10:14
+perf(voxelize): drop per-forward .item() sync; strengthen equivalence…
+…
+b84a3e1
+```
+… test
+
+Address review feedback on the fast GPU voxelizer:
+
+- voxelize_fast_gpu: compute the grid dims on the host from the config
+  instead of via a CUDA tensor, removing the per-forward device->host
+  .item() sync on this hot path (Copilot). floor(x+0.5) mirrors the C++
+  round() exactly; grid values verified identical to the old computation
+  across configs, and the op stays bit-identical on 8 real frames
+  (coords / num_points / full voxel tensors, max_abs_diff = 0).
+- Comments: clarify that the z-major linear key is an internal sort/group
+  key only and the output coords are (x, y, z) (matching this repo's
+  compiled hard_voxelize), and why M > max_voxels falls back to the C++ op
+  rather than truncating here (preserves bit-identity) (KSeangTan).
+- test: convert to unittest (auto-skips without CUDA) and compare the full
+  per-voxel tensors instead of only per-voxel means, so kept point-set and
+  slot-order differences are caught, not just permutation-invariant means
+  (Copilot).
+
+Signed-off-by: Max-Bin <vborisw@gmail.com>
+```
+ci(pre-commit): autofix
+d93cfe4
+Max-Bin
+requested a review
+from KSeangTan
+June 2, 2026 01:28
+KSeangTan
+approved these changes
+Jun 2, 2026
+View reviewed changes
+KSeangTan
+left a comment
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The code looks good to me overall. I ran the first test and everything works at the beginning. We can first merge the PR, and then proceeding to test the impact to deployment.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

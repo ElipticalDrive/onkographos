@@ -1,0 +1,147 @@
+--- v001.md
++++ v002.md
+@@ -4,23 +4,23 @@
+ 
+ ## Overview
+-This method generates 3D volumetric density maps for procedural textures, specifically targeting cloud-like structures, by combining low-frequency Perlin noise for broad mass with inverted Worley (cellular) noise to carve hollows [S1, S2, unofficial]. It differs from pure Perlin noise by introducing cellular erosion for puffy cumulus appearances and from pure Worley by retaining large-scale continuity [S2, unofficial]. It builds on [3D Perlin-like Noise and Fractal Brownian Motion (FBM)](1260-3d-perlin-like-noise-and-fractal-brownian-motion-fbm.md) by adding a secondary Worley noise layer for detail erosion.
++This method generates 3D volumetric density maps for procedural textures, specifically targeting cloud-like structures, by combining low-frequency Perlin noise for broad mass with inverted Worley (cellular) noise to carve hollows [S1, S2, unofficial]. It differs from pure Perlin noise by introducing cellular erosion for puffy cumulus appearances and from pure Worley by retaining large-scale continuity [S2, unofficial]. It builds on [3D Perlin-like Noise and Fractal Brownian Motion (FBM)](1260-3d-perlin-like-noise-and-fractal-brownian-motion-fbm.md) by adding a secondary Worley noise layer for detail erosion [S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Input position $P \in \mathbb{R}^3$.
+-- Texture resolution (for compute shader coordinate mapping).
+-- Noise parameters: frequencies and amplitudes for Perlin and Worley components.
++- Input position $P \in \mathbb{R}^3$ [S1, unofficial].
++- Texture resolution for compute shader coordinate mapping [S2, unofficial].
++- Noise parameters: frequencies and amplitudes for Perlin and Worley components [S1, unofficial].
+ 
+ **Outputs:**
+-- A 3D density value $D \in [0, 1]$ or a 3D texture image with `rgba8` layout [S2, unofficial].
++- A 3D density value $D \in [0, 1]$ or a 3D texture image with `rgba8` layout [S1, S2, unofficial].
+ 
+ **Data Structures:**
+ - `image3D u_NoiseTexture`: Bound as `layout(rgba8, binding = 0) writeonly uniform image3D` in the compute shader [S2, unofficial].
+-- Perlin noise samples $P_i$ at 6 octaves.
+-- Worley noise sample $W$ at frequency 1.0.
++- Perlin noise samples $P_i$ at 6 octaves [S1, unofficial].
++- Worley noise sample $W$ at frequency 1.0 [S1, unofficial].
+ 
+ **Steps:**
+-1. **Coordinate Transformation:** Add an offset to the input position and scale it to control the spatial frequency [S1, unofficial].
+-2. **Perlin Noise FBM:** Compute a fractal Brownian motion (fBm) sum using Perlin noise at 6 specific frequencies and amplitudes [S1, unofficial]:
++1. **Coordinate Transformation:** Add an offset to the input position and scale it to control spatial frequency [S1, unofficial].
++2. **Perlin Noise FBM:** Compute a fractal Brownian motion sum using Perlin noise at 6 specific frequencies and amplitudes [S1, unofficial]:
+    - Octave 1: Frequency 1.0, Amplitude 8.0
+    - Octave 2: Frequency 2.0, Amplitude 4.0
+@@ -30,5 +30,5 @@
+    - Octave 6: Frequency 32.0, Amplitude 0.25
+    Sum these values to get $P_{sum} = \sum_{i=1}^{6} P_i$ [S1, unofficial].
+-3. **Worley Noise:** Sample Worley noise at frequency 1.0 and amplitude 1.0. Invert the result (e.g., $1 - W$ or $-W$) and scale to the range $[-1, 1]$ to create $W_{inv}$ [S1, unofficial]. This inverted Worley noise carves hollows into the density [S2, unofficial].
++3. **Worley Noise:** Sample Worley noise at frequency 1.0 and amplitude 1.0, invert the result, and scale to the range $[-1, 1]$ to create $W_{inv}$ [S1, unofficial]. This inverted Worley noise carves hollows into the density [S2, unofficial].
+ 4. **Density Calculation:** Combine the Perlin sum and inverted Worley noise, subtract a threshold of 0.2, and clamp the result to 0 [S1, unofficial]:
+    $$ D = \max(0, P_{sum} + W_{inv} - 0.2) $$
+@@ -42,35 +42,61 @@
+     # Step 1: Transform position
+     pos = (position + offset) * scale
+-    
++
+     # Step 2: Perlin FBM Sum
+-    # Frequencies: [1, 2, 4, 8, 16, 32]
+-    # Amplitudes:  [8, 4, 2, 1, 0.5, 0.25]
+-    perlin_sum = 0.0
+     freqs = [1, 2, 4, 8, 16, 32]
+     amps = [8, 4, 2, 1, 0.5, 0.25]
+-    
++    perlin_sum = 0.0
+     for i in range(6):
+-        # Sample Perlin noise at current frequency
+-        # Note: Actual Perlin implementation details are assumed from parent article
+-        p = perlin_noise(pos * freqs[i])
+-        perlin_sum += p * amps[i]
+-        
++        perlin_sum += perlin_3d(pos * freqs[i]) * amps[i]
++
+     # Step 3: Worley Noise
+-    # Sample Worley noise at frequency 1.0
+-    w = worley_noise(pos * 1.0)
++    w = worley_3d(pos * 1.0)
+     # Invert and scale to [-1, 1]
+-    # Assuming Worley returns [0, 1], invert to [0, 1] then scale
+-    w_inv = (1.0 - w) * 2.0 - 1.0  # Maps [0,1] to [-1,1]
+-    
++    w_inv = (1.0 - w) * 2.0 - 1.0
++
+     # Step 4: Combine and Threshold
+-    density = perlin_sum + w_inv - 0.2
+-    density = max(0.0, density)
+-    
++    density = max(0.0, perlin_sum + w_inv - 0.2)
+     return density
++
++def perlin_3d(p):
++    # Standard 3D Perlin noise: hash grid coordinates, compute gradient dot products, trilinear interpolate [G]
++    def fade(t): return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
++    def lerp(t, a, b): return a + t * (b - a)
++    def grad(hash, x, y, z):
++        h = hash & 15
++        u = x if h < 8 else y
++        v = y if h < 4 else (x if h in [12, 14, 15] else z)
++        return (u if (h & 1) == 0 else -u) + (v if (h & 2) == 0 else -v)
++    x, y, z = p
++    X, Y, Z = int(x) & 255, int(y) & 255, int(z) & 255
++    x -= int(x); y -= int(y); z -= int(z)
++    u, v, w = fade(x), fade(y), fade(z)
++    # Standard permutation table omitted for brevity; assumed standard [G]
++    p00 = perm[X] + Y; p01 = p00 + Z; p10 = p00 + 1; p11 = p01 + 1
++    g000 = grad(perm[p00], x, y, z); g100 = grad(perm[p10], x-1, y, z)
++    g010 = grad(perm[p01], x, y-1, z); g110 = grad(perm[p11], x-1, y-1, z)
++    g001 = grad(perm[p00+1], x, y, z-1); g101 = grad(perm[p10+1], x-1, y, z-1)
++    g011 = grad(perm[p01+1], x, y-1, z-1); g111 = grad(perm[p11+1], x-1, y-1, z-1)
++    n000 = lerp(w, lerp(v, lerp(u, g000, g100), lerp(u, g010, g110)), lerp(v, lerp(u, g001, g101), lerp(u, g011, g111)))
++    return n000
++
++def worley_3d(p):
++    # Standard 3D Worley noise: distance to nearest grid point [G]
++    x, y, z = p
++    X, Y, Z = int(x), int(y), int(z)
++    min_dist = float('inf')
++    for dx in range(-1, 2):
++        for dy in range(-1, 2):
++            for dz in range(-1, 2):
++                gx, gy, gz = X + dx, Y + dy, Z + dz
++                dist = ((x - gx)**2 + (y - gy)**2 + (z - gz)**2)**0.5
++                if dist < min_dist:
++                    min_dist = dist
++    return min_dist
+ ```
+ 
+ **Edge Cases:**
+ - If the camera is inside the cloud layer, the ray start point must be clamped to the camera position [S2, unofficial].
+-- Precision issues may arise if the Perlin sum exceeds expected ranges; ensure amplitude scaling is consistent [S1, unofficial].
++- Precision issues may arise if the Perlin sum exceeds expected ranges; ensure amplitude scaling is consistent [G].
+ - The threshold of 0.2 is critical for defining the cloud base density; lower values increase cloud volume, higher values reduce it [S1, unofficial].
+ 
+@@ -78,12 +104,12 @@
+ 
+ ### Multi-Octave Worley
+-Stores three octaves of Worley noise in separate color channels (G, B, A) for detail erosion. Choose when fine cellular detail is needed beyond the base Perlin-Worley hybrid [S2, unofficial].
++Stores three octaves of Worley noise in separate color channels (G, B, A) for detail erosion [S2, unofficial].
+ 
+ ### Noise-based Density Sampling
+-Uses the generated density map for raymarching. Choose when integrating with existing volumetric raymarchers [S2, unofficial].
++Uses the generated density map for raymarching [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of voxels in the 3D texture volume. Each voxel requires 6 Perlin noise evaluations and 1 Worley noise evaluation [S1, S2, unofficial].
+-- **Memory Complexity:** $O(N^3)$ for the 3D texture, where $N$ is the resolution. Uses `rgba8` format, so 4 bytes per voxel [S2, unofficial].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Performance:** GPU compute shaders are used for generation, allowing parallel processing of voxels [S2, unofficial].
+ - **Strengths:** Produces realistic cloud-like structures with both large-scale mass and fine-scale erosion [S2, unofficial].
+@@ -91,5 +117,5 @@
+ 
+ ## Background
+-This method was developed for real-time volumetric cloud rendering in OpenGL, combining Perlin noise for structure and Worley noise for erosion [S2, unofficial]. It was implemented in WebGL and OpenGL contexts for procedural sky and cloud generation [S1, S2, unofficial].
++This method was developed for real-time volumetric cloud rendering in OpenGL, combining Perlin noise for structure and Worley noise for erosion [S2, unofficial]. It was implemented in OpenGL compute shader contexts for procedural sky and cloud generation [S2, unofficial].
+ 
+ ## Sources

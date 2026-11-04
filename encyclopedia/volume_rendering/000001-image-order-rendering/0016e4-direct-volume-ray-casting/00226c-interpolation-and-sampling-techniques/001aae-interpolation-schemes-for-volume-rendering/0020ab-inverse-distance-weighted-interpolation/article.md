@@ -1,0 +1,113 @@
+# Inverse Distance Weighted Interpolation
+
+Also called: 3D Inverse Distance Weighting (IDW) Interpolation, Inverse Distance Weighting
+
+## Overview
+Inverse Distance Weighted (IDW) Interpolation is a spatial interpolation method that generates a continuous 3D scalar field from discrete sample points by weighting nearby samples by the inverse of their distance raised to a power [S2, unofficial]. It solves the problem of reconstructing a volume from irregular or sparse data (e.g., drill-hole assays) where grid-aligned interpolation schemes like trilinear are not directly applicable [S1][S2, unofficial]. While often applied to arbitrary point sets, specific implementations restrict the neighborhood to the eight vertices of the grid cell containing the query point [S1]. It does not guarantee $C^0$ continuity along interior faces of the grid [S1].
+
+## How it works
+**Inputs:**
+- A set of $N$ sample points $P_i = (x_i, y_i, z_i)$ with associated scalar values $V_i$ [S2, unofficial].
+- A query point $Q = (x, y, z)$ at which to estimate the value [S1].
+- Parameters: `power` (exponent, typically 2), `searchRadius` (optional max distance, typically 60 world units), `maxNeighbors` (optional limit, typically 16) [S2, unofficial].
+
+**Outputs:**
+- The interpolated scalar value $F(Q)$ [S1].
+
+**Data Structures:**
+- A spatial index (e.g., uniform 3D hash grid) supporting neighbor queries like `queryRadius` and `queryKNearest` for $O(1)$ or $O(\log N)$ lookup [S2, unofficial].
+- An array of sample objects containing coordinates and values [S2, unofficial].
+
+**Steps:**
+1. **Query Neighbors:** Retrieve candidate points $S$ from the spatial index. If `searchRadius` is specified, select points within that distance. If `maxNeighbors` is specified, cap the result to the $k$ nearest neighbors [S2, unofficial].
+2. **Handle Empty Case:** If $S$ is empty, return a nodata sentinel value (e.g., $< -10^{29}$) to allow the renderer to skip these voxels [S2, unofficial].
+3. **Exact Hit Check:** For each $P_i \in S$, calculate $d_i = \|Q - P_i\|$. If $d_i = 0$ (or $< \epsilon$), return $V_i$ immediately to avoid division by zero [S2, unofficial].
+4. **Compute Weights:** For each $P_i \in S$, compute $w_i = 1 / d_i^{\text{power}}$ [S2, unofficial].
+5. **Normalize and Interpolate:** Compute $F(Q) = \frac{\sum_{i \in S} w_i V_i}{\sum_{i \in S} w_i}$ [S1][S2, unofficial].
+
+**Alternative Cell-Based Implementation:**
+In some implementations, the neighborhood is restricted to the eight vertices of the single grid cell containing $Q$ [S1]. The weights are computed using a product of squared distances to all other vertices in the cell [S1]:
+$$ w_i = \frac{\prod_{\substack{k=0 \\ k \neq i}}^7 [d_k(Q)]^2}{\sum_{\substack{j=0 \\ j \neq i}}^7 \prod_{\substack{l=0 \\ l \neq j}}^7 [d_l(Q)]^2} $$
+where $d_j(Q)$ is the Euclidean distance between the $j$-th vertex and $Q$ [S1]. If $Q$ coincides with vertex $j$, $w_j=1$ and $w_i=0$ for $i \neq j$, ensuring $F(Q) = V_j$ [S1].
+
+**Parameters:**
+- `power`: The IDW exponent controlling the rate of decay. Typical value: 2 [S2, unofficial].
+- `searchRadius`: Maximum distance to consider samples. Typical value: 60 world units [S2, unofficial].
+- `maxNeighbors`: Maximum number of nearest neighbors. Typical value: 16 [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** If $Q$ coincides exactly with a sample point, $d_i=0$. An exact-hit short-circuit must be used [S2, unofficial].
+- **Continuity:** The scheme does not guarantee $C^0$ continuity along interior faces [S1]. This can be minimized by using all vertices of all cells containing a point on an interior face, though this is ad hoc [S1].
+- **Local Bias:** Considering only surrounding cells ignores contributions from cells in the original volume that do not include an interpolated point, which is a problem with very local methods [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def idw_interpolate(query_point, samples, spatial_index, power=2.0, search_radius=None, max_neighbors=16, epsilon=1e-6):
+    # Step 1: Query neighbors
+    candidates = spatial_index.query_k_nearest(query_point, max_neighbors)
+    
+    # If search_radius is provided, filter candidates
+    if search_radius is not None:
+        candidates = [p for p in candidates if math.sqrt(sum((q - c)**2 for q, c in zip(query_point, p.coords))) <= search_radius]
+        
+    # Step 2: Handle empty case
+    if not candidates:
+        return -1e29  # Nodata sentinel
+        
+    # Step 3 & 4: Compute weights with exact-hit check
+    weights = []
+    values = []
+    for sample in candidates:
+        d = math.sqrt(sum((q - c)**2 for q, c in zip(query_point, sample.coords)))
+        if d < epsilon:
+            return sample.value  # Exact hit short-circuit
+        w = 1.0 / (d ** power)
+        weights.append(w)
+        values.append(sample.value)
+        
+    # Step 5: Normalize and interpolate
+    numerator = sum(w * v for w, v in zip(weights, values))
+    denominator = sum(weights)
+    
+    if denominator == 0:
+        return -1e29  # Fallback for numerical issues
+        
+    return numerator / denominator
+```
+
+## Subtopics
+
+### [Frequency Domain Volume Rendering with Sinc Resampling](826-frequency-domain-volume-rendering-with-sinc-resampling.md)
+Uses sinc functions for ideal reconstruction in the frequency domain; suitable for regular grids but computationally expensive.
+
+### [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md)
+Higher-order polynomial interpolation on regular grids; smoother than trilinear but more complex to implement.
+
+### [Bilinear Interpolation](858-bilinear-interpolation.md)
+2D linear interpolation; simpler than trilinear but not applicable to 3D volumes directly.
+
+### [Hardware Interpolation Approximation](1027-hardware-interpolation-approximation.md)
+Uses GPU texture hardware for fast, low-precision interpolation; limited by hardware constraints.
+
+### [Trilinear Interpolation](1531-trilinear-interpolation.md)
+Standard 3D linear interpolation on regular grids; efficient and $C^0$ continuous along faces, but requires structured data.
+
+## Operating characteristics
+- **Time Complexity:** $O(k)$ per query for interpolation, plus spatial index lookup cost ($O(1)$ for hash grids, $O(\log N)$ for trees) [S2, unofficial].
+- **Memory Complexity:** $O(N)$ to store the sample points and spatial index [S2, unofficial].
+- **Performance:** Depends heavily on the spatial index implementation. Uniform hash grids offer $O(1)$ lookup for static datasets [S2, unofficial].
+- **Strengths:** Works with irregular data; simple to implement; no grid structure required [S2, unofficial].
+- **Limitations:** No guaranteed continuity; sensitive to parameter choice (`power`); local methods may ignore distant but relevant data [S1].
+- **When to Use:** Irregular or sparse data (e.g., geological assays) that must be converted to a volume grid or queried directly [S2, unofficial].
+- **When Not to Use:** Regular grid data where trilinear or higher-order schemes are preferred for continuity and performance [S1].
+
+## Background
+IDW was introduced as a distance-weighted interpolation scheme in the 1980s [S1]. It has been applied to direct volume rendering of curvilinear volumes and geological data visualization [S1][S2, unofficial]. The method is particularly relevant for visualizing data from drill-hole assays or other non-uniform sampling patterns [S2, unofficial].
+
+## Sources
+[S1] Direct volume rendering of curvilinear volumes, https://doi.org/10.1145/99308.99318, fetched 2026-10-28
+[S2] feat: 3D IDW interpolation volume and voxel visualisation, https://github.com/darkmine-oss/baselode/pull/50, fetched 2026-10-27 (unofficial)

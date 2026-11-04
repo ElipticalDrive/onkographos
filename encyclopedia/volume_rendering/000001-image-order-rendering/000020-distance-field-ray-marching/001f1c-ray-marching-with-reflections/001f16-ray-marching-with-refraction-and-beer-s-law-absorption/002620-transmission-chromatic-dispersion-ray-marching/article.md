@@ -1,0 +1,112 @@
+# Transmission & Chromatic Dispersion Ray Marching
+Also called: Chromatic Dispersion Ray Marching
+
+## Overview
+This method extends [Ray Marching with Refraction and Beer's Law Absorption](1947-ray-marching-with-refraction-and-beer-s-law-absorption.md) by simulating chromatic dispersion, where the index of refraction (IOR) varies by wavelength. It splits the ray into Red, Green, and Blue channels, refracting each with a distinct IOR to produce spectral separation effects, while falling back to a single IOR when dispersion is negligible.
+
+## How it works
+**Inputs:**
+- Ray origin $O$ and direction $D$.
+- Scene SDF and material properties at the hit point: transmission $T$, IOR $n$, dispersion factor $d$.
+- Scene parameters: `throughHitPos`, `throughHitRes`, `transmissionSamples`.
+- Ambient light color $L_{amb}$ and base transmission color $C_{base}$.
+- Emission color $C_{emit}$ and strength $S_{emit}$.
+
+**Outputs:**
+- Transmitted color $C_{trans} = [R, G, B]$.
+
+**Data Structures:**
+- Material struct fields relevant to this step: `transmission` (float), `ior` (float), `dispersion` (float).
+
+**Steps:**
+1. **Check Transmission:** If $T \le 0.001$, return black or handle as opaque [S1, unofficial].
+2. **Compute Incident Vector:** Let $V$ be the view direction (from camera to hit point). Compute incident vector $I = -V$ [S1, unofficial].
+3. **Non-Dispersion Case:** If $d \le 10^{-4}$:
+   - Compute relative IOR: $\eta = \frac{1.0}{\max(n, 1.0001)}$ [S1, unofficial].
+   - Compute refracted direction $D_{refr} = \text{refract}(I, N, \eta)$, where $N$ is the surface normal [S1, unofficial].
+   - **TIR Check:** If $\|D_{refr}\|^2 < 10^{-6}$, set $D_{refr} = D_{reflected}$ (the reflected fallback direction) [S1, unofficial].
+   - **March:** Recursively march the ray from $O' = \text{hitPos} + D_{refr} \cdot (\epsilon \cdot 6.0)$ with direction $D_{refr}$, using `transmissionSamples` [S1, unofficial].
+   - **Accumulate:** If a hit occurs inside the medium, compute transmitted color: $C_{trans} = L_{amb} \cdot C_{base} + C_{emit} \cdot S_{emit}$ [S1, unofficial].
+4. **Dispersion Case:** If $d > 10^{-4}$:
+   - Compute IOR spread: $\Delta n = d \cdot 0.35$ [S1, unofficial].
+   - Define channel IORs: $n_R = n + \Delta n$, $n_G = n$, $n_B = n - \Delta n$ [S1, unofficial].
+   - For each channel $c \in \{R, G, B\}$:
+     - Compute $\eta_c = \frac{1.0}{\max(n_c, 1.0001)}$ [S1, unofficial].
+     - Compute $D_{refr,c} = \text{refract}(I, N, \eta_c)$ [S1, unofficial].
+     - **TIR Check:** If $\|D_{refr,c}\|^2 < 10^{-6}$, set $D_{refr,c} = D_{reflected}$ [S1, unofficial].
+     - **March:** Recursively march from $O'$ with $D_{refr,c}$ [S1, unofficial].
+     - **Accumulate:** Compute $C_c$ for the channel [S1, unofficial].
+   - **Combine:** $C_{trans} = [C_R, C_G, C_B]$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def march_chromatic_dispersion(hit_pos, normal, view_dir, material, scene_params):
+    # 1. Check transmission
+    if material.transmission <= 0.001:
+        return vec3(0.0)
+
+    # Incident vector
+    I = -view_dir
+
+    # 2. Non-dispersion path
+    if material.dispersion <= 1e-4:
+        eta = 1.0 / max(material.ior, 1.0001)
+        refracted_dir = refract(I, normal, eta)
+        
+        # TIR fallback
+        if dot(refracted_dir, refracted_dir) < 1e-6:
+            refracted_dir = reflect(I, normal)
+            
+        # March
+        start_pos = hit_pos + refracted_dir * (1e-4 * 6.0) # epsilon placeholder [G]
+        trans_color = march_scene_transmission(start_pos, refracted_dir, 
+                                               scene_params.through_hit_pos, 
+                                               scene_params.through_hit_res, 
+                                               scene_params.transmission_samples)
+        
+        # Accumulate
+        return scene_params.ambient_light * scene_params.through_base + trans_color
+
+    # 3. Dispersion path
+    ior_spread = material.dispersion * 0.35
+    ior_r = material.ior + ior_spread
+    ior_g = material.ior
+    ior_b = material.ior - ior_spread
+    
+    channels = []
+    for ior_val in [ior_r, ior_g, ior_b]:
+        eta = 1.0 / max(ior_val, 1.0001)
+        refracted_dir = refract(I, normal, eta)
+        
+        # TIR fallback
+        if dot(refracted_dir, refracted_dir) < 1e-6:
+            refracted_dir = reflect(I, normal)
+            
+        start_pos = hit_pos + refracted_dir * (1e-4 * 6.0) # epsilon placeholder [G]
+        trans_color = march_scene_transmission(start_pos, refracted_dir, 
+                                               scene_params.through_hit_pos, 
+                                               scene_params.through_hit_res, 
+                                               scene_params.transmission_samples)
+        channels.append(trans_color)
+        
+    return vec3(channels[0], channels[1], channels[2])
+```
+
+**Parameters:**
+- `dispersion`: Chromatic dispersion factor, typically in $[0, 1]$ [S1, unofficial].
+- `ior`: Index of refraction, clamped to $\ge 1.0$ [S1, unofficial].
+
+**Edge Cases:**
+- **Total Internal Reflection (TIR):** Detected by checking if the squared length of the refracted direction is less than $10^{-6}$. If true, the refracted ray is replaced with the reflected fallback direction to prevent NaN or invalid directions [S1, unofficial].
+- **Precision:** The threshold $10^{-4}$ for dispersion is used to avoid unnecessary branching and floating-point noise in the IOR calculation [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+This method is implemented in the `RayMarching_tool` repository by TeoGrajqevci [S1, unofficial]. It is an extension of standard ray marching with refraction, adding spectral separation to transparent materials.
+
+## Sources
+[S1] TeoGrajqevci/RayMarching_tool, https://github.com/TeoGrajqevci/RayMarching_tool, fetched 2026-10-26 (unofficial)

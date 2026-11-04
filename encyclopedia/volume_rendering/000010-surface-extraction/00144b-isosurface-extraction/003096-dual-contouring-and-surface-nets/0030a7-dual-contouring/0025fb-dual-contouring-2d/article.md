@@ -1,0 +1,197 @@
+# Dual Contouring 2D
+
+Also called: DualContour2, dc2
+
+## Overview
+Dual Contouring 2D is a surface extraction algorithm that generates a 2D polygonal mesh (vertices and edges) from a scalar field defined on a uniform grid. It solves the problem of extracting manifold 2D contours with sharp feature preservation by placing a single vertex inside each grid cell that intersects the isosurface, determined by minimizing a Quadratic Error Function (QEF) derived from intersection points and surface normals. It differs from its sibling [Dual Contouring (2D Grid Implementation)](3764-dual-contouring-2d-grid-implementation.md) by utilizing a specific dispatch mechanism for predefined function types and a sequential cell-processing loop with explicit edge generation, rather than a generic iterative grid approach. It builds on [Dual Contouring](778-dual-contouring.md) by restricting the domain to 2D and optimizing the QEF construction for planar cells.
+
+## How it works
+**Inputs and Outputs:**
+The algorithm takes a scalar field function type, domain bounds, grid resolution, and output buffers.
+- `ft`: Enum specifying the scalar field function (`FT_UNIT_SPHERE` or `FT_HEART`).
+- `xs, xt`: Starting and ending x coordinates of the domain.
+- `ys, yt`: Starting and ending y coordinates of the domain.
+- `n`: Number of grid intervals in the y-direction (and implicitly x, assuming uniform square cells or fixed aspect ratio handling).
+- `p`: Output buffer for mesh vertices, stored as an array of `float2` (x, y). Capacity `pcap`.
+- `pcap`: Capacity of the vertex output buffer `p`.
+- `pcnt`: Output variable storing the actual count of generated vertices.
+- `edges`: Output buffer for mesh edges, stored as an array of `int2` (vertex index pairs). Capacity `ecap`.
+- `ecap`: Capacity of the edge output buffer `edges`.
+- `ecnt`: Output variable storing the actual count of generated edges.
+
+**Data Structures:**
+The implementation uses temporary arrays allocated per cell processing or reused across the loop:
+- `S`: Sampled scalar values.
+- `I`: Intersection indices/coordinates.
+- `N`: Surface normals at intersection points.
+- `E`: Edge indices.
+- `ENS`: Edge normal signs or weights.
+- `H`: Horizontal edge vertex indices (mapping cell edge to vertex index).
+- `V`: Vertical edge vertex indices (not explicitly detailed in the snippet but implied by vertical edge generation).
+- `QEF`: Quadratic Error Function matrix and vector for the current cell.
+
+**Numbered Steps:**
+1.  **Dispatch:** The entry function `DualContour2` checks `ft`. If `FT_UNIT_SPHERE`, it calls `GenericDualContour2<FT_UNIT_SPHERE>`. If `FT_HEART`, it calls `GenericDualContour2<FT_HEART>`. Otherwise, it returns `false`.
+2.  **Initialization:** Inside `GenericDualContour2`, allocate temporary arrays `S, I, N, E, ENS, H, V, QEF`. Initialize `*pcnt = 0` and `*ecnt = 0`.
+3.  **Row Loop:** Iterate through grid rows `l` from `0` to `n - 2`. Let `prevy` be the y-coordinate of the previous row, and `y` be the current row's y-coordinate.
+4.  **Sample Scalar Field:** For the current row `y`, sample the scalar field values `s` across the x-domain `[xs, xt]` with `nsamples` points.
+5.  **Collect Intersection Edges:** For the strip between `prevy` and `y`, collect intersection points on the horizontal edges. This involves calling `CollectIntersectionEdges2` with the x-range and y-bounds, producing intersection data `ens` and edge indices `en`.
+6.  **Solve Intersections:** For the current row's horizontal edges, solve for the exact intersection points `ix, iy` using `SolveIntersection2`. This uses the scalar values and edge data.
+7.  **Sample Gradients:** Compute the surface normals `nx, ny` at the intersection points `ix, iy` using `SampleGradient2`. This provides the gradient information needed for the QEF.
+8.  **Construct QEF:** For each cell in the current row strip, construct the QEF. The QEF is built using intersection data from the current row (`CURR`) and the next row (`NEXTR`). The function `ConstructQEF2` takes intersection points, normals, and edge signs to form the linear system $A^T A x = A^T b$. The number of equations `nQEF` is returned.
+9.  **Check Capacity:** If `*pcnt + nQEF > pcap`, return `false` (buffer overflow).
+10. **Solve QEF:** Solve the QEF system to find the optimal vertex position. Store the result in `p` starting at index `2 * (*pcnt)`. The function `SolveQEF2` performs this minimization.
+11. **Update Vertex Count:** Increment `*pcnt` by `nQEF`.
+12. **Generate Horizontal Edges:** Iterate through cells `c` in the row. If both the current horizontal edge index `h1[c]` and the previous horizontal edge index `h1[c-1]` are valid (not `-1`), create an edge between the corresponding vertices. The vertex indices are offset by `base1` (the starting index of the current row's vertices). Check edge buffer capacity before adding.
+13. **Generate Vertical Edges:** Iterate through cells. If `l != 0` (not the first row) and both the current horizontal edge index `h1[c]` and the current vertical edge index `h0[c]` are valid, create an edge between the corresponding vertices. The vertical vertex indices come from the previous row's solution. Check edge buffer capacity.
+14. **Cleanup:** Free temporary arrays. Return `true` on success.
+
+**Formulas:**
+The QEF for a cell is constructed from linear constraints derived from surface normals $n_i$ and intersection points $p_i$:
+$$ (n_i \cdot (x - p_i))^2 $$
+Summing over all intersection points $i$ in the cell:
+$$ \min_x \sum_i (n_i \cdot x - n_i \cdot p_i)^2 $$
+This is solved as a least-squares problem:
+$$ \min_x \| A x - b \|^2 $$
+where $A$ is a matrix with rows $n_i^T$ and $b$ is a vector with entries $n_i \cdot p_i$.
+
+**Parameters:**
+- `ft`: `FT_UNIT_SPHERE` (0), `FT_HEART` (1).
+- `xs, xt, ys, yt`: Domain bounds.
+- `n`: Grid resolution.
+- `pcap, ecap`: Buffer capacities.
+
+**Edge Cases and Pitfalls:**
+- **Buffer Overflow:** If the number of generated vertices or edges exceeds `pcap` or `ecap`, the function returns `false`. Implementers must ensure sufficient capacity or handle the error.
+- **Degenerate Cells:** If a cell does not intersect the isosurface, no vertex is generated, and `h` or `v` indices may be `-1`. Edge generation must check for `-1`.
+- **Precision:** Floating-point precision in `SampleGradient2` and `SolveIntersection2` affects the accuracy of the QEF solution.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def DualContour2(ft, xs, xt, ys, yt, n, p, pcap, pcnt, edges, ecap, ecnt):
+    if ft == FT_UNIT_SPHERE:
+        return GenericDualContour2(FT_UNIT_SPHERE, xs, xt, ys, yt, n, p, pcap, pcnt, edges, ecap, ecnt)
+    elif ft == FT_HEART:
+        return GenericDualContour2(FT_HEART, xs, xt, ys, yt, n, p, pcap, pcnt, edges, ecap, ecnt)
+    else:
+        return False
+
+def GenericDualContour2(ft, xs, xt, ys, yt, n, p, pcap, pcnt, edges, ecap, ecnt):
+    # Allocate temporary arrays
+    S = allocate_temp_array()
+    I = allocate_temp_array()
+    N = allocate_temp_array()
+    E = allocate_temp_array()
+    ENS = allocate_temp_array()
+    H = allocate_temp_array()
+    V = allocate_temp_array()
+    QEF = allocate_temp_array()
+
+    *pcnt = 0
+    *ecnt = 0
+    prevy = ys + ystep
+    y = prevy + ystep
+
+    for l in range(n - 1):
+        # Sample scalar field for current row
+        Sample2(ft, xs, xt + xstep, y, y, S[NEXTS(l)], nsamples)
+
+        # Collect intersection edges for the strip between prevy and y
+        CollectIntersectionEdges2(
+            xs, xt + xstep, prevy, prevy,
+            xs, xt + xstep, y, y,
+            S[NEXTS(l)], S[NNEXTS(l)], nsamples,
+            xlow, ylow, xhigh, yhigh,
+            ENS[NEXTR(l)], &en[NEXTR(l)]
+        )
+
+        # Solve for intersection points
+        SolveIntersection2(
+            xlow, ylow,
+            xhigh, yhigh,
+            ix[NEXTR(l)], iy[NEXTR(l)], en[NEXTR(l)]
+        )
+
+        # Sample gradients at intersection points
+        SampleGradient2(
+            ix[NEXTR(l)], iy[NEXTR(l)],
+            nx[NEXTR(l)], ny[NEXTR(l)],
+            en[NEXTR(l)]
+        )
+
+        # Construct QEF for cells in the strip
+        nQEF = ConstructQEF2(
+            ix[CURR(l)], iy[CURR(l)],
+            ix[NEXTR(l)], iy[NEXTR(l)],
+            nx[CURR(l)], ny[CURR(l)],
+            nx[NEXTR(l)], ny[NEXTR(l)],
+            ENS[CURR(l)], ENS[NEXTR(l)],
+            ncells,
+            QEF, H[NEXTR(l)], &nQEF
+        )
+
+        # Check vertex buffer capacity
+        if *pcnt + nQEF > pcap:
+            free_temp_arrays()
+            return False
+
+        # Solve QEF and store vertices
+        SolveQEF2(QEF, p + 2 * (*pcnt), nQEF)
+        *pcnt += nQEF
+
+        # Generate horizontal edges
+        base1 = *pcnt - nQEF
+        h1 = H[NEXTR(l)]
+        for c in range(1, ncells - 1):
+            if h1[c] != -1 and h1[c - 1] != -1:
+                if *ecnt + 1 > ecap:
+                    free_temp_arrays()
+                    return False
+                edges[*ecnt * 2] = base1 + h1[c]
+                edges[*ecnt * 2 + 1] = base1 + h1[c - 1]
+                *ecnt += 1
+
+        # Generate vertical edges
+        base0 = base1 - last # last is vertex count from previous row
+        h0 = H[CURR(l)] # Assuming H[CURR] stores vertical edge indices for the previous row's cells
+        for c in range(ncells):
+            if l != 0 and h1[c] != -1 and h0[c] != -1:
+                if *ecnt + 1 > ecap:
+                    free_temp_arrays()
+                    return False
+                edges[*ecnt * 2] = base1 + h1[c]
+                edges[*ecnt * 2 + 1] = base0 + h0[c]
+                *ecnt += 1
+
+        last = nQEF
+        prevy = y
+        y += ystep
+
+    free_temp_arrays()
+    return True
+```
+
+## Subtopics
+
+### [Dual Contouring 2D (CUDA)](3671-dual-contouring-2d-cuda.md)
+A GPU-accelerated implementation using CUDA parallelism, tiled thread blocks, atomic operations, and parallel prefix sum for vertex and edge generation. Choose this for high-performance extraction on NVIDIA GPUs.
+
+### [Dual Contouring (2D Grid Implementation)](3764-dual-contouring-2d-grid-implementation.md)
+A concrete, iterative implementation on a simple uniform grid structure. Choose this for a straightforward CPU-based implementation that builds on the core Dual Contouring 2D concepts.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of grid cells in x and $M$ is the number of grid cells in y. Each cell is processed once, and QEF solving is constant time per cell (small linear system).
+- **Memory Complexity:** $O(N \cdot M)$ for the output buffers. Temporary arrays are $O(N)$ or $O(1)$ depending on implementation.
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Produces manifold meshes with sharp feature preservation. More accurate than Marching Squares for curved surfaces.
+- **Limitations:** Requires buffer capacity checks. Sequential implementation may be slow for large grids.
+- **When to use:** When manifold 2D meshes with sharp features are needed from a scalar field.
+- **When not to use:** When GPU acceleration is required (use CUDA variant) or when a simpler, less accurate method suffices (use Marching Squares).
+
+## Background
+Origin: The method is described in the unofficial source [S1, unofficial] from the `cudc` repository. It is a 2D specialization of the Dual Contouring algorithm, which was originally developed for 3D surface extraction. The 2D variant adapts the QEF minimization and dual graph construction to planar grids.
+
+## Sources
+[S1] thebusytypist/cudc, https://github.com/thebusytypist/cudc, fetched 2026-10-26 (unofficial)

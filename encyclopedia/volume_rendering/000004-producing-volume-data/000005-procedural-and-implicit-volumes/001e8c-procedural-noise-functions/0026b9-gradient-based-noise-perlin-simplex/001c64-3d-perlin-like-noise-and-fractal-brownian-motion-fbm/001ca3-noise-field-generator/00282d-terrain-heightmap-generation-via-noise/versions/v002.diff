@@ -1,0 +1,176 @@
+--- v001.md
++++ v002.md
+@@ -4,23 +4,23 @@
+ 
+ ## Overview
+-This method generates a 2D terrain heightmap by sampling a 3D scalar noise field at a fixed vertical coordinate, effectively projecting the noise onto the X-Y plane. It solves the problem of creating continuous, procedural ground geometry for voxel-based or mesh-based worlds without requiring pre-baked height data. It differs from its parent, the [Noise Field Generator](1302-noise-field-generator.md), by collapsing the 3D gradient-based noise into a single 2D function $H(X, Y)$, removing the vertical gradient offset and the Z-dimension sampling, to produce a flat-bottomed or offset heightmap suitable for terrain placement.
++This method generates a terrain heightmap by converting 2D world coordinates into a single height value using scaled fractal noise, remapped to a specific vertical range [S1, unofficial]. It differs from its parent [Noise Field Generator](1302-noise-field-generator.md) by operating directly on 2D world coordinates rather than sampling a 3D scalar field [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `WorldX`, `WorldY`: The 2D world-space coordinates for which to compute height.
+-- `Settings`: A configuration struct containing noise parameters (Seed, Scale, Octaves, Persistence, Lacunarity, HeightScale, BaseHeight).
++- `WorldX`, `WorldY`: The 2D world-space coordinates for which to compute height [S1, unofficial].
++- `Settings`: A configuration struct containing noise parameters (`Seed`, `Scale`, `Octaves`, `Persistence`, `Lacunarity`, `HeightScale`, `BaseHeight`) [S1, unofficial].
+ 
+ **Outputs:**
+-- `Height`: A single floating-point value representing the terrain elevation at `(WorldX, WorldY)`.
++- `Height`: A single floating-point value representing the terrain elevation at `(WorldX, WorldY)` [S1, unofficial].
+ 
+ **Data Structures:**
+-The `Settings` struct contains the following fields:
+-- `Seed` (int32): Random seed for permutation table initialization. Default: 1337.
+-- `Scale` (float): World units per noise cell. Controls spatial frequency. Default: 2000.0f.
+-- `Octaves` (int32): Number of noise layers. Range: 1–8. Default: 4.
+-- `Persistence` (float): Amplitude decay per octave. Range: 0.0–1.0. Default: 0.5f.
+-- `Lacunarity` (float): Frequency multiplier per octave. Default: 2.0f.
+-- `HeightScale` (float): Vertical amplitude multiplier. Default: 500.0f.
+-- `BaseHeight` (float): Vertical offset. Default: 0.0f.
++The `Settings` struct contains the following fields with exact defaults and ranges from the evidence [S1, unofficial]:
++- `Seed` (int32): Random seed for noise generation. Default: 1337.
++- `Scale` (float): World units per noise cell. Controls smoothness. Range: 1000–5000. Default: 2000.0f.
++- `Octaves` (int32): Number of noise layers summed. Controls detail. Range: 1–8. Default: 4.
++- `Persistence` (float): Amplitude falloff per octave. Controls roughness. Range: 0.0–1.0. Default: 0.5f.
++- `Lacunarity` (float): Frequency multiplier per octave. Standard choice: 2.0. Default: 2.0f.
++- `HeightScale` (float): Final output amplitude. The output is remapped to `[BaseHeight - HeightScale, BaseHeight + HeightScale]`. Default: 500.0f.
++- `BaseHeight` (float): Final output offset. Default: 0.0f.
+ 
+ **Algorithm Steps:**
+@@ -49,8 +49,9 @@
+ 
+ ```python
++import math
++
+ def GenerateHeight(WorldX: float, WorldY: float, Settings: NoiseSettings) -> float:
+     # 1. Scale Normalization
+-    # Guard against division by zero [G]
+-    scale = max(Settings.Scale, 1e-6)
++    scale = max(Settings.Scale, 1e-6) # Guard against division by zero [G]
+     noise_x = WorldX / scale
+     noise_y = WorldY / scale
+@@ -68,63 +69,36 @@
+     amplitude = 1.0
+     max_value = 0.0
+-    
+-    # Clamp octaves to valid range [1, 8]
+-    octaves = max(1, min(Settings.Octaves, 8))
+-    
+-    for i in range(octaves):
+-        # Sample raw 2D Perlin noise at current frequency
+-        # Note: RawPerlin2D implementation details are inherited from parent Noise Field Generator
+-        # but adapted for 2D input.
++    octaves = max(1, min(Settings.Octaves, 8)) # Clamp to [1, 8] [S1, unofficial]
++
++    for _ in range(octaves):
+         sample = RawPerlin2D(X * frequency, Y * frequency, Settings.Seed)
+-        
+         total += sample * amplitude
+         max_value += amplitude
+-        
+-        # Update amplitude and frequency for next octave
+         amplitude *= Settings.Persistence
+         frequency *= Settings.Lacunarity
+-        
+-    # Normalize to [-1, 1] range
+-    if max_value > 0:
+-        return total / max_value
+-    else:
+-        return 0.0
++
++    return total / max_value if max_value > 0.0 else 0.0
+ 
+ def RawPerlin2D(X: float, Y: float, Seed: int) -> float:
+-    """
+-    Standard 2D Perlin Noise implementation.
+-    Uses a permutation table derived from Seed.
+-    Returns value roughly in [-1, 1].
+-    """
+-    # 1. Find unit square
+-    xi = int(floor(X)) & 255
+-    yi = int(floor(Y)) & 255
+-    
+-    # 2. Find relative x, y in unit square
+-    xf = X - floor(X)
+-    yf = Y - floor(Y)
+-    
+-    # 3. Fade curves
++    # Standard 2D Perlin noise [G]
++    xi = math.floor(X) & 255
++    yi = math.floor(Y) & 255
++    xf = X - math.floor(X)
++    yf = Y - math.floor(Y)
+     u = fade(xf)
+     v = fade(yf)
+-    
+-    # 4. Hashing corners
+-    # P is the permutation table initialized with Seed
+-    # AA, AB, BA, BB are hash values for the four corners
+-    aa = p[p[xi] + yi]
+-    ab = p[p[xi] + yi + 1]
+-    ba = p[p[xi + 1] + yi]
+-    bb = p[p[xi + 1] + yi + 1]
+-    
+-    # 5. Gradient contributions
+-    # grad(hash, x, y) computes dot product of gradient vector and distance vector
+-    x1 = lerp(grad(aa, xf, yf), grad(ba, xf - 1, yf), u)
+-    x2 = lerp(grad(ab, xf, yf - 1), grad(bb, xf - 1, yf - 1), u)
+-    
+-    # 6. Interpolation
+-    return lerp(x1, x2, v)
++
++    # Permutation table P initialized from Seed [G]
++    aa = P[P[xi] + yi]
++    ab = P[P[xi] + yi + 1]
++    ba = P[P[xi + 1] + yi]
++    bb = P[P[xi + 1] + yi + 1]
++
++    x1 = lerp(u, grad(aa, xf, yf), grad(ba, xf - 1.0, yf))
++    x2 = lerp(u, grad(ab, xf, yf - 1.0), grad(bb, xf - 1.0, yf - 1.0))
++    return lerp(v, x1, x2)
+ 
+ def fade(t: float) -> float:
+-    return t * t * t * (t * (t * 6 - 15) + 10)
++    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+ 
+ def lerp(t: float, a: float, b: float) -> float:
+@@ -132,6 +106,4 @@
+ 
+ def grad(hash_val: int, x: float, y: float) -> float:
+-    # Simplified 2D gradient for Perlin noise
+-    # Typically uses a set of 4 or 8 gradient vectors
+     h = hash_val & 3
+     if h == 0: return x + y
+@@ -144,23 +116,24 @@
+ - **Division by Zero**: If `Settings.Scale` is 0, the normalization step fails. A minimum epsilon floor is required [G].
+ - **Precision Loss**: At very large world coordinates, floating-point precision in `WorldX/Scale` may cause noise artifacts. Wrapping coordinates or using double precision may be necessary for infinite worlds [G].
+-- **Discontinuities**: If the permutation table is not properly seeded or if `Seed` is not handled consistently across chunks, seams may appear at chunk boundaries.
++- **Discontinuities**: If the permutation table is not properly seeded or if `Seed` is not handled consistently across chunks, seams may appear at chunk boundaries [G].
+ 
+ ## Subtopics
+ 
+ ### Fractal Brownian Motion (FBM)
+-The underlying noise summation technique. It creates detail by layering noise at different frequencies. Choose this when you need multi-scale terrain features (large mountains + small rocks). See [3D Perlin-like Noise and Fractal Brownian Motion (FBM)](1303-3d-perlin-like-noise-and-fbm.md).
++The underlying noise summation technique [S1, unofficial]. It creates detail by layering noise at different frequencies [S1, unofficial]. Choose this when you need multi-scale terrain features (large mountains + small rocks) [G]. See [3D Perlin-like Noise and Fractal Brownian Motion (FBM)](1303-3d-perlin-like-noise-and-fbm.md).
+ 
+ ### Perlin Noise
+-The base gradient noise function. It provides smooth, continuous interpolation. Choose this over value noise for smoother terrain slopes. See [Gradient-based Noise (Perlin/Simplex)](1301-gradient-based-noise-perlin-simplex.md).
++The base gradient noise function [S1, unofficial]. It provides smooth, continuous interpolation [G]. Choose this over value noise for smoother terrain slopes [G]. See [Gradient-based Noise (Perlin/Simplex)](1301-gradient-based-noise-perlin-simplex.md).
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(O)$, where $O$ is the number of octaves. Each octave requires a constant number of hash lookups and interpolations.
+-- **Memory Complexity**: $O(1)$ per query. The permutation table is precomputed and stored once.
+-- **Performance**: Very fast. Suitable for real-time generation during chunk loading or on-the-fly terrain modification.
+-- **Strengths**: Deterministic (given same seed), continuous, easy to tune via parameters.
+-- **Limitations**: 2D projection loses vertical variation details that 3D noise might provide. Not suitable for caves or overhangs without additional 3D processing.
++- **Time Complexity**: $O(O)$, where $O$ is the number of octaves [G].
++- **Memory Complexity**: $O(1)$ per query [G].
++- **Measured Performance**: Not given in the sources.
++- **Scaling**: Not given in the sources.
++- **Strengths**: Deterministic (given same seed), continuous, easy to tune via parameters [G].
++- **Limitations**: 2D projection loses vertical variation details that 3D noise might provide. Not suitable for caves or overhangs without additional 3D processing [G].
+ 
+ ## Background
+-This method is derived from procedural generation techniques used in voxel games like Minecraft. The specific implementation is found in the UE5 Minecraft Clone project by Manolo94, which adapts standard Perlin noise for world height generation [S1, unofficial]. It builds on the [Noise Field Generator](1302-noise-field-generator.md) by simplifying the 3D field into a 2D heightmap.
++This method is derived from procedural generation techniques used in voxel games [G]. The implementation is found in the Manolo94/UE5MinecraftClone repository [S1, unofficial]. It builds on the [Noise Field Generator](1302-noise-field-generator.md) by simplifying the 3D field into a 2D heightmap [S1, unofficial].
+ 
+ ## Sources

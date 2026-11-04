@@ -1,0 +1,106 @@
+# Tensor Approximation
+Also called: Tensor decomposition, Tucker Decomposition, Tucker formulation tensor approximation
+## Overview
+Tensor Approximation (TA) is a volume data compression method that interprets a volume dataset as a multi-dimensional tensor and factorizes it into a set of basis matrices and a core tensor [S1, unofficial]. It solves the problem of storing and transmitting large volume datasets by reducing the reconstruction rank, thereby achieving data reduction [S1, unofficial]. Unlike wavelet transforms, rank-reduced TA captures non-axis aligned features at different scales more effectively using the same number of coefficients [S1, unofficial]. It is distinguished from its parent [Tucker Decomposition (HOSVD)](5352-tucker-decomposition-hosvd.md) by its specific integration into a multiresolution octree hierarchy with per-brick Tucker formulation and optimized GPU reconstruction [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+- Input: A volume dataset $V$ partitioned into bricks within a multiresolution octree hierarchy.
+- Output: A compressed representation consisting of Tucker factors (basis matrices) and a core tensor for each brick, along with quantized indices or coefficients.
+
+**Data Structures:**
+- **Brick:** A sub-volume block. Each brick is processed independently using a single TA [S1, unofficial].
+- **Tucker Model:** For a brick represented as tensor $\mathcal{X}$, the approximation is defined by a core tensor $\mathcal{G}$ and factor matrices $U^{(n)}$ for each dimension $n$:
+  $$ \mathcal{X} \approx \mathcal{G} \times_1 U^{(1)} \times_2 U^{(2)} \times_3 U^{(3)} $$
+  where $\times_n$ denotes the tensor-times-matrix (TTM) product [S1, unofficial].
+- **Quantization:** A tensor-specific quantization scheme is applied to the factors/core to enable efficient storage [S1, unofficial].
+
+**Steps:**
+1. **Partitioning:** Divide the input volume domain into bricks using a multiresolution octree hierarchy [S1, unofficial].
+2. **Decomposition:** For each brick, compute the Tucker decomposition. This involves learning data-specific bases (matrices $U^{(n)}$) and a core tensor $\mathcal{G}$ [S1, unofficial].
+3. **Rank Reduction:** Reduce the rank of the reconstruction to obtain data reduction. The rank $M$ determines the size of the basis matrices and core tensor [S1, unofficial].
+4. **Quantization:** Apply the tensor-specific quantization scheme to the decomposed components [S1, unofficial].
+5. **GPU Reconstruction:** During rendering, decompress the data before the rendering stage using a per-brick solution [S1, unofficial].
+   - Implement TTM multiplications on the GPU [S1, unofficial].
+   - Assign each kernel thread to decompress one voxel [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reconstruct_voxel(voxel_coords, brick_factors, brick_core, rank_M):
+    """
+    Reconstructs a single voxel value using the Tucker formulation.
+    brick_factors: List of 3 matrices [U1, U2, U3], each of shape (brick_dim, rank_M).
+    brick_core: Tensor of shape (rank_M, rank_M, rank_M).
+    voxel_coords: Tuple (x, y, z) indicating the position within the brick.
+    rank_M: The reduction rank.
+    """
+    # Extract the relevant rows from the factor matrices corresponding to the voxel's position
+    # U1[x], U2[y], U3[z] are vectors of length rank_M
+    u1 = brick_factors[0][voxel_coords[0]]
+    u2 = brick_factors[1][voxel_coords[1]]
+    u3 = brick_factors[2][voxel_coords[2]]
+    
+    # Compute the tensor-times-matrix product for this specific voxel
+    # This is equivalent to contracting the core tensor with the three vectors
+    # Value = sum_{i,j,k} Core[i,j,k] * u1[i] * u2[j] * u3[k]
+    value = 0.0
+    for i in range(rank_M):
+        for j in range(rank_M):
+            for k in range(rank_M):
+                value += brick_core[i, j, k] * u1[i] * u2[j] * u3[k]
+                
+    return value
+
+def decompress_bricks(bricks):
+    """
+    Decompresses all bricks in the hierarchy before rendering.
+    """
+    for brick in bricks:
+        # Apply inverse quantization to brick_factors and brick_core
+        # [G] Standard dequantization steps based on the specific scheme used
+        pass
+```
+
+**Parameters:**
+- **Rank $M$:** The reduction rank. Typical values are not explicitly given in the sources, but the complexity is linear in $M$ [S1, unofficial].
+- **Brick Size:** Determined by the multiresolution octree hierarchy [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Quantization errors may affect reconstruction quality. The tensor-specific quantization scheme must be chosen carefully [S1, unofficial].
+- **Boundaries:** The method assumes bricks are independent. Boundary artifacts may occur if not handled by the octree structure [S1, unofficial].
+- **Degenerate Input:** If a brick has low variance, the rank reduction might discard important features. The learned bases are data-specific, so they must be computed per brick [S1, unofficial].
+
+## Subtopics
+
+### Hierarchical Tensor-based Transform
+A hierarchical tensor-based transform where the input volume domain is recursively partitioned into smaller blocks, each defined with a truncated tensor-product basis [S1, unofficial]. It represents the original tensor as a summation of incomplete tensor approximations at multiple levels, where tensors at each level are subdivided into residual tensors passed from the higher levels [S1, unofficial]. This approach differs from standard TA by explicitly modeling residuals across hierarchy levels, allowing for multi-scale approximation [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- The computational complexity of the GPU reconstruction is $O(M)$, growing linearly with the rank $M$, instead of $O(M^3)$ [S1, unofficial].
+- Memory usage is reduced by the rank reduction and quantization, storing only the Tucker factors and core tensor per brick [S1, unofficial].
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- The method scales with the number of bricks and the rank $M$. The linear complexity $O(M)$ allows for efficient real-time rendering on GPUs [S1, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths:** Captures non-axis aligned features at different scales better than wavelet transforms using the same amount of coefficients [S1, unofficial]. Learned bases are data-specific, enabling effective feature extraction and compression [S1, unofficial].
+- **Limitations:** Pre-processing (decomposition and quantization) can be costly [S1, unofficial]. The method requires storing Tucker factors for each brick, which may increase memory overhead compared to simpler methods if the rank is not sufficiently reduced [S1, unofficial].
+
+**When to Use:**
+- Use when the volume data contains non-axis aligned features and efficient GPU-based rendering is required [S1, unofficial].
+- Use when data-specific basis learning is beneficial for compression [S1, unofficial].
+
+**When Not to Use:**
+- Avoid if pre-processing time is a critical constraint and the data does not benefit from learned bases [S1, unofficial].
+- Avoid if the data is highly axis-aligned, where wavelet transforms might be more efficient [S1, unofficial].
+
+## Background
+Tensor Approximation was proposed in combination with a multiresolution octree hierarchy [SIM* 11]. The same work introduced a tensor-specific quantization scheme and an optimized GPU reconstruction method [S1, unofficial]. The general idea behind tensor decomposition is to approximate a volume dataset with SVD/PCA-like tools, interpreting the volume as a tensor factorized into rank-one tensors (CP decomposition) or a core tensor and matrices (Tucker decomposition) [KB09]. Suter et al. [SZP10] showed that rank-reduced TA is more able to capture non-axis aligned features at different scales than wavelet transforms using the same amount of coefficients. The hierarchical tensor-based transform was proposed by Wu et al. [WXC* 08] [S1, unofficial].
+
+## Sources
+[S1] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27 (unofficial)

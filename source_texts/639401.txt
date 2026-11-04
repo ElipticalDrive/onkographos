@@ -1,0 +1,164 @@
+Cross-platform voxel sandbox engine built from scratch in C++20 with Vulkan and SDL3. - perf(chunk): materialize face keys to cut repeated work in greedy meshing by gkehren · Pull Request #116 · gkehren/ft_vox
+
+perf(chunk): materialize face keys to cut repeated work in greedy meshing by gkehren · Pull Request #116 · gkehren/ft_vox · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+gkehren
+commented
+Sep 5, 2026
+Copy link
+Copy Markdown
+Owner
+Closes #106
+What
+The greedy merge phase re-evaluated the semantic identity of a face for every width/height expansion probe — two voxel/shell samples, the transparency rules and biome-color lookups, per probe. Chunk::buildMeshRanged now runs a classification pass that materializes each slice cell's face inputs once into compact per-cell keys, and the greedy expansion evaluates the merge rules on the key fields: no voxel/shell sampling and no biome array lookups left in the hot loops.
+Key layout (thread-local planes, reserved once per worker — no per-slice/chunk heap churn; acceptance criterion "no new heap churn"):
+```
+lo: bits 0..7   type at cell      (the -q side voxel, may be a border)
+    bits 8..15  type at cell+q    (the +q side voxel, may be a border)
+    bits 16..47 owner color of the cell-side type (biome color of its
+                column / constant water tint / 0)
+    bit  48     a visible face exists (classified once in phase 1)
+    bit  49     face owned by the cell+q voxel (-q)
+hi: bits 0..31  owner color of the cell+q type
+```
+Plus an inert fast path (identical types, or two different non-air opaque types — no face possible from either side) that skips color/classification work for the majority of cells, and a precomputed 256-entry owner-color-kind table replacing the per-cell blockIsFoliage switch. Occupancy metadata (#105) already keeps empty Y slabs out of classification entirely; AO/light stay out of the key and are sampled at final merged quad corners exactly as before.
+Why the key carries the voxel PAIR, not the classified face
+A pure "same face" equality key — the issue's sketch — changed merge semantics (vertex counts shifted in both directions across the corpus): the old rules evaluate the candidate's voxel pair, not its classification:
+a +q face fronts AIR in one cell and a transparent block in the next (stone top over air merges with stone top over water);
+a -q face may merge with a candidate whose own first-match classification is the opposite face of a different transparent block (a water underside merging across a cell fronting kelp/leaves/ice).
+My first equality-key prototype was +13% slower and non-equivalent; the hash corpus caught it immediately, and the pair-carrying key restored byte-identity and the win. This iteration is documented in docs/benchmarks/issue106/benchmark.txt.
+Byte-identity proof
+New tests/test_mesh_facekey (--hash-corpus 25 97): 3 seeds × 25 strided chunks with generated 4-neighborhood borders, full greedy and LOD payload hashes + counts, plus one 600-edit noisy chunk per seed → 78/78 lines byte-identical before/after (covers plains/desert, forest foliage, mountains/caves, water/coast geometry across seeds; deterministic on a given build). The same test pins each boundary class with hand-built scenes: block-type splits, transparent pairs (glass|glass, glass|stone, glass|air), water (box, water-over-stone), biome tint boundaries (grass + foliage colors), chunk borders (solid neighbor occludes, transparent doesn't, border voxels never own faces), AO corner sampling, span-edge faces, key-path vs forced-full-range equivalence per scene, and 4-worker concurrent build determinism.
+Numbers (Release, RTX 4070 Ti — docs/benchmarks/issue106/benchmark.txt)
+Metric
+main
+PR
+Δ
+corpus facesGreedyAO per build (n=75, median of 3 runs)
+1393.8 µs
+1270.6 µs
+−8.8%
+corpus whole-build median
+2.33 ms
+2.21 ms
+~−5%
+end-to-end MeshBuild avgMs (--benchmark 60)
+2.3255
+2.2342
+−3.9%
+end-to-end facesGreedyAO per build
+1.3532 ms
+1.2212 ms
+−9.7%
+end-to-end TerrainGen avgMs (untouched control)
+1.2744
+1.2744
+0
+Score / avg FPS
+9924 / 615.4
+9922 / 612.6
+noise
+Vertex/index counts
+—
+—
+unchanged (byte-identical payloads)
+Corpus = 3 seeds × 25 chunks at stride 97 + edited chunks, neighbors generated for border sampling (test_mesh_facekey --bench-corpus 25 97), 3 interleaved runs per side. A first discarded end-to-end run was globally CPU-contended (TerrainGen +13% on untouched code); the clean run above was taken back-to-back with the baseline.
+Acceptance criteria
+✅ Each slice face classified once per pass; expansion compares key fields (no re-sampling)
+✅ No per-chunk/slice heap churn (thread-local planes reserved per worker)
+✅ Opaque/water visibility, transparency and tint boundaries correct — byte-identical meshes
+✅ AO/light bitwise consistent; chunk-edge occlusion correct (hash-identical)
+✅ Deterministic across runs/workers (×20 Release + ×5 Debug repeats, 4-thread test)
+✅ Tests for merge/non-merge boundaries (all classes above)
+✅ [Performance/Memory] Add resident-memory, allocator and draw-call telemetry to the benchmark #101 facesGreedyAO sub-timer: −8.8% corpus / −9.7% end-to-end
+✅ Vertex/index counts unchanged
+Validation
+ctest Release 19/19 (incl. new MeshFaceKey)
+Debug subset 8/8 (MeshFaceKey, ChunkLifecycle, TerrainGeneration, StreamOptHelpers, MeshResultPool, WorkloadTelemetry ×2, MeshUploadLifecycle)
+Repeats: test_mesh_facekey ×20 Release + ×5 Debug, test_chunk_lifecycle ×20 Release — all green
+git diff --check clean
+ASan/TSan: left to CI per project convention
+perf(chunk): materialize face keys to cut repeated work in greedy mes…
+…
+fc55235
+```
+…hing
+
+Issue #106: the greedy merge phase re-evaluated the semantic identity of a
+face for every width/height expansion probe - two voxel/shell samples, the
+transparency rules and biome-color lookups per probe - instead of deciding
+once per slice cell.
+
+buildMeshRanged now runs a classification pass that materializes each
+cell's face inputs into a compact per-cell key pair (thread-local workspace
+reserved once per worker, no per-slice/chunk heap churn):
+  lo: type at cell, type at cell+q, owner color of the cell side,
+      has-face + side flags (classification done once)
+  hi: owner color of the cell+q side
+The greedy seed walk reads the precomputed classification and the
+width/height probes evaluate the exact merge rules on the key fields, with
+no voxel/shell sampling and no biome array lookups left in the hot loops.
+An inert fast path (identical types, or two different non-air opaque types)
+skips color/classification work for the majority of cells, and owner-color
+kinds come from a precomputed 256-entry table.
+
+The key must carry the raw voxel PAIR rather than the cell's classified
+face: the old rules merge a +q face fronting air with one fronting a
+transparent block, and accept a -q candidate whose own first-match
+classification is the opposite face of a different transparent block. A
+first equality-key design shifted vertex counts in both directions and was
++13% slower; the hash corpus caught it and the pair key restored
+byte-identity. AO/light stay out of the key (sampled at final quad corners).
+
+Byte-identity is proven by tests/test_mesh_facekey --hash-corpus (3 seeds x
+25 strided chunks with generated neighbor borders + LOD + edited chunks:
+all payload hashes and counts equal before/after). The new test also pins
+the merge/non-merge contract with deterministic scenes (block types,
+transparent pairs, water, biome tint, chunk borders, AO corners), the
+metadata-bounds vs forced-full-range equivalence, and multi-worker
+determinism.
+
+Numbers (Release, RTX 4070 Ti; docs/benchmarks/issue106/benchmark.txt):
+- corpus (75 builds/run, 3 runs/side): facesGreedyAO 1393.8 -> 1270.6 us
+  per build (-8.8%); whole-build median 2.33 -> 2.21 ms
+- end-to-end --benchmark 60: MeshBuild 2.3255 -> 2.2342 ms (-3.9%),
+  facesGreedyAO -9.7%, TerrainGen identical, score 9924 -> 9922
+- vertex/index counts unchanged (byte-identical payloads)
+
+Validation: ctest Release 19/19; Debug subset 8/8; test_mesh_facekey x20
+Release + x5 Debug and test_chunk_lifecycle x20 Release all green;
+git diff --check clean. ASan/TSan left to CI.
+
+Close #106
+```
+Hide details
+View details
+gkehren
+merged commit 924ae7c
+into
+main
+Sep 5, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+gkehren
+deleted the
+issue-106-face-key-masks
+branch
+September 5, 2026 11:02
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

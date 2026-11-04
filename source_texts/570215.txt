@@ -1,0 +1,754 @@
+Contribute to zyra-project/sphere-sim development by creating an account on GitHub.
+
+Phase 2 wiring: both shaders trace and shade a mesh by Hackshaven · Pull Request #7 · zyra-project/sphere-sim · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Hackshaven
+commented
+Aug 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+What this is
+docs/ARBITRARY-SHAPES.md Phase 2 landed the traversal in PR #6 and left it unused: the mesh chunk could find a triangle, and nothing called it. Both renderers still asked raySphereIntersect what the light lands on. This routes them onto the surface they were given.
+The gate is unchanged and holds throughout: the sphere path stays byte-identical — bench --scenarios 12 --seed 1234 at 5,563,347 characters, env and per-scenario timings removed.
+The blend had to cross first, and that made it a texture
+A mesh's blend weight is not a closed form on the angle from a limb. It is Phase 3's per-vertex geodesic field, which footprintDistanceAt interpolates across the face a hit landed on — and a shader cannot follow a Float64Array any more than it can follow the hierarchy.
+So pack.ts gains a third texture: three texels per triangle, one per corner, four channels, because a framebuffer holds four viewports (PARAMETERS.md §3.4) and both shaders declare MAX_PROJ = 4. Per corner rather than per vertex, which is the trade the positions already make — a dependent fetch in the blend would sit in the same innermost loop the traversal is trying to keep prefetchable. A fifth field is refused rather than dropped into a channel that does not exist.
+packBvh(bvh, mesh, fields) is measured against footprintDistanceAt at six barycentric points on every seventh face: worst departure 3.46e-8 m, which is float32 on a 0.86 m sphere.
+That field belongs to the COMPOSITOR, which took a second look to see
+buildDisplayUniforms already states the rule and follows it for three uniforms:
+The blend and mask are the COMPOSITOR's: the weights belong to the calibration the content was generated against, not to where the light physically landed. Reading them off physical would be a subtle and very convincing bug — the picture would still look like a sphere.
+uRampShape, uWidthDeg and uRampGamma come off content.blend for that reason. On a mesh the ramp needs two more terms — the per-corner field and the blend width as an arc — and both came from whichever rig was handed to packMesh, which is the physical one. The shader ramped on where the light really goes while coverageAndWeights ramped on where the compositor thought it went. Code stating a rule and then not doing it, the same shape as the placeholder-texture finding below.
+This is not a second field texture, which is where it was heading. There is exactly one blend in the display shader and it is the compositor's: the compositor computes the weights and bakes them into the pixels it sends, a projector emits those pixels, and where they land is physics. rampWeight is called twice, both inside contentWeight; bvhFieldAt is called once, feeding it; meshIlluminated uses no field at all. A physical field would be sampled by nothing, stripped by the linker, and the page's own guard would refuse to start — exactly how uLimb went, two sections down. So the repair is to attribute the one field correctly.
+was
+is
+uBvhField
+uCBvhField
+uMeshHasField
+uCMeshHasField
+uMeshBlendWidthM
+uCMeshBlendWidthM
+DisplayMesh.field / .fieldWidth / .blendWidthM
+.contentField / .contentFieldWidth / .contentBlendWidthM
+packMesh(rig)
+packMesh(content) — the parameter named for the rig it needs
+How much it mattered. A footprint is computed from where a lens actually is, so displacing the compositor moves which vertices fall inside one. On the wall fixture under BOULDER_PRESET the two rigs' fields differ by 8.5e5 — footprint.ts's unreachable sentinel, not drift. Vertices inside one rig's footprint are unreachable in the other's, so the shader was ramping smoothly across faces where the compositor drew a hard seam. Both pictures look like a blend.
+blendWidthM is attribution rather than a changed number: rigs.ts takes the blend from the panel for both rigs, so the two agree today. It is now right by construction instead of by coincidence.
+The geometry stays unprefixed, and that is a statement rather than an economy. Both rigs trace ONE hierarchy, because a misregistration is a disagreement about where the lenses are and not about what shape is standing in the room. uMeshShadowBias sits with it, being a property of the surface. buildDisplayUniforms now refuses two rigs on two surfaces — there is no uCBvhNodes to carry a second shape, so they would silently share whichever got packed and the reader would be shown a substitution dressed as a misregistration.
+One question, one place
+surfaceIntersect is each shader's Surface.intersect: sphere or mesh, returning (t, triangle, u, v) with the triangle negative where there are no faces. The sphere keeps raySphereIntersect with the same arguments in the same order, which is why this is a routing change rather than an arithmetic one, and why the bench did not move.
+sampleSurface (harness) and shadeTwoRig (app) take that hit rather than a bare point, for the reason SurfaceLocation exists on the CPU: a mesh's normal and content coordinate belong to the face that was struck, and re-finding it from the point alone is a search a flat wall defeats completely. Four decisions now follow the face — the normal, the content coordinate, whether each projector reaches it, and the weight it gets — and every one of them was a sphere closed form until this phase.
+A model takes no rotation offset and no polar mask: its UV is anchored by its own unwrap, and it has neither a pole nor a mount to occlude one. The same two exceptions render.ts and warp.ts already make.
+The room's own occlusion follows: shadeFloor's ray asked whether the sphere was in the way and now asks the surface. A model that shadows the floor is exactly what a sphere could never do.
+The app: the second intersection, and the picker
+shadeTwoRig sends each pixel back out through the calibration the compositor believed and asks what should have been there. That second ray now hits the same model — a misregistration is a disagreement about where the lenses are, not about what shape is standing in the room.
+pickMarker occludes against the model too. Its own note already said it must answer the question the shader would answer, and the shader stopped answering "a sphere" here; without it a viewer clicks through a building and selects a projector they cannot see. It asks the surface — the simulator's float64 traversal over the hierarchy these texels were packed from — rather than growing a third traversal to match float32 exactly. That difference is nanometres and a click is pixels; a different shape is the thing that changes an answer.
+The traversal is written out twice, deliberately. That is the choice every other chunk in the app's shader already makes — the optics, the blend and the transfer curve are all there a second time. Two shaders each claiming to implement one model are worth more than one shader used twice: a transcription error shows up as a parity disagreement, and a shared bug shows up as nothing at all. What they share is pack.ts, which is a byte order rather than an answer.
+A bug carried across from PR #6's last round
+Both shaders computed the radiometric reference distance as uLimb[i].x - uRadius — a lens distance from the world origin minus a bound about the origin, which is one statement only for a body the origin sits inside. That is the same error the fifth review round found on the CPU. It is now uRefDistance[i], re-derived in harness/src/uniforms.ts from the model's centre and extent exactly as prepareProjector does, and read straight off the prepared projector in the app.
+uLimb is now gone from the app's shader, not merely unused, and smoke:app is what found that: GLSL strips an unread uniform, and the page's own guard refuses to start, saying a declared uniform the linker did not expose is "a term of the model that has stopped being applied". The compositor keeps uCLimb — its blend is still the closed form on the angle from its own limb — and glsl.test.ts pins the asymmetry rather than leaving a hole in its rig-pairing rule.
+The BVH stack-depth guard, which a review read as off by two
+packMesh refuses a hierarchy at maxDepth >= 32 because the shader's traversal stack is a compile-time int stack[32]. A review read packages/sim's new Int32Array(bvh.maxDepth + 2) as the traversal needing maxDepth + 2 slots, which would make a 31-deep hierarchy overflow and render with holes.
+Measured rather than argued. Peak stack occupancy is exactly maxDepth + 1: popping a node at depth d leaves at most one deferred sibling per ancestor level, and the deepest node that pushes anything is internal and therefore at maxDepth - 1. Checked over every binary tree shape up to ten leaves (6918 of them), over balanced trees to 20 levels, and over the hierarchies buildBvh produces for the fixtures — nothing exceeds maxDepth + 1, and a balanced tree reaches it exactly. The CPU's + 2 is one spare slot, not a requirement, and the threshold stands.
+What was missing is that nothing held the three statements of this one number together — the shader's #define, the TypeScript constant, and the property of the loop. Any one could be edited alone, and since every push is guarded by sp < BVH_STACK the failure would be a silently dropped subtree: a hole in the model, no crash. Two tests now pin them, the bound asserted as an equality so a traversal that stopped pushing would fail it too.
+What the tests measure
+Link (1) for the shading, not just the traversal. The mesh parity check sweeps rays at packages/sim directly and compares four things it never had to before:
+fixture
+rays
+t
+normal
+content lon
+blend weight
+tessellated sphere
+493
+2.95e-8 m
+2.13e-7
+1.14e-6°
+3.12e-8
+two plates
+174
+6.59e-9 m
+0
+4.14e-6°
+0
+float32, which is the packing rather than the model. Zero shared-edge disagreements in both — the sweep is 29×17 with an offset, deliberately incommensurate with the fixtures' own lattices, because a sweep on the model's grid aims every ray at a vertex where float32 and float64 pick different adjacent faces about half the time. That is an honest measurement of edge behaviour and a useless one of shading.
+A sphere cannot exercise the shadow test. Removing the shadow ray from the reference left the tessellated sphere pixel-identical — a convex body cannot get in its own way. That is how the two-plate fixture came to exist, where 86 samples face a lens and are dark anyway.
+Three tests of mine could not fail when first written, and are listed because the pattern is the useful part:
+the misregistration.ts content-lookup test measured "the picture varies", which a wall's blend weight does on its own whether the content lookup works or not. It now renders two images that agree across the middle and differ only at one edge, which a single coordinate cannot tell apart;
+the picker test failed to distinguish a picker that had gone back to intersecting a sphere, because a model's origin-centred bound is a ball big enough to swallow the ray. The control is now the same wall moved aside rather than removed — same bound, geometry off the line;
+the reference-distance assertion used a centred model, which is the one geometry where the two candidate expressions are the same number.
+The blend-attribution tests follow the same discipline. The one asserting the field moves with the rig checks the difference is sentinel-sized rather than within a tolerance, so a preset where the two rigs happened to agree fails the test instead of quietly making it vacuous; and the uniform test asserts bvhFieldAt actually fetches uCBvhField, because declaring the uniform while still fetching a physical one would pass a names-only check.
+Every new assertion is mutation-checked.
+What is NOT in this PR
+The page still hands the display shader no model, and it should not until parity.ts says what its verdict means on one.
+An earlier draft of this description named a constant LIT_BOUNDARY_FRACTION here. No such constant exists — the real one is BOUNDARY_PIXEL_ALLOWANCE in packages/harness/src/parity.ts, and correcting the name turned out to matter, because reading the actual gate showed the concern is real for a different reason than the one stated.
+judge() passes a track only when both p999 <= tolerance and fractionOverTolerance <= BOUNDARY_PIXEL_ALLOWANCE (1%). Those two are not independent: if more than 0.1% of samples are over tolerance then the 99.9th-percentile sample is one of them, so p999 > tolerance necessarily. percentileOk therefore implies boundaryOk, the conjunction reduces to percentileOk alone, and the 1% allowance documented as tolerating geometric boundaries actually tolerates 0.101%. On a sphere the boundary population sits under that and it never showed.
+A mesh does not. Measured on the branch that adds the harness Surface control (which stacks on this one), against SwiftShader: a tessellated sphere puts 0.72% of room samples and 0.87% of projector samples over tolerance — inside the 1% allowance, past what the percentile actually enforces — and the page reports DISAGREE. The disagreeing samples are isolated single pixels scattered through the interior at facet edges, not a region and not the silhouette, while the same shader text's JS mirror agrees with packages/sim to 3.8e-6 on the identical grid.
+So the verdict logic needs re-deriving before the live view gets a model, and that is a decision about what the project's headline gate number means rather than a change to make in passing. It belongs with the commit that makes the switch, not here.
+Gates, on the current head
+Gate
+Result
+bench --scenarios 12 --seed 1234 vs. the same command on main
+identical — 5,563,347 characters
+progress:reference:check
+clean: multiplicity ≤ 2, four-lobed scallop, boundary matches the closed form
+npm test
+961 pass, 0 fail
+lint:boundary
+206 files, 0 violations
+check:license
+213 files
+typecheck, check:docs, check:citation, build:app, build:web, smoke:app
+green
+smoke:app is load-bearing for the rename: it is what proves the linker still exposes the three uC uniforms, since an unread one would strip and the page would refuse to start.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01ERDeLjmV9phXwQEFtycoNu
+Generated by Claude Code
+Hackshaven
+added 2 commits
+August 29, 2026 23:33
+Phase 2 wiring, part one: the harness shader traces and shades the mesh
+…
+b3135f2
+```
+`docs/ARBITRARY-SHAPES.md` Phase 2 landed the traversal and left it unused: the
+`mesh` chunk could find a triangle, and nothing called it. Both renderers still
+asked `raySphereIntersect` what the light lands on. This routes them onto the
+surface they were given.
+
+**The blend had to cross first, and that is a texture.** A mesh's weight is not a
+closed form on the angle from a limb; it is a per-vertex geodesic field that
+`footprintDistanceAt` interpolates across the face a hit landed on. A shader
+cannot follow a `Float64Array` any more than it can follow the hierarchy, so
+`pack.ts` gains a third texture: three texels per triangle, one per corner, four
+channels because a framebuffer holds four viewports and both shaders declare
+`MAX_PROJ = 4`. Per corner rather than per vertex, which is the trade the
+positions already make -- a dependent fetch in the blend is a dependent fetch in
+the same loop the traversal is trying to keep prefetchable.
+
+**One question is answered in one place.** `surfaceIntersect` is the shader's
+`Surface.intersect`: sphere or mesh, returning `(t, triangle, u, v)` with the
+triangle negative where there are no faces. The sphere keeps
+`raySphereIntersect` with the same arguments in the same order, so this is a
+routing change rather than an arithmetic one -- and the bench is still
+byte-identical at 5,563,347 characters, which is what says so.
+
+`sampleSurface` takes that hit rather than a bare point, for the reason
+`SurfaceLocation` exists on the CPU: a mesh's normal and content coordinate
+belong to the FACE that was struck, and a flat wall defeats every attempt to
+re-find it from the point. Four decisions follow the face -- the normal, the
+content coordinate, whether each projector reaches it, and the weight it gets --
+and every one of them was a sphere closed form until now. A model takes no
+rotation offset and no polar mask: its UV is anchored by its own unwrap, and it
+has neither a pole nor a mount to occlude one.
+
+**The room's own occlusion follows too.** `shadeFloor`'s ray asked whether the
+SPHERE was in the way; it now asks the surface. A model that shadows the floor is
+exactly the thing a sphere could never do.
+
+**A bug carried across from the CPU fix.** The shader computed its radiometric
+reference distance as `uLimb[i].x - uRadius` -- a lens distance from the world
+origin minus a bound about the origin, which is one statement only for a body the
+origin sits inside. It is now `uRefDistance[i]`, re-derived in `uniforms.ts` from
+the model's centre and extent exactly as `prepareProjector` does.
+
+**Two fixtures, because a sphere cannot exercise the third test.** The comparison
+sweeps rays at `packages/sim` directly: 493 rays over a tessellated sphere agree
+on `t` to 3e-8 m, on the normal to 2e-7, on the content longitude to 1e-6 degrees
+and on the blend weight to 3e-8 -- float32, which is the packing and not the
+model. But a sphere is convex, so dropping the shadow ray from the reference
+leaves it pixel-identical; that is how the two-plate fixture came to exist, where
+86 samples face a lens and are dark anyway. Every assertion is mutation-checked.
+
+The sweep is deliberately incommensurate with the fixture's lattice. On the
+model's own grid every ray aims at a vertex, where float32 and float64 pick
+different adjacent faces about half the time -- an honest measurement of edge
+behaviour and a useless one of shading.
+
+Still to wire: the app's own display shader, its content rig's second
+intersection, and `pickMarker`.
+
+Gates: 949 tests, byte-identity at 5,563,347 characters, reference theorems,
+boundary lint, licence, build:app, build:web, smoke:app.
+
+Signed-off-by: Eric Hackathorn <erichackathorn@gmail.com>
+```
+Phase 2 wiring, part two: the display shader can trace the model
+…
+ea59b34
+```
+The app's own shader, its content rig's second intersection, and `pickMarker` --
+the three places Phase 0 deliberately left off the seam.
+
+**The traversal is written out again rather than shared with the harness**, which
+is the choice every other chunk in that file already makes: the optics, the
+blend and the transfer curve are all there a second time. Two shaders that each
+claim to implement one model are worth more than one shader used twice -- a
+transcription error shows up as a parity disagreement, and a shared bug shows up
+as nothing at all. What they share is `pack.ts`, which is a byte order rather
+than an answer.
+
+**The second intersection follows the model.** `shadeTwoRig` sends each pixel
+back out through the calibration the compositor believed and asks what should
+have been there; that ray now hits the same MODEL, because a misregistration is
+a disagreement about where the lenses are, not about what shape is standing in
+the room. The normal, the content coordinate and the blend all come off the face
+that was struck. A model takes neither the rotation offset nor the polar mask:
+its UV is anchored by its own unwrap and it has no pole.
+
+**`pickMarker` occludes against the model.** Its own note said it must answer the
+question the shader would answer, and the shader stopped answering "a sphere" in
+this phase. Without it a viewer clicks through a building and selects a projector
+they cannot see. It asks the surface -- the simulator's float64 traversal over
+the hierarchy these texels were packed from -- rather than growing a third
+traversal to match float32 exactly: that difference is nanometres and a click is
+pixels, while a different SHAPE is the thing that changes an answer.
+
+**`uLimb` is gone from this shader, not merely unused.** The physical rig's only
+use of its limb constant was `uLimb[i].x - uRadius` for the radiometric reference
+distance, and that expression is the right number only for a body the world
+origin sits inside. `uRefDistance` replaced it -- and `smoke:app` then refused to
+start, because GLSL strips an unread uniform and the page's own guard reports a
+declared uniform the linker did not expose as a term of the model that has
+stopped being applied. That guard found this; the deletion is the answer to it.
+The compositor keeps `uCLimb`: its blend is still the closed form on the angle
+from its own limb. `glsl.test.ts` pins the asymmetry rather than leaving it as a
+hole in the pairing rule.
+
+**Two of the three new tests could not fail when first written**, and both for
+the same reason: a model's origin-centred BOUND is a ball big enough to swallow
+the ray, so a picker that had gone back to intersecting a sphere still answered
+"blocked". The control is now the same wall MOVED ASIDE rather than removed --
+same bound, geometry off the line -- and the reference-distance assertion uses an
+off-centre model, which is the only geometry where the two candidate expressions
+differ at all. Both mutations now fail; so does leaving the blend width as an
+angle.
+
+**Not done, deliberately: the page still hands the display shader no model.** It
+should not until `parity.ts` says what its verdict means on one. The allowance
+for pixels past tolerance was measured against a sphere's single smooth
+silhouette; a mesh has one per triangle, and about 1% of hits at a shared edge
+pick a different face in float32 than in float64. Handing the live view a model
+before re-deriving that would put a number on screen that had quietly changed
+meaning.
+
+Gates: 952 tests, byte-identity at 5,563,347 characters, reference theorems,
+boundary lint, licence, build:app, build:web, smoke:app.
+
+Signed-off-by: Eric Hackathorn <erichackathorn@gmail.com>
+```
+Hackshaven
+requested a lite review from Copilot
+August 30, 2026 03:46
+Copilot started reviewing on behalf of
+Hackshaven
+August 30, 2026 03:47
+View session
+Copilot
+AI
+reviewed
+Aug 30, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Changes recommended
+Mesh placeholder textures are not uploaded on first render because meshUploaded is initialized to null, contradicting the intended “always bind complete textures” behavior and risking incomplete sampler state until a real mesh is uploaded.
+Once you've addressed the issues Copilot identified, you can request another Copilot review.
+Pull request overview
+This PR completes “Phase 2 wiring” for arbitrary-shape rendering by routing both the app and harness shaders through a shared surface-intersection abstraction (sphere vs BVH-traced mesh), and by packing the per-triangle footprint-distance field into a third texture so mesh blend weights can be evaluated in GLSL.
+Changes:
+Add GPU-side BVH traversal + mesh shading path (including self-occlusion and per-corner footprint field sampling) and route intersections via surfaceIntersect.
+Extend packing/uniform plumbing to upload mesh BVH + footprint field textures and pass model-scaled parameters (shadow bias, blend width, ref distance).
+Expand parity/tests to validate shading parity (not just traversal), including fixtures that exercise self-shadowing and field interpolation.
+File summaries
+File
+Description
+packages/web/web/gl.ts
+Adds mesh texture allocation/upload and new uniforms for mesh tracing in the app display GL binder.
+packages/web/test/glsl.test.ts
+Updates uniform-pairing assertions and adds tests for packing/using a mesh payload in display uniforms and picker occlusion.
+packages/web/src/uniforms.ts
+Introduces DisplayMesh, mesh packing for the shader (BVH + field), and mesh-aware picker occlusion.
+packages/web/src/glsl.ts
+Implements GPU BVH traversal + mesh-aware shading/blending and routes all hits through surfaceIntersect.
+packages/sim/src/mesh/pack.ts
+Adds a third packed texture for per-corner footprint distances and related packing/reading utilities.
+packages/harness/web/gl.ts
+Adds mesh texture allocation/upload and new mesh-related uniforms for the harness WebGL binder.
+packages/harness/test/mesh-parity.test.ts
+Extends parity tests to validate footprint field packing and full shading parity (including self-shadow cases).
+packages/harness/src/uniforms.ts
+Adds uRefDistance and model-scaled mesh parameters to harness uniforms, derived independently for parity.
+packages/harness/src/reference.ts
+Updates reference tracer to carry hit face info, support mesh-based sampling/shading, and use surfaceIntersect.
+packages/harness/src/glsl.ts
+Mirrors shader-side mesh traversal, sampling, and shading changes in the harness GLSL.
+docs/ARBITRARY-SHAPES.md
+Updates Phase 2 documentation to reflect completed wiring and the new field-texture requirement.
+Review details
+Files reviewed: 11/11 changed files
+Comments generated: 2
+Review effort level: Lite
+💡 Add a code-review agent skill or configure MCP servers for context-aware, tailored reviews. Learn more in the docs.
+Comment thread
+packages/web/web/gl.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+packages/harness/web/gl.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Review: the placeholder textures the comment promised were never uplo…
+…
+743a0f1
+```
+…aded
+
+Copilot, on both binders, and correct in both.
+
+`uploadMesh` skips work when the model it is asked for is the one already
+uploaded -- which is what keeps a megabyte hierarchy off the per-frame path. The
+bug is what the initial value of that record has to be. `null` is a legitimate
+model: no model, the 1x1 placeholders. So starting the record at `null` made the
+very first call -- which every page makes, with no model -- return immediately,
+and the three textures were created and never given storage. A sampler bound to
+an incomplete texture is undefined behaviour on some drivers rather than an
+unused uniform, which is the exact thing `uploadMesh`'s own doc comment claimed
+to be avoiding, two lines above the code that did not do it.
+
+`undefined` now means "nothing has been put there yet" and `null` means "the
+placeholders are". Three states rather than two, and the guard needs no special
+case: `undefined === null` is false, so the initial value carries it.
+
+**Nothing could have caught this but a reader.** `smoke:app` runs the real page
+in a real browser and came up green: software rendering tolerates an incomplete
+texture the shader never samples, and the shader never samples these -- uMeshMode
+is 0 and bvhIntersect returns before it fetches. The failure is a driver's
+prerogative, on hardware this container does not have.
+
+Pinned over the source text in both test suites rather than by calling
+`uploadMesh`, and that is a limitation rather than a preference: `web/gl.ts`
+needs DOM types, the root tsconfig withholds them from `packages/sim` on purpose,
+and a test that imported the binder would drag `WebGL2RenderingContext` into the
+config that keeps the simulator free of the browser. Mutation-checked -- putting
+`null` back fails both.
+
+Gates: 954 tests, byte-identity at 5,563,347 characters, reference theorems,
+boundary lint, licence, build:app, build:web, smoke:app.
+
+Signed-off-by: Eric Hackathorn <erichackathorn@gmail.com>
+```
+Hackshaven
+requested a lite review from Copilot
+August 30, 2026 04:35
+Copilot started reviewing on behalf of
+Hackshaven
+August 30, 2026 04:35
+View session
+Copilot
+AI
+reviewed
+Aug 30, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 Needs a closer look
+It changes multiple low-level GPU shader and WebGL binding paths (BVH traversal, occlusion, blend-field sampling) where correctness can be hardware/driver-sensitive despite strong test coverage.
+Review details
+Suppressed comments (1)
+Previously missed (1) — in code that hasn't changed since the last review.
+packages/web/src/uniforms.ts:145
+packMesh narrows by surface.kind === 'mesh' but then uses a broad unknown cast to reach .mesh. Since the concrete mesh surface type already declares mesh: SurfaceMesh, using that type directly keeps the cast honest and avoids accidentally accepting a future kind: 'mesh' surface that doesn't actually carry a mesh property.
+```
+export function packMesh(rig: PreparedRig): DisplayMesh | null {
+  const surface = rig.surface;
+  if (surface.kind !== 'mesh') return null;
+  const mesh = (surface as unknown as { mesh: SurfaceMesh }).mesh;
+  const packed = packBvh(buildBvh(mesh), mesh, rig.footprints);
+```
+Files reviewed: 12/12 changed files
+Comments generated: 0 new
+Review effort level: Lite
+Hackshaven
+mentioned this pull request
+Aug 30, 2026
+Give the harness a model, so link (3) covers the mesh path at all
+#8
+Merged
+Deep review: three renderers had drifted apart where no test looks
+…
+5d26210
+```
+Copilot's second pass on this PR returned "Needs a closer look" rather than
+findings -- driver-sensitive GPU paths, strong tests, review effort Lite. The
+closer look found seven correctness problems, all in the gap between "954 tests
+pass" and "the three renderers agree". Every one is verified against the
+`packages/sim` counterpart the changed code declares it mirrors.
+
+**Two places kept the very expression this PR was written to remove.**
+`reference.ts`'s `shadeSurface` still computed the radiometric reference as
+`p.limb[0] - u.radius` -- a lens distance from the world ORIGIN minus a bound
+about the origin -- while the GLSL `shadeSurface` it mirrors had moved to
+`uRefDistance[i]`. On a model standing away from the origin the two halves of
+link (3) disagreed about brightness, and the harness parity number would have
+called that a shader fault. `compareShading` cannot see it: it stops at
+`sampleSurface` and never calls `shadeSurface`.
+
+And `sim/src/render.ts`'s own `shadeFloor` was still on
+`p.distanceM - rig.radiusM`. That is the site PR #6's fifth round missed while
+claiming the class was closed, so the CPU's floor glow and the GPU's disagreed
+on a translated model.
+
+**A GL texture unit leaked, reintroducing the bug `bindContent` documents.**
+`uploadMesh` bound units 1-3 and left unit 3 selected; `ensureReadTarget` and
+`ensureVideoTarget` both call `bindTexture` with no `activeTexture`, which is
+unit 0 when the invariant holds and was unit 3 after an upload. The read-back
+target landed on `uBvhField`, and the identity guard meant the field texture was
+never re-bound -- so the blend would sample the framebuffer's own colour
+attachment for the life of the model. Binding and uploading were one function and
+that was the mistake: the binding is per FRAME, the upload is per MODEL. Split,
+in both binders, and the active unit is restored.
+
+**A mesh with no unwrap read two different content coordinates.** `pack.ts` wrote
+0 into the UV slots, which `uvToCoord` sends to latitude 90, longitude -180 --
+the north pole at the date line -- while `MeshSurface.coordAt` answers (0, 0).
+The whole model painted with one corner texel on the GPU and another on the CPU.
+`NO_UV` is now 0.5, which is the UV that maps to the coordinate the simulator
+gives.
+
+**`misregistration.ts` applied the sphere's two texture conventions to a model.**
+`render.ts` and `warp.ts` both gate the rotation offset and the polar mask on
+`blendModelApplies`; this path did not, and the shader -- which now does --
+disagreed with it about every pixel whenever either was non-zero.
+
+**The shadow bias was a float64 argument.** It scaled with the model's extent
+alone, which at float64 clears the self-intersection residual by a billion ulps.
+The shader runs the same ray in float32 over float32 positions, where the
+residual is an ulp AT THE WORLD COORDINATE: a 0.6 m model standing six metres out
+got a bias of roughly one ulp, re-hit the face the ray left, and rendered black
+where it was fully lit. Now scaled by the extent AND the distance from the
+origin, and it lives on `Surface.shadowBiasM` -- which removes the two hand-made
+copies of a fraction `mesh/surface.ts` did not export.
+
+**Two more, on the efficiency side.** `packMesh` built a second BVH over a mesh
+whose `MeshSurface` had already built one: the dominant preparation cost paid
+twice, and two hierarchies whose `order` arrays agree only while the build stays
+deterministic -- while `pickMarker` traverses one and the picture traverses
+texels packed from the other. And `surfaceIntersect` hardcoded `BVH_FAR`, so the
+floor's occlusion ray walked the whole hierarchy before discarding everything
+past a lens distance the caller already knew, once per projector over most of the
+frame. It takes a `tMax` now.
+
+The suppressed comment from the review is fixed too: `packMesh`'s structural cast
+through `unknown` is `as MeshSurface`, which is `optics.ts`'s own idiom and fails
+to compile if a future surface claims `kind: 'mesh'` without carrying a mesh.
+`uniforms.ts`'s module header no longer describes an arithmetic operation that is
+gone while omitting three that arrived.
+
+Both new fixes are mutation-checked: `NO_UV` back to 0 fails the coordinate test,
+and an extent-only bias fails the float32 one.
+
+Gates: 956 tests, byte-identity at 5,563,347 characters, reference theorems,
+boundary lint, licence, build:app, build:web, smoke:app.
+
+Signed-off-by: Eric Hackathorn <erichackathorn@gmail.com>
+```
+Hackshaven
+added a commit
+that referenced
+this pull request
+Aug 30, 2026
+Merge the deep-review fixes from #7 into the harness fixture branch
+…
+8c3566c
+```
+#8 is stacked on #7, and #7 gained seven correctness fixes after this branch
+was cut -- among them the shadow bias, the UV-less content coordinate, and
+`MeshSurface.bvh` becoming readable so nothing builds a second hierarchy. This
+branch's own `surfaceForWorld` was building one.
+```
+Hackshaven
+added a commit
+that referenced
+this pull request
+Aug 30, 2026
+Review: the cache never hit once, and it said so in its own comment
+…
+8e94320
+```
+Copilot on PR #8, and right about both.
+
+**`surfaceForWorld` cached on object identity and missed every time.**
+`buildWorld` runs on every control change and `surfaceMeshFor` allocates a fresh
+mesh each time, so `world.mesh` is a new object after every slider event. The
+check was an unconditional rebuild wearing a cache's clothes -- a hierarchy over
+the tessellated sphere, on the settled-frame path, per input event -- and the
+comment above it asserted the opposite in so many words.
+
+That is the third time in this phase: the display worker's per-request
+`MeshSurface`, the binder's `meshUploaded`, and now this. An identity check is
+only a cache when something holds the identity still, and nothing here does.
+
+**Two levels now, because the two halves go stale at different rates.** The
+geometry -- mesh, hierarchy, adjacency -- depends on the shape and the radius and
+nothing else, so it survives every projector the reader moves. The FIELD is a
+Dijkstra per projector over that geometry, so it depends on the whole rig;
+`RigCalibration` is JSON by contract, which makes stringifying it an exact
+comparison rather than a fingerprint that can collide. Dropping the geometry
+drops the pack with it, or a frame reads one model's field through another
+model's hierarchy.
+
+The test pins the property that makes an identity key wrong -- two worlds built
+from one state carry meshes that are deepEqual and not the same object -- since
+the page's own cache is module state behind a DOM entry point and not reachable
+from a test.
+
+**`as never` in the fixture test is gone.** It bypassed `surfaceMeshFor`'s
+nullability, so a shape-list regression would have arrived as a stack trace from
+a property read rather than as an assertion naming what changed.
+
+Also merged in #7's deep-review fixes, which this branch was cut before: among
+them `MeshSurface.bvh` becoming readable, so `surfaceForWorld` now packs from the
+surface's own hierarchy instead of building a second one over the same mesh --
+the CPU side of the parity check traverses that surface, and two builds agree
+only for as long as the build stays deterministic.
+
+Gates: 961 tests, byte-identity at 5,563,347 characters, reference theorems,
+boundary lint, licence, build:app, build:web, smoke:app.
+
+Signed-off-by: Eric Hackathorn <erichackathorn@gmail.com>
+```
+Hackshaven
+requested a lite review from Copilot
+August 30, 2026 06:22
+Copilot started reviewing on behalf of
+Hackshaven
+August 30, 2026 06:23
+View session
+Copilot
+AI
+reviewed
+Aug 30, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Changes recommended
+The BVH stack-depth refusal in packMesh is not strict enough to prevent GLSL stack overflow and could still allow models that render with missing geometry (“holes”).
+Once you've addressed the issues Copilot identified, you can request another Copilot review.
+Review details
+Files reviewed: 17/17 changed files
+Comments generated: 1
+Review effort level: Lite
+Comment thread
+packages/web/src/uniforms.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Hackshaven
+added 2 commits
+August 30, 2026 06:56
+Pin the BVH stack-depth guard, which a review read as off by two
+…
+66d40e8
+```
+`packMesh` refuses a hierarchy at `maxDepth >= 32` because the shader's
+traversal stack is a compile-time `int stack[32]`. A review read
+`packages/sim`'s `new Int32Array(bvh.maxDepth + 2)` as the traversal NEEDING
+`maxDepth + 2` slots, which would make a 31-deep hierarchy overflow and render
+with holes, and asked for the threshold to be tightened.
+
+Measured instead of argued, because the argument is subtle enough to go either
+way twice. The traversal's peak stack occupancy is exactly `maxDepth + 1`:
+popping a node at depth d leaves at most one deferred sibling per ancestor
+level, so at most d entries sit below it, and the deepest node that pushes
+anything is internal and therefore at `maxDepth - 1`. Checked over every binary
+tree shape up to ten leaves (6918 of them), over balanced trees to 20 levels,
+and over the hierarchies the real builder produces for the fixtures: nothing
+exceeds `maxDepth + 1`, and a balanced tree reaches it exactly.
+
+So the CPU's `+ 2` is an allocation with one spare slot, not a requirement, and
+tightening the guard on that reading would cost a legitimate model its last
+level of depth. The threshold stands.
+
+What was actually missing is that nothing held the three statements of this one
+number together: `#define BVH_STACK 32` in shader text, `BVH_STACK_DEPTH` in
+TypeScript, and the property of the loop that relates them. Any one could be
+edited alone and the failure would be a hole in a model rather than a crash,
+because every push is guarded. Two tests now pin them:
+
+  - the bound itself, asserted as an equality on balanced trees rather than an
+    inequality, so a traversal that quietly stopped pushing would fail it;
+  - the three-way agreement, including that every push but the root seed is
+    guarded by `sp < BVH_STACK`.
+
+`BVH_STACK_DEPTH` is exported for the second one, and carries the derivation in
+its doc comment so the next reader does not have to redo it.
+
+Mutation-checked, four ways: moving the threshold to 30, moving the shader's
+`#define` to 64, dropping one `sp < BVH_STACK` guard, and making the model
+traversal stop pushing the near child each fail a test, and only the intended
+one.
+
+Gates: 958 tests pass; lint:boundary 206 files 0 violations; check:license 213
+files; typecheck, check:docs, check:citation, progress:reference:check,
+build:app green; bench --scenarios 12 --seed 1234 unchanged at 5,563,347
+characters with env and per-scenario timings stripped.
+
+Signed-off-by: Eric Hackathorn <erichackathorn@gmail.com>
+```
+The mesh blend belongs to the compositor, and now says so
+…
+bacd397
+```
+buildDisplayUniforms already states the rule: "the blend and mask are the
+COMPOSITOR's -- the weights belong to the calibration the content was generated
+against, not to where the light physically landed", and it reads uRampShape,
+uWidthDeg and uRampGamma off content.blend for exactly that reason.
+
+On a mesh the ramp needs two more terms, and both came from whichever rig was
+handed to packMesh -- the physical one. The shader then ramped on where the
+light really goes while coverageAndWeights ramped on where the compositor
+thought it went. Another instance of code stating a rule and then not doing it,
+which is the same shape as the placeholder-texture finding earlier in this PR.
+
+NOT a second field texture, which is where this was heading. There is exactly
+one blend in the display shader and it is the compositor's: the compositor
+computes the weights and bakes them into the pixels it sends, a projector emits
+those pixels, and where they land is physics. rampWeight is called twice, both
+inside contentWeight; bvhFieldAt is called once, feeding it. A physical field
+would be sampled by nothing, stripped by the linker, and the page's own guard
+would then refuse to start -- which is exactly how uLimb went two commits ago.
+So the repair is to attribute the one field correctly, not to add a second.
+
+  uBvhField        -> uCBvhField
+  uMeshHasField    -> uCMeshHasField
+  uMeshBlendWidthM -> uCMeshBlendWidthM
+  DisplayMesh.field/fieldWidth/blendWidthM -> contentField/contentFieldWidth/
+                                              contentBlendWidthM
+  packMesh(rig) -> packMesh(content), the parameter named for the rig it needs
+
+The geometry stays unprefixed and that is a statement rather than an economy:
+both rigs trace ONE hierarchy, because a misregistration is a disagreement about
+where the lenses are and not about what shape is standing in the room.
+uMeshShadowBias sits with it, being a property of the surface. buildDisplayUniforms
+now refuses two rigs on two surfaces -- there is no uCBvhNodes to carry a second
+shape, so they would silently share whichever got packed and the reader would be
+shown a substitution dressed as a misregistration.
+
+How much this mattered: a footprint is computed from where a lens actually is, so
+displacing the compositor moves which vertices fall inside a footprint. Measured
+on the wall fixture under BOULDER_PRESET, the two rigs' fields differ by 8.5e5 --
+footprint.ts's `unreachable` sentinel, not drift. Vertices inside one rig's
+footprint are unreachable in the other's, so the shader was ramping smoothly
+across faces where the compositor drew a hard seam. Both pictures look like a
+blend.
+
+blendWidthM is attribution rather than a changed number: rigs.ts takes the blend
+from the panel for both rigs, so the two currently agree. It is now right by
+construction instead of by coincidence.
+
+Three tests, each mutation-checked -- restoring the physical fetch, disabling the
+surface guard, and making the two rigs' fields identical each fail one, and only
+the intended one:
+
+  - the mesh blend uniforms are the compositor's, the geometry ones are neither,
+    and bvhFieldAt actually fetches uCBvhField (declaring the uniform while still
+    fetching a physical one would pass a names-only check);
+  - the field really does move with the rig, asserted at sentinel size rather
+    than at a tolerance, so a preset where the two rigs happened to agree fails
+    the test instead of silently making it vacuous;
+  - two rigs on two surfaces are refused, and a sphere pair stays free.
+
+Gates: 961 tests pass; lint:boundary 206 files 0 violations; check:license 213
+files; typecheck, check:docs, check:citation, progress:reference:check,
+build:app, build:web green; smoke:app green, which is what proves the renamed
+uniforms survive the linker; bench --scenarios 12 --seed 1234 unchanged at
+5,563,347 characters with env and per-scenario timings stripped.
+
+Signed-off-by: Eric Hackathorn <erichackathorn@gmail.com>
+```
+Hackshaven
+added a commit
+that referenced
+this pull request
+Aug 30, 2026
+Merge the compositor blend attribution from #7 into the harness fixtu…
+…
+6abf249
+```
+…re branch
+
+Signed-off-by: Eric Hackathorn <erichackathorn@gmail.com>
+```
+Hide details
+View details
+Hackshaven
+merged commit 3f997dd
+into
+main
+Aug 30, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Hackshaven
+deleted the
+claude/sphere-simulator-arbitrary-shapes-03jj38
+branch
+August 30, 2026 18:36
+Hackshaven
+restored the
+claude/sphere-simulator-arbitrary-shapes-03jj38
+branch
+August 30, 2026 18:39
+Hackshaven
+deleted the
+claude/sphere-simulator-arbitrary-shapes-03jj38
+branch
+August 30, 2026 18:57
+Hackshaven
+mentioned this pull request
+Aug 31, 2026
+A facet cannot shadow itself, and the bias could never have stopped it
+#9
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

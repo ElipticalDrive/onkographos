@@ -1,0 +1,809 @@
+note: the program requires GLSL 3.30 ES support. This should be available on nearly all modern-ish devices
+
+This is A Real-Time GPU Accelerated 3D Point Cloud Based Volumetric Viewer done with python and OpenGL. A demo video can be found at https://www.youtube.com/watch?v=uB-b-hXqfhc
+A newer video demo with coloring added can be found here https://youtu.be/cQoxmrqUUS0
+
+Here you can see an example of what the viewer looks like rendering the 2k demobrain
+![Demonstration of colorin](colordemo.png)
+
+Controls: orbit the camera with WASD (AD - left-right, WS - forwards/backwads), TR is increase/decrease threshold, EQ is up/down, YH is increase/decrease point size, b toggles between adaptive and absolute coloring profile
+
+Run volumetricviewer.py with python3.
+
+Requirements: GLSL 3.30 ES support. Python libraries: pillow, numpy, pyopengl, opencv-python and pygame.
+Note: On Windows the depth might fail to render. This is a known bug which unfortunately I do not have time to fix. Using Linux with supported hardware is recommended.
+
+This program has been tested on Ubuntu 19.04, Manjaro and OpenSuse Tumbleweed with the latest (43x) NVidia (bumblebee if required) drivers installed. The volumetric viewer achieves a stable framerate of 60Hz on GTX1080 with i7-4770 when rendering the default brain (4k atlas). On Intel 630 grpahics the 2k brain atlas renders at ~20fps.
+Changing between 2k and 4k atlases doesn't change the quality drastically, but reduces the framerate significantly. Use what you can get away with.
+
+To view other files:
+Change the defines in vertex_shader.c. If experiementing with different form factors (currently set to 256x256 tiling, 4096x4096 image therefore tiling is 16). In addition, the amount of verticies has to be defined in volumetricviewer.py in the drawcall to be the same as the amount of pixels in the atlas.
+
+An atlas can be generated using either createAtlas.py, in which you can define your own mathematical formula by which to generate the atlas. Additionally formatBrainData.py can be used to generate an atlas from a image sequence. The viewer reads the data from bottom to up, left to right. The generated atlases have to be rotated -90d before they are usable in the viewer.
+Color of the mesh is defined by the color of the sample, including alpha. This (usually) grayscale data is then remapped to RGB for easier visualization.
+
+### createAtlas.py
+```
+import numpy as np
+import cv2
+import math
+
+size = (256, 256)
+height = 256
+
+def createCube():
+    cube = []
+
+    for l in range(height):
+        if l in [0, 1, height-2, height-1]:
+            layer = np.zeros(size)
+            cube.append(layer.copy())
+        else:
+            layer = np.ones(size)
+            cube.append(layer.copy())
+
+    return cube
+
+def createSphere():
+    sphere = []
+    center = int(size[0] / 2), int(size[1] / 2)
+
+    for i in range(int(height / 2)):
+        layer = np.zeros(size)
+        radius = abs(int(math.sin(i) * i))
+        
+        layer = cv2.circle(layer, center, radius, (1.0), -1)
+        sphere.append(layer)
+
+    for i in reversed(range(int(height / 2))):
+        layer = np.zeros(size)
+        layer = cv2.circle(layer, center, i, (1.0), -1)
+        sphere.append(layer)
+
+    return sphere
+
+def createAtlas(volume):
+    tiling = int(math.sqrt(height))
+    print("tiling:", tiling)
+
+    result = None
+
+    for x in range(tiling):
+        horizontal = None
+
+        for y in range(tiling):
+            if horizontal is None:
+                horizontal = volume[x * tiling + y]
+            else:
+                horizontal = np.hstack((horizontal, volume[x * tiling +y]))
+
+        if result is None:
+            result = horizontal.copy()
+        else:
+            result = np.vstack((result, horizontal.copy()))
+
+    return result
+
+def saveToDisk(volume, name):
+    volume = cv2.convertScaleAbs(volume * 255)
+    volume = cv2.cvtColor(volume, cv2.COLOR_GRAY2BGR)
+    cv2.imwrite(name + ".png", volume)
+
+
+def main():
+   obj = createSphere()
+   obj = createAtlas(obj)
+   obj = cv2.rotate(obj, cv2.ROTATE_90_CLOCKWISE)
+   saveToDisk(obj, "spherecubic4k")
+
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### formatBrainData.py
+```
+import numpy as np
+import cv2
+import glob
+import math
+
+# these files have been removed for copyright's sake
+files = sorted(glob.glob("data/brain/*.png"))
+
+
+result = []
+
+def createAtlas(volume):
+    tiling = int(math.sqrt(len(volume)))
+    print("tiling:", tiling)
+    print(len(volume))
+
+    resultimg = None
+
+    for x in range(tiling):
+        horizontal = None
+
+        for y in range(tiling):
+            if horizontal is None:
+                horizontal = volume[x * tiling + y]
+            else:
+                horizontal = np.hstack((horizontal, volume[x * tiling + y]))
+
+        if resultimg is None:
+            resultimg = horizontal.copy()
+        else:
+            resultimg = np.vstack((resultimg, horizontal.copy()))
+
+    return resultimg
+
+
+def saveToDisk(volume, name):
+    # volume = cv2.convertScaleAbs(volume * 255)
+    # volume = cv2.cvtColor(volume, cv2.COLOR_GRAY2BGR)
+    cv2.imwrite(name + ".png", volume)
+
+
+for fname in files:
+    bslice = cv2.imread(fname)
+    img = bslice[:, 251:710]
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    img = cv2.resize(img, (256, 256))
+
+    # cv2.imshow("i", img)
+    # cv2.waitKey(100)
+
+    result.append(img)
+    result.append(img)
+
+
+
+for n in range(256 - len(result)):
+    empty = np.zeros((256, 256))
+    result.append(empty)
+
+
+volume = createAtlas(result)
+saveToDisk(volume, "brainatlas")
+```
+
+### fragment_shader.c
+```
+#version 320 es
+
+in mediump vec4 color;
+out mediump vec4 fragColor;
+
+void main()
+{
+	fragColor = color;
+}
+```
+
+### mathstuff.py
+```
+import math
+import numpy as np
+
+PI = 3.14159
+
+def transform(m, v):
+    return np.asarray(m * np.asmatrix(v).T)[:,0]
+
+def magnitude(v):
+    x, y, z = v
+    return math.sqrt(np.sum(np.power(v, 2)))
+
+def normalize(v):
+    m = magnitude(v)
+    if m == 0:
+        return v
+    return np.divide(v, m)
+
+def identity():
+    return np.matrix([[1.0, 0.0, 0.0, 0.0],
+                     [0.0, 1.0, 0.0, 0.0],
+                     [0.0, 0.0, 1.0, 0.0],
+                     [0.0, 0.0, 0.0, 1.0]])
+
+def orbit(th, phi, r):
+    xp = r * math.sin(th) * math.cos(phi)
+    # yp = r * math.sin(th) * math.sin(phi)
+    yp = r * math.sin(phi)
+    zp = r * math.cos(th)
+
+    return xp, yp, zp
+
+def ortho(l, r, b, t, n, f):
+    dx = r - l
+    dy = t - b
+    dz = f - n
+    rx = -(r + l) / (r - l)
+    ry = -(t + b) / (t - b)
+    rz = -(f + n) / (f - n)
+    return np.matrix([[2.0/dx,0,0,rx],
+                      [0,2.0/dy,0,ry],
+                      [0,0,-2.0/dz,rz],
+                      [0,0,0,1]])
+
+def perspective(fovy, aspect, n, f):
+    s = 1.0/math.tan(math.radians(fovy)/2.0)
+    sx, sy = s / aspect, s
+    zz = (f+n)/(n-f)
+    zw = 2*f*n/(n-f)
+    return np.matrix([[sx,0,0,0],
+                      [0,sy,0,0],
+                      [0,0,zz,zw],
+                      [0,0,-1,0]])
+
+def frustum(x0, x1, y0, y1, z0, z1):
+    a = (x1+x0)/(x1-x0)
+    b = (y1+y0)/(y1-y0)
+    c = -(z1+z0)/(z1-z0)
+    d = -2*z1*z0/(z1-z0)
+    sx = 2*z0/(x1-x0)
+    sy = 2*z0/(y1-y0)
+    return np.matrix([[sx, 0, a, 0],
+                      [ 0,sy, b, 0],
+                      [ 0, 0, c, d],
+                      [ 0, 0,-1, 0]])
+
+def translate(xyz):
+    x, y, z = xyz
+    return np.matrix([[1,0,0,x],
+                      [0,1,0,y],
+                      [0,0,1,z],
+                      [0,0,0,1]])
+
+def scale(xyz):
+    x, y, z = xyz
+    return np.matrix([[x,0,0,0],
+                      [0,y,0,0],
+                      [0,0,z,0],
+                      [0,0,0,1]])
+
+def sincos(a):
+    a = math.radians(a)
+    return math.sin(a), math.cos(a)
+
+def rotate(a, xyz):
+    x, y, z = normalize(xyz)
+    #x, y, z = xyz
+    s, c = sincos(a)
+    nc = 1 - c
+    return np.matrix([[x*x*nc +   c, x*y*nc - z*s, x*z*nc + y*s, 0],
+                      [y*x*nc + z*s, y*y*nc +   c, y*z*nc - x*s, 0],
+                      [x*z*nc - y*s, y*z*nc + x*s, z*z*nc +   c, 0],
+                      [           0,            0,            0, 1]])
+
+def rotx(a):
+    s, c = sincos(a)
+    return np.matrix([[1,0,0,0],
+                      [0,c,-s,0],
+                      [0,s,c,0],
+                      [0,0,0,1]])
+
+def roty(a):
+    s, c = sincos(a)
+    return np.matrix([[c,0,s,0],
+                      [0,1,0,0],
+                      [-s,0,c,0],
+                      [0,0,0,1]])
+
+def rotz(a):
+    s, c = sincos(a)
+    return np.matrix([[c,-s,0,0],
+                      [s,c,0,0],
+                      [0,0,1,0],
+                      [0,0,0,1]])
+
+def lookat(eye, target, up):
+    F = target[:3] - eye[:3]
+    f = normalize(F)
+    U = normalize(up[:3])
+    s = np.cross(f, U)
+    u = np.cross(s, f)
+    M = np.matrix(np.identity(4))
+    M[:3,:3] = np.vstack([s,u,-f])
+    T = translate(-eye)
+    return M * T
+
+def viewport(x, y, w, h):
+    x, y, w, h = map(float, (x, y, w, h))
+    return np.matrix([[w/2, 0  , 0,x+w/2],
+                      [0  , h/2, 0,y+h/2],
+                      [0  , 0  , 1,    0],
+                      [0  , 0  , 0,    1]])
+
+
+def fpscam(eye, pitch, yaw):
+    pitch = math.degrees(pitch)
+    yaw = math.degrees(yaw)
+    cosPitch = math.cos(pitch)
+    sinPitch = math.sin(pitch)
+    cosYaw = math.cos(yaw)
+    sinYaw = math.sin(yaw)
+
+    xAxis = [cosYaw, 0, -sinYaw]
+    yAxis = [sinYaw * sinPitch, cosPitch, cosYaw * sinPitch]
+    zAxis = [sinYaw * cosPitch, -sinPitch, cosPitch * cosYaw]
+
+    return np.matrix([
+        [xAxis[0], yAxis[0], zAxis[0], 0],
+        [xAxis[1], yAxis[1], zAxis[1], 0],
+        [xAxis[2], yAxis[2], zAxis[2], 0],
+        [-np.dot(xAxis, eye), -np.dot(yAxis, eye), -np.dot(zAxis, eye), 1]])
+```
+
+### sphereshadervert.c
+```
+#version 440
+
+uniform mat4 modelMatrix;
+uniform mat4 viewMatrix;
+uniform mat4 projectionMatrix;
+
+uniform sampler2D atlas;
+
+out vec4 color;
+
+void main()
+{
+
+	float u = float(gl_VertexID) / 4096.;
+	float angle = u * 3.141 * 2.0;
+	float radius = 0.8;
+
+	vec2 pos = vec2(cos(angle), sin(angle)) * radius;
+
+	float aspect = 768.0 / 1280.0;
+	vec2 scale = vec2(aspect, 1.);
+
+	gl_Position = vec4(pos * scale, 0., 1.);
+	gl_PointSize = 5.0;
+
+	color = vec4(1.0);
+
+}
+```
+
+### vertex_shader.c
+```
+#version 320 es
+
+//in layout(location=0) vec3 vertexPos;
+uniform mat4 modelMatrix;
+uniform mat4 viewMatrix;
+uniform mat4 projectionMatrix;
+
+uniform sampler2D atlas;
+
+uniform float cutoffThreshold;
+uniform float pointSize;
+
+uniform float maxVal;
+uniform float minVal;
+
+out vec4 color;
+
+#define TILING 16
+#define WIDTH 128
+#define SAMPLEWIDTH 2048
+
+//#define POINT_SIZE 1.5
+//#define THRESHOLD vec3(0.27, 0.27, 0.27)
+
+
+int depthLUT[TILING][TILING];
+vec3 THRESHOLD;
+
+void populateDepthLUT()
+{
+	int currentDepth = 0;
+
+	for (int x = 0; x < TILING; x++)
+	{
+		for (int y = 0; y < TILING; y++)
+		{
+			depthLUT[x][y] = currentDepth;
+			currentDepth++;
+		}
+	}
+}
+
+int getDepth(vec2 point)
+{
+	int x = int(point.x);
+	int y = int(point.y);
+
+	return depthLUT[x][y];
+}
+
+
+vec2 getSampleCoordinate(int index)
+{
+	int x = int(index % SAMPLEWIDTH);
+	int y = int(index / SAMPLEWIDTH);
+
+	return vec2(float(x), float(y));
+}
+
+vec2 getVolumeCoordinate(vec2 sCoord)
+{
+	int x = int(sCoord.x) % WIDTH;
+	int y = int(sCoord.y) % WIDTH;
+
+	return vec2(float(x), float(y));
+	
+}
+
+int getTile(int x)
+{
+	int x_ = 0;
+
+	for (int i = 0; i < SAMPLEWIDTH;)
+	{
+		if (x >= i && x < i + WIDTH)
+		{
+			return x_;
+		}
+
+		x_++;
+		i += WIDTH;
+	}
+}
+
+vec2 getTileCoordinate(vec2 sampleCoord)
+{
+	int x = int(sampleCoord.x);
+	int y = int(sampleCoord.y);
+
+	int x_ = getTile(x);
+	int y_ = getTile(y);
+
+	return vec2(float(x_), float(y_));
+}
+
+vec4 remapColor(vec4 sColor)
+{
+	float fstThird = minVal + ((maxVal - minVal) / 3.0);
+	float sndThird = minVal + (2. * (maxVal - minVal) / 3.0);
+
+	if (sColor.w == 0.0)
+		return sColor;
+
+	float s = sColor.x;
+
+	if (s < fstThird && s >= minVal)
+	{
+		return vec4(s, 0.0, 0.0, sColor.w);
+	}
+	else if (s < sndThird && s >= fstThird)
+	{
+		return vec4(0.0, s, 0.0, sColor.w);
+	}
+	else if (s <= maxVal && s >= sndThird)
+	{
+		return vec4(0.0, 0.0, s, sColor.w);
+	}
+
+	return vec4(1.);
+}
+
+vec3 getPointOnVolume(int index)
+{
+	vec2 sCoord = getSampleCoordinate(index);
+	vec2 tCoord = getTileCoordinate(sCoord);
+	vec2 vCoord = getVolumeCoordinate(sCoord);
+
+	sCoord = sCoord / float(SAMPLEWIDTH);
+	vec4 tSample = texture(atlas, sCoord);
+
+	if (tSample.x > THRESHOLD.x && tSample.y > THRESHOLD.y && tSample.z > THRESHOLD.z)
+	{
+		color = remapColor(tSample);
+		return vec3((vCoord.x - 64.)*2., (vCoord.y -64.)*2., float(getDepth(tCoord)) - 128.);
+	}
+
+	color = vec4(0.);
+	return vec3(0.);
+}
+
+void main()
+{
+	THRESHOLD = vec3(cutoffThreshold);
+	populateDepthLUT();
+	vec3 vertexPos = getPointOnVolume(gl_VertexID);
+	gl_PointSize = pointSize; //POINT_SIZE;
+	gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(vertexPos, 1.0);
+}
+```
+
+### volumetricviewer.py
+```
+from ctypes import *
+import sys
+import numpy as np
+import math
+import PIL
+from PIL import Image
+
+import pygame
+from pygame.locals import *
+
+import cv2
+
+from OpenGL.GL import *
+from OpenGL.GLU import *
+# from OpenGL.GLUT import *
+
+from mathstuff import *
+
+GL_VERTEX_SHADER = 0x8B31
+GL_FRAGMENT_SHADER = 0x8B30
+GL_COMPILE_STATUS = 0x8B81
+GL_LINK_STATUS = 0x8B82
+GL_INFO_LOG_LENGTH = 0x8B84
+
+FILEPATH = "brainatlas2k.png"
+
+
+def glInit(x, y):
+    screen = pygame.display.set_mode((x, y), HWSURFACE | OPENGL | DOUBLEBUF)
+    glViewport(0, 0, x, y)
+    glShadeModel(GL_SMOOTH)
+    glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_NICEST)
+
+    viewport = glGetIntegerv(GL_VIEWPORT)
+
+def readShader(source):
+    file = open(source, 'r')
+    data = file.read()
+    # print(data)
+    data = bytes(data, 'utf-8')
+    file.close()
+    return data
+
+def compileShader(source, shaderType):
+    shaderData = readShader(source)
+    shader = glCreateShader(shaderType)
+    source = c_char_p(shaderData)
+    length = c_int(-1)
+    glShaderSource(shader, shaderData)
+    glCompileShader(shader)
+
+    if glGetShaderiv(shader, GL_COMPILE_STATUS) != GL_TRUE:
+        raise RuntimeError(glGetShaderInfoLog(shader))
+
+    return shader
+
+def compileProgram(vertex_source, fragment_source):
+    vertexShader = None
+    fragmentShader = None
+
+    program = glCreateProgram()
+
+    if vertex_source:
+        vertexShader = compileShader(vertex_source, GL_VERTEX_SHADER)
+        glAttachShader(program, vertexShader)
+    if fragment_source:
+        fragmentShader = compileShader(fragment_source, GL_FRAGMENT_SHADER)
+        glAttachShader(program, fragmentShader)
+
+    glLinkProgram(program)
+
+    if vertexShader:
+        glDeleteShader(vertexShader)
+    if fragmentShader:
+        glDeleteShader(fragmentShader)
+
+    return program, vertexShader, fragmentShader
+
+def main():
+
+    img = cv2.imread(FILEPATH)
+    imgMaxVal = np.max(img) / 256.0
+    imgMinVal = np.min(img) / 256.0
+
+    pygame.init()
+    glInit(1366, 768)
+    # glutInit()
+    program, vertexShader, fragmentShader = compileProgram("vertex_shader.c", "fragment_shader.c")
+    glEnable(GL_DEPTH_TEST)
+
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glEnable(GL_BLEND)
+   
+    UNIFORMS_LOCATIONS = {
+            "projectionMatrix" : glGetUniformLocation(program, "projectionMatrix"),
+            "modelMatrix" : glGetUniformLocation(program, "modelMatrix"),
+            "viewMatrix" : glGetUniformLocation(program, "viewMatrix"),
+            "atlas" : glGetUniformLocation(program, "atlas"),
+            "cutoffThreshold" : glGetUniformLocation(program, "cutoffThreshold"),
+            "pointSize" : glGetUniformLocation(program, "pointSize"),
+            "minVal" : glGetUniformLocation(program, "minVal"),
+            "maxVal" : glGetUniformLocation(program, "maxVal")
+            }
+
+    angle = 0
+
+    cY = 0
+    cX = 0
+    cZ = -200
+    rZ = 90
+
+    img = pygame.image.load(FILEPATH)
+    imgData = pygame.image.tostring(img, "RGBA", 1)
+    width, height = img.get_width(), img.get_height()
+
+    glEnable(GL_POINT_SPRITE)
+    glEnable(GL_VERTEX_PROGRAM_POINT_SIZE)
+
+    texture = glGenBuffers(1)
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+    glBindTexture(GL_TEXTURE_2D, texture)
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, imgData)
+
+    glEnable(GL_TEXTURE_2D)
+
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+    # glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    # glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+    # glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, imgData)
+
+    deltaX = 0
+    deltaY = 0
+    deltaZ = 0
+    deltaRZ = 0
+
+    mouseX, mouseY = pygame.mouse.get_pos()
+
+    lookX = 0
+    lookY = 0
+
+    cutoff = 0.05 * 7
+    pointsize = 1.0
+
+    minValAbsolute = False
+    
+
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                quit()
+
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_w:
+                    deltaZ = 0.1
+                elif event.key == pygame.K_s:
+                    deltaZ = -0.1
+                elif event.key == pygame.K_d:
+                    deltaX = 0.1
+                elif event.key == pygame.K_a:
+                    deltaX = -0.1
+                elif event.key == pygame.K_q:
+                    deltaY = -0.1
+                elif event.key == pygame.K_e:
+                    deltaY = 0.1
+                elif event.key == pygame.K_c:
+                    deltaRZ = 0.1
+                elif event.key == pygame.K_z:
+                    deltaRZ = -0.1
+
+                elif event.key == pygame.K_r:
+                    cutoff -= 0.05
+                elif event.key == pygame.K_t:
+                    cutoff += 0.05
+
+                elif event.key == pygame.K_y:
+                    pointsize += 0.1
+                elif event.key == pygame.K_h:
+                    pointsize -= 0.1
+
+                elif event.key == pygame.K_b:
+                    minValAbsolute = not minValAbsolute
+
+            elif event.type == pygame.KEYUP:
+                if event.key == pygame.K_w:
+                    deltaZ = 0
+                elif event.key == pygame.K_s:
+                    deltaZ = 0
+                elif event.key == pygame.K_d:
+                    deltaX = 0
+                elif event.key == pygame.K_a:
+                    deltaX = 0
+                elif event.key == pygame.K_q:
+                    deltaY = 0
+                elif event.key == pygame.K_e:
+                    deltaY = 0
+                elif event.key == pygame.K_c:
+                    deltaRZ = 0
+                elif event.key == pygame.K_z:
+                    deltaRZ = 0
+
+        mouseX_, mouseY_ = pygame.mouse.get_pos()
+
+        if (mouseX - mouseX_) > 0:
+            lookX += 0.1
+        elif (mouseX - mouseX_) < 0:
+            lookX -= 0.1
+
+        if (mouseY - mouseY_) > 0:
+            lookY += 0.1
+        elif (mouseY - mouseY_) < 0:
+            lookY -= 0.1
+
+        mouseX = mouseX_
+        mouseY = mouseY_
+
+        cY -= deltaY * 0.5
+        cX += deltaX * 0.8
+        cZ += deltaZ * 30
+        rZ += deltaRZ
+
+        PI = 3.14159
+        if cY > PI / 4.0:
+            cY = PI / 4.0
+        elif cY < -PI / 4.0:
+            cY = -PI / 4.0
+
+        if cZ > -1:
+            cZ = -1
+        elif cZ < -300:
+            cZ = -300
+
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
+        xp, yp, zp = orbit(cX, cY, cZ)
+
+        eye = np.array([xp, yp, zp])
+        target = np.array([0.0, 0.0, 0.0])
+        up = np.array([0.0, 1.0, 0.0])
+
+        projectionMatrix = perspective(90.0, 1366.0 / 768.0, 0.1, 1000.0)
+        viewMatrix = identity()
+        modelMatrix = identity()
+        modelMatrix *= rotate(90, (0.0, 1.0, 0.0))
+        modelMatrix *= rotate(-90, (1.0, 0.0, 0.0))
+        modelMatrix *= translate((0.0, 0.0, 50.0))
+        # modelMatrix *= rotate(cY*30, (1.0, 0.0, 0.0))
+        # viewMatrix = translate((cX*10, cZ*10, -30.0 + cY*10))
+        # viewMatrix *= rotate(rZ*10, (0.0, 1.0, 0.0))
+        viewMatrix = lookat(eye, target, up)
+        # viewMatrix = translate((xp, yp, zp))
+        # viewMatrix = fpscam(eye, lookX, lookY)
+        
+        angle += 1.0
+
+        glUseProgram(program)
+
+        glUniformMatrix4fv(UNIFORMS_LOCATIONS["modelMatrix"], 1, GL_TRUE, modelMatrix)        
+        glUniformMatrix4fv(UNIFORMS_LOCATIONS["viewMatrix"], 1, GL_TRUE, viewMatrix)
+        glUniformMatrix4fv(UNIFORMS_LOCATIONS["projectionMatrix"], 1, GL_TRUE,  projectionMatrix)
+        glUniform1f(UNIFORMS_LOCATIONS["cutoffThreshold"], cutoff)
+        glUniform1f(UNIFORMS_LOCATIONS["pointSize"], pointsize)
+        glUniform1f(UNIFORMS_LOCATIONS["maxVal"], imgMaxVal)
+        if not minValAbsolute:
+            glUniform1f(UNIFORMS_LOCATIONS["minVal"], cutoff)
+        else:
+            glUniform1f(UNIFORMS_LOCATIONS["minVal"], imgMinVal)
+
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, texture)
+        glUniform1i(UNIFORMS_LOCATIONS["atlas"], 0)
+
+
+        glDrawArrays(GL_POINTS, 0, width*height)
+        
+        pygame.display.flip()
+        pygame.time.wait(1)
+
+
+
+
+main()
+```

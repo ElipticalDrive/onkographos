@@ -1,0 +1,260 @@
+# Marching Cubes Triangulation
+
+
+## Overview
+
+Marching Cubes Triangulation is the final step in isosurface extraction that converts the discrete intersection data of a grid cube into a continuous triangle mesh [S2, unofficial]. It takes the vertex sign configuration (or cube index) and pre-computed edge intersection points to generate the specific set of triangles required to represent the surface within that cube [S1, S2, unofficial]. Unlike sibling methods that may focus on lookup table generation or sparse data structures, this method focuses strictly on the geometric assembly of vertices and indices from a single cell's intersection state [S2, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+
+**Inputs:**
+*   **Cube State:** The 8-bit vertex sign configuration (integer 0–255) or cube index, determining which edges are intersected [S1, S2, unofficial].
+*   **Intersection Data:**
+    *   `pairs`: An array of 8 `ValPair` structs, where each struct contains a `Vector3 position` and a `float intsect` (the scalar value at the corner) [S1, unofficial].
+    *   `edgeVertIndices`: An array of 12 `Vector3` positions representing the interpolated vertices on the 12 edges of the cube [S2, unofficial].
+*   **Gradient Function:** A function `grad` (type `Fun3v`) that computes the gradient vector at a given 3D position [S2, unofficial].
+*   **Lookup Tables:**
+    *   `triTable[cubeIndex][...]`: A table mapping cube indices to sequences of edge indices defining triangles, terminated by -1 [S1, unofficial].
+    *   `signConfigToTriangles[signConfig][...]`: A 2D array of integers with 256 rows and 16 columns. Each row contains a sequence of vertex indices (0–11) defining triangles, terminated by -1 [S2, unofficial].
+*   **Parameters:**
+    *   `isolevel`: The threshold value for contouring (e.g., 1.0f) [S1, unofficial].
+    *   `chunkSize`: The dimension of the chunk being processed (e.g., 16) [S1, unofficial].
+
+**Outputs:**
+*   **Mesh:** A structure containing:
+    *   `vertices`: A list of `Vector3` positions [S1, S2, unofficial].
+    *   `triangles`: A list of triangle indices (triplets of vertex indices) [S1, S2, unofficial].
+    *   `vertexNormals`: A list of `Vector3` normals corresponding to the vertices [S2, unofficial].
+    *   `uvs`: A list of `Vector2` texture coordinates [S1, unofficial].
+
+### Data Structures
+
+**ValPair (S1):**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```cpp
+struct ValPair {
+    Vector3 position; // 3D coordinates of the cube corner
+    float intsect;    // Scalar value at the corner
+};
+```
+
+**Mesh (S2):**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```cpp
+struct Mesh {
+    std::vector<Vec3> vertices;       // Vertex positions
+    std::vector<Triangle> triangles;  // Indices, where Triangle is std::array<int, 3>
+    std::vector<Vec3> vertexNormals;  // Vertex normals
+};
+```
+
+**Vec3 (S2):**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```cpp
+struct Vec3 {
+    double x, y, z;
+    // Operators: +, -, * (scalar)
+    // Methods: Norm() -> sqrt(x*x + y*y + z*z), Normalized() -> *this / Norm()
+};
+```
+
+**Lookup Table Layout (S2):**
+`signConfigToTriangles` is a 256x16 integer array. For a given `signConfig`, the row contains up to 5 triangles (15 indices) followed by -1. Example for config 1: `{ 0, 1, 10, 0, 10, 8, 8, 10, 11, -1, ... }`.
+
+### Numbered Steps
+
+1.  **Check for Empty/Filled Cells:** If the `signConfig` (or `cubeIndex`) is 0 or 255, the cube is entirely inside or outside the isovolume. Return immediately without generating triangles [S1, S2, unofficial].
+2.  **Retrieve Triangulation Definition:** Get the triangle index sequence `tri` from `signConfigToTriangles[signConfig]` (or `triTable[cubeIndex]`) [S1, S2, unofficial].
+3.  **Iterate Through Triangles:** Loop through `tri` in steps of 3. For each triplet of indices `tri[i]`, `tri[i+1]`, `tri[i+2]`:
+    a.  **Retrieve Vertices:** Get the corresponding vertex positions from `intersect.edgeVertIndices` (S2) or interpolate them from `pairs` using `edgeTable` (S1).
+    b.  **Compute Normals:** Call `grad` on each vertex position and normalize the result using `Normalized()` [S2, unofficial].
+    c.  **Add Vertices:** Push the three vertex positions into `mesh.vertices` [S2, unofficial].
+    d.  **Add Normals:** Push the three computed normals into `mesh.vertexNormals` [S2, unofficial].
+    e.  **Add Indices:** Calculate the index of the last vertex added (`last = mesh.vertices.size() - 1`). Create a triangle using indices `last-2`, `last-1`, and `last`, and push it into `mesh.triangles` [S2, unofficial].
+    f.  **Add UVs (Optional/S1):** If UVs are required, calculate base UV from block or debugger, then add three UVs: `uvBase`, `uvBase + (0, tec)`, `uvBase + (tec, tec)` where `tec = 0.25f` [S1, unofficial].
+    g.  **Add Triangle Indices (UV variant/S1):** If using the UV variant, add indices `(index + 0, index + 1, index + 2)` to the triangles list [S1, unofficial].
+4.  **Finalize Mesh:** Clear previous mesh data, set vertices, triangles, and UV arrays, then recalculate normals and bounds [S1, unofficial].
+
+### Formulas
+
+**Linear Interpolation Factor (S1):**
+To find the intersection point on an edge between two corners `pair1` and `pair2`:
+$$ \mu = \frac{\text{isolevel} - \text{pair1.intsect}}{\text{pair2.intsect} - \text{pair1.intsect}} $$
+
+**Vertex Position Interpolation (S1):**
+$$ p = \text{pair1.position} + \mu \times (\text{pair2.position} - \text{pair1.position}) $$
+
+**Gradient Normalization (S2):**
+$$ \mathbf{n} = \frac{\nabla f(\mathbf{p})}{\|\nabla f(\mathbf{p})\|} $$
+Where $\nabla f(\mathbf{p})$ is the result of `grad(p)` and $\|\cdot\|$ is the Euclidean norm.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Standard implementation based on S2 (using pre-computed edge vertices)
+def triangulate(intersect, grad, mesh):
+    sign_config = intersect.signConfig
+    
+    # Step 1: Check for empty/filled cells
+    if sign_config == 0 or sign_config == 255:
+        return
+
+    # Step 2: Retrieve triangulation definition
+    tri_row = signConfigToTriangles[sign_config]
+    
+    # Step 3: Iterate through triangles
+    i = 0
+    while tri_row[i] != -1:
+        # Get edge indices for the current triangle
+        e0 = tri_row[i]
+        e1 = tri_row[i+1]
+        e2 = tri_row[i+2]
+        
+        # Retrieve vertex positions from pre-computed edge intersections
+        v0 = intersect.edgeVertIndices[e0]
+        v1 = intersect.edgeVertIndices[e1]
+        v2 = intersect.edgeVertIndices[e2]
+        
+        # Compute normals
+        n0 = grad(v0).normalized()
+        n1 = grad(v1).normalized()
+        n2 = grad(v2).normalized()
+        
+        # Add vertices
+        mesh.vertices.append(v0)
+        mesh.vertices.append(v1)
+        mesh.vertices.append(v2)
+        
+        # Add normals
+        mesh.vertexNormals.append(n0)
+        mesh.vertexNormals.append(n1)
+        mesh.vertexNormals.append(n2)
+        
+        # Add triangle indices
+        last = len(mesh.vertices) - 1
+        mesh.triangles.append([last - 2, last - 1, last])
+        
+        i += 3
+
+# Alternative implementation based on S1 (interpolating vertices on the fly)
+def triangulate_interpolated(cube_index, pairs, edge_table, tri_table, isolevel, mesh):
+    # Step 1: Check for empty/filled cells
+    if cube_index == 0 or cube_index == 255:
+        return
+
+    # Step 2: Interpolate vertices on intersected edges
+    vertlist = [None] * 12
+    edge_mask = edge_table[cube_index]
+    
+    # Edge 0: pairs[0]-pairs[1], Edge 1: pairs[1]-pairs[2], etc.
+    # Mapping edges to pairs based on standard MC edge table
+    edge_pairs = [
+        (0, 1), (1, 2), (2, 3), (3, 0), # Bottom face
+        (4, 5), (5, 6), (6, 7), (7, 4), # Top face
+        (0, 4), (1, 5), (2, 6), (3, 7)  # Vertical edges
+    ]
+    
+    for edge_idx in range(12):
+        if (edge_mask & (1 << edge_idx)) != 0:
+            p1_idx, p2_idx = edge_pairs[edge_idx]
+            vertlist[edge_idx] = vertex_interp(pairs[p1_idx], pairs[p2_idx], isolevel)
+            
+    # Step 3: Iterate through triangles
+    tri_idx = 0
+    while tri_table[cube_index, tri_idx] != -1:
+        e0 = tri_table[cube_index, tri_idx]
+        e1 = tri_table[cube_index, tri_idx + 1]
+        e2 = tri_table[cube_index, tri_idx + 2]
+        
+        v0 = vertlist[e0]
+        v1 = vertlist[e1]
+        v2 = vertlist[e2]
+        
+        # Add vertices
+        mesh.vertices.append(v0)
+        mesh.vertices.append(v1)
+        mesh.vertices.append(v2)
+        
+        # Add triangle indices
+        last = len(mesh.vertices) - 1
+        mesh.triangles.append([last - 2, last - 1, last])
+        
+        tri_idx += 3
+
+def vertex_interp(pair1, pair2, isolevel):
+    # Handle exact isovalue or zero denominator
+    denom = pair2.intsect - pair1.intsect
+    if abs(denom) < 0.00001:
+        return pair1.position
+    
+    num = isolevel - pair1.intsect
+    if abs(num) < 0.00001:
+        return pair1.position
+        
+    mu = num / denom
+    return pair1.position + mu * (pair2.position - pair1.position)
+```
+
+### Parameters
+
+*   `chunkSize`: 16 (typical chunk dimension) [S1, unofficial].
+*   `isolevel`: 1.0f (typical threshold) [S1, unofficial].
+*   `tec`: 0.25f (UV tile size) [S1, unofficial].
+
+### Edge Cases and Pitfalls
+
+*   **Empty/Filled Cells:** If `cubeIndex` is 0 or 255, the cell is fully inside or outside the isovolume. Skipping these is critical for performance and correctness [S1, S2, unofficial].
+*   **Exact Isovalue Handling:** If `isolevel` equals `pair1.intsect` or `pair2.intsect`, or if `pair1.intsect` equals `pair2.intsect` (denominator zero), return `pair1.position` to avoid division by zero or NaN [S1, unofficial].
+*   **Boundary Conditions:** When fetching corner values, if the coordinate is outside the current chunk, fetch from neighbor chunks. If the neighbor is out of bounds (e.g., `ix == -1`), return 0f to treat out-of-bounds as outside the surface [S1, unofficial].
+*   **Bug in Two-State Implementation:** In implementations using only two isovalues (0 or 1), cells with isovalue 0 should be skipped. A reported bug occurred where these cells were incorrectly processed, leading to fallback textures [S1, unofficial].
+
+## Subtopics
+
+### [SDF to PLY Conversion](2343-sdf-to-ply-conversion.md)
+Converts signed distance fields to PLY mesh format. Choose when working with SDFs rather than voxel grids.
+
+### [CPU Immediate Mode Marching Cubes](2463-cpu-immediate-mode-marching-cubes.md)
+Renders triangles immediately without storing them. Choose for simple visualization or when memory allocation is prohibitive.
+
+### [Sparse Dual Marching Cubes](3801-sparse-dual-marching-cubes.md)
+Uses a dual-contouring approach on sparse grids. Choose for high-fidelity surfaces with feature preservation on sparse data.
+
+### [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md)
+Implements MC on the GPU. Choose for large volumes requiring high performance.
+
+### [Marching Cubes Vertex List Generation](4447-marching-cubes-vertex-list-generation.md)
+Focuses on generating the vertex list for MC. Choose when vertex generation is decoupled from triangulation.
+
+### [Lookup Table and Configuration](4978-lookup-table-and-configuration.md)
+Defines the lookup tables used by MC. Choose when configuring or customizing the triangulation rules.
+
+### [Marching Cubes with Disjoint Patch Decomposition](5004-marching-cubes-with-disjoint-patch-decomposition.md)
+Decomposes the surface into disjoint patches. Choose for parallel processing or specific rendering optimizations.
+
+## Operating characteristics
+
+*   **Time Complexity:** $O(1)$ per cell, as the number of triangles per cube is bounded (max 5) [S2, unofficial]. Total time is $O(N)$ where $N$ is the number of cells.
+*   **Memory Complexity:** $O(V + T)$ where $V$ is the number of vertices and $T$ is the number of triangles generated [S2, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales linearly with the number of voxels. Parallelization is straightforward as each cell is independent [S2, unofficial].
+*   **Strengths:** Simple to implement, fast, produces watertight meshes [S2, unofficial].
+*   **Limitations:** Can produce artifacts at critical points (saddle points) if not handled with dual contouring or specific tie-breaking rules [S2, unofficial].
+*   **When to Use:** General-purpose isosurface extraction from voxel data [S3, unofficial].
+*   **When Not to Use:** When feature preservation is critical (use Dual Contouring) or when working with SDFs directly (use SDF-to-Mesh methods) [S2, unofficial].
+
+## Background
+
+Marching Cubes was introduced by William E. Lorensen and Harvey E. Cline in 1987 [S2, unofficial]. It is a widely used algorithm for surface extraction in medical imaging, scientific visualization, and computer graphics [S3, unofficial]. The algorithm has been implemented in various forms, including immediate mode, GPU-accelerated, and sparse variants [S2, unofficial].
+
+## Sources
+
+[S1] Unity Marching Cubes triangulation bug, https://gamedev.stackexchange.com/questions/142332/unity-marching-cubes-triangulation-bug, fetched 2026-10-26 (unofficial)
+[S2] Magnus2/MeshReconstruction, https://github.com/Magnus2/MeshReconstruction, fetched 2026-10-26 (unofficial)
+[S3] TRTUZ8/TRTUZ8.github.io, https://github.com/TRTUZ8/TRTUZ8.github.io, fetched 2026-10-28 (unofficial)

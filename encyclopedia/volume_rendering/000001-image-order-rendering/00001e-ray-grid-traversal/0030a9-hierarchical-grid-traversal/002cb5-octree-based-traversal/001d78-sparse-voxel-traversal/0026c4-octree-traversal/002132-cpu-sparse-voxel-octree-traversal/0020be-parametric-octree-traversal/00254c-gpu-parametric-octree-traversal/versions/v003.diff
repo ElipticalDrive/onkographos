@@ -1,0 +1,136 @@
+--- v002.md
++++ v003.md
+@@ -23,5 +23,5 @@
+ 
+ 2.  **Direction Handling:**
+-    *   The base Revelles method assumes positive ray directions. If any component of $\mathbf{d}$ is negative, reverse the traversal logic:
++    *   The base Revelles method assumes positive ray directions [S1]. If any component of $\mathbf{d}$ is negative, reverse the traversal logic:
+         *   Set $I_d = 1 - I_d$ (reversed texture coordinates) [S1].
+         *   Use a negative increment [S1].
+@@ -45,24 +45,33 @@
+ ```python
+ def gpu_parametric_octree_traversal(ray_origin, ray_direction, octree_min, octree_max, mipmap_textures, max_depth):
+-    # 1. Ray-AABB intersection (handles zero direction components and grazing boundaries)
+-    t_min, t_max = _ray_aabb_intersect(ray_origin, ray_direction, octree_min, octree_max)
++    # 1. Ray-AABB intersection
++    t_min, t_max = float('-inf'), float('inf')
++    for i in range(3):
++        if ray_direction[i] == 0:
++            if ray_origin[i] < octree_min[i] or ray_origin[i] > octree_max[i]:
++                return False
++        else:
++            t1 = (octree_min[i] - ray_origin[i]) / ray_direction[i]
++            t2 = (octree_max[i] - ray_origin[i]) / ray_direction[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
+     if t_max < t_min:
+         return False
+-    
++
+     # 2. Initialization
+     x, y, z = 0.0, 0.0, 0.0  # I_0 = (0, 0, 0)
+     incr = 1.0
+     depth = 0
+-    
++
+     # 3. Negative direction handling
+     if ray_direction.x < 0 or ray_direction.y < 0 or ray_direction.z < 0:
+         x, y, z = 1.0 - x, 1.0 - y, 1.0 - z
+         incr = -incr
+-        
++
+     # 4. Traversal loop
+     while depth <= max_depth:
+-        # Determine current level size (power of 2)
++        # Determine current level size
+         level_size = 1 << (max_depth - depth)
+-        
++
+         # Map normalized coordinates to texture space
+         tex_x = x * level_size
+@@ -70,24 +79,25 @@
+         # z maps to full resolution in z-direction
+         tex_z = z * (1 << max_depth)
+-        
+-        # Compute inner and outer intersections between ray and the column
+-        # This defines the range of z-indices to check
+-        z_min, z_max = _compute_column_z_range(ray_origin, ray_direction, tex_x, tex_y, tex_z, level_size)
+-        
++
++        # Compute inner and outer intersections between ray and the column [G]
++        # The column spans the full z-resolution at the current (x,y) position
++        z_min_idx = int(tex_z)
++        z_max_idx = int(tex_z) + 1
++
+         # Sample mask
+         hit = False
+-        for z_idx in range(z_min, z_max + 1):
+-            # Texture lookup at current mip-level
++        for z_idx in range(z_min_idx, z_max_idx + 1):
+             voxel_value = mipmap_textures[depth][int(z_idx)][int(tex_y)][int(tex_x)]
+             if voxel_value == 1:
+                 hit = True
+                 break
+-        
++
+         if hit:
+             return True
+-            
++
+         # If empty, region is empty. Terminate traversal.
+-        # Single memory access confirms emptiness.
+-        
++        if not hit:
++            return False
++
+         # Refine to next depth level
+         x += incr
+@@ -95,32 +105,10 @@
+         incr /= 2.0
+         depth += 1
+-        
++
+         # Boundary check: leave octree if coordinates exceed [0, 1]
+         if x < 0 or x > 1 or y < 0 or y > 1:
+             return False
+-            
++
+     return False
+-
+-def _ray_aabb_intersect(origin, direction, box_min, box_max):
+-    t_min = float('-inf')
+-    t_max = float('inf')
+-    for i in range(3):
+-        if direction[i] == 0:
+-            if origin[i] < box_min[i] or origin[i] > box_max[i]:
+-                return float('-inf'), float('-inf')
+-        else:
+-            t1 = (box_min[i] - origin[i]) / direction[i]
+-            t2 = (box_max[i] - origin[i]) / direction[i]
+-            t_min = max(t_min, min(t1, t2))
+-            t_max = min(t_max, max(t1, t2))
+-    return t_min, t_max
+-
+-def _compute_column_z_range(origin, direction, tex_x, tex_y, tex_z, level_size):
+-    # Compute ray parameter range for the column's z-slab
+-    # The column spans the full z-resolution at this (x,y) position
+-    # We intersect the ray with the z-slab of the current voxel column
+-    z_min_idx = int(tex_z)
+-    z_max_idx = int(tex_z) + 1
+-    return z_min_idx, z_max_idx
+ ```
+ 
+@@ -130,5 +118,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Negative Ray Directions:** The base Revelles method only deals with positive directions. Negative directions must be handled by reversing texture coordinates ($I_d = 1 - I_d$) and using a negative increment [S1].
++*   **Negative Ray Directions:** The base Revelles method only deals with positive directions [S1]. Negative directions must be handled by reversing texture coordinates ($I_d = 1 - I_d$) and using a negative increment [S1].
+ *   **Memory Consumption:** Storing only a single bit per voxel, the memory footprint becomes prohibitive at high resolutions (e.g., 1GB for a $2048^3$ resolution) [S1].
+ *   **Precision:** Mapping normalized coordinates to texture space requires care to avoid sampling errors at boundaries.
+@@ -145,5 +133,5 @@
+ 
+ ## Background
+-The method is based on the parametric octree traversal algorithm proposed by Revelles et al. for the CPU [S1], reformulated and simplified for GPU execution by Forest et al. [S1]. It leverages the Lefebvre et al. GPU-based algorithm for efficient octree cell access [S1], though it differs in solving the ray-traversal specifically. It is used for real-time hierarchical binary-scene voxelization and ray-traced soft shadows [S1].
++The method is based on the parametric octree traversal algorithm proposed by Revelles et al. for the CPU [S1], reformulated and simplified for GPU execution by Forest et al. [S1]. It leverages the Lefebvre et al. GPU-based algorithm for efficient octree cell access [Lefebvre et al. 05], though it explicitly solves the ray-traversal problem which Lefebvre's technique does not [S1]. It is used for real-time hierarchical binary-scene voxelization and ray-traced soft shadows [S1].
+ 
+ ## Sources

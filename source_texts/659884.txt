@@ -1,0 +1,1707 @@
+TILE tensors carry their tile geometry in TensorSpec and buffer pages. These ops accept small tiles without a check, then use 32x32 counts/sizes: TILE_HEIGHT/WIDTH/HW, tt::tile_size(format) or missing tile_format_metadata (default 32x32:...
+
+[ttnn]: ops accept non-32x32 tiles but read them as 32x32 [tt-robot] · Issue #63619 · tenstorrent/tt-metal · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[ttnn]: ops accept non-32x32 tiles but read them as 32x32 [tt-robot] #63619
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+[ttnn]: ops accept non-32x32 tiles but read them as 32x32 [tt-robot]#63619
+Copy link
+Labels
+community
+Description
+dddrrreee
+opened on Nov 1, 2026
+Issue body actions
+TILE tensors carry their tile geometry in TensorSpec and buffer pages. These ops accept small tiles without a check, then use 32x32 counts/sizes: TILE_HEIGHT/WIDTH/HW, tt::tile_size(format) or missing tile_format_metadata (default 32x32: dataflow_buffer_spec.hpp:94-96). Results include stalls, wrong values, writes into another allocation and unrelated errors. Binary_ng rejects non-32x32 since #60507. We found no per-op support contract: docstrings list TILE only; #14517 concerns CCL, #47597/#36281 LLK.
+One Blackhole chip, main f5985995a, default fast dispatch, fresh processes. Controls first; noncompleting cases last. Timeout/reset observations are prose.
+#
+Op
+Tile
+Dtype, memory
+Symptom
+Where (permalink)
+A
+argmax(..., dim=-1)
+16x32; 32x16
+bfloat16 input, uint32 indices; DRAM
+P1: 16x32 stalls in synchronization after call returns (1/1 per shape; 180 s process limit). 32x16: 256/384 or 41/64 wrong indices (3/3 each)
+argmax_tile_layout.hpp:219-254
+R
+reshape, stack, unsqueeze
+reshape 32x16; others 16x32
+bfloat16, DRAM
+P1: reshape call 1: 35,520/36,864 wrong; identical call 2 returns then synchronization stalls (1/1 per mode). Stack/unsqueeze: both calls return, output-1 readback stalls (1/1 each); 180 s process limit, reset.
+reshape_tiled_program_factory.cpp:290-335
+F
+fill_implicit_tile_padding, called by gather
+16x16; 16x32
+bfloat16; gather index uint32; DRAM
+Writes beyond each affected page into following storage; gather width 31 changes 944/1,984 caller-owned index values (3/3)
+fill_pad_program_factory.cpp:74-87
+E
+ema
+16x32; 32x16; 16x16
+bfloat16, DRAM; output inherits tile
+Writes 2,048 bytes per output page into next allocation without error; 16x32 passes the repro's tolerance
+ema_program_factory.cpp:106-128
+B
+batch_norm (eval)
+inputs 16x16, 16x32 or 32x16
+float32, DRAM
+Default/output=32x32: 575–1,863/2,145 wrong. output=16x16: passes tolerance, but every word in next allocation changes
+batch_norm_program_factory.cpp:212-218
+C
+concat([a,b], dim=-1)
+input 16x32; output 32x32
+bfloat16, DRAM
+997/2,048 wrong (3/3); 32x32 exact
+concat_program_factory.cpp:71-74
+I
+experimental.isin, via input untilize
+2x32; 8x16
+uint32, DRAM; ROW_MAJOR tests
+2x32: 6 then 18/32 wrong; 8x16: 1,222 then 1,243/3,008 wrong; repeated calls differ (3/3). 32x32 exact
+untilize_with_unpadding_multi_core_interleaved_program_factory.cpp:48-95
+P
+prod(keepdim=True)
+dim=-1: 1x32; dim=1: 4x16, 16x32
+bfloat16; DRAM or L1
+dim=-1: 32/32 wrong; isolated permute 1,006/1,024. One-factor dim=1: 510–1,022/1,024 wrong, depending on tile/output memory; 32x32 exact
+permute_tiled_program_factory.cpp:17-31, prod_nc_program_factory.cpp:46-66
+L
+avg_pool2d, max_pool2d input preparation
+32x16
+bfloat16, DRAM; internally sharded
+Avg: 1,255/1,568 wrong (3/3), 32x32 exact. Max: copy input/output tile-shape mismatch, rather than pool tile check
+untilize_with_halo_program_factory.cpp:125-153, copy_device_operation.cpp:138-149
+Repros (one Blackhole chip, main f5985995a)
+A. Argmax
+Run python3 repro_argmax_small_tile.py for controls, then --case 32x16; repeat with --shape small --keepdim. Run --case 16x32 and --shape small --keepdim --case 16x32 last in separate fresh processes; each selected case follows controls.
+```
+#!/usr/bin/env python3
+"""One chip. Controls first; a selected small tile runs last.
+
+--case 16x32 or 32x16; --shape small gives [1,1,64,96], large gives
+[2,3,64,96]. --keepdim selects the output shape. Every row permutes 0..95,
+so the values are exact in bfloat16 and each row has one maximum.
+"""
+import argparse
+import math
+import torch
+import ttnn
+
+
+def run_case(device, shape, tile, keepdim, seed):
+    gen = torch.Generator().manual_seed(seed)
+    rows = math.prod(shape[:-1])
+    host = torch.stack([torch.randperm(shape[-1], generator=gen) for _ in range(rows)])
+    host = host.reshape(shape).to(torch.bfloat16)
+    layout = ttnn.ROW_MAJOR_LAYOUT if tile is None else ttnn.TILE_LAYOUT
+    options = {} if tile is None else {"tile": ttnn.Tile(list(tile))}
+    tensor = ttnn.from_torch(host, dtype=ttnn.bfloat16, layout=layout, device=device,
+                             memory_config=ttnn.DRAM_MEMORY_CONFIG, **options)
+    stored = ttnn.to_torch(tensor).clone()
+    if not torch.equal(stored, host):
+        raise AssertionError("Input roundtrip differs before argmax")
+    expected = stored.float().argmax(dim=-1, keepdim=keepdim)
+    tile_name = "ROW_MAJOR" if tile is None else "%dx%d" % tile
+    label = f"argmax {list(shape)} {tile_name} keepdim={keepdim}"
+    print(f"{label}: calling argmax", flush=True)
+    output = ttnn.argmax(tensor, dim=-1, keepdim=keepdim)
+    print(f"{label}: call returned; synchronizing", flush=True)
+    ttnn.synchronize_device(device)
+    got = ttnn.to_torch(output).long()
+    if got.shape != expected.shape:
+        raise AssertionError(f"{label}: shape {tuple(got.shape)}, expected {tuple(expected.shape)}")
+    wrong = int((got != expected).sum())
+    print(f"{label}: {wrong} of {expected.numel()} indices wrong", flush=True)
+    return wrong
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--case", choices=("16x32", "32x16"))
+    parser.add_argument("--shape", choices=("small", "large"), default="large")
+    parser.add_argument("--keepdim", action="store_true")
+    args = parser.parse_args()
+    shape = (1, 1, 64, 96) if args.shape == "small" else (2, 3, 64, 96)
+    device = ttnn.open_device(device_id=0)
+    try:
+        for i, tile in enumerate(((32, 32), None)):
+            if run_case(device, shape, tile, args.keepdim, 10 + i):
+                raise AssertionError("Control failed")
+        if args.case:
+            tile = tuple(map(int, args.case.split("x")))
+            run_case(device, shape, tile, args.keepdim, 3 if args.case == "16x32" else 4)
+    finally:
+        ttnn.close_device(device)
+
+
+if __name__ == "__main__":
+    main()
+```
+Default fast-dispatch result lines, large-shape 32x16:
+```
+argmax [2, 3, 64, 96] 32x32 keepdim=False: 0 of 384 indices wrong
+argmax [2, 3, 64, 96] ROW_MAJOR keepdim=False: 0 of 384 indices wrong
+argmax [2, 3, 64, 96] 32x16 keepdim=False: 256 of 384 indices wrong
+```
+Small-shape 32x16 result:
+```
+argmax [1, 1, 64, 96] 32x16 keepdim=True: 41 of 64 indices wrong
+```
+Large-shape 16x32 final lines:
+```
+argmax [2, 3, 64, 96] 16x32 keepdim=False: calling argmax
+argmax [2, 3, 64, 96] 16x32 keepdim=False: call returned; synchronizing
+```
+Small-shape 16x32 final lines:
+```
+argmax [1, 1, 64, 96] 16x32 keepdim=True: calling argmax
+argmax [1, 1, 64, 96] 16x32 keepdim=True: call returned; synchronizing
+```
+32x16 counts repeated 3/3 per shape, controls exact. Both 16x32 calls returned, then synchronization stalled until the 180 s process limit (1/1 per shape, reset; P1). Timeout/reset are runner observations.
+R. Cached reshape and two-call stack/unsqueeze
+Save as repro_reshape_small_tile_cached.py. Run without arguments and with --back-to-back for controls. Then, in fresh processes, run --case reshape and --case reshape --back-to-back; selected small-tile case last.
+```
+#!/usr/bin/env python3
+"""Two identical calls with program cache enabled; controls precede the selected case.
+
+Default: 32x32 controls only. Select the final small-tile case with --case.
+By default synchronize and compare call 1 before calling again. Add
+--back-to-back to queue both calls before synchronization, as in the old repros.
+"""
+import argparse
+import torch
+import ttnn
+
+
+CASES = ("stack", "unsqueeze", "reshape", "reshape-unsqueeze")
+
+
+def run_case(device, case, tile, seed, back_to_back):
+    inputs, stored = [], []
+    for offset in range(2 if case == "stack" else 1):
+        gen = torch.Generator().manual_seed(seed + offset)
+        host = (torch.randint(-16, 17, (2, 3, 64, 96), generator=gen).float() / 8).to(torch.bfloat16)
+        tensor = ttnn.from_torch(host, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                                 tile=ttnn.Tile(list(tile)), device=device,
+                                 memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        readback = ttnn.to_torch(tensor).clone()
+        if not torch.equal(readback, host):
+            raise AssertionError("Input roundtrip differs before the first call")
+        inputs.append(tensor)
+        stored.append(readback)
+    if case == "stack":
+        expected = torch.stack(stored, dim=3)
+        call = lambda: ttnn.stack(inputs, 3)
+    elif case == "unsqueeze":
+        expected = stored[0].unsqueeze(3)
+        call = lambda: ttnn.unsqueeze(inputs[0], 3)
+    elif case == "reshape-unsqueeze":
+        expected = stored[0].reshape(2, 3, 64, 1, 96)
+        call = lambda: ttnn.reshape(inputs[0], [2, 3, 64, 1, 96])
+    else:
+        expected = stored[0].reshape(2, 3, 128, 48)
+        call = lambda: ttnn.reshape(inputs[0], [2, 3, 128, 48])
+    label = f"{case} tile {tile[0]}x{tile[1]}"
+
+    def compare(output, number):
+        got = ttnn.to_torch(output)
+        if got.shape != expected.shape:
+            raise AssertionError(f"{label}: shape {tuple(got.shape)}, expected {tuple(expected.shape)}")
+        wrong = int((got != expected).sum())
+        print(f"{label} call {number}: {wrong} of {expected.numel()} values wrong", flush=True)
+        return wrong
+
+    before = device.num_program_cache_entries()
+    print(f"{label}: calling first operation (cache entries {before})", flush=True)
+    first = call()
+    after_first = device.num_program_cache_entries()
+    if back_to_back:
+        print(f"{label}: first call returned; deferring synchronization", flush=True)
+    else:
+        print(f"{label}: first call returned; synchronizing", flush=True)
+        ttnn.synchronize_device(device)
+        first_wrong = compare(first, 1)
+    # Keep first and the same input objects alive across the second call.
+    print(f"{label}: calling second operation with identical inputs "
+          f"(cache entries {after_first})", flush=True)
+    second = call()
+    print(f"{label}: second call returned; synchronizing", flush=True)
+    ttnn.synchronize_device(device)
+    if back_to_back:
+        first_wrong = compare(first, 1)
+    second_wrong = compare(second, 2)
+    after_second = device.num_program_cache_entries()
+    print(f"{label}: cache entries {before} -> {after_first} -> {after_second}", flush=True)
+    return first_wrong or second_wrong
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--case", choices=CASES)
+    parser.add_argument("--back-to-back", action="store_true")
+    args = parser.parse_args()
+    device = ttnn.open_device(device_id=0)
+    try:
+        device.enable_program_cache()
+        for i, case in enumerate(CASES):
+            if run_case(device, case, (32, 32), 100 + 10 * i, args.back_to_back):
+                raise AssertionError("32x32 two-call control failed")
+        if args.case:
+            tile = (32, 16) if args.case == "reshape" else (16, 32)
+            run_case(device, args.case, tile, 300 + 10 * CASES.index(args.case), args.back_to_back)
+    finally:
+        ttnn.close_device(device)
+
+
+if __name__ == "__main__":
+    main()
+```
+Default fast-dispatch output, --case reshape, selected-case lines:
+```
+reshape tile 32x16: calling first operation (cache entries 5)
+reshape tile 32x16: first call returned; synchronizing
+reshape tile 32x16 call 1: 35520 of 36864 values wrong
+reshape tile 32x16: calling second operation with identical inputs (cache entries 6)
+reshape tile 32x16: second call returned; synchronizing
+```
+--case reshape --back-to-back:
+```
+reshape tile 32x16: calling first operation (cache entries 5)
+reshape tile 32x16: first call returned; deferring synchronization
+reshape tile 32x16: calling second operation with identical inputs (cache entries 6)
+reshape tile 32x16: second call returned; synchronizing
+```
+Both call-2 synchronizations stalled until the 180 s process limit (1/1 per mode, reset; P1). Back-to-back reached no comparison. Controls completed 3/3 per mode, all calls exact; one additional device-open failure before results is excluded.
+Also run --case stack, --case unsqueeze or --case reshape-unsqueeze, with/without --back-to-back. All complete 3/3 per command. Both unsqueeze forms are exact; synchronized stack is exact. Back-to-back stack output 1 has 71,839, 71,553, 71,553/73,728 wrong; output 2 is exact. First-run result lines:
+```
+stack tile 16x32 call 1: 71839 of 73728 values wrong
+stack tile 16x32 call 2: 0 of 73728 values wrong
+```
+Save the following as repro_stack_unsqueeze_small_tile_farm.py. Controls: python3 repro_stack_unsqueeze_small_tile_farm.py. Then --case stack and --case unsqueeze in separate fresh processes, selected case last. Normal data, 32 KB L1_SMALL, no warmup/input readback/explicit sync; read output 1 then output 2 after both calls.
+```
+#!/usr/bin/env python3
+"""Match the original two-call stack/unsqueeze device and readback sequence.
+
+Run without arguments for 32x32 controls first. Then, in fresh processes, run
+--case stack or --case unsqueeze. A selected case has no preceding warmup,
+preserving the original absence of preceding warmup. All time limits and
+device recovery belong to the external runner.
+"""
+import argparse
+import torch
+import ttnn
+
+
+SHAPE = (2, 3, 64, 96)
+SEEDS = {"stack": (491855706, 491855707), "unsqueeze": (832501207,)}
+
+
+def neq(a, b):
+    return (a != b) & ~(torch.isnan(a) & torch.isnan(b))
+
+
+def run_case(case, tile):
+    device = ttnn.open_device(device_id=0, l1_small_size=32768, trace_region_size=0)
+    try:
+        device.enable_program_cache()
+        grid = device.compute_with_storage_grid_size()
+        print(f"compute grid {grid.x}x{grid.y}", flush=True)
+        inputs, hosts = [], []
+        for seed in SEEDS[case]:
+            gen = torch.Generator().manual_seed(int(seed) % (1 << 31))
+            host = torch.randn(SHAPE, generator=gen).to(torch.bfloat16)
+            tensor = ttnn.from_torch(host, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                                     device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                                     tile=ttnn.Tile(list(tile)))
+            inputs.append(tensor)
+            hosts.append(host)
+        label = f"{case} tile {tile[0]}x{tile[1]} original sequence"
+        # No input readback, cache-count query or synchronize is inserted here.
+        if case == "stack":
+            x0, x1 = inputs
+            print(f"{label}: calling first operation", flush=True)
+            out1 = ttnn.stack([x0, x1], 3)
+            print(f"{label}: calling second operation with identical inputs", flush=True)
+            out2 = ttnn.stack([x0, x1], 3)
+        else:
+            x = inputs[0]
+            print(f"{label}: calling first operation", flush=True)
+            out1 = ttnn.unsqueeze(x, 3)
+            print(f"{label}: calling second operation with identical inputs", flush=True)
+            out2 = ttnn.unsqueeze(x, 3)
+        # Retain both device outputs and clone each readback, in the original order.
+        print(f"{label}: second call returned; reading output 1", flush=True)
+        got1 = ttnn.to_torch(out1).clone()
+        print(f"{label}: output 1 read; reading output 2", flush=True)
+        got2 = ttnn.to_torch(out2).clone()
+        print(f"{label}: both outputs read; reading inputs", flush=True)
+        stored = [ttnn.to_torch(t).double() for t in inputs]
+        input_changed = any(t.shape != h.shape or bool(neq(t, h.double()).any())
+                            for t, h in zip(stored, hosts))
+        if case == "stack":
+            expected = torch.stack(stored, dim=3)
+        else:
+            expected = stored[0].unsqueeze(3)
+        got1, got2 = got1.double(), got2.double()
+        if got1.shape != expected.shape or got2.shape != expected.shape:
+            raise AssertionError(f"{label}: output shapes differ from {tuple(expected.shape)}")
+        bad1 = neq(got1, expected) | (~torch.isfinite(got1) & torch.isfinite(expected))
+        bad2 = neq(got2, expected) | (~torch.isfinite(got2) & torch.isfinite(expected))
+        wrong1, wrong2 = int(bad1.sum()), int(bad2.sum())
+        repeats = int(neq(got1, got2).sum())
+        print(f"{label} call 1: {wrong1} of {expected.numel()} values wrong", flush=True)
+        print(f"{label} call 2: {wrong2} of {expected.numel()} values wrong", flush=True)
+        print(f"{label}: {repeats} repeated-call differences; inputs changed: {input_changed}", flush=True)
+        return bool(wrong1 or wrong2 or repeats or input_changed)
+    finally:
+        # Inputs and both outputs are still live here, as in the original run().
+        print("closing device", flush=True)
+        ttnn.close_device(device)
+        print("device closed", flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--case", choices=("stack", "unsqueeze"))
+    args = parser.parse_args()
+    if args.case:
+        return int(run_case(args.case, (16, 32)))
+    for case in ("stack", "unsqueeze"):
+        if run_case(case, (32, 32)):
+            raise AssertionError(f"{case} 32x32 control failed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+Default fast-dispatch output, no-argument control result lines:
+```
+stack tile 32x32 original sequence call 1: 0 of 73728 values wrong
+stack tile 32x32 original sequence call 2: 0 of 73728 values wrong
+stack tile 32x32 original sequence: 0 repeated-call differences; inputs changed: False
+unsqueeze tile 32x32 original sequence call 1: 0 of 36864 values wrong
+unsqueeze tile 32x32 original sequence call 2: 0 of 36864 values wrong
+unsqueeze tile 32x32 original sequence: 0 repeated-call differences; inputs changed: False
+```
+--case stack, all selected-case lines:
+```
+stack tile 16x32 original sequence: calling first operation
+stack tile 16x32 original sequence: calling second operation with identical inputs
+stack tile 16x32 original sequence: second call returned; reading output 1
+```
+--case unsqueeze, all selected-case lines from the clean rerun:
+```
+unsqueeze tile 16x32 original sequence: calling first operation
+unsqueeze tile 16x32 original sequence: calling second operation with identical inputs
+unsqueeze tile 16x32 original sequence: second call returned; reading output 1
+```
+Controls: status 0, identical lines, 3/3. Both small-tile operations returned twice; output-1 readback stalled until the 180 s process limit (1/1 per op, reset; P1). No comparison was reached. An earlier unsqueeze device-open failure after stack reset had no case marker and is excluded. Timeout/reset are runner observations. Data, L1 reservation and readback timing differ from completing modes; which difference determines the stall is not isolated.
+F. ttnn.gather and ttnn.fill_implicit_tile_padding: 32x32 controls and a 16x16 gather without padding, then 16x16 and 16x32 tiles
+```
+"""ttnn.fill_implicit_tile_padding with a 16x16 or 16x32 tile writes past the pages of the tensor it pads, into the
+next DRAM allocation. ttnn.gather runs that fill on its input and index tensors before it computes, so a 16x16
+gather changes its index input.
+
+All tensors are uploaded first, in interleaved DRAM: each case's tensors one after the other (DRAM allocates
+upward), then a 4 KB-per-bank spacer, so a case can only change its own tensors and its spacer. The 32x32 cases and
+a 16x16 gather of width 32 (no padding, so no fill) run first. Values are exact in their dtypes."""
+import torch
+import ttnn
+
+device = ttnn.open_device(device_id=0)
+DRAM = ttnn.DRAM_MEMORY_CONFIG
+
+
+def upload(values, dtype, tile):
+    return ttnn.from_torch(values, dtype=dtype, layout=ttnn.TILE_LAYOUT, tile=ttnn.Tile(tile), device=device,
+                           memory_config=DRAM)
+
+
+def spacer():
+    return ttnn.from_torch(torch.zeros(1, 1, 8, 2048, dtype=torch.bfloat16), dtype=ttnn.bfloat16,
+                           layout=ttnn.ROW_MAJOR_LAYOUT, device=device, memory_config=DRAM)
+
+
+def x_values(width):  # multiples of 1/4 in [-7.5, 7.5]
+    i = torch.arange(64 * width).reshape(1, 1, 64, width)
+    return ((i % 61 - 30) / 4).to(torch.bfloat16)
+
+
+def index_values(width):  # 0 .. width - 1
+    rows = torch.arange(64).reshape(1, 1, 64, 1)
+    cols = torch.arange(width).reshape(1, 1, 1, width)
+    return ((rows * 5 + cols * 3) % width).to(torch.int32)
+
+
+def index_back(t):  # the uint32 index as exact integers
+    return torch.from_numpy(ttnn.to_torch(t).numpy().astype("int64"))
+
+
+def gap(first, second):
+    return second.buffer_address() - first.buffer_address()
+
+
+# (name, tile, width); 8388736 is 0x00800080, two bfloat16 copies of 1.18e-38, the value gather fills its input with
+gather_cases = [
+    ("gather, 32x32 tile, width 31", [32, 32], 31),
+    ("gather, 16x16 tile, width 32", [16, 16], 32),
+    ("gather, 16x16 tile, width 31", [16, 16], 31),
+]
+fill_cases = [
+    ("fill_implicit_tile_padding(x, 7.0), 32x32 tile", [32, 32]),
+    ("fill_implicit_tile_padding(x, 7.0), 16x16 tile", [16, 16]),
+    ("fill_implicit_tile_padding(x, 7.0), 16x32 tile", [16, 32]),
+]
+gathers = []
+for name, tile, width in gather_cases:
+    x = upload(x_values(width), ttnn.bfloat16, tile)
+    index = upload(index_values(width), ttnn.uint32, tile)
+    gathers.append((name, x, index, spacer()))
+fills = []
+for name, tile in fill_cases:
+    x = upload(x_values(31), ttnn.bfloat16, tile)
+    after_x = upload(torch.full((1, 1, 64, 32), 3.0, dtype=torch.bfloat16), ttnn.bfloat16, tile)  # whole tiles
+    fills.append((name, x, after_x, spacer()))
+
+
+def run_gather(name, x, index):
+    x_dev, index_before = ttnn.to_torch(x).float(), index_back(index)
+    out = ttnn.to_torch(ttnn.gather(x, 3, index)).float()
+    index_after = index_back(index)
+    wrong = int((out != torch.gather(x_dev, 3, index_before)).sum())
+    changed = index_after != index_before
+    cols = changed.nonzero()[:, 3]
+    where = "columns %d-%d" % (int(cols.min()), int(cols.max())) if len(cols) else "none"
+    print(f"{name}: {wrong} of {out.numel()} output values wrong; index input changed in {int(changed.sum())} of "
+          f"{changed.numel()} ({where}; {int((index_after[changed] == 8388736).sum())} now 8388736, "
+          f"{int((index_after[changed] == 0).sum())} now 0); index buffer {gap(x, index)} bytes above x's",
+          flush=True)
+
+
+def run_fill(name, x, after_x):
+    x_before = ttnn.to_torch(x)
+    ttnn.fill_implicit_tile_padding(x, 7.0)
+    x_changed = int((ttnn.to_torch(x) != x_before).sum())
+    after = ttnn.to_torch(after_x)
+    print(f"{name}: x changed in {x_changed} of {x_before.numel()} values; the tensor allocated next "
+          f"({gap(x, after_x)} bytes above x) changed in {int((after != 3.0).sum())} of {after.numel()} values, "
+          f"{int((after == 7.0).sum())} of them now 7.0", flush=True)
+
+
+run_gather(*gathers[0][:3])  # controls
+run_fill(*fills[0][:3])
+run_gather(*gathers[1][:3])
+run_gather(*gathers[2][:3])  # cases
+run_fill(*fills[1][:3])
+run_fill(*fills[2][:3])
+ttnn.close_device(device)
+```
+Output in the default fast dispatch:
+```
+gather, 32x32 tile, width 31: 0 of 1984 output values wrong; index input changed in 0 of 1984 (none; 0 now 8388736, 0 now 0); index buffer 2048 bytes above x's
+fill_implicit_tile_padding(x, 7.0), 32x32 tile: x changed in 0 of 1984 values; the tensor allocated next (2048 bytes above x) changed in 0 of 2048 values, 0 of them now 7.0
+gather, 16x16 tile, width 32: 1897 of 2048 output values wrong; index input changed in 0 of 2048 (none; 0 now 8388736, 0 now 0); index buffer 512 bytes above x's
+gather, 16x16 tile, width 31: 1838 of 1984 output values wrong; index input changed in 944 of 1984 (columns 16-30; 480 now 8388736, 432 now 0); index buffer 512 bytes above x's
+fill_implicit_tile_padding(x, 7.0), 16x16 tile: x changed in 0 of 1984 values; the tensor allocated next (512 bytes above x) changed in 1024 of 2048 values, 1024 of them now 7.0
+fill_implicit_tile_padding(x, 7.0), 16x32 tile: x changed in 0 of 1984 values; the tensor allocated next (1024 bytes above x) changed in 64 of 2048 values, 64 of them now 7.0
+```
+Three runs, each in a fresh process, printed the same lines.
+E. ttnn.ema: 32x32 control, then 16x32, 32x16 and 16x16 tiles, with a guard tensor after the output
+```
+#!/usr/bin/env python3
+"""ttnn.ema of a TILE input with a 16x32, 32x16 or 16x16 tile writes past its output in DRAM.
+
+The 32x32 case is the control. Each case allocates a guard, a placeholder with the output's spec and a second
+guard, frees the placeholder, and calls ttnn.ema(x, 0.5), whose output then takes the placeholder's slot
+(DRAM allocates upward, so the second guard is the next allocation after the output).
+x[..., 0] is 0, so the documented start value and the device's agree (TT #61221 does not show here).
+Run: python3 repro_ema_small_tile.py
+"""
+import torch
+import ttnn
+
+GUARD = 7.0
+T = 96
+ALPHA = 0.5
+
+
+def run_case(dev, tile):
+    th, tw = tile
+    kw = {"tile": ttnn.Tile([th, tw])}
+    g = torch.Generator().manual_seed(1)
+    x_t = (torch.randint(-16, 17, (1, 1, 1, T), generator=g).float() / 8).to(torch.bfloat16)
+    x_t[..., 0] = 0
+    x = ttnn.from_torch(x_t, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=dev,
+                        memory_config=ttnn.DRAM_MEMORY_CONFIG, **kw)
+    # 4 KB of -3.0 in each DRAM bank right after x, so that the bytes the reader takes past each input page are
+    # not guard values (the EMA of a run of 7.0 converges to 7.0 and would hide changed guard words).
+    filler = ttnn.from_torch(torch.full((1, 1, 8, 2048), -3.0, dtype=torch.bfloat16), dtype=ttnn.bfloat16,
+                             layout=ttnn.ROW_MAJOR_LAYOUT, device=dev, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    # Guards fill whole tiles ([1, 1, th, 96] has the output's pages), so every word of a page is visible.
+    guard_host = torch.full((1, 1, th, T), GUARD, dtype=torch.bfloat16)
+
+    def make_guard():
+        return ttnn.from_torch(guard_host, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=dev,
+                               memory_config=ttnn.DRAM_MEMORY_CONFIG, **kw)
+
+    guard_before = make_guard()
+    holder = ttnn.allocate_tensor_on_device(x.spec, dev)
+    slot = holder.buffer_address()
+    guard_after = make_guard()
+    ttnn.deallocate(holder)
+
+    y = ttnn.ema(x, ALPHA)
+    ttnn.synchronize_device(dev)
+
+    xd = ttnn.to_torch(x).double()
+    ref = torch.empty_like(xd)
+    ref[..., 0] = xd[..., 0]
+    for t in range(1, T):
+        ref[..., t] = ALPHA * ref[..., t - 1] + (1 - ALPHA) * xd[..., t]
+    yd = ttnn.to_torch(y).double()
+    wrong = int(((yd - ref).abs() > 2.0 / 128).sum())
+    before = int((ttnn.to_torch(guard_before) != GUARD).sum())
+    after = int((ttnn.to_torch(guard_after) != GUARD).sum())
+    n = guard_host.numel()
+    print("ema tile %dx%d: %d of %d values wrong; tensor allocated after the output: %d of %d words changed; "
+          "before it: %d of %d; output in the placeholder slot: %s"
+          % (th, tw, wrong, T, after, n, before, n, y.buffer_address() == slot), flush=True)
+    for t in (y, guard_after, guard_before, filler, x):
+        ttnn.deallocate(t)
+
+
+def main():
+    dev = ttnn.open_device(device_id=0)
+    try:
+        for tile in ((32, 32), (16, 32), (32, 16), (16, 16)):
+            run_case(dev, tile)
+    finally:
+        ttnn.close_device(dev)
+
+
+if __name__ == "__main__":
+    main()
+```
+Output in the default fast dispatch:
+```
+ema tile 32x32: 0 of 96 values wrong; tensor allocated after the output: 0 of 3072 words changed; before it: 0 of 3072; output in the placeholder slot: True
+ema tile 16x32: 0 of 96 values wrong; tensor allocated after the output: 1536 of 1536 words changed; before it: 0 of 1536; output in the placeholder slot: True
+ema tile 32x16: 41 of 96 values wrong; tensor allocated after the output: 3072 of 3072 words changed; before it: 0 of 3072; output in the placeholder slot: True
+ema tile 16x16: 87 of 96 values wrong; tensor allocated after the output: 1536 of 1536 words changed; before it: 0 of 1536; output in the placeholder slot: True
+```
+Three runs, each in a fresh process, printed the same lines, except that the 16x16 count was 87, 87 and 77.
+B. ttnn.batch_norm (eval): 32x32 control, then 16x16, 16x32 and 32x16 tiles; a 16x16 output between two guards
+```
+#!/usr/bin/env python3
+"""ttnn.batch_norm (eval) with TILE inputs whose tile is 16x16, 16x32 or 32x16.
+
+float32, all tensors in interleaved DRAM:
+  1. x, running_mean, running_var with 32x32 tiles (control), then with each small tile; the output is
+     preallocated with the default 32x32 tile and filled with a sentinel.
+  2. x, running_mean, running_var and the preallocated output all with 16x16 tiles, between two guards
+     (DRAM allocates upward, so the second guard is the next allocation after the output).
+Run: python3 repro_batch_norm_small_tile.py
+"""
+import torch
+import ttnn
+
+EPS = 1e-3
+SENTINEL = -12345.0
+GUARD = 7.0
+SHAPE = (1, 1, 33, 65)
+
+
+def put(dev, t, tile, dtype=ttnn.float32):
+    kw = {} if tile is None else {"tile": ttnn.Tile(list(tile))}
+    return ttnn.from_torch(t, dtype=dtype, layout=ttnn.TILE_LAYOUT, device=dev,
+                           memory_config=ttnn.DRAM_MEMORY_CONFIG, **kw)
+
+
+def eval_inputs(dev, tile):
+    g = torch.Generator().manual_seed(2)
+    x = put(dev, torch.randint(-64, 65, SHAPE, generator=g).float() / 16, tile)
+    rm = put(dev, torch.full((1, 1, 1, 1), 0.5), tile)
+    rv = put(dev, torch.full((1, 1, 1, 1), 2.25), tile)
+    return x, rm, rv
+
+
+def compare(name, x, rm, rv, y):
+    xd, rmd, rvd = (ttnn.to_torch(t).double() for t in (x, rm, rv))
+    ref = (xd - rmd) / torch.sqrt(rvd + EPS)
+    yd = ttnn.to_torch(y).double()
+    wrong = int(((yd - ref).abs() > 1e-3 * (1 + ref.abs())).sum() + torch.isnan(yd).sum())
+    left = int((yd == SENTINEL).sum())
+    return "%s: %d of %d values wrong (%d NaN), %d still hold the sentinel" % (
+        name, wrong, ref.numel(), int(torch.isnan(yd).sum()), left)
+
+
+def default_output_case(dev, tile):
+    x, rm, rv = eval_inputs(dev, tile)
+    out = put(dev, torch.full(SHAPE, SENTINEL), None)
+    y = ttnn.batch_norm(x, eps=EPS, training=False, running_mean=rm, running_var=rv, output=out)
+    name = "batch_norm x/mean/var tile %s, output tile 32x32" % ("32x32" if tile is None else "%dx%d" % tile)
+    print(compare(name, x, rm, rv, y), flush=True)
+    for t in (out, rv, rm, x):
+        ttnn.deallocate(t)
+
+
+def small_output_case(dev, tile):
+    x, rm, rv = eval_inputs(dev, tile)
+    th, tw = tile
+    padded = (1, 1, -(-SHAPE[2] // th) * th, -(-SHAPE[3] // tw) * tw)  # the output's pages, every word visible
+    guard_host = torch.full(padded, GUARD)
+    guard_before = put(dev, guard_host, tile)
+    out = put(dev, torch.full(SHAPE, SENTINEL), tile)
+    guard_after = put(dev, guard_host, tile)
+    y = ttnn.batch_norm(x, eps=EPS, training=False, running_mean=rm, running_var=rv, output=out)
+    ttnn.synchronize_device(dev)
+    line = compare("batch_norm all tiles %dx%d (output too)" % tile, x, rm, rv, y)
+    after = int((ttnn.to_torch(guard_after) != GUARD).sum())
+    before = int((ttnn.to_torch(guard_before) != GUARD).sum())
+    n = guard_host.numel()
+    print("%s; tensor allocated after the output: %d of %d words changed; before it: %d of %d"
+          % (line, after, n, before, n), flush=True)
+    for t in (guard_after, out, guard_before, rv, rm, x):
+        ttnn.deallocate(t)
+
+
+def main():
+    dev = ttnn.open_device(device_id=0)
+    try:
+        for tile in (None, (16, 16), (16, 32), (32, 16)):
+            default_output_case(dev, tile)
+        small_output_case(dev, (16, 16))
+    finally:
+        ttnn.close_device(dev)
+
+
+if __name__ == "__main__":
+    main()
+```
+Output in the default fast dispatch:
+```
+batch_norm x/mean/var tile 32x32, output tile 32x32: 0 of 2145 values wrong (0 NaN), 0 still hold the sentinel
+batch_norm x/mean/var tile 16x16, output tile 32x32: 1338 of 2145 values wrong (0 NaN), 0 still hold the sentinel
+batch_norm x/mean/var tile 16x32, output tile 32x32: 575 of 2145 values wrong (0 NaN), 0 still hold the sentinel
+batch_norm x/mean/var tile 32x16, output tile 32x32: 1863 of 2145 values wrong (0 NaN), 0 still hold the sentinel
+batch_norm all tiles 16x16 (output too): 0 of 2145 values wrong (0 NaN), 0 still hold the sentinel; tensor allocated after the output: 3840 of 3840 words changed; before it: 0 of 3840
+```
+Three runs, each in a fresh process, printed the same lines.
+C. Concat
+Run python3 repro_concat_small_tile.py: 32x32 control first, then 16x32.
+```
+#!/usr/bin/env python3
+"""One chip, default dispatch. Run the 32x32 control before the 16x32 case."""
+import torch
+import ttnn
+
+
+def run_case(device, tile, seed):
+    inputs = []
+    hosts = []
+    for offset in range(2):
+        gen = torch.Generator().manual_seed(seed + offset)
+        host = torch.randint(-20, 21, (1, 1, 32, 32), generator=gen).to(torch.bfloat16)
+        tensor = ttnn.from_torch(host, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                                 tile=ttnn.Tile(list(tile)), device=device,
+                                 memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        stored = ttnn.to_torch(tensor).clone()
+        if not torch.equal(stored, host):
+            raise AssertionError("Input roundtrip differs before concat")
+        inputs.append(tensor)
+        hosts.append(stored)
+    expected = torch.cat(hosts, dim=-1)
+    label = "concat tile %dx%d" % tile
+    print(f"{label}: calling concat", flush=True)
+    output = ttnn.concat(inputs, dim=-1)
+    print(f"{label}: call returned; synchronizing", flush=True)
+    ttnn.synchronize_device(device)
+    got = ttnn.to_torch(output)
+    if got.shape != expected.shape:
+        raise AssertionError(f"{label}: shape {tuple(got.shape)}, expected {tuple(expected.shape)}")
+    wrong = int((got != expected).sum())
+    print(f"{label}: {wrong} of {expected.numel()} values wrong", flush=True)
+    return wrong
+
+
+def main():
+    device = ttnn.open_device(device_id=0)
+    try:
+        if run_case(device, (32, 32), 879692410):
+            raise AssertionError("Control failed")
+        run_case(device, (16, 32), 879692414)
+    finally:
+        ttnn.close_device(device)
+
+
+if __name__ == "__main__":
+    main()
+```
+Output in the default fast dispatch:
+```
+concat tile 32x32: calling concat
+concat tile 32x32: call returned; synchronizing
+concat tile 32x32: 0 of 2048 values wrong
+concat tile 16x32: calling concat
+concat tile 16x32: call returned; synchronizing
+concat tile 16x32: 997 of 2048 values wrong
+```
+Three fresh-process runs printed the same result lines: the 32x32 control is exact and the 16x32 case has 997 of 2,048 values wrong.
+I. Isin and its input untilize conversion
+The complete repro, verbatim output and run notes for row I are in the follow-up comment beginning “Row I: Isin and its input untilize conversion”.
+P. Prod: permute and one-factor reduction
+Run python3 repro_prod_tiles.py: four controls before small tiles. Separate fresh processes: --stage permute, --stage prod, --stage prod-nc. Inputs/products are exact dyadic values; dim=1 has one factor.
+```
+#!/usr/bin/env python3
+"""Single-chip prod: all 32x32 controls first, then 1x32, 4x16 and 16x32 cases.
+
+Run: python3 repro_prod_tiles.py
+     python3 repro_prod_tiles.py --stage prod
+     python3 repro_prod_tiles.py --stage permute
+     python3 repro_prod_tiles.py --stage prod-nc
+
+The default runs both the dim=-1 and one-factor dim=1 cases.
+The separate permute run tests the first device program inside prod.
+The prod-nc mode tests dim=1 with one factor and its own dyadic input data.
+The inputs and every partial product are exact in bfloat16.
+"""
+import argparse
+import torch
+import ttnn
+
+
+def run_case(dev, label, tile, memory_config, stage):
+    # Fresh data per case; the same seed isolates tile and memory changes.
+    g = torch.Generator().manual_seed(258723337)
+    host = torch.ones((1, 1, 32, 32), dtype=torch.bfloat16)
+    host[..., 0] = (2 * torch.randint(0, 2, (1, 1, 32), generator=g) - 1).to(torch.bfloat16)
+    host[..., 1] = torch.where(torch.randint(0, 2, (1, 1, 32), generator=g) == 0, 0.5, 2.0)
+    x = ttnn.from_torch(host, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                        tile=ttnn.Tile(tile), device=dev, memory_config=memory_config)
+    xd = ttnn.to_torch(x).double()
+    assert torch.equal(xd, host.double()), label + ": input upload changed"
+    want = torch.prod(xd, dim=-1, keepdim=True) if stage == "prod" else xd.permute(3, 0, 1, 2)
+    y = (ttnn.prod(x, dim=-1, keepdim=True) if stage == "prod"
+         else ttnn.permute(x, (3, 0, 1, 2), memory_config=memory_config))
+    got = ttnn.to_torch(y).double()
+    if got.shape != want.shape:
+        raise AssertionError(f"{label}: shape {list(got.shape)}, expected {list(want.shape)}")
+    wrong = int((got != want).sum())
+    print(f"{label}: {wrong} of {want.numel()} values wrong", flush=True)
+    for tensor in (y, x):
+        ttnn.deallocate(tensor)
+    return wrong
+
+
+def run_nc_case(dev, label, tile, output_memory_config):
+    # Fresh data for this case; independent of the dim=-1 input above.
+    g = torch.Generator().manual_seed(337)
+    host = (torch.randint(-64, 65, (1, 1, 32, 32), generator=g).float() / 8).to(torch.bfloat16)
+    x = ttnn.from_torch(host, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                        tile=ttnn.Tile(tile), device=dev, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    xd = ttnn.to_torch(x).to(torch.float64)
+    assert torch.equal(xd, host.to(torch.float64)), label + ": input upload changed"
+    want = torch.prod(xd, dim=1, keepdim=True)
+    y = ttnn.prod(x, dim=1, keepdim=True, memory_config=output_memory_config)
+    got = ttnn.to_torch(y).to(torch.float64)
+    if got.shape != want.shape:
+        raise AssertionError(f"{label}: shape {list(got.shape)}, expected {list(want.shape)}")
+    wrong = int((got != want).sum())
+    nonfinite = int((~torch.isfinite(got)).sum())
+    print(f"{label}: {wrong} of {want.numel()} values wrong; {nonfinite} non-finite", flush=True)
+    for tensor in (y, x):
+        ttnn.deallocate(tensor)
+    return wrong
+
+
+def nc_output_configs():
+    hs_l1 = ttnn.MemoryConfig(
+        ttnn.TensorMemoryLayout.HEIGHT_SHARDED, ttnn.BufferType.L1,
+        ttnn.ShardSpec(
+            ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(0, 0))}),
+            [32, 32], ttnn.ShardOrientation.ROW_MAJOR))
+    return (("DRAM output", ttnn.DRAM_MEMORY_CONFIG), ("HS L1 output", hs_l1))
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--stage", choices=("all", "prod", "permute", "prod-nc"), default="all")
+    args = p.parse_args()
+    do_last_dim = args.stage in ("all", "prod", "permute")
+    do_nc = args.stage in ("all", "prod-nc")
+    last_dim_stage = "permute" if args.stage == "permute" else "prod"
+    dev = ttnn.open_device(device_id=0)
+    try:
+        if do_last_dim:
+            for label, memory_config in (("control 32x32 DRAM", ttnn.DRAM_MEMORY_CONFIG),
+                                         ("control 32x32 L1", ttnn.L1_MEMORY_CONFIG)):
+                if run_case(dev, label, [32, 32], memory_config, last_dim_stage):
+                    raise AssertionError("Control failed; stop before the small-tile cases")
+        if do_nc:
+            nc_configs = nc_output_configs()
+            for label, memory_config in nc_configs:
+                if run_nc_case(dev, f"control dim=1 32x32 {label}", [32, 32], memory_config):
+                    raise AssertionError("Control failed; stop before the small-tile cases")
+        if do_last_dim:
+            run_case(dev, "1x32 L1", [1, 32], ttnn.L1_MEMORY_CONFIG, last_dim_stage)
+        if do_nc:
+            for label, memory_config in nc_configs:
+                tiles = ([4, 16], [16, 32]) if label == "DRAM output" else ([4, 16],)
+                for tile in tiles:
+                    run_nc_case(dev, f"dim=1 {tile[0]}x{tile[1]} {label}", tile, memory_config)
+    finally:
+        ttnn.close_device(dev)
+
+
+if __name__ == "__main__":
+    main()
+```
+Output in default fast dispatch, default command:
+```
+control 32x32 DRAM: 0 of 32 values wrong
+control 32x32 L1: 0 of 32 values wrong
+control dim=1 32x32 DRAM output: 0 of 1024 values wrong; 0 non-finite
+control dim=1 32x32 HS L1 output: 0 of 1024 values wrong; 0 non-finite
+1x32 L1: 32 of 32 values wrong
+dim=1 4x16 DRAM output: 953 of 1024 values wrong; 0 non-finite
+dim=1 16x32 DRAM output: 510 of 1024 values wrong; 0 non-finite
+dim=1 4x16 HS L1 output: 1019 of 1024 values wrong; 0 non-finite
+```
+--stage permute:
+```
+control 32x32 DRAM: 0 of 1024 values wrong
+control 32x32 L1: 0 of 1024 values wrong
+1x32 L1: 1006 of 1024 values wrong
+```
+--stage prod-nc, small-tile results:
+```
+dim=1 4x16 DRAM output: 953 of 1024 values wrong; 0 non-finite
+dim=1 16x32 DRAM output: 510 of 1024 values wrong; 0 non-finite
+dim=1 4x16 HS L1 output: 1022 of 1024 values wrong; 0 non-finite
+```
+All six I/P commands completed 3/3 in fresh processes, status 0 without reset. The default, prod and permute program lines were identical across runs. Prod-nc HEIGHT_SHARDED L1 printed 1,022, 1,019, 1,019/1,024 wrong; default-mode L1 was 1,019 in all three. Other results were identical, every dim=1 result had zero non-finite values, and controls were exact.
+L. Pooling: avg 32x32 control, avg 32x16 wrong values, then max 32x16 copy error
+Run python3 repro_pool_small_tile.py. Controls first, fresh dyadic inputs, references from device readback; avg control uses exact equality, small avg tolerance 0.125; max catches/prints the copy error.
+```
+#!/usr/bin/env python3
+"""One Blackhole chip, default dispatch: avg control, avg small tile, max copy error.
+
+Run: python3 repro_pool_small_tile.py
+Each case uses independent exact dyadic bfloat16 data. References use input
+readback. The avg control is exact; the small-tile case uses 0.125 tolerance.
+"""
+import torch
+import ttnn
+
+
+COPY_ERROR = "Input and output tensors must have the same tile shape when layout is TILE"
+
+
+def upload(device, shape, tile, seed):
+    gen = torch.Generator().manual_seed(seed)
+    host = (torch.randint(-16, 17, shape, generator=gen).float() / 8).to(torch.bfloat16)
+    tensor = ttnn.from_torch(host, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                             tile=ttnn.Tile(list(tile)), device=device,
+                             memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    stored = ttnn.to_torch(tensor).clone()
+    if not torch.equal(stored, host):
+        raise AssertionError("Input roundtrip differs before pooling")
+    return tensor, stored.double().reshape(1, 8, 8, 32).permute(0, 3, 1, 2)
+
+
+def compare(name, output, expected, tolerance):
+    got = ttnn.to_torch(output).double().reshape(expected.shape)
+    bad = ~torch.isfinite(got) | ((got - expected).abs() > tolerance)
+    wrong = int(bad.sum())
+    print(f"{name}: {wrong} of {expected.numel()} values wrong", flush=True)
+    return wrong
+
+
+def avg_case(device, tile, seed):
+    x, stored = upload(device, (1, 8, 8, 32), tile, seed)
+    expected = torch.nn.functional.avg_pool2d(stored, (2, 2), (1, 1), (0, 0),
+                                             count_include_pad=True)
+    expected = expected.permute(0, 2, 3, 1).reshape(1, 1, 49, 32)
+    name = "avg_pool2d [1,8,8,32] tile %dx%d" % tile
+    print(f"{name}: calling avg_pool2d", flush=True)
+    output = ttnn.avg_pool2d(x, 1, 8, 8, 32, [2, 2], [1, 1], [0, 0], False, True)
+    ttnn.synchronize_device(device)
+    tolerance = 0.0 if tile == (32, 32) else 0.125
+    return compare(name, output, expected, tolerance)
+
+
+def max_case(device):
+    x, stored = upload(device, (1, 1, 64, 32), (32, 16), 2)
+    name = "max_pool2d [1,1,64,32] tile 32x16"
+    print(f"{name}: calling max_pool2d", flush=True)
+    try:
+        output = ttnn.max_pool2d(x, 1, 8, 8, 32, [2, 2], [1, 1], [0, 0], [1, 1], False)
+        ttnn.synchronize_device(device)
+    except RuntimeError as exc:
+        if COPY_ERROR not in str(exc):
+            raise
+        print(f"{name}: raised {type(exc).__name__}: {COPY_ERROR}", flush=True)
+        return
+    expected = torch.nn.functional.max_pool2d(stored, (2, 2), (1, 1), (0, 0))
+    expected = expected.permute(0, 2, 3, 1).reshape(1, 1, 49, 32)
+    compare(name + " (call completed)", output, expected, 0.0)
+
+
+def main():
+    device = ttnn.open_device(device_id=0, l1_small_size=32768)  # pool ops allocate from L1_SMALL
+    try:
+        if avg_case(device, (32, 32), 5):
+            raise AssertionError("Average-pool 32x32 control failed")
+        avg_case(device, (32, 16), 6)
+        max_case(device)
+    finally:
+        ttnn.close_device(device)
+
+
+if __name__ == "__main__":
+    main()
+```
+Output in the default fast dispatch:
+```
+$ python3 repro_pool_small_tile.py
+avg_pool2d [1,8,8,32] tile 32x32: calling avg_pool2d
+avg_pool2d [1,8,8,32] tile 32x32: 0 of 1568 values wrong
+avg_pool2d [1,8,8,32] tile 32x16: calling avg_pool2d
+avg_pool2d [1,8,8,32] tile 32x16: 1255 of 1568 values wrong
+max_pool2d [1,1,64,32] tile 32x16: calling max_pool2d
+max_pool2d [1,1,64,32] tile 32x16: raised RuntimeError: Input and output tensors must have the same tile shape when layout is TILE
+```
+Three runs, each in a fresh process, printed the same lines.
+Cause
+All permalinks pin the card-run revision; the cited code is the same in f5985995a.
+A. Argmax's scanner walks four 16x16 faces. argmax_tile_layout.hpp:219-254, reader_argmax_tile_layout.cpp:58-60 scan nonexistent faces 2/3 of a two-face tile. For 16x32 they also address rows 16-31 of arrays with only 16 entries. For 32x16, face 1 is the lower half but is interpreted as the right half. Input transfer size is correct; H=64/W=96 do not trigger padding protection. This confirms the scanner defect. The synchronization stall has not been traced to a particular assertion/overwrite.
+R. Tiled reshape mixes actual-tile counts with default-tile output/transfers. Stack unsqueezes inputs and unsqueeze calls reshape; changed inner dimensions reach this factory. reshape_tiled_program_factory.cpp:290-335, reshape_device_operation.cpp:31-62 count both input/output pages by input tile area, but allocate default-32x32 output and transfer tt::tile_size(format) bytes. On a miss, mapping is uploaded and retained in op_owned_tensors. On a hit, the generic adapter refreshes input/output/retained-map bindings, leaving per-core page ranges unchanged (mesh_device_operation_adapter.hpp:823-847, program_run_args.cpp:928-961). The key includes logical output shape, memory config, sub-core-grid, input tensor/spec and factory; it omits recreate_mapping_tensor and does not explicitly include padded_output_shape. Identical requests prove neither wrong-key reuse nor corrupted mapping contents/binding. The stalls remain here with the small-tile mechanism; no mapping readback/address trace establishes otherwise.
+F. Fill-pad writes default-sized entries in place. fill_pad_program_factory.cpp:74-87, fill_pad_writer.cpp:89-118 count by actual tile but use tt::tile_size(format) and a four-face mask. A 2,048-byte bfloat16 write overruns a 512-byte (16x16) or 1,024-byte (16x32) page into following same-bank storage. Gather fills caller-owned index/input before device execution (gather.cpp:141-161); the width-31 input fill changes the next allocation, its index. Width 32 runs no fill: unchanged index but wrong output exposes a separate gather-device defect. A device-validation check is too late to prevent the fill. The L1-sharded factory has the same size assumption but was not run.
+E. Ema omits dataflow-buffer tile metadata. ema_program_factory.cpp:106-128, ema_writer.cpp:32-41 size entries from the tensor tile but omit tile_format_metadata, so JIT/kernels use default 32x32 interpretation. The writer writes 2,048 bytes per bfloat16 page, beyond 1,024-/512-byte output pages into the next allocation. Reader transfers and compute packing also use default tiles. Extra faces can leave 16x32 output within the repro's tolerance while corrupting guards; for 32x16/16x16 extra steps affect the recurrence. L1 overwrite destinations have not been checked.
+B. Batch_norm reads default-sized entries using output tile ids. batch_norm_program_factory.cpp:212-218, reader_batch_norm.cpp:59-66, writer_batch_norm.cpp:125-131 use 4,096-byte float32 entries. A 16x16 input page holds 1,024 bytes; reading page k for output tile k takes following same-bank storage too. The default output is fully written, mostly with wrong data. Accepted 16x16 output= makes the same writes overrun into the next allocation. Mean/variance broadcasting correctly uses each page's first element.
+C. Concat's own factory reads default entries from small pages. concat_program_factory.cpp:71-74, reader_concat_interleaved_start_id.cpp:52-63 use output.physical_volume()/TILE_HW and tt::tile_size(format) without input tile metadata. These unpadded width-concat inputs avoid untilize fallback. Each input has two 1,024-byte pages, but scheduling reads one 2,048-byte entry per input; the extra bytes are same-bank storage, not its next logical tile. Output construction selects default 32x32.
+I. Isin converts elements through interleaved untilize-with-unpadding. isin.cpp:75-90, untilize_with_unpadding_multi_core_interleaved_program_factory.cpp:48-95 do not retile first; conversion validation tests volume modulo TILE_HW, not tile shape. For 8x16/padded-48x64, 24 input pages of 512 bytes become one block of two 4,096-byte reads; for 2x32/padded-32x32, 16 pages of 256 bytes become one 4,096-byte read. Reads remain in the same bank. Work distribution receives actual tile height after block count used 32. The isolated conversion is wrong too; membership itself bounds test fetches by logical element count.
+P. Dim=-1 prod first reaches the permute mismatch. prod.cpp:174-183, permute_tiled_program_factory.cpp:17-31, permute_tiled_program_factory.cpp:388-406 request {3,0,1,2} and count actual tiles, but size input/transpose-output DFBs as default tiles without tile metadata. Each 1x32 bfloat16 page holds 64 bytes; each read requests 2,048. Isolated permute is already wrong. It produces default tiles, so this failure is before reduction, not a demonstrated small-tile reduction input.
+P. Dim=1 independently reaches prod_nc with small tiles. No permute runs; one factor should equal input exactly. prod_nc_program_factory.cpp:46-66, prod_nc_program_factory.cpp:97-110 derive Ht/Wt/offsets and output counts from input geometry, but use 2,048-byte DFB entries for actual 128-/1,024-byte pages. Output allocation has one default tile; factory counts 16 or 2 using input area. This is an independent mismatch, not accumulation rounding; no device trace maps each bad value to particular bytes.
+L. Halo interprets the pool input as 32x32. The wrapper reshapes NHWC, shards, then runs halo before the ROW_MAJOR pool program. halo_device_operation.cpp:27-35, untilize_with_halo_program_factory.cpp:125-153 check volume only, count with TILE_WIDTH/HEIGHT, and bind default tt::tile_size(format) pages without tile geometry: 2,048 bytes versus actual 1,024, with incorrect face order. Source confirms incompatibility, but avg also passes through reshape; its 1,255 wrong values have not been isolated to halo.
+L. Flattened max-pool fails earlier in copy. copy_device_operation.cpp:138-149 constructs default-tile output then compares tiles, producing the input/output mismatch instead of a pool tile check. Direct to_memory_config to HEIGHT_SHARDED L1 fails likewise, preventing a pre-sharded halo-only probe. This case establishes no numerical halo failure. Validation must precede input conversions, or tile geometry must propagate through them.
+Source comparisons: E/B sites unchanged on 7aad8aacd (batch_norm allocation check became is_allocated()); C/A factories/readers unchanged on 3f57b50ff (concat codegen is ROW_MAJOR only). R factory/adapter and key unchanged on 3cdf1a630; general tensor refresh gained per-node support but its interleaved path retains map/page ranges. F sites unchanged there except the allocation check. I/P size/count expressions persist on 00690ca0a; I separately disabled implicit DFB synchronization, not run here. Prod wrapper/factory are byte-identical on be782c33d. Halo/validation/pool wrapper are byte-identical on 012c19bea; copy check unchanged in an otherwise changed file. These are source comparisons, not later-main card results.
+Related
+[ttnn/eltwise] binary_ng: reject non-32x32 tiles and handle ND-sharded operands (#58403) #60507 merged binary_ng's tile check. Open: [ttnn]: reject non-32x32 tiles in softmax and typecast #61302 (softmax/typecast), [Bug fix] gather: support rank-1 tile tensors; clone: reject non-32x32 tiles #62211 (unary/clone; supersedes [Bug fix] unary / clone: reject TILE tensors whose tile is not 32x32 #61709), [ttnn/pad]: reject tiles that return incorrect padding results #61741/[ttnn/sort]: reject tiles that return incorrect sorted values #61742/[ttnn/where]: reject tiles that return incorrect selected values #61743 (pad/sort/where), and [Bug fix] Reject non-32x32 tiles in transpose, permute, concat, reshape and reductions #63575 (A/R/C and P's permute). Gather in [Bug fix] gather: support rank-1 tile tensors; clone: reject non-32x32 tiles #62211 handles rank-1 TILE, not tile validation.
+ttnn.ema starts every sequence from 0 instead of input_0, contradicting its docstring and its registered golden #61221/open [Bug fix] ema: start each sequence from input_0, as documented #61292: tile-independent ema initial-value bug; repro input_0=0. Add Tiny Tile support to CCL OPs #14517 (closed), [Quasar] Tiny tile master issue #47597/SFPU tile dimensions support #36281 track CCL/LLK tiny tiles, not per-op support.
+[ops]: ttnn.concat of row-major tensors in L1 and DRAM into an L1 output gives wrong values #61625: mixed-L1/DRAM ROW_MAJOR concat, addressed by open [Bug fix] data_movement: transpose / concat wrong data and 7 more fixes #62141. Our open [ttnn/data_movement]: concat misreads mixed L1 and DRAM row-major inputs #61602 covers width-concat alignment. Tiled ttnn.reshape hangs after execute_trace: cached mapping tensor allocated in trace-owned memory #61727: tiled reshape after execute_trace with a trace-owned mapping tensor. Other defects in the same factories; no retained-map corruption/bad binding or L1-map fix is established here.
+Implement tiny tile support in data movement ops #49568: tiny-tile concat/reshape support, closed unmerged. [Bug fix] data_movement: transpose / concat wrong data and 7 more fixes #62141 retains concat TILE sizes/counts. [Performance] ttnn.argmax: read TILE input over the last dim on multiple cores #62393 adds multicore TILE argmax but retains the scanner; both paths need testing. [ttnn/ops]: ttnn::untilize corrupts data on Blackhole (breaks TrivialTnnFixedTest.TestSamplingPositiveTemperatureWithMask) #34451 fails in an explicit untilize before argmax, absent here.
+Follow-up work for ttnn.isin operation (validation, documentation, extensions) #35444 tracks isin support/correctness; merged [Bug fix] isin: fix wrong-units output write stride for narrow input dtypes #57656 (from [ttnn] 8 defects in to_layout / creation / embedding / full / isin / dropout / random #57365 item 6) fixes mask bytes and is already present. Both inputs here are uint32. untilize_with_unpadding hangs when both height and width are unpadded on a (1, 1, 64, 8192) input #54524 uses wide default-tile untilize/block factory; [ttnn/data_movement] 11 pad / tilize / untilize defects: missing FLOAT32 cases and unsigned underflow #57354 items 9-11, [Bug fix] untilize_with_unpadding: read the right input slabs when a leading dim is cropped #60168/[ttnn/data_movement]: sharded untilize drops batch rows after unpadding #61603/[Cleanup] Uplift to Quasar: untilize_with_unpadding #63401 change ND/sharded/block paths, not row I.
+[Performance][ttnn] Fix host round trips in ttnn.prod with device allocation (#54823) #60906 changes prod allocation; [Bug fix] reduction: prod fp32, int32 max, bfp8 max / min, sampling and 1 more #62145 (superseding [Bug fix] ttnn.prod: multiply float32 on the SFPU so the product keeps fp32 precision #61075) float32 multiplication; [LLK][Feature] Add SFPU within-tile product reduction (PoolType::PROD) #61647 LLK product; these do not repair permute page sizes. [Bug fix] Quasar tiled permute: cb_in entries are exactly one tile #60684 changes another permute factory, Quasar only.
+Uplift to use tile size obtained from tensor in all CNN ops #16159 requested CNN tile validation; closed completed with checklist unchecked. Merged [ttnn/reduction]: reductions overwrite input bits when filling padding #61601 gives max/min/sum/mean/topk private-copy fills; gather still fills callers. [Performance] fill_implicit_tile_padding: build mask tiles a row at a time #62617 changes fill_pad masks but retains 32x32 sizes/masks.
+We have not built or tested a fix.
+Please add one central check: reject non-32x32 tiles unless the op declares support. Run it before conversions or in-place preprocessing; every row here accepts a small tile without that check. Supporting ops must carry tile geometry through counts, sizes and buffers.
+Found by AI agents (Claude and Astra) during our Qwen bring-up on Blackhole.
+Activity
+github-actions
+added
+community
+on Nov 1, 2026
+dddrrreee commented on Nov 1, 2026
+dddrrreee
+on Nov 1, 2026
+ContributorAuthor
+More actions
+The explicit attn_mask of scaled_dot_product_attention prefill is another operand in this small-tile family. On one Blackhole p300c chip, main f5985995a, the 32x32-mask control had 0/8192 values wrong, while the 32x16 mask had 8192/8192 wrong. The three fresh-process runs printed the same lines. Only the mask uses small tiles; Q/K/V use 32x32 tiles. Scale is 1, and the mask contains 0/-inf, so finite-mask compensation does not account for this result.
+Op
+Operand / tile
+Result and fix site
+scaled_dot_product_attention
+BF16 TILE DRAM attn_mask, 32x16
+8192/8192 wrong; reject unsupported mask tile geometry or honor it in the mask reader/CB (sdpa_device_operation.cpp:148-180, sdpa_program_factory.cpp:1811-1819).
+Repro (one Blackhole chip, main f5985995a)
+```
+"""One Blackhole chip. Only the mask uses a small tile."""
+import torch
+import ttnn
+
+
+def run(device, tile, tag):
+    def put(x, shape=(32, 32)):
+        return ttnn.from_torch(x, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                              tile=ttnn.Tile(list(shape)), device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    q, k = put(torch.zeros(1, 8, 32, 32)), put(torch.zeros(1, 1, 32, 32))
+    vh = torch.full((1, 1, 32, 32), -1 + tag / 16)
+    vh[..., 16:, :] += 2
+    mh = torch.full((1, 8, 32, 32), float("-inf"))
+    mh[..., :16] = 0
+    v, m = put(vh), put(mh, tile)
+    qd, kd, vd, md = [ttnn.to_torch(t).double() for t in (q, k, v, m)]
+    want = torch.nn.functional.scaled_dot_product_attention(qd, kd.expand(1, 8, 32, 32),
+                vd.expand(1, 8, 32, 32), attn_mask=md, scale=1.0)
+    pc = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=ttnn.CoreCoord(2, 1),
+                               q_chunk_size=32, k_chunk_size=32, exp_approx_mode=False)
+    ck = ttnn.init_device_compute_kernel_config(device.arch(), math_fidelity=ttnn.MathFidelity.HiFi4,
+                                               math_approx_mode=False, fp32_dest_acc_en=False, packer_l1_acc=False)
+    out = ttnn.transformer.scaled_dot_product_attention(q, k, v, attn_mask=m, is_causal=False, scale=1.0,
+                                                       program_config=pc, compute_kernel_config=ck)
+    got = ttnn.to_torch(out).double()
+    bad = int((~((got - want).abs() <= 0.03)).sum())
+    print(f"mask tile {tile}: {bad} of {want.numel()} values wrong", flush=True)
+
+
+device = ttnn.open_device(device_id=0)
+try:
+    run(device, (32, 32), 1)
+    run(device, (32, 16), 5)
+finally:
+    ttnn.close_device(device)
+```
+Output in the default fast dispatch:
+```
+mask tile (32, 32): 0 of 8192 values wrong
+mask tile (32, 16): 8192 of 8192 values wrong
+```
+Cause
+Line labels below give file:line at f5985995a; the links pin current main eb4c660fd (checked 2026-10-31). The relevant ranges were compared directly: the cited code is the same in f5985995a.
+The mask validator explicitly requires TILE layout but never checks tile geometry (sdpa/device/sdpa_device_operation.cpp:148-180). The factory instead sizes the mask CB using uint32_t actual_mask_tile_size = tt::tile_size(actual_mask_df); (sdpa/device/sdpa_program_factory.cpp:1811-1819). The reader takes mask_tile_bytes from that CB and uses 32-column tile indices (sdpa/device/kernels/dataflow/reader_interleaved.cpp:269-285, sdpa/device/kernels/dataflow/reader_interleaved.cpp:830-869). For the BF16 mask, a 32x16 source page contains 1,024 bytes, while the full-tile CB transfer is 2,048 bytes. This proves the geometry mismatch. The card output establishes 8192 wrong values for this fixture; it does not identify every extra byte transferred from storage. Use scale=1 in this regression so ordinary prefill's mask compensation does not insert an elementwise multiply before the mask reaches SDPA.
+Related
+#54833: mask padding at non-tile-aligned logical K lengths, a different condition; here Sq=Sk=32.
+#55333: finite-mask scaling in MLA prefill; this test uses ordinary prefill, scale=1 and a 0/-inf mask.
+#59427: open generated-window-mask barrier fix; no explicit-mask tile check.
+#60197: open; the BF16-DEST path used here stays on streaming compute in its diff. No PR build tested.
+We have not built or tested a fix.
+dddrrreee commented on Nov 1, 2026
+dddrrreee
+on Nov 1, 2026
+ContributorAuthor
+More actions
+Row I's untilize_with_unpadding_multi_core_interleaved_program_factory also fails with BF16 16x32, 32x16 and 16x16 tiles. On one Blackhole p300c chip at main f5985995a, ttnn.untilize_with_unpadding of [1, 1, 32, 32] with a 16x32 tile returned 495 of 1024 values wrong. With a padded width of 16, to_layout(ROW_MAJOR), fold, scatter and repeat_interleave reached the same factory and stopped with DataflowBufferSpec 'mci_in' has num_entries = 0. All corresponding default-32x32 controls were exact.
+These are additional cases of row I's 32x32 page/count mismatch, so its fix needs to cover them too. The factory must either honor the input tile geometry throughout or reject unsupported tiles before creating its buffers. The complete script and output below are unchanged from one recorded run; its nlp_concat_heads cases belong to #34593, and are retained only to preserve the tested script/output pair.
+Repro (one Blackhole chip, main f5985995a)
+```
+"""nlp_concat_heads and untilize_with_unpadding (reached by to_layout, fold, repeat_interleave and scatter) count
+tiles with the 32x32 constants for a 16x32, 32x16 or 16x16 tile. Each case runs once with the default 32x32 tile
+(the control) and then with the smaller tile. Values are multiples of 1/8, exact in bfloat16 and float32."""
+import re
+
+import torch
+import ttnn
+
+device = ttnn.open_device(device_id=0)
+gen = torch.Generator().manual_seed(0)
+
+
+def data(shape, dtype=torch.bfloat16):
+    return (torch.randint(-16, 17, shape, generator=gen) / 8).to(dtype)
+
+
+def upload(t, tile, dtype=ttnn.bfloat16):
+    return ttnn.from_torch(t, dtype=dtype, layout=ttnn.TILE_LAYOUT, tile=ttnn.Tile(tile), device=device,
+                           memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+
+def short(exc):
+    """First line of the error and the first compiler error line, without local directories."""
+    text = str(exc)
+    head = text.split("info:", 1)[-1].split("backtrace:")[0].strip().splitlines()
+    first = head[0] if head else ""
+    compiler = next((l for l in text.splitlines() if "error:" in l), "")
+    out = re.sub(r"/\S*/", "", (first + (" | " + compiler.strip() if compiler else "")))
+    return f"raised {type(exc).__name__}: {out[:220]}"
+
+
+def case(name, inputs, call, reference):
+    """inputs: device tensors; reference gets them back through ttnn.to_torch."""
+    try:
+        got = ttnn.to_torch(call(*inputs)).double()
+    except Exception as exc:
+        print(f"{name}: {short(exc)}", flush=True)
+        return
+    want = reference(*[ttnn.to_torch(t) for t in inputs]).double()
+    if got.shape != want.shape:
+        print(f"{name}: shape {list(got.shape)}, expected {list(want.shape)}", flush=True)
+        return
+    print(f"{name}: {int((got != want).sum())} of {want.numel()} values wrong", flush=True)
+
+
+def fold_ref(x):  # ttnn.fold(x, 2, 2) of an NHWC tensor
+    n, h, w, c = x.shape
+    return x.reshape(n, h // 2, 2, w // 2, 2, c).permute(0, 1, 3, 2, 4, 5).reshape(n, h // 2, w // 2, 4 * c)
+
+
+def heads_ref(x):  # [B, heads, S, D] -> [B, 1, S, heads * D]
+    b, nh, s, d = x.shape
+    return x.permute(0, 2, 1, 3).reshape(b, 1, s, nh * d)
+
+
+x_small = data((1, 1, 1, 1))
+x_heads = data((1, 3, 33, 96), torch.float32)
+x_unpad = data((1, 1, 32, 32))
+x_fold = data((1, 12, 6, 1))
+x_ri = data((1, 1, 64, 1))
+x_sc = data((1, 1, 45, 2))
+idx_sc = torch.randint(0, 2, (1, 1, 45, 1), generator=gen).to(torch.int32)
+src_sc = data((1, 1, 45, 1))
+
+for tile in ([32, 32], [16, 32]):
+    t = f"{tile[0]}x{tile[1]} tile"
+    case(f"nlp_concat_heads [1,1,1,1] bf16, {t}", [upload(x_small, tile)],
+         ttnn.experimental.nlp_concat_heads, heads_ref)
+    case(f"nlp_concat_heads [1,3,33,96] fp32, {t}", [upload(x_heads, tile, ttnn.float32)],
+         ttnn.experimental.nlp_concat_heads, heads_ref)
+    case(f"untilize_with_unpadding [1,1,32,32] bf16, {t}", [upload(x_unpad, tile)],
+         lambda x: ttnn.untilize_with_unpadding(x, [0, 0, 31, 31]), lambda x: x)
+for tile in ([32, 32], [32, 16]):
+    t = f"{tile[0]}x{tile[1]} tile"
+    case(f"to_layout(ROW_MAJOR) [1,12,6,1] bf16, {t}", [upload(x_fold, tile)],
+         lambda x: ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT), lambda x: x)
+    case(f"fold(2, 2) [1,12,6,1] bf16, {t}", [upload(x_fold, tile)], lambda x: ttnn.fold(x, 2, 2), fold_ref)
+    case(f"scatter(dim -1) [1,1,45,2] bf16, {t}",
+         [upload(x_sc, tile), upload(idx_sc, tile, ttnn.uint32), upload(src_sc, tile)],
+         lambda x, i, s: ttnn.scatter(x, -1, i, s), lambda x, i, s: torch.scatter(x, -1, i.long(), s))
+for tile in ([32, 32], [16, 16]):
+    t = f"{tile[0]}x{tile[1]} tile"
+    case(f"repeat_interleave(5, dim 2) [1,1,64,1] bf16, {t}", [upload(x_ri, tile)],
+         lambda x: ttnn.repeat_interleave(x, 5, 2), lambda x: torch.repeat_interleave(x, 5, dim=2))
+ttnn.close_device(device)
+```
+Output in the default fast dispatch:
+```
+nlp_concat_heads [1,1,1,1] bf16, 32x32 tile: 0 of 1 values wrong
+nlp_concat_heads [1,3,33,96] fp32, 32x32 tile: 0 of 9504 values wrong
+untilize_with_unpadding [1,1,32,32] bf16, 32x32 tile: 0 of 1024 values wrong
+nlp_concat_heads [1,1,1,1] bf16, 16x32 tile: raised RuntimeError: Failed to generate binaries for reader_tm_tile_layout_nlp_concat_heads TT_THROW @ build.cpp:149: tt::exception | reader_tm_tile_layout_nlp_concat_heads.cpp:36:18: error: division by zero [-Werror=div-by-zero]
+nlp_concat_heads [1,3,33,96] fp32, 16x32 tile: 7729 of 9504 values wrong
+untilize_with_unpadding [1,1,32,32] bf16, 16x32 tile: 495 of 1024 values wrong
+to_layout(ROW_MAJOR) [1,12,6,1] bf16, 32x32 tile: 0 of 72 values wrong
+fold(2, 2) [1,12,6,1] bf16, 32x32 tile: 0 of 72 values wrong
+scatter(dim -1) [1,1,45,2] bf16, 32x32 tile: 0 of 90 values wrong
+to_layout(ROW_MAJOR) [1,12,6,1] bf16, 32x16 tile: raised RuntimeError: DataflowBufferSpec 'mci_in' has num_entries = 0. num_entries must be set to a non-zero value.
+fold(2, 2) [1,12,6,1] bf16, 32x16 tile: raised RuntimeError: DataflowBufferSpec 'mci_in' has num_entries = 0. num_entries must be set to a non-zero value.
+scatter(dim -1) [1,1,45,2] bf16, 32x16 tile: raised RuntimeError: DataflowBufferSpec 'mci_in' has num_entries = 0. num_entries must be set to a non-zero value.
+repeat_interleave(5, dim 2) [1,1,64,1] bf16, 32x32 tile: 0 of 320 values wrong
+repeat_interleave(5, dim 2) [1,1,64,1] bf16, 16x16 tile: raised RuntimeError: DataflowBufferSpec 'mci_in' has num_entries = 0. num_entries must be set to a non-zero value.
+```
+Cause
+File:line labels refer to the card-run revision; links pin main eea1740b1 (checked 2026-10-31); the cited code is the same in f5985995a. This is a source comparison, not a card run of later main.
+The multi-core interleaved factory derives its counts from the 32x32 constants (untilize_with_unpadding_multi_core_interleaved_program_factory.cpp:63-64):
+```
+    uint32_t num_blocks = input_shape[-1] == 0 ? 0 : a.physical_volume() / input_shape[-1] / TILE_HEIGHT;
+    uint32_t num_tiles_per_row = a.padded_shape()[-1] / TILE_WIDTH;
+```
+num_tiles_per_row is the entry count of both dataflow buffers, whose entries are tt::tile_size bytes (line 49, lines 84-95); mci_in is the input buffer. A 32x16 or 16x16 tile with a padded width of 16 gives 0 entries. With a 16x32 tile, [1, 1, 32, 32] has two 1024-byte pages, but num_blocks and num_tiles_per_row are 1, and the reader reads one 2048-byte entry at the address of page 0 (reader_unary_interleaved_start_id_metal2.cpp:33, line 47): page 0 holds rows 0-15, and the other 1024 bytes are whatever follows page 0 in its DRAM bank, not page 1. The same factory takes the input's own tile height a few lines later, for the row assignment only (lines 205-207). The device operation's only tile-related check is that the physical volume is a multiple of TILE_HW (untilize_with_unpadding_device_operation.cpp:127-133), and select_program_factory uses the same constants (lines 100-101).
+ttnn.to_layout to ROW_MAJOR calls untilize_with_unpadding whenever the padded shape differs from the logical one (to_layout_op.cpp:25-29, lines 169-183). fold when its tile-native path does not apply (fold.cpp:545-548), repeat_interleave (repeat_interleave.cpp:158) and scatter (scatter.cpp:174-176) call ttnn::to_layout on their TILE inputs.
+The source establishes the count and transfer-size mismatch; the card output establishes the numerical failures. The output does not identify every byte fetched after the first source page.
+Related
+This extends the umbrella's row I, which reaches the same factory through experimental.isin; it adds direct conversion and wrapper cases to that existing report.
+#57354 item 9 concerns the ND-sharded factory; items 10–11 concern writer bounds. The additional cases here are the interleaved factory's small-tile page/count mismatch already tracked in row I.
+We have not built or tested a fix.
+dddrrreee commented on Nov 1, 2026
+dddrrreee
+on Nov 1, 2026
+ContributorAuthor
+More actions
+Row I: Isin and its input untilize conversion. This is the complete repro and recorded output for row I of the issue above, on one Blackhole chip at main f5985995a, in default fast dispatch.
+I. Isin and its input untilize conversion
+Run python3 repro_isin_tiles.py, then python3 repro_isin_tiles.py --stage untilize in a fresh process. Each runs four 32x32 controls before both small-tile cases; each case has fresh inputs and two identical calls.
+```
+#!/usr/bin/env python3
+"""Single-chip isin: 32x32 controls, then 2x32 and 8x16 cases, two calls each.
+
+Run: python3 repro_isin_tiles.py
+     python3 repro_isin_tiles.py --stage untilize
+
+The stage option tests the input conversion separately. Every case runs by
+default and allocates fresh inputs. Each invocation opens only device_id=0.
+"""
+import argparse
+import torch
+import ttnn
+
+
+def run_case(dev, label, shape, count, seed, tile, test_layout, invert, stage):
+    # Recreate this case's inputs, including for the matching control.
+    g = torch.Generator().manual_seed(seed)
+    e_host = (torch.randint(2, 33, shape, generator=g).float() / 8).round().to(torch.int32)
+    gt = torch.Generator().manual_seed(seed + 1)
+    t_host = torch.randint(0, 2, (1, 1, 1, count), generator=gt).to(torch.int32)
+    e = ttnn.from_torch(e_host, dtype=ttnn.uint32, layout=ttnn.TILE_LAYOUT,
+                        tile=ttnn.Tile(tile), device=dev, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    t = ttnn.from_torch(t_host, dtype=ttnn.uint32, layout=test_layout,
+                        device=dev, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    # Torch isin does not support uint32 on every torch version; int64 is exact.
+    ed = ttnn.to_torch(e).to(torch.int64)
+    td = ttnn.to_torch(t).to(torch.int64)
+    assert torch.equal(ed, e_host.to(torch.int64)), label + ": elements upload changed"
+    assert torch.equal(td, t_host.to(torch.int64)), label + ": tests upload changed"
+    want = (torch.isin(ed, td, invert=invert).to(torch.int64) * 0xFFFFFFFF
+            if stage == "isin" else ed)
+    # Keep both outputs alive; use exactly the same device inputs in both calls.
+    outputs = []
+    for _ in range(2):
+        outputs.append(ttnn.experimental.isin(e, t, invert=invert) if stage == "isin"
+                       else ttnn.to_layout(e, ttnn.ROW_MAJOR_LAYOUT))
+    got = [ttnn.to_torch(y).to(torch.int64) for y in outputs]
+    for result in got:
+        if result.shape != want.shape:
+            raise AssertionError(f"{label}: shape {list(result.shape)}, expected {list(want.shape)}")
+    wrong = [int((result != want).sum()) for result in got]
+    changed = int((got[1] != got[0]).sum())
+    n = want.numel()
+    print(f"{label}: first call {wrong[0]} of {n} values wrong; "
+          f"second call {wrong[1]} of {n} values wrong; "
+          f"second call differs from first in {changed} of {n} results", flush=True)
+    for tensor in (*outputs, t, e):
+        ttnn.deallocate(tensor)
+    return wrong[0] or wrong[1] or changed
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--stage", choices=("isin", "untilize"), default="isin")
+    args = p.parse_args()
+    dev = ttnn.open_device(device_id=0)
+    try:
+        # The retained passing controls used TILE test elements. The RM controls
+        # below additionally keep test layout fixed when changing only e's tile.
+        for test_layout, layout_name in ((ttnn.TILE_LAYOUT, "TILE tests"),
+                                         (ttnn.ROW_MAJOR_LAYOUT, "RM tests")):
+            for label, shape, count, seed, invert in (
+                ("47x64/300", (1, 1, 47, 64), 300, 779306109, False),
+                ("32x1/37 invert", (1, 1, 32, 1), 37, 616924132, True),
+            ):
+                wrong = run_case(dev, f"control {label} 32x32 {layout_name}",
+                                 shape, count, seed, [32, 32], test_layout, invert, args.stage)
+                if wrong:
+                    raise AssertionError("Control failed; stop before the small-tile cases")
+        run_case(dev, "32x1/37 invert 2x32 RM tests", (1, 1, 32, 1), 37,
+                 616924132, [2, 32], ttnn.ROW_MAJOR_LAYOUT, True, args.stage)
+        run_case(dev, "47x64/300 8x16 RM tests", (1, 1, 47, 64), 300,
+                 779306109, [8, 16], ttnn.ROW_MAJOR_LAYOUT, False, args.stage)
+    finally:
+        ttnn.close_device(dev)
+
+
+if __name__ == "__main__":
+    main()
+```
+Default fast-dispatch output, selected small-tile cases:
+```
+32x1/37 invert 2x32 RM tests: first call 6 of 32 values wrong; second call 18 of 32 values wrong; second call differs from first in 12 of 32 results
+47x64/300 8x16 RM tests: first call 1222 of 3008 values wrong; second call 1243 of 3008 values wrong; second call differs from first in 1379 of 3008 results
+```
+--stage untilize, selected-case lines:
+```
+32x1/37 invert 2x32 RM tests: first call 9 of 32 values wrong; second call 12 of 32 values wrong; second call differs from first in 3 of 32 results
+47x64/300 8x16 RM tests: first call 1906 of 3008 values wrong; second call 1953 of 3008 values wrong; second call differs from first in 1264 of 3008 results
+```
+Each command printed identical program lines in three fresh processes, status 0 without reset. All four controls, including TILE tests, were exact and repeated exactly.
+dddrrreee commented on Nov 3, 2026
+dddrrreee
+on Nov 3, 2026
+ContributorAuthor
+More actions
+Following the earlier SDPA mask comment, this adds Q-tile, chunked page-table and separate-V checks in SDPAOperation::validate_on_program_cache_miss, plus the related MLA decode sink-tile case.
+On one Blackhole p300c chip, main f5985995a, default fast dispatch, prefill Q in 16x32 tiles gave 1024/2048 wrong values and an MLA attention sink in 16x32 tiles gave 4096/8192 wrong. Both matching 32x32 controls had 0 wrong. Each script ran in three fresh processes and printed identical lines each time. The scripts below use separate tensors and distinct V/KV data for their control and failing case, with references computed from device-input readback.
+Op
+Operand / tile
+One-chip result and fix routine
+scaled_dot_product_attention
+BF16 TILE DRAM Q, 16x32; K/V remain 32x32
+1024/2048 wrong; 32x32 Q control 0/2048. Check Q tile geometry in SDPAOperation::validate_on_program_cache_miss or honor it in the Q CB and reader.
+flash_multi_latent_attention_decode
+BF16 TILE DRAM attention_sink, 16x32; Q/KV remain 32x32
+4096/8192 wrong; 32x32 sink control 0/8192. Check sink tile geometry in SdpaDecodeDeviceOperation::validate_on_program_cache_miss or honor it in the sink CB and reader.
+chunked_scaled_dot_product_attention and the separate-V flash_mla_prefill overload admit representations inconsistent with their readers. On one Blackhole p300c chip, main f5985995a, each one-chip script below printed the same lines in three fresh processes: a WIDTH_SHARDED page table gave 2048/2048 wrong, including all 1024 of batch 0, whose rows 0 and 31 returned 0 where torch gives 0.0775 and 2; a ROW_MAJOR separate V gave 1024/1024 wrong (first value 8 instead of 0). The matching interleaved-table and TILE-V controls had 0 wrong. Older runs of the original fixtures on a 1x4 Blackhole mesh with replicated chip-local inputs failed in three fresh processes each on the first checked device, with 0 at both printed rows of batch 0 in the chunked-table case.
+Op
+Admitted representation and failure
+Correct configuration / validation fix
+chunked_scaled_dot_product_attention
+Flexible device-tensor chunk offset; WIDTH_SHARDED INT32 ROW_MAJOR page table [2,8] split into [2,4] shards. 2048/2048 wrong; batch 0: 1024/1024 wrong, zero at both printed rows.
+Interleaved DRAM table; require the complete-row storage contract or gather each row across shards.
+flash_mla_prefill
+Separate BF16 ROW_MAJOR V [1,1,256,32]. 1024/1024 wrong.
+BF16 TILE V; validate the actual optional V instead of the K alias.
+Both omissions are in SDPAOperation::validate_on_program_cache_miss; its chunked-table branch and common MLA operand loop need separate guards. A correction to that validation routine should cover both cases. Rejecting these unsupported representations is an acceptable outcome.
+Repro: small-tile Q (one Blackhole chip, main f5985995a)
+The 32x32 Q control runs before the 16x32 case, with fresh tensors and distinct V data. K and V stay 32x32. The float64 torch reference uses device Q/K/V; tolerance is atol=0.02, rtol=0.02. Unsupported tiles may instead be rejected.
+Run PYTHONDONTWRITEBYTECODE=1 python3 repro_prefill_q_tile.py.
+```
+"""One chip; full-tile Q control first; separate data per case."""
+import torch
+import ttnn
+
+
+def run(device, tile, tag):
+    def put(x, shape=(32, 32)):
+        return ttnn.from_torch(x.contiguous(), device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                              tile=ttnn.Tile(list(shape)), memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    qh = torch.zeros(1, 1, 64, 32)
+    qh[..., 32:, 0] = 4
+    kh = torch.zeros(1, 1, 32, 32)
+    kh[..., :16, 0], kh[..., 16:, 0] = 1, -1
+    vh = torch.ones(1, 1, 32, 32) + tag / 8
+    vh[..., 16:, :] -= 2
+    q, k, v = put(qh, tile), put(kh), put(vh)
+    qd, kd, vd = [ttnn.to_torch(t).double() for t in (q, k, v)]
+    want = torch.nn.functional.scaled_dot_product_attention(qd, kd, vd, scale=1.0)
+    pc = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=ttnn.CoreCoord(1, 1), q_chunk_size=32,
+                               k_chunk_size=32, exp_approx_mode=False)
+    ck = ttnn.init_device_compute_kernel_config(device.arch(), math_fidelity=ttnn.MathFidelity.HiFi4,
+                                               math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
+    label = "control Q tile 32x32" if tile == (32, 32) else "Q tile 16x32"
+    print(f"calling {label}", flush=True)
+    out = ttnn.transformer.scaled_dot_product_attention(q, k, v, is_causal=False, scale=1.0,
+                                                       program_config=pc, compute_kernel_config=ck)
+    got = ttnn.to_torch(out).double()
+    bad = int((~((got - want).abs() <= 0.02 + 0.02 * want.abs())).sum())
+    print(f"{label}: {bad} of {want.numel()} values wrong", flush=True)
+
+
+device = ttnn.open_device(device_id=0)
+try:
+    run(device, (32, 32), 1)
+    run(device, (16, 32), 0)
+finally:
+    ttnn.close_device(device)
+```
+Output in the default fast dispatch:
+```
+calling control Q tile 32x32
+control Q tile 32x32: 0 of 2048 values wrong
+calling Q tile 16x32
+Q tile 16x32: 1024 of 2048 values wrong
+```
+The three runs printed the same lines.
+Repro: small-tile MLA attention sink (one Blackhole chip, main f5985995a)
+The 32x32 sink control runs first, with fresh tensors and distinct KV data. Q and KV stay 32x32. Torch uses the device sink logits by adding a zero-valued sink to the softmax denominator. Tolerance is atol=0.02. Only unpaged MLA decode is measured here; paged MLA shares this source path but is not claimed as a tested member.
+Run PYTHONDONTWRITEBYTECODE=1 python3 repro_mla_sink_tile.py.
+```
+"""One chip; full-tile sink control first; torch includes a zero-valued sink."""
+import torch
+import ttnn
+
+
+def run(device, tile, tag):
+    def put(x, shape=(32, 32)):
+        return ttnn.from_torch(x.contiguous(), device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
+                              tile=ttnn.Tile(list(shape)), memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    q = put(torch.zeros(1, 1, 256, 32))
+    kv = put(torch.full((1, 1, 32, 32), 1 + tag / 8))
+    sh = torch.zeros(256, 1)
+    sh[128:] = 8
+    sink = put(sh, tile)
+    qd, kd, sd = [ttnn.to_torch(t).double() for t in (q, kv, sink)]
+    qu = qd.permute(1, 2, 0, 3)
+    keys, values = kd.expand(1, 256, 32, 32), kd.expand(1, 256, 32, 32)
+    # A sink adds exp(sink_logit) to the denominator and zero to the numerator.
+    logits = torch.matmul(qu, keys.transpose(-1, -2))
+    logits = torch.cat((logits, sd.reshape(1, 256, 1, 1)), dim=-1)
+    extended_v = torch.cat((values, torch.zeros(1, 256, 1, 32, dtype=torch.float64)), dim=-2)
+    want = (torch.softmax(logits, dim=-1) @ extended_v).permute(2, 0, 1, 3)
+    pc = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=ttnn.CoreCoord(1, 1), q_chunk_size=32,
+                               k_chunk_size=32, exp_approx_mode=False, max_cores_per_head_batch=1)
+    ck = ttnn.init_device_compute_kernel_config(device.arch(), math_fidelity=ttnn.MathFidelity.HiFi4,
+                                               math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
+    label = "control sink tile 32x32" if tile == (32, 32) else "sink tile 16x32"
+    print(f"calling {label}", flush=True)
+    out = ttnn.transformer.flash_multi_latent_attention_decode(
+        q, kv, input_tensor_v=None, head_dim_v=32, is_causal=True, cur_pos=[31], attention_sink=sink,
+        scale=1.0, program_config=pc, compute_kernel_config=ck)
+    got = ttnn.to_torch(out).double()
+    bad = int((~((got - want).abs() <= 0.02)).sum())
+    print(f"{label}: {bad} of {want.numel()} values wrong", flush=True)
+
+
+device = ttnn.open_device(device_id=0)
+try:
+    run(device, (32, 32), 1)
+    run(device, (16, 32), 0)
+finally:
+    ttnn.close_device(device)
+```
+Output in the default fast dispatch:
+```
+calling control sink tile 32x32
+control sink tile 32x32: 0 of 8192 values wrong
+calling sink tile 16x32
+sink tile 16x32: 4096 of 8192 values wrong
+```
+The three runs printed the same lines.
+Repro: chunked page-table storage (one Blackhole chip, main f5985995a)
+The DRAM table control runs before the WIDTH_SHARDED case. The script derives the causal mask from the device chunk offset and reconstructs K/V from the read-back table. It reports both users and batch 0 separately, with atol=0.02, rtol=0.03. The older mesh failure counts concern batch 0 only.
+Run PYTHONDONTWRITEBYTECODE=1 python3 repro_chunked_table_sharding.py.
+```
+"""One chip; DRAM table control first; per-case device-input torch reference."""
+import torch
+import ttnn
+
+
+def run(device, sharded, tag):
+    dram = ttnn.DRAM_MEMORY_CONFIG
+    cores = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(1, 0))})
+    mem = ttnn.MemoryConfig(ttnn.TensorMemoryLayout.WIDTH_SHARDED, ttnn.BufferType.L1,
+                           ttnn.ShardSpec(cores, [2, 4], ttnn.ShardOrientation.ROW_MAJOR)) if sharded else dram
+    def put(x, integer=False, memory=dram):
+        return ttnn.from_torch(x.contiguous(), device=device, dtype=ttnn.int32 if integer else ttnn.bfloat16,
+                              layout=ttnn.ROW_MAJOR_LAYOUT if integer else ttnn.TILE_LAYOUT, memory_config=memory)
+    q, k = put(torch.zeros(2, 1, 32, 32)), put(torch.zeros(2, 1, 32, 32))
+    vh = torch.full((2, 1, 32, 32), tag / 8)
+    vh[1] += 10
+    v = put(vh)
+    pt = put(torch.tensor([[0, 0, 0, 0, 1, 1, 1, 1]] * 2, dtype=torch.int32), True, mem)
+    start = put(torch.tensor([128], dtype=torch.int32), True)
+    qd, kd, vd = [ttnn.to_torch(t).double() for t in (q, k, v)]
+    pages = ttnn.to_torch(ttnn.to_memory_config(pt, dram) if sharded else pt).long()
+    offset = int(ttnn.to_torch(start).reshape(-1)[0])
+    refs = []
+    for batch in range(2):
+        ku, vu = [x[pages[batch]].permute(1, 0, 2, 3).reshape(1, 1, -1, 32) for x in (kd, vd)]
+        mask = torch.arange(ku.shape[-2])[None, :] <= offset + torch.arange(32)[:, None]
+        refs.append(torch.nn.functional.scaled_dot_product_attention(qd[batch:batch + 1], ku, vu,
+                                                                     attn_mask=mask, scale=1.0))
+    want = torch.cat(refs, dim=0)
+    pc = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=ttnn.CoreCoord(1, 1), q_chunk_size=32,
+                               k_chunk_size=32, exp_approx_mode=False, max_cores_per_head_batch=1)
+    ck = ttnn.init_device_compute_kernel_config(device.arch(), math_fidelity=ttnn.MathFidelity.HiFi4,
+                                               math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
+    label = "WIDTH_SHARDED page table" if sharded else "control DRAM page table"
+    print(f"calling {label}", flush=True)
+    out = ttnn.transformer.chunked_scaled_dot_product_attention(
+        q, k, v, pt, chunk_start_idx=None, chunk_start_idx_tensor=start, scale=1.0,
+        memory_config=dram, program_config=pc, compute_kernel_config=ck)
+    got = ttnn.to_torch(out).double()
+    bad = ~((got - want).abs() <= 0.02 + 0.03 * want.abs())
+    print(f"{label}: {int(bad.sum())} of {want.numel()} values wrong; "
+          f"batch 0: {int(bad[0].sum())} of {want[0].numel()} values wrong; "
+          f"row 0 got {got[0, 0, 0, 0].item():.8g}, torch {want[0, 0, 0, 0].item():.8g}; "
+          f"row 31 got {got[0, 0, 31, 0].item():.8g}, torch {want[0, 0, 31, 0].item():.8g}", flush=True)
+
+
+device = ttnn.open_device(device_id=0)
+try:
+    run(device, False, 1)
+    run(device, True, 0)
+finally:
+    ttnn.close_device(device)
+```
+Output in the default fast dispatch:
+```
+calling control DRAM page table
+control DRAM page table: 0 of 2048 values wrong; batch 0: 0 of 1024 values wrong; row 0 got 0.20214844, torch 0.20251938; row 31 got 2.125, torch 2.125
+calling WIDTH_SHARDED page table
+WIDTH_SHARDED page table: 2048 of 2048 values wrong; batch 0: 1024 of 1024 values wrong; row 0 got 0, torch 0.07751938; row 31 got 0, torch 2
+```
+The three runs printed the same lines.
+Repro: separate V layout (one Blackhole chip, main f5985995a)
+The TILE V control runs first. Each case uses a fresh V, with distinct channel values. Q/K are zero, so torch's device-input reference is the mean of V. Tolerance is atol=0.1.
+Run PYTHONDONTWRITEBYTECODE=1 python3 repro_mla_prefill_v_layout.py.
+```
+"""One chip; TILE V control first; separate V data in each case."""
+import torch
+import ttnn
+
+
+def run(device, row_major, tag):
+    def put(x, layout=ttnn.TILE_LAYOUT):
+        return ttnn.from_torch(x.contiguous(), device=device, dtype=ttnn.bfloat16, layout=layout,
+                              memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    q, k = put(torch.zeros(1, 1, 32, 32)), put(torch.zeros(1, 1, 256, 32))
+    vh = (torch.arange(32).float() + tag / 8).reshape(1, 1, 1, 32).expand(1, 1, 256, 32)
+    v = put(vh, ttnn.ROW_MAJOR_LAYOUT if row_major else ttnn.TILE_LAYOUT)
+    qd, kd, vd = [ttnn.to_torch(t).double() for t in (q, k, v)]
+    want = torch.nn.functional.scaled_dot_product_attention(qd, kd, vd, scale=1.0)
+    pc = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=ttnn.CoreCoord(1, 1), q_chunk_size=32,
+                               k_chunk_size=32, exp_approx_mode=False, max_cores_per_head_batch=1)
+    ck = ttnn.init_device_compute_kernel_config(device.arch(), math_fidelity=ttnn.MathFidelity.HiFi4,
+                                               math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=False)
+    label = "ROW_MAJOR separate V" if row_major else "control TILE separate V"
+    print(f"calling {label}", flush=True)
+    out = ttnn.transformer.flash_mla_prefill(q, k, v, is_causal=False, scale=1.0,
+                                           program_config=pc, compute_kernel_config=ck)
+    got = ttnn.to_torch(out).double()
+    bad = int((~((got - want).abs() <= 0.1)).sum())
+    print(f"{label}: {bad} of {want.numel()} values wrong; first got {got.flatten()[0].item():.8g}, "
+          f"torch {want.flatten()[0].item():.8g}", flush=True)
+
+
+device = ttnn.open_device(device_id=0)
+try:
+    run(device, False, 1)
+    run(device, True, 0)
+finally:
+    ttnn.close_device(device)
+```
+Output in the default fast dispatch:
+```
+calling control TILE separate V
+control TILE separate V: 0 of 1024 values wrong; first got 0.125, torch 0.125
+calling ROW_MAJOR separate V
+ROW_MAJOR separate V: 1024 of 1024 values wrong; first got 8, torch 0
+```
+The three runs printed the same lines.
+Cause
+Line labels give file:line at f5985995a; links pin current main a699bc1be, checked 2026-11-02. The relevant ranges were compared directly: the cited code is the same in f5985995a.
+Prefill Q
+The basic operand loop checks layout() == Layout::TILE but no tile shape (sdpa/device/sdpa_device_operation.cpp:36-41, sdpa/device/sdpa_device_operation.cpp:44-51). The factory computes Sqt = padded_Sq / TILE_HEIGHT and DHt = DH / TILE_WIDTH (sdpa/device/sdpa_program_factory.cpp:1248-1257) and uses q_tile_size = tt::tile_size(q_df) (sdpa/device/sdpa_program_factory.cpp:1761-1764). The reader constructs Q page indices in these 32-row units and calls read_chunk_with_padding<q_tile_bytes> (sdpa/device/kernels/dataflow/reader_interleaved.cpp:563-572); that helper reads tile_bytes at each successive page id (sdpa/device/kernels/dataflow/dataflow_common.hpp:163-169). A BF16 16x32 tile is 1024 bytes, whereas these CB transfers use 2048-byte tiles. The code proves inconsistent page size and row geometry. The one-chip output establishes 1024 wrong values for this fixture; exact contents beyond an admitted small source page are not inferred from source alone.
+MLA decode attention sink
+The sink validator checks padded shape, BF16, TILE and DRAM, but no tile geometry (sdpa_decode/device/sdpa_decode_device_operation.cpp:559-585). Both sink tile shapes pad [256,1] to [256,32]. With 256 query heads the factory's num_q_heads <= 16 half-tile condition is false, so stats_tile is full 32x32 (sdpa_decode/device/sdpa_decode_program_factory.cpp:510-513, sdpa_decode/device/sdpa_decode_program_factory.cpp:543-551), and the sink CB uses that statistics tile (sdpa_decode/device/sdpa_decode_program_factory.cpp:642-644). The reader explicitly assumes “the DRAM buffer stores full tiles (32x32)” and reads attention_sink_tile_bytes at successive source page ids (sdpa_decode/device/kernels/dataflow/reader_decode_all.cpp:254-264). This establishes the mismatch. The one-chip output establishes 4096 wrong values; neither that count nor the source alone establishes every erroneous head mapping.
+Chunked page-table storage
+For chunked input, validation requires a device ROW_MAJOR INT32 table on Q's device (sdpa/device/sdpa_device_operation.cpp:252-258) and checks its batch against Q (sdpa/device/sdpa_device_operation.cpp:299-304), but never rejects sharding. In the flexible chunk_start_idx_tensor path, compute_chunked_params sets page_table_stick_size = max_blocks_per_seq * sizeof(int32_t) (sdpa/device/sdpa_program_factory.cpp:160-166): 32 bytes for this eight-entry row. reader_interleaved invokes the shared row reader with the batch as page id (sdpa/device/kernels/dataflow/reader_interleaved.cpp:443-450). The helper builds a TensorAccessor then reads that complete row-sized transfer from page_id = batch_idx (sdpa/device/kernels/dataflow/dataflow_common.hpp:71-91). A [2,4] width shard contains only half of each eight-entry row. This proves that validation admits a representation not reconstructed by this row read; the source does not determine the contents of every extra byte. The one-chip run shows every value wrong for both users, with 0 at both printed batch-0 rows; the older mesh receipts also report 1024/1024 wrong in batch 0, with 0 at the two printed rows.
+Separate V layout
+For MLA, the validator sets const Tensor& v = use_mla ? tensors.k : tensors.v.value(); and runs storage/layout/dtype checks on that alias (sdpa/device/sdpa_device_operation.cpp:36-41, sdpa/device/sdpa_device_operation.cpp:44-51). Its final padding loop uses the same alias (sdpa/device/sdpa_device_operation.cpp:572-576). Thus a supplied separate V is not the operand whose layout was checked. The factory instead selects tensor_args.v.value_or(tensor_args.k) (sdpa/device/sdpa_program_factory.cpp:1152-1155) and uses v_tile_size = tt::tile_size(v_df) (sdpa/device/sdpa_program_factory.cpp:1761-1764). The independent-V reader calls read_chunk_with_padding<v_tile_bytes> (sdpa/device/kernels/dataflow/reader_interleaved.cpp:952-961), whose transfer is tile_bytes at each page id (sdpa/device/kernels/dataflow/dataflow_common.hpp:163-169). The BF16 V here has 64-byte ROW_MAJOR rows, while the reader requests 2048-byte tiles. The code proves the unchecked actual V reaches tiled addressing; it does not predict all bytes read for arbitrary invalid layouts.
+Related
+#57364: its flexible-chunked item is a performance-model sequence-length calculation, not page-table storage or V validation.
+#58408, #60258: attention-sink dtype and decode granularities; no actual-V/page-table guards.
+Open #62458 checks separate-V head counts, not the actual V's layout. A one-head ROW_MAJOR V still passes those new checks.
+Open #60197, head beb97d27d08, reroutes FP32-DEST prefill to recipes: recipe index validation rejects sharded page tables, and its operand validation checks actual V layout and 32x32 tiles. It also rejects prefill max_cores_per_head_batch, present in these fixtures. It is therefore a source-level candidate to stop these exact FP32 calls, potentially before the operand-specific guard. It leaves BF16-DEST streaming calls in the legacy validation routine described above; those sibling cases have not been measured here. This report asks for a complete contract correction in that shared routine. The same recipe tile check is a source-level candidate for rejecting the FP32 Q case. It does not route MLA decode. No PR build or new-path execution was performed.
+#48899, merged #59349 and #58381, and open #59427: scalar offset/chunk/boundary or generated-mask work, not these storage contracts. The device offset is aligned at 128 in this fixture.
+We have not built or tested a fix.
+dddrrreee commented on Nov 3, 2026
+dddrrreee
+on Nov 3, 2026
+ContributorAuthor
+More actions
+The single-core factory of untilize_with_unpadding, which use_multicore=False selects, is another routine in this family. The call is ttnn.untilize_with_unpadding(x, [0, 0, 110, 31], use_multicore=False) of a DRAM BF16 TILE tensor [1, 1, 111, 64], on one Blackhole P150 chip at main 3facb4345ea, in the default fast dispatch:
+With a 16x32 tile, the call returns, but reading its output back did not finish within 120 s, in 3 of 3 runs.
+With a 16x16 tile, the same happened, in 1 of 1 run.
+With a 32x16 tile, it returned 3173 of 3552 values wrong.
+With the default 32x32 tile, it was exact (0 of 3552 values wrong) in all 4 runs.
+We reset the chip after each run that did not finish.
+This factory counts tiles with the 32x32 constants, so this issue's fix needs to cover it as well. It must either honor the input tile geometry or reject unsupported tiles before building the program. It is separate code from the multi-core interleaved factory in an earlier comment on this issue.
+Repro (one Blackhole chip, main 3facb4345ea)
+Run python3 repro.py 32x32 32x16 16x32, then, after a chip reset, python3 repro.py 32x32 16x16. Each case runs in its own process.
+```
+"""ttnn.untilize_with_unpadding(x, [0, 0, 110, 31], use_multicore=False) of a DRAM BF16 TILE tensor [1, 1, 111, 64]
+with the default 32x32 tile and with 32x16, 16x32 and 16x16 tiles. Values are multiples of 1/8, exact in bfloat16.
+
+python3 repro.py [TILE ...]   TILE in 32x32 (default tile), 32x16, 16x32, 16x16; default: all four, in that order.
+Each case runs in its own process; one that does not finish within LIMIT seconds is killed. One Blackhole chip.
+"""
+
+import re
+import subprocess
+import sys
+
+LIMIT = 120
+TILES = ["32x32", "32x16", "16x32", "16x16"]
+
+
+def one(tile):
+    import torch
+    import ttnn
+
+    label = f"{tile} tile" + (" (default)" if tile == "32x32" else "")
+    h, w = map(int, tile.split("x"))
+    device = ttnn.open_device(device_id=0)
+    x = (torch.randint(-16, 17, (1, 1, 111, 64), generator=torch.Generator().manual_seed(0)) / 8).bfloat16()
+    kwargs = {} if tile == "32x32" else {"tile": ttnn.Tile([h, w])}
+    xt = ttnn.from_torch(
+        x, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG, **kwargs
+    )
+    try:
+        print(f"{label}: calling untilize_with_unpadding", flush=True)
+        y = ttnn.untilize_with_unpadding(xt, [0, 0, 110, 31], use_multicore=False)
+        print(f"{label}: call returned; reading the output back", flush=True)
+        got, want = ttnn.to_torch(y).double(), x[:, :, :111, :32].double()
+    except Exception as exc:
+        text = re.sub(r"/\S*/", "", " ".join(str(exc).split("backtrace:")[0].split()))  # drop local directories
+        print(f"{label}: raised {type(exc).__name__}: {text[:200]}", flush=True)
+    else:
+        if got.shape != want.shape:
+            print(f"{label}: output shape {list(got.shape)}, expected {list(want.shape)}", flush=True)
+        else:
+            print(f"{label}: {int((got != want).sum())} of {want.numel()} values wrong", flush=True)
+    ttnn.close_device(device)
+
+
+def run(tile):
+    """Run one case in a child process; print only the child's own result lines."""
+    child = subprocess.Popen(
+        [sys.executable, __file__, "--one", tile], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    )
+    try:
+        out, _ = child.communicate(timeout=LIMIT)
+        finished = True
+    except subprocess.TimeoutExpired:
+        child.kill()
+        out, _ = child.communicate()
+        finished = False
+    for line in out.splitlines():
+        if line.startswith(f"{tile} tile"):
+            print(line, flush=True)
+    if not finished:
+        print(f"{tile} tile: did not finish within {LIMIT} s; process killed", flush=True)
+    elif child.returncode:
+        print(f"{tile} tile: process exited with status {child.returncode}", flush=True)
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["--one"]:
+        one(sys.argv[2])
+    else:
+        for tile in sys.argv[1:] or TILES:
+            assert tile in TILES, tile
+            run(tile)
+```
+Output in the default fast dispatch:
+```
+32x32 tile (default): calling untilize_with_unpadding
+32x32 tile (default): call returned; reading the output back
+32x32 tile (default): 0 of 3552 values wrong
+32x16 tile: calling untilize_with_unpadding
+32x16 tile: call returned; reading the output back
+32x16 tile: 3173 of 3552 values wrong
+16x32 tile: calling untilize_with_unpadding
+16x32 tile: call returned; reading the output back
+16x32 tile: did not finish within 120 s; process killed
+```
+```
+32x32 tile (default): calling untilize_with_unpadding
+32x32 tile (default): call returned; reading the output back
+32x32 tile (default): 0 of 3552 values wrong
+16x16 tile: calling untilize_with_unpadding
+16x16 tile: call returned; reading the output back
+16x16 tile: did not finish within 120 s; process killed
+```
+The second and third 16x32 runs, each after a chip reset and with the 32x32 control first, printed the same 32x32 and 16x32 lines.
+Cause
+Links pin main de69037d3; the card run used main 3facb4345ea, and the cited files are the same in both.
+The single-core factory counts and sizes tiles with the 32x32 constants (untilize_with_unpadding_single_core_program_factory.cpp:63, line 83, lines 112-115, line 218):
+line 63: int32_t num_tiles = a.physical_volume() / TILE_HW;
+line 83: uint32_t num_tiles_in_row = input_x / TILE_WIDTH;
+lines 112-115: the padded and leftover row blocks in TILE_HEIGHT, e.g. num_leftover_Y = output_y - (output_y / TILE_HEIGHT * TILE_HEIGHT);
+line 218: the compute block count num_tiles / num_tiles_per_block
+Its input buffer entry is tt::tile_size(format), 2048 bytes for BF16 (line 55). The reader copies one entry of that size from each page address (reader_unary_interleaved_start_id_metal2.cpp:33, line 47). The writer's row blocks are 32 rows (writer_unary_unpad_dims_split_rows.cpp:17, lines 88-99).
+For [1, 1, 111, 64] with a 16x32 tile, the padded shape is [1, 1, 112, 64]: 14 pages of 1024 bytes. The factory counts 7168 / 1024 = 7 tiles and 2 per row, so compute untilizes 7 / 2 = 3 blocks. The writer waits for 111 / 32 = 3 full row blocks plus one of 15 leftover rows, 4 blocks in all. With a 16x16 tile the counts are the same (7 tiles, 3 blocks). With a 32x16 tile the padded height is 128, so the factory counts 8 tiles and 4 blocks, matching the writer. Its reader still copies 2048 bytes at each of the first 8 of 16 1024-byte pages. This is a source reading; we did not trace the kernels. Validation checks only that the physical volume is a multiple of TILE_HW (untilize_with_unpadding_device_operation.cpp:129-133). use_multicore=False selects this factory for an interleaved output (lines 85-86).
+The Quasar copy has the same counts (experimental/quasar/.../untilize_with_unpadding_single_core_program_factory.cpp:47, lines 64, 93-96 and 192); we did not run it.
+We have not built or tested a fix.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+community
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

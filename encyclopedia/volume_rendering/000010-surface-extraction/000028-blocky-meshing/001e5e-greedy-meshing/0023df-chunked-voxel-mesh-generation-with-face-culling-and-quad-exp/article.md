@@ -1,0 +1,273 @@
+# Chunked Voxel Mesh Generation with Face Culling and Quad Expansion
+
+Also called: Chunk Mesh Builder, Chunk-based Greedy Meshing, ChunkMeshActual, Greedy Meshing / Face Culling with AO, Greedy Meshing with Chunked Processing, Greedy Voxel Meshing, GreedyMeshing.OptimizeChunk, Voxel Mesh Generation
+
+## Overview
+Chunked Voxel Mesh Generation with Face Culling and Quad Expansion is a surface extraction algorithm that processes a 3D voxel chunk to generate an optimized triangle mesh by merging adjacent coplanar faces of identical voxel types into larger quads [S1, S4, unofficial]. It solves the problem of high vertex and triangle counts in naive voxel rendering by reducing draw calls and memory bandwidth usage [S1, S2, unofficial]. Unlike [Voxel Mesh Generation (Run-based Greedy Meshing)](3127-voxel-mesh-generation-run-based-greedy-meshing.md) which may process runs linearly, this method explicitly handles chunk boundaries and neighbor dependencies to enable maximal rectangle merging across chunk edges, trading increased preparation time for significant triangle count reduction [S2, S4, unofficial]. It differs from [Binary Greedy Meshing with Packed Quads](3312-binary-greedy-meshing-with-packed-quads.md) by using explicit boolean visitation arrays and separate quad expansion logic rather than binary packing for the expansion phase [S1, S4, unofficial].
+
+## How it works
+**Inputs:** A `Chunk` object containing a 1D array of voxel data (`data`), neighbor chunk pointers (`cXN`, `cXP`, `cYN`, `cYP`, `cZN`, `cZP`), chunk world position (`chunkPosX`, `chunkPosY`, `chunkPosZ`), and heightmaps (`minAltitude`, `maxAltitude`) [S1, S4, unofficial].
+**Outputs:** A vertex buffer (`vertexBuffer`) containing packed vertex attributes and a triangle index list [S1, S3, S4, unofficial].
+
+**Data Structures:**
+1.  **Voxel Array:** 1D array of size `Constants.ChunkSize` cubed. Layout: `index` (byte, 0=void), `health` (byte). Access stride: `ACCESS_STEP_X = Constants.ChunkSize`, `ACCESS_STEP_Y = 1`, `ACCESS_STEP_Z = Constants.ChunkSizeSquared` [S1, S4, unofficial].
+2.  **Visitation Arrays:** Six boolean arrays (`visitXN`, `visitXP`, `visitYN`, `visitYP`, `visitZN`, `visitZP`) of size `Constants.ChunkSize` cubed, initialized to false. These track which faces have been merged into quads to prevent double-counting [S1, S4, unofficial].
+3.  **Vertex Buffer:** Array of `uint32`. Size: `CHUNK_VOL * 18 * format_size` (where `format_size` is 4 bytes for `uint32`) [S3, unofficial].
+4.  **Packed Vertex Format:** A single `uint32` per vertex corner containing:
+    *   `x`: 6 bits
+    *   `y`: 6 bits
+    *   `z`: 6 bits
+    *   `voxel_id`: 8 bits
+    *   `face_id`: 3 bits
+    *   `ao_id`: 2 bits
+    *   `flip_id`: 1 bit
+    *   Total: 32 bits [S3, S4, unofficial].
+5.  **FaceTypeShifted:** Enum mapping face normals to bit shifts for the upper bits of the vertex attribute: `yp=0<<27`, `yn=1<<27`, `xp=2<<27`, `xn=3<<27`, `zp=4<<27`, `zn=5<<27` [S4, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization:**
+    *   Initialize `vertexBuffer` to zero.
+    *   Initialize all six visitation arrays to false [S1, S4, unofficial].
+    *   Determine iteration bounds using heightmaps: `minJ = minAltitude[i, k]`, `maxJ = maxAltitude[i, k]` for each `(i, k)` column [S1, S4, unofficial].
+
+2.  **Voxel Iteration:**
+    *   Iterate through the chunk using three nested loops:
+        *   Outer: `k` from 0 to `Constants.ChunkSize - 1` (Z-axis) [S1, S4, unofficial].
+        *   Middle: `i` from 0 to `Constants.ChunkSize - 1` (X-axis) [S1, S4, unofficial].
+        *   Inner: `j` from `minJ` to `maxJ` (Y-axis) [S1, S4, unofficial].
+    *   Calculate linear access index: `access = j | (i * Constants.ChunkSize) | (k * Constants.ChunkSizeSquared)` [S1, S4, unofficial].
+    *   Get voxel `b = data[access]`. If `b.index == 0`, continue [S3, S4, unofficial].
+
+3.  **Boundary and Visibility Check:**
+    *   Determine boundary flags for the current voxel `(i, j, k)`:
+        *   `minX = (i == 0)`, `maxX = (i == Constants.ChunkSize - 1)`
+        *   `minZ = (k == 0)`, `maxZ = (k == Constants.ChunkSize - 1)`
+        *   `minY = (j == 0)`, `maxY = (j == Constants.ChunkSize - 1)` [S1, S4, unofficial].
+    *   For each of the 6 face directions, check if the face is visible and not yet visited:
+        *   **X- (Left):** If `!visitXN[access]` and `DrawFaceXN(j, access, minX, k * Constants.ChunkSizeSquared)` is true:
+            *   Set `visitXN[access] = true` [S1, S4, unofficial].
+            *   Call `ExpandQuadXN(i, j, k, access, b)` [S4, unofficial].
+        *   **X+ (Right):** If `!visitXP[access]` and `DrawFaceXP(j, access, maxX, k * Constants.ChunkSizeSquared)` is true:
+            *   Set `visitXP[access] = true` [S1, S4, unofficial].
+            *   Call `ExpandQuadXP(i, j, k, access, b)` [S4, unofficial].
+        *   **Z- (Back):** If `!visitZN[access]` and `VisibleFaceZN(j, access, minZ, i * Constants.ChunkSize)` is true:
+            *   Set `visitZN[access] = true` [S1, S4, unofficial].
+            *   Call `ExpandQuadZN(i, j, k, access, b)` [S4, unofficial].
+        *   **Z+ (Front):** If `!visitZP[access]` and `VisibleFaceZP(j, access, maxZ, i * Constants.ChunkSize)` is true:
+            *   Set `visitZP[access] = true` [S1, S4, unofficial].
+            *   Call `ExpandQuadZP(i, j, k, access, b)` [S4, unofficial].
+        *   **Y- (Bottom):** If `j > 0` and `!visitYN[access]` and `DrawFaceYN(access, minY, i * Constants.ChunkSize, k * Constants.ChunkSizeSquared)` is true:
+            *   Set `visitYN[access] = true` [S1, S4, unofficial].
+            *   Call `ExpandQuadYN(i, j, k, access, b)` [S4, unofficial].
+        *   **Y+ (Top):** If `!visitYP[access]` and `VisibleFaceYP(access, maxY, i * Constants.ChunkSize, k * Constants.ChunkSizeSquared)` is true:
+            *   Set `visitYP[access] = true` [S1, S4, unofficial].
+            *   Call `ExpandQuadYP(i, j, k, access, b)` [S4, unofficial].
+
+4.  **Visibility Functions (`DrawFace...`):**
+    *   These functions determine if a face is exposed (adjacent voxel is void or chunk boundary).
+    *   **Example `DrawFaceXN`:**
+        *   If `minX` (chunk edge):
+            *   If `chunkPosX == 0`, return false (world boundary) [S4, unofficial].
+            *   If `cXN == null`, return true (visible to void) [S4, unofficial].
+            *   Else, check neighbor block at offset `31 * Constants.ChunkSize + j + k * Constants.ChunkSizeSquared`. If `index == 0`, return true [S4, unofficial].
+        *   Else (internal), check `data[access - Constants.ChunkSize].index == 0` [S4, unofficial].
+    *   **Example `VisibleFaceYP`:**
+        *   If `maxY` (chunk top):
+            *   Do NOT check `chunkPosY` boundary (players can move above map) [S4, unofficial].
+            *   If `cYP == null`, return true [S4, unofficial].
+            *   Else, check neighbor block at offset `i * Constants.ChunkSize + k * Constants.ChunkSizeSquared`. If `index == 0`, return true [S4, unofficial].
+        *   Else (internal), check `data[access + 1].index == 0` [S4, unofficial].
+    *   **DifferentBlock Check:** Used during expansion to ensure merged quads are of the same voxel type. Returns true if `b.index != compare.index || b.health != compare.health` [S4, unofficial].
+
+5.  **Quad Expansion (e.g., `ExpandQuadXN`):**
+    *   **Step 1: Expand along Y (length_a):**
+        *   Start at `j1 = j`. Iterate `end_a` from `j1` to `Constants.ChunkSize - 1`.
+        *   Calculate `access_next = access + (end_a - j1) * ACCESS_STEP_Y`.
+        *   If `DifferentBlock(access_next, b)` or `visitXN[access_next]` is true, break [S1, S4, unofficial].
+        *   Mark `visitXN[access_next] = true` [S1, S4, unofficial].
+        *   `length_a = end_a - j1 + 1` [S1, S4, unofficial].
+    *   **Step 2: Expand along Z (length_b):**
+        *   Reset pointer to `access` (start of the Y-run) [S1, S4, unofficial].
+        *   Iterate `g` from 0 to `Constants.ChunkSize - 1`.
+        *   Check if the row at `access + g * ACCESS_STEP_Z` is identical to the reference row (all voxels in the Y-run have same type and are unvisited) [S1, S4, unofficial].
+        *   If identical, mark all faces in that row as visited (`visitXN[access + g * ACCESS_STEP_Z + offset] = true`) and increment `length_b` [S1, S4, unofficial].
+        *   If different, break [S1, S4, unofficial].
+    *   **Step 3: Generate Vertices:**
+        *   Call `BlockVertex.AppendQuadX(vertexBuffer, ...)` with coordinates `(i, j, k)`, `length_a`, `length_b`, face type, and texture health [S4, unofficial].
+        *   `AppendQuadX` writes 6 `uint32` values to the buffer representing the 4 corners of the quad (with duplicate vertices for triangle fan/strip) [S4, unofficial].
+        *   Vertex packing uses `pack_data(x, y, z, voxel_id, face_id, ao_id, flip_id)` [S3, unofficial].
+        *   `flip_id` is determined by AO values: `flip_id = ao[1] + ao[3] > ao[0] + ao[2]` [S3, unofficial].
+        *   Triangles are generated with winding order determined by `outward` boolean (e.g., `[2, 1, 0, 3, 2, 0]` for outward) [S2, S4, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ChunkedVoxelMeshGeneration(chunk):
+    # Constants
+    CHUNK_SIZE = chunk.size
+    CHUNK_VOL = CHUNK_SIZE ** 3
+    ACCESS_STEP_X = CHUNK_SIZE
+    ACCESS_STEP_Y = 1
+    ACCESS_STEP_Z = CHUNK_SIZE * CHUNK_SIZE
+    
+    # Initialize buffers
+    vertex_buffer = [0] * (CHUNK_VOL * 18) # 18 uint32s per quad max estimate
+    visitXN = [False] * CHUNK_VOL
+    visitXP = [False] * CHUNK_VOL
+    visitYN = [False] * CHUNK_VOL
+    visitYP = [False] * CHUNK_VOL
+    visitZN = [False] * CHUNK_VOL
+    visitZP = [False] * CHUNK_VOL
+    
+    # Precompute heightmaps if not present
+    min_altitude, max_altitude = compute_heightmaps(chunk.data, CHUNK_SIZE)
+    
+    for k in range(CHUNK_SIZE):
+        for i in range(CHUNK_SIZE):
+            min_j = min_altitude[i, k]
+            max_j = max_altitude[i, k]
+            
+            for j in range(min_j, max_j + 1):
+                access = j + i * ACCESS_STEP_X + k * ACCESS_STEP_Z
+                voxel = chunk.data[access]
+                
+                if voxel.index == 0:
+                    continue
+                
+                # Boundary checks
+                min_x = (i == 0)
+                max_x = (i == CHUNK_SIZE - 1)
+                min_z = (k == 0)
+                max_z = (k == CHUNK_SIZE - 1)
+                min_y = (j == 0)
+                max_y = (j == CHUNK_SIZE - 1)
+                
+                # X- Face
+                if not visitXN[access] and is_visible_xn(chunk, access, voxel, min_x, j, k, ACCESS_STEP_Z):
+                    visitXN[access] = True
+                    expand_quad_xn(chunk, vertex_buffer, visitXN, voxel, i, j, k, access, ACCESS_STEP_X, ACCESS_STEP_Y, ACCESS_STEP_Z)
+                
+                # X+ Face
+                if not visitXP[access] and is_visible_xp(chunk, access, voxel, max_x, j, k, ACCESS_STEP_Z):
+                    visitXP[access] = True
+                    expand_quad_xp(chunk, vertex_buffer, visitXP, voxel, i, j, k, access, ACCESS_STEP_X, ACCESS_STEP_Y, ACCESS_STEP_Z)
+                
+                # Z- Face
+                if not visitZN[access] and is_visible_zn(chunk, access, voxel, min_z, i, k, ACCESS_STEP_X):
+                    visitZN[access] = True
+                    expand_quad_zn(chunk, vertex_buffer, visitZN, voxel, i, j, k, access, ACCESS_STEP_X, ACCESS_STEP_Y, ACCESS_STEP_Z)
+                
+                # Z+ Face
+                if not visitZP[access] and is_visible_zp(chunk, access, voxel, max_z, i, k, ACCESS_STEP_X):
+                    visitZP[access] = True
+                    expand_quad_zp(chunk, vertex_buffer, visitZP, voxel, i, j, k, access, ACCESS_STEP_X, ACCESS_STEP_Y, ACCESS_STEP_Z)
+                
+                # Y- Face
+                if j > 0 and not visitYN[access] and is_visible_yn(chunk, access, voxel, min_y, i, k, ACCESS_STEP_X, ACCESS_STEP_Z):
+                    visitYN[access] = True
+                    expand_quad_yn(chunk, vertex_buffer, visitYN, voxel, i, j, k, access, ACCESS_STEP_X, ACCESS_STEP_Y, ACCESS_STEP_Z)
+                
+                # Y+ Face
+                if not visitYP[access] and is_visible_yp(chunk, access, voxel, max_y, i, k, ACCESS_STEP_X, ACCESS_STEP_Z):
+                    visitYP[access] = True
+                    expand_quad_yp(chunk, vertex_buffer, visitYP, voxel, i, j, k, access, ACCESS_STEP_X, ACCESS_STEP_Y, ACCESS_STEP_Z)
+
+def is_visible_xn(chunk, access, voxel, min_x, j, k, step_z):
+    if min_x:
+        if chunk.pos_x == 0: return False
+        if chunk.neighbors.xn is None: return True
+        neighbor_access = 31 * chunk.size + j + k * chunk.size * chunk.size
+        return chunk.neighbors.xn.data[neighbor_access].index == 0
+    return chunk.data[access - chunk.size].index == 0
+
+def expand_quad_xn(chunk, vertex_buffer, visit_array, voxel, i, j, k, access, step_x, step_y, step_z):
+    # Expand along Y
+    j1 = j
+    end_a = j1
+    while end_a < chunk.size:
+        next_access = access + (end_a - j1) * step_y
+        if different_block(chunk.data[next_access], voxel) or visit_array[next_access]:
+            break
+        visit_array[next_access] = True
+        end_a += 1
+    length_a = end_a - j1 + 1
+    
+    # Expand along Z
+    length_b = 0
+    g = 0
+    while g < chunk.size:
+        # Check if row at g is identical to row at 0
+        row_match = True
+        for dy in range(length_a):
+            row_access = access + dy * step_y + g * step_z
+            if visit_array[row_access] or different_block(chunk.data[row_access], voxel):
+                row_match = False
+                break
+        if row_match:
+            for dy in range(length_a):
+                row_access = access + dy * step_y + g * step_z
+                visit_array[row_access] = True
+            length_b += 1
+            g += 1
+        else:
+            break
+            
+    # Append Quad
+    append_quad_x(vertex_buffer, i, j, k, length_a, length_b, voxel, FaceType.xn)
+
+def append_quad_x(vertex_buffer, i, j, k, length_a, length_b, voxel, face_type):
+    # Generate 6 vertices for 2 triangles
+    # Coordinates:
+    # V0: (i, j, k)
+    # V1: (i, j, k + length_b)
+    # V2: (i, j + length_a, k)
+    # V3: (i, j + length_a, k + length_b)
+    
+    # Pack vertices
+    v0 = pack_data(i, j, k, voxel.index, face_id, ao_id, flip_id)
+    v1 = pack_data(i, j, k + length_b, voxel.index, face_id, ao_id, flip_id)
+    v2 = pack_data(i, j + length_a, k, voxel.index, face_id, ao_id, flip_id)
+    v3 = pack_data(i, j + length_a, k + length_b, voxel.index, face_id, ao_id, flip_id)
+    
+    # Write to buffer (simplified, actual implementation writes 6 ints for 2 triangles)
+    # Triangle 1: 0, 1, 2
+    # Triangle 2: 1, 3, 2
+    write_vertex(vertex_buffer, v0)
+    write_vertex(vertex_buffer, v1)
+    write_vertex(vertex_buffer, v2)
+    write_vertex(vertex_buffer, v1)
+    write_vertex(vertex_buffer, v3)
+    write_vertex(vertex_buffer, v2)
+
+def pack_data(x, y, z, voxel_id, face_id, ao_id, flip_id):
+    # x: 6bit, y: 6bit, z: 6bit, voxel_id: 8bit, face_id: 3bit, ao_id: 2bit, flip_id: 1bit
+    return (x << 26) | (y << 20) | (z << 14) | (voxel_id << 6) | (face_id << 3) | (ao_id << 1) | flip_id
+```
+
+## Subtopics
+
+### [Chunk-based Marching Cubes with Face Combination](4158-chunk-based-marching-cubes-with-face-combination.md)
+A meshing algorithm that processes voxel data in fixed-size chunks (Constants.ChunkSize), generating triangles for visible faces and combining adjacent coplanar faces into quads to reduce vertex count. It differs by using Marching Cubes for smooth surfaces before greedy merging, whereas this method operates on blocky voxel faces directly. Choose when smooth terrain is required.
+
+### [Chunk Mesh Preparation](4265-chunk-mesh-preparation.md)
+Chunk Mesh Preparation prepares a 3D voxel chunk for surface extraction by constructing a padded volume that incorporates data from neighboring chunks. This padding ensures that visibility culling at chunk boundaries is correct, allowing the subsequent greedy meshing algorithm to merge coplanar faces across chunk edges without artifacts. It differs from naive face extraction by explicitly handling neighbor dependencies to enable maximal rectangle merging, trading increased preparation time for significant triangle count reduction. Choose when chunk boundaries cause visible seams or incorrect culling.
+
+## Operating characteristics
+**Time Complexity:** $O(V)$ where $V$ is the number of voxels in the chunk, as each voxel is visited a constant number of times. The expansion phase adds overhead proportional to the surface area, but the visitation arrays ensure each face is processed once [S1, S4, unofficial].
+**Memory Complexity:** $O(V)$ for the voxel data, plus $O(V)$ for the six boolean visitation arrays and the vertex buffer [S1, S3, S4, unofficial].
+**Measured Performance:** Reduces vertex count and draw calls significantly compared to naive meshing (one quad per face) [S1, S2, unofficial]. The algorithm is described as 'very optimal' and 'quite fast' [S2, unofficial].
+**Scaling:** Performance scales linearly with chunk size. Larger chunks reduce the overhead of chunk boundary checks but increase memory usage per chunk [S1, S4, unofficial].
+**Strengths:** High reduction in triangle count for large solid volumes; handles chunk boundaries correctly; compact vertex packing reduces memory bandwidth [S1, S2, S3, S4, unofficial].
+**Limitations:** Requires neighbor chunk data access, which can be complex to implement; expansion logic is sensitive to iteration order [S2, S4, unofficial]. Not suitable for non-axis-aligned surfaces or smooth terrain without additional processing [S2, S4, unofficial].
+
+## Background
+Originating from implementations in voxel engines like Vercidium and various open-source greedy meshing projects, this method combines face culling with greedy quad expansion in a chunked processing framework [S1, S2, S3, S4, unofficial]. It is widely used in voxel-based games and editors to optimize terrain rendering [S1, S2, S3, S4, unofficial]. The specific implementation details, such as packed vertex formats and neighbor chunk offsets, are derived from community-driven source code repositories [S1, S2, S3, S4, unofficial].
+
+## Sources
+[S1] vercidium-patreon/meshing, https://github.com/vercidium-patreon/meshing, fetched 2026-10-26 (unofficial)
+[S2] sm03854/Greedy-Voxel-Meshing, https://github.com/sm03854/Greedy-Voxel-Meshing, fetched 2026-10-26 (unofficial)
+[S3] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)
+[S4] Vercidium/voxel-mesh-generation, https://github.com/Vercidium/voxel-mesh-generation, fetched 2026-10-26 (unofficial)

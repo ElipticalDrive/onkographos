@@ -1,0 +1,139 @@
+--- v001.md
++++ v002.md
+@@ -1,39 +1,34 @@
+ # Sample Uniform and Occupied Cells
+ 
+-
+ ## Overview
+-This method generates a mixed set of voxel indices for volume rendering by combining uniformly sampled cells with cells known to be occupied by geometry. It addresses the need to balance exploration of empty space with focused sampling of visible geometry, filtering out cells with invalid density values (specifically -1) [S1, unofficial]. It differs from pure uniform sampling by ensuring coverage of occupied regions, and from exhaustive occupancy iteration by limiting the total sample count to a fixed budget $n$ per level [S1, unofficial].
++This method generates a mixed set of voxel indices for volume rendering by combining uniformly sampled cells with cells known to be occupied by geometry [S1, unofficial]. It filters out cells with invalid density values (specifically -1) [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `self.levels`: Integer, number of resolution levels in the grid hierarchy.
+-- `self.cells_per_lvl`: Integer, number of voxels per level (assumed constant across levels for this implementation).
+-- `self.device`: Target device for tensor operations (e.g., CUDA).
+-- `n`: Integer, number of samples to generate per level.
+-- `self.occs`: 1D tensor of shape `(total_voxels,)`, containing density or occupancy values. Cells with value `-1` are considered invalid/empty.
+-- `self.binaries`: List of 2D tensors, one per level. `self.binaries[lvl]` is a boolean or integer tensor representing the occupancy mask for level `lvl`.
++- `self.levels`: Integer, number of resolution levels in the grid hierarchy [S1, unofficial].
++- `self.cells_per_lvl`: Integer, number of voxels per level [S1, unofficial].
++- `self.occs`: 1D array/tensor of density or occupancy values [S1, unofficial].
++- `self.binaries`: List of arrays/tensors, one per level, representing occupancy masks [S1, unofficial].
++- `n`: Integer, number of uniform samples to generate per level [S1, unofficial].
++- `self.device`: Target device for computation [S1, unofficial].
+ 
+ **Outputs:**
+-- `lvl_indices`: List of 1D tensors. `lvl_indices[lvl]` contains `n` linear indices for level `lvl`.
++- `lvl_indices`: List of 1D arrays/tensors, one per level, containing linear indices [S1, unofficial].
+ 
+ **Data Structures:**
+-- Linear index calculation: $idx = lvl \times cells\_per\_lvl + local\_idx$.
+-- Invalid density marker: `-1` [S1, unofficial].
++- Linear index calculation: $idx = lvl \times cells\_per\_lvl + local\_idx$ [S1, unofficial].
++- Cells with value `-1` are considered invalid/empty [S1, unofficial].
+ 
+ **Steps:**
+-1. Initialize an empty list `lvl_indices`.
+-2. Iterate `lvl` from `0` to `self.levels - 1`:
+-    a. Generate `n` random integers in range `[0, self.cells_per_lvl)` using a uniform distribution. Store as `uniform_indices` [S1, unofficial].
+-    b. Compute global linear indices for these uniform samples:
+-       $$cell\_ids = lvl \times self.cells\_per\_lvl + uniform\_indices$$
+-    c. Filter `uniform_indices` to keep only those where `self.occs[cell_ids] >= 0.0`. Let the filtered count be $k$.
+-    d. Retrieve all occupied indices for the current level:
+-       $$occupied\_indices = \text{nonzero}(\text{flatten}(self.binaries[lvl]))[:, 0]$$
+-       Let the count of occupied indices be $m$.
+-    e. If $n < m$, select $n$ random indices from `occupied_indices` without replacement (or with replacement, depending on `torch.randint` behavior, typically with replacement if indices are reused, but `torch.randint` on indices implies selection with replacement if the same index is picked multiple times). Let this subset be `selected_occupied` [S1, unofficial].
+-       *Note: If $n \ge m$, use all `occupied_indices` and pad with additional uniform samples if necessary, or simply use all occupied indices. The source logic implies: if $n < len(occupied\_indices)$, select $n$. It does not explicitly handle $n \ge len(occupied\_indices)$ in the provided snippet, but standard interpretation is to take all occupied and potentially more uniform if needed, or just take all occupied. The source says "Concatenate uniform_indices and occupied_indices". This implies the final count might exceed $n$ if not careful. However, the source step 6 says "If n < len... select n...". It does not specify what happens if $n \ge len$. We assume if $n \ge len$, we take all occupied. Then we concatenate. The source step 7 says "Concatenate...". This suggests the final list length is $len(filtered\_uniform) + min(n, m)$. This might exceed $n$. Let's re-read carefully. "For each lvl... generate uniform... Filter... Get occupied... If n < len(occupied)... select n... Concatenate...". This results in a list of size $k + \min(n, m)$. This is not necessarily $n$. The method name "Sample Uniform and Occupied Cells" suggests a mixed strategy, not a strict budget of $n$ total. The budget $n$ applies to the *selection* from occupied if occupied is large, and $n$ uniform samples are *generated* initially. The final count is variable.*
+-    f. Concatenate `uniform_indices` (filtered) and `selected_occupied` (or all occupied if $n \ge m$).
+-    g. Append the concatenated tensor to `lvl_indices`.
+-3. Return `lvl_indices`.
++1. Initialize `lvl_indices` as an empty list [S1, unofficial].
++2. For each `lvl` in `range(self.levels)`:
++    a. Generate `n` random integers in range `[0, self.cells_per_lvl)` using a uniform distribution [S1, unofficial].
++    b. Compute global linear indices for these uniform samples: $cell\_ids = lvl \times self.cells\_per\_lvl + uniform\_indices$ [S1, unofficial].
++    c. Filter `uniform_indices` to keep only those where `self.occs[cell_ids] >= 0.0` [S1, unofficial].
++    d. Retrieve all occupied indices for the current level by flattening `self.binaries[lvl]` and collecting indices where the value is non-zero [S1, unofficial].
++    e. Let $m$ be the number of occupied indices. If $n < m$, select $n$ random indices from `occupied_indices` using a uniform random integer generator over `[0, m)` [S1, unofficial]. Otherwise, use all `occupied_indices` [S1, unofficial].
++    f. Concatenate the filtered `uniform_indices` and the selected `occupied_indices` [S1, unofficial].
++    g. Append the concatenated array to `lvl_indices` [S1, unofficial].
++3. Return `lvl_indices` [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -42,31 +37,28 @@
+     lvl_indices = []
+     for lvl in range(self.levels):
+-        # 1. Generate uniform samples
+-        uniform_indices = torch.randint(self.cells_per_lvl, (n,), device=self.device)
++        # 1. Generate n random integers in [0, self.cells_per_lvl)
++        uniform_indices = [random.randint(0, self.cells_per_lvl - 1) for _ in range(n)]
+         
+-        # 2. Compute global IDs for uniform samples
+-        cell_ids = lvl * self.cells_per_lvl + uniform_indices
++        # 2. Compute global linear indices
++        cell_ids = [lvl * self.cells_per_lvl + idx for idx in uniform_indices]
+         
+-        # 3. Filter uniform samples based on occupancy/density
+-        # Keep indices where density is not -1
+-        valid_mask = self.occs[cell_ids] >= 0.0
+-        uniform_indices = uniform_indices[valid_mask]
++        # 3. Filter uniform samples where density >= 0.0
++        valid_mask = [self.occs[cid] >= 0.0 for cid in cell_ids]
++        uniform_indices = [idx for idx, m in zip(uniform_indices, valid_mask) if m]
+         
+         # 4. Get all occupied indices for this level
+-        # Assuming self.binaries[lvl] is a tensor where non-zero/True indicates occupancy
+         occupied_flat = self.binaries[lvl].flatten()
+-        occupied_indices = torch.nonzero(occupied_flat).squeeze(1)
++        occupied_indices = [i for i, v in enumerate(occupied_flat) if v != 0]
+         
+         # 5. Select occupied indices
+         num_occupied = len(occupied_indices)
+         if n < num_occupied:
+-            # Select n random indices from occupied_indices
+-            selected_occupied = occupied_indices[torch.randint(num_occupied, (n,), device=self.device)]
++            selected = [random.randint(0, num_occupied - 1) for _ in range(n)]
++            occupied_subset = [occupied_indices[i] for i in selected]
+         else:
+-            # Take all occupied indices
+-            selected_occupied = occupied_indices
++            occupied_subset = occupied_indices
+             
+         # 6. Concatenate
+-        indices = torch.cat([uniform_indices, selected_occupied], dim=0)
++        indices = uniform_indices + occupied_subset
+         
+         # 7. Append to results
+@@ -77,22 +69,22 @@
+ 
+ **Edge Cases:**
+-- **Empty Level:** If `self.binaries[lvl]` has no occupied cells, `occupied_indices` is empty. The result contains only filtered uniform samples.
+-- **All Invalid Density:** If `self.occs` contains only `-1`, `uniform_indices` becomes empty. The result contains only occupied indices.
+-- **Precision:** `torch.nonzero` returns indices. Ensure `squeeze(1)` handles the case where only one index is found (shape `(1,)` vs `(1,1)`). [G]
++- **Empty Level:** If `self.binaries[lvl]` has no occupied cells, `occupied_indices` is empty and the result contains only filtered uniform samples [S1, unofficial].
++- **All Invalid Density:** If `self.occs` contains only `-1`, `uniform_indices` becomes empty and the result contains only occupied indices [S1, unofficial].
++- **Selection with Replacement:** `torch.randint` (or equivalent uniform integer generator) selects indices with replacement, meaning the same occupied cell may be sampled multiple times [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Grid Cell Collection via Occupancy Filtering
+-This variant returns *all* valid cells in the grid, filtering out cells with -1 density. It does not limit the sample count to $n$. It iterates through all grid indices, computes global IDs, and filters based on `self.occs`. It is used when exhaustive coverage of visible geometry is required rather than a fixed budget [S1, unofficial].
++This variant returns all valid cells in the grid, filtering out cells with -1 density [S1, unofficial]. It does not limit the sample count to $n$ [S1, unofficial]. It iterates through all grid indices, computes global IDs, and filters based on `self.occs` [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(L \cdot (n + M))$ where $L$ is the number of levels, $n$ is the sample budget, and $M$ is the number of occupied cells per level. Generating random indices is $O(n)$. Filtering is $O(n)$. Finding occupied indices is $O(V)$ where $V$ is voxels per level (via `nonzero`). Selection is $O(n)$.
+-- **Memory Complexity:** $O(n + M)$ per level to store the resulting indices.
+-- **Performance:** Efficient on GPU due to vectorized tensor operations (`torch.randint`, `torch.nonzero`). [S1, unofficial]
+-- **Strengths:** Ensures occupied regions are sampled; balances uniform exploration with geometry focus.
+-- **Limitations:** The total number of samples per level is not strictly $n$ (it is $k + \min(n, M)$). If $M$ is very large, memory usage for `occupied_indices` can be high.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Performance:** Not given in the sources.
++- **Strengths:** Ensures occupied regions are sampled alongside uniform exploration [S1, unofficial].
++- **Limitations:** The total number of samples per level is not strictly $n$; it equals the number of valid uniform samples plus $\min(n, m)$ occupied samples [S1, unofficial].
+ 
+ ## Background
+-This method is part of the `faster-occgrid` implementation, designed for efficient volume rendering using occupancy grids. It leverages PyTorch tensor operations for GPU acceleration. The approach is common in neural radiance fields (NeRF) and occupancy grid-based rendering where balancing sample efficiency and coverage is critical. [S1, unofficial]
++This method originates from the `faster-occgrid` repository [S1, unofficial]. It is implemented using PyTorch tensor operations for GPU acceleration [S1, unofficial].
+ 
+ ## Sources

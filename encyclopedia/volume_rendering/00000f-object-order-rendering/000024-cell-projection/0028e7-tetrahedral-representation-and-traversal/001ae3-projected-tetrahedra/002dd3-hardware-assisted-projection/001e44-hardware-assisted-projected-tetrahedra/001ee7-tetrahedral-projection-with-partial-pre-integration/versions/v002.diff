@@ -1,0 +1,182 @@
+--- v001.md
++++ v002.md
+@@ -4,16 +4,16 @@
+ 
+ ## Overview
+-Tetrahedral Projection with Partial Pre-integration (PTINT) is a hybrid volume and isosurface rendering method that projects tetrahedra onto the screen and computes fragment colors using pre-integrated optical depth tables [S1, unofficial]. It solves the performance bottleneck of explicit isosurface extraction by computing isosurfaces per fragment within the rendering pipeline, avoiding the case-handling complexity of marching tetrahedra [S1, unofficial]. Unlike full pre-integration, PTINT uses a transfer-function-independent $\psi$ table, allowing interactive transfer function editing without expensive table recomputation [S2, unofficial].
++Tetrahedral Projection with Partial Pre-integration (PTINT) is a hybrid volume and isosurface rendering method that projects tetrahedra onto the screen and computes fragment colors using pre-integrated optical depth tables [S1, unofficial]. It solves the performance bottleneck of explicit isosurface extraction by computing isosurfaces per fragment within the rendering pipeline, avoiding the case-handling complexity of marching tetrahedra [S1, unofficial]. Unlike full pre-integration, PTINT uses a transfer-function-independent $\psi$ table, allowing interactive transfer function editing without expensive table recomputation [S2, unofficial]. It builds on [Hardware-Assisted Projected Tetrahedra](1729-hardware-assisted-projected-tetrahedra.md) by leveraging GPU rasterization for cell projection [S2, unofficial].
+ 
+ ## How it works
+-**Inputs:** Regular 3D scalar volume data (stored as hexahedral volunits), viewing vector $\vec{v}$, isovalue (optional), transfer function (TF), Phong illumination coefficients (optional).
+-**Outputs:** Final color buffer.
++**Inputs:** Regular 3D scalar volume data (stored as hexahedral volunits), viewing vector $\vec{v}$, isovalue (optional), transfer function (TF), Phong illumination coefficients (optional) [S2, unofficial].
++**Outputs:** Final color buffer [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Volume Data:** Regular grid of hexahedral volunits. Each volunit is decomposed into 5 tetrahedra [S2, unofficial].
++1.  **Volume Data:** Regular grid of hexahedral volunits, each decomposed into 5 tetrahedra [S2, unofficial].
+ 2.  **Exponential Texture:** 1D texture (256 entries) storing $e^{-u}$ for $u \in [0,1]$ [S2, unofficial].
+ 3.  **$\psi$ Table:** 2D texture storing partial pre-integration integral values, independent of the transfer function [S2, unofficial].
+ 4.  **Transfer Function Texture:** 1D texture mapping scalar values to RGBA colors [S2, unofficial].
+-5.  **Vertex/Color/Normal Arrays:** Fixed-size arrays passed to `glMultiDrawElements`. Each array contains data for 5 tetrahedra per volunit (4 vertices + 1 "thick" vertex per tetrahedron) [S2, unofficial].
++5.  **Vertex/Color/Normal Arrays:** Fixed-size arrays passed to `glMultiDrawElements`, containing data for 5 tetrahedra per volunit (4 vertices + 1 thick vertex per tetrahedron) [S2, unofficial].
+ 6.  **Index Arrays:** 5 arrays of indices defining the triangle fan order for the 5 tetrahedra, created once for all volunits [S2, unofficial].
+ 
+@@ -21,12 +21,12 @@
+ 
+ 1.  **Sorting:** Determine traversal order based on viewing vector $\vec{v} = \{v_x, v_y, v_z\}$ [S2, unofficial].
+-    *   If $v_x > 0$, traverse x-indices ascending; else descending.
+-    *   If $v_y > 0$, traverse y-indices ascending; else descending.
+-    *   If $v_z > 0$, traverse z-indices ascending; else descending.
++    *   If $v_x > 0$, traverse x-indices ascending; else descending [S2, unofficial].
++    *   If $v_y > 0$, traverse y-indices ascending; else descending [S2, unofficial].
++    *   If $v_z > 0$, traverse z-indices ascending; else descending [S2, unofficial].
+     *   The relative order of axes traversal does not matter for regular data [S2, unofficial].
+     *   Only 8 traversal permutations are required to cover all viewing angles [S2, unofficial].
+ 
+ 2.  **Data Preparation (CPU):**
+-    *   For each volunit, compute vertex positions and colors.
++    *   For each volunit, compute vertex positions and colors [S2, unofficial].
+     *   Compute normal vectors (valid for all volunits, computed once) [S2, unofficial].
+     *   Upload vertex, color, and normal arrays to GPU memory [S2, unofficial].
+@@ -40,5 +40,5 @@
+ 4.  **Rasterization:**
+     *   Render each volunit as 5 triangle fans (one per tetrahedron) [S2, unofficial].
+-    *   Interpolate color and normal attributes across the triangles [S2, unofficial].
++    *   Interpolate color attributes across the triangles [S2, unofficial].
+ 
+ 5.  **Fragment Color Computation (Fragment Shader):**
+@@ -54,64 +54,74 @@
+         *   Lookup value from the $\psi$ table [S2, unofficial].
+         *   Compute final fragment color using the $\psi$ table value [S2, unofficial].
+-        *   *Alternative (Simpler/Faster):* Compute chromaticity as average of $C_f$ and $C_b$. Compute opacity $\alpha = 1 - e^{-\tau \cdot l}$, where $\tau$ is mean alpha. Use exponential texture for $e^{-u}$ lookup [S2, unofficial].
++        *   *Alternative (Simpler/Faster):* Compute chromaticity as average of $C_f$ and $C_b$ [S2, unofficial]. Compute opacity $\alpha = 1 - e^{-\tau \cdot l}$, where $\tau$ is mean alpha [S2, unofficial]. Use exponential texture for $e^{-u}$ lookup [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Fragment Shader Logic
+-def compute_fragment_color(front_scalar, back_scalar, thickness_l, isosurface_mode, isovalue):
+-    # 1. Transfer Function Lookup
+-    C_f = transfer_function_texture.lookup(front_scalar)
+-    C_b = transfer_function_texture.lookup(back_scalar)
++import math
++
++def compute_fragment_color(front_scalar, back_scalar, thickness_l, isosurface_enabled, isovalue, view_vector):
++    # 1. Transfer function lookup
++    C_f = tf_texture[front_scalar]
++    C_b = tf_texture[back_scalar]
+     
+-    # 2. Isosurface Normal Calculation (if enabled)
+-    if isosurface_mode:
+-        if isovalue is within valid range of front_scalar and back_scalar:
+-            # Retrieve gradients from pre-computed gradient arrays or interpolation
+-            g_f = get_gradient(front_scalar)
+-            g_b = get_gradient(back_scalar)
+-            
+-            # Calculate distances to isosurface intersection points
+-            # d_f: distance from ray origin to front intersection
+-            # d_b: distance from ray origin to back intersection
+-            # d_iso: distance from ray origin to isosurface intersection
+-            # Weights are relative to distance between isosurface and intersection points
+-            w_f = distance(isosurface, front_intersection)
+-            w_b = distance(isosurface, back_intersection)
+-            
+-            # Combine gradients
++    # 2. Exponential lookup for opacity
++    u = thickness_l
++    exp_val = exp_texture[u]
++    alpha = 1.0 - exp_val
++    
++    # 3. Partial pre-integration lookup
++    # Compute indices for psi table using C_f, C_b, and l
++    # (Exact indexing formula not given in sources [G])
++    psi_idx = compute_psi_index(C_f, C_b, thickness_l)
++    psi_value = psi_table[psi_idx]
++    
++    # 4. Final color composition
++    # (Exact composition formula not given in sources [G])
++    final_color = psi_value
++    
++    # 5. Isosurface contribution (optional)
++    if isosurface_enabled:
++        if min(front_scalar, back_scalar) <= isovalue <= max(front_scalar, back_scalar):
++            # Retrieve gradients
++            g_f = gradient_array[front_scalar]
++            g_b = gradient_array[back_scalar]
++            # Compute distances to intersection points
++            d_f = distance_to_front_intersection(front_scalar)
++            d_b = distance_to_back_intersection(back_scalar)
++            d_iso = distance_to_isosurface_intersection(isovalue)
++            # Weights relative to distance between isosurface and intersection points
++            w_f = abs(d_iso - d_f)
++            w_b = abs(d_iso - d_b)
++            # Combine gradients for normal
+             n = normalize(w_f * g_f + w_b * g_b)
+-            
+-            # Phong Illumination
+-            color = phong_lighting(n, view_vector, light_positions, coefficients)
+-        else:
+-            color = C_f # Or handle as volume only
+-    else:
+-        color = vec4(0.0) # No isosurface contribution
+-
+-    # 3. Partial Pre-integration
+-    # Compute indices for psi table based on C_f, C_b, and l
+-    # Note: Exact indexing formula depends on normalization of C and l
+-    psi_value = psi_table.lookup(C_f, C_b, thickness_l)
+-    
+-    # Final color composition
+-    # The psi value typically represents the integrated color contribution
+-    final_color = color + psi_value
+-    
++            # Phong illumination
++            iso_color = phong_lighting(n, view_vector)
++            final_color = iso_color + final_color
+     return final_color
+ 
+-# Vertex Shader Logic
+-def vertex_shader(volunit_index, tet_index, vertex_id):
+-    # Read basis hexahedron info from uniforms
+-    hexahedron = get_hexahedron_uniform(volunit_index)
+-    
+-    # Displace vertex based on basis info
+-    position = displace_vertex(hexahedron, tet_index, vertex_id)
+-    
+-    # Pass attributes
+-    color = vertex_color_array[tet_index][vertex_id]
+-    normal = normal_array[tet_index][vertex_id]
+-    
+-    return position, color, normal
++def normalize(v):
++    mag = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++    return (v[0]/mag, v[1]/mag, v[2]/mag)
++
++def phong_lighting(normal, view_dir):
++    # Standard Phong model using pre-loaded coefficients [S1, unofficial]
++    diffuse = max(0.0, sum(n * l for n, l in zip(normal, light_dir)))
++    specular = max(0.0, sum(n * r for n, r in zip(normal, reflect_dir))) ** 4.0
++    return (diffuse * ambient + specular * specular_coeff, 0.0, 0.0, 1.0)
++
++def compute_psi_index(cf, cb, l):
++    # Placeholder for exact indexing logic [G]
++    return (int(cf * 255), int(cb * 255))
++
++def distance_to_front_intersection(scalar):
++    # Placeholder for ray-tetrahedron intersection math [G]
++    return 0.0
++
++def distance_to_back_intersection(scalar):
++    return 0.0
++
++def distance_to_isosurface_intersection(iso):
++    return 0.0
+ ```
+ 
+@@ -127,5 +137,5 @@
+ 
+ ## Operating characteristics
+-**Time Complexity:** Sorting is $O(1)$ due to regular data spacing and implicit 3D array structure [S2, unofficial]. Rendering is proportional to the number of tetrahedra.
++**Time Complexity:** Sorting is $O(1)$ due to regular data spacing and implicit 3D array structure [S2, unofficial]. Rendering is proportional to the number of tetrahedra [S2, unofficial].
+ **Memory Complexity:** 24 bytes per tetrahedron on GPU memory [S1, unofficial]. No extra data structures beyond volume data [S2, unofficial].
+ **Performance:**

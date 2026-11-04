@@ -1,0 +1,131 @@
+# TF Simplification
+
+Also called: Error-tolerance window algorithm for TF, TF Line Segment Reduction, Transfer Function Simplification Method, Window-based TF Approximation
+
+## Overview
+TF Simplification reduces the number of line segments in a hand-drawn Transfer Function (TF) by approximating consecutive segments using a sliding error-tolerance window, thereby reducing computational overhead for ambient occlusion calculations [S1]. It distinguishes itself from general curve fitting by enforcing strict geometric constraints where simplified segments must pass through defined error windows around original vertices, specifically targeting noise from hand-drawn inputs [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A hand-drawn TF represented as a sequence of vertices $(x_i, y_i)$ connected by line segments.
+*   **Output:** A simplified TF with fewer line segments that approximates the original within the error tolerance.
+
+**Data Structures:**
+*   **Vertices:** A list of points $P = [(x_0, y_0), (x_1, y_1), \dots, (x_n, y_n)]$.
+*   **Windows:** For each vertex $P_i$, an error tolerance window $W_i$ is defined. The source describes this as a range or region around the vertex that the simplified line segment must intersect [S1]. The exact geometric definition (e.g., vertical band, diamond) is not explicitly detailed beyond "window," but the algorithm relies on slope calculations relative to these windows.
+
+**Pre-processing:**
+1.  Apply a pre-filtering average filter with kernel size 5 to the input TF vertices to remove noise caused by hand tremors [S1].
+
+**Algorithm Steps:**
+1.  Initialize the starting point $s$ to the first vertex $P_0$.
+2.  Define the error tolerance window $W_{next}$ for the next vertex $P_{next}$ (initially $P_1$) [S1].
+3.  Connect $s$ to the window $W_{next}$ to determine the initial slope range $[m_{min}, m_{max}]$ of the potential line segment [S1].
+4.  Iterate through subsequent vertices $P_i$:
+    a.  Update the slope range $[m_{min}, m_{max}]$ such that the line segment from $s$ to $P_i$ passes through the window $W_i$ [S1]. This involves intersecting the current valid slope range with the slopes required to hit $W_i$.
+    b.  If the current slope range becomes empty (i.e., no line from $s$ can pass through both previous windows and the current window $W_i$):
+        i.  Finalize the current simplified segment from $s$ to the previous vertex $P_{i-1}$.
+        ii. Set $s = P_{i-1}$.
+        iii. Reset the slope range based on the new starting point $s$ and the window $W_i$ [S1].
+5.  Finalize the last segment from the final $s$ to the last vertex $P_n$ [S1].
+
+**Parameters:**
+*   **Window Size:** Controls the trade-off between speed and quality. Larger windows allow for more aggressive simplification (fewer segments) but degrade image quality [S1].
+*   **Filter Kernel Size:** 5 [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def simplify_tf(vertices, window_size):
+    """
+    Simplifies a transfer function using the error-tolerance window algorithm.
+    
+    Args:
+        vertices: List of (x, y) tuples representing the hand-drawn TF.
+        window_size: Float or int defining the error tolerance window size.
+        
+    Returns:
+        List of (x, y) tuples representing the simplified TF control points.
+    """
+    # Pre-filtering step to remove hand tremor noise
+    # [G] Implementation of average filter with kernel size 5
+    filtered_vertices = apply_average_filter(vertices, kernel_size=5)
+    
+    if len(filtered_vertices) < 2:
+        return filtered_vertices
+
+    simplified_points = []
+    start_idx = 0
+    n = len(filtered_vertices)
+    
+    # Helper to calculate slope range intersection
+    # The source describes connecting start to window of next point to get slope range.
+    # We assume the window allows a range of slopes from the start point to the window.
+    def get_slope_range(p_start, p_target_window):
+        # [G] The exact geometric definition of "window" is not provided.
+        # Standard interpretation: The window is a vertical band or region around p_target.
+        # We calculate the min/max slope from p_start to the boundaries of the window.
+        # For simplicity, assuming window is a vertical tolerance dy around p_target.y
+        # or a region. Without explicit geometry, we assume the window defines
+        # a valid range of slopes [m_min, m_max] that intersect the window.
+        # This is a placeholder for the specific geometric intersection logic
+        # described as "Connect the starting point (s) to the window... to obtain the slope range".
+        pass 
+
+    # [G] Since the exact window geometry is not specified, we implement the logic
+    # based on the textual description of slope range reduction.
+    
+    current_start = filtered_vertices[0]
+    current_slope_min = -float('inf')
+    current_slope_max = float('inf')
+    
+    # Initialize slope range with the first window
+    # [G] Assuming window at index 1 defines the initial valid slopes from index 0
+    # This step is ambiguous in the source. We assume the first segment is always kept
+    # or the range is initialized by the first window.
+    
+    for i in range(1, n):
+        # Get the slope range allowed by the current vertex's window relative to start
+        # [G] Placeholder for specific window geometry intersection
+        # In a real implementation, this would be:
+        # window_bounds = get_window_bounds(filtered_vertices[i], window_size)
+        # new_slope_min, new_slope_max = calculate_slopes(current_start, window_bounds)
+        # current_slope_min = max(current_slope_min, new_slope_min)
+        # current_slope_max = min(current_slope_max, new_slope_max)
+        
+        # Check if range is valid
+        if current_slope_min > current_slope_max:
+            # Range invalid, finalize previous segment
+            simplified_points.append(current_start)
+            # New start is the previous vertex
+            current_start = filtered_vertices[i-1]
+            # Reset slope range for new start and current window
+            # [G] Re-initialize slope range based on new start and current window i
+            pass
+        else:
+            # Continue extending the segment
+            pass
+            
+    # Add the final point
+    simplified_points.append(filtered_vertices[-1])
+    
+    return simplified_points
+```
+
+**Edge Cases and Pitfalls:**
+*   **Window Size Degradation:** Increasing the window size sharply reduces the number of line segments (stabilizing around size 10) but continues to degrade image quality [S1].
+*   **Hand Tremor Noise:** Without pre-filtering, hand-drawn TFs may have unintentionally sharp graphs that increase segment count and reduce speed [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The computational cost is proportional to the number of line segments in the TF. Simplification reduces the number of segments from hundreds to dozens, significantly reducing overhead [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** On a PC with Intel Q9550 CPU, 4 GB RAM, and GeForce GTX 1050 GPU, the method enables real-time rendering with ambient occlusion by reducing calculation iterations [S1].
+*   **Strengths:** Reduces noise from hand-drawn inputs; improves rendering speed; produces visually comparable images for ambient occlusion [S1].
+*   **Limitations:** Image quality degrades as window size increases; assumes CT value distribution follows a normal distribution, which may cause lighting differences in binary images [S1].
+
+## Background
+The method is based on the error-tolerance window algorithm by Hadwiger et al. [S1]. It was developed to handle hand-drawn Transfer Functions in real-time computed tomography volume visualization with ambient occlusion [S1].
+
+## Sources
+[S1] Real-Time Computed Tomography Volume Visualization with Ambient Occlusion of Hand-Drawn Transfer Function Using Local Vicinity Statistic., https://doi.org/10.4258/hir.2019.25.4.297, fetched 2026-10-26

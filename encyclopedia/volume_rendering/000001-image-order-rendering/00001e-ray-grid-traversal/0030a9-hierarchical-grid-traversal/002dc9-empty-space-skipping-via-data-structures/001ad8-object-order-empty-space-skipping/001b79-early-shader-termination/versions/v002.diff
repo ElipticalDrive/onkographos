@@ -1,0 +1,123 @@
+--- v001.md
++++ v002.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-Early Shader Termination is an optimization technique that discards the execution of complex decoding shaders for fragments likely to represent empty space by using an early z-test in a two-pass rendering approach [S1, unofficial]. It builds on [Object-Order Empty Space Skipping](865-object-order-empty-space-skipping.md) by adding a lightweight pre-check to avoid expensive shader execution in empty regions. Compared to rendering uncompressed data, this approach initially perceives a loss in performance of a factor of 2-3 due to complex shaders and texture indirections; however, in empty regions, it results in a considerable speed-up because only one texture fetch is needed to check the mean [S1, unofficial].
++Early Shader Termination is an optimization technique that discards the execution of complex decoding shaders for fragments likely to represent empty space by using an early z-test in a two-pass rendering approach [S1, unofficial]. It builds on [Object-Order Empty Space Skipping](865-object-order-empty-space-skipping.md) by adding a lightweight pre-check to avoid expensive shader execution in empty regions [G]. Compared to rendering uncompressed data, this approach initially perceives a loss in performance of a factor of 2-3 due to complex shaders and texture indirections; however, in empty regions, it results in a considerable speed-up because only one texture fetch is needed to check the mean [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A compressed volume dataset where each block (macro-cell) has an associated index texture $I$ storing metadata (specifically the mean value in the R-component) and dependent data textures $C_1, C_2$ [S1, unofficial]. A slicing polygon representing the current view frustum or volume boundary.
+-*   **Output:** A rendered image where empty space fragments are skipped, and depth values are correctly updated to allow subsequent fragments to pass depth tests.
++*   **Input:** A compressed volume dataset where each block (macro-cell) has an associated index texture $I$ storing metadata (specifically the mean value in the R-component) and dependent data textures $C_1, C_2$ [S1, unofficial]. A slicing polygon representing the current view frustum or volume boundary [G].
++*   **Output:** A rendered image where empty space fragments are skipped, and depth values are correctly updated to allow subsequent fragments to pass depth tests [G].
+ 
+ **Data Structures:**
+@@ -16,59 +16,43 @@
+ 
+ **Steps:**
+-1.  **First Pass (Empty Space Detection):**
+-    1.  Render the slicing polygon with a simple pixel shader.
+-    2.  In the shader, access the index texture $I$ and read the mean value from the R-component.
+-    3.  If the mean value is zero:
+-        *   Set the fragment's color and opacity to zero.
+-        *   Write the fragment's depth to the depth buffer. This marks the space as "empty but processed" without affecting the color buffer [S1, unofficial].
+-    4.  If the mean value is not zero:
+-        *   Discard the fragment using a `kill` instruction (or equivalent discard mechanism).
+-        *   Do **not** write to the depth buffer. The depth value of the last rendered fragment remains valid [S1, unofficial].
+-
+-2.  **Second Pass (Complex Rendering):**
+-    1.  Render the same slicing polygon again.
+-    2.  Set the depth test function to `GL_GREATER` (or equivalent logic that passes fragments with depth greater than the current buffer value).
+-    3.  Execute the complex decoding shader (as described in Compression Domain Rendering).
+-    4.  The early z-test ensures that only fragments discarded in the first pass (where mean $\neq 0$) pass the depth test and enter the complex shader. Fragments where mean $= 0$ are discarded before shader execution because their depth is already in the buffer and they do not satisfy `GL_GREATER` [S1, unofficial].
++1.  **First Pass (Empty Space Detection):** Render the slicing polygon twice. In the first pass, issue a simple pixel shader program [S1, unofficial]. In the shader, access index texture $I$ and check the mean value stored in the R-component [S1, unofficial]. If the mean value is zero, render the fragment with color and opacity set to zero. This does not affect the color buffer but sets the depth value in the depth buffer [S1, unofficial]. If the mean value is not zero, discard the fragment using a `kill` instruction. This prevents the fragment from affecting the color or depth buffer [S1, unofficial].
++2.  **Second Pass (Complex Rendering):** Render the slicing polygon again with the complex shader [S1, unofficial]. Set the depth test to `GL_GREATER` in the second pass [S1, unofficial]. The early z-test only lets fragments pass that were discarded in the first pass (where mean $\neq 0$). All other fragments (where mean $= 0$) are discarded before entering the complex shader [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# First Pass Shader: Simple Empty Space Check
+-def simple_shader(fragment_depth, index_texture_I):
+-    # Read mean value from R-component of index texture
+-    mean_value = index_texture_I.read(fragment_depth).R
+-    
+-    if mean_value == 0:
+-        # Empty space: write depth, zero color/opacity
+-        depth_buffer.write(fragment_depth)
+-        return Color(0, 0, 0, 0)
+-    else:
+-        # Potential non-empty space: discard to prevent depth write
+-        # The depth buffer retains the last valid depth
+-        discard_fragment()
+-        return None
++def early_shader_termination(fragments, index_texture_I, complex_decode_func):
++    """
++    Simulates the two-pass early shader termination optimization.
++    fragments: list of objects with .block_id and .z (depth)
++    index_texture_I: dict mapping block_id to objects with .R (mean value)
++    complex_decode_func: callable that returns decoded color for non-empty blocks
++    """
++    depth_buffer = []
++    pass1_discarded = []
+ 
+-# Second Pass Shader: Complex Decoding
+-def complex_shader(fragment_depth, index_texture_I, data_textures_C1_C2):
+-    # Early z-test with GL_GREATER ensures this only runs for fragments
+-    # that were discarded in the first pass (mean != 0)
+-    
+-    # Access index and dependent textures for decoding
+-    mean_value = index_texture_I.read(fragment_depth).R
+-    # ... complex decoding logic using C1, C2 ...
+-    return decoded_color
++    # Pass 1: Simple pixel shader
++    for frag in fragments:
++        mean_val = index_texture_I[frag.block_id].R
++        if mean_val == 0:
++            # Empty space: write depth, zero color/opacity
++            depth_buffer.append(frag.z)
++            pass1_discarded.append(False)
++        else:
++            # Non-empty space: discard via kill instruction
++            # Depth buffer retains the last valid depth
++            pass1_discarded.append(True)
+ 
+-# Rendering Loop
+-def render_volume():
+-    # Pass 1: Detect empty blocks
+-    set_depth_test(GL_EQUAL) # Or default, as we explicitly write depth
+-    set_shader(simple_shader)
+-    render_slicing_polygon()
+-    
+-    # Pass 2: Render non-empty blocks
+-    set_depth_test(GL_GREATER) # Only pass if depth > buffer (i.e., not written in Pass 1)
+-    set_shader(complex_shader)
+-    render_slicing_polygon()
++    # Pass 2: Complex shader with depth test
++    final_output = []
++    for i, frag in enumerate(fragments):
++        if pass1_discarded[i]:
++            # Early z-test with GL_GREATER logic:
++            # Hardware compares frag.z against depth_buffer.
++            # Since pass 1 wrote depth for mean==0 blocks,
++            # pass 2 automatically skips them via depth test.
++            decoded = complex_decode_func(frag, index_texture_I)
++            final_output.append(decoded)
++    return final_output
+ ```
+ 
+@@ -87,5 +71,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** In empty regions, the complexity is reduced to one texture fetch per block to check the mean [S1, unofficial]. In non-empty regions, the full complex shader is executed.
++*   **Time Complexity:** In empty regions, the complexity is reduced to one texture fetch per block to check the mean [S1, unofficial]. In non-empty regions, the full complex shader is executed [S1, unofficial].
+ *   **Memory Complexity:** Requires storage for the index texture $I$ and dependent textures $C_1, C_2$ [S1, unofficial].
+ *   **Measured Performance:** On an Intel P4 1900 MHz machine, this approach saves another 5 percent of overall rendering time on average when combined with other optimizations like Early End of Computation [S2, unofficial].
+@@ -94,5 +78,5 @@
+ 
+ ## Background
+-The technique was proposed in the context of compression domain volume rendering to address performance losses caused by complex shader programs and texture indirections [S1, unofficial]. It leverages the early z-test feature available on target graphics architectures to avoid executing pixel shaders for fragments that are likely to decode empty space [S1, unofficial]. The concept of terminating computation early is also discussed in the context of cell-based first-hit ray casting, where rendering ends as soon as all pixels are covered, saving approximately 5% of overall rendering time [S2, unofficial].
++The technique was proposed in the context of compression domain volume rendering to address performance losses caused by complex shader programs and texture indirections [S1, unofficial]. It leverages the early z-test feature available on target graphics architectures to avoid executing pixel shaders for fragments that are likely to decode empty space [S1, unofficial]. The concept of terminating computation early is also discussed in the context of cell-based first-hit ray casting, where rendering ends as soon as all pixels are covered, saving approximately 5 percent of overall rendering time [S2, unofficial].
+ 
+ ## Sources

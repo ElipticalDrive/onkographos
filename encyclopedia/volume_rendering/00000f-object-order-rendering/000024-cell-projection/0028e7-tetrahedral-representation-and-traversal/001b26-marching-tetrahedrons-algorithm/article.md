@@ -1,0 +1,151 @@
+# Marching Tetrahedrons Algorithm
+
+
+## Overview
+The Marching Tetrahedrons Algorithm (MTA) is an iso-surface extraction method that converts a scalar field defined on a regular grid into a triangular mesh by subdividing each cubic voxel into tetrahedra and applying the Marching Cubes logic locally [S1, unofficial]. It solves the topological ambiguities inherent in the original Marching Cubes algorithm by ensuring that the intersection topology within each tetrahedron is unambiguous, as a tetrahedron has only one possible configuration for a planar cut [S1, unofficial]. Unlike its sibling [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md), which focuses on direct volume rendering via ray casting, MTA is specifically designed for surface reconstruction [S1, unofficial]. It differs from [Projected Tetrahedra](877-projected-tetrahedra.md) by generating an explicit polygonal mesh rather than projecting volumetric primitives to the screen [S1, unofficial].
+
+## How it works
+**Inputs:** A 3D scalar field $f(x,y,z)$ defined on a regular grid of voxels, where each voxel is a cube with 8 corner vertices. An iso-value $I$ defining the surface threshold.
+**Outputs:** A set of triangles representing the iso-surface.
+
+**Data Structures:**
+1.  **Grid:** A 3D array of scalar values.
+2.  **Tetrahedral Decomposition:** Each cube voxel is decomposed into 6 tetrahedra. The decomposition must be consistent across the entire grid to avoid gaps. A common non-symmetric decomposition (often attributed to T. S. Yee or similar) splits the cube along specific diagonals. Note that this decomposition is not symmetric, leading to directional ambiguities if not handled carefully [S1, unofficial].
+3.  **Lookup Table:** A table mapping the binary state of the 4 vertices of a tetrahedron (inside/outside the iso-surface) to the set of edges intersected by the iso-surface. Since a tetrahedron has 4 vertices, there are $2^4 = 16$ cases. However, due to symmetry and the planar nature of the cut, the number of distinct topological configurations is small (typically 4 distinct cases for the edges, plus the empty and full cases).
+
+**Steps:**
+1.  **Decomposition:** For each voxel in the grid, decompose the cube into 6 tetrahedra. Let the vertices of a tetrahedron be $v_0, v_1, v_2, v_3$ with scalar values $f_0, f_1, f_2, f_3$.
+2.  **Classification:** For each tetrahedron, determine the binary state of each vertex relative to the iso-value $I$. Let $s_i = 1$ if $f_i \ge I$ and $s_i = 0$ if $f_i < I$. This forms a 4-bit index.
+3.  **Edge Intersection:** Based on the index, determine which edges of the tetrahedron are intersected by the iso-surface. A tetrahedron has 6 edges. If both endpoints of an edge have different states (one inside, one outside), the iso-surface intersects that edge.
+4.  **Interpolation:** For each intersected edge, calculate the exact position of the intersection point using linear interpolation. If an edge connects vertices $v_a$ and $v_b$ with values $f_a$ and $f_b$, the intersection point $P$ is:
+    $$ P = v_a + \frac{I - f_a}{f_b - f_a} (v_b - v_a) $$
+    [G] Handle the case where $f_b = f_a$ by checking if $f_a = I$ (vertex is on surface) or skipping if the edge is entirely inside or outside.
+5.  **Triangle Generation:** Connect the intersection points to form triangles. The connectivity is determined by the lookup table. For a tetrahedron, the iso-surface forms a planar polygon (triangle or quadrilateral, which is split into two triangles). The lookup table specifies which pairs of intersection points form the edges of the resulting polygon.
+6.  **Mesh Assembly:** Collect all generated triangles from all tetrahedra. Since the decomposition is consistent, vertices on shared faces/edges are generated at the same location, ensuring a watertight mesh.
+
+**Parameters:**
+*   Iso-value $I$: Depends on the data.
+*   Decomposition scheme: Must be consistent. The choice of diagonal affects the shape of the tetrahedra and potentially the visual quality [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Directional Ambiguities:** Because the cube is subdivided into tetrahedra in a non-symmetric way, the algorithm can produce artifacts or "directional biases" depending on the orientation of the cube relative to the grid [S1, unofficial]. This is a known limitation compared to symmetric methods.
+*   **Degenerate Cases:** If a vertex lies exactly on the iso-surface ($f_i = I$), the classification is ambiguous. Standard practice is to treat $f_i \ge I$ as inside. This can lead to small gaps or overlaps if not handled consistently across shared vertices.
+*   **Precision:** Linear interpolation assumes the field is linear within the tetrahedron. For highly non-linear fields, this introduces geometric error.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def marching_tetrahedrons(grid, iso_value):
+    triangles = []
+    # Define the 6 tetrahedra for a cube with vertices 0..7
+    # Vertex ordering: 0=000, 1=100, 2=010, 3=110, 4=001, 5=101, 6=011, 7=111
+    # Common decomposition (example):
+    tetrahedra = [
+        (0, 1, 2, 5), (0, 2, 6, 5), (0, 6, 7, 5),
+        (0, 4, 7, 5), (0, 3, 7, 5), (0, 1, 3, 5)
+    ]
+    # Lookup table mapping 4-bit state to list of edge pairs
+    # Edges are indexed 0..5: (0,1), (0,2), (0,4), (1,2), (1,5), (2,5), (3,7), (3,4), (3,1), (7,5), (7,6), (6,5)
+    # Note: Edge indexing must match the tetrahedron vertex ordering
+    lookup = get_lookup_table() 
+
+    for x in range(grid.width - 1):
+        for y in range(grid.height - 1):
+            for z in range(grid.depth - 1):
+                # Get 8 vertices of the voxel
+                verts = [
+                    grid.get(x, y, z), grid.get(x+1, y, z),
+                    grid.get(x, y+1, z), grid.get(x+1, y+1, z),
+                    grid.get(x, y, z+1), grid.get(x+1, y, z+1),
+                    grid.get(x, y+1, z+1), grid.get(x+1, y+1, z+1)
+                ]
+                positions = [
+                    vec3(x, y, z), vec3(x+1, y, z),
+                    vec3(x, y+1, z), vec3(x+1, y+1, z),
+                    vec3(x, y, z+1), vec3(x+1, y, z+1),
+                    vec3(x, y+1, z+1), vec3(x+1, y+1, z+1)
+                ]
+
+                for tet in tetrahedra:
+                    v_indices = tet
+                    states = [1 if verts[i] >= iso_value else 0 for i in v_indices]
+                    state_index = sum(s << i for i, s in enumerate(states))
+                    
+                    edge_pairs = lookup[state_index]
+                    if not edge_pairs:
+                        continue
+
+                    # Find intersection points for intersected edges
+                    intersections = []
+                    for e1, e2 in edge_pairs:
+                        # Determine which global vertices correspond to e1 and e2 in this tet
+                        # This requires mapping local tet edge indices to global vertex indices
+                        # Simplified: assume edge_pairs refers to indices in the tet's vertex list
+                        # But lookup tables usually refer to edge indices 0..5
+                        # Let's assume a helper function get_edge_vertices(tet, edge_idx)
+                        # For brevity, we assume edge_pairs contains pairs of vertex indices within the tet
+                        # Actually, standard MTA lookup returns pairs of edge indices.
+                        # Let's refine: edge_pairs is list of (edge_idx1, edge_idx2)
+                        # We need to map edge_idx to the two vertices of that edge in the tet
+                        pass 
+                    
+                    # Re-implementing edge lookup for clarity
+                    # Edges of tetrahedron with vertices v0,v1,v2,v3:
+                    # 0: v0-v1, 1: v0-v2, 2: v0-v3, 3: v1-v2, 4: v1-v3, 5: v2-v3
+                    edge_map = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
+                    current_intersections = {}
+                    
+                    for edge_idx in range(6):
+                        v_a_idx, v_b_idx = edge_map[edge_idx]
+                        v_a = v_indices[v_a_idx]
+                        v_b = v_indices[v_b_idx]
+                        if states[v_a_idx] != states[v_b_idx]:
+                            # Interpolate
+                            fa = verts[v_a]
+                            fb = verts[v_b]
+                            t = (iso_value - fa) / (fb - fa)
+                            p = lerp(positions[v_a], positions[v_b], t)
+                            current_intersections[edge_idx] = p
+                    
+                    # Generate triangles from edge pairs
+                    for e1, e2 in edge_pairs:
+                        p1 = current_intersections[e1]
+                        p2 = current_intersections[e2]
+                        # Triangle needs 3 points. The lookup table usually provides pairs of edges that form the boundary.
+                        # For a tet, the cut is a triangle or quad.
+                        # If it's a triangle, there are 3 edges. If quad, 4 edges (split into 2 triangles).
+                        # The lookup table should return the list of vertices of the polygon.
+                        # Let's assume lookup returns list of intersection points in order.
+                        pass
+
+    return triangles
+```
+*Note: The pseudocode above is illustrative. A complete implementation requires a precise lookup table that maps the 16 states to the specific sequence of intersection points forming the polygon(s). The standard MTA lookup table for a tetrahedron typically results in either 0, 1, or 2 triangles.*
+
+## Subtopics
+
+### [Regularised Marching Tetrahedra](1301-regularised-marching-tetrahedra.md)
+Regularised Marching Tetrahedra (RMT) is an iso-surface extraction algorithm that combines the topological consistency of the Marching Tetrahedra (MT) method with vertex clustering to simplify the resulting mesh. Unlike standard MT, which often produces thin, poorly shaped triangles that degrade interpolated shading, RMT generates surfaces with near-regular triangles and significantly reduced triangle counts (typically 70% fewer than MT) while preserving the original topology. It builds on [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md) by introducing a pre-triangulation clustering step based on the tetrahedral lattice.
+
+### [Error Analysis via Marching Tetrahedra](1308-error-analysis-via-marching-tetrahedra.md)
+Error Analysis via Marching Tetrahedra is a geometric error metric used to determine whether two child tetrahedra in a hierarchical volume representation can be fused into a single parent tetrahedron without exceeding a specified approximation tolerance. It solves the problem of balancing mesh simplification against geometric fidelity during isosurface extraction. Unlike sibling methods that may rely on algebraic residuals or view-dependent projections, this method explicitly evaluates the displacement of the isosurface intersection points along specific segments within the tetrahedron using the Marching Tetrahedra topology. It is chosen when a physically meaningful, viewpoint-independent error bound is required for multiresolution isosurface rendering.
+
+### Tetrahedral Normal Calculation
+A method to calculate smooth isosurface normals for tetrahedral meshes by computing vertex normals weighted by the volume of connected tetrahedra [S2, unofficial]. The plane normal $N_t = (a, b, c)^T$ for each tetrahedron is constant within the cell because the orientation of the plane describing the iso-surface is independent of the iso-value [S2, unofficial]. These vertex normals can be pre-computed and stored in the data file [S2, unofficial]. The vertex normal $N_v$ is calculated as the sum of the tetrahedron normals $N_t$ weighted by their volume $V(h_t)$:
+$$ N_v = \sum_{t=0}^{n} N_t V(h_t) $$
+where $n$ is the number of tetrahedra connected to the vertex [S2, unofficial]. The resulting vector is normalized [S2, unofficial]. The 2D barycentric coordinates of the intersection point within the tetrahedron are extended to 3D and used to weight the vertex normals to obtain a smooth isosurface normal [S2, unofficial]. Using the constant cell normal $N_t$ directly results in severe discontinuities between tetrahedra surfaces, decreasing rendering quality [S2, unofficial].
+
+## Operating characteristics
+**Time Complexity:** $O(N)$, where $N$ is the number of voxels. Each voxel is processed independently.
+**Memory Complexity:** $O(N)$ for the grid and $O(M)$ for the output mesh, where $M$ is the number of triangles.
+**Performance:** The algorithm is computationally efficient and parallelizable. However, the non-symmetric decomposition can lead to visual artifacts (directional bias) [S1, unofficial].
+**Strengths:** Topologically unambiguous (no cell ambiguities like in Marching Cubes), simpler lookup table than Marching Cubes.
+**Limitations:** Directional ambiguities due to asymmetric tetrahedral decomposition [S1, unofficial]. The resulting triangles can be poorly shaped (thin) if the decomposition is not chosen carefully.
+
+## Background
+The Marching Tetrahedrons Algorithm was developed as an improvement over the Marching Cubes algorithm to resolve topological ambiguities. The Marching Cubes algorithm, while widely used, suffers from ambiguous cases where the connectivity of the iso-surface within a cube is not uniquely determined by the vertex states [S1, unofficial]. The MTA subdivides each cube into tetrahedra, and since a tetrahedron has only one possible topology for a planar cut, these ambiguities are eliminated [S1, unofficial]. The method was initially overlooked, resulting in the accidental generation of holes in some data sets, but this problem has since been fixed [S1, unofficial]. The MTA has directional ambiguities because it subdivides a cube with tetrahedrons, which cannot be done symmetrically [S1, unofficial].
+
+## Sources
+[S1] Volume-Enclosing Surface Extraction, https://arxiv.org/abs/1011.1787v4, fetched 2026-10-26 (unofficial)
+[S2] Fast Ray Traversal of Tetrahedral and Hexahedral Meshes for Direct Volume Rendering, https://doi.org/10.2312/vissym/eurovis06/235-242, fetched 2026-10-24 (unofficial)

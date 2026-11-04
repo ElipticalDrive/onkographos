@@ -1,0 +1,116 @@
+# Depth from Ray Distance
+
+Also called: Camera-space depth, Euclidean depth
+
+## Overview
+Depth from Ray Distance computes the Euclidean distance from the camera center to the intersection point along a viewing ray, converting the accumulated ray distance into camera-space depth ($z_c$). It solves the problem of generating geometrically accurate depth maps from differentiable volume rendering by accounting for the perspective projection geometry, which simple ray distance does not. It is distinguished from [Approximated Gradient Back-Propagation](5666-approximated-gradient-back-propagation.md) by providing exact gradients via the Implicit Function Theorem (IFT) as implemented in [Differentiable Depth Rendering](1332-differentiable-depth-rendering.md), avoiding the numerical instability of differentiating through iterative bisection or sphere tracing algorithms directly.
+
+## How it works
+**Inputs:**
+*   Ray distance $d$: The accumulated distance along the ray from the camera origin to the surface intersection, obtained from the differentiable volume rendering forward pass.
+*   Pixel coordinates $(x, y)$: Integer coordinates of the pixel in the image plane.
+*   Camera intrinsics $K$: The $3 \times 3$ camera calibration matrix.
+
+**Outputs:**
+*   Camera-space depth $z_c$: The depth value along the camera's optical axis (Z-axis in camera coordinates).
+
+**Data Structures:**
+*   $K$: $3 \times 3$ matrix.
+*   $K^{-1}$: Inverse of the camera intrinsics matrix.
+*   $(x, y)$: Scalar pixel coordinates.
+
+**Steps:**
+1.  **Normalize Homogeneous Coordinates:** Compute the normalized homogeneous direction vector components $(\tilde{x}, \tilde{y})$ by applying the inverse camera intrinsics to the pixel coordinates.
+    $$
+    \begin{bmatrix} \tilde{x} \\ \tilde{y} \\ 1 \end{bmatrix} = K^{-1} \begin{bmatrix} x \\ y \\ 1 \end{bmatrix}
+    $$
+    Here, $\tilde{x}$ and $\tilde{y}$ are the x and y components of the ray direction in camera space, normalized such that the z-component is 1.
+
+2.  **Compute Ray Direction Norm:** Calculate the Euclidean norm of the normalized direction vector $(\tilde{x}, \tilde{y}, 1)$.
+    $$
+    \|\mathbf{v}\| = \sqrt{\tilde{x}^2 + \tilde{y}^2 + 1}
+    $$
+
+3.  **Calculate Camera-Space Depth:** Divide the ray distance $d$ by the norm of the direction vector to project the distance onto the camera's Z-axis.
+    $$
+    z_c = \frac{d}{\sqrt{\tilde{x}^2 + \tilde{y}^2 + 1}}
+    $$
+
+**Parameters:**
+*   $K$: Camera intrinsic matrix. Typical values depend on the specific camera calibration. Not given in the sources.
+*   Threshold for surface intersection: Determined by the upstream differentiable volume rendering method (e.g., sphere tracing threshold). Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Principal Point Offset:** If the camera principal point $(c_x, c_y)$ is not at the image center, $K^{-1}$ must correctly account for this offset in the homogeneous coordinate calculation.
+*   **Division by Zero:** The denominator $\sqrt{\tilde{x}^2 + \tilde{y}^2 + 1}$ is always $\ge 1$ for valid pixel coordinates, so division by zero is not possible.
+*   **Precision:** For pixels far from the principal point, $\tilde{x}$ and $\tilde{y}$ become large, potentially affecting numerical precision in the square root calculation. [G] Use `hypot` or equivalent stable square root implementations if available.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def depth_from_ray_distance(d: torch.Tensor, x: torch.Tensor, y: torch.Tensor, K_inv: torch.Tensor) -> torch.Tensor:
+    """
+    Compute camera-space depth from ray distance and pixel coordinates.
+    
+    Args:
+        d: Ray distance tensor of shape (N,).
+        x: Pixel x-coordinates tensor of shape (N,).
+        y: Pixel y-coordinates tensor of shape (N,).
+        K_inv: Inverse camera intrinsic matrix of shape (3, 3).
+        
+    Returns:
+        z_c: Camera-space depth tensor of shape (N,).
+    """
+    # Step 1: Compute normalized homogeneous coordinates
+    # Construct homogeneous vector [x, y, 1]
+    # Note: x and y are assumed to be in pixel coordinates
+    ones = torch.ones_like(x)
+    hom_coords = torch.stack([x, y, ones], dim=-1)  # Shape (N, 3)
+    
+    # Multiply by K_inv: (N, 3) @ (3, 3).T -> (N, 3)
+    # K_inv is (3, 3), so we need to handle matrix multiplication correctly
+    # hom_coords @ K_inv.T
+    normalized_dir = hom_coords @ K_inv.T  # Shape (N, 3)
+    
+    # Extract tilde_x and tilde_y
+    # The third component should be 1.0 if K_inv is correct and hom_coords is [x,y,1]
+    # However, numerically it might drift slightly. We assume the formula uses the first two components
+    # derived from the inverse projection.
+    tilde_x = normalized_dir[:, 0]
+    tilde_y = normalized_dir[:, 1]
+    
+    # Step 2: Compute norm of direction vector (tilde_x, tilde_y, 1)
+    # The z-component is fixed at 1 in the normalized homogeneous coordinate system
+    norm = torch.sqrt(tilde_x**2 + tilde_y**2 + 1.0)
+    
+    # Step 3: Calculate camera-space depth
+    z_c = d / norm
+    
+    return z_c
+```
+
+## Subtopics
+
+### Expected Term Rendering
+Renders the expected termination distance (depth) along each ray by tracing through the volume. It computes the expected value of the depth distribution rather than a single hard intersection, which is useful for soft surfaces or probabilistic depth estimation. It is chosen when the volume represents a probabilistic density field rather than a hard boundary. [S2, unofficial]
+
+### Sigma-Threshold Depth Rendering
+Renders depth based on a binary threshold of the volume density ($\sigma$). It finds the first point along the ray where $\sigma$ exceeds a specified `sigma_thresh` value. This method is computationally efficient and produces sharp depth maps for well-defined surfaces. It is used in methods like Dex-NeRF. The parameter `sigma_thresh` is a float threshold for density comparison. [S2, unofficial]
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per pixel after the ray distance $d$ is computed. The dominant cost is the upstream differentiable volume rendering step.
+*   **Memory Complexity:** $O(1)$ auxiliary memory per pixel.
+*   **Strengths:** Provides geometrically correct depth values that are consistent with the camera model. Exact gradients are available via the IFT implementation in the parent method.
+*   **Limitations:** Depends entirely on the accuracy of the upstream ray distance computation. If the volume rendering fails to find a surface (e.g., transparent regions), the depth may be undefined or require a fallback (e.g., far plane).
+*   **When to use:** When geometric accuracy of depth maps is required for downstream tasks like stereo matching, SLAM, or 3D reconstruction.
+*   **When not to use:** When only relative depth or normalized depth is sufficient, or when computational resources are extremely limited and the overhead of the upstream differentiable rendering is prohibitive.
+
+## Background
+The method is based on the geometric relationship between ray distance and camera-space depth in perspective projection. It is commonly used in differentiable rendering pipelines that support depth output, such as those based on differentiable sphere tracing for Signed Distance Fields (SDFs) [S1]. The specific implementation details for expected term and sigma-threshold variants are found in the Svox2 library [S2, unofficial].
+
+## Sources
+[S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26
+[S2] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)

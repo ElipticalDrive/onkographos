@@ -1,0 +1,314 @@
+# Mip-NeRF 360
+
+Also called: Unbounded Anti-Aliased Neural Radiance Fields
+
+## Overview
+Mip-NeRF 360 is a method for synthesizing photorealistic views of unbounded, real-world scenes where the camera may rotate 360 degrees and content exists at arbitrary distances [S1]. It solves the problems of aliasing, training inefficiency, and geometric ambiguity inherent in standard NeRF and mip-NeRF when applied to large-scale environments [S1]. It sets itself apart from its parent [NeRF Training Loop](970-nerf-training-loop.md) and sibling [Mip-NeRF 360 Sampling and Training](3393-mip-nerf-360-sampling-and-training.md) by introducing a non-linear scene parameterization, an online distillation training scheme using a proposal network, and a distortion-based regularizer [S1].
+
+## How it works
+**Inputs:** A set of calibrated images with known camera poses and intrinsics.
+**Outputs:** A trained NeRF MLP ($\Theta_{\text{NeRF}}$) and a proposal MLP ($\Theta_{\text{Prop}}$) that can render images for new camera poses.
+
+**Data Structures:**
+1.  **NeRF MLP:** A coordinate-based multi-layer perceptron parameterized by $\Theta_{\text{NeRF}}$. It takes integrated positional encodings of 3D coordinates and view direction as input. It outputs volumetric density $\tau$ and color $\mathbf{c}$.
+2.  **Proposal MLP:** A smaller coordinate-based multi-layer perceptron parameterized by $\Theta_{\text{Prop}}$. It takes the same inputs as the NeRF MLP but outputs only volumetric density $\tau$. It does not predict color.
+3.  **Ray Representation:** Rays are represented as conical frustums defined by mean position $\boldsymbol{\mu}$ and covariance $\boldsymbol{\Sigma}$ [S1].
+
+**Non-linear Scene Parameterization:**
+To handle unbounded scenes, 3D scene coordinates are mapped to a bounded domain using a non-linear parameterization. This allocates more MLP capacity to nearby content and less to distant content, addressing the unbalanced detail and scale of objects [S1]. The specific parameterization function is not detailed in the sources, but it is applied to the ray's mean and covariance before encoding [S1].
+
+**Integrated Positional Encoding:**
+Instead of encoding infinitesimal points, mip-NeRF 360 encodes the conical frustum defined by the interval $T_i$. The mean $\boldsymbol{\mu}$ and covariance $\boldsymbol{\Sigma}$ of the frustum are featurized using integrated positional encoding [S1]:
+
+$$
+\gamma(\boldsymbol{\mu}, \boldsymbol{\Sigma}) = \left\{ \begin{bmatrix} \left[ \sin(2^\ell \boldsymbol{\mu}) \exp\left(-2^{2\ell-1} \operatorname{diag}(\boldsymbol{\Sigma})\right) \right] \\ \left[ \cos(2^\ell \boldsymbol{\mu}) \exp\left(-2^{2\ell-1} \operatorname{diag}(\boldsymbol{\Sigma})\right) \right] \end{bmatrix} \right\}_{\ell=0}^{L-1}
+$$
+
+where $\boldsymbol{\mu}$ and $\boldsymbol{\Sigma}$ are the mean and covariance of the conical frustum, and $L$ is the number of frequency bands [S1]. This is the expectation of the standard NeRF positional encodings with respect to a Gaussian approximating the conical frustum [S1].
+
+**MLP Forward Pass:**
+For each interval $T_i$ along the ray, the NeRF MLP computes density and color:
+
+$$
+(T_i, \mathbf{c}_i) = \text{MLP}(\gamma(\mathbf{r}(T_i)); \Theta_{\text{NeRF}})
+$$
+
+where $\mathbf{r}(T_i)$ represents the parameterized ray segment, $\mathbf{c}_i$ is the color, and the view direction is also provided as input (omitted for simplicity) [S1].
+
+**Volume Rendering:**
+The final pixel color $\mathbf{C}(\mathbf{r}, \mathbf{t})$ is approximated using numerical quadrature:
+
+$$
+\mathbf{C}(\mathbf{r}, \mathbf{t}) = \sum w_i \mathbf{c}_i
+$$
+
+The alpha compositing weights $w_i$ are calculated as:
+
+$$
+w_i = \left(1 - e^{-\tau_i(t_{i+1}-t_i)}\right)e^{-\sum_{i'} \tau_{i'}(t_{i'+1}-t_{i'})}
+$$
+
+where $\tau_i$ is the density at interval $i$, $t_i$ and $t_{i+1}$ are the interval boundaries, and the sum is over all intervals $i'$ [S1]. The weights $w$ are guaranteed to sum to less than or equal to 1 [S1].
+
+**Sampling Strategy:**
+1.  **Coarse Sampling:** The ray is sampled using evenly-spaced "coarse" distances $\mathbf{t}^c$. During training, these are stochastic samples from a uniform distribution spanning the camera's near and far planes $[t_n, t_f]$:
+    $$
+    t^c \sim \mathcal{U}[t_n, t_f], \quad \mathbf{t}^c = \text{sort}(\{t^c\})
+    $$
+    During evaluation, samples are evenly spaced [S1].
+2.  **Fine Sampling:** After the NeRF MLP generates coarse weights $\mathbf{w}^c$, "fine" distances $\mathbf{t}^f$ are sampled from the histogram defined by $\mathbf{t}^c$ and $\mathbf{w}^c$ using inverse transform sampling:
+    $$
+    t^f \sim \text{hist}(\mathbf{t}^c, \mathbf{w}^c), \quad \mathbf{t}^f = \text{sort}(\{t^f\})
+    $$
+    This concentrates samples around scene content, improving efficiency [S1].
+
+**Online Distillation Training:**
+Two MLPs are trained simultaneously: a proposal MLP and a NeRF MLP [S1].
+1.  The proposal MLP predicts density only.
+2.  The NeRF MLP predicts density and color.
+3.  The proposal MLP is used to resample new intervals for the NeRF MLP [S1].
+4.  Crucially, the proposal MLP weights are **not** supervised by image reconstruction loss. Instead, they are supervised using the histogram weights generated by the NeRF MLP. This "online distillation" allows the use of a large NeRF MLP evaluated few times, alongside a small proposal MLP evaluated many times [S1].
+
+**Distortion Regularizer:**
+A distortion-based regularizer is applied to address ambiguity in unbounded scenes. It is designed to work with the continuous weights defined along each mip-NeRF ray, unlike point-based regularizers [S1].
+
+**Training Loss:**
+The model is optimized via gradient descent to minimize a weighted combination of coarse and fine reconstruction losses:
+
+$$
+\sum_{\mathbf{r} \in \mathcal{R}} \frac{1}{10} \mathcal{L}_{\text{recon}}(\mathbf{C}(\mathbf{r}, \mathbf{t}^c), \mathbf{C}^*(\mathbf{r})) + \mathcal{L}_{\text{recon}}(\mathbf{C}(\mathbf{r}, \mathbf{t}^f), \mathbf{C}^*(\mathbf{r}))
+$$
+
+where $\mathcal{R}$ is the set of training rays, $\mathbf{C}^*(\mathbf{r})$ is the ground truth color, and $\mathcal{L}_{\text{recon}}$ is mean squared error [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def mip_nerf_360_training_loop(images, poses, intrinsics, num_iterations=25000):
+    """
+    Trains Mip-NeRF 360 model.
+    """
+    # Initialize MLPs
+    # Theta_NeRF: Large MLP for density and color
+    # Theta_Prop: Small MLP for density only
+    theta_nerf = initialize_mlp_large()
+    theta_prop = initialize_mlp_small()
+    
+    # Optimizer setup (Adam)
+    optimizer = Adam([theta_nerf, theta_prop], lr=1e-2, beta1=0.9, beta2=0.99, eps=1e-15)
+    
+    # Learning rate warm-up and decay parameters
+    warmup_iterations = 5000
+    max_lr = 1e-2
+    min_lr = 1e-3
+    
+    for iteration in range(1, num_iterations + 1):
+        # 1. Learning Rate Schedule
+        if iteration <= warmup_iterations:
+            # Cosine decay from 1e-8 to 1 for warmup multiplier
+            warmup_mult = cosine_decay(iteration / warmup_iterations, start=1e-8, end=1.0)
+            current_lr = max_lr * warmup_mult
+        else:
+            # Logarithmic decay from 1e-2 to 1e-3
+            current_lr = log_decay(iteration, start_lr=max_lr, end_lr=min_lr, total_iters=num_iterations)
+        
+        optimizer.set_lr(current_lr)
+        
+        # 2. Sample Batch of Rays
+        rays = sample_rays_from_images(images, poses, intrinsics, batch_size=216)
+        
+        # 3. Coarse Sampling
+        # Uniform sampling between near and far planes
+        t_coarse = uniform_sample(rays.near, rays.far, num_samples_coarse)
+        t_coarse = sort(t_coarse)
+        
+        # 4. Proposal Network Forward Pass (Density Only)
+        # Apply non-linear scene parameterization to ray coordinates
+        params_coarse = apply_scene_parameterization(rays, t_coarse)
+        # Integrated positional encoding
+        features_coarse = integrated_pos_encoding(params_coarse.mean, params_coarse.cov)
+        # Proposal MLP predicts density
+        tau_prop = theta_prop(features_coarse)
+        
+        # 5. Resampling for Fine Pass
+        # Compute coarse weights from proposal density (assuming no color for proposal)
+        # Note: The source says proposal is used to resample. 
+        # Standard volume rendering weights require density.
+        # We assume a simple opacity calculation for resampling weights
+        alpha_prop = 1 - exp(-tau_prop * (t_coarse[1:] - t_coarse[:-1]))
+        # Normalize or use as histogram for inverse transform sampling
+        weights_prop = compute_compositing_weights(alpha_prop)
+        
+        # Sample fine distances from histogram defined by t_coarse and weights_prop
+        t_fine = histogram_sample(t_coarse, weights_prop, num_samples_fine)
+        t_fine = sort(t_fine)
+        
+        # 6. NeRF Network Forward Pass (Density and Color)
+        params_fine = apply_scene_parameterization(rays, t_fine)
+        features_fine = integrated_pos_encoding(params_fine.mean, params_fine.cov)
+        # NeRF MLP predicts density and color
+        tau_nerf, color_nerf = theta_nerf(features_fine)
+        
+        # 7. Volume Rendering (Fine)
+        # Compute weights using NeRF density
+        alpha_nerf = 1 - exp(-tau_nerf * (t_fine[1:] - t_fine[:-1]))
+        weights_nerf = compute_compositing_weights(alpha_nerf)
+        color_rendered_fine = sum(weights_nerf * color_nerf)
+        
+        # 8. Volume Rendering (Coarse) - for supervision of proposal
+        # Compute weights using proposal density
+        alpha_prop_render = 1 - exp(-tau_prop * (t_coarse[1:] - t_coarse[:-1]))
+        weights_prop_render = compute_compositing_weights(alpha_prop_render)
+        # Note: Proposal does not output color, so we might not render color from it directly
+        # But we need the weights for distillation
+        
+        # 9. Compute Losses
+        # Ground truth colors for the sampled rays
+        gt_colors = get_gt_colors(rays)
+        
+        # Reconstruction Loss for Fine Pass
+        loss_recon_fine = mean_squared_error(color_rendered_fine, gt_colors)
+        
+        # Reconstruction Loss for Coarse Pass (supervising NeRF coarse output if needed, 
+        # but source emphasizes fine loss and proposal distillation)
+        # Source eq 7 includes coarse recon loss for NeRF. 
+        # We need to run NeRF on coarse intervals too or assume NeRF is evaluated on coarse t_coarse
+        params_coarse_nerf = apply_scene_parameterization(rays, t_coarse)
+        features_coarse_nerf = integrated_pos_encoding(params_coarse_nerf.mean, params_coarse_nerf.cov)
+        tau_nerf_coarse, color_nerf_coarse = theta_nerf(features_coarse_nerf)
+        alpha_nerf_coarse = 1 - exp(-tau_nerf_coarse * (t_coarse[1:] - t_coarse[:-1]))
+        weights_nerf_coarse = compute_compositing_weights(alpha_nerf_coarse)
+        color_rendered_coarse = sum(weights_nerf_coarse * color_nerf_coarse)
+        
+        loss_recon_coarse = mean_squared_error(color_rendered_coarse, gt_colors)
+        
+        # Total Reconstruction Loss
+        loss_recon = 0.1 * loss_recon_coarse + loss_recon_fine
+        
+        # Distortion Loss (Regularizer)
+        # Applied to NeRF weights/densities along the ray
+        loss_distortion = compute_distortion_loss(t_fine, weights_nerf, tau_nerf)
+        
+        # Online Distillation Loss
+        # Supervise proposal MLP weights using histogram weights from NeRF
+        # The source says: "supervised with the histogram weights generated by the NeRF MLP"
+        # This implies matching the proposal's density distribution to the NeRF's weight distribution
+        # A common implementation is MSE between proposal density (normalized) and NeRF weights
+        # Or KL divergence. Source doesn't specify exact loss function for distillation, 
+        # just "supervised using histogram weights". 
+        # We assume a regression loss on the density values scaled to match weight magnitudes.
+        # Let's assume we normalize proposal density to sum to 1 and compare to NeRF weights
+        prop_density_norm = normalize(tau_prop)
+        loss_distill = mean_squared_error(prop_density_norm, weights_nerf) # Simplified interpretation
+        
+        total_loss = loss_recon + loss_distortion + loss_distill
+        
+        # 10. Backpropagation
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+
+def integrated_pos_encoding(mean, cov, L=10):
+    """
+    Computes integrated positional encoding for mip-NeRF.
+    """
+    features = []
+    for l in range(L):
+        freq = 2**l
+        # Sin component
+        sin_val = sin(freq * mean) * exp(-0.5 * freq**2 * diag(cov)) # Note: Source uses 2^(2l-1) which is freq^2 / 2
+        # Correction: Source formula is exp(-2^(2l-1) diag(Sigma)). 
+        # 2^(2l-1) = (2^l)^2 / 2 = freq^2 / 2.
+        # So exp(-freq^2/2 * diag(cov)) is correct.
+        sin_val = sin(freq * mean) * exp(-0.5 * (freq**2) * diag(cov))
+        
+        # Cos component
+        cos_val = cos(freq * mean) * exp(-0.5 * (freq**2) * diag(cov))
+        
+        features.append(sin_val)
+        features.append(cos_val)
+    
+    return concatenate(features)
+
+def compute_compositing_weights(alpha):
+    """
+    Computes alpha compositing weights from opacities.
+    w_i = alpha_i * product(1 - alpha_j for j < i)
+    """
+    N = len(alpha)
+    weights = np.zeros(N)
+    transmittance = 1.0
+    for i in range(N):
+        weights[i] = alpha[i] * transmittance
+        transmittance *= (1 - alpha[i])
+    return weights
+
+def cosine_decay(progress, start, end):
+    """
+    Cosine decay from start to end over progress [0, 1].
+    """
+    import math
+    return end + 0.5 * (start - end) * (1 + math.cos(math.pi * progress))
+
+def log_decay(iteration, start_lr, end_lr, total_iters):
+    """
+    Logarithmic decay.
+    """
+    # Approximation: linear in log space
+    # log(lr) = log(start) + (iteration/total) * (log(end) - log(start))
+    import math
+    log_start = math.log(start_lr)
+    log_end = math.log(end_lr)
+    progress = iteration / total_iters
+    log_lr = log_start + progress * (log_end - log_start)
+    return math.exp(log_lr)
+```
+
+**Parameters:**
+*   **Model Capacity:** The total model capacity is approximately 15 times larger than mip-NeRF's capacity [S1].
+*   **Training Time:** Increases by approximately 2 times compared to mip-NeRF [S1].
+*   **Acceleration:** Training time acceleration is 300% compared to NeRF in Detail's learned proposer approach [S1].
+*   **Batch Size:** 216 [S2].
+*   **Iterations:** 25,000 [S2].
+*   **Optimizer:** Adam with $\beta_1 = 0.9$, $\beta_2 = 0.99$, $\epsilon = 10^{-15}$ [S2].
+*   **Learning Rate:** Decays logarithmically from $10^{-2}$ to $10^{-3}$ [S2].
+*   **Warm-up:** For the first 5,000 iterations, the learning rate is scaled by a cosine-decayed multiplier from $10^{-8}$ to 1 [S2].
+*   **Gradient Clipping:** None [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Unbounded Scenes:** Standard NeRF fails on unbounded scenes due to ambiguity and aliasing. The non-linear parameterization and distortion regularizer are critical [S1].
+*   **Floaters:** Semi-transparent densities near the camera ("floaters") are a significant issue. The distortion regularizer and online distillation help mitigate this [S1].
+*   **Precision:** The exponential terms in the integrated positional encoding and volume rendering weights require careful handling to avoid underflow/overflow, though specific numerical guards are not detailed in the sources [S1].
+
+## Subtopics
+
+### [Zip-NeRF](3030-zip-nerf.md)
+Zip-NeRF is a method that integrates scale-aware anti-aliased neural radiance fields with fast grid-based training to achieve lower error rates and faster convergence than prior techniques. It solves the problem of aliasing artifacts in both spatial rendering and the loss function during online distillation, which are particularly prominent when rendering scenes across multiple scales or with sparse sampling. It sets itself apart from its parent [Mip-NeRF 360](3306-mip-nerf-360.md) by replacing the large MLP with an Instant-NGP (iNGP) grid structure and introducing specific anti-aliasing mechanisms (multisampling, downweighting, and interlevel loss) to handle the high-frequency details of grid-based representations.
+
+#### Distortion Loss with Power Transformation
+A modification of the mip-NeRF 360 distortion loss that applies the Power Transformation $P$ to metric distance before computing the loss. This curves metric distance to aggressively penalize 'floaters' near the camera [S2].
+1.  Take metric distance $t$.
+2.  Apply power transformation $P$ to the scaled metric distance. In experiments, parameters were $P(10000x, -0.25)$ [S2].
+3.  Compute distortion loss on the transformed distance [S2].
+*   **Parameters:** Multiplier on distortion loss is 0.005 in all experiments [S2]. Transformation parameters: $x$ is scaled by 10000 and $\lambda$ is -0.25 [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Training time increases by approximately 2 times compared to mip-NeRF [S1]. It accelerates training by 300% compared to NeRF in Detail's learned proposer approach [S1].
+*   **Memory Complexity:** The total model capacity is approximately 15 times larger than mip-NeRF's capacity [S1].
+*   **Measured Performance:** Reduces mean squared error by 57% compared to mip-NeRF [S1]. Produces realistic synthesized views and detailed depth maps for highly intricate, unbounded real-world scenes [S1].
+*   **Scaling:** The method is designed for unbounded scenes where the camera rotates 360 degrees. It handles varying scales and distances effectively [S1].
+*   **Strengths:** Handles unbounded scenes, reduces aliasing, efficient training via online distillation, high quality for intricate scenes [S1].
+*   **Limitations:** Larger model capacity, increased training time compared to base mip-NeRF [S1].
+*   **When to Use:** When rendering unbounded, real-world scenes with 360-degree camera rotation and high detail requirements [S1].
+*   **When Not to Use:** For bounded scenes or when training time is a critical constraint and lower quality is acceptable [S1].
+
+## Background
+Mip-NeRF 360 was introduced as an extension of mip-NeRF to address the challenges of unbounded scenes [S1]. It builds on the concept of anti-aliasing via conical frustums introduced in mip-NeRF [S1]. The method was presented in the paper "Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields" [S1]. It addresses issues such as slow training, artifacts due to ambiguity in large scenes, and the inability of standard NeRF to handle unbounded environments [S1].
+
+## Sources
+[S1] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26
+[S2] Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01804, fetched 2026-10-26

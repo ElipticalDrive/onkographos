@@ -1,0 +1,87 @@
+# Finite Difference Stencils (Central/Forward/Backward)
+
+
+## Overview
+Finite difference stencils compute the spatial gradient of a scalar volume by approximating partial derivatives using discrete samples from neighboring voxels [G]. This method solves the problem of estimating surface normals or density rates of change for ray marching and shading without requiring analytic derivatives of the underlying basis functions [G]. It differs from [Analytic Gradient Computation](2167-analytic-gradient-computation.md) by relying on numerical approximation rather than closed-form differentiation, and from [Gradient Estimation from Samples](2180-gradient-estimation-from-samples.md) by using fixed geometric offsets rather than statistical sampling of ray hits [G].
+
+## Shared principles
+All finite difference stencils approximate the first derivative of a function $f(\mathbf{x})$ at a point $\mathbf{x}$ using a weighted sum of function values at discrete grid points [G]. The general form for a partial derivative with respect to coordinate $i$ is:
+
+$$ \frac{\partial f}{\partial x_i} \approx \sum_{k} w_k f(\mathbf{x} + \delta_k \mathbf{e}_i) $$
+
+where $w_k$ are weights and $\delta_k$ are offsets along the axis $\mathbf{e}_i$ [G]. The accuracy of the stencil is determined by the order of the Taylor series expansion it matches [G]. Lower-order stencils (like forward/backward) use fewer samples but suffer from bias or lower accuracy, while higher-order stencils (like central or 4th-order) use more samples to reduce truncation error [G]. The choice of stencil dictates the number of memory accesses (samples) required per gradient component [G].
+
+## Subtopics
+
+### Central Differences
+Central differences approximate the derivative using points on both sides of the target voxel [G]. For a 1D function $f$, the first-order central difference is:
+
+$$ f'(x) \approx \frac{f(x + h) - f(x - h)}{2h} $$
+
+In 3D, this requires 2 samples per axis (6 total for the full gradient vector) [G]. It is second-order accurate ($O(h^2)$) and unbiased for interior points [G]. It is the standard choice for smooth volumes where boundary effects are minimal or handled separately [G].
+
+### Forward Differences
+Forward differences approximate the derivative using the current voxel and the next voxel in the positive direction:
+
+$$ f'(x) \approx \frac{f(x + h) - f(x)}{h} $$
+
+This requires 2 samples per axis (6 total) [G]. It is first-order accurate ($O(h)$) and introduces a directional bias [G]. It is typically used when memory bandwidth is constrained or when computing gradients at boundaries where backward points are unavailable, though [Neumann Gradient](3342-neumann-gradient.md) offers a more robust boundary handling strategy [G].
+
+### Backward Differences
+Backward differences approximate the derivative using the current voxel and the previous voxel in the negative direction:
+
+$$ f'(x) \approx \frac{f(x) - f(x - h)}{h} $$
+
+This requires 2 samples per axis (6 total) [G]. Like forward differences, it is first-order accurate and biased [G]. It is the mirror counterpart to forward differences and is rarely used in isolation for volume rendering unless specific directional constraints exist [G].
+
+### Clamped Central Differences
+#### definition
+- [S1] A variant of central differencing for gradient computation that clamps offset positions to the current region to avoid additional ray traversals.
+#### step
+- [S1] Compute six additional basis reconstruction samples at positions offset from the current sample by a distance proportional to the region's sample rate.
+- [S1] Clamp the offset positions to the current region before evaluating them.
+#### pitfall
+- [S1] Gradients are not necessarily continuous at level boundaries because the offset size can change.
+#### comparison
+- [S1] Accurate central differencing requires tracing 6 additional rays per sample via infinitesimal rays to find containing regions, which is expensive. Clamped version removes ray traversals but reduces quality.
+
+### Curl Grid Computation
+#### definition
+- [S2, unofficial] Computes the curl ∇×F at every active voxel of a vector grid using central differences.
+#### step
+- [S2, unofficial] Initialize a GradStencil with the grid tree.
+- [S2, unofficial] Iterate over all active voxels (c, _) in the grid tree.
+- [S2, unofficial] Move the stencil to the current coordinate c.
+- [S2, unofficial] Compute the x, y, and z components of the curl using the formulas and store the tuple (cx, cy, cz) in a dictionary keyed by coordinate.
+- [S2, unofficial] Build the result grid using the computed data, a background value of zero vector (0,0,0), and the original grid's voxel size.
+#### formula
+- [S2, unofficial] curl_x = (v[4][3] - v[5][3] - v[6][2] + v[7][2]) * 0.5
+- [S2, unofficial] curl_y = (v[6][1] - v[7][1] - v[2][3] + v[3][3]) * 0.5
+- [S2, unofficial] curl_z = (v[2][2] - v[3][2] - v[4][1] + v[5][1]) * 0.5
+#### parameter
+- [S2, unofficial] half: The scalar multiplier 0.5, representing 1/(2*voxel_size) in index space.
+
+### WENO5 Interpolation
+#### definition
+- [S3] Implementation of nominally fifth-order finite-difference WENO that returns the numerical flux for interpolation.
+#### formula
+- [S3] Given $v_1 = f(x-2dx)$, $v_2 = f(x-dx)$, $v_3 = f(x)$, $v_4 = f(x+dx)$ and $v_5 = f(x+2dx)$, return an interpolated value $f(x+dx/2)$ with the special property that $( f(x+dx/2) - f(x-dx/2) ) / dx = df/dx (x) + error$, where the error is fifth-order in smooth regions: $O(dx) \le error \le O(dx^5)$
+#### parameter
+- [S3] scale2: A scaling factor for the weights, default value is 1.0.
+- [S3] v1, v2, v3, v4, v5: Five input values for the stencil.
+- [S3] RealT: Type for scale2, defaults to ValueType.
+#### history
+- [S3] Introduced by Chi-Wang Shu. Referenced in 'High Order Finite Difference and Finite Volume WENO Schemes and Discontinuous Galerkin Methods for CFD' (ICASE Report No 2001-11, page 6) and ICASE No 97-65 (Shu, 1997).
+
+### Zucker-Hummel Operator
+#### comparison
+- [S4, unofficial] More complex calculation than Central-Difference, requiring 54 sampling points, but offers significantly improved image quality.
+
+## Background
+Finite difference methods are a cornerstone of numerical analysis, dating back to the early 20th century [G]. In the context of volume rendering, they serve as a practical alternative to analytic gradients for complex basis functions or sparse data structures like AMR [G]. The ExaBricks framework documents accurate central differencing for ray-traced AMR data, which requires tracing infinitesimal rays through a region BVH to find containing regions for offset positions [S1]. The trade-off between computational cost and visual quality, particularly regarding the number of samples required (e.g., 6 for central vs. 54 for Zucker-Hummel), is a key consideration in real-time rendering systems [S4, unofficial].
+
+## Sources
+[S1] PDF Ray Tracing Structured AMR Data Using ExaBricks, https://www.sci.utah.edu/~wald/Publications/2020/exabrick/exabrick.pdf, fetched 2026-10-30
+[S2] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
+[S3] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24
+[S4] Volume Raycasting mit OpenCL, https://arxiv.org/abs/1609.01317v1, fetched 2026-10-26 (unofficial)

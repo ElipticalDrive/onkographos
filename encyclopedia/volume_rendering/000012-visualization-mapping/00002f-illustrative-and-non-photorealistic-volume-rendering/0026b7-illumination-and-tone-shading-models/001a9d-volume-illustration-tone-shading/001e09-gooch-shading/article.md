@@ -1,0 +1,96 @@
+# Gooch Shading
+Also called: Central Difference Normal Shading, Gooch Shading with Central Difference Normals, Gooch Tone Shading
+
+## Overview
+Gooch Shading is a non-photorealistic illumination model applied to volume rendering isosurfaces, combining cool/warm color mapping with directional shading based on the angle between the surface normal and the light vector. It is distinguished from standard Gooch shading by its specific integration with central difference normal estimation in rasterization pipelines, ensuring consistent visual output across different extraction methods (rasterization vs. ray-marching) [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Scalar volume data, camera parameters, light direction vector $\mathbf{l}$, and base cool/warm color parameters.
+- **Output:** Fragment color with Gooch shading applied.
+
+**Data Structures:**
+- **Vertex Normals:** Computed on the fly using central differences. No pre-computed normal buffer is required for the rasterization approach described in the sources [S1][S2, unofficial].
+- **Fragment Shader State:** Receives interpolated vertex normals and light direction.
+
+**Steps:**
+1. **Normal Estimation:** For each vertex or sample point on the isosurface, compute the normal $\mathbf{n}$ using the central difference method on the scalar field values [S1][S2, unofficial].
+   - Let $V(x, y, z)$ be the scalar value at grid coordinates $(x, y, z)$.
+   - The normal $\mathbf{n}$ is proportional to the gradient $\nabla V$:
+     $$ \mathbf{n} = \nabla V = \left[ \frac{\partial V}{\partial x}, \frac{\partial V}{\partial y}, \frac{\partial V}{\partial z} \right] $$
+   - The partial derivatives are computed as central differences:
+     $$ \frac{\partial V}{\partial x} \approx \frac{V(x+1, y, z) - V(x-1, y, z)}{2} $$
+     (Similarly for $y$ and $z$) [S1][S2, unofficial].
+   - Normalize $\mathbf{n}$ to unit length.
+2. **Pass to Fragment Shader:** The computed normals are passed to the fragment shader [S1][S2, unofficial].
+3. **Gooch Shading Application:** In the fragment shader, apply the Gooch shading model using the normal $\mathbf{n}$ and light direction $\mathbf{l}$ [S1][S2, unofficial].
+   - Compute the dot product $d = \mathbf{n} \cdot \mathbf{l}$.
+   - Map $d$ to a color using the Gooch cool/warm color scheme. The specific color mapping formula is not detailed in the provided sources, but it relies on the original Gooch shading model [GGSC98] cited in [S1][S2, unofficial].
+   - The fragment shader implementation is identical for both rasterization-based approaches and the ray-marching reference [S1][S2, unofficial].
+
+**Parameters:**
+- **Cool Color:** Not specified in sources.
+- **Warm Color:** Not specified in sources.
+- **Light Direction:** Not specified in sources.
+
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions:** Central difference requires neighbors. At volume boundaries, appropriate handling (e.g., clamping, mirroring, or using one-sided differences) is implied but not explicitly detailed in the sources [S1][S2, unofficial].
+- **Degenerate Normals:** If the scalar field is flat (zero gradient), the normal is undefined. This is not addressed in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_central_difference_normal(volume, x, y, z):
+    """
+    Compute normal at (x, y, z) using central differences.
+    Assumes volume is accessible and indices are valid.
+    Boundary handling is not specified in sources [G].
+    """
+    # Compute partial derivatives using central differences
+    # Note: Source [S1][S2, unofficial] mentions central difference method but does not provide exact boundary handling.
+    # We assume standard central difference with clamping or similar for boundaries [G].
+    
+    dx = (volume[x + 1, y, z] - volume[x - 1, y, z]) / 2.0
+    dy = (volume[x, y + 1, z] - volume[x, y - 1, z]) / 2.0
+    dz = (volume[x, y, z + 1] - volume[x, y, z - 1]) / 2.0
+    
+    normal = normalize(vec3(dx, dy, dz))
+    return normal
+
+def gooche_shading_fragment(normal, light_direction, cool_color, warm_color):
+    """
+    Apply Gooch shading.
+    Formula details not provided in sources [S1][S2, unofficial].
+    Relies on original Gooch shading model [GGSC98].
+    """
+    # Compute dot product
+    dot_product = dot(normal, normalize(light_direction))
+    
+    # Map dot product to color using Gooch cool/warm scheme
+    # Specific mapping function is not detailed in sources [G]
+    color = apply_gooch_color_mapping(dot_product, cool_color, warm_color)
+    return color
+```
+
+## Subtopics
+
+### Rasterization-based Gooch Shading
+Applied to direct isosurface rasterization. Uses central difference normals computed on the fly. Ensures consistency with ray-marching reference [S1][S2, unofficial].
+
+### Ray-marching Gooch Shading
+Applied in ray-marching reference. Computes normals in the same way (central difference) when an isosurface intersection is found. Uses identical fragment shader implementation [S1][S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Normal computation is $O(1)$ per vertex/sample. Shading is $O(1)$ per fragment.
+- **Memory Complexity:** No additional memory for normals if computed on the fly [S1][S2, unofficial].
+- **Measured Performance:** Not specified in sources.
+- **Strengths:** Consistent visual appearance across different rendering techniques (rasterization and ray-marching) [S1][S2, unofficial].
+- **Limitations:** Relies on central difference normal estimation, which may be sensitive to noise or boundaries [S1][S2, unofficial].
+
+## Background
+Gooch Shading was originally proposed by Gooch et al. in 1998 [GGSC98], cited in [S1][S2, unofficial]. It is used in volume rendering to provide illustrative shading that enhances shape perception [S1][S2, unofficial]. The specific application with central difference normals in rasterization is described in [S1][S2, unofficial].
+
+## Sources
+[S1] Efficient Direct Isosurface Rasterization of Scalar Volumes, https://www.uni-weimar.de/en/media/chairs/computer-science-department/vr/research/real-time-rendering/efficient-direct-isosurface-rasterization-of-scalar-volumes/, fetched 2026-11-01
+[S2] Efficient Direct Isosurface Rasterization of Scalar Volumes - EG, https://diglib.eg.org/items/8a65e0f0-c048-4fce-9d0b-5acf07452485, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,248 @@
+--- v001.md
++++ v002.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-Plenoxel Optimization with TV Regularization is a method for training sparse voxel-based radiance fields by combining mean squared error (MSE) reconstruction loss with Total Variation (TV) regularization on voxel opacities and spherical harmonic (SH) coefficients [S1]. It solves the problem of visual artifacts and memory bloat in high-dimensional, non-convex optimization by enforcing spatial smoothness and sparsity [S1]. Unlike standard differentiable rendering which relies solely on pixel-wise MSE, this method explicitly penalizes high-frequency variations in the voxel grid, allowing for faster convergence and cleaner geometry [S1]. It builds on [Plenoxels](52-plenoxels.md) and [Plenoxels regularization ablation](901-plenoxels-regularization-ablation.md).
++Plenoxel Optimization with TV Regularization trains sparse voxel-based radiance fields by combining mean squared error (MSE) reconstruction loss with Total Variation (TV) regularization on voxel opacities ($\sigma$) and spherical harmonic (SH) coefficients [S1]. It addresses visual artifacts and ill-conditioning in high-dimensional, non-convex optimization by explicitly penalizing high-frequency spatial variations in the voxel grid [S1]. It builds on [Plenoxels](52-plenoxels.md) and [Plenoxels regularization ablation](901-plenoxels-regularization-ablation.md).
+ 
+ ## How it works
+ **Inputs:**
+-- Ground truth images and corresponding camera poses.
++- Ground truth images and corresponding camera poses [S1].
+ - A sparse voxel grid structure containing opacity ($\sigma$) and SH coefficients for each active voxel [S1].
+ - Optimization hyperparameters: $\lambda_{TV}$ (TV weight), learning rates for $\sigma$ and SH coefficients, and batch sizes for rays $\mathcal{R}$ and voxels $\mathcal{V}$ [S1].
+@@ -16,5 +16,5 @@
+ 
+ **Data Structures:**
+-- **Voxel Grid:** A sparse 3D grid where each active voxel stores a scalar opacity $\sigma$ and a vector of SH coefficients. The dimensions of the SH vector depend on the chosen SH degree [S1].
++- **Voxel Grid:** A sparse 3D grid where each active voxel stores a scalar opacity $\sigma$ and a vector of SH coefficients [S1].
+ - **Ray Sample $\mathcal{R}$:** A stochastic subset of training rays used for the reconstruction loss [S1].
+ - **Voxel Sample $\mathcal{V}$:** A stochastic subset of active voxels used for the TV loss [S1].
+@@ -35,5 +35,5 @@
+ \mathcal{L}_{TV} = \frac{1}{|\mathcal{V}|} \sum_{\substack{\mathbf{v} \in \mathcal{V} \\ d \in [D]}} \sqrt{\Delta_x^2(\mathbf{v}, d) + \Delta_y^2(\mathbf{v}, d) + \Delta_z^2(\mathbf{v}, d)}
+ $$
+-where $D$ is the dimensionality of the SH coefficients, and $\Delta^2_x(\mathbf{v}, d)$ is the squared difference between the $d$-th value in voxel $\mathbf{v}=(i,j,k)$ and its neighbor $(i+1,j,k)$, normalized by the voxel resolution. Analogous definitions apply for $\Delta^2_y$ and $\Delta^2_z$ [S1].
++where $D$ is the dimensionality of the SH coefficients, and $\Delta^2_x(\mathbf{v}, d)$ is the squared difference between the $d$-th value in voxel $\mathbf{v}=(i,j,k)$ and its neighbor $(i+1,j,k)$, normalized by the voxel resolution [S1]. Analogous definitions apply for $\Delta^2_y$ and $\Delta^2_z$ [S1].
+ 
+ **Parameters:**
+@@ -53,149 +53,72 @@
+ **Pseudocode:**
+ ```python
++import math
++
+ def optimize_plenoxels_tv(voxel_grid, gt_images, cameras, lambda_tv, lr_sigma, lr_sh, n_iters, batch_size_rays, batch_size_voxels):
+-    """
+-    Optimizes Plenoxel parameters using TV regularization.
+-    voxel_grid: Sparse voxel grid with opacity and SH coefficients.
+-    gt_images: List of ground truth images.
+-    cameras: List of camera poses.
+-    lambda_tv: TV regularization weight.
+-    lr_sigma: Learning rate for opacity.
+-    lr_sh: Learning rate for SH coefficients.
+-    n_iters: Number of optimization iterations.
+-    batch_size_rays: Number of rays per batch.
+-    batch_size_voxels: Number of voxels per batch.
+-    """
+-    optimizer_sigma = RMSProp(voxel_grid.opacities, lr=lr_sigma)
+-    optimizer_sh = RMSProp(voxel_grid.sh_coeffs, lr=lr_sh)
+-    
++    # Initialize RMSProp optimizers for opacity and SH coefficients [G]
++    opt_sigma = RMSProp(voxel_grid.opacities, lr=lr_sigma)
++    opt_sh = RMSProp(voxel_grid.sh_coeffs, lr=lr_sh)
++
+     for step in range(n_iters):
+-        # 1. Sample rays and voxels
++        # 1. Stochastic sampling of rays and voxels [S1]
+         rays = sample_rays(cameras, batch_size_rays)
+         voxels = sample_voxels(voxel_grid, batch_size_voxels)
+-        
+-        # 2. Render colors for sampled rays
++
++        # 2. Differentiable volume rendering [S1]
+         rendered_colors = render_rays(voxel_grid, rays)
+-        
+-        # 3. Compute reconstruction loss
+         gt_colors = get_gt_colors(rays, gt_images)
++
++        # 3. Reconstruction loss [S1]
+         l_recon = mean_squared_error(rendered_colors, gt_colors)
+-        
+-        # 4. Compute TV loss
+-        l_tv = compute_tv_loss(voxel_grid, voxels)
+-        
+-        # 5. Combine losses
++
++        # 4. TV regularization loss [S1]
++        l_tv_sigma = compute_tv_loss(voxel_grid, voxels, voxel_grid.opacities, is_scalar=True)
++        l_tv_sh = compute_tv_loss(voxel_grid, voxels, voxel_grid.sh_coeffs, is_scalar=False)
++        l_tv = l_tv_sigma + l_tv_sh
++
++        # 5. Combine losses [S1]
+         loss = l_recon + lambda_tv * l_tv
+-        
+-        # 6. Backpropagate
++
++        # 6. Backpropagation and parameter update [S1]
+         loss.backward()
+-        
+-        # 7. Update parameters
+-        optimizer_sigma.step()
+-        optimizer_sh.step()
+-        
+-        # Clear gradients
+-        optimizer_sigma.zero_grad()
+-        optimizer_sh.zero_grad()
++        opt_sigma.step()
++        opt_sh.step()
++        opt_sigma.zero_grad()
++        opt_sh.zero_grad()
+ 
+-def compute_tv_loss(voxel_grid, voxels):
+-    """
+-    Computes the Total Variation loss for a batch of voxels.
+-    """
++def compute_tv_loss(voxel_grid, voxels, field, is_scalar):
++    """Computes the isotropic TV loss per voxel and dimension as defined in [S1]."""
+     tv_sum = 0.0
+     count = 0
++    res = voxel_grid.resolution
+     for v in voxels:
+-        # Get SH coefficients and opacity for voxel v
+-        sh_coeffs_v = voxel_grid.get_sh_coeffs(v)
+-        sigma_v = voxel_grid.get_opacity(v)
+-        
+-        # Get neighbors
+-        v_x = get_neighbor(v, direction='x')
+-        v_y = get_neighbor(v, direction='y')
+-        v_z = get_neighbor(v, direction='z')
+-        
+-        # Check if neighbors exist (boundary check)
+-        if v_x is not None:
+-            sh_coeffs_x = voxel_grid.get_sh_coeffs(v_x)
+-            sigma_x = voxel_grid.get_opacity(v_x)
+-            # Compute differences for SH coefficients
+-            for d in range(len(sh_coeffs_v)):
+-                diff_x = (sh_coeffs_v[d] - sh_coeffs_x[d]) / voxel_grid.resolution
+-                tv_sum += diff_x ** 2
+-            # Compute difference for opacity
+-            diff_x_sigma = (sigma_v - sigma_x) / voxel_grid.resolution
+-            tv_sum += diff_x_sigma ** 2
+-            
+-        if v_y is not None:
+-            sh_coeffs_y = voxel_grid.get_sh_coeffs(v_y)
+-            sigma_y = voxel_grid.get_opacity(v_y)
+-            for d in range(len(sh_coeffs_v)):
+-                diff_y = (sh_coeffs_v[d] - sh_coeffs_y[d]) / voxel_grid.resolution
+-                tv_sum += diff_y ** 2
+-            diff_y_sigma = (sigma_v - sigma_y) / voxel_grid.resolution
+-            tv_sum += diff_y_sigma ** 2
+-            
+-        if v_z is not None:
+-            sh_coeffs_z = voxel_grid.get_sh_coeffs(v_z)
+-            sigma_z = voxel_grid.get_opacity(v_z)
+-            for d in range(len(sh_coeffs_v)):
+-                diff_z = (sh_coeffs_v[d] - sh_coeffs_z[d]) / voxel_grid.resolution
+-                tv_sum += diff_z ** 2
+-            diff_z_sigma = (sigma_v - sigma_z) / voxel_grid.resolution
+-            tv_sum += diff_z_sigma ** 2
+-            
++        if is_scalar:
++            val_v = field[v]
++            grad_sq_sum = 0.0
++            for direction in ['x', 'y', 'z']:
++                neighbor = voxel_grid.get_neighbor(v, direction)
++                if neighbor is not None:
++                    diff = (val_v - field[neighbor]) / res
++                    grad_sq_sum += diff ** 2
++            tv_sum += math.sqrt(grad_sq_sum)
++        else:
++            for d in range(field.shape[1]):
++                val_v = field[v, d]
++                grad_sq_sum = 0.0
++                for direction in ['x', 'y', 'z']:
++                    neighbor = voxel_grid.get_neighbor(v, direction)
++                    if neighbor is not None:
++                        diff = (val_v - field[neighbor, d]) / res
++                        grad_sq_sum += diff ** 2
++                tv_sum += math.sqrt(grad_sq_sum)
+         count += 1
+-        
+-    # Take square root of sum of squares (isotropic TV)
+-    # Note: The formula in [S1] sums the square roots of the squared differences.
+-    # The implementation above sums the squared differences first. 
+-    # To match [S1] exactly, we should compute the norm per voxel/dimension.
+-    # However, [S1] defines L_TV as sum over v,d of sqrt(sum of squared diffs).
+-    # So we need to restructure the loop.
+-    
+-    # Corrected implementation matching [S1] formula:
+-    tv_sum = 0.0
+-    count = 0
+-    for v in voxels:
+-        sh_coeffs_v = voxel_grid.get_sh_coeffs(v)
+-        sigma_v = voxel_grid.get_opacity(v)
+-        
+-        for d in range(len(sh_coeffs_v)):
+-            grad_sq_sum = 0.0
+-            # X direction
+-            v_x = get_neighbor(v, 'x')
+-            if v_x is not None:
+-                diff = (sh_coeffs_v[d] - voxel_grid.get_sh_coeffs(v_x)[d]) / voxel_grid.resolution
+-                grad_sq_sum += diff ** 2
+-            # Y direction
+-            v_y = get_neighbor(v, 'y')
+-            if v_y is not None:
+-                diff = (sh_coeffs_v[d] - voxel_grid.get_sh_coeffs(v_y)[d]) / voxel_grid.resolution
+-                grad_sq_sum += diff ** 2
+-            # Z direction
+-            v_z = get_neighbor(v, 'z')
+-            if v_z is not None:
+-                diff = (sh_coeffs_v[d] - voxel_grid.get_sh_coeffs(v_z)[d]) / voxel_grid.resolution
+-                grad_sq_sum += diff ** 2
+-            tv_sum += sqrt(grad_sq_sum)
+-            
+-        # Opacity TV
+-        grad_sq_sum_sigma = 0.0
+-        v_x = get_neighbor(v, 'x')
+-        if v_x is not None:
+-            diff = (sigma_v - voxel_grid.get_opacity(v_x)) / voxel_grid.resolution
+-            grad_sq_sum_sigma += diff ** 2
+-        v_y = get_neighbor(v, 'y')
+-        if v_y is not None:
+-            diff = (sigma_v - voxel_grid.get_opacity(v_y)) / voxel_grid.resolution
+-            grad_sq_sum_sigma += diff ** 2
+-        v_z = get_neighbor(v, 'z')
+-        if v_z is not None:
+-            diff = (sigma_v - voxel_grid.get_opacity(v_z)) / voxel_grid.resolution
+-            grad_sq_sum_sigma += diff ** 2
+-        tv_sum += sqrt(grad_sq_sum_sigma)
+-        
+-        count += 1
+-        
+-    return tv_sum / count
++    return tv_sum / count if count > 0 else 0.0
++
++# Standard helper definitions for self-contained pseudocode [G]
++def sample_rays(cameras, n): return [cameras[i] for i in range(n)]
++def sample_voxels(grid, n): return list(grid.active_voxels)[:n]
++def render_rays(grid, rays): return [grid.render_ray(r) for r in rays]
++def get_gt_colors(rays, images): return [images[r.image_id] for r in rays]
++def mean_squared_error(pred, target): return sum((p - t)**2 for p, t in zip(pred, target)) / len(pred)
+ ```
+ 
+@@ -207,13 +130,11 @@
+ ## Operating characteristics
+ - **Time Complexity:** The method uses stochastic sampling for both rays and voxels, making each iteration faster than full-batch methods [S1]. The use of RMSProp avoids the high cost of second-order methods [S1].
+-- **Memory Complexity:** Depends on the sparse voxel grid size and the number of SH coefficients per voxel [S1].
+ - **Performance:** Achieves high-quality results after less than 1.5 minutes (first epoch) on synthetic scenes [S1]. Dramatic speedup in training compared to prior methods [S1].
+-- **Strengths:** Prevents visual artifacts, controls memory usage, handles ill-conditioning, and enables fast training [S1].
++- **Strengths:** Prevents visual artifacts, handles ill-conditioning, and enables fast training [S1].
+ - **Limitations:** Requires careful tuning of $\lambda_{TV}$ and learning rates for different parameters [S1]. The non-convex nature of the rendering formula makes optimization challenging [S1].
+ - **When to use:** When training sparse voxel radiance fields and needing to prevent artifacts and control memory [S1].
+-- **When not to use:** When real-time training speed is not critical and simpler methods suffice, or when the scene is too complex for the sparse grid to capture efficiently.
+ 
+ ## Background
+-The method originates from the Plenoxels paper, which introduced radiance fields without neural networks using sparse voxel grids and SH coefficients [S1]. The TV regularization was introduced to address artifacts and improve optimization stability [S1]. The implementation details, including the use of ODL for TV regularization, are described in an unofficial GitHub repository [S2, unofficial].
++The method originates from the Plenoxels paper, which introduced radiance fields without neural networks using sparse voxel grids and SH coefficients [S1]. TV regularization is applied to the loss function to mitigate visual artifacts observed in ablation studies [S1]. Implementation details for the optimization framework are documented in an unofficial repository [S2, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,94 @@
+# Scaling
+Also called: Scalar Field Scaling
+## Overview
+Scaling is a fundamental scalar field normalization technique that maps input data values to a target range, typically [0, 1], by dividing by a scale factor. It serves as the base linear transformation for volume data representation, ensuring numerical stability and consistent contrast across different datasets. It differs from non-linear methods like [Power Transformation](2346-power-transformation.md) by preserving the linear relationship between input intensity and output value, and from [Scaling and Biasing](2888-scaling-and-biasing.md) by lacking an explicit bias term in its core definition, though biasing is often applied subsequently.
+## How it works
+### Inputs and outputs
+- **Input**: A scalar field value $v$ (e.g., voxel intensity, Hounsfield Unit).
+- **Output**: A normalized scalar value $v'$ in the range $[0, 1]$ or a specific physical unit range.
+- **Parameters**: A scale factor $s$.
+
+### Data structures
+No specific complex data structures are required. The operation is element-wise on the scalar field tensor.
+
+### Steps
+1. **Retrieve input value**: Obtain the scalar value $v$ from the volume data at the current sampling point.
+2. **Apply scaling**: Divide the input value by the scale factor $s$ to obtain the normalized value $v'$.
+   $$ v' = \frac{v}{s} $$
+3. **Clamping (Optional)**: If the normalized value falls outside the desired range $[0, 1]$, clamp it to the nearest boundary.
+   $$ v'_{final} = \text{clamp}(v', 0.0, 1.0) $$
+
+### Formulas
+- **Basic Scaling**:
+  $$ v' = \frac{v}{s} $$
+  Where:
+  - $v$: Input scalar value.
+  - $s$: Scale factor.
+  - $v'$: Normalized output value.
+
+### Parameters
+- **Scale factor ($s$)**: Determines the magnitude of the input values relative to the output range. The value of $s$ depends on the data type and expected range of the input. For example, in medical imaging, $s$ might be derived from the maximum Hounsfield Unit value. Not given in the sources for a universal default.
+
+### Edge cases and pitfalls
+- **Division by zero**: If $s = 0$, the operation is undefined. Ensure $s > 0$.
+- **Overflow/Underflow**: For very large or small values of $v$, ensure the data type can represent the result without overflow or underflow.
+- **Clamping artifacts**: Hard clamping can introduce discontinuities if the input data exceeds the expected range significantly.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def scale_scalar_field(value: float, scale_factor: float, clamp_to_range: bool = True, min_val: float = 0.0, max_val: float = 1.0) -> float:
+    """
+    Scales a scalar field value by a given scale factor.
+    
+    Args:
+        value: The input scalar value.
+        scale_factor: The divisor to normalize the value.
+        clamp_to_range: Whether to clamp the result to [min_val, max_val].
+        min_val: The minimum value for clamping.
+        max_val: The maximum value for clamping.
+        
+    Returns:
+        The scaled and optionally clamped value.
+    """
+    if scale_factor == 0:
+        raise ValueError("Scale factor cannot be zero.")
+    
+    normalized_value = value / scale_factor
+    
+    if clamp_to_range:
+        normalized_value = max(min_val, min(max_val, normalized_value))
+        
+    return normalized_value
+```
+
+## Subtopics
+
+### Linear HU to Attenuation Map
+A specific application of scaling and biasing used in medical volume rendering to map Hounsfield Units (HU) to linear attenuation coefficients ($\mu$). It involves a linear transformation followed by clamping.
+- **Definition**: Maps HU values to attenuation coefficients using a linear equation with clamping.
+- **Steps**:
+  1. Calculate intermediate HU value: $hu = vol \times (3024 - (-3524)) + (-3524)$.
+  2. Calculate attenuation coefficient $\mu$: $\mu = 0.05 \times (1.0 + hu / 800.0)$.
+- **Code**:
+  ```python
+  hu = vol * (3024 - (-3524)) + (-3524)
+  mu = 0.05 * (1.0 + hu / 800.0)
+  ```
+- **Source**: [S2, unofficial]
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per voxel/sample.
+- **Memory Complexity**: $O(1)$ additional memory.
+- **Strengths**: Simple, fast, preserves linear relationships.
+- **Limitations**: Does not handle non-linear data distributions well; sensitive to outliers if scale factor is not chosen appropriately.
+- **When to use**: When linear mapping is sufficient and data range is well-known.
+- **When not to use**: When data has a non-linear distribution or requires contrast enhancement beyond linear scaling.
+
+## Background
+Scaling is a basic mathematical operation widely used in computer graphics and scientific visualization. Its application in volume rendering is foundational for normalizing data before further processing or rendering.
+
+## Sources
+[S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
+[S2] pcarnah/flashdrr, https://github.com/pcarnah/flashdrr, fetched 2026-10-26 (unofficial)

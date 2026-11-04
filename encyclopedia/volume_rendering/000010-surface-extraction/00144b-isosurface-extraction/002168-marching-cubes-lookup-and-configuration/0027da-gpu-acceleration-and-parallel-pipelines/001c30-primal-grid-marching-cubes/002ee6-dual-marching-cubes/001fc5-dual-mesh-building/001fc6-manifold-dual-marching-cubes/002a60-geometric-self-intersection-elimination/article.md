@@ -1,0 +1,142 @@
+# Geometric Self-Intersection Elimination
+
+Also called: Ambiguous face treatment, Ju et al. intersection removal
+
+## Overview
+Geometric Self-Intersection Elimination is a post-processing geometric treatment applied during the connection of dual vertices in adaptive octree constructions to ensure the resulting isosurface is free of polygon self-intersections [S1, unofficial]. It addresses the topological defects inherent in naive dual triangulations of adaptive grids by replacing trivial triangulations with triangle fans or geometrically validated subsets when ambiguous face configurations are detected [S1, unofficial]. Unlike ambiguity treatments for regular (non-adaptive) constructions, which primarily ensure manifoldness without increasing vertex/face counts, this method explicitly increases mesh complexity to guarantee intersection-free geometry [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** An adaptive octree structure containing meta-cells; a lookup table mapping Dual Marching Cubes configurations (0-255) to ambiguous face directions (or 255 if non-problematic); the current meta-cell being processed.
+- **Output:** A set of triangles connecting dual vertices and edge vertices that form a self-intersection-free surface patch.
+
+**Data Structures:**
+- **Meta-cell:** A block of octree nodes at a specific level, processed as a unit.
+- **Dual Vertex ($v_c$):** A vertex located inside a cell, typically at the centroid or computed via QEF.
+- **Edge Vertex ($v_e$):** A vertex located on an edge of the grid, derived from primal methods.
+- **Face Vertex ($v_f$):** A vertex located on a face of the grid.
+- **Configuration Table:** Maps the 256 possible Dual Marching Cubes cases to an ambiguous face direction index.
+
+**Steps:**
+1. **Identify Ambiguous Faces:** Iterate through the faces of adjacent cells within the meta-cell. Identify faces that are shared between adjacent cells and have configurations 2B or 3B from the Dual Marching Cubes lookup table [S1, unofficial].
+2. **Detect Non-Trivial Edges:** For edges that do not allow for a trivial triangulation (due to potential self-intersection identified in Step 1), mark them for special handling [S1, unofficial].
+3. **Create Triangle Fans:** Instead of a single trivial triangulation connecting only dual vertices, create a fan of triangles from the minimum edge $e$ [S1, unofficial].
+   - Let $v_e$ be the vertex on the edge $e$.
+   - Let $v_f$ be the vertices on the faces containing $e$.
+   - Let $v_c$ be the dual vertices inside the cells containing $e$.
+   - Each triangle in the fan connects $v_e$ to a pair of $(v_f, v_c)$ or similar combinations depending on the specific hybrid rule [S1, unofficial].
+4. **Apply Geometric Rules (Hybrid Method):** To reduce the excessive polygon count from full fans, apply geometric rules from Ju et al. [2006] to substitute fans with fewer triangles within a valid envelope [S1, unofficial].
+   - If the geometric conditions are met, use a trivial triangulation.
+   - Otherwise, use the fan.
+   - Fans typically consist of eight or six triangles for each minimum edge [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def eliminate_self_intersections(meta_cell, dual_marching_cubes_lut):
+    """
+    Eliminates self-intersections in an adaptive octree meta-cell by 
+    applying geometric treatments to ambiguous faces.
+    """
+    triangles = []
+    
+    # Step 1: Identify ambiguous faces
+    ambiguous_faces = []
+    for face in meta_cell.faces:
+        # Check if face is shared and has ambiguous config
+        if face.is_shared and face.config in [2B, 3B]:
+            ambiguous_faces.append(face)
+            
+    # Step 2 & 3: Process edges connected to ambiguous faces
+    for face in ambiguous_faces:
+        for edge in face.edges:
+            # Check if trivial triangulation is possible
+            if is_trivial_triangulation_possible(edge):
+                # Use standard dual triangulation
+                triangles.extend(create_trivial_triangulation(edge))
+            else:
+                # Create triangle fan from minimum edge e
+                # v_e is vertex on edge e
+                # v_f are vertices on faces containing e
+                # v_c are dual vertices inside cells containing e
+                triangles.extend(create_triangle_fan(edge))
+                
+    # Step 4: Apply geometric rules to reduce fan size if needed
+    optimized_triangles = []
+    for tri in triangles:
+        if is_fan_reducible(tri):
+            # Substitute fan with fewer triangles within valid envelope
+            optimized_triangles.extend(substitute_fan_with_envelope(tri))
+        else:
+            optimized_triangles.append(tri)
+            
+    return optimized_triangles
+
+def is_trivial_triangulation_possible(edge):
+    """
+    Determines if a trivial triangulation is safe (no self-intersection).
+    [G] Implementation detail: Check geometric validity of the trivial 
+    connection between dual vertices.
+    """
+    # Placeholder for geometric check logic
+    return False
+
+def create_triangle_fan(edge):
+    """
+    Creates a fan of triangles from the minimum edge.
+    """
+    # [G] Specific fan construction depends on the number of adjacent cells
+    # and the hybrid primal-dual vertex placement.
+    return []
+
+def is_fan_reducible(triangle):
+    """
+    Checks if the fan can be replaced by fewer triangles within a valid envelope.
+    """
+    # [G] Geometric rules from Ju et al. [2006]
+    return False
+
+def substitute_fan_with_envelope(triangle):
+    """
+    Substitutes a fan with a smaller set of triangles.
+    """
+    # [G] Implementation of Ju et al. geometric rules
+    return []
+```
+
+**Parameters:**
+- **Ambiguous Configurations:** 2B and 3B from the Dual Marching Cubes lookup table [S1, unofficial].
+- **Fan Size:** Typically 8 or 6 triangles per minimum edge [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Excessive Polygons:** The hybrid method creates an excessive number of polygons per fan if geometric rules are not applied [S1, unofficial].
+- **Precision:** The method relies on exact Euclidean distance calculations to avoid propagation errors common in distance transforms [S1, unofficial].
+
+## Subtopics
+
+### Hybrid Primal-Dual Method
+A hybrid method combining primal (vertices on edges) and dual (vertices inside cells) approaches to create intersection-free surfaces in adaptive octrees [S1, unofficial]. It creates a fan of triangles from the minimum edge $e$, connecting vertex $v_e$ (on the edge) to vertices $v_f$ (on faces containing $e$) and dual vertices $v_c$ (inside cells) [S1, unofficial]. Fans of eight or six triangles are created for each minimum edge [S1, unofficial]. A key pitfall is the excessive number of polygons created per fan; Ju et al. [2006] provide geometric rules to substitute fans with fewer triangles within a valid envelope [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- **Memory:** The method increases the number of vertices and faces in the resulting mesh. For Level 6, vertices increase from 85,220 to 87,138 (+2.2%) and triangles from 41,690 to 44,596 (+7%) [S1, unofficial]. For Level 7, vertices increase from 299,016 to 302,839 (+1.3%) and triangles from 148,188 to 154,248 (+4.1%) [S1, unofficial].
+- **Time:** Processing time for meta-cells increases slightly. For Level 6, meta-cell processing time increases from 144s to 154s (+10s). The connection step increases by 2s [S1, unofficial]. For Level 7, processing time increases from 161s to 171s [S1, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths:** Ensures a self-intersection-free surface, which is critical for volume rendering and simulation [S1, unofficial].
+- **Limitations:** Increases mesh complexity (vertices and faces) compared to regular ambiguity treatments [S1, unofficial]. The regular ambiguity treatment does not increase vertex/face count but only ensures manifoldness [S1, unofficial].
+
+**When to Use:**
+- Use when constructing isosurfaces from adaptive octrees where self-intersections are unacceptable.
+- Use when the scene requires exact Euclidean distance calculations without propagation errors [S1, unofficial].
+
+**When Not to Use:**
+- Avoid if mesh size is a critical constraint and self-intersections can be tolerated or handled by other means.
+- Avoid if processing time is extremely limited, as the geometric checks add overhead.
+
+## Background
+The method is based on the work of Ju et al. [2006], who proposed a hybrid primal-dual approach for adaptive octrees [S1, unofficial]. It was implemented and evaluated in the context of extracting isosurfaces from massive binary volumes, specifically salt domes [S1, unofficial]. The implementation uses a lookup table for Dual Marching Cubes configurations to identify ambiguous faces [S1, unofficial].
+
+## Sources
+[S1] EXTRAÇÃO DE ISOSUPERFÍCIES DE DOMOS DE SAL EM VOLUMES BINÁRIOS MASSIVOS, https://doi.org/10.17771/pucrio.acad.51290, fetched 2026-10-26 (unofficial)

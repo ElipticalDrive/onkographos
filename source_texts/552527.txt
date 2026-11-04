@@ -1,0 +1,541 @@
+1. Summary VK_KHR_dynamic_rendering (core in Vulkan 1.3) replaces VkRenderPass + VkFramebuffer objects with a single vkCmdBeginRendering() call that names its attachments (image views, layouts, load/store ops, clear values) directly at r...
+
+Use VK_KHR_dynamic_rendering · Issue #7650 · scp-fs2open/fs2open.github.com · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Use VK_KHR_dynamic_rendering #7650
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Use VK_KHR_dynamic_rendering#7650
+Copy link
+Assignees
+Labels
+graphicsA feature or issue related to graphics (2d and 3d)A feature or issue related to graphics (2d and 3d)refactorA cleanup/restructure of a feature for speed, simplicity, and/or maintainabilityA cleanup/restructure of a feature for speed, simplicity, and/or maintainabilityvulkanIssues and Features related to the vulkan render backendIssues and Features related to the vulkan render backend
+Description
+The-E
+opened on Jul 24, 2026
+Issue body actions
+1. Summary
+VK_KHR_dynamic_rendering (core in Vulkan 1.3) replaces VkRenderPass + VkFramebuffer objects with a single vkCmdBeginRendering() call that names its attachments (image views, layouts, load/store ops, clear values) directly
+at record time. Pipelines are created against a list of attachment formats (VkPipelineRenderingCreateInfo) instead of a render pass handle.
+This maps unusually well onto how the FSO Vulkan renderer is already built:
+Every pass in the codebase is a single-subpass render pass. We use no subpass chaining, no input attachments, no pResolveAttachments (the MSAA G-buffer resolve is a fullscreen-shader pass writing depth via gl_FragDepth). The one render-pass feature we would lose — multi-subpass merging on tilers — is a feature we never used.
+Almost every pass exists twice (a loadOp=eClear and a loadOp=eLoad twin) purely because load ops are baked into VkRenderPass. Dynamic rendering makes loadOp a per-begin parameter and collapses all of these.
+The renderer already leans heavily on explicit sync2 barriers (VulkanBarrier.h, ImageBarrier2, VK_KHR_synchronization2 is a hard requirement) for every mid-frame copy/transition. Only pass-boundary
+transitions and cross-frame hazards ride on implicit render-pass machinery. The migration moves those onto the same explicit mechanism, leaving one synchronization system instead of two.
+The migration deletes roughly 19 VkRenderPass objects, ~35 VkFramebuffer objects and their entire lifecycle management (creation, resize recreation, error-path cleanup, deletion queue traffic), and fixes a real existing inefficiency: the pipeline cache keys on the render pass handle, so compatible passes (clear/load twins, every render-to-texture target) silently
+create duplicate pipelines today.
+The main cost is that every implicit layout transition and every VK_SUBPASS_EXTERNAL dependency — several of which encode subtle, sync-validation-verified cross-frame hazard fixes — must be re-expressed as explicit ImageBarrier2 calls. This is the risk center of the whole project and is treated in detail in §6.
+2. Current state inventory
+2.1 API baseline
+Item
+Value
+Source
+Instance minimum
+Vulkan 1.1
+MinVulkanVersion, VulkanRendererSetup.cpp:30
+Requested API version
+Vulkan 1.2 (VK_API_VERSION_1_2, in lockstep with VMA)
+VulkanMemory.h:31
+Required device extensions
+VK_KHR_swapchain, VK_KHR_synchronization2 (+ feature bit enforced)
+VulkanRendererSetup.cpp:68
+Optional extensions
+shader_viewport_index_layer, hdr_metadata, acceleration_structure / ray_query / deferred_host_operations
+createLogicalDevice()
+MoltenVK
+Supported (portability enumeration handled)
+initializeInstance()
+ImGui backend
+Vendored imgui_impl_vulkan already supports dynamic rendering (UseDynamicRendering + PipelineInfoMain.PipelineRenderingCreateInfo)
+lib/imgui/backends/imgui_impl_vulkan.h
+VK_KHR_dynamic_rendering as an extension requires Vulkan 1.1 + VK_KHR_depth_stencil_resolve + VK_KHR_create_renderpass2, both of which are core in 1.2 — so on our 1.2 baseline it is a single extension + one feature
+bit (VkPhysicalDeviceDynamicRenderingFeatures::dynamicRendering). No API version bump is needed and VMA is unaffected.
+2.2 Render pass census
+Every render pass in the codebase, with the properties that matter for the migration (all single-subpass, all eInline):
+#
+Pass
+Owner
+Attachments
+Twins
+External dependency encodes
+1
+Composition (clear)
+VulkanRenderer::m_renderPass
+fp16 color + shared depth
+yes → #2
+cross-frame WAW on shared depth + composition color, WAR vs encode pass sampling
+2
+Composition (load)
+m_renderPassLoad
+same
+—
+same dependency; color initialLayout=eShaderReadOnlyOptimal → in-pass transition
+3
+Output encode
+m_encodeRenderPass
+swap chain image, finalLayout=ePresentSrcKHR
+no
+composition write → encode sample; initialLayout=eUndefined discard
+4
+HDR scene (clear)
+VulkanPostProcessor::m_sceneRenderPass
+RGBA16F + depth
+yes → #5
+cross-frame WAW/WAR on scene color/depth (incl. post-processing sample + copy_effect transfer)
+5
+HDR scene (load)
+m_sceneRenderPassLoad
+same
+—
+same
+6
+G-buffer (clear)
+VulkanDeferredGBuffer
+6 color + depth
+yes → #7
+cross-frame WAW + transfer ordering
+7
+G-buffer (load)
+— resume after mid-pass copy
+same
+—
+same
+8
+MSAA G-buffer (clear)
+5 MS color + MS depth
+yes → #9
+same class
+9
+MSAA G-buffer (load)
+emissive preserved via per-attachment loadOp override
+—
+same
+10
+MSAA resolve
+5 single-sample color + depth (shader resolve, gl_FragDepth)
+no
+prior sample/resolve ordering (useResolveDependency)
+11
+MSAA emissive copy
+1 MS color
+no
+—
+12
+Light accumulation
+VulkanDeferredLighting
+composite RGBA16F, loadOp=eLoad, additive
+no
+—
+13
+Fog
+VulkanFog
+scene color, loadOp=eDontCare, finalLayout=eColorAttachmentOptimal
+no
+—
+14
+Bloom
+VulkanBloom::m_renderPass
+RGBA16F mip view, eDontCare
+composite twin → #15
+yes (per-pass dep)
+15
+Bloom composite
+scene color, loadOp=eLoad, additive
+—
+yes
+16
+LDR
+VulkanLDR::m_ldrRenderPass (reused by SMAA)
+RGBA8, eDontCare
+load twin → #17
+—
+17
+LDR (load)
+additive lightshafts etc.
+—
+—
+—
+18
+Shadow map
+VulkanShadowMap
+depth-only D32F, layered framebuffer (layers = cascade count, VS layer output)
+no
+depth-clear ordering
+19
+Render-to-texture (per target!)
+tcache_slot_vulkan::renderPass
+RGBA8 (+ optional depth), finalLayout=eShaderReadOnlyOptimal
+per-target load twin renderPassLoad
+none (latent)
+Framebuffers: per-swap-image composition + encode framebuffers, scene FB, G-buffer FB, MSAA FB, resolve FB, emissive-copy FB, light-accum FB, fog FB, 2×4 bloom mip FBs + scene-color FB, 3 LDR FBs, 2 SMAA FBs, shadow layered FB, and one (or six, for cubemaps) per render-target texture.
+2.3 How passes are begun
+All frame-command-buffer passes go through VulkanRenderer::beginTrackedRenderPass(PassBeginDesc) (VulkanRendererLoop.cpp:16), which records vkCmdBeginRenderPass and syncs the state tracker (current pass handle, color attachment count, sample count, render area, viewport policy). Post-processing fullscreen passes instead begin/end their own short passes inside PostProcessContext::drawFullscreenTriangle[Multi]() (VulkanPostProcessingCommon.cpp:81), which also builds a PipelineConfig from the pass handle passed in.
+2.4 How pipelines consume render passes
+PipelineConfig (VulkanPipeline.h) carries vk::RenderPass renderPass + subpass + colorAttachmentCount + sampleCount; equality and the hash include the raw handle (VulkanPipeline.cpp:52,126), and createPipeline() plugs it into pipelineInfo.renderPass (VulkanPipeline.cpp:473). Draw-time code fills it from stateTracker->getCurrentRenderPass() (VulkanDraw.cpp:735,1064, VulkanDeferred.cpp:941, VulkanPostProcessing.cpp:621), and a few sites pass specific handles (msaaResolveRenderPass(), irrTs->renderPass, fog/light passes).
+Consequence worth naming: pipelines are duplicated today whenever two compatible passes have different handles — every clear/load twin pair, and every render-to-texture target (each RT has its own VkRenderPass even though nearly all are R8G8B8A8Unorm + the same depth format). Format-keyed caching under dynamic rendering removes this class of duplication outright.
+2.5 Synchronization split
+Two mechanisms coexist today:
+Explicit sync2 barriers for everything mid-frame: copyEffectTexture, copySceneDepth, mipmap generation, MSAA begin/resume transitions, distortion updates, readbacks. Helpers exist (ImageBarrier2, cmdImageBarrier[s], copyImageToImage with layout-derived masks).
+Implicit render-pass machinery for pass-boundary layout transitions (initialLayout/finalLayout) and cross-frame hazards
+(VK_SUBPASS_EXTERNAL dependencies, each carefully commented and verified with -gr_sync_validation).
+The split has already produced one platform workaround: flip() carries an #ifdef __APPLE__ barrier because MoltenVK's translation of the implicit encode-pass dependency was historically unreliable (VulkanRendererLoop.cpp:178). Moving everything to explicit barriers eliminates that entire failure class.
+3. Goals and non-goals
+Goals
+Replace all VkRenderPass/VkFramebuffer usage with vkCmdBeginRendering/vkCmdEndRendering.
+Key pipeline creation and caching on attachment formats, deduplicating pipelines across formerly-distinct-but-compatible passes.
+Unify all synchronization on explicit sync2 barriers; delete the MoltenVK special case.
+Collapse every clear/load pass twin into per-begin load ops.
+Keep the Vulkan 1.2 baseline (extension + feature bit, no version bump).
+Non-goals
+No change to the pass structure of a frame (same passes, same order, same images). This is a mechanical-with-sharp-edges refactor, not a frame-graph redesign.
+No adoption of VK_KHR_dynamic_rendering_local_read (we have no input attachments to emulate) or suspend/resume rendering flags (see §5.6).
+No change to shaders, descriptor layout, vertex formats, or the OpenGL backend.
+4. Availability decision
+VK_KHR_dynamic_rendering coverage: all major desktop drivers since ~2022 (NVIDIA 510+, AMD 21.x+, Intel Mesa 22+ / Windows DCH), and MoltenVK since v1.2.x. Hardware old enough to lack it generally also struggles with the rest of the FSO Vulkan path.
+Recommendation: hard requirement. The Vulkan backend is not yet FSO's shipping default; OpenGL remains available. If the extension (or its feature bit) is missing, fail Vulkan initialization with a clear log line, exactly as is done for synchronization2 today (isDeviceUnsuitable()), letting launcher fallback to OpenGL handle the rest.
+The alternative — keeping both code paths behind an abstraction — would make beginTrackedRenderPass, the pipeline cache key, and every barrier site permanently dual-mode. That's a large ongoing tax to support hardware that can still use the OpenGL backend. Rejected.
+Concretely, Phase 0 adds:
+VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME to RequiredDeviceExtensions.
+VkPhysicalDeviceDynamicRenderingFeatures in the pickPhysicalDevice() feature chain + isDeviceUnsuitable() rejection, and chained into vk::DeviceCreateInfo in createLogicalDevice() (same pattern as sync2Features).
+vulkan.hpp dispatch already covers the KHR entry points via the dynamic loader; use the KHR suffixed calls (cmd.beginRenderingKHR) or plain aliases — with VULKAN_HPP_DEFAULT_DISPATCHER both resolve.
+5. Design
+5.1 RenderingFormats — the new pipeline compatibility key
+```
+// VulkanPipeline.h
+struct RenderingFormats {
+    uint32_t colorAttachmentCount = 1;
+    std::array<vk::Format, PipelineConfig::MAX_COLOR_ATTACHMENTS> colorFormats{}; // eUndefined past count
+    vk::Format depthFormat   = vk::Format::eUndefined;  // eUndefined = no depth attachment
+    vk::Format stencilFormat = vk::Format::eUndefined;  // set when depthFormat has stencil
+    bool operator==(const RenderingFormats&) const;
+    void hashInto(uint64_t& h) const;
+};
+```
+PipelineConfig changes:
+Remove vk::RenderPass renderPass, uint32_t subpass, and the separate
+colorAttachmentCount (subsumed).
+Add RenderingFormats formats.
+sampleCount stays as-is.
+createPipeline() builds:
+```
+vk::PipelineRenderingCreateInfo renderingInfo;
+renderingInfo.colorAttachmentCount    = config.formats.colorAttachmentCount;
+renderingInfo.pColorAttachmentFormats = config.formats.colorFormats.data();
+renderingInfo.depthAttachmentFormat   = config.formats.depthFormat;
+renderingInfo.stencilAttachmentFormat = config.formats.stencilFormat;
+pipelineInfo.pNext      = &renderingInfo;
+pipelineInfo.renderPass = nullptr;
+```
+Stencil gotcha: the chosen depth format may be eD32SfloatS8Uint or
+eD24UnormS8Uint (findDepthFormat()). Under dynamic rendering the stencil
+aspect is a separate format slot and a separate
+VkRenderingInfo::pStencilAttachment (which must reference the same image
+view as pDepthAttachment). Pipelines using stencil ops
+(config.stencilEnabled, used by the stencil-decal path) will silently lose
+stencil if stencilAttachmentFormat stays eUndefined. The
+RenderingFormats builder must derive stencilFormat from the depth format's
+aspect mask (imageAspectFromFormat already exists in VulkanConvert.h).
+5.2 DynamicPassDesc — replacing PassBeginDesc + framebuffers
+```
+// VulkanRenderer.h
+struct PassAttachment {
+    vk::ImageView view;
+    vk::Format format = vk::Format::eUndefined;
+    vk::ImageLayout layout = vk::ImageLayout::eColorAttachmentOptimal; // layout DURING rendering
+    vk::AttachmentLoadOp  loadOp  = vk::AttachmentLoadOp::eLoad;
+    vk::AttachmentStoreOp storeOp = vk::AttachmentStoreOp::eStore;
+    vk::ClearValue clearValue{};
+};
+
+struct DynamicPassDesc {
+    std::array<PassAttachment, PipelineConfig::MAX_COLOR_ATTACHMENTS> color;
+    uint32_t colorCount = 0;
+    PassAttachment depth;          // format==eUndefined -> no depth
+    bool hasStencil = false;       // mirror depth attachment into pStencilAttachment
+    vk::Extent2D extent;
+    uint32_t layerCount = 1;       // shadow cascades use >1
+    vk::SampleCountFlagBits sampleCount = vk::SampleCountFlagBits::e1;
+    PassViewport viewport = PassViewport::FlipY;
+
+    RenderingFormats formats() const;   // derived, feeds tracker + pipelines
+};
+```
+beginTrackedRenderPass(PassBeginDesc) becomes
+beginTrackedRendering(const DynamicPassDesc&): builds
+vk::RenderingInfo (+ per-attachment vk::RenderingAttachmentInfo), calls
+cmd.beginRendering(), and updates the state tracker with
+desc.formats() / sample count / render area / viewport exactly as today.
+All eleven call sites in VulkanRendererLoop.cpp convert mechanically —
+the clear/load twin selection collapses into choosing loadOp per attachment.
+Deleted state:
+VulkanRenderer: m_renderPass, m_renderPassLoad, m_encodeRenderPass,
+m_swapChainFramebuffers, m_encodeFramebuffers (keep the image views;
+createFrameBuffers() and createRenderPass()/createEncodeRenderPass()
+go away entirely).
+VulkanPostProcessor and each subsystem: every vk::RenderPass /
+vk::Framebuffer member listed in §2.2, plus their creation code, resize
+recreation (VulkanBloom::resize() etc. keep only image/view recreation),
+and shutdown teardown.
+tcache_slot_vulkan: renderPass, renderPassLoad, framebuffer,
+cubeFaceFramebuffers (keep cubeFaceViews; beginRenderTarget() selects
+the face view instead of the face framebuffer). This deletes the two
+large error-cleanup ladders in VulkanTexture.cpp:1427-1545.
+VulkanDeletionQueue: render pass / framebuffer deferred-destroy entry
+points become unused; remove.
+5.3 State tracker
+VulkanStateTracker:
+setRenderPass(vk::RenderPass, subpass) → setRenderingFormats(const RenderingFormats&).
+getCurrentRenderPass() → getCurrentFormats(); the existing null-check
+idiom "are we inside a pass?" (VulkanDraw.cpp:739, gr_vulkan.cpp:84,
+VulkanDeferred.cpp:676) becomes an explicit bool isRenderingActive()
+flag toggled by begin/end — cleaner than inferring from a handle.
+setColorAttachmentCount / setCurrentSampleCount fold into the formats
+call (attachment count is part of RenderingFormats).
+Draw-time pipeline config assembly (VulkanDraw.cpp, VulkanDeferred.cpp,
+VulkanPostProcessing.cpp:621) copies getCurrentFormats() instead of the
+pass handle. Sites that name a specific pass today pass the target's formats:
+VulkanDeferred.cpp:345 (MSAA resolve prewarm) → G-buffer format list.
+VulkanDrawAPI.cpp:648 (irradiance RT) → {ts->format, depth?}.
+5.4 drawFullscreenTriangle family
+Signature change (PostProcessContext):
+```
+void drawFullscreenTriangle(vk::CommandBuffer cmd,
+                            const FullscreenTarget& target,   // view+format+loadOp(+clearValue), extent
+                            int shaderType, ...unchanged...);
+```
+where FullscreenTarget is a 1-color-attachment convenience wrapper that the
+helper expands into a DynamicPassDesc-equivalent RenderingInfo. Callers
+(bloom, LDR, SMAA, fog, tonemap, encode legs, MSAA emissive copy) each shrink:
+today they pass (renderPass, framebuffer) pairs whose only real information
+is (image view, loadOp) — exactly what the wrapper carries. The
+clearColor/vkCmdClearAttachments workaround for discard-shaders (SMAA edge
+detection) can become a genuine loadOp=eClear with a clear value, since
+loadOp is now per-call — a small correctness/clarity win.
+sampleCount and bindGlobalSet parameters are unchanged. The SMAA subsystem
+no longer needs to "reuse VulkanLDR's render pass" — the coupling reduces to
+reusing its formats, which is just LDR_COLOR_FORMAT.
+5.5 Explicit barrier plan (replacing implicit machinery)
+This is the load-bearing part. Two categories:
+(a) Pass-boundary layout transitions (initialLayout → subpass layout →
+finalLayout). Under dynamic rendering the image must already be in
+PassAttachment::layout at beginRendering, and stays there at end. Each
+transition becomes an ImageBarrier2 before begin / after end:
+Today (implicit)
+Replacement
+Scene/G-buffer/RT/etc. initialLayout=eUndefined + clear
+pre-begin barrier eUndefined → eColorAttachmentOptimal (discard), src = what §2.2 lists in that pass's external dependency, dst = eColorAttachmentOutput / early-frag
+finalLayout=eShaderReadOnlyOptimal at end (scene color, G-buffer, shadow depth, RT color, composition, bloom mips, LDR)
+post-end barrier eColorAttachmentOptimal → eShaderReadOnlyOptimal (or depth equivalent), dst = eFragmentShader/sampled-read placed at the point of first consumption
+Encode pass finalLayout=ePresentSrcKHR
+post-end barrier → ePresentSrcKHR (no dst access; present handles it)
+Load-twin initialLayout=eShaderReadOnlyOptimal → eColorAttachmentOptimal in-pass transition (composition resume, scene resume)
+pre-begin barrier; note copySceneDepthForParticles() already does exactly this barrier by hand (VulkanRendererLoop.cpp:437-454) — the pattern is established
+(b) Cross-frame VK_SUBPASS_EXTERNAL dependencies. These protect
+single-instance images shared across frames-in-flight (shared depth buffer,
+scene targets, G-buffer, composition image per swap-index). Each becomes a
+barrier recorded immediately before the corresponding beginRendering, with
+the same src/dst stage+access masks that the dependency carries today. The
+extensive comments documenting why each mask bit exists
+(VulkanRenderer.cpp:344-372, VulkanPostProcessing.cpp:123-153,
+VulkanPostProcessingGBuffer.cpp:85-127) must move with them — they are
+the distilled output of prior -gr_sync_validation debugging.
+Implementation shape: a small helper in VulkanBarrier.h,
+```
+// One barrier struct per attachment about to be rendered to.
+void cmdBeginRenderingBarriers(vk::CommandBuffer, ArrayView<const ImageBarrier2>);
+```
+plus per-pass constexpr-ish builder functions colocated with the pass code
+(e.g. VulkanDeferredGBuffer::beginBarriers(bool resuming)), so each former
+render pass's implicit behavior is visible as one block of explicit barriers
+next to its begin call.
+Deliberately not in scope: an automatic per-image layout tracker. It's
+tempting (RenderTarget could carry currentLayout), but correct barriers need
+src stage/access knowledge, not just layout — an automatic tracker that only
+watches layouts would emit under-synchronized barriers for the cross-frame WAW
+cases (same layout, still needs execution ordering). The manual per-pass
+blocks keep that reasoning local and auditable. A tracker can be revisited
+later as a pure refactor once the explicit barriers are proven by validation.
+Also note asymmetric wins:
+The RT-texture passes currently have no external dependency at all
+(§2.2 Debug console #19) — their cross-frame WAW protection is implicit-and-accidental
+(mid-frame submits / fence waits). Writing their barriers explicitly closes
+a latent hazard rather than opening one.
+The #ifdef __APPLE__ composition barrier in flip() becomes the normal
+path for all platforms; delete the conditional and its long apology comment.
+5.6 Mid-scene suspend/resume
+copyEffectTexture() / copySceneDepthForParticles() end the scene pass, do
+transfer work + barriers, and resume with the load twin. Dynamic rendering has
+VK_RENDERING_SUSPENDING/RESUMING_BIT, but the spec forbids most commands —
+including barriers and transfers — between a suspended and resumed instance,
+so it is unusable here. The design keeps the current shape: full
+endRendering, explicit copy/barriers, beginRendering with
+loadOp=eLoad. This is exactly what the load twins do today, minus the twin
+objects.
+5.7 Shadow pass (layered)
+The shadow map renders all cascades in one pass via a layered framebuffer
+(layers = Num_shadow_cascades + Num_cockpit_shadow_cascades) and
+VS gl_Layer output. Dynamic rendering: the depth attachment uses the
+existing 2D-array view and RenderingInfo::layerCount = layers,
+viewMask = 0. No behavioral change; VulkanShadowMap loses m_renderPass +
+m_framebuffer.
+5.8 ImGui
+initImGui() switches to:
+```
+initInfo.UseDynamicRendering = true;
+initInfo.PipelineInfoMain.PipelineRenderingCreateInfo = {
+    VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR, nullptr, 0,
+    1, &compositionFormatVk,          // HDR_COLOR_FORMAT
+    depthFormatVk, stencilFormatVk,   // matches the composition pass
+};
+```
+(the backend requires the extension to be enabled even on 1.3 devices — it is,
+per Phase 0). invalidateExternalBindings() interplay is unchanged; ImGui
+draws inside the composition rendering instance exactly as it does inside the
+composition render pass today.
+5.9 Pipeline caching
+App-level cache (m_pipelines map): key changes with PipelineConfig;
+no persistence concern (in-memory).
+Driver-level VkPipelineCache (persisted to disk): entries created via
+render-pass pipelines generally won't be reused byte-for-byte by
+dynamic-rendering pipelines, so first run after the migration re-warms.
+That's a one-time hitch identical to a driver update; no code change needed.
+Keep the cache file name unchanged.
+Expected win: RT-texture pipelines collapse from per-target to per-format;
+clear/load twin duplicates disappear. Log getPipelineCount() before/after
+in a soak test to quantify.
+6. Risks
+Risk
+Severity
+Mitigation
+Missed cross-frame hazard when converting an external dependency (renders fine on forgiving desktop drivers, corrupts on others/timing shifts)
+High
+Convert dependencies 1:1 including masks, keep their comments; run every migration phase under -gr_sync_validation (the codebase's stated verification tool); test matrix in §8
+Stencil silently dropped (missing stencilAttachmentFormat / pStencilAttachment on D24S8/D32S8 devices)
+Medium
+§5.1 builder derives stencil from depth format; add an assertion in createPipeline when stencilEnabled && stencilFormat == eUndefined
+MoltenVK behavioral differences in beginRendering translation
+Medium
+Dev machine is macOS — MoltenVK is exercised continuously; explicit barriers are more reliable on MoltenVK than implicit dependencies were (per the existing flip() comment)
+Tiler performance regressions (load/store now per-begin)
+Low
+We already use eDontCare/eLoad deliberately everywhere; RenderingAttachmentInfo expresses identical load/store ops, and we never used multi-subpass merging
+Old-driver support loss (pre-2022 desktop)
+Low
+Hard-requirement decision in §4; OpenGL backend remains
+ImGui backend API drift
+Low
+Vendored backend already has the API; pin behavior with the existing overlay smoke test
+Transient duplicate pipelines during phased migration (formats-keyed and handle-keyed configs coexist)
+Low
+Accept; memory-only, disappears at Phase 4
+7. Migration plan
+Phases are independently landable; dynamic rendering instances and classic
+render passes may coexist in one command buffer (not nested), so the renderer
+stays shippable between phases. Pipelines, however, are per-mechanism — a pass
+converts atomically with the pipelines used inside it.
+Phase 0 — Enablement (small).
+Extension + feature negotiation, isDeviceUnsuitable() gate, log line.
+No behavior change. Also land RenderingFormats + the PipelineConfig dual
+support: a config with renderPass == null and populated formats produces a
+dynamic-rendering pipeline; existing paths untouched.
+Phase 1 — Post-processing fullscreen passes.
+Convert drawFullscreenTriangle[Multi] to the FullscreenTarget form; this
+flips bloom (#14–15), LDR/FXAA/lightshafts/post-effects (#16–17), SMAA, fog
+(#13), tonemap, MSAA emissive copy (#11), and both encode legs (#3) in one
+motion, because they all begin their passes through that helper. These passes
+are already bracketed by explicit barriers on their inputs, so the new
+barrier work is limited to each target's own begin/end transitions. Delete the
+corresponding pass/FB members subsystem by subsystem.
+Phase 2 — Render-to-texture.
+VulkanTexture.cpp target creation drops render pass/framebuffer creation;
+beginRenderTarget/resumeRenderTargetPass/endRenderTarget move to
+DynamicPassDesc with explicit begin/end barriers (closing the latent
+cross-frame gap noted in §5.5). Covers cubemap faces (per-face views),
+mid-frame readbackRenderTarget flush/resume, env/irradiance mip regen.
+Phase 3 — Scene, G-buffer, shadow, light accumulation.
+The mid-frame suspend/resume web: beginSceneRendering,
+resumeScenePassAfterCopy, endSceneRendering, setUseGbufRenderPass
+consumers, MSAA begin/resume/resolve (#4–10, #12, #18). Largest barrier
+surface; do G-buffer non-MSAA first, then MSAA, then shadows. The existing
+transitionForResume/transitionMsaaForBegin helpers already model exactly
+this style of explicit transition and extend naturally.
+Phase 4 — Frame skeleton + ImGui + cleanup.
+Composition pass begin in setupFrame, resume in endSceneRendering/
+resumeSwapChainPass, encode-into-swap-chain, ImGui init switch, deletion of
+PassBeginDesc, createRenderPass*, createFrameBuffers, the __APPLE__
+barrier, deletion-queue entry points, and the now-dead state-tracker render
+pass accessors. Grep gate: git grep -l 'RenderPass\|Framebuffer' code/graphics/vulkan/
+should return only comments/docs.
+Rough size estimate: ~1.5–2.5k changed lines across ~22 files, dominated by
+Phase 3.
+8. Validation matrix
+Every phase, on at least one desktop driver + MoltenVK, with
+-gr_sync_validation enabled:
+Forward scene (deferred off) and deferred scene; MSAA off/2×/4×.
+Shadows on (cascade count > 1 exercises layerCount), raytraced shadows
+where supported (BLAS work is outside passes — should be inert, verify).
+HDR10 swap chain on/off (both encode legs), gamma slider.
+Mid-scene interrupts: distortion/thrusters (copyEffectTexture), soft
+particles (copySceneDepthForParticles), decals (stencil path — verifies
+§5.1 stencil formats).
+RTT: SCPUI icon generation incl. mid-frame screenToBlob readback +
+resume; env/irradiance cubemap render + mip regen.
+FXAA and SMAA paths (SMAA verifies the loadOp=eClear conversion), bloom,
+lightshafts, volumetric fog.
+gr_save_screen / readbackFramebuffer (previous-frame composition read).
+Swap chain recreation: resize, minimize-to-0×0, fullscreen toggle;
+VulkanPostProcessor::resize() (which now recreates only images/views).
+ImGui overlay (invalidateExternalBindings path).
+Pipeline count before/after (expect a drop), first-frame hitch check after
+cache invalidation.
+9. Open questions
+Minimum-spec statement. Does the project want to publish a driver
+floor for the Vulkan backend (e.g. "2022+ drivers / MoltenVK 1.2.2+")
+alongside the hard requirement? Recommended, cheap.
+VulkanRaytracing interplay. BLAS builds and ray queries never touch
+render passes, so no changes are expected — but the shadow ray-query path
+samples G-buffer products whose transitions move; re-verify its barriers
+during Phase 3 rather than assuming.
+Follow-ups unlocked (explicitly out of scope, listed for the record):
+VK_EXT_shader_object, dynamic-rendering-based VRS, and collapsing the
+remaining per-pass pipeline permutations via more dynamic state
+(VK_EXT_extended_dynamic_state3) all become tractable once pipelines are
+format-keyed.
+Activity
+The-E
+self-assigned this
+on Jul 24, 2026
+The-E
+added
+graphicsA feature or issue related to graphics (2d and 3d)A feature or issue related to graphics (2d and 3d)
+refactorA cleanup/restructure of a feature for speed, simplicity, and/or maintainabilityA cleanup/restructure of a feature for speed, simplicity, and/or maintainability
+vulkanIssues and Features related to the vulkan render backendIssues and Features related to the vulkan render backend
+on Jul 24, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+The-E
+Labels
+graphicsA feature or issue related to graphics (2d and 3d)A feature or issue related to graphics (2d and 3d)refactorA cleanup/restructure of a feature for speed, simplicity, and/or maintainabilityA cleanup/restructure of a feature for speed, simplicity, and/or maintainabilityvulkanIssues and Features related to the vulkan render backendIssues and Features related to the vulkan render backend
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

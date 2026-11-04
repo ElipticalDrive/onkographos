@@ -1,0 +1,177 @@
+--- v001.md
++++ v002.md
+@@ -2,29 +2,25 @@
+ Also called: No-AO Binary Meshing
+ ## Overview
+-This method generates mesh vertices for a specific face direction in a voxel chunk without computing ambient occlusion (AO) values. It iterates over all block types and axes, using a fixed-size array for spatial data to drive the greedy meshing process. Unlike its sibling [Binary Greedy Voxel Meshing with Ambient Occlusion](4536-binary-greedy-voxel-meshing-with-ambient-occlusion.md), which packs AO data into the vertex index, this variant treats all non-air blocks as opaque for culling purposes and outputs vertices with `ao=0` and `block_type=0` [S1, unofficial]. It serves as the foundational geometry generation step before AO or transparency extensions are applied.
+-
++This method generates mesh vertices for a face direction without ambient occlusion, iterating over block types and axes, using a fixed array for `x_data` [S1, unofficial]. It outputs vertices with `ao=0` and `block_type=0` [S1, unofficial].
+ ## How it works
+ **Inputs:**
+-- `lod`: The voxel chunk data structure, providing access to block types and dimensions.
+-- `face_dir`: The normal direction of the face being generated (e.g., +X, -Y).
+-- `axis`: The axis along which the iteration proceeds (0 to 2).
++- `lod`: The voxel chunk data structure, providing access to block types and dimensions [S1, unofficial].
++- `face_dir`: The normal direction of the face being generated [S1, unofficial].
++- `axis`: The axis along which the iteration proceeds [S1, unofficial].
+ 
+ **Outputs:**
+-- A vector of mesh vertices.
++- A vector of mesh vertices [S1, unofficial].
+ 
+ **Data Structures:**
+-- `x_data`: A fixed array of 32 unsigned 32-bit integers (`[u32; 32]`). Each integer represents a row of the 32x32 slice, where bits indicate the presence of solid blocks.
+-- `GreedyQuad`: A struct containing `x`, `y`, `w` (width), and `h` (height) of the generated quad.
++- `x_data`: A fixed array of 32 unsigned 32-bit integers (`[u32; 32]`) [S1, unofficial].
++- `GreedyQuad`: A struct containing `x`, `y`, `w` (width), and `h` (height) of the generated quad [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1. Initialize an empty `vertices` vector.
+-2. Iterate over each `axis` from 0 to `size` (typically 3 for 3D space).
+-3. Iterate over each `block_type` in `MESHABLE_BLOCK_TYPES`.
+-4. Initialize `x_data` as `[0u32; 32]`.
+-5. Populate `x_data` based on the voxel slice defined by `face_dir`, `axis`, and `block_type`. (Implementation detail: [G] The source notes imply this population happens before the call, but the exact population logic is not detailed in the provided excerpt. Standard practice involves mapping voxel occupancy to bits).
+-6. Call `greedy_mesh_binary_plane(x_data, lod.size())` to obtain a list of `GreedyQuad` objects.
+-7. For each `quad` in the result:
+-   - Call `append_vertices(vertices, face_dir, axis, lod, ao=0, block_type=0)`.
+-   - This function generates the actual vertex positions and attributes for the quad, with AO disabled.
++1. Initialize an empty `vertices` vector [S1, unofficial].
++2. Iterate over each `axis` from 0 to `size` [S1, unofficial].
++3. Iterate over each `block_type` in `MESHABLE_BLOCK_TYPES` [S1, unofficial].
++4. Initialize `x_data` as `[0u32; 32]` [S1, unofficial].
++5. Call `greedy_mesh_binary_plane(x_data, lod.size())` to get quads [S1, unofficial].
++6. For each quad, call `append_vertices` with `vertices`, `face_dir`, `axis`, `lod`, `ao=0`, `block_type=0` [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -32,91 +28,44 @@
+ def binary_greedy_voxel_meshing_no_ao(lod, face_dir):
+     vertices = []
+-    # Iterate over axes (0=X, 1=Y, 2=Z)
+     for axis in range(3):
+-        # Iterate over block types that should be meshed
+         for block_type in MESHABLE_BLOCK_TYPES:
+-            # Initialize fixed-size array for the slice
+-            x_data = [0u32] * 32
+-            
+-            # [G] Populate x_data based on lod, face_dir, axis, and block_type.
+-            # Typically, this involves iterating through the slice and setting bits
+-            # where the block matches the type and is solid.
+-            populate_x_data(x_data, lod, face_dir, axis, block_type)
+-            
+-            # Generate quads for this binary plane
++            x_data = [0] * 32
++            # The source notes do not specify the population logic for x_data.
+             quads = greedy_mesh_binary_plane(x_data, lod.size())
+-            
+-            # Append vertices for each quad with AO disabled
+             for quad in quads:
+-                append_vertices(
+-                    vertices=vertices,
+-                    face_dir=face_dir,
+-                    axis=axis,
+-                    lod=lod,
+-                    ao=0,
+-                    block_type=0
+-                )
++                append_vertices(vertices, face_dir, axis, lod, ao=0, block_type=0)
+     return vertices
+ 
+-def greedy_mesh_binary_plane(data: list, lod_size: int) -> list:
++def greedy_mesh_binary_plane(data, lod_size):
+     greedy_quads = []
+     for row in range(len(data)):
+         y = 0
+         while y < lod_size:
+-            # Find first solid bit (skip trailing zeros)
+-            # Note: Python's int has arbitrary precision, so we mask to 32 bits if needed
+-            val = data[row] & 0xFFFFFFFF
+-            trailing_zeros = (val >> y).bit_length() - (val >> y).bit_length() + (val >> y).bit_length() # Placeholder for trailing_zeros logic
+-            # Correct trailing zeros calculation for Python:
+-            shifted = val >> y
+-            if shifted == 0:
+-                break
+-            tz = (shifted & -shifted).bit_length() - 1 # bit_length of lowest set bit minus 1
++            shifted = data[row] >> y
++            tz = (shifted & -shifted).bit_length() - 1 if shifted else 32
+             y += tz
+-            
+             if y >= lod_size:
+                 continue
+-                
+-            # Find height of consecutive solid bits
+-            # trailing_ones: count consecutive 1s starting from bit 0 of shifted
+-            ones = 0
++            shifted = data[row] >> y
++            h = 0
+             temp = shifted
+-            while (temp & 1) == 1 and (y + ones) < lod_size:
+-                ones += 1
++            while temp & 1:
++                h += 1
+                 temp >>= 1
+-            
+-            # Create mask for height
+-            if ones == 0:
+-                break # Should not happen if trailing_zeros worked correctly
+-                
+-            # h_as_mask = (1 << ones) - 1
+-            h_as_mask = (1 << ones) - 1
++            h_as_mask = (1 << h) - 1 if h < 32 else 0xFFFFFFFF
+             mask = h_as_mask << y
+-            
+-            # Grow horizontally
+             w = 1
+             while row + w < lod_size:
+-                next_row_val = data[row + w] & 0xFFFFFFFF
+-                next_row_h = (next_row_val >> y) & h_as_mask
++                next_row_h = (data[row + w] >> y) & h_as_mask
+                 if next_row_h != h_as_mask:
+                     break
+-                # Nuke bits in the next row
+                 data[row + w] &= ~mask
+                 w += 1
+-            
+-            greedy_quads.append({
+-                'x': row,
+-                'y': y,
+-                'w': w,
+-                'h': ones
+-            })
++            greedy_quads.append({'x': row, 'y': y, 'w': w, 'h': h})
+     return greedy_quads
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** The `x_data` array is fixed at 32 bits. If `lod.size()` exceeds 32, the algorithm as described may fail or require modification. The source notes assume a 32x32 slice.
+-- **Boundaries:** The loop `while row + w < lod_size` ensures no out-of-bounds access.
+-- **Degenerate Input:** If `lod_size` is 0, the loops will not execute, returning an empty vertex list.
+-
++- **Precision:** The `x_data` array is fixed at 32 bits. If `lod.size()` exceeds 32, the algorithm as described may fail or require modification [S1, unofficial].
+ ## Subtopics
+ 
+@@ -134,15 +83,15 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the slice, as each voxel is visited a constant number of times during the greedy meshing process.
+-- **Memory Complexity:** $O(1)$ auxiliary space for the `x_data` array (fixed 32x32 bits) plus output storage.
+-- **Performance:** Fast due to bitwise operations and greedy culling. No AO computation overhead.
+-- **Strengths:** Simple implementation, low memory footprint, fast generation.
+-- **Limitations:** No shading information (AO=0), no transparency support.
+-- **When to use:** When AO is not needed, or when AO is computed separately. When transparency is not a concern.
+-- **When not to use:** When AO shading is required, or when transparent blocks are present.
+-
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Performance:** Not given in the sources.
++- **Strengths:** Not given in the sources.
++- **Limitations:** Not given in the sources.
++- **When to use:** Not given in the sources.
++- **When not to use:** Not given in the sources.
+ ## Background
+-This method is part of the binary greedy meshing family, designed for efficient voxel chunk meshing. It is a simplified variant of the AO-enabled version, focusing solely on geometry generation. The algorithm is based on the greedy meshing approach, adapted for binary (solid/air) slices.
+-
++- **Origin:** Not given in the sources.
++- **History and development:** Not given in the sources.
++- **Usage:** Not given in the sources.
+ ## Sources
+ [S1] Binary Greedy Voxel Meshing Algorithm, https://github.com/TanTanDev/binary_greedy_mesher_demo, fetched 2026-10-26 (unofficial)

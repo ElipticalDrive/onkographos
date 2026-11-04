@@ -1,0 +1,86 @@
+# Physics-based Gaussian Simulation
+Also called: PhysGaussian, Gaussian Splashing
+## Overview
+Physics-based Gaussian Simulation is a method that integrates physics-based continuum mechanics directly within 3D Gaussian Splatting (3DGS), treating each Gaussian as a discrete physical particle with volume for direct simulation [S1][S2, unofficial]. It solves the problem of animating 3D representations by creating a unified simulation-to-rendering pipeline, allowing for physically accurate dynamics rather than relying on pre-recorded motion or simple deformation [S1][S2, unofficial]. It sets itself apart from standard 3DGS by embedding physical laws into the representation itself, enabling the Gaussians to behave like material particles [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A static 3DGS scene (set of Gaussians with position, covariance, opacity, and color) and physical parameters (e.g., density, viscosity, gravity).
+*   **Output:** A sequence of animated 3DGS scenes where Gaussian positions and covariances evolve according to physical laws.
+
+**Data Structures:**
+Each Gaussian $i$ is treated as a discrete physical particle. The data structure extends standard 3DGS attributes:
+*   $\mathbf{p}_i$: Position (3D vector).
+*   $\mathbf{C}_i$: Covariance matrix (3x3 symmetric positive definite), representing the particle's volume and orientation.
+*   $\rho_i$: Density (scalar, if applicable).
+*   $\mathbf{v}_i$: Velocity (3D vector, [G] required for physics integration).
+*   $\mathbf{F}_i$: Force (3D vector, [G] accumulated per step).
+
+**Numbered Steps:**
+1.  **Initialization:** Load the 3DGS scene. Assign physical properties (mass, volume) to each Gaussian based on its covariance determinant and opacity [S1][S2, unofficial].
+2.  **Force Calculation:** Compute external forces (e.g., gravity) and internal forces (e.g., pressure, viscosity) between neighboring Gaussians. For fluid simulations, Position-Based Dynamics (PBD) may be used [S2, unofficial].
+3.  **Integration:** Update the velocity and position of each Gaussian particle using a physics integrator (e.g., Verlet or Euler) [S1][S2, unofficial].
+4.  **Covariance Update:** Update the covariance matrix to reflect deformation and rotation induced by the physical simulation [S1][S2, unofficial].
+5.  **Rendering:** Render the updated 3DGS scene using standard splatting techniques [S1][S2, unofficial].
+
+**Formulas:**
+*   Particle Mass: $m_i \propto \det(\mathbf{C}_i)^{1/2} \cdot \alpha_i$ [G] (where $\alpha_i$ is opacity).
+*   Force Balance: $\mathbf{F}_{total, i} = \mathbf{F}_{ext} + \sum_{j \in \text{neighbors}} \mathbf{F}_{int}(i, j)$ [G].
+*   Position Update: $\mathbf{p}_i^{t+1} = \mathbf{p}_i^t + \mathbf{v}_i^t \Delta t + \frac{1}{2} \mathbf{a}_i^t \Delta t^2$ [G].
+
+**Parameters:**
+*   Time step $\Delta t$: Not given in the sources.
+*   Physical constants (gravity, viscosity): Scene-dependent.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Physical simulations require high precision to avoid energy drift or explosion.
+*   **Boundaries:** Handling collisions with scene boundaries or other objects requires additional logic (e.g., mesh-based simulation frameworks) [S2, unofficial].
+*   **Degenerate Input:** Gaussians with zero volume or opacity may cause division by zero in physical calculations.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def physics_based_gaussian_simulation(gaussians, dt, gravity):
+    """
+    Simulate physics for a set of 3D Gaussians.
+    :param gaussians: List of Gaussian objects with attributes p, C, alpha, etc.
+    :param dt: Time step.
+    :param gravity: Gravity vector.
+    """
+    # Step 1: Calculate forces
+    for g in gaussians:
+        g.force = gravity * g.mass  # External force
+        # Internal forces (e.g., pressure, viscosity) between neighbors
+        for neighbor in get_neighbors(g, gaussians):
+            g.force += compute_internal_force(g, neighbor)
+    
+    # Step 2: Integrate physics
+    for g in gaussians:
+        # Update velocity
+        g.velocity += g.force * dt / g.mass
+        # Update position
+        g.position += g.velocity * dt
+        # Update covariance (simplified rotation/deformation)
+        g.covariance = update_covariance(g.covariance, g.velocity, dt)
+        
+    return gaussians
+```
+*Note: `get_neighbors`, `compute_internal_force`, and `update_covariance` are implementation-specific details not provided in the sources [G].*
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of Gaussians $N$ and the neighbor search complexity. Typically $O(N)$ to $O(N \log N)$ with spatial hashing.
+*   **Memory Complexity:** $O(N)$ to store Gaussian attributes plus physics state (velocity, force).
+*   **Strengths:** Physically accurate dynamics; unified simulation-to-rendering pipeline [S1][S2, unofficial].
+*   **Limitations:** Computationally expensive; requires careful tuning of physical parameters; may not handle complex topological changes (e.g., breaking) without additional mechanisms [S2, unofficial].
+*   **When to use:** When physically accurate animation is required for 3DGS scenes.
+*   **When not to use:** When real-time performance is critical and physical accuracy is not required.
+
+## Background
+*   **Origin:** PhysGaussian [41] integrates physics-based continuum mechanics directly within 3DGS [S1][S2, unofficial]. Gaussian Splashing [42] uses Position-Based Fluids [S2, unofficial].
+*   **History:** Developed as part of the evolution of 3DGS to support dynamic scenes and animation [S1][S2, unofficial].
+*   **Usage:** Used in applications requiring physically accurate animation of 3D representations, such as urban driving scenes and fluid simulation [S1][S2, unofficial].
+
+## Sources
+[S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
+[S2] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,412 @@
+# Canyon: WebGL Voxel Engine
+
+A custom-built WebGL 2 rendering engine that procedurally generates massive 3D voxel landscapes using hardware instancing and image sampling. Built entirely from scratch without external frameworks like Three.js.
+
+## Overview
+This project was designed to explore low-level computer graphics principles by directly interacting with the GPU. It renders a 500x500 grid (250,000 cubes) at a high framerate by utilizing WebGL 2 hardware instancing, packing all translation, scaling, and color data into flat `Float32Arrays` for a single, hyper-optimized draw call.
+
+## Features
+*   **Custom Math Library:** Implements custom matrix operations (translation, scaling, perspective projection, and lookAt) to handle 3D transformations natively in JavaScript.
+*   **Hardware Instancing (WebGL 2):** Bypasses CPU bottlenecks by sending a single 2x2x2 cube primitive to the GPU and executing `gl.drawElementsInstanced` to render hundreds of thousands of copies simultaneously.
+*   **Procedural Image Sampling:** Extracts raw pixel arrays from 2D `.png` files (a grayscale heightmap and an RGB colormap) to mathematically dictate the exact Y-axis height and vertex colors of each voxel.
+*   **Atmospheric Shaders:** Custom GLSL fragment shader utilizing a `smoothstep` function based on vertex depth (`vPosition`) to render distance fog and blend distant geometry with the background sky.
+*   **Parametric Animation:** Evaluates cubic Bezier curves in the render loop to drive the smooth, looping flight paths of an ambient skyscape ("bird" particles).
+
+## Installation & Usage
+Because this engine relies on JavaScript's `getImageData()` to sample local image files, it must be run through a local web server to avoid browser CORS (Cross-Origin Resource Sharing) restrictions.
+
+1. Clone the repository
+2. Open the project folder in VSCode.
+3. Install the **Live Server** extension.
+4. Right-click `index.html` and select **Open with Live Server**.
+
+## File Structure
+*   `index.html`: The application shell and WebGL `<canvas>` container.
+*   `style.css`: Viewport and UI styling.
+*   `script.js`: The core engine, handling WebGL context, GLSL shader compilation, matrix math, buffer allocation, image sampling, and the requestAnimationFrame loop.
+*   `assets/`: Contains the `heightmap.png` and `colormap.png` used for procedural terrain generation.
+
+## Technical Details
+*   **Language:** JavaScript (ES6+), GLSL (OpenGL Shading Language)
+*   **Graphics API:** WebGL 2
+*   **Dependencies:** None (Zero external libraries)
+
+## Demo Photo
+<img width="911" height="611" alt="Screenshot 2026-10-21 191523" src="https://github.com/user-attachments/assets/f8d5c522-d77f-4fac-9909-e72cde38e0b4" />
+
+### script.js
+```
+const canvas = document.getElementById('glcanvas');
+// Hardware instancing requires WebGL 2
+const gl = canvas.getContext('webgl2');
+
+if (!gl) alert('WebGL 2 is required for hardware instancing. Please use a modern browser.');
+
+// 1) Math Library
+const mat4 = {
+    create: () => new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]),
+    perspective: (out, fov, aspect, near, far) => {
+        const f = 1.0 / Math.tan(fov / 2);
+        out.fill(0);
+        out[0] = f / aspect; out[5] = f;
+        out[10] = (far + near) / (near - far); out[11] = -1;
+        out[14] = (2 * far * near) / (near - far);
+        return out;
+    },
+    lookAt: (out, eye, center, up) => {
+        let z0 = eye[0]-center[0], z1 = eye[1]-center[1], z2 = eye[2]-center[2];
+        let len = 1 / Math.hypot(z0, z1, z2);
+        z0 *= len; z1 *= len; z2 *= len;
+        let x0 = up[1]*z2 - up[2]*z1, x1 = up[2]*z0 - up[0]*z2, x2 = up[0]*z1 - up[1]*z0;
+        len = 1 / Math.hypot(x0, x1, x2);
+        x0 *= len; x1 *= len; x2 *= len;
+        let y0 = z1*x2 - z2*x1, y1 = z2*x0 - z0*x2, y2 = z0*x1 - z1*x0;
+        out[0]=x0; out[1]=y0; out[2]=z0; out[3]=0;
+        out[4]=x1; out[5]=y1; out[6]=z1; out[7]=0;
+        out[8]=x2; out[9]=y2; out[10]=z2; out[11]=0;
+        out[12]=-(x0*eye[0] + x1*eye[1] + x2*eye[2]);
+        out[13]=-(y0*eye[0] + y1*eye[1] + y2*eye[2]);
+        out[14]=-(z0*eye[0] + z1*eye[1] + z2*eye[2]);
+        out[15]=1;
+        return out;
+    }
+};
+
+// 2) Shaders
+const vsSource = `#version 300 es
+    in vec4 aVertexPosition;
+    in vec3 aVertexNormal;
+    
+    // Instancing Attributes (1 per cube)
+    in vec3 aInstancePosition;
+    in float aInstanceScaleY;
+    in vec3 aInstanceColor;
+
+    uniform mat4 uViewMatrix;
+    uniform mat4 uProjectionMatrix;
+    
+    // Uniforms for the Bezier Skyscape fallback
+    uniform float uIsSkyObject;
+    uniform mat4 uModelMatrix;
+
+    out vec4 vColor;
+    out vec3 vPosition;
+
+    void main() {
+        vec4 pos = aVertexPosition;
+        
+        if (uIsSkyObject > 0.5) {
+            // Standard render for single sky objects
+            gl_Position = uProjectionMatrix * uViewMatrix * uModelMatrix * pos;
+            vPosition = (uViewMatrix * uModelMatrix * pos).xyz;
+            float light = max(dot(normalize(mat3(uModelMatrix) * aVertexNormal), vec3(0.5, 1.0, 0.3)), 0.4);
+            vColor = vec4(aInstanceColor * light, 1.0);
+        } else {
+            // Hardware Instancing render for the terrain cubes
+            pos.y *= aInstanceScaleY;
+            pos.xyz += aInstancePosition;
+            
+            gl_Position = uProjectionMatrix * uViewMatrix * pos;
+            vPosition = (uViewMatrix * pos).xyz;
+            
+            float light = max(dot(normalize(aVertexNormal), vec3(0.5, 1.0, 0.3)), 0.4);
+            vColor = vec4(aInstanceColor * light, 1.0);
+        }
+    }
+`;
+
+const fsSource = `#version 300 es
+    precision mediump float;
+    
+    in vec4 vColor;
+    in vec3 vPosition;
+    out vec4 fragColor;
+
+    void main() {
+        float fogDistance = length(vPosition);
+        // Pushed fog deep into the distance for the massive map
+        float fogAmount = smoothstep(200.0, 1500.0, fogDistance);
+        vec4 fogColor = vec4(0.8, 0.5, 0.2, 0.8); 
+        
+        fragColor = mix(vColor, fogColor, fogAmount);
+    }
+`;
+
+function createShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(shader));
+        return null;
+    }
+    return shader;
+}
+
+const shaderProgram = gl.createProgram();
+gl.attachShader(shaderProgram, createShader(gl, gl.VERTEX_SHADER, vsSource));
+gl.attachShader(shaderProgram, createShader(gl, gl.FRAGMENT_SHADER, fsSource));
+gl.linkProgram(shaderProgram);
+gl.useProgram(shaderProgram);
+
+const programInfo = {
+    attribs: {
+        position: gl.getAttribLocation(shaderProgram, 'aVertexPosition'),
+        normal: gl.getAttribLocation(shaderProgram, 'aVertexNormal'),
+        instancePos: gl.getAttribLocation(shaderProgram, 'aInstancePosition'),
+        instanceScaleY: gl.getAttribLocation(shaderProgram, 'aInstanceScaleY'),
+        instanceColor: gl.getAttribLocation(shaderProgram, 'aInstanceColor'),
+    },
+    uniforms: {
+        projection: gl.getUniformLocation(shaderProgram, 'uProjectionMatrix'),
+        view: gl.getUniformLocation(shaderProgram, 'uViewMatrix'),
+        model: gl.getUniformLocation(shaderProgram, 'uModelMatrix'),
+        isSkyObject: gl.getUniformLocation(shaderProgram, 'uIsSkyObject'),
+    }
+};
+
+// 3) Geometry
+const positions = [
+    -1,-1,1,  1,-1,1,  1,1,1,  -1,1,1,
+    -1,-1,-1, -1,1,-1, 1,1,-1, 1,-1,-1,
+    -1,1,-1,  -1,1,1,  1,1,1,  1,1,-1,
+    -1,-1,-1, 1,-1,-1, 1,-1,1, -1,-1,1,
+    1,-1,-1,  1,1,-1,  1,1,1,  1,-1,1,
+    -1,-1,-1, -1,-1,1, -1,1,1, -1,1,-1,
+];
+const normals = [
+    0,0,1, 0,0,1, 0,0,1, 0,0,1,
+    0,0,-1, 0,0,-1, 0,0,-1, 0,0,-1,
+    0,1,0, 0,1,0, 0,1,0, 0,1,0,
+    0,-1,0, 0,-1,0, 0,-1,0, 0,-1,0,
+    1,0,0, 1,0,0, 1,0,0, 1,0,0,
+    -1,0,0, -1,0,0, -1,0,0, -1,0,0,
+];
+const indices = [
+    0,1,2, 0,2,3,       4,5,6, 4,6,7,
+    8,9,10, 8,10,11,    12,13,14, 12,14,15,
+    16,17,18, 16,18,19, 20,21,22, 20,22,23,
+];
+
+const posBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+
+const normBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, normBuffer);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+
+const indexBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+
+// 4) World Generation
+const gridSize = 500; // World Size (Must change assets resolution too)
+const spacing = 2;
+const numInstances = gridSize * gridSize;
+
+// Create flat typed arrays for maximum GPU throughput
+const instancePositions = new Float32Array(numInstances * 3);
+const instanceScales = new Float32Array(numInstances);
+const instanceColors = new Float32Array(numInstances * 3);
+
+function loadImagesAndBuildWorld() {
+    console.log(`Generating ${numInstances} cubes from images...`);
+    const hImg = document.getElementById('heightmap');
+    const cImg = document.getElementById('colormap');
+    
+    const tempCanvas = document.createElement('canvas');
+    const ctx = tempCanvas.getContext('2d', { willReadFrequently: true });
+    tempCanvas.width = gridSize;
+    tempCanvas.height = gridSize;
+
+    let heightData = null, colorData = null;
+
+    try {
+        if (hImg.complete && hImg.naturalHeight !== 0 && cImg.complete && cImg.naturalHeight !== 0) {
+            ctx.drawImage(hImg, 0, 0, gridSize, gridSize);
+            heightData = ctx.getImageData(0, 0, gridSize, gridSize).data;
+            
+            ctx.drawImage(cImg, 0, 0, gridSize, gridSize);
+            colorData = ctx.getImageData(0, 0, gridSize, gridSize).data;
+        }
+    } catch(e) {
+        console.warn("Could not sample local images, falling back to math terrain.");
+    }
+
+    const offset = (gridSize * spacing) / 2;
+    let i3 = 0, i1 = 0;
+
+    for (let x = 0; x < gridSize; x++) {
+        for (let z = 0; z < gridSize; z++) {
+            const posX = (x * spacing) - offset;
+            const posZ = (z * spacing) - offset;
+            const pixelIndex = (z * gridSize + x) * 4;
+            
+            // Sample height
+            let yScale = 1;
+            if (heightData) {
+                yScale = 1 + (heightData[pixelIndex] / 255.0) * 100; 
+            } else {
+                yScale = 1 + Math.abs(Math.sin(x * 0.01) * Math.cos(z * 0.01)) * 100;
+            }
+
+            // Sample color or fallback
+            let r, g, b;
+            if (colorData) {
+                r = colorData[pixelIndex] / 255.0;
+                g = colorData[pixelIndex + 1] / 255.0;
+                b = colorData[pixelIndex + 2] / 255.0;
+            } else {
+                r = yScale > 10 ? 0.9 : 0.2;
+                g = 0.8;
+                b = 0.3;
+            }
+
+            instancePositions[i3] = posX;
+            instancePositions[i3 + 1] = yScale - 1; 
+            instancePositions[i3 + 2] = posZ;
+
+            instanceScales[i1] = yScale;
+
+            instanceColors[i3] = r; 
+            instanceColors[i3 + 1] = g;
+            instanceColors[i3 + 2] = b;
+
+            i3 += 3; i1 += 1;
+        }
+    }
+
+    // Upload Instancing Data to GPU
+    const instPosBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, instPosBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, instancePositions, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(programInfo.attribs.instancePos);
+    gl.vertexAttribPointer(programInfo.attribs.instancePos, 3, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(programInfo.attribs.instancePos, 1); 
+
+    const instScaleBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, instScaleBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, instanceScales, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(programInfo.attribs.instanceScaleY);
+    gl.vertexAttribPointer(programInfo.attribs.instanceScaleY, 1, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(programInfo.attribs.instanceScaleY, 1);
+
+    const instColorBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, instColorBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, instanceColors, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(programInfo.attribs.instanceColor);
+    gl.vertexAttribPointer(programInfo.attribs.instanceColor, 3, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(programInfo.attribs.instanceColor, 1);
+}
+
+// Ensure the images finish loading in the DOM before we try to sample them
+window.addEventListener('load', loadImagesAndBuildWorld);
+
+// 5) Bezier Curve Skyscape
+function cubicBezier(t, p0, p1, p2, p3) {
+    const invT = 1 - t;
+    return [
+        invT**3 * p0[0] + 3 * invT**2 * t * p1[0] + 3 * invT * t**2 * p2[0] + t**3 * p3[0],
+        invT**3 * p0[1] + 3 * invT**2 * t * p1[1] + 3 * invT * t**2 * p2[1] + t**3 * p3[1],
+        invT**3 * p0[2] + 3 * invT**2 * t * p1[2] + 3 * invT * t**2 * p2[2] + t**3 * p3[2]
+    ];
+}
+
+const skyObjects = [];
+// Generate dust particles
+for (let i = 0; i < 1000; i++) {
+    skyObjects.push({
+        // Start at random points
+        t: Math.random(), 
+        // Flight Speed
+        speed: 0.0001 + Math.random() * 0.0005, 
+        // Color
+        color: [1.0, 0.5, 0], 
+        // Scale
+        scale: Math.random() * 0.5 + 0.2, 
+        
+        // Flight paths spread evenly across map
+        p0: [(Math.random() - 0.5) * 1000, Math.random() * 10 + 100, (Math.random() - 0.5) * 1000],
+        p1: [(Math.random() - 0.5) * 1000, Math.random() * 100 + 170, (Math.random() - 0.5) * 1000],
+        p2: [(Math.random() - 0.5) * 1000, Math.random() * 10 + 100, (Math.random() - 0.5) * 1000],
+        p3: [(Math.random() - 0.5) * 1000, Math.random() * 100 + 170, (Math.random() - 0.5) * 1000]
+    });
+}
+
+// 6) Render Loop
+function drawScene(now) {
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    // Sky Color
+    gl.clearColor(0.8, 0.5, 0.2, 1.0);
+    gl.clearDepth(1.0);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    const projMatrix = mat4.create();
+    // Vast draw distance
+    mat4.perspective(projMatrix, 45 * Math.PI / 180, canvas.width / canvas.height, 0.1, 2000.0);
+
+    const viewMatrix = mat4.create();
+    const time = now * 0.001 || 0; 
+    const radius = 500; 
+    mat4.lookAt(viewMatrix, [Math.sin(time * 0.2) * radius, 200, Math.cos(time * 0.2) * radius], [0, 0, 0], [0, 1, 0]);
+
+    gl.uniformMatrix4fv(programInfo.uniforms.projection, false, projMatrix);
+    gl.uniformMatrix4fv(programInfo.uniforms.view, false, viewMatrix);
+
+    // Bind Base Geometry
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+    gl.vertexAttribPointer(programInfo.attribs.position, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(programInfo.attribs.position);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, normBuffer);
+    gl.vertexAttribPointer(programInfo.attribs.normal, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(programInfo.attribs.normal);
+
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+
+    // A) Draw the Grid Cubes (Hardware Instanced)
+    gl.uniform1f(programInfo.uniforms.isSkyObject, 0.0);
+    
+    // This single command draws the entire world simultaneously 
+    gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0, numInstances);
+
+    // B) Draw the Sky Objects
+    gl.uniform1f(programInfo.uniforms.isSkyObject, 1.0);
+    
+    // Briefly disable instance buffers
+    gl.disableVertexAttribArray(programInfo.attribs.instancePos);
+    gl.disableVertexAttribArray(programInfo.attribs.instanceScaleY);
+    gl.disableVertexAttribArray(programInfo.attribs.instanceColor);
+
+    skyObjects.forEach(obj => {
+        obj.t += obj.speed;
+        if (obj.t > 1.0) obj.t = 0;
+        
+        const pos = cubicBezier(obj.t, obj.p0, obj.p1, obj.p2, obj.p3);
+        const modelMatrix = mat4.create();
+        
+        modelMatrix[0] = obj.scale;
+        modelMatrix[5] = obj.scale;
+        modelMatrix[10] = obj.scale;
+        modelMatrix[12] = pos[0];
+        modelMatrix[13] = pos[1];
+        modelMatrix[14] = pos[2];
+
+        gl.uniformMatrix4fv(programInfo.uniforms.model, false, modelMatrix);
+        gl.vertexAttrib3fv(programInfo.attribs.instanceColor, obj.color);
+        gl.drawElements(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0);
+    });
+
+    // Re-enable instance buffers for next frame
+    gl.enableVertexAttribArray(programInfo.attribs.instancePos);
+    gl.enableVertexAttribArray(programInfo.attribs.instanceScaleY);
+    gl.enableVertexAttribArray(programInfo.attribs.instanceColor);
+
+    requestAnimationFrame(drawScene);
+}
+
+requestAnimationFrame(drawScene);
+```

@@ -1,0 +1,201 @@
+# Variable Bit Rate Color Compression with Macro Blocks
+
+Also called: Compressing Color Data for Voxelized Surface Geometry (Extension), Paper IB
+
+## Overview
+Variable Bit Rate Color Compression with Macro Blocks is a compression format for sparse 3D color data that uses variable bits per weight (bpw) to optimize compression ratio, addressing the limitation of fixed bpw methods where theoretical optimal compression is constrained by header overhead [S1, unofficial]. It sets itself apart from its sibling [Variable-Block Color Compression](1878-variable-block-color-compression.md) by introducing macro blocks to localize header offsets, thereby reducing the bit-width required for pointers and enabling efficient variable bit-rate encoding without prohibitive header sizes [S1, unofficial].
+
+## How it works
+**Inputs:** A sparse 3D color dataset (voxel colors).
+**Outputs:** Compressed data stream containing macro block headers, base colors, weight bits, and weight pointers.
+
+**Data Structures:**
+The data is organized into **Macro Blocks** and **Block Headers**.
+
+1.  **Macro Block:** A fixed-size partition of the color array.
+    *   Size: $2^{14}$ colors (16,384 colors) [S1, unofficial].
+    *   Each macro block is compressed independently.
+
+2.  **Block Header (32-bit section):**
+    *   **Voxel Index Offset:** 14 bits. Stores the macro-local voxel index offset of the first voxel in the block [S1, unofficial].
+    *   **Bits/Weight:** 2 bits. Enumerates the number of bits per weight for this block. Values 1, 2, 3, 4 correspond to 1-4 bpw. The value 3 (binary `11`) is unused as a sentinel to allow a fifth case (implied 0 bpw or other specific state) [S1, unofficial].
+    *   **Weight Pointer:** 16 bits. Stores the macro-local bit pointer (offset into the weight array) for this block [S1, unofficial].
+
+**Algorithm:**
+
+1.  **Segregation:** Segregate the underlying color array into sets of size $2^{14}$, called macro blocks [S1, unofficial].
+2.  **Tree Construction:**
+    *   Create a tree structure of blocks with different weight bit-rates [S1, unofficial].
+    *   Construct leaf-level blocks at 0 bpw [S1, unofficial].
+    *   Recursively create new blocks with higher bit rates using the lower bit-rate blocks [S1, unofficial].
+3.  **Optimal Cut:**
+    *   Find the optimal cut through the tree by comparing the sum of memory overhead of blocks with lower bit rates against the parent block (which describes the same set of colors) [S1, unofficial].
+    *   Keep the configuration(s) with the lowest overhead [S1, unofficial].
+    *   Repeat recursively up to the root [S1, unofficial].
+4.  **Encoding:**
+    *   For each block in the optimal cut, store the 32-bit header (14-bit voxel offset, 2-bit bpw, 16-bit weight pointer) [S1, unofficial].
+    *   Store the base colors and weight bits for the block [S1, unofficial].
+5.  **Decoding:**
+    *   Given a voxel index, calculate the macro block index directly [S1, unofficial].
+    *   Use the header index of the comprising and directly following macro blocks to define a range of header candidates [S1, unofficial].
+    *   Perform a binary search on the headers' first voxel index to find the block spanning the color [S1, unofficial].
+    *   Perform a direct lookup in the weight array using the same index [S1, unofficial].
+    *   Reconstruct color, base colors (from header), and weight [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def encode_variable_bit_rate_color(colors, macro_block_size=16384):
+    """
+    Encodes sparse 3D color data using variable bit rate compression with macro blocks.
+    
+    Args:
+        colors: List of voxel colors (e.g., RGB tuples).
+        macro_block_size: Size of macro blocks in number of colors (default 2^14).
+        
+    Returns:
+        compressed_data: Dictionary containing headers, base_colors, and weights.
+    """
+    # Step 1: Segregate into macro blocks
+    macro_blocks = []
+    for i in range(0, len(colors), macro_block_size):
+        macro_blocks.append(colors[i : i + macro_block_size])
+        
+    compressed_data = {
+        'headers': [],
+        'base_colors': [],
+        'weights': []
+    }
+    
+    # Step 2 & 3: Build tree and find optimal cut for each macro block
+    for mb_idx, mb_colors in enumerate(macro_blocks):
+        # Construct leaf-level blocks at 0 bpw
+        # Note: The exact tree construction algorithm is referenced from Paper IA.
+        # Here we assume a function that returns the optimal block structure.
+        optimal_blocks = build_optimal_block_tree(mb_colors)
+        
+        # Step 4: Encode headers and data
+        current_weight_bit_offset = 0
+        
+        for block in optimal_blocks:
+            # Determine bpw (1-4, or sentinel 0 if applicable)
+            bpw = block.bpw
+            if bpw == 0:
+                bpw_sentinel = 3 # Sentinel value for 0 bpw
+            else:
+                bpw_sentinel = bpw # 1-4 map directly
+            
+            # Calculate macro-local voxel index offset
+            # This is the index of the first voxel in this block relative to the macro block start
+            local_voxel_offset = block.first_voxel_index - (mb_idx * macro_block_size)
+            
+            # Calculate macro-local weight pointer
+            # This is the bit offset into the weight array for this block
+            local_weight_pointer = current_weight_bit_offset
+            
+            # Create 32-bit header
+            # 14 bits: voxel index offset
+            # 2 bits: bits/weight
+            # 16 bits: weight pointer
+            header = (local_voxel_offset << 18) | (bpw_sentinel << 16) | local_weight_pointer
+            
+            compressed_data['headers'].append(header)
+            
+            # Store base colors and weight bits
+            compressed_data['base_colors'].extend(block.base_colors)
+            compressed_data['weights'].extend(block.weight_bits)
+            
+            # Update weight bit offset for next block
+            current_weight_bit_offset += len(block.weight_bits)
+            
+    return compressed_data
+
+def decode_variable_bit_rate_color(compressed_data, voxel_index, macro_block_size=16384):
+    """
+    Decodes a single color value given a voxel index.
+    
+    Args:
+        compressed_data: Output from encode_variable_bit_rate_color.
+        voxel_index: The global index of the voxel to decode.
+        macro_block_size: Size of macro blocks in number of colors.
+        
+    Returns:
+        color: The reconstructed RGB color.
+    """
+    # Step 5: Decoding
+    # Calculate macro block index
+    mb_idx = voxel_index // macro_block_size
+    
+    # Define range of header candidates
+    # Headers for the current macro block and the next one
+    start_header_idx = mb_idx * len(compressed_data['headers']) # Assuming headers are stored sequentially per macro block
+    # Note: The source implies headers are indexed by macro block. 
+    # If headers are global, we need to find the range corresponding to mb_idx.
+    # For simplicity, assuming headers are grouped by macro block in the structure.
+    
+    # Binary search on headers' first voxel index
+    # Find the block spanning the color
+    target_header = None
+    for header in compressed_data['headers']:
+        # Extract voxel index offset from header
+        voxel_offset = (header >> 18) & 0x3FFF # 14 bits
+        
+        # Reconstruct global voxel index for this block's start
+        # This assumes the header stores the start index of the block
+        if voxel_offset <= (voxel_index % macro_block_size):
+            # Check if this block contains the voxel
+            # We need the block's size in voxels to know the end range
+            # This information is implicit in the tree structure or needs to be stored
+            # For the purpose of this pseudocode, we assume we can determine if the voxel is in the block
+            # based on the binary search result on the sorted headers.
+            pass 
+            
+    # In a real implementation, the headers would be sorted by voxel index.
+    # Binary search finds the header where header.voxel_index <= voxel_index < next_header.voxel_index
+    
+    # Direct lookup in weight array
+    # Extract weight pointer from header
+    weight_pointer = header & 0xFFFF # 16 bits
+    
+    # Extract bpw
+    bpw_sentinel = (header >> 16) & 0x3
+    if bpw_sentinel == 3:
+        bpw = 0
+    else:
+        bpw = bpw_sentinel
+        
+    # Reconstruct weight
+    # Extract bpw bits from weight array starting at weight_pointer
+    weight_bits = compressed_data['weights'][weight_pointer : weight_pointer + bpw]
+    weight = bits_to_float(weight_bits, bpw)
+    
+    # Reconstruct color
+    # Find the base colors associated with this header
+    # This requires mapping the header to its base colors
+    base_colors = get_base_colors_for_header(header, compressed_data)
+    
+    color = reconstruct_color(base_colors, weight)
+    
+    return color
+```
+
+**Parameters:**
+*   Macro block size: $2^{14}$ colors (16,384 colors) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   Blocks ideally residing on the border between two macro blocks are forced to be (up to) two blocks, causing slight overhead [S1, unofficial].
+*   The 2-bit field for bits/weight enumerates 1-4 bpw; the value 3 (`11`) is unused as a sentinel to allow a 5th case (implied 0 bpw) [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Lookup times are slightly more expensive than fixed bpw methods due to the binary search, but decoding is as fast or faster than previous formats due to the reduced binary search range [S1, unofficial].
+*   **Memory Complexity:** Memory overhead is practically negligible compared to previous methods which doubled DAG size [S1, unofficial]. The overhead is 1/128 extra bits per color for the macro-block header, plus a small extra overhead due to border blocks [S1, unofficial].
+*   **Strengths:** Significantly decreases compressed size given the same error thresholds compared to fixed bpw methods [S1, unofficial].
+*   **Limitations:** Slightly more expensive lookup times than fixed bpw methods [S1, unofficial].
+
+## Background
+This method was introduced in "Paper IB - Compressing Color Data for Voxelized Surface Geometry (Extension)" as an alternative to mapping attributes to a DAG [S1, unofficial]. It addresses the limitations of fixed bit rate weights (Paper IA) where the theoretical optimal compression ratio is constrained by header overhead [S1, unofficial]. The method allows higher bit rates to span larger areas, decreasing the headers footprint at the cost of weights, while lower bit rates are suitable for large regions of similar or identical colors [S1, unofficial].
+
+## Sources
+[S1] PDF On sparse voxel DAGs and memory efficient compression of surface ..., https://research.chalmers.se/publication/528795/file/528795_Fulltext.pdf, fetched 2026-10-27 (unofficial)

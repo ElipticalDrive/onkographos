@@ -1,0 +1,237 @@
+Minecraft: Java Edition 26.3 rewritten from scratch in Rust, checked against vanilla with 281 differential harnesses. Get it with the Horizon launcher. - Cave culling: search on a worker thread, frames never wait for it by ludovic111 · Pull Request #788 · horizon-rust/horizon
+
+Cave culling: search on a worker thread, frames never wait for it by ludovic111 · Pull Request #788 · horizon-rust/horizon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ludovic111
+commented
+Oct 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+🤖 Opened by Ludovic's AI agent (Claude), not by Ludovic himself.
+The cost
+The cave culling search (gfx/occlusion.rs, Horizon's SectionOcclusionGraph) ran on the render thread whenever a section was meshed or the camera entered another section. At render distance 32 that is a breadth-first walk over about 124,000 cells. While exploring, new sections arrive every frame, so it ran nearly every frame. In whole-game benchmark runs on main (tools/perf_bench.py, RD 32, 4 scenes) the occlusion span took at least 0.5 ms in 35% of frames, averaging 5.6 ms in those frames on the loaded Mac mini.
+The change
+Vanilla 26.3 runs this search on a background executor (scheduleFullUpdate) and updates its graph on the render thread only for sections that changed (runPartialUpdate). Horizon now does the same:
+A worker thread keeps its own copy of every section's face connectivity, fed the changes with each job, and runs the full search over dense arrays around the camera.
+Frames use the last finished graph and never wait for the next one. The search starts at the top of Game::render, as soon as the camera is known, so it usually lands before the frame builds its visible list.
+A section meshed in between propagates into the graph the frame already has (vanilla's partial update). A wall that opens shows what is behind it in the same frame. A wall that closes takes effect at the next full search; until then the hidden sections are still drawn, behind the depth buffer.
+A graph that never reached the camera's section (after a teleport, say) is not used. Until the next one lands, every section in the frustum is drawn, so nothing goes missing.
+If the worker thread cannot start or dies, the search runs on the render thread as before.
+The search itself is unchanged: the same box, steps and first-entry rule. A test checks it cell for cell against main's code over random worlds.
+Performance
+Mac mini M4 Pro (Metal), offscreen 1280×720, seed 1234, spectator, Fancy. The machine was heavily loaded by other sessions throughout (load average 85–100 on 14 threads), so the comparison is paired inside one game. A local-only switch (not in this PR) alternated between running the same search on the render thread, as main does, and the worker, in ABBA order over consecutive flight segments. The "better" column counts the pairs where the worker won.
+Exploring fresh terrain (16 blocks/s, 12 pairs of 3 s):
+RD 32
+render thread (main)
+worker (this PR)
+better in
+prepare phase, where the search ran (ms)
+10.28
+0.96
+12/12
+CPU ms/frame
+125.3
+88.3
+8/12
+frame p99 (ms)
+274.8
+208.2
+9/12
+1% low FPS
+3.65
+4.28
+8/12
+avg FPS
+13.1
+13.4
+8/12
+RD 16
+render thread (main)
+worker (this PR)
+better in
+prepare phase (ms)
+1.16
+0.68
+9/12
+CPU ms/frame
+24.1
+19.6
+5/12
+frame p99 (ms)
+149.8
+127.4
+7/12
+avg FPS
+56.9
+56.3
+6/12
+At RD 32 the search no longer runs on the render thread, but frame rate while exploring is still held down by world updates and ticks, not by rendering (about 88 ms of CPU per frame at 13 FPS on this loaded machine).
+Loaded terrain (flying back and forth over 32 blocks, 20 pairs of 2 s):
+RD 32 main
+RD 32 PR
+better in
+RD 8 main
+RD 8 PR
+better in
+avg FPS
+116.4
+135.3
+15/20
+534
+676
+16/20
+CPU ms/frame
+13.13
+8.15
+14/20
+1.98
+1.85
+16/20
+frame p99 (ms)
+74.9
+60.8
+13/20
+27.3
+23.3
+16/20
+render phase (ms)
+5.65
+4.30
+13/20
+1.25
+1.15
+16/20
+GPU ms/frame
+1.67
+1.54
+11/20
+0.38
+0.30
+12/20
+An earlier, shorter run (10 pairs of 3 s) had RD 8 going the other way (render 1.33 → 1.66 ms), with two outlier segments at 620 FPS. At this load the RD 8 difference is within noise; at RD 32 the gain held in every run. These runs used an earlier revision whose search also merged entry faces (see below), in both arms.
+Drawn sections are the same in both modes: 131 at RD 8 standing still, and a mean of 158 for both while flying.
+ThinkPad, Intel HD Graphics 620 (Vulkan through Mesa, 2 cores / 4 threads, headless under Xvfb, same paired method):
+main
+this PR
+loaded terrain RD 16: avg FPS
+149.9
+151.2
+loaded terrain RD 16: CPU ms/frame
+5.67
+5.52
+loaded terrain RD 16: GPU ms/frame
+4.94
+5.02
+loaded terrain RD 8: avg FPS
+390
+395
+exploring RD 16 (6 pairs): prepare phase (ms)
+1.25
+0.94 (6/6)
+exploring RD 16: render phase (ms)
+2.21
+2.40 (0/6)
+exploring RD 16: avg FPS
+166
+168
+exploring RD 16: frame p99 (ms)
+28.5
+31.4
+Neutral there: with two cores the worker has no free core to run on, so the search time moves out of the prepare phase but competes with the render thread. GPU time (about 5 ms a frame at RD 16) is what limits this machine.
+Picture
+Same game, ticks frozen, HUD hidden. Each view was captured with the search on the render thread (as main), with the worker graph, and with the render thread again (the noise floor), at 9 views × RD 16 and RD 32:
+Drawn section counts are identical in all 18 views (for example 3,707, 6,040 and 2,610 at RD 32).
+Pixels are identical in the 5 views without water. In the other 13, the differences are on water surfaces only and match the noise floor: water animates between captures even with ticks frozen. For example, RD 32 village-n differs in 11,304 pixels between modes and 14,817 between two captures in the same mode.
+Not in this PR: vanilla's graph rules
+Vanilla's Node.sourceDirections keeps every face a section is reached through; Horizon keeps the first only. Vanilla also drops sections more than 60 blocks away when a ray towards the camera crosses a section the search has not reached. I measured the first rule: it draws 5–15% more sections (RD 32: 3,707 → 4,110, 3,943 → 4,540) with no visible difference in the same 18 views. So it is left out here, and filed as #782 for a decision together with the ray test.
+Checks
+cargo fmt --all --check: clean.
+cargo clippy --workspace --all-targets -- -D warnings: clean.
+cargo test -p horizon-client --lib: 842 passed, 0 failed, 11 ignored. New tests in gfx/occlusion.rs: the worker's graph matches a search on the render thread, partial updates open a wall in the same frame, frames never wait, a graph that lost the camera culls nothing, and the search matches main's code cell for cell over 3 random worlds × 5 camera positions (more than 1,000 sections hidden in each).
+tools/parity.py --changed origin/main: 89 passed, 0 failed (Cave culling: search on a worker thread, frames never wait for it #788 and Cull boats, paintings, item frames, armor stands, TNT, tridents and fireworks like vanilla #789 merged together on main, 11 changed files).
+🤖 Generated with Claude Code
+Cave culling: search on a worker thread, frames never wait for it
+…
+c78bf74
+```
+The section occlusion search (SectionOcclusionGraph) ran on the render
+thread whenever a section was meshed or the camera entered another
+section: at render distance 32 that is a breadth-first walk over about
+124,000 cells, and while exploring it ran nearly every frame.
+
+As in vanilla 26.3, the full search now runs off the render thread. A
+worker keeps its own copy of every section's face connectivity, fed the
+changes with each job, and searches over dense arrays around the camera.
+Frames use the last finished graph and never wait for the next. The search
+starts at the top of the frame, as soon as the camera is known, so it
+usually lands before the frame builds its visible list. A section meshed in
+between propagates into the graph the frame has (vanilla's
+runPartialUpdate), so a wall that opens shows what is behind it at once; a
+section that closes goes at the next full search. A graph that never
+reached the camera's section (after a teleport, say) is not used: until the
+next one lands every section in the frustum is drawn.
+
+The search itself is unchanged: the same box, steps and first-entry rule,
+checked cell for cell against the previous code in a test.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+ludovic111
+added
+the
+enhancement
+New feature or request
+label
+Oct 18, 2026
+ludovic111
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+🤖 Agent: tools/parity.py --changed origin/main on #788 and #789 merged together: 89 passed, 0 failed (164 min on the Mac mini). The self-check in the description is updated.
+ludovic111
+mentioned this pull request
+Oct 18, 2026
+Cull boats, paintings, item frames, armor stands, TNT, tridents and fireworks like vanilla
+#789
+Merged
+Hide details
+View details
+ludovic111
+merged commit e627842
+into
+main
+Oct 18, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ludovic111
+deleted the
+perf/occlusion-async
+branch
+October 18, 2026 02:12
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+enhancement
+New feature or request
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

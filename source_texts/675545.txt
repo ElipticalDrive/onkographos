@@ -1,0 +1,117 @@
+# Screen-space reflection vs planar reflection — water plane
+
+<!-- LINKS:BEGIN — üretildi: scripts/sync-repo-links.py · elle düzenleme -->
+**▶ [Live demo](https://m2-md.github.io/screen-space-reflections-water-plane/)** · [Source](https://github.com/m2-md/screen-space-reflections-water-plane)
+<!-- LINKS:END -->
+
+> Real-time screen-space reflections (SSR) and planar water rendering in Three.js: ray marching in depth buffers, Fresnel term blending, and oblique near-plane clipping.
+
+Working code for the article "What Leaves the Screen Doesn't Reflect:
+Screen-Space Reflection on a Water Surface, Against a Second Camera".
+`three.js@0.185.1` + `WebGLRenderer` + raw GLSL ES 3.00 (`ShaderMaterial` +
+`glslVersion: THREE.GLSL3`), TypeScript, Vite, vitest.
+
+There are **no** ready-made three add-ons like `Reflector`, `SSRPass` or
+`EffectComposer`; all of the reflection math is written by hand. There is no
+texture file either: the wave normal comes from an analytic derivative, the sky
+from a flat color.
+
+The same scene is drawn three ways and measured side by side with the GPU clock:
+
+| Path       | What it does                                                     |
+| ---------- | ---------------------------------------------------------------- |
+| `baseline` | Reflectionless base. G-buffer + copy pass                        |
+| `ssr`      | G-buffer + fullscreen screen-space reflection pass               |
+| `planar`   | Extra scene pass with a mirrored second camera + G-buffer + copy |
+
+## What's inside
+
+- **Pure logic layer** (`src/depth.ts`, `src/march.ts`, `src/projection.ts`,
+  `src/mirror.ts`, `src/oblique.ts`, `src/wave.ts`, `src/fresnel.ts`,
+  `src/outcomes.ts`, `src/viewport.ts`, `src/stats.ts`) — knows nothing about
+  the browser, tested with `vitest`. `src/march.ts` is the CPU twin of the march
+  in the shader.
+- **G-buffer** (`src/gbuffer.ts`) — passing `count: 2` to `WebGLRenderTarget`
+  gives two color attachments in a single pass (color + view-space
+  normal/material id) and a readable `DepthTexture`.
+- **SSR pass** (`src/shaders/ssr.frag.glsl`) — perspective-correct screen-space
+  ray march, intersection refined with binary search, thickness test, edge/facing
+  fades, Fresnel blend. `SSR_STEPS`, `SSR_REFINE`, `SSR_REFINE_STEPS`,
+  `MARCH_MODE` are **not defined** in this file; they arrive via
+  `material.defines` (`needsUpdate = true` is mandatory).
+- **Planar reflection** (`src/mirrorCamera.ts`, `src/oblique.ts`) — a mirror
+  camera whose pose is mirrored as three vectors and rebuilt with `lookAt` (not
+  a matrix multiplication: a determinant of −1 flips the winding order) and
+  Lengyel's oblique near plane.
+- **Outcome counter** (`src/probe.ts` + `src/outcomes.ts`) — which of the march's
+  four outcomes a pixel fell into is written as a byte into a 240×135 RGBA8
+  target and read back (`gl.disable(gl.DITHER)` is mandatory for this reason).
+- **GPU clock** (`src/timer.ts`) — `EXT_disjoint_timer_query_webgl2`, a query
+  queue, a `GPU_DISJOINT_EXT` check. If the extension is missing the output says
+  so explicitly (`timerExt: false`) and frame time is reported instead of GPU ms.
+- **Deterministic measurement mode** (`src/measure.ts`) — `?measure=1`.
+
+## Setup
+
+```bash
+npm install
+```
+
+## Test (no browser, deterministic)
+
+```bash
+npm test
+```
+
+**102 tests green** (11 files):
+
+| File                      | What it checks                                                                                      | Tests |
+| ------------------------- | --------------------------------------------------------------------------------------------------- | ----- |
+| `test/depth.test.ts`      | depth ↔ view-space z round trip, monotonicity, `viewPositionFromDepth`                              | 9     |
+| `test/projection.test.ts` | `perspectiveMatrix` element by element, `w = -z`, near/far plane, matrix inverse                    | 8     |
+| `test/march.test.ts`      | perspective-correct interpolation, screen ↔ ray parameter, hit/miss/thickness, screen vs view march | 14    |
+| `test/mirror.test.ts`     | the mirroring trap (`2h − 1`), distance preservation, basis determinant **+1**                      | 7     |
+| `test/oblique.test.ts`    | `clip.z / clip.w = −1` on the plane, side test, only row 3 changes                                  | 6     |
+| `test/wave.test.ts`       | analytic gradient = central difference, GLSL ↔ TS constant parity                                   | 8     |
+| `test/fresnel.test.ts`    | endpoints, monotonicity, `f0FromIor(1.33) ≈ 0.02`                                                   | 8     |
+| `test/outcomes.test.ts`   | byte encoding, percentages, `throw` on an invalid code                                              | 7     |
+| `test/viewport.test.ts`   | dpr/scale clamps, pixel budget                                                                      | 8     |
+| `test/stats.test.ts`      | median/percentile edge cases, RMS, crossover interpolation                                          | 17    |
+| `test/shaders.test.ts`    | the real `?raw` sources: no `#version`, MRT outputs, constant parity                                | 10    |
+
+No test file references `document`, `window`, `navigator`,
+`WebGL2RenderingContext` or `performance`; `three` is not imported either.
+
+## Demo
+
+```bash
+npm run dev
+```
+
+`http://localhost:5173/` — **don't open it with `file://`**, you get a blank
+screen (Vite is what resolves the bare module specifiers).
+
+Drag with the mouse to orbit (azimuth + pitch, pitch −60°…−2°), scroll to change
+distance.
+
+| Control          | Values                  | Default |
+| ---------------- | ----------------------- | ------- |
+| Path             | Baseline / SSR / Planar | SSR     |
+| Step count       | 16 / 32 / 64 / 128      | 32      |
+| Binary search    | on / off                | on      |
+| March space      | Screen / View           | Screen  |
+| Thickness        | 0.05 – 2.0              | 0.45    |
+| Object count     | 6 / 24 / 96             | 6       |
+| Sky fallback     | on / off                | on      |
+| Resolution scale | 0.35 / 0.5 / 0.75 / 1.0 | 0.5     |
+| Mode             | Shaded / Outcome        | Shaded  |
+| Pause/Resume     | —                       | Running |
+
+The HUD is split in two: **MEASURED** (FPS, frame ms, GPU ms, draw calls,
+triangles, water pixel %, hit %, offscreen %) and **STRUCTURAL** (path, steps,
+binary search, march space, objects, backbuffer `WxH`). Don't confuse what is
+measured with what was selected.
+
+In "Outcome" mode the water pixels are painted by the outcome of the march:
+green = intersection, red = offscreen, yellow = step budget ran out,
+blue = failed the thickness test.

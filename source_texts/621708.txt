@@ -1,0 +1,206 @@
+Differentiable implicit CAD in the browser: edit via GUI or code, solve constraints, render with WebGPU raymarching, optimize shapes end-to-end. - Construction primitives, transform gizmo, and primitive tools by andrinr · Pull Request #17 · andrinr/cadjoint
+
+Construction primitives, transform gizmo, and primitive tools by andrinr · Pull Request #17 · andrinr/cadjoint · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+andrinr
+commented
+Jul 29, 2026
+Copy link
+Copy Markdown
+Owner
+PR B of the CAD viewport work (PR A was #16). Adds the ability to create geometry in the viewer rather than only edit an existing sketch.
+The gap this closes
+Translate(Sphere(0.5), [1, 0, 0]) is an SDF tree with no notion of "a sphere at this position" — so the viewer could not outline it, select it, or move it. Sketch profiles were editable precisely because they are construction-layer objects whose parameters are shared with the SDF they generate.
+ConstructionPrimitive supplies the same mirror for primitives. It owns position, rotation, and dimensions as named free parameters, builds the placed SDF from those same Parameter objects, and reports a wireframe outline:
+```
+scene = Union(
+    Solid.box(size=[1, 1, 0.5], position=[0, 0, 0], rotation=[0, 0, 0.4]),
+    Solid.sphere(radius=0.6, position=[1.5, 0, 0]),
+)
+```
+The factories return the placed SDF, so solids compose directly. Because the parameters are shared and free, extract_parameters, apply_parameters, constraints, and jax.grad all reach a solid's placement exactly as they reach sketch vertices — there is a test that gradients flow to position.
+Two design notes:
+Rotation is three scalars, not one vector. Rotate takes a scalar angle, and sharing the parameter object is what keeps the mirror and the solid in step. Angles are intrinsic X→Y→Z radians, matching the nesting of the generated Rotate transforms.
+Identity rotations are not emitted, so an unrotated solid costs no extra matrix multiply per raymarch step.
+Viewer
+Action
+Result
+Box / Sphere / Cylinder tool, then click
+Writes a Solid.* statement, wires it into the scene, adds any missing import
+Click a solid's outline
+Selects it and shows the move/rotate gizmo
+Drag an arrow / ring
+Rewrites position= / rotation= on that solid
+set_value adds the keyword when it is absent, so a solid written without rotation= is still rotatable rather than erroring. add_primitive extends an existing scene = Union(...), or wraps a non-Union scene, and picks a non-colliding variable name.
+Payload change
+The construction payload now carries a ready-made world-space edge list for every object, so sketches, boxes, and spheres draw through one path. The renderer previously hardcoded a closed vertex loop ((i + 1) % count) and simply could not express a box's twelve edges.
+Also fixed
+A dismissed viewer error came back on every recompile — on a machine without WebGPU that banner sat over the viewport swallowing clicks. Found while writing the e2e tests.
+Testing
+Python (440 passing): construction primitives, parameter sharing, gradients, and outline geometry — including that every outline vertex lies on the generated solid's surface, which is what proves the wireframe transform matches the Rotate composition. Plus the new patch operations.
+vitest (52): gizmo geometry, axis picking, closest-point-on-axis and angle math, and a cross-language check that the TypeScript rotation matrix matches Python's — if those drift, outlines stop sitting on their solids.
+Playwright (11): placing a primitive writes a Solid call into the scene; selecting its outline shows the gizmo; dragging an axis moves it in the source.
+Not verified
+No browser here, so the gizmo's feel is unverified — arrow/ring size, how the axis colours read against the model, whether picking radii feel right in practice. Worth driving before merge.
+Follow-ups
+Sketch-plane origins are not yet gizmo-movable (the plan included them; the primitive path landed first and planes need their own payload entry).
+Scaling handles, and Solid factories for the remaining primitives (torus, capsule, round box).
+🤖 Generated with Claude Code
+andrinr
+and others
+added 4 commits
+July 29, 2026 08:43
+Add construction primitives, a transform gizmo, and a primitive tool
+…
+e933ed5
+```
+Primitives had no construction mirror: Translate(Sphere(0.5), [1, 0, 0]) is an
+SDF tree with no notion of "a sphere at this position", so the viewer could
+neither outline it nor move it.
+
+ConstructionPrimitive supplies that mirror, following PolygonProfile's pattern.
+It owns position, rotation, and dimensions as named free parameters, builds the
+placed SDF from those same Parameter objects, and reports a wireframe outline.
+Solid.box/sphere/cylinder return the placed SDF, so solids compose directly:
+
+    scene = Union(
+        Solid.box(size=[1, 1, 0.5], position=[0, 0, 0], rotation=[0, 0, 0.4]),
+        Solid.sphere(radius=0.6, position=[1.5, 0, 0]),
+    )
+
+Rotation is three scalars rather than one vector because Rotate takes a scalar
+angle, and sharing the parameter object is what keeps mirror and solid in step.
+Identity rotations are not emitted, so they cost nothing per raymarch step.
+
+Viewer:
+- click a solid's outline to select it; drag the gizmo's arrows to translate or
+  its rings to rotate, each rewriting position= or rotation= in the source
+- Box/Sphere/Cylinder tools place a solid where you click, writing a Solid.*
+  statement, wiring it into the scene expression, and adding any missing import
+- set_value adds the keyword when it is absent, so a solid written without
+  rotation= is still rotatable
+
+The construction payload now carries a ready-made world-space edge list for
+every object, so sketches, boxes, and spheres all draw through one path; the
+renderer previously assumed a closed vertex loop and could not express a box.
+
+Also stops a dismissed viewer error from reappearing on every recompile, where
+it sat over the viewport swallowing clicks.
+
+Tests: construction primitives (including that every outline vertex lies on the
+generated solid's surface), the new patch operations, gizmo math with a
+cross-language check that the TypeScript rotation matches Python's, and
+Playwright coverage of placing, selecting, and dragging a solid.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Reject unknown patch operations with a clear message
+…
+95a9d47
+```
+An operation the server does not know fell through to the vertex-edit
+validation and complained about a missing `line`, which points nowhere near
+the real cause: a browser running newer assets than the long-running server
+process. Say so instead, and suggest restarting.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Rework the viewport UI around a ViewCube and an icon tool rail
+…
+f8df752
+```
+The view selector was a text dropdown in the top bar, which is not where a 3D
+application puts it. It becomes a CSS-3D ViewCube overlaying the viewport that
+tracks the camera, so it doubles as an orientation readout: click a face to look
+down that axis, or use the compact views menu beside it. Back faces are hidden
+so a click always lands on the face you can see.
+
+Tools move into a vertical icon rail on the viewport, grouped as selection mode,
+creation, and transform, each with a keyboard shortcut (1/2, P/B/S/C, G/R).
+
+Selection modes: object picking selects a whole sketch or solid and raises the
+gizmo; vertex picking selects sketch handles. Previously both competed for the
+same click, so a sketch's vertices always won.
+
+Cursor now reflects what the pointer can do — crosshair places, grab drags a
+handle or gizmo axis, pointer selects, and the plain arrow means dragging will
+orbit. Hovering a gizmo axis highlights it before you commit.
+
+Render settings are one grouped panel: segmented shading, shadows, and quality
+controls (mutually exclusive choices should not be checkboxes) plus switches for
+the independent effects. Quality moves in from the top bar.
+
+Shadows gain a hard mode: one occlusion ray, no penumbra, lifted off black so
+the shaded side stays readable. Flat shading now takes shadowing into account —
+it returned before the shadow term was computed, so shadows silently vanished —
+and flat with hard shadows becomes the default, which reads like a working
+drawing while modelling.
+
+Also:
+- placing a solid selects it, so the gizmo is usable without a second click
+- the editor had no syntax highlighting: the language package supplies a parser
+  but no highlight style, so one is defined on the app's palette
+- the WGSL dialog opened off screen. Its <pre> had no min-height, so a shader
+  thousands of lines long expanded the flex item and pushed the centred dialog
+  out of view
+- the starter scene now carries a glass sphere and a metal cylinder, so
+  transparency and reflection are visible out of the box
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Move sketches, delete objects, and drag the view cube
+…
+93418ec
+```
+Sketches could not be moved: a profile has no placement of its own, it lives on
+its SketchPlane. The payload now reports where that placement is patchable —
+which call owns it, which keyword holds the position — so the gizmo drives a
+plane's origin= for a sketch and a solid's position= for a primitive. Rotation
+stays primitive-only, since reorienting a plane means changing a normal rather
+than an angle triple.
+
+Delete: a trash button and the Delete key remove the selected object, dropping
+both its statement and its operand in the scene Union. It refuses when the
+value is used elsewhere — an extrude() input, say — because silently removing
+it would change what the program builds without saying so.
+
+The view cube is now draggable to orbit, and only snaps to a face when the
+pointer barely moved. Pointer capture starts on the first real movement rather
+than on press, or the capture would retarget the click and a face would never
+receive it. The views dropdown is gone; iso and projection are icons.
+
+Hovering an object highlights its outline before the click, and space held
+turns any drag into a pan alongside shift and right-drag.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Hide details
+View details
+andrinr
+merged commit 66b91ad
+into
+main
+Jul 31, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+github-actions
+Bot
+locked and limited conversation to collaborators
+Jul 31, 2026
+Sign up for free
+to subscribe to this conversation on GitHub.
+Already have an account?
+Sign in.
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

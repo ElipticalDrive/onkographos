@@ -1,0 +1,115 @@
+--- v004.md
++++ v005.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs:**
+-- A list of input points (lattice coordinates or physical coordinates mapped to lattice indices).
+-- A set of functions (typically 1 for `f1v4`, or 8/16/32/64 for variants).
+-- Grid data structures: brick hierarchy, shell definitions, and function coefficients (e.g., $C$ matrix for Gaussian-type orbitals).
++- A list of input points (lattice coordinates) [S1, unofficial].
++- A set of functions (typically 1 for `f1v4`, or 8/16/32/64 for variants) [S1, unofficial].
++- Grid data structures: brick hierarchy, shell definitions, and function coefficients (e.g., $C$ matrix for Gaussian-type orbitals) [S1, unofficial].
+ 
+ **Outputs:**
+-- For each input point, the values of the functions at the 8 corners of the enclosing voxel.
++- For each input point, the values of the functions at the 8 corners of the enclosing voxel [S1, unofficial].
+ - In the case of `iso_dcorners`, the values in the $\phi^T D \phi$ form (density-like quantities) [S1, unofficial].
+ 
+@@ -25,9 +25,5 @@
+ 2. **Brick Identification:** Determine the bricks enclosing the 256 points. This may span 2–4 neighboring bricks [S1, unofficial].
+ 3. **Shell Setup:** Compute the shells required for the bounding box of the group's points. This setup is shared among all 256 threads, reducing overhead compared to per-brick setup (which would handle 70–125 points) [S1, unofficial].
+-4. **Point Processing:** For each point in the group:
+-   - Identify which shells are within reach. Skip shells outside the point's bounding box [S1, unofficial].
+-   - Load the necessary shell data from group-shared memory.
+-   - Compute the function values at the 8 corners. For `iso_corners_list_f1v4`, this involves one function. For variants, it involves 8, 16, 32, or 64 functions [S1, unofficial].
+-   - If using tiled GEMM (`iso_gcorners`), perform matrix multiplication of AO values and coefficients [S1, unofficial].
++4. **Point Processing:** For each point in the group: identify which shells are within reach and skip shells outside the point's bounding box [S1, unofficial]. Load the necessary shell data from group-shared memory. Compute the function values at the 8 corners. For `iso_corners_list_f1v4`, this involves one function. For variants, it involves 8, 16, 32, or 64 functions [S1, unofficial]. If using tiled GEMM (`iso_gcorners`), perform matrix multiplication of AO values and coefficients [S1, unofficial].
+ 5. **Output:** Store the computed corner values. Points that skip shells due to being out of reach simply do not access those shell data blocks [S1, unofficial].
+ 
+@@ -37,5 +33,4 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** Standard floating-point precision is used. No specific higher-precision requirements are noted [S1, unofficial].
+ - **Boundaries:** Points near the edge of the grid or brick boundaries must correctly identify neighboring bricks. The octree structure ensures that rejected siblings are kept to maintain neighbor connectivity [S1, unofficial].
+ - **Degenerate Input:** If a point is far from any brick, it may skip all shells. The kernel handles this by checking shell reachability [S1, unofficial].
+@@ -43,45 +38,43 @@
+ **Pseudocode:**
+ ```python
+-# Pseudocode for iso_corners_list_f1v4 kernel
+-# Each thread group handles 256 points
+-
+ def iso_corners_list_f1v4_kernel(points, bricks, shells, coeffs):
+-    # Shared memory for shells
+-    shared_shells = group_shared_memory()
++    # Each thread group handles 256 points
++    shared_shells = [0.0] * MAX_SHELLS  # Group-shared memory allocation
+     
+-    # 1. Identify bricks for the 256 points
+-    # This may involve 2-4 neighboring bricks
+-    brick_ids = identify_bricks(points)
++    # 1. Identify bricks for the 256 points (spans 2-4 neighbors)
++    brick_ids = [find_brick(p, bricks) for p in points]
+     
+-    # 2. Shared shell setup for the group
+-    # Compute shells for the bounding box of the group's points
++    # 2. Shared shell setup for the group bounding box
+     group_shells = compute_shells_for_box(points, bricks)
+     
+     # Load shells into shared memory
+-    load_shells_to_shared(group_shells, shared_shells)
+-    
++    for i, shell_idx in enumerate(group_shells):
++        shared_shells[i] = load_shell_data(shell_idx)
++        
+     # 3. Process each point in the group
+     for i in range(256):
+         point = points[i]
+-        brick_id = brick_ids[i]
++        corner_values = [0.0] * 8
+         
+         # Determine which shells are within reach
+-        reachable_shells = get_reachable_shells(point, group_shells)
+-        
+-        # Skip shells out of reach
+-        corner_values = zeros(8)
++        reachable_shells = [s for s in group_shells if is_shell_reachable(point, s)]
+         
+         for shell in reachable_shells:
+             shell_data = shared_shells[shell]
+-            
+             # Compute contribution to corner values
+-            # For f1v4, this is one function
+-            # Formula: value = sum(shell_coeff * point_offset)
+-            # Specific formula depends on the function type (e.g., Gaussian)
++            # For f1v4, this is one function; variants handle 8/16/32/64
+             contribution = compute_shell_contribution(shell_data, point)
+-            corner_values += contribution
+-        
++            for c in range(8):
++                corner_values[c] += contribution[c]
++                
+         # Store result
+         output[i] = corner_values
++
++# Helper definitions
++def find_brick(p, bricks): return bricks.lookup(p)
++def compute_shells_for_box(points, bricks): return shells.query_bounding_box(points)
++def load_shell_data(idx): return shells.memory[idx]
++def is_shell_reachable(p, shell): return distance(p, shell.center) <= shell.radius
++def compute_shell_contribution(shell_data, p): return shell_data.evaluate(p)
+ ```
+ 
+@@ -89,5 +82,5 @@
+ 
+ ### [Cube Index Calculation](3717-cube-index-calculation.md)
+-Computes an 8-bit integer index representing the configuration of a voxel's eight corners relative to an isolevel, determining which edges are intersected by the surface. It serves as the lookup key for the Marching Cubes lookup table. Unlike sibling methods that handle sparse point clouds or pre-gathered data, this method operates directly on the scalar values at the voxel corners to produce the topology case.
++Computes an 8-bit integer index representing the configuration of a voxel's eight corners relative to an isolevel, determining which edges are intersected by the surface. It calculates the marching cubes case index for each voxel based on corner values relative to an iso-level. Unlike sibling methods that handle sparse point clouds or pre-gathered data, this method operates directly on the scalar values at the voxel corners to produce the topology case.
+ 
+ ### iso_gcorners and iso_geval kernels (Tiled GEMM implementation)
+@@ -107,5 +100,5 @@
+ 
+ ## Background
+-Originated in the `md_gto_iso_gpu` optimization for GPU isosurface extraction, specifically for molecular orbitals and densities [S1, unofficial]. Developed by scanberg and co-authored with Claude Opus 5.5 [S1, unofficial]. Used in computational chemistry for visualizing electron densities and molecular orbitals [S1, unofficial].
++Originated in the `md_gto_iso_gpu` optimization for GPU isosurface extraction, specifically for molecular orbitals and densities [S1, unofficial]. Co-authored with Claude Opus 5.5 [S1, unofficial]. Used in computational chemistry for visualizing electron densities and molecular orbitals [S1, unofficial].
+ 
+ ## Sources

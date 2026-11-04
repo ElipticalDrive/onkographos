@@ -1,0 +1,402 @@
+Large collection of number systems providing custom arithmetic for mixed-precision algorithm development and optimization for AI, Machine Learning, Computer Vision, Signal Processing, CAE, EDA, control, optimization, estimation, and approximation. - feat(zfpblock): full constexpr promotion of zfparray multi-block container by Ravenwater · Pull Request #831 · stillwater-sc/universal
+
+feat(zfpblock): full constexpr promotion of zfparray multi-block container by Ravenwater · Pull Request #831 · stillwater-sc/universal · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Ravenwater
+commented
+May 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Summary
+Completes the array-layer constexpr work for the ZFP container, building on the codec promotion in PR #830 (issue #815, just merged). zfparray<Real, Dim> is now usable in constant-evaluated contexts — enabling compile-time generation of compressed scientific-data tables and constinit-friendly init patterns, per the motivation in #816.
+Approach
+The codec from PR #815 is constexpr, so per-block encode_block / decode_block calls work at compile time without further plumbing. Three classes of cleanup remain:
+`std::memset` / `std::memcpy` → element-wise loops: mechanical, identical runtime behavior. Cache init, cache copy, store copy, padded-block init.
+`const_cast<zfparray>(this)` removal*: the const lazy-cache-load methods (`operator()`, `decompress`, `clear_cache`, `load_block`) previously cast away const to call `flush()`/`write_back_cache()`. This is now solved by making `_store` `mutable` and marking `flush` / `write_back_cache` const — the cache (_cache, _cached_block, _dirty already mutable) and the compressed store are all internal implementation details, so const methods are entitled to update them when a dirty cache evicts. This is also a strict const-correctness improvement and removes a long-standing code smell.
+In-class initializers + `= default` ctor: every state member gets an in-class initializer, so the default constructor drops to `= default` and the explicit-rate constructors no longer need `std::memset(_cache, 0, ...)`.
+Every member function is annotated `constexpr`. No `std::is_constant_evaluated()` branching is required.
+Changes
+`include/sw/universal/number/zfpblock/zfparray_impl.hpp` — main rewrite (91 insertions, 89 deletions, no net size change).
+`static/block/zfpblock/array/array_constexpr.cpp` — NEW. static_assert-based constexpr tests covering default ctor, sized ctor, construct-from-source compress/decompress roundtrip, set/flush/get through the write-back cache, and cross-block access exercising cache eviction. Naming: `array_constexpr.cpp` to match the existing `array_*` prefix in this directory (avoids a target-name collision with `api/constexpr.cpp`).
+Test Results
+Target
+gcc build
+gcc test
+clang build
+clang test
+zfpblock_array_api
+OK
+PASS
+OK
+PASS
+zfpblock_array_cache
+OK
+PASS
+OK
+PASS
+zfpblock_array_copy_move
+OK
+PASS
+OK
+PASS
+zfpblock_array_roundtrip
+OK
+PASS
+OK
+PASS
+zfpblock_array_constexpr (NEW)
+OK
+PASS
+OK
+PASS
+zfpblock_constexpr (regression)
+OK
+PASS
+OK
+PASS
+C++20 `std::vector` constexpr scope
+C++20 makes `std::vector` usable in constexpr contexts under one rule: no allocation may persist beyond the constant expression. The supported pattern is a constexpr lambda that constructs a `zfparray`, uses it, and returns (the vector is freed at lambda exit). Static-storage `constexpr zfparray` instances are NOT supported by the language and are out of scope. All five new tests follow the supported pattern.
+Test plan
+Fast CI passes (gcc + clang CI_LITE)
+CodeRabbit feedback addressed
+Promote to ready: `gh pr ready`
+Full CI tier passes
+Merge
+Resolves #816
+Generated with Claude Code
+Summary by CodeRabbit
+New Features
+Enabled zfparray usage in compile-time (constant-evaluated) contexts through constexpr support for constructors, destructors, and core operations.
+Added data() and data_size() public accessor methods for raw array access.
+Tests
+Added compile-time verification test suite validating constexpr array operations and cache behavior at compile time.
+feat(zfpblock): full constexpr promotion of zfparray multi-block cont…
+…
+901644d
+```
+…ainer
+
+Completes the array layer constexpr work tracked under issue #745.
+Building on the codec promotion in PR #830 (#815), zfparray<Real, Dim>
+is now usable in constant-evaluated contexts -- enabling compile-time
+generation of compressed scientific-data tables.
+
+Container changes (zfparray_impl.hpp):
+
+* All member functions annotated constexpr.  No std::is_constant_evaluated
+  branching is required: every helper the container calls (encode_block,
+  decode_block, zfp_bitstream, ...) is already constexpr after #815.
+* _store (the std::vector<uint8_t> compressed buffer) is now mutable.
+  This eliminates every const_cast<zfparray*>(this) in the const lazy-
+  cache-load methods (operator(), decompress, clear_cache, load_block).
+  The cache is an internal implementation detail; const methods are
+  entitled to flush it.  flush() and write_back_cache() become const
+  members.  Strictly safer and a const-correctness improvement.
+* In-class initializers for _n, _rate, _cache, _cached_block, _dirty
+  let the default constructor default to `= default` and drop the
+  std::memset(_cache, 0, sizeof(_cache)) call that previously needed
+  it.  All other constructors drop their memsets too.
+* std::memset / std::memcpy replaced with element-wise loops throughout
+  (cache copy, store copy, padded-block init).  Mechanical and reads
+  identically at runtime; constexpr-safe.
+
+Test additions (static/block/zfpblock/array/array_constexpr.cpp, NEW):
+
+* Default-construct accessors: size, num_blocks, compressed_bytes,
+  compression_ratio all constexpr-deterministic at zero state.
+* Sized-rate construction: zfparray(8, 16.0) sets up 2 blocks of 4
+  with 8 bytes per block -- verified via static_assert.
+* Construct-from-source roundtrip: zfparray(8, 32.0, src) + decompress
+  recovers powers of two within 2^-20 relative tolerance.  Exercises
+  the full per-block codec at compile time through the container.
+* set / flush / get roundtrip: write through the cache, flush, read
+  back through the (clean) cache.
+* Cross-block access: set in block 0, set in block 1 (forces eviction),
+  set in block 0 again (forces re-load).  Verifies load_block /
+  write_back_cache / flush at constant evaluation.
+
+Test target naming: chose array_constexpr.cpp to match the existing
+array_* prefix convention (collides with api/constexpr.cpp otherwise --
+compile_all derives target name from the source basename).
+
+Verified on gcc and clang: all 6 zfpblock array + constexpr targets
+pass; no regressions in the runtime array tests.
+
+Resolves #816
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+coderabbitai
+Bot
+commented
+May 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+📝 Walkthrough
+Walkthrough
+The PR promotes zfparray<Real, Dim> to full constexpr support: constructors, destructors, assignment operators, element access, and cache-management methods are marked constexpr; memory operations are replaced with element-wise loops; cache state is maintained via mutable members to support const operations. A new compile-time test suite validates all constexpr paths with static assertions.
+Changes
+zfparray constexpr promotion
+Layer / File(s)
+Summary
+Public API constexpr marking
+include/sw/universal/number/zfpblock/zfparray_impl.hpp
+Header includes are reordered and public construction, destruction, assignment, element access, and query methods are marked constexpr to enable compile-time usage.
+Core implementation and cache refactoring
+include/sw/universal/number/zfpblock/zfparray_impl.hpp
+Compression, decompression, and cache-management logic are reimplemented using value-initialized temporaries and element-wise loops instead of memcpy/memset; mutable cache state is made constexpr-compatible; new raw accessors data() and data_size() are added.
+Compile-time verification tests
+static/block/zfpblock/array/array_constexpr.cpp
+New test file validates constexpr behavior via static assertions: default construction, sized-rate construction, compress/decompress roundtrip tolerance, cache-backed set/flush/readback operations, and cross-block access with cache eviction.
+Estimated code review effort
+🎯 3 (Moderate) | ⏱️ ~20 minutes
+Possibly related PRs
+stillwater-sc/universal#814: Complements this PR by adding constexpr accessors to zfpblock (the single-block compression layer); together they enable full constexpr promotion of the zfpblock stack.
+Suggested labels
+enhancement
+Poem
+🐇 A bunny hops through compile-time arrays,
+Cache dancing in constant-expression ways,
+No runtime needed, all locked at build—
+Compression constexpr, compile-time filled! ✨
+🚥 Pre-merge checks | ✅ 5
+✅ Passed checks (5 passed)
+Check name
+Status
+Explanation
+Title check
+✅ Passed
+Title accurately describes the main change: promoting zfparray to full constexpr support for the multi-block container.
+Linked Issues check
+✅ Passed
+All coding objectives from #816 are met: zfparray methods are constexpr, memcpy/memset replaced with element-wise loops, constructors support constexpr contexts, cache/invalidation logic is constexpr, and comprehensive tests validate functionality.
+Out of Scope Changes check
+✅ Passed
+All changes are directly related to #816 scope: only zfparray_impl.hpp was modified and a new constexpr test file was added; no unrelated changes detected.
+Docstring Coverage
+✅ Passed
+Docstring coverage is 92.59% which is sufficient. The required threshold is 80.00%.
+Description Check
+✅ Passed
+Check skipped - CodeRabbit’s high-level summary is enabled.
+✏️ Tip: You can configure your own custom pre-merge checks in the settings.
+✨ Finishing Touches
+📝 Generate docstrings
+Create stacked PR
+Commit on current branch
+🧪 Generate unit tests (beta)
+Create PR with unit tests
+Commit unit tests in branch feat/issue-816-zfparray-constexpr
+Comment @coderabbitai help to get the list of available commands and usage tips.
+coderabbitai
+Bot
+reviewed
+May 13, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🧹 Nitpick comments (1)
+include/sw/universal/number/zfpblock/zfparray_impl.hpp (1)
+119-133: 💤 Low value
+No bounds checking on element access.
+operator() and set() don't validate that i < _n. Out-of-bounds access would read/write arbitrary memory. This mirrors std::vector::operator[] semantics (unchecked), but consider whether an assertion in debug builds would be appropriate for this container.
+💡 Optional: add debug assertions
+```
+ constexpr Real operator()(size_t i) const {
++    // assert(i < _n && "zfparray index out of bounds");
+     size_t block_idx = i / BLOCK_SIZE;
+     ...
+ }
+
+ constexpr void set(size_t i, Real val) {
++    // assert(i < _n && "zfparray index out of bounds");
+     size_t block_idx = i / BLOCK_SIZE;
+     ...
+ }
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@include/sw/universal/number/zfpblock/zfparray_impl.hpp` around lines 119 -
+133, operator() and set() currently perform no bounds checks leading to
+undefined behavior for i >= _n; add a debug-only assertion at the start of both
+functions (e.g., assert(i < _n)) to validate the index before computing
+block_idx/offset and calling load_block, so out-of-bounds access is caught in
+debug builds while retaining release performance; reference the methods
+operator()(size_t), set(size_t, Real), and members _n, load_block(), and _cache
+when applying the change.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Nitpick comments:
+In `@include/sw/universal/number/zfpblock/zfparray_impl.hpp`:
+- Around line 119-133: operator() and set() currently perform no bounds checks
+leading to undefined behavior for i >= _n; add a debug-only assertion at the
+start of both functions (e.g., assert(i < _n)) to validate the index before
+computing block_idx/offset and calling load_block, so out-of-bounds access is
+caught in debug builds while retaining release performance; reference the
+methods operator()(size_t), set(size_t, Real), and members _n, load_block(), and
+_cache when applying the change.
+```
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yaml
+Review profile: CHILL
+Plan: Pro
+Run ID: 8107e034-e702-4299-a43b-31a5001beeab
+📥 Commits
+Reviewing files that changed from the base of the PR and between bfcd463 and 901644d.
+📒 Files selected for processing (2)
+include/sw/universal/number/zfpblock/zfparray_impl.hpp
+static/block/zfpblock/array/array_constexpr.cpp
+Ravenwater
+self-assigned this
+May 13, 2026
+Ravenwater
+added this to the
+V4 milestone
+May 13, 2026
+Ravenwater
+added this to Universal Number Library
+May 13, 2026
+Ravenwater
+added
+the
+enhancement
+label
+May 13, 2026
+Ravenwater
+moved this to In progress
+in Universal Number Library
+May 13, 2026
+Ravenwater
+marked this pull request as ready for review
+May 13, 2026 15:44
+coveralls
+commented
+May 13, 2026
+Copy link
+Copy Markdown
+Coverage Report for CI Build 25809929230
+Warning
+No base build found for commit bfcd463 on main.
+Coverage changes can't be calculated without a base build.
+If a base build is processing, this comment will update automatically when it completes.
+Coverage: 83.889%
+Details
+Patch coverage: 52 of 52 lines across 1 file are fully covered (100%).
+Uncovered Changes
+No uncovered changes found.
+Coverage Regressions
+Requires a base build to compare against. How to fix this →
+Coverage Stats
+Relevant Lines:
+54703
+Covered Lines:
+45890
+Line Coverage:
+83.89%
+Coverage Strength:
+6470003.29 hits per line
+💛 - Coveralls
+Hide details
+View details
+Ravenwater
+merged commit b7a7e67
+into
+main
+May 13, 2026
+42 of 43 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Ravenwater
+deleted the
+feat/issue-816-zfparray-constexpr
+branch
+May 13, 2026 16:21
+github-project-automation
+Bot
+moved this from In progress
+to Done
+in Universal Number Library
+May 13, 2026
+This was referenced May 13, 2026
+feat(zfpblock): full constexpr support across all operators
+#745
+Closed
+Epic: constexpr support across Universal number systems
+#723
+Closed
+Ravenwater
+added a commit
+that referenced
+this pull request
+May 13, 2026
+docs: wrapup 2026-05-13 -- zfpblock constexpr completion + Epic #723 …
+…
+28ed445
+```
+…closed
+
+CHANGELOG entry plus full session doc for the two PRs that closed the
+constexpr Epic:
+
+- PR #830 (#815) -- ZFP transform codec constexpr promotion: cx_ldexp /
+  cx_frexp_exp / std::countr_zero / std::is_constant_evaluated() dispatch /
+  zfp_bitstream reader-mode constructor.  Bit-identical compressed output
+  preserved across both compilers and the change.
+- PR #831 (#816) -- zfparray multi-block container constexpr promotion:
+  mutable _store eliminates every const_cast, in-class member initializers,
+  loop replacements for memset/memcpy.  New array_constexpr.cpp test.
+
+With #745 (zfpblock umbrella) closed, all 32 sub-issues of Epic #723
+(constexpr across Universal number systems) are closed.  Universal now
+delivers the "plug-in" promise: any expression in any fixed-size number
+type is constexpr-evaluable.
+
+Also documents the LNS Phase F filing (#829) -- research/spec only,
+captures the Vouzis/Collange/Arnold cotransformation requirements for a
+future high-accuracy LNS add/sub algorithm.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+enhancement
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,84 @@
+# Voxel World Data Structure
+Also called: Hash Grid for Voxel World, HashSet of IVec3
+## Overview
+The Voxel World Data Structure is a sparse representation for voxel worlds that stores voxel existence using a hash set of integer-based 3D vectors [S1, unofficial]. It efficiently tracks which grid-aligned positions contain solid geometry without allocating memory for empty space [S1, unofficial]. It differs from its parent [Hash Grids](936-hash-grids.md) by operating on discrete world coordinates for voxel placement rather than hashing continuous vertex positions for feature extraction, and it serves as the foundational sparse storage layer for [Multi-type Voxel Storage](1104-multi-type-voxel-storage.md) [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+- Input: A camera position (floating-point 3D vector) and a set of initial voxel coordinates [S1, unofficial].
+- Output: A `World` data structure containing a set of occupied voxel positions, and a rendered scene where cubes are drawn at these positions [S1, unofficial].
+
+**Data Structures:**
+The core structure is a `World` object containing a single field:
+- `voxels`: A `HashSet` of `IVec3` (integer 3D vectors). Each `IVec3` represents the integer grid coordinates $(x, y, z)$ of an occupied voxel. The use of `IVec3` ensures that all voxel positions are strictly aligned to the integer grid, preventing floating-point alignment errors [S1, unofficial].
+
+**Steps:**
+1. **Initialization:** Create the `World` structure and populate it with initial voxels by iterating over desired ranges and inserting `IVec3` coordinates into the hash set [S1, unofficial].
+2. **Runtime Interaction (Toggle):** To add or remove a voxel at the camera's current location:
+   a. Convert the camera's floating-point position to an integer `IVec3` using truncation [S1, unofficial].
+   b. Check if this `IVec3` exists in the `voxels` hash set [S1, unofficial].
+   c. If it exists, remove it. If it does not exist, insert it [S1, unofficial].
+3. **Rendering:** Iterate through every `IVec3` in the `voxels` hash set and invoke a rendering primitive to draw a cube centered at that integer coordinate [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Standard Python tuple used as hashable IVec3
+IVec3 = tuple
+
+def draw_cube(pos: IVec3) -> None:
+    # The sources do not specify the rendering implementation.
+    pass
+
+class World:
+    def __init__(self):
+        self.voxels: set[IVec3] = set()
+
+    def initialize_platform(self, width: int, depth: int, y: int) -> None:
+        """Populate the world with an initial flat platform."""
+        for z in range(depth):
+            for x in range(width):
+                self.voxels.add((x, y, z))
+
+    def toggle_voxel_at_camera(self, camera_position: tuple) -> None:
+        """Add or remove a voxel at the camera's grid-aligned position."""
+        voxel_pos = (int(camera_position[0]), int(camera_position[1]), int(camera_position[2]))
+        if voxel_pos in self.voxels:
+            self.voxels.remove(voxel_pos)
+        else:
+            self.voxels.add(voxel_pos)
+
+    def render(self) -> None:
+        """Draw a cube at every occupied voxel position."""
+        for voxel_pos in self.voxels:
+            draw_cube(voxel_pos)
+```
+
+**Parameters:**
+- Grid Alignment: Voxels are strictly integer-aligned. Floating-point positions are converted to integers before storage [S1, unofficial].
+- Initial Platform: Example uses a $32 \times 32$ platform at $y=0$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Performance:** Naively drawing individual cubes for every voxel in the hash set results in poor performance due to high vertex upload overhead. The source notes that increasing platform size causes significant performance suffering if instancing is not used [S1, unofficial].
+- **Data Type:** Using `Vec3` (float) instead of `IVec3` (int) in the hash set is discouraged because it fails to ensure grid alignment, which is critical for consistent voxel placement [S1, unofficial].
+- **Existence Check:** The structure only tracks existence. It does not store material properties or geometry details beyond position [S1, unofficial].
+
+## Subtopics
+
+### [Multi-type Voxel Storage](1104-multi-type-voxel-storage.md)
+Extends this binary existence model by associating a discrete material identifier with each occupied voxel, allowing distinction between material kinds (e.g., dirt, stone). It builds on this structure by introducing an enumeration-based type system for voxel content.
+
+## Operating characteristics
+- **Time Complexity:** Insertion, removal, and existence checks in the `HashSet` are $O(1)$ on average [G]. Rendering is $O(V)$ where $V$ is the number of voxels, as it iterates over the entire set [S1, unofficial].
+- **Memory Complexity:** $O(V)$, storing only the coordinates of occupied voxels [G].
+- **Performance:** Naive rendering (one draw call per voxel) scales poorly with voxel count due to CPU-GPU communication overhead. Instancing is required for larger worlds [S1, unofficial].
+- **Strengths:** Simple implementation, efficient sparse storage for existence checks, easy runtime modification of the world [S1, unofficial].
+- **Limitations:** No support for multiple voxel types or complex geometry per voxel in this base form; rendering performance degrades without optimization (instancing) [S1, unofficial].
+- **When to use:** When a simple, sparse voxel world with binary existence (solid/empty) is needed, and performance requirements are low or instancing is employed [S1, unofficial].
+- **When not to use:** When multiple material types are required (use [Multi-type Voxel Storage](1104-multi-type-voxel-storage.md)) or when rendering large numbers of voxels without GPU instancing [S1, unofficial].
+
+## Background
+This structure is presented in the tutorial "Make yourself a Voxel Engine THIS weekend" as a foundational step in building a voxel engine. It introduces the concept of using a hash set for sparse voxel storage and highlights the importance of integer grid alignment [S1, unofficial].
+
+## Sources
+[S1] Make yourself a Voxel Engine THIS weekend, https://daymare.net/blogs/voxel-engine-in-a-weekend/, fetched 2026-10-26 (unofficial)

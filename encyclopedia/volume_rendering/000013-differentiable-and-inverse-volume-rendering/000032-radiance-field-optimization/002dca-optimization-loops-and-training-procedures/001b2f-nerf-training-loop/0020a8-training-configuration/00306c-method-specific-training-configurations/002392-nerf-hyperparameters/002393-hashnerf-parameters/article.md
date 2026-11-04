@@ -1,0 +1,126 @@
+# HashNeRF Parameters
+
+Also called: HashNeRF Hyperparameters
+
+## Overview
+HashNeRF parameters configure the training loop and model architecture for the HashNeRF method, which builds on [NeRF Hyperparameters](3065-nerf-hyperparameters.md) [S1, unofficial]. Unlike standard NeRF which relies on positional encoding or fixed-resolution grids, HashNeRF uses a multi-resolution hashed embedding table indexed by voxel coordinates, requiring specific settings for the hash map size, loss regularization, and dataset-specific loading behaviors [S1, unofficial].
+
+## How it works
+The HashNeRF training configuration defines the inputs (dataset images, poses), the model structure (`NeRFSmall` with hashed embeddings), and the optimization schedule [S1, unofficial].
+
+### Data Structures
+When `args.i_embed==1`, the model uses a hashed embedding table instead of standard positional encoding or fixed grids, with parameters stored in `embedding_params` [S1, unofficial]. The model architecture is `NeRFSmall` with fixed dimensions `hidden_dim=64` and `geo_feat_dim=15` [S1, unofficial]. Non-hashed modes use the standard `NeRF` model with configurable depth and width [S1, unofficial].
+
+### Parameters and Settings
+All values are defaults unless noted otherwise [S1, unofficial].
+
+**Model and Embedding:**
+* `finest_res`: Finest resolution for the hashed embedding grid. Default: `512` [S1, unofficial].
+* `log2_hashmap_size`: Log2 of the hashmap size. Default: `19` [S1, unofficial].
+* `raw_noise_std`: Standard deviation of noise added to the regularized sigma output. Recommended: `1e0` [S1, unofficial].
+* `tv-loss-weight`: Weight for Total Variation loss applied to the embedding table. Default: `1e-6` [S1, unofficial].
+* `sparse-loss-weight`: Weight for sparse loss. Default: `1e-10` [S1, unofficial].
+
+**Optimizer:**
+* When `args.i_embed==1`, the optimizer for embedding parameters uses RAdam with `eps: 1e-15` [S1, unofficial].
+
+**Rendering and Crops:**
+* `render_factor`: Downsampling factor for rendering to speed up previews. Set to `4` or `8` for fast preview [S1, unofficial].
+* `precrop_iters`: Number of steps to train on central crops. Default: `0` [S1, unofficial].
+* `precrop_frac`: Fraction of the image taken for central crops. Default: `0.5` [S1, unofficial].
+
+**Dataset and Scene Configuration:**
+* `dataset_type`: Options: `llff`, `blender`, `deepvoxels`. Default: `'llff'` [S1, unofficial].
+* `shape`: Options: `armchair`, `cube`, `greek`, `vase`. Default: `'greek'` [S1, unofficial].
+* `white_bkgd`: Boolean flag to render synthetic data on a white background [S1, unofficial].
+* `half_res`: Boolean flag to load Blender synthetic data at 400x400 instead of 800x800 [S1, unofficial].
+* `scannet_sceneID`: Scene ID to load from ScanNet. Default: `'scene0000_00'` [S1, unofficial].
+* `factor`: Downsampling factor for LLFF images. Default: `8` [S1, unofficial].
+* `no_ndc`: Boolean flag to disable Normalized Device Coordinates (set for non-forward facing scenes) [S1, unofficial].
+* `lindisp`: Boolean flag to sample linearly in disparity rather than depth [S1, unofficial].
+* `spherify`: Boolean flag to set for spherical 360 scenes [S1, unofficial].
+* `llffhold`: Takes every 1/N images as the LLFF test set. Default: `8` [S1, unofficial].
+* `testskip`: Loads 1/N images from test/val sets. Default: `8` [S1, unofficial].
+
+**Logging and Checkpointing:**
+* `i_print`: Frequency of console printout and metric logging. Default: `100` [S1, unofficial].
+* `i_img`: Frequency of TensorBoard image logging. Default: `500` [S1, unofficial].
+* `i_weights`: Frequency of weight checkpoint saving. Default: `10000` [S1, unofficial].
+* `i_testset`: Frequency of testset saving. Default: `1000` [S1, unofficial].
+* `i_video`: Frequency of render_poses video saving. Default: `5000` [S1, unofficial].
+
+### Pseudocode
+The forward pass iterates over multiple resolution levels, computes voxel indices via hashing, looks up embeddings, and interpolates features [S1, unofficial]. The helper functions for voxelization and interpolation follow standard graphics routines [G].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+class HashedEmbedding(torch.nn.Module):
+    def __init__(self, finest_res=512, log2_hashmap_size=19, n_levels=4, b=2.0, bounding_box=None):
+        super().__init__()
+        self.finest_res = finest_res
+        self.log2_hashmap_size = log2_hashmap_size
+        self.n_levels = n_levels
+        self.b = b
+        self.base_resolution = finest_res / (b ** (n_levels - 1))
+        self.bounding_box = bounding_box
+        self.embeddings = torch.nn.ModuleList([
+            torch.nn.Embedding(2**log2_hashmap_size, 4) for _ in range(n_levels)
+        ])
+
+    def get_voxel_vertices(self, x, resolution, log2_hashmap_size):
+        # [G] Standard voxelization: normalize points, quantize to grid, hash coordinates, compute bounds
+        if self.bounding_box is not None:
+            x_norm = (x - self.bounding_box.min) / (self.bounding_box.max - self.bounding_box.min)
+        else:
+            x_norm = (x + 1.0) / 2.0
+        grid_coords = (x_norm * resolution).long()
+        keep_mask = (grid_coords >= 0).all(dim=-1) & (grid_coords < resolution).all(dim=-1)
+        hashed_indices = (grid_coords[:, 0] * 73856093) ^ (grid_coords[:, 1] * 19349663) ^ (grid_coords[:, 2] * 83492791)
+        hashed_indices = hashed_indices % (2**log2_hashmap_size)
+        voxel_min = grid_coords.float() / resolution
+        voxel_max = (grid_coords + 1).float() / resolution
+        return voxel_min, voxel_max, hashed_indices, keep_mask
+
+    def trilinear_interp(self, x, voxel_min, voxel_max, voxel_embedds):
+        # [G] Standard trilinear interpolation using fractional coordinates within the voxel
+        frac = (x * self.base_resolution) - voxel_min * self.base_resolution
+        w000 = (1 - frac[:, 0]) * (1 - frac[:, 1]) * (1 - frac[:, 2])
+        w100 = frac[:, 0] * (1 - frac[:, 1]) * (1 - frac[:, 2])
+        w010 = (1 - frac[:, 0]) * frac[:, 1] * (1 - frac[:, 2])
+        w110 = frac[:, 0] * frac[:, 1] * (1 - frac[:, 2])
+        w001 = (1 - frac[:, 0]) * (1 - frac[:, 1]) * frac[:, 2]
+        w101 = frac[:, 0] * (1 - frac[:, 1]) * frac[:, 2]
+        w011 = (1 - frac[:, 0]) * frac[:, 1] * frac[:, 2]
+        w111 = frac[:, 0] * frac[:, 1] * frac[:, 2]
+        # Simplified to center lookup for this context; full implementation gathers 8 corners
+        return voxel_embedds
+
+    def forward(self, x):
+        x_embedded_all = []
+        for i in range(self.n_levels):
+            resolution = torch.floor(self.base_resolution * self.b**i)
+            voxel_min_vertex, voxel_max_vertex, hashed_voxel_indices, keep_mask = \
+                self.get_voxel_vertices(x, resolution, self.log2_hashmap_size)
+            voxel_embedds = self.embeddings[i](hashed_voxel_indices)
+            x_embedded = self.trilinear_interp(x, voxel_min_vertex, voxel_max_vertex, voxel_embedds)
+            x_embedded_all.append(x_embedded)
+        keep_mask = keep_mask.sum(dim=-1) == keep_mask.shape[-1]
+        return torch.cat(x_embedded_all, dim=-1), keep_mask
+```
+
+## Subtopics
+
+### Hashed Embedding Table Initialization
+When `args.i_embed==1`, the model uses a hashed embedding table instead of standard positional encoding or fixed grids. The embedding parameters are stored in `embedding_params` and optimized with RAdam using `eps: 1e-15` [S1, unofficial]. This configuration is paired with the `NeRFSmall` architecture (hidden_dim=64, geo_feat_dim=15), whereas non-hashed modes use the standard `NeRF` model with configurable depth and width [S1, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+HashNeRF is an implementation variant of NeRF that utilizes hashed feature grids [S1, unofficial]. The specific parameters and code structure described here are from the `yashbhalgat/HashNeRF-pytorch` repository, which is an unofficial port or implementation [S1, unofficial]. It builds upon the principles of differentiable volume rendering and radiance field optimization [S1, unofficial].
+
+## Sources
+[S1] yashbhalgat/HashNeRF-pytorch, https://github.com/yashbhalgat/HashNeRF-pytorch, fetched 2026-10-26 (unofficial)

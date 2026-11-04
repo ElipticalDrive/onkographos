@@ -1,0 +1,102 @@
+# Triangle Projection Voxelization
+Also called: Union-based Voxelization, VoxelizationByUnionPass
+
+## Overview
+Triangle Projection Voxelization converts a triangle mesh into a voxel grid by rasterizing triangles into a union-based hash table of voxel centers and colors [S1, unofficial]. It sets itself apart from sibling methods by explicitly using a union-based approach to resolve overlaps, likely combining multiple passes or render targets to ensure correct coverage [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Triangle mesh geometry (indices, vertices), voxel grid dimensions, and a boolean flag `m_solid` determining whether to render solid or transparent voxels.
+*   **Output:** A voxel grid (UAV) populated with voxel data.
+
+**Data Structures:**
+*   **Pipeline Layout (`PASS_VOXELIZE_UNION`):**
+    *   Range 0: Constant Buffer View (CBV), count 1, offset 0, flags `DATA_STATIC`.
+    *   Range 1: Constant Buffer View (CBV), count 1, offset 0, flags `DATA_STATIC`.
+    *   Range 2: Unordered Access View (UAV), count `numUAVs`, offset 0, flags `DATA_STATIC_WHILE_SET_AT_EXECUTE`.
+    *   Shader Stages: 0: Vertex Shader (VS), 1: Pixel Shader (PS), 2: Pixel Shader (PS).
+*   **Shaders:** `VS_TRI_PROJ_UNION` and `PS_TRI_PROJ_UNION`.
+
+**Steps:**
+1.  Reset the command allocator and command list.
+2.  Bind the descriptor heap (CBV/SRV/UAV heap).
+3.  Set resource barriers to transition the render target to `RENDER_TARGET` state.
+4.  Clear the render target view with a clear color `{CLEAR_COLOR, 0.0f}` if `m_solid` is false.
+5.  Clear the depth stencil view with depth value `1.0f`.
+6.  Configure the voxelization pass based on the method type (`TRI_PROJ_UNION`):
+    *   Set `layoutIdx` to `PASS_VOXELIZE_UNION`.
+    *   Set `pipeIdx` to `PASS_VOXELIZE_UNION_SOLID` if `depthPeel` is true, otherwise `PASS_VOXELIZE_UNION`.
+    *   Set `instanceCount` to 3.
+7.  Bind the pipeline layout `PASS_VOXELIZE_UNION` with the specified descriptor ranges.
+8.  Bind the pipeline state using shaders `VS_TRI_PROJ_UNION` and `PS_TRI_PROJ_UNION`.
+9.  Call `DrawIndexed(m_numIndices, instanceCount, 0, 0, 0)`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_triangle_projection_voxelization(command_list, mesh, voxel_grid, solid, depth_peel):
+    # Reset command list
+    command_allocator.reset()
+    command_list.reset(command_allocator, None)
+    
+    # Bind descriptor heap
+    descriptor_heap = get_descriptor_heap(CBV_SRV_UAV_HEAP)
+    command_list.set_descriptor_heaps([descriptor_heap])
+    
+    # Setup render target
+    render_target = get_render_target()
+    render_target.set_barrier(command_list, ResourceState.RENDER_TARGET)
+    
+    if not solid:
+        clear_color = [CLEAR_COLOR, 0.0f]
+        command_list.clear_render_target_view(render_target.get_rtv(), clear_color)
+        
+    command_list.clear_depth_stencil_view(get_depth_view(), ClearFlag.DEPTH, 1.0f)
+    
+    # Configure pass
+    layout_idx = PASS_VOXELIZE_UNION
+    if depth_peel:
+        pipe_idx = PASS_VOXELIZE_UNION_SOLID
+    else:
+        pipe_idx = PASS_VOXELIZE_UNION
+    instance_count = 3
+    
+    # Bind pipeline
+    bind_pipeline_layout(layout_idx, [
+        DescriptorRange(DescriptorType.CBV, 1, 0, DATA_STATIC),
+        DescriptorRange(DescriptorType.CBV, 1, 0, DATA_STATIC),
+        DescriptorRange(DescriptorType.UAV, voxel_grid.num_uavs, 0, DATA_STATIC_WHILE_SET_AT_EXECUTE)
+    ])
+    bind_pipeline_state(pipe_idx, VS_TRI_PROJ_UNION, PS_TRI_PROJ_UNION)
+    
+    # Execute
+    command_list.draw_indexed(mesh.num_indices, instance_count, 0, 0, 0)
+```
+
+**Parameters:**
+*   `instanceCount`: 3.
+*   `m_solid`: Boolean flag for solid rendering.
+*   `depthPeel`: Boolean flag for depth peeling.
+
+**Edge Cases and Pitfalls:**
+*   The sources do not specify how the union-based overlap resolution is implemented in the shaders.
+*   Precision issues with rasterization boundaries are not detailed.
+
+## Subtopics
+
+### [Axis-Aligned Projection via Face Normal](5925-axis-aligned-projection-via-face-normal.md)
+A geometry shader technique that projects triangles onto a 2D plane aligned with the axis most perpendicular to the face normal, minimizing distortion and overlap artifacts.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Union-based approach handles overlaps explicitly.
+*   **Limitations:** Not given in the sources.
+
+## Background
+Origin: [S1, unofficial] describes this method in the context of the VoxelizerX12 project, a DirectX 12 voxelization implementation.
+
+## Sources
+[S1] StarsX/VoxelizerX12, https://github.com/StarsX/VoxelizerX12, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,304 @@
+# Gradient of 2D Gaussian PDF (Conic)
+
+Also called: Gradient of 2D Gaussian Probability Density (Normalized/Unnormalized Factor Only), Gradient of 2D Gaussian Probability Density from Conic and Rescale
+
+## Overview
+Computes the probability density value $p$ and its gradients with respect to the Gaussian mean ($\frac{dp}{d\_mean}$) and covariance ($\frac{dp}{d\_cov}$) for a 2D Gaussian [S1, unofficial]. This method provides three variants: normalized (including the $1/(2\pi\sqrt{\det})$ factor), unnormalized (excluding the factor), and conic-based (using the conic matrix representation) [S1, unofficial]. It builds on [2D Gaussian Probability Density (Standard)](3466-2d-gaussian-probability-density-standard.md) by providing the necessary derivatives for optimization, specifically for training Gaussian splats where gradients must flow back to mean and covariance parameters [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+- `xy`: 2D point coordinates, vector $\mathbb{R}^2$.
+- `gaussian_mean`: 2D mean vector, $\mu \in \mathbb{R}^2$.
+- `gaussian_covariance`: 2×2 symmetric positive-definite covariance matrix, $\Sigma \in \mathbb{R}^{2 \times 2}$.
+- `conic_and_rescale`: (For conic variant) A 4D vector or struct containing the conic matrix elements and a rescale factor [S1, unofficial]. The conic matrix $C$ is derived from the inverse covariance $\Sigma^{-1}$ [S1, unofficial]. The vector contains $[C_{00}, C_{01}, C_{11}, R]$ where $R$ is the rescale factor [S1, unofficial].
+
+**Outputs:**
+- `p`: Scalar probability density value.
+- `d_p_d_mean`: Gradient of $p$ with respect to `gaussian_mean`, vector $\mathbb{R}^2$.
+- `d_p_d_cov`: Gradient of $p$ with respect to `gaussian_covariance`, matrix $\mathbb{R}^{2 \times 2}$ [S1, unofficial].
+
+### Data Structures
+- **Vector2**: 2D vector with components $x, y$.
+- **Matrix2**: 2×2 matrix with elements $M_{00}, M_{01}, M_{10}, M_{11}$. For symmetric covariance, $M_{01} = M_{10}$ [G].
+- **ConicAndRescale**: A structure or vector of 4 floats. Based on the source code, the layout is:
+  - `.x`: $C_{00}$
+  - `.y`: $C_{01}$ (which equals $C_{10}$)
+  - `.z`: $C_{11}$
+  - `.w`: Rescale factor $R$ [S1, unofficial].
+
+### Formulas
+Let $\Delta = xy - gaussian\_mean$.
+
+**1. Normalized Variant:**
+$$ p = \frac{\exp(-0.5 \Delta^T \Sigma^{-1} \Delta)}{2\pi\sqrt{\det(\Sigma)}} $$
+$$ \frac{dp}{d\_mean} = p \cdot \Sigma^{-1} \Delta $$
+$$ \frac{dp}{d\_cov} = -0.5 p (\Sigma^{-1} - \Sigma^{-1} \Delta \Delta^T \Sigma^{-1}) $$ [S1, unofficial].
+
+**2. Unnormalized Variant:**
+$$ p = \exp(-0.5 \Delta^T \Sigma^{-1} \Delta) $$
+$$ \frac{dp}{d\_mean} = p \cdot \Sigma^{-1} \Delta $$
+$$ \frac{dp}{d\_cov} = 0.5 p (\Sigma^{-1} \Delta \Delta^T \Sigma^{-1}) $$ [S1, unofficial].
+
+**3. Conic Variant:**
+Let $C$ be the conic matrix (inverse covariance) and $R$ be the rescale factor [S1, unofficial].
+$$ p = \exp(-0.5 \Delta^T C \Delta) \cdot R $$
+$$ \frac{dp}{d\_mean} = p \cdot C \Delta $$
+$$ \frac{dp}{d\_cov} = 0.5 p (C \Delta \Delta^T C) $$ [S1, unofficial].
+*Note: The gradient with respect to the rescale factor $R$ is not computed* [S1, unofficial].
+
+### Steps
+
+**For Normalized and Unnormalized Variants:**
+
+1. Compute the displacement vector: $\Delta = xy - gaussian\_mean$ [S1, unofficial].
+2. Compute the determinant of the covariance matrix: $\det(\Sigma) = \Sigma_{00}\Sigma_{11} - \Sigma_{01}\Sigma_{10}$ [G].
+3. Compute the inverse covariance matrix $\Sigma^{-1}$:
+   $$ \Sigma^{-1} = \frac{1}{\det(\Sigma)} \begin{bmatrix} \Sigma_{11} & -\Sigma_{01} \\ -\Sigma_{10} & \Sigma_{00} \end{bmatrix} $$ [G].
+4. Compute the term $\Sigma^{-1} \Delta$:
+   $$ v = \Sigma^{-1} \Delta $$ [S1, unofficial].
+5. Compute the exponent term:
+   $$ exponent = -0.5 (\Delta^T v) = -0.5 (\Delta_x v_x + \Delta_y v_y) $$ [S1, unofficial].
+6. Compute the exponential:
+   $$ exp\_val = \exp(exponent) $$ [S1, unofficial].
+7. Compute $p$:
+   - **Normalized**: $p = \frac{exp\_val}{2\pi\sqrt{\det(\Sigma)}}$ [S1, unofficial].
+   - **Unnormalized**: $p = exp\_val$ [S1, unofficial].
+8. Compute $\frac{dp}{d\_mean}$:
+   $$ \frac{dp}{d\_mean} = p \cdot v $$ [S1, unofficial].
+9. Compute the outer product $\Delta \Delta^T$:
+   $$ outer = \begin{bmatrix} \Delta_x^2 & \Delta_x \Delta_y \\ \Delta_y \Delta_x & \Delta_y^2 \end{bmatrix} $$ [S1, unofficial].
+10. Compute $\frac{dp}{d\_cov}$:
+    - **Normalized**: $\frac{dp}{d\_cov} = -0.5 p (\Sigma^{-1} - \Sigma^{-1} outer \Sigma^{-1})$ [S1, unofficial].
+    - **Unnormalized**: $\frac{dp}{d\_cov} = 0.5 p (\Sigma^{-1} outer \Sigma^{-1})$ [S1, unofficial].
+
+**For Conic Variant:**
+
+1. Compute the displacement vector: $\Delta = xy - gaussian\_mean$ [S1, unofficial].
+2. Construct the conic matrix $C$ from `conic_and_rescale`:
+   $$ C = \begin{bmatrix} conic\_and\_rescale.x & conic\_and\_rescale.y \\ conic\_and\_rescale.y & conic\_and\_rescale.z \end{bmatrix} $$ [S1, unofficial].
+3. Compute the term $C \Delta$:
+   $$ v = C \Delta $$ [S1, unofficial].
+4. Compute the exponent term:
+   $$ exponent = -0.5 (\Delta^T v) = -0.5 (\Delta_x v_x + \Delta_y v_y) $$ [S1, unofficial].
+5. Compute the exponential:
+   $$ exp\_val = \exp(exponent) $$ [S1, unofficial].
+6. Compute $p$:
+   $$ p = exp\_val \cdot conic\_and\_rescale.w $$ [S1, unofficial].
+7. Compute $\frac{dp}{d\_mean}$:
+   $$ \frac{dp}{d\_mean} = p \cdot v $$ [S1, unofficial].
+8. Compute the outer product $\Delta \Delta^T$:
+   $$ outer = \begin{bmatrix} \Delta_x^2 & \Delta_x \Delta_y \\ \Delta_y \Delta_x & \Delta_y^2 \end{bmatrix} $$ [S1, unofficial].
+9. Compute $\frac{dp}{d\_cov}$ (gradient w.r.t. conic matrix elements, interpreted as covariance gradient in the source context):
+   $$ \frac{dp}{d\_cov} = 0.5 p (C outer C) $$ [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def gradient_2d_gaussian_normalized(xy, gaussian_mean, gaussian_covariance):
+    """
+    Computes p, dp/d_mean, dp/d_cov for normalized 2D Gaussian.
+    xy: (2,) array
+    gaussian_mean: (2,) array
+    gaussian_covariance: (2,2) array
+    """
+    # 1. Displacement
+    delta = [xy[0] - gaussian_mean[0], xy[1] - gaussian_mean[1]]
+    
+    # 2. Determinant
+    det_cov = gaussian_covariance[0][0] * gaussian_covariance[1][1] - gaussian_covariance[0][1] * gaussian_covariance[1][0]
+    
+    # 3. Inverse Covariance
+    inv_cov = [
+        [gaussian_covariance[1][1] / det_cov, -gaussian_covariance[0][1] / det_cov],
+        [-gaussian_covariance[1][0] / det_cov, gaussian_covariance[0][0] / det_cov]
+    ]
+    
+    # 4. inv_cov @ delta
+    cov_inv_delta = [
+        inv_cov[0][0] * delta[0] + inv_cov[0][1] * delta[1],
+        inv_cov[1][0] * delta[0] + inv_cov[1][1] * delta[1]
+    ]
+    
+    # 5. Exponent
+    exponent = -0.5 * (delta[0] * cov_inv_delta[0] + delta[1] * cov_inv_delta[1])
+    
+    # 6. Exponential
+    exp_val = math.exp(exponent)
+    
+    # 7. p (Normalized)
+    p = exp_val / (2.0 * math.pi * math.sqrt(det_cov))
+    
+    # 8. dp/d_mean
+    d_p_d_mean = [p * cov_inv_delta[0], p * cov_inv_delta[1]]
+    
+    # 9. Outer Product delta * delta^T
+    outer = [
+        [delta[0]*delta[0], delta[0]*delta[1]],
+        [delta[1]*delta[0], delta[1]*delta[1]]
+    ]
+    
+    # 10. dp/d_cov
+    # Term: inv_cov @ outer @ inv_cov
+    # First: inv_cov @ outer
+    temp1 = [
+        [inv_cov[0][0]*outer[0][0] + inv_cov[0][1]*outer[1][0], inv_cov[0][0]*outer[0][1] + inv_cov[0][1]*outer[1][1]],
+        [inv_cov[1][0]*outer[0][0] + inv_cov[1][1]*outer[1][0], inv_cov[1][0]*outer[0][1] + inv_cov[1][1]*outer[1][1]]
+    ]
+    # Second: temp1 @ inv_cov
+    temp2 = [
+        [temp1[0][0]*inv_cov[0][0] + temp1[0][1]*inv_cov[1][0], temp1[0][0]*inv_cov[0][1] + temp1[0][1]*inv_cov[1][1]],
+        [temp1[1][0]*inv_cov[0][0] + temp1[1][1]*inv_cov[1][0], temp1[1][0]*inv_cov[0][1] + temp1[1][1]*inv_cov[1][1]]
+    ]
+    
+    # dp/d_cov = -0.5 * p * (inv_cov - temp2)
+    d_p_d_cov = [
+        [-0.5 * p * (inv_cov[0][0] - temp2[0][0]), -0.5 * p * (inv_cov[0][1] - temp2[0][1])],
+        [-0.5 * p * (inv_cov[1][0] - temp2[1][0]), -0.5 * p * (inv_cov[1][1] - temp2[1][1])]
+    ]
+    
+    return p, d_p_d_mean, d_p_d_cov
+
+def gradient_2d_gaussian_unnormalized(xy, gaussian_mean, gaussian_covariance):
+    """
+    Computes p, dp/d_mean, dp/d_cov for unnormalized 2D Gaussian.
+    """
+    delta = [xy[0] - gaussian_mean[0], xy[1] - gaussian_mean[1]]
+    
+    det_cov = gaussian_covariance[0][0] * gaussian_covariance[1][1] - gaussian_covariance[0][1] * gaussian_covariance[1][0]
+    
+    inv_cov = [
+        [gaussian_covariance[1][1] / det_cov, -gaussian_covariance[0][1] / det_cov],
+        [-gaussian_covariance[1][0] / det_cov, gaussian_covariance[0][0] / det_cov]
+    ]
+    
+    cov_inv_delta = [
+        inv_cov[0][0] * delta[0] + inv_cov[0][1] * delta[1],
+        inv_cov[1][0] * delta[0] + inv_cov[1][1] * delta[1]
+    ]
+    
+    exponent = -0.5 * (delta[0] * cov_inv_delta[0] + delta[1] * cov_inv_delta[1])
+    exp_val = math.exp(exponent)
+    
+    p = exp_val
+    
+    d_p_d_mean = [p * cov_inv_delta[0], p * cov_inv_delta[1]]
+    
+    outer = [
+        [delta[0]*delta[0], delta[0]*delta[1]],
+        [delta[1]*delta[0], delta[1]*delta[1]]
+    ]
+    
+    temp1 = [
+        [inv_cov[0][0]*outer[0][0] + inv_cov[0][1]*outer[1][0], inv_cov[0][0]*outer[0][1] + inv_cov[0][1]*outer[1][1]],
+        [inv_cov[1][0]*outer[0][0] + inv_cov[1][1]*outer[1][0], inv_cov[1][0]*outer[0][1] + inv_cov[1][1]*outer[1][1]]
+    ]
+    temp2 = [
+        [temp1[0][0]*inv_cov[0][0] + temp1[0][1]*inv_cov[1][0], temp1[0][0]*inv_cov[0][1] + temp1[0][1]*inv_cov[1][1]],
+        [temp1[1][0]*inv_cov[0][0] + temp1[1][1]*inv_cov[1][0], temp1[1][0]*inv_cov[0][1] + temp1[1][1]*inv_cov[1][1]]
+    ]
+    
+    # dp/d_cov = 0.5 * p * (inv_cov @ outer @ inv_cov)
+    d_p_d_cov = [
+        [0.5 * p * temp2[0][0], 0.5 * p * temp2[0][1]],
+        [0.5 * p * temp2[1][0], 0.5 * p * temp2[1][1]]
+    ]
+    
+    return p, d_p_d_mean, d_p_d_cov
+
+def gradient_2d_gaussian_conic(xy, gaussian_mean, conic_and_rescale):
+    """
+    Computes p, dp/d_mean, dp/d_cov for conic 2D Gaussian.
+    conic_and_rescale: [C00, C01, C11, R]
+    """
+    delta = [xy[0] - gaussian_mean[0], xy[1] - gaussian_mean[1]]
+    
+    C = [
+        [conic_and_rescale[0], conic_and_rescale[1]],
+        [conic_and_rescale[1], conic_and_rescale[2]]
+    ]
+    
+    C_delta = [
+        C[0][0] * delta[0] + C[0][1] * delta[1],
+        C[1][0] * delta[0] + C[1][1] * delta[1]
+    ]
+    
+    exponent = -0.5 * (delta[0] * C_delta[0] + delta[1] * C_delta[1])
+    exp_val = math.exp(exponent)
+    
+    p = exp_val * conic_and_rescale[3]
+    
+    d_p_d_mean = [p * C_delta[0], p * C_delta[1]]
+    
+    outer = [
+        [delta[0]*delta[0], delta[0]*delta[1]],
+        [delta[1]*delta[0], delta[1]*delta[1]]
+    ]
+    
+    temp1 = [
+        [C[0][0]*outer[0][0] + C[0][1]*outer[1][0], C[0][0]*outer[0][1] + C[0][1]*outer[1][1]],
+        [C[1][0]*outer[0][0] + C[1][1]*outer[1][0], C[1][0]*outer[0][1] + C[1][1]*outer[1][1]]
+    ]
+    temp2 = [
+        [temp1[0][0]*C[0][0] + temp1[0][1]*C[1][0], temp1[0][0]*C[0][1] + temp1[0][1]*C[1][1]],
+        [temp1[1][0]*C[0][0] + temp1[1][1]*C[1][0], temp1[1][0]*C[0][1] + temp1[1][1]*C[1][1]]
+    ]
+    
+    # dp/d_cov = 0.5 * p * (C @ outer @ C)
+    d_p_d_cov = [
+        [0.5 * p * temp2[0][0], 0.5 * p * temp2[0][1]],
+        [0.5 * p * temp2[1][0], 0.5 * p * temp2[1][1]]
+    ]
+    
+    return p, d_p_d_mean, d_p_d_cov
+```
+
+### Parameters with Typical Values
+- No specific typical values are given for `xy`, `mean`, or `cov` in the sources [S1, unofficial].
+- The normalization factor is $2\pi\sqrt{\det(\Sigma)}$ [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Rescale Factor Gradient**: The gradient with respect to the rescale factor (`conic_and_rescale.w`) is **not** computed [S1, unofficial].
+- **Determinant Zero**: If $\det(\Sigma) = 0$, the inverse covariance is undefined [G]. In practice, a small epsilon should be added to the determinant to avoid division by zero [G].
+- **Precision**: The computation involves exponentials and matrix inversions [G]. For very large or small variances, numerical stability should be considered [G].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+- **Time**: $O(1)$ per Gaussian evaluation [G]. The operations involve fixed-size matrix multiplications (2×2) and vector operations [G].
+- **Memory**: $O(1)$ auxiliary memory per evaluation [G].
+
+### Measured Performance
+- Not given in the sources.
+
+### Scaling
+- Not given in the sources.
+
+### Strengths and Limitations
+- **Strengths**: Provides exact gradients for optimization [S1, unofficial]. The conic variant avoids explicit matrix inversion, which can be more stable and efficient if the conic matrix is already available [S1, unofficial].
+- **Limitations**: The conic variant does not provide gradients for the rescale factor [S1, unofficial]. The normalized variant requires computing the determinant and its square root, which can be slightly more expensive than the unnormalized variant [S1, unofficial].
+
+### When to Use
+- Use the **normalized** variant when the absolute probability density value is required for loss functions or normalization [S1, unofficial].
+- Use the **unnormalized** variant when the normalization constant is handled separately or is irrelevant for the optimization (e.g., if it cancels out in the gradient) [S1, unofficial].
+- Use the **conic** variant when the conic matrix is already computed (e.g., from a previous step in the rendering pipeline) to avoid redundant matrix inversion [S1, unofficial].
+
+## Background
+
+### Origin
+The method is derived from the implementation in the unofficial Taichi-based 3D Gaussian Splatting repository [S1, unofficial]. It is used in the context of training Gaussian point clouds for novel view synthesis [S1, unofficial].
+
+### History and Development
+The specific implementation details, including the conic representation and the handling of gradients, are taken from the `taichi_3d_gaussian_splatting` project [S1, unofficial]. The mathematical formulation is standard for Gaussian splatting [S1, unofficial].
+
+### Where it is Used
+Used in the `GaussianPointCloudRasterisation` module of the `taichi_3d_gaussian_splatting` project for computing gradients during the training of 3D Gaussian splats [S1, unofficial].
+
+## Sources
+
+[S1] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
